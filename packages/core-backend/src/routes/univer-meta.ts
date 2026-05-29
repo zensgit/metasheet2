@@ -5923,24 +5923,32 @@ export function univerMetaRouter(): Router {
         return res.status(413).json({ ok: false, error: { code: 'AGGREGATE_TOO_LARGE', message: `Too many rows to aggregate (${rawCount} > ${maxRows})`, total: rawCount } })
       }
 
-      // FILTER/SEARCH field set MIRRORS /view (static-visible only, NOT D3c-filtered) so the filtered
-      // SET is identical to /view. The AGGREGATE OUTPUT is separately restricted to the D3c-allowed set
-      // (hidden fields' aggregates omitted) — filtering on a hidden field still counts the rows (matches
-      // /view) but never outputs that field's aggregate (no leak).
+      // #2038 (a): SEARCH/FILTER SELECTION is gated by a layer-3-ONLY set (selectableFieldIds, hiddenFieldIds: []),
+      // mirroring /view's allowedFieldIds → the filtered SET stays identical to /view (the parity invariant) while a
+      // field_permissions-denied field is treated as unavailable (dropped from search/filter, exactly like a
+      // non-existent field). This is SEPARATE from the AGGREGATE OUTPUT set (aggregateFieldTypeById below), which is
+      // layer-1∧layer-3 (hiddenFieldIds: viewHiddenFieldIds) and omits view-hidden + denied aggregates — layer-1
+      // stays display-only for SELECTION (a readable-but-view-hidden field is still searchable/filterable on both).
       const viewHiddenFieldIds = view?.hiddenFieldIds ?? []
       const visibleFields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
       const filterFieldTypeById = new Map(visibleFields.map((field) => [field.id, field.type]))
       const filterInfo = view ? parseMetaFilterInfo(view.filterInfo) : null
 
+      const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
+      const selectionFieldPermissions = deriveFieldPermissions(visibleFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
+      const selectableFieldIds = new Set(visibleFields.filter((field) => selectionFieldPermissions[field.id]?.visible !== false).map((field) => field.id))
+      const selectableFields = visibleFields.filter((field) => selectableFieldIds.has(field.id))
+
       // Computed (lookup/rollup/formula) filter conditions can't be evaluated here (no applyLookupRollup),
       // so the filtered set would silently disagree with /view. HARD-FAIL instead (deferred to #4-3b-2).
+      // Only SELECTABLE (non-denied) conditions trip this — a denied condition is dropped (= non-existent),
+      // matching /view, so it never forces a 422 (which would break the parity invariant).
       const COMPUTED_FILTER_TYPES = new Set(['lookup', 'rollup', 'formula'])
-      if (filterInfo?.conditions.some((c) => COMPUTED_FILTER_TYPES.has(filterFieldTypeById.get(c.fieldId) ?? ''))) {
+      if (filterInfo?.conditions.some((c) => selectableFieldIds.has(c.fieldId) && COMPUTED_FILTER_TYPES.has(filterFieldTypeById.get(c.fieldId) ?? ''))) {
         return res.status(422).json({ ok: false, error: { code: 'AGGREGATE_COMPUTED_FILTER_UNSUPPORTED', message: 'Aggregation over a view filtering on a computed (lookup/rollup/formula) field is not yet supported' } })
       }
 
-      // D3c permission composite → which fields' aggregates may be OUTPUT
-      const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
+      // D3c permission composite → which fields' aggregates may be OUTPUT (layer-1∧layer-3; reuses fieldScopeMap above)
       const fieldPermissions = deriveFieldPermissions(visibleFields, capabilities, { hiddenFieldIds: viewHiddenFieldIds, fieldScopeMap })
       const aggregateFieldTypeById = new Map(
         visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => [field.id, field.type]),
@@ -5954,9 +5962,9 @@ export function univerMetaRouter(): Router {
         version: Number(r.version ?? 1),
         data: normalizeJson(r.data),
       }))
-      if (search) rows = rows.filter((rec) => recordMatchesSearch(rec, visibleFields, search))
+      if (search) rows = rows.filter((rec) => recordMatchesSearch(rec, selectableFields, search))
       if (filterInfo) {
-        const conditions = filterInfo.conditions.filter((c) => filterFieldTypeById.has(c.fieldId))
+        const conditions = filterInfo.conditions.filter((c) => filterFieldTypeById.has(c.fieldId) && selectableFieldIds.has(c.fieldId))
         if (conditions.length > 0) {
           rows = rows.filter((rec) => {
             const matches = (c: MetaFilterCondition) => evaluateMetaFilterCondition(filterFieldTypeById.get(c.fieldId)!, rec.data[c.fieldId], c)
@@ -6162,21 +6170,25 @@ export function univerMetaRouter(): Router {
         visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id),
       )
       const fieldTypeById = new Map(visiblePropertyFields.map((f) => [f.id, f.type] as const))
-      const searchableFieldIds = visiblePropertyFields
-        .filter((field) => isSearchableFieldType(field.type))
-        .map((field) => field.id)
+      // #2038 (a): search/sort/filter SELECTION is gated by allowedFieldIds (layer-3, the field-read gate) —
+      // a field_permissions-denied field is treated as unavailable (not searchable/filterable/sortable),
+      // exactly like a non-existent field. `allowedFieldIds` is layer-3-ONLY (hiddenFieldIds: [], :6161), so
+      // layer-1 (view.hidden_field_ids) stays display-only here (a readable-but-view-hidden field is still
+      // searchable). Denied fields are SILENTLY dropped — NOT added to the "field doesn't exist" warning below.
+      const searchableFields = visiblePropertyFields.filter((field) => allowedFieldIds.has(field.id) && isSearchableFieldType(field.type))
+      const searchableFieldIds = searchableFields.map((field) => field.id)
       const warnings: string[] = []
 
       const ignoredSortFieldIds = rawSortRules
         .filter((rule) => !fieldTypeById.has(rule.fieldId))
         .map((rule) => rule.fieldId)
-      const sortRules = rawSortRules.filter((rule) => fieldTypeById.has(rule.fieldId))
+      const sortRules = rawSortRules.filter((rule) => fieldTypeById.has(rule.fieldId) && allowedFieldIds.has(rule.fieldId))
 
       const ignoredFilterFieldIds = rawFilterInfo
         ? rawFilterInfo.conditions.filter((condition) => !fieldTypeById.has(condition.fieldId)).map((c) => c.fieldId)
         : []
       const filteredConditions = rawFilterInfo
-        ? rawFilterInfo.conditions.filter((condition) => fieldTypeById.has(condition.fieldId))
+        ? rawFilterInfo.conditions.filter((condition) => fieldTypeById.has(condition.fieldId) && allowedFieldIds.has(condition.fieldId))
         : []
       const filterInfo = filteredConditions.length > 0 && rawFilterInfo
         ? { ...rawFilterInfo, conditions: filteredConditions }
@@ -6301,7 +6313,7 @@ export function univerMetaRouter(): Router {
         }
 
         if (hasSearch) {
-          all = all.filter((record) => recordMatchesSearch(record, visiblePropertyFields, search))
+          all = all.filter((record) => recordMatchesSearch(record, searchableFields, search))
         }
 
         if (filterInfo) {
