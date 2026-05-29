@@ -50,10 +50,10 @@ Two things follow:
 
 ## 4. The fix (locked approach)
 
-Intersect the filter/search/sort field **selection** with the **layer-3 allowed set** — the `deriveFieldPermissions(... ).visible !== false` composite already computed as `allowedFieldIds` on `/view` (`:6161`, from #2015) and as the aggregate-output set on view-aggregate (`:5944-5946`). A denied field is then treated like an **unavailable field** (excluded from search/filter/sort), exactly as a non-existent field already is.
+Intersect the filter/search/sort field **selection** with a **layer-3-ONLY allowed set** — `deriveFieldPermissions(<static-visible fields>, capabilities, { hiddenFieldIds: [], fieldScopeMap }).visible !== false`. ⚠️ **`hiddenFieldIds: []` is load-bearing**: the selection gate must be **layer-3 only** so layer-1 (`view.hidden_field_ids`) stays *display-only* and the `/view`↔aggregate parity (§2) holds. `/view` already has exactly this set as `allowedFieldIds` (`:6161`, from #2015). **view-aggregate does NOT have a reusable one** — its `:5944-5946` set is derived with `hiddenFieldIds: viewHiddenFieldIds` (layer-1 ∧ layer-3) and exists for *output omission*; it must **not** be reused for selection (see the per-endpoint note). A denied field is then treated like an **unavailable field** (excluded from search/filter/sort), exactly as a non-existent field already is.
 
 - **`/view`** — derive `searchableFieldIds` (`:6165`) from `allowedFieldIds` not `visiblePropertyFields`; pass the layer-3 field subset to the in-memory `recordMatchesSearch` (`:6304`); validate sort rules (`:6173`/`:6325`) and filter conditions (`:6178`/`:6308`) against `allowedFieldIds` instead of `fieldTypeById`. **Both search paths (fast-path + in-memory) must change.**
-- **`/view-aggregate`** — gate search (`:5957`) and filter (`:5959`) by the layer-3 set already present at `:5944-5946`; revise the `:5926-5929` comment to state that the filter/search set is now layer-3 on **both** endpoints (parity preserved at the *security* boundary).
+- **`/view-aggregate`** — derive a **separate layer-3-only selection set** (`deriveFieldPermissions(visibleFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })`, mirroring `/view`'s `allowedFieldIds`) and gate search (`:5957`) + filter (`:5959`) by it. **Do NOT reuse the `:5944-5946` output set** — it bakes in layer-1 (`hiddenFieldIds: viewHiddenFieldIds`, `:5930`), so using it for *selection* would make a **readable-but-view-hidden** field unsearchable/unfilterable on view-aggregate while it stays searchable on `/view` (whose `allowedFieldIds` is layer-3-only) → **breaks the §2 parity invariant**. Keep `:5944-5946` for its existing job (**output omission**, which correctly *does* drop view-hidden + denied aggregates). Revise the `:5926-5929` comment to state the filter/search **selection** is now layer-3-only on **both** endpoints (layer-1 stays display-only; parity preserved at the security boundary).
 
 ### 4.1 Dropped-condition semantic (explicit)
 Dropping a denied filter/sort condition **broadens / reorders** the result relative to what the saved view intended (the narrowing/ordering is gone). This is **correct, not a regression**: a filter/sort on a field the user cannot read cannot be honored, and it is the *same disposition* the code already applies to a non-existent field — minus the misleading warning (§4.2). State this in the impl PR so "the saved view now returns more rows" is not misread.
@@ -73,7 +73,7 @@ On `/view` the saved filter exists as **two** shapes: the **applied** conditions
 
 ## 6. Test matrix (real-DB integration; fail-first mandatory)
 
-Add to the `plugin-tests.yml` real-DB step (DATABASE_URL hard-guard; `describeIfDatabase` + sentinel). Seed (mirroring #2015/#2028): a sheet the user can read; `FLD_VISIBLE`; `FLD_SECRET` carrying a `do-not-leak` canary value, denied **only** via `field_permissions(subject=user, visible=false)`.
+Add to the `plugin-tests.yml` real-DB step (DATABASE_URL hard-guard; `describeIfDatabase` + sentinel). Seed (mirroring #2015/#2028): a sheet the user can read; `FLD_VISIBLE`; `FLD_SECRET` carrying a `do-not-leak` canary value, denied **only** via `field_permissions(subject=user, visible=false)`; and (for R9) `FLD_VIEWHIDDEN` — **no** `field_permissions` deny (layer-3 visible) but present in the test view's `hidden_field_ids` (layer-1 hidden).
 
 **Seed non-negotiables (the security regression's proof):**
 1. **`FLD_SECRET.property.hidden` MUST be UNSET** — deny solely via layer-3 (else layer-2 already excludes it and the test false-greens pre-fix).
@@ -91,6 +91,7 @@ Add to the `plugin-tests.yml` real-DB step (DATABASE_URL hard-guard; `describeIf
 | **R6** | `GET …/view-aggregate` with a saved denied-field filter | aggregate result unchanged vs no-filter (denied filter dropped) | RED |
 | **R7** | **parity** | under a saved denied-field filter, `/view` row **count** == view-aggregate **count** (pins the `:5926-5929` invariant being rewritten) | — (assert agreement) |
 | **R8** | non-over-restriction | `FLD_VISIBLE` IS searchable/filterable/sortable; an **ungranted-to-deny** user CAN search/filter `FLD_SECRET` (per-subject) | green pre+post |
+| **R9** | **layer-1 ≠ selection gate** (the parity regression guard) | a **readable-but-view-hidden** field (`FLD_VIEWHIDDEN`: no `field_permissions` deny, present in the view's `hidden_field_ids`) stays **searchable + filterable on BOTH `/view` and view-aggregate**, and their counts **agree** — layer-1 is display-only, not a selection gate. **RED if impl wrongly gates view-aggregate selection by the `:5944-5946` output set** (which bakes in layer-1) → the field would drop on aggregate but not `/view`. | green pre+post (guards the layer-3-only-selection requirement) |
 
 R5's assertion shape differs deliberately from R1-R4 (advisor): on view-aggregate the oracle is the aggregate **output** moving, so assert result equality, not value-absence.
 
