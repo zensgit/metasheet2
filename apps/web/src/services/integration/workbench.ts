@@ -305,6 +305,57 @@ export function deriveFieldRulesFromMappings(
     })
 }
 
+// DF-T2b: a typed DF-T1 field rule (produced by the DF-T2a derive helper, edited by the
+// authoring UI). Vocabulary mirrors http-routes.cjs DF_T1_* (route-local on the backend).
+export interface IntegrationFieldRule {
+  targetField: string
+  sourceType: 'from_staging' | 'from_constant' | 'preserve_template' | 'from_reference_table'
+  sourceField?: string
+  value?: unknown
+  shape: 'scalar' | 'object-passthrough' | 'by-fnumber' | 'by-fid'
+  completeness?: 'none' | 'require-fnumber-fname' | 'require-fid-fname'
+  required?: boolean
+}
+
+export interface IntegrationFieldRuleEditability {
+  editable: boolean
+  locked: boolean
+  reason: 'gated' | 'reference' | null
+  isReference: boolean
+}
+
+// DF-T2b: whether a field's replace/preserve mode may be edited. The durable REFERENCE identity
+// is the SHAPE (object-passthrough / by-* — set by DF-T2a for object values), NOT the sourceType:
+// a *scalar* may legitimately be `from_staging` (replace) OR `preserve_template` (preserve), so
+// sourceType is the editable mode, not the lock signal. A non-scalar (reference) field is locked
+// to preserve and may NOT be downgraded to a scalar replace in v1. Gated fields are locked outright.
+export function fieldRuleEditability(
+  rule: Pick<IntegrationFieldRule, 'targetField' | 'shape'>,
+  gatedFields: string[] = [],
+): IntegrationFieldRuleEditability {
+  if (gatedFields.includes(rule.targetField)) {
+    return { editable: false, locked: true, reason: 'gated', isReference: false }
+  }
+  if (rule.shape !== 'scalar') {
+    return { editable: false, locked: true, reason: 'reference', isReference: true }
+  }
+  return { editable: true, locked: false, reason: null, isReference: false }
+}
+
+// Pure mode setters — called only on an editable (scalar) field. Shape stays 'scalar'; only the
+// replace/preserve mode flips. These never run on a reference/gated field (the UI locks those).
+export function setFieldRuleReplace(rule: IntegrationFieldRule, sourceField: string): IntegrationFieldRule {
+  const next: IntegrationFieldRule = { ...rule, sourceType: 'from_staging', shape: 'scalar', sourceField }
+  delete next.completeness
+  return next
+}
+
+export function setFieldRulePreserve(rule: IntegrationFieldRule): IntegrationFieldRule {
+  const next: IntegrationFieldRule = { ...rule, sourceType: 'preserve_template', shape: 'scalar' }
+  delete next.sourceField
+  return next
+}
+
 export type IntegrationFieldProvenanceSource = 'staging' | 'template' | 'constant' | 'reference_table'
 
 // DF-T1 target-payload preview evidence — present only when the request carried a payloadTemplate.
