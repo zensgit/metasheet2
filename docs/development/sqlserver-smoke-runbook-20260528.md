@@ -51,6 +51,11 @@ Use either `MSSQL_HOST` plus `MSSQL_PORT`, or `MSSQL_SERVER`. If both are suppli
 
 ## Run
 
+> Opt-in gate (B5A): with no `MSSQL_HOST`/`MSSQL_SERVER` set, this command **skips (exit 0)** and is
+> therefore CI-safe; configure a target (above) to run it for real. The gate behavior, strengthened
+> coverage (incl. the OFFSET/FETCH branch), and a 2019/2022 container recipe are in
+> `sqlserver-smoke-wire-gate-verification-20260529.md`.
+
 ```bash
 pnpm --filter @metasheet/core-backend smoke:sqlserver
 ```

@@ -6,6 +6,9 @@ const env = process.env
 function printHelp(): void {
   console.log(`Usage: pnpm --filter @metasheet/core-backend smoke:sqlserver
 
+Opt-in real-wire gate: with no MSSQL_HOST/MSSQL_SERVER set it SKIPS (exit 0), so it is safe in
+normal CI. Configure a target to run it for real against a SQL Server.
+
 Required environment:
   MSSQL_HOST or MSSQL_SERVER
   MSSQL_DATABASE
@@ -90,6 +93,17 @@ function buildConfig(): DataSourceConfig {
 }
 
 async function main(): Promise<void> {
+  // Opt-in real-wire gate (B5A): skip cleanly (exit 0) when no SQL Server target is configured, so
+  // this is safe in normal CI and on machines without a SQL Server. A target (MSSQL_HOST or
+  // MSSQL_SERVER) present = opted in → run for real (a missing required var then fails loudly).
+  if (!env.MSSQL_HOST && !env.MSSQL_SERVER) {
+    console.log(
+      '[skip] SQL Server smoke skipped — no MSSQL_HOST / MSSQL_SERVER set. This is an opt-in ' +
+        'real-wire gate; export MSSQL_* (see docs/development/sqlserver-smoke-runbook-20260528.md) ' +
+        'to run it against a real SQL Server. Exiting 0.'
+    )
+    return
+  }
   const config = buildConfig()
   const schema = env.MSSQL_SCHEMA || 'dbo'
   const table = env.MSSQL_TABLE
@@ -150,10 +164,26 @@ async function main(): Promise<void> {
 
       const sample = await adapter.select(table, { limit: 5 })
       if (sample.error) throw sample.error
-      console.log('[ok] select sample', {
+      console.log('[ok] select sample (TOP)', {
         table: `${schema}.${table}`,
         rows: sample.data.length
       })
+
+      // Exercise the OFFSET/FETCH + ORDER BY branch as well (the TOP path above does not cover it).
+      const orderColumn = tableInfo.primaryKey?.[0] ?? tableInfo.columns[0]?.name
+      if (orderColumn) {
+        const paged = await adapter.select(table, {
+          limit: 3,
+          offset: 1,
+          orderBy: [{ column: orderColumn, direction: 'asc' }]
+        })
+        if (paged.error) throw paged.error
+        console.log('[ok] select page (OFFSET/FETCH)', {
+          table: `${schema}.${table}`,
+          orderBy: orderColumn,
+          rows: paged.data.length
+        })
+      }
     }
   } finally {
     await adapter.disconnect().catch(error => {
