@@ -221,13 +221,15 @@ async function fetchUserProfile(userId: string): Promise<Record<string, unknown>
     id: string
     email: string
     name: string | null
+    employeeNo: string | null
+    department: string | null
     role: string
     is_active: boolean
     is_admin: boolean
     last_login_at: string | null
     created_at: string
   }>(
-    `SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at
+    `SELECT id, email, name, employee_no AS "employeeNo", department, role, is_active, is_admin, last_login_at, created_at
      FROM users
      WHERE id = $1`,
     [userId],
@@ -266,6 +268,8 @@ type AttendanceAdminResolvedUser = {
   id: string
   email: string
   name: string | null
+  employeeNo: string | null
+  department: string | null
   is_active: boolean
 }
 
@@ -279,7 +283,7 @@ async function resolveBatchUsers(userIds: string[]): Promise<{
   }
 
   const found = await query<AttendanceAdminResolvedUser>(
-    `SELECT id, email, name, is_active
+    `SELECT id, email, name, employee_no AS "employeeNo", department, is_active
      FROM users
      WHERE id = ANY($1::text[])`,
     [userIds],
@@ -332,10 +336,12 @@ export function attendanceAdminRouter(): Router {
       })
 
       const term = q ? `%${q}%` : '%'
-      const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR id ILIKE $1' : ''
+      const where = q
+        ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1'
+        : ''
       const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
       const listSql = `
-        SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at
+        SELECT id, email, name, employee_no AS "employeeNo", department, role, is_active, is_admin, last_login_at, created_at
         FROM users
         ${where}
         ORDER BY created_at DESC

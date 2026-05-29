@@ -484,6 +484,10 @@ describe('admin-users routes', () => {
           email: 'alpha@example.com',
           name: 'Alpha',
           mobile: null,
+          employeeNo: null,
+          department: null,
+          position: null,
+          hireDate: null,
           role: 'user',
           is_active: true,
           is_admin: false,
@@ -499,6 +503,10 @@ describe('admin-users routes', () => {
           email: 'alpha@example.com',
           name: 'Alpha Prime',
           mobile: '13800138000',
+          employeeNo: null,
+          department: null,
+          position: null,
+          hireDate: null,
           role: 'user',
           is_active: true,
           is_admin: false,
@@ -519,15 +527,29 @@ describe('admin-users routes', () => {
     expect(response.statusCode).toBe(200)
     expect(pgMocks.query).toHaveBeenNthCalledWith(2,
       expect.stringContaining('UPDATE users'),
-      ['Alpha Prime', '13800138000', 'user-1', true, null],
+      ['Alpha Prime', '13800138000', null, null, null, null, 'user-1', true, null],
     )
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'update',
       resourceType: 'user',
       resourceId: 'user-1',
       meta: expect.objectContaining({
-        before: { name: 'Alpha', mobile: null },
-        after: { name: 'Alpha Prime', mobile: '13800138000' },
+        before: {
+          name: 'Alpha',
+          mobile: null,
+          employeeNo: null,
+          department: null,
+          position: null,
+          hireDate: null,
+        },
+        after: {
+          name: 'Alpha Prime',
+          mobile: '13800138000',
+          employeeNo: null,
+          department: null,
+          position: null,
+          hireDate: null,
+        },
       }),
     }))
     expect((response.body as Record<string, any>).data.user).toMatchObject({
@@ -535,6 +557,125 @@ describe('admin-users routes', () => {
       name: 'Alpha Prime',
       mobile: '13800138000',
     })
+  })
+
+  it('updates attendance HR profile fields', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          mobile: '13800138000',
+          employeeNo: null,
+          department: null,
+          position: null,
+          hireDate: null,
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          mobile: '13800138000',
+          employeeNo: 'E-2026-009',
+          department: 'Assembly',
+          position: 'Line Lead',
+          hireDate: '2026-05-29',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-05-29T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/profile', {
+      params: { userId: 'user-1' },
+      body: {
+        employeeNo: ' E-2026-009 ',
+        department: ' Assembly ',
+        position: ' Line Lead ',
+        hireDate: '2026-05-29',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(pgMocks.query).toHaveBeenNthCalledWith(2,
+      expect.stringContaining('UPDATE users'),
+      ['Alpha', '13800138000', 'E-2026-009', 'Assembly', 'Line Lead', '2026-05-29', 'user-1', false, null],
+    )
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'update',
+      resourceType: 'user',
+      resourceId: 'user-1',
+      meta: expect.objectContaining({
+        before: expect.objectContaining({
+          employeeNo: null,
+          department: null,
+          position: null,
+          hireDate: null,
+        }),
+        after: expect.objectContaining({
+          employeeNo: 'E-2026-009',
+          department: 'Assembly',
+          position: 'Line Lead',
+          hireDate: '2026-05-29',
+        }),
+      }),
+    }))
+    expect((response.body as Record<string, any>).data.user).toMatchObject({
+      id: 'user-1',
+      employeeNo: 'E-2026-009',
+      department: 'Assembly',
+      position: 'Line Lead',
+      hireDate: '2026-05-29',
+    })
+  })
+
+  it('rejects invalid HR profile hire dates', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 'user-1',
+        email: 'alpha@example.com',
+        name: 'Alpha',
+        mobile: null,
+        employeeNo: null,
+        department: null,
+        position: null,
+        hireDate: null,
+        role: 'user',
+        is_active: true,
+        is_admin: false,
+        last_login_at: null,
+        created_at: '2026-03-12T00:00:00.000Z',
+        updated_at: '2026-03-12T00:00:00.000Z',
+      }],
+    })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/profile', {
+      params: { userId: 'user-1' },
+      body: { hireDate: '2026-02-31' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error.code).toBe('INVALID_HIRE_DATE')
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
   it('clears user mobile profile field', async () => {
@@ -549,6 +690,10 @@ describe('admin-users routes', () => {
           email: 'alpha@example.com',
           name: 'Alpha',
           mobile: '13800138000',
+          employeeNo: null,
+          department: null,
+          position: null,
+          hireDate: null,
           role: 'user',
           is_active: true,
           is_admin: false,
@@ -564,6 +709,10 @@ describe('admin-users routes', () => {
           email: 'alpha@example.com',
           name: 'Alpha',
           mobile: null,
+          employeeNo: null,
+          department: null,
+          position: null,
+          hireDate: null,
           role: 'user',
           is_active: true,
           is_admin: false,
@@ -584,7 +733,7 @@ describe('admin-users routes', () => {
     expect(response.statusCode).toBe(200)
     expect(pgMocks.query).toHaveBeenNthCalledWith(2,
       expect.stringContaining('UPDATE users'),
-      ['Alpha', null, 'user-1', true, '13800138000'],
+      ['Alpha', null, null, null, null, null, 'user-1', true, '13800138000'],
     )
     expect((response.body as Record<string, any>).data.user).toMatchObject({
       id: 'user-1',
@@ -605,6 +754,10 @@ describe('admin-users routes', () => {
           email: 'alpha@example.com',
           name: 'Alpha',
           mobile: '138 0013 8000',
+          employeeNo: null,
+          department: null,
+          position: null,
+          hireDate: null,
           role: 'user',
           is_active: true,
           is_admin: false,
@@ -621,6 +774,10 @@ describe('admin-users routes', () => {
           email: 'alpha@example.com',
           name: 'Alpha',
           mobile: '13800138000',
+          employeeNo: null,
+          department: null,
+          position: null,
+          hireDate: null,
           role: 'user',
           is_active: true,
           is_admin: false,
@@ -640,7 +797,7 @@ describe('admin-users routes', () => {
     const updateCall = pgMocks.query.mock.calls[1]
     expect(String(updateCall[0])).toContain('regexp_replace')
     expect(String(updateCall[0])).toContain('IS NOT DISTINCT FROM')
-    expect(updateCall[1]).toEqual(['Alpha', '13800138000', 'user-1', true, '13800138000'])
+    expect(updateCall[1]).toEqual(['Alpha', '13800138000', null, null, null, null, 'user-1', true, '13800138000'])
   })
 
   it('returns 409 when expected mobile no longer matches current value', async () => {
@@ -652,6 +809,10 @@ describe('admin-users routes', () => {
           email: 'alpha@example.com',
           name: 'Alpha',
           mobile: '13600000000',
+          employeeNo: null,
+          department: null,
+          position: null,
+          hireDate: null,
           role: 'user',
           is_active: true,
           is_admin: false,
@@ -2558,6 +2719,10 @@ describe('admin-users routes', () => {
           id: 'user-new',
           email: 'new@example.com',
           name: 'New User',
+          employeeNo: 'E-2026-010',
+          department: 'Assembly',
+          position: 'Operator',
+          hireDate: '2026-05-29',
           role: 'user',
           is_active: true,
           is_admin: false,
@@ -2592,6 +2757,10 @@ describe('admin-users routes', () => {
       body: {
         email: 'new@example.com',
         name: 'New User',
+        employeeNo: ' E-2026-010 ',
+        department: ' Assembly ',
+        position: ' Operator ',
+        hireDate: '2026-05-29',
         password: 'WelcomePass9A',
         presetId: 'attendance-employee',
         isActive: true,
@@ -2600,12 +2769,25 @@ describe('admin-users routes', () => {
 
     expect(response.statusCode).toBe(200)
     expect((response.body as Record<string, any>).data.user.email).toBe('new@example.com')
+    expect((response.body as Record<string, any>).data.user).toMatchObject({
+      employeeNo: 'E-2026-010',
+      department: 'Assembly',
+      position: 'Operator',
+      hireDate: '2026-05-29',
+    })
     expect((response.body as Record<string, any>).data.roles).toEqual(['attendance_employee'])
     expect((response.body as Record<string, any>).data.onboarding.productMode).toBe('attendance')
     expect((response.body as Record<string, any>).data.inviteToken).toBe('invite-token-fixed')
     expect(String((response.body as Record<string, any>).data.onboarding.acceptInviteUrl)).toContain('invite-token-fixed')
     expect(String((response.body as Record<string, any>).data.onboarding.inviteMessage)).toContain('推荐入口：/attendance')
     expect(bcryptMocks.hash).toHaveBeenCalledWith('WelcomePass9A', 10)
+    const insertCall = pgMocks.query.mock.calls.find((args) => String(args[0]).includes('INSERT INTO users ('))
+    expect(insertCall?.[1]).toEqual(expect.arrayContaining([
+      'E-2026-010',
+      'Assembly',
+      'Operator',
+      '2026-05-29',
+    ]))
     expect(auditMocks.auditLog).toHaveBeenCalled()
   })
 

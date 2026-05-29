@@ -96,6 +96,10 @@ type UserFixture = {
   username?: string | null
   name: string
   mobile: string | null
+  employeeNo?: string | null
+  department?: string | null
+  position?: string | null
+  hireDate?: string | null
   role: string
   is_active: boolean
   grantEnabled: boolean
@@ -151,6 +155,10 @@ function createApiState(): UserFixture[] {
       username: 'bravo',
       name: 'Bravo',
       mobile: null,
+      employeeNo: 'E-2002',
+      department: 'Production',
+      position: 'Assembler',
+      hireDate: '2026-05-01',
       role: 'user',
       is_active: true,
       grantEnabled: false,
@@ -246,7 +254,16 @@ function createApiImplementation(
     const pathname = url.pathname
     const query = url.searchParams.get('q')?.trim().toLowerCase() || ''
     const filteredUsers = query
-      ? state.filter((user) => [user.name, user.email || '', user.username || '', user.id, user.role, user.mobile || ''].some((field) => field.toLowerCase().includes(query)))
+      ? state.filter((user) => [
+        user.name,
+        user.email || '',
+        user.username || '',
+        user.id,
+        user.role,
+        user.mobile || '',
+        user.employeeNo || '',
+        user.department || '',
+      ].some((field) => field.toLowerCase().includes(query)))
       : state
 
     const findUserById = (userId: string) => state.find((user) => user.id === userId) || state[0]
@@ -257,6 +274,10 @@ function createApiImplementation(
       username: user.username ?? null,
       name: user.name,
       mobile: user.mobile,
+      employeeNo: user.employeeNo ?? null,
+      department: user.department ?? null,
+      position: user.position ?? null,
+      hireDate: user.hireDate ?? null,
       role: user.role,
       is_active: user.is_active,
       is_admin: user.role === 'admin',
@@ -409,6 +430,10 @@ function createApiImplementation(
         email?: unknown
         username?: unknown
         mobile?: unknown
+        employeeNo?: unknown
+        department?: unknown
+        position?: unknown
+        hireDate?: unknown
       } : {}
       const newUser: UserFixture = {
         id: 'user-created',
@@ -416,6 +441,10 @@ function createApiImplementation(
         username: typeof parsed.username === 'string' && parsed.username.trim().length > 0 ? parsed.username.trim() : null,
         name: typeof parsed.name === 'string' && parsed.name.trim().length > 0 ? parsed.name.trim() : '新用户',
         mobile: typeof parsed.mobile === 'string' && parsed.mobile.trim().length > 0 ? parsed.mobile.trim() : null,
+        employeeNo: typeof parsed.employeeNo === 'string' && parsed.employeeNo.trim().length > 0 ? parsed.employeeNo.trim() : null,
+        department: typeof parsed.department === 'string' && parsed.department.trim().length > 0 ? parsed.department.trim() : null,
+        position: typeof parsed.position === 'string' && parsed.position.trim().length > 0 ? parsed.position.trim() : null,
+        hireDate: typeof parsed.hireDate === 'string' && parsed.hireDate.trim().length > 0 ? parsed.hireDate.trim() : null,
         role: 'user',
         is_active: true,
         grantEnabled: false,
@@ -553,9 +582,20 @@ function createApiImplementation(
     if (profileMatch) {
       const user = findUserById(decodeURIComponent(profileMatch[1]))
       const rawBody = typeof init?.body === 'string' ? init.body : ''
-      const parsed = rawBody ? JSON.parse(rawBody) as { name?: unknown; mobile?: unknown } : {}
+      const parsed = rawBody ? JSON.parse(rawBody) as {
+        name?: unknown
+        mobile?: unknown
+        employeeNo?: unknown
+        department?: unknown
+        position?: unknown
+        hireDate?: unknown
+      } : {}
       if (typeof parsed.name === 'string') user.name = parsed.name
       if (typeof parsed.mobile === 'string') user.mobile = parsed.mobile.trim() || null
+      if (typeof parsed.employeeNo === 'string') user.employeeNo = parsed.employeeNo.trim() || null
+      if (typeof parsed.department === 'string') user.department = parsed.department.trim() || null
+      if (typeof parsed.position === 'string') user.position = parsed.position.trim() || null
+      if (typeof parsed.hireDate === 'string') user.hireDate = parsed.hireDate.trim() || null
       return createJsonResponse({
         ok: true,
         data: {
@@ -1351,11 +1391,72 @@ describe('UserManagementView', () => {
     expect(JSON.parse(String((profileCall[1] as RequestInit | undefined)?.body))).toEqual({
       name: 'Bravo',
       mobile: '13800138000',
+      employeeNo: 'E-2002',
+      department: 'Production',
+      position: 'Assembler',
+      hireDate: '2026-05-01',
       expectedMobile: null,
     })
 
     await waitForCondition(() => container?.textContent?.includes('用户资料已更新') ?? false)
     expect(container?.textContent).toContain('手机号：13800138000')
+  })
+
+  it('can update attendance HR profile fields from the user detail panel', async () => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    const bravoRow = findUserRow(container!, 'Bravo')
+    const bravoDetailButton = Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))
+    if (!(bravoDetailButton instanceof HTMLButtonElement)) {
+      throw new Error('Bravo detail button not found')
+    }
+    bravoDetailButton.click()
+    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+    const detailPanel = () => container!.querySelector('.user-admin__panel--detail') as HTMLElement | null
+    await waitForCondition(() => detailPanel()?.textContent?.includes('员工号：E-2002') ?? false)
+    expect(detailPanel()?.textContent).toContain('部门：Production')
+
+    const inputs = Array.from(container!.querySelectorAll('input'))
+    const employeeNoInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '员工号，可留空')
+    const departmentInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '部门，可留空')
+    const positionInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '岗位，可留空')
+    const hireDateInput = inputs.find((candidate) => (candidate as HTMLInputElement).getAttribute('aria-label') === '入职日期，可留空')
+    if (!(employeeNoInput instanceof HTMLInputElement) || !(departmentInput instanceof HTMLInputElement) || !(positionInput instanceof HTMLInputElement) || !(hireDateInput instanceof HTMLInputElement)) {
+      throw new Error('HR profile inputs not found')
+    }
+
+    employeeNoInput.value = 'E-2026-009'
+    employeeNoInput.dispatchEvent(new Event('input', { bubbles: true }))
+    departmentInput.value = 'Assembly'
+    departmentInput.dispatchEvent(new Event('input', { bubbles: true }))
+    positionInput.value = 'Line Lead'
+    positionInput.dispatchEvent(new Event('input', { bubbles: true }))
+    hireDateInput.value = '2026-05-29'
+    hireDateInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    findButtonByText(container!, '保存资料').click()
+    await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/user-2/profile'))
+
+    const profileCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/user-2/profile')
+    if (!profileCall) throw new Error('Profile update request not found')
+    expect(JSON.parse(String((profileCall[1] as RequestInit | undefined)?.body))).toEqual({
+      name: 'Bravo',
+      mobile: '',
+      employeeNo: 'E-2026-009',
+      department: 'Assembly',
+      position: 'Line Lead',
+      hireDate: '2026-05-29',
+      expectedMobile: null,
+    })
+
+    await waitForCondition(() => container?.textContent?.includes('员工号：E-2026-009') ?? false)
+    expect(container?.textContent).toContain('部门：Assembly')
+    expect(container?.textContent).toContain('岗位：Line Lead')
+    expect(container?.textContent).toContain('入职：2026-05-29')
   })
 
   it('refreshes and surfaces the latest mobile when a PROFILE_MOBILE_CONFLICT happens', async () => {
@@ -1476,7 +1577,11 @@ describe('UserManagementView', () => {
     const nameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '姓名') as HTMLInputElement | undefined
     const usernameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '用户名（可选）') as HTMLInputElement | undefined
     const mobileInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '手机号（可选）') as HTMLInputElement | undefined
-    if (!nameInput || !usernameInput || !mobileInput) {
+    const employeeNoInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '员工号（可选）') as HTMLInputElement | undefined
+    const departmentInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '部门（可选）') as HTMLInputElement | undefined
+    const positionInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '岗位（可选）') as HTMLInputElement | undefined
+    const hireDateInput = inputs.find((candidate) => candidate.getAttribute('aria-label') === '入职日期（可选）') as HTMLInputElement | undefined
+    if (!nameInput || !usernameInput || !mobileInput || !employeeNoInput || !departmentInput || !positionInput || !hireDateInput) {
       throw new Error('Create-user form inputs not found')
     }
 
@@ -1486,6 +1591,14 @@ describe('UserManagementView', () => {
     usernameInput.dispatchEvent(new Event('input', { bubbles: true }))
     mobileInput.value = '13900001234'
     mobileInput.dispatchEvent(new Event('input', { bubbles: true }))
+    employeeNoInput.value = 'E-2026-010'
+    employeeNoInput.dispatchEvent(new Event('input', { bubbles: true }))
+    departmentInput.value = 'Assembly'
+    departmentInput.dispatchEvent(new Event('input', { bubbles: true }))
+    positionInput.value = 'Operator'
+    positionInput.dispatchEvent(new Event('input', { bubbles: true }))
+    hireDateInput.value = '2026-05-29'
+    hireDateInput.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi(2)
 
     findButtonByText(container!, '创建用户').click()
@@ -1499,6 +1612,10 @@ describe('UserManagementView', () => {
       email: '',
       username: 'linlan',
       mobile: '13900001234',
+      employeeNo: 'E-2026-010',
+      department: 'Assembly',
+      position: 'Operator',
+      hireDate: '2026-05-29',
       role: 'user',
       isActive: true,
     })
