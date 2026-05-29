@@ -12,14 +12,14 @@
             <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
-            <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+            <router-link v-if="canUseApprovals" to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
           </template>
           <template v-else>
             <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
             <router-link to="/apps" class="nav-link">{{ navLabels.apps }}</router-link>
             <router-link to="/multitable" class="nav-link">{{ navLabels.multitable }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
-            <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+            <router-link v-if="canUseApprovals" to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
             <router-link
               v-for="item in pluginNavItems"
               :key="item.id"
@@ -107,6 +107,10 @@ const canManageUsers = computed(() => {
 const canUseIntegration = computed(() => {
   void route.fullPath
   return hasPermission('integration:write')
+})
+const canUseApprovals = computed(() => {
+  void route.fullPath
+  return hasPermission('approvals:read')
 })
 const isLoggedIn = computed(() => {
   void route.fullPath

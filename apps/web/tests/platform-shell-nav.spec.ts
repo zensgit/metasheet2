@@ -113,8 +113,8 @@ describe('platform shell navigation', () => {
     expect(links).toEqual(expect.arrayContaining([
       expect.objectContaining({ href: '/attendance', text: '考勤' }),
       expect.objectContaining({ href: '/multitable', text: '多维表' }),
-      expect.objectContaining({ href: '/approvals', text: '审批中心' }),
     ]))
+    expect(links.some((link) => link.href === '/approvals')).toBe(false)
     expect(links.some((link) => link.href === '/grid')).toBe(false)
     expect(links.some((link) => link.href === '/spreadsheets')).toBe(false)
     expect(links.some((link) => link.href === '/kanban')).toBe(false)
@@ -214,8 +214,72 @@ describe('platform shell navigation', () => {
     expect(links.some((link) => link.href === '/gallery')).toBe(false)
     expect(links.some((link) => link.href === '/form')).toBe(false)
     expect(links.some((link) => link.href === '/admin/users')).toBe(false)
+    expect(links.some((link) => link.href === '/approvals')).toBe(false)
     // A3 runs view is admin-only (canManageUsers === snapshot.isAdmin) — hidden here.
     expect(links.some((link) => link.href === '/admin/automation-executions')).toBe(false)
+  })
+
+  it('shows the approval center nav entry only when approval read permission is present', async () => {
+    vi.doMock('vue-router', () => ({
+      useRoute: () => ({ path: '/multitable', fullPath: '/multitable', meta: { requiresAuth: true } }),
+    }))
+    vi.doMock('../src/composables/usePlugins', () => ({
+      usePlugins: () => ({ navItems: ref([]), fetchPlugins: vi.fn().mockResolvedValue(undefined) }),
+    }))
+    vi.doMock('../src/stores/featureFlags', () => ({
+      useFeatureFlags: () => ({
+        loadProductFeatures: vi.fn().mockResolvedValue(undefined),
+        isAttendanceFocused: () => false,
+        isPlmWorkbenchFocused: () => false,
+        hasFeature: () => false,
+      }),
+    }))
+    vi.doMock('../src/composables/useLocale', () => ({
+      useLocale: () => ({ locale: ref('zh-CN'), isZh: ref(true), setLocale: vi.fn() }),
+    }))
+    vi.doMock('../src/composables/useAuth', () => ({
+      useAuth: () => ({
+        clearToken: vi.fn(),
+        getAccessSnapshot: () => ({
+          email: 'approver@test.local',
+          roles: ['approval_viewer'],
+          permissions: ['approvals:read'],
+          isAdmin: false,
+        }),
+        getToken: () => 'session-token',
+        hasPermission: (permission: string) => permission === 'approvals:read',
+      }),
+    }))
+    vi.doMock('../src/utils/api', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/utils/api')>()
+      return {
+        ...actual,
+        getApiBase: () => 'http://example.test',
+      }
+    })
+
+    const { default: App } = await import('../src/App.vue')
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(App as Component)
+    app.component('router-view', { render: () => h('div') })
+    app.component('router-link', {
+      props: ['to'],
+      render() {
+        return h('a', { href: this.$props.to }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    const links = Array.from(container.querySelectorAll('a')).map((node) => ({
+      href: node.getAttribute('href'),
+      text: node.textContent?.trim(),
+    }))
+    expect(links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ href: '/approvals', text: '审批中心' }),
+    ]))
   })
 
   it('shows the automation runs admin nav entry for an admin user', async () => {
@@ -319,6 +383,7 @@ describe('platform shell navigation', () => {
     expect(source).toContain("path: '/approvals'")
     expect(source).toContain("import('../views/approval/ApprovalCenterView.vue')")
     expect(source).toContain("titleZh: '审批中心'")
+    expect(source).toContain("permissions: ['approvals:read']")
     expect(source).toContain("path: '/p/plugin-attendance/attendance'")
     expect(source).toContain("redirect: '/attendance'")
   })
