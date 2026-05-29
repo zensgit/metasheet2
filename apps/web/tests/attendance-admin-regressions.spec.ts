@@ -1483,6 +1483,13 @@ describe('Attendance admin regressions', () => {
     setInput(previewPanel!, '[data-attendance-group-fixed-schedule-end]', '2026-06-30')
     await flushUi(2)
 
+    const weekMatrix = previewPanel!.querySelector<HTMLElement>('[data-attendance-group-fixed-schedule-week-matrix]')
+    expect(weekMatrix).toBeTruthy()
+    expect(weekMatrix!.textContent).toContain('Day shift')
+    expect(weekMatrix!.textContent).toContain('09:00-18:00')
+    expect(weekMatrix!.textContent).toContain('Sun')
+    expect(weekMatrix!.textContent).toContain('Rest')
+
     const previewButton = previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-preview-submit]')
     expect(previewButton).toBeTruthy()
     previewButton!.click()

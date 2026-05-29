@@ -3459,6 +3459,30 @@
                         />
                       </label>
                     </div>
+                    <div
+                      class="attendance__fixed-schedule-week-matrix"
+                      data-attendance-group-fixed-schedule-week-matrix
+                    >
+                      <div class="attendance__admin-section-header">
+                        <div>
+                          <h6>{{ tr('Weekly shift matrix', '周班次矩阵') }}</h6>
+                          <span class="attendance__field-hint">{{ attendanceGroupFixedScheduleWeekMatrixHint }}</span>
+                        </div>
+                      </div>
+                      <div class="attendance__fixed-schedule-week-grid">
+                        <div
+                          v-for="day in attendanceGroupFixedScheduleWeekMatrix"
+                          :key="day.value"
+                          class="attendance__fixed-schedule-week-day"
+                          :class="{ 'attendance__fixed-schedule-week-day--rest': !day.isWorkingDay }"
+                          data-attendance-group-fixed-schedule-week-day
+                        >
+                          <span>{{ day.label }}</span>
+                          <strong>{{ day.assignmentLabel }}</strong>
+                          <small>{{ day.timeLabel }}</small>
+                        </div>
+                      </div>
+                    </div>
                     <div class="attendance__admin-actions">
                       <button
                         class="attendance__btn attendance__btn--primary"
@@ -6714,6 +6738,14 @@ type AttendanceGroupSummaryCard = {
   policyLines?: AttendanceGroupSummaryPolicyLine[]
 }
 
+type AttendanceGroupFixedScheduleWeekDay = {
+  value: number
+  label: string
+  isWorkingDay: boolean
+  assignmentLabel: string
+  timeLabel: string
+}
+
 interface AttendancePayrollTemplate {
   id: string
   orgId?: string
@@ -8816,6 +8848,36 @@ const attendanceGroupMemberSubmitAvailable = computed(() =>
     || Boolean(attendanceGroupMemberSelectedUserId.value.trim())
     || parseUserIdList(attendanceGroupMemberUserIds.value).length > 0
 )
+const attendanceGroupFixedScheduleSelectedShift = computed(() =>
+  shifts.value.find(shift => shift.id === attendanceGroupFixedSchedulePreviewForm.shiftId) ?? null
+)
+const attendanceGroupFixedScheduleWeekMatrix = computed<AttendanceGroupFixedScheduleWeekDay[]>(() => {
+  const shift = attendanceGroupFixedScheduleSelectedShift.value
+  const workingDays = new Set(Array.isArray(shift?.workingDays) ? shift.workingDays : [])
+  return ruleBuilderDayOptions.map((day) => {
+    const isWorkingDay = Boolean(shift && workingDays.has(day.value))
+    return {
+      value: day.value,
+      label: tr(day.labelEn, day.labelZh),
+      isWorkingDay,
+      assignmentLabel: isWorkingDay && shift
+        ? shift.name
+        : tr('Rest', '休息'),
+      timeLabel: isWorkingDay && shift
+        ? `${shift.workStartTime}-${shift.workEndTime}`
+        : tr('No shift', '无班次'),
+    }
+  })
+})
+const attendanceGroupFixedScheduleWeekMatrixHint = computed(() => {
+  const shift = attendanceGroupFixedScheduleSelectedShift.value
+  if (!shift) return tr('No shift selected.', '未选择班次。')
+  const workingDayCount = Array.isArray(shift.workingDays) ? shift.workingDays.length : 0
+  return tr(
+    `${shift.name} uses ${workingDayCount} working day(s) per week.`,
+    `${shift.name} 每周 ${workingDayCount} 个工作日。`,
+  )
+})
 const attendanceGroupFixedSchedulePreviewAvailable = computed(() =>
   Boolean(
     attendanceGroupEditingId.value
@@ -20202,6 +20264,44 @@ const holidaySectionBindings = {
   margin-top: 4px;
 }
 
+.attendance__fixed-schedule-week-matrix {
+  display: grid;
+  gap: 10px;
+}
+
+.attendance__fixed-schedule-week-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(92px, 1fr));
+  gap: 8px;
+}
+
+.attendance__fixed-schedule-week-day {
+  min-height: 82px;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid #b9d7c8;
+  border-radius: 8px;
+  background: #f3fbf6;
+}
+
+.attendance__fixed-schedule-week-day span,
+.attendance__fixed-schedule-week-day small {
+  color: #52606d;
+  font-size: 12px;
+}
+
+.attendance__fixed-schedule-week-day strong {
+  color: #12263a;
+  font-size: 13px;
+}
+
+.attendance__fixed-schedule-week-day--rest {
+  border-color: #d7dde7;
+  background: #f7f8fb;
+}
+
 .attendance__group-preview-result {
   display: grid;
   gap: 8px;
@@ -20333,6 +20433,10 @@ const holidaySectionBindings = {
   .attendance__admin-shortcut {
     width: 100%;
     text-align: left;
+  }
+
+  .attendance__fixed-schedule-week-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .attendance__table--records {
