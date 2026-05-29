@@ -1010,4 +1010,39 @@ describe('MetaViewManager', () => {
 
     app.unmount()
   })
+
+  it('a UNARY operator on a denied field shows the no-value span, NOT the hidden hint (isUnaryFilterOperator guard)', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_grid',
+          fields: [{ id: 'fld_secret', name: 'Secret', type: 'string' }],
+          views: [
+            { id: 'view_grid', sheetId: 'sheet_1', name: 'Grid', type: 'grid',
+              filterInfo: { conjunction: 'and', conditions: [{ fieldId: 'fld_secret', operator: 'isNotEmpty' }] } },
+          ],
+          fieldPermissions: { fld_secret: { visible: false, readOnly: false } },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+    ;(container.querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    const filterRow = container.querySelector('.meta-view-mgr__rule-row--filter') as HTMLElement
+    expect(filterRow).toBeTruthy()
+    // unary operator → no value to hide → the existing no-value span, NOT the permission-hidden hint
+    expect(filterRow.querySelector('[data-test="filter-value-hidden"]')).toBeNull()
+    expect(filterRow.querySelector('input.meta-view-mgr__input')).toBeNull()
+    expect(filterRow.textContent).toContain('no value')
+
+    app.unmount()
+  })
 })
