@@ -113,6 +113,70 @@ afterEach(async () => {
 })
 
 describe('attendance UUID route validation', () => {
+  it('returns attendance group member counts on list and lookup routes', async () => {
+    const { db, routes } = await createHarness()
+    const groupId = '00000000-0000-4000-8000-000000000101'
+    const groupRow = {
+      id: groupId,
+      org_id: 'default',
+      name: 'Ops Team',
+      code: 'ops-team',
+      timezone: 'UTC',
+      rule_set_id: null,
+      description: 'unit-test',
+      attendance_type: 'fixed_shift',
+      member_count: 3,
+      created_at: '2026-05-29T20:00:00.000Z',
+      updated_at: '2026-05-29T20:00:00.000Z',
+    }
+
+    db.query
+      .mockResolvedValueOnce([{ total: 1 }])
+      .mockResolvedValueOnce([groupRow])
+
+    const listRes = await invokeRoute(routes, 'GET /api/attendance/groups')
+
+    expect(listRes.statusCode).toBe(200)
+    expect(listRes.body).toMatchObject({
+      ok: true,
+      data: {
+        items: [
+          {
+            id: groupId,
+            memberCount: 3,
+            member_count: 3,
+          },
+        ],
+        total: 1,
+      },
+    })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('attendance_group_members'),
+      ['default', 50, 0],
+    )
+
+    db.query.mockClear()
+    db.query.mockResolvedValueOnce([{ ...groupRow, member_count: 4 }])
+
+    const lookupRes = await invokeRoute(routes, 'GET /api/attendance/groups/:id', {
+      params: { id: groupId },
+    })
+
+    expect(lookupRes.statusCode).toBe(200)
+    expect(lookupRes.body).toMatchObject({
+      ok: true,
+      data: {
+        id: groupId,
+        memberCount: 4,
+        member_count: 4,
+      },
+    })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('attendance_group_members'),
+      [groupId, 'default'],
+    )
+  })
+
   it('persists attendance group type on create and rejects type changes on update', async () => {
     const { db, routes } = await createHarness()
     const groupId = '00000000-0000-4000-8000-000000000101'

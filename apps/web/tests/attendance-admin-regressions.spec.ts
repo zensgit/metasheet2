@@ -253,6 +253,7 @@ describe('Attendance admin regressions', () => {
                 ruleSetId: 'rule-set-1',
                 attendanceType: 'fixed_shift',
                 description: 'Operations attendance group',
+                memberCount: 1,
                 createdAt: '2026-03-28T08:00:00.000Z',
                 updatedAt: '2026-03-28T08:30:00.000Z',
               },
@@ -906,6 +907,7 @@ describe('Attendance admin regressions', () => {
         ruleSetId: 'rule-set-1',
         attendanceType: 'fixed_shift',
         description: 'Operations attendance group',
+        memberCount: 3,
         createdAt: '2026-03-28T08:00:00.000Z',
         updatedAt: '2026-03-28T08:30:00.000Z',
       },
@@ -917,6 +919,7 @@ describe('Attendance admin regressions', () => {
         ruleSetId: null,
         attendanceType: 'scheduled_shift',
         description: 'Quality attendance group',
+        memberCount: 0,
         createdAt: '2026-03-29T08:00:00.000Z',
         updatedAt: '2026-03-29T08:30:00.000Z',
       },
@@ -965,6 +968,7 @@ describe('Attendance admin regressions', () => {
           ruleSetId: typeof body.ruleSetId === 'string' ? body.ruleSetId : null,
           attendanceType: String(body.attendanceType || 'fixed_shift'),
           description: typeof body.description === 'string' ? body.description : null,
+          memberCount: 0,
           createdAt: '2026-03-30T08:00:00.000Z',
           updatedAt: '2026-03-30T08:00:00.000Z',
         }
@@ -977,7 +981,10 @@ describe('Attendance admin regressions', () => {
         if (index >= 0) savedGroups.splice(index, 1)
         return jsonResponse(200, { ok: true, data: { id: 'group-b' } })
       }
-      if (url === '/api/attendance/groups/group-a/members' || url === '/api/attendance/groups/group-copy/members') {
+      if (url === '/api/attendance/groups/group-a/members') {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 3 } })
+      }
+      if (url === '/api/attendance/groups/group-copy/members') {
         return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
       }
       return emptyAttendanceResponse()
@@ -1040,6 +1047,7 @@ describe('Attendance admin regressions', () => {
       const opsRow = Array.from(groupsSection.querySelectorAll<HTMLElement>('[data-attendance-group-row]'))
         .find(row => row.textContent?.includes('Ops Team'))
       expect(opsRow).toBeTruthy()
+      expect(opsRow!.querySelector('[data-attendance-group-list-member-count]')?.textContent).toContain('3 members')
       opsRow!.querySelector<HTMLButtonElement>('[data-attendance-group-copy]')!.click()
       await flushUi(8)
 
