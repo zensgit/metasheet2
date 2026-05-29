@@ -17,6 +17,18 @@ preview and K3 Save must share one body-composition source of truth, or a
 byte-parity gate must prove that preview output equals the adapter Save body for
 the same input. A misleading no-write preview is just a slower blind Save.
 
+> **Scope boundary / related note.** This document covers only Data Factory
+> template composition and target-payload preview — how cleansed multitable rows
+> become a trustworthy target-system payload. It does **not** cover the external
+> data-source connector base (credential encryption, read-only protection, owner
+> scoping, supported-type matrix, connector extension boundary); that security /
+> governance layer and its open-source benchmarking live in
+> `docs/research/data-sources-oss-references-20260528.md`. The two are distinct
+> subsystems — target-write payload composition here vs source-read connector
+> base there — not a single feature. The only open-source references shared by
+> both documents are n8n and Airbyte, applied to different problems (templates /
+> actions / run evidence here; connector & credential governance there).
+
 ## Summary
 
 This document defines how MetaSheet Data Factory should provide a reusable

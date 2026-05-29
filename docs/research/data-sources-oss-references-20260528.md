@@ -4,6 +4,9 @@
 > 性质:**内部研究**,可出现外部产品名;**不进正式设计文档**(正式文档只述 MetaSheet 自有原则)。
 > 方法:**bounded patterns 研究**(基于公开资料/已知架构,不 clone、不逐行读源码——深度源码研究留到真要采用时)。
 > 目的:把我们已落的 Lane A 四件事(A0.1/A-RO/A1/A4 已合并)与成熟开源系统对标,确认选择、找可借鉴模式、明确"我们规模下该/不该做什么"。
+> 范围边界 / 关联说明:本文只讨论 **data-sources 外接数据源连接器底座**(凭据加密、只读保护、owner scope、支持类型矩阵、连接器扩展边界)——即"一个外部数据源怎样被安全地创建、保存、查询、权限收口"。
+> Data Factory 的模板 / payload / preview / 运行编排是另一个问题域,见 `docs/development/data-factory-template-composition-open-source-design-20260527.md` 及其 gated 执行清单 `data-factory-template-composition-execution-plan-todo-20260527.md`。
+> 两者是**不同子系统**(源读连接器底座 vs 目标写 payload 组合),非同一功能;与 DF 设计稿的开源引用**重叠仅 n8n / Airbyte 两家**,用途不同(此处借"连接器 / 凭据治理",DF 借"模板 / 动作 / 运行证据")。
 
 ## 0. 候选系统与 license(借鉴边界)
 | 系统 | 栈 | License | 借鉴边界 |
