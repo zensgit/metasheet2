@@ -420,26 +420,21 @@ describe('Attendance self-service dashboard', () => {
     expect(actionsCard).toContain('Start with missing-punch handling to resolve the current anomaly reminder.')
   })
 
-  it('requires and submits a rejection note when rejecting an attendance request', async () => {
-    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('Needs manager evidence')
-    try {
-      app = createApp(AttendanceView, { mode: 'overview' })
-      app.mount(container!)
-      await flushUi()
+  it('hides approval actions from employee self-service request cards', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
 
-      findButton(container!, 'Reject').click()
-      await flushUi()
-
-      const rejectCall = vi.mocked(apiFetch).mock.calls.find(call =>
-        String(call[0]).includes('/api/attendance/requests/request-pending/reject')
-      )
-      expect(rejectCall).toBeTruthy()
-      expect(JSON.parse(String(rejectCall?.[1]?.body))).toEqual({
-        comment: 'Needs manager evidence',
-      })
-    } finally {
-      promptSpy.mockRestore()
-    }
+    expect(findButton(container!, 'Cancel')).toBeTruthy()
+    expect(Array.from(container!.querySelectorAll('button')).some(
+      candidate => candidate.textContent?.trim() === 'Approve'
+    )).toBe(false)
+    expect(Array.from(container!.querySelectorAll('button')).some(
+      candidate => candidate.textContent?.trim() === 'Reject'
+    )).toBe(false)
+    expect(vi.mocked(apiFetch).mock.calls.some(call =>
+      /\/api\/attendance\/requests\/request-pending\/(?:approve|reject)/.test(String(call[0]))
+    )).toBe(false)
   })
 
   it('prefills the request form from quick actions without leaving overview', async () => {

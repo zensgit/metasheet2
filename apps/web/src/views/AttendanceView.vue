@@ -828,8 +828,6 @@
                 </div>
                 <div class="attendance__request-actions" v-if="item.status === 'pending'">
                   <button class="attendance__btn" @click="cancelRequest(item.id)">{{ tr('Cancel', '取消') }}</button>
-                  <button class="attendance__btn" @click="resolveRequest(item.id, 'approve')">{{ tr('Approve', '批准') }}</button>
-                  <button class="attendance__btn attendance__btn--danger" @click="resolveRequest(item.id, 'reject')">{{ tr('Reject', '驳回') }}</button>
                 </div>
               </li>
             </ul>
