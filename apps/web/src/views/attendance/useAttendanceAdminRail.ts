@@ -34,6 +34,7 @@ export const ATTENDANCE_ADMIN_SECTION_IDS = {
   rotationAssignments: 'attendance-admin-rotation-assignments',
   shifts: 'attendance-admin-shifts',
   assignments: 'attendance-admin-assignments',
+  schedulerScopes: 'attendance-admin-scheduler-scopes',
   holidays: 'attendance-admin-holidays',
 } as const
 
@@ -182,6 +183,7 @@ export function useAttendanceAdminRail({
     { id: ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments, label: tr('Rotation Assignments', '轮班分配') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.shifts, label: tr('Shifts', '班次') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.assignments, label: tr('Assignments', '排班分配') },
+    { id: ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes, label: tr('Scheduler scope mgmt', '排班管理范围') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.holidays, label: tr('Holidays', '节假日') },
   ])
   const adminSectionItemMap = computed(() => new Map(adminSectionNavItems.value.map(item => [item.id, item])))
@@ -206,6 +208,7 @@ export function useAttendanceAdminRail({
         ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments,
         ATTENDANCE_ADMIN_SECTION_IDS.shifts,
         ATTENDANCE_ADMIN_SECTION_IDS.assignments,
+        ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes,
         ATTENDANCE_ADMIN_SECTION_IDS.holidays,
       ],
     },
