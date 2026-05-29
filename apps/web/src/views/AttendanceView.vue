@@ -3559,6 +3559,75 @@
                     </aside>
                   </div>
 
+                  <div
+                    v-if="attendanceGroupPunchMethodDrawerOpen"
+                    class="attendance__drawer-backdrop"
+                    data-attendance-group-punch-method-drawer
+                    @click.self="closeAttendanceGroupPunchMethodDrawer"
+                  >
+                    <aside
+                      class="attendance__work-time-drawer"
+                      role="dialog"
+                      aria-modal="true"
+                      aria-labelledby="attendance-group-punch-method-drawer-title"
+                    >
+                      <div class="attendance__work-time-drawer-header">
+                        <div>
+                          <h6 id="attendance-group-punch-method-drawer-title">{{ tr('Punch method settings', '打卡方式设置') }}</h6>
+                          <span class="attendance__field-hint">
+                            {{ tr('Current enforcement comes from workspace settings; this drawer is read-only for attendance groups.', '当前打卡校验来自工作区设置；此抽屉对考勤组保持只读。') }}
+                          </span>
+                        </div>
+                        <button
+                          class="attendance__btn attendance__btn--compact"
+                          type="button"
+                          data-attendance-group-punch-method-close
+                          @click="closeAttendanceGroupPunchMethodDrawer"
+                        >
+                          {{ tr('Close', '关闭') }}
+                        </button>
+                      </div>
+
+                      <div class="attendance__work-time-drawer-body" data-attendance-group-punch-method-scope>
+                        <strong>{{ tr('Workspace-level policy', '工作区级策略') }}</strong>
+                        <span>
+                          {{ tr('These settings apply to every attendance group until group-owned punch policies are designed and persisted.', '这些设置当前适用于所有考勤组；考勤组级打卡策略需等后续设计与持久化契约。') }}
+                        </span>
+                      </div>
+
+                      <ul class="attendance__group-summary-policy" data-attendance-group-punch-method-policy>
+                        <li
+                          v-for="line in attendanceGroupPunchPolicyLines"
+                          :key="`punch-method-drawer-${line.key}`"
+                          :data-attendance-group-punch-method-line="line.key"
+                        >
+                          <span class="attendance__group-summary-policy-label">{{ line.label }}</span>:
+                          <span class="attendance__group-summary-policy-value">{{ line.value }}</span>
+                        </li>
+                      </ul>
+
+                      <div class="attendance__work-time-holiday-callout" data-attendance-group-punch-method-boundary>
+                        <div>
+                          <strong>{{ tr('Group-owned controls deferred', '考勤组级控制暂缓') }}</strong>
+                          <span>
+                            {{ tr('Location, Wi-Fi, device, photo, face verification, and field-work policies need a separate backend contract before editable controls appear here.', '地点、Wi-Fi、设备、拍照、人脸与外勤策略需要独立后端契约后，才会在这里出现可编辑控件。') }}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div class="attendance__work-time-drawer-actions">
+                        <button
+                          class="attendance__btn"
+                          type="button"
+                          data-attendance-group-punch-method-settings-open
+                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.settings); closeAttendanceGroupPunchMethodDrawer()"
+                        >
+                          {{ tr('Open Settings', '打开设置') }}
+                        </button>
+                      </div>
+                    </aside>
+                  </div>
+
                   <section
                     v-if="attendanceGroupEditingId && attendanceGroupForm.attendanceType === 'fixed_shift'"
                     class="attendance__group-panel"
@@ -6889,7 +6958,7 @@ type AttendanceGroupSummaryAction = {
   key: string
   label: string
   sectionId?: string
-  drawer?: 'work-time'
+  drawer?: 'work-time' | 'punch-method'
 }
 
 type AttendanceGroupSummaryPolicyLine = {
@@ -8605,6 +8674,7 @@ const attendanceGroupTypeFilter = ref<AttendanceGroupType | ''>('')
 const attendanceGroupCopyingId = ref<string | null>(null)
 const attendanceGroupDeletingId = ref<string | null>(null)
 const attendanceGroupWorkTimeDrawerOpen = ref(false)
+const attendanceGroupPunchMethodDrawerOpen = ref(false)
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
 const payrollSummaryFieldOptions = ref<AttendancePayrollSummaryFieldOption[]>(
@@ -8905,6 +8975,8 @@ function buildAttendanceGroupPunchPolicyLines(): AttendanceGroupSummaryPolicyLin
   ]
 }
 
+const attendanceGroupPunchPolicyLines = computed(() => buildAttendanceGroupPunchPolicyLines())
+
 const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() => {
   const groupSaved = Boolean(attendanceGroupEditingId.value)
   const ruleSetName = groupSaved
@@ -9005,12 +9077,12 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
       title: tr('Punch method', '打卡方式'),
       value: tr('Workspace-level policy · applies to all attendance groups', '工作区级策略 · 适用于所有考勤组'),
       detail: tr('Wi-Fi, device, photo, and face verification are not available here.', 'Wi-Fi、设备、拍照与人脸识别在此不可用。'),
-      policyLines: buildAttendanceGroupPunchPolicyLines(),
+      policyLines: attendanceGroupPunchPolicyLines.value,
       actions: [
         {
-          key: 'open-settings',
-          label: tr('Open Settings', '打开设置'),
-          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.settings,
+          key: 'open-punch-method-drawer',
+          label: tr('Open Punch method', '打开打卡方式'),
+          drawer: 'punch-method',
         },
       ],
     },
@@ -9073,6 +9145,10 @@ function handleAttendanceGroupSummaryAction(action: AttendanceGroupSummaryAction
     openAttendanceGroupWorkTimeDrawer()
     return
   }
+  if (action.drawer === 'punch-method') {
+    openAttendanceGroupPunchMethodDrawer()
+    return
+  }
   if (action.sectionId) {
     selectAdminSection(action.sectionId)
   }
@@ -9084,6 +9160,14 @@ function openAttendanceGroupWorkTimeDrawer() {
 
 function closeAttendanceGroupWorkTimeDrawer() {
   attendanceGroupWorkTimeDrawerOpen.value = false
+}
+
+function openAttendanceGroupPunchMethodDrawer() {
+  attendanceGroupPunchMethodDrawerOpen.value = true
+}
+
+function closeAttendanceGroupPunchMethodDrawer() {
+  attendanceGroupPunchMethodDrawerOpen.value = false
 }
 
 function setAttendanceGroupWorkTimeType(type: AttendanceGroupType) {

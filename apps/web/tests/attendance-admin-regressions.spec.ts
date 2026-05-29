@@ -1314,6 +1314,37 @@ describe('Attendance admin regressions', () => {
     expect(card.textContent).not.toContain('192.168.0.0/16')
   })
 
+  it('opens a read-only group punch-method drawer without issuing API writes', async () => {
+    attendanceSettingsData = {
+      ipAllowlist: ['10.0.0.0/8', '192.168.0.0/16'],
+      geoFence: { lat: 31.2, lng: 121.5, radiusMeters: 200 },
+      minPunchIntervalMinutes: 5,
+    }
+    const card = await openAttendanceGroupPunchCard()
+    const openDrawer = card.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-punch-method-drawer"]')
+    expect(openDrawer).toBeTruthy()
+
+    const beforeCalls = vi.mocked(apiFetch).mock.calls.length
+    openDrawer!.click()
+    await flushUi(2)
+
+    const drawer = container!.querySelector<HTMLElement>('[data-attendance-group-punch-method-drawer]')
+    expect(drawer).toBeTruthy()
+    expect(drawer!.querySelector('[data-attendance-group-punch-method-scope]')?.textContent).toContain('Workspace-level policy')
+    expect(drawer!.querySelector('[data-attendance-group-punch-method-line="ip"]')?.textContent).toContain('Restricted to 2 address range(s)')
+    expect(drawer!.querySelector('[data-attendance-group-punch-method-line="geofence"]')?.textContent).toContain('Geofence enabled · 200 m radius')
+    expect(drawer!.querySelector('[data-attendance-group-punch-method-line="interval"]')?.textContent).toContain('5 minutes')
+    expect(drawer!.querySelector('[data-attendance-group-punch-method-boundary]')?.textContent).toContain('Group-owned controls deferred')
+    expect(drawer!.querySelectorAll('input, select, textarea').length).toBe(0)
+    expect(drawer!.textContent).not.toContain('10.0.0.0/8')
+    expect(drawer!.textContent).not.toContain('192.168.0.0/16')
+    expect(vi.mocked(apiFetch).mock.calls.slice(beforeCalls)).toHaveLength(0)
+
+    drawer!.querySelector<HTMLButtonElement>('[data-attendance-group-punch-method-close]')!.click()
+    await flushUi(2)
+    expect(container!.querySelector('[data-attendance-group-punch-method-drawer]')).toBeNull()
+  })
+
   it('renders default punch policy as unrestricted in the group punch-method card', async () => {
     attendanceSettingsData = null
     const card = await openAttendanceGroupPunchCard()
@@ -1368,7 +1399,7 @@ describe('Attendance admin regressions', () => {
     expect(refreshed.textContent).not.toContain('100 m radius')
   })
 
-  it('keeps the group punch-method card read-only with only an Open Settings nav', async () => {
+  it('keeps the group punch-method card read-only with only an Open drawer action', async () => {
     const card = await openAttendanceGroupPunchCard()
     // PM4: no inputs/toggles/save controls inside the punch card
     expect(card.querySelectorAll('input, select, textarea').length).toBe(0)
@@ -1384,7 +1415,14 @@ describe('Attendance admin regressions', () => {
 
   it('does not write punch policy or touch clock events from the group detail', async () => {
     const card = await openAttendanceGroupPunchCard()
-    const settingsAction = card.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-settings"]')
+    const openDrawer = card.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-punch-method-drawer"]')
+    expect(openDrawer).toBeTruthy()
+    openDrawer!.click()
+    await flushUi(2)
+
+    const drawer = container!.querySelector<HTMLElement>('[data-attendance-group-punch-method-drawer]')
+    expect(drawer).toBeTruthy()
+    const settingsAction = drawer!.querySelector<HTMLButtonElement>('[data-attendance-group-punch-method-settings-open]')
     expect(settingsAction).toBeTruthy()
     settingsAction!.click()
     await flushUi(2)
@@ -1403,6 +1441,7 @@ describe('Attendance admin regressions', () => {
       String(url).includes('/api/attendance/records')
       && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()))
     expect(recordWrites).toEqual([])
+    expect(container!.querySelector('[data-attendance-group-punch-method-drawer]')).toBeNull()
   })
 
   it('navigates from attendance group summary cards without issuing API writes', async () => {
