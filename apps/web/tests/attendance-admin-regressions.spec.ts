@@ -987,6 +987,315 @@ describe('Attendance admin regressions', () => {
     )).toBe(false)
   })
 
+  it('rebuilds and clears managed fixed schedule rows through group routes', async () => {
+    const rebuildBodies: unknown[] = []
+    const clearBodies: unknown[] = []
+    const confirmSpy = vi.spyOn(window, 'confirm')
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true)
+    const rebuiltData = {
+      group: { id: 'group-a', name: 'Ops Team', timezone: 'Asia/Shanghai' },
+      shift: {
+        id: 'shift-a',
+        name: 'Day shift',
+        timezone: 'Asia/Shanghai',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        lateGraceMinutes: 10,
+        earlyGraceMinutes: 5,
+        roundingMinutes: 5,
+        workingDays: [1, 2, 3, 4, 5],
+      },
+      window: { startDate: '2026-06-01', endDate: '2026-06-30' },
+      target: { total: 2, userIds: ['user-create', 'user-stale'] },
+      wouldCreate: [
+        { userId: 'user-create', shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', isActive: true },
+      ],
+      skipped: [],
+      skippedManaged: [],
+      skippedUnmanaged: [],
+      skippedExternalManaged: [],
+      blockingConflicts: [],
+      rebuilt: true,
+      created: [
+        { id: 'assignment-created', userId: 'user-create', shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', isActive: true },
+      ],
+      deactivated: [
+        { id: 'assignment-stale', userId: 'user-stale', shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', isActive: false },
+      ],
+    }
+
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/rule-sets')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'rule-set-1', name: 'Ops Rules', scope: 'org', version: 3, isDefault: true },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/rebuild') && init?.method === 'POST') {
+        rebuildBodies.push(JSON.parse(String(init.body || '{}')))
+        return jsonResponse(200, { ok: true, data: rebuiltData })
+      }
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/clear') && init?.method === 'POST') {
+        clearBodies.push(JSON.parse(String(init.body || '{}')))
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            producer: {
+              type: 'attendance_group_fixed_schedule',
+              refId: 'group-a',
+              key: 'attendance_group_fixed_schedule:group-a:shift-a:2026-06-01:2026-06-30',
+            },
+            deactivated: [
+              { id: 'assignment-created', userId: 'user-create', shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', isActive: false },
+              { id: 'assignment-stale', userId: 'user-stale', shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', isActive: false },
+            ],
+            cleared: true,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/groups/group-a/members')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'member-1', groupId: 'group-a', userId: 'user-create', createdAt: '2026-03-28T08:00:00.000Z' },
+            ],
+            total: 2,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/groups')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'group-a',
+                name: 'Ops Team',
+                code: 'ops-team',
+                timezone: 'Asia/Shanghai',
+                ruleSetId: 'rule-set-1',
+                description: 'Operations attendance group',
+              },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-a',
+                name: 'Day shift',
+                timezone: 'Asia/Shanghai',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 5,
+                roundingMinutes: 5,
+                workingDays: [1, 2, 3, 4, 5],
+              },
+            ],
+          },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+    await flushUi(4)
+
+    const previewPanel = container!.querySelector<HTMLElement>('[data-attendance-group-fixed-schedule-preview]')
+    expect(previewPanel).toBeTruthy()
+    const shiftSelect = previewPanel!.querySelector<HTMLSelectElement>('[data-attendance-group-fixed-schedule-shift]')
+    expect(shiftSelect).toBeTruthy()
+    shiftSelect!.value = 'shift-a'
+    shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(previewPanel!, '[data-attendance-group-fixed-schedule-start]', '2026-06-01')
+    setInput(previewPanel!, '[data-attendance-group-fixed-schedule-end]', '2026-06-30')
+    await flushUi(2)
+
+    const expectedBody = {
+      shiftId: 'shift-a',
+      startDate: '2026-06-01',
+      endDate: '2026-06-30',
+    }
+    const rebuildButton = previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-rebuild-submit]')
+    const clearButton = previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-clear-submit]')
+    expect(rebuildButton).toBeTruthy()
+    expect(clearButton).toBeTruthy()
+    expect(rebuildButton!.disabled).toBe(false)
+    expect(clearButton!.disabled).toBe(false)
+
+    try {
+      rebuildButton!.click()
+      await flushUi(8)
+
+      expect(rebuildBodies).toEqual([expectedBody])
+      expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-rebuild-created]')?.textContent).toContain('1')
+      expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-deactivated]')?.textContent).toContain('1')
+
+      clearButton!.click()
+      await flushUi(2)
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      expect(clearBodies).toEqual([])
+
+      clearButton!.click()
+      await flushUi(8)
+
+      expect(clearBodies).toEqual([expectedBody])
+      expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-preview-result]')).toBeNull()
+      expect(container!.textContent).toContain('Cleared 2 managed fixed schedule rows.')
+      expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+        String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+      )).toBe(false)
+    } finally {
+      confirmSpy.mockRestore()
+    }
+  })
+
+  it('shows a clear-first hint when a managed fixed schedule blocks the selected window', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/rule-sets')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'rule-set-1', name: 'Ops Rules', scope: 'org', version: 3, isDefault: true },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/preview') && init?.method === 'POST') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            group: { id: 'group-a', name: 'Ops Team', timezone: 'Asia/Shanghai' },
+            shift: {
+              id: 'shift-a',
+              name: 'Day shift',
+              timezone: 'Asia/Shanghai',
+              workStartTime: '09:00',
+              workEndTime: '18:00',
+              lateGraceMinutes: 10,
+              earlyGraceMinutes: 5,
+              roundingMinutes: 5,
+              workingDays: [1, 2, 3, 4, 5],
+            },
+            window: { startDate: '2026-06-01', endDate: '2026-06-30' },
+            target: { total: 1, userIds: ['user-a'] },
+            wouldCreate: [],
+            skipped: [],
+            blockingConflicts: [
+              {
+                conflictType: 'shift_assignment_overlap',
+                draftKind: 'shift',
+                existingKind: 'shift',
+                assignmentId: 'assignment-managed-old-window',
+                userId: 'user-a',
+                startDate: '2026-06-01',
+                endDate: '2026-06-30',
+                existingStartDate: '2026-05-15',
+                existingEndDate: '2026-06-15',
+                managedScheduleAction: 'clear_existing_managed_schedule_first',
+                message: 'Shift assignment overlaps an active shift assignment for the same user',
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/groups/group-a/members')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'member-1', groupId: 'group-a', userId: 'user-a', createdAt: '2026-03-28T08:00:00.000Z' },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/groups')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'group-a',
+                name: 'Ops Team',
+                code: 'ops-team',
+                timezone: 'Asia/Shanghai',
+                ruleSetId: 'rule-set-1',
+                description: 'Operations attendance group',
+              },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-a',
+                name: 'Day shift',
+                timezone: 'Asia/Shanghai',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 5,
+                roundingMinutes: 5,
+                workingDays: [1, 2, 3, 4, 5],
+              },
+            ],
+          },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+    await flushUi(4)
+
+    const previewPanel = container!.querySelector<HTMLElement>('[data-attendance-group-fixed-schedule-preview]')
+    expect(previewPanel).toBeTruthy()
+    const shiftSelect = previewPanel!.querySelector<HTMLSelectElement>('[data-attendance-group-fixed-schedule-shift]')
+    expect(shiftSelect).toBeTruthy()
+    shiftSelect!.value = 'shift-a'
+    shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(previewPanel!, '[data-attendance-group-fixed-schedule-start]', '2026-06-01')
+    setInput(previewPanel!, '[data-attendance-group-fixed-schedule-end]', '2026-06-30')
+    await flushUi(2)
+
+    previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-preview-submit]')!.click()
+    await flushUi(8)
+
+    expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-clear-first-hint]')?.textContent).toContain('Clear the existing managed rows first')
+    expect(previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-apply-submit]')?.disabled).toBe(true)
+  })
+
   it('renders the production calendar-policy quick-add panel and appends a group day-index row', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
