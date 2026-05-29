@@ -1402,6 +1402,176 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('Replay 成功')
   })
 
+  it('expands a dead-letter into a read-only cross-run provenance timeline (fires by-rowId GET with rowId+pipelineId)', async () => {
+    const provenanceCalls: Array<{ url: string; method?: string }> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/runs?tenantId=default&pipelineId=pipe_prov&limit=5') return jsonResponse([])
+      if (url === '/api/integration/dead-letters?tenantId=default&pipelineId=pipe_prov&status=open&limit=5') {
+        return jsonResponse([
+          {
+            id: 'dl_prov_1',
+            tenantId: 'default',
+            workspaceId: null,
+            pipelineId: 'pipe_prov',
+            runId: 'run_prov_2',
+            idempotencyKey: 'MAT-777',
+            errorCode: 'VALIDATION_FAILED',
+            errorMessage: 'missing name',
+            status: 'open',
+          },
+        ])
+      }
+      if (url.startsWith('/api/integration/provenance')) {
+        provenanceCalls.push({ url, method: init?.method })
+        // Cross-run: the same rowId failed across two runs (still open → no success arc yet).
+        return jsonResponse([
+          {
+            runId: 'run_prov_1',
+            pipelineId: 'pipe_prov',
+            rowId: 'MAT-777',
+            eventType: 'target_write_failed',
+            at: '2026-05-27T02:00:00.000Z',
+            attrs: { errorCode: 'VALIDATION_FAILED', step: 'write' },
+            eventIndex: 0,
+            runStatus: 'partial',
+            runMode: 'manual',
+            runCreatedAt: '2026-05-27T02:00:00.000Z',
+          },
+          {
+            runId: 'run_prov_2',
+            pipelineId: 'pipe_prov',
+            rowId: 'MAT-777',
+            eventType: 'target_write_failed',
+            at: '2026-05-28T03:00:00.000Z',
+            attrs: { errorCode: 'VALIDATION_FAILED', step: 'write' },
+            eventIndex: 0,
+            runStatus: 'partial',
+            runMode: 'manual',
+            runCreatedAt: '2026-05-28T03:00:00.000Z',
+          },
+        ])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_prov'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="refresh-observation"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // Dead-letter present; timeline NOT fetched until the row is expanded.
+    expect(container.querySelector('[data-testid="dead-letter-dl_prov_1"]')).not.toBeNull()
+    expect(provenanceCalls).toHaveLength(0)
+    expect(container.querySelector('[data-testid="dead-letter-provenance-dl_prov_1"]')).toBeNull()
+
+    // KEYSTONE (real wire): expanding the row FIRES the by-rowId provenance GET,
+    // and the query carries rowId + pipelineId — not a pre-mocked render.
+    ;(container.querySelector('[data-testid="toggle-dead-letter-provenance-dl_prov_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(provenanceCalls).toHaveLength(1)
+    expect(provenanceCalls[0].url).toContain('/api/integration/provenance')
+    expect(provenanceCalls[0].url).toContain('rowId=MAT-777')
+    expect(provenanceCalls[0].url).toContain('pipelineId=pipe_prov')
+    // Read-only: the fetch is a GET, never a POST/write.
+    expect(provenanceCalls[0].method ?? 'GET').toBe('GET')
+
+    // Cross-run timeline rendered: both runs + the event type are visible.
+    const timeline = container.querySelector('[data-testid="dead-letter-provenance-timeline-dl_prov_1"]') as HTMLElement
+    expect(timeline).not.toBeNull()
+    expect(timeline.textContent).toContain('target_write_failed')
+    expect(timeline.textContent).toContain('run_prov_1')
+    expect(timeline.textContent).toContain('run_prov_2')
+
+    // Read-only: the timeline introduces no replay/confirm affordance.
+    expect(container.querySelector('[data-testid="confirm-replay-dead-letter-dl_prov_1"]')).toBeNull()
+
+    // Collapse hides the timeline; re-expanding reuses the cached fetch (no refetch).
+    ;(container.querySelector('[data-testid="toggle-dead-letter-provenance-dl_prov_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container.querySelector('[data-testid="dead-letter-provenance-timeline-dl_prov_1"]')).toBeNull()
+    ;(container.querySelector('[data-testid="toggle-dead-letter-provenance-dl_prov_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(provenanceCalls).toHaveLength(1)
+  })
+
+  it('disables the provenance lookup for a dead-letter without an idempotency key (no rowId)', async () => {
+    const provenanceCalls: string[] = []
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/runs?tenantId=default&pipelineId=pipe_nokey&limit=5') return jsonResponse([])
+      if (url === '/api/integration/dead-letters?tenantId=default&pipelineId=pipe_nokey&status=open&limit=5') {
+        return jsonResponse([
+          {
+            id: 'dl_nokey_1',
+            tenantId: 'default',
+            workspaceId: null,
+            pipelineId: 'pipe_nokey',
+            runId: 'run_nokey_1',
+            idempotencyKey: null,
+            errorCode: 'WRITE_FAILED',
+            errorMessage: 'no key',
+            status: 'open',
+          },
+        ])
+      }
+      if (url.startsWith('/api/integration/provenance')) {
+        provenanceCalls.push(url)
+        return jsonResponse([])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_nokey'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="refresh-observation"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // No rowId → the toggle is disabled, an explicit hint shows, and clicking fires no GET.
+    const toggle = container.querySelector('[data-testid="toggle-dead-letter-provenance-dl_nokey_1"]') as HTMLButtonElement
+    expect(toggle).not.toBeNull()
+    expect(toggle.disabled).toBe(true)
+    expect(container.querySelector('[data-testid="dead-letter-provenance-unavailable-dl_nokey_1"]')).not.toBeNull()
+    toggle.click()
+    await flushUi()
+    expect(provenanceCalls).toHaveLength(0)
+    expect(container.querySelector('[data-testid="dead-letter-provenance-dl_nokey_1"]')).toBeNull()
+  })
+
   it('treats a successful replay carrying a markReplayed warning as success (no false retry prompt)', async () => {
     apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url === '/api/integration/adapters') return jsonResponse([])
