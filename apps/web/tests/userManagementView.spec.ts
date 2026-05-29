@@ -423,6 +423,37 @@ function createApiImplementation(
       })
     }
 
+    if (pathname === '/api/attendance/groups') {
+      return createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: '11111111-1111-4111-8111-111111111111',
+              name: '总装一组',
+              code: 'ASM-1',
+            },
+          ],
+        },
+      })
+    }
+
+    if (pathname === '/api/attendance/shifts') {
+      return createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: '22222222-2222-4222-8222-222222222222',
+              name: '早班',
+              workStartTime: '09:00',
+              workEndTime: '18:00',
+            },
+          ],
+        },
+      })
+    }
+
     if (pathname === '/api/admin/users' && (init?.method || 'GET').toUpperCase() === 'POST') {
       const rawBody = typeof init?.body === 'string' ? init.body : ''
       const parsed = rawBody ? JSON.parse(rawBody) as {
@@ -1581,7 +1612,21 @@ describe('UserManagementView', () => {
     const departmentInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '部门（可选）') as HTMLInputElement | undefined
     const positionInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '岗位（可选）') as HTMLInputElement | undefined
     const hireDateInput = inputs.find((candidate) => candidate.getAttribute('aria-label') === '入职日期（可选）') as HTMLInputElement | undefined
-    if (!nameInput || !usernameInput || !mobileInput || !employeeNoInput || !departmentInput || !positionInput || !hireDateInput) {
+    const groupSelect = container!.querySelector<HTMLSelectElement>('select[aria-label="考勤组（可选）"]')
+    const shiftSelect = container!.querySelector<HTMLSelectElement>('select[aria-label="默认班次（可选）"]')
+    const shiftStartDateInput = inputs.find((candidate) => candidate.getAttribute('aria-label') === '默认班次生效日期（可选）') as HTMLInputElement | undefined
+    if (
+      !nameInput
+      || !usernameInput
+      || !mobileInput
+      || !employeeNoInput
+      || !departmentInput
+      || !positionInput
+      || !hireDateInput
+      || !groupSelect
+      || !shiftSelect
+      || !shiftStartDateInput
+    ) {
       throw new Error('Create-user form inputs not found')
     }
 
@@ -1599,6 +1644,10 @@ describe('UserManagementView', () => {
     positionInput.dispatchEvent(new Event('input', { bubbles: true }))
     hireDateInput.value = '2026-05-29'
     hireDateInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await setSelectValue(groupSelect, '11111111-1111-4111-8111-111111111111')
+    await setSelectValue(shiftSelect, '22222222-2222-4222-8222-222222222222')
+    shiftStartDateInput.value = '2026-06-01'
+    shiftStartDateInput.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi(2)
 
     findButtonByText(container!, '创建用户').click()
@@ -1616,6 +1665,9 @@ describe('UserManagementView', () => {
       department: 'Assembly',
       position: 'Operator',
       hireDate: '2026-05-29',
+      attendanceGroupId: '11111111-1111-4111-8111-111111111111',
+      defaultShiftId: '22222222-2222-4222-8222-222222222222',
+      defaultShiftStartDate: '2026-06-01',
       role: 'user',
       isActive: true,
     })
