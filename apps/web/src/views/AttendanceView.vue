@@ -3181,7 +3181,7 @@
                           :tr="tr"
                           :label="tr('User picker', '用户选择器')"
                           name="attendanceGroupMemberUserPicker"
-                          :help-text="tr('Pick one user and stage it before adding members, or paste multiple IDs manually.', '先选择一个用户并暂存，再添加成员；也可以手动粘贴多个 ID。')"
+                          :help-text="tr('Pick one user and add them directly, or stage several users / paste multiple IDs for bulk changes.', '选择一个用户可直接添加；也可以暂存多个用户或粘贴多个 ID 批量处理。')"
                           :search-placeholder="tr('Search users to append', '搜索要追加的用户')"
                           input-id="attendance-group-member-user-picker"
                         />
@@ -5399,15 +5399,15 @@
                 </small>
               </div>
               <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-rotation-user">
-                  <span>{{ tr('User ID', '用户 ID') }}</span>
-                  <input
-                    id="attendance-rotation-user"
-                    name="rotationUserId"
-                    v-model="rotationAssignmentForm.userId"
-                    type="text"
-                  />
-                </label>
+                <AttendanceUserPickerField
+                  v-model="rotationAssignmentForm.userId"
+                  :tr="tr"
+                  :label="tr('User', '用户')"
+                  name="rotationUserId"
+                  :help-text="tr('Search by email, name, or user ID, then pick a user for this rotation.', '按邮箱、姓名或用户 ID 搜索，然后为该轮班选择用户。')"
+                  :search-placeholder="tr('Search users for rotation assignment', '搜索轮班分配用户')"
+                  input-id="attendance-rotation-user"
+                />
                 <label class="attendance__field" for="attendance-rotation-rule">
                   <span>{{ tr('Rotation rule', '轮班规则') }}</span>
                   <select
@@ -5495,7 +5495,24 @@
                   </thead>
                   <tbody>
                     <tr v-for="item in rotationAssignments" :key="item.assignment.id">
-                      <td>{{ item.assignment.userId }}</td>
+                      <td>
+                        <span class="attendance__group-member-identity" data-attendance-rotation-assignment-user-identity>
+                          <strong
+                            v-if="attendanceAssignmentUserPrimaryLabel(item.assignment.userId)"
+                            data-attendance-rotation-assignment-user-label
+                          >
+                            {{ attendanceAssignmentUserPrimaryLabel(item.assignment.userId) }}
+                          </strong>
+                          <span data-attendance-rotation-assignment-user-id>{{ item.assignment.userId }}</span>
+                          <small
+                            v-if="attendanceAssignmentUserSecondaryLabel(item.assignment.userId)"
+                            class="attendance__field-hint"
+                            data-attendance-rotation-assignment-user-secondary
+                          >
+                            {{ attendanceAssignmentUserSecondaryLabel(item.assignment.userId) }}
+                          </small>
+                        </span>
+                      </td>
                       <td>{{ item.rotation.name }}</td>
                       <td>{{ item.assignment.startDate }}</td>
                       <td>{{ item.assignment.endDate || '--' }}</td>
@@ -5724,15 +5741,15 @@
                 </small>
               </div>
               <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-assignment-user-id">
-                  <span>{{ tr('User ID', '用户 ID') }}</span>
-                  <input
-                    id="attendance-assignment-user-id"
-                    name="assignmentUserId"
-                    v-model="assignmentForm.userId"
-                    type="text"
-                  />
-                </label>
+                <AttendanceUserPickerField
+                  v-model="assignmentForm.userId"
+                  :tr="tr"
+                  :label="tr('User', '用户')"
+                  name="assignmentUserId"
+                  :help-text="tr('Search by email, name, or user ID, then pick a user for this shift assignment.', '按邮箱、姓名或用户 ID 搜索，然后为该班次选择用户。')"
+                  :search-placeholder="tr('Search users for shift assignment', '搜索班次分配用户')"
+                  input-id="attendance-assignment-user-id"
+                />
                 <label class="attendance__field" for="attendance-assignment-shift-id">
                   <span>{{ tr('Shift', '班次') }}</span>
                   <select
@@ -5816,7 +5833,24 @@
                   </thead>
                   <tbody>
                     <tr v-for="item in assignments" :key="item.assignment.id">
-                      <td>{{ item.assignment.userId }}</td>
+                      <td>
+                        <span class="attendance__group-member-identity" data-attendance-assignment-user-identity>
+                          <strong
+                            v-if="attendanceAssignmentUserPrimaryLabel(item.assignment.userId)"
+                            data-attendance-assignment-user-label
+                          >
+                            {{ attendanceAssignmentUserPrimaryLabel(item.assignment.userId) }}
+                          </strong>
+                          <span data-attendance-assignment-user-id>{{ item.assignment.userId }}</span>
+                          <small
+                            v-if="attendanceAssignmentUserSecondaryLabel(item.assignment.userId)"
+                            class="attendance__field-hint"
+                            data-attendance-assignment-user-secondary
+                          >
+                            {{ attendanceAssignmentUserSecondaryLabel(item.assignment.userId) }}
+                          </small>
+                        </span>
+                      </td>
                       <td>{{ item.shift.name }}</td>
                       <td>{{ item.assignment.startDate }}</td>
                       <td>{{ item.assignment.endDate || '--' }}</td>
@@ -8281,6 +8315,8 @@ const attendanceGroupPendingMemberIds = ref<string[]>([])
 const attendanceGroupMemberDuplicateNotice = ref('')
 const attendanceGroupMemberTotal = ref(0)
 const attendanceGroupMemberResolvedUsers = ref<AttendanceGroupMemberResolvedUsers>({})
+const attendanceAssignmentResolvedUsers = ref<AttendanceGroupMemberResolvedUsers>({})
+let attendanceAssignmentResolveSeq = 0
 const attendanceGroupFixedSchedulePreviewForm = reactive({
   shiftId: '',
   startDate: toDateInput(new Date()),
@@ -8354,7 +8390,7 @@ function attendanceGroupMemberResolverUserIds(members: AttendanceGroupMember[]):
   const userIds: string[] = []
   for (const member of members) {
     const userId = String(member.userId || '').trim()
-    if (!isUuid(userId) || seen.has(userId)) continue
+    if (!userId || seen.has(userId)) continue
     seen.add(userId)
     userIds.push(userId)
   }
@@ -8371,6 +8407,37 @@ function attendanceGroupMemberSecondaryLabel(userId: string): string {
   const item = attendanceGroupMemberResolvedUsers.value[userId]
   if (!item) return ''
   const primary = attendanceGroupMemberPrimaryLabel(userId)
+  const parts: string[] = []
+  const email = item.email.trim()
+  if (email && email !== primary) parts.push(email)
+  if (!item.is_active) parts.push(tr('Inactive', '已停用'))
+  return parts.join(' · ')
+}
+
+function attendanceAssignmentResolverUserIds(): string[] {
+  const seen = new Set<string>()
+  const userIds: string[] = []
+  const pushUserId = (value: string) => {
+    const userId = String(value || '').trim()
+    if (!userId || seen.has(userId)) return
+    seen.add(userId)
+    userIds.push(userId)
+  }
+  for (const item of assignments.value) pushUserId(item.assignment.userId)
+  for (const item of rotationAssignments.value) pushUserId(item.assignment.userId)
+  return userIds
+}
+
+function attendanceAssignmentUserPrimaryLabel(userId: string): string {
+  const item = attendanceAssignmentResolvedUsers.value[userId]
+  if (!item) return ''
+  return item.name?.trim() || item.email.trim() || ''
+}
+
+function attendanceAssignmentUserSecondaryLabel(userId: string): string {
+  const item = attendanceAssignmentResolvedUsers.value[userId]
+  if (!item) return ''
+  const primary = attendanceAssignmentUserPrimaryLabel(userId)
   const parts: string[] = []
   const email = item.email.trim()
   if (email && email !== primary) parts.push(email)
@@ -8526,7 +8593,9 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
   ]
 })
 const attendanceGroupMemberSubmitAvailable = computed(() =>
-  attendanceGroupPendingMemberIds.value.length > 0 || parseUserIdList(attendanceGroupMemberUserIds.value).length > 0
+  attendanceGroupPendingMemberIds.value.length > 0
+    || Boolean(attendanceGroupMemberSelectedUserId.value.trim())
+    || parseUserIdList(attendanceGroupMemberUserIds.value).length > 0
 )
 const attendanceGroupFixedSchedulePreviewAvailable = computed(() =>
   Boolean(
@@ -15810,6 +15879,7 @@ async function loadRotationAssignments() {
     }
     adminForbidden.value = false
     rotationAssignments.value = data.data.items || []
+    void resolveAttendanceAssignmentUserLabels()
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load rotation assignments', '加载轮班分配失败')), 'error')
   } finally {
@@ -16043,6 +16113,7 @@ async function loadAssignments() {
     }
     adminForbidden.value = false
     assignments.value = data.data.items || []
+    void resolveAttendanceAssignmentUserLabels()
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load assignments', '加载分配失败')), 'error')
   } finally {
@@ -16706,21 +16777,55 @@ async function resolveAttendanceGroupMemberLabels(groupId: string, members: Atte
   }
 }
 
+async function resolveAttendanceAssignmentUserLabels() {
+  const seq = ++attendanceAssignmentResolveSeq
+  const userIds = attendanceAssignmentResolverUserIds()
+  if (userIds.length === 0) {
+    attendanceAssignmentResolvedUsers.value = {}
+    return
+  }
+
+  try {
+    const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ userIds }),
+    })
+    if (seq !== attendanceAssignmentResolveSeq) return
+    if (response.status === 403 || response.status === 404) {
+      attendanceAssignmentResolvedUsers.value = {}
+      return
+    }
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      attendanceAssignmentResolvedUsers.value = {}
+      return
+    }
+    attendanceAssignmentResolvedUsers.value = normalizeAttendanceGroupMemberResolvedUsers(data.data, userIds)
+  } catch {
+    if (seq === attendanceAssignmentResolveSeq) {
+      attendanceAssignmentResolvedUsers.value = {}
+    }
+  }
+}
+
 async function addAttendanceGroupMembers() {
   const groupId = attendanceGroupMemberGroupId.value
-  const enteredUserIds = parseUserIdList(attendanceGroupMemberUserIds.value)
-  stageAttendanceGroupMemberIds(enteredUserIds)
-  attendanceGroupMemberUserIds.value = ''
-  const userIds = attendanceGroupPendingMemberIds.value.filter(userId => !attendanceGroupLoadedMemberIds.value.has(userId))
   if (!groupId) {
     setStatus(tr('Select an attendance group first.', '请先选择考勤分组。'), 'error')
     return
   }
+  const selectedUserId = attendanceGroupMemberSelectedUserId.value.trim()
+  const enteredUserIds = parseUserIdList(attendanceGroupMemberUserIds.value)
+  const draftUserIds = selectedUserId ? [selectedUserId, ...enteredUserIds] : enteredUserIds
+  stageAttendanceGroupMemberIds(draftUserIds)
+  attendanceGroupMemberSelectedUserId.value = ''
+  attendanceGroupMemberUserIds.value = ''
+  const userIds = attendanceGroupPendingMemberIds.value.filter(userId => !attendanceGroupLoadedMemberIds.value.has(userId))
   if (userIds.length === 0) {
     setStatus(
-      enteredUserIds.length > 0
-        ? tr('All entered IDs are already in this group or pending.', '输入的 ID 均已在本组或待添加列表中。')
-        : tr('Enter at least one user ID.', '请至少输入一个用户 ID。'),
+      draftUserIds.length > 0
+        ? tr('All selected or entered users are already in this group or pending.', '选择或输入的用户均已在本组或待添加列表中。')
+        : tr('Select or enter at least one user.', '请至少选择或输入一个用户。'),
       'error',
     )
     return
