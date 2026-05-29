@@ -3411,13 +3411,123 @@
                           class="attendance__btn attendance__btn--inline"
                           type="button"
                           :data-attendance-group-summary-action="action.key"
-                          @click="selectAdminSection(action.sectionId)"
+                          @click="handleAttendanceGroupSummaryAction(action)"
                         >
                           {{ action.label }}
                         </button>
                       </div>
                     </div>
                   </section>
+
+                  <div
+                    v-if="attendanceGroupWorkTimeDrawerOpen"
+                    class="attendance__drawer-backdrop"
+                    data-attendance-group-work-time-drawer
+                    @click.self="closeAttendanceGroupWorkTimeDrawer"
+                  >
+                    <aside
+                      class="attendance__work-time-drawer"
+                      role="dialog"
+                      aria-modal="true"
+                      aria-labelledby="attendance-group-work-time-drawer-title"
+                    >
+                      <div class="attendance__work-time-drawer-header">
+                        <div>
+                          <h6 id="attendance-group-work-time-drawer-title">{{ tr('Work time settings', '考勤时间设置') }}</h6>
+                          <span class="attendance__field-hint">
+                            {{ attendanceGroupEditingId
+                              ? tr('Group type is locked after creation; scheduling details stay in the matching surface.', '考勤组类型创建后锁定；排班细节仍在对应管理界面维护。')
+                              : tr('Choose the work-time type before creating the group.', '创建考勤组前选择考勤时间类型。') }}
+                          </span>
+                        </div>
+                        <button
+                          class="attendance__btn attendance__btn--compact"
+                          type="button"
+                          data-attendance-group-work-time-close
+                          @click="closeAttendanceGroupWorkTimeDrawer"
+                        >
+                          {{ tr('Close', '关闭') }}
+                        </button>
+                      </div>
+
+                      <div class="attendance__work-time-type-list" data-attendance-group-work-time-options>
+                        <button
+                          v-for="option in ATTENDANCE_GROUP_TYPE_OPTIONS"
+                          :key="option.value"
+                          class="attendance__work-time-type-option"
+                          :class="{ 'attendance__work-time-type-option--active': normalizeAttendanceGroupType(attendanceGroupForm.attendanceType) === option.value }"
+                          type="button"
+                          :disabled="Boolean(attendanceGroupEditingId)"
+                          :data-attendance-group-work-time-option="option.value"
+                          @click="setAttendanceGroupWorkTimeType(option.value)"
+                        >
+                          <span>{{ tr(option.labelEn, option.labelZh) }}</span>
+                          <small>{{ tr(option.detailEn, option.detailZh) }}</small>
+                        </button>
+                      </div>
+
+                      <div class="attendance__work-time-drawer-body" data-attendance-group-work-time-selected>
+                        <strong>{{ attendanceGroupTypeLabel(attendanceGroupForm.attendanceType) }}</strong>
+                        <span>{{ attendanceGroupTypeDetail(attendanceGroupForm.attendanceType) }}</span>
+                        <small v-if="attendanceGroupEditingId" class="attendance__field-hint" data-attendance-group-work-time-lock>
+                          {{ tr('Type changes are blocked after creation so existing assignments keep their meaning.', '创建后禁止修改类型，以保护已有排班含义。') }}
+                        </small>
+                        <small v-else class="attendance__field-hint" data-attendance-group-work-time-draft>
+                          {{ tr('The selected type will be saved when you create the attendance group.', '创建考勤组时会保存当前选择的类型。') }}
+                        </small>
+                      </div>
+
+                      <div
+                        v-if="normalizeAttendanceGroupType(attendanceGroupForm.attendanceType) === 'fixed_shift'"
+                        class="attendance__fixed-schedule-week-matrix"
+                        data-attendance-group-work-time-week-matrix
+                      >
+                        <div class="attendance__admin-section-header">
+                          <div>
+                            <h6>{{ tr('Weekly shift matrix', '周班次矩阵') }}</h6>
+                            <span class="attendance__field-hint">{{ attendanceGroupFixedScheduleWeekMatrixHint }}</span>
+                          </div>
+                        </div>
+                        <div class="attendance__fixed-schedule-week-grid">
+                          <div
+                            v-for="day in attendanceGroupFixedScheduleWeekMatrix"
+                            :key="`drawer-${day.value}`"
+                            class="attendance__fixed-schedule-week-day"
+                            :class="{ 'attendance__fixed-schedule-week-day--rest': !day.isWorkingDay }"
+                            data-attendance-group-work-time-week-day
+                          >
+                            <span>{{ day.label }}</span>
+                            <strong>{{ day.assignmentLabel }}</strong>
+                            <small>{{ day.timeLabel }}</small>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div class="attendance__work-time-drawer-actions">
+                        <button
+                          class="attendance__btn"
+                          type="button"
+                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.shifts); closeAttendanceGroupWorkTimeDrawer()"
+                        >
+                          {{ tr('Open Shifts', '打开班次') }}
+                        </button>
+                        <button
+                          class="attendance__btn"
+                          type="button"
+                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.assignments); closeAttendanceGroupWorkTimeDrawer()"
+                        >
+                          {{ tr('Open Assignments', '打开排班分配') }}
+                        </button>
+                        <button
+                          class="attendance__btn"
+                          type="button"
+                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench); closeAttendanceGroupWorkTimeDrawer()"
+                        >
+                          {{ tr('Open Advanced scheduling', '打开高级排班') }}
+                        </button>
+                      </div>
+                    </aside>
+                  </div>
 
                   <section
                     v-if="attendanceGroupEditingId && attendanceGroupForm.attendanceType === 'fixed_shift'"
@@ -6748,7 +6858,8 @@ interface AttendanceGroupFixedSchedulePreviewResult {
 type AttendanceGroupSummaryAction = {
   key: string
   label: string
-  sectionId: string
+  sectionId?: string
+  drawer?: 'work-time'
 }
 
 type AttendanceGroupSummaryPolicyLine = {
@@ -8463,6 +8574,7 @@ const attendanceGroupRuleSetFilter = ref('')
 const attendanceGroupTypeFilter = ref<AttendanceGroupType | ''>('')
 const attendanceGroupCopyingId = ref<string | null>(null)
 const attendanceGroupDeletingId = ref<string | null>(null)
+const attendanceGroupWorkTimeDrawerOpen = ref(false)
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
 const payrollSummaryFieldOptions = ref<AttendancePayrollSummaryFieldOption[]>(
@@ -8772,6 +8884,11 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
   const workTimeActions: AttendanceGroupSummaryAction[] = attendanceGroupType === 'fixed_shift'
     ? [
         {
+          key: 'open-work-time-drawer',
+          label: tr('Open Work time', '打开考勤时间'),
+          drawer: 'work-time',
+        },
+        {
           key: 'open-shifts',
           label: tr('Open Shifts', '打开班次'),
           sectionId: ATTENDANCE_ADMIN_SECTION_IDS.shifts,
@@ -8783,6 +8900,11 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
         },
       ]
     : [
+        {
+          key: 'open-work-time-drawer',
+          label: tr('Open Work time', '打开考勤时间'),
+          drawer: 'work-time',
+        },
         {
           key: 'open-advanced-scheduling',
           label: tr('Open Advanced scheduling', '打开高级排班'),
@@ -8915,6 +9037,29 @@ const attendanceGroupFixedSchedulePreviewAvailable = computed(() =>
       && !attendanceGroupFixedScheduleFormBusy.value,
   )
 )
+
+function handleAttendanceGroupSummaryAction(action: AttendanceGroupSummaryAction) {
+  if (action.drawer === 'work-time') {
+    openAttendanceGroupWorkTimeDrawer()
+    return
+  }
+  if (action.sectionId) {
+    selectAdminSection(action.sectionId)
+  }
+}
+
+function openAttendanceGroupWorkTimeDrawer() {
+  attendanceGroupWorkTimeDrawerOpen.value = true
+}
+
+function closeAttendanceGroupWorkTimeDrawer() {
+  attendanceGroupWorkTimeDrawerOpen.value = false
+}
+
+function setAttendanceGroupWorkTimeType(type: AttendanceGroupType) {
+  if (attendanceGroupEditingId.value) return
+  attendanceGroupForm.attendanceType = normalizeAttendanceGroupType(type)
+}
 const attendanceGroupFixedScheduleFormBusy = computed(() =>
   attendanceGroupFixedSchedulePreviewLoading.value
     || attendanceGroupFixedScheduleApplyLoading.value
@@ -20314,6 +20459,99 @@ const holidaySectionBindings = {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 4px;
+}
+
+.attendance__drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(17, 24, 39, 0.32);
+}
+
+.attendance__work-time-drawer {
+  width: min(520px, 100vw);
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 18px;
+  overflow: auto;
+  border-left: 1px solid #dbe3ee;
+  background: #fff;
+  box-shadow: -12px 0 30px rgba(17, 24, 39, 0.18);
+}
+
+.attendance__work-time-drawer-header,
+.attendance__work-time-drawer-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.attendance__work-time-drawer-header h6 {
+  margin: 0;
+  color: #111827;
+}
+
+.attendance__work-time-type-list {
+  display: grid;
+  gap: 8px;
+}
+
+.attendance__work-time-type-option {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  background: #f9fafb;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attendance__work-time-type-option:disabled {
+  cursor: default;
+}
+
+.attendance__work-time-type-option--active {
+  border-color: #1f6feb;
+  background: #eff6ff;
+  box-shadow: 0 0 0 1px rgba(31, 111, 235, 0.12);
+}
+
+.attendance__work-time-type-option span,
+.attendance__work-time-drawer-body strong {
+  color: #111827;
+  font-weight: 700;
+}
+
+.attendance__work-time-type-option small,
+.attendance__work-time-drawer-body span {
+  color: #52606d;
+  font-size: 12px;
+}
+
+.attendance__work-time-drawer-body {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.attendance__work-time-drawer-actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.attendance__work-time-drawer .attendance__fixed-schedule-week-grid {
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
 }
 
 .attendance__fixed-schedule-week-matrix {
