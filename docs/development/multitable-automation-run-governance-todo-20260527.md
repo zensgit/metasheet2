@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed through retry runtime + redaction invariant hardening (2026-05-29); A6 remains frozen / demand-gated
+Status: A0-A5 closed through retry runtime + redaction invariant hardening (2026-05-29); A6-0 docs-only scout recorded; A6 runtime remains frozen / demand-gated
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, not-wired); RFC #1885
 
@@ -94,7 +94,7 @@ Completed by the named A4/A5 retry line:
 - whole-execution retry route, provenance, and side-effect confirmation — #2047.
 - HTTP response serialization invariant for `/test` + retry — #2051 + #2053.
 
-Deferred (capability half — A6, frozen/demand-gated):
+Deferred (capability half — A6, frozen/demand-gated; A6-0 scout only is recorded):
 
 - persistent automation_jobs runtime; suspend/resume; branch/parallel
 - BPMN compile/preview adapter; approval-as-job bridge
@@ -228,13 +228,23 @@ Acceptance:
 - [x] Retry rejects missing / empty / invalid trigger events without loading rule or executing actions.
 - [x] Retry response and `/test` response never serialize raw in-memory ruleSnapshot / steps.
 
-### A6 — Capability-half Bridge  (lock: design only, frozen / demand-gated)
+### A6 — Capability-half Bridge  (lock: A6-0 design only; runtime frozen / demand-gated)
 
-- [ ] Runtime remains frozen / demand-gated; this milestone is not complete.
-- [ ] Record convergence sequence: persist job -> suspend/resume [webhook before delay]
+Checklist status below records the docs-only A6-0 scout/scope gate. It does NOT
+mark the convergence engine complete.
+
+- [x] A6-0 docs-only scout/scope gate recorded in
+      `multitable-automation-a6-convergence-scout-20260529.md`.
+- [x] Runtime remains frozen / demand-gated; this milestone is not complete.
+- [x] Record convergence sequence: persist job -> suspend/resume [webhook before delay]
       -> branch/parallel -> BPMN compile/preview adapter -> approval-as-job.
-- [ ] Each step references a concrete integration use-case before unlock (demand gate).
-- [ ] Graph fields (upstreamStepKey/branchIndex) introduced HERE, not in A1.
-- [ ] Governance inheritance: any capability reuses this line's
+- [x] Each step references a concrete integration use-case before unlock (demand gate).
+- [x] Graph fields (upstreamStepKey/branchIndex) introduced in A6-3, not in A1/A5.
+- [x] Governance inheritance: any capability reuses this line's
       run/job/status/provenance/redaction/replay substrate (no second-class layer).
-- [ ] No runtime in this milestone.
+- [x] No runtime in this milestone.
+- [ ] A6-1 persistent WorkflowJob runtime scout / implementation — not started.
+- [ ] A6-2 suspend/resume runtime — not started.
+- [ ] A6-3 branch/parallel DAG runtime — not started.
+- [ ] A6-4 BPMN compile/preview adapter — not started.
+- [ ] A6-5 approval-as-job bridge — not started.
