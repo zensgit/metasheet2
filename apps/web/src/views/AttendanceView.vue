@@ -4184,6 +4184,8 @@
                     name="payrollCycleStartDate"
                     v-model="payrollCycleForm.startDate"
                     type="date"
+                    :class="{ 'attendance__input--invalid': payrollCycleManualPeriodRequired && !payrollCycleForm.startDate }"
+                    :aria-invalid="payrollCycleManualPeriodRequired && !payrollCycleForm.startDate ? 'true' : 'false'"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-payroll-cycle-end">
@@ -4193,6 +4195,8 @@
                     name="payrollCycleEndDate"
                     v-model="payrollCycleForm.endDate"
                     type="date"
+                    :class="{ 'attendance__input--invalid': payrollCycleManualPeriodRequired && !payrollCycleForm.endDate }"
+                    :aria-invalid="payrollCycleManualPeriodRequired && !payrollCycleForm.endDate ? 'true' : 'false'"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-payroll-cycle-status">
@@ -4211,15 +4215,15 @@
               <div class="attendance__admin-actions">
                 <button
                   class="attendance__btn attendance__btn--primary"
-                  :disabled="payrollCycleSaving"
+                  :disabled="payrollCycleSaving || !payrollCycleCanSave"
                   @click="savePayrollCycle"
                 >
                   {{ payrollCycleSaving ? tr('Saving...', '保存中...') : payrollCycleEditingId ? tr('Update cycle', '更新周期') : tr('Create cycle', '创建周期') }}
                 </button>
-                <button class="attendance__btn" :disabled="payrollCycleSaving" @click="loadPayrollCycleSummary">
+                <button class="attendance__btn" :disabled="payrollCycleSaving || !payrollCycleEditingId" @click="loadPayrollCycleSummary">
                   {{ tr('Load summary', '加载汇总') }}
                 </button>
-                <button class="attendance__btn" :disabled="payrollCycleSaving" @click="exportPayrollCycleSummary">
+                <button class="attendance__btn" :disabled="payrollCycleSaving || !payrollCycleEditingId" @click="exportPayrollCycleSummary">
                   {{ tr('Export CSV', '导出 CSV') }}
                 </button>
                 <button
@@ -4231,6 +4235,13 @@
                   {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
+              <small
+                v-if="payrollCycleValidationHint"
+                class="attendance__field-hint attendance__field-hint--error"
+                data-payroll-cycle-validation-hint
+              >
+                {{ payrollCycleValidationHint }}
+              </small>
               <small class="attendance__field-hint">
                 {{ payrollCycleTemplateTimezoneHint }}
               </small>
@@ -7085,6 +7096,35 @@ const payrollCycleTemplateTimezoneHint = computed(() =>
 const payrollCycleGenerateTimezoneHint = computed(() =>
   `${tr('Generate timezone context', '生成时区上下文')}: ${resolvePayrollTemplateTimezoneLabel(payrollCycleGenerateForm.templateId, 'default')}`
 )
+const payrollCycleManualPeriodRequired = computed(() => !payrollCycleForm.templateId)
+const payrollCycleManualPeriodComplete = computed(() =>
+  Boolean(payrollCycleForm.startDate && payrollCycleForm.endDate)
+)
+const payrollCycleCanSave = computed(() =>
+  Boolean(payrollCycleForm.templateId) || payrollCycleManualPeriodComplete.value
+)
+const payrollCycleValidationHint = computed(() => {
+  if (!payrollCycleManualPeriodRequired.value) return ''
+  if (!payrollCycleForm.startDate && !payrollCycleForm.endDate) {
+    return tr(
+      'Select a payroll template, or enter both start and end dates for a manual cycle.',
+      '请选择计薪模板，或为手工周期填写开始和结束日期。',
+    )
+  }
+  if (!payrollCycleForm.startDate) {
+    return tr(
+      'Enter a start date for this manual payroll cycle.',
+      '请填写手工计薪周期的开始日期。',
+    )
+  }
+  if (!payrollCycleForm.endDate) {
+    return tr(
+      'Enter an end date for this manual payroll cycle.',
+      '请填写手工计薪周期的结束日期。',
+    )
+  }
+  return ''
+})
 const rotationRuleTimezoneLabel = computed(() => displayTimezone(rotationRuleForm.timezone))
 const shiftTimezoneLabel = computed(() => displayTimezone(shiftForm.timezone))
 
@@ -17170,6 +17210,14 @@ async function generatePayrollCycles() {
 }
 
 async function savePayrollCycle() {
+  if (!payrollCycleCanSave.value) {
+    setStatus(
+      payrollCycleValidationHint.value || tr('Payroll cycle dates are required.', '计薪周期日期为必填项。'),
+      'error',
+    )
+    return
+  }
+
   payrollCycleSaving.value = true
   try {
     const payload: Record<string, any> = {
@@ -17200,9 +17248,18 @@ async function savePayrollCycle() {
       throw new Error(readErrorMessage(data, tr('Failed to save payroll cycle', '保存计薪周期失败')))
     }
     adminForbidden.value = false
-    resetPayrollCycleForm()
+    const savedCycle = data.data ?? null
+    const savedCycleId = savedCycle?.id ?? payrollCycleEditingId.value
     await loadPayrollCycles()
-    setStatus(tr('Payroll cycle saved.', '计薪周期已保存。'))
+    const selectedCycle = savedCycleId
+      ? payrollCycles.value.find(item => item.id === savedCycleId) ?? savedCycle
+      : savedCycle
+    if (selectedCycle?.id) {
+      editPayrollCycle(selectedCycle)
+    } else {
+      resetPayrollCycleForm()
+    }
+    setStatus(tr('Payroll cycle saved and selected.', '计薪周期已保存并已选中。'))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save payroll cycle', '保存计薪周期失败')), 'error')
   } finally {
@@ -17515,6 +17572,11 @@ const holidaySectionBindings = {
   border: 1px solid #d0d0d0;
   border-radius: 6px;
   min-width: 180px;
+}
+
+.attendance__input--invalid {
+  border-color: #c0392b;
+  box-shadow: 0 0 0 1px rgba(192, 57, 43, 0.2);
 }
 
 .attendance__field--full {

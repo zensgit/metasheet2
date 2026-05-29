@@ -263,6 +263,8 @@
           v-model="payrollCycleForm.startDate"
           name="payrollCycleStartDate"
           type="date"
+          :class="{ 'attendance__input--invalid': payrollCycleManualPeriodRequired && !payrollCycleForm.startDate }"
+          :aria-invalid="payrollCycleManualPeriodRequired && !payrollCycleForm.startDate ? 'true' : 'false'"
         />
       </label>
       <label class="attendance__field" for="attendance-payroll-cycle-end">
@@ -272,6 +274,8 @@
           v-model="payrollCycleForm.endDate"
           name="payrollCycleEndDate"
           type="date"
+          :class="{ 'attendance__input--invalid': payrollCycleManualPeriodRequired && !payrollCycleForm.endDate }"
+          :aria-invalid="payrollCycleManualPeriodRequired && !payrollCycleForm.endDate ? 'true' : 'false'"
         />
       </label>
       <label class="attendance__field" for="attendance-payroll-cycle-status">
@@ -288,13 +292,13 @@
       </label>
     </div>
     <div class="attendance__admin-actions">
-      <button class="attendance__btn attendance__btn--primary" :disabled="payrollCycleSaving" @click="savePayrollCycle">
+      <button class="attendance__btn attendance__btn--primary" :disabled="payrollCycleSaving || !payrollCycleCanSave" @click="savePayrollCycle">
         {{ payrollCycleSaving ? tr('Saving...', '保存中...') : payrollCycleEditingId ? tr('Update cycle', '更新周期') : tr('Create cycle', '创建周期') }}
       </button>
-      <button class="attendance__btn" :disabled="payrollCycleSaving" @click="loadPayrollCycleSummary">
+      <button class="attendance__btn" :disabled="payrollCycleSaving || !payrollCycleEditingId" @click="loadPayrollCycleSummary">
         {{ tr('Load summary', '加载汇总') }}
       </button>
-      <button class="attendance__btn" :disabled="payrollCycleSaving" @click="exportPayrollCycleSummary">
+      <button class="attendance__btn" :disabled="payrollCycleSaving || !payrollCycleEditingId" @click="exportPayrollCycleSummary">
         {{ tr('Export CSV', '导出 CSV') }}
       </button>
       <button
@@ -306,6 +310,13 @@
         {{ tr('Cancel edit', '取消编辑') }}
       </button>
     </div>
+    <small
+      v-if="payrollCycleValidationHint"
+      class="attendance__field-hint attendance__field-hint--error"
+      data-payroll-cycle-validation-hint
+    >
+      {{ payrollCycleValidationHint }}
+    </small>
 
     <details class="attendance__details">
       <summary class="attendance__details-summary">{{ tr('Batch generate cycles', '批量生成周期') }}</summary>
@@ -513,6 +524,9 @@ interface PayrollBindings {
   payrollTemplateForm: PayrollTemplateFormState
   payrollCycleForm: PayrollCycleFormState
   payrollCycleGenerateForm: PayrollCycleGenerateFormState
+  payrollCycleCanSave: Readonly<Ref<boolean>>
+  payrollCycleManualPeriodRequired: Readonly<Ref<boolean>>
+  payrollCycleValidationHint: Readonly<Ref<string>>
   payrollTemplateName: (templateId?: string | null) => string
   resetPayrollTemplateForm: () => MaybePromise<void>
   editPayrollTemplate: (item: AttendancePayrollTemplate) => MaybePromise<void>
@@ -559,6 +573,9 @@ const payrollCycleSummary = props.payroll.payrollCycleSummary
 const payrollTemplateForm = props.payroll.payrollTemplateForm
 const payrollCycleForm = props.payroll.payrollCycleForm
 const payrollCycleGenerateForm = props.payroll.payrollCycleGenerateForm
+const payrollCycleCanSave = props.payroll.payrollCycleCanSave
+const payrollCycleManualPeriodRequired = props.payroll.payrollCycleManualPeriodRequired
+const payrollCycleValidationHint = props.payroll.payrollCycleValidationHint
 const payrollTemplateTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(payrollTemplateForm.timezone))
 const payrollTemplateName = props.payroll.payrollTemplateName
 const resetPayrollTemplateForm = () => props.payroll.resetPayrollTemplateForm()
@@ -624,6 +641,11 @@ const exportPayrollCycleSummary = () => props.payroll.exportPayrollCycleSummary(
 
 .attendance__field--checkbox {
   justify-content: flex-end;
+}
+
+.attendance__input--invalid {
+  border-color: #c0392b;
+  box-shadow: 0 0 0 1px rgba(192, 57, 43, 0.2);
 }
 
 .attendance__btn {
@@ -709,6 +731,10 @@ const exportPayrollCycleSummary = () => props.payroll.exportPayrollCycleSummary(
 .attendance__field-hint {
   color: #666;
   font-size: 12px;
+}
+
+.attendance__field-hint--error {
+  color: #c0392b;
 }
 
 .attendance__payroll-summary-fields {

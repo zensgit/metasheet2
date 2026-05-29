@@ -280,6 +280,75 @@ describe('useAttendanceAdminPayroll', () => {
     expect(options.setStatus).toHaveBeenCalledWith('Payroll cycles generated.')
   })
 
+  it('blocks empty manual payroll cycles before posting', async () => {
+    const options = createOptions()
+    const payroll = useAttendanceAdminPayroll(options)
+
+    expect(payroll.payrollCycleCanSave.value).toBe(false)
+    expect(payroll.payrollCycleValidationHint.value).toContain('start and end dates')
+
+    await payroll.savePayrollCycle()
+
+    expect(options.apiFetch).not.toHaveBeenCalled()
+    expect(options.setStatus).toHaveBeenCalledWith(
+      'Select a payroll template, or enter both start and end dates for a manual cycle.',
+      'error',
+    )
+  })
+
+  it('selects a saved payroll cycle so summary actions target it immediately', async () => {
+    const savedCycle = {
+      id: 'cycle-new',
+      templateId: null,
+      name: 'Manual May',
+      startDate: '2026-05-01',
+      endDate: '2026-05-31',
+      status: 'open',
+    }
+    const apiFetch = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input === '/api/attendance/payroll-cycles' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true, data: savedCycle })
+      }
+      if (input === '/api/attendance/payroll-cycles?orgId=org-1') {
+        return jsonResponse(200, { ok: true, data: { items: [savedCycle] } })
+      }
+      if (input === '/api/attendance/payroll-cycles/cycle-new/summary?orgId=org-1&userId=user-1') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            summary: {
+              total_days: 20,
+              total_minutes: 9600,
+              normal_days: 20,
+              late_days: 0,
+              early_leave_days: 0,
+              late_early_days: 0,
+              partial_days: 0,
+              absent_days: 0,
+              adjusted_days: 0,
+              off_days: 8,
+            },
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const options = createOptions({ apiFetch })
+    const payroll = useAttendanceAdminPayroll(options)
+    payroll.payrollCycleForm.name = 'Manual May'
+    payroll.payrollCycleForm.startDate = '2026-05-01'
+    payroll.payrollCycleForm.endDate = '2026-05-31'
+
+    await payroll.savePayrollCycle()
+    await payroll.loadPayrollCycleSummary()
+
+    expect(payroll.payrollCycleEditingId.value).toBe('cycle-new')
+    expect(payroll.payrollCycleForm.name).toBe('Manual May')
+    expect(payroll.payrollCycleSummary.value?.total_minutes).toBe(9600)
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/payroll-cycles/cycle-new/summary?orgId=org-1&userId=user-1')
+    expect(options.setStatus).toHaveBeenCalledWith('Payroll cycle saved and selected.')
+  })
+
   it('loads payroll summary and exports it through the injected downloader', async () => {
     const downloadFile = vi.fn()
     const apiFetch = vi.fn(async (input: string) => {

@@ -625,6 +625,108 @@ describe('Attendance admin regressions', () => {
     expect(container!.textContent).toContain('Open Attendance groups')
   })
 
+  it('blocks empty manual payroll cycles and selects a newly saved cycle for summary', async () => {
+    const savedCycle = {
+      id: 'cycle-new',
+      templateId: null,
+      name: 'Manual May',
+      startDate: '2026-05-01',
+      endDate: '2026-05-31',
+      status: 'open',
+    }
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/payroll-cycles/cycle-new/summary')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            summary: {
+              total_days: 20,
+              total_minutes: 9600,
+              normal_days: 20,
+              late_days: 0,
+              early_leave_days: 0,
+              late_early_days: 0,
+              partial_days: 0,
+              absent_days: 0,
+              adjusted_days: 0,
+              off_days: 8,
+            },
+          },
+        })
+      }
+      if (url === '/api/attendance/payroll-cycles' && method === 'POST') {
+        return jsonResponse(200, { ok: true, data: savedCycle })
+      }
+      if (url.includes('/api/attendance/payroll-cycles')) {
+        return jsonResponse(200, { ok: true, data: { items: [savedCycle] } })
+      }
+      if (url.includes('/api/attendance/payroll-templates')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const dataPayrollHeader = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-group-header'))
+      .find(button => button.textContent?.includes('Data & Payroll'))
+    expect(dataPayrollHeader).toBeTruthy()
+    if (dataPayrollHeader!.getAttribute('aria-expanded') === 'false') {
+      dataPayrollHeader!.click()
+      await flushUi(2)
+    }
+
+    const payrollCyclesNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-payroll-cycles"]')
+    expect(payrollCyclesNav).toBeTruthy()
+    payrollCyclesNav!.click()
+    await flushUi(2)
+
+    const payrollCyclesSection = container!.querySelector<HTMLElement>('[data-admin-section="attendance-admin-payroll-cycles"]')
+    expect(payrollCyclesSection).toBeTruthy()
+    const createButton = Array.from(payrollCyclesSection!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create cycle'))
+    expect(createButton).toBeTruthy()
+    expect(createButton!.disabled).toBe(true)
+    expect(payrollCyclesSection!.querySelector('[data-payroll-cycle-validation-hint]')?.textContent).toContain('start and end dates')
+    expect(payrollCyclesSection!.querySelector<HTMLInputElement>('#attendance-payroll-cycle-start')?.getAttribute('aria-invalid')).toBe('true')
+
+    setInput(payrollCyclesSection!, '#attendance-payroll-cycle-name', 'Manual May')
+    setInput(payrollCyclesSection!, '#attendance-payroll-cycle-start', '2026-05-01')
+    setInput(payrollCyclesSection!, '#attendance-payroll-cycle-end', '2026-05-31')
+    await flushUi(2)
+
+    expect(createButton!.disabled).toBe(false)
+    createButton!.click()
+    await flushUi(6)
+
+    const postCall = vi.mocked(apiFetch).mock.calls.find(call =>
+      String(call[0]) === '/api/attendance/payroll-cycles' &&
+      String((call[1] as { method?: string } | undefined)?.method || '').toUpperCase() === 'POST'
+    )
+    expect(postCall).toBeTruthy()
+    expect(JSON.parse(String((postCall![1] as { body?: string }).body))).toMatchObject({
+      name: 'Manual May',
+      startDate: '2026-05-01',
+      endDate: '2026-05-31',
+    })
+
+    const loadSummaryButton = Array.from(payrollCyclesSection!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Load summary'))
+    expect(loadSummaryButton?.disabled).toBe(false)
+    loadSummaryButton!.click()
+    await flushUi(6)
+
+    expect(vi.mocked(apiFetch).mock.calls.some(call =>
+      String(call[0]).includes('/api/attendance/payroll-cycles/cycle-new/summary')
+    )).toBe(true)
+    expect(payrollCyclesSection!.textContent).toContain('Cycle total minutes')
+    expect(payrollCyclesSection!.textContent).toContain('9600')
+  })
+
   it('renders attendance groups as a list-detail manager with people inside the selected group', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
