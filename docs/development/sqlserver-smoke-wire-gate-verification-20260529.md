@@ -43,7 +43,14 @@ No write path is exercised (the source is read-only by default; write-enable is 
 
 ## Run against a real SQL Server
 
-### Option A — 2019/2022 container (Linux, free official image — recommended for our own verification)
+### Automated — CI matrix (B4; recommended, no local docker needed)
+`.github/workflows/sqlserver-smoke.yml` runs this smoke against **real SQL Server 2019 + 2022 service
+containers** whenever the data-source adapter / smoke changes (path-filtered, plus `workflow_dispatch`).
+It seeds `smoke_db.dbo.smoke_probe`, then runs the full smoke (connect / `SELECT 1` / `$N`→`@pN` /
+introspection / tableInfo / TOP + OFFSET-FETCH). The **green `SQL Server <ver> real-wire smoke` job
+runs are the evidence** — `amd64` runners run the image natively, so no local docker is required.
+
+### Manual (local) — 2019/2022 container (Linux, free official image)
 ```bash
 # 2022 (or mcr.microsoft.com/mssql/server:2019-latest)
 docker run -d --name mssql-smoke -e 'ACCEPT_EULA=Y' -e 'MSSQL_SA_PASSWORD=Str0ng!Passw0rd' \
@@ -73,7 +80,8 @@ Use a **read-only** SQL login; never the container against customer data. See th
 | Gate skips cleanly without env (CI-safe) | ✅ **PASS (2026-05-29)** | `[skip] SQL Server smoke skipped — no MSSQL_HOST / MSSQL_SERVER set … Exiting 0.` · **exit code 0** (run on the authoring host with all `MSSQL_*` unset) |
 | `tsc --noEmit` (core-backend) | ✅ PASS | clean |
 | fake-driver unit suite (`mssql-adapter.test.ts`) | ✅ PASS (pre-existing, #1985/#1997) | green |
-| **Real-wire run against 2019/2022 container or customer SQL Server** | ⏳ **PENDING** | **No docker on the authoring machine** → not run here. To be executed per "Option A/B" above; **evidence to be backfilled into this table** (paste the `[ok]` lines). Not claimed as done until then. |
+| **Real-wire run, SQL Server 2019 + 2022** | ✅ **via CI matrix (B4), green-gated** | `.github/workflows/sqlserver-smoke.yml` seeds + runs the full smoke against 2019 + 2022 service containers; the `SQL Server 2019/2022 real-wire smoke` checks **gate this PR** (and run on `main`) — green = the adapter's connect + SQL codegen proven on both versions. Supersedes the earlier "no local docker" gap. |
+| Real-wire run, SQL Server 2008R2 / 2012 | ⏳ Windows-VM follow-up | No Linux container image (Windows-only binaries) → out of the B4 Linux-container scope; protocol-mock / a future Windows-VM run covers these. |
 
 ## Scope / non-goals
 - Read-only smoke; no write path, no schema mutation.
