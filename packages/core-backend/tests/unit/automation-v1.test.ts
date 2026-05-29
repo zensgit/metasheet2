@@ -2672,3 +2672,125 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rules[0].enabled).toBe(true)
   })
 })
+
+describe('AutomationService — retryExecution (A5)', () => {
+  let service: AutomationService
+
+  beforeEach(() => {
+    const eventBus = new EventBus()
+    const queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    // Minimal kysely-ish stub; retryExecution collaborators are spied, so the db is unused.
+    service = new AutomationService(eventBus, {} as never, queryFn)
+  })
+
+  function storedExecution(over: Partial<AutomationExecution> = {}): AutomationExecution {
+    return {
+      id: 'axe_orig',
+      ruleId: 'atr_1',
+      triggeredBy: 'event',
+      triggeredAt: '2026-05-29T00:00:00.000Z',
+      status: 'failed',
+      steps: [],
+      triggerEvent: { recordId: 'rec1', data: { name: 'Bolt' } },
+      ...over,
+    }
+  }
+  // Shape returned by service.getRule (DB-ish AutomationRule row).
+  function currentRule(over: Record<string, unknown> = {}) {
+    return {
+      id: 'atr_1', sheet_id: 'sheet_1', name: 'R', trigger_type: 'record.created',
+      trigger_config: {}, action_type: 'send_webhook', action_config: { url: 'https://x', token: 'LIVE-TOKEN' },
+      enabled: true, actions: null, conditions: null,
+      ...over,
+    } as never
+  }
+
+  it('404 NOT_FOUND when the original execution is missing', async () => {
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(undefined)
+    const r = await service.retryExecution('axe_missing', 'admin1')
+    expect(r).toMatchObject({ status: 404, code: 'NOT_FOUND' })
+  })
+
+  it('409 NOT_RETRYABLE for success/running originals', async () => {
+    for (const status of ['success', 'running'] as const) {
+      vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({ status }))
+      const r = await service.retryExecution('axe_orig', 'admin1')
+      expect(r).toMatchObject({ status: 409, code: 'NOT_RETRYABLE' })
+    }
+  })
+
+  it('409 MISSING_TRIGGER_EVENT fail-closed: absent / empty {} / array — never silent empty-context retry', async () => {
+    const getRule = vi.spyOn(service, 'getRule')
+    const execSpy = vi.spyOn(service, 'executeRule')
+    for (const bad of [undefined, {}, [] as unknown, 'x' as unknown, 0 as unknown]) {
+      vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({ triggerEvent: bad }))
+      const r = await service.retryExecution('axe_orig', 'admin1')
+      expect(r).toMatchObject({ status: 409, code: 'MISSING_TRIGGER_EVENT' })
+    }
+    // fail-closed: never loaded the rule nor executed anything
+    expect(getRule).not.toHaveBeenCalled()
+    expect(execSpy).not.toHaveBeenCalled()
+  })
+
+  it('a record-less scheduler trigger ({_triggeredBy:"schedule"}) is still retryable (non-empty object)', async () => {
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({ status: 'failed', triggerEvent: { _triggeredBy: 'schedule' } }))
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_new', status: 'success' }))
+    const r = await service.retryExecution('axe_orig', 'admin1')
+    expect('execution' in r).toBe(true)
+    expect(execSpy.mock.calls[0][1]).toEqual({ _triggeredBy: 'schedule' }) // passes the non-empty guard
+  })
+
+  it('409 RULE_MISSING_OR_DISABLED when current rule is gone or disabled', async () => {
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution())
+    const getRule = vi.spyOn(service, 'getRule').mockResolvedValue(null)
+    expect(await service.retryExecution('axe_orig', 'admin1')).toMatchObject({ status: 409, code: 'RULE_MISSING_OR_DISABLED' })
+    getRule.mockResolvedValue(currentRule({ enabled: false }))
+    expect(await service.retryExecution('axe_orig', 'admin1')).toMatchObject({ status: 409, code: 'RULE_MISSING_OR_DISABLED' })
+  })
+
+  it('failed retry delegates to executeRule with stored trigger_event + retry provenance', async () => {
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution())
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const newExec = storedExecution({ id: 'axe_new', status: 'success', rerunOfExecutionId: 'axe_orig', initiatedBy: 'admin1' })
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(newExec)
+    const r = await service.retryExecution('axe_orig', 'admin1')
+    expect(r).toEqual({ execution: newExec })
+    const [, triggerEvent, retryMeta] = execSpy.mock.calls[0]
+    expect(triggerEvent).toEqual({ recordId: 'rec1', data: { name: 'Bolt' } }) // original stored trigger event reused
+    expect(retryMeta).toEqual({ rerunOfExecutionId: 'axe_orig', initiatedBy: 'admin1' })
+  })
+
+  it('D1 — retry uses the CURRENT rule (live token), never the redacted rule_snapshot', async () => {
+    // stored snapshot carries a scrubbed token; the current rule carries the real one.
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({
+      ruleSnapshot: { id: 'atr_1', actions: [{ type: 'send_webhook', config: { token: '<redacted>' } }] } as never,
+    }))
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_new', status: 'success' }))
+    await service.retryExecution('axe_orig', 'admin1')
+    const execRule = execSpy.mock.calls[0][0] as { actions: { config: Record<string, unknown> }[] }
+    expect(execRule.actions[0].config.token).toBe('LIVE-TOKEN') // from current rule
+    expect(JSON.stringify(execRule)).not.toContain('<redacted>') // never the snapshot
+  })
+
+  it('redacted field inside the stored trigger_event replays deterministically (no crash)', async () => {
+    // A1 may scrub a secret-shaped record field to <redacted>; retry passes it through unchanged.
+    const redactedEvent = { recordId: 'rec1', data: { name: 'Bolt', token: '<redacted>' } }
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({ triggerEvent: redactedEvent }))
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_new', status: 'success' }))
+    const r = await service.retryExecution('axe_orig', 'admin1')
+    expect('execution' in r).toBe(true)
+    expect(execSpy.mock.calls[0][1]).toEqual(redactedEvent) // passed through verbatim
+  })
+
+  it('skipped originals are retryable (delegates with the current rule)', async () => {
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({ status: 'skipped' }))
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_new', status: 'success' }))
+    const r = await service.retryExecution('axe_orig', 'admin1')
+    expect('execution' in r).toBe(true)
+    expect(execSpy).toHaveBeenCalledTimes(1) // skipped → re-runs against the current rule (its conditions may now pass)
+  })
+})

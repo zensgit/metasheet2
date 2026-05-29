@@ -488,6 +488,11 @@ export interface AutomationExecution {
   finishedAt?: string
   /** Forward-compat tag for the snapshot shape. */
   schemaVersion?: number
+  // ── A5 retry provenance (set by AutomationService.retryExecution; plain ids, not redacted) ──
+  /** The original execution id this run re-ran (only on a retry-created execution). */
+  rerunOfExecutionId?: string
+  /** The admin user id that initiated the retry (only on a retry-created execution). */
+  initiatedBy?: string
 }
 
 export interface AutomationStepResult {

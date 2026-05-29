@@ -55,6 +55,9 @@ export class AutomationLogService {
         rule_snapshot: ruleSnapshotJsonb,
         finished_at: execution.finishedAt ?? null,
         schema_version: execution.schemaVersion ?? AUTOMATION_EXECUTION_SCHEMA_VERSION,
+        // A5 retry provenance — plain identifiers, NOT redacted (an execution id / a user id).
+        rerun_of_execution_id: execution.rerunOfExecutionId ?? null,
+        initiated_by: execution.initiatedBy ?? null,
       })
       .execute()
   }
@@ -189,6 +192,9 @@ function toExecution(row: Record<string, unknown>): AutomationExecution {
           ? row.finished_at.toISOString()
           : String(row.finished_at),
     schemaVersion: row.schema_version != null ? Number(row.schema_version) : undefined,
+    // A5 retry provenance — null-safe for non-retry / pre-A5 rows.
+    rerunOfExecutionId: (row.rerun_of_execution_id as string) ?? undefined,
+    initiatedBy: (row.initiated_by as string) ?? undefined,
   }
 }
 

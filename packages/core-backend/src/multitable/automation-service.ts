@@ -215,6 +215,21 @@ function toExecutorRule(rule: AutomationRule): ExecutorRule {
   }
 }
 
+/**
+ * A5 retry fail-closed guard (A4-D7): the stored trigger_event must be a NON-EMPTY
+ * plain object. Reject null/undefined, arrays, and `{}` — otherwise the executor's
+ * `recordId ?? '' / recordData ?? {}` fallback would silently retry with empty
+ * context (e.g. send_webhook firing with no record, update_record on an empty id).
+ * `recordId` is NOT required: a scheduler trigger is legitimately `{ _triggeredBy:
+ * 'schedule' }` (record-less but valid).
+ */
+function isRetryableStoredTriggerEvent(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object'
+    && value !== null
+    && !Array.isArray(value)
+    && Object.keys(value as Record<string, unknown>).length > 0
+}
+
 let sharedAutomationService: AutomationService | null = null
 
 export function setAutomationServiceInstance(service: AutomationService | null): void {
@@ -655,14 +670,68 @@ export class AutomationService {
   /**
    * Execute a rule via the V1 executor and log the result.
    */
-  async executeRule(rule: ExecutorRule, triggerEvent: unknown): Promise<AutomationExecution> {
+  async executeRule(
+    rule: ExecutorRule,
+    triggerEvent: unknown,
+    retryMeta?: { rerunOfExecutionId: string; initiatedBy: string },
+  ): Promise<AutomationExecution> {
     const execution = await this.executor.execute(rule, triggerEvent)
+    if (retryMeta) {
+      // A5: stamp retry provenance onto the NEW execution before persistence.
+      execution.rerunOfExecutionId = retryMeta.rerunOfExecutionId
+      execution.initiatedBy = retryMeta.initiatedBy
+    }
     try {
       await this.logService.record(execution)
     } catch (err) {
       logger.error('Automation execution log persistence failed', err instanceof Error ? err : undefined)
     }
     return execution
+  }
+
+  /**
+   * A5 — whole-execution retry. Re-runs a failed/skipped execution using the
+   * CURRENT enabled rule (live credentials) + the original STORED trigger_event,
+   * producing a NEW execution linked by `rerun_of_execution_id`. The original run
+   * is immutable. Returns a discriminated result (mirrors `requireRecordReadable`)
+   * so the route maps precise status codes (A4 design-lock #2039, D1/D2/D7).
+   *
+   * NOTE (A4-D1 / known limitation): the stored trigger_event is REDACTED — A1
+   * scrubs secret-shaped values (incl. inside the record `data` map) before
+   * persist. Retry credentials come from the current rule, never the snapshot;
+   * but a record field that was secret-shaped will replay as `<redacted>` into
+   * conditions/actions. Documented in the A5 verification doc; raw-secret storage
+   * was explicitly rejected.
+   */
+  async retryExecution(
+    executionId: string,
+    initiatedBy: string,
+  ): Promise<{ execution: AutomationExecution } | { status: number; code: string; message: string }> {
+    const original = await this.logService.getById(executionId)
+    if (!original) {
+      return { status: 404, code: 'NOT_FOUND', message: `Execution ${executionId} not found` }
+    }
+    if (original.status !== 'failed' && original.status !== 'skipped') {
+      return {
+        status: 409,
+        code: 'NOT_RETRYABLE',
+        message: `Only failed/skipped executions can be retried (got ${original.status})`,
+      }
+    }
+    if (!isRetryableStoredTriggerEvent(original.triggerEvent)) {
+      // Fail closed (A4-D7): null/undefined, array, or empty `{}` cannot rebuild context.
+      return { status: 409, code: 'MISSING_TRIGGER_EVENT', message: 'Original execution has no usable stored trigger event to retry' }
+    }
+    const rule = await this.getRule(original.ruleId)
+    if (!rule || !rule.enabled) {
+      return { status: 409, code: 'RULE_MISSING_OR_DISABLED', message: `Rule ${original.ruleId} is missing or disabled; cannot retry` }
+    }
+    const execRule = toExecutorRule(rule)
+    const execution = await this.executeRule(execRule, original.triggerEvent, {
+      rerunOfExecutionId: original.id,
+      initiatedBy,
+    })
+    return { execution }
   }
 
   /**
