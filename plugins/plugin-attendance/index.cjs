@@ -10333,21 +10333,27 @@ function applyEngineOverrides(metrics, engineResult) {
   return { metrics: nextMetrics, meta: { base, overrides } }
 }
 
+function buildAttendanceSummaryCountedDaySql(alias = '') {
+  const prefix = alias ? `${alias}.` : ''
+  return `(${prefix}is_workday = true OR COALESCE(${prefix}work_minutes, 0) > 0 OR ${prefix}status IN ('normal', 'late', 'early_leave', 'late_early', 'partial', 'adjusted'))`
+}
+
 async function loadAttendanceSummary(db, orgId, userId, from, to) {
+  const countedDaySql = buildAttendanceSummaryCountedDaySql()
   const rows = await db.query(
     `SELECT
-       COALESCE(SUM(CASE WHEN is_workday THEN 1 ELSE 0 END), 0)::int AS total_days,
-       COALESCE(SUM(CASE WHEN is_workday THEN work_minutes ELSE 0 END), 0)::int AS total_minutes,
-       COALESCE(SUM(CASE WHEN is_workday THEN late_minutes ELSE 0 END), 0)::int AS total_late_minutes,
-       COALESCE(SUM(CASE WHEN is_workday THEN early_leave_minutes ELSE 0 END), 0)::int AS total_early_leave_minutes,
-       COALESCE(SUM(CASE WHEN is_workday AND status = 'normal' THEN 1 ELSE 0 END), 0)::int AS normal_days,
-       COALESCE(SUM(CASE WHEN is_workday AND status = 'late' THEN 1 ELSE 0 END), 0)::int AS late_days,
-       COALESCE(SUM(CASE WHEN is_workday AND status = 'early_leave' THEN 1 ELSE 0 END), 0)::int AS early_leave_days,
-       COALESCE(SUM(CASE WHEN is_workday AND status = 'late_early' THEN 1 ELSE 0 END), 0)::int AS late_early_days,
-       COALESCE(SUM(CASE WHEN is_workday AND status = 'partial' THEN 1 ELSE 0 END), 0)::int AS partial_days,
-       COALESCE(SUM(CASE WHEN is_workday AND status = 'absent' THEN 1 ELSE 0 END), 0)::int AS absent_days,
-       COALESCE(SUM(CASE WHEN is_workday AND status = 'adjusted' THEN 1 ELSE 0 END), 0)::int AS adjusted_days,
-       COALESCE(SUM(CASE WHEN NOT is_workday THEN 1 ELSE 0 END), 0)::int AS off_days
+       COALESCE(SUM(CASE WHEN ${countedDaySql} THEN 1 ELSE 0 END), 0)::int AS total_days,
+       COALESCE(SUM(CASE WHEN ${countedDaySql} THEN work_minutes ELSE 0 END), 0)::int AS total_minutes,
+       COALESCE(SUM(CASE WHEN ${countedDaySql} THEN late_minutes ELSE 0 END), 0)::int AS total_late_minutes,
+       COALESCE(SUM(CASE WHEN ${countedDaySql} THEN early_leave_minutes ELSE 0 END), 0)::int AS total_early_leave_minutes,
+       COALESCE(SUM(CASE WHEN ${countedDaySql} AND status = 'normal' THEN 1 ELSE 0 END), 0)::int AS normal_days,
+       COALESCE(SUM(CASE WHEN ${countedDaySql} AND status = 'late' THEN 1 ELSE 0 END), 0)::int AS late_days,
+       COALESCE(SUM(CASE WHEN ${countedDaySql} AND status = 'early_leave' THEN 1 ELSE 0 END), 0)::int AS early_leave_days,
+       COALESCE(SUM(CASE WHEN ${countedDaySql} AND status = 'late_early' THEN 1 ELSE 0 END), 0)::int AS late_early_days,
+       COALESCE(SUM(CASE WHEN ${countedDaySql} AND status = 'partial' THEN 1 ELSE 0 END), 0)::int AS partial_days,
+       COALESCE(SUM(CASE WHEN ${countedDaySql} AND status = 'absent' THEN 1 ELSE 0 END), 0)::int AS absent_days,
+       COALESCE(SUM(CASE WHEN ${countedDaySql} AND status = 'adjusted' THEN 1 ELSE 0 END), 0)::int AS adjusted_days,
+       COALESCE(SUM(CASE WHEN NOT ${countedDaySql} THEN 1 ELSE 0 END), 0)::int AS off_days
      FROM attendance_records
      WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4`,
     [userId, orgId, from, to]
@@ -14704,6 +14710,8 @@ module.exports = {
     buildAttendanceOvertimeSubtypeReportFieldDefinitions,
     loadAttendanceReportDynamicSubtypeContext,
     loadApprovedMinutesRange,
+    buildAttendanceSummaryCountedDaySql,
+    loadAttendanceSummary,
     resolveAttendanceRecordReportFields,
     resolveAttendanceFormulaSourceFields,
     resolveAttendanceSummaryFormulaFields,
