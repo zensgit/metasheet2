@@ -18,6 +18,7 @@ import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
 import { DataSourceManager, SUPPORTED_DATA_SOURCE_TYPES } from '../data-adapters/DataSourceManager'
 import type { DataSourceConfig, QueryOptions } from '../data-adapters/BaseAdapter'
+import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
 
 // Zod schemas for request validation
 const ConnectionConfigSchema = z.record(z.union([z.string(), z.number(), z.boolean()]))
@@ -81,8 +82,8 @@ const SelectSchema = z.object({
     column: z.string(),
     direction: z.enum(['asc', 'desc'])
   })).optional(),
-  limit: z.number().min(1).max(10000).optional(),
-  offset: z.number().min(0).optional()
+  limit: z.number().int().min(1).max(DATA_SOURCE_MAX_ROWS).optional(),
+  offset: z.number().int().min(0).optional()
 })
 
 // Singleton instance (can be replaced with dependency injection)
@@ -599,18 +600,31 @@ export function dataSourcesRouter(): Router {
 
       const result = await manager.query(req.params.id, sql, params as (string | number | boolean | null | Date | Buffer)[])
 
+      // A5: raw /query runs arbitrary SQL, so it cannot be safely auto-bounded (rewriting SQL is
+      // unsafe; rejecting no-LIMIT would break legitimately WHERE-bounded queries). It is therefore
+      // a non-large-export channel — surface a best-effort warning + audit annotation when no
+      // row-COUNT limiter is present, so a caller does not unknowingly pull an unbounded set.
+      // Only LIMIT / TOP / FETCH actually cap the row count; a bare OFFSET only SKIPS rows and still
+      // returns the rest of the table, so it must NOT count as a bound. Use /select (hard-capped at
+      // DATA_SOURCE_MAX_ROWS) for bounded structured reads.
+      const unbounded = !/\b(?:LIMIT|TOP|FETCH)\b/i.test(sql)
+      const warning = unbounded
+        ? `Query has no row-count limit (LIMIT/TOP/FETCH); raw /query is not a large-table export channel — add an explicit row bound (a bare OFFSET does not cap rows), or use /select (capped at ${DATA_SOURCE_MAX_ROWS} rows).`
+        : undefined
+
       await auditLog({
         actorId: req.user?.id?.toString(),
         actorType: 'user',
         action: 'query',
         resourceType: 'data_source',
         resourceId: req.params.id,
-        meta: { sql: sql.substring(0, 200), rowCount: result.data.length }
+        meta: { sql: sql.substring(0, 200), rowCount: result.data.length, ...(unbounded ? { unbounded: true } : {}) }
       })
 
       return res.json({
         ok: true,
-        data: result
+        data: result,
+        ...(warning ? { warning } : {})
       })
     } catch (error) {
       if (error instanceof Error && error.message.includes('not found')) {
@@ -649,6 +663,14 @@ export function dataSourcesRouter(): Router {
       const manager = getManager()
       manager.assertAccess(req.params.id, resolveUserId(req))
       const { table, ...options } = parse.data
+
+      // A5: apply the friendly default row limit at the API entry when the caller omits one, so a
+      // bare /select never pulls an unbounded result set. over-max is already rejected 400 by
+      // SelectSchema (max DATA_SOURCE_MAX_ROWS); the adapter still enforces the hard ceiling as a
+      // defense-in-depth backstop for callers that bypass this route.
+      if (options.limit === undefined) {
+        options.limit = DATA_SOURCE_DEFAULT_LIMIT
+      }
 
       // Cast options to proper QueryOptions type
       const result = await manager.select(req.params.id, table, options as QueryOptions)

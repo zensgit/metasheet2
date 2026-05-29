@@ -191,10 +191,10 @@ export class PostgresAdapter extends BaseDataAdapter {
       sql += ` ORDER BY ${orderClauses.join(', ')}`
     }
 
-    // Add limit and offset
-    if (options.limit) {
-      sql += ` LIMIT ${options.limit}`
-    }
+    // A5: always bound the read at the adapter layer (omit -> MAX cap, > MAX -> throw), so a direct
+    // internal caller cannot issue an unbounded SELECT. resolveEffectiveLimit returns a validated
+    // positive integer, so the interpolation is injection-safe.
+    sql += ` LIMIT ${this.resolveEffectiveLimit(options.limit)}`
     if (options.offset) {
       sql += ` OFFSET ${options.offset}`
     }

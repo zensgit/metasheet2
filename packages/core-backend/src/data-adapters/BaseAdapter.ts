@@ -67,6 +67,17 @@ export interface QueryOptions {
   raw?: boolean
 }
 
+/**
+ * Result-boundary policy (A5). Read paths MUST be bounded so a large source table cannot OOM the
+ * backend. `DATA_SOURCE_DEFAULT_LIMIT` is the friendly default the route/API entry applies when a
+ * caller omits `limit`; `DATA_SOURCE_MAX_ROWS` is the hard ceiling enforced at the ADAPTER layer
+ * — the chokepoint every structured read passes through, INCLUDING direct internal callers that
+ * bypass the route — so "omit limit" can never mean "whole table". Genuine full-volume copies must
+ * paginate explicitly (see DataSourceManager's copy loop) rather than rely on an unbounded read.
+ */
+export const DATA_SOURCE_MAX_ROWS = 10000
+export const DATA_SOURCE_DEFAULT_LIMIT = 1000
+
 export interface QueryResult<T = Record<string, DbValue>> {
   data: T[]
   metadata?: {
@@ -262,6 +273,31 @@ export abstract class BaseDataAdapter extends EventEmitter {
       }
     }
     return identifier
+  }
+
+  /**
+   * A5 result-boundary backstop. Resolve the row limit actually applied to a structured read,
+   * enforcing the hard ceiling at the adapter layer regardless of caller:
+   *  - omitted  -> DATA_SOURCE_MAX_ROWS (bounded; never "whole table")
+   *  - > MAX    -> throw (explicit over-ask is an error, NOT a silent clamp — paginate instead)
+   *  - invalid  -> throw
+   * The route applies the friendlier DATA_SOURCE_DEFAULT_LIMIT before reaching here; this is the
+   * defense-in-depth floor for direct internal callers (e.g. the DataSourceManager copy loop) that
+   * bypass the route and call adapter.select() straight.
+   */
+  protected resolveEffectiveLimit(limit?: number | null): number {
+    if (limit === undefined || limit === null) {
+      return DATA_SOURCE_MAX_ROWS
+    }
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new Error(`Invalid row limit ${JSON.stringify(limit)} (must be a positive integer)`)
+    }
+    if (limit > DATA_SOURCE_MAX_ROWS) {
+      throw new Error(
+        `Row limit ${limit} exceeds the maximum ${DATA_SOURCE_MAX_ROWS}; paginate with limit+offset instead`
+      )
+    }
+    return limit
   }
 
   protected buildWhereClause(where: Record<string, WhereValue>): { sql: string; params: DbValue[] } {
