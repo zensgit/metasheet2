@@ -3820,36 +3820,68 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
 
-      const result = await pool.query(
-        `SELECT
-            vp.id,
-            vp.view_id,
-            vp.subject_type,
-            vp.subject_id,
-            vp.permission,
-            vp.created_at,
-            vp.created_by,
-            u.name AS user_name,
-            u.email AS user_email,
-            u.is_active AS user_is_active,
-            r.name AS role_name,
-            r.description AS role_description,
-            g.name AS group_name,
-            g.description AS group_description
-         FROM meta_view_permissions vp
-         LEFT JOIN users u
-           ON vp.subject_type = 'user'
-          AND u.id = vp.subject_id
-         LEFT JOIN roles r
-           ON vp.subject_type = 'role'
-          AND r.id::text = vp.subject_id
-         LEFT JOIN platform_member_groups g
-           ON vp.subject_type = 'member-group'
-          AND g.id::text = vp.subject_id
-         WHERE vp.view_id = $1
-         ORDER BY vp.created_at ASC`,
-        [viewId],
-      )
+      let result: { rows: any[] }
+      try {
+        result = await pool.query(
+          `SELECT
+              vp.id,
+              vp.view_id,
+              vp.subject_type,
+              vp.subject_id,
+              vp.permission,
+              vp.created_at,
+              vp.created_by,
+              u.name AS user_name,
+              u.email AS user_email,
+              u.is_active AS user_is_active,
+              r.name AS role_name,
+              r.description AS role_description,
+              g.name AS group_name,
+              g.description AS group_description
+           FROM meta_view_permissions vp
+           LEFT JOIN users u
+             ON vp.subject_type = 'user'
+            AND u.id = vp.subject_id
+           LEFT JOIN roles r
+             ON vp.subject_type = 'role'
+            AND r.id::text = vp.subject_id
+           LEFT JOIN platform_member_groups g
+             ON vp.subject_type = 'member-group'
+            AND g.id::text = vp.subject_id
+           WHERE vp.view_id = $1
+           ORDER BY vp.created_at ASC`,
+          [viewId],
+        )
+      } catch (err) {
+        if (!isUndefinedTableError(err, 'platform_member_groups')) throw err
+        result = await pool.query(
+          `SELECT
+              vp.id,
+              vp.view_id,
+              vp.subject_type,
+              vp.subject_id,
+              vp.permission,
+              vp.created_at,
+              vp.created_by,
+              u.name AS user_name,
+              u.email AS user_email,
+              u.is_active AS user_is_active,
+              r.name AS role_name,
+              r.description AS role_description,
+              NULL::text AS group_name,
+              NULL::text AS group_description
+           FROM meta_view_permissions vp
+           LEFT JOIN users u
+             ON vp.subject_type = 'user'
+            AND u.id = vp.subject_id
+           LEFT JOIN roles r
+             ON vp.subject_type = 'role'
+            AND r.id::text = vp.subject_id
+           WHERE vp.view_id = $1
+           ORDER BY vp.created_at ASC`,
+          [viewId],
+        )
+      }
       const items = (result.rows as any[]).map((row) => ({
         id: String(row.id),
         viewId: String(row.view_id),
@@ -3966,37 +3998,70 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
 
-      const result = await pool.query(
-        `SELECT
-            fp.id,
-            fp.sheet_id,
-            fp.field_id,
-            fp.subject_type,
-            fp.subject_id,
-            fp.visible,
-            fp.read_only,
-            fp.created_at,
-            u.name AS user_name,
-            u.email AS user_email,
-            u.is_active AS user_is_active,
-            r.name AS role_name,
-            r.description AS role_description,
-            g.name AS group_name,
-            g.description AS group_description
-         FROM field_permissions fp
-         LEFT JOIN users u
-           ON fp.subject_type = 'user'
-          AND u.id = fp.subject_id
-         LEFT JOIN roles r
-           ON fp.subject_type = 'role'
-          AND r.id::text = fp.subject_id
-         LEFT JOIN platform_member_groups g
-           ON fp.subject_type = 'member-group'
-          AND g.id::text = fp.subject_id
-         WHERE fp.sheet_id = $1
-         ORDER BY fp.field_id ASC, fp.created_at ASC`,
-        [sheetId],
-      )
+      let result: { rows: any[] }
+      try {
+        result = await pool.query(
+          `SELECT
+              fp.id,
+              fp.sheet_id,
+              fp.field_id,
+              fp.subject_type,
+              fp.subject_id,
+              fp.visible,
+              fp.read_only,
+              fp.created_at,
+              u.name AS user_name,
+              u.email AS user_email,
+              u.is_active AS user_is_active,
+              r.name AS role_name,
+              r.description AS role_description,
+              g.name AS group_name,
+              g.description AS group_description
+           FROM field_permissions fp
+           LEFT JOIN users u
+             ON fp.subject_type = 'user'
+            AND u.id = fp.subject_id
+           LEFT JOIN roles r
+             ON fp.subject_type = 'role'
+            AND r.id::text = fp.subject_id
+           LEFT JOIN platform_member_groups g
+             ON fp.subject_type = 'member-group'
+            AND g.id::text = fp.subject_id
+           WHERE fp.sheet_id = $1
+           ORDER BY fp.field_id ASC, fp.created_at ASC`,
+          [sheetId],
+        )
+      } catch (err) {
+        if (!isUndefinedTableError(err, 'platform_member_groups')) throw err
+        result = await pool.query(
+          `SELECT
+              fp.id,
+              fp.sheet_id,
+              fp.field_id,
+              fp.subject_type,
+              fp.subject_id,
+              fp.visible,
+              fp.read_only,
+              fp.created_at,
+              u.name AS user_name,
+              u.email AS user_email,
+              u.is_active AS user_is_active,
+              r.name AS role_name,
+              r.description AS role_description,
+              NULL::text AS group_name,
+              NULL::text AS group_description
+           FROM field_permissions fp
+           LEFT JOIN users u
+             ON fp.subject_type = 'user'
+            AND u.id = fp.subject_id
+           LEFT JOIN roles r
+             ON fp.subject_type = 'role'
+            AND r.id::text = fp.subject_id
+           WHERE fp.sheet_id = $1
+           ORDER BY fp.field_id ASC, fp.created_at ASC`,
+          [sheetId],
+        )
+      }
       const items = (result.rows as any[]).map((row) => ({
         id: String(row.id),
         sheetId: String(row.sheet_id),
