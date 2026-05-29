@@ -267,6 +267,10 @@ type CreateUserRequestBody = {
   department?: string
   position?: string
   hireDate?: string
+  orgId?: string
+  attendanceGroupId?: string
+  defaultShiftId?: string
+  defaultShiftStartDate?: string
   name?: string
   password?: string
   role?: string
@@ -275,11 +279,28 @@ type CreateUserRequestBody = {
   isActive?: boolean
 }
 
+type AttendanceOnboardingResponse = {
+  orgId: string
+  group: {
+    id: string
+    name: string | null
+    memberCreated: boolean
+  } | null
+  defaultShift: {
+    id: string
+    name: string | null
+    startDate: string
+    assignmentId: string | null
+  } | null
+}
+
 const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-namespace-admission', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template', 'platform-member-group', 'delegated-admin-group-scope'] as const
 const DINGTALK_PROVIDER = 'dingtalk'
 const DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR =
   'Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
+const DEFAULT_ATTENDANCE_ORG_ID = 'default'
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
 const ADMIN_USER_PROFILE_SELECT = `
   id,
@@ -428,6 +449,29 @@ function sanitizeHireDate(value: string): string | null | undefined {
   const parsed = new Date(`${normalized}T00:00:00.000Z`)
   if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== normalized) return undefined
   return normalized
+}
+
+function sanitizeOptionalUuid(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim()
+  if (!normalized) return null
+  return UUID_PATTERN.test(normalized) ? normalized : undefined
+}
+
+function resolveAttendanceOnboardingOrgId(req: Request): string {
+  const user = req.user as Record<string, unknown> | undefined
+  const headerOrg = req.headers['x-org-id']
+  const header = Array.isArray(headerOrg) ? headerOrg[0] : headerOrg
+  const body = req.body as Record<string, unknown> | undefined
+  const raw = body?.orgId ?? req.query?.orgId ?? user?.orgId ?? user?.workspaceId ?? header
+  if (typeof raw === 'string' && raw.trim().length > 0) return raw.trim()
+  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  return DEFAULT_ATTENDANCE_ORG_ID
+}
+
+function todayUtcDate(): string {
+  return new Date().toISOString().slice(0, 10)
 }
 
 function validateUsername(username: string | null): string | null {
@@ -3032,6 +3076,9 @@ export function adminUsersRouter(): Router {
       const cleanDepartment = typeof body.department === 'string' ? sanitizeOptionalProfileText(body.department, 100) : null
       const cleanPosition = typeof body.position === 'string' ? sanitizeOptionalProfileText(body.position, 100) : null
       const cleanHireDate = typeof body.hireDate === 'string' ? sanitizeHireDate(body.hireDate) : null
+      const cleanAttendanceGroupId = sanitizeOptionalUuid(body.attendanceGroupId)
+      const cleanDefaultShiftId = sanitizeOptionalUuid(body.defaultShiftId)
+      const cleanDefaultShiftStartDate = typeof body.defaultShiftStartDate === 'string' ? sanitizeHireDate(body.defaultShiftStartDate) : null
       const cleanName = typeof body.name === 'string' ? sanitizeName(body.name) : ''
       const preset = getAccessPreset(typeof body.presetId === 'string' ? body.presetId.trim() : '')
       const cleanRole = typeof body.role === 'string' && body.role.trim()
@@ -3065,6 +3112,15 @@ export function adminUsersRouter(): Router {
       }
       if (cleanHireDate === undefined) {
         return jsonError(res, 400, 'INVALID_HIRE_DATE', 'hireDate must be YYYY-MM-DD or blank')
+      }
+      if (cleanAttendanceGroupId === undefined) {
+        return jsonError(res, 400, 'INVALID_ATTENDANCE_GROUP_ID', 'attendanceGroupId must be a UUID or blank')
+      }
+      if (cleanDefaultShiftId === undefined) {
+        return jsonError(res, 400, 'INVALID_DEFAULT_SHIFT_ID', 'defaultShiftId must be a UUID or blank')
+      }
+      if (cleanDefaultShiftStartDate === undefined) {
+        return jsonError(res, 400, 'INVALID_DEFAULT_SHIFT_START_DATE', 'defaultShiftStartDate must be YYYY-MM-DD or blank')
       }
 
       const password = requestedPassword || generateTemporaryPassword()
@@ -3105,6 +3161,39 @@ export function adminUsersRouter(): Router {
         if (!roleRow.rows.length) {
           return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
         }
+      }
+
+      const attendanceOrgId = cleanAttendanceGroupId || cleanDefaultShiftId
+        ? resolveAttendanceOnboardingOrgId(req)
+        : null
+      const defaultShiftStartDate = cleanDefaultShiftId
+        ? (cleanDefaultShiftStartDate || cleanHireDate || todayUtcDate())
+        : null
+      let attendanceGroupName: string | null = null
+      let defaultShiftName: string | null = null
+      if (attendanceOrgId && cleanAttendanceGroupId) {
+        const groupRow = await query<{ id: string; name: string | null }>(
+          `SELECT id, name
+           FROM attendance_groups
+           WHERE id = $1 AND org_id = $2`,
+          [cleanAttendanceGroupId, attendanceOrgId],
+        )
+        if (!groupRow.rows.length) {
+          return jsonError(res, 404, 'ATTENDANCE_GROUP_NOT_FOUND', 'Attendance group not found')
+        }
+        attendanceGroupName = groupRow.rows[0]?.name ?? null
+      }
+      if (attendanceOrgId && cleanDefaultShiftId) {
+        const shiftRow = await query<{ id: string; name: string | null }>(
+          `SELECT id, name
+           FROM attendance_shifts
+           WHERE id = $1 AND org_id = $2`,
+          [cleanDefaultShiftId, attendanceOrgId],
+        )
+        if (!shiftRow.rows.length) {
+          return jsonError(res, 404, 'DEFAULT_SHIFT_NOT_FOUND', 'Default shift not found')
+        }
+        defaultShiftName = shiftRow.rows[0]?.name ?? null
       }
 
       const userId = crypto.randomUUID()
@@ -3162,6 +3251,44 @@ export function adminUsersRouter(): Router {
         invalidateUserPerms(userId)
       }
 
+      const attendanceOnboarding: AttendanceOnboardingResponse | null = attendanceOrgId
+        ? {
+            orgId: attendanceOrgId,
+            group: null,
+            defaultShift: null,
+          }
+        : null
+      if (attendanceOnboarding && cleanAttendanceGroupId) {
+        const memberResult = await query<{ memberId: string }>(
+          `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
+           VALUES ($1, $2, $3, NOW(), NOW())
+           ON CONFLICT (org_id, group_id, user_id) DO NOTHING
+           RETURNING id AS "memberId"`,
+          [attendanceOrgId, cleanAttendanceGroupId, userId],
+        )
+        attendanceOnboarding.group = {
+          id: cleanAttendanceGroupId,
+          name: attendanceGroupName,
+          memberCreated: memberResult.rows.length > 0,
+        }
+      }
+      if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
+        const assignmentId = crypto.randomUUID()
+        const assignmentResult = await query<{ assignmentId: string }>(
+          `INSERT INTO attendance_shift_assignments
+             (id, org_id, user_id, shift_id, start_date, is_active, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5::date, true, NOW(), NOW())
+           RETURNING id AS "assignmentId"`,
+          [assignmentId, attendanceOrgId, userId, cleanDefaultShiftId, defaultShiftStartDate],
+        )
+        attendanceOnboarding.defaultShift = {
+          id: cleanDefaultShiftId,
+          name: defaultShiftName,
+          startDate: defaultShiftStartDate,
+          assignmentId: assignmentResult.rows[0]?.assignmentId ?? assignmentId,
+        }
+      }
+
       await auditLog({
         actorId: adminUserId,
         actorType: 'user',
@@ -3182,6 +3309,7 @@ export function adminUsersRouter(): Router {
           must_change_password: mustChangePassword,
           permissions: directPermissions,
           generatedPassword: requestedPassword.length === 0,
+          attendanceOnboarding,
         },
       })
 
@@ -3221,8 +3349,12 @@ export function adminUsersRouter(): Router {
           preset,
           inviteToken,
         }),
+        attendanceOnboarding,
       })
     } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'USER_CREATE_SCHEMA_UNAVAILABLE', 'Required user or attendance tables are not available until migrations are applied')
+      }
       return jsonError(res, 500, 'USER_CREATE_FAILED', (error as Error)?.message || 'Failed to create user')
     }
   })

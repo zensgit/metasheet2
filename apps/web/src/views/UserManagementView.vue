@@ -63,6 +63,35 @@
         <input v-model.trim="createForm.department" class="user-admin__search" type="text" placeholder="部门（可选）" />
         <input v-model.trim="createForm.position" class="user-admin__search" type="text" placeholder="岗位（可选）" />
         <input v-model="createForm.hireDate" class="user-admin__search" type="date" aria-label="入职日期（可选）" />
+        <select
+          v-model="createForm.attendanceGroupId"
+          class="user-admin__select"
+          :disabled="attendanceSetupLoading || attendanceGroups.length === 0"
+          aria-label="考勤组（可选）"
+        >
+          <option value="">考勤组（可选）</option>
+          <option v-for="group in attendanceGroups" :key="group.id" :value="group.id">
+            {{ group.name }}{{ group.code ? ` · ${group.code}` : '' }}
+          </option>
+        </select>
+        <select
+          v-model="createForm.defaultShiftId"
+          class="user-admin__select"
+          :disabled="attendanceSetupLoading || attendanceShifts.length === 0"
+          aria-label="默认班次（可选）"
+        >
+          <option value="">默认班次（可选）</option>
+          <option v-for="shift in attendanceShifts" :key="shift.id" :value="shift.id">
+            {{ shift.name }}{{ formatShiftOptionTime(shift) }}
+          </option>
+        </select>
+        <input
+          v-model="createForm.defaultShiftStartDate"
+          class="user-admin__search"
+          type="date"
+          aria-label="默认班次生效日期（可选）"
+          :disabled="!createForm.defaultShiftId"
+        />
         <input v-model.trim="createForm.password" class="user-admin__search" type="text" placeholder="可选：初始密码" />
         <select v-model="presetModeFilter" class="user-admin__select">
           <option value="">预设模式（全部）</option>
@@ -88,6 +117,9 @@
           <span>创建后立即启用</span>
         </label>
       </div>
+      <p v-if="attendanceSetupLoadError" class="user-admin__hint">
+        {{ attendanceSetupLoadError }}
+      </p>
       <div class="user-admin__role-actions">
         <button class="user-admin__button" type="button" :disabled="busy" @click="void createUser()">
           创建用户
@@ -924,11 +956,27 @@ type CreateUserForm = {
   department: string
   position: string
   hireDate: string
+  attendanceGroupId: string
+  defaultShiftId: string
+  defaultShiftStartDate: string
   password: string
   presetId: string
   role: string
   roleId: string
   isActive: boolean
+}
+
+type AttendanceGroupOption = {
+  id: string
+  name: string
+  code: string
+}
+
+type AttendanceShiftOption = {
+  id: string
+  name: string
+  workStartTime: string
+  workEndTime: string
 }
 
 type AccessPreset = {
@@ -1018,6 +1066,7 @@ const loadingInvites = ref(false)
 const loadingSessions = ref(false)
 const loadingDingTalk = ref(false)
 const loadingAdmission = ref(false)
+const attendanceSetupLoading = ref(false)
 const bulkBusy = ref(false)
 const busy = ref(false)
 const status = ref('')
@@ -1028,6 +1077,9 @@ const selectedUserIds = ref<string[]>([])
 const userListFilter = ref<UserListFilter>(readInitialUserNavigation().filter)
 const roleCatalog = ref<RoleCatalogItem[]>([])
 const accessPresets = ref<AccessPreset[]>([])
+const attendanceGroups = ref<AttendanceGroupOption[]>([])
+const attendanceShifts = ref<AttendanceShiftOption[]>([])
+const attendanceSetupLoadError = ref('')
 const presetModeFilter = ref<'' | 'platform' | 'attendance' | 'plm-workbench'>('')
 const selectedNamespace = ref('')
 const selectedUserId = ref('')
@@ -1059,6 +1111,9 @@ const createForm = ref<CreateUserForm>({
   department: '',
   position: '',
   hireDate: '',
+  attendanceGroupId: '',
+  defaultShiftId: '',
+  defaultShiftStartDate: '',
   password: '',
   presetId: '',
   role: 'user',
@@ -1847,6 +1902,78 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
   }
 }
 
+function readOptionalString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function firstOptionalString(...values: unknown[]): string {
+  for (const value of values) {
+    const text = readOptionalString(value)
+    if (text) return text
+  }
+  return ''
+}
+
+function normalizeAttendanceGroupOptions(payload: Record<string, unknown>): AttendanceGroupOption[] {
+  const data = payload.data as { items?: Array<Record<string, unknown>> } | undefined
+  const items = Array.isArray(data?.items) ? data.items : []
+  return items
+    .map((item) => ({
+      id: readOptionalString(item.id),
+      name: firstOptionalString(item.name, item.code, item.id),
+      code: readOptionalString(item.code),
+    }))
+    .filter((item) => item.id.length > 0 && item.name.length > 0)
+}
+
+function normalizeAttendanceShiftOptions(payload: Record<string, unknown>): AttendanceShiftOption[] {
+  const data = payload.data as { items?: Array<Record<string, unknown>> } | undefined
+  const items = Array.isArray(data?.items) ? data.items : []
+  return items
+    .map((item) => ({
+      id: readOptionalString(item.id),
+      name: firstOptionalString(item.name, item.id),
+      workStartTime: firstOptionalString(item.workStartTime, item.work_start_time),
+      workEndTime: firstOptionalString(item.workEndTime, item.work_end_time),
+    }))
+    .filter((item) => item.id.length > 0 && item.name.length > 0)
+}
+
+function formatShiftOptionTime(shift: AttendanceShiftOption): string {
+  if (!shift.workStartTime || !shift.workEndTime) return ''
+  return ` · ${shift.workStartTime}-${shift.workEndTime}`
+}
+
+async function loadAttendanceOnboardingOptions(): Promise<void> {
+  attendanceSetupLoading.value = true
+  attendanceSetupLoadError.value = ''
+  try {
+    const [groupsResponse, shiftsResponse] = await Promise.all([
+      apiFetch('/api/attendance/groups?page=1&pageSize=100'),
+      apiFetch('/api/attendance/shifts?page=1&pageSize=100'),
+    ])
+    const [groupsPayload, shiftsPayload] = await Promise.all([
+      readJson(groupsResponse),
+      readJson(shiftsResponse),
+    ])
+    if (!groupsResponse.ok || groupsPayload.ok !== true) {
+      throw new Error(String((groupsPayload.error as Record<string, unknown> | undefined)?.message || '加载考勤组失败'))
+    }
+    if (!shiftsResponse.ok || shiftsPayload.ok !== true) {
+      throw new Error(String((shiftsPayload.error as Record<string, unknown> | undefined)?.message || '加载班次失败'))
+    }
+
+    attendanceGroups.value = normalizeAttendanceGroupOptions(groupsPayload)
+    attendanceShifts.value = normalizeAttendanceShiftOptions(shiftsPayload)
+  } catch {
+    attendanceGroups.value = []
+    attendanceShifts.value = []
+    attendanceSetupLoadError.value = '考勤配置选项暂不可用，可创建后从下一步进入考勤管理配置。'
+  } finally {
+    attendanceSetupLoading.value = false
+  }
+}
+
 async function loadUsers(): Promise<void> {
   loading.value = true
   try {
@@ -2323,6 +2450,9 @@ async function createUser(): Promise<void> {
         department: createForm.value.department || undefined,
         position: createForm.value.position || undefined,
         hireDate: createForm.value.hireDate || undefined,
+        attendanceGroupId: createForm.value.attendanceGroupId || undefined,
+        defaultShiftId: createForm.value.defaultShiftId || undefined,
+        defaultShiftStartDate: createForm.value.defaultShiftStartDate || undefined,
         password: createForm.value.password || undefined,
         presetId: createForm.value.presetId || undefined,
         role: createForm.value.role || undefined,
@@ -2353,6 +2483,9 @@ async function createUser(): Promise<void> {
       department: '',
       position: '',
       hireDate: '',
+      attendanceGroupId: '',
+      defaultShiftId: '',
+      defaultShiftStartDate: '',
       password: '',
       presetId: '',
       role: 'user',
@@ -2432,6 +2565,15 @@ watch(presetModeFilter, async () => {
   await loadAccessPresets()
   if (createForm.value.presetId && !accessPresets.value.some((preset) => preset.id === createForm.value.presetId)) {
     createForm.value.presetId = ''
+  }
+})
+
+watch(() => createForm.value.defaultShiftId, (shiftId) => {
+  if (shiftId && !createForm.value.defaultShiftStartDate && createForm.value.hireDate) {
+    createForm.value.defaultShiftStartDate = createForm.value.hireDate
+  }
+  if (!shiftId) {
+    createForm.value.defaultShiftStartDate = ''
   }
 })
 
@@ -2660,7 +2802,7 @@ const stopUserLocationSync = subscribeToLocationChanges(() => {
 })
 
 onMounted(async () => {
-  await Promise.all([loadRoles(), loadUsers(), loadAccessPresets(), loadInviteRecords()])
+  await Promise.all([loadRoles(), loadUsers(), loadAccessPresets(), loadInviteRecords(), loadAttendanceOnboardingOptions()])
 })
 
 onUnmounted(() => {

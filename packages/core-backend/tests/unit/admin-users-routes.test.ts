@@ -2791,6 +2791,129 @@ describe('admin-users routes', () => {
     expect(auditMocks.auditLog).toHaveBeenCalled()
   })
 
+  it('creates attendance group membership and default shift assignment during user provisioning', async () => {
+    const groupId = '11111111-1111-4111-8111-111111111111'
+    const shiftId = '22222222-2222-4222-8222-222222222222'
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = String(sql)
+      if (statement.includes('SELECT id FROM users WHERE lower(username)')) return { rows: [] }
+      if (statement.includes('FROM attendance_groups')) {
+        return { rows: [{ id: groupId, name: '总装一组' }] }
+      }
+      if (statement.includes('FROM attendance_shifts')) {
+        return { rows: [{ id: shiftId, name: '早班' }] }
+      }
+      if (statement.includes('INSERT INTO users (')) return { rows: [] }
+      if (statement.includes('INSERT INTO attendance_group_members')) {
+        expect(params).toEqual(['default', groupId, expect.any(String)])
+        return { rows: [{ memberId: 'member-1' }] }
+      }
+      if (statement.includes('INSERT INTO attendance_shift_assignments')) {
+        expect(params).toEqual([expect.any(String), 'default', expect.any(String), shiftId, '2026-06-01'])
+        return { rows: [{ assignmentId: 'assignment-1' }] }
+      }
+      if (statement.includes('FROM users') && statement.includes('WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'user-new',
+            email: null,
+            username: 'newuser',
+            name: 'New User',
+            employeeNo: 'E-2026-011',
+            department: 'Assembly',
+            position: 'Operator',
+            hireDate: '2026-05-29',
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            last_login_at: null,
+            created_at: '2026-03-12T00:00:00.000Z',
+            updated_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      if (statement.includes('FROM user_roles')) return { rows: [] }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        username: 'newuser',
+        name: 'New User',
+        employeeNo: 'E-2026-011',
+        department: 'Assembly',
+        position: 'Operator',
+        hireDate: '2026-05-29',
+        attendanceGroupId: groupId,
+        defaultShiftId: shiftId,
+        defaultShiftStartDate: '2026-06-01',
+        password: 'WelcomePass9A',
+        isActive: true,
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.attendanceOnboarding).toMatchObject({
+      orgId: 'default',
+      group: {
+        id: groupId,
+        name: '总装一组',
+        memberCreated: true,
+      },
+      defaultShift: {
+        id: shiftId,
+        name: '早班',
+        startDate: '2026-06-01',
+        assignmentId: 'assignment-1',
+      },
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'create',
+      resourceType: 'user',
+      meta: expect.objectContaining({
+        attendanceOnboarding: expect.objectContaining({
+          orgId: 'default',
+          group: expect.objectContaining({ id: groupId }),
+          defaultShift: expect.objectContaining({ id: shiftId, startDate: '2026-06-01' }),
+        }),
+      }),
+    }))
+  })
+
+  it('rejects attendance onboarding when the selected group does not exist', async () => {
+    const groupId = '11111111-1111-4111-8111-111111111111'
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('SELECT id FROM users WHERE email = $1')) return { rows: [] }
+      if (statement.includes('FROM attendance_groups')) return { rows: [] }
+      if (statement.includes('INSERT INTO users (')) {
+        throw new Error('unexpected user insert')
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'new@example.com',
+        name: 'New User',
+        attendanceGroupId: groupId,
+        password: 'WelcomePass9A',
+        isActive: true,
+      },
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect((response.body as Record<string, any>).error.code).toBe('ATTENDANCE_GROUP_NOT_FOUND')
+    expect(pgMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO users ('))).toBe(false)
+  })
+
   it('rejects create user requests when password policy fails', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
 
