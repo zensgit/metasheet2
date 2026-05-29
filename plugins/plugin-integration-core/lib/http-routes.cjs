@@ -43,6 +43,9 @@ const { projectRecordForBody, findUnfilledPlaceholders, applyReferenceShape, isB
 // DF-T3b-2a: from_reference_table resolves a per-material reference via the shared resolver (the
 // SAME decision both the preview and the record materializer use, so they cannot diverge).
 const { resolveReferenceRuleValue } = require('./reference-mapping-resolver.cjs')
+// DF-T3b-2b: live mapping-sheet bulk-read → referenceMappingIndexes for the preview seam (read-only).
+const { buildReferenceMappingIndexes } = require('./reference-mapping-source.cjs')
+const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-templates.cjs')
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
 const { deriveK3MaterialTemplateDraft, summarizeTemplateForEvidence, TemplateDeriveError } = require('./connector-template-derive.cjs')
 const { validateRecord } = require('./validator.cjs')
@@ -655,6 +658,35 @@ function checkReferenceCompleteness(completeness, value) {
   return null
 }
 
+// DF-T3b-2b: bindings telling the preview which staging system/object holds each domain's mapping
+// sheet. Tenant-scoped (the system is loaded scoped to the request) — the client names a binding, the
+// server does the bulk-read. [{ domain, systemId, object }].
+function normalizeReferenceMappingSources(value) {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) {
+    throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'referenceMappingSources must be an array', { field: 'referenceMappingSources' })
+  }
+  const seenDomains = new Set()
+  return value.map((source, index) => {
+    if (!isPlainObject(source)) {
+      throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', `referenceMappingSources[${index}] must be an object`, { field: `referenceMappingSources[${index}]` })
+    }
+    const domain = firstString(source.domain)
+    const systemId = firstString(source.systemId)
+    const object = firstString(source.object)
+    if (!domain || !systemId || !object) {
+      throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', `referenceMappingSources[${index}] requires domain, systemId, object`, { field: `referenceMappingSources[${index}]` })
+    }
+    // P2: one sheet per domain (#2036). A duplicate domain is a config error — fail closed rather than
+    // silently letting the last binding win (Object.assign would otherwise overwrite).
+    if (seenDomains.has(domain)) {
+      throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', `referenceMappingSources has a duplicate domain: ${domain}`, { field: `referenceMappingSources[${index}].domain` })
+    }
+    seenDomains.add(domain)
+    return { domain, systemId, object }
+  })
+}
+
 function buildTargetPayloadPreview(input, options = {}) {
   if (!isPlainObject(input.sourceRecord)) {
     throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'sourceRecord must be an object', { field: 'sourceRecord' })
@@ -1080,7 +1112,41 @@ function createHandlers(services) {
 
     async templatesPreview(req, res) {
       requireAccess(req, 'write')
-      return sendOk(res, buildTemplatePreview(requestBody(req)))
+      const body = requestBody(req)
+      // DF-T3b-2b: when the request names referenceMappingSources, LIVE bulk-read each domain's mapping
+      // sheet via the staging source-adapter (read-only) and feed the #2063 referenceMappingIndexes seam,
+      // so from_reference_table resolves per-material in the preview. No sources → unchanged behavior.
+      const sources = normalizeReferenceMappingSources(body.referenceMappingSources)
+      let previewOptions = {}
+      if (sources.length > 0) {
+        const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+          ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+          : externalSystems.getExternalSystem.bind(externalSystems)
+        const referenceMappingIndexes = {}
+        const adapterBySystem = new Map()
+        for (const source of sources) {
+          let adapter = adapterBySystem.get(source.systemId)
+          if (!adapter) {
+            const system = await loadSystem(scopedInput(req, { id: source.systemId }))
+            // P1: fail-closed BEFORE createAdapter — ONLY a metasheet:staging source may back a mapping
+            // sheet. Otherwise the preview becomes an arbitrary-adapter read() entry point: a caller
+            // pointing at a K3 / other external system would trigger an external read instead of a
+            // read-only workspace mapping-sheet read (the slice's whole boundary).
+            if (!system || system.kind !== 'metasheet:staging') {
+              throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', `referenceMappingSources must reference a metasheet:staging system (systemId ${source.systemId} is ${(system && system.kind) || 'unknown'})`, { field: 'referenceMappingSources' })
+            }
+            adapter = adapterRegistry.createAdapter(system)
+            adapterBySystem.set(source.systemId, adapter)
+          }
+          const template = K3_REFERENCE_MAPPING_TEMPLATES.find((t) => t.domain === source.domain)
+          if (!template) {
+            throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', `unknown reference mapping domain: ${source.domain}`, { field: 'referenceMappingSources' })
+          }
+          Object.assign(referenceMappingIndexes, await buildReferenceMappingIndexes(adapter, [{ domain: source.domain, object: source.object, template }]))
+        }
+        previewOptions = { referenceMappingIndexes }
+      }
+      return sendOk(res, buildTemplatePreview(body, previewOptions))
     },
 
     // DF-T2c: read-only derive — run the DF-T2a helper on an operator-supplied (raw, operator-local)

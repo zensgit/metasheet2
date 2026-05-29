@@ -1992,9 +1992,121 @@ async function testTemplatePreviewReferenceMappingResolution() {
   assert.equal(noIdx.targetPayloadPreview.referenceResolutions[0].evidence.errorType, 'unresolved')
 }
 
+// DF-T3b-2b: the preview ROUTE performs a LIVE mapping-sheet bulk-read via the staging source-adapter
+// (real adapter + mocked recordsApi through the registry) and resolves from_reference_table — read-only.
+async function testTemplatePreviewLiveBulkRead() {
+  const { createMetaSheetStagingSourceAdapter } = require(path.join(__dirname, '..', 'lib', 'adapters', 'metasheet-staging-source-adapter.cjs'))
+  const stagingSystem = {
+    id: 'ms_staging_1', tenantId: 'tenant_1', workspaceId: 'workspace_1', name: 'staging', kind: 'metasheet:staging', role: 'source',
+    config: { objects: { unit_dict: { name: 'unit_dict', sheetId: 'sheet_unit', fieldDetails: [
+      { id: 'sourceCode', name: 'sourceCode', type: 'string' }, { id: 'fNumber', name: 'fNumber', type: 'string' },
+      { id: 'fName', name: 'fName', type: 'string' }, { id: 'enabled', name: 'enabled', type: 'boolean' },
+    ] } } },
+  }
+  let queryCalls = 0
+  let currentRows = []
+  const { services } = createMockServices()
+  services.externalSystemRegistry.getExternalSystemForAdapter = async (input) => ({ ...stagingSystem, id: input.id })
+  // a REAL staging source-adapter backed by a mocked recordsApi (the live bulk-read path, not a fixture index)
+  services.adapterRegistry.createAdapter = () => createMetaSheetStagingSourceAdapter({
+    system: stagingSystem,
+    context: { api: { multitable: { records: { async queryRecords(input) {
+      queryCalls += 1
+      const offset = Number(input.offset || 0); const limit = Number(input.limit || currentRows.length)
+      return currentRows.slice(offset, offset + limit)
+    } } } } },
+  })
+  const { routes } = mountRoutes(services)
+  const previewBody = () => ({
+    bodyKey: 'Data', payloadTemplate: {}, sourceRecord: { unitGroupSourceCode: 'STD' },
+    fieldRules: [{ targetField: 'FUnitGroupID', sourceType: 'from_reference_table', domain: 'unit', sourceField: 'unitGroupSourceCode', shape: 'object-passthrough', completeness: 'require-fnumber-fname' }],
+    referenceMappingSources: [{ domain: 'unit', systemId: 'ms_staging_1', object: 'unit_dict' }],
+  })
+
+  // resolved via the LIVE bulk-read
+  currentRows = [{ id: 'm1', sheetId: 'sheet_unit', data: { sourceCode: 'STD', fNumber: '10', fName: 'Each', enabled: true } }]
+  let res = await invoke(routes, 'POST', '/api/integration/templates/preview', { user: WRITE_USER, body: previewBody() })
+  assert.ok(queryCalls >= 1, 'route ran a live bulk-read (queryRecords called via the staging adapter)')
+  assert.equal(res.body.data.payload.Data.FUnitGroupID.FNumber, '10', 'preview resolved FNumber from the live mapping sheet')
+  assert.equal(res.body.data.payload.Data.FUnitGroupID.FName, 'Each')
+  assert.equal(res.body.data.valid, true)
+  assert.equal(res.body.data.targetPayloadPreview.referenceResolutions[0].status, 'resolved')
+
+  // three-state fail-closed at the preview layer, all via the live bulk-read
+  const cases = {
+    unresolved: [{ id: 'm1', sheetId: 'sheet_unit', data: { sourceCode: 'OTHER', fNumber: '9', fName: 'X', enabled: true } }],
+    ambiguous: [
+      { id: 'm1', sheetId: 'sheet_unit', data: { sourceCode: 'STD', fNumber: 'A', fName: 'X', enabled: true } },
+      { id: 'm2', sheetId: 'sheet_unit', data: { sourceCode: 'STD', fNumber: 'B', fName: 'Y', enabled: true } },
+    ],
+    'incomplete-row': [{ id: 'm1', sheetId: 'sheet_unit', data: { sourceCode: 'STD', fNumber: 'A', enabled: true } }],
+  }
+  for (const [errorType, rows] of Object.entries(cases)) {
+    currentRows = rows
+    res = await invoke(routes, 'POST', '/api/integration/templates/preview', { user: WRITE_USER, body: previewBody() })
+    assert.equal(res.body.data.valid, false, `${errorType}: preview fail-closed via live bulk-read`)
+    assert.equal(res.body.data.targetPayloadPreview.referenceResolutions[0].evidence.errorType, errorType, `${errorType}: evidence errorType`)
+  }
+
+  // a bad domain (no built-in template) is rejected 400
+  currentRows = []
+  res = await invoke(routes, 'POST', '/api/integration/templates/preview', { user: WRITE_USER, body: { ...previewBody(), referenceMappingSources: [{ domain: 'not-a-domain', systemId: 'ms_staging_1', object: 'x' }] } })
+  assert.equal(res.body.error.code, 'INVALID_TEMPLATE_PREVIEW', 'unknown reference mapping domain rejected')
+}
+
+// DF-T3b-2b P1/P2: the bulk-read entry point must fail closed on (P1) a non-staging system — so the
+// preview can't become an arbitrary-adapter read() into K3/other externals — and (P2) a duplicate
+// domain — never silently last-wins. Both reject BEFORE any adapter is created / any read runs.
+async function testTemplatePreviewBulkReadGuards() {
+  const { createMetaSheetStagingSourceAdapter } = require(path.join(__dirname, '..', 'lib', 'adapters', 'metasheet-staging-source-adapter.cjs'))
+  const stagingSystem = {
+    id: 'ms_staging_1', tenantId: 'tenant_1', workspaceId: 'workspace_1', name: 'staging', kind: 'metasheet:staging', role: 'source',
+    config: { objects: { unit_dict: { name: 'unit_dict', sheetId: 'sheet_unit', fieldDetails: [
+      { id: 'sourceCode', name: 'sourceCode', type: 'string' }, { id: 'fNumber', name: 'fNumber', type: 'string' },
+      { id: 'fName', name: 'fName', type: 'string' }, { id: 'enabled', name: 'enabled', type: 'boolean' },
+    ] } } },
+  }
+  let createAdapterCalls = 0
+  let queryCalls = 0
+  const { services } = createMockServices()
+  // an 'erp' (non-staging) system for id 'erp_sys'; staging otherwise
+  services.externalSystemRegistry.getExternalSystemForAdapter = async (input) =>
+    input.id === 'erp_sys'
+      ? { id: 'erp_sys', tenantId: 'tenant_1', workspaceId: 'workspace_1', name: 'K3', kind: 'erp', role: 'target' }
+      : { ...stagingSystem, id: input.id }
+  services.adapterRegistry.createAdapter = (system) => {
+    createAdapterCalls += 1
+    return createMetaSheetStagingSourceAdapter({ system, context: { api: { multitable: { records: { async queryRecords() { queryCalls += 1; return [] } } } } } })
+  }
+  const { routes } = mountRoutes(services)
+  const rule = { targetField: 'FUnitGroupID', sourceType: 'from_reference_table', domain: 'unit', sourceField: 'unitGroupSourceCode', shape: 'object-passthrough', completeness: 'require-fnumber-fname' }
+  const base = { bodyKey: 'Data', payloadTemplate: {}, sourceRecord: { unitGroupSourceCode: 'STD' }, fieldRules: [rule] }
+
+  // P1: a non-staging systemId → 400, and the adapter is NEVER created / NO read runs
+  let res = await invoke(routes, 'POST', '/api/integration/templates/preview', { user: WRITE_USER, body: { ...base, referenceMappingSources: [{ domain: 'unit', systemId: 'erp_sys', object: 'unit_dict' }] } })
+  assert.equal(res.body.error.code, 'INVALID_TEMPLATE_PREVIEW', 'P1: non-staging system rejected')
+  assert.equal(createAdapterCalls, 0, 'P1: a non-staging system NEVER creates an adapter')
+  assert.equal(queryCalls, 0, 'P1: a non-staging system NEVER triggers a read')
+
+  // P2: duplicate domain → 400, rejected before any adapter/read (no silent last-wins)
+  res = await invoke(routes, 'POST', '/api/integration/templates/preview', { user: WRITE_USER, body: { ...base, referenceMappingSources: [
+    { domain: 'unit', systemId: 'ms_staging_1', object: 'unit_dict' },
+    { domain: 'unit', systemId: 'ms_staging_1', object: 'other_sheet' },
+  ] } })
+  assert.equal(res.body.error.code, 'INVALID_TEMPLATE_PREVIEW', 'P2: duplicate domain rejected')
+  assert.equal(createAdapterCalls, 0, 'P2: duplicate-domain config rejected before any adapter/read')
+
+  // control: a valid staging source still works (the guards do not block the happy path)
+  res = await invoke(routes, 'POST', '/api/integration/templates/preview', { user: WRITE_USER, body: { ...base, referenceMappingSources: [{ domain: 'unit', systemId: 'ms_staging_1', object: 'unit_dict' }] } })
+  assert.equal(createAdapterCalls, 1, 'a valid staging source DOES create the adapter')
+  assert.ok(queryCalls >= 1, 'a valid staging source DOES read')
+}
+
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testTemplatePreviewReferenceMappingResolution()
+  await testTemplatePreviewLiveBulkRead()
+  await testTemplatePreviewBulkReadGuards()
   await testExternalSystemRoutes()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
