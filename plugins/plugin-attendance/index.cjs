@@ -15118,6 +15118,75 @@ module.exports = {
         context.api.events.emit(type, data)
       }
     }
+    async function userManagesAttendanceGroup(orgId, groupId, userId) {
+      const rows = await db.query(
+        `SELECT 1
+         FROM attendance_group_managers
+         WHERE org_id = $1
+           AND group_id = $2
+           AND user_id = $3
+           AND role IN ('owner', 'sub_owner')
+         LIMIT 1`,
+        [orgId, groupId, userId]
+      )
+      return rows.length > 0
+    }
+
+    function withAttendanceGroupMemberAccess(handler) {
+      return async (req, res, next) => {
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        const invokeHandler = async () => {
+          try {
+            await handler(req, res, next)
+          } catch (error) {
+            if (error instanceof HttpError && !res.headersSent) {
+              res.status(error.status).json({
+                ok: false,
+                error: {
+                  code: error.code,
+                  message: error.message,
+                  ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+                },
+              })
+              return
+            }
+            throw error
+          }
+        }
+
+        const userId = getUserId(req)
+        if (!userId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        if (process.env.RBAC_BYPASS === 'true') {
+          await invokeHandler()
+          return
+        }
+
+        try {
+          const orgId = getOrgId(req)
+          if (await hasAttendanceAdminAccess(userId) || await userManagesAttendanceGroup(orgId, groupId, userId)) {
+            await invokeHandler()
+            return
+          }
+          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance group manager tables missing' } })
+            return
+          }
+          logger.error('Attendance group scoped manager guard failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+        }
+      }
+    }
 
     const calendarPolicyOverrideSchema = z.object({
       id: z.string().optional(),
@@ -26413,7 +26482,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups/:id/members',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceGroupMemberAccess(async (req, res) => {
         const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
@@ -26458,7 +26527,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/members',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceGroupMemberAccess(async (req, res) => {
         const schema = z.object({
           userId: z.string().optional(),
           userIds: z.array(z.string()).optional(),
@@ -26516,7 +26585,7 @@ module.exports = {
     context.api.http.addRoute(
       'DELETE',
       '/api/attendance/groups/:id/members/:userId',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceGroupMemberAccess(async (req, res) => {
         const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {

@@ -84,7 +84,7 @@ async function createHarness(rbacBypass = 'true') {
 async function invokeRoute(
   routes: Map<string, RouteHandler>,
   key: string,
-  options: { params?: Record<string, string>; body?: unknown; query?: Record<string, unknown> } = {},
+  options: { params?: Record<string, string>; body?: unknown; query?: Record<string, unknown>; user?: Record<string, unknown> } = {},
 ) {
   const handler = routes.get(key)
   expect(handler, key).toBeTypeOf('function')
@@ -95,7 +95,7 @@ async function invokeRoute(
       body: options.body ?? {},
       query: options.query ?? {},
       headers: {},
-      user: { id: 'attendance-user-1', orgId: 'default' },
+      user: options.user ?? { id: 'attendance-user-1', orgId: 'default' },
       ip: '127.0.0.1',
       get: vi.fn(() => undefined),
     },
@@ -369,6 +369,142 @@ describe('attendance UUID route validation', () => {
     expect(db.query).not.toHaveBeenCalled()
   })
 
+  it('allows attendance group owners to manage only their group members', async () => {
+    const { db, routes } = await createHarness('false')
+    const groupId = '00000000-0000-4000-8000-000000000101'
+    const ownerUserId = 'owner-user-1'
+    const memberRow = {
+      id: '00000000-0000-4000-8000-000000000301',
+      org_id: 'default',
+      group_id: groupId,
+      user_id: 'member-user-1',
+      created_at: '2026-05-29T22:30:00.000Z',
+      updated_at: '2026-05-29T22:30:00.000Z',
+    }
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const text = String(sql)
+      if (text.includes('FROM user_roles') && text.includes('role_id = $2')) return []
+      if (text.includes('FROM user_permissions')) return []
+      if (text.includes('JOIN role_permissions')) return []
+      if (text.includes('FROM attendance_group_managers') && text.includes('SELECT 1')) {
+        return params[0] === 'default' && params[1] === groupId && params[2] === ownerUserId
+          ? [{ ok: 1 }]
+          : []
+      }
+      if (text.includes('COUNT(*)::int AS total FROM attendance_group_members')) return [{ total: 1 }]
+      if (text.includes('SELECT * FROM attendance_group_members')) return [memberRow]
+      if (text.includes('INSERT INTO attendance_group_members')) return [{ ...memberRow, user_id: params[2] }]
+      if (text.includes('DELETE FROM attendance_group_members')) return [{ id: memberRow.id }]
+      throw new Error(`unexpected SQL: ${text}`)
+    })
+
+    const scopedUser = { id: ownerUserId, orgId: 'default' }
+    const listRes = await invokeRoute(routes, 'GET /api/attendance/groups/:id/members', {
+      params: { id: groupId },
+      user: scopedUser,
+    })
+
+    expect(listRes.statusCode).toBe(200)
+    expect(listRes.body).toMatchObject({
+      ok: true,
+      data: {
+        items: [{ groupId, userId: 'member-user-1' }],
+        total: 1,
+      },
+    })
+
+    const addRes = await invokeRoute(routes, 'POST /api/attendance/groups/:id/members', {
+      params: { id: groupId },
+      body: { userId: 'member-user-2' },
+      user: scopedUser,
+    })
+
+    expect(addRes.statusCode).toBe(200)
+    expect(addRes.body).toMatchObject({
+      ok: true,
+      data: {
+        items: [{ groupId, userId: 'member-user-2' }],
+      },
+    })
+
+    const removeRes = await invokeRoute(routes, 'DELETE /api/attendance/groups/:id/members/:userId', {
+      params: { id: groupId, userId: 'member-user-2' },
+      user: scopedUser,
+    })
+
+    expect(removeRes.statusCode).toBe(200)
+    expect(removeRes.body).toMatchObject({
+      ok: true,
+      data: { id: memberRow.id },
+    })
+    expect(db.query.mock.calls.some(call =>
+      String(call[0]).includes('FROM attendance_group_managers')
+      && (call[1] as unknown[])[2] === ownerUserId
+    )).toBe(true)
+  })
+
+  it('rejects non-manager member writes without touching membership rows', async () => {
+    const { db, routes } = await createHarness('false')
+    const groupId = '00000000-0000-4000-8000-000000000101'
+
+    db.query.mockImplementation(async (sql: string) => {
+      const text = String(sql)
+      if (text.includes('FROM user_roles') && text.includes('role_id = $2')) return []
+      if (text.includes('FROM user_permissions')) return []
+      if (text.includes('JOIN role_permissions')) return []
+      if (text.includes('FROM attendance_group_managers') && text.includes('SELECT 1')) return []
+      throw new Error(`unexpected SQL: ${text}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/members', {
+      params: { id: groupId },
+      body: { userId: 'member-user-1' },
+      user: { id: 'not-a-manager', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+      },
+    })
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(db.query.mock.calls.map(call => String(call[0])).join('\n')).not.toContain('INSERT INTO attendance_group_members')
+  })
+
+  it('keeps attendance group owner roster management admin-only', async () => {
+    const { db, routes } = await createHarness('false')
+    const groupId = '00000000-0000-4000-8000-000000000101'
+
+    db.query.mockImplementation(async (sql: string) => {
+      const text = String(sql)
+      if (text.includes('FROM user_roles') && text.includes('role_id = $2')) return []
+      if (text.includes('FROM user_permissions')) return []
+      if (text.includes('JOIN role_permissions')) return []
+      throw new Error(`unexpected SQL: ${text}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/managers', {
+      params: { id: groupId },
+      body: {
+        userId: 'owner-user-2',
+        role: 'owner',
+      },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+      },
+    })
+    expect(db.query.mock.calls.map(call => String(call[0])).join('\n')).not.toContain('INSERT INTO attendance_group_managers')
+  })
+
   it('rejects malformed route UUID params before hitting the database', async () => {
     const { db, routes } = await createHarness()
     const cases = [
@@ -390,6 +526,20 @@ describe('attendance UUID route validation', () => {
       { key: 'GET /api/attendance/payroll-cycles/:id/summary' },
       { key: 'GET /api/attendance/payroll-cycles/:id/summary/export' },
       { key: 'GET /api/attendance/payroll-cycles/:id/export' },
+      { key: 'GET /api/attendance/groups/:id/members' },
+      {
+        key: 'POST /api/attendance/groups/:id/members',
+        body: {
+          userId: 'member-user-1',
+        },
+      },
+      {
+        key: 'DELETE /api/attendance/groups/:id/members/:userId',
+        params: {
+          id: 'not-a-uuid',
+          userId: 'member-user-1',
+        },
+      },
       { key: 'GET /api/attendance/groups/:id/managers' },
       {
         key: 'POST /api/attendance/groups/:id/managers',
