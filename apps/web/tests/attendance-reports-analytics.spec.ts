@@ -44,6 +44,24 @@ function installReportsMock(): void {
   vi.mocked(apiFetch).mockImplementation(async (input) => {
     const url = typeof input === 'string' ? input : input.url
 
+    if (
+      url.includes('userId=forbidden-user')
+      && (
+        url.includes('/api/attendance/summary?')
+        || url.includes('/api/attendance/records?')
+        || url.includes('/api/attendance/reports/requests?')
+        || url.includes('/api/attendance/export?')
+      )
+    ) {
+      return jsonResponse(403, {
+        ok: false,
+        error: {
+          code: 'ACCESS',
+          message: 'Access denied',
+        },
+      })
+    }
+
     if (url.includes('/api/attendance/summary?')) {
       return jsonResponse(200, {
         ok: true,
@@ -166,6 +184,13 @@ function findFilterButton(container: HTMLElement, group: string, value: string):
   return button as HTMLButtonElement
 }
 
+function findButtonByText(container: HTMLElement, text: string): HTMLButtonElement {
+  const button = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+    .find(item => item.textContent?.includes(text))
+  expect(button, `expected button containing "${text}"`).toBeTruthy()
+  return button as HTMLButtonElement
+}
+
 describe('Attendance reports analytics', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -215,7 +240,7 @@ describe('Attendance reports analytics', () => {
     findFilterButton(container!, 'request-status', 'pending').click()
     await flushUi(3)
 
-    let requestRows = Array.from(
+    const requestRows = Array.from(
       container!.querySelectorAll<HTMLElement>('[data-report-card="request-report"] tbody tr'),
     ).map(row => row.textContent?.replace(/\s+/g, ' ').trim() || '')
     expect(requestRows).toHaveLength(1)
@@ -256,5 +281,38 @@ describe('Attendance reports analytics', () => {
     expect(periodLabel?.textContent).toContain('Apr')
     expect(vi.mocked(apiFetch).mock.calls.length).toBeGreaterThan(initialCallCount)
     expect(vi.mocked(apiFetch).mock.calls.some((call) => String(call[0]).includes('/api/attendance/summary?'))).toBe(true)
+  })
+
+  it('clears stale report data and blocks export when the current user filter is forbidden', async () => {
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container?.querySelector('[data-reports-insight="snapshot"]')?.textContent).toContain('4')
+    expect(container?.querySelectorAll('[data-report-card="records"] tbody > tr')).toHaveLength(3)
+
+    const userInput = container!.querySelector<HTMLInputElement>('#attendance-user-id')
+    expect(userInput).toBeTruthy()
+    userInput!.value = 'forbidden-user'
+    userInput!.dispatchEvent(new Event('input'))
+    await flushUi(3)
+
+    expect(findButtonByText(container!, 'Export CSV').disabled).toBe(true)
+
+    findButtonByText(container!, 'Reload report').click()
+    await flushUi()
+
+    const requestedUrls = vi.mocked(apiFetch).mock.calls.map(call => String(call[0]))
+    expect(requestedUrls.some(url => url.includes('/api/attendance/summary?') && url.includes('userId=forbidden-user'))).toBe(true)
+    expect(requestedUrls.some(url => url.includes('/api/attendance/export?') && url.includes('userId=forbidden-user'))).toBe(false)
+    expect(container?.querySelector('[data-reports-state="unavailable"]')?.textContent).toContain('unavailable')
+    expect(container?.querySelector('[data-reports-insight="snapshot"]')?.textContent).toContain('Visible requests')
+    expect(container?.querySelector('[data-reports-insight="snapshot"]')?.textContent).toContain('0')
+    expect(container?.querySelector('[data-report-card="request-report"]')?.textContent).toContain('No report data.')
+    expect(container?.querySelector('[data-report-card="records"]')?.textContent).toContain('No records.')
+    expect(container?.querySelectorAll('[data-report-card="records"] tbody > tr')).toHaveLength(0)
+    expect(findButtonByText(container!, 'Export CSV').disabled).toBe(true)
+    expect(container?.querySelector('.attendance__status-block')?.textContent).toContain('Access denied')
+    expect(container?.querySelector('.attendance__status-block')?.textContent).toContain('Code: ACCESS')
   })
 })
