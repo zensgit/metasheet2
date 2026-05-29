@@ -358,7 +358,7 @@
     />
     <MetaViewManager
       :visible="showViewManager" :views="workbench.views.value" :fields="propertyVisibleWorkbenchFields" :sheet-id="workbench.activeSheetId.value"
-      :active-view-id="workbench.activeViewId.value"
+      :active-view-id="workbench.activeViewId.value" :field-permissions="effectiveFieldPermissions"
       @update:dirty="viewManagerDirty = $event"
       @close="showViewManager = false" @create-view="onCreateView" @update-view="onUpdateView" @delete-view="onDeleteView"
     />

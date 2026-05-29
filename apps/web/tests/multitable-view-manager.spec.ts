@@ -961,4 +961,53 @@ describe('MetaViewManager', () => {
 
     app.unmount()
   })
+
+  it('shows a permission-hidden hint (not an editable input) for a filter on a field the viewer cannot read', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_grid',
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_secret', name: 'Secret', type: 'string' },
+          ],
+          views: [
+            {
+              id: 'view_grid', sheetId: 'sheet_1', name: 'Grid', type: 'grid',
+              // fld_secret arrives as a #2059-redacted echo (no `value`); fld_name carries a literal.
+              filterInfo: { conjunction: 'and', conditions: [
+                { fieldId: 'fld_secret', operator: 'is' },
+                { fieldId: 'fld_name', operator: 'is', value: 'keep-me' },
+              ] },
+            },
+          ],
+          fieldPermissions: { fld_secret: { visible: false, readOnly: false } }, // viewer can't read fld_secret
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+    ;(container.querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    const filterRows = Array.from(container.querySelectorAll('.meta-view-mgr__rule-row--filter'))
+    expect(filterRows.length).toBe(2)
+    // the denied field's condition → hidden hint, and NO editable value input
+    const hiddenRow = filterRows.find((row) => row.querySelector('[data-test="filter-value-hidden"]'))
+    expect(hiddenRow).toBeTruthy()
+    expect(hiddenRow!.textContent).toContain('value hidden by permissions')
+    expect(hiddenRow!.querySelector('input.meta-view-mgr__input')).toBeNull()
+    // the readable field's condition → normal editable input, no hidden hint
+    const readableRow = filterRows.find((row) => !row.querySelector('[data-test="filter-value-hidden"]'))
+    expect(readableRow).toBeTruthy()
+    expect((readableRow!.querySelector('input.meta-view-mgr__input') as HTMLInputElement | null)?.value).toBe('keep-me')
+
+    app.unmount()
+  })
 })

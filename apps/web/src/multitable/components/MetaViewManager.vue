@@ -331,8 +331,14 @@
                 >
                   <option v-for="operator in operatorsForField(rule.fieldId)" :key="operator.value" :value="operator.value">{{ filterOperatorLabel(operator.value, operator.label, isZh) }}</option>
                 </select>
+                <span
+                  v-if="isPermissionHiddenFilterValue(rule)"
+                  class="meta-view-mgr__rule-empty meta-view-mgr__rule-hidden"
+                  :title="ml('view.valueHiddenByPermission')"
+                  data-test="filter-value-hidden"
+                >&#x1F512; {{ ml('view.valueHiddenByPermission') }}</span>
                 <input
-                  v-if="!isUnaryFilterOperator(rule.operator)"
+                  v-else-if="!isUnaryFilterOperator(rule.operator)"
                   class="meta-view-mgr__input"
                   :type="inputTypeForField(rule.fieldId)"
                   :value="rule.value ?? ''"
@@ -432,6 +438,7 @@ import type {
   ConditionalFormattingRule,
   MetaCalendarViewConfig,
   MetaField,
+  MetaFieldPermission,
   MetaGanttViewConfig,
   MetaGalleryViewConfig,
   MetaHierarchyViewConfig,
@@ -488,6 +495,9 @@ const props = defineProps<{
   fields: MetaField[]
   sheetId: string
   activeViewId: string
+  // #UX-redacted-filter: the viewer's field-read permissions, so a filter value on a field they can't read
+  // renders as "value hidden by permissions" (non-editable) instead of a misleading empty input.
+  fieldPermissions?: Record<string, MetaFieldPermission>
 }>()
 
 const emit = defineEmits<{
@@ -996,6 +1006,12 @@ const UNARY_FILTER_OPERATORS = new Set(['isEmpty', 'isNotEmpty'])
 
 function isUnaryFilterOperator(operator: string): boolean {
   return UNARY_FILTER_OPERATORS.has(operator)
+}
+
+// #UX-redacted-filter: a value-taking condition on a field the viewer can't read (layer-3) — its literal
+// was redacted on read (#2059), so the value input is meaningless/misleading. Show a hidden hint instead.
+function isPermissionHiddenFilterValue(rule: FilterRule): boolean {
+  return !isUnaryFilterOperator(rule.operator) && props.fieldPermissions?.[rule.fieldId]?.visible === false
 }
 
 function operatorsForField(fieldId: string) {
