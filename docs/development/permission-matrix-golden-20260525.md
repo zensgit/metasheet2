@@ -26,12 +26,14 @@ Knowing this prevents re-litigating the same phantoms:
 
 | # | gate | mechanism | proven by |
 |---|---|---|---|
-| 1 | **Field masking** | `field_permissions.visible=false` → field stripped from export + view projection | D3d-1 (#1827) |
+| 1 | **Field masking** | `field_permissions.visible=false` → field value stripped from export **and** the interactive `/view` / `GET /records/:recordId` reads (+ view-aggregate, formula dry-run) | D3d-1 (#1827, export) · #2015 (#2024 design / interactive reads) |
 | 2 | **Field via member-group** | same, via `platform_member_group_members` membership | D3d-2 |
 | 3 | **Sheet write-intersection** | base `multitable:write` + read-only sheet row → `scopedCanWrite=false` → PATCH 403 | D3d-2 |
 | 4 | **Record write-own** | write-own sheet scope + non-creator → PATCH 403 | D3d-2 |
 
 Everything else is annotation/grant-additive (non-gates, §2).
+
+> **#2015 reconciliation (2026-05-29, not a model change).** Gate #1 was originally evidenced on **export only** (D3d-1); the interactive read paths masked `row.data`/`record.data` by **static layer-2 (`property.hidden`)** alone and shipped a `field_permissions`-denied value inside the JSON payload, relying on the client to hide it from the returned `fieldPermissions` metadata (a client-side-only control — the documented "skip-when-unreachable / wire-vs-fixture" blind spot: the gate was proven on the path it was tested on and the conclusion generalized). #2015 (#2024 design-lock, scope B / value-only) made `/view` + `GET /records/:recordId` honor the subject-scoped layer-3 gate at the wire, asserted real-DB in `multitable-records-read-field-mask.test.ts` (R1/R2, fail-first). **Layer-1 (`view.hidden_field_ids`) stays display-only on the interactive reads** (value present, hidden via metadata — R4), unlike export which bakes it in; that asymmetry is intentional (one-shot egress vs. interactive feed). Field-**definition** stripping (name/type/config) is deferred (value-only), gated on a missing-field-def compat scan.
 
 ## 1. Golden matrix — real gates (asserted, real DB)
 
@@ -41,7 +43,11 @@ Everything else is annotation/grant-additive (non-gates, §2).
 | field | denied (user visible=false) | export-xlsx | field absent (header+cells) | D3d-1 |
 | field | inherited-via-role (role visible=false) | export-xlsx | field absent | D3d-1 |
 | field | inherited-via-member-group (group visible=false) | export-xlsx | field absent | D3d-2 |
+| field | denied (user visible=false) | `GET /view` (`rows[].data`; link summaries — attachment summaries ride the identical `allowedFieldIds` set) | value absent (canary never on the wire) | #2015 (R1 data; R6 link summary) |
+| field | denied (user visible=false) | `GET /records/:recordId` (`record.data`) | value absent | #2015 (R2) |
+| field | denied (user visible=false) | `GET /view` / `GET /records` | **ungranted-to-deny** user still sees the value (per-subject; mask doesn't deny the wrong user) | #2015 (R5) |
 | view-projection | granted / denied (`view.hidden_field_ids`) | export-xlsx | present / absent | D3d-1 |
+| view-projection | `view.hidden_field_ids` | `GET /view` / `GET /records` | value **present** in data, hidden via `fieldPermissions` metadata (layer-1 = display-only on interactive reads, unlike export) | #2015 (R4) |
 | sheet | inherited (no row, base write) | PATCH /records | 200 | D3d-2 |
 | sheet | granted (`spreadsheet:write`) | PATCH /records | 200 | D3d-2 |
 | sheet | **write-downgraded** (`spreadsheet:read` only) | PATCH /records | **403** | D3d-2 |

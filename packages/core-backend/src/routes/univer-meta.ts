@@ -6147,7 +6147,20 @@ export function univerMetaRouter(): Router {
       }
 
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
-      const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
+      // #2015 read-path field mask: the D3c security composite — layer-2 (property.hidden, already applied
+      // by filterVisiblePropertyFields) ∧ layer-3 (field_permissions.visible, the subject-scoped read gate).
+      // Mirrors export-xlsx (:5839) and formula dry-run #5c-a (:6089). hiddenFieldIds:[] deliberately omits
+      // layer-1 (view.hidden_field_ids) — that stays a display-only concern carried in the returned
+      // fieldPermissions metadata below, not a server-side data drop. access.userId is guaranteed truthy
+      // here (401 at the top of the handler); loaded ONCE and reused for the metadata derive below — do not
+      // re-load (this is the hottest read endpoint).
+      const fieldScopeMap = access.userId
+        ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
+        : new Map()
+      const securityFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
+      const allowedFieldIds = new Set(
+        visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id),
+      )
       const fieldTypeById = new Map(visiblePropertyFields.map((f) => [f.id, f.type] as const))
       const searchableFieldIds = visiblePropertyFields
         .filter((field) => isSearchableFieldType(field.type))
@@ -6395,7 +6408,7 @@ export function univerMetaRouter(): Router {
         linkValuesByRecord,
       )
       for (const row of rows) {
-        row.data = filterRecordDataByFieldIds(row.data, visiblePropertyFieldIds)
+        row.data = filterRecordDataByFieldIds(row.data, allowedFieldIds)
       }
       const linkSummaries = includeLinkSummaries
         ? filterRecordFieldSummaryMap(
@@ -6408,7 +6421,7 @@ export function univerMetaRouter(): Router {
                 linkValuesByRecord,
               ),
             ),
-            visiblePropertyFieldIds,
+            allowedFieldIds,
           )
         : undefined
       const attachmentSummaries = attachmentFields.length > 0
@@ -6422,7 +6435,7 @@ export function univerMetaRouter(): Router {
                 attachmentFields,
               ),
             ),
-            visiblePropertyFieldIds,
+            allowedFieldIds,
           )
         : undefined
       // Record-level permission filtering: remove records user cannot read (admin bypass)
@@ -6453,7 +6466,6 @@ export function univerMetaRouter(): Router {
         sheetScope,
         access,
       )
-      const fieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
       const viewScopeMap = (access.userId && viewConfig) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [viewConfig.id], access.userId) : new Map()
       const permissions: MultitableScopedPermissions = {
         fieldPermissions: deriveFieldPermissions(fields, capabilities, {
@@ -7422,13 +7434,24 @@ export function univerMetaRouter(): Router {
       }
       await applyLookupRollup(req, pool.query.bind(pool), fields, [record], relationalLinkFields, linkValuesByRecord)
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
-      const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
-      record.data = filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds)
+      // #2015 read-path field mask: D3c security composite (layer-2 property.hidden ∧ layer-3
+      // field_permissions.visible), mirroring export-xlsx / dry-run #5c-a. hiddenFieldIds:[] keeps layer-1
+      // (view.hidden_field_ids) a display-only concern in the returned fieldPermissions metadata, not a
+      // data drop. access.userId is guaranteed truthy here (401 at :7399); loaded ONCE and reused for the
+      // metadata derive below.
+      const fieldScopeMap = access.userId
+        ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
+        : new Map()
+      const securityFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
+      const allowedFieldIds = new Set(
+        visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id),
+      )
+      record.data = filterRecordDataByFieldIds(record.data, allowedFieldIds)
       const linkSummaries = filterSingleRecordFieldSummaryMap(
         Object.fromEntries(
           Array.from((await buildLinkSummaries(req, pool.query.bind(pool), [record], relationalLinkFields, linkValuesByRecord)).get(record.id)?.entries() ?? []),
         ),
-        visiblePropertyFieldIds,
+        allowedFieldIds,
       )
       const attachmentSummaries = visiblePropertyFields.some((field) => field.type === 'attachment')
         ? filterSingleRecordFieldSummaryMap(
@@ -7441,11 +7464,10 @@ export function univerMetaRouter(): Router {
                 visiblePropertyFields.filter((field) => field.type === 'attachment'),
               ),
             )[record.id] ?? {},
-            visiblePropertyFieldIds,
+            allowedFieldIds,
           )
         : undefined
 
-      const fieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
       const viewScopeMap = (access.userId && viewConfig) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [viewConfig.id], access.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
         hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
