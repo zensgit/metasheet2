@@ -9,6 +9,8 @@ export interface AttendanceAdminUserSearchItem {
   email: string
   name: string | null
   role: string
+  employeeNo?: string | null
+  department?: string | null
   is_active: boolean
   is_admin: boolean
   last_login_at: string | null
@@ -44,7 +46,8 @@ function formatUserLabel(user: AttendanceAdminUserSearchItem, tr: Translate): st
   }
   const primary = user.name?.trim() || user.email.trim() || user.id
   const secondary = user.email.trim() && user.email.trim() !== primary ? user.email.trim() : user.id
-  return user.id ? `${primary} · ${secondary}` : tr('Unknown user', '未知用户')
+  const profileParts = [user.employeeNo?.trim(), user.department?.trim()].filter(Boolean)
+  return user.id ? [primary, ...profileParts, secondary].join(' · ') : tr('Unknown user', '未知用户')
 }
 
 export function useAttendanceAdminUsers({
@@ -100,6 +103,8 @@ export function useAttendanceAdminUsers({
         id: normalizedUserId,
         email: normalizedUserId,
         name: null,
+        employeeNo: null,
+        department: null,
         role: '',
         is_active: true,
         is_admin: false,

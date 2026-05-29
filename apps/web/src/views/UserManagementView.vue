@@ -15,7 +15,7 @@
           v-model.trim="search"
           class="user-admin__search"
           type="search"
-          placeholder="搜索邮箱、用户名、手机号、姓名或用户 ID"
+          placeholder="搜索邮箱、用户名、手机号、姓名、员工号、部门或用户 ID"
           @keyup.enter="void loadUsers()"
         />
         <button class="user-admin__button" type="button" :disabled="loading" @click="void loadUsers()">
@@ -59,6 +59,10 @@
         <input v-model.trim="createForm.email" class="user-admin__search" type="email" placeholder="邮箱（可选）" />
         <input v-model.trim="createForm.username" class="user-admin__search" type="text" placeholder="用户名（可选）" />
         <input v-model.trim="createForm.mobile" class="user-admin__search" type="text" placeholder="手机号（可选）" />
+        <input v-model.trim="createForm.employeeNo" class="user-admin__search" type="text" placeholder="员工号（可选）" />
+        <input v-model.trim="createForm.department" class="user-admin__search" type="text" placeholder="部门（可选）" />
+        <input v-model.trim="createForm.position" class="user-admin__search" type="text" placeholder="岗位（可选）" />
+        <input v-model="createForm.hireDate" class="user-admin__search" type="date" aria-label="入职日期（可选）" />
         <input v-model.trim="createForm.password" class="user-admin__search" type="text" placeholder="可选：初始密码" />
         <select v-model="presetModeFilter" class="user-admin__select">
           <option value="">预设模式（全部）</option>
@@ -348,6 +352,7 @@
               <h2>{{ access.user.name || formatManagedUserLabel(access.user) }}</h2>
               <p>{{ formatManagedUserIdentifier(access.user) }}</p>
               <p v-if="access.user.mobile" class="user-admin__hint">手机号：{{ access.user.mobile }}</p>
+              <p v-if="profileSummaryLine" class="user-admin__hint">{{ profileSummaryLine }}</p>
             </div>
             <div class="user-admin__badges">
               <span class="user-admin__badge">{{ access.user.role }}</span>
@@ -379,6 +384,30 @@
                 class="user-admin__search"
                 type="text"
                 placeholder="手机号，可留空"
+              />
+              <input
+                v-model.trim="profileDraftEmployeeNo"
+                class="user-admin__search"
+                type="text"
+                placeholder="员工号，可留空"
+              />
+              <input
+                v-model.trim="profileDraftDepartment"
+                class="user-admin__search"
+                type="text"
+                placeholder="部门，可留空"
+              />
+              <input
+                v-model.trim="profileDraftPosition"
+                class="user-admin__search"
+                type="text"
+                placeholder="岗位，可留空"
+              />
+              <input
+                v-model="profileDraftHireDate"
+                class="user-admin__search"
+                type="date"
+                aria-label="入职日期，可留空"
               />
             </div>
             <div class="user-admin__role-actions">
@@ -723,6 +752,10 @@ type ManagedUser = {
   username?: string | null
   name: string | null
   mobile?: string | null
+  employeeNo?: string | null
+  department?: string | null
+  position?: string | null
+  hireDate?: string | null
   role: string
   is_active: boolean
   is_admin: boolean
@@ -863,6 +896,10 @@ type CreateUserForm = {
   email: string
   username: string
   mobile: string
+  employeeNo: string
+  department: string
+  position: string
+  hireDate: string
   password: string
   presetId: string
   role: string
@@ -974,12 +1011,20 @@ const dingtalkAccess = ref<DingTalkAccess | null>(null)
 const memberAdmission = ref<MemberAdmission | null>(null)
 const profileDraftName = ref('')
 const profileDraftMobile = ref('')
+const profileDraftEmployeeNo = ref('')
+const profileDraftDepartment = ref('')
+const profileDraftPosition = ref('')
+const profileDraftHireDate = ref('')
 const appliedUserNavigationKey = ref('')
 const createForm = ref<CreateUserForm>({
   name: '',
   email: '',
   username: '',
   mobile: '',
+  employeeNo: '',
+  department: '',
+  position: '',
+  hireDate: '',
   password: '',
   presetId: '',
   role: 'user',
@@ -1071,7 +1116,24 @@ const filteredAccessPresets = computed(() => {
 })
 const hasProfileDraftChanges = computed(() => {
   if (!access.value) return false
-  return profileDraftName.value !== (access.value.user.name || '') || profileDraftMobile.value !== (access.value.user.mobile || '')
+  return profileDraftName.value !== (access.value.user.name || '')
+    || profileDraftMobile.value !== (access.value.user.mobile || '')
+    || profileDraftEmployeeNo.value !== (access.value.user.employeeNo || '')
+    || profileDraftDepartment.value !== (access.value.user.department || '')
+    || profileDraftPosition.value !== (access.value.user.position || '')
+    || profileDraftHireDate.value !== (access.value.user.hireDate || '')
+})
+
+const profileSummaryLine = computed(() => {
+  const user = access.value?.user
+  if (!user) return ''
+  const parts = [
+    user.employeeNo ? `员工号：${user.employeeNo}` : '',
+    user.department ? `部门：${user.department}` : '',
+    user.position ? `岗位：${user.position}` : '',
+    user.hireDate ? `入职：${user.hireDate}` : '',
+  ].filter(Boolean)
+  return parts.join(' · ')
 })
 
 function formatManagedUserIdentifier(user: ManagedUser | null | undefined): string {
@@ -1574,6 +1636,10 @@ function syncUserNavigationFromLocation(): boolean {
 function syncProfileDraftFromAccess(): void {
   profileDraftName.value = access.value?.user.name || ''
   profileDraftMobile.value = access.value?.user.mobile || ''
+  profileDraftEmployeeNo.value = access.value?.user.employeeNo || ''
+  profileDraftDepartment.value = access.value?.user.department || ''
+  profileDraftPosition.value = access.value?.user.position || ''
+  profileDraftHireDate.value = access.value?.user.hireDate || ''
 }
 
 function extractNamespaceFromPermission(permission: string): string | null {
@@ -2181,6 +2247,10 @@ async function createUser(): Promise<void> {
         email: createForm.value.email,
         username: createForm.value.username || undefined,
         mobile: createForm.value.mobile || undefined,
+        employeeNo: createForm.value.employeeNo || undefined,
+        department: createForm.value.department || undefined,
+        position: createForm.value.position || undefined,
+        hireDate: createForm.value.hireDate || undefined,
         password: createForm.value.password || undefined,
         presetId: createForm.value.presetId || undefined,
         role: createForm.value.role || undefined,
@@ -2206,6 +2276,10 @@ async function createUser(): Promise<void> {
       email: '',
       username: '',
       mobile: '',
+      employeeNo: '',
+      department: '',
+      position: '',
+      hireDate: '',
       password: '',
       presetId: '',
       role: 'user',
@@ -2465,6 +2539,10 @@ async function saveUserProfile(): Promise<void> {
       body: JSON.stringify({
         name: profileDraftName.value,
         mobile: profileDraftMobile.value,
+        employeeNo: profileDraftEmployeeNo.value,
+        department: profileDraftDepartment.value,
+        position: profileDraftPosition.value,
+        hireDate: profileDraftHireDate.value,
         expectedMobile: baselineMobile,
       }),
     })

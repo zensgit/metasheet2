@@ -1804,6 +1804,8 @@
                     <tr>
                       <th>{{ tr('Email', '邮箱') }}</th>
                       <th>{{ tr('Name', '姓名') }}</th>
+                      <th>{{ tr('Employee no.', '员工号') }}</th>
+                      <th>{{ tr('Department', '部门') }}</th>
                       <th>{{ tr('User ID', '用户 ID') }}</th>
                       <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
@@ -1812,6 +1814,8 @@
                     <tr v-for="user in provisionSearchResults" :key="user.id">
                       <td>{{ user.email }}</td>
                       <td>{{ user.name || '--' }}</td>
+                      <td>{{ user.employeeNo || '--' }}</td>
+                      <td>{{ user.department || '--' }}</td>
                       <td><code>{{ user.id.slice(0, 8) }}</code></td>
                       <td class="attendance__table-actions">
                         <button class="attendance__btn" @click="selectProvisionUser(user)">{{ tr('Select', '选择') }}</button>
@@ -6283,6 +6287,8 @@ interface AttendanceAdminUserSearchItem {
   id: string
   email: string
   name: string | null
+  employeeNo?: string | null
+  department?: string | null
   role: string
   is_active: boolean
   is_admin: boolean
@@ -6300,6 +6306,8 @@ interface AttendanceAdminBatchResolveItem {
   id: string
   email: string
   name: string | null
+  employeeNo?: string | null
+  department?: string | null
   is_active: boolean
 }
 
@@ -8378,6 +8386,8 @@ function normalizeAttendanceGroupMemberResolvedUsers(payload: any, requestedUser
       id,
       email: String((raw as any).email || ''),
       name: (raw as any).name === null || (raw as any).name === undefined ? null : String((raw as any).name),
+      employeeNo: (raw as any).employeeNo === null || (raw as any).employeeNo === undefined ? null : String((raw as any).employeeNo),
+      department: (raw as any).department === null || (raw as any).department === undefined ? null : String((raw as any).department),
       is_active: (raw as any).is_active === false ? false : true,
     }
   }
@@ -8408,6 +8418,10 @@ function attendanceGroupMemberSecondaryLabel(userId: string): string {
   if (!item) return ''
   const primary = attendanceGroupMemberPrimaryLabel(userId)
   const parts: string[] = []
+  const employeeNo = item.employeeNo?.trim()
+  if (employeeNo && employeeNo !== primary) parts.push(employeeNo)
+  const department = item.department?.trim()
+  if (department && department !== primary) parts.push(department)
   const email = item.email.trim()
   if (email && email !== primary) parts.push(email)
   if (!item.is_active) parts.push(tr('Inactive', '已停用'))
@@ -8439,6 +8453,10 @@ function attendanceAssignmentUserSecondaryLabel(userId: string): string {
   if (!item) return ''
   const primary = attendanceAssignmentUserPrimaryLabel(userId)
   const parts: string[] = []
+  const employeeNo = item.employeeNo?.trim()
+  if (employeeNo && employeeNo !== primary) parts.push(employeeNo)
+  const department = item.department?.trim()
+  if (department && department !== primary) parts.push(department)
   const email = item.email.trim()
   if (email && email !== primary) parts.push(email)
   if (!item.is_active) parts.push(tr('Inactive', '已停用'))

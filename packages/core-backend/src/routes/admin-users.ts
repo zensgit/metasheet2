@@ -34,6 +34,10 @@ type AdminUserProfile = {
   username: string | null
   name: string | null
   mobile: string | null
+  employeeNo: string | null
+  department: string | null
+  position: string | null
+  hireDate: string | null
   role: string
   is_active: boolean
   is_admin: boolean
@@ -259,6 +263,10 @@ type CreateUserRequestBody = {
   email?: string
   username?: string
   mobile?: string
+  employeeNo?: string
+  department?: string
+  position?: string
+  hireDate?: string
   name?: string
   password?: string
   role?: string
@@ -273,6 +281,23 @@ const DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR =
   'Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
+const ADMIN_USER_PROFILE_SELECT = `
+  id,
+  email,
+  username,
+  name,
+  mobile,
+  employee_no AS "employeeNo",
+  department,
+  position,
+  hire_date AS "hireDate",
+  role,
+  is_active,
+  is_admin,
+  last_login_at,
+  created_at,
+  updated_at
+`
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
@@ -307,7 +332,7 @@ async function ensurePlatformAdmin(req: Request, res: Response): Promise<string 
 
 async function fetchUserProfile(userId: string): Promise<AdminUserProfile | null> {
   const result = await query<AdminUserProfile>(
-    `SELECT id, email, username, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
+    `SELECT ${ADMIN_USER_PROFILE_SELECT}
      FROM users
      WHERE id = $1`,
     [userId],
@@ -388,6 +413,21 @@ function sanitizeUsername(username: string): string | null {
   const value = username.trim().toLowerCase()
   if (!value) return null
   return value.slice(0, 64)
+}
+
+function sanitizeOptionalProfileText(value: string, maxLength: number): string | null {
+  const normalized = value.trim().replace(/[<>'"&;]/g, '')
+  if (!normalized) return null
+  return normalized.slice(0, maxLength)
+}
+
+function sanitizeHireDate(value: string): string | null | undefined {
+  const normalized = value.trim()
+  if (!normalized) return null
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return undefined
+  const parsed = new Date(`${normalized}T00:00:00.000Z`)
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== normalized) return undefined
+  return normalized
 }
 
 function validateUsername(username: string | null): string | null {
@@ -1229,7 +1269,15 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
 
   const term = search.trim() ? `%${search.trim()}%` : ''
   const filterSql = term
-    ? `AND (u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3 OR u.id ILIKE $3)`
+    ? `AND (
+      u.email ILIKE $3
+      OR COALESCE(u.username, '') ILIKE $3
+      OR COALESCE(u.name, '') ILIKE $3
+      OR COALESCE(u.mobile, '') ILIKE $3
+      OR COALESCE(u.employee_no, '') ILIKE $3
+      OR COALESCE(u.department, '') ILIKE $3
+      OR u.id ILIKE $3
+    )`
     : ''
   const paginationParams = term ? [adminUserId, namespaces, term, pageSize, offset] : [adminUserId, namespaces, pageSize, offset]
 
@@ -1318,7 +1366,13 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
       SELECT DISTINCT
         u.id,
         u.email,
+        u.username,
         u.name,
+        u.mobile,
+        u.employee_no AS "employeeNo",
+        u.department,
+        u.position,
+        u.hire_date AS "hireDate",
         u.role,
         u.is_active,
         u.is_admin,
@@ -1342,7 +1396,13 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
       SELECT DISTINCT
         u.id,
         u.email,
+        u.username,
         u.name,
+        u.mobile,
+        u.employee_no AS "employeeNo",
+        u.department,
+        u.position,
+        u.hire_date AS "hireDate",
         u.role,
         u.is_active,
         u.is_admin,
@@ -1357,7 +1417,7 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
       WHERE 1 = 1
       ${filterSql}
     )
-    SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+    SELECT id, email, username, name, mobile, "employeeNo", department, position, "hireDate", role, is_active, is_admin, last_login_at, created_at, updated_at
     FROM scoped_users
     ORDER BY created_at DESC
     LIMIT $${term ? 4 : 3} OFFSET $${term ? 5 : 4}
@@ -2311,10 +2371,10 @@ export function adminUsersRouter(): Router {
           Promise.resolve([]),
           (async () => {
             const term = q ? `%${q}%` : '%'
-            const where = q ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR id ILIKE $1' : ''
+            const where = q ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1' : ''
             const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
             const listSql = `
-              SELECT id, email, username, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
+              SELECT ${ADMIN_USER_PROFILE_SELECT}
               FROM users
               ${where}
               ORDER BY created_at DESC
@@ -2617,10 +2677,10 @@ export function adminUsersRouter(): Router {
       })
 
       const term = q ? `%${q}%` : '%'
-      const where = q ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR id ILIKE $1' : ''
+      const where = q ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1' : ''
       const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
       const listSql = `
-        SELECT id, email, username, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
+        SELECT ${ADMIN_USER_PROFILE_SELECT}
         FROM users
         ${where}
         ORDER BY created_at DESC
@@ -2637,7 +2697,7 @@ export function adminUsersRouter(): Router {
         // Deep-link target was not in the paginated window — fetch the single
         // row so the caller can focus it without a second round-trip.
         const pinned = await query<AdminUserProfile>(
-          `SELECT id, email, username, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
+          `SELECT ${ADMIN_USER_PROFILE_SELECT}
            FROM users
            WHERE id = $1`,
           [pinUserId],
@@ -2968,6 +3028,10 @@ export function adminUsersRouter(): Router {
       const cleanEmail = typeof body.email === 'string' ? sanitizeEmail(body.email) : ''
       const cleanUsername = typeof body.username === 'string' ? sanitizeUsername(body.username) : null
       const cleanMobile = typeof body.mobile === 'string' ? sanitizeMobile(body.mobile) : null
+      const cleanEmployeeNo = typeof body.employeeNo === 'string' ? sanitizeOptionalProfileText(body.employeeNo, 64) : null
+      const cleanDepartment = typeof body.department === 'string' ? sanitizeOptionalProfileText(body.department, 100) : null
+      const cleanPosition = typeof body.position === 'string' ? sanitizeOptionalProfileText(body.position, 100) : null
+      const cleanHireDate = typeof body.hireDate === 'string' ? sanitizeHireDate(body.hireDate) : null
       const cleanName = typeof body.name === 'string' ? sanitizeName(body.name) : ''
       const preset = getAccessPreset(typeof body.presetId === 'string' ? body.presetId.trim() : '')
       const cleanRole = typeof body.role === 'string' && body.role.trim()
@@ -2998,6 +3062,9 @@ export function adminUsersRouter(): Router {
 
       if (cleanName.length < 2 || cleanName.length > 100) {
         return jsonError(res, 400, 'INVALID_NAME', 'Name must be between 2 and 100 characters')
+      }
+      if (cleanHireDate === undefined) {
+        return jsonError(res, 400, 'INVALID_HIRE_DATE', 'hireDate must be YYYY-MM-DD or blank')
       }
 
       const password = requestedPassword || generateTemporaryPassword()
@@ -3050,14 +3117,21 @@ export function adminUsersRouter(): Router {
       })
 
       await query(
-        `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, NOW(), NOW())`,
+        `INSERT INTO users (
+           id, email, username, name, mobile, employee_no, department, position, hire_date,
+           password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13::jsonb, $14, $15, NOW(), NOW())`,
         [
           userId,
           cleanEmail || null,
           cleanUsername,
           cleanName,
           cleanMobile,
+          cleanEmployeeNo,
+          cleanDepartment,
+          cleanPosition,
+          cleanHireDate,
           passwordHash,
           mustChangePassword,
           effectiveRole,
@@ -3163,9 +3237,13 @@ export function adminUsersRouter(): Router {
 
       const hasName = typeof req.body?.name === 'string'
       const hasMobile = typeof req.body?.mobile === 'string'
+      const hasEmployeeNo = typeof req.body?.employeeNo === 'string'
+      const hasDepartment = typeof req.body?.department === 'string'
+      const hasPosition = typeof req.body?.position === 'string'
+      const hasHireDate = typeof req.body?.hireDate === 'string'
       const hasExpectedMobile = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'expectedMobile')
-      if (!hasName && !hasMobile) {
-        return jsonError(res, 400, 'PROFILE_FIELDS_REQUIRED', 'name or mobile is required')
+      if (!hasName && !hasMobile && !hasEmployeeNo && !hasDepartment && !hasPosition && !hasHireDate) {
+        return jsonError(res, 400, 'PROFILE_FIELDS_REQUIRED', 'At least one profile field is required')
       }
 
       const profile = await fetchUserProfile(userId)
@@ -3173,6 +3251,10 @@ export function adminUsersRouter(): Router {
 
       const nextName = hasName ? sanitizeName(String(req.body.name)) : profile.name
       const nextMobile = hasMobile ? sanitizeMobile(String(req.body.mobile)) : profile.mobile
+      const nextEmployeeNo = hasEmployeeNo ? sanitizeOptionalProfileText(String(req.body.employeeNo), 64) : profile.employeeNo
+      const nextDepartment = hasDepartment ? sanitizeOptionalProfileText(String(req.body.department), 100) : profile.department
+      const nextPosition = hasPosition ? sanitizeOptionalProfileText(String(req.body.position), 100) : profile.position
+      const nextHireDate = hasHireDate ? sanitizeHireDate(String(req.body.hireDate)) : profile.hireDate
       const expectedMobile = hasExpectedMobile
         ? req.body?.expectedMobile === null
           ? null
@@ -3187,6 +3269,9 @@ export function adminUsersRouter(): Router {
       if (hasExpectedMobile && expectedMobile === undefined) {
         return jsonError(res, 400, 'INVALID_EXPECTED_MOBILE', 'expectedMobile must be string or null')
       }
+      if (nextHireDate === undefined) {
+        return jsonError(res, 400, 'INVALID_HIRE_DATE', 'hireDate must be YYYY-MM-DD or blank')
+      }
 
       // Both the stored value and the witness are normalised the same way
       // (strip all whitespace, map empty to NULL) before comparison so legacy
@@ -3196,16 +3281,30 @@ export function adminUsersRouter(): Router {
         `UPDATE users
          SET name = $1,
              mobile = $2,
+             employee_no = $3,
+             department = $4,
+             position = $5,
+             hire_date = $6::date,
              updated_at = NOW()
-         WHERE id = $3
+         WHERE id = $7
            AND (
-             $4::boolean = FALSE
+             $8::boolean = FALSE
              OR NULLIF(regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g'), '')
                 IS NOT DISTINCT FROM
-                NULLIF(regexp_replace(COALESCE($5::text, ''), '\\s+', '', 'g'), '')
+                NULLIF(regexp_replace(COALESCE($9::text, ''), '\\s+', '', 'g'), '')
            )
          RETURNING id`,
-        [nextName, nextMobile, userId, hasExpectedMobile, expectedMobile ?? null],
+        [
+          nextName,
+          nextMobile,
+          nextEmployeeNo,
+          nextDepartment,
+          nextPosition,
+          nextHireDate,
+          userId,
+          hasExpectedMobile,
+          expectedMobile ?? null,
+        ],
       )
       if (updateResult.rows.length === 0) {
         return jsonError(res, 409, 'PROFILE_MOBILE_CONFLICT', 'User mobile changed before update was applied')
@@ -3222,10 +3321,18 @@ export function adminUsersRouter(): Router {
           before: {
             name: profile.name,
             mobile: profile.mobile,
+            employeeNo: profile.employeeNo,
+            department: profile.department,
+            position: profile.position,
+            hireDate: profile.hireDate,
           },
           after: {
             name: nextName,
             mobile: nextMobile,
+            employeeNo: nextEmployeeNo,
+            department: nextDepartment,
+            position: nextPosition,
+            hireDate: nextHireDate,
           },
         },
       })
