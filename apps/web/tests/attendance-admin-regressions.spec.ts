@@ -90,11 +90,13 @@ describe('Attendance admin regressions', () => {
   let exportReportFieldViewId = 'fields_by_category'
   let attendanceSettingsData: Record<string, unknown> | null = null
   let attendanceSettingsFail = false
+  let attendanceSettingsSaveData: Record<string, unknown> | null = null
 
   beforeEach(() => {
     vi.clearAllMocks()
     attendanceSettingsData = null
     attendanceSettingsFail = false
+    attendanceSettingsSaveData = null
     exportReportFieldFingerprint = 'records-unit-test-fingerprint'
     exportReportFieldCodes = 'work_date,employee_name'
     exportReportFieldCount = '2'
@@ -107,7 +109,7 @@ describe('Attendance admin regressions', () => {
     window.history.replaceState({}, '', '/attendance')
     setViewportWidth(1280)
 
-    vi.mocked(apiFetch).mockImplementation(async (input) => {
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
       if (url.includes('/api/attendance/rule-sets/preview')) {
         return jsonResponse(200, {
@@ -532,6 +534,10 @@ describe('Attendance admin regressions', () => {
         })
       }
       if (url.includes('/api/attendance/settings')) {
+        const settingsMethod = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+        if (settingsMethod !== 'GET') {
+          return jsonResponse(200, { ok: true, data: attendanceSettingsSaveData ?? {} })
+        }
         if (attendanceSettingsFail) {
           return jsonResponse(500, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'settings unavailable' } })
         }
@@ -711,6 +717,38 @@ describe('Attendance admin regressions', () => {
     expect(card.querySelector('[data-attendance-group-punch-line="status"]')?.textContent).toContain('Unavailable')
     // workspace-level framing still present; only the values are withheld
     expect(card.textContent).toContain('applies to all attendance groups')
+  })
+
+  it('refreshes the punch card after saving workspace settings without a reload (F2)', async () => {
+    attendanceSettingsData = {
+      ipAllowlist: ['10.0.0.0/8'],
+      geoFence: { lat: 1, lng: 2, radiusMeters: 100 },
+      minPunchIntervalMinutes: 2,
+    }
+    const card = await openAttendanceGroupPunchCard()
+    // old policy visible
+    expect(card.querySelector('[data-attendance-group-punch-line="ip"]')?.textContent).toContain('Restricted to 1 address range(s)')
+    expect(card.querySelector('[data-attendance-group-punch-line="geofence"]')?.textContent).toContain('100 m radius')
+    expect(card.querySelector('[data-attendance-group-punch-line="interval"]')?.textContent).toContain('2 minutes')
+
+    // save new settings through the only edit path (Settings surface)
+    attendanceSettingsSaveData = {
+      ipAllowlist: ['10.0.0.0/8', '192.168.0.0/16'],
+      geoFence: { lat: 1, lng: 2, radiusMeters: 300 },
+      minPunchIntervalMinutes: 7,
+    }
+    const saveButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Save settings'))
+    expect(saveButton).toBeTruthy()
+    saveButton!.click()
+    await flushUi(4)
+
+    // punch card reflects the saved policy immediately (no admin reload)
+    const refreshed = container!.querySelector<HTMLElement>('[data-attendance-group-summary-card="punch-method"]')!
+    expect(refreshed.querySelector('[data-attendance-group-punch-line="ip"]')?.textContent).toContain('Restricted to 2 address range(s)')
+    expect(refreshed.querySelector('[data-attendance-group-punch-line="geofence"]')?.textContent).toContain('300 m radius')
+    expect(refreshed.querySelector('[data-attendance-group-punch-line="interval"]')?.textContent).toContain('7 minutes')
+    expect(refreshed.textContent).not.toContain('100 m radius')
   })
 
   it('keeps the group punch-method card read-only with only an Open Settings nav', async () => {

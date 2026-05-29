@@ -14598,6 +14598,7 @@ async function loadSettings() {
     const response = await apiFetchWithTimeout('/api/attendance/settings', {}, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
     if (response.status === 403) {
       adminForbidden.value = true
+      attendanceSettings.value = null
       return
     }
     const data = await response.json()
@@ -14608,6 +14609,7 @@ async function loadSettings() {
     attendanceSettings.value = (data.data as AttendanceSettings | null) ?? null
     applySettingsToForm(data.data || {})
   } catch (error: any) {
+    attendanceSettings.value = null
     setStatusFromError(error, tr('Failed to load settings', '加载设置失败'), 'admin')
   } finally {
     settingsLoading.value = false
@@ -14727,7 +14729,9 @@ async function saveSettings() {
       throw createApiError(response, data, tr('Failed to save settings', '保存设置失败'))
     }
     adminForbidden.value = false
-    applySettingsToForm(data.data || payload)
+    const savedSettings = (data.data || payload) as AttendanceSettings
+    attendanceSettings.value = savedSettings
+    applySettingsToForm(savedSettings)
     setStatus(tr('Settings updated.', '设置已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save settings', '保存设置失败'), 'save-settings')
