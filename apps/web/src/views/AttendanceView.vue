@@ -3260,7 +3260,7 @@
                         <select
                           id="attendance-group-fixed-schedule-shift"
                           v-model="attendanceGroupFixedSchedulePreviewForm.shiftId"
-                          :disabled="shifts.length === 0 || attendanceGroupFixedSchedulePreviewLoading"
+                          :disabled="shifts.length === 0 || attendanceGroupFixedScheduleFormBusy"
                           data-attendance-group-fixed-schedule-shift
                         >
                           <option value="">{{ tr('Select shift', '选择班次') }}</option>
@@ -3275,7 +3275,7 @@
                           id="attendance-group-fixed-schedule-start"
                           v-model="attendanceGroupFixedSchedulePreviewForm.startDate"
                           type="date"
-                          :disabled="attendanceGroupFixedSchedulePreviewLoading"
+                          :disabled="attendanceGroupFixedScheduleFormBusy"
                           data-attendance-group-fixed-schedule-start
                         />
                       </label>
@@ -3285,7 +3285,7 @@
                           id="attendance-group-fixed-schedule-end"
                           v-model="attendanceGroupFixedSchedulePreviewForm.endDate"
                           type="date"
-                          :disabled="attendanceGroupFixedSchedulePreviewLoading"
+                          :disabled="attendanceGroupFixedScheduleFormBusy"
                           data-attendance-group-fixed-schedule-end
                         />
                       </label>
@@ -3309,6 +3309,24 @@
                       >
                         {{ attendanceGroupFixedScheduleApplyLoading ? tr('Applying...', '应用中...') : tr('Apply preview', '应用预览') }}
                       </button>
+                      <button
+                        class="attendance__btn"
+                        type="button"
+                        :disabled="!attendanceGroupFixedScheduleRebuildAvailable"
+                        data-attendance-group-fixed-schedule-rebuild-submit
+                        @click="rebuildAttendanceGroupFixedScheduleManagedRows"
+                      >
+                        {{ attendanceGroupFixedScheduleRebuildLoading ? tr('Rebuilding...', '重建中...') : tr('Rebuild managed rows', '重建已管理排班') }}
+                      </button>
+                      <button
+                        class="attendance__btn"
+                        type="button"
+                        :disabled="!attendanceGroupFixedScheduleClearAvailable"
+                        data-attendance-group-fixed-schedule-clear-submit
+                        @click="clearAttendanceGroupFixedScheduleManagedRows"
+                      >
+                        {{ attendanceGroupFixedScheduleClearLoading ? tr('Clearing...', '清除中...') : tr('Clear managed rows', '清除已管理排班') }}
+                      </button>
                     </div>
                     <div
                       v-if="attendanceGroupFixedSchedulePreviewResult"
@@ -3321,7 +3339,16 @@
                         <span data-attendance-group-fixed-schedule-preview-skip>{{ tr('Skipped', '跳过') }}: {{ attendanceGroupFixedSchedulePreviewResult.skipped.length }}</span>
                         <span data-attendance-group-fixed-schedule-preview-conflict>{{ tr('Blocking conflicts', '阻断冲突') }}: {{ attendanceGroupFixedSchedulePreviewResult.blockingConflicts.length }}</span>
                         <span v-if="attendanceGroupFixedSchedulePreviewResult.applied" data-attendance-group-fixed-schedule-apply-created>{{ tr('Created', '已创建') }}: {{ attendanceGroupFixedSchedulePreviewResult.created?.length ?? 0 }}</span>
+                        <span v-if="attendanceGroupFixedSchedulePreviewResult.rebuilt" data-attendance-group-fixed-schedule-rebuild-created>{{ tr('Created', '已创建') }}: {{ attendanceGroupFixedSchedulePreviewResult.created?.length ?? 0 }}</span>
+                        <span v-if="attendanceGroupFixedSchedulePreviewResult.deactivated" data-attendance-group-fixed-schedule-deactivated>{{ tr('Deactivated', '已停用') }}: {{ attendanceGroupFixedSchedulePreviewResult.deactivated.length }}</span>
                       </div>
+                      <small
+                        v-if="attendanceGroupFixedScheduleManagedConflictHint"
+                        class="attendance__field-hint"
+                        data-attendance-group-fixed-schedule-clear-first-hint
+                      >
+                        {{ attendanceGroupFixedScheduleManagedConflictHint }}
+                      </small>
                       <small class="attendance__field-hint">{{ tr('If blocking conflicts are present, apply stays disabled and writes nothing.', '如果存在阻断冲突，应用保持禁用且零写入。') }}</small>
                     </div>
                   </section>
@@ -6318,6 +6345,10 @@ interface AttendanceGroupFixedSchedulePreviewSkipped {
   shiftId: string
   startDate: string
   endDate: string | null
+  ownership?: 'managed' | 'unmanaged' | 'externalManaged'
+  producerType?: string | null
+  producerRefId?: string | null
+  producerKey?: string | null
 }
 
 interface AttendanceGroupFixedSchedulePreviewConflict {
@@ -6331,6 +6362,7 @@ interface AttendanceGroupFixedSchedulePreviewConflict {
   existingStartDate: string
   existingEndDate: string | null
   message?: string
+  managedScheduleAction?: 'clear_existing_managed_schedule_first'
 }
 
 interface AttendanceGroupFixedSchedulePreviewResult {
@@ -6346,9 +6378,14 @@ interface AttendanceGroupFixedSchedulePreviewResult {
   }
   wouldCreate: AttendanceGroupFixedSchedulePreviewCandidate[]
   skipped: AttendanceGroupFixedSchedulePreviewSkipped[]
+  skippedManaged?: AttendanceGroupFixedSchedulePreviewSkipped[]
+  skippedUnmanaged?: AttendanceGroupFixedSchedulePreviewSkipped[]
+  skippedExternalManaged?: AttendanceGroupFixedSchedulePreviewSkipped[]
   blockingConflicts: AttendanceGroupFixedSchedulePreviewConflict[]
   created?: AttendanceAssignment[]
+  deactivated?: AttendanceAssignment[]
   applied?: boolean
+  rebuilt?: boolean
 }
 
 type AttendanceGroupSummaryAction = {
@@ -6933,6 +6970,8 @@ const attendanceGroupMemberLoading = ref(false)
 const attendanceGroupMemberSaving = ref(false)
 const attendanceGroupFixedSchedulePreviewLoading = ref(false)
 const attendanceGroupFixedScheduleApplyLoading = ref(false)
+const attendanceGroupFixedScheduleRebuildLoading = ref(false)
+const attendanceGroupFixedScheduleClearLoading = ref(false)
 const payrollTemplateLoading = ref(false)
 const payrollTemplateSaving = ref(false)
 const payrollSummaryFieldOptionsLoading = ref(false)
@@ -8234,7 +8273,22 @@ const attendanceGroupFixedSchedulePreviewAvailable = computed(() =>
       && attendanceGroupFixedSchedulePreviewForm.shiftId
       && attendanceGroupFixedSchedulePreviewForm.startDate
       && attendanceGroupFixedSchedulePreviewForm.endDate
-      && !attendanceGroupFixedSchedulePreviewLoading.value,
+      && !attendanceGroupFixedScheduleFormBusy.value,
+  )
+)
+const attendanceGroupFixedScheduleFormBusy = computed(() =>
+  attendanceGroupFixedSchedulePreviewLoading.value
+    || attendanceGroupFixedScheduleApplyLoading.value
+    || attendanceGroupFixedScheduleRebuildLoading.value
+    || attendanceGroupFixedScheduleClearLoading.value
+)
+const attendanceGroupFixedScheduleManagedActionAvailable = computed(() =>
+  Boolean(
+    attendanceGroupEditingId.value
+      && attendanceGroupFixedSchedulePreviewForm.shiftId
+      && attendanceGroupFixedSchedulePreviewForm.startDate
+      && attendanceGroupFixedSchedulePreviewForm.endDate
+      && !attendanceGroupFixedScheduleFormBusy.value,
   )
 )
 const attendanceGroupFixedScheduleApplyAvailable = computed(() =>
@@ -8242,16 +8296,26 @@ const attendanceGroupFixedScheduleApplyAvailable = computed(() =>
     attendanceGroupFixedSchedulePreviewResult.value
       && attendanceGroupFixedSchedulePreviewResult.value.blockingConflicts.length === 0
       && !attendanceGroupFixedSchedulePreviewResult.value.applied
-      && !attendanceGroupFixedSchedulePreviewLoading.value
-      && !attendanceGroupFixedScheduleApplyLoading.value,
+      && !attendanceGroupFixedSchedulePreviewResult.value.rebuilt
+      && !attendanceGroupFixedScheduleFormBusy.value,
   )
 )
+const attendanceGroupFixedScheduleRebuildAvailable = computed(() => attendanceGroupFixedScheduleManagedActionAvailable.value)
+const attendanceGroupFixedScheduleClearAvailable = computed(() => attendanceGroupFixedScheduleManagedActionAvailable.value)
 const attendanceGroupFixedSchedulePreviewSummary = computed(() => {
   const result = attendanceGroupFixedSchedulePreviewResult.value
   if (!result) return ''
   return tr(
     `${result.target.total} target members · ${result.wouldCreate.length} would create · ${result.skipped.length} skipped · ${result.blockingConflicts.length} blocking conflicts`,
     `${result.target.total} 位目标成员 · ${result.wouldCreate.length} 位将创建 · ${result.skipped.length} 位跳过 · ${result.blockingConflicts.length} 个阻断冲突`,
+  )
+})
+const attendanceGroupFixedScheduleManagedConflictHint = computed(() => {
+  const result = attendanceGroupFixedSchedulePreviewResult.value
+  if (!result?.blockingConflicts.some(item => item.managedScheduleAction === 'clear_existing_managed_schedule_first')) return ''
+  return tr(
+    'A different managed schedule for this group is blocking the selected window. Clear the existing managed rows first, then preview again.',
+    '此考勤组已有不同窗口的已管理排班阻断当前选择。请先清除旧的已管理排班，再重新预览。',
   )
 })
 const importCsvFile = ref<File | null>(null)
@@ -16146,6 +16210,15 @@ async function previewAttendanceGroupFixedSchedule() {
   }
 }
 
+function buildAttendanceGroupFixedScheduleRequestBody(): Record<string, string | undefined> {
+  return {
+    shiftId: attendanceGroupFixedSchedulePreviewForm.shiftId,
+    startDate: attendanceGroupFixedSchedulePreviewForm.startDate,
+    endDate: attendanceGroupFixedSchedulePreviewForm.endDate,
+    orgId: normalizedOrgId(),
+  }
+}
+
 async function applyAttendanceGroupFixedSchedulePreview() {
   const groupId = attendanceGroupEditingId.value
   const preview = attendanceGroupFixedSchedulePreviewResult.value
@@ -16161,12 +16234,7 @@ async function applyAttendanceGroupFixedSchedulePreview() {
   try {
     const response = await apiFetch(`/api/attendance/groups/${groupId}/fixed-schedule/apply`, {
       method: 'POST',
-      body: JSON.stringify({
-        shiftId: attendanceGroupFixedSchedulePreviewForm.shiftId,
-        startDate: attendanceGroupFixedSchedulePreviewForm.startDate,
-        endDate: attendanceGroupFixedSchedulePreviewForm.endDate,
-        orgId: normalizedOrgId(),
-      }),
+      body: JSON.stringify(buildAttendanceGroupFixedScheduleRequestBody()),
     })
     if (response.status === 403) {
       adminForbidden.value = true
@@ -16184,6 +16252,78 @@ async function applyAttendanceGroupFixedSchedulePreview() {
     setStatus(readErrorMessage(error, tr('Failed to apply fixed schedule', '应用固定排班失败')), 'error')
   } finally {
     attendanceGroupFixedScheduleApplyLoading.value = false
+  }
+}
+
+async function rebuildAttendanceGroupFixedScheduleManagedRows() {
+  const groupId = attendanceGroupEditingId.value
+  if (!groupId) {
+    setStatus(tr('Save the group before rebuilding managed fixed schedules.', '请先保存考勤组，再重建已管理固定排班。'), 'error')
+    return
+  }
+  if (!attendanceGroupFixedScheduleManagedActionAvailable.value) return
+  attendanceGroupFixedScheduleRebuildLoading.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/groups/${groupId}/fixed-schedule/rebuild`, {
+      method: 'POST',
+      body: JSON.stringify(buildAttendanceGroupFixedScheduleRequestBody()),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to rebuild managed fixed schedule rows', '重建已管理固定排班失败')))
+    }
+    adminForbidden.value = false
+    attendanceGroupFixedSchedulePreviewResult.value = data.data as AttendanceGroupFixedSchedulePreviewResult
+    await loadAssignments()
+    setStatus(tr('Managed fixed schedule rows rebuilt.', '已重建已管理固定排班。'))
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to rebuild managed fixed schedule rows', '重建已管理固定排班失败')), 'error')
+  } finally {
+    attendanceGroupFixedScheduleRebuildLoading.value = false
+  }
+}
+
+async function clearAttendanceGroupFixedScheduleManagedRows() {
+  const groupId = attendanceGroupEditingId.value
+  if (!groupId) {
+    setStatus(tr('Save the group before clearing managed fixed schedules.', '请先保存考勤组，再清除已管理固定排班。'), 'error')
+    return
+  }
+  if (!attendanceGroupFixedScheduleManagedActionAvailable.value) return
+  if (!window.confirm(tr(
+    'Clear managed fixed schedule rows for this shift and date window? Unmanaged/manual rows will not be touched.',
+    '确认清除此班次与日期窗口的已管理固定排班吗？未管理/手工排班不会被修改。',
+  ))) return
+  attendanceGroupFixedScheduleClearLoading.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/groups/${groupId}/fixed-schedule/clear`, {
+      method: 'POST',
+      body: JSON.stringify(buildAttendanceGroupFixedScheduleRequestBody()),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to clear managed fixed schedule rows', '清除已管理固定排班失败')))
+    }
+    adminForbidden.value = false
+    attendanceGroupFixedSchedulePreviewResult.value = null
+    await loadAssignments()
+    const count = Array.isArray(data.data?.deactivated) ? data.data.deactivated.length : 0
+    setStatus(tr(
+      `Cleared ${count} managed fixed schedule rows.`,
+      `已清除 ${count} 条已管理固定排班。`,
+    ))
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to clear managed fixed schedule rows', '清除已管理固定排班失败')), 'error')
+  } finally {
+    attendanceGroupFixedScheduleClearLoading.value = false
   }
 }
 
