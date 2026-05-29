@@ -3,7 +3,7 @@
 > 类型：**前向开发安排（forward plan）**，非开工清单。
 > 配套（已收口）：`multitable-automation-run-governance-development-20260527.md` + `-todo-20260527.md`（#1987 固化）。
 > 上游契约：C1 `workflow-job-contract.ts`（#1889，landed）· 收敛 RFC #1885。
-> 锁：K3 PoC Stage-1 锁有效。**治理半（A0–A3）属于内核治理 / observability，已关闭**；**能力半（A4–A6）不是默认锁安全项** —— 每一步仍需独立具名 opt-in / 需求闸，不碰 integration-core / RBAC / auth，除非对应 scout 明确授权。
+> 锁：**K3 Stage-1 blanket 锁已退役（#1993；#1792 = M1 单条 Material Save-only PASS）→ 改用 post-GATE scoped gates（见 `k3-post-gate-scoped-governance-20260528.md`）**。这不改变本线纪律：**治理半（A0–A3）属于内核治理 / observability，已关闭**；**能力半（A4–A6）仍各受需求闸 / 独立具名 opt-in**（本线天然为 multitable 内核范畴，不依赖 integration-core / RBAC / auth），除非对应 scout 明确授权。
 
 ---
 
@@ -78,9 +78,9 @@
 
 ## 5. 这条线在产品大局中的位置（避免 myopia）
 
-**这条线不是产品关键路径。** 真正的关键路径是 **K3 客户 GATE 及其下游 DF/K3 能力线**（DF-N2、K3 read/list、Save 扩展），gated on 客户签字；这些线按各自 session / PR 节奏推进，本账本不抢主线。
+**这条线不是产品关键路径。** 真正的关键路径是 **K3 下游 DF/K3 能力线**（DF-N2、K3 read/list、Save 扩展、Submit/Audit/BOM/多条）—— K3 PoC macro-GATE 已过（#1792 M1 单条 Save-only PASS），这些下游能力改由 **post-GATE scoped gates** 管（仍需 owner / 客户分别签核，见 `k3-post-gate-scoped-governance-20260528.md`）；它们按各自 session / PR 节奏推进，本账本不抢主线。
 
-→ "全局接下去开发什么"的答案不是本线，而是 **K3 GATE + 其下游**。本线**让位**：能力半的 A6 甚至本就排在 K3 GATE 下游（需求来自成熟的 DF 流水线）。
+→ "全局接下去开发什么"的答案不是本线，而是 **K3 下游 scoped 能力线**。本线**让位**：能力半的 A6 需求本就来自**成熟的 DF 流水线**（post-GATE scoped，需 human-in-the-loop 时才触发）。
 
 ---
 
@@ -92,7 +92,7 @@
 | **本 session** | 点名 review（K3/DF/data-sources 主线优先）+ 能力半具名 opt-in 时的 scout/impl | 待命，不主动推 |
 | **并行 session** | K3 GATE 主线、DF-N/DF-T、data-sources lanes | 进行中 |
 | **Owner（你）** | 需求闸决策：是否"要 retry"（开 A4）、其余 owner 决策点（如 grid C0 已拍） | 决策位 |
-| **Customer** | K3 GATE 签字（解锁 K3 写扩展 + 下游 + 间接 A6 编排需求） | 待 |
+| **Customer / Owner** | K3 下游 scoped-gate 签核（Save 扩展 / Submit/Audit/BOM / 多条 — 间接拉动 A6 编排需求） | macro-GATE ✅ PASS（#1792 M1）；下游 scoped gates 仍待 |
 
 ---
 

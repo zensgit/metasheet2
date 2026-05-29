@@ -30,7 +30,7 @@
 
 **本计划是“治理半”**：让自动化运行可观测、可审计、可诊断，**并保证未来引擎长出来时直接继承这套治理**。
 
-**本计划明确不做（“能力半”，冻结 / 需求驱动 / 见 §A6）**：`approval_trigger_bindings` / `start_approval` / approval 完成事件桥；persistent `automation_jobs` **runtime**；suspend/resume、branch/parallel、cross-engine 编排；Workflow Designer / BPMN **live execution**。K3 stage-1 lock 仍有效；每项均为独立具名解锁。
+**本计划明确不做（“能力半”，冻结 / 需求驱动 / 见 §A6）**：`approval_trigger_bindings` / `start_approval` / approval 完成事件桥；persistent `automation_jobs` **runtime**；suspend/resume、branch/parallel、cross-engine 编排；Workflow Designer / BPMN **live execution**。K3 Stage-1 blanket 锁已退役（#1993；#1792 M1 单条 Save-only PASS，改用 post-GATE scoped gates）；这不解锁能力半 —— 每项仍为独立具名解锁 / 需求闸。
 
 ---
 
