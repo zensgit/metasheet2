@@ -455,7 +455,22 @@ function handlePageChange(page: number) {
   loadCurrentTab()
 }
 
+function isAttendanceApproval(row: UnifiedApprovalDTO): boolean {
+  return row.workflowKey === 'attendance.request'
+    || row.formSnapshot?.attendanceRequestId !== undefined
+}
+
 function handleRowClick(row: UnifiedApprovalDTO) {
+  if (isAttendanceApproval(row)) {
+    router.push({
+      name: 'attendance',
+      query: {
+        section: 'attendance-overview-requests',
+        requestId: String(row.formSnapshot?.attendanceRequestId ?? ''),
+      },
+    })
+    return
+  }
   router.push({ name: 'approval-detail', params: { id: row.id } })
 }
 

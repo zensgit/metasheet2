@@ -143,7 +143,20 @@ const ElTable = defineComponent({
   props: { data: Array, loading: Boolean, stripe: Boolean, highlightCurrentRow: Boolean },
   emits: ['row-click'],
   render() {
-    return h('div', { 'data-el-table': 'true' }, this.$slots.default?.())
+    const rows = Array.isArray(this.data)
+      ? this.data.map((row: any) => h(
+        'button',
+        {
+          'data-testid': `approval-row-${row.id}`,
+          onClick: () => this.$emit('row-click', row),
+        },
+        row.title || row.id,
+      ))
+      : []
+    return h('div', { 'data-el-table': 'true' }, [
+      this.$slots.default?.(),
+      ...rows,
+    ])
   },
 })
 
@@ -505,6 +518,33 @@ describe('ApprovalCenterView 未读红点 (WP3 slice 2)', () => {
     expect(getPendingCountSpy).toHaveBeenLastCalledWith('plm')
     const updatedBadge = container!.querySelector('[data-testid="approval-pending-badge"]') as HTMLElement | null
     expect(updatedBadge?.getAttribute('data-badge-value')).toBe('1')
+  })
+
+  it('routes bridged attendance approval rows back to the attendance request queue', async () => {
+    mockPendingApprovals.value = [{
+      id: 'apv-attendance-1',
+      workflowKey: 'attendance.request',
+      formSnapshot: { attendanceRequestId: 'request-1' },
+      title: '考勤审批 · 漏打下班卡',
+      status: 'pending',
+      requester: { name: '新员工' },
+      createdAt: '2026-05-29T10:00:00.000Z',
+    }]
+
+    await mountCenter({ count: 1, unreadCount: 1 })
+
+    const row = container!.querySelector('[data-testid="approval-row-apv-attendance-1"]') as HTMLButtonElement
+    expect(row).toBeTruthy()
+    row.click()
+    await flushUi()
+
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'attendance',
+      query: {
+        section: 'attendance-overview-requests',
+        requestId: 'request-1',
+      },
+    })
   })
 })
 
