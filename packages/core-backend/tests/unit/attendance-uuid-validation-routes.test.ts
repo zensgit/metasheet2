@@ -113,6 +113,82 @@ afterEach(async () => {
 })
 
 describe('attendance UUID route validation', () => {
+  it('persists attendance group type on create and rejects type changes on update', async () => {
+    const { db, routes } = await createHarness()
+    const groupId = '00000000-0000-4000-8000-000000000101'
+    const createdAt = '2026-05-29T20:00:00.000Z'
+    const groupRow = {
+      id: groupId,
+      org_id: 'default',
+      name: 'Ops Team',
+      code: 'ops-team',
+      timezone: 'UTC',
+      rule_set_id: null,
+      description: 'unit-test',
+      attendance_type: 'scheduled_shift',
+      created_at: createdAt,
+      updated_at: createdAt,
+    }
+
+    db.query.mockResolvedValueOnce([groupRow])
+
+    const createRes = await invokeRoute(routes, 'POST /api/attendance/groups', {
+      body: {
+        name: 'Ops Team',
+        code: 'ops-team',
+        timezone: 'UTC',
+        attendanceType: 'scheduled-shift',
+        description: 'unit-test',
+      },
+    })
+
+    expect(createRes.statusCode).toBe(200)
+    expect(createRes.body).toMatchObject({
+      ok: true,
+      data: {
+        id: groupId,
+        attendanceType: 'scheduled_shift',
+        attendance_type: 'scheduled_shift',
+      },
+    })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('attendance_type'),
+      expect.arrayContaining(['scheduled_shift']),
+    )
+
+    db.query.mockClear()
+    db.query.mockResolvedValueOnce([
+      {
+        ...groupRow,
+        attendance_type: 'fixed_shift',
+      },
+    ])
+
+    const updateRes = await invokeRoute(routes, 'PUT /api/attendance/groups/:id', {
+      params: { id: groupId },
+      body: {
+        name: 'Ops Team',
+        code: 'ops-team',
+        timezone: 'UTC',
+        attendanceType: 'free_time',
+        description: 'unit-test',
+      },
+    })
+
+    expect(updateRes.statusCode).toBe(409)
+    expect(updateRes.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'ATTENDANCE_GROUP_TYPE_LOCKED',
+      },
+    })
+    expect(db.query).toHaveBeenCalledTimes(1)
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT * FROM attendance_groups'),
+      [groupId, 'default'],
+    )
+  })
+
   it('rejects malformed route UUID params before hitting the database', async () => {
     const { db, routes } = await createHarness()
     const cases = [

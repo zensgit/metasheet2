@@ -3067,7 +3067,7 @@
                         id="attendance-group-search"
                         v-model.trim="attendanceGroupSearch"
                         type="search"
-                        :placeholder="tr('Name, code, rule, timezone...', '名称、编码、规则、时区...')"
+                        :placeholder="tr('Name, code, type, rule, timezone...', '名称、编码、类型、规则、时区...')"
                       />
                     </label>
                     <label class="attendance__field" for="attendance-group-rule-filter">
@@ -3077,6 +3077,15 @@
                         <option value="__default__">{{ tr('Default', '默认') }}</option>
                         <option v-for="ruleSet in ruleSets" :key="ruleSet.id" :value="ruleSet.id">
                           {{ ruleSet.name }}
+                        </option>
+                      </select>
+                    </label>
+                    <label class="attendance__field" for="attendance-group-type-filter">
+                      <span>{{ tr('Type', '类型') }}</span>
+                      <select id="attendance-group-type-filter" v-model="attendanceGroupTypeFilter">
+                        <option value="">{{ tr('All types', '全部类型') }}</option>
+                        <option v-for="option in ATTENDANCE_GROUP_TYPE_OPTIONS" :key="option.value" :value="option.value">
+                          {{ tr(option.labelEn, option.labelZh) }}
                         </option>
                       </select>
                     </label>
@@ -3108,6 +3117,7 @@
                           <strong>{{ item.name }}</strong>
                           <small>{{ item.code || item.id }}</small>
                         </span>
+                        <span>{{ attendanceGroupTypeLabel(readAttendanceGroupType(item)) }}</span>
                         <span>{{ resolveRuleSetName(item.ruleSetId) }}</span>
                       </button>
                       <button
@@ -3132,6 +3142,7 @@
                     <div v-if="attendanceGroupEditingId" class="attendance__group-detail-actions">
                       <div class="attendance__admin-meta">
                         <span>{{ tr('Code', '编码') }}: {{ attendanceGroupForm.code || '-' }}</span>
+                        <span>{{ tr('Type', '类型') }}: {{ attendanceGroupTypeLabel(attendanceGroupForm.attendanceType) }}</span>
                         <span>{{ tr('Timezone', '时区') }}: {{ displayTimezone(attendanceGroupForm.timezone) }}</span>
                       </div>
                       <button
@@ -3180,6 +3191,24 @@
                             {{ item.name }}
                           </option>
                         </select>
+                      </label>
+                      <label class="attendance__field" for="attendance-group-type">
+                        <span>{{ tr('Group type', '考勤组类型') }}</span>
+                        <select
+                          id="attendance-group-type"
+                          v-model="attendanceGroupForm.attendanceType"
+                          :disabled="Boolean(attendanceGroupEditingId)"
+                          data-attendance-group-type
+                        >
+                          <option v-for="option in ATTENDANCE_GROUP_TYPE_OPTIONS" :key="option.value" :value="option.value">
+                            {{ tr(option.labelEn, option.labelZh) }}
+                          </option>
+                        </select>
+                        <small class="attendance__field-hint">
+                          {{ attendanceGroupEditingId
+                            ? tr('Locked after creation to protect schedule semantics.', '创建后锁定，避免破坏排班语义。')
+                            : tr('Choose once at creation so each group keeps stable scheduling semantics.', '创建时选择一次，让每个考勤组保持稳定的排班语义。') }}
+                        </small>
                       </label>
                       <label class="attendance__field attendance__field--full" for="attendance-group-description">
                         <span>{{ tr('Description', '描述') }}</span>
@@ -3377,7 +3406,7 @@
                   </section>
 
                   <section
-                    v-if="attendanceGroupEditingId"
+                    v-if="attendanceGroupEditingId && attendanceGroupForm.attendanceType === 'fixed_shift'"
                     class="attendance__group-panel"
                     data-attendance-group-fixed-schedule-preview
                   >
@@ -3490,6 +3519,28 @@
                         {{ attendanceGroupFixedScheduleManagedConflictHint }}
                       </small>
                       <small class="attendance__field-hint">{{ tr('If blocking conflicts are present, apply stays disabled and writes nothing.', '如果存在阻断冲突，应用保持禁用且零写入。') }}</small>
+                    </div>
+                  </section>
+                  <section
+                    v-else-if="attendanceGroupEditingId"
+                    class="attendance__group-panel"
+                    data-attendance-group-schedule-type-placeholder
+                  >
+                    <div class="attendance__admin-section-header">
+                      <div>
+                        <h6>{{ attendanceGroupTypeLabel(attendanceGroupForm.attendanceType) }}</h6>
+                        <span class="attendance__field-hint">{{ attendanceGroupTypeDetail(attendanceGroupForm.attendanceType) }}</span>
+                      </div>
+                      <button
+                        class="attendance__btn"
+                        type="button"
+                        @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench)"
+                      >
+                        {{ tr('Open Advanced scheduling', '打开高级排班') }}
+                      </button>
+                    </div>
+                    <div class="attendance__empty">
+                      {{ tr('This type keeps the group as a people and policy boundary here. Scheduling details stay in Advanced scheduling.', '该类型在这里作为人员与策略边界；排班细节仍在高级排班维护。') }}
                     </div>
                   </section>
                 </section>
@@ -6508,6 +6559,8 @@ interface AttendanceRuleTemplateVersion {
   templates?: unknown[] | null
 }
 
+type AttendanceGroupType = 'fixed_shift' | 'scheduled_shift' | 'free_time'
+
 interface AttendanceGroup {
   id: string
   orgId?: string
@@ -6516,8 +6569,63 @@ interface AttendanceGroup {
   timezone: string
   ruleSetId?: string | null
   description?: string | null
+  attendanceType?: AttendanceGroupType | null
+  attendance_type?: AttendanceGroupType | null
   createdAt?: string
   updatedAt?: string
+}
+
+const ATTENDANCE_GROUP_TYPE_OPTIONS: Array<{
+  value: AttendanceGroupType
+  labelEn: string
+  labelZh: string
+  detailEn: string
+  detailZh: string
+}> = [
+  {
+    value: 'fixed_shift',
+    labelEn: 'Fixed shift',
+    labelZh: '固定班制',
+    detailEn: 'Uses the group fixed schedule preview and apply panel. Weekly patterns stay in the existing shift and assignment surfaces.',
+    detailZh: '使用考勤组固定排班预览与应用面板；周模式仍在现有班次与排班界面维护。',
+  },
+  {
+    value: 'scheduled_shift',
+    labelEn: 'Scheduled shift',
+    labelZh: '排班制',
+    detailEn: 'Routed to Advanced scheduling for rotation and coverage workflows.',
+    detailZh: '轮班与覆盖工作流仍进入高级排班。',
+  },
+  {
+    value: 'free_time',
+    labelEn: 'Free time',
+    labelZh: '自由工时',
+    detailEn: 'Keeps people and policy grouping here; detailed work-time rules stay out of this slice.',
+    detailZh: '此处仅维护人员与策略分组；详细工时规则不在本切片内。',
+  },
+]
+
+function normalizeAttendanceGroupType(value: unknown): AttendanceGroupType {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase().replace(/-/g, '_') : ''
+  return ATTENDANCE_GROUP_TYPE_OPTIONS.some(option => option.value === normalized)
+    ? normalized as AttendanceGroupType
+    : 'fixed_shift'
+}
+
+function readAttendanceGroupType(group?: AttendanceGroup | null): AttendanceGroupType {
+  return normalizeAttendanceGroupType(group?.attendanceType ?? group?.attendance_type)
+}
+
+function attendanceGroupTypeLabel(value?: AttendanceGroupType | null): string {
+  const normalized = normalizeAttendanceGroupType(value)
+  const option = ATTENDANCE_GROUP_TYPE_OPTIONS.find(item => item.value === normalized) ?? ATTENDANCE_GROUP_TYPE_OPTIONS[0]
+  return tr(option.labelEn, option.labelZh)
+}
+
+function attendanceGroupTypeDetail(value?: AttendanceGroupType | null): string {
+  const normalized = normalizeAttendanceGroupType(value)
+  const option = ATTENDANCE_GROUP_TYPE_OPTIONS.find(item => item.value === normalized) ?? ATTENDANCE_GROUP_TYPE_OPTIONS[0]
+  return tr(option.detailEn, option.detailZh)
 }
 
 interface AttendanceGroupMember {
@@ -8293,6 +8401,7 @@ const attendanceGroups = ref<AttendanceGroup[]>([])
 const attendanceGroupMembers = ref<AttendanceGroupMember[]>([])
 const attendanceGroupSearch = ref('')
 const attendanceGroupRuleSetFilter = ref('')
+const attendanceGroupTypeFilter = ref<AttendanceGroupType | ''>('')
 const attendanceGroupCopyingId = ref<string | null>(null)
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
@@ -8400,14 +8509,16 @@ const selectedAttendanceGroup = computed(() =>
   attendanceGroups.value.find(group => group.id === attendanceGroupEditingId.value) ?? null
 )
 const attendanceGroupFilterActive = computed(() =>
-  attendanceGroupSearch.value.trim().length > 0 || attendanceGroupRuleSetFilter.value !== ''
+  attendanceGroupSearch.value.trim().length > 0 || attendanceGroupRuleSetFilter.value !== '' || attendanceGroupTypeFilter.value !== ''
 )
 const filteredAttendanceGroups = computed(() => {
   const term = attendanceGroupSearch.value.trim().toLowerCase()
   const ruleSetFilter = attendanceGroupRuleSetFilter.value
+  const typeFilter = attendanceGroupTypeFilter.value
   return attendanceGroups.value.filter((group) => {
     if (ruleSetFilter === '__default__' && group.ruleSetId) return false
     if (ruleSetFilter && ruleSetFilter !== '__default__' && group.ruleSetId !== ruleSetFilter) return false
+    if (typeFilter && readAttendanceGroupType(group) !== typeFilter) return false
     if (!term) return true
     return [
       group.name,
@@ -8415,6 +8526,7 @@ const filteredAttendanceGroups = computed(() => {
       group.timezone ?? '',
       group.description ?? '',
       resolveRuleSetName(group.ruleSetId),
+      attendanceGroupTypeLabel(readAttendanceGroupType(group)),
     ].some(value => value.toLowerCase().includes(term))
   })
 })
@@ -8596,6 +8708,27 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
   const ruleSetName = groupSaved
     ? resolveRuleSetName(attendanceGroupForm.ruleSetId)
     : tr('Choose or save a group first', '先选择或保存考勤组')
+  const attendanceGroupType = normalizeAttendanceGroupType(attendanceGroupForm.attendanceType)
+  const workTimeActions: AttendanceGroupSummaryAction[] = attendanceGroupType === 'fixed_shift'
+    ? [
+        {
+          key: 'open-shifts',
+          label: tr('Open Shifts', '打开班次'),
+          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.shifts,
+        },
+        {
+          key: 'open-assignments',
+          label: tr('Open Assignments', '打开排班分配'),
+          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.assignments,
+        },
+      ]
+    : [
+        {
+          key: 'open-advanced-scheduling',
+          label: tr('Open Advanced scheduling', '打开高级排班'),
+          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench,
+        },
+      ]
 
   return [
     {
@@ -8616,20 +8749,13 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
     {
       key: 'work-time',
       title: tr('Work time', '考勤时间'),
-      value: tr('Configured in Shifts and Assignments', '在班次与排班分配中配置'),
-      detail: tr('This card does not claim a group schedule type or mutate schedules.', '此卡片不声明考勤组排班类型，也不修改排班。'),
-      actions: [
-        {
-          key: 'open-shifts',
-          label: tr('Open Shifts', '打开班次'),
-          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.shifts,
-        },
-        {
-          key: 'open-assignments',
-          label: tr('Open Assignments', '打开排班分配'),
-          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.assignments,
-        },
-      ],
+      value: groupSaved
+        ? attendanceGroupTypeLabel(attendanceGroupType)
+        : tr('Choose or save a group first', '先选择或保存考勤组'),
+      detail: groupSaved
+        ? attendanceGroupTypeDetail(attendanceGroupType)
+        : tr('Group type is selected at creation and locked afterward.', '考勤组类型在创建时选择，保存后锁定。'),
+      actions: workTimeActions,
     },
     {
       key: 'scheduling-coverage',
@@ -10014,6 +10140,7 @@ const attendanceGroupForm = reactive({
   code: '',
   timezone: defaultTimezone,
   ruleSetId: '',
+  attendanceType: 'fixed_shift' as AttendanceGroupType,
   description: '',
 })
 
@@ -16527,6 +16654,7 @@ function resetAttendanceGroupForm() {
   attendanceGroupForm.code = ''
   attendanceGroupForm.timezone = defaultTimezone
   attendanceGroupForm.ruleSetId = ''
+  attendanceGroupForm.attendanceType = 'fixed_shift'
   attendanceGroupForm.description = ''
   attendanceGroupMemberGroupId.value = ''
   attendanceGroupMembers.value = []
@@ -16550,6 +16678,7 @@ function editAttendanceGroup(item: AttendanceGroup) {
   attendanceGroupForm.code = item.code ?? ''
   attendanceGroupForm.timezone = item.timezone ?? defaultTimezone
   attendanceGroupForm.ruleSetId = item.ruleSetId ?? ''
+  attendanceGroupForm.attendanceType = readAttendanceGroupType(item)
   attendanceGroupForm.description = item.description ?? ''
   attendanceGroupMemberGroupId.value = item.id
   if (groupChanged) {
@@ -16590,6 +16719,7 @@ function resolveRuleSetName(ruleSetId?: string | null): string {
 function clearAttendanceGroupFilters() {
   attendanceGroupSearch.value = ''
   attendanceGroupRuleSetFilter.value = ''
+  attendanceGroupTypeFilter.value = ''
 }
 
 function nextAttendanceGroupCopyName(sourceName: string): string {
@@ -16610,10 +16740,11 @@ function exportAttendanceGroupsCsv() {
     setStatus(tr('No attendance groups to export.', '没有可导出的考勤组。'), 'error')
     return
   }
-  const headers = ['Name', 'Code', 'Rule policy', 'Timezone', 'Description', 'Created at', 'Updated at']
+  const headers = ['Name', 'Code', 'Type', 'Rule policy', 'Timezone', 'Description', 'Created at', 'Updated at']
   const csvRows = rows.map(group => [
     group.name,
     group.code ?? '',
+    attendanceGroupTypeLabel(readAttendanceGroupType(group)),
     resolveRuleSetName(group.ruleSetId),
     group.timezone ?? '',
     group.description ?? '',
@@ -16632,6 +16763,7 @@ async function copyAttendanceGroup(item: AttendanceGroup) {
       code: null,
       timezone: item.timezone || defaultTimezone,
       ruleSetId: item.ruleSetId || null,
+      attendanceType: readAttendanceGroupType(item),
       description: item.description || null,
       orgId: normalizedOrgId(),
     }
@@ -16701,6 +16833,7 @@ async function saveAttendanceGroup() {
       code: attendanceGroupForm.code.trim() || null,
       timezone: attendanceGroupForm.timezone.trim() || defaultTimezone,
       ruleSetId: attendanceGroupForm.ruleSetId || null,
+      attendanceType: normalizeAttendanceGroupType(attendanceGroupForm.attendanceType),
       description: attendanceGroupForm.description.trim() || null,
       orgId: normalizedOrgId(),
     }
