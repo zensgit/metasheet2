@@ -6152,6 +6152,12 @@ interface AttendanceRecord {
   user_id?: string
   user_name?: string | null
   username?: string | null
+  employee_no?: string | null
+  employeeNo?: string | null
+  department?: string | null
+  position?: string | null
+  hire_date?: string | null
+  hireDate?: string | null
   first_in_at: string | null
   last_out_at: string | null
   work_minutes: number
@@ -10728,6 +10734,7 @@ function formatRecordReportFieldLabel(field: AttendanceRecordReportField): strin
     employee_no: tr('Employee No.', '工号'),
     department: tr('Department', '部门'),
     position: tr('Position', '职位'),
+    hire_date: tr('Hire date', '入职日期'),
     attendance_group: tr('Attendance group', '考勤组'),
     punch_times: tr('Punch times', '打卡时间'),
     punch_result: tr('Punch result', '打卡结果'),
@@ -10784,11 +10791,28 @@ function formatRecordReportCell(record: AttendanceRecord, field: AttendanceRecor
     case 'employee_name':
       return firstRecordValue(record.user_name, record.username, record.user_id)
     case 'employee_no':
-      return firstRecordValue(recordMetaValue(record, ['empNo', 'employeeNo', 'employee_no', '工号']), record.user_id)
+      return firstRecordValue(
+        serverValue,
+        record.employee_no,
+        record.employeeNo,
+        recordMetaValue(record, ['empNo', 'employeeNo', 'employee_no', '工号']),
+        record.user_id,
+      )
     case 'department':
-      return firstRecordValue(recordMetaValue(record, ['department', '部门']))
+      return firstRecordValue(serverValue, record.department, recordMetaValue(record, ['department', '部门']))
     case 'position':
-      return firstRecordValue(recordMetaValue(record, ['position', 'role', 'roleTags', 'role_tags', '职位']))
+      return firstRecordValue(
+        serverValue,
+        record.position,
+        recordMetaValue(record, ['position', 'role', 'roleTags', 'role_tags', '职位']),
+      )
+    case 'hire_date':
+      return firstRecordValue(
+        serverValue,
+        record.hire_date,
+        record.hireDate,
+        recordMetaValue(record, ['hireDate', 'hire_date', '入职日期']),
+      )
     case 'attendance_group':
       return firstRecordValue(recordMetaValue(record, ['attendanceGroup', 'attendance_group', '考勤组']))
     case 'punch_times':

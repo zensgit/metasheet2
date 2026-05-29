@@ -1053,6 +1053,17 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     description: '法定节假日或节假日规则下归集的加班分钟数。',
     internalKey: 'summary.holidayOvertimeMinutes',
   },
+  {
+    code: 'hire_date',
+    name: '入职日期',
+    category: 'fixed',
+    source: 'system',
+    unit: 'date',
+    dingtalkFieldName: '入职日期',
+    description: '员工入职日期。',
+    internalKey: 'user.hireDate',
+    sortOrder: 1006,
+  },
 ].map((field, index) => ({
   enabled: true,
   reportVisible: true,
@@ -2484,7 +2495,9 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
   const rows = await db.query(
     `SELECT ar.user_id, ar.org_id, ar.work_date, ar.timezone, ar.first_in_at, ar.last_out_at,
             ar.work_minutes, ar.late_minutes, ar.early_leave_minutes, ar.status, ar.is_workday,
-            ar.meta, u.name AS user_name, u.username AS username
+            ar.meta, u.name AS user_name, u.username AS username,
+            u.employee_no AS employee_no, u.department AS department,
+            u.position AS position, u.hire_date AS hire_date
      FROM attendance_records ar
      LEFT JOIN users u ON u.id = ar.user_id
      WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4
@@ -2523,7 +2536,7 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
         [ATTENDANCE_REPORT_RECORDS_FIELDS.orgId]: orgId,
         [ATTENDANCE_REPORT_RECORDS_FIELDS.userId]: userId,
         [ATTENDANCE_REPORT_RECORDS_FIELDS.employeeName]: firstNonEmptyValue(row.user_name, row.username, userId),
-        [ATTENDANCE_REPORT_RECORDS_FIELDS.department]: firstNonEmptyValue(readAttendanceRecordMeta(enrichedRow, ['department', '部门'])),
+        [ATTENDANCE_REPORT_RECORDS_FIELDS.department]: getAttendanceRecordReportFieldValue(enrichedRow, 'department'),
         [ATTENDANCE_REPORT_RECORDS_FIELDS.attendanceGroup]: firstNonEmptyValue(readAttendanceRecordMeta(enrichedRow, ['attendanceGroup', 'attendance_group', '考勤组'])),
         [ATTENDANCE_REPORT_RECORDS_FIELDS.workDate]: workDate,
       }
@@ -4007,6 +4020,7 @@ const ATTENDANCE_RECORD_REPORT_FIELD_CODES = Object.freeze([
   'employee_no',
   'department',
   'position',
+  'hire_date',
   'attendance_group',
   'punch_times',
   'punch_result',
@@ -4259,6 +4273,10 @@ function readAttendanceRecordMeta(row, keys) {
   return undefined
 }
 
+function normalizeAttendanceReportDateOnly(value) {
+  return normalizeDateOnlyValue(value) ?? firstNonEmptyValue(value)
+}
+
 function readAttendanceRecordMinutes(row, keys, fallback = 0) {
   const value = readAttendanceRecordMeta(row, keys)
   const parsed = Number(value)
@@ -4293,11 +4311,37 @@ function getAttendanceRecordReportFieldValue(row, fieldCode) {
     case 'employee_name':
       return firstNonEmptyValue(row?.user_name, row?.username, row?.user_id)
     case 'employee_no':
-      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['empNo', 'employeeNo', 'employee_no', '工号']), row?.user_id)
+      return firstNonEmptyValue(
+        row?.employee_no,
+        row?.employeeNo,
+        row?.user?.employee_no,
+        row?.user?.employeeNo,
+        readAttendanceRecordMeta(row, ['empNo', 'employeeNo', 'employee_no', '工号']),
+        row?.user_id,
+      )
     case 'department':
-      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['department', '部门']))
+      return firstNonEmptyValue(
+        row?.department,
+        row?.user_department,
+        row?.user?.department,
+        readAttendanceRecordMeta(row, ['department', '部门']),
+      )
     case 'position':
-      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['position', 'role', 'roleTags', 'role_tags', '职位']))
+      return firstNonEmptyValue(
+        row?.position,
+        row?.user_position,
+        row?.user?.position,
+        readAttendanceRecordMeta(row, ['position', 'role', 'roleTags', 'role_tags', '职位']),
+      )
+    case 'hire_date':
+      return normalizeAttendanceReportDateOnly(firstNonEmptyValue(
+        row?.hire_date,
+        row?.hireDate,
+        row?.user_hire_date,
+        row?.user?.hire_date,
+        row?.user?.hireDate,
+        readAttendanceRecordMeta(row, ['hireDate', 'hire_date', '入职日期']),
+      ))
     case 'attendance_group':
       return firstNonEmptyValue(readAttendanceRecordMeta(row, ['attendanceGroup', 'attendance_group', '考勤组']))
     case 'punch_times':
@@ -17830,7 +17874,9 @@ module.exports = {
           const total = Number(countRows[0]?.total ?? 0)
 
           const rows = await db.query(
-            `SELECT ar.*, u.name AS user_name, u.username AS username
+            `SELECT ar.*, u.name AS user_name, u.username AS username,
+                    u.employee_no AS employee_no, u.department AS department,
+                    u.position AS position, u.hire_date AS hire_date
              FROM attendance_records ar
              LEFT JOIN users u ON u.id = ar.user_id
              WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4
@@ -29430,7 +29476,9 @@ module.exports = {
           const rows = await db.query(
             `SELECT ar.user_id, ar.org_id, ar.work_date, ar.timezone, ar.first_in_at, ar.last_out_at,
                     ar.work_minutes, ar.late_minutes, ar.early_leave_minutes, ar.status, ar.is_workday,
-                    ar.meta, u.name AS user_name, u.username AS username
+                    ar.meta, u.name AS user_name, u.username AS username,
+                    u.employee_no AS employee_no, u.department AS department,
+                    u.position AS position, u.hire_date AS hire_date
              FROM attendance_records ar
              LEFT JOIN users u ON u.id = ar.user_id
              WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4

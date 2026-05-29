@@ -380,6 +380,47 @@ describe('attendance report field catalog multitable foundation', () => {
     ], fields, { headerMode: 'code' })).toBe('work_date,late_duration\n2026-05-13,12')
   })
 
+  it('resolves HR profile fields from joined user columns for record reports', () => {
+    const reportFields = helpers.resolveAttendanceRecordReportFields(
+      helpers.mergeAttendanceReportFieldDefinitions([], {}),
+    ).filter((field: { code: string }) => ['employee_no', 'department', 'position', 'hire_date'].includes(field.code))
+    expect(reportFields.map((field: { code: string }) => field.code)).toEqual([
+      'department',
+      'employee_no',
+      'position',
+      'hire_date',
+    ])
+
+    const row = {
+      user_id: 'user-uuid-fallback',
+      employee_no: 'E-1001',
+      department: 'Assembly',
+      position: 'Line Lead',
+      hire_date: new Date('2026-05-29T00:00:00.000Z'),
+      meta: {
+        employee_no: 'STALE-META-NO',
+        department: 'Stale Department',
+        position: 'Stale Position',
+        hire_date: '2026-01-01',
+      },
+    }
+
+    expect(helpers.getAttendanceRecordReportFieldValue(row, 'employee_no')).toBe('E-1001')
+    expect(helpers.getAttendanceRecordReportFieldValue(row, 'department')).toBe('Assembly')
+    expect(helpers.getAttendanceRecordReportFieldValue(row, 'position')).toBe('Line Lead')
+    expect(helpers.getAttendanceRecordReportFieldValue(row, 'hire_date')).toBe('2026-05-29')
+
+    const item = helpers.buildAttendanceRecordReportExportItem(row, reportFields)
+    expect(item).toEqual({
+      department: 'Assembly',
+      employee_no: 'E-1001',
+      position: 'Line Lead',
+      hire_date: '2026-05-29',
+    })
+    expect(helpers.buildAttendanceRecordReportCsv([item], reportFields))
+      .toBe('部门,工号,职位,入职日期\nAssembly,E-1001,Line Lead,2026-05-29')
+  })
+
   it('builds a shared report field config envelope for records and JSON exports', () => {
     const fields = helpers.resolveAttendanceRecordReportFields([
       {
@@ -1049,8 +1090,8 @@ describe('attendance report field catalog multitable foundation', () => {
       // NO findObjectSheet → catalog falls back to deterministic built-in field set
     }
     const attendanceRows = [
-      { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-13', timezone: 'UTC', first_in_at: '2026-05-13T09:00:00Z', last_out_at: '2026-05-13T18:00:00Z', work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, status: 'normal', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan' },
-      { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-14', timezone: 'UTC', first_in_at: '2026-05-14T09:10:00Z', last_out_at: '2026-05-14T18:00:00Z', work_minutes: 470, late_minutes: 10, early_leave_minutes: 0, status: 'late', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan' },
+      { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-13', timezone: 'UTC', first_in_at: '2026-05-13T09:00:00Z', last_out_at: '2026-05-13T18:00:00Z', work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, status: 'normal', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan', employee_no: 'E-1001', department: 'Assembly', position: 'Line Lead', hire_date: '2026-05-29' },
+      { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-14', timezone: 'UTC', first_in_at: '2026-05-14T09:10:00Z', last_out_at: '2026-05-14T18:00:00Z', work_minutes: 470, late_minutes: 10, early_leave_minutes: 0, status: 'late', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan', employee_no: 'E-1001', department: 'Assembly', position: 'Line Lead', hire_date: '2026-05-29' },
     ]
     const db = {
       query: async (sql: string) => {
@@ -1079,6 +1120,10 @@ describe('attendance report field catalog multitable foundation', () => {
       expect(valueEnsure.fields.filter(f => f.id === sk)).toHaveLength(1)
     }
     expect(store[0].data[rowKeyFid]).toBe('org-1:u-1:2026-05-13')
+    expect(store[0].data.fld_department).toBe('Assembly')
+    expect(store[0].data.fld_employee_no).toBe('E-1001')
+    expect(store[0].data.fld_position).toBe('Line Lead')
+    expect(store[0].data.fld_hire_date).toBe('2026-05-29')
     expect(typeof store[0].data['fld_field_fingerprint']).toBe('string')
     expect(typeof store[0].data['fld_source_fingerprint']).toBe('string')
 
