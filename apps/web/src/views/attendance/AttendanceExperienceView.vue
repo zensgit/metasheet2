@@ -126,6 +126,11 @@ const overviewInitialSectionId = computed(() => {
   return section === 'attendance-overview-requests' ? section : ''
 })
 
+const adminInitialSectionId = computed(() => {
+  const section = Array.isArray(route.query.section) ? route.query.section[0] : route.query.section
+  return typeof section === 'string' && section.startsWith('attendance-admin-') ? section : ''
+})
+
 function matchesMediaQuery(query: string): boolean {
   try {
     return Boolean(window.matchMedia?.(query)?.matches)
@@ -167,7 +172,7 @@ const activeView = computed(() => {
       return {
         component: AttendanceAdminCenter,
         key: 'attendance-admin',
-        props: {},
+        props: { initialSectionId: adminInitialSectionId.value },
       }
     case 'import':
       if (!canAccessAdmin.value) return null
