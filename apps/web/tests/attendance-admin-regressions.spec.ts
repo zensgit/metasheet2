@@ -58,6 +58,20 @@ function setInput(container: HTMLElement, selector: string, value: string): void
   input!.dispatchEvent(new Event('input', { bubbles: true }))
 }
 
+function selectUserPicker(container: HTMLElement, selector: string, userId: string): void {
+  const searchInput = container.querySelector<HTMLInputElement>(selector)
+  expect(searchInput, `expected user picker ${selector}`).toBeTruthy()
+  const field = searchInput!.closest('.attendance__field')
+  expect(field, `expected user picker field ${selector}`).toBeTruthy()
+  const select = field!.querySelector<HTMLSelectElement>('select')
+  expect(select, `expected user picker select ${selector}`).toBeTruthy()
+  if (!Array.from(select!.options).some((option) => option.value === userId)) {
+    select!.appendChild(new Option(userId, userId))
+  }
+  select!.value = userId
+  select!.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
 function setViewportWidth(width: number): void {
   Object.defineProperty(window, 'innerWidth', {
     configurable: true,
@@ -601,6 +615,10 @@ describe('Attendance admin regressions', () => {
     await flushUi()
 
     const requestedUrls = vi.mocked(apiFetch).mock.calls.map(call => String(call[0]))
+    const overviewReadOnlyCatalogLoads = new Set([
+      '/api/attendance/leave-types?isActive=true',
+      '/api/attendance/overtime-rules?isActive=true',
+    ])
     const forbiddenAdminLoads = [
       '/api/attendance-admin/',
       '/api/attendance/settings',
@@ -628,7 +646,10 @@ describe('Attendance admin regressions', () => {
 
     expect(requestedUrls.length).toBeGreaterThan(0)
     expect(
-      requestedUrls.filter(url => forbiddenAdminLoads.some(prefix => url.startsWith(prefix))),
+      requestedUrls.filter(url =>
+        !overviewReadOnlyCatalogLoads.has(url)
+        && forbiddenAdminLoads.some(prefix => url.startsWith(prefix))
+      ),
     ).toEqual([])
   })
 
@@ -862,6 +883,157 @@ describe('Attendance admin regressions', () => {
     expect(groupsSection!.querySelector('[data-attendance-group-detail]')?.textContent).toContain('New attendance group')
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('Save the group before adding people.')
     expect(groupsSection!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Choose or save a group first')
+  })
+
+  it('keeps attendance setup flows on user pickers and resolved labels instead of UUID handoffs', async () => {
+    const memberUserId = '11111111-1111-4111-8111-111111111111'
+    const shiftUserId = '22222222-2222-4222-8222-222222222222'
+    const rotationUserId = '33333333-3333-4333-8333-333333333333'
+    const memberPostBodies: unknown[] = []
+    const resolvedUsers = new Map([
+      [memberUserId, { id: memberUserId, email: 'mei.member@example.com', name: 'Mei Member', is_active: true }],
+      [shiftUserId, { id: shiftUserId, email: 'shift.owner@example.com', name: 'Shift Owner', is_active: true }],
+      [rotationUserId, { id: rotationUserId, email: 'rotation.owner@example.com', name: 'Rotation Owner', is_active: true }],
+    ])
+    const groupMembers: Array<{ id: string, groupId: string, userId: string, createdAt: string }> = []
+
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.startsWith('/api/admin/users')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: memberUserId, email: 'mei.member@example.com', name: 'Mei Member', role: 'employee', is_active: true, is_admin: false, last_login_at: null, created_at: '2026-05-28T00:00:00.000Z' },
+              { id: shiftUserId, email: 'shift.owner@example.com', name: 'Shift Owner', role: 'employee', is_active: true, is_admin: false, last_login_at: null, created_at: '2026-05-28T00:00:00.000Z' },
+              { id: rotationUserId, email: 'rotation.owner@example.com', name: 'Rotation Owner', role: 'employee', is_active: true, is_admin: false, last_login_at: null, created_at: '2026-05-28T00:00:00.000Z' },
+            ],
+          },
+        })
+      }
+      if (url === '/api/attendance-admin/users/batch/resolve') {
+        const body = JSON.parse(String(init?.body || '{}')) as { userIds?: string[] }
+        const requested = Array.isArray(body.userIds) ? body.userIds : []
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            requested: requested.length,
+            items: requested.map((userId) => resolvedUsers.get(userId)).filter(Boolean),
+            missingUserIds: requested.filter((userId) => !resolvedUsers.has(userId)),
+            inactiveUserIds: [],
+          },
+        })
+      }
+      if (url === '/api/attendance/groups/group-a/members' && method === 'POST') {
+        const body = JSON.parse(String(init?.body || '{}'))
+        memberPostBodies.push(body)
+        const createdUserIds = Array.isArray(body.userIds) ? body.userIds : []
+        groupMembers.splice(0, groupMembers.length, ...createdUserIds.map((userId: string, index: number) => ({
+          id: `member-${index}`,
+          groupId: 'group-a',
+          userId,
+          createdAt: '2026-05-28T08:00:00.000Z',
+        })))
+        return jsonResponse(200, { ok: true, data: { items: groupMembers, total: groupMembers.length } })
+      }
+      if (url === '/api/attendance/groups/group-a/members') {
+        return jsonResponse(200, { ok: true, data: { items: groupMembers, total: groupMembers.length } })
+      }
+      if (url.startsWith('/api/attendance/groups?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'group-a', name: 'Operations floor', code: 'ops_floor', timezone: 'Asia/Shanghai', ruleSetId: null },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'shift-a', name: 'Day shift', timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', isOvernight: false, lateGraceMinutes: 10, earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/rotation-rules')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'rot-1', name: 'Two shift', timezone: 'UTC', shiftSequence: ['shift-a'], isActive: true },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/assignments')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                assignment: { id: 'assignment-a', userId: shiftUserId, shiftId: 'shift-a', startDate: '2026-05-01', endDate: null, isActive: true },
+                shift: { id: 'shift-a', name: 'Day shift', timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', isOvernight: false, lateGraceMinutes: 10, earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/rotation-assignments')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                assignment: { id: 'rotation-assignment-a', userId: rotationUserId, rotationRuleId: 'rot-1', startDate: '2026-05-01', endDate: null, isActive: true },
+                rotation: { id: 'rot-1', name: 'Two shift', timezone: 'UTC', shiftSequence: ['shift-a'], isActive: true },
+              },
+            ],
+          },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(10)
+
+    const groupsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+    expect(groupsNav).toBeTruthy()
+    groupsNav!.click()
+    await flushUi(4)
+
+    const people = container!.querySelector<HTMLElement>('[data-attendance-group-people]')
+    expect(people).toBeTruthy()
+    selectUserPicker(people!, '#attendance-group-member-user-picker', memberUserId)
+    await flushUi(2)
+
+    const addButton = Array.from(people!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Add members'))
+    expect(addButton).toBeTruthy()
+    expect(addButton!.disabled).toBe(false)
+    addButton!.click()
+    await flushUi(10)
+
+    expect(memberPostBodies).toEqual([{ userIds: [memberUserId] }])
+    expect(people!.querySelector('[data-attendance-group-member-label]')?.textContent).toContain('Mei Member')
+    expect(people!.querySelector('[data-attendance-group-member-secondary]')?.textContent).toContain('mei.member@example.com')
+
+    const assignmentsSection = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
+    expect(assignmentsSection).toBeTruthy()
+    expect(assignmentsSection!.querySelector('[data-attendance-assignment-user-label]')?.textContent).toContain('Shift Owner')
+    expect(assignmentsSection!.querySelector('[data-attendance-assignment-user-secondary]')?.textContent).toContain('shift.owner@example.com')
+
+    const rotationsSection = container!.querySelector<HTMLElement>('#attendance-admin-rotation-assignments')
+    expect(rotationsSection).toBeTruthy()
+    expect(rotationsSection!.querySelector('[data-attendance-rotation-assignment-user-label]')?.textContent).toContain('Rotation Owner')
+    expect(rotationsSection!.querySelector('[data-attendance-rotation-assignment-user-secondary]')?.textContent).toContain('rotation.owner@example.com')
   })
 
   async function openAttendanceGroupPunchCard(): Promise<HTMLElement> {
@@ -2155,7 +2327,7 @@ describe('Attendance admin regressions', () => {
 
     const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
     expect(section).toBeTruthy()
-    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    selectUserPicker(section!, '#attendance-assignment-user-id', 'user-9')
     const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
     expect(shiftSelect).toBeTruthy()
     shiftSelect!.value = 'shift-a'
@@ -2259,7 +2431,7 @@ describe('Attendance admin regressions', () => {
 
     const section = container!.querySelector<HTMLElement>('#attendance-admin-rotation-assignments')
     expect(section).toBeTruthy()
-    setInput(section!, '#attendance-rotation-user', 'user-7')
+    selectUserPicker(section!, '#attendance-rotation-user', 'user-7')
     const rotationSelect = section!.querySelector<HTMLSelectElement>('#attendance-rotation-rule')
     expect(rotationSelect).toBeTruthy()
     rotationSelect!.value = 'rot-1'
@@ -2337,7 +2509,7 @@ describe('Attendance admin regressions', () => {
 
     const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
     expect(section).toBeTruthy()
-    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    selectUserPicker(section!, '#attendance-assignment-user-id', 'user-9')
     const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
     expect(shiftSelect).toBeTruthy()
     shiftSelect!.value = 'shift-a'
@@ -2438,7 +2610,7 @@ describe('Attendance admin regressions', () => {
 
     const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
     expect(section).toBeTruthy()
-    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    selectUserPicker(section!, '#attendance-assignment-user-id', 'user-9')
     const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
     expect(shiftSelect).toBeTruthy()
     shiftSelect!.value = 'shift-a'
@@ -2562,7 +2734,7 @@ describe('Attendance admin regressions', () => {
 
     const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
     expect(section).toBeTruthy()
-    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    selectUserPicker(section!, '#attendance-assignment-user-id', 'user-9')
     const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
     shiftSelect!.value = 'shift-a'
     shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
@@ -2668,7 +2840,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(2)
 
     const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
-    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    selectUserPicker(section!, '#attendance-assignment-user-id', 'user-9')
     const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
     shiftSelect!.value = 'shift-a'
     shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
@@ -2736,7 +2908,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(2)
 
     const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
-    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    selectUserPicker(section!, '#attendance-assignment-user-id', 'user-9')
     const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
     shiftSelect!.value = 'shift-a'
     shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
@@ -2831,7 +3003,7 @@ describe('Attendance admin regressions', () => {
 
     const section = container!.querySelector<HTMLElement>('#attendance-admin-rotation-assignments')
     expect(section).toBeTruthy()
-    setInput(section!, '#attendance-rotation-user', 'user-7')
+    selectUserPicker(section!, '#attendance-rotation-user', 'user-7')
     const rotationSelect = section!.querySelector<HTMLSelectElement>('#attendance-rotation-rule')
     rotationSelect!.value = 'rot-1'
     rotationSelect!.dispatchEvent(new Event('change', { bubbles: true }))
@@ -2942,7 +3114,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(2)
 
     const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
-    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    selectUserPicker(section!, '#attendance-assignment-user-id', 'user-9')
     const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
     shiftSelect!.value = 'shift-a'
     shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
@@ -3008,7 +3180,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(2)
 
     const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
-    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    selectUserPicker(section!, '#attendance-assignment-user-id', 'user-9')
     const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
     shiftSelect!.value = 'shift-a'
     shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
