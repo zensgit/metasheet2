@@ -645,6 +645,50 @@ describe('Attendance admin regressions', () => {
     expect(section!.querySelector('[data-attendance-scheduler-scopes-intent]')?.textContent || '').toContain('administrative registry')
     // The mocked scope row renders by subjectRef (real wire render, not a vacuous mount).
     expect(section!.querySelector('[data-attendance-scheduler-scopes-list]')?.textContent || '').toContain('Alice')
+    // Request the full first page so the registry is not silently capped at the backend default (no-silent-caps).
+    const scopeCall = vi.mocked(apiFetch).mock.calls.map(call => String(call[0])).find(url => url.includes('/api/attendance/scheduler-scopes'))
+    expect(scopeCall).toBeTruthy()
+    expect(scopeCall).toContain('page=1')
+    expect(scopeCall).toContain('pageSize=200')
+  })
+
+  it('flags truncation when scheduler scopes exceed the fetched page (no silent caps)', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/scheduler-scopes')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 's1',
+                subjectType: 'user',
+                subjectRef: 'Alice',
+                actions: ['view'],
+                scope: { scheduleGroupIds: [], attendanceGroupIds: [], userIds: ['u1'], departments: [], roles: [], roleTags: [] },
+                isActive: true,
+              },
+            ],
+            total: 250,
+            page: 1,
+            pageSize: 200,
+          },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const scopesNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')
+    scopesNav!.click()
+    await flushUi(4)
+
+    const hint = container!.querySelector('[data-attendance-scheduler-scopes-truncated]')
+    expect(hint).toBeTruthy()
+    expect(hint?.textContent || '').toContain('250')
   })
 
   it('keeps the clicked admin section focused and retires the show-all toggle', async () => {

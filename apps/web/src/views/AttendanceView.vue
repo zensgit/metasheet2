@@ -1333,6 +1333,13 @@
                   <div class="attendance__scheduler-scope-targets">{{ schedulerScopeTargetSummary(scope.scope) }}</div>
                 </li>
               </ul>
+              <p
+                v-if="schedulerScopesTotal > schedulerScopes.length"
+                class="attendance__scheduler-scope-truncated"
+                data-attendance-scheduler-scopes-truncated
+              >
+                {{ tr(`Showing first ${schedulerScopes.length} of ${schedulerScopesTotal}`, `仅显示前 ${schedulerScopes.length}/${schedulerScopesTotal} 条`) }}
+              </p>
             </div>
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
@@ -7108,6 +7115,7 @@ type AttendanceSchedulerScope = {
 }
 const schedulerScopes = ref<AttendanceSchedulerScope[]>([])
 const schedulerScopesLoading = ref(false)
+const schedulerScopesTotal = ref(0)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 const timezoneOptions = computed(() =>
   buildTimezoneOptions([defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'])
@@ -17469,7 +17477,10 @@ function normalizeSchedulerScope(value: unknown): AttendanceSchedulerScope | nul
 async function loadSchedulerScopes() {
   schedulerScopesLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
+    // Request the full first page (backend default pageSize is 50, max 200). Without this the
+    // registry would silently show only the first 50 scopes; T1 surfaces a truncation hint
+    // (no-silent-caps). Full pagination is deferred to a later slice.
+    const query = buildQuery({ orgId: normalizedOrgId(), page: '1', pageSize: '200' })
     const response = await apiFetch(`/api/attendance/scheduler-scopes?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -17484,6 +17495,8 @@ async function loadSchedulerScopes() {
     schedulerScopes.value = items
       .map(normalizeSchedulerScope)
       .filter((item: AttendanceSchedulerScope | null): item is AttendanceSchedulerScope => item !== null)
+    const total = Number(data.data?.total)
+    schedulerScopesTotal.value = Number.isFinite(total) && total >= 0 ? total : schedulerScopes.value.length
   } catch (error: unknown) {
     setStatus(readErrorMessage(error, tr('Failed to load scheduler scopes', '加载排班管理范围失败')), 'error')
   } finally {
@@ -19970,5 +19983,10 @@ const holidaySectionBindings = {
 .attendance__scheduler-scope-targets {
   font-size: 13px;
   color: #5b6b7b;
+}
+.attendance__scheduler-scope-truncated {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: #8a6d3b;
 }
 </style>
