@@ -1291,6 +1291,50 @@
               </div>
             </div>
             <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes)"
+              data-attendance-scheduler-scopes
+            >
+              <div class="attendance__admin-section-header">
+                <h4>{{ tr('Scheduler scope management', '排班管理范围') }}</h4>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn" :disabled="schedulerScopesLoading" @click="loadSchedulerScopes">
+                    {{ schedulerScopesLoading ? tr('Loading...', '加载中...') : tr('Reload', '重新加载') }}
+                  </button>
+                </div>
+              </div>
+              <p class="attendance__scheduler-scope-notice" data-attendance-scheduler-scopes-intent>
+                {{ tr('These scopes are an administrative registry only and are not yet enforced at runtime. Runtime enforcement is a separate later capability.', '此处仅为管理登记，运行时尚未强制执行；运行时强制为后续独立能力。') }}
+              </p>
+              <div v-if="!schedulerScopesLoading && schedulerScopes.length === 0" class="attendance__empty">
+                {{ tr('No scheduler scopes yet.', '暂无排班管理范围记录。') }}
+              </div>
+              <ul v-else class="attendance__scheduler-scope-list" data-attendance-scheduler-scopes-list>
+                <li
+                  v-for="scope in schedulerScopes"
+                  :key="scope.id"
+                  class="attendance__scheduler-scope-item"
+                  :class="{ 'attendance__scheduler-scope-item--inactive': !scope.isActive }"
+                  data-attendance-scheduler-scope-item
+                >
+                  <div class="attendance__scheduler-scope-subject">
+                    <strong>{{ scope.subjectRef }}</strong>
+                    <span class="attendance__scheduler-scope-subject-type">{{ schedulerScopeSubjectLabel(scope.subjectType) }}</span>
+                    <span v-if="!scope.isActive" class="attendance__scheduler-scope-flag">{{ tr('Inactive', '已停用') }}</span>
+                  </div>
+                  <div class="attendance__scheduler-scope-actions">
+                    <span
+                      v-for="action in scope.actions"
+                      :key="action"
+                      class="attendance__scheduler-scope-action"
+                    >{{ schedulerScopeActionLabel(action) }}</span>
+                  </div>
+                  <div class="attendance__scheduler-scope-targets">{{ schedulerScopeTargetSummary(scope.scope) }}</div>
+                </li>
+              </ul>
+            </div>
+            <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
               class="attendance__admin-section"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
@@ -7046,6 +7090,24 @@ const payrollCycleGenerating = ref(false)
 const payrollCycleGenerateResult = ref<{ created: number; skipped: number } | null>(null)
 const importLoading = ref(false)
 const adminForbidden = ref(false)
+type AttendanceSchedulerScopeTargets = {
+  scheduleGroupIds: string[]
+  attendanceGroupIds: string[]
+  userIds: string[]
+  departments: string[]
+  roles: string[]
+  roleTags: string[]
+}
+type AttendanceSchedulerScope = {
+  id: string
+  subjectType: string
+  subjectRef: string
+  actions: string[]
+  scope: AttendanceSchedulerScopeTargets
+  isActive: boolean
+}
+const schedulerScopes = ref<AttendanceSchedulerScope[]>([])
+const schedulerScopesLoading = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 const timezoneOptions = computed(() =>
   buildTimezoneOptions([defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'])
@@ -17366,6 +17428,104 @@ async function exportPayrollCycleSummary() {
   }
 }
 
+const ATTENDANCE_SCHEDULER_SCOPE_TARGET_KEYS = [
+  'scheduleGroupIds',
+  'attendanceGroupIds',
+  'userIds',
+  'departments',
+  'roles',
+  'roleTags',
+] as const
+
+function normalizeSchedulerScope(value: unknown): AttendanceSchedulerScope | null {
+  const row = value && typeof value === 'object' ? (value as Record<string, unknown>) : null
+  if (!row || typeof row.id !== 'string') return null
+  const scopeSource = row.scope && typeof row.scope === 'object' ? (row.scope as Record<string, unknown>) : {}
+  const scope: AttendanceSchedulerScopeTargets = {
+    scheduleGroupIds: [],
+    attendanceGroupIds: [],
+    userIds: [],
+    departments: [],
+    roles: [],
+    roleTags: [],
+  }
+  for (const key of ATTENDANCE_SCHEDULER_SCOPE_TARGET_KEYS) {
+    const arr = scopeSource[key]
+    scope[key] = Array.isArray(arr) ? arr.filter((item): item is string => typeof item === 'string') : []
+  }
+  return {
+    id: row.id,
+    subjectType: typeof row.subjectType === 'string' ? row.subjectType : '',
+    subjectRef: typeof row.subjectRef === 'string' ? row.subjectRef : '',
+    actions: Array.isArray(row.actions) ? row.actions.filter((item): item is string => typeof item === 'string') : [],
+    scope,
+    isActive: row.isActive !== false,
+  }
+}
+
+// Read-only registry of scheduler scopes (T1). Mirrors loadAttendanceGroups: defensive,
+// 403 -> adminForbidden, non-ok -> caught. Scopes are administrative intent and are NOT
+// enforced at runtime yet (see design-lock §5); the section banner says so.
+async function loadSchedulerScopes() {
+  schedulerScopesLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/scheduler-scopes?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load scheduler scopes', '加载排班管理范围失败')))
+    }
+    adminForbidden.value = false
+    const items = Array.isArray(data.data?.items) ? data.data.items : []
+    schedulerScopes.value = items
+      .map(normalizeSchedulerScope)
+      .filter((item: AttendanceSchedulerScope | null): item is AttendanceSchedulerScope => item !== null)
+  } catch (error: unknown) {
+    setStatus(readErrorMessage(error, tr('Failed to load scheduler scopes', '加载排班管理范围失败')), 'error')
+  } finally {
+    schedulerScopesLoading.value = false
+  }
+}
+
+function schedulerScopeSubjectLabel(subjectType: string): string {
+  if (subjectType === 'user') return tr('Employee', '员工')
+  if (subjectType === 'role') return tr('Role', '角色')
+  if (subjectType === 'role_tag') return tr('Role tag', '角色标签')
+  return subjectType
+}
+
+const ATTENDANCE_SCHEDULER_SCOPE_ACTION_LABELS: Record<string, [string, string]> = {
+  view: ['View', '查看'],
+  edit: ['Edit', '编辑'],
+  import: ['Import', '导入'],
+  export: ['Export', '导出'],
+  clear: ['Clear', '清空'],
+  approve: ['Approve', '审批'],
+  dispatch: ['Dispatch', '调度'],
+}
+function schedulerScopeActionLabel(action: string): string {
+  const pair = ATTENDANCE_SCHEDULER_SCOPE_ACTION_LABELS[action]
+  return pair ? tr(pair[0], pair[1]) : action
+}
+
+function schedulerScopeTargetSummary(scope: AttendanceSchedulerScopeTargets): string {
+  const parts: string[] = []
+  const push = (count: number, en: string, zh: string) => {
+    if (count > 0) parts.push(`${count} ${tr(en, zh)}`)
+  }
+  push(scope.departments.length, 'dept', '部门')
+  push(scope.attendanceGroupIds.length, 'att. groups', '考勤组')
+  push(scope.scheduleGroupIds.length, 'sched. groups', '排班组')
+  push(scope.userIds.length, 'users', '员工')
+  push(scope.roles.length, 'roles', '角色')
+  push(scope.roleTags.length, 'role tags', '角色标签')
+  return parts.length > 0 ? parts.join(' · ') : tr('No targets', '无范围目标')
+}
+
 async function loadAdminData() {
   if (!showAdmin.value) return
   try {
@@ -17390,6 +17550,7 @@ async function loadAdminData() {
       loadShifts(),
       loadAssignments(),
       loadRotationAssignments(),
+      loadSchedulerScopes(),
       loadHolidays(),
     ])
   } catch (error) {
@@ -19747,5 +19908,67 @@ const holidaySectionBindings = {
     flex-direction: column;
     gap: 4px;
   }
+}
+
+.attendance__scheduler-scope-notice {
+  margin: 8px 0 12px;
+  padding: 8px 12px;
+  border: 1px solid #f0d58a;
+  background: #fff8e6;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.attendance__scheduler-scope-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.attendance__scheduler-scope-item {
+  border: 1px solid #e3e8ef;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.attendance__scheduler-scope-item--inactive {
+  opacity: 0.6;
+}
+.attendance__scheduler-scope-subject {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.attendance__scheduler-scope-subject-type {
+  font-size: 12px;
+  color: #5b6b7b;
+}
+.attendance__scheduler-scope-flag {
+  font-size: 12px;
+  color: #b04632;
+  border: 1px solid #e0b4ab;
+  border-radius: 10px;
+  padding: 0 8px;
+}
+.attendance__scheduler-scope-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.attendance__scheduler-scope-action {
+  font-size: 12px;
+  background: #eef2f8;
+  border-radius: 10px;
+  padding: 1px 8px;
+  color: #2c3e50;
+}
+.attendance__scheduler-scope-targets {
+  font-size: 13px;
+  color: #5b6b7b;
 }
 </style>

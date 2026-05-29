@@ -543,6 +543,33 @@ describe('Attendance admin regressions', () => {
         }
         return jsonResponse(200, { ok: true, data: attendanceSettingsData ?? {} })
       }
+      if (url.includes('/api/attendance/scheduler-scopes')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'scope-1',
+                subjectType: 'user',
+                subjectRef: 'Alice',
+                actions: ['view', 'edit'],
+                scope: {
+                  scheduleGroupIds: ['sg-1'],
+                  attendanceGroupIds: [],
+                  userIds: [],
+                  departments: ['dept-eng'],
+                  roles: [],
+                  roleTags: [],
+                },
+                isActive: true,
+              },
+            ],
+            total: 1,
+            page: 1,
+            pageSize: 20,
+          },
+        })
+      }
       return emptyAttendanceResponse()
     })
 
@@ -592,12 +619,32 @@ describe('Attendance admin regressions', () => {
       '/api/attendance/rotation-assignments',
       '/api/attendance/assignments',
       '/api/attendance/rotation-rules',
+      '/api/attendance/scheduler-scopes',
     ]
 
     expect(requestedUrls.length).toBeGreaterThan(0)
     expect(
       requestedUrls.filter(url => forbiddenAdminLoads.some(prefix => url.startsWith(prefix))),
     ).toEqual([])
+  })
+
+  it('renders scheduler scopes as a read-only registry under scheduling admin', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const scopesNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')
+    expect(scopesNav).toBeTruthy()
+    scopesNav!.click()
+    await flushUi(4)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')
+    expect(section).toBeTruthy()
+    expect(window.getComputedStyle(section!).display).not.toBe('none')
+    // The intent banner must ship — it keeps a not-yet-enforced registry honest.
+    expect(section!.querySelector('[data-attendance-scheduler-scopes-intent]')?.textContent || '').toContain('administrative registry')
+    // The mocked scope row renders by subjectRef (real wire render, not a vacuous mount).
+    expect(section!.querySelector('[data-attendance-scheduler-scopes-list]')?.textContent || '').toContain('Alice')
   })
 
   it('keeps the clicked admin section focused and retires the show-all toggle', async () => {
