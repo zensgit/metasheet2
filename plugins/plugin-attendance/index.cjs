@@ -18682,6 +18682,18 @@ module.exports = {
         return
       }
 
+      const decisionComment = normalizeOptionalText(parsed.data.comment)
+      if (action === 'reject' && !decisionComment) {
+        res.status(400).json(
+          validationErrorBody(
+            'Rejection comment is required',
+            singleValidationDetail('comment', 'Required when rejecting an attendance request')
+          )
+        )
+        return
+      }
+      const decisionActorName = getUserLabel(req, requesterId)
+
       try {
         const result = await db.transaction(async (trx) => {
           const requestRows = await trx.query(
@@ -18735,6 +18747,7 @@ module.exports = {
             ? (isFinalApproval ? 'approved' : 'pending')
             : 'rejected'
           const newVersion = Number(approval.version ?? 0) + 1
+          const resolvedAt = new Date()
 
           await trx.query(
             'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
@@ -18755,8 +18768,8 @@ module.exports = {
               approvalId,
               action,
               requesterId,
-              getUserLabel(req, requesterId),
-              parsed.data.comment ?? null,
+              decisionActorName,
+              decisionComment,
               approval.status,
               newStatus,
               approval.version,
@@ -18767,7 +18780,6 @@ module.exports = {
             ]
           )
 
-          const resolvedAt = new Date()
           const nextMetadata = { ...requestMetadata }
           if (flowMeta.id || flowMeta.name || flowSteps.length > 0) {
             nextMetadata.approvalFlow = {
@@ -18775,6 +18787,16 @@ module.exports = {
               name: flowMeta.name,
               steps: flowSteps,
               currentStep: isFinalApproval ? currentStepIndex : currentStepIndex + 1,
+            }
+          }
+          if (isFinalApproval) {
+            nextMetadata.resolution = {
+              action,
+              status: newStatus,
+              comment: decisionComment,
+              actorId: requesterId,
+              actorName: decisionActorName,
+              resolvedAt: resolvedAt.toISOString(),
             }
           }
 

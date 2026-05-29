@@ -3882,6 +3882,92 @@ attendanceIntegrationDescribe(
     expect((requestGetAfterDeleteRes.body as { data?: { request?: { status?: string } } } | undefined)?.data?.request?.status).toBe('cancelled')
   })
 
+  it('requires rejection comments and exposes request reason plus rejection note', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-reject-note-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const requestReason = 'I need to correct the check-in time from the kiosk.'
+    const rejectionComment = 'Please attach kiosk or manager evidence.'
+    const requestCreateRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        workDate,
+        requestType: 'time_correction',
+        requestedInAt: new Date().toISOString(),
+        reason: requestReason,
+      }),
+    })
+    expect(requestCreateRes.status).toBe(201)
+    const createdRequest = (requestCreateRes.body as { data?: { request?: { id?: string; reason?: string } } } | undefined)?.data?.request
+    expect(createdRequest?.reason).toBe(requestReason)
+    const requestId = createdRequest?.id
+    expect(requestId).toBeTruthy()
+    if (!requestId) return
+
+    const emptyRejectRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/reject`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ comment: '   ' }),
+    })
+    expect(emptyRejectRes.status).toBe(400)
+    const emptyRejectBody = (emptyRejectRes.body as {
+      ok?: boolean
+      error?: { code?: string; message?: string; details?: Array<{ field?: string }> }
+    } | undefined) ?? {}
+    expect(emptyRejectBody.ok).toBe(false)
+    expect(emptyRejectBody.error?.code).toBe('VALIDATION_ERROR')
+    expect(emptyRejectBody.error?.message).toBe('Rejection comment is required')
+    expect(emptyRejectBody.error?.details?.[0]?.field).toBe('comment')
+
+    const rejectRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/reject`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ comment: rejectionComment }),
+    })
+    expect(rejectRes.status).toBe(200)
+    expect((rejectRes.body as { data?: { status?: string } } | undefined)?.data?.status).toBe('rejected')
+
+    const requestGetRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(requestGetRes.status).toBe(200)
+    const rejectedRequest = (requestGetRes.body as {
+      data?: {
+        request?: {
+          status?: string
+          reason?: string
+          metadata?: { resolution?: { action?: string; status?: string; comment?: string } }
+        }
+      }
+    } | undefined)?.data?.request
+    expect(rejectedRequest?.status).toBe('rejected')
+    expect(rejectedRequest?.reason).toBe(requestReason)
+    expect(rejectedRequest?.metadata?.resolution?.action).toBe('reject')
+    expect(rejectedRequest?.metadata?.resolution?.status).toBe('rejected')
+    expect(rejectedRequest?.metadata?.resolution?.comment).toBe(rejectionComment)
+  })
+
   it('returns validation errors for malformed attendance UUID route params', async () => {
     if (!baseUrl) return
 
