@@ -239,4 +239,103 @@ describe('attendance scheduling assignment conflict guard', () => {
     })
     expect(db.query).toHaveBeenCalledTimes(3)
   })
+
+  it('applies fixed-schedule group plans by locking users, skipping exact matches, and inserting only missing rows', async () => {
+    const db = {
+      query: vi.fn()
+        .mockResolvedValueOnce([{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }])
+        .mockResolvedValueOnce([{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }])
+        .mockResolvedValueOnce([{ user_id: 'user-create' }, { user_id: 'user-skip' }])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            id: 'assignment-skip',
+            user_id: 'user-skip',
+            shift_id: 'shift-a',
+            start_date: '2026-06-01',
+            end_date: '2026-06-30',
+            kind: 'shift',
+          },
+        ])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            id: 'assignment-created',
+            org_id: 'org-a',
+            user_id: 'user-create',
+            shift_id: 'shift-a',
+            start_date: '2026-06-01',
+            end_date: '2026-06-30',
+            is_active: true,
+          },
+        ]),
+    }
+
+    const result = await helpers.applyAttendanceGroupFixedSchedule(db, {
+      orgId: 'org-a',
+      groupId: 'group-a',
+      shiftId: 'shift-a',
+      startDate: '2026-06-01',
+      endDate: '2026-06-30',
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.data.wouldCreate.map((item: any) => item.userId)).toEqual(['user-create'])
+    expect(result.data.skipped.map((item: any) => item.userId)).toEqual(['user-skip'])
+    expect(result.data.blockingConflicts).toEqual([])
+    expect(result.data.created).toEqual([
+      expect.objectContaining({
+        id: 'assignment-created',
+        orgId: 'org-a',
+        userId: 'user-create',
+        shiftId: 'shift-a',
+        startDate: '2026-06-01',
+        endDate: '2026-06-30',
+        isActive: true,
+      }),
+    ])
+
+    const queries = db.query.mock.calls.map(call => String(call[0]))
+    expect(queries.filter(sql => sql.includes('pg_advisory_xact_lock'))).toHaveLength(2)
+    expect(queries.filter(sql => /\bINSERT INTO attendance_shift_assignments\b/i.test(sql))).toHaveLength(1)
+  })
+
+  it('refuses fixed-schedule group applies without inserting when a blocking conflict exists', async () => {
+    const db = {
+      query: vi.fn()
+        .mockResolvedValueOnce([{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }])
+        .mockResolvedValueOnce([{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }])
+        .mockResolvedValueOnce([{ user_id: 'user-conflict' }])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            id: 'assignment-conflict',
+            user_id: 'user-conflict',
+            shift_id: 'shift-b',
+            start_date: '2026-06-10',
+            end_date: '2026-06-20',
+            kind: 'shift',
+          },
+        ])
+        .mockResolvedValueOnce([]),
+    }
+
+    const result = await helpers.applyAttendanceGroupFixedSchedule(db, {
+      orgId: 'org-a',
+      groupId: 'group-a',
+      shiftId: 'shift-a',
+      startDate: '2026-06-01',
+      endDate: '2026-06-30',
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: 409,
+      code: 'ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT',
+    })
+    expect(result.details.blockingConflicts.map((item: any) => item.userId)).toEqual(['user-conflict'])
+    const queries = db.query.mock.calls.map(call => String(call[0])).join('\n')
+    expect(queries).not.toMatch(/\bINSERT INTO attendance_shift_assignments\b/i)
+  })
 })
