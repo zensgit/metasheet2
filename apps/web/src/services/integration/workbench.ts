@@ -579,6 +579,53 @@ export async function listIntegrationDeadLetters(
   return Array.isArray(data) ? data : []
 }
 
+// DF-N2-3 read-only: one redacted provenance event in a row's cross-run timeline.
+// Mirrors the DF-N2-2c OpenAPI ProvenanceTimelineEntry (GET /api/integration/provenance).
+// attrs were redacted at write (DF-N2-2b scrub gate); this read path does NOT re-redact.
+export interface IntegrationProvenanceTimelineEntry {
+  runId: string
+  pipelineId: string
+  rowId: string
+  eventType: string
+  at: string
+  attrs: Record<string, unknown>
+  eventIndex: number
+  runStatus: string
+  runMode: string
+  runCreatedAt: string
+}
+
+export interface IntegrationProvenanceQuery extends IntegrationScope {
+  rowId: string
+  // pipelineId is sent to avoid cross-pipeline idempotency-key collisions merging
+  // unrelated row timelines; the read route applies it as an extra view filter.
+  pipelineId?: string
+  from?: string
+  to?: string
+  limit?: number
+  offset?: number
+}
+
+// DF-N2-3 (read-only): a row's cross-run provenance timeline from the DF-N2-2c
+// by-rowId route. rowId is the idempotency key the provenance view groups on. No
+// write/replay/retry; the route is read-only and 501s on hosts without it.
+export async function listIntegrationProvenanceByRow(
+  query: IntegrationProvenanceQuery,
+): Promise<IntegrationProvenanceTimelineEntry[]> {
+  const response = await apiFetch(`/api/integration/provenance?${buildQueryString({
+    tenantId: query.tenantId,
+    workspaceId: query.workspaceId,
+    rowId: query.rowId,
+    pipelineId: query.pipelineId,
+    from: query.from,
+    to: query.to,
+    limit: query.limit,
+    offset: query.offset,
+  })}`)
+  const data = await parseIntegrationResponse<IntegrationProvenanceTimelineEntry[]>(response)
+  return Array.isArray(data) ? data : []
+}
+
 export interface IntegrationDeadLetterReplayPayload extends IntegrationScope {
   mode?: IntegrationPipelineMode
 }

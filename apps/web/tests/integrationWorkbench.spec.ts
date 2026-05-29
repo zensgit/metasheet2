@@ -6,6 +6,7 @@ import {
   listExternalSystemObjects,
   listIntegrationAdapters,
   listIntegrationPipelineRuns,
+  listIntegrationProvenanceByRow,
   listIntegrationStagingDescriptors,
   listWorkbenchExternalSystems,
   previewIntegrationTemplate,
@@ -444,5 +445,67 @@ describe('integration dead-letter replay service', () => {
     ))
     await expect(replayIntegrationDeadLetter('dl 1', { tenantId: 'default' }))
       .rejects.toThrow('write permission required')
+  })
+})
+
+describe('integration provenance read service (DF-N2-3)', () => {
+  beforeEach(() => {
+    apiFetchMock.mockReset()
+  })
+
+  it('reads a row cross-run timeline by-rowId with rowId + pipelineId + scope on the GET, and coerces to an array', async () => {
+    const calls: Array<{ url: string; method?: string }> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method })
+      if (url.startsWith('/api/integration/provenance')) {
+        return jsonResponse([
+          {
+            runId: 'run_a',
+            pipelineId: 'pipe_x',
+            rowId: 'MAT-9',
+            eventType: 'target_write_failed',
+            at: '2026-05-28T00:00:00.000Z',
+            attrs: { errorCode: 'VALIDATION_FAILED' },
+            eventIndex: 0,
+            runStatus: 'partial',
+            runMode: 'manual',
+            runCreatedAt: '2026-05-28T00:00:00.000Z',
+          },
+        ])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const entries = await listIntegrationProvenanceByRow({
+      tenantId: 'default',
+      rowId: 'MAT-9',
+      pipelineId: 'pipe_x',
+    })
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ runId: 'run_a', rowId: 'MAT-9', eventType: 'target_write_failed' })
+
+    // The GET carries rowId + pipelineId (collision guard) + tenant scope; read-only.
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toContain('/api/integration/provenance?')
+    expect(calls[0].url).toContain('rowId=MAT-9')
+    expect(calls[0].url).toContain('pipelineId=pipe_x')
+    expect(calls[0].url).toContain('tenantId=default')
+    expect(calls[0].method ?? 'GET').toBe('GET')
+  })
+
+  it('omits empty optional params and tolerates a non-array body', async () => {
+    const calls: string[] = []
+    apiFetchMock.mockImplementation(async (url: string) => {
+      calls.push(url)
+      // Non-array body (e.g. an unexpected envelope) must coerce to [].
+      return jsonResponse({ unexpected: true })
+    })
+    const entries = await listIntegrationProvenanceByRow({ tenantId: 'default', rowId: 'MAT-1' })
+    expect(entries).toEqual([])
+    // No pipelineId/from/to/limit/offset provided → those keys are absent from the query.
+    expect(calls[0]).not.toContain('pipelineId=')
+    expect(calls[0]).not.toContain('from=')
+    expect(calls[0]).not.toContain('limit=')
+    expect(calls[0]).toContain('rowId=MAT-1')
   })
 })

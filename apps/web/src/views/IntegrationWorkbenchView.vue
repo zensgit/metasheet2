@@ -767,6 +767,68 @@
                   </template>
                 </template>
               </div>
+              <div class="integration-workbench__dead-letter-provenance">
+                <button
+                  type="button"
+                  class="integration-workbench__link-button"
+                  :data-testid="`toggle-dead-letter-provenance-${deadLetter.id}`"
+                  :disabled="!canViewRowProvenance(deadLetter)"
+                  :title="canViewRowProvenance(deadLetter) ? '查看该行(rowId)跨 run 的写入血缘（只读）' : '该 dead letter 无 idempotency key（rowId），无法查询血缘'"
+                  @click="toggleDeadLetterProvenance(deadLetter)"
+                >{{ isRowProvenanceExpanded(deadLetter.id) ? '收起血缘' : '查看跨-run 血缘' }}</button>
+                <span
+                  v-if="!canViewRowProvenance(deadLetter)"
+                  class="integration-workbench__hint"
+                  :data-testid="`dead-letter-provenance-unavailable-${deadLetter.id}`"
+                >无 rowId（idempotency key），不可查血缘</span>
+                <div
+                  v-if="isRowProvenanceExpanded(deadLetter.id)"
+                  class="integration-workbench__provenance-timeline"
+                  :data-testid="`dead-letter-provenance-${deadLetter.id}`"
+                >
+                  <div
+                    v-if="isRowProvenanceLoading(deadLetter.id)"
+                    class="integration-workbench__hint"
+                    :data-testid="`dead-letter-provenance-loading-${deadLetter.id}`"
+                  >血缘加载中…</div>
+                  <div
+                    v-else-if="rowProvenanceError(deadLetter.id)"
+                    class="integration-workbench__hint integration-workbench__hint--strong"
+                    :data-testid="`dead-letter-provenance-error-${deadLetter.id}`"
+                  >{{ rowProvenanceError(deadLetter.id) }}</div>
+                  <ol
+                    v-else-if="rowProvenanceTimeline(deadLetter.id).length > 0"
+                    class="integration-workbench__record-list"
+                    :data-testid="`dead-letter-provenance-timeline-${deadLetter.id}`"
+                  >
+                    <li
+                      v-for="(entry, index) in rowProvenanceTimeline(deadLetter.id)"
+                      :key="`${entry.runId}-${entry.eventIndex}`"
+                      :data-testid="`provenance-entry-${deadLetter.id}-${index}`"
+                    >
+                      <div class="integration-workbench__provenance-event-head">
+                        <strong>{{ entry.eventType }}</strong>
+                        <span
+                          class="integration-workbench__run-status"
+                          :class="`integration-workbench__run-status--${entry.runStatus}`"
+                        >run {{ entry.runStatus }}</span>
+                        <span>{{ entry.runCreatedAt || entry.at }}</span>
+                      </div>
+                      <small>runId {{ entry.runId }} · pipeline {{ entry.pipelineId }} · {{ entry.runMode }}</small>
+                      <p
+                        v-if="rowProvenanceAttrsSummary(entry.attrs)"
+                        class="integration-workbench__provenance-attrs"
+                      >{{ rowProvenanceAttrsSummary(entry.attrs) }}</p>
+                    </li>
+                  </ol>
+                  <div
+                    v-else
+                    class="integration-workbench__empty"
+                    :data-testid="`dead-letter-provenance-empty-${deadLetter.id}`"
+                  >暂无血缘事件。</div>
+                  <p class="integration-workbench__hint">只读：仅展示脱敏后的事件，不含 payload 原文，不触发任何写入/重放。</p>
+                </div>
+              </div>
             </li>
           </ol>
         </div>
@@ -839,6 +901,7 @@ import {
   isDeadLetterReplayable,
   listIntegrationDeadLetters,
   listIntegrationPipelineRuns,
+  listIntegrationProvenanceByRow,
   listIntegrationStagingDescriptors,
   listExternalSystemObjects,
   listIntegrationAdapters,
@@ -859,6 +922,7 @@ import {
   type IntegrationPipelineMode,
   type IntegrationPipelineRun,
   type IntegrationPipelineRunResult,
+  type IntegrationProvenanceTimelineEntry,
   type IntegrationTargetWriteSummary,
   type IntegrationStagingDescriptor,
   type IntegrationStagingInstallResult,
@@ -1003,6 +1067,12 @@ const lastDryRunResult = ref<IntegrationPipelineRunResult | null>(null)
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
 const expandedRunIds = ref<Set<string>>(new Set())
+// DF-N2-3 (read-only): per-dead-letter cross-run provenance timeline, fetched lazily
+// on expand by the row's idempotency key (rowId). No write/replay affordance here.
+const expandedDeadLetterProvenanceIds = ref<Set<string>>(new Set())
+const rowProvenanceByDeadLetterId = ref<Map<string, IntegrationProvenanceTimelineEntry[]>>(new Map())
+const rowProvenanceLoadingIds = ref<Set<string>>(new Set())
+const rowProvenanceErrorById = ref<Map<string, string>>(new Map())
 const confirmReplayDeadLetterId = ref('')
 const replayingDeadLetterId = ref('')
 const statusMessage = ref('')
@@ -2418,6 +2488,84 @@ function toggleRunSummaries(runId: string): void {
   expandedRunIds.value = next
 }
 
+// DF-N2-3 (read-only): a dead-letter's row (idempotency key) is the only typed rowId
+// in this panel. Expanding fetches that row's cross-run provenance timeline once via
+// the DF-N2-2c by-rowId GET; pipelineId is passed to avoid cross-pipeline key
+// collisions. This is observation only — never a write, replay, or retry.
+function canViewRowProvenance(deadLetter: IntegrationDeadLetter): boolean {
+  return typeof deadLetter.idempotencyKey === 'string' && deadLetter.idempotencyKey.trim().length > 0
+}
+
+function isRowProvenanceExpanded(deadLetterId: string): boolean {
+  return expandedDeadLetterProvenanceIds.value.has(deadLetterId)
+}
+
+function isRowProvenanceLoading(deadLetterId: string): boolean {
+  return rowProvenanceLoadingIds.value.has(deadLetterId)
+}
+
+function rowProvenanceTimeline(deadLetterId: string): IntegrationProvenanceTimelineEntry[] {
+  return rowProvenanceByDeadLetterId.value.get(deadLetterId) ?? []
+}
+
+function rowProvenanceError(deadLetterId: string): string {
+  return rowProvenanceErrorById.value.get(deadLetterId) ?? ''
+}
+
+// Compact, names-safe summary of the already-redacted attrs (no raw payload dump).
+function rowProvenanceAttrsSummary(attrs: Record<string, unknown> | undefined): string {
+  if (!attrs || typeof attrs !== 'object') return ''
+  const parts: string[] = []
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value === null || value === undefined) continue
+    const text = typeof value === 'object' ? JSON.stringify(value) : String(value)
+    parts.push(`${key}=${text.length > 60 ? `${text.slice(0, 60)}…` : text}`)
+    if (parts.length >= 4) break
+  }
+  const remaining = Object.keys(attrs).length - parts.length
+  return remaining > 0 ? `${parts.join(' · ')} · +${remaining}` : parts.join(' · ')
+}
+
+async function toggleDeadLetterProvenance(deadLetter: IntegrationDeadLetter): Promise<void> {
+  // No rowId (idempotency key) → nothing to look up (the toggle is disabled in the
+  // UI too); guard before toggling so a no-key row never opens an empty panel.
+  if (!canViewRowProvenance(deadLetter)) return
+  const next = new Set(expandedDeadLetterProvenanceIds.value)
+  if (next.has(deadLetter.id)) {
+    next.delete(deadLetter.id)
+    expandedDeadLetterProvenanceIds.value = next
+    return
+  }
+  next.add(deadLetter.id)
+  expandedDeadLetterProvenanceIds.value = next
+  // Fetch once per row; re-expanding a collapsed row reuses the cached timeline.
+  if (rowProvenanceByDeadLetterId.value.has(deadLetter.id)) return
+  const loading = new Set(rowProvenanceLoadingIds.value)
+  loading.add(deadLetter.id)
+  rowProvenanceLoadingIds.value = loading
+  const clearedError = new Map(rowProvenanceErrorById.value)
+  clearedError.delete(deadLetter.id)
+  rowProvenanceErrorById.value = clearedError
+  try {
+    const entries = await listIntegrationProvenanceByRow({
+      ...currentScope(),
+      rowId: String(deadLetter.idempotencyKey),
+      pipelineId: deadLetter.pipelineId,
+    })
+    const map = new Map(rowProvenanceByDeadLetterId.value)
+    map.set(deadLetter.id, entries)
+    rowProvenanceByDeadLetterId.value = map
+  } catch (error) {
+    const map = new Map(rowProvenanceErrorById.value)
+    map.set(deadLetter.id, error instanceof Error ? error.message : String(error))
+    rowProvenanceErrorById.value = map
+  } finally {
+    const done = new Set(rowProvenanceLoadingIds.value)
+    done.delete(deadLetter.id)
+    rowProvenanceLoadingIds.value = done
+  }
+}
+
 // Two-step confirm before any live replay. Replay re-runs the pipeline with the
 // stored payload (a real target/ERP write), so it mirrors the deliberate
 // allowSaveOnlyRun opt-in used for Save-only runs in this view.
@@ -3471,6 +3619,33 @@ watch(showAdvancedConnectors, () => {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+/* DF-N2-3 read-only cross-run provenance timeline (per dead-letter row). */
+.integration-workbench__dead-letter-provenance {
+  margin-top: 6px;
+  display: grid;
+  gap: 4px;
+}
+
+.integration-workbench__provenance-timeline {
+  display: grid;
+  gap: 6px;
+  padding: 6px 0 0;
+}
+
+.integration-workbench__provenance-event-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.integration-workbench__provenance-attrs {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: #5a6473;
+  word-break: break-word;
 }
 
 .integration-workbench__badge--retryable {
