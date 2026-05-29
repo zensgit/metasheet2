@@ -2,6 +2,7 @@
 import { Worker, MessageChannel } from 'worker_threads'
 import { EventEmitter } from 'eventemitter3'
 import path from 'path'
+import os from 'os'
 import crypto from 'crypto'
 import fs from 'fs/promises'
 
@@ -105,7 +106,10 @@ export class ScriptSandbox extends EventEmitter {
         'worker_threads'
       ],
       env: options.env || {},
-      workDir: options.workDir || '/tmp/sandbox',
+      // Lane C / C1: default under the OS temp dir (os.tmpdir()) instead of the hardcoded POSIX
+      // '/tmp/sandbox', so the sandbox is portable to native Windows (no '/tmp'). Identical value
+      // on POSIX where os.tmpdir() resolves to /tmp; resolves under %TEMP% on Windows.
+      workDir: options.workDir || path.join(os.tmpdir(), 'sandbox'),
       maxOutputSize: options.maxOutputSize || 1024 * 1024, // 1MB
       maxExecutions: options.maxExecutions || 1000,
       isolateContext: options.isolateContext !== false
