@@ -12,9 +12,15 @@ const { createK3WiseWebApiAdapter } = require('../lib/adapters/k3-wise-webapi-ad
 const { __internals: httpInternals } = require('../lib/http-routes.cjs')
 const { getK3WiseMaterialProfile, getK3WiseDocumentObjectDefaults } = require('../lib/adapters/k3-wise-document-templates.cjs')
 const composer = require('../lib/adapters/k3-save-body-composer.cjs')
+// DF-T3b-2a: resolve from_reference_table INTO the record, then prove the resolved record composes
+// BYTE-IDENTICALLY through the schema-path preview and the real adapter Save.
+const { K3_REFERENCE_MAPPING_TEMPLATES } = require('../lib/reference-mapping-templates.cjs')
+const { buildReferenceMappingIndex, resolveReferenceRulesIntoRecord, UNRESOLVED_PLACEHOLDER } = require('../lib/reference-mapping-resolver.cjs')
 
 const PROFILE_ID = 'material-k3wise-customer-profile-v1'
-const { buildTemplatePreview } = httpInternals
+const { buildTemplatePreview, buildTargetPayloadPreview } = httpInternals
+const UNIT_GROUP_TEMPLATE = K3_REFERENCE_MAPPING_TEMPLATES.find((t) => t.domain === 'unit-group') // BY_NUMBER
+const REF_RULE = { targetField: 'FUnitGroupID', domain: 'unit-group', sourceField: 'unitGroupSourceCode' }
 
 function jsonResponse(status, body) {
   return { ok: status >= 200 && status < 300, status, headers: { get: () => null }, async text() { return JSON.stringify(body) } }
@@ -187,8 +193,111 @@ async function testCustomerProfileDropsFBaseUnitID() {
   assert.equal(body.Data.FModel, 'M-1', 'FModel scalar still composes')
 }
 
+// ---- DF-T3b-2a Parity 4: resolved-record byte-parity — a from_reference_table reference resolved
+//      INTO the record composes identically on the preview schema path and the adapter Save ----
+async function testResolvedRecordParity() {
+  const indexes = { 'unit-group': buildReferenceMappingIndex(UNIT_GROUP_TEMPLATE, [
+    { sourceCode: 'STD', fNumber: '10', fName: 'Each', enabled: true },
+  ]) }
+  const source = { FNumber: 'MAT-RM1', FName: 'Bolt', unitGroupSourceCode: 'STD' }
+  const { record: resolved } = resolveReferenceRulesIntoRecord(source, [REF_RULE], indexes)
+  // sanity: the resolver materialized the FULL reference object into the record
+  assert.deepEqual(resolved.FUnitGroupID, { FNumber: '10', FName: 'Each' }, 'resolver materialized the reference into the record')
+
+  const { body } = await adapterSaveBody(resolved)
+  const preview = previewPayload(resolved)
+  const expected = { Data: { FNumber: 'MAT-RM1', FName: 'Bolt', FUnitGroupID: { FNumber: '10', FName: 'Each' } } }
+  assert.deepEqual(body, expected, 'adapter Save composes the resolved reference (unitGroupSourceCode dropped — not in schema)')
+  assert.deepEqual(preview.payload, body, 'DF-T3b-2a: preview ≡ adapter Save with a from_reference_table-resolved reference')
+  assert.equal(preview.valid, true)
+}
+
+// ---- DF-T3b-2a Parity 5: all THREE non-resolved statuses → IDENTICAL fail-closed disposition on
+//      both sides (preview valid:false + adapter Save throws K3_WISE_PRESET_PLACEHOLDER_UNFILLED).
+//      Mirrors testPlaceholderParity — the Save throws (no body) so we assert disposition, not bytes. ----
+async function testNonResolvedFailClosedParity() {
+  const cases = {
+    unresolved: [{ sourceCode: 'OTHER', fNumber: '9', fName: 'X', enabled: true }],
+    ambiguous: [
+      { sourceCode: 'STD', fNumber: 'A', fName: 'X', enabled: true },
+      { sourceCode: 'STD', fNumber: 'B', fName: 'Y', enabled: true },
+    ],
+    'incomplete-row': [{ sourceCode: 'STD', fNumber: 'A', enabled: true }], // missing fName
+  }
+  for (const [label, rows] of Object.entries(cases)) {
+    const indexes = { 'unit-group': buildReferenceMappingIndex(UNIT_GROUP_TEMPLATE, rows) }
+    const { record: resolved } = resolveReferenceRulesIntoRecord({ FNumber: 'MAT-X', FName: 'Y', unitGroupSourceCode: 'STD' }, [REF_RULE], indexes)
+    assert.equal(resolved.FUnitGroupID, UNRESOLVED_PLACEHOLDER, `${label}: target field carries the sentinel`)
+
+    const { result, body } = await adapterSaveBody(resolved)
+    assert.equal(body, null, `${label}: adapter made NO Save call (fail-closed before HTTP)`)
+    assert.equal(result.written, 0, `${label}: nothing written`)
+    assert.equal(result.errors[0].code, 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED', `${label}: Save throws the placeholder code`)
+
+    const preview = previewPayload(resolved)
+    assert.equal(preview.valid, false, `${label}: preview reports invalid`)
+    assert.ok(preview.placeholderErrors.some((e) => /FUnitGroupID/.test(e.field)), `${label}: preview names the unresolved field`)
+    assert.ok(preview.placeholderErrors.every((e) => e.code === 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED'),
+      `${label}: preview placeholder code matches the Save throw code (identical disposition)`)
+  }
+}
+
+// ---- DF-T3b-2a Parity 6: desync NEGATIVE CONTROL — resolving the two sides with DIFFERENT indexes
+//      must break byte-parity, proving the assertion catches a preview/Save resolver divergence. ----
+async function testDesyncNegativeControl() {
+  const source = { FNumber: 'MAT-DS', FName: 'Z', unitGroupSourceCode: 'STD' }
+  const indexA = { 'unit-group': buildReferenceMappingIndex(UNIT_GROUP_TEMPLATE, [{ sourceCode: 'STD', fNumber: '10', fName: 'Each', enabled: true }]) }
+  const indexB = { 'unit-group': buildReferenceMappingIndex(UNIT_GROUP_TEMPLATE, [{ sourceCode: 'STD', fNumber: '99', fName: 'Box', enabled: true }]) }
+  const previewResolved = resolveReferenceRulesIntoRecord(source, [REF_RULE], indexA).record
+  const saveResolved = resolveReferenceRulesIntoRecord(source, [REF_RULE], indexB).record
+  const { body } = await adapterSaveBody(saveResolved)
+  const preview = previewPayload(previewResolved)
+  assert.notDeepEqual(preview.payload, body, 'desync (different indexes) → byte-parity assertion catches the divergence')
+}
+
+// ---- DF-T3b-2a Parity 7: NESTED sourceField — the operator preview and the record materializer must
+//      extract the sourceCode with the SAME path semantics (getPath), so they resolve the SAME object.
+//      Guards the "shared decision cannot diverge" claim against extraction drift (flat vs nested). ----
+function testNestedSourceFieldNoDivergence() {
+  const indexes = { 'unit-group': buildReferenceMappingIndex(UNIT_GROUP_TEMPLATE, [{ sourceCode: 'STD', fNumber: '10', fName: 'Each', enabled: true }]) }
+  const nestedRule = { targetField: 'FUnitGroupID', domain: 'unit-group', sourceField: 'source.unitGroup' }
+  const sourceRecord = { source: { unitGroup: 'STD' } }
+
+  const preview = buildTargetPayloadPreview(
+    { bodyKey: 'Data', payloadTemplate: {}, sourceRecord, fieldRules: [{ ...nestedRule, sourceType: 'from_reference_table', shape: 'object-passthrough', completeness: 'require-fnumber-fname' }] },
+    { referenceMappingIndexes: indexes },
+  )
+  const { record } = resolveReferenceRulesIntoRecord(sourceRecord, [nestedRule], indexes)
+  assert.equal(preview.payload.Data.FUnitGroupID.FNumber, '10', 'preview resolves a nested sourceField (getPath)')
+  assert.equal(record.FUnitGroupID.FNumber, '10', 'materializer resolves the SAME nested sourceField (no flat-vs-nested divergence)')
+  assert.deepEqual(preview.payload.Data.FUnitGroupID, record.FUnitGroupID, 'preview path ≡ materializer for a nested sourceField')
+}
+
+// ---- DF-T3b-2a Parity 8: OVERLAPPING source/target rules — the operator preview always reads the
+//      original sourceRecord; the materializer must too (read snapshot = original, write = clone), so an
+//      earlier rule writing a path a later rule reads cannot diverge between the two surfaces. ----
+function testSourceTargetOverlapNoDivergence() {
+  const indexes = { 'unit-group': buildReferenceMappingIndex(UNIT_GROUP_TEMPLATE, [{ sourceCode: 'STD', fNumber: '10', fName: 'Each', enabled: true }]) }
+  const overlapRules = [
+    { targetField: 'source.unitGroup', domain: 'unit-group', sourceField: 'source.unitGroup' }, // rule 1 writes the read path
+    { targetField: 'FUnitGroupID', domain: 'unit-group', sourceField: 'source.unitGroup' }, // rule 2 reads it
+  ]
+  const sourceRecord = { source: { unitGroup: 'STD' } }
+  const preview = buildTargetPayloadPreview(
+    { bodyKey: 'Data', payloadTemplate: {}, sourceRecord, fieldRules: overlapRules.map((r) => ({ ...r, sourceType: 'from_reference_table', shape: 'object-passthrough', completeness: 'require-fnumber-fname' })) },
+    { referenceMappingIndexes: indexes },
+  )
+  const { record } = resolveReferenceRulesIntoRecord(sourceRecord, overlapRules, indexes)
+  assert.equal(preview.payload.Data.FUnitGroupID.FNumber, '10', 'preview resolves FUnitGroupID (reads original snapshot)')
+  assert.equal(record.FUnitGroupID.FNumber, '10', 'materializer resolves FUnitGroupID identically (reads original, writes clone)')
+  assert.deepEqual(preview.payload.Data.FUnitGroupID, record.FUnitGroupID, 'preview ≡ materializer with overlapping source/target rules')
+  assert.equal(sourceRecord.source.unitGroup, 'STD', 'the input sourceRecord is not mutated')
+}
+
 async function main() {
   await testScalarShapeParity()
+  testNestedSourceFieldNoDivergence()
+  testSourceTargetOverlapNoDivergence()
   await testObjectPassthroughParity()
   await testPlaceholderParity()
   await testPreviewIsNoWrite()
@@ -197,7 +306,10 @@ async function main() {
   testIdentifierEmptyStringFallback()
   testNoDivergentDuplicate()
   await testCustomerProfileDropsFBaseUnitID()
-  console.log('✓ k3-save-body-composer.parity: preview ≡ adapter Save (shape/passthrough/placeholder), nested-path preserved, identifier-fallback, no-write, opt-in, no divergent duplicate, customer-profile drops FBaseUnitID')
+  await testResolvedRecordParity()
+  await testNonResolvedFailClosedParity()
+  await testDesyncNegativeControl()
+  console.log('✓ k3-save-body-composer.parity: preview ≡ adapter Save (shape/passthrough/placeholder), nested-path preserved, identifier-fallback, no-write, opt-in, no divergent duplicate, customer-profile drops FBaseUnitID, DF-T3b-2a resolved-record parity + 3-state fail-closed + desync neg-control')
 }
 
 main().catch((err) => {

@@ -40,6 +40,9 @@ const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
 // DF-T1 reuses applyReferenceShape (shaping) + findUnfilledPlaceholders (detection); it does
 // NOT introduce a new K3 shaper/projector.
 const { projectRecordForBody, findUnfilledPlaceholders, applyReferenceShape, isBlankValue } = require('./adapters/k3-save-body-composer.cjs')
+// DF-T3b-2a: from_reference_table resolves a per-material reference via the shared resolver (the
+// SAME decision both the preview and the record materializer use, so they cannot diverge).
+const { resolveReferenceRuleValue } = require('./reference-mapping-resolver.cjs')
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
 const { deriveK3MaterialTemplateDraft, summarizeTemplateForEvidence, TemplateDeriveError } = require('./connector-template-derive.cjs')
 const { validateRecord } = require('./validator.cjs')
@@ -629,6 +632,8 @@ function normalizeFieldRules(value) {
       shape,
       completeness,
       required: rule.required === true,
+      // DF-T3b-2a: domain selects the mapping index for a from_reference_table rule (else undefined).
+      domain: firstString(rule.domain) || undefined,
     }
   })
 }
@@ -650,10 +655,13 @@ function checkReferenceCompleteness(completeness, value) {
   return null
 }
 
-function buildTargetPayloadPreview(input) {
+function buildTargetPayloadPreview(input, options = {}) {
   if (!isPlainObject(input.sourceRecord)) {
     throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'sourceRecord must be an object', { field: 'sourceRecord' })
   }
+  // DF-T3b-2a: mapping indexes are SERVER-SIDE only (not from the client body) — passed via options.
+  // T3b-2a injects them in tests; T3b-2b will source them from a live mapping-sheet bulk-read.
+  const referenceMappingIndexes = isPlainObject(options.referenceMappingIndexes) ? options.referenceMappingIndexes : undefined
   // Reuse the legacy preview's bodyKey guard (rejects __proto__/prototype/constructor and
   // control chars) — DF-T1 must NOT bypass it (P2).
   const bodyKey = normalizePreviewBodyKey(
@@ -665,13 +673,25 @@ function buildTargetPayloadPreview(input) {
   const fieldProvenance = {}
   const missingRequiredFields = []
   const unresolvedReferenceComponents = []
+  const referenceResolutions = [] // DF-T3b-2a: values-free resolution evidence per from_reference_table rule
   for (const rule of fieldRules) {
     if (rule.sourceType === 'preserve_template') {
       fieldProvenance[rule.targetField] = 'template'
     } else {
       let raw
-      if (rule.sourceType === 'from_staging') raw = getPath(input.sourceRecord, rule.sourceField)
-      else raw = rule.value // from_constant, or from_reference_table (v1 = pre-resolved scalar)
+      if (rule.sourceType === 'from_staging') {
+        raw = getPath(input.sourceRecord, rule.sourceField)
+      } else if (rule.sourceType === 'from_reference_table') {
+        // DF-T3b-2a: resolve the material's sourceCode via the injected mapping index for rule.domain,
+        // through the SHARED decision fn (so preview ≡ the record materializer). Non-resolved
+        // (unresolved/ambiguous/incomplete) → UNRESOLVED sentinel → fail-closed via
+        // findUnfilledPlaceholders, identical to the Save side. Evidence is values-free.
+        const resolution = resolveReferenceRuleValue(referenceMappingIndexes, rule, getPath(input.sourceRecord, rule.sourceField))
+        raw = resolution.value
+        referenceResolutions.push({ field: rule.targetField, status: resolution.outcome.status, evidence: resolution.outcome.evidence })
+      } else {
+        raw = rule.value // from_constant
+      }
       fieldProvenance[rule.targetField] = rule.sourceType === 'from_staging' ? 'staging'
         : rule.sourceType === 'from_constant' ? 'constant' : 'reference_table'
       const shaped = applyDfT1Shape(raw, rule.shape)
@@ -729,6 +749,9 @@ function buildTargetPayloadPreview(input) {
       unresolvedReferenceComponents: cloneJson(unresolvedReferenceComponents),
       missingRequiredFields: cloneJson(missingRequiredFields),
       fieldProvenance: cloneJson(fieldProvenance),
+      // DF-T3b-2a: values-free per-reference resolution evidence (field/domain/sourceCode-presence/
+      // error-type only — never customer values). Empty unless from_reference_table rules ran.
+      referenceResolutions: cloneJson(referenceResolutions),
       compositionSource: 'k3-save-body-composer',
     },
   })
@@ -741,7 +764,7 @@ function buildTargetPayloadPreview(input) {
   return response
 }
 
-function buildTemplatePreview(input) {
+function buildTemplatePreview(input, options = {}) {
   if (!isPlainObject(input)) {
     throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'input must be an object')
   }
@@ -777,9 +800,9 @@ function buildTemplatePreview(input) {
         sourceRecord: transformed.value,
         transformErrors: transformed.errors,
         validationErrors: validation.errors,
-      })
+      }, options)
     }
-    return buildTargetPayloadPreview(input)
+    return buildTargetPayloadPreview(input, options)
   }
   if (!isPlainObject(input.sourceRecord)) {
     throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'sourceRecord must be an object', { field: 'sourceRecord' })
@@ -1212,6 +1235,7 @@ module.exports = {
   VALID_USER_RUN_MODES,
   __internals: {
     buildTemplatePreview,
+    buildTargetPayloadPreview,
     hasPermission,
     requireAccess,
     resolveTenantId,

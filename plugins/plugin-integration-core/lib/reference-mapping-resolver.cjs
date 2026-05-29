@@ -10,6 +10,10 @@
 // domain / sourceCode-PRESENCE / error-type only (the error-type tokens are locked by #2036/#2048).
 
 const { normalizeReferenceMappingTemplate } = require('./reference-mapping-templates.cjs')
+// DF-T3b-2a: read sourceCode / write the resolved value through the SAME path semantics the operator
+// preview (buildTargetPayloadPreview) uses (getPath/setPath) — so a nested sourceField resolves
+// identically on both surfaces and the "shared decision cannot diverge" guarantee actually holds.
+const { getPath, setPath } = require('./transform-engine.cjs')
 
 // Resolution status — the outcome vocabulary.
 const OUTCOME = Object.freeze({
@@ -124,11 +128,60 @@ function resolveReferenceFromRows(template, rows, sourceCode, opts = {}) {
   return resolveReference(buildReferenceMappingIndex(template, rows), sourceCode, opts)
 }
 
+// DF-T3b-2a: the UNRESOLVED sentinel placed at a target field when resolution fails. A bare `<…>`
+// token caught by the shared composer's findUnfilledPlaceholders → identical fail-closed disposition
+// (K3_WISE_PRESET_PLACEHOLDER_UNFILLED) on BOTH the preview compose and the adapter Save compose.
+// (Dropping the field instead would NOT fail-close: the schema-path preview has no bodyTemplate and
+// the adapter Save only throws on placeholders, so an absent field is silently omitted on the Save.)
+const UNRESOLVED_PLACEHOLDER = '<unresolved>'
+
+// SHARED per-field decision used by BOTH the operator preview (buildTargetPayloadPreview) and the
+// record materializer (resolveReferenceRulesIntoRecord) so the two surfaces CANNOT diverge on the
+// composed value. `indexes` = { [domain]: builtIndex }. Returns { value, outcome }: value = the
+// resolved reference object on 'resolved', else UNRESOLVED_PLACEHOLDER (any non-resolved status).
+function resolveReferenceRuleValue(indexes, rule, sourceCode) {
+  const domain = rule && typeof rule.domain === 'string' ? rule.domain : undefined
+  const field = rule && typeof rule.targetField === 'string' ? rule.targetField : undefined
+  const index = domain && isPlainObject(indexes) ? indexes[domain] : undefined
+  const outcome = index
+    ? resolveReference(index, sourceCode, { field })
+    : makeOutcome(OUTCOME.UNRESOLVED, domain, sourceCode, field) // no index for this domain → unresolved
+  const value = outcome.status === OUTCOME.RESOLVED ? outcome.reference : UNRESOLVED_PLACEHOLDER
+  return { value, outcome }
+}
+
+// Materialize from_reference_table rules INTO a record (single-representation): set each rule's
+// targetField to the resolved {FNumber|FID,FName} object, or the UNRESOLVED_PLACEHOLDER sentinel on
+// any non-resolved status. The resulting record composes IDENTICALLY through the preview's schema
+// path and the adapter Save (both projectRecordForBody) — the byte-parity DF-T3b-2a proves. Pure:
+// a new record object; flat field access (from_reference_table fields are flat K3 names). rules =
+// [{ targetField, domain, sourceField }] (sourceField defaults to targetField).
+function resolveReferenceRulesIntoRecord(record, rules, indexes) {
+  // READ snapshot = the ORIGINAL record (never mutated) — the operator preview always reads
+  // input.sourceRecord, so we must too. WRITE target = an INDEPENDENT deep clone, so an earlier
+  // rule's write can't change what a later rule reads (overlapping source/target → no divergence).
+  // getPath/setPath = the same path semantics as the preview (nested sourceField resolves identically).
+  const source = isPlainObject(record) ? record : {}
+  const out = JSON.parse(JSON.stringify(source))
+  const outcomes = []
+  for (const rule of (Array.isArray(rules) ? rules : [])) {
+    if (!isPlainObject(rule) || typeof rule.targetField !== 'string') continue
+    const sourceField = typeof rule.sourceField === 'string' && rule.sourceField ? rule.sourceField : rule.targetField
+    const { value, outcome } = resolveReferenceRuleValue(indexes, rule, getPath(source, sourceField))
+    setPath(out, rule.targetField, value)
+    outcomes.push({ field: rule.targetField, status: outcome.status, evidence: outcome.evidence })
+  }
+  return { record: out, outcomes }
+}
+
 module.exports = {
   OUTCOME,
   STATUS_TO_ERROR_TYPE,
+  UNRESOLVED_PLACEHOLDER,
   buildReferenceMappingIndex,
   resolveReference,
   resolveReferenceFromRows,
+  resolveReferenceRuleValue,
+  resolveReferenceRulesIntoRecord,
   __internals: { isBlank, isCompleteRow, identifierColumn, normalizeSourceCodeKey },
 }
