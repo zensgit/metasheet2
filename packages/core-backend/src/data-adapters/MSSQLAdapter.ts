@@ -1,7 +1,11 @@
-// Generic SQL Server (modern direct path) data-source adapter (Lane B PR1).
-// Driver: `mssql` (^10), aligned with plugin-integration-core. Legacy SQL Server
-// (pre-2017 / TLS-negotiation issues) is out of scope here — that stays with the
-// Bridge Agent / Lane C line. stream() uses batch fetch, not a true cursor.
+// Generic SQL Server data-source adapter (Lane B). Driver: `mssql` (^10),
+// aligned with plugin-integration-core. Modern servers connect securely by
+// default; a legacy SQL Server (2008R2/2012) that cannot negotiate modern TLS
+// can opt down PER-SOURCE via the B3 lever (buildLegacyTlsOptions) — scoped to
+// this one connection, the customer's server is never changed. Genuinely
+// unreachable cases (RC4/3DES needing the OpenSSL legacy provider, or plaintext)
+// stay on the sidecar / Bridge Agent line. stream() uses batch fetch, not a true
+// cursor.
 import type {
   QueryOptions,
   QueryResult,
@@ -12,7 +16,8 @@ import type {
   ForeignKeyInfo,
   DbValue,
   WhereValue,
-  Transaction
+  Transaction,
+  ConnectionConfig
 } from './BaseAdapter';
 import { BaseDataAdapter, getStringConfig, getNumberConfig } from './BaseAdapter'
 
@@ -110,9 +115,88 @@ export class MSSQLAdapter extends BaseDataAdapter {
     throw new Error('SQL Server data source requires connection.host or connection.server')
   }
 
+  // Valid TLS protocol floors accepted by Node's tls module (B3 validation).
+  private static readonly VALID_TLS_MIN_VERSIONS: readonly string[] = [
+    'TLSv1',
+    'TLSv1.1',
+    'TLSv1.2',
+    'TLSv1.3'
+  ]
+
+  /**
+   * B3 — per-connection legacy-TLS escape hatch. SECURE BY DEFAULT: returns
+   * undefined unless this source explicitly opts down. When a legacy SQL Server
+   * (e.g. 2008R2/2012) cannot negotiate modern TLS, an operator may lower the
+   * TLS floor / cipher security level for THIS connection only — the customer's
+   * server is never touched, and the scope is never process-wide.
+   *
+   *   connection.tlsMinVersion  -> cryptoCredentialsDetails.minVersion ('TLSv1' …)
+   *   connection.tlsCiphers     -> cryptoCredentialsDetails.ciphers    ('DEFAULT@SECLEVEL=0' …)
+   *   connection.legacyTls=true -> convenience: applies the documented legacy
+   *                                defaults above unless an explicit key overrides.
+   *
+   * The wire stays encrypted (this lowers the floor, it is not `encrypt:false`).
+   * Lowering below the secure default emits an audit signal.
+   */
+  private buildLegacyTlsOptions(conn: ConnectionConfig): { minVersion?: string; ciphers?: string } | undefined {
+    const legacyTls = coerceBoolean(conn.legacyTls, false)
+    let minVersion = getStringConfig(conn.tlsMinVersion)
+    let ciphers = getStringConfig(conn.tlsCiphers)
+
+    if (legacyTls) {
+      // Documented legacy defaults; explicit keys win.
+      minVersion = minVersion ?? 'TLSv1'
+      ciphers = ciphers ?? 'DEFAULT@SECLEVEL=0'
+    }
+
+    // No downgrade requested → keep Node/tedious secure defaults (TLSv1.2 floor).
+    if (minVersion === undefined && ciphers === undefined) return undefined
+
+    // B3 lowers the TLS floor but keeps the wire ENCRYPTED. It must not be
+    // combined with connection.encrypt=false — that is a SEPARATE plaintext
+    // escape hatch with a different security posture. Allowing both would make
+    // the audit below falsely claim "wire stays encrypted" for a plaintext
+    // source. Reject the contradiction loudly; the plaintext path is opt-in on
+    // its own (encrypt=false with no TLS-downgrade keys).
+    if (coerceBoolean(conn.encrypt, true) === false) {
+      throw new Error(
+        'connection.encrypt=false cannot be combined with the legacy-TLS lever ' +
+          '(legacyTls / tlsMinVersion / tlsCiphers): the TLS downgrade keeps the wire ' +
+          'encrypted, while encrypt=false is a separate plaintext escape hatch — use one or the other.'
+      )
+    }
+
+    // Enum-strict: never silently fall back to a default for a bad floor value.
+    if (minVersion !== undefined && !MSSQLAdapter.VALID_TLS_MIN_VERSIONS.includes(minVersion)) {
+      throw new Error(
+        `Invalid connection.tlsMinVersion "${minVersion}" ` +
+          `(expected one of ${MSSQLAdapter.VALID_TLS_MIN_VERSIONS.join(', ')})`
+      )
+    }
+
+    // Audit: this source is connecting with a deliberately lowered TLS posture.
+    const detail = [
+      minVersion !== undefined ? `minVersion=${minVersion}` : null,
+      ciphers !== undefined ? `ciphers=${ciphers}` : null
+    ]
+      .filter(Boolean)
+      .join(', ')
+    this.emit('tls-downgrade', { adapter: this.config.name, minVersion, ciphers })
+    console.warn(
+      `[MSSQLAdapter] legacy TLS enabled for data source "${this.config.name}" (${detail}); ` +
+        `wire stays encrypted, scope is this connection only.`
+    )
+
+    return {
+      ...(minVersion !== undefined ? { minVersion } : {}),
+      ...(ciphers !== undefined ? { ciphers } : {})
+    }
+  }
+
   private buildPoolConfig(): Record<string, unknown> {
     const conn = this.config.connection
     const { server, port } = this.resolveServerAndPort()
+    const legacyTls = this.buildLegacyTlsOptions(conn)
     return {
       server,
       ...(port != null ? { port } : {}),
@@ -122,9 +206,12 @@ export class MSSQLAdapter extends BaseDataAdapter {
       // Secure by default: encrypt the wire; trust the (typically self-signed)
       // intranet certificate. Set connection.encrypt=false only as an explicit
       // per-source escape hatch for a legacy server that cannot negotiate TLS.
+      // cryptoCredentialsDetails (B3) lowers the TLS floor/ciphers per-source
+      // for genuinely old servers — still encrypted, opt-in only.
       options: {
         encrypt: coerceBoolean(conn.encrypt, true),
-        trustServerCertificate: coerceBoolean(conn.trustServerCertificate, true)
+        trustServerCertificate: coerceBoolean(conn.trustServerCertificate, true),
+        ...(legacyTls ? { cryptoCredentialsDetails: legacyTls } : {})
       },
       // ?? (not ||) so an explicit 0 ("no timeout" in mssql) is not overridden.
       connectionTimeout: getNumberConfig(conn.connectionTimeoutMs) ?? 10000,
