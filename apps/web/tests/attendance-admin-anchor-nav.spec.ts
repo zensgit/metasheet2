@@ -745,6 +745,12 @@ describe('Attendance admin anchor navigation', () => {
     expect(button?.getAttribute('aria-current')).toBe('true')
     expect(button?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
     expect(container!.querySelector('[data-admin-shortcut="attendance-admin-import-batches"]')?.textContent).toContain('Data & Payroll · Import batches')
+
+    const importSection = container!.querySelector<HTMLElement>('[data-admin-section="attendance-admin-import"]')
+    const importBatchesSection = container!.querySelector<HTMLElement>('[data-admin-section="attendance-admin-import-batches"]')
+    expect(importSection?.style.display).toBe('none')
+    expect(importBatchesSection?.style.display).not.toBe('none')
+    expect(importBatchesSection?.closest('[data-admin-section="attendance-admin-import"]')).toBeNull()
   })
 
   it('keeps the right pane focused on the active admin section and ignores legacy show-all preferences', async () => {

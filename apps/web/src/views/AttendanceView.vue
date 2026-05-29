@@ -3855,22 +3855,22 @@
                   </tbody>
                 </table>
               </div>
+            </div>
 
-              <div
-                v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
-                class="attendance__admin-section"
-                v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
-              >
-                <AttendanceImportBatchesSection
-                  :tr="tr"
-                  :workflow="attendanceImportBatchSectionBindings"
-                  :resolve-rule-set-name="resolveRuleSetName"
-                  :format-status="formatStatus"
-                  :format-date-time="formatDateTime"
-                  :format-json="formatJson"
-                  :storage-key="attendanceImportBatchStorageKey"
-                />
-              </div>
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
+            >
+              <AttendanceImportBatchesSection
+                :tr="tr"
+                :workflow="attendanceImportBatchSectionBindings"
+                :resolve-rule-set-name="resolveRuleSetName"
+                :format-status="formatStatus"
+                :format-date-time="formatDateTime"
+                :format-json="formatJson"
+                :storage-key="attendanceImportBatchStorageKey"
+              />
             </div>
 
             <div
