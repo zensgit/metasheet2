@@ -12,6 +12,7 @@ import 'element-plus/dist/index.css'
 import './styles/calendar-source-palette.css'
 import App from './App.vue'
 import { useAuth } from './composables/useAuth'
+import { resolveAdminRouteRedirect } from './router/adminAccess'
 import { appRoutes } from './router/appRoutes'
 import { ROUTE_PATHS } from './router/types'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
@@ -95,6 +96,11 @@ router.beforeEach(async (to, _from, next) => {
         // Ignore transient feature load failures and fall back to default home.
       }
       return next(flags.resolveHomePath())
+    }
+
+    const adminRedirect = await resolveAdminRouteRedirect(to, auth, flags)
+    if (adminRedirect) {
+      return next(adminRedirect)
     }
   }
 

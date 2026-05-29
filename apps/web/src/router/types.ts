@@ -272,6 +272,7 @@ export interface RouteMeta {
   // Permission requirements
   permissions?: string[]
   roles?: string[]
+  requiresAdmin?: boolean
 
   // Layout settings
   layout?: 'default' | 'empty' | 'admin'
