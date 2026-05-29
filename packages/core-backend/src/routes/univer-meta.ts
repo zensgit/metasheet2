@@ -2280,6 +2280,47 @@ function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>)
   )
 }
 
+// #2052 (b): the layer-2 ∧ layer-3 allowed-field set (the #2015 composite, hiddenFieldIds: [] — layer-1
+// excluded). Reused as the redaction gate for view-config filter literals.
+function computeAllowedFieldIds(fields: UniverMetaField[], capabilities: MultitableCapabilities, fieldScopeMap: Map<string, FieldPermissionScope>): Set<string> {
+  const visible = filterVisiblePropertyFields(fields)
+  const perms = deriveFieldPermissions(visible, capabilities, { hiddenFieldIds: [], fieldScopeMap })
+  return new Set(visible.filter((field) => perms[field.id]?.visible !== false).map((field) => field.id))
+}
+
+// #2052 (b): load the allowed-field set for a (sheet, subject). No subject / no sheet → EMPTY set =
+// FAIL CLOSED (anonymous/unscoped callers redact every filter literal — never the authenticated
+// "empty map ⇒ no denials ⇒ show all" default, which would fail open on public/base-only paths).
+async function loadAllowedFieldIds(query: QueryFn, sheetId: string | null | undefined, userId: string | null | undefined, capabilities: MultitableCapabilities): Promise<Set<string>> {
+  if (!userId || !sheetId) return new Set()
+  const [fields, fieldScopeMap] = await Promise.all([
+    loadFieldsForSheet(query, sheetId),
+    loadFieldPermissionScopeMap(query, sheetId, userId),
+  ])
+  return computeAllowedFieldIds(fields, capabilities, fieldScopeMap)
+}
+
+// #2052 (b): PURE — returns a redacted COPY (view configs are cached/shared; never mutate in place, or a
+// per-user redaction corrupts a later cross-user read). For each filterInfo condition on a field NOT in
+// allowedFieldIds, OMIT the `value` key (keep fieldId+operator so the client can still render the chip);
+// sortInfo/groupInfo/config carry only fieldIds (not literals) → untouched. Returns the input unchanged
+// when nothing needs redacting (still never mutated).
+function redactViewConfigFilterLiterals<T extends { filterInfo?: unknown } | null | undefined>(view: T, allowedFieldIds: Set<string>): T {
+  if (!view || typeof view !== 'object') return view
+  const filterInfo = (view as { filterInfo?: unknown }).filterInfo
+  if (!filterInfo || typeof filterInfo !== 'object' || !Array.isArray((filterInfo as { conditions?: unknown }).conditions)) return view
+  const conditions = (filterInfo as { conditions: Array<Record<string, unknown>> }).conditions
+  const isDenied = (c: Record<string, unknown>) =>
+    typeof c?.fieldId === 'string' && !allowedFieldIds.has(c.fieldId) && Object.prototype.hasOwnProperty.call(c, 'value')
+  if (!conditions.some(isDenied)) return view
+  const redactedConditions = conditions.map((c) => {
+    if (!isDenied(c)) return c
+    const { value: _omitted, ...rest } = c // omit the literal; keep fieldId + operator
+    return rest
+  })
+  return { ...(view as object), filterInfo: { ...(filterInfo as object), conditions: redactedConditions } } as T
+}
+
 async function loadXlsxModule(): Promise<XlsxModule> {
   return await import('xlsx') as unknown as XlsxModule
 }
@@ -3527,11 +3568,17 @@ export function univerMetaRouter(): Router {
         : serializedViews[0] ?? null
       const viewIds = serializedViews.map((v: UniverMetaViewConfig) => v.id)
       const viewScopeMap = access.userId ? await loadViewPermissionScopeMap(pool.query.bind(pool), viewIds, access.userId) : new Map()
-      const fieldScopeMap = (access.userId && resolvedSheetId) ? await loadFieldPermissionScopeMap(pool.query.bind(pool), resolvedSheetId, access.userId) : new Map()
+      // #2052 (b): bind fieldScopeMap to effectiveSheetId (NOT resolvedSheetId) — on a base-only ?baseId=
+      // request resolvedSheetId is null but the returned views bind to effectiveSheetId; gating off
+      // resolvedSheetId leaves the map empty and fails open. (Also corrects the fieldPermissions metadata.)
+      const fieldScopeMap = (access.userId && effectiveSheetId) ? await loadFieldPermissionScopeMap(pool.query.bind(pool), effectiveSheetId, access.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(activeFields, capabilities, {
         hiddenFieldIds: selectedView?.hiddenFieldIds ?? [],
         fieldScopeMap,
       })
+      // #2052 (b): allowed-field set for redacting filter literals — BOTH inputs keyed to effectiveSheetId
+      // (activeFields above + this fieldScopeMap), so the redaction matches the sheet whose views ship.
+      const allowedFieldIds = computeAllowedFieldIds(activeFields, capabilities, fieldScopeMap)
       const viewPermissions = deriveViewPermissions(serializedViews, capabilities, viewScopeMap)
 
       return res.json({
@@ -3555,7 +3602,7 @@ export function univerMetaRouter(): Router {
             !isSystemPeopleSheetDescription(row.description)
             && readableSheetRows.some((visibleRow) => String(visibleRow.id) === String(row.id)),
           ),
-          views: serializedViews,
+          views: serializedViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
           capabilities,
           capabilityOrigin,
           fieldPermissions,
@@ -5016,7 +5063,9 @@ export function univerMetaRouter(): Router {
         config: normalizeJson(r.config),
       }))
 
-      return res.json({ ok: true, data: { views } })
+      // #2052 (b): redact denied-field filter literals per the requester's allowed-field set.
+      const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, (await resolveRequestAccess(req)).userId, capabilities)
+      return res.json({ ok: true, data: { views: views.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)) } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -5105,7 +5154,8 @@ export function univerMetaRouter(): Router {
       }
 
       metaViewConfigCache.set(viewId, view)
-      return res.status(201).json({ ok: true, data: { view } })
+      const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, (await resolveRequestAccess(req)).userId, capabilities)
+      return res.status(201).json({ ok: true, data: { view: redactViewConfigFilterLiterals(view, allowedFieldIds) } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -5210,7 +5260,8 @@ export function univerMetaRouter(): Router {
       }
 
       metaViewConfigCache.set(viewId, view)
-      return res.json({ ok: true, data: { view } })
+      const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), String(row.sheet_id), (await resolveRequestAccess(req)).userId, capabilities)
+      return res.json({ ok: true, data: { view: redactViewConfigFilterLiterals(view, allowedFieldIds) } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -6511,7 +6562,7 @@ export function univerMetaRouter(): Router {
         rows,
         ...(linkSummaries ? { linkSummaries } : {}),
         ...(attachmentSummaries ? { attachmentSummaries } : {}),
-        ...(viewConfig ? { view: viewConfig } : {}),
+        ...(viewConfig ? { view: redactViewConfigFilterLiterals(viewConfig, allowedFieldIds) } : {}),
         ...(meta ? { meta } : {}),
         ...(page ? { page } : {}),
       }
@@ -6645,7 +6696,9 @@ export function univerMetaRouter(): Router {
               : `/api/multitable/views/${resolved.view.id}/submit`)
             : '/api/multitable/records',
           sheet,
-          ...(resolved.view ? { view: resolved.view } : {}),
+          // #2052 (b): public form render — redact ALL filter literals (empty allowedFieldIds = fail closed).
+          // A public/anonymous caller has no field-read grants; the saved view's filter is irrelevant to form submit.
+          ...(resolved.view ? { view: redactViewConfigFilterLiterals(resolved.view, new Set<string>()) } : {}),
           fields: visibleFields,
           capabilities: effectiveCapabilities,
           ...(effectiveCapabilityOrigin ? { capabilityOrigin: effectiveCapabilityOrigin } : {}),
@@ -7495,7 +7548,7 @@ export function univerMetaRouter(): Router {
         ok: true,
         data: {
           sheet,
-          ...(viewConfig ? { view: viewConfig } : {}),
+          ...(viewConfig ? { view: redactViewConfigFilterLiterals(viewConfig, allowedFieldIds) } : {}),
           fields: visiblePropertyFields,
           record,
           capabilities,
