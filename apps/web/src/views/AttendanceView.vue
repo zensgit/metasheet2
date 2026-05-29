@@ -388,6 +388,20 @@
           <p class="attendance__field-hint attendance__field-hint--strong">
             {{ reportRangeLabel }}
           </p>
+          <div
+            v-if="reportsUnavailable"
+            class="attendance__empty"
+            data-reports-state="unavailable"
+          >
+            {{ tr('Report data is unavailable for the current filters.', '当前筛选条件下报表数据不可用。') }}
+          </div>
+          <p
+            v-else-if="reportsDataStale"
+            class="attendance__field-hint attendance__field-hint--strong"
+            data-reports-state="stale"
+          >
+            {{ tr('Filters changed. Reload the report before exporting.', '筛选条件已变化，请先重载报表再导出。') }}
+          </p>
           <div class="attendance__summary attendance__summary--reports">
             <div class="attendance__summary-item">
               <span>{{ tr('Visible requests', '筛选后申请') }}</span>
@@ -927,7 +941,7 @@
                 <option value="code">{{ tr('Field codes', '字段编码') }}</option>
               </select>
             </label>
-            <button class="attendance__btn" :disabled="exporting || loading" @click="exportCsv">
+            <button class="attendance__btn" :disabled="exporting || loading || reportsExportBlocked" @click="exportCsv">
               {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
             </button>
           </div>
@@ -5864,9 +5878,11 @@ type AttendanceStatusAction =
   | 'retry-preview-import'
   | 'retry-run-import'
   | 'retry-submit-request'
+  | 'reload-reports'
   | 'reload-requests'
 type AttendanceStatusContext =
   | 'refresh'
+  | 'report-refresh'
   | 'admin'
   | 'save-settings'
   | 'save-rule'
@@ -7101,6 +7117,22 @@ const requestReportMinutesTotal = computed(() =>
 const requestReportStatusFilter = ref('all')
 const requestReportTypeFilter = ref('all')
 const recordStatusFilter = ref('all')
+const reportsUnavailable = ref(false)
+const loadedReportsQueryKey = ref('')
+const currentReportsQueryKey = computed(() =>
+  buildQuery({
+    from: fromDate.value,
+    to: toDate.value,
+    orgId: normalizedOrgId(),
+    userId: normalizedUserId(),
+  }).toString()
+)
+const reportsDataStale = computed(() =>
+  loadedReportsQueryKey.value.length > 0 && loadedReportsQueryKey.value !== currentReportsQueryKey.value
+)
+const reportsExportBlocked = computed(() =>
+  reportsUnavailable.value || reportsDataStale.value
+)
 
 function startOfWeek(date: Date): Date {
   const next = new Date(date)
@@ -7989,6 +8021,33 @@ function clearReportsFilters(): void {
   requestReportStatusFilter.value = 'all'
   requestReportTypeFilter.value = 'all'
   recordStatusFilter.value = 'all'
+}
+
+function clearReportsDataset(): void {
+  summary.value = null
+  records.value = []
+  recordsTotal.value = 0
+  recordReportFields.value = []
+  recordReportFieldConfig.value = null
+  requestReport.value = []
+  lastRecordCsvExportConfig.value = null
+  resetRecordTimelineState()
+}
+
+function beginReportsDatasetRefresh(): void {
+  reportsUnavailable.value = false
+  clearReportsDataset()
+}
+
+function markReportsDatasetLoaded(): void {
+  reportsUnavailable.value = false
+  loadedReportsQueryKey.value = currentReportsQueryKey.value
+}
+
+function markReportsDatasetUnavailable(): void {
+  loadedReportsQueryKey.value = ''
+  reportsUnavailable.value = true
+  clearReportsDataset()
 }
 
 async function applyReportRangePreset(preset: AttendanceReportRangePreset): Promise<void> {
@@ -12770,6 +12829,7 @@ function downloadCsvText(filename: string, csvText: string) {
 }
 function defaultStatusActionForContext(context: AttendanceStatusContext): AttendanceStatusAction | undefined {
   if (context === 'refresh') return 'refresh-overview'
+  if (context === 'report-refresh') return 'reload-reports'
   if (context === 'admin') return 'reload-admin'
   if (context === 'save-settings') return 'retry-save-settings'
   if (context === 'save-rule') return 'retry-save-rule'
@@ -13039,7 +13099,9 @@ function classifyStatusError(
     meta.hint = tr('Use an account with required attendance permissions, then reload data.', '请使用具备所需考勤权限的账号，并重新加载数据。')
     meta.action = context === 'request-submit' || context === 'request-resolve' || context === 'request-cancel'
       ? 'reload-requests'
-      : 'reload-admin'
+      : context === 'report-refresh'
+        ? 'reload-reports'
+        : 'reload-admin'
   } else if (status === 409 || code === 'DUPLICATE_REQUEST' || code === 'ALREADY_EXISTS') {
     message = context === 'request-submit'
       ? tr('A request for the same date and type already exists.', '同一天同类型的申请已存在。')
@@ -13067,6 +13129,10 @@ async function runStatusAction() {
   if (!action) return
   if (action === 'refresh-overview') {
     await refreshAll()
+    return
+  }
+  if (action === 'reload-reports') {
+    await reloadReportsWithStatus()
     return
   }
   if (action === 'reload-admin') {
@@ -13921,7 +13987,7 @@ async function loadSummary() {
   const response = await apiFetch(`/api/attendance/summary?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
-    throw new Error(readErrorMessage(data, tr('Failed to load summary', '加载汇总失败')))
+    throw createApiError(response, data, tr('Failed to load summary', '加载汇总失败'))
   }
   summary.value = data.data
 }
@@ -13987,7 +14053,7 @@ async function loadRecords() {
   const response = await apiFetch(`/api/attendance/records?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
-    throw new Error(readErrorMessage(data, tr('Failed to load records', '加载记录失败')))
+    throw createApiError(response, data, tr('Failed to load records', '加载记录失败'))
   }
   resetRecordTimelineState()
   records.value = data.data.items
@@ -14064,7 +14130,7 @@ async function loadRequestReport() {
     const response = await apiFetch(`/api/attendance/reports/requests?${query.toString()}`)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to load request report', '加载申请报表失败')))
+      throw createApiError(response, data, tr('Failed to load request report', '加载申请报表失败'))
     }
     requestReport.value = data.data.items || []
   } finally {
@@ -14086,12 +14152,20 @@ async function refreshAll(): Promise<boolean> {
   committedCalendarUserId.value = normalizedUserId() ?? currentUserId.value ?? null
   let success = true
   try {
-    await Promise.all([loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()])
+    const results = await Promise.allSettled([loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()])
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failed) throw failed.reason
+    if (showReports.value) {
+      markReportsDatasetLoaded()
+    }
     if (lastCalendarEffectiveRange.value) {
       void loadEffectiveCalendarForOverview(lastCalendarEffectiveRange.value, { force: true })
     }
   } catch (error: any) {
     success = false
+    if (showReports.value) {
+      markReportsDatasetUnavailable()
+    }
     setStatusFromError(error, tr('Refresh failed', '刷新失败'), 'refresh')
   } finally {
     loading.value = false
@@ -14110,8 +14184,12 @@ async function refreshOverviewWithStatus() {
 async function reloadReportsWithStatus() {
   loading.value = true
   recordsPage.value = 1
+  beginReportsDatasetRefresh()
   try {
-    await Promise.all([loadSummary(), loadRequestReport(), loadRecords()])
+    const results = await Promise.allSettled([loadSummary(), loadRequestReport(), loadRecords()])
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failed) throw failed.reason
+    markReportsDatasetLoaded()
     setStatus(
       appendStatusContext(
         tr(
@@ -14122,11 +14200,12 @@ async function reloadReportsWithStatus() {
       ),
     )
   } catch (error: any) {
+    markReportsDatasetUnavailable()
     setStatusFromErrorWithContext(
       error,
       tr('Failed to refresh reports', '刷新报表失败'),
       `${requestReportTimezoneContextHint.value} · ${reportRangeLabel.value}`,
-      'refresh',
+      'report-refresh',
     )
   } finally {
     loading.value = false
@@ -14401,6 +14480,18 @@ async function changeRecordsPage(delta: number) {
 }
 
 async function exportCsv() {
+  if (reportsExportBlocked.value) {
+    setStatus(
+      appendStatusContext(
+        reportsUnavailable.value
+          ? tr('Reload the report before exporting.', '请先重载报表再导出。')
+          : tr('Filters changed. Reload the report before exporting.', '筛选条件已变化，请先重载报表再导出。'),
+        recordsTimezoneContextHint.value,
+      ),
+      'error',
+    )
+    return
+  }
   exporting.value = true
   try {
     const query = buildQuery({
