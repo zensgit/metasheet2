@@ -1119,6 +1119,127 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('lets attendance self-service users read only active leave and overtime policies', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const adminUserId = `attendance-policy-admin-${runSuffix}`
+    const employeeUserId = `attendance-policy-employee-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+
+    try {
+      process.env.RBAC_BYPASS = 'false'
+      await pool.query(
+        `INSERT INTO permissions (code, name, description)
+         VALUES
+           ('attendance:read', 'Attendance Read', 'Read attendance data'),
+           ('attendance:write', 'Attendance Write', 'Write attendance data'),
+           ('attendance:admin', 'Attendance Admin', 'Administer attendance')
+         ON CONFLICT (code) DO NOTHING`
+      )
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES
+           ($1, 'attendance:read'),
+           ($1, 'attendance:write'),
+           ($1, 'attendance:admin'),
+           ($2, 'attendance:read'),
+           ($2, 'attendance:write')
+         ON CONFLICT DO NOTHING`,
+        [adminUserId, employeeUserId]
+      )
+
+      const adminTokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      )
+      const employeeTokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&roles=user&perms=attendance:read,attendance:write`
+      )
+      const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+      const employeeToken = (employeeTokenRes.body as { token?: string } | undefined)?.token
+      expect(adminToken).toBeTruthy()
+      expect(employeeToken).toBeTruthy()
+      if (!adminToken || !employeeToken) return
+
+      const activeLeaveName = `Policy Active Leave ${runSuffix}`
+      const inactiveLeaveName = `Policy Inactive Leave ${runSuffix}`
+      const activeOvertimeName = `Policy Active OT ${runSuffix}`
+      const inactiveOvertimeName = `Policy Inactive OT ${runSuffix}`
+
+      for (const payload of [
+        { code: `active-leave-${runSuffix}`, name: activeLeaveName, isActive: true },
+        { code: `inactive-leave-${runSuffix}`, name: inactiveLeaveName, isActive: false },
+      ]) {
+        const res = await requestJson(`${baseUrl}/api/attendance/leave-types`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+        })
+        expect(res.status).toBe(201)
+      }
+
+      for (const payload of [
+        { name: activeOvertimeName, minMinutes: 0, isActive: true },
+        { name: inactiveOvertimeName, minMinutes: 0, isActive: false },
+      ]) {
+        const res = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+        })
+        expect(res.status).toBe(201)
+      }
+
+      const employeeLeaveList = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=false`, {
+        headers: { Authorization: `Bearer ${employeeToken}` },
+      })
+      expect(employeeLeaveList.status).toBe(200)
+      const leaveItems =
+        (employeeLeaveList.body as { data?: { items?: Array<{ name?: string; isActive?: boolean }> } } | undefined)
+          ?.data?.items ?? []
+      expect(
+        leaveItems.some(item => item.name === activeLeaveName && item.isActive === true),
+        employeeLeaveList.raw
+      ).toBe(true)
+      expect(leaveItems.some(item => item.name === inactiveLeaveName)).toBe(false)
+
+      const employeeOvertimeList = await requestJson(`${baseUrl}/api/attendance/overtime-rules?isActive=false`, {
+        headers: { Authorization: `Bearer ${employeeToken}` },
+      })
+      expect(employeeOvertimeList.status).toBe(200)
+      const overtimeItems =
+        (employeeOvertimeList.body as { data?: { items?: Array<{ name?: string; isActive?: boolean }> } } | undefined)
+          ?.data?.items ?? []
+      expect(
+        overtimeItems.some(item => item.name === activeOvertimeName && item.isActive === true),
+        employeeOvertimeList.raw
+      ).toBe(true)
+      expect(overtimeItems.some(item => item.name === inactiveOvertimeName)).toBe(false)
+
+      const forbiddenCreate = await requestJson(`${baseUrl}/api/attendance/leave-types`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${employeeToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: `Forbidden Leave ${runSuffix}` }),
+      })
+      expect(forbiddenCreate.status).toBe(403)
+    } finally {
+      process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[adminUserId, employeeUserId]]).catch(() => undefined)
+      await pool.end()
+    }
+  })
+
   it('lists raw punch events with stable timeline fields and cross-user guardrails', async () => {
     if (!baseUrl) return
 

@@ -338,13 +338,15 @@ export class ScriptSandbox extends EventEmitter {
       const scriptPath = path.join(this.workDir, `${executionId}.py`)
       fs.writeFile(scriptPath, this.wrapPythonScript(script, context))
         .then(() => {
-          const pythonProcess = spawn(this.getPythonBinary(), [scriptPath], {
+          const pythonBinary = this.getPythonBinary()
+          const pythonProcess = spawn(pythonBinary, [scriptPath], {
             env: { ...process.env, ...this.options.env },
             timeout: this.options.timeout
           })
 
           let stdout = ''
           let stderr = ''
+          let isResolved = false
 
           pythonProcess.stdout.on('data', (data: Buffer) => {
             stdout += data.toString()
@@ -355,6 +357,8 @@ export class ScriptSandbox extends EventEmitter {
           })
 
           pythonProcess.on('close', async (code: number) => {
+            if (isResolved) return
+            isResolved = true
             // Clean up temp file
             await fs.unlink(scriptPath).catch(() => {})
 
@@ -395,6 +399,8 @@ export class ScriptSandbox extends EventEmitter {
           })
 
           pythonProcess.on('error', async (error: Error) => {
+            if (isResolved) return
+            isResolved = true
             // Lane C / C3: a spawn 'error' (e.g. ENOENT when the python binary is not found — the
             // common native-Windows case) fires WITHOUT 'close', so the temp script must be cleaned
             // up here too or it leaks. Surface the resolved binary in the message to aid PYTHON_BIN
@@ -402,7 +408,7 @@ export class ScriptSandbox extends EventEmitter {
             await fs.unlink(scriptPath).catch(() => {})
             resolve({
               success: false,
-              error: `Failed to run python ('${this.getPythonBinary()}'): ${error.message}`,
+              error: `Failed to run python ('${pythonBinary}'): ${error.message}`,
               logs,
               metrics: {
                 executionTime: Date.now() - startTime,

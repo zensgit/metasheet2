@@ -82,14 +82,19 @@ interface UseAttendanceAdminLeavePoliciesOptions {
   tr?: Translate
 }
 
+interface LoadPolicyOptions {
+  activeOnly?: boolean
+}
+
 function defaultTranslate(en: string): string {
   return en
 }
 
-function buildOrgQuery(orgId?: string): URLSearchParams {
+function buildOrgQuery(orgId?: string, options: LoadPolicyOptions = {}): URLSearchParams {
   const query = new URLSearchParams()
   const normalizedOrgId = typeof orgId === 'string' ? orgId.trim() : ''
   if (normalizedOrgId) query.set('orgId', normalizedOrgId)
+  if (options.activeOnly) query.set('isActive', 'true')
   return query
 }
 
@@ -228,10 +233,10 @@ export function useAttendanceAdminLeavePolicies({
     leaveTypeForm.isActive = item.isActive
   }
 
-  async function loadLeaveTypes() {
+  async function loadLeaveTypes(options: LoadPolicyOptions = {}) {
     leaveTypeLoading.value = true
     try {
-      const query = buildOrgQuery(getOrgId())
+      const query = buildOrgQuery(getOrgId(), options)
       const response = await apiFetch(`/api/attendance/leave-types?${query.toString()}`)
       if (response.status === 403) {
         adminForbidden.value = true
@@ -340,10 +345,10 @@ export function useAttendanceAdminLeavePolicies({
     overtimeRuleForm.isActive = item.isActive
   }
 
-  async function loadOvertimeRules() {
+  async function loadOvertimeRules(options: LoadPolicyOptions = {}) {
     overtimeRuleLoading.value = true
     try {
-      const query = buildOrgQuery(getOrgId())
+      const query = buildOrgQuery(getOrgId(), options)
       const response = await apiFetch(`/api/attendance/overtime-rules?${query.toString()}`)
       if (response.status === 403) {
         adminForbidden.value = true
