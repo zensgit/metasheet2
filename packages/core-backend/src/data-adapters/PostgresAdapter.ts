@@ -127,7 +127,8 @@ export class PostgresAdapter extends BaseDataAdapter {
     try {
       const result = await this.pool.query('SELECT NOW()')
       return result.rows.length > 0
-    } catch {
+    } catch (error) {
+      await this.onError(error as Error) // A3: record the redacted cause (else the test failure is silent)
       return false
     }
   }

@@ -263,7 +263,8 @@ export class MSSQLAdapter extends BaseDataAdapter {
     try {
       const result = await this.pool.request().query<{ ok: number }>('SELECT 1 AS ok')
       return (result.recordset?.length ?? 0) > 0
-    } catch {
+    } catch (error) {
+      await this.onError(error as Error) // A3: record the redacted cause (else the test failure is silent)
       return false
     }
   }

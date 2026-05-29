@@ -492,9 +492,20 @@ export class DataSourceManager extends EventEmitter {
     await adapter.disconnect()
   }
 
-  async testConnection(id: string): Promise<boolean> {
+  // A3: returns success + the redacted failure cause. Ensures a connection is attempted (so the
+  // operator learns WHY it fails), then probes. The adapter stays Promise<boolean>; it records the
+  // redacted cause in `connectionError` (via onError) which we aggregate here.
+  async testConnection(id: string): Promise<{ success: boolean; error?: string }> {
     const adapter = this.getDataSource(id)
-    return adapter.testConnection()
+    try {
+      if (!adapter.isConnected()) {
+        await adapter.connect() // throws on failure; onError has recorded the redacted cause
+      }
+    } catch {
+      return { success: false, error: adapter.connectionError ?? undefined }
+    }
+    const ok = await adapter.testConnection()
+    return ok ? { success: true } : { success: false, error: adapter.connectionError ?? undefined }
   }
 
   // Query routing methods

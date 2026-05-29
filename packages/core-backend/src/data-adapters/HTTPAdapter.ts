@@ -242,7 +242,8 @@ export class HTTPAdapter extends BaseDataAdapter {
       try {
         const response = await this.client.head('/')
         return response.status >= 200 && response.status < 300
-      } catch {
+      } catch (error) {
+        await this.onError(error as Error) // A3: record the redacted cause of the final test failure
         return false
       }
     }
