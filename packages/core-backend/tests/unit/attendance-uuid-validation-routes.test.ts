@@ -253,6 +253,122 @@ describe('attendance UUID route validation', () => {
     )
   })
 
+  it('manages attendance group owners separately from attendance members', async () => {
+    const { db, routes } = await createHarness()
+    const groupId = '00000000-0000-4000-8000-000000000101'
+    const managerId = '00000000-0000-4000-8000-000000000201'
+    const createdAt = '2026-05-29T22:00:00.000Z'
+    const managerRow = {
+      id: managerId,
+      org_id: 'default',
+      group_id: groupId,
+      user_id: 'owner-user-1',
+      role: 'owner',
+      created_by: 'attendance-user-1',
+      created_at: createdAt,
+      updated_at: createdAt,
+    }
+
+    db.query
+      .mockResolvedValueOnce([{ total: 1 }])
+      .mockResolvedValueOnce([managerRow])
+
+    const listRes = await invokeRoute(routes, 'GET /api/attendance/groups/:id/managers', {
+      params: { id: groupId },
+    })
+
+    expect(listRes.statusCode).toBe(200)
+    expect(listRes.body).toMatchObject({
+      ok: true,
+      data: {
+        items: [
+          {
+            id: managerId,
+            groupId,
+            userId: 'owner-user-1',
+            role: 'owner',
+            createdBy: 'attendance-user-1',
+          },
+        ],
+        total: 1,
+      },
+    })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('attendance_group_managers'),
+      ['default', groupId, 50, 0],
+    )
+    expect(db.query.mock.calls.map(call => String(call[0])).join('\n')).not.toContain('attendance_group_members')
+
+    db.query.mockClear()
+    db.query.mockResolvedValueOnce([{ ...managerRow, role: 'sub_owner' }])
+
+    const createRes = await invokeRoute(routes, 'POST /api/attendance/groups/:id/managers', {
+      params: { id: groupId },
+      body: {
+        userId: 'owner-user-1',
+        role: 'sub-owner',
+      },
+    })
+
+    expect(createRes.statusCode).toBe(200)
+    expect(createRes.body).toMatchObject({
+      ok: true,
+      data: {
+        id: managerId,
+        groupId,
+        userId: 'owner-user-1',
+        role: 'sub_owner',
+        createdBy: 'attendance-user-1',
+      },
+    })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('attendance_group_managers'),
+      ['default', groupId, 'owner-user-1', 'sub_owner', 'attendance-user-1'],
+    )
+
+    db.query.mockClear()
+    db.query.mockResolvedValueOnce([{ id: managerId }])
+
+    const deleteRes = await invokeRoute(routes, 'DELETE /api/attendance/groups/:id/managers/:managerId', {
+      params: { id: groupId, managerId },
+    })
+
+    expect(deleteRes.statusCode).toBe(200)
+    expect(deleteRes.body).toMatchObject({
+      ok: true,
+      data: {
+        id: managerId,
+      },
+    })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('attendance_group_managers'),
+      [managerId, 'default', groupId],
+    )
+  })
+
+  it('rejects invalid attendance group manager roles before writing', async () => {
+    const { db, routes } = await createHarness()
+    const groupId = '00000000-0000-4000-8000-000000000101'
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/managers', {
+      params: { id: groupId },
+      body: {
+        userId: 'owner-user-1',
+        role: 'manager',
+      },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'role must be owner or sub_owner',
+      },
+    })
+    expect(db.query).not.toHaveBeenCalled()
+  })
+
   it('rejects malformed route UUID params before hitting the database', async () => {
     const { db, routes } = await createHarness()
     const cases = [
@@ -274,6 +390,21 @@ describe('attendance UUID route validation', () => {
       { key: 'GET /api/attendance/payroll-cycles/:id/summary' },
       { key: 'GET /api/attendance/payroll-cycles/:id/summary/export' },
       { key: 'GET /api/attendance/payroll-cycles/:id/export' },
+      { key: 'GET /api/attendance/groups/:id/managers' },
+      {
+        key: 'POST /api/attendance/groups/:id/managers',
+        body: {
+          userId: 'owner-user-1',
+          role: 'owner',
+        },
+      },
+      {
+        key: 'DELETE /api/attendance/groups/:id/managers/:managerId',
+        params: {
+          id: 'not-a-uuid',
+          managerId: '00000000-0000-4000-8000-000000000201',
+        },
+      },
       {
         key: 'POST /api/attendance/groups/:id/fixed-schedule/preview',
         body: {
@@ -323,6 +454,29 @@ describe('attendance UUID route validation', () => {
       })
     }
 
+    expect(db.query).not.toHaveBeenCalled()
+    expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed attendance group manager ids before hitting the database', async () => {
+    const { db, routes } = await createHarness()
+    const groupId = '00000000-0000-4000-8000-000000000101'
+
+    const res = await invokeRoute(routes, 'DELETE /api/attendance/groups/:id/managers/:managerId', {
+      params: {
+        id: groupId,
+        managerId: 'not-a-uuid',
+      },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'managerId must be a UUID',
+      },
+    })
     expect(db.query).not.toHaveBeenCalled()
     expect(db.transaction).not.toHaveBeenCalled()
   })
