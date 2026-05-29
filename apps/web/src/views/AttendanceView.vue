@@ -3235,6 +3235,86 @@
                       </div>
                     </div>
                   </section>
+
+                  <section
+                    v-if="attendanceGroupEditingId"
+                    class="attendance__group-panel"
+                    data-attendance-group-fixed-schedule-preview
+                  >
+                    <div class="attendance__admin-section-header">
+                      <div>
+                        <h6>{{ tr('Fixed schedule preview', '固定排班预览') }}</h6>
+                        <span class="attendance__field-hint">{{ tr('Preview only: target members are resolved server-side and no assignments are written.', '仅预览：目标成员由服务端完整枚举，不写入任何排班。') }}</span>
+                      </div>
+                      <button
+                        class="attendance__btn"
+                        type="button"
+                        @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.assignments)"
+                      >
+                        {{ tr('Open Assignments', '打开排班分配') }}
+                      </button>
+                    </div>
+                    <div class="attendance__admin-grid">
+                      <label class="attendance__field" for="attendance-group-fixed-schedule-shift">
+                        <span>{{ tr('Shift', '班次') }}</span>
+                        <select
+                          id="attendance-group-fixed-schedule-shift"
+                          v-model="attendanceGroupFixedSchedulePreviewForm.shiftId"
+                          :disabled="shifts.length === 0 || attendanceGroupFixedSchedulePreviewLoading"
+                          data-attendance-group-fixed-schedule-shift
+                        >
+                          <option value="">{{ tr('Select shift', '选择班次') }}</option>
+                          <option v-for="shift in shifts" :key="shift.id" :value="shift.id">
+                            {{ shift.name }}
+                          </option>
+                        </select>
+                      </label>
+                      <label class="attendance__field" for="attendance-group-fixed-schedule-start">
+                        <span>{{ tr('Start date', '开始日期') }}</span>
+                        <input
+                          id="attendance-group-fixed-schedule-start"
+                          v-model="attendanceGroupFixedSchedulePreviewForm.startDate"
+                          type="date"
+                          :disabled="attendanceGroupFixedSchedulePreviewLoading"
+                          data-attendance-group-fixed-schedule-start
+                        />
+                      </label>
+                      <label class="attendance__field" for="attendance-group-fixed-schedule-end">
+                        <span>{{ tr('End date', '结束日期') }}</span>
+                        <input
+                          id="attendance-group-fixed-schedule-end"
+                          v-model="attendanceGroupFixedSchedulePreviewForm.endDate"
+                          type="date"
+                          :disabled="attendanceGroupFixedSchedulePreviewLoading"
+                          data-attendance-group-fixed-schedule-end
+                        />
+                      </label>
+                    </div>
+                    <div class="attendance__admin-actions">
+                      <button
+                        class="attendance__btn attendance__btn--primary"
+                        type="button"
+                        :disabled="!attendanceGroupFixedSchedulePreviewAvailable"
+                        data-attendance-group-fixed-schedule-preview-submit
+                        @click="previewAttendanceGroupFixedSchedule"
+                      >
+                        {{ attendanceGroupFixedSchedulePreviewLoading ? tr('Previewing...', '预览中...') : tr('Preview fixed schedule', '预览固定排班') }}
+                      </button>
+                    </div>
+                    <div
+                      v-if="attendanceGroupFixedSchedulePreviewResult"
+                      class="attendance__group-preview-result"
+                      data-attendance-group-fixed-schedule-preview-result
+                    >
+                      <strong data-attendance-group-fixed-schedule-preview-summary>{{ attendanceGroupFixedSchedulePreviewSummary }}</strong>
+                      <div class="attendance__group-preview-counts">
+                        <span data-attendance-group-fixed-schedule-preview-create>{{ tr('Would create', '将创建') }}: {{ attendanceGroupFixedSchedulePreviewResult.wouldCreate.length }}</span>
+                        <span data-attendance-group-fixed-schedule-preview-skip>{{ tr('Skipped', '跳过') }}: {{ attendanceGroupFixedSchedulePreviewResult.skipped.length }}</span>
+                        <span data-attendance-group-fixed-schedule-preview-conflict>{{ tr('Blocking conflicts', '阻断冲突') }}: {{ attendanceGroupFixedSchedulePreviewResult.blockingConflicts.length }}</span>
+                      </div>
+                      <small class="attendance__field-hint">{{ tr('If blocking conflicts are present, the future apply step must write nothing.', '如果存在阻断冲突，后续应用步骤必须零写入。') }}</small>
+                    </div>
+                  </section>
                 </section>
               </div>
             </div>
@@ -6214,6 +6294,51 @@ interface AttendanceGroupMember {
 
 type AttendanceGroupMemberResolvedUsers = Record<string, AttendanceAdminBatchResolveItem>
 
+interface AttendanceGroupFixedSchedulePreviewCandidate {
+  userId: string
+  shiftId: string
+  startDate: string
+  endDate: string | null
+  isActive: boolean
+}
+
+interface AttendanceGroupFixedSchedulePreviewSkipped {
+  assignmentId: string
+  userId: string
+  shiftId: string
+  startDate: string
+  endDate: string | null
+}
+
+interface AttendanceGroupFixedSchedulePreviewConflict {
+  conflictType: string
+  draftKind: string
+  existingKind: string
+  assignmentId: string
+  userId: string
+  startDate: string
+  endDate: string | null
+  existingStartDate: string
+  existingEndDate: string | null
+  message?: string
+}
+
+interface AttendanceGroupFixedSchedulePreviewResult {
+  group: AttendanceGroup
+  shift: AttendanceShift
+  window: {
+    startDate: string
+    endDate: string | null
+  }
+  target: {
+    total: number
+    userIds: string[]
+  }
+  wouldCreate: AttendanceGroupFixedSchedulePreviewCandidate[]
+  skipped: AttendanceGroupFixedSchedulePreviewSkipped[]
+  blockingConflicts: AttendanceGroupFixedSchedulePreviewConflict[]
+}
+
 type AttendanceGroupSummaryAction = {
   key: string
   label: string
@@ -6794,6 +6919,7 @@ const attendanceGroupLoading = ref(false)
 const attendanceGroupSaving = ref(false)
 const attendanceGroupMemberLoading = ref(false)
 const attendanceGroupMemberSaving = ref(false)
+const attendanceGroupFixedSchedulePreviewLoading = ref(false)
 const payrollTemplateLoading = ref(false)
 const payrollTemplateSaving = ref(false)
 const payrollSummaryFieldOptionsLoading = ref(false)
@@ -7896,6 +8022,12 @@ const attendanceGroupPendingMemberIds = ref<string[]>([])
 const attendanceGroupMemberDuplicateNotice = ref('')
 const attendanceGroupMemberTotal = ref(0)
 const attendanceGroupMemberResolvedUsers = ref<AttendanceGroupMemberResolvedUsers>({})
+const attendanceGroupFixedSchedulePreviewForm = reactive({
+  shiftId: '',
+  startDate: toDateInput(new Date()),
+  endDate: toDateInput(new Date()),
+})
+const attendanceGroupFixedSchedulePreviewResult = ref<AttendanceGroupFixedSchedulePreviewResult | null>(null)
 const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
 const payrollCycleSummary = ref<AttendanceSummary | null>(null)
@@ -8083,6 +8215,23 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
 const attendanceGroupMemberSubmitAvailable = computed(() =>
   attendanceGroupPendingMemberIds.value.length > 0 || parseUserIdList(attendanceGroupMemberUserIds.value).length > 0
 )
+const attendanceGroupFixedSchedulePreviewAvailable = computed(() =>
+  Boolean(
+    attendanceGroupEditingId.value
+      && attendanceGroupFixedSchedulePreviewForm.shiftId
+      && attendanceGroupFixedSchedulePreviewForm.startDate
+      && attendanceGroupFixedSchedulePreviewForm.endDate
+      && !attendanceGroupFixedSchedulePreviewLoading.value,
+  )
+)
+const attendanceGroupFixedSchedulePreviewSummary = computed(() => {
+  const result = attendanceGroupFixedSchedulePreviewResult.value
+  if (!result) return ''
+  return tr(
+    `${result.target.total} target members · ${result.wouldCreate.length} would create · ${result.skipped.length} skipped · ${result.blockingConflicts.length} blocking conflicts`,
+    `${result.target.total} 位目标成员 · ${result.wouldCreate.length} 位将创建 · ${result.skipped.length} 位跳过 · ${result.blockingConflicts.length} 个阻断冲突`,
+  )
+})
 const importCsvFile = ref<File | null>(null)
 const importCsvFileName = ref('')
 const importCsvFileId = ref('')
@@ -15356,6 +15505,9 @@ async function loadShifts() {
     if (!assignmentForm.shiftId && shifts.value.length > 0) {
       assignmentForm.shiftId = shifts.value[0].id
     }
+    if (!attendanceGroupFixedSchedulePreviewForm.shiftId && shifts.value.length > 0) {
+      attendanceGroupFixedSchedulePreviewForm.shiftId = shifts.value[0].id
+    }
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load shifts', '加载班次失败')), 'error')
   } finally {
@@ -15765,7 +15917,15 @@ function resetAttendanceGroupForm() {
   attendanceGroupMembers.value = []
   attendanceGroupMemberTotal.value = 0
   attendanceGroupMemberResolvedUsers.value = {}
+  resetAttendanceGroupFixedSchedulePreview()
   resetAttendanceGroupMemberDraft()
+}
+
+function resetAttendanceGroupFixedSchedulePreview() {
+  attendanceGroupFixedSchedulePreviewResult.value = null
+  attendanceGroupFixedSchedulePreviewForm.startDate = toDateInput(today)
+  attendanceGroupFixedSchedulePreviewForm.endDate = toDateInput(today)
+  attendanceGroupFixedSchedulePreviewForm.shiftId = shifts.value[0]?.id ?? attendanceGroupFixedSchedulePreviewForm.shiftId
 }
 
 function editAttendanceGroup(item: AttendanceGroup) {
@@ -15781,6 +15941,7 @@ function editAttendanceGroup(item: AttendanceGroup) {
     attendanceGroupMembers.value = []
     attendanceGroupMemberTotal.value = 0
     attendanceGroupMemberResolvedUsers.value = {}
+    resetAttendanceGroupFixedSchedulePreview()
     resetAttendanceGroupMemberDraft()
   }
 }
@@ -15916,6 +16077,50 @@ async function loadAttendanceGroupMembers() {
     setStatus(readErrorMessage(error, tr('Failed to load group members', '加载分组成员失败')), 'error')
   } finally {
     attendanceGroupMemberLoading.value = false
+  }
+}
+
+async function previewAttendanceGroupFixedSchedule() {
+  const groupId = attendanceGroupEditingId.value
+  if (!groupId) {
+    setStatus(tr('Save the group before previewing a fixed schedule.', '请先保存考勤组，再预览固定排班。'), 'error')
+    return
+  }
+  if (!attendanceGroupFixedSchedulePreviewForm.shiftId) {
+    setStatus(tr('Select a shift before previewing.', '请先选择班次再预览。'), 'error')
+    return
+  }
+  if (!attendanceGroupFixedSchedulePreviewForm.startDate || !attendanceGroupFixedSchedulePreviewForm.endDate) {
+    setStatus(tr('Select a start and end date before previewing.', '请先选择开始和结束日期再预览。'), 'error')
+    return
+  }
+  attendanceGroupFixedSchedulePreviewLoading.value = true
+  attendanceGroupFixedSchedulePreviewResult.value = null
+  try {
+    const response = await apiFetch(`/api/attendance/groups/${groupId}/fixed-schedule/preview`, {
+      method: 'POST',
+      body: JSON.stringify({
+        shiftId: attendanceGroupFixedSchedulePreviewForm.shiftId,
+        startDate: attendanceGroupFixedSchedulePreviewForm.startDate,
+        endDate: attendanceGroupFixedSchedulePreviewForm.endDate,
+        orgId: normalizedOrgId(),
+      }),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to preview fixed schedule', '预览固定排班失败')))
+    }
+    adminForbidden.value = false
+    attendanceGroupFixedSchedulePreviewResult.value = data.data as AttendanceGroupFixedSchedulePreviewResult
+    setStatus(tr('Fixed schedule preview ready. No assignments were written.', '固定排班预览已生成，未写入任何排班。'))
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to preview fixed schedule', '预览固定排班失败')), 'error')
+  } finally {
+    attendanceGroupFixedSchedulePreviewLoading.value = false
   }
 }
 
@@ -16771,6 +16976,17 @@ watch(attendanceGroupMemberGroupId, () => {
     loadAttendanceGroupMembers()
   }
 })
+
+watch(
+  () => [
+    attendanceGroupFixedSchedulePreviewForm.shiftId,
+    attendanceGroupFixedSchedulePreviewForm.startDate,
+    attendanceGroupFixedSchedulePreviewForm.endDate,
+  ],
+  () => {
+    attendanceGroupFixedSchedulePreviewResult.value = null
+  },
+)
 
 watch(importProfileId, () => {
   const profile = selectedImportProfile.value
@@ -18847,6 +19063,23 @@ const holidaySectionBindings = {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 4px;
+}
+
+.attendance__group-preview-result {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.attendance__group-preview-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #374151;
+  font-size: 12px;
 }
 
 .attendance__details {

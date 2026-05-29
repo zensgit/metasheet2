@@ -134,13 +134,21 @@ describe('attendance UUID route validation', () => {
       { key: 'GET /api/attendance/payroll-cycles/:id/summary' },
       { key: 'GET /api/attendance/payroll-cycles/:id/summary/export' },
       { key: 'GET /api/attendance/payroll-cycles/:id/export' },
+      {
+        key: 'POST /api/attendance/groups/:id/fixed-schedule/preview',
+        body: {
+          shiftId: '00000000-0000-4000-8000-000000000001',
+          startDate: '2026-06-01',
+          endDate: '2026-06-30',
+        },
+      },
       { key: 'GET /api/attendance/holidays/:id' },
       { key: 'PUT /api/attendance/holidays/:id' },
       { key: 'DELETE /api/attendance/holidays/:id' },
     ]
 
     for (const testCase of cases) {
-      const res = await invokeRoute(routes, testCase.key, { params: { id: 'not-a-uuid' } })
+      const res = await invokeRoute(routes, testCase.key, { params: { id: 'not-a-uuid' }, body: 'body' in testCase ? testCase.body : undefined })
       expect(res.statusCode, testCase.key).toBe(400)
       expect(res.body, testCase.key).toMatchObject({
         ok: false,

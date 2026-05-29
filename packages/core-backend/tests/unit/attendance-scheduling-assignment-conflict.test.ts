@@ -103,4 +103,140 @@ describe('attendance scheduling assignment conflict guard', () => {
     expect(helpers.getAttendanceScheduleAssignmentConflictType('rotation', 'shift')).toBe('rotation_overrides_shift')
     expect(helpers.getAttendanceScheduleAssignmentConflictType('shift', 'rotation')).toBe('rotation_overrides_shift')
   })
+
+  it('builds fixed-schedule group previews from the complete member set without writes', async () => {
+    const db = {
+      query: vi.fn()
+        .mockResolvedValueOnce([
+          {
+            id: 'group-a',
+            org_id: 'org-a',
+            name: 'Operations',
+            code: 'ops',
+            timezone: 'Asia/Shanghai',
+            rule_set_id: null,
+            description: null,
+          },
+        ])
+        .mockResolvedValueOnce([
+          {
+            id: 'shift-a',
+            org_id: 'org-a',
+            name: 'Day shift',
+            timezone: 'Asia/Shanghai',
+            work_start_time: '09:00',
+            work_end_time: '18:00',
+            late_grace_minutes: 10,
+            early_grace_minutes: 5,
+            rounding_minutes: 5,
+            working_days: [1, 2, 3, 4, 5],
+          },
+        ])
+        .mockResolvedValueOnce([
+          { user_id: 'user-create' },
+          { user_id: 'user-skip' },
+          { user_id: 'user-shift-conflict' },
+          { user_id: 'user-rotation-conflict' },
+        ])
+        .mockResolvedValueOnce([
+          {
+            id: 'assignment-skip',
+            user_id: 'user-skip',
+            shift_id: 'shift-a',
+            start_date: '2026-06-01',
+            end_date: '2026-06-30',
+            kind: 'shift',
+          },
+          {
+            id: 'assignment-conflict',
+            user_id: 'user-shift-conflict',
+            shift_id: 'shift-b',
+            start_date: '2026-06-10',
+            end_date: '2026-06-20',
+            kind: 'shift',
+          },
+        ])
+        .mockResolvedValueOnce([
+          {
+            id: 'rotation-conflict',
+            user_id: 'user-rotation-conflict',
+            rotation_rule_id: 'rotation-a',
+            start_date: '2026-06-01',
+            end_date: null,
+            kind: 'rotation',
+          },
+        ]),
+    }
+
+    const preview = await helpers.buildAttendanceGroupFixedSchedulePreview(db, {
+      orgId: 'org-a',
+      groupId: 'group-a',
+      shiftId: 'shift-a',
+      startDate: '2026-06-01',
+      endDate: '2026-06-30',
+    })
+
+    expect(preview.ok).toBe(true)
+    expect(preview.data.target).toEqual({
+      total: 4,
+      userIds: ['user-create', 'user-skip', 'user-shift-conflict', 'user-rotation-conflict'],
+    })
+    expect(preview.data.wouldCreate).toEqual([
+      {
+        userId: 'user-create',
+        shiftId: 'shift-a',
+        startDate: '2026-06-01',
+        endDate: '2026-06-30',
+        isActive: true,
+      },
+    ])
+    expect(preview.data.skipped).toEqual([
+      {
+        assignmentId: 'assignment-skip',
+        userId: 'user-skip',
+        shiftId: 'shift-a',
+        startDate: '2026-06-01',
+        endDate: '2026-06-30',
+      },
+    ])
+    expect(preview.data.blockingConflicts.map((item: any) => item.userId)).toEqual([
+      'user-shift-conflict',
+      'user-rotation-conflict',
+    ])
+    expect(preview.data.blockingConflicts.map((item: any) => item.conflictType)).toEqual([
+      'shift_assignment_overlap',
+      'rotation_overrides_shift',
+    ])
+
+    const queries = db.query.mock.calls.map(call => String(call[0])).join('\n')
+    expect(queries).toContain('attendance_group_members')
+    expect(queries).toContain('attendance_shift_assignments')
+    expect(queries).toContain('attendance_rotation_assignments')
+    expect(queries).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/i)
+  })
+
+  it('rejects fixed-schedule group previews for empty groups', async () => {
+    const db = {
+      query: vi.fn()
+        .mockResolvedValueOnce([{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }])
+        .mockResolvedValueOnce([{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }])
+        .mockResolvedValueOnce([]),
+    }
+
+    const preview = await helpers.buildAttendanceGroupFixedSchedulePreview(db, {
+      orgId: 'org-a',
+      groupId: 'group-a',
+      shiftId: 'shift-a',
+      startDate: '2026-06-01',
+      endDate: '2026-06-30',
+    })
+
+    expect(preview).toEqual({
+      ok: false,
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'Group has no members to schedule',
+    })
+    expect(db.query).toHaveBeenCalledTimes(3)
+  })
 })

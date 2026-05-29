@@ -677,6 +677,160 @@ describe('Attendance admin regressions', () => {
     expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-groups')!).display).toBe('none')
   })
 
+  it('previews fixed schedule coverage without writing assignments', async () => {
+    const previewBodies: unknown[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/rule-sets')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'rule-set-1', name: 'Ops Rules', scope: 'org', version: 3, isDefault: true },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/preview') && init?.method === 'POST') {
+        previewBodies.push(JSON.parse(String(init.body || '{}')))
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            group: {
+              id: 'group-a',
+              name: 'Ops Team',
+              timezone: 'Asia/Shanghai',
+            },
+            shift: {
+              id: 'shift-a',
+              name: 'Day shift',
+              timezone: 'Asia/Shanghai',
+              workStartTime: '09:00',
+              workEndTime: '18:00',
+              lateGraceMinutes: 10,
+              earlyGraceMinutes: 5,
+              roundingMinutes: 5,
+              workingDays: [1, 2, 3, 4, 5],
+            },
+            window: { startDate: '2026-06-01', endDate: '2026-06-30' },
+            target: { total: 3, userIds: ['user-create', 'user-skip', 'user-conflict'] },
+            wouldCreate: [
+              { userId: 'user-create', shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', isActive: true },
+            ],
+            skipped: [
+              { assignmentId: 'assignment-skip', userId: 'user-skip', shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30' },
+            ],
+            blockingConflicts: [
+              {
+                conflictType: 'shift_assignment_overlap',
+                draftKind: 'shift',
+                existingKind: 'shift',
+                assignmentId: 'assignment-conflict',
+                userId: 'user-conflict',
+                startDate: '2026-06-01',
+                endDate: '2026-06-30',
+                existingStartDate: '2026-06-10',
+                existingEndDate: '2026-06-20',
+                message: 'Shift assignment overlaps an active shift assignment for the same user',
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/groups/group-a/members')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'member-1', groupId: 'group-a', userId: 'user-create', createdAt: '2026-03-28T08:00:00.000Z' },
+            ],
+            total: 3,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/groups')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'group-a',
+                name: 'Ops Team',
+                code: 'ops-team',
+                timezone: 'Asia/Shanghai',
+                ruleSetId: 'rule-set-1',
+                description: 'Operations attendance group',
+              },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-a',
+                name: 'Day shift',
+                timezone: 'Asia/Shanghai',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 5,
+                roundingMinutes: 5,
+                workingDays: [1, 2, 3, 4, 5],
+              },
+            ],
+          },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const groupsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+    expect(groupsNav).toBeTruthy()
+    groupsNav!.click()
+    await flushUi(4)
+
+    const previewPanel = container!.querySelector<HTMLElement>('[data-attendance-group-fixed-schedule-preview]')
+    expect(previewPanel).toBeTruthy()
+    const shiftSelect = previewPanel!.querySelector<HTMLSelectElement>('[data-attendance-group-fixed-schedule-shift]')
+    expect(shiftSelect).toBeTruthy()
+    shiftSelect!.value = 'shift-a'
+    shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(previewPanel!, '[data-attendance-group-fixed-schedule-start]', '2026-06-01')
+    setInput(previewPanel!, '[data-attendance-group-fixed-schedule-end]', '2026-06-30')
+    await flushUi(2)
+
+    const previewButton = previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-preview-submit]')
+    expect(previewButton).toBeTruthy()
+    previewButton!.click()
+    await flushUi(8)
+
+    expect(previewBodies).toEqual([
+      {
+        shiftId: 'shift-a',
+        startDate: '2026-06-01',
+        endDate: '2026-06-30',
+      },
+    ])
+    expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-preview-summary]')?.textContent).toContain('3 target members')
+    expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-preview-create]')?.textContent).toContain('1')
+    expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-preview-skip]')?.textContent).toContain('1')
+    expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-preview-conflict]')?.textContent).toContain('1')
+    expect(previewPanel!.textContent).not.toContain('Apply')
+    expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+    )).toBe(false)
+  })
+
   it('renders the production calendar-policy quick-add panel and appends a group day-index row', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
