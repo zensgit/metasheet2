@@ -93,6 +93,23 @@ function toRunView(execution: AutomationExecution, { includeSnapshot }: { includ
 }
 
 /**
+ * Re-fetch the persisted (redacted) execution after a run/test/retry. A log-READ
+ * failure must NOT mask an already-completed run (testRun/retry swallow log-WRITE
+ * failures by design) — on throw, return undefined so the caller uses its redacted
+ * fallback instead of bubbling a 500.
+ */
+async function safeGetPersistedExecution(
+  svc: AutomationService,
+  executionId: string,
+): Promise<AutomationExecution | undefined> {
+  try {
+    return await svc.logs.getById(executionId)
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Build the automation routes router.
  *
  * Accepts either an AutomationService instance or a resolver function. The
@@ -136,7 +153,8 @@ export function createAutomationRoutes(
       // NOT mutate it. Serialize the PERSISTED (redacted) row; if it didn't land, fall back to
       // a response-level redaction (NEVER the raw execution). Flat AutomationExecution shape is
       // preserved either way (client does parseJson<AutomationExecution>(res)).
-      const persisted = await svc.logs.getById(execution.id)
+      // safeGet: a log-read failure must not 500 a completed test run → redacted fallback.
+      const persisted = await safeGetPersistedExecution(svc, execution.id)
       return res.json(persisted ?? redactAutomationExecutionForResponse(execution))
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Test run failed'
@@ -282,7 +300,9 @@ export function createAutomationRoutes(
       // output) are only scrubbed by record()'s at-persist redaction, which returns new
       // objects and does NOT mutate the in-memory execution. Re-fetch so the response
       // equals what is stored — same contract as the detail GET (no raw-secret leak).
-      const persisted = await svc.logs.getById(result.execution.id)
+      // safeGet: a log-read failure must not 500 a retry whose side effects already ran →
+      // fall through to the minimal safe body below (never a 500 that hides the completed run).
+      const persisted = await safeGetPersistedExecution(svc, result.execution.id)
       if (persisted) {
         return res.json(toRunView(persisted, { includeSnapshot: true }))
       }

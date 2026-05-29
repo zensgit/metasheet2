@@ -100,6 +100,25 @@ describe('createAutomationRoutes HTTP mounting', () => {
     expect(JSON.stringify(res.body)).not.toContain('LIVE-SECRET-TOKEN') // came from the persisted redacted row
   })
 
+  it('POST /test stays 200 (redacted fallback) when the persisted-row re-fetch THROWS — a log read must not 500 a completed test', async () => {
+    const svc = makeMockService()
+    svc.testRun.mockResolvedValue({
+      id: 'exec-4', ruleId: 'rule-1', triggeredBy: 'manual_test', triggeredAt: '2026-05-29T00:00:00Z', status: 'success',
+      ruleSnapshot: { actions: [{ config: { token: 'LIVE-SECRET-TOKEN' } }] },
+      // secret-SHAPED error (conn-string) — the redactor scrubs by shape, not bare strings.
+      steps: [{ actionType: 'send_webhook', status: 'failed', error: 'connect postgres://u:SECRETPW@h/db failed' }],
+    })
+    svc.logs.getById.mockRejectedValue(new Error('db down')) // log read fails
+
+    const res = await request(buildApp(svc))
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .expect(200) // NOT 500 — the test run completed; only the log read failed
+    expect(res.body.id).toBe('exec-4') // flat shape via redacted fallback
+    const serialized = JSON.stringify(res.body)
+    expect(serialized).not.toContain('LIVE-SECRET-TOKEN')
+    expect(serialized).not.toContain('SECRETPW')
+  })
+
   it('GET /logs returns shape { executions: [...] } — NOT { logs }', async () => {
     const svc = makeMockService()
     svc.logs.getByRule.mockResolvedValue([
