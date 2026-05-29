@@ -190,6 +190,17 @@ async function main(): Promise<void> {
             rows: paged.data.length
           })
         }
+
+        // A2 real-wire proof: a SCHEMA-QUALIFIED select exercises the per-segment quoting
+        // ([schema].[table]) against the live engine — the bare-table probes above only cover the
+        // single-segment [table] form. Connected to MSSQL_DATABASE, so [dbo].[<table>] resolves.
+        const qualified = `${schema}.${table}`
+        const qualifiedSample = await adapter.select(qualified, { limit: 1 })
+        if (qualifiedSample.error) throw qualifiedSample.error
+        console.log('[ok] select schema-qualified ([schema].[table])', {
+          table: qualified,
+          rows: qualifiedSample.data.length
+        })
       } else {
         console.log(
           '[skip] select probes (TOP / OFFSET-FETCH) — adapter.select() is not schema-qualified; it ' +

@@ -33,8 +33,9 @@ The smoke drives `MSSQLAdapter` end-to-end against the target:
 3. parameterized query — `SELECT $1` → exercises the `$N`→`@pN` translation.
 4. `getSchema(schema)` — `INFORMATION_SCHEMA` + `sys.*` introspection (skippable via `MSSQL_SKIP_SCHEMA`).
 5. (with `MSSQL_TABLE`) `tableExists` + `getTableInfo` (columns + PK), and — **only on the default `dbo`
-   schema** — `select` **TOP** (`{limit}`) + `select` **OFFSET/FETCH** (`{limit, offset, orderBy}`), both
-   pagination branches. `adapter.select()` emits `FROM [table]` (unqualified → resolves against the login
+   schema** — `select` **TOP** (`{limit}`) + `select` **OFFSET/FETCH** (`{limit, offset, orderBy}`) (both
+   pagination branches) + a **schema-qualified** `select` (`[dbo].[table]`) that proves the A2 per-segment
+   quoting against the live engine (not just the fake-pool unit test). `adapter.select()` emits `FROM [table]` (unqualified → resolves against the login
    default schema), so on a non-`dbo` `MSSQL_SCHEMA` the select probes are **skipped** (`[skip] select
    probes …`) while the schema-qualified `tableExists`/`getTableInfo` still run. (Making `select()`
    schema-aware is a separate adapter enhancement, not B5A.)
