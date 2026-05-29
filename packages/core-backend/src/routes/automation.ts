@@ -80,6 +80,10 @@ function toRunView(execution: AutomationExecution, { includeSnapshot }: { includ
     duration: execution.duration ?? null,
     error: execution.error ?? null,
     schemaVersion: execution.schemaVersion ?? null,
+    // A5 retry provenance (plain ids; surfaced in both list + detail so an operator
+    // can see a run is a re-run and who triggered it).
+    rerunOfExecutionId: execution.rerunOfExecutionId ?? null,
+    initiatedBy: execution.initiatedBy ?? null,
     steps: (execution.steps ?? []).map((s, i) => toWorkflowJobView(execution, s, i)),
     ...(includeSnapshot
       ? { triggerEvent: execution.triggerEvent ?? null, ruleSnapshot: execution.ruleSnapshot ?? null }
@@ -235,6 +239,58 @@ export function createAutomationRoutes(
       return res.json(toRunView(execution, { includeSnapshot: true }))
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load run'
+      return res.status(500).json({ error: message })
+    }
+  })
+
+  // A5 — whole-execution retry (admin-only; re-runs real side effects). Reconstructs from
+  // the CURRENT enabled rule + the original stored trigger_event; new execution links back
+  // via rerun_of_execution_id. (A4 design-lock #2039.)
+  router.post('/automation-executions/:executionId/retry', requireAdminRole(), async (req: Request, res: Response) => {
+    const executionId = typeof req.params.executionId === 'string' ? req.params.executionId : ''
+    if (!executionId) {
+      return res.status(400).json({ error: 'executionId is required' })
+    }
+    // D4: retry re-runs external side effects (record writes / webhook / email / DingTalk) —
+    // require an explicit confirmation flag; absence is a 400, not a silent run.
+    const body = (req.body ?? {}) as { confirmSideEffects?: unknown }
+    if (body.confirmSideEffects !== true) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'CONFIRM_SIDE_EFFECTS_REQUIRED', message: 'confirmSideEffects must be true to retry (re-runs external side effects)' },
+      })
+    }
+
+    const svc = getService(res)
+    if (!svc) return undefined
+
+    const initiatedBy = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
+
+    try {
+      const result = await svc.retryExecution(executionId, initiatedBy)
+      if ('status' in result) {
+        return res.status(result.status).json({ ok: false, error: { code: result.code, message: result.message } })
+      }
+      // Serialize the PERSISTED (redacted) row, NOT the raw in-memory execution: the new
+      // execution's ruleSnapshot (current rule = LIVE credentials) + steps (raw action
+      // output) are only scrubbed by record()'s at-persist redaction, which returns new
+      // objects and does NOT mutate the in-memory execution. Re-fetch so the response
+      // equals what is stored — same contract as the detail GET (no raw-secret leak).
+      const persisted = await svc.logs.getById(result.execution.id)
+      if (persisted) {
+        return res.json(toRunView(persisted, { includeSnapshot: true }))
+      }
+      // record() is fire-and-forget; if persistence was swallowed, return a minimal safe
+      // body (ids/status only) — never the raw in-memory snapshot/steps.
+      return res.json({
+        id: result.execution.id,
+        status: legacyAutomationStatusToJobStatus(result.execution.status),
+        statusLegacy: result.execution.status,
+        rerunOfExecutionId: result.execution.rerunOfExecutionId ?? null,
+        initiatedBy: result.execution.initiatedBy ?? null,
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Retry failed'
       return res.status(500).json({ error: message })
     }
   })

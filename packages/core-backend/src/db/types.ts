@@ -1258,6 +1258,9 @@ export interface MultitableAutomationExecutionsTable {
   rule_snapshot: JsonObjectColumn
   finished_at: Date | string | null
   schema_version: number
+  // A5 retry provenance columns (nullable; set only on a retry-created execution).
+  rerun_of_execution_id: string | null
+  initiated_by: string | null
   created_at: CreatedAt
 }
 
