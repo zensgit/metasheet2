@@ -24,7 +24,7 @@
 
 1. **对客户数据源零改动、零风险**:不要求客户升级 SQL Server、不要求客户改服务器 TLS/证书配置、不要求客户开维护窗口。一切兼容性在我方 runtime 侧消化。
 2. **只读优先(MVP 强制,框架级,非装饰)**:MVP 只暴露读路径。只读保障必须做到**框架级双层**(不能只靠适配器层):① 路由级 —— readOnly 源拒绝 raw `POST /:id/query` 写语句(SELECT-only 分类器,或对 readOnly 源直接禁用 raw query);② 适配器层 —— 拒绝 `insert/update/delete/transaction` 写。由 per-source `readOnly` 旗标(默认 `true`)统一控制。落地见 Lane A 的 **A-RO**(框架级,适用全部适配器),MSSQL 仅继承该保障。写能力解禁是后续独立闸。
-3. **默认安全,放宽显式且可审计**:连接默认 `encrypt=true`、`trustServerCertificate=false`;任何"降级"(跳证书校验 / 关加密 / 降 TLS 版本)都是**单数据源**级别的显式配置,并在降级时落 warn 审计日志。
+3. **默认安全,放宽显式且可审计**:连接默认 `encrypt=true`(线缆始终加密);`trustServerCertificate` 默认 `true`(信任内网自签证书、跳过证书身份校验,但**仍全程加密**——ERP 内网部署常态,PR1 #1985 既定默认)。更进一步的降级(降 TLS 版本/cipher、或关加密走明文)都是**单数据源**级别的显式配置,并在降级时落 warn 审计日志。降 TLS(B3,仍加密)与关加密(明文)互斥,不可同设。
 4. **线缆加密与存储加密正交**:网络 TLS 与"凭据落库加密"是两件事,都要做;内网部署不豁免存储加密。
 5. **适配器与部署形态解耦**:连 SQL Server 的能力不依赖后端跑在哪(Linux VM / 容器 / 原生 Windows 三档通用)。
 
@@ -78,16 +78,16 @@
 |---|---|
 | B1 契约(先行) | `connection` 新增 per-source 旋钮:`version` / `encrypt` / `trustServerCertificate`;zod enum 加 `mssql` + **registry 同步注册 `mssql`**(避免重蹈 A4 的 enum/registry 不一致);OpenAPI parity 同步;非法 `type` 必须报错不回落。`readOnly` 旗标由 A-RO 统一定义,MSSQL 默认 `true`。**`authType` 本期只定 `'sql'`**;`'windows'`(集成认证)从 Linux runtime 走需 Kerberos/keytab/AD 信任/票据续期,是独立切片(B6),不在本期契约里半成品化 |
 | B2 适配器实现 | `MSSQLAdapter extends BaseDataAdapter`(tedious,长连接/池化生命周期,**非 new-pool-per-call**),对齐 connect/query/select/getSchema/stream;**继承 A-RO 框架级只读保障**(路由级 + 适配器层);TLS 旋钮经 tedious `cryptoCredentialsDetails` 的 **per-connection** `minVersion` + `ciphers`(含 `@SECLEVEL=0`)落地——明确走 per-connection,不用进程级 `--tls-min-v1.0` flag;复用 §Lane B 抽出的共享 mssql helper |
-| B3 TLS 放宽策略(我方侧) | 默认 `encrypt:true,trustServerCertificate:false`;内网自签 → per-source 开 `trustServerCertificate`(仍加密);老库 TLS1.0/老 cipher(AES-CBC-SHA)→ **per-connection** 放宽(`cryptoCredentialsDetails.minVersion='TLSv1'` + cipher 串带 `@SECLEVEL=0`),作用域限该源、客户服务器零改动;**两个机制非 per-source、需进程级**:(i) 若误用 `--tls-min-v1.0` flag 是进程级——不采用;(ii) OpenSSL3 legacy provider(仅当撞上 RC4/3DES/MD5)经 `openssl.cnf` 进程级加载,**不可 per-source** → 这类极老库一律走隔离代理 sidecar 分支,不在主进程放 legacy provider;再不行该源 `encrypt:false`(仅内网 + 审计) |
+| B3 TLS 放宽策略(我方侧) | 默认 `encrypt:true` + `trustServerCertificate:true`(信任内网自签证书,仍加密;PR1 #1985 既定默认,有受信 CA 时可 per-source 收紧为 `false`);老库 TLS1.0/老 cipher(AES-CBC-SHA)→ **per-connection** 放宽(`cryptoCredentialsDetails.minVersion='TLSv1'` + cipher 串带 `@SECLEVEL=0`),作用域限该源、客户服务器零改动,**仍加密;与 `encrypt:false` 互斥(同设即抛)**;**两个机制非 per-source、需进程级**:(i) 若误用 `--tls-min-v1.0` flag 是进程级——不采用;(ii) OpenSSL3 legacy provider(仅当撞上 RC4/3DES/MD5)经 `openssl.cnf` 进程级加载,**不可 per-source** → 这类极老库一律走隔离代理 sidecar 分支,不在主进程放 legacy provider;再不行该源 `encrypt:false`(仅内网 + 审计) |
 | B4 版本兼容矩阵 | 2008R2 / 2012 / 2016 / 2019 / 2022 行为表(默认加密要求、TLS 版本、握手关键字)。**真实容器只能测 2017+**(MS 官方 Linux mssql 镜像最低 SQL Server 2017;2008R2/2012 是 Windows-only 二进制,无 Linux 容器)→ 2017/2019/2022 用 `mcr.microsoft.com/mssql/server` 真测;2008R2/2012 用协议级 mock。**真实 legacy(2008R2/2012)验证需 Windows VM/快照** —— 这条会给 B4 带来 Windows 测试基础设施依赖,本预算未含,列为 P0 待裁示项 |
 | B5 测试 | connect/query/transaction 单测 + 经真实 wire 的集成测试(round-trip 校验,套用 wire-vs-fixture 纪律) |
 
 **降级决策树(B3 核心)**:
 ```
-默认: encrypt=true, trustServerCertificate=false        ← 2016+ 直接用
- └ 自签证书连不上 → trustServerCertificate=true          ← 仍加密,放弃证书身份校验(内网可接受)
-    └ 老库 TLS<1.2 握手断 → 我方 runtime 放宽 TLS 下限    ← 仍加密,客户服务器不动
-       └ 连 TLS1.0 都谈不拢 → 该源 encrypt=false(内网+审计) 或 隔离代理 sidecar  ← 明文为最后手段,作用域限一台
+默认: encrypt=true, trustServerCertificate=true         ← PR1 既定:加密 + 信任内网自签证书(2016+/内网直接用)
+ ├ (可选收紧) 有受信 CA 证书 → trustServerCertificate=false  ← 校验证书身份,更严
+ └ 老库 TLS<1.2 握手断 → per-connection 降 TLS 下限/cipher(B3)  ← 仍加密(cryptoCredentialsDetails),客户服务器不动
+    └ 连 TLS1.0 都谈不拢 → 该源 encrypt=false(内网+审计) 或 隔离代理 sidecar  ← 明文为最后手段,作用域限一台;与 B3 互斥
 ```
 
 ### Lane C — 部署形态(基础设施;运行时已基本可移植)
@@ -114,31 +114,33 @@
 
 ## 4. 门控 TODO 清单(🔒 待开闸 / ⬜ 待办未阻塞 / ✅ 完成)
 
+> **状态回填 2026-05-28**:本清单原为 #1960 落仓时的快照、之后未更新。现按 `origin/main` 真实状态回填:Lane A 安全核心(A0/A0.1/A-RO/A1/A4)与 Lane B B1/B2/B3 已落地;剩余待办 = A2/A3/A5/A6、B0(共享 helper)、B4(真容器/legacy 矩阵)、B5 的真 wire 集成测试;B6 + Lane C(C3)仍 gated。
+
 ### Phase 0 — 决策与开闸(裁示见 §5)
 - ✅ P0-3 Lane A 放行(归入内核打磨/安全修复)
-- 🔒 P0-4 Lane B hold,待 A0+A-RO+A1+A4 后再 opt-in
+- ✅ P0-4 Lane B 已 opt-in(A0/A0.1/A-RO/A1/A4 定住后,2026-05-28):通用连接器 PR1 #1985 + B3 legacy-TLS 本刀
 - ✅ P0-5 落点 `docs/development/data-sources-mssql-windows-deploy-design-20260527.md` + 新分支 `codex/data-sources-lane-a-hardening-20260527`(从 `origin/main`)
 - ✅ P0-6 现做协议 mock + 2017+ 容器真测;legacy VM 延后
 - ✅ P0-1/P0-2 优先级 A>B>C(C 兜底);客户 Linux VM / Docker 事实执行期回填
 
 ### Phase A — 适配器修复(P0-3 已放行;A0 最前置)
-- ⬜ **A0 持久化接线**:`DataSourceManager` 绑 Kysely + `initialize(db)` 启动调用 + autoload/persist + 确认/补 `data_sources` 表(**A1/A4 的前置,先做**)
-- ⬜ **A0.1 scope/ownership 收口**:写路径带 owner/workspace + 读/list/load 及每个 `:id` 操作按 scope 收口 + 越权拒绝测试(**与 A0 同前置,否则持久化=跨 workspace 全局缓存**)
-- ⬜ **A-RO 框架级只读**:per-source `readOnly` 旗标 + 路由级 raw-query 写拦截(SELECT-only 或禁用)+ 适配器层 mutation guard + 测试
-- ⬜ A1 凭据落库加密(**用真正的 crypto service,非 SecretManager**)+ 密钥来源/轮换/存量一次性迁移 + wire round-trip 集成测试
+- ✅ **A0 持久化接线**(#1960 `ec0516b5d`):`DataSourceManager.initialize(db)` 启动调用 + autoload/persist + `data_sources` 表
+- ✅ **A0.1 scope/ownership 收口**(#1960):写路径带 owner + `assertAccess` 每个 `:id` 操作越权 404 + list 过滤 + 越权拒绝测试
+- ✅ **A-RO 框架级只读**(#1964 `b0f7c54df`):per-source `readOnly`(默认 true)+ 路由级 SELECT-only 分类器 + 适配器层 `assertWritable`
+- ✅ A1 凭据落库加密(#1972 `5e11ee72c`):用 `encrypted-secrets` AES-256-GCM(非 SecretManager)+ 惰性迁移 + decrypt fail-loud
 - ⬜ A2 `sanitizeIdentifier` 违规即抛 + schema-qualified 支持 + 非法值测试
 - ⬜ A3 query/testConnection 错误不吞,保留错因 + 集成测试
-- ⬜ A4 enum↔registry↔驱动三方对齐(收敛 enum 到可用集 / 或注册+装驱动)+ 破坏性契约迁移 + 非法 type 测试
+- ✅ A4 enum↔registry↔驱动三方对齐(#1976 `f5013324e`):`SUPPORTED_DATA_SOURCE_TYPES` 单一支持矩阵 + 非法 type 400 + load 跳过不支持行
 - ⬜ A5 `stream()` 真游标流 或 明确文档标注 + 上限保护
 - ⬜ A6 Postgres connect/query/transaction/错误路径单测
 
-### Phase B — MSSQL 连接器(🔒 仍 hold;P0-4 裁示:待 A0+A0.1+A-RO+A1+A4 定住后再 opt-in;contracts-first)
-- 🔒 B0 抽共享 mssql helper(连接/TLS/类型映射,通用侧,不碰 integration-core)
-- 🔒 B1 契约:config 旋钮 + zod enum `mssql` + **registry 同步注册** + OpenAPI parity + 非法值测试(`readOnly` 用 A-RO,`authType` 仅 `sql`)
-- 🔒 B2 `MSSQLAdapter`(tedious)实现 + 只读 guard + per-connection TLS 旋钮(`cryptoCredentialsDetails`)
-- 🔒 B3 TLS 降级策略(per-connection 优先;legacy provider/明文走 sidecar 或内网+审计)+ 降级时审计日志
-- 🔒 B4 2016/2019/2022 真实容器测 + 2008R2/2012 协议级 mock(真实 legacy 验证依 P0-6 决策)
-- 🔒 B5 单测 + 经真实 wire 集成测试(wire-vs-fixture 纪律)
+### Phase B — MSSQL 连接器(Lane B 已 opt-in 2026-05-28;contracts-first)
+- ⬜ B0 抽共享 mssql helper(连接/TLS/类型映射)—— PR1 暂内联在 `MSSQLAdapter`,helper 抽取留作收口项(不碰 integration-core)
+- ✅ B1 契约(#1985 `ff0bcd0cc`):`type=sqlserver` zod enum + registry 同步注册(`SUPPORTED_DATA_SOURCE_TYPES`)+ config 旋钮(encrypt/trustServerCertificate)+ 非法 type 400;`readOnly` 用 A-RO 默认 true;`authType` 仅 `sql`
+- ✅ B2 `MSSQLAdapter`(mssql 驱动,池化生命周期)实现(#1985):connect/query/select/getSchema/stream + 继承 A-RO 只读 guard + `[ ]`/TOP/OFFSET-FETCH/`@pN`
+- ✅ B3 per-connection TLS 降级旋钮(本刀):`cryptoCredentialsDetails.minVersion`/`ciphers`(经 `tlsMinVersion`/`tlsCiphers`/`legacyTls` 便捷开关),secure-by-default,非法 minVersion 即抛,降级 `emit('tls-downgrade')` 审计 + warn;仍加密(明文/legacy-provider 仍走 sidecar)
+- ⬜ B4 版本兼容矩阵:2017/2019/2022 真容器测 + 2008R2/2012 协议级 mock(真实 legacy 验证需 Windows VM,依 P0-6,**follow-up**)
+- ⬜ B5 单测 ✅(#1985 + 本刀 B3 共 24 例:config/SQL 生成/路由/TLS 旋钮);**经真实 wire 的集成测试待 B4 容器**(wire-vs-fixture 纪律:fake-driver 单测不替代真 wire)
 - 🔒 B6(后续切片)Windows 集成认证 `authType:'windows'` —— Kerberos/keytab/AD,独立设计
 
 ### Phase C — 部署形态(随 A/B 决策)

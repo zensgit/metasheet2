@@ -14,7 +14,11 @@ type PoolConfig = {
   database?: string
   user?: string
   password?: string
-  options: { encrypt: boolean; trustServerCertificate: boolean }
+  options: {
+    encrypt: boolean
+    trustServerCertificate: boolean
+    cryptoCredentialsDetails?: { minVersion?: string; ciphers?: string }
+  }
   connectionTimeout: number
   requestTimeout: number
 }
@@ -95,6 +99,82 @@ describe('MSSQLAdapter — config mapping', () => {
 
   it('throws on a server-embedded port that conflicts with an explicit port', () => {
     expect(() => poolConfig({ server: 'h,1444', port: 9999, database: 'D' })).toThrow(/Conflicting port/)
+  })
+})
+
+describe('MSSQLAdapter — legacy TLS lever (B3)', () => {
+  // Build an adapter so we can subscribe to the audit event before buildPoolConfig.
+  function adapter(connection: Record<string, unknown>, name = 's'): MSSQLAdapter {
+    return new MSSQLAdapter({
+      id: 's', name, type: 'sqlserver',
+      connection: connection as DataSourceConfig['connection'],
+      credentials: { username: 'u', password: 'p' }, options: { autoConnect: false },
+    })
+  }
+  const build = (a: MSSQLAdapter): PoolConfig =>
+    (a as unknown as { buildPoolConfig(): PoolConfig }).buildPoolConfig()
+
+  it('secure by default: no TLS keys → no cryptoCredentialsDetails', () => {
+    const cfg = poolConfig({ host: 'db', database: 'D' })
+    expect(cfg.options.cryptoCredentialsDetails).toBeUndefined()
+    expect(cfg.options.encrypt).toBe(true)
+  })
+
+  it('explicit tlsMinVersion lowers the floor but keeps the wire encrypted', () => {
+    const cfg = poolConfig({ host: 'db', database: 'D', tlsMinVersion: 'TLSv1' })
+    expect(cfg.options.cryptoCredentialsDetails).toEqual({ minVersion: 'TLSv1' })
+    expect(cfg.options.encrypt).toBe(true) // a downgrade lowers the floor, not encryption
+  })
+
+  it('explicit tlsCiphers sets cryptoCredentialsDetails.ciphers', () => {
+    const cfg = poolConfig({ host: 'db', database: 'D', tlsCiphers: 'DEFAULT@SECLEVEL=0' })
+    expect(cfg.options.cryptoCredentialsDetails).toEqual({ ciphers: 'DEFAULT@SECLEVEL=0' })
+  })
+
+  it('legacyTls:true applies the documented legacy defaults', () => {
+    const cfg = poolConfig({ host: 'db', database: 'D', legacyTls: true })
+    expect(cfg.options.cryptoCredentialsDetails).toEqual({ minVersion: 'TLSv1', ciphers: 'DEFAULT@SECLEVEL=0' })
+  })
+
+  it('explicit keys override the legacyTls convenience defaults', () => {
+    const cfg = poolConfig({ host: 'db', database: 'D', legacyTls: true, tlsMinVersion: 'TLSv1.1', tlsCiphers: 'HIGH' })
+    expect(cfg.options.cryptoCredentialsDetails).toEqual({ minVersion: 'TLSv1.1', ciphers: 'HIGH' })
+  })
+
+  it('throws on an invalid tlsMinVersion (enum-strict, no silent fallback)', () => {
+    expect(() => poolConfig({ host: 'db', database: 'D', tlsMinVersion: 'SSLv3' })).toThrow(/Invalid connection\.tlsMinVersion/)
+  })
+
+  it('rejects combining a B3 TLS downgrade with encrypt:false (plaintext is a separate hatch)', () => {
+    expect(() => poolConfig({ host: 'db', database: 'D', legacyTls: true, encrypt: false }))
+      .toThrow(/encrypt=false cannot be combined/)
+    expect(() => poolConfig({ host: 'db', database: 'D', tlsMinVersion: 'TLSv1', encrypt: false }))
+      .toThrow(/encrypt=false cannot be combined/)
+    expect(() => poolConfig({ host: 'db', database: 'D', tlsCiphers: 'DEFAULT@SECLEVEL=0', encrypt: false }))
+      .toThrow(/encrypt=false cannot be combined/)
+  })
+
+  it('still allows encrypt:false on its own (plaintext escape hatch, no B3 keys)', () => {
+    const cfg = poolConfig({ host: 'db', database: 'D', encrypt: false })
+    expect(cfg.options.encrypt).toBe(false)
+    expect(cfg.options.cryptoCredentialsDetails).toBeUndefined()
+  })
+
+  it('emits a tls-downgrade audit event (with source name + params) when downgrading', () => {
+    const a = adapter({ host: 'db', database: 'D', legacyTls: true }, 'legacy-erp')
+    const events: Array<{ adapter: string; minVersion?: string; ciphers?: string }> = []
+    a.on('tls-downgrade', e => events.push(e as never))
+    build(a)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ adapter: 'legacy-erp', minVersion: 'TLSv1', ciphers: 'DEFAULT@SECLEVEL=0' })
+  })
+
+  it('emits no audit event for a secure-default source', () => {
+    const a = adapter({ host: 'db', database: 'D' })
+    const events: unknown[] = []
+    a.on('tls-downgrade', e => events.push(e))
+    build(a)
+    expect(events).toHaveLength(0)
   })
 })
 
