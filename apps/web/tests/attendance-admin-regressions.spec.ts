@@ -609,9 +609,13 @@ describe('Attendance admin regressions', () => {
       '/api/attendance/groups',
       '/api/attendance/import/batches',
       '/api/attendance/report-fields',
-      '/api/attendance/overtime-rules',
+      // NOTE: leave-types / overtime-rules are intentionally NOT in this forbidden list.
+      // As of #2066 (self-service leave policies) the employee overview refresh loads the
+      // ACTIVE leave-types and overtime-rules (?isActive=true) so the self-service leave /
+      // overtime request form can populate its dropdowns (AttendanceView.vue:
+      // requestForm.leaveTypeId / requestForm.overtimeRuleId). Those are employee-facing
+      // reference reads, not admin-only preloads — the full admin lists stay showAdmin-gated.
       '/api/attendance/payroll-templates',
-      '/api/attendance/leave-types',
       '/api/attendance/approval-flows',
       '/api/attendance/payroll-cycles',
       '/api/attendance/advanced-scheduling/workbench',
