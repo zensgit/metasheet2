@@ -568,6 +568,10 @@ export class ScriptSandbox extends EventEmitter {
   private wrapPythonScript(script: string, context: ExecutionContext): string {
     const contextJson = JSON.stringify(context.data || {})
 
+    // NB: the user-script interpolation below is intentionally at column 0 in the template. Each
+    // line is indented to 4 spaces by `map(l => '    ' + l)` so it sits inside the `try:` block at
+    // the same level as `result = None`. A literal leading indent on the interpolation line would
+    // DOUBLE it (8 spaces) and IndentationError every non-empty script — do not re-indent it.
     return `
 import json
 import sys
@@ -609,7 +613,7 @@ data = json.loads('${contextJson.replace(/'/g, "\\'")}')
 # User script
 try:
     result = None
-    ${script.split('\n').map(line => '    ' + line).join('\n')}
+${script.split('\n').map(line => '    ' + line).join('\n')}
 
     # Output result
     output = {
