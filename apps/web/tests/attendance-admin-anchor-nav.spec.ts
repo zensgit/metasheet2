@@ -545,7 +545,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.textContent).not.toContain('resolver unavailable')
   })
 
-  it('skips non-UUID attendance group member IDs before resolving labels', async () => {
+  it('sends non-UUID (legacy) member IDs to label resolve and falls back to the raw ID (no uuid handoffs)', async () => {
     const resolveBodies: unknown[] = []
     vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString()
@@ -605,7 +605,10 @@ describe('Attendance admin anchor navigation', () => {
 
     const people = container!.querySelector<HTMLElement>('[data-attendance-group-people]')
     expect(people).toBeTruthy()
-    expect(resolveBodies).toEqual([])
+    // No uuid handoffs (496e3a082): non-UUID / legacy member IDs are now sent to the label
+    // resolver too (the resolver no longer pre-filters to UUIDs).
+    expect(resolveBodies).toEqual([{ userIds: ['legacy-user-1'] }])
+    // The resolver rejects the legacy ID (400), so the UI falls back to showing the raw ID.
     expect(people!.querySelector('[data-attendance-group-member-label]')).toBeNull()
     expect(people!.querySelector('[data-attendance-group-member-user-id]')?.textContent).toContain('legacy-user-1')
   })
@@ -678,7 +681,7 @@ describe('Attendance admin anchor navigation', () => {
     await flushUi(4)
 
     expect(postBodies).toEqual([])
-    expect(container!.textContent).toContain('All entered IDs are already in this group or pending.')
+    expect(container!.textContent).toContain('All selected or entered users are already in this group or pending.')
     expect(container!.textContent).not.toContain('Enter at least one user ID.')
   })
 
