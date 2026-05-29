@@ -7969,6 +7969,14 @@ function mapAssignmentRow(row) {
     end_date: normalizeDateOnly(row.end_date) ?? row.end_date ?? null,
     isActive: row.is_active ?? true,
     is_active: row.is_active ?? true,
+    producerType: row.producer_type ?? null,
+    producer_type: row.producer_type ?? null,
+    producerRefId: row.producer_ref_id ?? null,
+    producer_ref_id: row.producer_ref_id ?? null,
+    producerKey: row.producer_key ?? null,
+    producer_key: row.producer_key ?? null,
+    producerRunId: row.producer_run_id ?? null,
+    producer_run_id: row.producer_run_id ?? null,
   }
 }
 
@@ -14512,6 +14520,7 @@ module.exports = {
     normalizeAttendanceComprehensiveHoursPreviewInput,
     resolveAttendanceComprehensiveHoursPreviewPeriod,
     previewAttendanceComprehensiveHours,
+    mapAssignmentRow,
     findAttendanceScheduleAssignmentConflict,
     buildAttendanceGroupFixedSchedulePlan,
     buildAttendanceGroupFixedSchedulePreview,

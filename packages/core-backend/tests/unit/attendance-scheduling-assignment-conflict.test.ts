@@ -1,9 +1,15 @@
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { describe, expect, it, vi } from 'vitest'
 
 const require = createRequire(import.meta.url)
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
 const helpers = attendancePlugin.__attendanceReportFieldCatalogForTests
+
+const provenanceMigrationSource = readFileSync(
+  new URL('../../src/db/migrations/zzzz20260528200000_add_attendance_shift_assignment_provenance.ts', import.meta.url),
+  'utf8',
+)
 
 describe('attendance scheduling assignment conflict guard', () => {
   it('detects same-kind and cross-kind active assignment overlaps', async () => {
@@ -102,6 +108,60 @@ describe('attendance scheduling assignment conflict guard', () => {
     expect(helpers.getAttendanceScheduleAssignmentConflictType('rotation', 'rotation')).toBe('rotation_assignment_overlap')
     expect(helpers.getAttendanceScheduleAssignmentConflictType('rotation', 'shift')).toBe('rotation_overrides_shift')
     expect(helpers.getAttendanceScheduleAssignmentConflictType('shift', 'rotation')).toBe('rotation_overrides_shift')
+  })
+
+  it('maps optional shift-assignment producer metadata without claiming legacy rows', () => {
+    expect(helpers.mapAssignmentRow({
+      id: 'assignment-legacy',
+      org_id: 'org-a',
+      user_id: 'user-a',
+      shift_id: 'shift-a',
+      start_date: '2026-06-01',
+      end_date: '2026-06-30',
+      is_active: true,
+    })).toEqual(expect.objectContaining({
+      producerType: null,
+      producerRefId: null,
+      producerKey: null,
+      producerRunId: null,
+    }))
+
+    expect(helpers.mapAssignmentRow({
+      id: 'assignment-managed',
+      org_id: 'org-a',
+      user_id: 'user-a',
+      shift_id: 'shift-a',
+      start_date: '2026-06-01',
+      end_date: '2026-06-30',
+      is_active: true,
+      producer_type: 'attendance_group_fixed_schedule',
+      producer_ref_id: '11111111-1111-4111-8111-111111111111',
+      producer_key: 'attendance_group_fixed_schedule:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222:2026-06-01:2026-06-30',
+      producer_run_id: '33333333-3333-4333-8333-333333333333',
+    })).toEqual(expect.objectContaining({
+      producerType: 'attendance_group_fixed_schedule',
+      producerRefId: '11111111-1111-4111-8111-111111111111',
+      producerKey: 'attendance_group_fixed_schedule:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222:2026-06-01:2026-06-30',
+      producerRunId: '33333333-3333-4333-8333-333333333333',
+      producer_type: 'attendance_group_fixed_schedule',
+      producer_ref_id: '11111111-1111-4111-8111-111111111111',
+      producer_key: 'attendance_group_fixed_schedule:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222:2026-06-01:2026-06-30',
+      producer_run_id: '33333333-3333-4333-8333-333333333333',
+    }))
+  })
+
+  it('adds nullable shift-assignment producer metadata without creating a second schedule fact table', () => {
+    expect(provenanceMigrationSource).toContain("addColumnIfNotExists(db, TABLE_NAME, 'producer_type', 'text')")
+    expect(provenanceMigrationSource).toContain("addColumnIfNotExists(db, TABLE_NAME, 'producer_ref_id', 'uuid')")
+    expect(provenanceMigrationSource).toContain("addColumnIfNotExists(db, TABLE_NAME, 'producer_key', 'text')")
+    expect(provenanceMigrationSource).toContain("addColumnIfNotExists(db, TABLE_NAME, 'producer_run_id', 'uuid')")
+    expect(provenanceMigrationSource).toContain('chk_attendance_shift_assignments_producer_metadata')
+    expect(provenanceMigrationSource).toContain('producer_type IS NULL')
+    expect(provenanceMigrationSource).toContain('producer_run_id IS NOT NULL')
+    expect(provenanceMigrationSource).toContain('idx_attendance_shift_assignments_producer_key')
+    expect(provenanceMigrationSource).toContain('idx_attendance_shift_assignments_producer_ref')
+    expect(provenanceMigrationSource).not.toContain("createTable('attendance_group")
+    expect(provenanceMigrationSource).not.toContain("createTable('attendance_schedule")
   })
 
   it('builds fixed-schedule group previews from the complete member set without writes', async () => {
