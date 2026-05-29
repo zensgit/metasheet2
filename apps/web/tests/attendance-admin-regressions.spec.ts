@@ -888,11 +888,12 @@ describe('Attendance admin regressions', () => {
     expect(groupsSection!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Choose or save a group first')
   })
 
-  it('filters, exports, and copies attendance groups from the list tools', async () => {
+  it('filters, exports, copies, and deletes attendance groups from the list tools', async () => {
     const originalCreateObjectURL = URL.createObjectURL
     const originalRevokeObjectURL = URL.revokeObjectURL
     const createObjectURL = vi.fn(() => 'blob:attendance-groups')
     const revokeObjectURL = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
@@ -921,6 +922,7 @@ describe('Attendance admin regressions', () => {
       },
     ]
     const copyBodies: Array<Record<string, unknown>> = []
+    const deletedGroupIds: string[] = []
 
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.toString()
@@ -968,6 +970,12 @@ describe('Attendance admin regressions', () => {
         }
         savedGroups.unshift(copied)
         return jsonResponse(200, { ok: true, data: copied })
+      }
+      if (url === '/api/attendance/groups/group-b' && method === 'DELETE') {
+        deletedGroupIds.push('group-b')
+        const index = savedGroups.findIndex(group => group.id === 'group-b')
+        if (index >= 0) savedGroups.splice(index, 1)
+        return jsonResponse(200, { ok: true, data: { id: 'group-b' } })
       }
       if (url === '/api/attendance/groups/group-a/members' || url === '/api/attendance/groups/group-copy/members') {
         return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
@@ -1047,9 +1055,29 @@ describe('Attendance admin regressions', () => {
       ])
       expect(list.textContent).toContain('Ops Team copy')
       expect(groupsSection.querySelector('[data-attendance-group-detail]')?.textContent).toContain('Ops Team copy')
+
+      const qaRowForDelete = Array.from(groupsSection.querySelectorAll<HTMLElement>('[data-attendance-group-row]'))
+        .find(row => row.textContent?.includes('QA Team'))
+      expect(qaRowForDelete).toBeTruthy()
+      qaRowForDelete!.querySelector<HTMLButtonElement>('[data-attendance-group-row-delete]')!.click()
+      await flushUi(8)
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      expect(deletedGroupIds).toEqual(['group-b'])
+      expect(list.textContent).not.toContain('QA Team')
+      expect(groupsSection.querySelector('[data-attendance-group-detail]')?.textContent).toContain('Ops Team copy')
+      expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+        String(input).includes('/api/attendance/groups/group-b/members')
+        && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(init?.method || 'GET').toUpperCase())
+      )).toBe(false)
+      expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+        String(input).includes('/api/attendance/assignments')
+        && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(init?.method || 'GET').toUpperCase())
+      )).toBe(false)
     } finally {
       Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
       Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+      confirmSpy.mockRestore()
     }
   })
 

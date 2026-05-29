@@ -3120,15 +3120,26 @@
                         <span>{{ attendanceGroupTypeLabel(readAttendanceGroupType(item)) }}</span>
                         <span>{{ resolveRuleSetName(item.ruleSetId) }}</span>
                       </button>
-                      <button
-                        class="attendance__btn attendance__btn--compact"
-                        type="button"
-                        :disabled="attendanceGroupCopyingId === item.id"
-                        data-attendance-group-copy
-                        @click="copyAttendanceGroup(item)"
-                      >
-                        {{ attendanceGroupCopyingId === item.id ? tr('Copying...', '复制中...') : tr('Copy', '复制') }}
-                      </button>
+                      <div class="attendance__group-list-row-actions">
+                        <button
+                          class="attendance__btn attendance__btn--compact"
+                          type="button"
+                          :disabled="attendanceGroupCopyingId === item.id || attendanceGroupDeletingId === item.id"
+                          data-attendance-group-copy
+                          @click="copyAttendanceGroup(item)"
+                        >
+                          {{ attendanceGroupCopyingId === item.id ? tr('Copying...', '复制中...') : tr('Copy', '复制') }}
+                        </button>
+                        <button
+                          class="attendance__btn attendance__btn--compact attendance__btn--danger"
+                          type="button"
+                          :disabled="attendanceGroupDeletingId === item.id"
+                          data-attendance-group-row-delete
+                          @click="deleteAttendanceGroupFromList(item)"
+                        >
+                          {{ attendanceGroupDeletingId === item.id ? tr('Deleting...', '删除中...') : tr('Delete', '删除') }}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </aside>
@@ -3148,10 +3159,11 @@
                       <button
                         class="attendance__btn attendance__btn--danger"
                         type="button"
+                        :disabled="attendanceGroupDeletingId === attendanceGroupEditingId"
                         data-attendance-group-delete
                         @click="deleteSelectedAttendanceGroup"
                       >
-                        {{ tr('Delete group', '删除考勤组') }}
+                        {{ attendanceGroupDeletingId === attendanceGroupEditingId ? tr('Deleting...', '删除中...') : tr('Delete group', '删除考勤组') }}
                       </button>
                     </div>
                   </div>
@@ -8435,6 +8447,7 @@ const attendanceGroupSearch = ref('')
 const attendanceGroupRuleSetFilter = ref('')
 const attendanceGroupTypeFilter = ref<AttendanceGroupType | ''>('')
 const attendanceGroupCopyingId = ref<string | null>(null)
+const attendanceGroupDeletingId = ref<string | null>(null)
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
 const payrollSummaryFieldOptions = ref<AttendancePayrollSummaryFieldOption[]>(
@@ -16773,6 +16786,10 @@ function deleteSelectedAttendanceGroup() {
   void deleteAttendanceGroup(attendanceGroupEditingId.value)
 }
 
+function deleteAttendanceGroupFromList(item: AttendanceGroup) {
+  void deleteAttendanceGroup(item.id)
+}
+
 function resolveRuleSetName(ruleSetId?: string | null): string {
   if (!ruleSetId) return tr('Default', '默认')
   return ruleSets.value.find(item => item.id === ruleSetId)?.name ?? tr('Default', '默认')
@@ -17306,6 +17323,7 @@ async function removeAttendanceGroupMember(userId: string) {
 
 async function deleteAttendanceGroup(id: string) {
   if (!window.confirm(tr('Delete this attendance group?', '确认删除该考勤分组吗？'))) return
+  attendanceGroupDeletingId.value = id
   try {
     const response = await apiFetch(`/api/attendance/groups/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -17329,6 +17347,8 @@ async function deleteAttendanceGroup(id: string) {
     setStatus(tr('Attendance group deleted.', '考勤分组已删除。'))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to delete attendance group', '删除考勤分组失败')), 'error')
+  } finally {
+    attendanceGroupDeletingId.value = null
   }
 }
 
@@ -20129,6 +20149,13 @@ const holidaySectionBindings = {
 .attendance__group-list-main span {
   display: grid;
   gap: 4px;
+}
+
+.attendance__group-list-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .attendance__group-list-item small,
