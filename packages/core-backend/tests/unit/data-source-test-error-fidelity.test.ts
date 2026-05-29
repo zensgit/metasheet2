@@ -95,6 +95,33 @@ describe('data-source /test error fidelity (A3)', () => {
     expect(out).not.toContain(SECRET)   // configured secret value scrubbed
     expect(out).not.toContain('hunter2') // password=… pattern scrubbed
     expect(out).not.toContain('abc.def.ghi') // token: … pattern scrubbed
+    expect(out).not.toContain('xyz') // P2: the bearer token after "authorization=Bearer" is fully removed
     expect(out).toContain('***')
+  })
+
+  it('does not leak the secret via the adapter:error event / forwarded status (P1)', async () => {
+    const manager = getDataSourceManager()
+    manager.registerAdapterType('faildb', FailingConnectAdapter as never)
+    const id = `ds_evt_${Date.now()}`
+    await manager.addDataSource(
+      {
+        id, name: id, type: 'faildb',
+        connection: { host: 'unreachable' },
+        credentials: { username: 'u', password: SECRET },
+        options: { autoConnect: false },
+      },
+      { ownerId: 'tester', persist: false }
+    )
+    const events: Array<{ error?: unknown }> = []
+    manager.on('adapter:error', (p) => events.push(p as { error?: unknown }))
+
+    await manager.testConnection(id) // connect fails → onError → adapter emits 'error' → manager forwards
+
+    expect(events.length).toBeGreaterThan(0)
+    for (const e of events) {
+      // the forwarded event (and thus the persisted last_error) must NOT carry the secret
+      expect(JSON.stringify(e)).not.toContain(SECRET)
+    }
+    expect(events.some((e) => typeof e.error === 'string' && e.error.includes('***'))).toBe(true)
   })
 })

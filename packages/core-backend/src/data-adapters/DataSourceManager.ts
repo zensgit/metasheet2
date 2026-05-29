@@ -337,9 +337,13 @@ export class DataSourceManager extends EventEmitter {
       this.emit('adapter:disconnected', { ...data, id: config.id })
       this.updateStatus(config.id, 'disconnected').catch(() => {})
     })
-    adapter.on('error', (data) => {
-      this.emit('adapter:error', { ...data, id: config.id })
-      this.updateStatus(config.id, 'error', (data as { error?: string }).error).catch(() => {})
+    adapter.on('error', () => {
+      // A3 leak-fix: forward the REDACTED cause (adapter.connectionError, set by onError just before
+      // this fires), never the raw Error — the adapter:error event AND the persisted last_error must
+      // not carry a secret. The manager is the only consumer of an adapter's 'error' event.
+      const redacted = adapter.connectionError ?? 'connection error'
+      this.emit('adapter:error', { id: config.id, adapter: config.name, error: redacted })
+      this.updateStatus(config.id, 'error', redacted).catch(() => {})
     })
 
     this.adapters.set(config.id, adapter)

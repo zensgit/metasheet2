@@ -320,8 +320,15 @@ export abstract class BaseDataAdapter extends EventEmitter {
     for (const secret of secretValues) {
       out = out.split(secret).join('***')
     }
+    // key=value / key: value with a single-token value.
+    out = out.replace(
+      /(\b(?:password|pwd|pass|token|api[_-]?key|secret)\b\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s;,)]+)/gi,
+      '$1***'
+    )
+    // Authorization carries a scheme + token (e.g. "Bearer xyz"); consume the whole credential so the
+    // token after the scheme is not left behind (a single-token rule would leave "Bearer ***  xyz").
     return out.replace(
-      /(\b(?:password|pwd|pass|token|api[_-]?key|secret|authorization)\b\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s;,)]+)/gi,
+      /(\bauthorization\b\s*[=:]\s*)(?:bearer|basic|digest|negotiate)?\s*[^\s;,)]+/gi,
       '$1***'
     )
   }
