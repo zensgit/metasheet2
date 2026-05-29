@@ -163,7 +163,7 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/admin/users',
     name: 'user-management',
     component: () => import('../views/UserManagementView.vue'),
-    meta: { title: 'User Management', requiresAuth: true }
+    meta: { title: 'User Management', requiresAuth: true, requiresAdmin: true }
   },
   {
     path: '/admin/role-delegation',
@@ -175,31 +175,31 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/admin/directory',
     name: AppRouteNames.DIRECTORY_MANAGEMENT,
     component: () => import('../views/DirectoryManagementView.vue'),
-    meta: { title: 'Directory Management', titleZh: '目录同步', requiresAuth: true }
+    meta: { title: 'Directory Management', titleZh: '目录同步', requiresAuth: true, requiresAdmin: true }
   },
   {
     path: '/admin/roles',
     name: 'role-management',
     component: () => import('../views/RoleManagementView.vue'),
-    meta: { title: 'Role Management', requiresAuth: true }
+    meta: { title: 'Role Management', requiresAuth: true, requiresAdmin: true }
   },
   {
     path: '/admin/permissions',
     name: 'permission-management',
     component: () => import('../views/PermissionManagementView.vue'),
-    meta: { title: 'Permission Management', requiresAuth: true }
+    meta: { title: 'Permission Management', requiresAuth: true, requiresAdmin: true }
   },
   {
     path: '/admin/automation-executions',
     name: 'automation-executions',
     component: () => import('../views/AutomationExecutionsView.vue'),
-    meta: { title: 'Automation Runs', titleZh: '自动化运行记录', requiresAuth: true }
+    meta: { title: 'Automation Runs', titleZh: '自动化运行记录', requiresAuth: true, requiresAdmin: true }
   },
   {
     path: '/admin/audit',
     name: 'admin-audit',
     component: () => import('../views/AdminAuditView.vue'),
-    meta: { title: 'Admin Audit', requiresAuth: true }
+    meta: { title: 'Admin Audit', requiresAuth: true, requiresAdmin: true }
   },
   {
     path: '/integrations/workbench',
@@ -265,7 +265,7 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: PluginManagerView,
-    meta: { title: 'Plugins', requiresAuth: true, requiredFeature: 'attendanceAdmin' }
+    meta: { title: 'Plugins', requiresAuth: true, requiresAdmin: true, requiredFeature: 'attendanceAdmin' }
   },
   {
     path: '/:pathMatch(.*)*',
