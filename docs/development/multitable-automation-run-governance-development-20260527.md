@@ -1,11 +1,12 @@
 # Multitable Automation 运行治理开发计划（development MD · v2 · 2026-05-27）
 
-> **Closeout update · 2026-05-28**：治理半已在 `origin/main` 闭环到 A3 + admin nav。落地链路：
+> **Closeout update · 2026-05-29**：治理半已在 `origin/main` 闭环到 A3 + admin nav，且 A4/A5 retry v1 已按具名 opt-in 落地。落地链路：
 > A0 scope gate / two-gate doctrine (#1932) → A1 execution snapshot + before-persist redaction (#1937) →
 > A2 read-only runs API + C1 boundary mapping + admin-only gate (#1967 + #1973) →
-> A3 admin runs view + navigation entry (#1975 + #1983). `#1917` 另补 dead-letter error secret scrub。
-> 能力半未完成也未启动：A4 retry scope-gate 等显式需求；A5 retry runtime gated；A6 convergence-engine runtime
-> frozen / demand-gated.
+> A3 admin runs view + navigation entry (#1975 + #1983) →
+> A4 retry scope-gate (#2039) → A5 whole-execution retry runtime (#2047) →
+> HTTP serialization redaction/fail-open hardening (#2051 + #2053). `#1917` 另补 dead-letter error secret scrub。
+> A6 convergence-engine runtime 仍 frozen / demand-gated：persistent WorkflowJob、suspend/resume、branch/parallel、BPMN adapter、approval-as-job 均未启动。
 >
 > **v2 定位**：在原“运行治理”线（A0–A5）基础上，折入复审敲定的修订，使本线**不偏科**且实现阶段不踩契约坑。
 > v2 相对 v1 的实质变更（复审 Blocking/High 全部采纳）：
@@ -52,8 +53,8 @@
 | A1 | execution 快照字段（含落盘前脱敏）+ 边界映射准备 | 🟡 **S1 observability 具名解锁**（加 nullable 列 + executor 脱敏，低风险但需显式 opt-in） |
 | A2 | 只读 runs/detail API + `toWorkflowJobView` 映射 | 🟡 **S1 observability 具名解锁**（新只读 route） |
 | A3 | 前端只读 runs view | 🟡 **S1 observability 具名解锁**（新只读 UI） |
-| A4 | retry scope gate（design only） | ✅ docs；**runtime 🔒 gated** |
-| A5 | whole-execution retry runtime（+ `rerun_of`/`initiated_by` 列） | 🔒 **gated**（retry = 未来 resume 的退化特例） |
+| A4 | retry scope gate（design only） | ✅ **DONE** (#2039) |
+| A5 | whole-execution retry runtime（+ `rerun_of`/`initiated_by` 列） | ✅ **DONE** (#2047; hardened by #2051/#2053) |
 | A6 | 能力半 bridge（design only） | ✅ docs；**所有 runtime 🔒 frozen / 需求驱动** |
 
 > 复审纪律：A1/A2/A3 虽属低风险只读/可观测，**仍是 named unlock，不写成“自然 lock-safe / 只读不用审”**（staged-opt-in）。
@@ -149,17 +150,17 @@ function toWorkflowJobView(execution, step, index) {
 
 在现有 automation manager/log viewer 上增加只读 runs list：按 status/rule/sheet 筛选；展示 status（**label 取自共享 `WorkflowJobStatus` i18n 词条**）、rule name/id、triggeredBy、duration、finished_at、error；可展开 steps（C1 视图）；复用现有 support-packet builder；**不提供 Retry 按钮**（或 disabled “retry requires next gate”）。
 
-### A4 — Retry Scope Gate（后续 PR · design only）
+### A4 — Retry Scope Gate（design only）— DONE (#2039)
 
-只做设计，不写 runtime。锁定 retry 语义：仅 failed/skipped；复用原始 `trigger_event`；用 `rule_snapshot` 还是当前 rule 在 gate 决定（默认 `rule_snapshot`）；新 execution id；写 `rerun_of_execution_id`；外部副作用动作需用户确认或 idempotency key。**声明 retry = 未来 resume 的退化特例**（A6 落地后复用 resume 路径）。**并决定 §A1 标记的 business-field/PII 遮罩开放问题**（retry 重放是否暴露/遮罩业务数据）。
+设计已落地为 #2039；A5 v1 采用 **current enabled rule + stored trigger_event**，不 replay redacted `rule_snapshot`；仅 failed/skipped；新 execution id；写 `rerun_of_execution_id`；外部副作用动作需 `confirmSideEffects === true`。A5 v1 不扩展 PII masking；secret-shaped values 继续遵循 A1 redaction。retry UI、external idempotency keys、re-fetch-current-record context 都是独立后续 opt-in。
 
-### A5 — Whole-execution Retry（后续 PR · runtime 🔒 gated）
+### A5 — Whole-execution Retry（runtime）— DONE (#2047 + #2051 + #2053)
 
 ```http
 POST /api/multitable/automation-executions/:executionId/retry
 ```
 
-**本里程碑迁移加列**：`rerun_of_execution_id TEXT NULL`、`initiated_by TEXT NULL`（此时才有写入者）。从 `rule_snapshot` 重建 executor rule；复用 `trigger_event`；持久新 execution；`rerun_of_execution_id` 回链。不做步骤级 retry。**runtime 受锁，需具名解锁。**
+**本里程碑已加列**：`rerun_of_execution_id TEXT NULL`、`initiated_by TEXT NULL`。执行 current enabled rule + stored `trigger_event`；持久新 execution；`rerun_of_execution_id` 回链；admin-only + side-effect confirmation；不做步骤级 retry。#2051/#2053 补齐 `/test` 与 retry response serialization invariant：HTTP 出口只返回 persisted redacted row 或 safe fallback，不吐 raw in-memory `ruleSnapshot` / `steps`。
 
 ### A6 —（新增 · design only · 冻结 / 需求驱动）能力半 Bridge
 
@@ -214,9 +215,9 @@ pnpm --filter @metasheet/web exec vitest run --watch=false \
 
 ## 5. Assumptions
 
-- 下一个 PR 是 A0 docs-only；首个 runtime PR 是 A1（非 retry），**且 A1/A2/A3 各需 S1 named unlock**。
+- A0-A5 已落地；后续不是自动继续排期，而是按新需求触发 retry UI / idempotency / A6 scout。
 - automation 路由保持 flat 响应风格。
-- A1 新列仅含“现在写真值”的列；`rerun_of`/`initiated_by` 随 A5 落地。
+- A1 新列仅含“当时写真值”的列；`rerun_of`/`initiated_by` 已随 A5 落地。
 - **C1 `WorkflowJobStatus` 是唯一状态词汇**；本线映射到它，绝不另 fork。
 - **脱敏在落盘前**，收敛为单一 multitable/core helper，不反向 import integration-core；secret-scrub 保留业务字段，业务/PII 遮罩留 A4 决定。
 - **能力半（A6）frozen/需求驱动**；治理继承是硬契约。
@@ -231,7 +232,7 @@ pnpm --filter @metasheet/web exec vitest run --watch=false \
 | steps 前向兼容 | “持久化 superset / 过 normalize”（不自洽） | **存储不动；A2 `toWorkflowJobView` 读边界合成；测断映射器输出** |
 | graph 字段 | A1 预留 upstreamStepKey/branchIndex | **删，挪 A6** |
 | 脱敏 | 仅泛提“继承 redaction” | **落盘前脱 rule_snapshot+trigger_event+step.output/error；单脱敏器收敛；secret-only 保业务字段；PII 遮罩留 A4** |
-| A1 字段 | sheet_id/trigger_event/rule_snapshot/rerun_of/created_by/finished_at/schema_version | **ultra-narrow：去 rerun_of+created_by（→A5），其余保留** |
+| A1 字段 | sheet_id/trigger_event/rule_snapshot/rerun_of/created_by/finished_at/schema_version | **ultra-narrow：A1 去 rerun_of+created_by；A5 后续补 rerun_of+initiated_by** |
 | 锁姿态 | A2/A3“现在可做” | **A1/A2/A3 = S1 named unlock（非自然 lock-safe）** |
 | status filter | “接受两种” | **C1 规范+legacy 宽限；未来态合法但空结果** |
 | status 映射 | 表述含 no-op 三元风险 | **直接 `legacyAutomationStatusToJobStatus(step.status)`（已核实子集）** |

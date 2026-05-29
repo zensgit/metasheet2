@@ -1,7 +1,7 @@
 # Multitable Automation A5 — Whole-execution Retry Runtime (verification) — 2026-05-29
 
 - **Slice**: A5 — runtime for `POST /api/multitable/automation-executions/:executionId/retry`. Implements the A4 scope-gate `multitable-automation-retry-scope-gate-20260529.md` (#2039). Owner opt-in given 2026-05-29 ("start A5 whole-execution retry runtime, current enabled rule + stored trigger event, admin-only, side-effect confirmation").
-- **Status**: ✅ implemented + verified (this doc). A6 convergence engine remains frozen / demand-gated.
+- **Status**: ✅ implemented + verified (this doc). Follow-up response hardening landed in #2051/#2053. A6 convergence engine remains frozen / demand-gated.
 - **Grounding**: worktree off `origin/main`. Automation is multitable-kernel (never `integration-core`); post-GATE the K3 Stage-1 blanket lock is retired (#1993), but A5 is gated by its own named opt-in (retry re-runs external side effects).
 
 ## What shipped
@@ -51,4 +51,4 @@ The new execution built by `executor.execute` carries `ruleSnapshot = the curren
 - Frontend retry button (A3 is read-only; #2039 says no button until backend + provenance + tests land — now they have, so a frontend slice could follow as its own opt-in).
 - External idempotency keys for webhook/email/DingTalk retries (#2039 D5 follow-up).
 - Re-fetch-current-record retry context (addresses the redacted-trigger limitation) — separate design.
-- **PRE-EXISTING (flagged, NOT fixed here):** `POST /sheets/:sheetId/automations/:ruleId/test` (`automation.ts:134`) does `res.json(execution)` on the raw in-memory execution. Since **A1** added `ruleSnapshot` to `AutomationExecution`, that endpoint likely serializes the raw (live-credential) snapshot the same way the retry route would have. This is an A1-era gap, not an A5 regression — out of scope for this PR; recommend a separate fix (re-fetch persisted row, or redact at serialization). Surfaced consciously.
+- **Closed after #2047:** the pre-existing `POST /sheets/:sheetId/automations/:ruleId/test` raw in-memory response gap was fixed by #2051: the route now prefers the persisted redacted row and falls back to response-level redaction while preserving the flat `AutomationExecution` shape. #2053 additionally made both `/test` and retry fail-open on persisted-row read failures, so a log-read error no longer 500s an already-completed run.
