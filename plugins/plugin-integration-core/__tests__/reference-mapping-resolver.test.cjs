@@ -10,9 +10,12 @@ const path = require('node:path')
 const {
   OUTCOME,
   STATUS_TO_ERROR_TYPE,
+  UNRESOLVED_PLACEHOLDER,
   buildReferenceMappingIndex,
   resolveReference,
   resolveReferenceFromRows,
+  resolveReferenceRuleValue,
+  resolveReferenceRulesIntoRecord,
 } = require(path.join(__dirname, '..', 'lib', 'reference-mapping-resolver.cjs'))
 const { K3_REFERENCE_MAPPING_TEMPLATES, ReferenceMappingTemplateError } = require(path.join(__dirname, '..', 'lib', 'reference-mapping-templates.cjs'))
 
@@ -172,6 +175,67 @@ function main() {
     assert.deepEqual(resolveReference(idx, 'B').reference, { FNumber: '2', FName: 'Beta' })
     assert.equal(resolveReference(idx, 'C').status, OUTCOME.UNRESOLVED)
   }
+
+  // ====================== DF-T3b-2a: resolveReferenceRuleValue + resolveReferenceRulesIntoRecord ==
+
+  const unitIndex = buildReferenceMappingIndex(UNIT, [{ sourceCode: 'PCS', fNumber: '01', fName: 'Each', enabled: true }])
+  const indexes = { unit: unitIndex }
+  const rule = { targetField: 'FUnitID', domain: 'unit', sourceField: 'unitSourceCode' }
+
+  // ---- shared decision fn: resolved → reference object; non-resolved → UNRESOLVED_PLACEHOLDER ----
+  {
+    const ok = resolveReferenceRuleValue(indexes, rule, 'PCS')
+    assert.deepEqual(ok.value, { FNumber: '01', FName: 'Each' }, 'resolved → reference object as the value')
+    assert.equal(ok.outcome.status, OUTCOME.RESOLVED)
+    assert.equal(resolveReferenceRuleValue(indexes, rule, 'NOPE').value, UNRESOLVED_PLACEHOLDER, 'unresolved → sentinel')
+    assert.equal(resolveReferenceRuleValue({}, rule, 'PCS').value, UNRESOLVED_PLACEHOLDER, 'no index for domain → sentinel')
+    assert.equal(resolveReferenceRuleValue(indexes, { targetField: 'X' }, 'PCS').value, UNRESOLVED_PLACEHOLDER, 'no domain → sentinel')
+  }
+
+  // ---- materialize into record: resolved sets the full object; sourceCode field preserved ----
+  {
+    const { record, outcomes } = resolveReferenceRulesIntoRecord({ FNumber: 'MAT-1', unitSourceCode: 'PCS' }, [rule], indexes)
+    assert.deepEqual(record.FUnitID, { FNumber: '01', FName: 'Each' }, 'targetField set to resolved object')
+    assert.equal(record.unitSourceCode, 'PCS', 'sourceCode field left intact (schema drops it later)')
+    assert.equal(record.FNumber, 'MAT-1', 'other fields preserved')
+    assert.equal(outcomes[0].status, OUTCOME.RESOLVED)
+  }
+
+  // ---- materialize: all THREE non-resolved statuses → UNRESOLVED_PLACEHOLDER + correct errorType ----
+  {
+    const cases = [
+      { rows: [{ sourceCode: 'OTHER', fNumber: '9', fName: 'X', enabled: true }], sc: 'PCS', status: OUTCOME.UNRESOLVED, errorType: 'unresolved' },
+      { rows: [{ sourceCode: 'PCS', fNumber: 'A', fName: 'X', enabled: true }, { sourceCode: 'PCS', fNumber: 'B', fName: 'Y', enabled: true }], sc: 'PCS', status: OUTCOME.AMBIGUOUS, errorType: 'ambiguous' },
+      { rows: [{ sourceCode: 'PCS', fNumber: 'A', enabled: true }], sc: 'PCS', status: OUTCOME.INCOMPLETE, errorType: 'incomplete-row' },
+    ]
+    for (const c of cases) {
+      const idx = { unit: buildReferenceMappingIndex(UNIT, c.rows) }
+      const { record, outcomes } = resolveReferenceRulesIntoRecord({ unitSourceCode: c.sc }, [rule], idx)
+      assert.equal(record.FUnitID, UNRESOLVED_PLACEHOLDER, `${c.status} → sentinel`)
+      assert.equal(outcomes[0].status, c.status)
+      assert.equal(outcomes[0].evidence.errorType, c.errorType, `${c.status} → errorType ${c.errorType}`)
+      // evidence stays values-free even in the materializer outcomes (no sourceCode value leaks)
+      assert.ok(!JSON.stringify(outcomes[0].evidence).includes(c.sc), 'materializer evidence carries no sourceCode value')
+    }
+  }
+
+  // ---- read snapshot = ORIGINAL record; write = materialized out (overlapping source/target rules
+  //      must NOT let an earlier rule's WRITE change what a later rule READS) ----
+  {
+    const idx = { 'unit-group': buildReferenceMappingIndex(byDomain['unit-group'], [{ sourceCode: 'STD', fNumber: '10', fName: 'Each', enabled: true }]) }
+    const overlapRules = [
+      { targetField: 'source.unitGroup', domain: 'unit-group', sourceField: 'source.unitGroup' }, // rule 1 writes the read path
+      { targetField: 'FUnitGroupID', domain: 'unit-group', sourceField: 'source.unitGroup' }, // rule 2 reads it
+    ]
+    const original = { source: { unitGroup: 'STD' } }
+    const { record, outcomes } = resolveReferenceRulesIntoRecord(original, overlapRules, idx)
+    assert.deepEqual(outcomes.map((o) => o.status), [OUTCOME.RESOLVED, OUTCOME.RESOLVED], 'both rules read the ORIGINAL snapshot → both resolved')
+    assert.deepEqual(record.FUnitGroupID, { FNumber: '10', FName: 'Each' }, 'rule 2 resolves despite rule 1 writing the same path')
+    assert.equal(original.source.unitGroup, 'STD', 'the input record is NOT mutated (writes go to an independent clone)')
+  }
+
+  // ---- UNRESOLVED_PLACEHOLDER is a bare <…> sentinel (so findUnfilledPlaceholders catches it) ----
+  assert.match(UNRESOLVED_PLACEHOLDER, /^<[^>]+>$/, 'sentinel is a bare placeholder token')
 
   console.log('reference-mapping-resolver.test.cjs OK')
 }

@@ -1943,8 +1943,58 @@ async function testTemplatesDeriveRoute() {
   assert.equal(res.body.error.code, 'TEMPLATE_DERIVE_REJECTED')
 }
 
+// DF-T3b-2a: the OPERATOR preview surface (buildTargetPayloadPreview) must actually RESOLVE a
+// from_reference_table reference via the injected (server-side) mapping index — the parity test does
+// not exercise this path, so it gets its own coverage here (wire-vs-fixture: test the real surface).
+async function testTemplatePreviewReferenceMappingResolution() {
+  const { buildTargetPayloadPreview } = httpRoutes.__internals
+  const { buildReferenceMappingIndex } = require(path.join(__dirname, '..', 'lib', 'reference-mapping-resolver.cjs'))
+  const { K3_REFERENCE_MAPPING_TEMPLATES } = require(path.join(__dirname, '..', 'lib', 'reference-mapping-templates.cjs'))
+  const unitGroup = K3_REFERENCE_MAPPING_TEMPLATES.find((t) => t.domain === 'unit-group')
+  const input = {
+    bodyKey: 'Data',
+    payloadTemplate: {},
+    sourceRecord: { unitGroupSourceCode: 'STD' },
+    fieldRules: [{ targetField: 'FUnitGroupID', sourceType: 'from_reference_table', domain: 'unit-group', sourceField: 'unitGroupSourceCode', shape: 'object-passthrough', completeness: 'require-fnumber-fname' }],
+  }
+
+  // happy: injected index → resolved object in the payload; evidence 'resolved'; valid; values-free
+  const okIndexes = { 'unit-group': buildReferenceMappingIndex(unitGroup, [{ sourceCode: 'STD', fNumber: '10', fName: 'Each', enabled: true }]) }
+  const ok = buildTargetPayloadPreview(input, { referenceMappingIndexes: okIndexes })
+  // field-level asserts (the payload uses null-prototype objects from setPath — fine for JSON/wire,
+  // but node:assert/strict deepEqual is prototype-sensitive).
+  assert.equal(ok.payload.Data.FUnitGroupID.FNumber, '10', 'operator preview resolves FNumber via the injected index')
+  assert.equal(ok.payload.Data.FUnitGroupID.FName, 'Each', 'operator preview resolves FName via the injected index')
+  assert.equal(ok.valid, true)
+  const okRes = ok.targetPayloadPreview.referenceResolutions
+  assert.equal(okRes.length, 1)
+  assert.equal(okRes[0].status, 'resolved')
+  assert.equal(okRes[0].field, 'FUnitGroupID')
+  assert.equal(okRes[0].evidence.errorType, undefined, 'resolved → no errorType')
+  assert.ok(!JSON.stringify(okRes[0].evidence).includes('Each') && !JSON.stringify(okRes[0].evidence).includes('STD'), 'resolution evidence is values-free')
+
+  // three non-resolved statuses → valid:false (fail-closed via placeholder) + correct errorType
+  const cases = {
+    unresolved: [{ sourceCode: 'OTHER', fNumber: '9', fName: 'X', enabled: true }],
+    ambiguous: [{ sourceCode: 'STD', fNumber: 'A', fName: 'X', enabled: true }, { sourceCode: 'STD', fNumber: 'B', fName: 'Y', enabled: true }],
+    'incomplete-row': [{ sourceCode: 'STD', fNumber: 'A', enabled: true }],
+  }
+  for (const [errorType, rows] of Object.entries(cases)) {
+    const out = buildTargetPayloadPreview(input, { referenceMappingIndexes: { 'unit-group': buildReferenceMappingIndex(unitGroup, rows) } })
+    assert.equal(out.valid, false, `${errorType}: operator preview fail-closed`)
+    assert.ok(out.placeholderErrors.some((e) => /FUnitGroupID/.test(e.field)), `${errorType}: placeholder fires on the unresolved field`)
+    assert.equal(out.targetPayloadPreview.referenceResolutions[0].evidence.errorType, errorType, `${errorType}: evidence errorType`)
+  }
+
+  // no index injected (T3b-2a default; live bulk-read is T3b-2b) → unresolved fail-closed
+  const noIdx = buildTargetPayloadPreview(input, {})
+  assert.equal(noIdx.valid, false, 'no index → unresolved fail-closed')
+  assert.equal(noIdx.targetPayloadPreview.referenceResolutions[0].evidence.errorType, 'unresolved')
+}
+
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
+  await testTemplatePreviewReferenceMappingResolution()
   await testExternalSystemRoutes()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
