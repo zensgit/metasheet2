@@ -29,6 +29,7 @@ function makeMockService() {
     logs: {
       getByRule: vi.fn(),
       getStats: vi.fn(),
+      getById: vi.fn(), // /test re-fetches the persisted (redacted) row; undefined → response-level redaction fallback
     },
   }
 }
@@ -55,6 +56,48 @@ describe('createAutomationRoutes HTTP mounting', () => {
     // Old envelope shape must NOT appear
     expect(res.body.data).toBeUndefined()
     expect(res.body.ok).toBeUndefined()
+  })
+
+  it('POST /test never serializes the raw in-memory execution (live creds / raw secrets redacted)', async () => {
+    const svc = makeMockService()
+    // testRun returns a fresh in-memory execution: ruleSnapshot = live rule, raw step error.
+    svc.testRun.mockResolvedValue({
+      id: 'exec-2', ruleId: 'rule-1', triggeredBy: 'manual_test', triggeredAt: '2026-05-29T00:00:00Z', status: 'failed',
+      ruleSnapshot: { id: 'rule-1', actions: [{ type: 'send_webhook', config: { token: 'LIVE-SECRET-TOKEN' } }] },
+      steps: [{ actionType: 'send_webhook', status: 'failed', error: 'connect postgres://u:SECRETPW@h/db failed' }],
+    })
+    svc.logs.getById.mockResolvedValue(undefined) // not persisted → response-level redaction fallback
+
+    const res = await request(buildApp(svc))
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .expect(200)
+
+    expect(res.body.id).toBe('exec-2') // flat shape preserved
+    const serialized = JSON.stringify(res.body)
+    expect(serialized).not.toContain('LIVE-SECRET-TOKEN')
+    expect(serialized).not.toContain('SECRETPW')
+  })
+
+  it('POST /test returns the PERSISTED (redacted) row when it exists, not the raw in-memory execution', async () => {
+    const svc = makeMockService()
+    svc.testRun.mockResolvedValue({
+      id: 'exec-3', ruleId: 'rule-1', triggeredBy: 'manual_test', triggeredAt: '2026-05-29T00:00:00Z', status: 'success',
+      ruleSnapshot: { actions: [{ config: { token: 'LIVE-SECRET-TOKEN' } }] }, // raw in-memory
+      steps: [],
+    })
+    svc.logs.getById.mockResolvedValue({
+      id: 'exec-3', ruleId: 'rule-1', triggeredBy: 'manual_test', triggeredAt: '2026-05-29T00:00:00Z', status: 'success',
+      ruleSnapshot: { actions: [{ config: { token: '<redacted>' } }] }, // persisted redacted row
+      steps: [],
+    })
+
+    const res = await request(buildApp(svc))
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .expect(200)
+
+    expect(svc.logs.getById).toHaveBeenCalledWith('exec-3')
+    expect(res.body.id).toBe('exec-3')
+    expect(JSON.stringify(res.body)).not.toContain('LIVE-SECRET-TOKEN') // came from the persisted redacted row
   })
 
   it('GET /logs returns shape { executions: [...] } — NOT { logs }', async () => {

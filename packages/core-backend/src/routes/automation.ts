@@ -19,6 +19,7 @@
 
 import { Router, type Request, type Response } from 'express'
 import type { AutomationService } from '../multitable/automation-service'
+import { redactAutomationExecutionForResponse } from '../multitable/automation-log-service'
 import type { AutomationExecution, AutomationStepResult } from '../multitable/automation-executor'
 import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-contract'
 import { requireAdminRole } from '../guards/audit-integration'
@@ -130,8 +131,13 @@ export function createAutomationRoutes(
 
     try {
       const execution = await svc.testRun(ruleId, sheetId)
-      // Flat shape — client does parseJson<AutomationExecution>(res)
-      return res.json(execution)
+      // The in-memory execution carries the live rule (credentials) in ruleSnapshot + raw
+      // action output in steps; record()'s at-persist redaction returns new objects and does
+      // NOT mutate it. Serialize the PERSISTED (redacted) row; if it didn't land, fall back to
+      // a response-level redaction (NEVER the raw execution). Flat AutomationExecution shape is
+      // preserved either way (client does parseJson<AutomationExecution>(res)).
+      const persisted = await svc.logs.getById(execution.id)
+      return res.json(persisted ?? redactAutomationExecutionForResponse(execution))
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Test run failed'
       const code = message.includes('not found') ? 404 : 500
