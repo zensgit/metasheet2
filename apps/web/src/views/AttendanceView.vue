@@ -3117,6 +3117,7 @@
                           <strong>{{ item.name }}</strong>
                           <small>{{ item.code || item.id }}</small>
                         </span>
+                        <span data-attendance-group-list-member-count>{{ attendanceGroupListMemberCountLabel(item) }}</span>
                         <span>{{ attendanceGroupTypeLabel(readAttendanceGroupType(item)) }}</span>
                         <span>{{ resolveRuleSetName(item.ruleSetId) }}</span>
                       </button>
@@ -3153,6 +3154,7 @@
                     <div v-if="attendanceGroupEditingId" class="attendance__group-detail-actions">
                       <div class="attendance__admin-meta">
                         <span>{{ tr('Code', '编码') }}: {{ attendanceGroupForm.code || '-' }}</span>
+                        <span>{{ tr('People', '考勤人员') }}: {{ attendanceGroupListMemberCountLabel(selectedAttendanceGroup) }}</span>
                         <span>{{ tr('Type', '类型') }}: {{ attendanceGroupTypeLabel(attendanceGroupForm.attendanceType) }}</span>
                         <span>{{ tr('Timezone', '时区') }}: {{ displayTimezone(attendanceGroupForm.timezone) }}</span>
                       </div>
@@ -6605,6 +6607,8 @@ interface AttendanceGroup {
   timezone: string
   ruleSetId?: string | null
   description?: string | null
+  memberCount?: number | null
+  member_count?: number | null
   attendanceType?: AttendanceGroupType | null
   attendance_type?: AttendanceGroupType | null
   createdAt?: string
@@ -6662,6 +6666,17 @@ function attendanceGroupTypeDetail(value?: AttendanceGroupType | null): string {
   const normalized = normalizeAttendanceGroupType(value)
   const option = ATTENDANCE_GROUP_TYPE_OPTIONS.find(item => item.value === normalized) ?? ATTENDANCE_GROUP_TYPE_OPTIONS[0]
   return tr(option.detailEn, option.detailZh)
+}
+
+function attendanceGroupListMemberCountValue(group?: AttendanceGroup | null): number {
+  const raw = group?.memberCount ?? group?.member_count
+  const count = Number(raw)
+  return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0
+}
+
+function attendanceGroupListMemberCountLabel(group?: AttendanceGroup | null): string {
+  const count = attendanceGroupListMemberCountValue(group)
+  return count === 1 ? tr('1 member', '1 人') : tr(`${count} members`, `${count} 人`)
 }
 
 interface AttendanceGroupMember {
@@ -16819,11 +16834,12 @@ function exportAttendanceGroupsCsv() {
     setStatus(tr('No attendance groups to export.', '没有可导出的考勤组。'), 'error')
     return
   }
-  const headers = ['Name', 'Code', 'Type', 'Rule policy', 'Timezone', 'Description', 'Created at', 'Updated at']
+  const headers = ['Name', 'Code', 'Type', 'Member count', 'Rule policy', 'Timezone', 'Description', 'Created at', 'Updated at']
   const csvRows = rows.map(group => [
     group.name,
     group.code ?? '',
     attendanceGroupTypeLabel(readAttendanceGroupType(group)),
+    attendanceGroupListMemberCountValue(group),
     resolveRuleSetName(group.ruleSetId),
     group.timezone ?? '',
     group.description ?? '',
@@ -16974,12 +16990,21 @@ async function loadAttendanceGroupMembers() {
     const items = Array.isArray(data.data?.items) ? data.data.items : []
     attendanceGroupMembers.value = items
     attendanceGroupMemberTotal.value = Number(data.data?.total ?? items.length) || items.length
+    syncAttendanceGroupMemberCount(groupId, attendanceGroupMemberTotal.value)
     void resolveAttendanceGroupMemberLabels(groupId, items)
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load group members', '加载分组成员失败')), 'error')
   } finally {
     attendanceGroupMemberLoading.value = false
   }
+}
+
+function syncAttendanceGroupMemberCount(groupId: string, count: number) {
+  const normalizedCount = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0
+  const group = attendanceGroups.value.find(item => item.id === groupId)
+  if (!group) return
+  group.memberCount = normalizedCount
+  group.member_count = normalizedCount
 }
 
 async function previewAttendanceGroupFixedSchedule() {

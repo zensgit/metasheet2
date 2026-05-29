@@ -7354,6 +7354,7 @@ function mapShiftRow(row) {
 
 function mapAttendanceGroupRow(row) {
   const attendanceType = normalizeAttendanceGroupType(row.attendance_type)
+  const memberCount = Number(row.member_count ?? 0) || 0
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -7362,6 +7363,8 @@ function mapAttendanceGroupRow(row) {
     timezone: row.timezone ?? DEFAULT_RULE.timezone,
     ruleSetId: row.rule_set_id ?? null,
     description: row.description ?? null,
+    memberCount,
+    member_count: memberCount,
     attendanceType,
     attendance_type: attendanceType,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : undefined,
@@ -26100,9 +26103,16 @@ module.exports = {
           const total = Number(countRows[0]?.total ?? 0)
 
           const rows = await db.query(
-            `SELECT * FROM attendance_groups
-             WHERE org_id = $1
-             ORDER BY created_at DESC
+            `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
+             FROM attendance_groups g
+             LEFT JOIN (
+               SELECT group_id, COUNT(*)::int AS member_count
+               FROM attendance_group_members
+               WHERE org_id = $1
+               GROUP BY group_id
+             ) member_counts ON member_counts.group_id = g.id
+             WHERE g.org_id = $1
+             ORDER BY g.created_at DESC
              LIMIT $2 OFFSET $3`,
             [orgId, pageSize, offset]
           )
@@ -26140,7 +26150,15 @@ module.exports = {
 
         try {
           const rows = await db.query(
-            'SELECT * FROM attendance_groups WHERE id = $1 AND org_id = $2',
+            `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
+             FROM attendance_groups g
+             LEFT JOIN (
+               SELECT group_id, COUNT(*)::int AS member_count
+               FROM attendance_group_members
+               WHERE org_id = $2
+               GROUP BY group_id
+             ) member_counts ON member_counts.group_id = g.id
+             WHERE g.id = $1 AND g.org_id = $2`,
             [groupId, orgId]
           )
           if (!rows.length) {
