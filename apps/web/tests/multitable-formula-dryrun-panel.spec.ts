@@ -7,8 +7,9 @@ import { localizeDryRunDiagnostic } from '../src/multitable/utils/meta-formula-l
 
 // Drives MetaFieldManager into formula-config state and exposes the dry-run panel (#5b).
 async function mountFormulaConfig(
-  dryRunFn: (p: { sheetId: string; expression: string; sampleValues: Record<string, unknown> }) => Promise<DryRunResult>,
+  dryRunFn: (p: { sheetId: string; expression: string; sampleValues: Record<string, unknown>; recordId?: string }) => Promise<DryRunResult>,
   extraFields: Array<{ id: string; name: string; type: string }> = [],
+  currentRecordId: string | null = null, // #5c: when set, the "preview with current record" button appears
 ) {
   const container = document.createElement('div')
   document.body.appendChild(container)
@@ -25,6 +26,7 @@ async function mountFormulaConfig(
           { id: 'fld_total', name: 'Total', type: 'formula', property: { expression: '' } },
         ],
         dryRunFn,
+        currentRecordId,
       })
     },
   })
@@ -49,6 +51,8 @@ async function setSample(container: HTMLElement, value: string) {
   await nextTick()
 }
 const clickEvaluate = (c: HTMLElement) => (c.querySelector('.meta-field-mgr__dryrun-btn') as HTMLButtonElement).click()
+const recordBtn = (c: HTMLElement) => c.querySelector('.meta-field-mgr__dryrun-btn--record') as HTMLButtonElement | null
+const clickRecordPreview = (c: HTMLElement) => recordBtn(c)!.click()
 async function flush() { for (let i = 0; i < 6; i++) { await Promise.resolve(); await nextTick() } }
 
 afterEach(() => { useLocale().setLocale('en'); document.body.innerHTML = '' ; vi.restoreAllMocks() })
@@ -152,5 +156,56 @@ describe('MetaFieldManager formula dry-run panel (#5b)', () => {
     const future = localizeDryRunDiagnostic({ kind: 'some_future_kind' }, true)
     expect(future).toContain('some_future_kind')
     expect(future).toBe('诊断：some_future_kind')
+  })
+})
+
+describe('MetaFieldManager formula dry-run — current-record sampling (#5c)', () => {
+  it('no current record → record-preview button absent; manual payload carries no recordId', async () => {
+    const fn = vi.fn().mockResolvedValue({ success: true, result: 2, resultType: 'number', referencedFields: ['fld_price'], diagnostics: [] } satisfies DryRunResult)
+    const { container } = await mountFormulaConfig(fn) // no currentRecordId
+    await setExpression(container, '={fld_price}+1')
+    expect(recordBtn(container)).toBeNull() // button hidden without a record
+    await setSample(container, '1')
+    clickEvaluate(container)
+    await flush()
+    expect(fn.mock.calls[0][0]).not.toHaveProperty('recordId') // manual path never sends recordId
+  })
+
+  it('with a current record → button appears and clicking it sends recordId in the payload', async () => {
+    const fn = vi.fn().mockResolvedValue({ success: true, result: 30, resultType: 'number', referencedFields: ['fld_price'], diagnostics: [] } satisfies DryRunResult)
+    const { container } = await mountFormulaConfig(fn, [], 'rec_42')
+    await setExpression(container, '={fld_price}+1')
+    expect(recordBtn(container)).not.toBeNull()
+    clickRecordPreview(container)
+    await flush()
+    expect(fn.mock.calls[0][0].recordId).toBe('rec_42') // server samples this record's RAW values
+  })
+
+  it('manual sample overrides still ride along on the record path (server merges record + overrides)', async () => {
+    const fn = vi.fn().mockResolvedValue({ success: true, result: 100, resultType: 'number', referencedFields: ['fld_price'], diagnostics: [] } satisfies DryRunResult)
+    const { container } = await mountFormulaConfig(fn, [], 'rec_42')
+    await setExpression(container, '={fld_price}+1')
+    await setSample(container, '99') // manual override for fld_price
+    clickRecordPreview(container)
+    await flush()
+    expect(fn.mock.calls[0][0].recordId).toBe('rec_42')
+    expect(fn.mock.calls[0][0].sampleValues).toEqual({ fld_price: 99 }) // override forwarded as a number
+  })
+
+  it('record path: a masked (denied/hidden) field shows a diagnostic and never leaks a value', async () => {
+    const fn = vi.fn().mockResolvedValue({
+      success: true, result: 42, resultType: 'number', referencedFields: ['fld_price', 'fld_secret'],
+      // server masked fld_secret → no value returned, only a missing_sample diagnostic (message is debug-only)
+      diagnostics: [{ severity: 'info', kind: 'missing_sample', fieldId: 'fld_secret', message: 'LEAK_CANARY_DO_NOT_RENDER' }],
+    } satisfies DryRunResult)
+    const { container } = await mountFormulaConfig(fn, [{ id: 'fld_secret', name: 'Secret', type: 'number' }], 'rec_42')
+    await setExpression(container, '={fld_price}+{fld_secret}')
+    clickRecordPreview(container)
+    await flush()
+    const zone = container.querySelector('.meta-field-mgr__dryrun-result') as HTMLElement
+    expect(zone).not.toBeNull()
+    expect(zone.textContent).toContain('42') // visible result rendered
+    expect(zone.querySelectorAll('.meta-field-mgr__formula-diagnostic').length).toBeGreaterThan(0) // missing_sample shown
+    expect(zone.textContent).not.toContain('LEAK_CANARY_DO_NOT_RENDER') // diagnostic.message never rendered (no leak)
   })
 })

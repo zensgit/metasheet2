@@ -188,6 +188,15 @@
             <button type="button" class="meta-field-mgr__dryrun-btn" :disabled="!dryRunCanEvaluate" @click="runDryRun">
               {{ dryRunRunning ? ml('field.formulaDryRun.evaluating') : ml('field.formulaDryRun.test') }}
             </button>
+            <button
+              v-if="dryRunHasRecord"
+              type="button"
+              class="meta-field-mgr__dryrun-btn meta-field-mgr__dryrun-btn--record"
+              :disabled="!dryRunCanEvaluate"
+              @click="runDryRunWithRecord"
+            >
+              {{ dryRunRunning ? ml('field.formulaDryRun.evaluating') : ml('field.formulaDryRun.testWithRecord') }}
+            </button>
             <div v-if="dryRunTransportError" class="meta-field-mgr__dryrun-result meta-field-mgr__dryrun-result--error">{{ dryRunTransportError }}</div>
             <div v-else-if="dryRunResult" class="meta-field-mgr__dryrun-result">
               <div class="meta-field-mgr__dryrun-result-head">
@@ -574,7 +583,10 @@ const props = defineProps<{
   sheetId: string
   // #5b: formula dry-run callback (the workbench wires it to client.dryRunFormula). Optional so the
   // panel degrades gracefully (button hidden) where no fn is provided.
-  dryRunFn?: (params: { sheetId: string; expression: string; sampleValues: Record<string, unknown> }) => Promise<DryRunResult>
+  dryRunFn?: (params: { sheetId: string; expression: string; sampleValues: Record<string, unknown>; recordId?: string }) => Promise<DryRunResult>
+  // #5c: the currently-selected record, if any. When present, a "preview with current record" button
+  // appears that samples this record's real values server-side (manual samples still override).
+  currentRecordId?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -750,13 +762,22 @@ function buildDryRunSampleValues(): Record<string, unknown> {
   }
   return out
 }
-async function runDryRun() {
+// #5c: a record is available to sample from → show the "preview with current record" button.
+const dryRunHasRecord = computed(() => Boolean(props.currentRecordId))
+// Shared core. recordId omitted → manual-sample path (#5b); recordId present → server samples that
+// record's RAW values (#5c) with manual samples as per-field overrides. Same seq/stale/error handling.
+async function executeDryRun(recordId?: string) {
   if (!props.dryRunFn || !dryRunCanEvaluate.value) return
   const seq = ++dryRunSeq
   dryRunRunning.value = true
   dryRunTransportError.value = null
   try {
-    const res = await props.dryRunFn({ sheetId: props.sheetId, expression: formulaDraft.expression, sampleValues: buildDryRunSampleValues() })
+    const res = await props.dryRunFn({
+      sheetId: props.sheetId,
+      expression: formulaDraft.expression,
+      sampleValues: buildDryRunSampleValues(),
+      ...(recordId ? { recordId } : {}),
+    })
     if (seq !== dryRunSeq) return // stale response superseded
     dryRunResult.value = res
   } catch (err) {
@@ -770,6 +791,8 @@ async function runDryRun() {
     if (seq === dryRunSeq) dryRunRunning.value = false
   }
 }
+function runDryRun() { void executeDryRun() }
+function runDryRunWithRecord() { void executeDryRun(props.currentRecordId ?? undefined) }
 // C2: result describes the current expression; any edit clears it + invalidates an in-flight response.
 // Also clear `running` — otherwise a superseded request's `finally` skips the reset (seq !== dryRunSeq)
 // and the Evaluate button would stay disabled for the new expression.
