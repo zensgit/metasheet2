@@ -27,6 +27,7 @@ const ROUTES = [
   ['GET', '/api/integration/staging/descriptors', 'stagingDescriptors'],
   ['POST', '/api/integration/staging/install', 'stagingInstall'],
   ['GET', '/api/integration/runs', 'runsList'],
+  ['GET', '/api/integration/provenance', 'provenanceByRow'],
   ['GET', '/api/integration/dead-letters', 'deadLettersList'],
   ['POST', '/api/integration/dead-letters/:id/replay', 'deadLettersReplay'],
 ]
@@ -1083,6 +1084,30 @@ function createHandlers(services) {
       return sendOk(res, await pipelineRegistry.listPipelineRuns(scopedInput(req, {
         pipelineId: query.pipelineId,
         status: query.status,
+        limit: asListLimit(query.limit),
+        offset: asListOffset(query.offset),
+      })))
+    },
+
+    // DF-N2-2c: read-only by-rowId provenance timeline (cross-run). Reads the
+    // migration-060 view via pipelineRegistry.listProvenanceByRow. No write/replay.
+    // listProvenanceByRow is intentionally NOT in requireService (optional-method 501,
+    // like deadLettersReplay) so older host wiring isn't broken silently.
+    async provenanceByRow(req, res) {
+      requireAccess(req, 'read')
+      if (typeof pipelineRegistry.listProvenanceByRow !== 'function') {
+        throw new HttpRouteError(501, 'PROVENANCE_READ_NOT_IMPLEMENTED', 'Provenance read is not implemented')
+      }
+      const query = requestQuery(req)
+      const rowId = firstString(query.rowId)
+      if (!rowId) {
+        throw new HttpRouteError(400, 'ROW_ID_REQUIRED', 'rowId is required')
+      }
+      return sendOk(res, await pipelineRegistry.listProvenanceByRow(scopedInput(req, {
+        rowId,
+        pipelineId: query.pipelineId,
+        from: query.from,
+        to: query.to,
         limit: asListLimit(query.limit),
         offset: asListOffset(query.offset),
       })))

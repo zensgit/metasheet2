@@ -170,6 +170,14 @@ function createMockServices(overrides = {}) {
         calls.push(['listPipelineRuns', input])
         return [run]
       },
+      async listProvenanceByRow(input) {
+        calls.push(['listProvenanceByRow', input])
+        return [{
+          runId: 'run_1', pipelineId: input.pipelineId || 'pipe_1', rowId: input.rowId,
+          eventType: 'target_write_succeeded', at: '2026-04-24T01:00:00.000Z', attrs: {},
+          eventIndex: 1, runStatus: 'succeeded', runMode: 'full', runCreatedAt: '2026-04-24T01:00:00.000Z',
+        }]
+      },
     },
     pipelineRunner: {
       async runPipeline(input) {
@@ -1837,6 +1845,58 @@ async function testListOffsetCap() {
     'small valid offset passes through unchanged')
 }
 
+async function testProvenanceReadRoute() {
+  const { calls, services } = createMockServices()
+  const { routes, registered } = mountRoutes(services)
+  assert.ok(registered.includes('GET /api/integration/provenance'), 'provenance read route registered')
+
+  // unauthenticated → 401/403, reached no service
+  let res = await invoke(routes, 'GET', '/api/integration/provenance', { query: { rowId: 'k1' } })
+  assertErrorResponse(res, [401, 403])
+  assert.equal(findCalls(calls, 'listProvenanceByRow').length, 0, 'unauthenticated read did not reach the registry')
+
+  // a non-integration permission → 403
+  res = await invoke(routes, 'GET', '/api/integration/provenance', { user: { permissions: ['other:read'] }, query: { rowId: 'k1' } })
+  assertErrorResponse(res, [403])
+
+  // read permission but missing rowId → 400, short-circuits before the registry
+  res = await invoke(routes, 'GET', '/api/integration/provenance', { user: READ_USER, query: {} })
+  assertErrorResponse(res, [400])
+  assert.equal(res.body.error.code, 'ROW_ID_REQUIRED')
+  assert.equal(findCalls(calls, 'listProvenanceByRow').length, 0, 'missing rowId short-circuits before the registry')
+
+  // happy path: read permission + rowId → 200; scoped input carries rowId/window/pipeline
+  res = await invoke(routes, 'GET', '/api/integration/provenance', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', rowId: 'k1', pipelineId: 'pipe_1', from: '2026-04-24T00:00:00.000Z', to: '2026-04-25T00:00:00.000Z' },
+  })
+  assertOkResponse(res, 200)
+  assert.ok(Array.isArray(res.body.data) && res.body.data.length === 1, 'timeline array returned')
+  assert.deepEqual(
+    Object.keys(res.body.data[0]).sort(),
+    ['at', 'attrs', 'eventIndex', 'eventType', 'pipelineId', 'rowId', 'runCreatedAt', 'runId', 'runMode', 'runStatus'],
+    'serialized entry has exactly the timeline fields (no drop, no extra)',
+  )
+  const provCall = findCall(calls, 'listProvenanceByRow')[1]
+  assert.equal(provCall.rowId, 'k1')
+  assert.equal(provCall.pipelineId, 'pipe_1')
+  assert.equal(provCall.from, '2026-04-24T00:00:00.000Z')
+  assert.equal(provCall.to, '2026-04-25T00:00:00.000Z')
+
+  // write permission also grants read (and reaches the registry, not just a 200 shell)
+  res = await invoke(routes, 'GET', '/api/integration/provenance', { user: WRITE_USER, query: { rowId: 'k1' } })
+  assertOkResponse(res, 200)
+  assert.ok(findCalls(calls, 'listProvenanceByRow').length >= 2, 'write permission also reached the registry')
+
+  // 501 when a host's registry predates listProvenanceByRow (optional-method, like replay)
+  const noProv = createMockServices()
+  delete noProv.services.pipelineRegistry.listProvenanceByRow
+  const { routes: noProvRoutes } = mountRoutes(noProv.services)
+  res = await invoke(noProvRoutes, 'GET', '/api/integration/provenance', { user: READ_USER, query: { rowId: 'k1' } })
+  assertErrorResponse(res, [501])
+  assert.equal(res.body.error.code, 'PROVENANCE_READ_NOT_IMPLEMENTED')
+}
+
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testExternalSystemRoutes()
@@ -1851,6 +1911,7 @@ async function main() {
   await testTemplatePreviewRoute()
   await testStagingRoutes()
   await testRunAndDeadLetterRoutes()
+  await testProvenanceReadRoute()
   await testErrorResponseShape()
   await testTenantGuards()
   await testCursorStringGuard()

@@ -1365,6 +1365,61 @@ components:
         - eventType
         - at
         - attrs
+    ProvenanceTimelineEntry:
+      type: object
+      description: >-
+        Data Factory DF-N2-2c read-only timeline entry — one redacted provenance
+        event in a row's cross-run timeline (GET
+        /api/integration/provenance?rowId=...). Reads the
+        integration_provenance_by_row view (migration 060); attrs were redacted
+        at write (DF-N2-2b scrub gate), the read path does NOT re-redact.
+      additionalProperties: false
+      properties:
+        runId:
+          type: string
+          minLength: 1
+        pipelineId:
+          type: string
+        rowId:
+          type: string
+          minLength: 1
+        eventType:
+          $ref: '#/components/schemas/ProvenanceEventType'
+        at:
+          type: string
+          format: date-time
+        attrs:
+          type: object
+          description: >-
+            Redacted safe attributes only (redacted at write; never
+            tokens/passwords/connection-strings/raw payloads).
+          additionalProperties: true
+        eventIndex:
+          type: integer
+          description: >-
+            Stable ordinal of the event within its run (the view's WITH
+            ORDINALITY).
+        runStatus:
+          type: string
+        runMode:
+          type: string
+        runCreatedAt:
+          type: string
+          format: date-time
+          description: >-
+            Run creation time; the read-route from/to window bounds whole runs
+            by this field.
+      required:
+        - runId
+        - pipelineId
+        - rowId
+        - eventType
+        - at
+        - attrs
+        - eventIndex
+        - runStatus
+        - runMode
+        - runCreatedAt
     AttendanceShift:
       type: object
       properties:
