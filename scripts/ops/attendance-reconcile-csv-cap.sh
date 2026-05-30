@@ -9,6 +9,7 @@ CSV_MAX_ROWS="${CSV_MAX_ROWS:-100000}"
 DEPLOY_BCRYPT_SALT_ROUNDS="${DEPLOY_BCRYPT_SALT_ROUNDS:-12}"
 RUN_ATTENDANCE_PREFLIGHT="${RUN_ATTENDANCE_PREFLIGHT:-true}"
 RESTART_BACKEND="${RESTART_BACKEND:-true}"
+ENSURE_METRICS_SCRAPE_TOKEN="${ENSURE_METRICS_SCRAPE_TOKEN:-false}"
 
 is_truthy() {
   case "${1:-}" in
@@ -40,7 +41,7 @@ backup="${ENV_FILE}.bak.$(date -u +%Y%m%d-%H%M%S)"
 cp "${ENV_FILE}" "${backup}"
 echo "[attendance-env-reconcile] backup=${backup}"
 
-python3 - "${ENV_FILE}" "${CSV_MAX_ROWS}" "${DEPLOY_JWT_SECRET:-}" "${DEPLOY_BCRYPT_SALT_ROUNDS}" <<'PY'
+python3 - "${ENV_FILE}" "${CSV_MAX_ROWS}" "${DEPLOY_JWT_SECRET:-}" "${DEPLOY_BCRYPT_SALT_ROUNDS}" "${ENSURE_METRICS_SCRAPE_TOKEN}" "${DEPLOY_METRICS_SCRAPE_TOKEN:-}" <<'PY'
 from pathlib import Path
 import secrets
 import sys
@@ -49,6 +50,12 @@ path = Path(sys.argv[1])
 csv_max_rows = sys.argv[2]
 deploy_jwt_secret = sys.argv[3].strip()
 deploy_bcrypt_rounds = sys.argv[4].strip() or "12"
+ensure_metrics_token = sys.argv[5].strip().lower() in {"true", "1", "yes", "on"}
+deploy_metrics_token = sys.argv[6].strip()
+
+if "\n" in deploy_metrics_token or "\r" in deploy_metrics_token:
+    print("[attendance-env-reconcile] ERROR: DEPLOY_METRICS_SCRAPE_TOKEN must be a single-line value", file=sys.stderr)
+    sys.exit(4)
 
 text = path.read_text()
 if "\\n" in text and text.count("\n") <= 1:
@@ -85,6 +92,21 @@ if not entries.get("BCRYPT_SALT_ROUNDS"):
     if "BCRYPT_SALT_ROUNDS" not in order:
         order.append("BCRYPT_SALT_ROUNDS")
 
+metrics_status = "skipped"
+if ensure_metrics_token:
+    if entries.get("METRICS_SCRAPE_TOKEN"):
+        metrics_status = "present"
+    elif deploy_metrics_token:
+        entries["METRICS_SCRAPE_TOKEN"] = deploy_metrics_token
+        metrics_status = "injected"
+        if "METRICS_SCRAPE_TOKEN" not in order:
+            order.append("METRICS_SCRAPE_TOKEN")
+    else:
+        entries["METRICS_SCRAPE_TOKEN"] = secrets.token_urlsafe(32)
+        metrics_status = "generated and persisted"
+        if "METRICS_SCRAPE_TOKEN" not in order:
+            order.append("METRICS_SCRAPE_TOKEN")
+
 updated = []
 seen = set()
 for line in lines:
@@ -119,10 +141,20 @@ if not verified.get("JWT_SECRET"):
 if not verified.get("BCRYPT_SALT_ROUNDS"):
     print("[attendance-env-reconcile] ERROR: BCRYPT_SALT_ROUNDS is missing after reconcile", file=sys.stderr)
     sys.exit(4)
+if ensure_metrics_token:
+    metrics_token = verified.get("METRICS_SCRAPE_TOKEN", "")
+    if not metrics_token:
+        print("[attendance-env-reconcile] ERROR: METRICS_SCRAPE_TOKEN is missing after reconcile", file=sys.stderr)
+        sys.exit(4)
+    if "\n" in metrics_token or "\r" in metrics_token:
+        print("[attendance-env-reconcile] ERROR: METRICS_SCRAPE_TOKEN must be a single-line value", file=sys.stderr)
+        sys.exit(4)
 
 print(f"[attendance-env-reconcile] ensured ATTENDANCE_IMPORT_CSV_MAX_ROWS={current_cap}")
 print(f"[attendance-env-reconcile] JWT_SECRET {jwt_status}")
 print("[attendance-env-reconcile] BCRYPT_SALT_ROUNDS present")
+if ensure_metrics_token:
+    print(f"[attendance-env-reconcile] METRICS_SCRAPE_TOKEN {metrics_status}")
 PY
 
 if is_truthy "${RUN_ATTENDANCE_PREFLIGHT}"; then
@@ -148,6 +180,16 @@ if is_truthy "${RESTART_BACKEND}"; then
     die "backend runtime ATTENDANCE_IMPORT_CSV_MAX_ROWS mismatch: expected ${CSV_MAX_ROWS}, got ${runtime_cap:-<missing>}"
   fi
   echo "[attendance-env-reconcile] runtime ATTENDANCE_IMPORT_CSV_MAX_ROWS=${runtime_cap}"
+  if is_truthy "${ENSURE_METRICS_SCRAPE_TOKEN}"; then
+    runtime_metrics_token="$("${compose_cmd[@]}" -f "${COMPOSE_FILE}" exec -T backend sh -lc 'printf "%s" "${METRICS_SCRAPE_TOKEN:-}"' < /dev/null)"
+    if [[ -z "${runtime_metrics_token}" ]]; then
+      die "backend runtime METRICS_SCRAPE_TOKEN missing after reconcile"
+    fi
+    if [[ "${runtime_metrics_token}" == *$'\n'* || "${runtime_metrics_token}" == *$'\r'* ]]; then
+      die "backend runtime METRICS_SCRAPE_TOKEN must be a single-line value"
+    fi
+    echo "[attendance-env-reconcile] runtime METRICS_SCRAPE_TOKEN present"
+  fi
 else
   echo "[attendance-env-reconcile] backend recreate skipped (RESTART_BACKEND=${RESTART_BACKEND})"
 fi
