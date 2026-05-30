@@ -39,7 +39,6 @@ describe('attendance import permission wiring', () => {
       '/api/attendance/import/preview-async',
       '/api/attendance/import/commit-async',
       '/api/attendance/import/jobs/:id',
-      '/api/attendance/import',
       '/api/attendance/integrations',
       '/api/attendance/integrations/:id/runs',
       '/api/attendance/integrations/:id/sync',
@@ -51,11 +50,12 @@ describe('attendance import permission wiring', () => {
     ].forEach(expectImportGuard)
   })
 
-  it('lets scheduler-scoped import prepare, preview, and commit use direct runtime guards', () => {
+  it('lets scheduler-scoped sync import routes use direct runtime guards', () => {
     [
       '/api/attendance/import/prepare',
       '/api/attendance/import/preview',
       '/api/attendance/import/commit',
+      '/api/attendance/import',
     ].forEach(expectDirectAsyncImportRoute)
     expect(pluginSource).toContain('assertAttendanceImportPrepareAllowed')
     expect(pluginSource).toContain('assertAttendanceImportPreviewAllowed')

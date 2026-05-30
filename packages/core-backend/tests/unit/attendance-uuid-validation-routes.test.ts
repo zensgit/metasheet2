@@ -1548,6 +1548,134 @@ describe('attendance UUID route validation', () => {
     expect(db.transaction).not.toHaveBeenCalled()
   })
 
+  it('lets scoped non-admin schedulers run legacy import rows inside their import scope', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
+      const sql = typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query)
+      const params = typeof query === 'string'
+        ? paramsArg
+        : ((query as { values?: unknown[] })?.values ?? paramsArg)
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
+      if (sql.includes('SELECT DISTINCT group_id') && sql.includes('FROM attendance_group_members')) return []
+      if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
+        return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
+      }
+      if (sql.includes('FROM attendance_rules')) return []
+      if (sql.includes('SELECT value FROM system_configs')) return []
+      if (sql.includes('SELECT name, code, rule_set_id FROM attendance_groups')) return []
+      if (sql.includes('SET LOCAL statement_timeout')) return []
+      if (sql.includes('FROM attendance_holidays')) return []
+      if (sql.includes('FROM attendance_shift_assignments')) return []
+      if (sql.includes('FROM attendance_rotation_assignments')) return []
+      if (sql.includes('FROM attendance_records ar')) return []
+      if (sql.includes('FROM attendance_records WHERE user_id = $1')) return []
+      if (sql.includes('INSERT INTO attendance_records')) {
+        return [{
+          id: '00000000-0000-4000-8000-000000000402',
+          user_id: 'worker-1',
+          work_date: '2026-06-10',
+        }]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/import', {
+      body: {
+        rows: [
+          {
+            userId: 'worker-1',
+            workDate: '2026-06-10',
+            fields: {
+              firstInAt: '2026-06-10T09:00:00.000Z',
+              lastOutAt: '2026-06-10T18:00:00.000Z',
+            },
+          },
+        ],
+      },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: {
+        imported: 1,
+        processedRows: 1,
+        failedRows: 0,
+        batchId: null,
+        items: [
+          {
+            id: '00000000-0000-4000-8000-000000000402',
+            userId: 'worker-1',
+            workDate: '2026-06-10',
+          },
+        ],
+      },
+    })
+    expect(db.transaction).toHaveBeenCalledTimes(1)
+    expect(db.query.mock.calls.map(([query]) => typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query))
+      .some(sql => sql.includes('INSERT INTO attendance_records'))).toBe(true)
+  })
+
+  it('rejects scoped legacy import outside scheduler scope before rule evaluation or writes', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) {
+        return [schedulerScopeImportRow({
+          scope: {
+            scheduleGroupIds: ['00000000-0000-4000-8000-000000009999'],
+            attendanceGroupIds: [],
+            userIds: [],
+            departments: [],
+            roles: [],
+            roleTags: [],
+          },
+        })]
+      }
+      if (sql.includes('SELECT DISTINCT group_id') && sql.includes('FROM attendance_group_members')) return []
+      if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
+        return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/import', {
+      body: {
+        rows: [
+          {
+            userId: 'worker-1',
+            workDate: '2026-06-10',
+            fields: {
+              firstInAt: '2026-06-10T09:00:00.000Z',
+              lastOutAt: '2026-06-10T18:00:00.000Z',
+            },
+          },
+        ],
+      },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
+      ['default', 'worker-1', '2026-06-10', '2026-06-10'],
+    )
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_rules'))).toBe(false)
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('INSERT INTO attendance_records'))).toBe(false)
+    expect(db.transaction).not.toHaveBeenCalled()
+  })
+
   it('lets full attendance admins add schedule group members without scheduler scopes', async () => {
     const { db, routes } = await createHarness('false')
 
