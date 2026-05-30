@@ -1,5 +1,4 @@
-// External data-source connector store (UI-1/UI-2/UI-3: list / create / update / delete / test).
-// Credential rotation is intentionally deferred; the update route currently accepts non-secret config only.
+// External data-source connector store (UI-1..UI-4: list / create / update / credential rotation / delete / test).
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import {
@@ -7,6 +6,7 @@ import {
   deleteDataSource,
   getDataSource,
   listDataSources,
+  rotateDataSourceCredentials,
   testDataSourceConnection,
   updateDataSource,
 } from '../data-sources/api'
@@ -15,6 +15,7 @@ import type {
   DataSourceDetail,
   DataSourceListItem,
   DataSourceTestResult,
+  RotateDataSourceCredentialsPayload,
   UpdateDataSourcePayload,
 } from '../data-sources/types'
 
@@ -76,6 +77,22 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
     }
   }
 
+  /** Rotate write-only credentials then refresh. Blank fields are omitted by the payload builder. */
+  async function rotateCredentials(id: string, payload: RotateDataSourceCredentialsPayload): Promise<boolean> {
+    error.value = null
+    try {
+      await rotateDataSourceCredentials(id, payload)
+      const remainingResults = { ...testResults.value }
+      delete remainingResults[id]
+      testResults.value = remainingResults
+      await fetchAll()
+      return true
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to update data source credentials'
+      return false
+    }
+  }
+
   /** Delete then refresh. Returns true on success; on failure sets `error` and returns false. */
   async function remove(id: string): Promise<boolean> {
     error.value = null
@@ -125,6 +142,7 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
     create,
     loadDetail,
     update,
+    rotateCredentials,
     remove,
     testConnection,
   }

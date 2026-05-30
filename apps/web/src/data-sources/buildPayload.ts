@@ -1,7 +1,11 @@
 // Pure builder for the create payload — extracted so the credential-safety rule (OMIT blank
 // optional fields; never send an empty string as a value) is unit-testable without mounting the view.
-import type { CreateDataSourcePayload, DataSourceType } from './types'
-import type { UpdateDataSourcePayload } from './types'
+import type {
+  CreateDataSourcePayload,
+  DataSourceType,
+  RotateDataSourceCredentialsPayload,
+  UpdateDataSourcePayload,
+} from './types'
 
 export interface CreateFormState {
   id: string
@@ -71,4 +75,22 @@ export function buildUpdatePayload(form: CreateFormState): UpdateDataSourcePaylo
     options: { readOnly: form.readOnly },
   }
   return payload
+}
+
+/**
+ * Build the credential-rotation payload. Blank fields are omitted, never sent as empty
+ * strings, so "leave blank to keep current credential" is a real wire invariant.
+ */
+export function buildCredentialRotationPayload(form: CreateFormState): RotateDataSourceCredentialsPayload {
+  const isSql = form.type !== 'http'
+  const credentials: RotateDataSourceCredentialsPayload['credentials'] = {}
+
+  if (isSql) {
+    if (form.username) credentials.username = form.username
+    if (form.password) credentials.password = form.password
+  } else if (form.apiKey) {
+    credentials.apiKey = form.apiKey
+  }
+
+  return { credentials }
 }
