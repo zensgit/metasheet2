@@ -8,6 +8,7 @@ import {
   setFieldRulePreserve,
   setFieldRuleFromReferenceTable,
   setFieldRuleReferencePreserve,
+  setFieldRuleReferenceSourceField,
   type IntegrationFieldRule,
 } from '../src/services/integration/workbench'
 
@@ -43,10 +44,18 @@ describe('fieldRuleEditability + setters (DF-T2b / DF-T3b-2d)', () => {
     const halfState = setFieldRuleFromReferenceTable(ref, '')
     expect(halfState).toMatchObject({ sourceType: 'from_reference_table', shape: 'object-passthrough' })
     expect(halfState.domain).toBeUndefined()
-    // back to preserve drops domain, keeps the reference shape
-    const back = setFieldRuleReferencePreserve(mapped)
+    // back to preserve drops domain AND sourceField, keeps the reference shape
+    const back = setFieldRuleReferencePreserve({ ...mapped, sourceField: 'unitSourceCode' })
     expect(back).toMatchObject({ sourceType: 'preserve_template', shape: 'object-passthrough', completeness: 'require-fnumber-fname' })
     expect(back.domain).toBeUndefined()
+    expect(back.sourceField).toBeUndefined()
+  })
+
+  it('DF-T3b setFieldRuleReferenceSourceField sets/clears the sourceCode column, keeps everything else', () => {
+    const ref: IntegrationFieldRule = { targetField: 'FUnitID', sourceType: 'from_reference_table', shape: 'object-passthrough', completeness: 'require-fnumber-fname', domain: 'unit' }
+    const bound = setFieldRuleReferenceSourceField(ref, 'unitSourceCode')
+    expect(bound).toMatchObject({ sourceType: 'from_reference_table', domain: 'unit', shape: 'object-passthrough', completeness: 'require-fnumber-fname', sourceField: 'unitSourceCode' })
+    expect(setFieldRuleReferenceSourceField(bound, '').sourceField).toBeUndefined()
   })
 
   it('DF_T3_REFERENCE_DOMAINS pins the exact 12-domain set (mirrors the backend templates)', () => {
@@ -155,6 +164,21 @@ describe('MetaIntegrationFieldRuleAuthoring (DF-T2b)', () => {
     domainSel.dispatchEvent(new Event('change'))
     await nextTick()
     expect(updates.at(-1)![0]).toMatchObject({ targetField: 'FUnitID', sourceType: 'from_reference_table', shape: 'object-passthrough', completeness: 'require-fnumber-fname', domain: 'unit' })
+  })
+
+  it('DF-T3b: a from_reference_table reference shows the sourceCode-column input + "需填写" hint; typing emits sourceField', async () => {
+    const updates = mount([
+      { targetField: 'FUnitID', sourceType: 'from_reference_table', shape: 'object-passthrough', completeness: 'require-fnumber-fname', domain: 'unit' },
+    ])
+    await nextTick()
+    const srcCol = container!.querySelector('[data-testid="field-rule-source-code-FUnitID"]') as HTMLInputElement
+    expect(srcCol).not.toBeNull()
+    expect(container!.querySelector('[data-testid="field-rule-source-code-required-FUnitID"]')).not.toBeNull() // required while empty
+    srcCol.value = 'unitSourceCode'
+    srcCol.dispatchEvent(new Event('input'))
+    await nextTick()
+    // emits sourceField, keeping sourceType/domain/shape/completeness (the second binding, on the rule)
+    expect(updates.at(-1)![0]).toMatchObject({ targetField: 'FUnitID', sourceType: 'from_reference_table', domain: 'unit', shape: 'object-passthrough', completeness: 'require-fnumber-fname', sourceField: 'unitSourceCode' })
   })
 
   it('DF-T3b-2d: a GATED reference stays locked (gated wins over reference-editability)', async () => {

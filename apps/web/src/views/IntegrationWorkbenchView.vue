@@ -847,14 +847,32 @@
           placeholder='{ "FNumber": "&lt;code&gt;", "FName": "&lt;name&gt;" }'
         ></textarea>
         <small class="integration-workbench__hint">可选。填写后使用 DF-T1 no-write payloadTemplate 预览；留空则保持 legacy preview。</small>
-        <h2>引用映射来源 JSON</h2>
-        <textarea
-          v-model="referenceMappingSourcesText"
-          data-testid="reference-mapping-sources"
-          spellcheck="false"
-          placeholder='[ { "domain": "unit", "systemId": "…", "object": "…" } ]'
-        ></textarea>
-        <small class="integration-workbench__hint">可选。为 from_reference_table 字段绑定各 domain 的映射表（staging 系统 / 对象）；填写后预览会实时 bulk-read 解析，留空则不解析。仅在已填写目标模板 JSON 时生效。</small>
+        <h2>引用映射来源(各 domain 绑定 staging 表)</h2>
+        <div v-if="referenceMappingDomains.length > 0" data-testid="reference-mapping-picker">
+          <div
+            v-for="domain in referenceMappingDomains"
+            :key="domain"
+            class="integration-workbench__ref-mapping-row"
+            :data-testid="`ref-mapping-row-${domain}`"
+          >
+            <code>{{ domain }}</code>
+            <select
+              :data-testid="`ref-mapping-system-${domain}`"
+              :value="referenceMappingBindings[domain]?.systemId || ''"
+              @change="onRefMappingSystemChange(domain, ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">— staging 系统 —</option>
+              <option v-for="system in stagingSystems" :key="system.id" :value="system.id">{{ system.name }}</option>
+            </select>
+            <input
+              :data-testid="`ref-mapping-object-${domain}`"
+              :value="referenceMappingBindings[domain]?.object || ''"
+              placeholder="对象/表名"
+              @input="onRefMappingObjectChange(domain, ($event.target as HTMLInputElement).value)"
+            />
+          </div>
+        </div>
+        <small class="integration-workbench__hint">将 reference 字段授权为「从映射表解析」并选 domain 后,这里按 domain 绑定其 staging 映射表(系统按名称选,对象填表名);预览会实时 bulk-read 解析。sourceCode 列在上方字段规则里填。</small>
         <button
           type="button"
           class="integration-workbench__button"
@@ -1127,10 +1145,9 @@ const sampleRecordText = ref(JSON.stringify({
 // DF-T1.5 reachability wire: optional payloadTemplate JSON. When filled, previewPayload sends the
 // DF-T1 no-write preview shape so the backend returns targetPayloadPreview (provenance); empty = legacy.
 const payloadTemplateText = ref('')
-// DF-T3b-2b UI-wire: optional referenceMappingSources JSON; when filled (and a payloadTemplate is set),
-// previewPayload sends it so the route live-bulk-reads each domain's mapping sheet and resolves
-// from_reference_table per-material. Empty = no live resolution (byte-compatible).
-const referenceMappingSourcesText = ref('')
+// DF-T3b dual-binding picker: per-domain staging-table binding (sheet half of from_reference_table
+// resolution). Keyed by domain (the distinct from_reference_table domains the operator authored above).
+const referenceMappingBindings = ref<Record<string, { systemId: string; object: string }>>({})
 // DF-T2c: the authored fieldRules draft (from the read-only derive route, then edited via the
 // authoring UI) + the gated fields it returns. previewPayload sends these (not a re-derive) when set.
 const authoredFieldRules = ref<IntegrationFieldRule[]>([])
@@ -1165,6 +1182,18 @@ const hiddenAdvancedSystemCount = computed(() => systems.value.filter((system) =
 const visibleSystems = computed(() => systems.value.filter((system) => showAdvancedConnectors.value || !isAdvancedSystem(system)))
 const sourceSystems = computed(() => visibleSystems.value.filter((system) => canUseSystemForSide(system, 'source')))
 const targetSystems = computed(() => visibleSystems.value.filter((system) => canUseSystemForSide(system, 'target')))
+// DF-T3b dual-binding picker: only metasheet:staging systems may back a mapping sheet (matches the
+// route's P1 staging-kind guard); the picker shows their NAMES so the operator never types a systemId.
+const stagingSystems = computed(() => systems.value.filter((system) => system.kind === 'metasheet:staging'))
+// the distinct from_reference_table domains the operator authored — the picker binds exactly these
+// (a binding for a domain no longer authored is dropped at send time).
+const referenceMappingDomains = computed(() => {
+  const seen = new Set<string>()
+  for (const rule of authoredFieldRules.value) {
+    if (rule.sourceType === 'from_reference_table' && typeof rule.domain === 'string' && rule.domain) seen.add(rule.domain)
+  }
+  return [...seen]
+})
 const runnableSourceSystems = computed(() => sourceSystems.value.filter((system) => !isSourceOptionDisabled(system)))
 const hasRunnableSourceSystem = computed(() => runnableSourceSystems.value.length > 0)
 const selectedTargetObject = computed(() => targetObjects.value.find((object) => object.name === targetObjectName.value) || null)
@@ -2744,6 +2773,18 @@ async function deriveTemplateDraft(): Promise<void> {
   }
 }
 
+// DF-T3b dual-binding picker: bind a domain's mapping sheet (staging system + object). Stored per-domain;
+// previewPayload assembles referenceMappingSources from the currently-authored domains.
+function onRefMappingSystemChange(domain: string, systemId: string): void {
+  const current = referenceMappingBindings.value[domain] || { systemId: '', object: '' }
+  referenceMappingBindings.value = { ...referenceMappingBindings.value, [domain]: { ...current, systemId } }
+}
+
+function onRefMappingObjectChange(domain: string, object: string): void {
+  const current = referenceMappingBindings.value[domain] || { systemId: '', object: '' }
+  referenceMappingBindings.value = { ...referenceMappingBindings.value, [domain]: { ...current, object } }
+}
+
 async function previewPayload(): Promise<void> {
   try {
     const sourceRecord = JSON.parse(sampleRecordText.value) as Record<string, unknown>
@@ -2776,17 +2817,19 @@ async function previewPayload(): Promise<void> {
       request.fieldRules = authoredFieldRules.value.length > 0
         ? authoredFieldRules.value
         : deriveFieldRulesFromMappings(fieldMappings)
-      // DF-T3b-2b UI-wire: when the operator provides reference mapping sources, send them so the route
-      // live-bulk-reads each domain's mapping sheet (from_reference_table resolves per-material). Empty =
-      // omitted (byte-compatible); invalid JSON / non-array throws here → error path, no backend call.
-      const referenceMappingSourcesRaw = referenceMappingSourcesText.value.trim()
-      if (referenceMappingSourcesRaw) {
-        const parsedSources = JSON.parse(referenceMappingSourcesRaw) as unknown
-        if (!Array.isArray(parsedSources)) {
-          throw new Error('引用映射来源 JSON 必须是一个数组')
+      // DF-T3b dual-binding picker: build referenceMappingSources from the per-domain picker bindings,
+      // for ONLY the domains currently authored as from_reference_table (stale bindings for removed
+      // domains are dropped; incomplete bindings — missing system or object — are skipped). The route
+      // live-bulk-reads each. The SECOND binding (sourceCode column) rides on the from_reference_table
+      // rules' sourceField, already in request.fieldRules above.
+      const referenceMappingSources: IntegrationReferenceMappingSource[] = []
+      for (const domain of referenceMappingDomains.value) {
+        const binding = referenceMappingBindings.value[domain]
+        if (binding && binding.systemId && binding.object) {
+          referenceMappingSources.push({ domain, systemId: binding.systemId, object: binding.object })
         }
-        request.referenceMappingSources = parsedSources as IntegrationReferenceMappingSource[]
       }
+      if (referenceMappingSources.length > 0) request.referenceMappingSources = referenceMappingSources
     }
     const result = await previewIntegrationTemplate(request)
     previewText.value = JSON.stringify(result, null, 2)

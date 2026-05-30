@@ -395,6 +395,18 @@ export function setFieldRuleFromReferenceTable(rule: IntegrationFieldRule, domai
 export function setFieldRuleReferencePreserve(rule: IntegrationFieldRule): IntegrationFieldRule {
   const next: IntegrationFieldRule = { ...rule, sourceType: 'preserve_template' }
   delete next.domain
+  delete next.sourceField
+  return next
+}
+
+// DF-T3b dual-binding picker: set the sourceCode COLUMN (rule.sourceField) the resolver reads for a
+// from_reference_table reference — the SECOND binding (the sheet binding is referenceMappingSources).
+// The preview path reads getPath(sourceRecord, rule.sourceField) (http-routes.cjs), so without this the
+// resolver would default to the targetField column and read the wrong value. Empty → drop sourceField.
+export function setFieldRuleReferenceSourceField(rule: IntegrationFieldRule, sourceField: string): IntegrationFieldRule {
+  const next: IntegrationFieldRule = { ...rule }
+  if (sourceField) next.sourceField = sourceField
+  else delete next.sourceField
   return next
 }
 
