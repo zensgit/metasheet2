@@ -45,7 +45,7 @@ This folder contains GitHub Actions that validate Phase 5 SLOs against a Prometh
 ## Required Secrets
 
  - `METRICS_URL` (optional for scheduled Phase 5 workflows when `METASHEET_BASE_URL` is set): e.g., `https://staging.example.com/metrics/prom`.
- - `METRICS_AUTH_HEADER` (optional): e.g., `Authorization: Bearer <token>`. Scheduled Phase 5 workflows can derive this from the deploy-host backend `METRICS_SCRAPE_TOKEN` only when they fall back to the trusted `METASHEET_BASE_URL` `/api/metrics/prom` endpoint.
+ - `METRICS_AUTH_HEADER` (optional): e.g., `Authorization: Bearer <token>`. Scheduled Phase 5 workflows can derive this from the deploy-host backend `METRICS_SCRAPE_TOKEN` only when they fall back to the trusted `METASHEET_BASE_URL` `/metrics/prom` endpoint.
  - `ALERTMANAGER_WEBHOOK_URL`, `ALERT_WEBHOOK_URL`, `SLACK_WEBHOOK_URL`, or `ATTENDANCE_ALERT_SLACK_WEBHOOK_URL` (one optional webhook secret is used to self-heal on-prem Alertmanager config before DingTalk OAuth stability checks; `SLACK_WEBHOOK_URL` also powers older nightly notification workflows).
  - `SLACK_CHANNEL` (optional): e.g., `alerts`.
  - `GRAFANA_API_TOKEN` (ops deploy only, for dashboard upload).
