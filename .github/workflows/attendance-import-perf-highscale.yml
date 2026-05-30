@@ -339,6 +339,7 @@ jobs:
           log_dir="output/playwright/attendance-import-perf-highscale"
           final_log="${log_dir}/perf.log"
           mismatch_file="${log_dir}/perf-capacity-mismatch.json"
+          runtime_file="${log_dir}/perf-runtime-failure.json"
           if PERF_LOG="${final_log}" \
             OUTPUT_FILE="${mismatch_file}" \
             ROWS="${ROWS}" \
@@ -362,6 +363,22 @@ jobs:
               echo "- csv rows limit hint: \`${hint_value}\`"
               echo "- remote csv rows limit: \`${remote_value}\` (${remote_value_source:-unknown})"
               echo "- failure: \`${last_failure_line}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif PERF_LOG="${final_log}" \
+            OUTPUT_FILE="${runtime_file}" \
+            node ./scripts/ops/attendance-classify-perf-runtime-failure.mjs >/dev/null; then
+            runtime_classification="$(jq -r '.classification // empty' "${runtime_file}")"
+            runtime_signals="$(jq -r '(.signals // []) | join(",")' "${runtime_file}")"
+            last_failure_line="$(jq -r '.failureLine // empty' "${runtime_file}")"
+            suggested_action="$(jq -r '.suggestedAction // empty' "${runtime_file}")"
+            echo "classification=${runtime_classification}" >> "$GITHUB_OUTPUT"
+            {
+              echo "High-scale perf benchmark classified as runtime failure."
+              echo
+              echo "- classification: \`${runtime_classification}\`"
+              echo "- signals: \`${runtime_signals:-<none>}\`"
+              echo "- failure: \`${last_failure_line:-<missing>}\`"
+              echo "- suggested action: ${suggested_action:-inspect perf.log and rerun after remediation}"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 

@@ -90,10 +90,21 @@ if [[ -n "$REF" ]]; then
   fi
 fi
 
+function dispatch_workflow() {
+  local -a args=("$WORKFLOW")
+  if (( ${#workflow_run_args[@]} > 0 )); then
+    args+=("${workflow_run_args[@]}")
+  fi
+  if (( ${#dispatch_attempt_args[@]} > 0 )); then
+    args+=("${dispatch_attempt_args[@]}")
+  fi
+  gh workflow run "${args[@]}"
+}
+
 dispatch_output=''
 dispatch_rc=0
 declare -a dispatch_attempt_args=("${dispatch_args[@]}")
-dispatch_output="$(gh workflow run "$WORKFLOW" "${workflow_run_args[@]}" "${dispatch_attempt_args[@]}" 2>&1)" || dispatch_rc=$?
+dispatch_output="$(dispatch_workflow 2>&1)" || dispatch_rc=$?
 if [[ "$dispatch_rc" -ne 0 ]]; then
   unsupported_inputs="$(extract_unexpected_workflow_inputs "$dispatch_output" || true)"
   if [[ -n "$unsupported_inputs" ]]; then
@@ -121,7 +132,7 @@ if [[ "$dispatch_rc" -ne 0 ]]; then
       dispatch_attempt_args=("${filtered_dispatch_args[@]}")
       dispatch_output=''
       dispatch_rc=0
-      dispatch_output="$(gh workflow run "$WORKFLOW" "${workflow_run_args[@]}" "${dispatch_attempt_args[@]}" 2>&1)" || dispatch_rc=$?
+      dispatch_output="$(dispatch_workflow 2>&1)" || dispatch_rc=$?
     fi
   fi
 fi

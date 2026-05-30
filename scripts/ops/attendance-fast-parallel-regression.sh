@@ -96,7 +96,7 @@ if [[ "$PROFILE" == "full" || "$PROFILE" == "ops" ]]; then
 
   add_check \
     "ops-perf-highscale-runner-tests" \
-    "node --test scripts/ops/attendance-run-perf-highscale.test.mjs"
+    "node --test scripts/ops/attendance-run-perf-highscale.test.mjs scripts/ops/attendance-classify-perf-capacity-mismatch.test.mjs scripts/ops/attendance-classify-perf-runtime-failure.test.mjs scripts/ops/attendance-highscale-workflow-classification-contract.test.mjs"
 fi
 
 if [[ "$PROFILE" == "contracts" || "$RUN_CONTRACT_CASES" == "true" ]]; then
