@@ -7,6 +7,22 @@ const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cj
 const helpers = attendancePlugin.__attendanceReportFieldCatalogForTests
 
 describe('attendance import COPY stream safeguards', () => {
+  it('unwraps nested transaction adapters to the real pg client before COPY', () => {
+    const poolClient = {
+      query() {},
+    }
+    const transactionClient = {
+      query: async () => undefined,
+      __rawClient: poolClient,
+    }
+    const pluginTransaction = {
+      query: async () => undefined,
+      __rawClient: transactionClient,
+    }
+
+    expect(helpers.resolveAttendanceImportRawClient(pluginTransaction)).toBe(poolClient)
+  })
+
   it('uses the attendance heavy-query timeout for COPY FROM STDIN query objects', () => {
     const query = helpers.buildAttendanceImportCopyQuery(
       (sql: string) => ({
