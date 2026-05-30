@@ -84,7 +84,7 @@
       </p>
       <table v-else class="data-sources__table">
         <thead>
-          <tr><th>名称</th><th>类型</th><th>状态</th><th></th></tr>
+          <tr><th>名称</th><th>类型</th><th>状态</th><th>连接测试</th><th></th></tr>
         </thead>
         <tbody>
           <tr v-for="ds in store.items" :key="ds.id" data-testid="ds-row" :data-ds-id="ds.id">
@@ -98,10 +98,31 @@
             <td>
               <button
                 type="button"
-                class="data-sources__btn data-sources__btn--danger"
-                data-testid="ds-delete"
-                @click="confirmRemove(ds.id, ds.name)"
-              >删除</button>
+                class="data-sources__btn"
+                data-testid="ds-test"
+                :disabled="store.isTesting(ds.id)"
+                @click="testConnection(ds.id)"
+              >
+                {{ store.isTesting(ds.id) ? '测试中…' : '测试连接' }}
+              </button>
+              <p
+                v-if="store.testResults[ds.id]"
+                class="data-sources__test-result"
+                :class="store.testResults[ds.id].success ? 'is-ok' : 'is-fail'"
+                data-testid="ds-test-result"
+              >
+                {{ testResultText(ds.id) }}
+              </p>
+            </td>
+            <td>
+              <div class="data-sources__actions">
+                <button
+                  type="button"
+                  class="data-sources__btn data-sources__btn--danger"
+                  data-testid="ds-delete"
+                  @click="confirmRemove(ds.id, ds.name)"
+                >删除</button>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -145,6 +166,15 @@ function typeLabel(type: string): string {
   return DATA_SOURCE_TYPE_LABELS[type as DataSourceType] ?? type
 }
 
+function testResultText(id: string): string {
+  const result = store.testResults[id]
+  if (!result) return ''
+  if (result.success) {
+    return `通过${result.latency ? ` · ${result.latency}` : ''}`
+  }
+  return `失败${result.error?.message ? ` · ${result.error.message}` : ''}`
+}
+
 function toggleForm(): void {
   formOpen.value = !formOpen.value
   store.error = null
@@ -168,6 +198,10 @@ async function submit(): Promise<void> {
   } finally {
     submitting.value = false
   }
+}
+
+async function testConnection(id: string): Promise<void> {
+  await store.testConnection(id)
 }
 
 async function confirmRemove(id: string, name: string): Promise<void> {
@@ -194,14 +228,18 @@ onMounted(() => {
 .data-sources__checkbox { flex-direction: row; align-items: center; gap: 8px; }
 .data-sources__form-actions { margin-top: 8px; }
 .data-sources__btn { padding: 6px 14px; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; font-size: 13px; }
+.data-sources__btn:disabled { opacity: 0.6; cursor: default; }
 .data-sources__btn--primary { background: #2563eb; border-color: #2563eb; color: #fff; }
-.data-sources__btn--primary:disabled { opacity: 0.6; cursor: default; }
 .data-sources__btn--danger { color: #cf1322; border-color: #ffccc7; }
 .data-sources__list { margin-top: 8px; }
 .data-sources__muted { color: #9ca3af; font-size: 13px; }
 .data-sources__table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .data-sources__table th, .data-sources__table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
-.data-sources__status { font-size: 12px; padding: 2px 8px; border-radius: 10px; }
+.data-sources__status { font-size: 12px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
 .data-sources__status.is-on { background: #f6ffed; color: #389e0d; }
 .data-sources__status.is-off { background: #f5f5f5; color: #8c8c8c; }
+.data-sources__actions { display: flex; justify-content: flex-end; }
+.data-sources__test-result { margin: 6px 0 0; font-size: 12px; max-width: 260px; overflow-wrap: anywhere; }
+.data-sources__test-result.is-ok { color: #237804; }
+.data-sources__test-result.is-fail { color: #cf1322; }
 </style>

@@ -23,6 +23,14 @@ export interface DataSourceListItem {
   connected: boolean
 }
 
+/** Result from `GET /api/data-sources/:id/test`. Request success is separate from connection success. */
+export interface DataSourceTestResult {
+  id: string
+  success: boolean
+  latency?: string
+  error?: { message?: string }
+}
+
 /** Connection fields — a free-form record on the wire; these are the common typed keys the form uses. */
 export interface DataSourceConnectionInput {
   host?: string

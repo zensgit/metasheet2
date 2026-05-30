@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { createApp, nextTick } from 'vue'
 
 import { buildCreatePayload, type CreateFormState } from '../src/data-sources/buildPayload'
 
@@ -7,13 +8,16 @@ import { buildCreatePayload, type CreateFormState } from '../src/data-sources/bu
 const listMock = vi.hoisted(() => vi.fn())
 const createMock = vi.hoisted(() => vi.fn())
 const deleteMock = vi.hoisted(() => vi.fn())
+const testConnectionMock = vi.hoisted(() => vi.fn())
 vi.mock('../src/data-sources/api', () => ({
   listDataSources: listMock,
   createDataSource: createMock,
   deleteDataSource: deleteMock,
+  testDataSourceConnection: testConnectionMock,
 }))
 
 import { useDataSourcesStore } from '../src/stores/dataSources'
+import DataSourcesView from '../src/views/DataSourcesView.vue'
 
 function form(overrides: Partial<CreateFormState> = {}): CreateFormState {
   return {
@@ -106,5 +110,85 @@ describe('useDataSourcesStore (UI-1)', () => {
     expect(ok).toBe(true)
     expect(deleteMock).toHaveBeenCalledWith('a')
     expect(store.items).toEqual([])
+  })
+
+  it('testConnection stores the per-source result and refetches connection state', async () => {
+    testConnectionMock.mockResolvedValue({ id: 'a', success: true, latency: '12ms' })
+    listMock.mockResolvedValue([{ id: 'a', name: 'A', type: 'postgres', connected: true }])
+    const store = useDataSourcesStore()
+    const ok = await store.testConnection('a')
+    expect(ok).toBe(true)
+    expect(testConnectionMock).toHaveBeenCalledWith('a')
+    expect(store.testResults.a).toEqual({ id: 'a', success: true, latency: '12ms' })
+    expect(store.items[0].connected).toBe(true)
+    expect(store.isTesting('a')).toBe(false)
+  })
+
+  it('testConnection keeps connection failure as a row result, not a global load error', async () => {
+    testConnectionMock.mockResolvedValue({ id: 'a', success: false, error: { message: 'timeout' } })
+    listMock.mockResolvedValue([{ id: 'a', name: 'A', type: 'postgres', connected: false }])
+    const store = useDataSourcesStore()
+    const ok = await store.testConnection('a')
+    expect(ok).toBe(false)
+    expect(store.error).toBeNull()
+    expect(store.testResults.a.success).toBe(false)
+    expect(store.testResults.a.error?.message).toBe('timeout')
+  })
+})
+
+describe('DataSourcesView (UI-2 connection test reachability)', () => {
+  let cleanup: (() => void) | null = null
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    document.body.innerHTML = ''
+  })
+
+  afterEach(() => {
+    cleanup?.()
+    cleanup = null
+    document.body.innerHTML = ''
+  })
+
+  async function flush(): Promise<void> {
+    await Promise.resolve()
+    await nextTick()
+    await Promise.resolve()
+    await nextTick()
+  }
+
+  async function mountView(): Promise<HTMLElement> {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(DataSourcesView)
+    app.use(createPinia())
+    app.mount(container)
+    cleanup = () => app.unmount()
+    await flush()
+    return container
+  }
+
+  it('clicking a row test button calls the test endpoint and renders the row result', async () => {
+    listMock.mockResolvedValue([{ id: 'a', name: 'A', type: 'postgres', connected: false }])
+    testConnectionMock.mockResolvedValue({
+      id: 'a',
+      success: false,
+      latency: '24ms',
+      error: { message: 'timeout' },
+    })
+
+    const container = await mountView()
+    const testButton = container.querySelector('[data-testid="ds-test"]') as HTMLButtonElement | null
+    expect(testButton).not.toBeNull()
+
+    testButton!.click()
+    await flush()
+    await flush()
+    await flush()
+
+    expect(testConnectionMock).toHaveBeenCalledWith('a')
+    const result = container.querySelector('[data-testid="ds-test-result"]')
+    expect(result?.textContent).toContain('失败')
+    expect(result?.textContent).toContain('timeout')
   })
 })
