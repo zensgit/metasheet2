@@ -147,7 +147,7 @@ import {
   createYjsInvalidationPostCommitHook,
   type YjsInvalidator,
 } from '../multitable/post-commit-hooks'
-import { listRecordRevisions } from '../multitable/record-history-service'
+import { listRecordRevisions, type RecordRevisionEntry } from '../multitable/record-history-service'
 import {
   getRecordSubscriptionStatus,
   listRecordSubscriptionNotifications,
@@ -2248,6 +2248,15 @@ function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>)
   )
 }
 
+function redactRecordRevisionEntry(item: RecordRevisionEntry, allowedFieldIds: Set<string>): RecordRevisionEntry {
+  return {
+    ...item,
+    changedFieldIds: item.changedFieldIds.filter((fieldId) => allowedFieldIds.has(fieldId)),
+    patch: filterRecordDataByFieldIds(item.patch, allowedFieldIds),
+    snapshot: item.snapshot === null ? null : filterRecordDataByFieldIds(item.snapshot, allowedFieldIds),
+  }
+}
+
 // #2052 (b): the layer-2 ∧ layer-3 allowed-field set (the #2015 composite, hiddenFieldIds: [] — layer-1
 // excluded). Reused as the redaction gate for view-config filter literals.
 function computeAllowedFieldIds(fields: UniverMetaField[], capabilities: MultitableCapabilities, fieldScopeMap: Map<string, FieldPermissionScope>): Set<string> {
@@ -4301,7 +4310,9 @@ export function univerMetaRouter(): Router {
         }
       }
 
-      const items = await listRecordRevisions(pool.query.bind(pool), { sheetId, recordId, limit, offset })
+      const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+      const items = (await listRecordRevisions(pool.query.bind(pool), { sheetId, recordId, limit, offset }))
+        .map((item) => redactRecordRevisionEntry(item, allowedFieldIds))
       return res.json({ ok: true, data: { items, limit, offset } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) {
