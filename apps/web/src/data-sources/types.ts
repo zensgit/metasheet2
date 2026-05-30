@@ -1,0 +1,45 @@
+// Generic external data-source connector — frontend types (UI-1).
+//
+// IMPORTANT: credentials are WRITE-ONLY across the wire. A1 encrypts them at rest and the backend
+// never returns them in any GET/list response — so read types here carry NO credentials. Credentials
+// only appear in the CREATE payload.
+
+// Keep in sync with backend SUPPORTED_DATA_SOURCE_TYPES (postgresql is an accepted alias of postgres;
+// the UI offers the three distinct kinds).
+export const DATA_SOURCE_TYPES = ['postgres', 'sqlserver', 'http'] as const
+export type DataSourceType = (typeof DATA_SOURCE_TYPES)[number]
+
+export const DATA_SOURCE_TYPE_LABELS: Record<DataSourceType, string> = {
+  postgres: 'PostgreSQL',
+  sqlserver: 'SQL Server',
+  http: 'HTTP / REST',
+}
+
+/** Shape of one source from `GET /api/data-sources` (DataSourceManager.listDataSources projection). */
+export interface DataSourceListItem {
+  id: string
+  name: string
+  type: string
+  connected: boolean
+}
+
+/** Connection fields — a free-form record on the wire; these are the common typed keys the form uses. */
+export interface DataSourceConnectionInput {
+  host?: string
+  port?: number
+  database?: string
+  server?: string
+  baseURL?: string
+  encrypt?: boolean
+  trustServerCertificate?: boolean
+}
+
+/** Payload for `POST /api/data-sources`. Credentials are write-only (sent on create, never read back). */
+export interface CreateDataSourcePayload {
+  id: string
+  name: string
+  type: DataSourceType
+  connection: DataSourceConnectionInput
+  credentials?: { username?: string; password?: string; apiKey?: string; token?: string }
+  options?: { readOnly?: boolean; autoConnect?: boolean }
+}

@@ -121,6 +121,12 @@ export const appRoutes: RouteRecordRaw[] = [
     component: () => import('../views/MultitableTemplateCenterView.vue'),
     meta: { title: 'Templates', titleZh: '模板中心', requiresAuth: true },
   },
+  {
+    path: '/data-sources',
+    name: 'data-sources',
+    component: () => import('../views/DataSourcesView.vue'),
+    meta: { title: 'Data Sources', titleZh: '外接数据源', requiresAuth: true },
+  },
   buildPublicMultitableFormRoute(() => import('../views/PublicMultitableFormView.vue')),
   buildMultitableRoute(() => import('../multitable/views/MultitableEmbedHost.vue')),
   {
