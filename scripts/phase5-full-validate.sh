@@ -619,11 +619,12 @@ main() {
 
     log_success "Dynamic assertions generated ($(echo "$assertions" | jq 'length') checks)"
 
-    # Calculate overall pass/fail
+    # Calculate overall pass/fail. Missing latency samples are blocking because
+    # Phase 5 SLO validation cannot prove target latency health from N/A data.
     local pass_count=$(echo "$assertions" | jq '[.[] | select(.status == "pass")] | length')
     local fail_count=$(echo "$assertions" | jq '[.[] | select(.status == "fail")] | length')
     local na_count=$(echo "$assertions" | jq '[.[] | select(.status == "na")] | length')
-    local overall_status=$([ "$fail_count" -eq 0 ] && echo "pass" || echo "fail")
+    local overall_status=$([ "$fail_count" -eq 0 ] && [ "$na_count" -eq 0 ] && echo "pass" || echo "fail")
 
     # Construct final JSON
     local final_json=$(cat <<EOF
