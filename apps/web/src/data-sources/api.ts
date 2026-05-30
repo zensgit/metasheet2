@@ -5,6 +5,7 @@ import type {
   DataSourceDetail,
   DataSourceListItem,
   DataSourceTestResult,
+  RotateDataSourceCredentialsPayload,
   UpdateDataSourcePayload,
 } from './types'
 
@@ -60,6 +61,19 @@ export async function updateDataSource(id: string, payload: UpdateDataSourcePayl
   })
   if (!res.ok) {
     throw new Error(await errorFrom(res, 'Failed to update data source'))
+  }
+}
+
+export async function rotateDataSourceCredentials(
+  id: string,
+  payload: RotateDataSourceCredentialsPayload,
+): Promise<void> {
+  const res = await apiFetch(`/api/data-sources/${encodeURIComponent(id)}/credentials`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    throw new Error(await errorFrom(res, 'Failed to update data source credentials'))
   }
 }
 

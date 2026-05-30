@@ -2,13 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { createApp, nextTick } from 'vue'
 
-import { buildCreatePayload, buildUpdatePayload, type CreateFormState } from '../src/data-sources/buildPayload'
+import {
+  buildCreatePayload,
+  buildCredentialRotationPayload,
+  buildUpdatePayload,
+  type CreateFormState,
+} from '../src/data-sources/buildPayload'
 
 // Mock the api client so the store is tested in isolation.
 const listMock = vi.hoisted(() => vi.fn())
 const getMock = vi.hoisted(() => vi.fn())
 const createMock = vi.hoisted(() => vi.fn())
 const updateMock = vi.hoisted(() => vi.fn())
+const rotateCredentialsMock = vi.hoisted(() => vi.fn())
 const deleteMock = vi.hoisted(() => vi.fn())
 const testConnectionMock = vi.hoisted(() => vi.fn())
 vi.mock('../src/data-sources/api', () => ({
@@ -16,6 +22,7 @@ vi.mock('../src/data-sources/api', () => ({
   getDataSource: getMock,
   createDataSource: createMock,
   updateDataSource: updateMock,
+  rotateDataSourceCredentials: rotateCredentialsMock,
   deleteDataSource: deleteMock,
   testDataSourceConnection: testConnectionMock,
 }))
@@ -89,6 +96,30 @@ describe('buildUpdatePayload — non-secret update safety', () => {
   it('omits a blank update port instead of sending port: ""', () => {
     const p = buildUpdatePayload(form({ type: 'sqlserver', host: 'h', port: '', database: 'd' }))
     expect(p.connection).toEqual({ host: 'h', database: 'd' })
+  })
+})
+
+describe('buildCredentialRotationPayload — write-only credential safety', () => {
+  it('sends only filled SQL credential fields and omits blank secrets', () => {
+    const p = buildCredentialRotationPayload(form({
+      type: 'postgres',
+      username: 'new-user',
+      password: '',
+      host: 'ignored',
+      database: 'ignored',
+    }))
+    expect(p).toEqual({ credentials: { username: 'new-user' } })
+    expect(p.credentials).not.toHaveProperty('password')
+  })
+
+  it('sends only filled HTTP credential fields', () => {
+    const p = buildCredentialRotationPayload(form({
+      type: 'http',
+      apiKey: 'new-key',
+      username: 'ignored',
+      password: 'ignored',
+    }))
+    expect(p).toEqual({ credentials: { apiKey: 'new-key' } })
   })
 })
 
@@ -168,6 +199,28 @@ describe('useDataSourcesStore (UI-1)', () => {
     expect(updateMock).toHaveBeenCalledWith('a', payload)
     expect(store.testResults.a).toBeUndefined()
     expect(store.items[0].name).toBe('Renamed')
+  })
+
+  it('rotateCredentials posts write-only credentials, clears stale test result, and refetches', async () => {
+    rotateCredentialsMock.mockResolvedValue(undefined)
+    listMock.mockResolvedValue([{ id: 'a', name: 'A', type: 'postgres', connected: false }])
+    const store = useDataSourcesStore()
+    store.testResults.a = { id: 'a', success: false }
+
+    const payload = { credentials: { password: 'new-secret' } }
+    const ok = await store.rotateCredentials('a', payload)
+    expect(ok).toBe(true)
+    expect(rotateCredentialsMock).toHaveBeenCalledWith('a', payload)
+    expect(store.testResults.a).toBeUndefined()
+    expect(store.items[0].id).toBe('a')
+  })
+
+  it('rotateCredentials returns false and surfaces the backend message on failure', async () => {
+    rotateCredentialsMock.mockRejectedValue(new Error('credentials: at least one credential field is required'))
+    const store = useDataSourcesStore()
+    const ok = await store.rotateCredentials('a', { credentials: {} })
+    expect(ok).toBe(false)
+    expect(store.error).toBe('credentials: at least one credential field is required')
   })
 
   it('remove deletes by id and refetches', async () => {
@@ -303,5 +356,55 @@ describe('DataSourcesView (UI-2 connection test reachability)', () => {
       options: { readOnly: true },
     })
     expect(updateMock.mock.calls[0][1]).not.toHaveProperty('credentials')
+  })
+
+  it('opens credential mode and submits only filled credential fields', async () => {
+    listMock.mockResolvedValue([{ id: 'a', name: 'A', type: 'postgres', connected: false }])
+    getMock.mockResolvedValue({
+      id: 'a',
+      name: 'A',
+      type: 'postgres',
+      connected: false,
+      hasCredentials: true,
+      connection: { host: 'db.internal', port: 5432, database: 'erp' },
+      options: { readOnly: true },
+    })
+    rotateCredentialsMock.mockResolvedValue(undefined)
+
+    const container = await mountView()
+    const credentialsButton = container.querySelector('[data-testid="ds-credentials"]') as HTMLButtonElement | null
+    expect(credentialsButton).not.toBeNull()
+
+    credentialsButton!.click()
+    await flush()
+    await flush()
+    await flush()
+
+    expect(getMock).toHaveBeenCalledWith('a')
+    expect(container.querySelector('[data-testid="ds-credential-fields"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="ds-field-id"]')?.getAttribute('disabled')).not.toBeNull()
+    expect(container.querySelector('[data-testid="ds-field-type"]')?.getAttribute('disabled')).not.toBeNull()
+    expect(container.querySelector('[data-testid="ds-field-host"]')).toBeNull()
+    expect(container.querySelector('[data-testid="ds-field-readonly"]')).toBeNull()
+
+    const submit = container.querySelector('[data-testid="ds-submit"]') as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+
+    const passwordInput = container.querySelector('[data-testid="ds-field-password"]') as HTMLInputElement
+    passwordInput.value = 'new-password'
+    passwordInput.dispatchEvent(new Event('input'))
+    await flush()
+    expect(submit.disabled).toBe(false)
+
+    submit.click()
+    await flush()
+    await flush()
+    await flush()
+
+    expect(rotateCredentialsMock).toHaveBeenCalledWith('a', {
+      credentials: { password: 'new-password' },
+    })
+    expect(rotateCredentialsMock.mock.calls[0][1]).not.toHaveProperty('connection')
+    expect(rotateCredentialsMock.mock.calls[0][1]).not.toHaveProperty('options')
   })
 })

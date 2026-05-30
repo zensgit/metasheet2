@@ -2,7 +2,7 @@
 //
 // IMPORTANT: credentials are WRITE-ONLY across the wire. A1 encrypts them at rest and the backend
 // never returns them in any GET/list response — so read types here carry NO credentials. Credentials
-// only appear in the CREATE payload.
+// only appear in the CREATE / credential-rotation payloads.
 
 // Keep in sync with backend SUPPORTED_DATA_SOURCE_TYPES (postgresql is an accepted alias of postgres;
 // the UI offers the three distinct kinds).
@@ -59,9 +59,14 @@ export interface CreateDataSourcePayload {
   options?: { readOnly?: boolean; autoConnect?: boolean }
 }
 
-/** Payload for `PUT /api/data-sources/:id`. Credential rotation is intentionally out of this UI slice. */
+/** Payload for `PUT /api/data-sources/:id`. Credentials use the dedicated rotation endpoint. */
 export interface UpdateDataSourcePayload {
   name?: string
   connection?: DataSourceConnectionInput
   options?: { readOnly?: boolean; autoConnect?: boolean }
+}
+
+/** Payload for `PUT /api/data-sources/:id/credentials`. Blank fields are omitted by the UI. */
+export interface RotateDataSourceCredentialsPayload {
+  credentials: { username?: string; password?: string; apiKey?: string; token?: string }
 }

@@ -69,6 +69,15 @@ const DataSourceUpdateSchema = z.object({
   }).optional()
 })
 
+const DataSourceCredentialsUpdateSchema = z.object({
+  credentials: z.object({
+    username: z.string().min(1).optional(),
+    password: z.string().min(1).optional(),
+    apiKey: z.string().min(1).optional(),
+    token: z.string().min(1).optional()
+  }).strict()
+}).strict()
+
 const QuerySchema = z.object({
   sql: z.string().min(1, 'SQL query is required'),
   params: z.array(z.unknown()).optional()
@@ -410,6 +419,92 @@ export function dataSourcesRouter(): Router {
         error: {
           code: 'INTERNAL_ERROR',
           message: error instanceof Error ? error.message : 'Failed to update data source'
+        }
+      })
+    }
+  })
+
+  /**
+   * PUT /api/data-sources/:id/credentials
+   * Rotate write-only credentials. Non-secret config updates stay on PUT /:id.
+   */
+  router.put('/api/data-sources/:id/credentials', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
+    const parse = DataSourceCredentialsUpdateSchema.safeParse(req.body)
+    if (!parse.success) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: parse.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('; ')
+        }
+      })
+    }
+    const changedCredentialKeys = Object.keys(parse.data.credentials)
+    if (changedCredentialKeys.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'credentials: at least one credential field is required'
+        }
+      })
+    }
+
+    try {
+      const manager = getManager()
+      const id = req.params.id
+      manager.assertAccess(id, resolveUserId(req))
+
+      const existing = manager.getDataSource(id)
+      const oldConfig = existing.getConfig()
+      const scope = manager.getScope(id)
+
+      const newConfig: DataSourceConfig = {
+        ...oldConfig,
+        credentials: {
+          ...oldConfig.credentials,
+          ...parse.data.credentials
+        },
+        id
+      }
+
+      const adapter = await manager.updateDataSource(id, newConfig, {
+        ownerId: scope?.ownerId ?? resolveUserId(req)!,
+        workspaceId: scope?.workspaceId ?? undefined
+      })
+
+      await auditLog({
+        actorId: req.user?.id?.toString(),
+        actorType: 'user',
+        action: 'update_credentials',
+        resourceType: 'data_source',
+        resourceId: id,
+        meta: {
+          changedCredentialKeys,
+          before: sanitizeConfig(oldConfig),
+          after: sanitizeConfig(newConfig)
+        }
+      })
+
+      return res.json({
+        ok: true,
+        data: {
+          ...sanitizeConfig(newConfig),
+          connected: adapter.isConnected()
+        }
+      })
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('not found')) {
+        return res.status(404).json({
+          ok: false,
+          error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
+        })
+      }
+      return res.status(500).json({
+        ok: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: error instanceof Error ? error.message : 'Failed to update data source credentials'
         }
       })
     }

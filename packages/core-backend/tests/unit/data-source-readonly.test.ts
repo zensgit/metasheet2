@@ -4,8 +4,9 @@ import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
 
+import { auditLog } from '../../src/audit/audit'
 import { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
-import { dataSourcesRouter, isReadOnlySql } from '../../src/routes/data-sources'
+import { dataSourcesRouter, getDataSourceManager, isReadOnlySql } from '../../src/routes/data-sources'
 import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
 
 function sqlConfig(id: string, readOnly?: boolean): DataSourceConfig {
@@ -163,5 +164,78 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
     // credentials are still never returned, and the merge does not resurrect them into the response
     expect(got.body.data).not.toHaveProperty('credentials')
     expect(got.body.data.hasCredentials).toBe(true)
+  })
+
+  it('rotates credentials without exposing them or wiping omitted keys', async () => {
+    currentUser = admin('alice')
+    await request(app).post('/api/data-sources').send({
+      id: 'rotate-creds', name: 'rotate-creds', type: 'postgres',
+      connection: { host: 'db', database: 'erp' },
+      credentials: { username: 'old-user', password: 'old-password', apiKey: 'kept-key' },
+      options: { autoConnect: false, readOnly: true },
+    })
+
+    const put = await request(app)
+      .put('/api/data-sources/rotate-creds/credentials')
+      .send({ credentials: { password: 'new-password' } })
+    expect(put.status).toBe(200)
+    expect(put.body.data).not.toHaveProperty('credentials')
+    expect(put.body.data.hasCredentials).toBe(true)
+
+    const got = await request(app).get('/api/data-sources/rotate-creds')
+    expect(got.body.data).not.toHaveProperty('credentials')
+    expect(got.body.data.hasCredentials).toBe(true)
+
+    const config = getDataSourceManager().getDataSource('rotate-creds').getConfig()
+    expect(config.credentials).toMatchObject({
+      username: 'old-user',
+      password: 'new-password',
+      apiKey: 'kept-key',
+    })
+    const auditMeta = vi.mocked(auditLog).mock.calls.at(-1)?.[0]?.meta
+    expect(auditMeta).toMatchObject({ changedCredentialKeys: ['password'] })
+    expect(JSON.stringify(auditMeta)).not.toContain('new-password')
+    expect(JSON.stringify(auditMeta)).not.toContain('old-password')
+  })
+
+  it('fails closed on empty credential rotation payloads', async () => {
+    currentUser = admin('alice')
+    await request(app).post('/api/data-sources').send({
+      id: 'rotate-empty', name: 'rotate-empty', type: 'postgres',
+      connection: { host: 'db', database: 'erp' },
+      credentials: { username: 'u', password: 'p' },
+      options: { autoConnect: false, readOnly: true },
+    })
+
+    const empty = await request(app)
+      .put('/api/data-sources/rotate-empty/credentials')
+      .send({ credentials: {} })
+    expect(empty.status).toBe(400)
+    expect(empty.body.error.code).toBe('VALIDATION_ERROR')
+
+    const blank = await request(app)
+      .put('/api/data-sources/rotate-empty/credentials')
+      .send({ credentials: { password: '' } })
+    expect(blank.status).toBe(400)
+    expect(blank.body.error.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('scopes credential rotation to the source owner', async () => {
+    currentUser = admin('alice')
+    await request(app).post('/api/data-sources').send({
+      id: 'rotate-scope', name: 'rotate-scope', type: 'postgres',
+      connection: { host: 'db', database: 'erp' },
+      credentials: { username: 'u', password: 'alice-password' },
+      options: { autoConnect: false, readOnly: true },
+    })
+
+    currentUser = admin('bob')
+    const denied = await request(app)
+      .put('/api/data-sources/rotate-scope/credentials')
+      .send({ credentials: { password: 'bob-password' } })
+    expect(denied.status).toBe(404)
+
+    const config = getDataSourceManager().getDataSource('rotate-scope').getConfig()
+    expect(config.credentials?.password).toBe('alice-password')
   })
 })

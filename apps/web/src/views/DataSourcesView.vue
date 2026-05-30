@@ -24,20 +24,20 @@
     <form v-if="formOpen" class="data-sources__form" data-testid="ds-create-form" @submit.prevent="submit">
       <div class="data-sources__grid">
         <label>ID
-          <input v-model.trim="form.id" required data-testid="ds-field-id" :disabled="formMode === 'edit'" placeholder="my-erp-db" />
+          <input v-model.trim="form.id" required data-testid="ds-field-id" :disabled="formMode !== 'create'" placeholder="my-erp-db" />
         </label>
         <label>名称 Name
-          <input v-model.trim="form.name" required data-testid="ds-field-name" placeholder="客户 ERP 库" />
+          <input v-model.trim="form.name" required data-testid="ds-field-name" :disabled="formMode === 'credentials'" placeholder="客户 ERP 库" />
         </label>
         <label>类型 Type
-          <select v-model="form.type" data-testid="ds-field-type" :disabled="formMode === 'edit'">
+          <select v-model="form.type" data-testid="ds-field-type" :disabled="formMode !== 'create'">
             <option v-for="t in DATA_SOURCE_TYPES" :key="t" :value="t">{{ DATA_SOURCE_TYPE_LABELS[t] }}</option>
           </select>
         </label>
       </div>
 
       <!-- SQL connection -->
-      <div v-if="isSql" class="data-sources__grid">
+      <div v-if="isSql && formMode !== 'credentials'" class="data-sources__grid">
         <label>Host
           <input v-model.trim="form.host" required data-testid="ds-field-host" placeholder="10.0.0.5" />
         </label>
@@ -56,7 +56,7 @@
       </div>
 
       <!-- HTTP connection -->
-      <div v-else class="data-sources__grid">
+      <div v-else-if="formMode !== 'credentials'" class="data-sources__grid">
         <label>Base URL
           <input v-model.trim="form.baseURL" required data-testid="ds-field-baseurl" placeholder="https://api.example.com" />
         </label>
@@ -69,14 +69,32 @@
         凭据保持不变;如需轮换凭据,请走单独的凭据更新流程。
       </p>
 
-      <label class="data-sources__checkbox">
+      <div v-if="formMode === 'credentials'" class="data-sources__grid" data-testid="ds-credential-fields">
+        <template v-if="isSql">
+          <label>Username
+            <input v-model.trim="form.username" autocomplete="off" data-testid="ds-field-username" placeholder="留空则保持不变" />
+          </label>
+          <label>Password
+            <input v-model="form.password" type="password" autocomplete="new-password" data-testid="ds-field-password" placeholder="留空则保持不变" />
+          </label>
+        </template>
+        <label v-else>API Key
+          <input v-model="form.apiKey" type="password" autocomplete="off" data-testid="ds-field-apikey" placeholder="留空则保持不变" />
+        </label>
+      </div>
+
+      <p v-if="formMode === 'credentials'" class="data-sources__muted" data-testid="ds-credential-note">
+        仅更新填写的凭据字段;留空字段保持不变,不会作为空字符串提交。
+      </p>
+
+      <label v-if="formMode !== 'credentials'" class="data-sources__checkbox">
         <input v-model="form.readOnly" type="checkbox" data-testid="ds-field-readonly" />
         只读(推荐;关闭后允许写 SQL)
       </label>
 
       <div class="data-sources__form-actions">
-        <button type="submit" class="data-sources__btn data-sources__btn--primary" :disabled="submitting" data-testid="ds-submit">
-          {{ submitting ? '保存中…' : formMode === 'edit' ? '保存' : '创建' }}
+        <button type="submit" class="data-sources__btn data-sources__btn--primary" :disabled="submitDisabled" data-testid="ds-submit">
+          {{ submitLabel }}
         </button>
       </div>
     </form>
@@ -129,6 +147,13 @@
                 >编辑</button>
                 <button
                   type="button"
+                  class="data-sources__btn"
+                  data-testid="ds-credentials"
+                  :disabled="detailLoading"
+                  @click="openCredentialForm(ds.id)"
+                >凭据</button>
+                <button
+                  type="button"
                   class="data-sources__btn data-sources__btn--danger"
                   data-testid="ds-delete"
                   @click="confirmRemove(ds.id, ds.name)"
@@ -151,11 +176,11 @@ import {
   type DataSourceDetail,
   type DataSourceType,
 } from '../data-sources/types'
-import { buildCreatePayload, buildUpdatePayload } from '../data-sources/buildPayload'
+import { buildCreatePayload, buildCredentialRotationPayload, buildUpdatePayload } from '../data-sources/buildPayload'
 
 const store = useDataSourcesStore()
 const formOpen = ref(false)
-const formMode = ref<'create' | 'edit'>('create')
+const formMode = ref<'create' | 'edit' | 'credentials'>('create')
 const editingId = ref<string | null>(null)
 const submitting = ref(false)
 const detailLoading = ref(false)
@@ -176,6 +201,19 @@ const form = reactive({
 
 const isSql = computed(() => form.type !== 'http')
 const defaultPort = computed(() => (form.type === 'sqlserver' ? '1433' : '5432'))
+const credentialFieldsFilled = computed(() => (
+  form.type === 'http'
+    ? form.apiKey.length > 0
+    : form.username.length > 0 || form.password.length > 0
+))
+const submitDisabled = computed(() => (
+  submitting.value || (formMode.value === 'credentials' && !credentialFieldsFilled.value)
+))
+const submitLabel = computed(() => {
+  if (submitting.value) return '保存中…'
+  if (formMode.value === 'credentials') return '更新凭据'
+  return formMode.value === 'edit' ? '保存' : '创建'
+})
 
 function typeLabel(type: string): string {
   return DATA_SOURCE_TYPE_LABELS[type as DataSourceType] ?? type
@@ -238,12 +276,28 @@ async function openEditForm(id: string): Promise<void> {
   }
 }
 
+async function openCredentialForm(id: string): Promise<void> {
+  detailLoading.value = true
+  try {
+    const detail = await store.loadDetail(id)
+    if (!detail) return
+    fillFormFromDetail(detail)
+    formMode.value = 'credentials'
+    editingId.value = id
+    formOpen.value = true
+  } finally {
+    detailLoading.value = false
+  }
+}
+
 async function submit(): Promise<void> {
   submitting.value = true
   try {
-    const ok = formMode.value === 'edit' && editingId.value
+    const ok = editingId.value && formMode.value === 'edit'
       ? await store.update(editingId.value, buildUpdatePayload(form))
-      : await store.create(buildCreatePayload(form))
+      : editingId.value && formMode.value === 'credentials'
+        ? await store.rotateCredentials(editingId.value, buildCredentialRotationPayload(form))
+        : await store.create(buildCreatePayload(form))
     if (ok) {
       resetForm()
       formMode.value = 'create'
