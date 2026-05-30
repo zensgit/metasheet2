@@ -744,7 +744,7 @@ describe('Attendance admin regressions', () => {
     expect(hint?.textContent || '').toContain('250')
   })
 
-  it('creates a scheduler scope, mapping each free-text target field to its scope key', async () => {
+  it('creates a scheduler scope: picks users / groups and maps each target to its scope key', async () => {
     const created: Array<Record<string, unknown>> = []
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = String(input)
@@ -755,6 +755,27 @@ describe('Attendance admin regressions', () => {
       }
       if (url.includes('/api/attendance/scheduler-scopes')) {
         return jsonResponse(200, { ok: true, data: { items: [], total: 0, page: 1, pageSize: 200 } })
+      }
+      // Picker sources — each returns exactly one distinct option so the A2 round-trip guard
+      // below catches a checkbox/chip wired to the wrong scope key.
+      if (url.startsWith('/api/admin/users')) {
+        return jsonResponse(200, { ok: true, data: { items: [
+          { id: 'user-x', email: 'user-x@example.com', name: 'User X', role: 'employee', is_active: true, is_admin: false, last_login_at: null, created_at: '2026-05-30T00:00:00.000Z' },
+        ] } })
+      }
+      if (url.includes('/api/attendance/advanced-scheduling/workbench')) {
+        return jsonResponse(200, { ok: true, data: {
+          summary: { scheduleGroups: 1 },
+          scheduleGroups: { total: 1, items: [
+            { id: 'sg-x', name: 'Schedule Group X', memberCount: 0, assignedUserCount: 0, shiftAssignmentCount: 0, rotationAssignmentCount: 0 },
+          ] },
+          diagnostics: [],
+        } })
+      }
+      if (url.includes('/api/attendance/groups')) {
+        return jsonResponse(200, { ok: true, data: { items: [
+          { id: 'ag-x', name: 'Attendance Group X', timezone: 'Asia/Shanghai' },
+        ], total: 1 } })
       }
       return emptyAttendanceResponse()
     })
@@ -775,20 +796,31 @@ describe('Attendance admin regressions', () => {
     subjectRef.dispatchEvent(new Event('input', { bubbles: true }))
     section.querySelector<HTMLInputElement>('[data-attendance-scheduler-scope-actions] input[data-action="view"]')!.click()
 
-    // Distinct sentinel per target field — catches a field wired to the wrong scope key
-    // (the backend normalizer silently drops unknown keys; this is the A2 round-trip guard).
-    const setTarget = (id: string, value: string): void => {
+    // Free-text targets keep their textareas; distinct sentinel per field (the A2 round-trip guard).
+    const setText = (id: string, value: string): void => {
       const el = section.querySelector<HTMLTextAreaElement>(`#${id}`)!
       el.value = value
       el.dispatchEvent(new Event('input', { bubbles: true }))
     }
-    setTarget('attendance-scheduler-scope-target-departments', 'dept-x')
-    setTarget('attendance-scheduler-scope-target-attendance-groups', 'ag-x')
-    setTarget('attendance-scheduler-scope-target-schedule-groups', 'sg-x')
-    setTarget('attendance-scheduler-scope-target-users', 'user-x')
-    setTarget('attendance-scheduler-scope-target-roles', 'role-x')
-    setTarget('attendance-scheduler-scope-target-role-tags', 'tag-x')
+    setText('attendance-scheduler-scope-target-departments', 'dept-x')
+    setText('attendance-scheduler-scope-target-roles', 'role-x')
+    setText('attendance-scheduler-scope-target-role-tags', 'tag-x')
+
+    // Picker targets: check the one attendance group + the one schedule group (array v-model).
+    section.querySelector<HTMLInputElement>('[data-attendance-scheduler-scope-attendance-group="ag-x"]')!.click()
+    section.querySelector<HTMLInputElement>('[data-attendance-scheduler-scope-schedule-group="sg-x"]')!.click()
+
+    // Users: load the directory, pick user-x in the add-select, then add it as a chip.
+    section.querySelector<HTMLButtonElement>('[data-attendance-user-multi-picker-search="attendanceSchedulerScopeUsers"]')!.click()
+    await flushUi(4)
+    const userSelect = section.querySelector<HTMLSelectElement>('[data-attendance-user-multi-picker-select="attendanceSchedulerScopeUsers"]')!
+    userSelect.value = 'user-x'
+    userSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(1)
+    section.querySelector<HTMLButtonElement>('[data-attendance-user-multi-picker-add="attendanceSchedulerScopeUsers"]')!.click()
     await flushUi(2)
+    // The added user reads as a chip, not a raw id typed into a textarea.
+    expect(section.querySelector('[data-attendance-user-multi-picker-chips="attendanceSchedulerScopeUsers"] [data-chip-id="user-x"]')).toBeTruthy()
 
     section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-create]')!.click()
     await flushUi(4)
@@ -796,6 +828,7 @@ describe('Attendance admin regressions', () => {
     expect(created).toHaveLength(1)
     // toEqual (not toMatchObject) so an extra body key — e.g. a re-added orgId, which the
     // backend's .strict() schema rejects with 400 — fails the test instead of slipping through.
+    // Picked arrays + free-text lists all land as arrays under the same six scope keys.
     expect(created[0]).toEqual({
       subjectType: 'role',
       subjectRef: 'attendance_admin',
@@ -932,6 +965,183 @@ describe('Attendance admin regressions', () => {
         roleTags: [],
       },
     })
+  })
+
+  it('edits a scope: prefills picked group checkboxes and user chips from the array targets', async () => {
+    const puts: Array<{ url: string; body: Record<string, unknown> }> = []
+    const existing = {
+      id: 'scope-9',
+      subjectType: 'role',
+      subjectRef: 'attendance_admin',
+      actions: ['view'],
+      scope: { scheduleGroupIds: ['sg-x'], attendanceGroupIds: ['ag-x'], userIds: ['user-x'], departments: [], roles: [], roleTags: [] },
+      isActive: true,
+    }
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/scheduler-scopes/scope-9') && method === 'PUT') {
+        puts.push({ url, body: JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')) })
+        return jsonResponse(200, { ok: true, data: { ...existing } })
+      }
+      if (url.includes('/api/attendance/scheduler-scopes')) {
+        return jsonResponse(200, { ok: true, data: { items: [existing], total: 1, page: 1, pageSize: 200 } })
+      }
+      if (url.startsWith('/api/admin/users')) {
+        return jsonResponse(200, { ok: true, data: { items: [
+          { id: 'user-x', email: 'user-x@example.com', name: 'User X', role: 'employee', is_active: true, is_admin: false, last_login_at: null, created_at: '2026-05-30T00:00:00.000Z' },
+        ] } })
+      }
+      if (url.includes('/api/attendance/advanced-scheduling/workbench')) {
+        return jsonResponse(200, { ok: true, data: {
+          summary: { scheduleGroups: 1 },
+          scheduleGroups: { total: 1, items: [
+            { id: 'sg-x', name: 'Schedule Group X', memberCount: 0, assignedUserCount: 0, shiftAssignmentCount: 0, rotationAssignmentCount: 0 },
+          ] },
+          diagnostics: [],
+        } })
+      }
+      if (url.includes('/api/attendance/groups')) {
+        return jsonResponse(200, { ok: true, data: { items: [
+          { id: 'ag-x', name: 'Attendance Group X', timezone: 'Asia/Shanghai' },
+        ], total: 1 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')!
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-item] [data-attendance-scheduler-scope-edit]')!.click()
+    await flushUi(4)
+
+    // Array targets hydrate into the pickers — the regression most likely to break silently when
+    // the edit path switched from joined strings to arrays.
+    expect(section.querySelector<HTMLInputElement>('[data-attendance-scheduler-scope-attendance-group="ag-x"]')!.checked).toBe(true)
+    expect(section.querySelector<HTMLInputElement>('[data-attendance-scheduler-scope-schedule-group="sg-x"]')!.checked).toBe(true)
+    expect(section.querySelector('[data-attendance-user-multi-picker-chips="attendanceSchedulerScopeUsers"] [data-chip-id="user-x"]')).toBeTruthy()
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-create]')!.click()
+    await flushUi(4)
+
+    expect(puts).toHaveLength(1)
+    expect(puts[0].url).toContain('/api/attendance/scheduler-scopes/scope-9')
+    // An unchanged submit round-trips the prefilled arrays back through the wire.
+    expect(puts[0].body).toEqual({
+      subjectType: 'role',
+      subjectRef: 'attendance_admin',
+      actions: ['view'],
+      scope: {
+        scheduleGroupIds: ['sg-x'],
+        attendanceGroupIds: ['ag-x'],
+        userIds: ['user-x'],
+        departments: [],
+        roles: [],
+        roleTags: [],
+      },
+    })
+  })
+
+  it('warns when the attendance-group picker source is capped (no silent caps)', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/scheduler-scopes')) {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 0, page: 1, pageSize: 200 } })
+      }
+      if (url.includes('/api/attendance/advanced-scheduling/workbench')) {
+        // Schedule groups are returned uncapped (the workbench total echoes items.length), so
+        // there is nothing to warn about — total === items.length here, the realistic shape.
+        return jsonResponse(200, { ok: true, data: {
+          summary: { scheduleGroups: 1 },
+          scheduleGroups: { total: 1, items: [
+            { id: 'sg-1', name: 'SG 1', memberCount: 0, assignedUserCount: 0, shiftAssignmentCount: 0, rotationAssignmentCount: 0 },
+          ] },
+          diagnostics: [],
+        } })
+      }
+      if (url.includes('/api/attendance/groups')) {
+        // Real COUNT(*) total 4 but the loader caps at pageSize and only 1 item came back ->
+        // a target group past the cap would be silently un-pickable without this hint.
+        return jsonResponse(200, { ok: true, data: { items: [
+          { id: 'ag-1', name: 'AG 1', timezone: 'Asia/Shanghai' },
+        ], total: 4 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')!
+
+    expect(section.querySelector('[data-attendance-scheduler-scope-attendance-groups-truncated]')).toBeTruthy()
+    // Schedule groups are uncapped, so they intentionally carry no truncation hint.
+    expect(section.querySelector('[data-attendance-scheduler-scope-schedule-groups-truncated]')).toBeNull()
+  })
+
+  it('removes a user chip, emptying the target so the create guard refuses', async () => {
+    const posts: unknown[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/scheduler-scopes') && method === 'POST') {
+        posts.push(1)
+        return jsonResponse(200, { ok: true, data: {} })
+      }
+      if (url.includes('/api/attendance/scheduler-scopes')) {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 0, page: 1, pageSize: 200 } })
+      }
+      if (url.startsWith('/api/admin/users')) {
+        return jsonResponse(200, { ok: true, data: { items: [
+          { id: 'user-x', email: 'user-x@example.com', name: 'User X', role: 'employee', is_active: true, is_admin: false, last_login_at: null, created_at: '2026-05-30T00:00:00.000Z' },
+        ] } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')!
+
+    // Subject + action are valid, so only the (removed) user target is what blocks the POST.
+    const subjectType = section.querySelector<HTMLSelectElement>('#attendance-scheduler-scope-subject-type')!
+    subjectType.value = 'role'
+    subjectType.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    const subjectRef = section.querySelector<HTMLInputElement>('#attendance-scheduler-scope-subject-ref')!
+    subjectRef.value = 'attendance_admin'
+    subjectRef.dispatchEvent(new Event('input', { bubbles: true }))
+    section.querySelector<HTMLInputElement>('[data-attendance-scheduler-scope-actions] input[data-action="view"]')!.click()
+
+    // Add the only target (a user), then remove its chip via the × button.
+    section.querySelector<HTMLButtonElement>('[data-attendance-user-multi-picker-search="attendanceSchedulerScopeUsers"]')!.click()
+    await flushUi(4)
+    const userSelect = section.querySelector<HTMLSelectElement>('[data-attendance-user-multi-picker-select="attendanceSchedulerScopeUsers"]')!
+    userSelect.value = 'user-x'
+    userSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(1)
+    section.querySelector<HTMLButtonElement>('[data-attendance-user-multi-picker-add="attendanceSchedulerScopeUsers"]')!.click()
+    await flushUi(2)
+    expect(section.querySelector('[data-attendance-user-multi-picker-chips="attendanceSchedulerScopeUsers"] [data-chip-id="user-x"]')).toBeTruthy()
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-user-multi-picker-remove="user-x"]')!.click()
+    await flushUi(2)
+    // Chip gone -> userIds empty -> no target remains.
+    expect(section.querySelector('[data-attendance-user-multi-picker-chips="attendanceSchedulerScopeUsers"] [data-chip-id="user-x"]')).toBeNull()
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-create]')!.click()
+    await flushUi(4)
+    expect(posts).toEqual([])
+    expect(container!.textContent).toContain('Add at least one scope target')
   })
 
   it('keeps the user subject ref through edit hydration (PUTs the original UUID, not blank)', async () => {

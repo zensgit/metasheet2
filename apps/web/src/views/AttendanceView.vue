@@ -1353,18 +1353,6 @@
                     <span>{{ tr('Departments', '部门') }}</span>
                     <textarea id="attendance-scheduler-scope-target-departments" v-model="schedulerScopeForm.departments" rows="1" :placeholder="tr('dept-a, dept-b', 'dept-a, dept-b')"></textarea>
                   </label>
-                  <label class="attendance__field" for="attendance-scheduler-scope-target-attendance-groups">
-                    <span>{{ tr('Attendance groups', '考勤组') }}</span>
-                    <textarea id="attendance-scheduler-scope-target-attendance-groups" v-model="schedulerScopeForm.attendanceGroupIds" rows="1" :placeholder="tr('attendance group id(s)', '考勤组 ID')"></textarea>
-                  </label>
-                  <label class="attendance__field" for="attendance-scheduler-scope-target-schedule-groups">
-                    <span>{{ tr('Schedule groups', '排班组') }}</span>
-                    <textarea id="attendance-scheduler-scope-target-schedule-groups" v-model="schedulerScopeForm.scheduleGroupIds" rows="1" :placeholder="tr('schedule group id(s)', '排班组 ID')"></textarea>
-                  </label>
-                  <label class="attendance__field" for="attendance-scheduler-scope-target-users">
-                    <span>{{ tr('Users', '员工') }}</span>
-                    <textarea id="attendance-scheduler-scope-target-users" v-model="schedulerScopeForm.userIds" rows="1" :placeholder="tr('user id(s)', '员工 ID')"></textarea>
-                  </label>
                   <label class="attendance__field" for="attendance-scheduler-scope-target-roles">
                     <span>{{ tr('Roles', '角色') }}</span>
                     <textarea id="attendance-scheduler-scope-target-roles" v-model="schedulerScopeForm.roles" rows="1" :placeholder="tr('role(s)', '角色')"></textarea>
@@ -1374,8 +1362,61 @@
                     <textarea id="attendance-scheduler-scope-target-role-tags" v-model="schedulerScopeForm.roleTags" rows="1" :placeholder="tr('role tag(s)', '角色标签')"></textarea>
                   </label>
                 </div>
+                <fieldset class="attendance__scheduler-scope-targets-field" data-attendance-scheduler-scope-attendance-groups-field>
+                  <legend>{{ tr('Attendance groups', '考勤组') }}</legend>
+                  <p v-if="attendanceGroups.length === 0" class="attendance__field-hint">{{ tr('No attendance groups loaded.', '暂无考勤组。') }}</p>
+                  <div v-else class="attendance__scheduler-scope-checkbox-list">
+                    <label
+                      v-for="group in attendanceGroups"
+                      :key="group.id"
+                      class="attendance__field attendance__field--checkbox"
+                    >
+                      <input
+                        type="checkbox"
+                        :value="group.id"
+                        v-model="schedulerScopeForm.attendanceGroupIds"
+                        :data-attendance-scheduler-scope-attendance-group="group.id"
+                      />
+                      <span>{{ group.name }}</span>
+                    </label>
+                  </div>
+                  <p
+                    v-if="schedulerScopeAttendanceGroupsTruncated"
+                    class="attendance__field-hint attendance__field-hint--error"
+                    data-attendance-scheduler-scope-attendance-groups-truncated
+                  >
+                    {{ tr(`Showing first ${attendanceGroups.length} of ${attendanceGroupsTotal} attendance groups; not all are listed.`, `仅显示前 ${attendanceGroups.length}/${attendanceGroupsTotal} 个考勤组，部分未列出。`) }}
+                  </p>
+                </fieldset>
+                <fieldset class="attendance__scheduler-scope-targets-field" data-attendance-scheduler-scope-schedule-groups-field>
+                  <legend>{{ tr('Schedule groups', '排班组') }}</legend>
+                  <p v-if="advancedSchedulingWorkbenchGroups.length === 0" class="attendance__field-hint">{{ tr('No schedule groups loaded.', '暂无排班组。') }}</p>
+                  <div v-else class="attendance__scheduler-scope-checkbox-list">
+                    <label
+                      v-for="group in advancedSchedulingWorkbenchGroups"
+                      :key="group.id"
+                      class="attendance__field attendance__field--checkbox"
+                    >
+                      <input
+                        type="checkbox"
+                        :value="group.id"
+                        v-model="schedulerScopeForm.scheduleGroupIds"
+                        :data-attendance-scheduler-scope-schedule-group="group.id"
+                      />
+                      <span>{{ group.name }}</span>
+                    </label>
+                  </div>
+                </fieldset>
+                <AttendanceUserMultiPickerField
+                  v-model="schedulerScopeForm.userIds"
+                  :tr="tr"
+                  :label="tr('Users', '员工')"
+                  name="attendanceSchedulerScopeUsers"
+                  :search-placeholder="tr('Search the target users', '搜索目标员工')"
+                  input-id="attendance-scheduler-scope-target-users"
+                />
                 <p class="attendance__field-hint">
-                  {{ tr('Separate multiple values with commas or new lines. At least one target and one action are required.', '多个值用逗号或换行分隔；至少需要一个目标和一个动作。') }}
+                  {{ tr('Pick users and groups above; departments, roles, and role tags accept comma- or newline-separated lists. At least one target and one action are required.', '在上方选择员工与分组；部门、角色、角色标签可用逗号或换行分隔多个值。至少需要一个目标和一个动作。') }}
                 </p>
                 <div class="attendance__scheduler-scope-form-actions">
                   <button type="submit" class="attendance__btn" :disabled="schedulerScopeCreating" data-attendance-scheduler-scope-create>
@@ -6558,6 +6599,7 @@ import AttendanceCalendarPolicyPreviewPanel from './attendance/AttendanceCalenda
 import AttendanceImportBatchesSection from './attendance/AttendanceImportBatchesSection.vue'
 import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSection.vue'
 import AttendanceUserPickerField from './attendance/AttendanceUserPickerField.vue'
+import AttendanceUserMultiPickerField from './attendance/AttendanceUserMultiPickerField.vue'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import {
   buildCalendarPolicyOverrideDiagnostics,
@@ -7938,15 +7980,16 @@ const schedulerScopes = ref<AttendanceSchedulerScope[]>([])
 const schedulerScopesLoading = ref(false)
 const schedulerScopesTotal = ref(0)
 const ATTENDANCE_SCHEDULER_SCOPE_ALL_ACTIONS = ['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'] as const
-// T2 "new scope" create form. Targets are free-text (comma / new-line) this slice; each field
-// maps to one scope key — picker-based targets land in a later slice.
+// "New / edit scope" form. Targets are mixed input: users / attendance groups / schedule groups
+// are picker-backed arrays (T4); departments / roles / roleTags stay free-text (open vocabulary,
+// no enumerable source). Every field still maps to exactly one scope key and lands as an array.
 const schedulerScopeForm = reactive({
   subjectType: 'user' as 'user' | 'role' | 'role_tag',
   subjectRef: '',
   actions: [] as string[],
-  scheduleGroupIds: '',
-  attendanceGroupIds: '',
-  userIds: '',
+  scheduleGroupIds: [] as string[],
+  attendanceGroupIds: [] as string[],
+  userIds: [] as string[],
   departments: '',
   roles: '',
   roleTags: '',
@@ -9049,6 +9092,15 @@ const selectedRuleTemplateVersion = computed(
   () => ruleTemplateVersions.value.find(item => item.id === selectedRuleTemplateVersionId.value) ?? null,
 )
 const attendanceGroups = ref<AttendanceGroup[]>([])
+// No-silent-caps for the attendance-group picker: its loader caps at pageSize 200 while the
+// endpoint reports the real COUNT(*), so warn (mirroring the scheduler-scope list truncation
+// hint) when the loaded list is shorter than the total — otherwise a target group past the cap
+// would be silently un-pickable. Schedule groups are returned uncapped (workbench total echoes
+// items.length), so the schedule-group picker needs no such guard.
+const attendanceGroupsTotal = ref(0)
+const schedulerScopeAttendanceGroupsTruncated = computed(
+  () => attendanceGroupsTotal.value > attendanceGroups.value.length,
+)
 const attendanceGroupMembers = ref<AttendanceGroupMember[]>([])
 const attendanceGroupManagers = ref<AttendanceGroupManager[]>([])
 const attendanceGroupSearch = ref('')
@@ -17728,6 +17780,7 @@ async function loadAttendanceGroups() {
     adminForbidden.value = false
     const selectedId = attendanceGroupEditingId.value || attendanceGroupMemberGroupId.value
     attendanceGroups.value = data.data?.items ?? []
+    attendanceGroupsTotal.value = typeof data.data?.total === 'number' ? data.data.total : attendanceGroups.value.length
     const selected = selectedId ? attendanceGroups.value.find(item => item.id === selectedId) : null
     if (selected) {
       editAttendanceGroup(selected)
@@ -18982,9 +19035,9 @@ function resetSchedulerScopeForm(): void {
   schedulerScopeForm.subjectType = 'user'
   schedulerScopeForm.subjectRef = ''
   schedulerScopeForm.actions = []
-  schedulerScopeForm.scheduleGroupIds = ''
-  schedulerScopeForm.attendanceGroupIds = ''
-  schedulerScopeForm.userIds = ''
+  schedulerScopeForm.scheduleGroupIds = []
+  schedulerScopeForm.attendanceGroupIds = []
+  schedulerScopeForm.userIds = []
   schedulerScopeForm.departments = ''
   schedulerScopeForm.roles = ''
   schedulerScopeForm.roleTags = ''
@@ -19004,9 +19057,9 @@ function editSchedulerScope(scope: AttendanceSchedulerScope): void {
     : 'user'
   schedulerScopeForm.subjectRef = scope.subjectRef
   schedulerScopeForm.actions = [...scope.actions]
-  schedulerScopeForm.scheduleGroupIds = scope.scope.scheduleGroupIds.join(', ')
-  schedulerScopeForm.attendanceGroupIds = scope.scope.attendanceGroupIds.join(', ')
-  schedulerScopeForm.userIds = scope.scope.userIds.join(', ')
+  schedulerScopeForm.scheduleGroupIds = [...scope.scope.scheduleGroupIds]
+  schedulerScopeForm.attendanceGroupIds = [...scope.scope.attendanceGroupIds]
+  schedulerScopeForm.userIds = [...scope.scope.userIds]
   schedulerScopeForm.departments = scope.scope.departments.join(', ')
   schedulerScopeForm.roles = scope.scope.roles.join(', ')
   schedulerScopeForm.roleTags = scope.scope.roleTags.join(', ')
@@ -19031,9 +19084,9 @@ async function submitSchedulerScope() {
     return
   }
   const scope = {
-    scheduleGroupIds: parseUserIdList(schedulerScopeForm.scheduleGroupIds),
-    attendanceGroupIds: parseUserIdList(schedulerScopeForm.attendanceGroupIds),
-    userIds: parseUserIdList(schedulerScopeForm.userIds),
+    scheduleGroupIds: [...schedulerScopeForm.scheduleGroupIds],
+    attendanceGroupIds: [...schedulerScopeForm.attendanceGroupIds],
+    userIds: [...schedulerScopeForm.userIds],
     departments: parseUserIdList(schedulerScopeForm.departments),
     roles: parseUserIdList(schedulerScopeForm.roles),
     roleTags: parseUserIdList(schedulerScopeForm.roleTags),
@@ -21861,6 +21914,24 @@ const holidaySectionBindings = {
   padding: 0 4px;
   font-size: 12px;
   color: #5b6b7b;
+}
+.attendance__scheduler-scope-targets-field {
+  margin: 0 0 12px;
+  border: 1px solid #e3e8ef;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.attendance__scheduler-scope-targets-field legend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: #5b6b7b;
+}
+.attendance__scheduler-scope-checkbox-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  max-height: 160px;
+  overflow-y: auto;
 }
 .attendance__scheduler-scope-form-actions {
   display: flex;
