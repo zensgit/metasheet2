@@ -112,6 +112,8 @@ const shiftAssignmentId = '00000000-0000-4000-8000-000000000304'
 const rotationRuleId = '00000000-0000-4000-8000-000000000305'
 const rotationAssignmentId = '00000000-0000-4000-8000-000000000306'
 const attendanceGroupId = '00000000-0000-4000-8000-000000000307'
+const attendanceRequestId = '00000000-0000-4000-8000-000000000308'
+const approvalInstanceId = 'apv_00000000-0000-4000-8000-000000000309'
 
 function scheduleGroupRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -206,6 +208,21 @@ function schedulerScopeFixedScheduleRow(actions: string[], overrides: Record<str
     scope: {
       scheduleGroupIds: [],
       attendanceGroupIds: [attendanceGroupId],
+      userIds: [],
+      departments: [],
+      roles: [],
+      roleTags: [],
+    },
+    ...overrides,
+  })
+}
+
+function schedulerScopeApproveRow(overrides: Record<string, unknown> = {}) {
+  return schedulerScopeRow({
+    actions: ['approve'],
+    scope: {
+      scheduleGroupIds: [scheduleGroupId],
+      attendanceGroupIds: [],
       userIds: [],
       departments: [],
       roles: [],
@@ -320,6 +337,48 @@ function attendanceGroupRow(overrides: Record<string, unknown> = {}) {
     member_count: 1,
     created_at: '2026-05-29T20:00:00.000Z',
     updated_at: '2026-05-29T20:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function attendanceRequestRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: attendanceRequestId,
+    user_id: 'worker-1',
+    org_id: 'default',
+    work_date: '2026-06-10',
+    request_type: 'leave',
+    requested_in_at: null,
+    requested_out_at: null,
+    reason: 'annual leave',
+    status: 'pending',
+    approval_instance_id: approvalInstanceId,
+    metadata: {
+      minutes: 60,
+      approvalFlow: {
+        steps: [
+          { name: 'Line lead', approverUserIds: ['scheduler-1'], approverRoleIds: [] },
+          { name: 'HR', approverUserIds: ['hr-1'], approverRoleIds: [] },
+        ],
+        currentStep: 0,
+      },
+    },
+    created_at: '2026-05-30T10:00:00.000Z',
+    updated_at: '2026-05-30T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function approvalInstanceRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: approvalInstanceId,
+    status: 'pending',
+    version: 1,
+    current_step: 0,
+    current_node_key: 'attendance_request_step_0',
+    metadata: {},
+    created_at: '2026-05-30T10:00:00.000Z',
+    updated_at: '2026-05-30T10:00:00.000Z',
     ...overrides,
   }
 }
@@ -926,6 +985,131 @@ describe('attendance UUID route validation', () => {
 
     expect(db.query).not.toHaveBeenCalled()
     expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it('keeps existing attendance approval permission resolving requests without scheduler scopes', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return []
+      if (sql.includes('FROM user_permissions') && params[1] === 'attendance:approve') return [{ ok: 1 }]
+      if (sql.includes('FROM user_permissions')) return []
+      if (sql.includes('JOIN role_permissions')) return []
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE')) return [attendanceRequestRow()]
+      if (sql.includes('SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE')) return [approvalInstanceRow()]
+      if (sql.includes('UPDATE approval_instances')) return []
+      if (sql.includes('UPDATE approval_assignments')) return []
+      if (sql.includes('INSERT INTO approval_records')) return []
+      if (sql.includes('UPDATE attendance_requests')) return []
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/requests/:id/reject', {
+      params: { id: attendanceRequestId },
+      body: { comment: 'Not enough context' },
+      user: { id: 'approver-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: {
+        requestId: attendanceRequestId,
+        status: 'rejected',
+        userId: 'worker-1',
+      },
+    })
+    expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining('FROM attendance_scheduler_scopes'), expect.anything())
+    expect(db.transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('lets scoped non-admin schedulers approve requests inside their scheduler scope', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE')) return [attendanceRequestRow()]
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeApproveRow()]
+      if (sql.includes('SELECT DISTINCT group_id') && sql.includes('FROM attendance_group_members')) return []
+      if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
+        return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
+      }
+      if (sql.includes('SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE')) return [approvalInstanceRow()]
+      if (sql.includes('UPDATE approval_instances')) return []
+      if (sql.includes('UPDATE approval_assignments')) return []
+      if (sql.includes('INSERT INTO approval_assignments')) return []
+      if (sql.includes('INSERT INTO approval_records')) return []
+      if (sql.includes('UPDATE attendance_requests')) return []
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/requests/:id/approve', {
+      params: { id: attendanceRequestId },
+      body: { comment: 'Looks good' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: {
+        requestId: attendanceRequestId,
+        status: 'pending',
+        approvalStep: { index: 1, total: 2 },
+      },
+    })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM attendance_scheduler_scopes'),
+      ['default', 'scheduler-1', [], []],
+    )
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
+      ['default', 'worker-1', '2026-06-10'],
+    )
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('INSERT INTO approval_records'))).toBe(true)
+  })
+
+  it('rejects scoped request approval outside scheduler scope before writing', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE')) return [attendanceRequestRow()]
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) {
+        return [schedulerScopeApproveRow({
+          scope: {
+            scheduleGroupIds: ['00000000-0000-4000-8000-000000009999'],
+            attendanceGroupIds: [],
+            userIds: [],
+            departments: [],
+            roles: [],
+            roleTags: [],
+          },
+        })]
+      }
+      if (sql.includes('SELECT DISTINCT group_id') && sql.includes('FROM attendance_group_members')) return []
+      if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
+        return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/requests/:id/approve', {
+      params: { id: attendanceRequestId },
+      body: { comment: 'Looks good' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('SELECT * FROM approval_instances'))).toBe(false)
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('UPDATE attendance_requests'))).toBe(false)
   })
 
   it('lets full attendance admins add schedule group members without scheduler scopes', async () => {
