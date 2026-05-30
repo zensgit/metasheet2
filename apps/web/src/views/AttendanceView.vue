@@ -1307,6 +1307,80 @@
               <p class="attendance__scheduler-scope-notice" data-attendance-scheduler-scopes-intent>
                 {{ tr('These scopes are an administrative registry only and are not yet enforced at runtime. Runtime enforcement is a separate later capability.', '此处仅为管理登记，运行时尚未强制执行；运行时强制为后续独立能力。') }}
               </p>
+              <form class="attendance__scheduler-scope-form" data-attendance-scheduler-scope-form @submit.prevent="createSchedulerScope">
+                <h5>{{ tr('New scope', '新建范围') }}</h5>
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field" for="attendance-scheduler-scope-subject-type">
+                    <span>{{ tr('Subject type', '主体类型') }}</span>
+                    <select id="attendance-scheduler-scope-subject-type" v-model="schedulerScopeForm.subjectType">
+                      <option value="user">{{ tr('Employee', '员工') }}</option>
+                      <option value="role">{{ tr('Role', '角色') }}</option>
+                      <option value="role_tag">{{ tr('Role tag', '角色标签') }}</option>
+                    </select>
+                  </label>
+                  <AttendanceUserPickerField
+                    v-if="schedulerScopeForm.subjectType === 'user'"
+                    v-model="schedulerScopeForm.subjectRef"
+                    :tr="tr"
+                    :label="tr('Subject user', '主体用户')"
+                    name="attendanceSchedulerScopeSubject"
+                    :search-placeholder="tr('Search the subject user', '搜索主体用户')"
+                    input-id="attendance-scheduler-scope-subject-ref"
+                  />
+                  <label v-else class="attendance__field" for="attendance-scheduler-scope-subject-ref">
+                    <span>{{ tr('Subject (role / role tag)', '主体（角色 / 角色标签）') }}</span>
+                    <input
+                      id="attendance-scheduler-scope-subject-ref"
+                      v-model="schedulerScopeForm.subjectRef"
+                      type="text"
+                      :placeholder="tr('e.g. attendance_admin', '如 attendance_admin')"
+                    />
+                  </label>
+                </div>
+                <fieldset class="attendance__scheduler-scope-actions-field" data-attendance-scheduler-scope-actions>
+                  <legend>{{ tr('Actions', '动作') }}</legend>
+                  <label
+                    v-for="action in ATTENDANCE_SCHEDULER_SCOPE_ALL_ACTIONS"
+                    :key="action"
+                    class="attendance__field attendance__field--checkbox"
+                  >
+                    <input type="checkbox" :value="action" v-model="schedulerScopeForm.actions" :data-action="action" />
+                    <span>{{ schedulerScopeActionLabel(action) }}</span>
+                  </label>
+                </fieldset>
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field" for="attendance-scheduler-scope-target-departments">
+                    <span>{{ tr('Departments', '部门') }}</span>
+                    <textarea id="attendance-scheduler-scope-target-departments" v-model="schedulerScopeForm.departments" rows="1" :placeholder="tr('dept-a, dept-b', 'dept-a, dept-b')"></textarea>
+                  </label>
+                  <label class="attendance__field" for="attendance-scheduler-scope-target-attendance-groups">
+                    <span>{{ tr('Attendance groups', '考勤组') }}</span>
+                    <textarea id="attendance-scheduler-scope-target-attendance-groups" v-model="schedulerScopeForm.attendanceGroupIds" rows="1" :placeholder="tr('attendance group id(s)', '考勤组 ID')"></textarea>
+                  </label>
+                  <label class="attendance__field" for="attendance-scheduler-scope-target-schedule-groups">
+                    <span>{{ tr('Schedule groups', '排班组') }}</span>
+                    <textarea id="attendance-scheduler-scope-target-schedule-groups" v-model="schedulerScopeForm.scheduleGroupIds" rows="1" :placeholder="tr('schedule group id(s)', '排班组 ID')"></textarea>
+                  </label>
+                  <label class="attendance__field" for="attendance-scheduler-scope-target-users">
+                    <span>{{ tr('Users', '员工') }}</span>
+                    <textarea id="attendance-scheduler-scope-target-users" v-model="schedulerScopeForm.userIds" rows="1" :placeholder="tr('user id(s)', '员工 ID')"></textarea>
+                  </label>
+                  <label class="attendance__field" for="attendance-scheduler-scope-target-roles">
+                    <span>{{ tr('Roles', '角色') }}</span>
+                    <textarea id="attendance-scheduler-scope-target-roles" v-model="schedulerScopeForm.roles" rows="1" :placeholder="tr('role(s)', '角色')"></textarea>
+                  </label>
+                  <label class="attendance__field" for="attendance-scheduler-scope-target-role-tags">
+                    <span>{{ tr('Role tags', '角色标签') }}</span>
+                    <textarea id="attendance-scheduler-scope-target-role-tags" v-model="schedulerScopeForm.roleTags" rows="1" :placeholder="tr('role tag(s)', '角色标签')"></textarea>
+                  </label>
+                </div>
+                <p class="attendance__field-hint">
+                  {{ tr('Separate multiple IDs with commas or new lines. At least one target and one action are required. Picker-based targets land in a later slice; this slice accepts free-text.', '多个 ID 用逗号或换行分隔；至少需要一个目标和一个动作。下拉选择器在后续切片提供，本切片用 free-text。') }}
+                </p>
+                <button type="submit" class="attendance__btn" :disabled="schedulerScopeCreating" data-attendance-scheduler-scope-create>
+                  {{ schedulerScopeCreating ? tr('Creating...', '创建中...') : tr('Create scope', '创建范围') }}
+                </button>
+              </form>
               <div v-if="!schedulerScopesLoading && schedulerScopes.length === 0" class="attendance__empty">
                 {{ tr('No scheduler scopes yet.', '暂无排班管理范围记录。') }}
               </div>
@@ -7833,6 +7907,26 @@ type AttendanceSchedulerScope = {
 const schedulerScopes = ref<AttendanceSchedulerScope[]>([])
 const schedulerScopesLoading = ref(false)
 const schedulerScopesTotal = ref(0)
+const ATTENDANCE_SCHEDULER_SCOPE_ALL_ACTIONS = ['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'] as const
+// T2 "new scope" create form. Targets are free-text (comma / new-line) this slice; each field
+// maps to one scope key — picker-based targets land in a later slice.
+const schedulerScopeForm = reactive({
+  subjectType: 'user' as 'user' | 'role' | 'role_tag',
+  subjectRef: '',
+  actions: [] as string[],
+  scheduleGroupIds: '',
+  attendanceGroupIds: '',
+  userIds: '',
+  departments: '',
+  roles: '',
+  roleTags: '',
+})
+const schedulerScopeCreating = ref(false)
+// Subject ref is type-specific (a user UUID via the picker vs a role/role-tag string); clear it
+// on type change so a picked user UUID can't be submitted as a role string.
+watch(() => schedulerScopeForm.subjectType, () => {
+  schedulerScopeForm.subjectRef = ''
+})
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 const timezoneOptions = computed(() =>
   buildTimezoneOptions([defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'])
@@ -18844,6 +18938,69 @@ function normalizeSchedulerScope(value: unknown): AttendanceSchedulerScope | nul
 // Read-only registry of scheduler scopes (T1). Mirrors loadAttendanceGroups: defensive,
 // 403 -> adminForbidden, non-ok -> caught. Scopes are administrative intent and are NOT
 // enforced at runtime yet (see design-lock §5); the section banner says so.
+// Create one scheduler scope (T2, create-only). Maps the 6 free-text target fields to the 6
+// scope keys (names MUST match the backend normalizer; a wrong key is silently dropped).
+// Mirrors the backend validation (>=1 action, >=1 target) client-side before POSTing.
+async function createSchedulerScope() {
+  const subjectRef = schedulerScopeForm.subjectRef.trim()
+  if (!subjectRef) {
+    setStatus(tr('Enter a subject for the scope.', '请填写范围主体。'), 'error')
+    return
+  }
+  const actions = [...schedulerScopeForm.actions]
+  if (actions.length === 0) {
+    setStatus(tr('Select at least one action.', '请至少选择一个动作。'), 'error')
+    return
+  }
+  const scope = {
+    scheduleGroupIds: parseUserIdList(schedulerScopeForm.scheduleGroupIds),
+    attendanceGroupIds: parseUserIdList(schedulerScopeForm.attendanceGroupIds),
+    userIds: parseUserIdList(schedulerScopeForm.userIds),
+    departments: parseUserIdList(schedulerScopeForm.departments),
+    roles: parseUserIdList(schedulerScopeForm.roles),
+    roleTags: parseUserIdList(schedulerScopeForm.roleTags),
+  }
+  if (!Object.values(scope).some(ids => ids.length > 0)) {
+    setStatus(tr('Add at least one scope target.', '请至少添加一个范围目标。'), 'error')
+    return
+  }
+  schedulerScopeCreating.value = true
+  try {
+    const response = await apiFetch('/api/attendance/scheduler-scopes', {
+      method: 'POST',
+      body: JSON.stringify({
+        subjectType: schedulerScopeForm.subjectType,
+        subjectRef,
+        actions,
+        scope,
+        orgId: normalizedOrgId(),
+      }),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to create scheduler scope', '创建排班管理范围失败')))
+    }
+    schedulerScopeForm.subjectRef = ''
+    schedulerScopeForm.actions = []
+    schedulerScopeForm.scheduleGroupIds = ''
+    schedulerScopeForm.attendanceGroupIds = ''
+    schedulerScopeForm.userIds = ''
+    schedulerScopeForm.departments = ''
+    schedulerScopeForm.roles = ''
+    schedulerScopeForm.roleTags = ''
+    setStatus(tr('Scheduler scope created.', '已创建排班管理范围。'), 'info')
+    await loadSchedulerScopes()
+  } catch (error: unknown) {
+    setStatus(readErrorMessage(error, tr('Failed to create scheduler scope', '创建排班管理范围失败')), 'error')
+  } finally {
+    schedulerScopeCreating.value = false
+  }
+}
+
 async function loadSchedulerScopes() {
   schedulerScopesLoading.value = true
   try {
@@ -21565,5 +21722,31 @@ const holidaySectionBindings = {
   margin: 10px 0 0;
   font-size: 12px;
   color: #8a6d3b;
+}
+.attendance__scheduler-scope-form {
+  margin: 0 0 16px;
+  padding: 12px;
+  border: 1px solid #e3e8ef;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.attendance__scheduler-scope-form h5 {
+  margin: 0;
+}
+.attendance__scheduler-scope-actions-field {
+  margin: 0;
+  border: 1px solid #e3e8ef;
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.attendance__scheduler-scope-actions-field legend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: #5b6b7b;
 }
 </style>
