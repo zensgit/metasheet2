@@ -22,6 +22,7 @@ import { RedisLeaderLock, type RedisLeaderLockClient } from './redis-leader-lock
 import { getRedisClient } from '../db/redis'
 import { randomBytes } from 'crypto'
 import { AutomationLogService } from './automation-log-service'
+import { AutomationJobService } from './automation-job-service'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -131,6 +132,8 @@ export type AutomationRule = {
   // V1 extended fields (nullable for backward compat)
   conditions?: ConditionGroup | null
   actions?: AutomationAction[] | null
+  // A6-1 opt-in (nullable; NULL/'legacy' = no job rows, 'workflow_job_v1' = persist jobs)
+  execution_mode?: string | null
 }
 
 export type AutomationQueryFn = (
@@ -212,6 +215,7 @@ function toExecutorRule(rule: AutomationRule): ExecutorRule {
     createdBy: rule.created_by ?? '',
     createdAt: rule.created_at,
     updatedAt: rule.updated_at,
+    executionMode: rule.execution_mode ?? undefined,
   }
 }
 
@@ -268,6 +272,7 @@ export class AutomationService {
   private executor: AutomationExecutor
   private scheduler: AutomationScheduler
   private logService: AutomationLogService
+  private jobService: AutomationJobService
   /** Kept for backward-compat with raw SQL in executor actions */
   private queryFn: AutomationQueryFn
 
@@ -292,6 +297,7 @@ export class AutomationService {
     }
     this.executor = new AutomationExecutor(deps)
     this.logService = new AutomationLogService()
+    this.jobService = new AutomationJobService()
     this.scheduler = new AutomationScheduler(
       async (rule) => {
         await this.executeRule(rule, { _triggeredBy: 'schedule' })
@@ -304,6 +310,10 @@ export class AutomationService {
   /** Expose log service for routes */
   get logs(): AutomationLogService {
     return this.logService
+  }
+
+  get jobs(): AutomationJobService {
+    return this.jobService
   }
 
   /** Expose executor for manual test runs */
@@ -675,7 +685,13 @@ export class AutomationService {
     triggerEvent: unknown,
     retryMeta?: { rerunOfExecutionId: string; initiatedBy: string },
   ): Promise<AutomationExecution> {
-    const execution = await this.executor.execute(rule, triggerEvent)
+    // A6-1: ONLY opted-in rules ('workflow_job_v1') get a per-action job lifecycle. Legacy rules
+    // pass no factory → executor writes zero job rows (opt-out path is byte-identical to today).
+    // This is the single place the path is chosen, so a retry of an opt-in rule also writes jobs.
+    const jobLifecycleFactory = rule.executionMode === 'workflow_job_v1'
+      ? (executionId: string) => this.jobService.lifecycleFor(executionId, { id: rule.id, sheetId: rule.sheetId })
+      : undefined
+    const execution = await this.executor.execute(rule, triggerEvent, jobLifecycleFactory)
     if (retryMeta) {
       // A5: stamp retry provenance onto the NEW execution before persistence.
       execution.rerunOfExecutionId = retryMeta.rerunOfExecutionId
@@ -785,6 +801,7 @@ export class AutomationService {
       created_by: (row.created_by as string) ?? null,
       conditions: (row.conditions as ConditionGroup) ?? null,
       actions: (row.actions as AutomationAction[]) ?? null,
+      execution_mode: (row.execution_mode as string) ?? null,
     }
   }
 }

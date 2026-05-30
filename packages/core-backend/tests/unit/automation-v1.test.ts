@@ -11,6 +11,7 @@ import { EventBus } from '../../src/integration/events/event-bus'
 const _executeResults: unknown[] = []
 const _executeTakeFirstResults: unknown[] = []
 const _valuesCalls: unknown[] = []
+const _setCalls: unknown[] = [] // A6-1: captures updateTable().set(...) payloads (job onSettled)
 
 function makeChain(): Record<string, unknown> {
   const self: Record<string, unknown> = {}
@@ -24,11 +25,10 @@ function makeChain(): Record<string, unknown> {
   ]
   for (const m of methods) {
     self[m] = m === 'values'
-      ? vi.fn((value: unknown) => {
-        _valuesCalls.push(value)
-        return self
-      })
-      : vi.fn(chainFn)
+      ? vi.fn((value: unknown) => { _valuesCalls.push(value); return self })
+      : m === 'set'
+        ? vi.fn((value: unknown) => { _setCalls.push(value); return self })
+        : vi.fn(chainFn)
   }
   self.execute = vi.fn(async () => {
     return _executeResults.shift() ?? []
@@ -54,6 +54,8 @@ vi.mock('../../src/db/db', () => {
 
 import { AutomationLogService } from '../../src/multitable/automation-log-service'
 import { AutomationRuleValidationError, AutomationService } from '../../src/multitable/automation-service'
+import { AutomationJobService } from '../../src/multitable/automation-job-service'
+import { normalizeWorkflowJob } from '../../src/multitable/workflow-job-contract'
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -2792,5 +2794,153 @@ describe('AutomationService — retryExecution (A5)', () => {
     const r = await service.retryExecution('axe_orig', 'admin1')
     expect('execution' in r).toBe(true)
     expect(execSpy).toHaveBeenCalledTimes(1) // skipped → re-runs against the current rule (its conditions may now pass)
+  })
+})
+
+describe('AutomationExecutor — A6-1 job lifecycle hooks', () => {
+  let deps: AutomationDeps
+  let executor: AutomationExecutor
+
+  beforeEach(() => {
+    deps = createMockDeps()
+    executor = new AutomationExecutor(deps)
+  })
+
+  // A recording lifecycle; throwOn lets a test simulate a job-write failure at a phase.
+  function recordingLifecycle(throwOn?: { phase: 'start' | 'settled'; index: number }) {
+    const calls: string[] = []
+    return {
+      calls,
+      factory: (_executionId: string) => ({
+        onStart: async (i: number) => {
+          calls.push(`start:${i}`)
+          if (throwOn?.phase === 'start' && throwOn.index === i) throw new Error('job create failed')
+        },
+        onSettled: async (i: number, _a: unknown, r: { status: string }) => {
+          calls.push(`settled:${i}:${r.status}`)
+          if (throwOn?.phase === 'settled' && throwOn.index === i) throw new Error('job update failed')
+        },
+        onSkipped: async (i: number) => { calls.push(`skipped:${i}`) },
+      }),
+    }
+  }
+
+  it('fires onStart→onSettled per action in order for an opted-in (factory-supplied) run', async () => {
+    const rule = createMockRule({
+      actions: [
+        { type: 'send_webhook', config: { url: 'https://example.com/a' } },
+        { type: 'send_webhook', config: { url: 'https://example.com/b' } },
+      ],
+    })
+    const lc = recordingLifecycle()
+    const execution = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1' }, lc.factory)
+    expect(execution.status).toBe('success')
+    expect(lc.calls).toEqual(['start:0', 'settled:0:success', 'start:1', 'settled:1:success'])
+  })
+
+  it('fires onSkipped for the fail-stop remainder', async () => {
+    const rule = createMockRule({
+      actions: [
+        { type: 'send_webhook', config: {} }, // missing url → fails
+        { type: 'send_webhook', config: { url: 'https://example.com/b' } },
+      ],
+    })
+    const lc = recordingLifecycle()
+    const execution = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1' }, lc.factory)
+    expect(execution.status).toBe('failed')
+    expect(lc.calls).toEqual(['start:0', 'settled:0:failed', 'skipped:1'])
+  })
+
+  it('FAIL-CLOSED (a): onStart throw → side effect NEVER runs + execution failed', async () => {
+    const rule = createMockRule({ actions: [{ type: 'send_webhook', config: { url: 'https://example.com/a' } }] })
+    const lc = recordingLifecycle({ phase: 'start', index: 0 })
+    const execution = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1' }, lc.factory)
+    expect(execution.status).toBe('failed') // outer catch, not a swallowed step
+    expect(deps.fetchFn).not.toHaveBeenCalled() // the webhook (side effect) never fired
+    expect(execution.error).toContain('job create failed')
+  })
+
+  it('FAIL-CLOSED (b): onSettled throw AFTER the action → side effect ran once + execution failed', async () => {
+    const rule = createMockRule({ actions: [{ type: 'send_webhook', config: { url: 'https://example.com/a' } }] })
+    const lc = recordingLifecycle({ phase: 'settled', index: 0 })
+    const execution = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1' }, lc.factory)
+    expect(execution.status).toBe('failed') // NOT pretended successful
+    expect(deps.fetchFn).toHaveBeenCalledTimes(1) // the action DID run (must not pretend otherwise)
+    expect(execution.error).toContain('job update failed')
+  })
+
+  it('legacy run (no factory) fires no lifecycle and behaves exactly as today', async () => {
+    const rule = createMockRule({ actions: [{ type: 'send_webhook', config: { url: 'https://example.com/a' } }] })
+    const execution = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1' })
+    expect(execution.status).toBe('success')
+    expect(execution.steps).toHaveLength(1) // legacy steps unchanged; no jobs involved
+  })
+})
+
+describe('AutomationService — A6-1 opt-in path choice', () => {
+  let service: AutomationService
+  beforeEach(() => {
+    service = new AutomationService(new EventBus(), {} as never, vi.fn(async () => ({ rows: [], rowCount: 0 })))
+  })
+
+  it('opt-OUT rule (no execution_mode) → executor.execute called WITHOUT a job factory (no jobs)', async () => {
+    const execSpy = vi.spyOn(service['executor'], 'execute').mockResolvedValue(storedExecutionForPath())
+    await service.executeRule(execRule({ executionMode: undefined }), { recordId: 'r1' })
+    expect(execSpy.mock.calls[0][2]).toBeUndefined() // 3rd arg = jobLifecycleFactory
+  })
+
+  it('opt-IN rule (workflow_job_v1) → executor.execute called WITH a job factory', async () => {
+    const execSpy = vi.spyOn(service['executor'], 'execute').mockResolvedValue(storedExecutionForPath())
+    await service.executeRule(execRule({ executionMode: 'workflow_job_v1' }), { recordId: 'r1' })
+    expect(typeof execSpy.mock.calls[0][2]).toBe('function')
+  })
+
+  function execRule(over: Record<string, unknown>) {
+    return {
+      id: 'rule_1', name: 'R', sheetId: 'sheet_1', trigger: { type: 'record.created', config: {} },
+      actions: [{ type: 'update_record', config: { fields: { x: 1 } } }], enabled: true,
+      createdBy: 'u1', createdAt: '2026-01-01T00:00:00Z', ...over,
+    } as never
+  }
+  function storedExecutionForPath(): AutomationExecution {
+    return { id: 'axe_1', ruleId: 'rule_1', triggeredBy: 'event', triggeredAt: '2026-05-30T00:00:00Z', status: 'success', steps: [] }
+  }
+})
+
+describe('AutomationJobService — A6-1 persistence + C1 read', () => {
+  beforeEach(() => { _valuesCalls.length = 0; _setCalls.length = 0; _executeResults.length = 0; _executeTakeFirstResults.length = 0 })
+
+  it('onStart inserts a running job; onSettled redacts result/error and maps status to C1', async () => {
+    const svc = new AutomationJobService()
+    const lc = svc.lifecycleFor('axe_x', { id: 'rule_1', sheetId: 'sheet_1' })
+    _executeResults.push([]) // onStart insert
+    await lc.onStart(0, { type: 'send_webhook', config: {} } as never)
+    const inserted = _valuesCalls.at(-1) as Record<string, unknown>
+    expect(inserted.id).toBe('axe_x:job:0')
+    expect(inserted.status).toBe('running')
+    expect(inserted.upstream_job_id).toBeNull()
+
+    _executeResults.push([]) // onSettled update
+    await lc.onSettled(0, { type: 'send_webhook' } as never, {
+      actionType: 'send_webhook', status: 'failed',
+      error: 'connect postgres://u:SECRETPW@h/db failed', output: { token: 'LIVE-SECRET' }, durationMs: 5,
+    } as never)
+    const upd = _setCalls.at(-1) as Record<string, unknown> // updateTable().set(...) payload
+    expect(upd.status).toBe('failed') // C1 (failed identity)
+    expect(String(upd.error)).not.toContain('SECRETPW') // redactString
+    expect(JSON.stringify(upd)).not.toContain('LIVE-SECRET') // redactValue on result (token key masked)
+  })
+
+  it('listByExecution maps rows to C1 views that pass normalizeWorkflowJob (error string-or-absent)', async () => {
+    const svc = new AutomationJobService()
+    _executeResults.push([
+      { id: 'axe_x:job:0', execution_id: 'axe_x', step_key: '0', status: 'resolved', upstream_job_id: null, result: { ok: true }, error: null },
+      { id: 'axe_x:job:1', execution_id: 'axe_x', step_key: '1', status: 'failed', upstream_job_id: 'axe_x:job:0', result: null, error: 'boom' },
+    ])
+    const views = await svc.listByExecution('axe_x')
+    expect(views[0].status).toBe('resolved')
+    expect(views[0].error).toBeUndefined() // null → absent (C1)
+    expect(views[1].error).toBe('boom')
+    for (const v of views) expect(() => normalizeWorkflowJob(v)).not.toThrow()
   })
 })

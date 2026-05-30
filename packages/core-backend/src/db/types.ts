@@ -106,6 +106,7 @@ export interface Database {
   meta_widgets: MetaWidgetsTable
   // Multitable automation & dashboard
   automation_rules: AutomationRulesTable
+  multitable_automation_jobs: MultitableAutomationJobsTable
   multitable_automation_executions: MultitableAutomationExecutionsTable
   multitable_charts: MultitableChartsTable
   multitable_dashboards: MultitableDashboardsTable
@@ -1241,6 +1242,30 @@ export interface AutomationRulesTable {
   created_by: string | null
   conditions: JSONColumnType<Record<string, unknown> | null>
   actions: JSONColumnType<Record<string, unknown>[] | null>
+  // A6-1 opt-in flag: NULL/'legacy' = legacy execution path (no job rows);
+  // 'workflow_job_v1' = persist one C1 job per action.
+  execution_mode: string | null
+}
+
+/** A6-1 persistent WorkflowJob rows — opt-in linear job plane (additive to executions). */
+export interface MultitableAutomationJobsTable {
+  id: string
+  execution_id: string
+  rule_id: string
+  sheet_id: string | null
+  step_index: number
+  step_key: string
+  action_type: string
+  status: string
+  upstream_job_id: string | null
+  result: JsonValueColumn
+  error: string | null
+  started_at: Date | string | null
+  finished_at: Date | string | null
+  duration_ms: number | null
+  schema_version: number
+  created_at: CreatedAt
+  updated_at: UpdatedAt
 }
 
 export interface MultitableAutomationExecutionsTable {
