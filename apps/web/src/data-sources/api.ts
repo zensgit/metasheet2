@@ -1,10 +1,15 @@
-// Typed client for the generic external data-source connector API (UI-1: list / create / delete).
+// Typed client for the generic external data-source connector API.
 import { apiGet, apiFetch } from '../utils/api'
-import type { CreateDataSourcePayload, DataSourceListItem } from './types'
+import type { CreateDataSourcePayload, DataSourceListItem, DataSourceTestResult } from './types'
 
 interface ListEnvelope {
   ok: boolean
   data?: { items?: DataSourceListItem[]; total?: number }
+}
+
+interface TestEnvelope {
+  ok: boolean
+  data?: DataSourceTestResult
 }
 
 interface ErrorEnvelope {
@@ -34,4 +39,16 @@ export async function deleteDataSource(id: string): Promise<void> {
   if (!res.ok) {
     throw new Error(await errorFrom(res, 'Failed to delete data source'))
   }
+}
+
+export async function testDataSourceConnection(id: string): Promise<DataSourceTestResult> {
+  const res = await apiFetch(`/api/data-sources/${encodeURIComponent(id)}/test`)
+  if (!res.ok) {
+    throw new Error(await errorFrom(res, 'Failed to test data source'))
+  }
+  const body = await res.json() as TestEnvelope
+  if (!body.data) {
+    throw new Error('Failed to test data source: empty response')
+  }
+  return body.data
 }
