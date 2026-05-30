@@ -107,6 +107,10 @@ async function invokeRoute(
 
 const scheduleGroupId = '00000000-0000-4000-8000-000000000301'
 const scheduleGroupMemberId = '00000000-0000-4000-8000-000000000302'
+const shiftId = '00000000-0000-4000-8000-000000000303'
+const shiftAssignmentId = '00000000-0000-4000-8000-000000000304'
+const rotationRuleId = '00000000-0000-4000-8000-000000000305'
+const rotationAssignmentId = '00000000-0000-4000-8000-000000000306'
 
 function schedulerScopeRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -142,6 +146,53 @@ function scheduleGroupMemberRow(overrides: Record<string, unknown> = {}) {
     source: 'manual',
     created_by: 'scheduler-1',
     updated_by: 'scheduler-1',
+    created_at: '2026-05-30T10:00:00.000Z',
+    updated_at: '2026-05-30T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function shiftRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: shiftId,
+    org_id: 'default',
+    name: 'Day Shift',
+    timezone: 'UTC',
+    work_start_time: '09:00',
+    work_end_time: '18:00',
+    is_overnight: false,
+    late_grace_minutes: 10,
+    early_grace_minutes: 10,
+    rounding_minutes: 5,
+    working_days: [1, 2, 3, 4, 5],
+    ...overrides,
+  }
+}
+
+function shiftAssignmentRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: shiftAssignmentId,
+    org_id: 'default',
+    user_id: 'worker-1',
+    shift_id: shiftId,
+    start_date: '2026-06-10',
+    end_date: null,
+    is_active: true,
+    created_at: '2026-05-30T10:00:00.000Z',
+    updated_at: '2026-05-30T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function rotationAssignmentRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: rotationAssignmentId,
+    org_id: 'default',
+    user_id: 'worker-1',
+    rotation_rule_id: rotationRuleId,
+    start_date: '2026-06-10',
+    end_date: null,
+    is_active: true,
     created_at: '2026-05-30T10:00:00.000Z',
     updated_at: '2026-05-30T10:00:00.000Z',
     ...overrides,
@@ -869,6 +920,143 @@ describe('attendance UUID route validation', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toEqual({ ok: true, data: { id: scheduleGroupMemberId } })
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('DELETE FROM attendance_schedule_group_members'))).toBe(true)
+  })
+
+  it('lets full attendance admins create shift assignments without scheduler scopes', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, true)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT * FROM attendance_shifts')) return [shiftRow()]
+      if (sql.includes('pg_advisory_xact_lock')) return []
+      if (sql.includes('FROM attendance_shift_assignments') && sql.includes('LIMIT 1')) return []
+      if (sql.includes('FROM attendance_rotation_assignments') && sql.includes('LIMIT 1')) return []
+      if (sql.includes('INSERT INTO attendance_shift_assignments')) return [shiftAssignmentRow()]
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/assignments', {
+      body: { userId: 'worker-1', shiftId, startDate: '2026-06-10' },
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(res.body).toMatchObject({ ok: true, data: { assignment: { userId: 'worker-1', shiftId } } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('SELECT DISTINCT m.schedule_group_id'))).toBe(false)
+    expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining('FROM attendance_scheduler_scopes'), expect.anything())
+  })
+
+  it('lets scoped non-admin schedulers create shift assignments inside resolved schedule group scope', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT DISTINCT m.schedule_group_id')) return [{ schedule_group_id: scheduleGroupId }]
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRow()]
+      if (sql.includes('SELECT * FROM attendance_shifts')) return [shiftRow()]
+      if (sql.includes('pg_advisory_xact_lock')) return []
+      if (sql.includes('FROM attendance_shift_assignments') && sql.includes('LIMIT 1')) return []
+      if (sql.includes('FROM attendance_rotation_assignments') && sql.includes('LIMIT 1')) return []
+      if (sql.includes('INSERT INTO attendance_shift_assignments')) return [shiftAssignmentRow()]
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/assignments', {
+      body: { userId: 'worker-1', shiftId, startDate: '2026-06-10' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(res.body).toMatchObject({ ok: true, data: { assignment: { userId: 'worker-1', shiftId } } })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
+      ['default', 'worker-1', '2026-06-10', null],
+    )
+    expect(db.transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects scoped shift assignment dispatch without resolved schedule group membership', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT DISTINCT m.schedule_group_id')) return []
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/assignments', {
+      body: { userId: 'worker-1', shiftId, startDate: '2026-06-10' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('INSERT INTO attendance_shift_assignments'))).toBe(false)
+  })
+
+  it('requires scoped shift assignment updates to cover both existing and next targets', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT * FROM attendance_shift_assignments WHERE id = $1')) return [shiftAssignmentRow()]
+      if (sql.includes('SELECT DISTINCT m.schedule_group_id')) return [{ schedule_group_id: scheduleGroupId }]
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRow()]
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'PUT /api/attendance/assignments/:id', {
+      params: { id: shiftAssignmentId },
+      body: { userId: 'worker-2' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
+      ['default', 'worker-1', '2026-06-10', null],
+    )
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
+      ['default', 'worker-2', '2026-06-10', null],
+    )
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('UPDATE attendance_shift_assignments'))).toBe(false)
+  })
+
+  it('lets scoped non-admin schedulers delete rotation assignments inside resolved schedule group scope', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT * FROM attendance_rotation_assignments WHERE id = $1')) return [rotationAssignmentRow()]
+      if (sql.includes('SELECT DISTINCT m.schedule_group_id')) return [{ schedule_group_id: scheduleGroupId }]
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRow()]
+      if (sql.includes('DELETE FROM attendance_rotation_assignments')) return [{ id: rotationAssignmentId }]
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'DELETE /api/attendance/rotation-assignments/:id', {
+      params: { id: rotationAssignmentId },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toEqual({ ok: true, data: { id: rotationAssignmentId } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('DELETE FROM attendance_rotation_assignments'))).toBe(true)
   })
 
   it('does not relabel handler failures as permission check failures', async () => {
