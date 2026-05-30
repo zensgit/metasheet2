@@ -47,13 +47,13 @@
 
 `GET /sheets/:sheetId/charts/:id/data`: after `canRead`, resolve the viewer's `allowedFieldIds` (layer-2 ∧ layer-3 composite — the #2015/#1840 pattern), then check the fields the chart references — **`dataSource.aggregation.fieldId`, `dataSource.groupByFieldId`, `dataSource.dateFieldId`, `dataSource.filterFieldId`** — against it.
 
-- **Parity with #1840 view-aggregate**, which gates `canRead` then **omits** denied/view-hidden-field aggregates (it does **not** 403 the request, and it does **not** apply record-level permissions — it `SELECT … FROM meta_records WHERE sheet_id` over all rows; record-read is a golden non-gate). **F0b matches: field-level omit, no record-perm in aggregation.**
+- **Parity with #1840 view-aggregate**, which gates `canRead` then withholds field-denied aggregates without 403 and does **not** apply record-level permissions — it `SELECT … FROM meta_records WHERE sheet_id` over all rows; record-read is a golden non-gate. **F0b matches the security side: layer-2 ∧ layer-3 field-level withhold, no record-perm in aggregation.** Layer-1 `view.hidden_field_ids` stays display semantics for this slice unless a later chart-view product rule says otherwise.
 - **Withhold contract (PINNED).** `canRead` is still required (else 403). If `canRead` holds but **any** referenced `dataSource` field ∉ `allowedFieldIds`, the endpoint returns the `ChartData` shape with **withheld values**, not the aggregation and not a 403:
   ```jsonc
   { "chartId": "...", "chartType": "...", "dataPoints": [], "total": 0,
     "metadata": { "restricted": true, "recordCount": 0 } }
   ```
-  `metadata.restricted: true` is an explicit flag so the client renders "restricted by permissions", not "no data". (A new optional `restricted?: boolean` on `ChartData.metadata`.)
+  `metadata.restricted: true` is an explicit flag so a client/UI follow-up can render "restricted by permissions" instead of "no data"; the impl slice must either include that small frontend render/test or explicitly record it as follow-up. (A new optional `restricted?: boolean` on `ChartData.metadata`.)
 - **Today this branch is unreachable in practice** (provider unwired → records empty → series already empty), so it is **forward-defense**: it lands with the authz so the gate exists before any real record provider is wired. The verification doc and tests must state this — the mask is not closing a live value leak.
 - **Impl sequencing constraint (for the F0b impl opt-in):** wiring a real `recordProvider` is itself what *activates* this value channel. So the withhold mask MUST land in the **same** PR as any provider wiring — **never a PR earlier, never later**. If the impl slice does not wire a provider (keeps charts data-empty), the mask still lands (cheap, future-proofs), but no provider may be wired in a separate unmasked PR.
 
