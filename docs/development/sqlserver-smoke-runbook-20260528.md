@@ -41,6 +41,20 @@ export MSSQL_CONNECTION_TIMEOUT_MS='10000'
 export MSSQL_REQUEST_TIMEOUT_MS='30000'
 ```
 
+Legacy-TLS lever (B3) — to validate against a **legacy** SQL Server (2008R2/2012) WITHOUT upgrading it.
+The downgrade keeps the wire **encrypted**; do NOT combine it with `MSSQL_ENCRYPT='false'` (the adapter
+throws — plaintext is a separate, mutually-exclusive hatch):
+
+```bash
+export MSSQL_LEGACY_TLS='true'              # convenience: applies TLSv1 + DEFAULT@SECLEVEL=0 defaults
+# …or set the floor / ciphers explicitly (these win over the legacyTls defaults):
+export MSSQL_TLS_MIN_VERSION='TLSv1'        # enum-strict; a bad value fails loudly
+export MSSQL_TLS_CIPHERS='DEFAULT@SECLEVEL=0'
+```
+
+The smoke logs the active `legacyTls` / `tlsMinVersion` / `tlsCiphers` in its `[sqlserver-smoke] target`
+line so the downgrade is visible in the evidence (values-free — these are TLS knobs, not secrets).
+
 Compatibility alias:
 
 ```bash
