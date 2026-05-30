@@ -70,9 +70,14 @@
       "threshold": 80.0,
       "unit": "percent",
       "type": "lower_bound",
-      "prometheus_metrics": ["cache_hits_total", "cache_miss_total"],
-      "calculation": "cache_hits_total / (cache_hits_total + cache_miss_total) * 100",
-      "description": "Cache hot hit rate should be at least 80%"
+      "prometheus_metrics": [
+        "cache_hits_total",
+        "cache_miss_total",
+        "rbac_perm_cache_hits_total",
+        "rbac_perm_cache_miss_total"
+      ],
+      "calculation": "Prefer generic cache_hits_total / (cache_hits_total + cache_miss_total) * 100; when generic cache has no samples, use RBAC permission cache counters.",
+      "description": "Observed cache hit rate should be at least 80%"
     },
     {
       "metric": "fallback_effective_ratio",

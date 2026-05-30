@@ -188,6 +188,10 @@ EOF
 "
 
     local cache_hit_rate=$(echo "$json" | jq -r '.counters.cache_hit_rate')
+    local cache_hit_rate_source=$(echo "$json" | jq -r '.counters.cache_hit_rate_source // "unknown"')
+    local cache_hits=$(echo "$json" | jq -r '.counters.cache_hits // 0')
+    local cache_misses=$(echo "$json" | jq -r '.counters.cache_misses // 0')
+    local cache_total=$(echo "$json" | jq -r '.counters.cache_total // 0')
     local http_success_rate=$(echo "$json" | jq -r '.counters.http_success_rate')
     local error_rate=$(echo "$json" | jq -r '.counters.error_rate')
     local raw_fallback=$(echo "$json" | jq -r '.counters.raw_fallback')
@@ -195,7 +199,7 @@ EOF
     local fallback_effective_ratio=$(echo "$json" | jq -r '.counters.fallback_effective_ratio')
     local memory_rss=$(echo "$json" | jq -r '.counters.memory_rss_mb')
 
-    report+="- **Cache Hit Rate**: ${cache_hit_rate}%
+    report+="- **Cache Hit Rate**: ${cache_hit_rate}% (${cache_hit_rate_source}, hits=${cache_hits}, misses=${cache_misses}, total=${cache_total})
 - **HTTP Success Rate**: ${http_success_rate}%
 - **Error Rate**: ${error_rate}%
 - **Raw Fallback Count**: $raw_fallback
