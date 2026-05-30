@@ -5,11 +5,12 @@
 # specs. As a result, employee/admin surface guard regressions in AttendanceView slipped
 # through green CI (e.g. the overview admin-only-preload guard going red unnoticed).
 #
-# Scope (deliberately TARGETED, first step): run only attendance-admin-regressions.spec.ts,
-# which is currently green and holds the admin-surface guards we care about. The full
+# Scope (deliberately TARGETED): run the green attendance admin-surface guard specs —
+# attendance-admin-regressions.spec.ts (overview admin-only-preload guard) and
+# attendance-admin-anchor-nav.spec.ts (member resolve / nav guards). The full
 # `@metasheet/web` vitest suite still has historical/flaky failures, so wiring the whole
-# suite as a required gate now would be red on arrival. Expand the `vitest run` filter (or
-# move to the full web suite) as those specs are cleaned up.
+# suite as a required gate now would be red on arrival. Keep expanding the `vitest run`
+# filter (or move to the full web suite) as more web specs are cleaned up.
 name: Attendance Web Guard
 
 on:
@@ -18,6 +19,7 @@ on:
       - 'apps/web/src/views/AttendanceView.vue'
       - 'apps/web/src/views/attendance/**'
       - 'apps/web/tests/attendance-admin-regressions.spec.ts'
+      - 'apps/web/tests/attendance-admin-anchor-nav.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
   push:
     branches: [main]
@@ -25,6 +27,7 @@ on:
       - 'apps/web/src/views/AttendanceView.vue'
       - 'apps/web/src/views/attendance/**'
       - 'apps/web/tests/attendance-admin-regressions.spec.ts'
+      - 'apps/web/tests/attendance-admin-anchor-nav.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -67,4 +70,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run attendance web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav --reporter=dot
