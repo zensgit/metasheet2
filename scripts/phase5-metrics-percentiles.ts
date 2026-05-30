@@ -48,14 +48,32 @@ interface MetricsOutput {
   };
 }
 
+function parseMetricsAuthHeader(): Record<string, string> | undefined {
+  const rawHeader = (process.env.METRICS_AUTH_HEADER || process.env.EXTRA_CURL_HEADER || '').trim();
+  if (!rawHeader) return undefined;
+
+  const separatorIndex = rawHeader.indexOf(':');
+  const name = rawHeader.slice(0, separatorIndex).trim();
+  const value = rawHeader.slice(separatorIndex + 1).trim();
+
+  if (separatorIndex <= 0 || !name || !value) {
+    throw new Error('METRICS_AUTH_HEADER must use "Name: value" format');
+  }
+
+  return { [name]: value };
+}
+
 /**
  * Fetch metrics from Prometheus endpoint
  */
 async function fetchMetrics(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https') ? https : http;
+    const requestOptions = {
+      headers: parseMetricsAuthHeader() || {},
+    };
 
-    const req = client.get(url, (res) => {
+    const req = client.get(url, requestOptions, (res) => {
       let data = '';
 
       res.on('data', (chunk) => {
@@ -338,6 +356,7 @@ export {
   parsePrometheusMetrics,
   calculatePercentile,
   calculatePercentiles,
+  parseMetricsAuthHeader,
   filterHistograms,
   type Histogram,
   type PercentileResult,

@@ -41,10 +41,12 @@ readonly COUNT_CACHE_MISS_AS_FALLBACK="${COUNT_CACHE_MISS_AS_FALLBACK:-false}"
 # Usage
 usage() {
     echo "Usage: $0 <metrics-url> [output-json-path]"
+    echo "       $0 -o <output-json-path> <metrics-url>"
     echo ""
     echo "Examples:"
     echo "  $0 http://localhost:8900/metrics/prom"
     echo "  $0 http://localhost:8900/metrics/prom /tmp/validation.json"
+    echo "  $0 -o /tmp/validation.json http://localhost:8900/metrics/prom"
     exit 1
 }
 
@@ -63,6 +65,10 @@ log_warning() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $*" >&2
+}
+
+metrics_auth_header() {
+    printf '%s' "${METRICS_AUTH_HEADER:-${EXTRA_CURL_HEADER:-}}"
 }
 
 # Validate prerequisites
@@ -99,7 +105,14 @@ fetch_raw_metrics() {
 
     log_info "Fetching raw metrics from $metrics_url..."
 
-    if ! curl -fsS "$metrics_url" > "$temp_file"; then
+    local curl_args=(-fsS)
+    local auth_header
+    auth_header=$(metrics_auth_header)
+    if [ -n "$auth_header" ]; then
+        curl_args+=(-H "$auth_header")
+    fi
+
+    if ! curl "${curl_args[@]}" "$metrics_url" > "$temp_file"; then
         log_error "Failed to fetch metrics from $metrics_url"
         exit 1
     fi
@@ -109,7 +122,7 @@ fetch_raw_metrics() {
 
 # Resolve a TS runner (prefer pnpm workspace tsx, fallback to npx tsx)
 resolve_tsx_runner() {
-    if command -v pnpm >/dev/null 2>&1; then
+    if command -v pnpm >/dev/null 2>&1 && pnpm -F @metasheet/core-backend exec tsx --version >/dev/null 2>&1; then
         echo "pnpm -F @metasheet/core-backend exec tsx"
         return
     fi
@@ -431,12 +444,42 @@ EOF
 # Main validation logic
 main() {
     # Parse arguments
-    if [ $# -lt 1 ]; then
+    local metrics_url=""
+    local output_path=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -o|--output)
+                if [ $# -lt 2 ]; then
+                    usage
+                fi
+                output_path="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                usage
+                ;;
+            *)
+                if [ -z "$metrics_url" ]; then
+                    metrics_url="$1"
+                elif [ -z "$output_path" ]; then
+                    output_path="$1"
+                else
+                    log_error "Unexpected extra argument: $1"
+                    usage
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$metrics_url" ]; then
         usage
     fi
-
-    local metrics_url="$1"
-    local output_path="${2:-}"
 
     validate_prerequisites
 

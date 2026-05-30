@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       metrics_url:
-        description: 'Override metrics URL (default http://localhost:8900/metrics/prom)'
+        description: 'Override metrics URL (default METRICS_URL or METASHEET_BASE_URL/api/metrics/prom)'
         required: false
 
 jobs:
@@ -18,20 +18,47 @@ jobs:
 
       - name: Determine metrics URL
         id: cfg
+        shell: bash
         env:
           METRICS_URL_SECRET: ${{ secrets.METRICS_URL }}
+          METRICS_AUTH_HEADER_SECRET: ${{ secrets.METRICS_AUTH_HEADER }}
+          ATTENDANCE_ADMIN_JWT: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
+          METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || vars.ATTENDANCE_WEB_BASE_URL || '' }}
         run: |
           URL_INPUT="${{ github.event.inputs.metrics_url }}"
+          URL_SOURCE=""
           if [ -n "$URL_INPUT" ]; then
-            echo "url=$URL_INPUT" >> $GITHUB_OUTPUT
+            URL="$URL_INPUT"
+            URL_SOURCE="input"
           elif [ -n "$METRICS_URL_SECRET" ]; then
-            echo "url=$METRICS_URL_SECRET" >> $GITHUB_OUTPUT
+            URL="$METRICS_URL_SECRET"
+            URL_SOURCE="secret"
+          elif [ -n "$METASHEET_BASE_URL" ]; then
+            URL="${METASHEET_BASE_URL%/}/api/metrics/prom"
+            URL_SOURCE="metasheet_base_url"
           else
-            echo "url=" >> $GITHUB_OUTPUT
+            URL=""
+          fi
+
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "source=$URL_SOURCE" >> "$GITHUB_OUTPUT"
+
+          AUTH_HEADER="$METRICS_AUTH_HEADER_SECRET"
+          if [ -z "$AUTH_HEADER" ] && [ "$URL_SOURCE" = "metasheet_base_url" ] && [ -n "$ATTENDANCE_ADMIN_JWT" ]; then
+            echo "::add-mask::$ATTENDANCE_ADMIN_JWT"
+            AUTH_HEADER="Authorization: Bearer $ATTENDANCE_ADMIN_JWT"
+          fi
+          if [ -n "$AUTH_HEADER" ]; then
+            echo "::add-mask::$AUTH_HEADER"
+            echo "METRICS_AUTH_HEADER=$AUTH_HEADER" >> "$GITHUB_ENV"
+            echo "auth_configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "auth_configured=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Probe metrics endpoint
         id: probe
+        shell: bash
         run: |
           URL="${{ steps.cfg.outputs.url }}"
           if [ -z "$URL" ]; then
@@ -41,7 +68,11 @@ jobs:
             echo "Regression check skipped: no METRICS_URL provided." > /tmp/regression.txt
             exit 0
           fi
-          if curl -sSf -m 5 "$URL" >/dev/null; then
+          CURL_ARGS=(-sSf -m 5)
+          if [ -n "${METRICS_AUTH_HEADER:-}" ]; then
+            CURL_ARGS+=(-H "$METRICS_AUTH_HEADER")
+          fi
+          if curl "${CURL_ARGS[@]}" "$URL" >/dev/null; then
             echo "available=true" >> $GITHUB_OUTPUT
           else
             echo "available=false" >> $GITHUB_OUTPUT
