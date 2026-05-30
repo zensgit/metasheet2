@@ -23,6 +23,13 @@ export interface DataSourceListItem {
   connected: boolean
 }
 
+/** Sanitized detail from `GET /api/data-sources/:id`; credentials are never returned. */
+export interface DataSourceDetail extends DataSourceListItem {
+  connection: DataSourceConnectionInput
+  options?: { readOnly?: boolean; autoConnect?: boolean }
+  hasCredentials?: boolean
+}
+
 /** Result from `GET /api/data-sources/:id/test`. Request success is separate from connection success. */
 export interface DataSourceTestResult {
   id: string
@@ -49,5 +56,12 @@ export interface CreateDataSourcePayload {
   type: DataSourceType
   connection: DataSourceConnectionInput
   credentials?: { username?: string; password?: string; apiKey?: string; token?: string }
+  options?: { readOnly?: boolean; autoConnect?: boolean }
+}
+
+/** Payload for `PUT /api/data-sources/:id`. Credential rotation is intentionally out of this UI slice. */
+export interface UpdateDataSourcePayload {
+  name?: string
+  connection?: DataSourceConnectionInput
   options?: { readOnly?: boolean; autoConnect?: boolean }
 }

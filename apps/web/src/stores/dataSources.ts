@@ -1,9 +1,22 @@
-// External data-source connector store (UI-1/UI-2: list / create / delete / test). Edit is deferred —
-// it needs omit-blank-not-empty credential handling + PUT deep-merge, which warrant their own slice.
+// External data-source connector store (UI-1/UI-2/UI-3: list / create / update / delete / test).
+// Credential rotation is intentionally deferred; the update route currently accepts non-secret config only.
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { createDataSource, deleteDataSource, listDataSources, testDataSourceConnection } from '../data-sources/api'
-import type { CreateDataSourcePayload, DataSourceListItem, DataSourceTestResult } from '../data-sources/types'
+import {
+  createDataSource,
+  deleteDataSource,
+  getDataSource,
+  listDataSources,
+  testDataSourceConnection,
+  updateDataSource,
+} from '../data-sources/api'
+import type {
+  CreateDataSourcePayload,
+  DataSourceDetail,
+  DataSourceListItem,
+  DataSourceTestResult,
+  UpdateDataSourcePayload,
+} from '../data-sources/types'
 
 export const useDataSourcesStore = defineStore('dataSources', () => {
   const items = ref<DataSourceListItem[]>([])
@@ -33,6 +46,32 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
       return true
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to create data source'
+      return false
+    }
+  }
+
+  async function loadDetail(id: string): Promise<DataSourceDetail | null> {
+    error.value = null
+    try {
+      return await getDataSource(id)
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to load data source'
+      return null
+    }
+  }
+
+  /** Update non-secret config then refresh. Credential rotation is not part of UI-3. */
+  async function update(id: string, payload: UpdateDataSourcePayload): Promise<boolean> {
+    error.value = null
+    try {
+      await updateDataSource(id, payload)
+      const remainingResults = { ...testResults.value }
+      delete remainingResults[id]
+      testResults.value = remainingResults
+      await fetchAll()
+      return true
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to update data source'
       return false
     }
   }
@@ -75,5 +114,18 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
     }
   }
 
-  return { items, loading, error, testing, testResults, isTesting, fetchAll, create, remove, testConnection }
+  return {
+    items,
+    loading,
+    error,
+    testing,
+    testResults,
+    isTesting,
+    fetchAll,
+    create,
+    loadDetail,
+    update,
+    remove,
+    testConnection,
+  }
 })
