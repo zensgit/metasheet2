@@ -753,6 +753,34 @@ describe('Attendance admin regressions', () => {
     expect(hint?.textContent || '').toContain('250')
   })
 
+  it('warns when the attendance-group picker source is capped (no silent caps)', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/scheduler-scopes')) {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 0, page: 1, pageSize: 200 } })
+      }
+      if (url.includes('/api/attendance/groups')) {
+        // Real COUNT(*) total 4 but only 1 item came back (the loader caps at pageSize) -> a group
+        // past the cap would be silently un-pickable in the target <select> without this hint.
+        return jsonResponse(200, { ok: true, data: { items: [
+          { id: 'ag-1', name: 'AG 1', timezone: 'Asia/Shanghai' },
+        ], total: 4 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')!
+
+    const hint = section.querySelector('[data-attendance-scheduler-scope-attendance-groups-truncated]')
+    expect(hint).toBeTruthy()
+    expect(hint?.textContent || '').toContain('of 4') // "Showing first 1 of 4 attendance groups …"
+  })
+
   it('creates a scheduler scope, mapping each picker/chip target field to its scope key', async () => {
     const created: Array<Record<string, unknown>> = []
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
