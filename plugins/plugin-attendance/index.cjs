@@ -13604,6 +13604,27 @@ function resolveAttendanceImportRawClient(client) {
   return raw
 }
 
+function buildAttendanceImportCopyQuery(copyFromFactory, sql) {
+  const copyQuery = copyFromFactory(sql)
+  const timeoutMs = Number(ATTENDANCE_IMPORT_HEAVY_QUERY_TIMEOUT_MS)
+  if (copyQuery && typeof copyQuery === 'object' && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+    const normalized = Math.floor(timeoutMs)
+    copyQuery.query_timeout = normalized
+    copyQuery.statement_timeout = normalized
+  }
+  return copyQuery
+}
+
+function attachAttendanceImportCopyStreamErrorSink(copyStream) {
+  if (!copyStream || typeof copyStream.on !== 'function') return copyStream
+  if (copyStream.__attendanceImportCopyErrorSinkAttached === true) return copyStream
+  copyStream.__attendanceImportCopyErrorSinkAttached = true
+  copyStream.on('error', (error) => {
+    copyStream.__attendanceImportCopyLastError = error
+  })
+  return copyStream
+}
+
 function shouldUseAttendanceImportCopyStdin({ client, totalRows }) {
   if (!ATTENDANCE_IMPORT_COPY_ENABLED) return false
   if (ATTENDANCE_IMPORT_COPY_STREAM_MODE === 'off') return false
@@ -13654,12 +13675,14 @@ async function copyAttendanceImportRowsToStage(client, rows) {
   const rawClient = resolveAttendanceImportRawClient(client)
   const copyFromFactory = resolveAttendanceCopyFromFactory()
   if (!rawClient || !copyFromFactory) return false
-  const copyStream = rawClient.query(
-    copyFromFactory(
-      `COPY attendance_import_records_stage
-        (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta_json, source_batch_id)
-       FROM STDIN WITH (FORMAT csv, NULL '\\N')`
-    )
+  const copyQuery = buildAttendanceImportCopyQuery(
+    copyFromFactory,
+    `COPY attendance_import_records_stage
+      (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta_json, source_batch_id)
+     FROM STDIN WITH (FORMAT csv, NULL '\\N')`
+  )
+  const copyStream = attachAttendanceImportCopyStreamErrorSink(
+    rawClient.query(copyQuery)
   )
   await pipeline(Readable.from(iterAttendanceImportStageCsvLines(rows)), copyStream)
   return true
@@ -13687,12 +13710,14 @@ async function copyAttendanceImportItemsToStage(client, { batchId, orgId, items 
   const rawClient = resolveAttendanceImportRawClient(client)
   const copyFromFactory = resolveAttendanceCopyFromFactory()
   if (!rawClient || !copyFromFactory) return false
-  const copyStream = rawClient.query(
-    copyFromFactory(
-      `COPY attendance_import_items_stage
-        (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot)
-       FROM STDIN WITH (FORMAT csv, NULL '\\N')`
-    )
+  const copyQuery = buildAttendanceImportCopyQuery(
+    copyFromFactory,
+    `COPY attendance_import_items_stage
+      (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot)
+     FROM STDIN WITH (FORMAT csv, NULL '\\N')`
+  )
+  const copyStream = attachAttendanceImportCopyStreamErrorSink(
+    rawClient.query(copyQuery)
   )
   await pipeline(
     Readable.from(iterAttendanceImportItemsStageCsvLines({ batchId, orgId, items })),
@@ -15002,6 +15027,8 @@ module.exports = {
     attendanceReportRecordRowKey,
     buildAttendanceImportMultiPunchMeta,
     computeAttendanceRecordUpsertValues,
+    buildAttendanceImportCopyQuery,
+    attachAttendanceImportCopyStreamErrorSink,
     ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
     ATTENDANCE_REPORT_RECORDS_FIELDS,
     mergeAttendanceReportFieldDefinitions,
