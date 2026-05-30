@@ -81,18 +81,17 @@
 > **状态标注(勿当已签收)**:C1(workDir 可移植)**本刀已落**;但 **C3(Windows 原生运行时整体验证)仍 🔒 未做** —— 路径/文件操作/服务化/PG+Garnet/Memurai 连通**未在真实 Windows 上跑通过**。本节是**设计 + 已修可移植性**的部署指引,**不是已验证的签收路径**。真实落 C 档前必须先完成 §7 的 C3。
 
 1. **Node 运行时**:装 Node ≥18;`pnpm --filter @metasheet/core-backend build` 出 `dist/`。
-2. **注册为 Windows 服务**:用 `nssm` 或 `node-windows` 把 `node packages/core-backend/dist/src/index.js` 注册为服务(开机自启、崩溃重启);服务环境注入 §2.2 的全部变量。
+2. **注册为 Windows 服务**:**推荐默认 `nssm`**(`node-windows` 为附录/备选,见研究文档)把 `node packages/core-backend/dist/src/index.js` 注册为服务(开机自启、崩溃重启);服务环境注入 §2.2 的全部变量。可用 kit 的 `-RegisterService`(显式 opt-in)机械化此步。
 3. **PostgreSQL**:用 PostgreSQL 官方 **Windows 安装包**;`DATABASE_URL` 指向它。
-4. **Redis 替代(C 档关键)**:Windows 无官方原生 Redis →
-   - **Garnet**(Microsoft,MIT 开源,.NET,RESP 兼容)= **OSS 首选**;
-   - **Memurai**(开发版免费 / 商业版付费)= 稳定商业 fallback。
-   - 二者均 RESP 兼容,后端 `REDIS_HOST`(及端口)指向其监听地址即可,**应用侧无需改代码**。
+4. **Redis 替代(C 档关键)**:Windows 无官方原生 Redis → 用 **RESP 兼容的 OSS 实现作推荐默认 / 商业实现作备选**(具体选型 + 许可证见 `docs/research/windows-deploy-oss-references-20260529.md`,并**先核实后端实际用到的 Redis 命令落在所选实现的支持集内**)。后端 `REDIS_HOST`/`REDIS_PORT` 指向其监听地址即可,**应用侧无需改代码**。
 5. **沙箱临时目录**:C1 后 `ScriptSandbox` 默认落 `%TEMP%\sandbox`(`os.tmpdir()`),无需手配。
 6. **迁移 + 冒烟**:`pnpm --filter @metasheet/core-backend migrate`(§2.3)+ §6 验证。
 
 ---
 
 ## 6. 部署后验证(三档共用)
+
+> **机械化(C3-env validation kit)**:本节探测可由 `scripts/ops/validate-windows-runtime.ps1` 一键跑出 **pass/fail/evidence**(**默认只读探测、零改动**;安装 / 服务注册 / 写系统环境变量需显式 `-Install` / `-RegisterService` opt-in)。带 `-BaseUrl -Token -DataSourceId` 时,下面第 2/3 项的鉴权 + 数据源只读 smoke 也一并机械跑。kit 是**验证器,不是一键安装器**——不会擅自固化客户环境。
 
 1. **迁移完整性**:`migrate --list` 确认无 pending;部署 SOP 的 migration-pending diff。
 2. **Auth round-trip**:登录 → 带 token 调一个鉴权接口 → 200。**静默 401 = schema gap**,回查迁移,别先怀疑 `JWT_SECRET`。
@@ -108,8 +107,8 @@
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| **C3 Windows 原生运行时验证** | 🔒 未做 | 走 C 档前必须验:路径/文件操作(含 `%TEMP%\sandbox`)、Node-as-service、PG + Garnet/Memurai 连通、端到端只读拉数。**需 Windows VM/快照**,本预算未含。 |
-| **2008R2 / 2012 真实验证** | ⬜ follow-up | B4 已覆盖 2019/2022 真容器;2008R2/2012 是 Windows-only 二进制无 Linux 容器,真实验证需 **Windows VM**(P0-6:仅当客户明确是 legacy 或进最终 signoff 才投)。 |
+| **C3 Windows 原生运行时验证** | 🔒 未做 | 走 C 档前必须验:路径/文件操作(含 `%TEMP%\sandbox`)、Node-as-service、PG + RESP 缓存连通、端到端只读拉数。**需 Windows VM/快照**,本预算未含。**机械化跑证据 = C3-env validation kit**(`scripts/ops/validate-windows-runtime.ps1`,§6);判读细项见 `data-sources-windows-c3-validation-plan-20260529.md`。 |
+| **2008R2 / 2012 真实验证** | ⬜ follow-up | B4 已覆盖 2019/2022 真容器;2008R2/2012 是 Windows-only 二进制无 Linux 容器,真实验证需 **Windows VM**。兼容矩阵 + legacy smoke recipe(B3 TLS 降级)见 `data-sources-windows-2008r2-2012-compat-matrix-20260529.md`(**只到协议级 + recipe,不承诺 CI/本机验证**)。 |
 | **B6 Windows 集成认证** | 🔒 独立切片 | `authType:'windows'`(Kerberos/keytab/AD)未做;本期连接器只支持 `authType:'sql'`。 |
 | **共享 workDir 跨实例** | ⬜ 观察项 | C1 只改 base path(`/tmp/sandbox` → `os.tmpdir()/sandbox`),**语义不变**:多个 `ScriptSandbox` 实例仍共享同一 `<tmpdir>/sandbox`,`cleanup()` 递归删该目录。per-instance 隔离不在 C1 范围,留作后续独立项(非本刀引入)。 |
 

@@ -46,6 +46,8 @@
 
 ## 3. 环境集成层 — 手动验证 checklist(🔒 需客户 Windows 主机)
 
+> **机械化(C3-env validation kit)**:下列大部分项可由 `scripts/ops/validate-windows-runtime.ps1` 一键探测出 pass/fail/evidence(**默认只读、零改动**;安装 / 服务注册 / 写系统环境变量需显式 `-Install` / `-RegisterService` opt-in)。带 `-BaseUrl -Token -DataSourceId` 时连鉴权 round-trip + 数据源只读 smoke 也跑。OSS 选型见 `docs/research/windows-deploy-oss-references-20260529.md`;旧库(2008R2/2012)见 `data-sources-windows-2008r2-2012-compat-matrix-20260529.md`。
+
 按 runbook **档 C** 部署后逐项验证(每项含 pass 判据):
 
 - ⬜ **服务化**(nssm / node-windows):`node …/dist/src/index.js` 注册为服务 → 开机自启 + 崩溃重启生效。
