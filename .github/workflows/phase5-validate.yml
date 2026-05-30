@@ -37,7 +37,7 @@ jobs:
         if: steps.probe.outputs.metrics_url != ''
         run: |
           corepack enable
-          corepack prepare pnpm@latest --activate
+          corepack prepare pnpm@10.16.1 --activate
 
       - name: Install dependencies
         if: steps.probe.outputs.metrics_url != ''
@@ -74,4 +74,3 @@ jobs:
           if [ "${STATUS}" != "pass" ]; then
             echo "Phase 5 PR validation failed" && exit 1
           fi
-

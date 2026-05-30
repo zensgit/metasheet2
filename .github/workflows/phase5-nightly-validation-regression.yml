@@ -24,6 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           corepack enable
+          corepack prepare pnpm@10.16.1 --activate
           pnpm install --frozen-lockfile
 
       - name: Determine metrics URL
