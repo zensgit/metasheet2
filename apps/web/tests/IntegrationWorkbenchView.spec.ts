@@ -1868,7 +1868,12 @@ describe('IntegrationWorkbenchView', () => {
     expect((deriveBodies[0].payloadTemplate as Record<string, unknown>).FUnitID).toBeDefined()
     // the authoring UI is driven by the REAL derived draft
     expect(container.querySelector('[data-testid="field-rule-FNumber"]')).not.toBeNull()
-    expect(container.querySelector('[data-testid="field-rule-locked-FUnitID"]')).not.toBeNull() // reference locked
+    // DF-T3b-2d: a reference is now reference-EDITABLE (preserve↔from_reference_table), not locked — it
+    // renders an editable mode <select>, and there is still no scalar source input (never downgradable).
+    const refMode = container.querySelector('[data-testid="field-rule-mode-FUnitID"]') as HTMLSelectElement
+    expect(refMode?.tagName).toBe('SELECT')
+    expect(container.querySelector('[data-testid="field-rule-locked-FUnitID"]')).toBeNull()
+    expect(container.querySelector('[data-testid="field-rule-source-FUnitID"]')).toBeNull()
 
     // author: set FNumber's cleansed staging column
     const source = container.querySelector('[data-testid="field-rule-source-FNumber"]') as HTMLInputElement

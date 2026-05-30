@@ -1,7 +1,7 @@
 <template>
   <div class="integration-field-rule-authoring" data-testid="field-rule-authoring">
     <p class="integration-field-rule-authoring__hint">
-      逐字段选择 替换(replace,来自清洗表列)或 保留(preserve,沿用模板)。参照字段锁定为 preserve;gated 字段不可编辑。仅产出 fieldRules 草案,不写入 K3,也不调用 preview。
+      逐字段选择 替换(replace,来自清洗表列)或 保留(preserve,沿用模板)。参照字段可在 保留(preserve) 与 从映射表解析(from_reference_table,需选 domain)间切换,但不可降级为 scalar;gated 字段不可编辑。仅产出 fieldRules 草案,不写入 K3,也不调用 preview。
     </p>
 
     <ol class="integration-field-rule-authoring__list" data-testid="field-rule-list">
@@ -14,15 +14,44 @@
         <code class="integration-field-rule-authoring__field">{{ rule.targetField }}</code>
         <span class="integration-field-rule-authoring__shape" :data-shape="rule.shape">{{ rule.shape }}</span>
 
-        <template v-if="editability(rule).locked">
+        <template v-if="editability(rule).reason === 'gated'">
           <span
             class="integration-field-rule-authoring__mode integration-field-rule-authoring__mode--locked"
             :data-testid="`field-rule-mode-${rule.targetField}`"
-          >{{ editability(rule).reason === 'gated' ? 'gated（锁定,不可授权）' : 'preserve（参照字段锁定）' }}</span>
+          >gated（锁定,不可授权）</span>
           <span
             class="integration-field-rule-authoring__hint integration-field-rule-authoring__hint--strong"
             :data-testid="`field-rule-locked-${rule.targetField}`"
-          >{{ editability(rule).reason === 'gated' ? 'gated 字段不可编辑(不可授权)' : 'v1:参照字段不可降级为 scalar replace' }}</span>
+          >gated 字段不可编辑(不可授权)</span>
+        </template>
+
+        <template v-else-if="editability(rule).isReference">
+          <!-- DF-T3b-2d: a reference may flip preserve ↔ from_reference_table (+domain); NEVER scalar. -->
+          <select
+            class="integration-field-rule-authoring__mode"
+            :data-testid="`field-rule-mode-${rule.targetField}`"
+            :value="rule.sourceType === 'from_reference_table' ? 'mapping' : 'preserve'"
+            @change="onReferenceModeChange(index, ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="preserve">保留(template)</option>
+            <option value="mapping">从映射表解析(reference table)</option>
+          </select>
+          <template v-if="rule.sourceType === 'from_reference_table'">
+            <select
+              class="integration-field-rule-authoring__domain"
+              :data-testid="`field-rule-domain-${rule.targetField}`"
+              :value="rule.domain || ''"
+              @change="onReferenceDomainChange(index, ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">— 选择 domain —</option>
+              <option v-for="domain in referenceDomains" :key="domain" :value="domain">{{ domain }}</option>
+            </select>
+            <span
+              v-if="!rule.domain"
+              class="integration-field-rule-authoring__hint integration-field-rule-authoring__hint--strong"
+              :data-testid="`field-rule-domain-required-${rule.targetField}`"
+            >需选择 domain(否则该参照字段保持未解析)</span>
+          </template>
         </template>
 
         <template v-else>
@@ -68,9 +97,12 @@
 // only); it makes NO backend call (no preview wire — that is DF-T2c) and never writes to K3.
 import { computed } from 'vue'
 import {
+  DF_T3_REFERENCE_DOMAINS,
   fieldRuleEditability,
   setFieldRuleReplace,
   setFieldRulePreserve,
+  setFieldRuleFromReferenceTable,
+  setFieldRuleReferencePreserve,
   type IntegrationFieldRule,
 } from '../../services/integration/workbench'
 
@@ -86,6 +118,7 @@ const emit = defineEmits<{ (e: 'update:modelValue', rules: IntegrationFieldRule[
 
 const rules = computed(() => props.modelValue)
 const gatedFields = computed(() => props.gatedFields ?? [])
+const referenceDomains = DF_T3_REFERENCE_DOMAINS
 
 function editability(rule: IntegrationFieldRule) {
   return fieldRuleEditability(rule, gatedFields.value)
@@ -95,17 +128,37 @@ function emitUpdated(index: number, next: IntegrationFieldRule): void {
   emit('update:modelValue', props.modelValue.map((rule, i) => (i === index ? next : rule)))
 }
 
+// SCALAR mode (replace/preserve). Guards against gated AND reference fields — a reference must never be
+// downgraded to a scalar replace (its mode is handled by onReferenceModeChange).
 function onModeChange(index: number, mode: string): void {
   const rule = props.modelValue[index]
-  // Guard: a reference/gated field is locked — never downgrade it to a scalar replace.
-  if (!editability(rule).editable) return
+  const e = editability(rule)
+  if (!e.editable || e.isReference) return
   if (mode === 'replace') emitUpdated(index, setFieldRuleReplace(rule, rule.sourceField || ''))
   else emitUpdated(index, setFieldRulePreserve(rule))
 }
 
 function onSourceFieldChange(index: number, sourceField: string): void {
   const rule = props.modelValue[index]
-  if (!editability(rule).editable) return
+  const e = editability(rule)
+  if (!e.editable || e.isReference) return
   emitUpdated(index, setFieldRuleReplace(rule, sourceField))
+}
+
+// DF-T3b-2d: REFERENCE mode (preserve ↔ from_reference_table). Keeps shape/completeness; never scalar.
+// Switching to 'mapping' yields the half-state (no domain yet) → the operator must pick a domain.
+function onReferenceModeChange(index: number, mode: string): void {
+  const rule = props.modelValue[index]
+  const e = editability(rule)
+  if (!e.editable || !e.isReference) return
+  if (mode === 'mapping') emitUpdated(index, setFieldRuleFromReferenceTable(rule, rule.domain || ''))
+  else emitUpdated(index, setFieldRuleReferencePreserve(rule))
+}
+
+function onReferenceDomainChange(index: number, domain: string): void {
+  const rule = props.modelValue[index]
+  const e = editability(rule)
+  if (!e.editable || !e.isReference) return
+  emitUpdated(index, setFieldRuleFromReferenceTable(rule, domain))
 }
 </script>

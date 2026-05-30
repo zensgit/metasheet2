@@ -326,7 +326,17 @@ export interface IntegrationFieldRule {
   shape: 'scalar' | 'object-passthrough' | 'by-fnumber' | 'by-fid'
   completeness?: 'none' | 'require-fnumber-fname' | 'require-fid-fname'
   required?: boolean
+  // DF-T3b-2d: the reference-mapping domain a from_reference_table rule resolves against.
+  domain?: string
 }
+
+// DF-T3b-2d: the reference-mapping domains an operator may bind a from_reference_table field to.
+// Mirrors the backend built-in templates (K3_REFERENCE_MAPPING_TEMPLATES, #2043). The backend
+// validates the domain (unknown → 400), so a stale list here is a non-correctness gap, not a bug.
+export const DF_T3_REFERENCE_DOMAINS = [
+  'unit', 'unit-group', 'account', 'warehouse', 'manager', 'category',
+  'use-state', 'track', 'planning-strategy', 'order-strategy', 'inspection-level', 'inspection-mode',
+] as const
 
 export interface IntegrationFieldRuleEditability {
   editable: boolean
@@ -335,11 +345,13 @@ export interface IntegrationFieldRuleEditability {
   isReference: boolean
 }
 
-// DF-T2b: whether a field's replace/preserve mode may be edited. The durable REFERENCE identity
-// is the SHAPE (object-passthrough / by-* — set by DF-T2a for object values), NOT the sourceType:
-// a *scalar* may legitimately be `from_staging` (replace) OR `preserve_template` (preserve), so
-// sourceType is the editable mode, not the lock signal. A non-scalar (reference) field is locked
-// to preserve and may NOT be downgraded to a scalar replace in v1. Gated fields are locked outright.
+// Whether a field's mode may be edited, and how. The durable REFERENCE identity is the SHAPE
+// (object-passthrough / by-* — set by DF-T2a for object values), NOT the sourceType: a *scalar* may
+// legitimately be `from_staging` (replace) OR `preserve_template` (preserve). DF-T3b-2d: a reference is
+// now **reference-editable** — it may flip between preserve_template and from_reference_table(+domain),
+// but is STILL never downgradable to a scalar replace (the v1 no-downgrade rule holds; from_reference_table
+// keeps a full reference object, resolved per-material). Gated fields are locked outright and win over
+// reference-editability (the gated check is first — e.g. FBaseUnitID stays closed even though it's a reference).
 export function fieldRuleEditability(
   rule: Pick<IntegrationFieldRule, 'targetField' | 'shape'>,
   gatedFields: string[] = [],
@@ -348,22 +360,41 @@ export function fieldRuleEditability(
     return { editable: false, locked: true, reason: 'gated', isReference: false }
   }
   if (rule.shape !== 'scalar') {
-    return { editable: false, locked: true, reason: 'reference', isReference: true }
+    return { editable: true, locked: false, reason: 'reference', isReference: true }
   }
   return { editable: true, locked: false, reason: null, isReference: false }
 }
 
-// Pure mode setters — called only on an editable (scalar) field. Shape stays 'scalar'; only the
-// replace/preserve mode flips. These never run on a reference/gated field (the UI locks those).
+// Pure SCALAR mode setters — called only on an editable scalar field. Shape stays 'scalar'; only the
+// replace/preserve mode flips. These never run on a reference/gated field (the UI routes those elsewhere).
 export function setFieldRuleReplace(rule: IntegrationFieldRule, sourceField: string): IntegrationFieldRule {
   const next: IntegrationFieldRule = { ...rule, sourceType: 'from_staging', shape: 'scalar', sourceField }
   delete next.completeness
+  delete next.domain
   return next
 }
 
 export function setFieldRulePreserve(rule: IntegrationFieldRule): IntegrationFieldRule {
   const next: IntegrationFieldRule = { ...rule, sourceType: 'preserve_template', shape: 'scalar' }
   delete next.sourceField
+  delete next.domain
+  return next
+}
+
+// DF-T3b-2d: pure REFERENCE mode setters — keep the reference SHAPE (object-passthrough / by-*) and
+// completeness; flip only between preserve_template and from_reference_table (+domain). NEVER scalar.
+// `setFieldRuleFromReferenceTable(rule, '')` yields the half-state (from_reference_table, no domain) —
+// safe: the backend resolver fail-closes a domain-less rule (no index → unresolved), never silently picks.
+export function setFieldRuleFromReferenceTable(rule: IntegrationFieldRule, domain: string): IntegrationFieldRule {
+  const next: IntegrationFieldRule = { ...rule, sourceType: 'from_reference_table' }
+  if (domain) next.domain = domain
+  else delete next.domain
+  return next
+}
+
+export function setFieldRuleReferencePreserve(rule: IntegrationFieldRule): IntegrationFieldRule {
+  const next: IntegrationFieldRule = { ...rule, sourceType: 'preserve_template' }
+  delete next.domain
   return next
 }
 
