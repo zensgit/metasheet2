@@ -1,3 +1,5 @@
+import * as path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { MSSQLAdapter } from '../src/data-adapters/MSSQLAdapter'
 import type { ConfigValue, DataSourceConfig } from '../src/data-adapters/BaseAdapter'
 
@@ -26,7 +28,13 @@ Optional environment:
   MSSQL_LEGACY_TLS                (B3 legacy-TLS convenience: applies the documented legacy downgrade)
   MSSQL_CONNECTION_TIMEOUT_MS
   MSSQL_REQUEST_TIMEOUT_MS
-  MSSQL_SKIP_SCHEMA`)
+  MSSQL_SKIP_SCHEMA
+
+Legacy-TLS lever (B3) — to validate against a legacy SQL Server WITHOUT upgrading it; the wire
+stays encrypted (cannot be combined with MSSQL_ENCRYPT=false):
+  MSSQL_LEGACY_TLS               (true → applies TLSv1 + DEFAULT@SECLEVEL=0 defaults)
+  MSSQL_TLS_MIN_VERSION          (e.g. TLSv1 — explicit floor; wins over the legacyTls default)
+  MSSQL_TLS_CIPHERS              (e.g. DEFAULT@SECLEVEL=0 — explicit ciphers; wins over the default)`)
 }
 
 function required(name: string): string {
@@ -56,6 +64,12 @@ function optionalBoolean(name: string): boolean | undefined {
   throw new Error(`${name} must be a boolean-like value`)
 }
 
+function optionalString(name: string): string | undefined {
+  const value = env[name]
+  if (value == null || value.trim() === '') return undefined
+  return value.trim()
+}
+
 function putOptional(
   target: Record<string, ConfigValue>,
   name: string,
@@ -66,7 +80,7 @@ function putOptional(
   }
 }
 
-function buildConfig(): DataSourceConfig {
+export function buildConfig(): DataSourceConfig {
   const connection: Record<string, ConfigValue> = {
     database: required('MSSQL_DATABASE')
   }
@@ -76,14 +90,16 @@ function buildConfig(): DataSourceConfig {
   putOptional(connection, 'port', optionalNumber('MSSQL_PORT'))
   putOptional(connection, 'encrypt', optionalBoolean('MSSQL_ENCRYPT'))
   putOptional(connection, 'trustServerCertificate', optionalBoolean('MSSQL_TRUST_SERVER_CERTIFICATE'))
-  // B3 legacy-TLS knobs — map env -> per-connection TLS downgrade (still encrypted) so a TLS-1.0-only
-  // 2008R2/2012 instance can be smoked via this ops script. See data-sources-windows-2008r2-2012-
-  // compat-matrix-20260529.md. tlsMinVersion/tlsCiphers are strings; legacyTls is the convenience flag.
-  putOptional(connection, 'tlsMinVersion', env.MSSQL_TLS_MIN_VERSION)
-  putOptional(connection, 'tlsCiphers', env.MSSQL_TLS_CIPHERS)
-  putOptional(connection, 'legacyTls', optionalBoolean('MSSQL_LEGACY_TLS'))
   putOptional(connection, 'connectionTimeoutMs', optionalNumber('MSSQL_CONNECTION_TIMEOUT_MS'))
   putOptional(connection, 'requestTimeoutMs', optionalNumber('MSSQL_REQUEST_TIMEOUT_MS'))
+  // B3 legacy-TLS lever — expose the per-source TLS-downgrade knobs via env so a real legacy
+  // SQL Server (2008R2/2012) can be validated WITHOUT editing this script. They map straight through
+  // to MSSQLAdapter.buildLegacyTlsOptions (connection.{legacyTls,tlsMinVersion,tlsCiphers}). The
+  // downgrade KEEPS the wire encrypted; the adapter throws if combined with MSSQL_ENCRYPT=false
+  // (that is the separate plaintext hatch — mutually exclusive).
+  putOptional(connection, 'legacyTls', optionalBoolean('MSSQL_LEGACY_TLS'))
+  putOptional(connection, 'tlsMinVersion', optionalString('MSSQL_TLS_MIN_VERSION'))
+  putOptional(connection, 'tlsCiphers', optionalString('MSSQL_TLS_CIPHERS'))
 
   return {
     id: 'sqlserver-smoke',
@@ -127,8 +143,10 @@ async function main(): Promise<void> {
     database: config.connection.database,
     encrypt: config.connection.encrypt ?? true,
     trustServerCertificate: config.connection.trustServerCertificate ?? true,
-    tlsMinVersion: config.connection.tlsMinVersion ?? null,
+    // B3 legacy-TLS lever (visible so the operator confirms the downgrade is active in the evidence)
     legacyTls: config.connection.legacyTls ?? false,
+    tlsMinVersion: config.connection.tlsMinVersion ?? null,
+    tlsCiphers: config.connection.tlsCiphers ?? null,
     schema,
     table: table || null
   })
@@ -227,12 +245,17 @@ async function main(): Promise<void> {
   }
 }
 
-if (process.argv.includes('--help')) {
-  printHelp()
-} else {
-  main().catch(error => {
-    console.error('[failed] SQL Server smoke failed')
-    console.error(error)
-    process.exitCode = 1
-  })
+// Run only when invoked directly (tsx scripts/smoke-sqlserver.ts) — NOT when imported by the test,
+// so importing buildConfig() never triggers a connection attempt.
+const entryUrl = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : ''
+if (import.meta.url === entryUrl) {
+  if (process.argv.includes('--help')) {
+    printHelp()
+  } else {
+    main().catch(error => {
+      console.error('[failed] SQL Server smoke failed')
+      console.error(error)
+      process.exitCode = 1
+    })
+  }
 }
