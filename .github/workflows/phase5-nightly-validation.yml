@@ -19,18 +19,50 @@ jobs:
 
       - name: Probe metrics URL
         id: probe
+        shell: bash
         env:
-          METRICS_URL: ${{ inputs.metrics_url || secrets.METRICS_URL }}
-          METRICS_AUTH_HEADER: ${{ secrets.METRICS_AUTH_HEADER }}
+          METRICS_URL_INPUT: ${{ inputs.metrics_url }}
+          METRICS_URL_SECRET: ${{ secrets.METRICS_URL }}
+          METRICS_AUTH_HEADER_SECRET: ${{ secrets.METRICS_AUTH_HEADER }}
+          ATTENDANCE_ADMIN_JWT: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
+          METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || vars.ATTENDANCE_WEB_BASE_URL || '' }}
         run: |
-          echo "metrics_url=${METRICS_URL}" >> $GITHUB_OUTPUT
+          URL_SOURCE=""
+          if [ -n "${METRICS_URL_INPUT}" ]; then
+            METRICS_URL="$METRICS_URL_INPUT"
+            URL_SOURCE="input"
+          elif [ -n "${METRICS_URL_SECRET}" ]; then
+            METRICS_URL="$METRICS_URL_SECRET"
+            URL_SOURCE="secret"
+          elif [ -n "${METASHEET_BASE_URL}" ]; then
+            METRICS_URL="${METASHEET_BASE_URL%/}/api/metrics/prom"
+            URL_SOURCE="metasheet_base_url"
+          else
+            METRICS_URL=""
+          fi
+
           if [ -z "${METRICS_URL}" ]; then
+            echo "metrics_url=" >> "$GITHUB_OUTPUT"
             echo "No METRICS_URL configured; skipping." && exit 0
           fi
-          if [ -n "${METRICS_AUTH_HEADER}" ]; then
-            curl -s -H "${METRICS_AUTH_HEADER}" "${METRICS_URL}" >/dev/null || exit 0
+
+          AUTH_HEADER="$METRICS_AUTH_HEADER_SECRET"
+          if [ -z "$AUTH_HEADER" ] && [ "$URL_SOURCE" = "metasheet_base_url" ] && [ -n "$ATTENDANCE_ADMIN_JWT" ]; then
+            echo "::add-mask::$ATTENDANCE_ADMIN_JWT"
+            AUTH_HEADER="Authorization: Bearer $ATTENDANCE_ADMIN_JWT"
+          fi
+          CURL_ARGS=(-sSf -m 5)
+          if [ -n "$AUTH_HEADER" ]; then
+            echo "::add-mask::$AUTH_HEADER"
+            echo "METRICS_AUTH_HEADER=$AUTH_HEADER" >> "$GITHUB_ENV"
+            CURL_ARGS+=(-H "$AUTH_HEADER")
+          fi
+
+          if curl "${CURL_ARGS[@]}" "${METRICS_URL}" >/dev/null; then
+            echo "metrics_url=${METRICS_URL}" >> "$GITHUB_OUTPUT"
           else
-            curl -s "${METRICS_URL}" >/dev/null || exit 0
+            echo "metrics_url=" >> "$GITHUB_OUTPUT"
+            echo "Metrics endpoint unreachable; skipping."
           fi
 
       - name: Setup Node
@@ -53,13 +85,8 @@ jobs:
         if: steps.probe.outputs.metrics_url != ''
         env:
           METRICS_URL: ${{ steps.probe.outputs.metrics_url }}
-          METRICS_AUTH_HEADER: ${{ secrets.METRICS_AUTH_HEADER }}
         run: |
           chmod +x scripts/phase5-full-validate.sh || true
-          if [ -n "${METRICS_AUTH_HEADER}" ]; then
-            # pass through via curl in script if needed
-            export METRICS_AUTH_HEADER
-          fi
           ./scripts/phase5-full-validate.sh -o /tmp/phase5.json "${METRICS_URL}" || true
           ./scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md || true
 

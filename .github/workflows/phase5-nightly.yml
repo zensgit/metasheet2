@@ -12,21 +12,50 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    env:
-      METRICS_URL: ${{ github.event.inputs.metrics_url || secrets.METRICS_URL }}
-      METRICS_AUTH_HEADER: ${{ secrets.METRICS_AUTH_HEADER }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Ensure metrics URL configured
+      - name: Resolve metrics config
         shell: bash
+        env:
+          METRICS_URL_INPUT: ${{ github.event.inputs.metrics_url }}
+          METRICS_URL_SECRET: ${{ secrets.METRICS_URL }}
+          METRICS_AUTH_HEADER_SECRET: ${{ secrets.METRICS_AUTH_HEADER }}
+          ATTENDANCE_ADMIN_JWT: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
+          METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || vars.ATTENDANCE_WEB_BASE_URL || '' }}
         run: |
-          if [ -z "${METRICS_URL}" ]; then
+          URL_SOURCE=""
+          if [ -n "$METRICS_URL_INPUT" ]; then
+            URL="$METRICS_URL_INPUT"
+            URL_SOURCE="input"
+          elif [ -n "$METRICS_URL_SECRET" ]; then
+            URL="$METRICS_URL_SECRET"
+            URL_SOURCE="secret"
+          elif [ -n "$METASHEET_BASE_URL" ]; then
+            URL="${METASHEET_BASE_URL%/}/api/metrics/prom"
+            URL_SOURCE="metasheet_base_url"
+          else
+            URL=""
+          fi
+
+          if [ -z "$URL" ]; then
             echo "METRICS_URL not set via input or secret; skipping validation." > unreachable.txt
             echo "skip=true" >> $GITHUB_OUTPUT
           else
-            echo "Using METRICS_URL=${METRICS_URL}"
+            echo "METRICS_URL=$URL" >> "$GITHUB_ENV"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Using METRICS_URL=${URL}"
+          fi
+
+          AUTH_HEADER="$METRICS_AUTH_HEADER_SECRET"
+          if [ -z "$AUTH_HEADER" ] && [ "$URL_SOURCE" = "metasheet_base_url" ] && [ -n "$ATTENDANCE_ADMIN_JWT" ]; then
+            echo "::add-mask::$ATTENDANCE_ADMIN_JWT"
+            AUTH_HEADER="Authorization: Bearer $ATTENDANCE_ADMIN_JWT"
+          fi
+          if [ -n "$AUTH_HEADER" ]; then
+            echo "::add-mask::$AUTH_HEADER"
+            echo "METRICS_AUTH_HEADER=$AUTH_HEADER" >> "$GITHUB_ENV"
           fi
         id: config
 
@@ -40,8 +69,8 @@ jobs:
             HDRS=( -H "${METRICS_AUTH_HEADER}" )
           fi
           # Try a quick HEAD, fall back to GET
-          if ! curl -sS -I "${METRICS_URL}" "${HDRS[@]}" | head -n 1 | grep -q "200"; then
-            if ! curl -sS "${METRICS_URL}" "${HDRS[@]}" | head -n 1 >/dev/null; then
+          if ! curl -sSf -I "${METRICS_URL}" "${HDRS[@]}" | head -n 1 | grep -q "200"; then
+            if ! curl -sSf "${METRICS_URL}" "${HDRS[@]}" | head -n 1 >/dev/null; then
               echo "Metrics endpoint unreachable: ${METRICS_URL}" > unreachable.txt
               echo "skip=true" >> $GITHUB_OUTPUT
             fi
@@ -62,14 +91,7 @@ jobs:
       - name: Run Phase 5 validation
         if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
         shell: bash
-        env:
-          METRICS_URL: ${{ env.METRICS_URL }}
-          METRICS_AUTH_HEADER: ${{ env.METRICS_AUTH_HEADER }}
         run: |
-          # Export auth header to scripts when supported
-          if [ -n "${METRICS_AUTH_HEADER}" ]; then
-            export EXTRA_CURL_HEADER="${METRICS_AUTH_HEADER}"
-          fi
           bash scripts/phase5-full-validate.sh "${METRICS_URL}" /tmp/phase5.json
           bash scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md
 
