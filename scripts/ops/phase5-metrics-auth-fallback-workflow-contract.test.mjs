@@ -38,3 +38,12 @@ test('regression workflow uploads deploy-host metrics token fallback diagnostics
 
   assert.match(raw, /\/tmp\/phase5-metrics-token-fallback\.log/)
 })
+
+test('regression workflow resolves a valid nightly PR branch name', () => {
+  const raw = readWorkflow('.github/workflows/phase5-nightly-validation-regression.yml')
+
+  assert.match(raw, /id: nightly_date/)
+  assert.match(raw, /echo "date=\$\(date -u '\+%Y%m%d'\)" >> "\$GITHUB_OUTPUT"/)
+  assert.match(raw, /branch: chore\/phase5-nightly-\$\{\{ steps\.nightly_date\.outputs\.date \}\}/)
+  assert.doesNotMatch(raw, /branch: chore\/phase5-nightly-\$\(date/)
+})
