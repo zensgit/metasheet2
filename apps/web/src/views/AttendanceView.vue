@@ -1395,13 +1395,13 @@
                         <button type="button" :aria-label="tr('Remove target', '移除目标')" data-attendance-scheduler-scope-target-remove="attendanceGroupIds" @click="removeSchedulerScopeTargetValue('attendanceGroupIds', target)">×</button>
                       </span>
                     </div>
-                    <p
+                    <span
                       v-if="schedulerScopeAttendanceGroupsTruncated"
                       class="attendance__scheduler-scope-truncated"
                       data-attendance-scheduler-scope-attendance-groups-truncated
                     >
                       {{ tr(`Showing first ${attendanceGroups.length} of ${attendanceGroupsTotal} attendance groups; pick the rest from the attendance-groups manager.`, `仅显示前 ${attendanceGroups.length}/${attendanceGroupsTotal} 个考勤组；其余请在考勤组管理中选择。`) }}
-                    </p>
+                    </span>
                   </label>
                   <label class="attendance__field" for="attendance-scheduler-scope-target-schedule-groups">
                     <span>{{ tr('Schedule groups', '排班组') }}</span>
@@ -22044,6 +22044,7 @@ const holidaySectionBindings = {
   color: #5b6b7b;
 }
 .attendance__scheduler-scope-truncated {
+  display: block;
   margin: 10px 0 0;
   font-size: 12px;
   color: #8a6d3b;
