@@ -132,4 +132,36 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
     // shallow merge would have wiped readOnly/autoConnect; deep merge keeps them
     expect(got.body.data.options).toMatchObject({ autoConnect: true, readOnly: false, timeout: 5 })
   })
+
+  it('a partial connection update preserves hidden security keys (P1 regression)', async () => {
+    currentUser = admin('alice')
+    // A source whose connection carries security-sensitive keys an edit UI does NOT surface.
+    await request(app).post('/api/data-sources').send({
+      id: 'tlsmerge', name: 'tlsmerge', type: 'postgres',
+      connection: {
+        host: 'old-host', database: 'db',
+        encrypt: true, trustServerCertificate: false, tlsMinVersion: 'TLSv1',
+      },
+      credentials: { username: 'u', password: 'p' },
+      options: { autoConnect: false, readOnly: true },
+    })
+
+    // The edit flow re-sends connection with only the visible field {host}. Wholesale replace would
+    // drop encrypt/trustServerCertificate/tlsMinVersion (weakening cert validation / breaking TLS).
+    const put = await request(app).put('/api/data-sources/tlsmerge').send({ connection: { host: 'new-host' } })
+    expect(put.status).toBe(200)
+
+    const got = await request(app).get('/api/data-sources/tlsmerge')
+    expect(got.status).toBe(200)
+    expect(got.body.data.connection).toMatchObject({
+      host: 'new-host',        // visible edit applied
+      database: 'db',          // hidden key preserved
+      encrypt: true,           // hidden security key preserved
+      trustServerCertificate: false,
+      tlsMinVersion: 'TLSv1',
+    })
+    // credentials are still never returned, and the merge does not resurrect them into the response
+    expect(got.body.data).not.toHaveProperty('credentials')
+    expect(got.body.data.hasCredentials).toBe(true)
+  })
 })

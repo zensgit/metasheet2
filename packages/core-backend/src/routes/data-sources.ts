@@ -361,8 +361,12 @@ export function dataSourcesRouter(): Router {
       const newConfig: DataSourceConfig = {
         ...oldConfig,
         ...parse.data,
-        // Deep-merge nested config: a partial update (e.g. only options.timeout)
-        // must not wipe sibling keys like readOnly / autoConnect / poolConfig.
+        // Deep-merge nested config: a partial update must NOT wipe sibling keys. For `connection`
+        // this is security-sensitive — an edit UI that re-sends connection with only {host,port,
+        // database} would otherwise drop encrypt / trustServerCertificate / tlsMinVersion / tlsCiphers
+        // / legacyTls / timeouts (weakening cert validation or breaking legacy TLS). Removing a
+        // connection key requires an explicit delete, not a partial PUT.
+        connection: { ...oldConfig.connection, ...parse.data.connection },
         options: { ...oldConfig.options, ...parse.data.options },
         poolConfig: { ...oldConfig.poolConfig, ...parse.data.poolConfig },
         id // Preserve original ID
