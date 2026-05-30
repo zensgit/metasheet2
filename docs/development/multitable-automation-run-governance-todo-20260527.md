@@ -2,9 +2,9 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed through retry runtime + redaction invariant hardening (2026-05-29); A6-0 docs-only scout recorded; A6 runtime remains frozen / demand-gated
+Status: A0-A5 closed through retry runtime + redaction invariant hardening (2026-05-29); A6-0 and A6-1 docs-only scouts recorded; A6 runtime remains frozen / demand-gated
 Companion: multitable-automation-run-governance-development-20260527.md
-Depends on (landed): C1 contract workflow-job-contract.ts (#1889, not-wired); RFC #1885
+Depends on (landed): C1 contract workflow-job-contract.ts (#1889, read-boundary wired only); RFC #1885
 
 ## Closeout Snapshot — 2026-05-29
 
@@ -18,6 +18,8 @@ The governance half and named A5 retry runtime are complete on `origin/main`:
 - A4 retry scope gate / design lock: #2039.
 - A5 whole-execution retry runtime: #2047.
 - A1/A5 HTTP serialization hardening: #2051 + #2053.
+- A6-0 convergence scout and A6-1 persistent `WorkflowJob` runtime scout are
+  recorded as docs-only planning artifacts. Runtime remains unstarted.
 
 This closeout does NOT mark the convergence engine complete. A6 remains frozen /
 demand-gated: persistent WorkflowJob runtime, suspend/resume, branch/parallel,
@@ -74,7 +76,8 @@ Already present before this line:
 - frontend redacted support packet utility
 - scheduler leader lock for in-memory timers
 - DingTalk-specific redactor in executor (redactDingTalkFailureAlertText) — to be CONSOLIDATED, not extended
-- C1 WorkflowJob contract (workflow-job-contract.ts, #1889) — LANDED, NOT WIRED
+- C1 WorkflowJob contract (workflow-job-contract.ts, #1889) — LANDED, wired only
+  at the A2 read boundary; not runtime-wired into the executor
   (WorkflowJobStatus 8-state; legacyAutomationStatusToJobStatus: success->resolved, rest identity)
 
 Completed by this governance-half line:
@@ -94,7 +97,7 @@ Completed by the named A4/A5 retry line:
 - whole-execution retry route, provenance, and side-effect confirmation — #2047.
 - HTTP response serialization invariant for `/test` + retry — #2051 + #2053.
 
-Deferred (capability half — A6, frozen/demand-gated; A6-0 scout only is recorded):
+Deferred (capability half — A6, frozen/demand-gated; A6-0/A6-1 scouts only are recorded):
 
 - persistent automation_jobs runtime; suspend/resume; branch/parallel
 - BPMN compile/preview adapter; approval-as-job bridge
@@ -243,7 +246,9 @@ mark the convergence engine complete.
 - [x] Governance inheritance: any capability reuses this line's
       run/job/status/provenance/redaction/replay substrate (no second-class layer).
 - [x] No runtime in this milestone.
-- [ ] A6-1 persistent WorkflowJob runtime scout / implementation — not started.
+- [x] A6-1 persistent WorkflowJob runtime scout recorded in
+      `multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md`.
+- [ ] A6-1 persistent WorkflowJob runtime implementation — not started.
 - [ ] A6-2 suspend/resume runtime — not started.
 - [ ] A6-3 branch/parallel DAG runtime — not started.
 - [ ] A6-4 BPMN compile/preview adapter — not started.

@@ -2,6 +2,7 @@
 
 > 类型：**前向开发安排（forward plan）**，非开工清单。
 > **2026-05-29 update**：A4 retry scope-gate (#2039) + A5 whole-execution retry runtime (#2047) 已按具名 opt-in 落地；`/test` + retry HTTP serialization redaction/fail-open hardening 已由 #2051/#2053 闭合。A6-0 docs-only scout 已记录在 `multitable-automation-a6-convergence-scout-20260529.md`；A6 runtime 仍 frozen / demand-gated。
+> **2026-05-30 update**：A6-1 persistent `WorkflowJob` runtime scout 已记录在 `multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md`。它回答 table shape / opt-in / worker / side-effect boundary / redaction / mixed read model / legacy-off tests；runtime 仍未启动。
 > 配套（已收口）：`multitable-automation-run-governance-development-20260527.md` + `-todo-20260527.md`（#1987 固化）。
 > 上游契约：C1 `workflow-job-contract.ts`（#1889，landed）· 收敛 RFC #1885。
 > 锁：**K3 Stage-1 blanket 锁已退役（#1993；#1792 = M1 单条 Material Save-only PASS）→ 改用 post-GATE scoped gates（见 `k3-post-gate-scoped-governance-20260528.md`）**。这不改变本线纪律：**治理半（A0–A3）属于内核治理 / observability，已关闭**；**能力半（A4–A6）仍各受需求闸 / 独立具名 opt-in**（本线天然为 multitable 内核范畴，不依赖 integration-core / RBAC / auth），除非对应 scout 明确授权。
@@ -16,7 +17,7 @@
 |---|---|---|---|
 | **治理半**（observability：快照→脱敏→只读 API→admin UI→可达） | 运行可观测/可审计/可诊断 | **✅ 100% + 文档固化** | 否 —— 已关闭，不重开 |
 | **Retry 能力薄片**（A4/A5：whole-execution retry） | 失败/跳过 run 可由 admin 显式确认后整 run 重跑 | **✅ 100% for A5 v1** | 否 —— 已关闭；UI/idempotency/record-refresh 另需 opt-in |
-| **收敛引擎能力半**（A6：suspend/resume / branch / DAG / approval-as-job） | automation+approval 统一到 WorkflowJob 引擎 | **⬜ 引擎本体 0%**（契约层就位、被读边界消费；机器本体未建） | 否 —— **受需求闸，未触发即过早工程** |
+| **收敛引擎能力半**（A6：persistent jobs / suspend/resume / branch / DAG / approval-as-job） | automation+approval 统一到 WorkflowJob 引擎 | **⬜ 引擎本体 0%**（A6-0/A6-1 scout 已记录；契约层就位、被读边界消费；机器本体未建） | 否 —— **受需求闸，未触发即过早工程** |
 
 > **grounded 2026-05-29**：`/retry` 路由已存在且仅实现 A5 whole-execution retry；`automation-executor.ts` 仍无 suspend/resume/branch/persist-job runtime；C1 契约仅被 `routes/automation.ts` 在 A2 读边界用作状态映射（`success→resolved`），job/suspend/branch 机器未被任何 runtime 引用。
 
@@ -65,8 +66,9 @@
 ### A6 — 收敛引擎 🔒 frozen / 需求驱动
 依赖序：**持久 WorkflowJob runtime → suspend/resume（先 webhook 后 delay）→ branch/parallel（DAG）→ BPMN compile/preview adapter → approval-as-job**。
 - **A6-0 scout**：`multitable-automation-a6-convergence-scout-20260529.md` 只记录边界/顺序/测试面；它不是 runtime unlock。
+- **A6-1 scout**：`multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md` 已回答第一片 runtime 的七个设计问题；它仍不是 runtime unlock。
 - **触发信号**：某个**集成/DF 流水线真的需要 human-in-the-loop**（"导入→清洗→**等人工审批**→导出"= suspend + approval-as-job）或按记录分支；**且本就在 K3 GATE 下游**。
-- **解锁后第一步**：持久 WorkflowJob runtime（wire #1889）—— **风险：热路径重写（每 action 一次 DB 写 = 写放大 + 事务性 + 旧规则兼容）→ 必带 flag / 向后兼容**，现有 fire-and-forget 规则不得突然全量持久。
+- **解锁后第一步**：持久 WorkflowJob runtime（wire #1889）—— 按 A6-1 scout 的推荐形状：新 `multitable_automation_jobs` 表、rule-level opt-in、inline linear job persistence、A1 redaction 复用、A2/A3 混合 legacy/persisted 渲染。**风险：热路径重写（每 action 一次 DB 写 = 写放大 + 事务性 + 旧规则兼容）→ 必带 flag / 向后兼容**，现有 fire-and-forget 规则不得突然全量持久。
 - **治理继承硬契约**：A6 任一能力落地必须**复用本线的 run/job/status/provenance/redaction 底座**，不得新建二等可观测层。
 - **BPMN 永久定位**：compile/preview adapter（编译成 auto/approval 定义），**永不自己执行**（否则第四套状态孤岛）。
 - **锁姿态**：🔒🔒 全 frozen。approval-as-job 排最后（最高价值+最高风险，completion-event-contract 先行）。
@@ -113,4 +115,4 @@
 
 ## 8. 一句话排期
 
-**治理半已完成、A5 whole-execution retry v1 已完成、文档固化后不重开。A6 收敛引擎仍 frozen / demand-gated。** 近期"开发安排"实质是：**本 session 待命做点名 review；A5 的运行效果用于判断是否需要 retry UI / idempotency / A6；A6 本就排在 K3/DF 成熟需求下游。** 触发出现 → 走 §7 流程。无触发 → 不动，这就是正确的安排。
+**治理半已完成、A5 whole-execution retry v1 已完成、A6-0/A6-1 scout 已记录、文档固化后不重开。A6 收敛引擎 runtime 仍 frozen / demand-gated。** 近期"开发安排"实质是：**本 session 待命做点名 review；A5 的运行效果用于判断是否需要 retry UI / idempotency / A6；A6 本就排在 K3/DF 成熟需求下游。** 触发出现 → 走 §7 流程。无触发 → 不动，这就是正确的安排。
