@@ -7627,6 +7627,43 @@ function attendanceSchedulerScopeMatchesTarget(scopeRow, target) {
   return true
 }
 
+function normalizeAttendanceSchedulerScopeRef(value) {
+  return String(value ?? '').trim()
+}
+
+function attendanceSchedulerScopeActorRefs(actorContext) {
+  const roles = sortedUnique([
+    ...ensureStringArray(actorContext?.role),
+    ...ensureStringArray(actorContext?.roles),
+  ].map(normalizeAttendanceSchedulerScopeRef).filter(Boolean))
+  const roleTags = sortedUnique(ensureStringArray(actorContext?.roleTags)
+    .map(normalizeAttendanceSchedulerScopeRef)
+    .filter(Boolean))
+  return {
+    userId: normalizeAttendanceSchedulerScopeRef(actorContext?.userId),
+    roles,
+    roleTags,
+  }
+}
+
+function attendanceSchedulerScopeMatchesActor(scopeRow, actorContext) {
+  const subjectType = scopeRow?.subjectType ?? scopeRow?.subject_type
+  const subjectRef = normalizeAttendanceSchedulerScopeRef(scopeRow?.subjectRef ?? scopeRow?.subject_ref)
+  if (!subjectType || !subjectRef) return false
+  const actor = attendanceSchedulerScopeActorRefs(actorContext)
+  if (subjectType === 'user') return actor.userId === subjectRef
+  if (subjectType === 'role') return actor.roles.includes(subjectRef)
+  if (subjectType === 'role_tag') return actor.roleTags.includes(subjectRef)
+  return false
+}
+
+function attendanceSchedulerScopeAllowsActorActionTarget(scopeRow, actorContext, action, target) {
+  if (!scopeRow || scopeRow.isActive === false || scopeRow.is_active === false) return false
+  if (!attendanceSchedulerScopeMatchesActor(scopeRow, actorContext)) return false
+  if (!normalizeStringArray(scopeRow.actions).includes(action)) return false
+  return attendanceSchedulerScopeMatchesTarget(scopeRow, target)
+}
+
 function countBy(items, resolveKey) {
   const counts = new Map()
   for (const item of Array.isArray(items) ? items : []) {
@@ -15132,6 +15169,8 @@ module.exports = {
     normalizeAttendanceSchedulerScopeInput,
     mapAttendanceSchedulerScopeRow,
     attendanceSchedulerScopeMatchesTarget,
+    attendanceSchedulerScopeMatchesActor,
+    attendanceSchedulerScopeAllowsActorActionTarget,
     matchScopeFilters,
     loadAttendanceScopeContextForUser,
     loadAttendanceScopeContextMapForUsers,
@@ -15167,6 +15206,81 @@ module.exports = {
         [orgId, groupId, userId]
       )
       return rows.length > 0
+    }
+
+    function respondAttendanceSchedulerScopeForbidden(res) {
+      res.status(403).json({
+        ok: false,
+        error: {
+          code: 'SCHEDULER_SCOPE_FORBIDDEN',
+          message: 'Scheduler scope does not allow this attendance scheduling action',
+        },
+      })
+    }
+
+    async function resolveAttendanceSchedulerScopeActor(req, res) {
+      const userId = getUserId(req)
+      if (!userId) {
+        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+        return null
+      }
+      const orgId = getOrgId(req)
+      try {
+        const fullAdmin = await hasAttendanceAdminAccess(userId)
+        return { userId, orgId, fullAdmin }
+      } catch (error) {
+        logger.error('Attendance scheduler scope actor resolution failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+        return null
+      }
+    }
+
+    async function loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext) {
+      const actor = attendanceSchedulerScopeActorRefs(actorContext)
+      const rows = await db.query(
+        `SELECT *
+         FROM attendance_scheduler_scopes
+         WHERE org_id = $1
+           AND is_active = true
+           AND (
+             (subject_type = 'user' AND subject_ref = $2)
+             OR (subject_type = 'role' AND subject_ref = ANY($3::text[]))
+             OR (subject_type = 'role_tag' AND subject_ref = ANY($4::text[]))
+           )
+         ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST`,
+        [orgId, actor.userId, actor.roles, actor.roleTags]
+      )
+      return rows.map(mapAttendanceSchedulerScopeRow)
+    }
+
+    async function assertAttendanceSchedulerScopeAllowed(req, res, { action, target, actorAccess } = {}) {
+      const access = actorAccess ?? await resolveAttendanceSchedulerScopeActor(req, res)
+      if (!access) return null
+      if (access.fullAdmin) return access
+
+      try {
+        const actorContext = await loadAttendanceScopeContextForUser(db, access.orgId, access.userId)
+        const scopes = await loadActiveAttendanceSchedulerScopesForActor(access.orgId, actorContext)
+        const allowed = scopes.some((scope) => attendanceSchedulerScopeAllowsActorActionTarget(
+          scope,
+          actorContext,
+          action,
+          target
+        ))
+        if (!allowed) {
+          respondAttendanceSchedulerScopeForbidden(res)
+          return null
+        }
+        return access
+      } catch (error) {
+        if (isDatabaseSchemaError(error)) {
+          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+          return null
+        }
+        logger.error('Attendance scheduler scope guard failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Scheduler scope check failed' } })
+        return null
+      }
     }
 
     function withAttendanceGroupMemberAccess(handler) {
@@ -27404,14 +27518,13 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/schedule-groups/:id/members',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const parsed = scheduleGroupMemberSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
         const orgId = getOrgId(req)
-        const actorId = getUserId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -27427,6 +27540,12 @@ module.exports = {
           }
           throw error
         }
+        const access = await assertAttendanceSchedulerScopeAllowed(req, res, {
+          action: 'dispatch',
+          target: { scheduleGroupIds: [groupId], userIds: input.userIds },
+        })
+        if (!access) return
+        const actorId = access.userId
         try {
           const created = []
           await db.transaction(async (trx) => {
@@ -27475,13 +27594,13 @@ module.exports = {
           logger.error('Attendance schedule group member create failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to add schedule group members' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'DELETE',
       '/api/attendance/schedule-groups/:id/members/:memberId',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         const memberId = normalizeUuidString(req.params.memberId)
@@ -27493,7 +27612,30 @@ module.exports = {
           respondInvalidUuid(res, 'memberId')
           return
         }
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         try {
+          const existingRows = await db.query(
+            `SELECT user_id
+             FROM attendance_schedule_group_members
+             WHERE id = $1 AND org_id = $2 AND schedule_group_id = $3
+             LIMIT 1`,
+            [memberId, orgId, groupId]
+          )
+          if (!existingRows.length) {
+            if (!actorAccess.fullAdmin) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule group member not found' } })
+            return
+          }
+          const access = await assertAttendanceSchedulerScopeAllowed(req, res, {
+            action: 'dispatch',
+            target: { scheduleGroupIds: [groupId], userIds: [existingRows[0].user_id] },
+            actorAccess,
+          })
+          if (!access) return
           const rows = await db.query(
             `DELETE FROM attendance_schedule_group_members
              WHERE id = $1 AND org_id = $2 AND schedule_group_id = $3
@@ -27513,7 +27655,7 @@ module.exports = {
           logger.error('Attendance schedule group member delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to remove schedule group member' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
