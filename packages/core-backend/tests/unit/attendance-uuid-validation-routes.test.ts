@@ -105,6 +105,63 @@ async function invokeRoute(
   return res
 }
 
+const scheduleGroupId = '00000000-0000-4000-8000-000000000301'
+const scheduleGroupMemberId = '00000000-0000-4000-8000-000000000302'
+
+function schedulerScopeRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'scope-1',
+    org_id: 'default',
+    subject_type: 'user',
+    subject_ref: 'scheduler-1',
+    actions: ['dispatch'],
+    scope: {
+      scheduleGroupIds: [scheduleGroupId],
+      attendanceGroupIds: [],
+      userIds: ['worker-1'],
+      departments: [],
+      roles: [],
+      roleTags: [],
+    },
+    is_active: true,
+    created_at: '2026-05-30T10:00:00.000Z',
+    updated_at: '2026-05-30T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function scheduleGroupMemberRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: scheduleGroupMemberId,
+    org_id: 'default',
+    schedule_group_id: scheduleGroupId,
+    user_id: 'worker-1',
+    effective_from: '2026-06-01',
+    effective_to: null,
+    role: 'member',
+    source: 'manual',
+    created_by: 'scheduler-1',
+    updated_by: 'scheduler-1',
+    created_at: '2026-05-30T10:00:00.000Z',
+    updated_at: '2026-05-30T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function rbacQueryResult(sql: string, params: unknown[] = [], admin = false) {
+  if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return admin ? [{ ok: 1 }] : []
+  if (sql.includes('FROM user_permissions')) return []
+  if (sql.includes('JOIN role_permissions')) return []
+  return undefined
+}
+
+function actorContextQueryResult(sql: string) {
+  if (sql.includes('SELECT name, role FROM users')) return [{ name: 'Scoped scheduler', role: null }]
+  if (sql.includes('FROM attendance_group_members m')) return []
+  if (sql.includes('SELECT ur.role_id')) return []
+  return undefined
+}
+
 afterEach(async () => {
   restoreEnv('RBAC_BYPASS', originalRbacBypass)
   restoreEnv('ATTENDANCE_IMPORT_ASYNC_ENABLED', originalAsyncEnabled)
@@ -679,6 +736,139 @@ describe('attendance UUID route validation', () => {
 
     expect(db.query).not.toHaveBeenCalled()
     expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it('lets full attendance admins add schedule group members without scheduler scopes', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, true)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('pg_advisory_xact_lock')) return []
+      if (sql.includes('FROM attendance_schedule_group_members') && sql.includes('LIMIT 1')) return []
+      if (sql.includes('INSERT INTO attendance_schedule_group_members')) return [scheduleGroupMemberRow()]
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/schedule-groups/:id/members', {
+      params: { id: scheduleGroupId },
+      body: { userIds: ['worker-1'], effectiveFrom: '2026-06-01' },
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { items: [{ userId: 'worker-1' }] } })
+    expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining('FROM attendance_scheduler_scopes'), expect.anything())
+    expect(db.transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('lets scoped non-admin schedulers add members inside their scheduler scope', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRow()]
+      if (sql.includes('pg_advisory_xact_lock')) return []
+      if (sql.includes('FROM attendance_schedule_group_members') && sql.includes('LIMIT 1')) return []
+      if (sql.includes('INSERT INTO attendance_schedule_group_members')) return [scheduleGroupMemberRow()]
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/schedule-groups/:id/members', {
+      params: { id: scheduleGroupId },
+      body: { userIds: ['worker-1'], effectiveFrom: '2026-06-01' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { items: [{ userId: 'worker-1' }] } })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM attendance_scheduler_scopes'),
+      ['default', 'scheduler-1', [], []],
+    )
+    expect(db.transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects member dispatch outside scheduler scope and does not write', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) {
+        return [schedulerScopeRow({ scope: { scheduleGroupIds: [scheduleGroupId], userIds: ['someone-else'] } })]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/schedule-groups/:id/members', {
+      params: { id: scheduleGroupId },
+      body: { userIds: ['worker-1'], effectiveFrom: '2026-06-01' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('INSERT INTO attendance_schedule_group_members'))).toBe(false)
+  })
+
+  it('checks existing member targets before scoped scheduler deletes', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT user_id') && sql.includes('FROM attendance_schedule_group_members')) {
+        return [{ user_id: 'worker-1' }]
+      }
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) {
+        return [schedulerScopeRow({ scope: { scheduleGroupIds: [scheduleGroupId], userIds: ['someone-else'] } })]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'DELETE /api/attendance/schedule-groups/:id/members/:memberId', {
+      params: { id: scheduleGroupId, memberId: scheduleGroupMemberId },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('DELETE FROM attendance_schedule_group_members'))).toBe(false)
+  })
+
+  it('lets scoped non-admin schedulers delete members inside their scheduler scope', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT user_id') && sql.includes('FROM attendance_schedule_group_members')) {
+        return [{ user_id: 'worker-1' }]
+      }
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRow()]
+      if (sql.includes('DELETE FROM attendance_schedule_group_members')) return [{ id: scheduleGroupMemberId }]
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'DELETE /api/attendance/schedule-groups/:id/members/:memberId', {
+      params: { id: scheduleGroupId, memberId: scheduleGroupMemberId },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toEqual({ ok: true, data: { id: scheduleGroupMemberId } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('DELETE FROM attendance_schedule_group_members'))).toBe(true)
   })
 
   it('does not relabel handler failures as permission check failures', async () => {

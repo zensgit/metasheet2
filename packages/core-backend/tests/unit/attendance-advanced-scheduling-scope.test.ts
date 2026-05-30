@@ -34,15 +34,21 @@ describe('attendance advanced scheduling scope foundation', () => {
     expect(migrationSource).not.toContain("dropTable('attendance_group_members')")
   })
 
-  it('guards the new scheduling group and scheduler-scope routes behind attendance admin', () => {
+  it('guards the new scheduling group and scheduler-scope routes behind attendance admin or scoped dispatch', () => {
     [
       '/api/attendance/schedule-groups',
       '/api/attendance/schedule-groups/:id',
       '/api/attendance/schedule-groups/:id/members',
-      '/api/attendance/schedule-groups/:id/members/:memberId',
       '/api/attendance/scheduler-scopes',
       '/api/attendance/scheduler-scopes/:id',
     ].forEach(expectAdminRoute)
+    expect(pluginSource).toContain('SCHEDULER_SCOPE_FORBIDDEN')
+    expect(pluginSource).toMatch(
+      /'POST',\s*\n\s*'\/api\/attendance\/schedule-groups\/:id\/members',\s*\n\s*async \(req, res\)/,
+    )
+    expect(pluginSource).toMatch(
+      /'DELETE',\s*\n\s*'\/api\/attendance\/schedule-groups\/:id\/members\/:memberId',\s*\n\s*async \(req, res\)/,
+    )
   })
 
   it('normalizes schedule groups without overloading attendance_groups semantics', () => {
@@ -166,5 +172,45 @@ describe('attendance advanced scheduling scope foundation', () => {
       actions: ['view'],
       scope: {},
     })).toThrow(/scope must include at least one target/)
+  })
+
+  it('matches scheduler scopes by actor subject, action, and target for runtime enforcement', () => {
+    const scope = {
+      subjectType: 'role_tag',
+      subjectRef: 'line_scheduler',
+      actions: ['dispatch'],
+      scope: {
+        scheduleGroupIds: ['sg-1'],
+        attendanceGroupIds: [],
+        userIds: ['u-1'],
+        departments: [],
+        roles: [],
+        roleTags: [],
+      },
+      isActive: true,
+    }
+    const actor = {
+      userId: 'actor-1',
+      roles: ['ops'],
+      roleTags: ['line_scheduler'],
+    }
+
+    expect(helpers.attendanceSchedulerScopeMatchesActor(scope, actor)).toBe(true)
+    expect(helpers.attendanceSchedulerScopeAllowsActorActionTarget(scope, actor, 'dispatch', {
+      scheduleGroupIds: ['sg-1'],
+      userIds: ['u-1'],
+    })).toBe(true)
+    expect(helpers.attendanceSchedulerScopeAllowsActorActionTarget(scope, actor, 'edit', {
+      scheduleGroupIds: ['sg-1'],
+      userIds: ['u-1'],
+    })).toBe(false)
+    expect(helpers.attendanceSchedulerScopeAllowsActorActionTarget(scope, actor, 'dispatch', {
+      scheduleGroupIds: ['sg-2'],
+      userIds: ['u-1'],
+    })).toBe(false)
+    expect(helpers.attendanceSchedulerScopeAllowsActorActionTarget({ ...scope, isActive: false }, actor, 'dispatch', {
+      scheduleGroupIds: ['sg-1'],
+      userIds: ['u-1'],
+    })).toBe(false)
   })
 })
