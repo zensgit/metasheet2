@@ -1,0 +1,211 @@
+name: Attendance Remote Log Snapshot (Prod)
+
+run-name: Attendance Remote Log Snapshot (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.skip_host_sync == 'true' && ' [DEBUG]' || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: 'docker logs --since value, for example 2h or 2026-05-30T06:00:00Z'
+        required: false
+        default: '2h'
+      until:
+        description: 'optional docker logs --until value, for example 2026-05-30T06:15:00Z'
+        required: false
+        default: ''
+      tail_lines:
+        description: 'maximum log lines per container'
+        required: false
+        default: '2500'
+      containers_csv:
+        description: 'comma-separated container names'
+        required: false
+        default: 'metasheet-backend,metasheet-web,metasheet-postgres,metasheet-redis'
+      skip_host_sync:
+        description: 'skip deploy-host git sync before collecting logs (true/false)'
+        required: false
+        default: 'false'
+      issue_number:
+        description: 'optional issue number to comment with artifact pointer'
+        required: false
+        default: '447'
+
+concurrency:
+  group: attendance-remote-log-snapshot-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      snapshot_rc: ${{ steps.remote_snapshot.outputs.snapshot_rc }}
+      artifact_name: ${{ steps.remote_snapshot.outputs.artifact_name }}
+    steps:
+      - name: Remote log snapshot
+        id: remote_snapshot
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          SINCE: ${{ github.event.inputs.since || '2h' }}
+          UNTIL: ${{ github.event.inputs.until || '' }}
+          TAIL_LINES: ${{ github.event.inputs.tail_lines || '2500' }}
+          CONTAINERS_CSV: ${{ github.event.inputs.containers_csv || 'metasheet-backend,metasheet-web,metasheet-postgres,metasheet-redis' }}
+          SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${SINCE}" =~ ^[0-9A-Za-z:._+TZ-]+$ ]]; then
+            echo "invalid since input: ${SINCE}" >&2
+            exit 2
+          fi
+          if [[ -n "${UNTIL}" && ! "${UNTIL}" =~ ^[0-9A-Za-z:._+TZ-]+$ ]]; then
+            echo "invalid until input: ${UNTIL}" >&2
+            exit 2
+          fi
+          if [[ ! "${TAIL_LINES}" =~ ^[0-9]+$ ]]; then
+            echo "invalid tail_lines input: ${TAIL_LINES}" >&2
+            exit 2
+          fi
+          if [[ ! "${CONTAINERS_CSV}" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]]; then
+            echo "invalid containers_csv input: ${CONTAINERS_CSV}" >&2
+            exit 2
+          fi
+
+          mkdir -p ~/.ssh output/remote-log-snapshot
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+          SKIP_HOST_SYNC="${SKIP_HOST_SYNC:-false}"
+          remote_output_dir="/tmp/attendance-remote-log-snapshot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          artifact_name="attendance-remote-log-snapshot-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          remote_cmds=(
+            "set -euo pipefail"
+            "DEPLOY_PATH=\"${DEPLOY_PATH}\""
+            "SINCE=\"${SINCE}\""
+            "UNTIL=\"${UNTIL}\""
+            "TAIL_LINES=\"${TAIL_LINES}\""
+            "CONTAINERS_CSV=\"${CONTAINERS_CSV}\""
+            "SKIP_HOST_SYNC=\"${SKIP_HOST_SYNC}\""
+            "REMOTE_OUTPUT_DIR=\"${remote_output_dir}\""
+            'if [[ "${DEPLOY_PATH}" == /* ]]; then'
+              '  DEPLOY_REPO_PATH="${DEPLOY_PATH}"'
+            'elif [[ "${DEPLOY_PATH}" == ~/* ]]; then'
+              '  DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH#~/}"'
+            "else"
+              '  DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH}"'
+            "fi"
+            'if [[ ! -d "$DEPLOY_REPO_PATH" ]]; then'
+              '  echo "[remote-log-snapshot][error] DEPLOY_PATH missing: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH})"'
+              '  exit 1'
+            "fi"
+            'cd "$DEPLOY_REPO_PATH"'
+            'echo "[host-sync] repo_path=${DEPLOY_REPO_PATH}"'
+            "host_sync_rc=0"
+            'if [[ "${SKIP_HOST_SYNC}" == "true" ]]; then'
+              '  echo "[host-sync] skipped (skip_host_sync=true)"'
+            'elif git rev-parse --is-inside-work-tree >/dev/null 2>&1; then'
+              "  set +e"
+              '  git fetch origin main && git checkout main && git pull --ff-only origin main'
+              '  host_sync_rc=$?'
+              "  set -e"
+              '  echo "[host-sync] rc=${host_sync_rc}"'
+            "else"
+              '  echo "[host-sync][warn] DEPLOY_PATH is not a git repo; continuing with existing files"'
+            "fi"
+            'if [[ "${host_sync_rc}" != "0" ]]; then exit "${host_sync_rc}"; fi'
+            'rm -rf "${REMOTE_OUTPUT_DIR}"'
+            'mkdir -p "${REMOTE_OUTPUT_DIR}"'
+            'SINCE="${SINCE}" UNTIL="${UNTIL}" TAIL_LINES="${TAIL_LINES}" CONTAINERS_CSV="${CONTAINERS_CSV}" OUTPUT_DIR="${REMOTE_OUTPUT_DIR}" scripts/ops/attendance-collect-remote-logs.sh'
+          )
+
+          set +e
+          printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee output/remote-log-snapshot/ssh.log
+          rc=${PIPESTATUS[1]}
+          scp $ssh_opts -r "$DEPLOY_USER@$DEPLOY_HOST:${remote_output_dir}/." output/remote-log-snapshot/ 2>&1 | tee -a output/remote-log-snapshot/ssh.log
+          scp_rc=${PIPESTATUS[0]}
+          set -e
+
+          if [[ "$rc" == "0" && "$scp_rc" != "0" ]]; then
+            rc="$scp_rc"
+          fi
+
+          echo "snapshot_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write step summary
+        if: always()
+        env:
+          SNAPSHOT_RC: ${{ steps.remote_snapshot.outputs.snapshot_rc }}
+          ARTIFACT_NAME: ${{ steps.remote_snapshot.outputs.artifact_name }}
+          SINCE: ${{ github.event.inputs.since || '2h' }}
+          UNTIL: ${{ github.event.inputs.until || '' }}
+          TAIL_LINES: ${{ github.event.inputs.tail_lines || '2500' }}
+          CONTAINERS_CSV: ${{ github.event.inputs.containers_csv || 'metasheet-backend,metasheet-web,metasheet-postgres,metasheet-redis' }}
+        run: |
+          set -euo pipefail
+          echo "## Attendance Remote Log Snapshot" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Snapshot rc: \`${SNAPSHOT_RC:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Since: \`${SINCE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Until: \`${UNTIL:-<none>}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tail lines: \`${TAIL_LINES}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Containers: \`${CONTAINERS_CSV}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f output/remote-log-snapshot/snapshot-summary.md ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat output/remote-log-snapshot/snapshot-summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.remote_snapshot.outputs.artifact_name || format('attendance-remote-log-snapshot-prod-{0}-{1}', github.run_id, github.run_attempt) }}
+          path: output/remote-log-snapshot
+
+      - name: Comment on issue
+        if: always() && github.event.inputs.issue_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.inputs.issue_number || '447' }}
+          SNAPSHOT_RC: ${{ steps.remote_snapshot.outputs.snapshot_rc }}
+          ARTIFACT_NAME: ${{ steps.remote_snapshot.outputs.artifact_name }}
+          SINCE: ${{ github.event.inputs.since || '2h' }}
+          UNTIL: ${{ github.event.inputs.until || '' }}
+          CONTAINERS_CSV: ${{ github.event.inputs.containers_csv || 'metasheet-backend,metasheet-web,metasheet-postgres,metasheet-redis' }}
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="$(mktemp)"
+          {
+            echo "Remote log snapshot collected."
+            echo
+            echo "- Run: ${run_url}"
+            echo "- Artifact: \`${ARTIFACT_NAME:-attendance-remote-log-snapshot-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}\`"
+            echo "- Snapshot rc: \`${SNAPSHOT_RC:-missing}\`"
+            echo "- Since: \`${SINCE}\`"
+            echo "- Until: \`${UNTIL:-<none>}\`"
+            echo "- Containers: \`${CONTAINERS_CSV}\`"
+            echo
+            echo "Download:"
+            echo '```bash'
+            echo "gh run download ${GITHUB_RUN_ID} -n \"${ARTIFACT_NAME:-attendance-remote-log-snapshot-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}\" -D \"output/playwright/ga/${GITHUB_RUN_ID}/remote-log-snapshot\""
+            echo '```'
+          } >"$body"
+          gh issue comment "$ISSUE_NUMBER" --body-file "$body"
+
+      - name: Fail on snapshot error
+        if: steps.remote_snapshot.outputs.snapshot_rc != '0'
+        run: exit 1
