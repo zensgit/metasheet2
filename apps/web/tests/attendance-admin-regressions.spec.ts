@@ -744,6 +744,137 @@ describe('Attendance admin regressions', () => {
     expect(hint?.textContent || '').toContain('250')
   })
 
+  it('creates a scheduler scope, mapping each free-text target field to its scope key', async () => {
+    const created: Array<Record<string, unknown>> = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/scheduler-scopes') && method === 'POST') {
+        created.push(JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')))
+        return jsonResponse(200, { ok: true, data: { id: 'scope-new' } })
+      }
+      if (url.includes('/api/attendance/scheduler-scopes')) {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 0, page: 1, pageSize: 200 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
+    await flushUi(4)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')!
+    const subjectType = section.querySelector<HTMLSelectElement>('#attendance-scheduler-scope-subject-type')!
+    subjectType.value = 'role'
+    subjectType.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    const subjectRef = section.querySelector<HTMLInputElement>('#attendance-scheduler-scope-subject-ref')!
+    subjectRef.value = 'attendance_admin'
+    subjectRef.dispatchEvent(new Event('input', { bubbles: true }))
+    section.querySelector<HTMLInputElement>('[data-attendance-scheduler-scope-actions] input[data-action="view"]')!.click()
+
+    // Distinct sentinel per target field — catches a field wired to the wrong scope key
+    // (the backend normalizer silently drops unknown keys; this is the A2 round-trip guard).
+    const setTarget = (id: string, value: string): void => {
+      const el = section.querySelector<HTMLTextAreaElement>(`#${id}`)!
+      el.value = value
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    setTarget('attendance-scheduler-scope-target-departments', 'dept-x')
+    setTarget('attendance-scheduler-scope-target-attendance-groups', 'ag-x')
+    setTarget('attendance-scheduler-scope-target-schedule-groups', 'sg-x')
+    setTarget('attendance-scheduler-scope-target-users', 'user-x')
+    setTarget('attendance-scheduler-scope-target-roles', 'role-x')
+    setTarget('attendance-scheduler-scope-target-role-tags', 'tag-x')
+    await flushUi(2)
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-create]')!.click()
+    await flushUi(4)
+
+    expect(created).toHaveLength(1)
+    // toEqual (not toMatchObject) so an extra body key — e.g. a re-added orgId, which the
+    // backend's .strict() schema rejects with 400 — fails the test instead of slipping through.
+    expect(created[0]).toEqual({
+      subjectType: 'role',
+      subjectRef: 'attendance_admin',
+      actions: ['view'],
+      scope: {
+        departments: ['dept-x'],
+        attendanceGroupIds: ['ag-x'],
+        scheduleGroupIds: ['sg-x'],
+        userIds: ['user-x'],
+        roles: ['role-x'],
+        roleTags: ['tag-x'],
+      },
+    })
+  })
+
+  it('refuses to create a scheduler scope without a target and explains why', async () => {
+    const posts: unknown[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/scheduler-scopes') && method === 'POST') {
+        posts.push(1)
+        return jsonResponse(200, { ok: true, data: {} })
+      }
+      if (url.includes('/api/attendance/scheduler-scopes')) {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 0, page: 1, pageSize: 200 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
+    await flushUi(4)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')!
+    const subjectType = section.querySelector<HTMLSelectElement>('#attendance-scheduler-scope-subject-type')!
+    subjectType.value = 'role'
+    subjectType.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    const subjectRef = section.querySelector<HTMLInputElement>('#attendance-scheduler-scope-subject-ref')!
+    subjectRef.value = 'attendance_admin'
+    subjectRef.dispatchEvent(new Event('input', { bubbles: true }))
+    section.querySelector<HTMLInputElement>('[data-attendance-scheduler-scope-actions] input[data-action="view"]')!.click()
+    await flushUi(2)
+
+    // No targets entered → client guard blocks the POST.
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-create]')!.click()
+    await flushUi(4)
+
+    expect(posts).toEqual([])
+    expect(container!.textContent).toContain('Add at least one scope target')
+  })
+
+  it('clears the scheduler scope subject ref when the subject type changes', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
+    await flushUi(4)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')!
+    const subjectType = section.querySelector<HTMLSelectElement>('#attendance-scheduler-scope-subject-type')!
+    subjectType.value = 'role'
+    subjectType.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    const subjectRef = section.querySelector<HTMLInputElement>('#attendance-scheduler-scope-subject-ref')!
+    subjectRef.value = 'some-role'
+    subjectRef.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(1)
+
+    subjectType.value = 'role_tag'
+    subjectType.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    expect(section.querySelector<HTMLInputElement>('#attendance-scheduler-scope-subject-ref')!.value).toBe('')
+  })
+
   it('keeps the clicked admin section focused and retires the show-all toggle', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
