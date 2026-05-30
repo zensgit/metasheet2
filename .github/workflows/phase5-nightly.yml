@@ -37,7 +37,7 @@ jobs:
             URL="$METRICS_URL_SECRET"
             URL_SOURCE="secret"
           elif [ -n "$METASHEET_BASE_URL" ]; then
-            URL="${METASHEET_BASE_URL%/}/api/metrics/prom"
+            URL="${METASHEET_BASE_URL%/}/metrics/prom"
             URL_SOURCE="metasheet_base_url"
           else
             URL=""

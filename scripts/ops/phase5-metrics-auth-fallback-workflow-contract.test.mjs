@@ -26,6 +26,8 @@ for (const workflowPath of workflowPaths) {
     assert.match(raw, /METRICS_SCRAPE_TOKEN_RESOLVE_REQUIRED=false\s+bash scripts\/ops\/resolve-metrics-scrape-token\.sh/)
     assert.match(raw, /AUTH_HEADER="Authorization: Bearer \$metrics_token"/)
     assert.match(raw, /METRICS_AUTH_HEADER=\$AUTH_HEADER/)
+    assert.match(raw, /\$\{METASHEET_BASE_URL%\/\}\/metrics\/prom/)
+    assert.doesNotMatch(raw, /\/api\/metrics\/prom/)
     assert.doesNotMatch(raw, /ATTENDANCE_ADMIN_JWT/)
     assert.doesNotMatch(raw, /Authorization: Bearer \$ATTENDANCE_ADMIN_JWT/)
   })
