@@ -6,6 +6,7 @@ Runtime: not started
 Companions:
 - `docs/development/run-governance-forward-plan-20260528.md`
 - `docs/development/multitable-automation-run-governance-todo-20260527.md`
+- `docs/development/multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md`
 - `docs/research/approval-automation-convergence-rfc-20260526.md`
 
 ## Verdict
@@ -13,9 +14,10 @@ Companions:
 A6 can be opened only as a docs-only scout / scope-gate slice right now. A6
 runtime remains frozen and demand-gated.
 
-The next runtime step is not "build the workflow engine". If a named product or
-integration demand arrives, the first runtime slice must be a separately
-reviewed A6-1 persistent `WorkflowJob` runtime scout, with a feature flag /
+The next runtime step is not "build the workflow engine". The A6-1 persistent
+`WorkflowJob` runtime scout is now recorded in
+`multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md`; runtime
+still requires a separate implementation unlock with a feature flag /
 compatibility gate and no default behavior change for existing automation rules.
 
 This document records the sequence, boundaries, risks, and future test surface so
@@ -75,7 +77,7 @@ The dependency order is fixed, but it is not a schedule.
 | Step | Name | First deliverable after opt-in | Gate |
 |---|---|---|---|
 | A6-0 | Scout / scope gate | This docs-only document | done by this slice |
-| A6-1 | Persistent WorkflowJob runtime | design scout, then feature-flagged linear job persistence | named demand |
+| A6-1 | Persistent WorkflowJob runtime | design scout recorded; next is feature-flagged linear job persistence | named demand |
 | A6-2 | Suspend/resume | external-event/webhook resume before delay/timer resume | named demand |
 | A6-3 | Branch/parallel DAG | condition/parallel nodes with upstream/downstream graph fields | named demand |
 | A6-4 | BPMN adapter | compile/preview + gap report only; no live BPMN runtime | named demand |
@@ -84,6 +86,12 @@ The dependency order is fixed, but it is not a schedule.
 ### A6-1 — Persistent WorkflowJob Runtime
 
 Goal: persist per-step job state without changing default execution semantics.
+
+The docs-only runtime scout is recorded in
+`multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md`. It recommends
+a new `multitable_automation_jobs` table, rule-level opt-in, inline linear job
+persistence, A1 redaction reuse, and A2/A3 mixed legacy/persisted rendering.
+It does not start runtime.
 
 Runtime unlock requirements:
 
@@ -256,9 +264,9 @@ A6 must not:
 
 ## Current Recommendation
 
-Stop after this A6-0 document unless a named A6 demand is provided.
+Stop after the A6-1 scout unless a named A6 runtime demand is provided.
 
-The healthiest next technical action, when demand appears, is A6-1 scout only:
-feature-flagged persistent job runtime for linear automation, with legacy rules
-unchanged by default. Anything beyond that is exciting, sharp, and currently too
-large to sneak in through a side door.
+The healthiest next technical action, when demand appears, is a small A6-1
+runtime PR: feature-flagged persistent job runtime for linear automation, with
+legacy rules unchanged by default. Anything beyond that is exciting, sharp, and
+currently too large to sneak in through a side door.
