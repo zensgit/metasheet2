@@ -190,6 +190,10 @@ jobs:
             - SLO tightening suggestions (window 30d): claudedocs/PHASE5_SLO_SUGGESTIONS.json
             Supports future baseline rotation after sustained PASS streak.
           branch: chore/phase5-nightly-${{ steps.nightly_date.outputs.date }}
+          add-paths: |
+            results/nightly/*.json
+            claudedocs/PHASE5_WEEKLY_TREND.md
+            claudedocs/PHASE5_SLO_SUGGESTIONS.json
 
       - name: Auto-rotate baseline (if streak met)
         if: success() && steps.probe.outputs.available == 'true'

@@ -54,3 +54,11 @@ test('regression workflow can write nightly artifact pull requests', () => {
   assert.match(raw, /\npermissions:\n  contents: write\n  pull-requests: write\n/)
   assert.match(raw, /uses: peter-evans\/create-pull-request@v5/)
 })
+
+test('regression workflow limits nightly artifact PR contents', () => {
+  const raw = readWorkflow('.github/workflows/phase5-nightly-validation-regression.yml')
+
+  assert.match(raw, /add-paths:\s+\|\n\s+results\/nightly\/\*\.json\n\s+claudedocs\/PHASE5_WEEKLY_TREND\.md\n\s+claudedocs\/PHASE5_SLO_SUGGESTIONS\.json/)
+  assert.doesNotMatch(raw, /add-paths:[\s\S]*node_modules/)
+  assert.doesNotMatch(raw, /add-paths:[\s\S]*package\.json/)
+})
