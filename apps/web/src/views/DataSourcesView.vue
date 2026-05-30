@@ -39,7 +39,10 @@
       <!-- SQL connection -->
       <div v-if="isSql && formMode !== 'credentials'" class="data-sources__grid">
         <label>Host
-          <input v-model.trim="form.host" required data-testid="ds-field-host" placeholder="10.0.0.5" />
+          <input v-model.trim="form.host" data-testid="ds-field-host" placeholder="10.0.0.5" />
+        </label>
+        <label v-if="form.type === 'sqlserver'">Server
+          <input v-model.trim="form.server" data-testid="ds-field-server" placeholder="命名实例(Host 备选)" />
         </label>
         <label>Port
           <input v-model.number="form.port" type="number" data-testid="ds-field-port" :placeholder="defaultPort" />
@@ -168,7 +171,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useDataSourcesStore } from '../stores/dataSources'
 import {
   DATA_SOURCE_TYPES,
@@ -190,6 +193,7 @@ const form = reactive({
   name: '',
   type: 'postgres' as DataSourceType,
   host: '',
+  server: '',
   port: undefined as number | undefined,
   database: '',
   username: '',
@@ -213,6 +217,12 @@ const submitLabel = computed(() => {
   if (submitting.value) return '保存中…'
   if (formMode.value === 'credentials') return '更新凭据'
   return formMode.value === 'edit' ? '保存' : '创建'
+})
+
+// `server` is a SQL-Server-only concept; clear it when switching away so a stale value can't linger
+// (the builder + guard already ignore it for non-sqlserver — this keeps the form state clean).
+watch(() => form.type, (type) => {
+  if (type !== 'sqlserver') form.server = ''
 })
 
 function typeLabel(type: string): string {
@@ -242,7 +252,7 @@ function toggleCreateForm(): void {
 
 function resetForm(): void {
   Object.assign(form, {
-    id: '', name: '', type: 'postgres', host: '', port: undefined, database: '',
+    id: '', name: '', type: 'postgres', host: '', server: '', port: undefined, database: '',
     username: '', password: '', baseURL: '', apiKey: '', readOnly: true,
   })
 }
@@ -256,6 +266,7 @@ function fillFormFromDetail(detail: DataSourceDetail): void {
     ? detail.type as DataSourceType
     : 'postgres'
   form.host = String(connection.host ?? '')
+  form.server = String(connection.server ?? '')
   form.port = typeof connection.port === 'number' ? connection.port : undefined
   form.database = String(connection.database ?? '')
   form.baseURL = String(connection.baseURL ?? '')
@@ -291,6 +302,17 @@ async function openCredentialForm(id: string): Promise<void> {
 }
 
 async function submit(): Promise<void> {
+  // P2: `server` (SQL Server named instance) is a host alternative ONLY for sqlserver — Postgres
+  // ignores it, so Postgres still requires host (UI-1's rule), while SQL Server accepts host OR
+  // server (so a server-only source is editable/savable rather than blocked by an empty Host).
+  if (isSql.value) {
+    const hasHost = !!form.host.trim()
+    const hasServer = form.type === 'sqlserver' && !!form.server.trim()
+    if (!hasHost && !hasServer) {
+      store.error = form.type === 'sqlserver' ? 'SQL Server 源需填写 Host 或 Server 之一' : '请填写 Host'
+      return
+    }
+  }
   submitting.value = true
   try {
     const ok = editingId.value && formMode.value === 'edit'
