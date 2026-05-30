@@ -25,7 +25,7 @@ test('remote log snapshot workflow can comment with a run artifact pointer', () 
   const raw = readRepoFile('.github/workflows/attendance-remote-log-snapshot-prod.yml')
 
   assert.match(raw, /issues: write/)
-  assert.match(raw, /gh issue comment "\$ISSUE_NUMBER" --body-file "\$body"/)
+  assert.match(raw, /gh issue comment --repo "\$GITHUB_REPOSITORY" "\$ISSUE_NUMBER" --body-file "\$body"/)
   assert.match(raw, /gh run download \$\{GITHUB_RUN_ID\}/)
 })
 
@@ -37,6 +37,8 @@ test('remote log collector redacts common secret shapes and avoids full inspect 
   assert.match(raw, /postgres\(ql\)\?:\/\//)
   assert.match(raw, /access\[_-\]\?token\|refresh\[_-\]\?token\|id\[_-\]\?token\|password\|passwd\|secret\|jwt\|session\|authorityCode/)
   assert.match(raw, /docker inspect --format/)
+  assert.match(raw, /docker events/)
+  assert.match(raw, /docker-events\.jsonl/)
   assert.doesNotMatch(raw, /\.Config\.Env/)
   assert.doesNotMatch(raw, /docker inspect "\$container" >/)
 })
