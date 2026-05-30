@@ -196,6 +196,7 @@ Follow-up design locks now split the first two questions:
 
 - `docs/development/attendance-group-admin-ux-owner-role-design-20260529.md` covers owner/sub-owner roster and delegation boundaries.
 - `docs/development/attendance-group-admin-ux-punch-method-config-design-20260529.md` covers punch-method configuration boundaries.
+- `docs/development/attendance-group-admin-ux-rule-policy-config-design-20260529.md` covers group-owned rule-policy editing boundaries.
 
 ## 9. Acceptance For This Design
 
