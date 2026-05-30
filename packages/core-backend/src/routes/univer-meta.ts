@@ -2877,6 +2877,7 @@ async function loadRecordSummaries(
   sheetId: string,
   args: {
     displayFieldId?: string | null
+    allowedFieldIds?: Set<string>
     search?: string
     limit?: number
     offset?: number
@@ -2891,11 +2892,14 @@ async function loadRecordSummaries(
     [sheetId],
   )
   const fields = fieldRes.rows as Array<{ id: string; name: string; type: string }>
+  const selectableFields = args.allowedFieldIds
+    ? fields.filter((field) => args.allowedFieldIds?.has(field.id))
+    : fields
 
   let effectiveDisplayFieldId = args.displayFieldId ?? null
-  if (!effectiveDisplayFieldId && fields.length > 0) {
-    const stringField = fields.find((field) => mapFieldType(field.type) === 'string')
-    effectiveDisplayFieldId = stringField?.id ?? fields[0]?.id ?? null
+  if (!effectiveDisplayFieldId && selectableFields.length > 0) {
+    const stringField = selectableFields.find((field) => mapFieldType(field.type) === 'string')
+    effectiveDisplayFieldId = stringField?.id ?? selectableFields[0]?.id ?? null
   }
 
   const recordRes = await query(
@@ -7754,8 +7758,14 @@ export function univerMetaRouter(): Router {
       }
       if (!capabilities.canRead) return sendForbidden(res)
 
+      const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+      if (displayFieldId && !allowedFieldIds.has(displayFieldId)) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid displayFieldId' } })
+      }
+
       const summary = await loadRecordSummaries(pool.query.bind(pool), sheetId, {
         displayFieldId,
+        allowedFieldIds,
         search,
         limit,
         offset,
