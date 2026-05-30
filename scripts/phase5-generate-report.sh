@@ -97,7 +97,12 @@ EOF
         local comparison=$(echo "$assertions" | jq -r ".[$i].comparison")
         local status=$(echo "$assertions" | jq -r ".[$i].status")
 
-        local status_icon=$([ "$status" = "pass" ] && echo "✅" || echo "❌")
+        local status_icon="❌"
+        if [ "$status" = "pass" ]; then
+            status_icon="✅"
+        elif [ "$status" = "na" ]; then
+            status_icon="⚪"
+        fi
 
         # Format actual and threshold based on unit
         local actual_str="$actual"
