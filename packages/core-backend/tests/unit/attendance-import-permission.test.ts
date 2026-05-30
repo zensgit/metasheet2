@@ -14,6 +14,12 @@ function expectImportGuard(path: string) {
   expect(pluginSource).toMatch(pattern)
 }
 
+function expectDirectAsyncImportRoute(path: string) {
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`['"]${escaped}['"],\\s*\\n\\s*async \\(req, res\\)`)
+  expect(pluginSource).toMatch(pattern)
+}
+
 describe('attendance import permission wiring', () => {
   it('exposes a dedicated importer preset and keeps admins import-capable', () => {
     const presets = listAccessPresets()
@@ -30,8 +36,6 @@ describe('attendance import permission wiring', () => {
       '/api/attendance/import/template',
       '/api/attendance/import/template.csv',
       '/api/attendance/import/upload',
-      '/api/attendance/import/prepare',
-      '/api/attendance/import/preview',
       '/api/attendance/import/commit',
       '/api/attendance/import/preview-async',
       '/api/attendance/import/commit-async',
@@ -46,5 +50,14 @@ describe('attendance import permission wiring', () => {
       '/api/attendance/import/batches/:id/export.csv',
       '/api/attendance/import/rollback/:id',
     ].forEach(expectImportGuard)
+  })
+
+  it('lets scheduler-scoped import prepare and preview use direct runtime guards', () => {
+    [
+      '/api/attendance/import/prepare',
+      '/api/attendance/import/preview',
+    ].forEach(expectDirectAsyncImportRoute)
+    expect(pluginSource).toContain('assertAttendanceImportPrepareAllowed')
+    expect(pluginSource).toContain('assertAttendanceImportPreviewAllowed')
   })
 })

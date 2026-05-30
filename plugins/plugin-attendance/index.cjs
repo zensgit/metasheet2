@@ -14733,12 +14733,18 @@ function createRbacHelpers(db, logger) {
     return withAnyPermission([permission], handler)
   }
 
+  async function hasAttendanceImportAccess(userId) {
+    if (process.env.RBAC_BYPASS === 'true') return true
+    if (await hasAttendanceAdminAccess(userId)) return true
+    return userHasPermission(userId, 'attendance:import')
+  }
+
   async function canAccessOtherUsers(userId) {
     if (await hasAttendanceAdminAccess(userId)) return true
     return userHasPermission(userId, 'attendance:approve')
   }
 
-  return { hasAttendanceAdminAccess, withAnyPermission, withPermission, canAccessOtherUsers }
+  return { hasAttendanceAdminAccess, hasAttendanceImportAccess, withAnyPermission, withPermission, canAccessOtherUsers }
 }
 
 function normalizeApprovalSteps(value) {
@@ -15187,7 +15193,7 @@ module.exports = {
   async activate(context) {
     const db = context.api.database
     const logger = context.logger
-    const { hasAttendanceAdminAccess, withAnyPermission, withPermission, canAccessOtherUsers } = createRbacHelpers(db, logger)
+    const { hasAttendanceAdminAccess, hasAttendanceImportAccess, withAnyPermission, withPermission, canAccessOtherUsers } = createRbacHelpers(db, logger)
     const withAttendanceImportPermission = (handler) => withAnyPermission(['attendance:import', 'attendance:admin'], handler)
     const emitEvent = (type, data) => {
       if (context.api?.events?.emit) {
@@ -15660,6 +15666,103 @@ module.exports = {
           return null
         }
         logger.error('Attendance export scheduler scope guard failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Scheduler scope check failed' } })
+        return null
+      }
+    }
+
+    async function resolveAttendanceImportActor(req, res) {
+      const access = await resolveAttendanceSchedulerScopeActor(req, res)
+      if (!access) return null
+      try {
+        return {
+          ...access,
+          fullImport: access.fullAdmin || await hasAttendanceImportAccess(access.userId),
+        }
+      } catch (error) {
+        logger.error('Attendance import actor resolution failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+        return null
+      }
+    }
+
+    async function assertAttendanceImportPrepareAllowed(req, res) {
+      const access = await resolveAttendanceImportActor(req, res)
+      if (!access) return null
+      if (access.fullImport) return access
+
+      try {
+        const actorContext = await loadAttendanceScopeContextForUser(db, access.orgId, access.userId)
+        const scopes = await loadActiveAttendanceSchedulerScopesForActor(access.orgId, actorContext)
+        const allowed = scopes.some(scope =>
+          attendanceSchedulerScopeMatchesActor(scope, actorContext)
+          && normalizeStringArray(scope.actions).includes('import')
+        )
+        if (!allowed) {
+          respondAttendanceSchedulerScopeForbidden(res)
+          return null
+        }
+        return access
+      } catch (error) {
+        if (isDatabaseSchemaError(error)) {
+          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+          return null
+        }
+        logger.error('Attendance import prepare scheduler scope guard failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Scheduler scope check failed' } })
+        return null
+      }
+    }
+
+    function resolveAttendanceImportScopeTargets(rows, payload, fallbackUserId) {
+      const targets = new Map()
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const userId = resolveRowUserId({
+          row,
+          fallbackUserId,
+          userMap: payload?.userMap,
+          userMapKeyField: payload?.userMapKeyField,
+          userMapSourceFields: payload?.userMapSourceFields,
+        })
+        const workDate = normalizeDateOnly(row?.workDate) ?? row?.workDate
+        if (!userId || !workDate) continue
+        targets.set(`${userId}:${workDate}`, { userId, workDate })
+      }
+      return Array.from(targets.values())
+    }
+
+    async function assertAttendanceImportPreviewAllowed(req, res, { orgId, rows, payload, fallbackUserId, actorAccess }) {
+      const access = actorAccess ?? await resolveAttendanceImportActor(req, res)
+      if (!access) return null
+      if (access.fullImport) return access
+
+      try {
+        const actorContext = await loadAttendanceScopeContextForUser(db, orgId, access.userId)
+        const scopes = (await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext))
+          .filter(scope => normalizeStringArray(scope.actions).includes('import'))
+        const targets = resolveAttendanceImportScopeTargets(rows, payload, fallbackUserId)
+        let allowed = targets.length > 0
+        for (const target of targets) {
+          const facts = await resolveAttendanceUserSchedulerScopeFacts(db, orgId, target.userId, { workDate: target.workDate })
+          const targetAllowed = scopes.some(scope =>
+            attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'import', facts)
+          )
+          if (!targetAllowed) {
+            allowed = false
+            break
+          }
+        }
+        if (!allowed) {
+          respondAttendanceSchedulerScopeForbidden(res)
+          return null
+        }
+        return access
+      } catch (error) {
+        if (isDatabaseSchemaError(error)) {
+          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+          return null
+        }
+        logger.error('Attendance import preview scheduler scope guard failed', error)
         res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Scheduler scope check failed' } })
         return null
       }
@@ -22330,13 +22433,13 @@ module.exports = {
 	    context.api.http.addRoute(
 	      'POST',
 	      '/api/attendance/import/prepare',
-      withAttendanceImportPermission(async (req, res) => {
+      async (req, res) => {
         const orgId = getOrgId(req)
-        const requesterId = getUserId(req)
-        if (!requesterId) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+        const access = await assertAttendanceImportPrepareAllowed(req, res)
+        if (!access) {
           return
         }
+        const requesterId = access.userId
 
         try {
           const { token, expiresAt } = await createImportCommitToken({ db, orgId, userId: requesterId })
@@ -22356,13 +22459,13 @@ module.exports = {
           logger.error('Attendance import token prepare failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to prepare import token' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'POST',
       '/api/attendance/import/preview',
-      withAttendanceImportPermission(async (req, res) => {
+      async (req, res) => {
         const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -22371,6 +22474,12 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+        const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
+        if (!importAccess) return
 	        const userId = parsed.data.userId ?? requesterId
 	        if (!userId) {
 	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
@@ -22389,34 +22498,6 @@ module.exports = {
 	          return
 	        }
 	        const previewStartedAtMs = Date.now()
-	        if (requireImportCommitToken) {
-          if (!requesterId) {
-            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-            return
-          }
-          const commitToken = parsed.data.commitToken
-          if (!commitToken) {
-            res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
-            return
-          }
-          let tokenOk = false
-          try {
-            // Tokens are bound to the requester, not the imported row's userId.
-            tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId: requesterId })
-          } catch (error) {
-            if (error instanceof HttpError) {
-              res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
-              return
-            }
-            logger.error('Attendance import token validation failed (preview)', error)
-            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate commit token' } })
-            return
-          }
-          if (!tokenOk) {
-            res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
-            return
-          }
-        }
 
         try {
           let ruleSetConfig = null
@@ -22473,6 +22554,42 @@ module.exports = {
               })
 	            return
 	          }
+          const scopedAccess = await assertAttendanceImportPreviewAllowed(req, res, {
+            orgId,
+            rows,
+            payload: parsed.data,
+            fallbackUserId: parsed.data.userId ?? userId,
+            actorAccess: importAccess,
+          })
+          if (!scopedAccess) return
+	        if (requireImportCommitToken) {
+            if (!requesterId) {
+              res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+              return
+            }
+            const commitToken = parsed.data.commitToken
+            if (!commitToken) {
+              res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
+              return
+            }
+            let tokenOk = false
+            try {
+              // Tokens are bound to the requester, not the imported row's userId.
+              tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId: requesterId })
+            } catch (error) {
+              if (error instanceof HttpError) {
+                res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+                return
+              }
+              logger.error('Attendance import token validation failed (preview)', error)
+              res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate commit token' } })
+              return
+            }
+            if (!tokenOk) {
+              res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
+              return
+            }
+          }
 
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
@@ -22884,7 +23001,7 @@ module.exports = {
           logger.error('Attendance import preview failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview import' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
