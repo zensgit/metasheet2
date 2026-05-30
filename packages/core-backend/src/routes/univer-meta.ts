@@ -76,7 +76,6 @@ import {
 import { Logger } from '../core/logger'
 import {
   queryRecordsWithCursor,
-  buildRecordsCacheKey,
   type CursorPaginatedResult,
   type LoadedMultitableRecord,
 } from '../multitable/records'
@@ -118,7 +117,6 @@ import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-gr
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
 import {
   publishMultitableSheetRealtime as publishMultitableSheetRealtimeShared,
-  setRealtimeCacheInvalidator,
   type MultitableSheetRealtimePayload as SharedRealtimePayload,
 } from '../multitable/realtime-publish'
 import {
@@ -335,36 +333,6 @@ let multitableAttachmentStorage: StorageServiceImpl | null = null
 const metaSheetSummaryCache = new Map<string, { id: string; name: string }>()
 const metaFieldCache = new Map<string, UniverMetaField[]>()
 const metaViewConfigCache = new Map<string, UniverMetaViewConfig>()
-
-// ---------------------------------------------------------------------------
-// Lightweight query-result cache for cursor-paginated record queries
-// ---------------------------------------------------------------------------
-type RecordsCacheEntry = { data: unknown; expiresAt: number }
-const recordsQueryCache = new Map<string, RecordsCacheEntry>()
-const RECORDS_CACHE_TTL_MS = 30_000
-
-function getRecordsCache(key: string): unknown | null {
-  const entry = recordsQueryCache.get(key)
-  if (!entry) return null
-  if (Date.now() >= entry.expiresAt) {
-    recordsQueryCache.delete(key)
-    return null
-  }
-  return entry.data
-}
-
-function setRecordsCache(key: string, data: unknown): void {
-  recordsQueryCache.set(key, { data, expiresAt: Date.now() + RECORDS_CACHE_TTL_MS })
-}
-
-function invalidateRecordsCacheForSheet(sheetId: string): void {
-  const prefix = `mt:records:${sheetId}:`
-  for (const key of recordsQueryCache.keys()) {
-    if (key.startsWith(prefix)) {
-      recordsQueryCache.delete(key)
-    }
-  }
-}
 
 type UniverMetaBase = {
   id: string
@@ -3274,9 +3242,6 @@ class PermissionError extends Error {
 
 export function univerMetaRouter(): Router {
   const router = Router()
-
-  // Wire up the shared realtime cache invalidator
-  setRealtimeCacheInvalidator(invalidateRecordsCacheForSheet)
 
   router.get('/bases', async (req: Request, res: Response) => {
     try {
@@ -7509,14 +7474,42 @@ export function univerMetaRouter(): Router {
     try {
       const pool = poolManager.get()
 
-      // Check cache first
-      const sort = sortField ? { fieldId: sortField, direction: sortDir } : undefined
-      const cacheKey = buildRecordsCacheKey(sheetId, { filter, sort, cursor })
-      const cached = getRecordsCache(cacheKey)
-      if (cached) {
-        return res.json(cached)
+      // F0a (#2106 §3 F0a / §4): this cursor-list endpoint previously had NO authorization, NO field
+      // mask, and a subject-less response cache — any authenticated caller could read any sheet's full
+      // records by id, and filter.*/sortField over a denied field was an oracle a data mask alone would
+      // not close. Apply the full read gate (mirrors GET /view): sheet canRead → layer-2 ∧ layer-3 field
+      // mask → filter/sort selection gate → record-permission filter. The response cache is REMOVED (see
+      // the deleted records-query-cache block): a subject-scoped mask cannot ride a subject-less cache key
+      // without cross-subject poisoning, and this is not the grid hot path (the grid uses GET /view), so
+      // dropping the cache is smaller and safer than designing a subject-aware key.
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
+
+      // Field-read gate: layer-2 (property.hidden) ∧ layer-3 (field_permissions.visible) — the #2015
+      // composite shared with GET /view. hiddenFieldIds:[] keeps layer-1 a display-only concern (this list
+      // endpoint takes a sheetId, not a viewId, so layer-1 does not apply here). access.userId is
+      // guaranteed truthy past the 401 above.
+      const fields = await loadSheetFields(pool as unknown as { query: QueryFn }, sheetId)
+      const visiblePropertyFields = filterVisiblePropertyFields(fields)
+      const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
+      const securityFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
+      const allowedFieldIds = new Set(
+        visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id),
+      )
+
+      // Selection gate (#2044 parity): filter.*/sortField over a field the caller cannot read (denied,
+      // statically hidden, or non-existent — all ∉ allowedFieldIds) is a value/ordering oracle that
+      // survives the data mask. Reject with one generic 400 whose message names NO field and is identical
+      // for denied vs non-existent, so it cannot be used to probe field existence.
+      const selectionFieldIds = [...Object.keys(filter), ...(sortField ? [sortField] : [])]
+      if (selectionFieldIds.some((fieldId) => !allowedFieldIds.has(fieldId))) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Field not permitted for filter/sort' } })
       }
 
+      const sort = sortField ? { fieldId: sortField, direction: sortDir } : undefined
       const result: CursorPaginatedResult<LoadedMultitableRecord> = await queryRecordsWithCursor({
         query: pool.query.bind(pool),
         sheetId,
@@ -7526,15 +7519,33 @@ export function univerMetaRouter(): Router {
         filter,
       })
 
+      // Record-permission filter (parity with GET /view): drop records the subject cannot read when
+      // record-level assignments exist. Read is grant-additive today, so this is mostly defense-in-depth,
+      // but keeps GET /records' record posture identical to GET /view.
+      let items = result.items
+      if (!access.isAdminRole && access.userId && items.length > 0) {
+        const hasRecordPerms = await hasRecordPermissionAssignments(pool.query.bind(pool), sheetId)
+        if (hasRecordPerms) {
+          const recordScopeMap = await loadRecordPermissionScopeMap(
+            pool.query.bind(pool),
+            sheetId,
+            items.map((r) => r.id),
+            access.userId,
+          )
+          if (recordScopeMap.size > 0) {
+            items = items.filter((r) => deriveRecordPermissions(r.id, capabilities, recordScopeMap).canRead)
+          }
+        }
+      }
+
       const body = {
         ok: true,
         data: {
-          records: result.items.map((r) => ({ id: r.id, version: r.version, data: r.data })),
+          records: items.map((r) => ({ id: r.id, version: r.version, data: filterRecordDataByFieldIds(r.data, allowedFieldIds) })),
           nextCursor: result.nextCursor,
           hasMore: result.hasMore,
         },
       }
-      setRecordsCache(cacheKey, body)
       return res.json(body)
     } catch (err: any) {
       if (err?.code === 'VALIDATION_ERROR') {
