@@ -14,6 +14,53 @@ import express from 'express'
 import request from 'supertest'
 import { dashboardRouter, getDashboardService } from '../../src/routes/dashboard'
 
+vi.mock('../../src/integration/db/connection-pool', () => ({
+  poolManager: {
+    get: () => ({
+      getInternalPool: () => ({}),
+      query: vi.fn(),
+    }),
+  },
+}))
+
+vi.mock('../../src/multitable/loaders', () => ({
+  loadFieldsForSheet: vi.fn(async () => []),
+}))
+
+vi.mock('../../src/multitable/permission-service', () => ({
+  resolveSheetReadableCapabilities: vi.fn(async () => ({
+    access: { userId: 'unit-user' },
+    capabilities: {
+      canRead: true,
+      canCreateRecord: true,
+      canEditRecord: true,
+      canDeleteRecord: true,
+      canManageFields: true,
+      canManageSheetAccess: true,
+      canManageViews: true,
+      canComment: true,
+      canManageAutomation: true,
+      canExport: true,
+    },
+  })),
+  resolveSheetCapabilities: vi.fn(async () => ({
+    access: { userId: 'unit-user' },
+    capabilities: {
+      canRead: true,
+      canCreateRecord: true,
+      canEditRecord: true,
+      canDeleteRecord: true,
+      canManageFields: true,
+      canManageSheetAccess: true,
+      canManageViews: true,
+      canComment: true,
+      canManageAutomation: true,
+      canExport: true,
+    },
+  })),
+  loadFieldPermissionScopeMap: vi.fn(async () => new Map()),
+}))
+
 // Mount on a fresh app in the same way index.ts does.
 function buildApp() {
   const app = express()
@@ -62,7 +109,7 @@ describe('dashboardRouter HTTP mounting', () => {
   })
 
   it('POST /api/multitable/sheets/:sheetId/charts creates and returns a chart', async () => {
-    vi.spyOn(service, 'createChart').mockResolvedValue({
+    const createChart = vi.spyOn(service, 'createChart').mockResolvedValue({
       id: 'new-chart',
       sheetId: 'sheet-a',
       name: 'New',
@@ -76,11 +123,18 @@ describe('dashboardRouter HTTP mounting', () => {
       .expect(201)
 
     expect(res.body).toMatchObject({ id: 'new-chart', name: 'New', type: 'bar' })
+    expect(createChart).toHaveBeenCalledWith('sheet-a', expect.objectContaining({
+      createdBy: 'unit-user',
+    }))
   })
 
   it('GET /api/multitable/sheets/:sheetId/charts/:id/data returns the computed data', async () => {
     vi.spyOn(service, 'getChart').mockResolvedValue({
-      id: 'chart-1', sheetId: 'sheet-a', name: 'c', type: 'bar',
+      id: 'chart-1',
+      sheetId: 'sheet-a',
+      name: 'c',
+      type: 'bar',
+      dataSource: { aggregation: { function: 'count' } },
     } as any)
     vi.spyOn(service, 'getChartData').mockResolvedValue({
       dataPoints: [{ label: 'A', value: 1 }],
@@ -95,7 +149,11 @@ describe('dashboardRouter HTTP mounting', () => {
 
   it('GET on a chart that belongs to a different sheet returns 404', async () => {
     vi.spyOn(service, 'getChart').mockResolvedValue({
-      id: 'chart-x', sheetId: 'sheet-OTHER', name: 'c', type: 'bar',
+      id: 'chart-x',
+      sheetId: 'sheet-OTHER',
+      name: 'c',
+      type: 'bar',
+      dataSource: { aggregation: { function: 'count' } },
     } as any)
 
     await request(buildApp())

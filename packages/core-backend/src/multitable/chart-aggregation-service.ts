@@ -23,6 +23,7 @@ export interface ChartData {
     groupByField?: string
     aggregationFunction?: string
     recordCount?: number
+    restricted?: boolean
   }
 }
 
