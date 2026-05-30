@@ -196,3 +196,21 @@ test('deploy workflow checks deploy host disk before sync archive extraction', (
     'deploy host sync disk gate must run before tar extraction',
   )
 })
+
+test('deploy workflow protects git sync from pre-synced host file dirtiness', () => {
+  const raw = readFileSync(deployWorkflowPath, 'utf8')
+
+  assertContains(raw, 'git fetch origin main', 'deploy git sync')
+  assertContains(raw, 'git diff --quiet -- docker-compose.app.yml docker/nginx.conf scripts/ops/attendance-preflight.sh', 'deploy git sync')
+  assertContains(raw, 'git stash push -m "deploy-host-presync-files" -- docker-compose.app.yml docker/nginx.conf scripts/ops/attendance-preflight.sh', 'deploy git sync')
+  assertContains(raw, 'git checkout main', 'deploy git sync')
+  assertContains(raw, 'git merge --ff-only origin/main', 'deploy git sync')
+  assert.ok(
+    raw.indexOf('git stash push -m "deploy-host-presync-files"') < raw.indexOf('git checkout main'),
+    'deploy workflow must stash pre-synced host files before checking out main',
+  )
+  assert.ok(
+    raw.indexOf('git stash push -m "deploy-host-presync-files"') < raw.indexOf('git merge --ff-only origin/main'),
+    'deploy workflow must stash pre-synced host files before merging origin/main',
+  )
+})
