@@ -112,6 +112,26 @@ const shiftAssignmentId = '00000000-0000-4000-8000-000000000304'
 const rotationRuleId = '00000000-0000-4000-8000-000000000305'
 const rotationAssignmentId = '00000000-0000-4000-8000-000000000306'
 
+function scheduleGroupRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: scheduleGroupId,
+    org_id: 'default',
+    name: 'Line A',
+    code: 'line-a',
+    description: null,
+    attendance_group_id: null,
+    parent_id: null,
+    department_ref: null,
+    source: 'manual',
+    is_active: true,
+    created_by: 'admin-1',
+    updated_by: 'admin-1',
+    created_at: '2026-05-30T10:00:00.000Z',
+    updated_at: '2026-05-30T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
 function schedulerScopeRow(overrides: Record<string, unknown> = {}) {
   return {
     id: 'scope-1',
@@ -132,6 +152,21 @@ function schedulerScopeRow(overrides: Record<string, unknown> = {}) {
     updated_at: '2026-05-30T10:00:00.000Z',
     ...overrides,
   }
+}
+
+function schedulerScopeEditRow(overrides: Record<string, unknown> = {}) {
+  return schedulerScopeRow({
+    actions: ['edit'],
+    scope: {
+      scheduleGroupIds: [scheduleGroupId],
+      attendanceGroupIds: [],
+      userIds: [],
+      departments: [],
+      roles: [],
+      roleTags: [],
+    },
+    ...overrides,
+  })
 }
 
 function scheduleGroupMemberRow(overrides: Record<string, unknown> = {}) {
@@ -920,6 +955,168 @@ describe('attendance UUID route validation', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toEqual({ ok: true, data: { id: scheduleGroupMemberId } })
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('DELETE FROM attendance_schedule_group_members'))).toBe(true)
+  })
+
+  it('keeps schedule group creation admin-only because new groups have no scoped target id yet', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/schedule-groups', {
+      body: { name: 'Line B' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('INSERT INTO attendance_schedule_groups'))).toBe(false)
+  })
+
+  it('lets full attendance admins edit schedule groups without scheduler scopes', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, true)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT * FROM attendance_schedule_groups WHERE id = $1')) return [scheduleGroupRow()]
+      if (sql.includes('UPDATE attendance_schedule_groups') && sql.includes('SET name = $3')) {
+        return [scheduleGroupRow({ name: 'Line A Prime', updated_by: params[10] })]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'PUT /api/attendance/schedule-groups/:id', {
+      params: { id: scheduleGroupId },
+      body: { name: 'Line A Prime' },
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { id: scheduleGroupId, name: 'Line A Prime' } })
+    expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining('FROM attendance_scheduler_scopes'), expect.anything())
+  })
+
+  it('lets scoped non-admin schedulers edit schedule groups inside their scheduler scope', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT * FROM attendance_schedule_groups WHERE id = $1')) return [scheduleGroupRow()]
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeEditRow()]
+      if (sql.includes('UPDATE attendance_schedule_groups') && sql.includes('SET name = $3')) {
+        return [scheduleGroupRow({ name: 'Line A Prime', updated_by: params[10] })]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'PUT /api/attendance/schedule-groups/:id', {
+      params: { id: scheduleGroupId },
+      body: { name: 'Line A Prime' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { id: scheduleGroupId, name: 'Line A Prime' } })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM attendance_scheduler_scopes'),
+      ['default', 'scheduler-1', [], []],
+    )
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE attendance_schedule_groups'),
+      [
+        scheduleGroupId,
+        'default',
+        'Line A Prime',
+        'line-a',
+        null,
+        null,
+        null,
+        null,
+        'manual',
+        true,
+        'scheduler-1',
+      ],
+    )
+  })
+
+  it('rejects scoped schedule group edits without edit action and does not write', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT * FROM attendance_schedule_groups WHERE id = $1')) return [scheduleGroupRow()]
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRow()]
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'PUT /api/attendance/schedule-groups/:id', {
+      params: { id: scheduleGroupId },
+      body: { name: 'Line A Prime' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('UPDATE attendance_schedule_groups'))).toBe(false)
+  })
+
+  it('lets scoped non-admin schedulers deactivate schedule groups inside their scheduler scope', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT * FROM attendance_schedule_groups WHERE id = $1')) return [scheduleGroupRow()]
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeEditRow()]
+      if (sql.includes('UPDATE attendance_schedule_groups') && sql.includes('SET is_active = false')) {
+        return [scheduleGroupRow({ is_active: false, updated_by: params[2] })]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'DELETE /api/attendance/schedule-groups/:id', {
+      params: { id: scheduleGroupId },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { id: scheduleGroupId, isActive: false } })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('SET is_active = false'),
+      [scheduleGroupId, 'default', 'scheduler-1'],
+    )
+  })
+
+  it('does not disclose missing schedule groups to scoped non-admin schedulers', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT * FROM attendance_schedule_groups WHERE id = $1')) return []
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'DELETE /api/attendance/schedule-groups/:id', {
+      params: { id: scheduleGroupId },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining('FROM attendance_scheduler_scopes'), expect.anything())
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('UPDATE attendance_schedule_groups'))).toBe(false)
   })
 
   it('lets full attendance admins create shift assignments without scheduler scopes', async () => {

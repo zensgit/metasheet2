@@ -15325,6 +15325,18 @@ module.exports = {
       })
     }
 
+    async function assertAttendanceScheduleGroupEditAllowed(req, res, { groupId, actorAccess } = {}) {
+      const access = actorAccess ?? await resolveAttendanceSchedulerScopeActor(req, res)
+      if (!access) return null
+      if (access.fullAdmin) return access
+
+      return assertAttendanceSchedulerScopeAllowed(req, res, {
+        action: 'edit',
+        target: { scheduleGroupIds: [groupId] },
+        actorAccess: access,
+      })
+    }
+
     function withAttendanceGroupMemberAccess(handler) {
       return async (req, res, next) => {
         const groupId = normalizeUuidString(req.params.id)
@@ -27456,28 +27468,35 @@ module.exports = {
     context.api.http.addRoute(
       'PUT',
       '/api/attendance/schedule-groups/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const parsed = scheduleGroupSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
         const orgId = getOrgId(req)
-        const actorId = getUserId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
           return
         }
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         try {
           const existingRows = await db.query(
             'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
             [groupId, orgId]
           )
           if (!existingRows.length) {
+            if (!actorAccess.fullAdmin) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule group not found' } })
             return
           }
+          const access = await assertAttendanceScheduleGroupEditAllowed(req, res, { groupId, actorAccess })
+          if (!access) return
           const input = normalizeAttendanceScheduleGroupInput(parsed.data, existingRows[0])
           const rows = await db.query(
             `UPDATE attendance_schedule_groups
@@ -27504,7 +27523,7 @@ module.exports = {
               input.departmentRef,
               input.source,
               input.isActive,
-              actorId,
+              access.userId,
             ]
           )
           res.json({ ok: true, data: mapAttendanceScheduleGroupRow(rows[0]) })
@@ -27524,27 +27543,42 @@ module.exports = {
           logger.error('Attendance schedule group update failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update schedule group' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'DELETE',
       '/api/attendance/schedule-groups/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const orgId = getOrgId(req)
-        const actorId = getUserId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
           return
         }
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
+            [groupId, orgId]
+          )
+          if (!existingRows.length) {
+            if (!actorAccess.fullAdmin) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule group not found' } })
+            return
+          }
+          const access = await assertAttendanceScheduleGroupEditAllowed(req, res, { groupId, actorAccess })
+          if (!access) return
           const rows = await db.query(
             `UPDATE attendance_schedule_groups
              SET is_active = false, updated_by = $3, updated_at = now()
              WHERE id = $1 AND org_id = $2
              RETURNING *`,
-            [groupId, orgId, actorId]
+            [groupId, orgId, access.userId]
           )
           if (!rows.length) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule group not found' } })
@@ -27559,7 +27593,7 @@ module.exports = {
           logger.error('Attendance schedule group delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete schedule group' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(

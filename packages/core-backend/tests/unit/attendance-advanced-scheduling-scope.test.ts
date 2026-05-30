@@ -16,9 +16,15 @@ const migrationSource = readFileSync(
   'utf8',
 )
 
-function expectAdminRoute(path: string) {
+function expectAdminRoute(method: string, path: string) {
   const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const pattern = new RegExp(`['"]${escaped}['"],\\s*\\n\\s*withPermission\\(['"]attendance:admin['"]`)
+  const pattern = new RegExp(`['"]${method}['"],\\s*\\n\\s*['"]${escaped}['"],\\s*\\n\\s*withPermission\\(['"]attendance:admin['"]`)
+  expect(pluginSource).toMatch(pattern)
+}
+
+function expectDirectAsyncRoute(method: string, path: string) {
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`['"]${method}['"],\\s*\\n\\s*['"]${escaped}['"],\\s*\\n\\s*async \\(req, res\\)`)
   expect(pluginSource).toMatch(pattern)
 }
 
@@ -34,33 +40,34 @@ describe('attendance advanced scheduling scope foundation', () => {
     expect(migrationSource).not.toContain("dropTable('attendance_group_members')")
   })
 
-  it('guards the new scheduling group and scheduler-scope routes behind attendance admin or scoped dispatch', () => {
+  it('guards the new scheduling group and scheduler-scope routes behind attendance admin or scoped scheduler actions', () => {
     [
-      '/api/attendance/schedule-groups',
-      '/api/attendance/schedule-groups/:id',
-      '/api/attendance/schedule-groups/:id/members',
-      '/api/attendance/scheduler-scopes',
-      '/api/attendance/scheduler-scopes/:id',
-    ].forEach(expectAdminRoute)
+      ['GET', '/api/attendance/schedule-groups'],
+      ['POST', '/api/attendance/schedule-groups'],
+      ['GET', '/api/attendance/schedule-groups/:id'],
+      ['GET', '/api/attendance/schedule-groups/:id/members'],
+      ['GET', '/api/attendance/scheduler-scopes'],
+      ['POST', '/api/attendance/scheduler-scopes'],
+      ['PUT', '/api/attendance/scheduler-scopes/:id'],
+      ['DELETE', '/api/attendance/scheduler-scopes/:id'],
+    ].forEach(([method, path]) => expectAdminRoute(method, path))
     expect(pluginSource).toContain('SCHEDULER_SCOPE_FORBIDDEN')
-    expect(pluginSource).toMatch(
-      /'POST',\s*\n\s*'\/api\/attendance\/schedule-groups\/:id\/members',\s*\n\s*async \(req, res\)/,
-    )
-    expect(pluginSource).toMatch(
-      /'DELETE',\s*\n\s*'\/api\/attendance\/schedule-groups\/:id\/members\/:memberId',\s*\n\s*async \(req, res\)/,
-    )
+    expectDirectAsyncRoute('POST', '/api/attendance/schedule-groups/:id/members')
+    expectDirectAsyncRoute('DELETE', '/api/attendance/schedule-groups/:id/members/:memberId')
+    expectDirectAsyncRoute('PUT', '/api/attendance/schedule-groups/:id')
+    expectDirectAsyncRoute('DELETE', '/api/attendance/schedule-groups/:id')
     const scopedDispatchRoutes = [
-      '/api/attendance/assignments',
-      '/api/attendance/assignments/:id',
-      '/api/attendance/rotation-assignments',
-      '/api/attendance/rotation-assignments/:id',
+      ['POST', '/api/attendance/assignments'],
+      ['PUT', '/api/attendance/assignments/:id'],
+      ['DELETE', '/api/attendance/assignments/:id'],
+      ['POST', '/api/attendance/rotation-assignments'],
+      ['PUT', '/api/attendance/rotation-assignments/:id'],
+      ['DELETE', '/api/attendance/rotation-assignments/:id'],
     ]
-    scopedDispatchRoutes.forEach((path) => {
-      const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      expect(pluginSource).toMatch(new RegExp(`['"]${escaped}['"],\\s*\\n\\s*async \\(req, res\\)`))
-    })
+    scopedDispatchRoutes.forEach(([method, path]) => expectDirectAsyncRoute(method, path))
     expect(pluginSource).toContain('resolveAttendanceScheduleAssignmentScopeTarget')
     expect(pluginSource).toContain('assertAttendanceScheduleAssignmentDispatchAllowed')
+    expect(pluginSource).toContain('assertAttendanceScheduleGroupEditAllowed')
   })
 
   it('normalizes schedule groups without overloading attendance_groups semantics', () => {
