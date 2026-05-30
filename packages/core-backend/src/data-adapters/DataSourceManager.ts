@@ -719,7 +719,7 @@ export class DataSourceManager extends EventEmitter {
     return sources
   }
 
-  async healthCheck(): Promise<Map<string, {
+  async healthCheck(filter?: { ownerId?: string }): Promise<Map<string, {
     connected: boolean
     responsive: boolean
     latency?: number
@@ -731,6 +731,15 @@ export class DataSourceManager extends EventEmitter {
     }>()
 
     for (const [id, adapter] of this.adapters) {
+      // A0.1: health is a read surface too; keep it scoped with list/get so
+      // fixing the /health route shadow does not leak cross-owner source ids.
+      if (filter?.ownerId !== undefined) {
+        const scope = this.scopes.get(id)
+        if (!scope || scope.ownerId !== filter.ownerId) {
+          continue
+        }
+      }
+
       const startTime = Date.now()
       const connected = adapter.isConnected()
       let responsive = false
