@@ -13598,10 +13598,19 @@ async function batchUpsertAttendanceRecordsUnnest(client, rows) {
 }
 
 function resolveAttendanceImportRawClient(client) {
-  if (!client || typeof client !== 'object') return null
-  const raw = client.__rawClient ?? client.rawClient ?? null
-  if (!raw || typeof raw.query !== 'function') return null
-  return raw
+  const seen = new Set()
+  let current = client
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current)
+    const nested = current.__rawClient ?? current.rawClient ?? null
+    if (nested && typeof nested === 'object' && !seen.has(nested)) {
+      current = nested
+      continue
+    }
+    if (typeof current.query === 'function') return current
+    break
+  }
+  return null
 }
 
 function buildAttendanceImportCopyQuery(copyFromFactory, sql) {
@@ -15027,6 +15036,7 @@ module.exports = {
     attendanceReportRecordRowKey,
     buildAttendanceImportMultiPunchMeta,
     computeAttendanceRecordUpsertValues,
+    resolveAttendanceImportRawClient,
     buildAttendanceImportCopyQuery,
     attachAttendanceImportCopyStreamErrorSink,
     ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
