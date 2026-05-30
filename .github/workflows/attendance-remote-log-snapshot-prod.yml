@@ -204,7 +204,7 @@ jobs:
             echo "gh run download ${GITHUB_RUN_ID} -n \"${ARTIFACT_NAME:-attendance-remote-log-snapshot-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}\" -D \"output/playwright/ga/${GITHUB_RUN_ID}/remote-log-snapshot\""
             echo '```'
           } >"$body"
-          gh issue comment "$ISSUE_NUMBER" --body-file "$body"
+          gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE_NUMBER" --body-file "$body"
 
       - name: Fail on snapshot error
         if: steps.remote_snapshot.outputs.snapshot_rc != '0'

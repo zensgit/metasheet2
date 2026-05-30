@@ -40,6 +40,7 @@ summary_path="$OUTPUT_DIR/snapshot-summary.md"
   echo "- Until: \`${UNTIL:-<none>}\`"
   echo "- Tail lines: \`${TAIL_LINES}\`"
   echo "- Containers: \`${CONTAINERS_CSV}\`"
+  echo "- Docker events: \`docker-events.jsonl\`"
 } >"$summary_path"
 
 {
@@ -69,6 +70,12 @@ summary_path="$OUTPUT_DIR/snapshot-summary.md"
 
 run_redacted docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' >"$OUTPUT_DIR/docker-ps.txt" || true
 run_redacted docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}' >"$OUTPUT_DIR/docker-stats.txt" || true
+events_until="${UNTIL:-$generated_at}"
+run_redacted docker events \
+  --since "$SINCE" \
+  --until "$events_until" \
+  --filter type=container \
+  --format '{{json .}}' >"$OUTPUT_DIR/docker-events.jsonl" || true
 
 IFS=',' read -r -a containers <<< "$CONTAINERS_CSV"
 for raw_container in "${containers[@]}"; do
