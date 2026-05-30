@@ -73,6 +73,35 @@ test('reconciles CSV cap and normalizes literal newline env files without printi
   }
 })
 
+test('can ensure metrics scrape token without printing its value', async () => {
+  const tmp = makeTmpDir()
+  const envFile = path.join(tmp, 'app.env')
+  try {
+    writeFileSync(
+      envFile,
+      'NODE_ENV=production\nJWT_SECRET=already-strong-secret-value-123456\nBCRYPT_SALT_ROUNDS=12\n',
+    )
+
+    const result = await runScript({
+      ENV_FILE: envFile,
+      CSV_MAX_ROWS: '100000',
+      ENSURE_METRICS_SCRAPE_TOKEN: 'true',
+      DEPLOY_METRICS_SCRAPE_TOKEN: 'metrics-secret-that-must-not-print',
+      RUN_ATTENDANCE_PREFLIGHT: 'false',
+      RESTART_BACKEND: 'false',
+    })
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /METRICS_SCRAPE_TOKEN injected/)
+    assert.doesNotMatch(result.stdout, /metrics-secret-that-must-not-print/)
+    assert.doesNotMatch(result.stderr, /metrics-secret-that-must-not-print/)
+    const envText = readFileSync(envFile, 'utf8')
+    assert.match(envText, /^METRICS_SCRAPE_TOKEN=metrics-secret-that-must-not-print$/m)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
 test('recreates backend and verifies runtime CSV cap', async () => {
   const tmp = makeTmpDir()
   const envFile = path.join(tmp, 'app.env')
@@ -117,6 +146,54 @@ exit 9
     const dockerCalls = readFileSync(dockerLog, 'utf8')
     assert.match(dockerCalls, /compose -f .* up -d --no-deps --force-recreate backend/)
     assert.match(dockerCalls, /compose -f .* exec -T backend sh -lc/)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('verifies backend runtime metrics scrape token when requested', async () => {
+  const tmp = makeTmpDir()
+  const envFile = path.join(tmp, 'app.env')
+  const composeFile = path.join(tmp, 'docker-compose.yml')
+  const binDir = path.join(tmp, 'bin')
+  try {
+    writeFileSync(envFile, 'JWT_SECRET=already-strong-secret-value-123456\nBCRYPT_SALT_ROUNDS=12\n')
+    writeFileSync(composeFile, 'services:\n  backend:\n    image: test\n')
+    mkdirSync(binDir)
+    const dockerPath = path.join(binDir, 'docker')
+    writeFileSync(dockerPath, `#!/usr/bin/env bash
+if [[ "$1" == "compose" && "$2" == "version" ]]; then
+  exit 0
+fi
+if [[ "$1" == "compose" && "$4" == "up" ]]; then
+  exit 0
+fi
+if [[ "$1" == "compose" && "$4" == "exec" ]]; then
+  if [[ "$*" == *"METRICS_SCRAPE_TOKEN"* ]]; then
+    printf 'runtime-metrics-token'
+  else
+    printf '100000'
+  fi
+  exit 0
+fi
+exit 9
+`)
+    chmodSync(dockerPath, 0o755)
+
+    const result = await runScript({
+      PATH: `${binDir}:${process.env.PATH || ''}`,
+      ENV_FILE: envFile,
+      COMPOSE_FILE: composeFile,
+      CSV_MAX_ROWS: '100000',
+      ENSURE_METRICS_SCRAPE_TOKEN: 'true',
+      RUN_ATTENDANCE_PREFLIGHT: 'false',
+      RESTART_BACKEND: 'true',
+    })
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /METRICS_SCRAPE_TOKEN generated and persisted/)
+    assert.match(result.stdout, /runtime METRICS_SCRAPE_TOKEN present/)
+    assert.doesNotMatch(result.stdout, /runtime-metrics-token/)
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }

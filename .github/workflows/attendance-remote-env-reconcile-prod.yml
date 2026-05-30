@@ -9,6 +9,10 @@ on:
         description: 'Value for ATTENDANCE_IMPORT_CSV_MAX_ROWS (default 100000)'
         required: false
         default: '100000'
+      ensure_metrics_scrape_token:
+        description: 'Ensure backend runtime METRICS_SCRAPE_TOKEN exists for Phase 5 metrics auth fallback (true/false)'
+        required: false
+        default: 'true'
       skip_host_sync:
         description: 'Optional: skip deploy-host git sync step (true/false). Use for debugging when host sync is broken.'
         required: false
@@ -36,9 +40,11 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
           CSV_MAX_ROWS: ${{ github.event.inputs.csv_max_rows || '100000' }}
+          ENSURE_METRICS_SCRAPE_TOKEN: ${{ github.event.inputs.ensure_metrics_scrape_token || 'true' }}
           SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
           DEPLOY_JWT_SECRET: ${{ secrets.DEPLOY_JWT_SECRET || secrets.JWT_SECRET || '' }}
           DEPLOY_BCRYPT_SALT_ROUNDS: ${{ vars.DEPLOY_BCRYPT_SALT_ROUNDS || '12' }}
+          DEPLOY_METRICS_SCRAPE_TOKEN: ${{ secrets.METRICS_SCRAPE_TOKEN || '' }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -49,6 +55,7 @@ jobs:
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
           CSV_MAX_ROWS="${CSV_MAX_ROWS:-100000}"
+          ENSURE_METRICS_SCRAPE_TOKEN="${ENSURE_METRICS_SCRAPE_TOKEN:-true}"
           SKIP_HOST_SYNC="${SKIP_HOST_SYNC:-false}"
 
           if [[ ! "${CSV_MAX_ROWS}" =~ ^[0-9]+$ ]]; then
@@ -68,9 +75,11 @@ jobs:
             "DEPLOY_PATH=\"${DEPLOY_PATH}\""
             "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\""
             "CSV_MAX_ROWS=\"${CSV_MAX_ROWS}\""
+            "ENSURE_METRICS_SCRAPE_TOKEN=\"${ENSURE_METRICS_SCRAPE_TOKEN}\""
             "SKIP_HOST_SYNC=\"${SKIP_HOST_SYNC}\""
             "DEPLOY_JWT_SECRET=\"${DEPLOY_JWT_SECRET:-}\""
             "DEPLOY_BCRYPT_SALT_ROUNDS=\"${DEPLOY_BCRYPT_SALT_ROUNDS:-12}\""
+            "DEPLOY_METRICS_SCRAPE_TOKEN=\"${DEPLOY_METRICS_SCRAPE_TOKEN:-}\""
             'if [[ "${DEPLOY_PATH}" == /* ]]; then'
               '  DEPLOY_REPO_PATH="${DEPLOY_PATH}"'
             'elif [[ "${DEPLOY_PATH}" == ~/* ]]; then'
@@ -118,7 +127,7 @@ jobs:
             '  reconcile_rc="$host_sync_rc"'
             "else"
               "  set +e"
-              '  CSV_MAX_ROWS="${CSV_MAX_ROWS}" ENV_FILE="docker/app.env" COMPOSE_FILE="${DEPLOY_COMPOSE_FILE}" NGINX_CONF="docker/nginx.conf" DEPLOY_JWT_SECRET="${DEPLOY_JWT_SECRET:-}" DEPLOY_BCRYPT_SALT_ROUNDS="${DEPLOY_BCRYPT_SALT_ROUNDS:-12}" RESTART_BACKEND=true scripts/ops/attendance-reconcile-csv-cap.sh'
+              '  CSV_MAX_ROWS="${CSV_MAX_ROWS}" ENV_FILE="docker/app.env" COMPOSE_FILE="${DEPLOY_COMPOSE_FILE}" NGINX_CONF="docker/nginx.conf" DEPLOY_JWT_SECRET="${DEPLOY_JWT_SECRET:-}" DEPLOY_BCRYPT_SALT_ROUNDS="${DEPLOY_BCRYPT_SALT_ROUNDS:-12}" ENSURE_METRICS_SCRAPE_TOKEN="${ENSURE_METRICS_SCRAPE_TOKEN}" DEPLOY_METRICS_SCRAPE_TOKEN="${DEPLOY_METRICS_SCRAPE_TOKEN:-}" RESTART_BACKEND=true scripts/ops/attendance-reconcile-csv-cap.sh'
               '  reconcile_rc=$?'
               "  set -e"
             "fi"
@@ -140,6 +149,7 @@ jobs:
         env:
           RECONCILE_RC: ${{ steps.remote_reconcile.outputs.reconcile_rc }}
           CSV_MAX_ROWS: ${{ github.event.inputs.csv_max_rows || '100000' }}
+          ENSURE_METRICS_SCRAPE_TOKEN: ${{ github.event.inputs.ensure_metrics_scrape_token || 'true' }}
           SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
         run: |
           set -euo pipefail
@@ -158,6 +168,7 @@ jobs:
           echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Remote exit code: \`${RECONCILE_RC:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Applied target: \`ATTENDANCE_IMPORT_CSV_MAX_ROWS=${CSV_MAX_ROWS}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Ensure metrics scrape token: \`${ENSURE_METRICS_SCRAPE_TOKEN}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Skip host sync: \`${SKIP_HOST_SYNC}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
