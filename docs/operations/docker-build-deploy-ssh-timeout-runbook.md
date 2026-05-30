@@ -9,9 +9,9 @@ all succeed), but the downstream `deploy` job fails at the very first
 step:
 
 - failing step: `Sync deploy host files`
-  (`.github/workflows/docker-build.yml:71`)
+  (`.github/workflows/docker-build.yml:83` on current main)
 - failing command: the first `ssh` inside that step
-  (`.github/workflows/docker-build.yml:88`)
+  (`.github/workflows/docker-build.yml:100` on current main)
 - failing error shape:
 
   ```text
@@ -246,8 +246,11 @@ system API. It is operator documentation only.
 
 - Workflow: `Build and Push Docker Images` -
   `.github/workflows/docker-build.yml` (`name:` on line 1, `deploy:`
-  job starts at line 64, `Sync deploy host files` step at line 71,
-  first `ssh` command inside that step on line 88).
+  job starts at line 76, `Sync deploy host files` step at line 83,
+  first `ssh` command inside that step on line 100 as of
+  `origin/main` `e4f5d1a91`). If the YAML shifts, match by workflow
+  name, deploy job, step name, and the first `ssh $ssh_opts` invocation
+  rather than treating the line numbers as the contract.
 - Tracking issue: #1772.
 - First failing run: workflow run `26293551077` after the
   `d23472167` main commit (`fix(multitable): hint when calendar

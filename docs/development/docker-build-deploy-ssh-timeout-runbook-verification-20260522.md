@@ -25,8 +25,8 @@ Each marker the task required, counted via `grep -cF` against
 | `Re-run failed jobs` | 2 (section 9 instruction + the closing reference) |
 | `26293551077` | 3 (cited as the workflow run, in symptom + step 9 + "Related" footer) |
 | `#1772` | 3 (top tracking line + step 9 reference + "Related" footer) |
-| `docker-build.yml:71` | 1 (the failing step's exact line) |
-| `docker-build.yml:88` | 1 (the failing `ssh` command's exact line inside the step) |
+| `docker-build.yml:83` | 1 (the failing step's current exact line) |
+| `docker-build.yml:100` | 1 (the failing `ssh` command's current exact line inside the step) |
 
 All eight checklist items from the task acceptance are present
 (DNS/IP, port 22, security group / firewall, deploy user, deploy key,
@@ -35,19 +35,19 @@ GitHub runner outbound, manual `ssh -v`, when to rerun).
 ### 2. Workflow grounding (cite-only, no edit)
 
 The runbook cites `.github/workflows/docker-build.yml` line numbers
-verified against `origin/main` (HEAD `18dccc36d` at the time of this
-PR's branch creation):
+verified against current `origin/main` (HEAD `e4f5d1a91` at the time of
+the 2026-05-30 refresh):
 
 - `name: Build and Push Docker Images` on line 1
 - `jobs:` on line 19
-- `deploy:` job on line 64
-- `Sync deploy host files` step on line 71
-- the first `ssh` command inside that step on line 88
+- `deploy:` job on line 76
+- `Sync deploy host files` step on line 83
+- the first `ssh` command inside that step on line 100
 
 The runbook does **not** modify the workflow YAML. The line numbers are
-load-bearing for operator triage, so they are cited; the runbook also
-notes "the workflow is fine when the host is reachable; do not add a
-debug step to docker-build.yml itself".
+helpful for operator triage but intentionally not the contract; the
+runbook now tells operators to match by workflow name, deploy job, step
+name, and first `ssh $ssh_opts` invocation if the YAML shifts.
 
 ### 3. Secret-shape sweep
 
@@ -91,7 +91,7 @@ git diff --check  -> exit 0
 | Operator checklist: GitHub runner outbound IPs | section 5 cites `https://api.github.com/meta` |
 | Operator checklist: manual `ssh -v` | section 8 with the `ssh -vv -o ConnectTimeout=10 ...` placeholder-only reproduction shape |
 | Operator checklist: when to rerun failed jobs | section 9 with the "fix first, rerun once" discipline |
-| Cite #1772 and workflow failure point | tracking line + step 9 + Related-workflows footer; line numbers 71 and 88 for the step and the ssh call |
+| Cite #1772 and workflow failure point | tracking line + step 9 + Related-workflows footer; current line numbers 83 and 100 for the step and ssh call, with an explicit "match by shape if YAML shifts" caveat |
 | Design MD + verification MD | this PR adds both |
 | No secret / host / user / key emitted | secret-shape sweep above; `0.0.0.0/0` is the only IPv4 literal and it is the CIDR-any placeholder, not a leak |
 

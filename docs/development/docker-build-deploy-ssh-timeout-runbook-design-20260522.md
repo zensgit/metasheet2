@@ -52,15 +52,17 @@ The failure is operational, not code. Three signals say so:
   (firewall, SG, sshd state), not code changes.
 
 So the deliverable is operator knowledge in a single place, citing the
-exact step and line in the workflow so an operator triaging the next
-recurrence does not have to read the YAML to find what failed.
+workflow, deploy job, step name, and current line references so an
+operator triaging the next recurrence does not have to read the YAML to
+find what failed.
 
 ## Runbook shape decisions
 
 1. **Symptom-first**, not failure-class-first. The runbook opens with
-   the exact step name, the exact line number, and the exact sanitized
-   error text. The operator's eye should match-in-one-pass without
-   reading the whole doc.
+   the exact step name, current line references, and the exact
+   sanitized error text. The operator's eye should match-in-one-pass
+   without reading the whole doc; if the workflow YAML shifts, the
+   workflow / job / step / first-`ssh` shape remains the contract.
 
 2. **Order the checklist by failure probability**, not by OSI layer.
    Most recurrences will be DNS drift / cloud-SG edit / runner CIDR
