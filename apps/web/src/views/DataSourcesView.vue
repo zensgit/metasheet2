@@ -39,13 +39,13 @@
       <!-- SQL connection -->
       <div v-if="isSql" class="data-sources__grid">
         <label>Host
-          <input v-model.trim="form.host" data-testid="ds-field-host" placeholder="10.0.0.5" />
+          <input v-model.trim="form.host" required data-testid="ds-field-host" placeholder="10.0.0.5" />
         </label>
         <label>Port
           <input v-model.number="form.port" type="number" data-testid="ds-field-port" :placeholder="defaultPort" />
         </label>
         <label>Database
-          <input v-model.trim="form.database" data-testid="ds-field-database" placeholder="erp" />
+          <input v-model.trim="form.database" required data-testid="ds-field-database" placeholder="erp" />
         </label>
         <label>Username
           <input v-model.trim="form.username" autocomplete="off" data-testid="ds-field-username" />
@@ -58,7 +58,7 @@
       <!-- HTTP connection -->
       <div v-else class="data-sources__grid">
         <label>Base URL
-          <input v-model.trim="form.baseURL" data-testid="ds-field-baseurl" placeholder="https://api.example.com" />
+          <input v-model.trim="form.baseURL" required data-testid="ds-field-baseurl" placeholder="https://api.example.com" />
         </label>
         <label>API Key
           <input v-model="form.apiKey" type="password" autocomplete="off" data-testid="ds-field-apikey" />
