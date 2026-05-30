@@ -1307,8 +1307,8 @@
               <p class="attendance__scheduler-scope-notice" data-attendance-scheduler-scopes-intent>
                 {{ tr('These scopes are an administrative registry only and are not yet enforced at runtime. Runtime enforcement is a separate later capability.', '此处仅为管理登记，运行时尚未强制执行；运行时强制为后续独立能力。') }}
               </p>
-              <form class="attendance__scheduler-scope-form" data-attendance-scheduler-scope-form @submit.prevent="createSchedulerScope">
-                <h5>{{ tr('New scope', '新建范围') }}</h5>
+              <form class="attendance__scheduler-scope-form" data-attendance-scheduler-scope-form @submit.prevent="submitSchedulerScope">
+                <h5>{{ schedulerScopeEditingId ? tr('Edit scope', '编辑范围') : tr('New scope', '新建范围') }}</h5>
                 <div class="attendance__admin-grid">
                   <label class="attendance__field" for="attendance-scheduler-scope-subject-type">
                     <span>{{ tr('Subject type', '主体类型') }}</span>
@@ -1377,9 +1377,20 @@
                 <p class="attendance__field-hint">
                   {{ tr('Separate multiple values with commas or new lines. At least one target and one action are required.', '多个值用逗号或换行分隔；至少需要一个目标和一个动作。') }}
                 </p>
-                <button type="submit" class="attendance__btn" :disabled="schedulerScopeCreating" data-attendance-scheduler-scope-create>
-                  {{ schedulerScopeCreating ? tr('Creating...', '创建中...') : tr('Create scope', '创建范围') }}
-                </button>
+                <div class="attendance__scheduler-scope-form-actions">
+                  <button type="submit" class="attendance__btn" :disabled="schedulerScopeCreating" data-attendance-scheduler-scope-create>
+                    {{ schedulerScopeCreating ? tr('Saving...', '保存中...') : (schedulerScopeEditingId ? tr('Update scope', '更新范围') : tr('Create scope', '创建范围')) }}
+                  </button>
+                  <button
+                    v-if="schedulerScopeEditingId"
+                    type="button"
+                    class="attendance__btn"
+                    @click="cancelSchedulerScopeEdit"
+                    data-attendance-scheduler-scope-cancel
+                  >
+                    {{ tr('Cancel', '取消') }}
+                  </button>
+                </div>
               </form>
               <div v-if="!schedulerScopesLoading && schedulerScopes.length === 0" class="attendance__empty">
                 {{ tr('No scheduler scopes yet.', '暂无排班管理范围记录。') }}
@@ -1405,6 +1416,25 @@
                     >{{ schedulerScopeActionLabel(action) }}</span>
                   </div>
                   <div class="attendance__scheduler-scope-targets">{{ schedulerScopeTargetSummary(scope.scope) }}</div>
+                  <div class="attendance__scheduler-scope-row-actions">
+                    <button
+                      type="button"
+                      class="attendance__btn"
+                      @click="editSchedulerScope(scope)"
+                      data-attendance-scheduler-scope-edit
+                    >
+                      {{ tr('Edit', '编辑') }}
+                    </button>
+                    <button
+                      type="button"
+                      class="attendance__btn"
+                      :disabled="schedulerScopeDeactivatingId === scope.id"
+                      @click="deactivateSchedulerScope(scope.id)"
+                      data-attendance-scheduler-scope-deactivate
+                    >
+                      {{ schedulerScopeDeactivatingId === scope.id ? tr('Deactivating...', '停用中...') : tr('Deactivate', '停用') }}
+                    </button>
+                  </div>
                 </li>
               </ul>
               <p
@@ -7922,9 +7952,16 @@ const schedulerScopeForm = reactive({
   roleTags: '',
 })
 const schedulerScopeCreating = ref(false)
+const schedulerScopeEditingId = ref<string | null>(null)
+const schedulerScopeDeactivatingId = ref<string | null>(null)
+// True only while editSchedulerScope() programmatically hydrates the form from an existing scope,
+// so the subjectType watcher below does NOT wipe the prefilled subjectRef. A user-initiated type
+// change (hydrating === false) still clears it.
+let schedulerScopeFormHydrating = false
 // Subject ref is type-specific (a user UUID via the picker vs a role/role-tag string); clear it
-// on type change so a picked user UUID can't be submitted as a role string.
+// on a user-initiated type change so a picked user UUID can't be submitted as a role string.
 watch(() => schedulerScopeForm.subjectType, () => {
+  if (schedulerScopeFormHydrating) return
   schedulerScopeForm.subjectRef = ''
 })
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
@@ -18941,7 +18978,48 @@ function normalizeSchedulerScope(value: unknown): AttendanceSchedulerScope | nul
 // Create one scheduler scope (T2, create-only). Maps the 6 free-text target fields to the 6
 // scope keys (names MUST match the backend normalizer; a wrong key is silently dropped).
 // Mirrors the backend validation (>=1 action, >=1 target) client-side before POSTing.
-async function createSchedulerScope() {
+function resetSchedulerScopeForm(): void {
+  schedulerScopeForm.subjectType = 'user'
+  schedulerScopeForm.subjectRef = ''
+  schedulerScopeForm.actions = []
+  schedulerScopeForm.scheduleGroupIds = ''
+  schedulerScopeForm.attendanceGroupIds = ''
+  schedulerScopeForm.userIds = ''
+  schedulerScopeForm.departments = ''
+  schedulerScopeForm.roles = ''
+  schedulerScopeForm.roleTags = ''
+  schedulerScopeEditingId.value = null
+}
+
+function cancelSchedulerScopeEdit(): void {
+  resetSchedulerScopeForm()
+}
+
+// Load an existing scope into the shared form for editing. The hydration guard (see the
+// subjectType watcher) keeps the prefilled subjectRef from being wiped while we set the type.
+function editSchedulerScope(scope: AttendanceSchedulerScope): void {
+  schedulerScopeFormHydrating = true
+  schedulerScopeForm.subjectType = scope.subjectType === 'role' || scope.subjectType === 'role_tag'
+    ? scope.subjectType
+    : 'user'
+  schedulerScopeForm.subjectRef = scope.subjectRef
+  schedulerScopeForm.actions = [...scope.actions]
+  schedulerScopeForm.scheduleGroupIds = scope.scope.scheduleGroupIds.join(', ')
+  schedulerScopeForm.attendanceGroupIds = scope.scope.attendanceGroupIds.join(', ')
+  schedulerScopeForm.userIds = scope.scope.userIds.join(', ')
+  schedulerScopeForm.departments = scope.scope.departments.join(', ')
+  schedulerScopeForm.roles = scope.scope.roles.join(', ')
+  schedulerScopeForm.roleTags = scope.scope.roleTags.join(', ')
+  schedulerScopeEditingId.value = scope.id
+  void nextTick(() => {
+    schedulerScopeFormHydrating = false
+  })
+}
+
+// Create (POST) or update (PUT) one scheduler scope. The PUT body is the same .strict() shape as
+// create (no orgId — that rides the query); the backend merges with the existing row, so omitting
+// isActive preserves the active flag.
+async function submitSchedulerScope() {
   const subjectRef = schedulerScopeForm.subjectRef.trim()
   if (!subjectRef) {
     setStatus(tr('Enter a subject for the scope.', '请填写范围主体。'), 'error')
@@ -18964,13 +19042,17 @@ async function createSchedulerScope() {
     setStatus(tr('Add at least one scope target.', '请至少添加一个范围目标。'), 'error')
     return
   }
+  const editingId = schedulerScopeEditingId.value
   schedulerScopeCreating.value = true
   try {
-    // orgId rides the query string (same as the GET); the POST body must match the backend's
-    // .strict() schedulerScopeCreateSchema exactly — an extra key (incl. orgId) is a 400.
+    // orgId rides the query string (same as the GET / create); the body must match the backend's
+    // .strict() schema exactly — an extra key (incl. orgId) is a 400.
     const query = buildQuery({ orgId: normalizedOrgId() })
-    const response = await apiFetch(`/api/attendance/scheduler-scopes?${query.toString()}`, {
-      method: 'POST',
+    const url = editingId
+      ? `/api/attendance/scheduler-scopes/${encodeURIComponent(editingId)}?${query.toString()}`
+      : `/api/attendance/scheduler-scopes?${query.toString()}`
+    const response = await apiFetch(url, {
+      method: editingId ? 'PUT' : 'POST',
       body: JSON.stringify({
         subjectType: schedulerScopeForm.subjectType,
         subjectRef,
@@ -18984,22 +19066,51 @@ async function createSchedulerScope() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to create scheduler scope', '创建排班管理范围失败')))
+      throw new Error(readErrorMessage(data, editingId
+        ? tr('Failed to update scheduler scope', '更新排班管理范围失败')
+        : tr('Failed to create scheduler scope', '创建排班管理范围失败')))
     }
-    schedulerScopeForm.subjectRef = ''
-    schedulerScopeForm.actions = []
-    schedulerScopeForm.scheduleGroupIds = ''
-    schedulerScopeForm.attendanceGroupIds = ''
-    schedulerScopeForm.userIds = ''
-    schedulerScopeForm.departments = ''
-    schedulerScopeForm.roles = ''
-    schedulerScopeForm.roleTags = ''
-    setStatus(tr('Scheduler scope created.', '已创建排班管理范围。'), 'info')
+    resetSchedulerScopeForm()
+    setStatus(editingId
+      ? tr('Scheduler scope updated.', '已更新排班管理范围。')
+      : tr('Scheduler scope created.', '已创建排班管理范围。'), 'info')
     await loadSchedulerScopes()
   } catch (error: unknown) {
-    setStatus(readErrorMessage(error, tr('Failed to create scheduler scope', '创建排班管理范围失败')), 'error')
+    setStatus(readErrorMessage(error, editingId
+      ? tr('Failed to update scheduler scope', '更新排班管理范围失败')
+      : tr('Failed to create scheduler scope', '创建排班管理范围失败')), 'error')
   } finally {
     schedulerScopeCreating.value = false
+  }
+}
+
+// Soft-deactivate (DELETE => is_active=false). Deactivated scopes leave the active-only list;
+// reactivation / an inactive view is a follow-up slice.
+async function deactivateSchedulerScope(id: string) {
+  if (!window.confirm(tr('Deactivate this scheduler scope?', '确认停用该排班管理范围吗？'))) return
+  schedulerScopeDeactivatingId.value = id
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/scheduler-scopes/${encodeURIComponent(id)}?${query.toString()}`, {
+      method: 'DELETE',
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to deactivate scheduler scope', '停用排班管理范围失败')))
+    }
+    if (schedulerScopeEditingId.value === id) {
+      resetSchedulerScopeForm()
+    }
+    setStatus(tr('Scheduler scope deactivated.', '已停用排班管理范围。'), 'info')
+    await loadSchedulerScopes()
+  } catch (error: unknown) {
+    setStatus(readErrorMessage(error, tr('Failed to deactivate scheduler scope', '停用排班管理范围失败')), 'error')
+  } finally {
+    schedulerScopeDeactivatingId.value = null
   }
 }
 
@@ -21750,5 +21861,14 @@ const holidaySectionBindings = {
   padding: 0 4px;
   font-size: 12px;
   color: #5b6b7b;
+}
+.attendance__scheduler-scope-form-actions {
+  display: flex;
+  gap: 8px;
+}
+.attendance__scheduler-scope-row-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
 }
 </style>
