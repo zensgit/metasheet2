@@ -659,25 +659,8 @@ describe('IntegrationWorkbenchView', () => {
     expect(wiredText).not.toContain('Bolt')
     expect(wiredText).not.toContain('Pcs')
 
-    // DF-T3b-2b UI-wire — filling reference mapping sources sends them in the preview POST so the route
-    // live-bulk-reads (from_reference_table resolution becomes operator-UI-reachable). The #1968
-    // request-body keystone: assert the POST body carries referenceMappingSources (not just a render).
-    expect(previewBodies[1]).not.toHaveProperty('referenceMappingSources') // empty before → omitted
-    const refSourcesInput = container.querySelector('[data-testid="reference-mapping-sources"]') as HTMLTextAreaElement
-    refSourcesInput.value = JSON.stringify([{ domain: 'unit', systemId: 'metasheet_staging_project_1', object: 'unit_dict' }])
-    refSourcesInput.dispatchEvent(new Event('input'))
-    await flushUi()
-    ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
-    await flushUi()
-    expect(previewBodies).toHaveLength(3)
-    expect(previewBodies[2]).toHaveProperty('payloadTemplate') // still the DF-T1 path
-    expect((previewBodies[2] as Record<string, unknown>).referenceMappingSources).toEqual([
-      { domain: 'unit', systemId: 'metasheet_staging_project_1', object: 'unit_dict' },
-    ])
-    // reset so the invalid-payloadTemplate test below keeps its original semantics
-    refSourcesInput.value = ''
-    refSourcesInput.dispatchEvent(new Event('input'))
-    await flushUi()
+    // (DF-T3b dual-binding picker has its own focused test below — it needs authored from_reference_table
+    // rules, which this DF-T1 derive path does not produce.)
 
     // DF-T1.5 reachability — Test 3 (invalid payloadTemplate JSON blocks the request): no new POST
     // is made and an error is surfaced.
@@ -686,7 +669,7 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi()
     ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
     await flushUi()
-    expect(previewBodies).toHaveLength(3)
+    expect(previewBodies).toHaveLength(2)
     expect(container.textContent).toContain('预览失败')
 
     // reset to legacy for the remainder of the test (pipeline save below is preview-independent)
@@ -1810,7 +1793,10 @@ describe('IntegrationWorkbenchView', () => {
     const previewBodies: Array<Record<string, unknown>> = []
     apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url === '/api/integration/adapters') return jsonResponse([])
-      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      // a metasheet:staging system so the DF-T3b dual-binding picker has a system to bind
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([
+        { id: 'ms_staging_1', name: 'MetaSheet staging', kind: 'metasheet:staging', status: 'active' },
+      ])
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
       if (url === '/api/integration/templates/derive') {
         deriveBodies.push(JSON.parse(String(init?.body)))
@@ -1891,5 +1877,53 @@ describe('IntegrationWorkbenchView', () => {
     const rules = previewBodies[0].fieldRules as Array<Record<string, unknown>>
     expect(rules.find((r) => r.targetField === 'FNumber')).toMatchObject({ sourceType: 'from_staging', sourceField: 'materialCode', shape: 'scalar' })
     expect(rules.find((r) => r.targetField === 'FUnitID')).toMatchObject({ sourceType: 'preserve_template' })
+
+    // KEYSTONE 3 (DF-T3b DUAL-BINDING) — author FUnitID as from_reference_table, bind BOTH halves via the
+    // structured picker, and assert the preview POST carries both: the sheet binding (referenceMappingSources)
+    // AND the sourceCode-column binding (rule.sourceField on the from_reference_table rule).
+    const refModeK3 = container.querySelector('[data-testid="field-rule-mode-FUnitID"]') as HTMLSelectElement
+    refModeK3.value = 'mapping'
+    refModeK3.dispatchEvent(new Event('change'))
+    await flushUi()
+    const domainSel = container.querySelector('[data-testid="field-rule-domain-FUnitID"]') as HTMLSelectElement
+    domainSel.value = 'unit'
+    domainSel.dispatchEvent(new Event('change'))
+    await flushUi()
+    const srcCol = container.querySelector('[data-testid="field-rule-source-code-FUnitID"]') as HTMLInputElement
+    expect(srcCol).not.toBeNull() // the sourceCode-column input (binding #2)
+    srcCol.value = 'unitSourceCode'
+    srcCol.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    // the picker now lists the 'unit' domain (derived from the authored from_reference_table rule) — bind it
+    const sysSel = container.querySelector('[data-testid="ref-mapping-system-unit"]') as HTMLSelectElement
+    expect(sysSel?.tagName).toBe('SELECT') // staging-system dropdown (by NAME → id; no typed systemId)
+    sysSel.value = 'ms_staging_1'
+    sysSel.dispatchEvent(new Event('change'))
+    await flushUi()
+    const objInput = container.querySelector('[data-testid="ref-mapping-object-unit"]') as HTMLInputElement
+    objInput.value = 'unit_dict'
+    objInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
+    await flushUi()
+    const lastBody = previewBodies.at(-1)!
+    // binding #1 — the sheet binding
+    expect(lastBody.referenceMappingSources).toEqual([{ domain: 'unit', systemId: 'ms_staging_1', object: 'unit_dict' }])
+    // binding #2 — the sourceCode column on the from_reference_table rule (NOT just the sheet)
+    const rules2 = lastBody.fieldRules as Array<Record<string, unknown>>
+    expect(rules2.find((r) => r.targetField === 'FUnitID')).toMatchObject({ sourceType: 'from_reference_table', domain: 'unit', sourceField: 'unitSourceCode' })
+
+    // orphan-drop — revert FUnitID to preserve → 'unit' is no longer an authored from_reference_table
+    // domain → the (now stale) sheet binding is dropped from the next preview POST (the send loop iterates
+    // the CURRENT domains, not the bindings map).
+    const refModeRevert = container.querySelector('[data-testid="field-rule-mode-FUnitID"]') as HTMLSelectElement
+    refModeRevert.value = 'preserve'
+    refModeRevert.dispatchEvent(new Event('change'))
+    await flushUi()
+    ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(previewBodies.at(-1)!).not.toHaveProperty('referenceMappingSources')
   })
 })

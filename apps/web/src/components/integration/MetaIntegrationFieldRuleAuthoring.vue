@@ -51,6 +51,19 @@
               class="integration-field-rule-authoring__hint integration-field-rule-authoring__hint--strong"
               :data-testid="`field-rule-domain-required-${rule.targetField}`"
             >需选择 domain(否则该参照字段保持未解析)</span>
+            <!-- DF-T3b dual-binding: the sourceCode COLUMN the resolver reads (the second binding). -->
+            <input
+              class="integration-field-rule-authoring__source"
+              :data-testid="`field-rule-source-code-${rule.targetField}`"
+              :value="rule.sourceField || ''"
+              placeholder="sourceCode 列名(清洗表列)"
+              @input="onReferenceSourceFieldChange(index, ($event.target as HTMLInputElement).value)"
+            />
+            <span
+              v-if="!rule.sourceField"
+              class="integration-field-rule-authoring__hint integration-field-rule-authoring__hint--strong"
+              :data-testid="`field-rule-source-code-required-${rule.targetField}`"
+            >需填写 sourceCode 列(否则解析读到的列不对)</span>
           </template>
         </template>
 
@@ -103,6 +116,7 @@ import {
   setFieldRulePreserve,
   setFieldRuleFromReferenceTable,
   setFieldRuleReferencePreserve,
+  setFieldRuleReferenceSourceField,
   type IntegrationFieldRule,
 } from '../../services/integration/workbench'
 
@@ -160,5 +174,13 @@ function onReferenceDomainChange(index: number, domain: string): void {
   const e = editability(rule)
   if (!e.editable || !e.isReference) return
   emitUpdated(index, setFieldRuleFromReferenceTable(rule, domain))
+}
+
+// DF-T3b dual-binding: the sourceCode column (rule.sourceField) for a from_reference_table reference.
+function onReferenceSourceFieldChange(index: number, sourceField: string): void {
+  const rule = props.modelValue[index]
+  const e = editability(rule)
+  if (!e.editable || !e.isReference || rule.sourceType !== 'from_reference_table') return
+  emitUpdated(index, setFieldRuleReferenceSourceField(rule, sourceField))
 }
 </script>
