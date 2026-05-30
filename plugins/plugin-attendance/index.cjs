@@ -15235,9 +15235,9 @@ module.exports = {
       }
     }
 
-    async function loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext) {
+    async function loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext, client = db) {
       const actor = attendanceSchedulerScopeActorRefs(actorContext)
-      const rows = await db.query(
+      const rows = await client.query(
         `SELECT *
          FROM attendance_scheduler_scopes
          WHERE org_id = $1
@@ -15525,6 +15525,106 @@ module.exports = {
         actions: ['clear'],
         actorAccess,
       })
+    }
+
+    function buildAttendanceSchedulerScopeFactTarget(scopeRow, facts) {
+      const scope = normalizeAttendanceSchedulerScopeBody(scopeRow?.scope ?? scopeRow)
+      const target = {}
+      let constrained = false
+      for (const key of ['scheduleGroupIds', 'attendanceGroupIds', 'userIds', 'departments', 'roles', 'roleTags']) {
+        const scopeValues = normalizeStringArray(scope[key])
+        if (scopeValues.length === 0) continue
+        constrained = true
+        const factValues = new Set(normalizeStringArray(facts?.[key]))
+        const matches = scopeValues.filter(value => factValues.has(value))
+        if (matches.length === 0) return null
+        target[key] = matches
+      }
+      return constrained ? target : null
+    }
+
+    function attendanceSchedulerScopeAllowsActorActionFacts(scopeRow, actorContext, action, facts) {
+      if (!scopeRow || scopeRow.isActive === false || scopeRow.is_active === false) return false
+      if (!attendanceSchedulerScopeMatchesActor(scopeRow, actorContext)) return false
+      if (!normalizeStringArray(scopeRow.actions).includes(action)) return false
+      const target = buildAttendanceSchedulerScopeFactTarget(scopeRow, facts)
+      return target ? attendanceSchedulerScopeMatchesTarget(scopeRow, target) : false
+    }
+
+    async function resolveAttendanceRequestApprovalScopeFacts(client, orgId, requestRow) {
+      const userId = normalizeAttendanceSchedulerScopeRef(requestRow?.user_id)
+      const workDate = normalizeDateOnly(requestRow?.work_date) ?? requestRow?.work_date
+      const facts = {
+        scheduleGroupIds: [],
+        attendanceGroupIds: [],
+        userIds: userId ? [userId] : [],
+        departments: [],
+        roles: [],
+        roleTags: [],
+      }
+      if (!userId) return facts
+
+      const targetContext = await loadAttendanceScopeContextForUser(client, orgId, userId)
+      const targetActorRefs = attendanceSchedulerScopeActorRefs(targetContext)
+      facts.roles = targetActorRefs.roles
+      facts.roleTags = targetActorRefs.roleTags
+
+      const attendanceGroupRows = await client.query(
+        `SELECT DISTINCT group_id
+         FROM attendance_group_members
+         WHERE org_id = $1
+           AND user_id = $2
+           AND group_id IS NOT NULL
+         ORDER BY group_id ASC`,
+        [orgId, userId]
+      )
+      facts.attendanceGroupIds = attendanceGroupRows.map(row => row.group_id).filter(Boolean)
+
+      if (workDate) {
+        const scheduleGroupRows = await client.query(
+          `SELECT DISTINCT m.schedule_group_id, g.department_ref
+           FROM attendance_schedule_group_members m
+           JOIN attendance_schedule_groups g
+             ON g.id = m.schedule_group_id
+            AND g.org_id = m.org_id
+            AND COALESCE(g.is_active, true) = true
+           WHERE m.org_id = $1
+             AND m.user_id = $2
+             AND m.schedule_group_id IS NOT NULL
+             AND COALESCE(m.effective_from, DATE '0001-01-01') <= $3::date
+             AND COALESCE(m.effective_to, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+           ORDER BY m.schedule_group_id ASC`,
+          [orgId, userId, workDate]
+        )
+        facts.scheduleGroupIds = scheduleGroupRows.map(row => row.schedule_group_id).filter(Boolean)
+        facts.departments = sortedUnique(scheduleGroupRows.map(row => row.department_ref).filter(Boolean))
+      }
+
+      return facts
+    }
+
+    async function assertAttendanceRequestApprovalAllowed(req, { client, requestRow }) {
+      const requesterId = getUserId(req)
+      if (!requesterId) {
+        throw new HttpError(401, 'UNAUTHORIZED', 'User ID not found')
+      }
+      const orgId = requestRow?.org_id ?? getOrgId(req)
+
+      if (await canAccessOtherUsers(requesterId)) return
+
+      const actorContext = await loadAttendanceScopeContextForUser(client, orgId, requesterId)
+      const scopes = await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext, client)
+      const facts = await resolveAttendanceRequestApprovalScopeFacts(client, orgId, requestRow)
+      const allowed = scopes.some(scope =>
+        attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'approve', facts)
+      )
+      if (!allowed) {
+        throw new HttpError(
+          403,
+          'SCHEDULER_SCOPE_FORBIDDEN',
+          'Scheduler scope does not allow this attendance approval action'
+        )
+      }
     }
 
     function withAttendanceGroupMemberAccess(handler) {
@@ -19478,12 +19578,6 @@ module.exports = {
         return
       }
 
-      const allowed = await canAccessOtherUsers(requesterId)
-      if (!allowed) {
-        res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'No approval access' } })
-        return
-      }
-
       const requestId = normalizeUuidString(req.params.id)
       if (!requestId) {
         respondInvalidUuid(res)
@@ -19513,6 +19607,7 @@ module.exports = {
           }
 
           const requestRow = requestRows[0]
+          await assertAttendanceRequestApprovalAllowed(req, { client: trx, requestRow })
           if (requestRow.status !== 'pending') {
             throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
           }
@@ -19878,13 +19973,13 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests/:id/approve',
-      withAnyPermission(['attendance:approve', 'attendance:admin'], async (req, res) => resolveRequest(req, res, 'approve'))
+      async (req, res) => resolveRequest(req, res, 'approve')
     )
 
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests/:id/reject',
-      withAnyPermission(['attendance:approve', 'attendance:admin'], async (req, res) => resolveRequest(req, res, 'reject'))
+      async (req, res) => resolveRequest(req, res, 'reject')
     )
 
     context.api.http.addRoute(

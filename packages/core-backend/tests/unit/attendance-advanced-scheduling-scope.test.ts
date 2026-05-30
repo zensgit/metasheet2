@@ -53,6 +53,8 @@ describe('attendance advanced scheduling scope foundation', () => {
     expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/apply')
     expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/rebuild')
     expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/clear')
+    expectDirectAsyncRoute('POST', '/api/attendance/requests/:id/approve')
+    expectDirectAsyncRoute('POST', '/api/attendance/requests/:id/reject')
     expectDirectAsyncRoute('GET', '/api/attendance/schedule-groups')
     expectDirectAsyncRoute('GET', '/api/attendance/schedule-groups/:id')
     expectDirectAsyncRoute('GET', '/api/attendance/schedule-groups/:id/members')
@@ -77,6 +79,8 @@ describe('attendance advanced scheduling scope foundation', () => {
     expect(pluginSource).toContain('assertAttendanceGroupFixedScheduleDispatchAllowed')
     expect(pluginSource).toContain('assertAttendanceGroupFixedScheduleRebuildAllowed')
     expect(pluginSource).toContain('assertAttendanceGroupFixedScheduleClearAllowed')
+    expect(pluginSource).toContain('assertAttendanceRequestApprovalAllowed')
+    expect(pluginSource).toContain('resolveAttendanceRequestApprovalScopeFacts')
     expect(pluginSource).toContain('buildAttendanceAssignmentViewSql')
   })
 
