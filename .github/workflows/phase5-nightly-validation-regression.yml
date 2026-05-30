@@ -16,17 +16,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: Install dependencies
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.16.1 --activate
-          pnpm install --frozen-lockfile
-
       - name: Determine metrics URL
         id: cfg
         env:
@@ -49,6 +38,7 @@ jobs:
             echo "available=false" >> $GITHUB_OUTPUT
             echo "No METRICS_URL provided; skipping validation." > /tmp/phase5.md
             echo '{"summary":{"overall_status":"na"}}' > /tmp/phase5.json
+            echo "Regression check skipped: no METRICS_URL provided." > /tmp/regression.txt
             exit 0
           fi
           if curl -sSf -m 5 "$URL" >/dev/null; then
@@ -57,7 +47,21 @@ jobs:
             echo "available=false" >> $GITHUB_OUTPUT
             echo "Metrics endpoint unreachable: $URL" > /tmp/phase5.md
             echo '{"summary":{"overall_status":"na"}}' > /tmp/phase5.json
+            echo "Regression check skipped: metrics endpoint unreachable." > /tmp/regression.txt
           fi
+
+      - name: Setup Node.js
+        if: steps.probe.outputs.available == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        if: steps.probe.outputs.available == 'true'
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.16.1 --activate
+          pnpm install --frozen-lockfile
 
       - name: Run Phase 5 validation
         if: steps.probe.outputs.available == 'true'
