@@ -34,6 +34,7 @@ readonly PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Configuration files
 readonly THRESHOLDS_FILE="${SCRIPT_DIR}/phase5-thresholds.json"
 readonly PERCENTILES_SCRIPT="${SCRIPT_DIR}/phase5-metrics-percentiles.ts"
+readonly CACHE_HIT_RATE_SCRIPT="${SCRIPT_DIR}/phase5-cache-hit-rate.sh"
 
 # Environment configuration
 readonly COUNT_CACHE_MISS_AS_FALLBACK="${COUNT_CACHE_MISS_AS_FALLBACK:-false}"
@@ -158,23 +159,15 @@ extract_metric() {
     grep "^${metric_name}[{ ]" "$raw_file" | grep -v "^#" | awk '{print $2}' | head -1 || echo "0"
 }
 
-# Calculate cache hit rate
-# Note: Uses cache_miss_total (singular) which is the actual metric name
-calculate_cache_hit_rate() {
+# Calculate cache hit rate.
+#
+# Generic cache counters are preferred. Production may only exercise the RBAC
+# permission cache counters, so fall back to those when generic cache counters
+# have no samples.
+calculate_cache_hit_rate_json() {
     local raw_file="$1"
 
-    # Sum all cache_hits_total entries (may have labels)
-    local cache_hits=$(grep "^cache_hits_total" "$raw_file" | grep -v "^#" | awk '{sum+=$2} END {print sum+0}')
-    # Sum all cache_miss_total entries (singular, not misses)
-    local cache_misses=$(grep "^cache_miss_total" "$raw_file" | grep -v "^#" | awk '{sum+=$2} END {print sum+0}')
-
-    local total=$((cache_hits + cache_misses))
-
-    if [ "$total" -gt 0 ]; then
-        echo "scale=2; $cache_hits * 100 / $total" | bc
-    else
-        echo "0"
-    fi
+    bash "$CACHE_HIT_RATE_SCRIPT" "$raw_file"
 }
 
 # Calculate HTTP metrics (success rate and error rate)
@@ -498,8 +491,13 @@ main() {
     local percentiles_json=$(cat "$temp_percentiles")
 
     # Extract cache hit rate
-    local cache_hit_rate=$(calculate_cache_hit_rate "$temp_raw")
-    log_info "Cache hit rate: ${cache_hit_rate}%"
+    local cache_hit_json=$(calculate_cache_hit_rate_json "$temp_raw")
+    local cache_hit_rate=$(echo "$cache_hit_json" | jq -r '.hit_rate')
+    local cache_hit_rate_source=$(echo "$cache_hit_json" | jq -r '.source')
+    local cache_hits=$(echo "$cache_hit_json" | jq -r '.hits')
+    local cache_misses=$(echo "$cache_hit_json" | jq -r '.misses')
+    local cache_total=$(echo "$cache_hit_json" | jq -r '.total')
+    log_info "Cache hit rate: ${cache_hit_rate}% (source=${cache_hit_rate_source}, hits=${cache_hits}, misses=${cache_misses}, total=${cache_total})"
 
     # Redis recent failures (15m): derive from last_failure_timestamp if present
     local redis_recent_failures=0
@@ -639,6 +637,10 @@ main() {
   "percentiles": $(echo "$percentiles_json" | jq '.metrics'),
   "counters": {
     "cache_hit_rate": $cache_hit_rate,
+    "cache_hit_rate_source": "$cache_hit_rate_source",
+    "cache_hits": $cache_hits,
+    "cache_misses": $cache_misses,
+    "cache_total": $cache_total,
     "raw_fallback": $raw_fallback,
     "effective_fallback": $effective_fallback,
     "fallback_effective_ratio": $fallback_effective_ratio,
