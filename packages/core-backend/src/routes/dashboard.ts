@@ -27,7 +27,20 @@
 
 import type { Request, Response } from 'express'
 import { Router } from 'express'
+import { poolManager } from '../integration/db/connection-pool'
+import type { MultitableCapabilities } from '../multitable/access'
+import type { ChartConfig } from '../multitable/charts'
+import type { ChartData } from '../multitable/chart-aggregation-service'
 import { DashboardService } from '../multitable/dashboard-service'
+import type { MultitableField } from '../multitable/field-codecs'
+import { loadFieldsForSheet } from '../multitable/loaders'
+import { deriveFieldPermissions, isFieldPermissionHidden } from '../multitable/permission-derivation'
+import {
+  loadFieldPermissionScopeMap,
+  resolveSheetCapabilities,
+  resolveSheetReadableCapabilities,
+  type QueryFn,
+} from '../multitable/permission-service'
 
 const dashboardService = new DashboardService()
 
@@ -42,6 +55,125 @@ function getUserId(req: Request): string {
   return raw ? String(raw) : 'anonymous'
 }
 
+function getQuery(): QueryFn {
+  const pool = poolManager.get()
+  return pool.query.bind(pool) as QueryFn
+}
+
+function sendUnauthorized(res: Response): void {
+  res.status(401).json({
+    error: {
+      code: 'UNAUTHORIZED',
+      message: 'Authentication required',
+    },
+  })
+}
+
+function sendForbidden(res: Response): void {
+  res.status(403).json({
+    error: {
+      code: 'FORBIDDEN',
+      message: 'Forbidden',
+    },
+  })
+}
+
+type SheetAuthContext = {
+  query: QueryFn
+  userId: string
+  capabilities: MultitableCapabilities
+}
+
+async function requireSheetRead(
+  req: Request,
+  res: Response,
+  sheetId: string,
+): Promise<SheetAuthContext | null> {
+  const query = getQuery()
+  const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
+  if (!access.userId) {
+    sendUnauthorized(res)
+    return null
+  }
+  if (!capabilities.canRead) {
+    sendForbidden(res)
+    return null
+  }
+  return { query, userId: access.userId, capabilities }
+}
+
+async function requireSheetManageViews(
+  req: Request,
+  res: Response,
+  sheetId: string,
+): Promise<SheetAuthContext | null> {
+  const query = getQuery()
+  const { access, capabilities } = await resolveSheetCapabilities(req, query, sheetId)
+  if (!access.userId) {
+    sendUnauthorized(res)
+    return null
+  }
+  if (!capabilities.canManageViews) {
+    sendForbidden(res)
+    return null
+  }
+  return { query, userId: access.userId, capabilities }
+}
+
+function filterVisiblePropertyFields(fields: MultitableField[]): MultitableField[] {
+  return fields.filter((field) => !isFieldPermissionHidden(field))
+}
+
+async function loadAllowedFieldIds(
+  query: QueryFn,
+  sheetId: string,
+  userId: string,
+  capabilities: MultitableCapabilities,
+): Promise<Set<string>> {
+  const [fields, fieldScopeMap] = await Promise.all([
+    loadFieldsForSheet(query, sheetId),
+    loadFieldPermissionScopeMap(query, sheetId, userId),
+  ])
+  const visibleFields = filterVisiblePropertyFields(fields)
+  const fieldPermissions = deriveFieldPermissions(visibleFields, capabilities, {
+    hiddenFieldIds: [],
+    fieldScopeMap,
+  })
+  return new Set(
+    visibleFields
+      .filter((field) => fieldPermissions[field.id]?.visible !== false)
+      .map((field) => field.id),
+  )
+}
+
+function chartReferencedFieldIds(chart: ChartConfig): string[] {
+  const source = chart.dataSource
+  const ids = [
+    source.aggregation.fieldId,
+    source.groupByFieldId,
+    source.dateFieldId,
+    source.filterFieldId,
+  ]
+  return ids.filter((id): id is string => typeof id === 'string' && id.length > 0)
+}
+
+function isChartDataRestricted(chart: ChartConfig, allowedFieldIds: Set<string>): boolean {
+  return chartReferencedFieldIds(chart).some((fieldId) => !allowedFieldIds.has(fieldId))
+}
+
+function restrictedChartData(chart: ChartConfig): ChartData {
+  return {
+    chartId: chart.id,
+    chartType: chart.type,
+    dataPoints: [],
+    total: 0,
+    metadata: {
+      restricted: true,
+      recordCount: 0,
+    },
+  }
+}
+
 export function dashboardRouter() {
   const router = Router()
 
@@ -52,6 +184,8 @@ export function dashboardRouter() {
   /** GET /api/multitable/sheets/:sheetId/charts — list charts */
   router.get('/sheets/:sheetId/charts', async (req: Request, res: Response) => {
     try {
+      const auth = await requireSheetRead(req, res, req.params.sheetId)
+      if (!auth) return
       const charts = await dashboardService.listCharts(req.params.sheetId)
       res.json({ charts })
     } catch (err: unknown) {
@@ -62,6 +196,8 @@ export function dashboardRouter() {
   /** POST /api/multitable/sheets/:sheetId/charts — create chart */
   router.post('/sheets/:sheetId/charts', async (req: Request, res: Response) => {
     try {
+      const auth = await requireSheetManageViews(req, res, req.params.sheetId)
+      if (!auth) return
       const userId = getUserId(req)
       const chart = await dashboardService.createChart(req.params.sheetId, {
         ...req.body,
@@ -75,17 +211,25 @@ export function dashboardRouter() {
 
   /** GET /api/multitable/sheets/:sheetId/charts/:id — get chart config */
   router.get('/sheets/:sheetId/charts/:id', async (req: Request, res: Response) => {
-    const chart = await dashboardService.getChart(req.params.id)
-    if (!chart || chart.sheetId !== req.params.sheetId) {
-      res.status(404).json({ error: 'Chart not found' })
-      return
+    try {
+      const auth = await requireSheetRead(req, res, req.params.sheetId)
+      if (!auth) return
+      const chart = await dashboardService.getChart(req.params.id)
+      if (!chart || chart.sheetId !== req.params.sheetId) {
+        res.status(404).json({ error: 'Chart not found' })
+        return
+      }
+      res.json(chart)
+    } catch (err: unknown) {
+      res.status(500).json({ error: (err as Error).message })
     }
-    res.json(chart)
   })
 
   /** PATCH /api/multitable/sheets/:sheetId/charts/:id — update chart */
   router.patch('/sheets/:sheetId/charts/:id', async (req: Request, res: Response) => {
     try {
+      const auth = await requireSheetManageViews(req, res, req.params.sheetId)
+      if (!auth) return
       const chart = await dashboardService.getChart(req.params.id)
       if (!chart || chart.sheetId !== req.params.sheetId) {
         res.status(404).json({ error: 'Chart not found' })
@@ -100,21 +244,39 @@ export function dashboardRouter() {
 
   /** DELETE /api/multitable/sheets/:sheetId/charts/:id — delete chart */
   router.delete('/sheets/:sheetId/charts/:id', async (req: Request, res: Response) => {
-    const chart = await dashboardService.getChart(req.params.id)
-    if (!chart || chart.sheetId !== req.params.sheetId) {
-      res.status(404).json({ error: 'Chart not found' })
-      return
+    try {
+      const auth = await requireSheetManageViews(req, res, req.params.sheetId)
+      if (!auth) return
+      const chart = await dashboardService.getChart(req.params.id)
+      if (!chart || chart.sheetId !== req.params.sheetId) {
+        res.status(404).json({ error: 'Chart not found' })
+        return
+      }
+      await dashboardService.deleteChart(req.params.id)
+      res.status(204).send()
+    } catch (err: unknown) {
+      res.status(500).json({ error: (err as Error).message })
     }
-    await dashboardService.deleteChart(req.params.id)
-    res.status(204).send()
   })
 
   /** GET /api/multitable/sheets/:sheetId/charts/:id/data — get computed chart data */
   router.get('/sheets/:sheetId/charts/:id/data', async (req: Request, res: Response) => {
     try {
+      const auth = await requireSheetRead(req, res, req.params.sheetId)
+      if (!auth) return
       const chart = await dashboardService.getChart(req.params.id)
       if (!chart || chart.sheetId !== req.params.sheetId) {
         res.status(404).json({ error: 'Chart not found' })
+        return
+      }
+      const allowedFieldIds = await loadAllowedFieldIds(
+        auth.query,
+        req.params.sheetId,
+        auth.userId,
+        auth.capabilities,
+      )
+      if (isChartDataRestricted(chart, allowedFieldIds)) {
+        res.json(restrictedChartData(chart))
         return
       }
       const data = await dashboardService.getChartData(req.params.id)
@@ -131,6 +293,8 @@ export function dashboardRouter() {
   /** GET /api/multitable/sheets/:sheetId/dashboards — list dashboards */
   router.get('/sheets/:sheetId/dashboards', async (req: Request, res: Response) => {
     try {
+      const auth = await requireSheetRead(req, res, req.params.sheetId)
+      if (!auth) return
       const dashboards = await dashboardService.listDashboards(req.params.sheetId)
       res.json({ dashboards })
     } catch (err: unknown) {
@@ -141,6 +305,8 @@ export function dashboardRouter() {
   /** POST /api/multitable/sheets/:sheetId/dashboards — create dashboard */
   router.post('/sheets/:sheetId/dashboards', async (req: Request, res: Response) => {
     try {
+      const auth = await requireSheetManageViews(req, res, req.params.sheetId)
+      if (!auth) return
       const userId = getUserId(req)
       const dashboard = await dashboardService.createDashboard({
         name: req.body.name,
@@ -155,17 +321,25 @@ export function dashboardRouter() {
 
   /** GET /api/multitable/sheets/:sheetId/dashboards/:id — get dashboard */
   router.get('/sheets/:sheetId/dashboards/:id', async (req: Request, res: Response) => {
-    const dashboard = await dashboardService.getDashboard(req.params.id)
-    if (!dashboard || dashboard.sheetId !== req.params.sheetId) {
-      res.status(404).json({ error: 'Dashboard not found' })
-      return
+    try {
+      const auth = await requireSheetRead(req, res, req.params.sheetId)
+      if (!auth) return
+      const dashboard = await dashboardService.getDashboard(req.params.id)
+      if (!dashboard || dashboard.sheetId !== req.params.sheetId) {
+        res.status(404).json({ error: 'Dashboard not found' })
+        return
+      }
+      res.json(dashboard)
+    } catch (err: unknown) {
+      res.status(500).json({ error: (err as Error).message })
     }
-    res.json(dashboard)
   })
 
   /** PATCH /api/multitable/sheets/:sheetId/dashboards/:id — update dashboard */
   router.patch('/sheets/:sheetId/dashboards/:id', async (req: Request, res: Response) => {
     try {
+      const auth = await requireSheetManageViews(req, res, req.params.sheetId)
+      if (!auth) return
       const dashboard = await dashboardService.getDashboard(req.params.id)
       if (!dashboard || dashboard.sheetId !== req.params.sheetId) {
         res.status(404).json({ error: 'Dashboard not found' })
@@ -180,13 +354,19 @@ export function dashboardRouter() {
 
   /** DELETE /api/multitable/sheets/:sheetId/dashboards/:id — delete dashboard */
   router.delete('/sheets/:sheetId/dashboards/:id', async (req: Request, res: Response) => {
-    const dashboard = await dashboardService.getDashboard(req.params.id)
-    if (!dashboard || dashboard.sheetId !== req.params.sheetId) {
-      res.status(404).json({ error: 'Dashboard not found' })
-      return
+    try {
+      const auth = await requireSheetManageViews(req, res, req.params.sheetId)
+      if (!auth) return
+      const dashboard = await dashboardService.getDashboard(req.params.id)
+      if (!dashboard || dashboard.sheetId !== req.params.sheetId) {
+        res.status(404).json({ error: 'Dashboard not found' })
+        return
+      }
+      await dashboardService.deleteDashboard(req.params.id)
+      res.status(204).send()
+    } catch (err: unknown) {
+      res.status(500).json({ error: (err as Error).message })
     }
-    await dashboardService.deleteDashboard(req.params.id)
-    res.status(204).send()
   })
 
   return router
