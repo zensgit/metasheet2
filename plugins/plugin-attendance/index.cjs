@@ -15474,6 +15474,18 @@ module.exports = {
       })
     }
 
+    async function assertAttendanceGroupFixedScheduleClearAllowed(req, res, { groupId, actorAccess } = {}) {
+      const access = actorAccess ?? await resolveAttendanceSchedulerScopeActor(req, res)
+      if (!access) return null
+      if (access.fullAdmin) return access
+
+      return assertAttendanceSchedulerScopeAllowed(req, res, {
+        action: 'clear',
+        target: { attendanceGroupIds: [groupId] },
+        actorAccess: access,
+      })
+    }
+
     function withAttendanceGroupMemberAccess(handler) {
       return async (req, res, next) => {
         const groupId = normalizeUuidString(req.params.id)
@@ -27386,7 +27398,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/clear',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -27427,6 +27439,9 @@ module.exports = {
         }
 
         try {
+          const access = await assertAttendanceGroupFixedScheduleClearAllowed(req, res, { groupId })
+          if (!access) return
+
           const result = await db.transaction((trx) => clearAttendanceGroupFixedScheduleManagedRows(trx, {
             orgId,
             groupId,
@@ -27446,7 +27461,7 @@ module.exports = {
           logger.error('Attendance group fixed schedule clear failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to clear fixed schedule' } })
         }
-      })
+      }
     )
 
     const scheduleGroupSchema = z.object({
