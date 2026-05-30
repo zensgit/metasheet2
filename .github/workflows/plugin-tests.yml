@@ -176,6 +176,7 @@ jobs:
             tests/integration/multitable-viewconfig-filter-literal-redaction.test.ts \
             tests/integration/multitable-viewconfig-resave-guard.test.ts \
             tests/integration/multitable-records-list-authz.test.ts \
+            tests/integration/multitable-record-history-field-mask.test.ts \
             tests/integration/multitable-dashboard-chart-authz.test.ts \
             tests/integration/multitable-automation-retry.test.ts \
             tests/integration/multitable-automation-jobs.test.ts \
