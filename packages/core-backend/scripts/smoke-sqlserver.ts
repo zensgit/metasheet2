@@ -21,6 +21,9 @@ Optional environment:
   MSSQL_TABLE
   MSSQL_ENCRYPT
   MSSQL_TRUST_SERVER_CERTIFICATE
+  MSSQL_TLS_MIN_VERSION            (B3 legacy-TLS: e.g. TLSv1 for 2008R2/2012; still encrypted)
+  MSSQL_TLS_CIPHERS               (B3 legacy-TLS: e.g. DEFAULT@SECLEVEL=0)
+  MSSQL_LEGACY_TLS                (B3 legacy-TLS convenience: applies the documented legacy downgrade)
   MSSQL_CONNECTION_TIMEOUT_MS
   MSSQL_REQUEST_TIMEOUT_MS
   MSSQL_SKIP_SCHEMA`)
@@ -73,6 +76,12 @@ function buildConfig(): DataSourceConfig {
   putOptional(connection, 'port', optionalNumber('MSSQL_PORT'))
   putOptional(connection, 'encrypt', optionalBoolean('MSSQL_ENCRYPT'))
   putOptional(connection, 'trustServerCertificate', optionalBoolean('MSSQL_TRUST_SERVER_CERTIFICATE'))
+  // B3 legacy-TLS knobs — map env -> per-connection TLS downgrade (still encrypted) so a TLS-1.0-only
+  // 2008R2/2012 instance can be smoked via this ops script. See data-sources-windows-2008r2-2012-
+  // compat-matrix-20260529.md. tlsMinVersion/tlsCiphers are strings; legacyTls is the convenience flag.
+  putOptional(connection, 'tlsMinVersion', env.MSSQL_TLS_MIN_VERSION)
+  putOptional(connection, 'tlsCiphers', env.MSSQL_TLS_CIPHERS)
+  putOptional(connection, 'legacyTls', optionalBoolean('MSSQL_LEGACY_TLS'))
   putOptional(connection, 'connectionTimeoutMs', optionalNumber('MSSQL_CONNECTION_TIMEOUT_MS'))
   putOptional(connection, 'requestTimeoutMs', optionalNumber('MSSQL_REQUEST_TIMEOUT_MS'))
 
@@ -118,6 +127,8 @@ async function main(): Promise<void> {
     database: config.connection.database,
     encrypt: config.connection.encrypt ?? true,
     trustServerCertificate: config.connection.trustServerCertificate ?? true,
+    tlsMinVersion: config.connection.tlsMinVersion ?? null,
+    legacyTls: config.connection.legacyTls ?? false,
     schema,
     table: table || null
   })

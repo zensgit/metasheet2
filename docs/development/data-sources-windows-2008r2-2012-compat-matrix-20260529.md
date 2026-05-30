@@ -22,9 +22,20 @@
 
 ## 2. Legacy smoke recipe(客户 Windows VM 上机械跑)
 
-旧库需要 B3 TLS 降级旋钮,而 **ops 脚本 `smoke:sqlserver` 当前只暴露 `MSSQL_ENCRYPT`/`MSSQL_TRUST_SERVER_CERTIFICATE`,不暴露 B3 的 `tlsMinVersion`/`tlsCiphers`/`legacyTls`**(见 §3 缺口)。故 legacy 验证走**真实产品路径**(数据源 create 的 connection 配置支持 B3 旋钮)+ kit 的只读 smoke:
+旧库需要 B3 TLS 降级旋钮。**`smoke:sqlserver` 现已暴露 B3 legacy-TLS env**(`MSSQL_TLS_MIN_VERSION`/`MSSQL_TLS_CIPHERS`/`MSSQL_LEGACY_TLS`,见 §3 已闭),故 TLS-1.0-only 旧库**既可一行 ops 命令 smoke,也可走真实产品路径**(数据源 create 的 connection 配置支持同名 B3 旋钮)。两种路径如下:
 
-**步骤(在客户同网段、能连到 2008R2/2012 的机器上):**
+**前提**:在客户同网段、能连到 2008R2/2012 的机器上。
+
+**选项 A — 一行 ops 命令(最快;直接经 `MSSQLAdapter` 真 wire,无需起后端)**:
+```bash
+MSSQL_HOST=<legacy-host> MSSQL_DATABASE=<db> MSSQL_USERNAME=<u> MSSQL_PASSWORD=<p> \
+  MSSQL_TLS_MIN_VERSION=TLSv1 \
+  pnpm --filter @metasheet/core-backend smoke:sqlserver
+# 必要时再加 MSSQL_LEGACY_TLS=true 或 MSSQL_TLS_CIPHERS='DEFAULT@SECLEVEL=0'
+```
+> 输出的 `[sqlserver-smoke] target` 行回显 `tlsMinVersion`/`legacyTls` 确认降级生效;connect/select/OFFSET-FETCH 全过 = 旧库经 B3 降级**只读连通**成立。`MSSQL_TLS_MIN_VERSION` 与 `MSSQL_ENCRYPT=false` **互斥**(同设即抛)。
+
+**选项 B — 真实产品路径(经 API/UI 建源 + kit 只读 smoke,验证端到端 read 路径)**:
 
 1. **建只读数据源**(API/UI),`type:'sqlserver'`,connection 带 B3 旋钮:
    ```jsonc
@@ -56,5 +67,5 @@
 
 ## 3. 已知缺口(follow-up,非本刀)
 
-- ⬜ **`smoke:sqlserver` 未暴露 B3 legacy-TLS env**:`smoke-sqlserver.ts` 目前只映射 `encrypt`/`trustServerCertificate`,无 `MSSQL_TLS_MIN_VERSION`/`MSSQL_TLS_CIPHERS`/`MSSQL_LEGACY_TLS`。故 TLS-1.0-only 旧库无法直接经该 ops 脚本 smoke,需走 §2 的 API-create 路径。补这三个 env 映射是一个**小 follow-up**(test/ops 脚本,lock-safe),做了之后 legacy 也能一行命令 smoke。
+- ✅ **`smoke:sqlserver` 暴露 B3 legacy-TLS env(本刀已闭)**:`smoke-sqlserver.ts` 现把 `MSSQL_TLS_MIN_VERSION`/`MSSQL_TLS_CIPHERS`/`MSSQL_LEGACY_TLS` 映射进 `connection.{tlsMinVersion,tlsCiphers,legacyTls}`(与 `MSSQLAdapter.buildLegacyTlsOptions` 同名旋钮一致),并在目标诊断行回显 `tlsMinVersion`/`legacyTls`。故 TLS-1.0-only 旧库可一行 ops 命令 smoke(见 §2 选项 A)。
 - 🔒 **真实 2008R2/2012 验证**:需客户 Windows VM/快照;本矩阵只到协议级 + recipe。
