@@ -19,7 +19,7 @@ jobs:
       - name: Enable corepack and install pnpm
         run: |
           corepack enable
-          corepack prepare pnpm@latest --activate
+          corepack prepare pnpm@10.16.1 --activate
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -44,4 +44,3 @@ jobs:
             /tmp/phase5.json
             /tmp/phase5.md
             /tmp/server.log
-
