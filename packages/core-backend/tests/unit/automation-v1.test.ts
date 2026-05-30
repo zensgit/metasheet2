@@ -2866,6 +2866,11 @@ describe('AutomationExecutor — A6-1 job lifecycle hooks', () => {
     const execution = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1' }, lc.factory)
     expect(execution.status).toBe('failed') // NOT pretended successful
     expect(deps.fetchFn).toHaveBeenCalledTimes(1) // the action DID run (must not pretend otherwise)
+    expect(execution.steps[0]).toMatchObject({
+      actionType: 'send_webhook',
+      status: 'success',
+      output: { httpStatus: 200 },
+    })
     expect(execution.error).toContain('job update failed')
   })
 
@@ -2893,6 +2898,47 @@ describe('AutomationService — A6-1 opt-in path choice', () => {
     const execSpy = vi.spyOn(service['executor'], 'execute').mockResolvedValue(storedExecutionForPath())
     await service.executeRule(execRule({ executionMode: 'workflow_job_v1' }), { recordId: 'r1' })
     expect(typeof execSpy.mock.calls[0][2]).toBe('function')
+  })
+
+  it('opt-IN rule pre-creates the parent execution before side effects, then final-updates it', async () => {
+    const events: string[] = []
+    const fetchFn = vi.fn(async () => {
+      events.push('side-effect')
+      return new Response('OK', { status: 200 })
+    }) as unknown as typeof fetch
+    service = new AutomationService(
+      new EventBus(),
+      {} as never,
+      vi.fn(async () => ({ rows: [], rowCount: 0 })),
+      fetchFn,
+    )
+    vi.spyOn(service.logs, 'record').mockImplementation(async () => { events.push('parent-start') })
+    vi.spyOn(service.logs, 'updateRecordedExecution').mockImplementation(async () => { events.push('parent-final') })
+
+    const execution = await service.executeRule(execRule({
+      executionMode: 'workflow_job_v1',
+      actions: [{ type: 'send_webhook', config: { url: 'https://example.com/hook' } }],
+    }), { recordId: 'r1', data: {} })
+
+    expect(execution.status).toBe('success')
+    expect(events).toEqual(['parent-start', 'side-effect', 'parent-final'])
+  })
+
+  it('opt-IN rule fails before side effects when the parent execution cannot be pre-created', async () => {
+    const fetchFn = vi.fn(async () => new Response('OK', { status: 200 })) as unknown as typeof fetch
+    service = new AutomationService(
+      new EventBus(),
+      {} as never,
+      vi.fn(async () => ({ rows: [], rowCount: 0 })),
+      fetchFn,
+    )
+    vi.spyOn(service.logs, 'record').mockRejectedValue(new Error('parent execution insert failed'))
+
+    await expect(service.executeRule(execRule({
+      executionMode: 'workflow_job_v1',
+      actions: [{ type: 'send_webhook', config: { url: 'https://example.com/hook' } }],
+    }), { recordId: 'r1', data: {} })).rejects.toThrow('parent execution insert failed')
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 
   function execRule(over: Record<string, unknown>) {

@@ -685,11 +685,15 @@ export class AutomationService {
     triggerEvent: unknown,
     retryMeta?: { rerunOfExecutionId: string; initiatedBy: string },
   ): Promise<AutomationExecution> {
+    const persistJobs = rule.executionMode === 'workflow_job_v1'
     // A6-1: ONLY opted-in rules ('workflow_job_v1') get a per-action job lifecycle. Legacy rules
     // pass no factory → executor writes zero job rows (opt-out path is byte-identical to today).
     // This is the single place the path is chosen, so a retry of an opt-in rule also writes jobs.
-    const jobLifecycleFactory = rule.executionMode === 'workflow_job_v1'
-      ? (executionId: string) => this.jobService.lifecycleFor(executionId, { id: rule.id, sheetId: rule.sheetId })
+    const jobLifecycleFactory = persistJobs
+      ? (executionId: string) => ({
+          onExecutionStarted: (execution: AutomationExecution) => this.logService.record(execution),
+          ...this.jobService.lifecycleFor(executionId, { id: rule.id, sheetId: rule.sheetId }),
+        })
       : undefined
     const execution = await this.executor.execute(rule, triggerEvent, jobLifecycleFactory)
     if (retryMeta) {
@@ -698,7 +702,11 @@ export class AutomationService {
       execution.initiatedBy = retryMeta.initiatedBy
     }
     try {
-      await this.logService.record(execution)
+      if (persistJobs) {
+        await this.logService.updateRecordedExecution(execution)
+      } else {
+        await this.logService.record(execution)
+      }
     } catch (err) {
       logger.error('Automation execution log persistence failed', err instanceof Error ? err : undefined)
     }

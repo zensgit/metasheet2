@@ -180,6 +180,7 @@ describe('A2 runs API — GET /automation-executions/:id (detail)', () => {
       jobs: {
         listByExecution: vi.fn().mockResolvedValue([
           { id: 'axe_1:job:0', executionId: 'axe_1', stepKey: '0', status: 'resolved', upstreamJobId: null, result: { ok: true } },
+          { id: 'axe_1:job:1', executionId: 'axe_1', stepKey: '1', status: 'failed', upstreamJobId: 'axe_1:job:0', error: 'boom' },
         ]),
       },
     })
@@ -191,6 +192,46 @@ describe('A2 runs API — GET /automation-executions/:id (detail)', () => {
     const noJobs = makeMockService() // default jobs.listByExecution → []
     const r2 = await request(buildApp(noJobs)).get('/api/multitable/automation-executions/axe_1').expect(200)
     expect(r2.body.steps[0].id).toBe('axe_1:step:0') // legacy synth
+  })
+
+  it('A6-1: terminal execution falls back to legacy steps when persisted jobs are stale/non-terminal', async () => {
+    const failedExec = {
+      ...sampleExec,
+      status: 'failed',
+      error: 'job update failed',
+      steps: [
+        { actionType: 'send_webhook', status: 'success', output: { sideEffectRan: true }, durationMs: 4 },
+      ],
+    }
+    const svc = makeMockService(
+      { getById: vi.fn().mockResolvedValue(failedExec) },
+      {
+        jobs: {
+          listByExecution: vi.fn().mockResolvedValue([
+            { id: 'axe_1:job:0', executionId: 'axe_1', stepKey: '0', status: 'running', upstreamJobId: null, result: null },
+          ]),
+        },
+      },
+    )
+    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions/axe_1').expect(200)
+    expect(res.body.status).toBe('failed')
+    expect(res.body.steps[0].id).toBe('axe_1:step:0')
+    expect(res.body.steps[0].status).toBe('resolved')
+    expect(res.body.steps[0].result).toEqual({ sideEffectRan: true })
+  })
+
+  it('A6-1: detail falls back to legacy steps when persisted job rows are unreadable', async () => {
+    const svc = makeMockService(
+      {},
+      {
+        jobs: {
+          listByExecution: vi.fn().mockRejectedValue(new Error('jobs table temporarily unavailable')),
+        },
+      },
+    )
+    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions/axe_1').expect(200)
+    expect(res.body.steps[0].id).toBe('axe_1:step:0')
+    expect(res.body.steps[0].status).toBe('resolved')
   })
 })
 

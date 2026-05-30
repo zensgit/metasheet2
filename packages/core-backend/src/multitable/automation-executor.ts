@@ -476,6 +476,8 @@ export interface AutomationRule {
  * provenance), instead of being swallowed into a failed STEP result.
  */
 export interface ActionJobLifecycle {
+  /** Before any condition/action side effects — persist a visible parent execution row. */
+  onExecutionStarted?(execution: AutomationExecution): Promise<void>
   /** Before the action's side effect runs — create the job as `running` (observable on crash). */
   onStart(stepIndex: number, action: AutomationAction): Promise<void>
   /** After the action settled — update the job to resolved/failed. */
@@ -582,6 +584,10 @@ export class AutomationExecutor {
       schemaVersion: AUTOMATION_EXECUTION_SCHEMA_VERSION,
     }
 
+    // A6-1: opt-in job persistence needs a visible parent execution before any
+    // job row/action side effect. If this write fails, no action has run yet.
+    if (jobLifecycle?.onExecutionStarted) await jobLifecycle.onExecutionStarted(execution)
+
     // Build execution context from trigger event
     const payload = triggerEvent as Record<string, unknown>
     const context: ExecutionContext = {
@@ -607,7 +613,7 @@ export class AutomationExecutor {
 
     // Execute actions in sequence
     try {
-      execution.steps = await this.executeActions(rule.actions, context, jobLifecycle)
+      await this.executeActions(rule.actions, context, execution.steps, jobLifecycle)
 
       const hasFailed = execution.steps.some((s) => s.status === 'failed')
       const allSkipped = execution.steps.length > 0 && execution.steps.every((s) => s.status === 'skipped')
@@ -632,10 +638,9 @@ export class AutomationExecutor {
   private async executeActions(
     actions: AutomationAction[],
     context: ExecutionContext,
+    results: AutomationStepResult[],
     jobLifecycle?: ActionJobLifecycle,
   ): Promise<AutomationStepResult[]> {
-    const results: AutomationStepResult[] = []
-
     for (let index = 0; index < actions.length; index++) {
       const action = actions[index]
       // A6-1 fail-closed: onStart runs BEFORE the inner try, so a job-create failure propagates
