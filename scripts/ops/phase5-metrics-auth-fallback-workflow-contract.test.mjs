@@ -47,3 +47,10 @@ test('regression workflow resolves a valid nightly PR branch name', () => {
   assert.match(raw, /branch: chore\/phase5-nightly-\$\{\{ steps\.nightly_date\.outputs\.date \}\}/)
   assert.doesNotMatch(raw, /branch: chore\/phase5-nightly-\$\(date/)
 })
+
+test('regression workflow can write nightly artifact pull requests', () => {
+  const raw = readWorkflow('.github/workflows/phase5-nightly-validation-regression.yml')
+
+  assert.match(raw, /\npermissions:\n  contents: write\n  pull-requests: write\n/)
+  assert.match(raw, /uses: peter-evans\/create-pull-request@v5/)
+})
