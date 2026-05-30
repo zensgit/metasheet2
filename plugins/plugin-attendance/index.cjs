@@ -15283,6 +15283,48 @@ module.exports = {
       }
     }
 
+    async function resolveAttendanceScheduleAssignmentScopeTarget(orgId, payload) {
+      const userId = payload?.userId ?? payload?.user_id
+      const startDate = normalizeDateOnly(payload?.startDate ?? payload?.start_date) ?? payload?.startDate ?? payload?.start_date
+      const endDate = normalizeAttendanceScheduleAssignmentEndDate(payload?.endDate ?? payload?.end_date)
+      const rows = await db.query(
+        `SELECT DISTINCT m.schedule_group_id
+         FROM attendance_schedule_group_members m
+         JOIN attendance_schedule_groups g
+           ON g.id = m.schedule_group_id
+          AND g.org_id = m.org_id
+          AND COALESCE(g.is_active, true) = true
+         WHERE m.org_id = $1
+           AND m.user_id = $2
+           AND m.schedule_group_id IS NOT NULL
+           AND COALESCE(m.effective_from, DATE '0001-01-01') <= COALESCE($4::date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}')
+           AND COALESCE(m.effective_to, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+         ORDER BY m.schedule_group_id ASC`,
+        [orgId, userId, startDate, endDate]
+      )
+      return {
+        scheduleGroupIds: rows.map(row => row.schedule_group_id).filter(Boolean),
+        userIds: [userId],
+      }
+    }
+
+    async function assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload, actorAccess } = {}) {
+      const access = actorAccess ?? await resolveAttendanceSchedulerScopeActor(req, res)
+      if (!access) return null
+      if (access.fullAdmin) return access
+
+      const target = await resolveAttendanceScheduleAssignmentScopeTarget(orgId, payload)
+      if (target.scheduleGroupIds.length === 0) {
+        respondAttendanceSchedulerScopeForbidden(res)
+        return null
+      }
+      return assertAttendanceSchedulerScopeAllowed(req, res, {
+        action: 'dispatch',
+        target,
+        actorAccess: access,
+      })
+    }
+
     function withAttendanceGroupMemberAccess(handler) {
       return async (req, res, next) => {
         const groupId = normalizeUuidString(req.params.id)
@@ -20815,7 +20857,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/rotation-assignments',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const parsed = rotationAssignmentCreateSchema.safeParse(normalizeRotationAssignmentPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -20842,6 +20884,9 @@ module.exports = {
         }
 
         try {
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
+          if (!access) return
+
           const ruleRows = await db.query(
             'SELECT * FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2',
             [payload.rotationRuleId, orgId]
@@ -20898,13 +20943,13 @@ module.exports = {
           logger.error('Attendance rotation assignment creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create rotation assignment' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'PUT',
       '/api/attendance/rotation-assignments/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const parsed = rotationAssignmentUpdateSchema.safeParse(normalizeRotationAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -20919,11 +20964,18 @@ module.exports = {
         }
 
         try {
+          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+          if (!actorAccess) return
+
           const existingRows = await db.query(
             'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
             [assignmentId, orgId]
           )
           if (!existingRows.length) {
+            if (!actorAccess.fullAdmin) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation assignment not found' } })
             return
           }
@@ -20948,6 +21000,19 @@ module.exports = {
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'End date must be after start date' } })
             return
           }
+
+          const existingAccess = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload: existing,
+            actorAccess,
+          })
+          if (!existingAccess) return
+          const nextAccess = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload,
+            actorAccess,
+          })
+          if (!nextAccess) return
 
           const ruleRows = await db.query(
             'SELECT * FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2',
@@ -21011,13 +21076,13 @@ module.exports = {
           logger.error('Attendance rotation assignment update failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update rotation assignment' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'DELETE',
       '/api/attendance/rotation-assignments/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const orgId = getOrgId(req)
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
@@ -21026,6 +21091,29 @@ module.exports = {
         }
 
         try {
+          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+          if (!actorAccess) return
+
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
+            [assignmentId, orgId]
+          )
+          if (!existingRows.length) {
+            if (!actorAccess.fullAdmin) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation assignment not found' } })
+            return
+          }
+
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload: existingRows[0],
+            actorAccess,
+          })
+          if (!access) return
+
           const rows = await db.query(
             'DELETE FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2 RETURNING id',
             [assignmentId, orgId]
@@ -21044,7 +21132,7 @@ module.exports = {
           logger.error('Attendance rotation assignment delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete rotation assignment' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
@@ -28515,7 +28603,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/assignments',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const parsed = assignmentCreateSchema.safeParse(normalizeAssignmentPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -28542,6 +28630,9 @@ module.exports = {
         }
 
         try {
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
+          if (!access) return
+
           const shiftRows = await db.query(
             'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
             [payload.shiftId, orgId]
@@ -28598,13 +28689,13 @@ module.exports = {
           logger.error('Attendance assignment creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create assignment' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'PUT',
       '/api/attendance/assignments/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const parsed = assignmentUpdateSchema.safeParse(normalizeAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -28619,11 +28710,18 @@ module.exports = {
         }
 
         try {
+          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+          if (!actorAccess) return
+
           const existingRows = await db.query(
             'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
             [assignmentId, orgId]
           )
           if (!existingRows.length) {
+            if (!actorAccess.fullAdmin) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Assignment not found' } })
             return
           }
@@ -28648,6 +28746,19 @@ module.exports = {
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'End date must be after start date' } })
             return
           }
+
+          const existingAccess = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload: existing,
+            actorAccess,
+          })
+          if (!existingAccess) return
+          const nextAccess = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload,
+            actorAccess,
+          })
+          if (!nextAccess) return
 
           const shiftRows = await db.query(
             'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
@@ -28711,13 +28822,13 @@ module.exports = {
           logger.error('Attendance assignment update failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update assignment' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'DELETE',
       '/api/attendance/assignments/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const orgId = getOrgId(req)
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
@@ -28726,6 +28837,29 @@ module.exports = {
         }
 
         try {
+          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+          if (!actorAccess) return
+
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
+            [assignmentId, orgId]
+          )
+          if (!existingRows.length) {
+            if (!actorAccess.fullAdmin) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Assignment not found' } })
+            return
+          }
+
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload: existingRows[0],
+            actorAccess,
+          })
+          if (!access) return
+
           const rows = await db.query(
             'DELETE FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2 RETURNING id',
             [assignmentId, orgId]
@@ -28744,7 +28878,7 @@ module.exports = {
           logger.error('Attendance assignment delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete assignment' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(

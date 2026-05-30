@@ -49,6 +49,18 @@ describe('attendance advanced scheduling scope foundation', () => {
     expect(pluginSource).toMatch(
       /'DELETE',\s*\n\s*'\/api\/attendance\/schedule-groups\/:id\/members\/:memberId',\s*\n\s*async \(req, res\)/,
     )
+    const scopedDispatchRoutes = [
+      '/api/attendance/assignments',
+      '/api/attendance/assignments/:id',
+      '/api/attendance/rotation-assignments',
+      '/api/attendance/rotation-assignments/:id',
+    ]
+    scopedDispatchRoutes.forEach((path) => {
+      const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      expect(pluginSource).toMatch(new RegExp(`['"]${escaped}['"],\\s*\\n\\s*async \\(req, res\\)`))
+    })
+    expect(pluginSource).toContain('resolveAttendanceScheduleAssignmentScopeTarget')
+    expect(pluginSource).toContain('assertAttendanceScheduleAssignmentDispatchAllowed')
   })
 
   it('normalizes schedule groups without overloading attendance_groups semantics', () => {
