@@ -24380,7 +24380,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/import',
-      withAttendanceImportPermission(async (req, res) => {
+      async (req, res) => {
         const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -24388,7 +24388,9 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const requesterId = getUserId(req)
+        const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
+        if (!importAccess) return
+        const requesterId = importAccess.userId
 		        const userId = parsed.data.userId ?? requesterId
 		        if (!userId) {
 		          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
@@ -24406,32 +24408,10 @@ module.exports = {
 	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate import size' } })
 	          return
 	        }
-	        if (requireImportCommitToken) {
-          if (!requesterId) {
-            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-            return
-          }
-          const commitToken = parsed.data.commitToken
-          if (!commitToken) {
-            res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
-            return
-          }
-          let tokenOk = false
-          try {
-            tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId: requesterId })
-          } catch (error) {
-            if (error instanceof HttpError) {
-              res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
-              return
-            }
-            logger.error('Attendance import token validation failed (legacy import)', error)
-            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate commit token' } })
-            return
-          }
-          if (!tokenOk) {
-            res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
-            return
-          }
+        const commitToken = parsed.data.commitToken
+	        if (!commitToken && requireImportCommitToken) {
+          res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
+          return
         }
 
         try {
@@ -24465,6 +24445,32 @@ module.exports = {
 	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
 	            return
 	          }
+          const scopedAccess = await assertAttendanceImportCommitAllowed(req, res, {
+            orgId,
+            rows,
+            payload: parsed.data,
+            fallbackUserId: parsed.data.userId ?? userId,
+            actorAccess: importAccess,
+          })
+          if (!scopedAccess) return
+	        if (requireImportCommitToken) {
+          let tokenOk = false
+          try {
+            tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId: requesterId })
+          } catch (error) {
+            if (error instanceof HttpError) {
+              res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+              return
+            }
+            logger.error('Attendance import token validation failed (legacy import)', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate commit token' } })
+            return
+          }
+          if (!tokenOk) {
+            res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
+            return
+          }
+        }
 	          const importEngine = resolveImportEngineByRowCount(rows.length)
 	          const importRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
 	            rowCount: rows.length,
@@ -24921,7 +24927,7 @@ module.exports = {
           logger.error('Attendance import failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
