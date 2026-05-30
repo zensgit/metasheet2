@@ -463,7 +463,31 @@ export interface AutomationRule {
   createdBy: string
   createdAt: string
   updatedAt?: string
+  /** A6-1 opt-in: 'workflow_job_v1' persists one job per action; undefined/'legacy' = no jobs. */
+  executionMode?: string
 }
+
+/**
+ * A6-1 per-action job lifecycle hooks. The job-persisting path supplies these so
+ * one C1 job row is written around each action; the legacy path passes none → no jobs.
+ *
+ * Fail-closed contract: these run OUTSIDE the inner per-action try/catch, so a thrown
+ * hook propagates to execute()'s outer catch and fails the EXECUTION (opt-in durable
+ * provenance), instead of being swallowed into a failed STEP result.
+ */
+export interface ActionJobLifecycle {
+  /** Before any condition/action side effects — persist a visible parent execution row. */
+  onExecutionStarted?(execution: AutomationExecution): Promise<void>
+  /** Before the action's side effect runs — create the job as `running` (observable on crash). */
+  onStart(stepIndex: number, action: AutomationAction): Promise<void>
+  /** After the action settled — update the job to resolved/failed. */
+  onSettled(stepIndex: number, action: AutomationAction, result: AutomationStepResult): Promise<void>
+  /** A fail-stop-skipped action — record a terminal `skipped` job. */
+  onSkipped(stepIndex: number, action: AutomationAction): Promise<void>
+}
+
+/** Builds the per-execution job lifecycle once the executionId is known (service-supplied for opt-in rules). */
+export type ActionJobLifecycleFactory = (executionId: string) => ActionJobLifecycle
 
 /** Snapshot schema version stamped on every execution row (A1 run-governance). */
 export const AUTOMATION_EXECUTION_SCHEMA_VERSION = 1
@@ -535,8 +559,15 @@ export class AutomationExecutor {
    * Execute a rule against a trigger event.
    * Returns an execution record with step results.
    */
-  async execute(rule: AutomationRule, triggerEvent: unknown): Promise<AutomationExecution> {
+  async execute(
+    rule: AutomationRule,
+    triggerEvent: unknown,
+    jobLifecycleFactory?: ActionJobLifecycleFactory,
+  ): Promise<AutomationExecution> {
     const executionId = `axe_${randomUUID()}`
+    // A6-1: opt-in rules get a per-action job lifecycle bound to this executionId. The factory
+    // is supplied by the service ONLY for 'workflow_job_v1' rules → legacy rules never write jobs.
+    const jobLifecycle = jobLifecycleFactory ? jobLifecycleFactory(executionId) : undefined
     const startTime = Date.now()
     const execution: AutomationExecution = {
       id: executionId,
@@ -552,6 +583,10 @@ export class AutomationExecutor {
       ruleSnapshot: rule,
       schemaVersion: AUTOMATION_EXECUTION_SCHEMA_VERSION,
     }
+
+    // A6-1: opt-in job persistence needs a visible parent execution before any
+    // job row/action side effect. If this write fails, no action has run yet.
+    if (jobLifecycle?.onExecutionStarted) await jobLifecycle.onExecutionStarted(execution)
 
     // Build execution context from trigger event
     const payload = triggerEvent as Record<string, unknown>
@@ -578,7 +613,7 @@ export class AutomationExecutor {
 
     // Execute actions in sequence
     try {
-      execution.steps = await this.executeActions(rule.actions, context)
+      await this.executeActions(rule.actions, context, execution.steps, jobLifecycle)
 
       const hasFailed = execution.steps.some((s) => s.status === 'failed')
       const allSkipped = execution.steps.length > 0 && execution.steps.every((s) => s.status === 'skipped')
@@ -603,10 +638,14 @@ export class AutomationExecutor {
   private async executeActions(
     actions: AutomationAction[],
     context: ExecutionContext,
+    results: AutomationStepResult[],
+    jobLifecycle?: ActionJobLifecycle,
   ): Promise<AutomationStepResult[]> {
-    const results: AutomationStepResult[] = []
-
-    for (const action of actions) {
+    for (let index = 0; index < actions.length; index++) {
+      const action = actions[index]
+      // A6-1 fail-closed: onStart runs BEFORE the inner try, so a job-create failure propagates
+      // to execute()'s outer catch (execution fails) — and the action's side effect never runs.
+      if (jobLifecycle) await jobLifecycle.onStart(index, action)
       const startMs = Date.now()
       let result: AutomationStepResult
 
@@ -668,10 +707,17 @@ export class AutomationExecutor {
 
       results.push(result)
 
+      // A6-1 fail-closed: onSettled runs AFTER the inner try/catch (+durationMs +dingtalk) — i.e.
+      // OUTSIDE it — so a job-UPDATE failure propagates to execute()'s outer catch (execution
+      // fails) rather than being swallowed into a failed step. The action's side effect already
+      // ran by here, so this is the "must not pretend the action didn't run" case.
+      if (jobLifecycle) await jobLifecycle.onSettled(index, action, result)
+
       // Stop on failure
       if (result.status === 'failed') {
         // Mark remaining actions as skipped
         for (let i = results.length; i < actions.length; i++) {
+          if (jobLifecycle) await jobLifecycle.onSkipped(i, actions[i])
           results.push({
             actionType: actions[i].type,
             status: 'skipped',

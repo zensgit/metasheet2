@@ -68,7 +68,16 @@ function toWorkflowJobView(execution: AutomationExecution, step: AutomationStepR
 }
 
 /** Map a persisted execution to the runs-API view; `includeSnapshot` adds the redacted blobs (detail only). */
-function toRunView(execution: AutomationExecution, { includeSnapshot }: { includeSnapshot: boolean }) {
+// `jobs` (A6-1) are persisted C1 WorkflowJob views (already in the step-view shape). When present
+// (an opted-in execution), they are the detail source-of-truth; otherwise we synthesize the C1 view
+// from the legacy `execution.steps`. Job ids are `${exec}:job:i`; legacy fallback is `${exec}:step:i`.
+const TERMINAL_JOB_STATUSES = new Set(['resolved', 'failed', 'skipped', 'rejected', 'errored'])
+
+function toRunView(
+  execution: AutomationExecution,
+  { includeSnapshot, jobs }: { includeSnapshot: boolean; jobs?: ReturnType<typeof toWorkflowJobView>[] },
+) {
+  const hasCompleteTerminalJobs = shouldUsePersistedJobs(execution, jobs)
   return {
     id: execution.id,
     ruleId: execution.ruleId,
@@ -85,11 +94,33 @@ function toRunView(execution: AutomationExecution, { includeSnapshot }: { includ
     // can see a run is a re-run and who triggered it).
     rerunOfExecutionId: execution.rerunOfExecutionId ?? null,
     initiatedBy: execution.initiatedBy ?? null,
-    steps: (execution.steps ?? []).map((s, i) => toWorkflowJobView(execution, s, i)),
+    // A6-1: prefer persisted jobs only when they are coherent for this execution;
+    // fall back to legacy steps for old/opt-out/degraded executions.
+    steps: hasCompleteTerminalJobs ? jobs : (execution.steps ?? []).map((s, i) => toWorkflowJobView(execution, s, i)),
     ...(includeSnapshot
       ? { triggerEvent: execution.triggerEvent ?? null, ruleSnapshot: execution.ruleSnapshot ?? null }
       : {}),
   }
+}
+
+function shouldUsePersistedJobs(
+  execution: AutomationExecution,
+  jobs: ReturnType<typeof toWorkflowJobView>[] | undefined,
+): jobs is ReturnType<typeof toWorkflowJobView>[] {
+  if (!Array.isArray(jobs) || jobs.length === 0) return false
+
+  const legacyStepCount = execution.steps?.length ?? 0
+  if (legacyStepCount > 0 && jobs.length < legacyStepCount) return false
+
+  // If the parent execution is terminal, stale non-terminal job rows usually mean
+  // a fail-closed job-update failure happened after the action. The legacy step
+  // row carries the action result/error, so prefer it over a misleading `running`
+  // persisted job view.
+  if (execution.status !== 'running' && jobs.some((job) => !TERMINAL_JOB_STATUSES.has(job.status))) {
+    return false
+  }
+
+  return true
 }
 
 /**
@@ -260,7 +291,12 @@ export function createAutomationRoutes(
       if (!execution) {
         return res.status(404).json({ error: 'execution not found' })
       }
-      return res.json(toRunView(execution, { includeSnapshot: true }))
+      // A6-1: prefer persisted jobs for the detail step view (empty/unreadable for
+      // legacy/opt-out/degraded executions → toRunView falls back to legacy steps).
+      // Detail-only: list avoids the per-row job fetch (N+1). A job-read failure
+      // must not hide the parent execution behind a 500.
+      const jobs = await safeListJobs(svc, executionId)
+      return res.json(toRunView(execution, { includeSnapshot: true, jobs }))
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load run'
       return res.status(500).json({ error: message })
@@ -322,4 +358,15 @@ export function createAutomationRoutes(
   })
 
   return router
+}
+
+async function safeListJobs(
+  svc: AutomationService,
+  executionId: string,
+): Promise<ReturnType<typeof toWorkflowJobView>[] | undefined> {
+  try {
+    return await svc.jobs.listByExecution(executionId)
+  } catch {
+    return undefined
+  }
 }

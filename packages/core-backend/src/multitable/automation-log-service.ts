@@ -24,21 +24,7 @@ export class AutomationLogService {
    * Record an execution log by inserting into the database.
    */
   async record(execution: AutomationExecution): Promise<void> {
-    // Redact secret-shaped values out of ALL FOUR free-form channels BEFORE they
-    // hit the DB (they ride into the runs UI and would survive any future replay):
-    // steps (recursive — covers step.output/step.error), trigger_event,
-    // rule_snapshot, and the execution-level error. Business field values are
-    // preserved — this is secret-shaped value scrubbing only.
-    // node-postgres treats JS arrays as PostgreSQL array literals unless we cast explicit JSON text.
-    const stepsJsonb = toJsonValue(redactValue(execution.steps)) as unknown as Record<string, unknown>[]
-    const triggerEventJsonb =
-      execution.triggerEvent == null
-        ? null
-        : (toJsonValue(redactValue(execution.triggerEvent)) as unknown as Record<string, unknown>)
-    const ruleSnapshotJsonb =
-      execution.ruleSnapshot == null
-        ? null
-        : (toJsonValue(redactValue(execution.ruleSnapshot)) as unknown as Record<string, unknown>)
+    const persisted = toPersistedExecutionValues(execution)
     await db
       .insertInto('multitable_automation_executions')
       .values({
@@ -47,18 +33,44 @@ export class AutomationLogService {
         triggered_by: execution.triggeredBy,
         triggered_at: execution.triggeredAt,
         status: execution.status,
-        steps: stepsJsonb,
-        error: execution.error != null ? redactString(execution.error) : null,
+        steps: persisted.stepsJsonb,
+        error: persisted.error,
         duration: execution.duration ?? null,
         sheet_id: execution.sheetId ?? null,
-        trigger_event: triggerEventJsonb,
-        rule_snapshot: ruleSnapshotJsonb,
+        trigger_event: persisted.triggerEventJsonb,
+        rule_snapshot: persisted.ruleSnapshotJsonb,
         finished_at: execution.finishedAt ?? null,
         schema_version: execution.schemaVersion ?? AUTOMATION_EXECUTION_SCHEMA_VERSION,
         // A5 retry provenance — plain identifiers, NOT redacted (an execution id / a user id).
         rerun_of_execution_id: execution.rerunOfExecutionId ?? null,
         initiated_by: execution.initiatedBy ?? null,
       })
+      .execute()
+  }
+
+  /**
+   * Update an already-inserted execution row. A6-1 uses this after pre-creating
+   * the parent execution before job/action side effects, so job rows never become
+   * invisible orphans just because final execution persistence is delayed.
+   */
+  async updateRecordedExecution(execution: AutomationExecution): Promise<void> {
+    const persisted = toPersistedExecutionValues(execution)
+    await db
+      .updateTable('multitable_automation_executions')
+      .set({
+        status: execution.status,
+        steps: persisted.stepsJsonb,
+        error: persisted.error,
+        duration: execution.duration ?? null,
+        sheet_id: execution.sheetId ?? null,
+        trigger_event: persisted.triggerEventJsonb,
+        rule_snapshot: persisted.ruleSnapshotJsonb,
+        finished_at: execution.finishedAt ?? null,
+        schema_version: execution.schemaVersion ?? AUTOMATION_EXECUTION_SCHEMA_VERSION,
+        rerun_of_execution_id: execution.rerunOfExecutionId ?? null,
+        initiated_by: execution.initiatedBy ?? null,
+      })
+      .where('id', '=', execution.id)
       .execute()
   }
 
@@ -161,6 +173,35 @@ export class AutomationLogService {
       .executeTakeFirst()
 
     return Number(result.numDeletedRows ?? 0)
+  }
+}
+
+function toPersistedExecutionValues(execution: AutomationExecution): {
+  stepsJsonb: Record<string, unknown>[]
+  triggerEventJsonb: Record<string, unknown> | null
+  ruleSnapshotJsonb: Record<string, unknown> | null
+  error: string | null
+} {
+  // Redact secret-shaped values out of ALL FOUR free-form channels BEFORE they
+  // hit the DB (they ride into the runs UI and would survive any future replay):
+  // steps (recursive — covers step.output/step.error), trigger_event,
+  // rule_snapshot, and the execution-level error. Business field values are
+  // preserved — this is secret-shaped value scrubbing only.
+  // node-postgres treats JS arrays as PostgreSQL array literals unless we cast explicit JSON text.
+  const stepsJsonb = toJsonValue(redactValue(execution.steps)) as unknown as Record<string, unknown>[]
+  const triggerEventJsonb =
+    execution.triggerEvent == null
+      ? null
+      : (toJsonValue(redactValue(execution.triggerEvent)) as unknown as Record<string, unknown>)
+  const ruleSnapshotJsonb =
+    execution.ruleSnapshot == null
+      ? null
+      : (toJsonValue(redactValue(execution.ruleSnapshot)) as unknown as Record<string, unknown>)
+  return {
+    stepsJsonb,
+    triggerEventJsonb,
+    ruleSnapshotJsonb,
+    error: execution.error != null ? redactString(execution.error) : null,
   }
 }
 
