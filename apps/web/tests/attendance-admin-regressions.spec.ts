@@ -72,6 +72,15 @@ function selectUserPicker(container: HTMLElement, selector: string, userId: stri
   select!.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
+function selectMultipleOptions(container: HTMLElement, selector: string, values: string[]): void {
+  const select = container.querySelector<HTMLSelectElement>(selector)
+  expect(select, `expected multi-select ${selector}`).toBeTruthy()
+  for (const option of Array.from(select!.options)) {
+    option.selected = values.includes(option.value)
+  }
+  select!.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
 function setViewportWidth(width: number): void {
   Object.defineProperty(window, 'innerWidth', {
     configurable: true,
@@ -744,17 +753,69 @@ describe('Attendance admin regressions', () => {
     expect(hint?.textContent || '').toContain('250')
   })
 
-  it('creates a scheduler scope, mapping each free-text target field to its scope key', async () => {
+  it('creates a scheduler scope, mapping each picker/chip target field to its scope key', async () => {
     const created: Array<Record<string, unknown>> = []
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = String(input)
       const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.startsWith('/api/admin/users')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-x', email: 'user-x@example.com', name: 'User X', role: 'employee', is_active: true, is_admin: false, last_login_at: null, created_at: '2026-05-30T00:00:00.000Z' },
+            ],
+          },
+        })
+      }
       if (url.includes('/api/attendance/scheduler-scopes') && method === 'POST') {
         created.push(JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')))
         return jsonResponse(200, { ok: true, data: { id: 'scope-new' } })
       }
       if (url.includes('/api/attendance/scheduler-scopes')) {
         return jsonResponse(200, { ok: true, data: { items: [], total: 0, page: 1, pageSize: 200 } })
+      }
+      if (url.includes('/api/attendance/groups/group-a/')) {
+        return emptyAttendanceResponse()
+      }
+      if (url.includes('/api/attendance/groups')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'group-a', name: 'Ops Team', code: 'ops-team', timezone: 'Asia/Shanghai', attendanceType: 'fixed_shift', memberCount: 1 },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/advanced-scheduling/workbench')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            summary: {
+              scheduleGroups: 1,
+              scheduleGroupMembers: 0,
+              schedulerScopes: 0,
+              shifts: 0,
+              rotationRules: 0,
+              shiftAssignments: 0,
+              rotationAssignments: 0,
+              assignedUsers: 0,
+              diagnostics: 0,
+              groupsWithoutMembers: 0,
+              assignmentUsersWithoutScheduleGroup: 0,
+              usersWithMultipleScheduleGroups: 0,
+              usersWithBothAssignmentKinds: 0,
+            },
+            scheduleGroups: {
+              items: [{ id: 'sg-1', name: 'Line A', code: 'line-a', source: 'manual', memberCount: 0, assignedUserCount: 0, shiftAssignmentCount: 0, rotationAssignmentCount: 0, isActive: true }],
+              total: 1,
+            },
+            diagnostics: [],
+            metadata: { readOnly: true },
+          },
+        })
       }
       return emptyAttendanceResponse()
     })
@@ -777,17 +838,20 @@ describe('Attendance admin regressions', () => {
 
     // Distinct sentinel per target field — catches a field wired to the wrong scope key
     // (the backend normalizer silently drops unknown keys; this is the A2 round-trip guard).
-    const setTarget = (id: string, value: string): void => {
-      const el = section.querySelector<HTMLTextAreaElement>(`#${id}`)!
+    const addTextTarget = (key: string, id: string, value: string): void => {
+      const el = section.querySelector<HTMLInputElement>(`#${id}`)!
       el.value = value
       el.dispatchEvent(new Event('input', { bubbles: true }))
+      section.querySelector<HTMLButtonElement>(`[data-attendance-scheduler-scope-target-add="${key}"]`)!.click()
     }
-    setTarget('attendance-scheduler-scope-target-departments', 'dept-x')
-    setTarget('attendance-scheduler-scope-target-attendance-groups', 'ag-x')
-    setTarget('attendance-scheduler-scope-target-schedule-groups', 'sg-x')
-    setTarget('attendance-scheduler-scope-target-users', 'user-x')
-    setTarget('attendance-scheduler-scope-target-roles', 'role-x')
-    setTarget('attendance-scheduler-scope-target-role-tags', 'tag-x')
+    addTextTarget('departments', 'attendance-scheduler-scope-target-departments', 'dept-x')
+    selectMultipleOptions(section, '#attendance-scheduler-scope-target-attendance-groups', ['group-a'])
+    selectMultipleOptions(section, '#attendance-scheduler-scope-target-schedule-groups', ['sg-1'])
+    selectUserPicker(section, '#attendance-scheduler-scope-target-users', 'user-x')
+    await flushUi(2)
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-target-user-add]')!.click()
+    addTextTarget('roles', 'attendance-scheduler-scope-target-roles', 'role-x')
+    addTextTarget('roleTags', 'attendance-scheduler-scope-target-role-tags', 'tag-x')
     await flushUi(2)
 
     section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-create]')!.click()
@@ -802,8 +866,8 @@ describe('Attendance admin regressions', () => {
       actions: ['view'],
       scope: {
         departments: ['dept-x'],
-        attendanceGroupIds: ['ag-x'],
-        scheduleGroupIds: ['sg-x'],
+        attendanceGroupIds: ['group-a'],
+        scheduleGroupIds: ['sg-1'],
         userIds: ['user-x'],
         roles: ['role-x'],
         roleTags: ['tag-x'],
@@ -907,10 +971,13 @@ describe('Attendance admin regressions', () => {
 
     section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-item] [data-attendance-scheduler-scope-edit]')!.click()
     await flushUi(2)
-    const dept = section.querySelector<HTMLTextAreaElement>('#attendance-scheduler-scope-target-departments')!
-    expect(dept.value).toContain('dept-x') // prefilled from the existing scope
+    const deptChips = section.querySelector<HTMLElement>('[data-attendance-scheduler-scope-target-chips="departments"]')!
+    expect(deptChips.textContent).toContain('dept-x') // prefilled from the existing scope
+    deptChips.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-target-remove="departments"]')!.click()
+    const dept = section.querySelector<HTMLInputElement>('#attendance-scheduler-scope-target-departments')!
     dept.value = 'dept-y'
     dept.dispatchEvent(new Event('input', { bubbles: true }))
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-target-add="departments"]')!.click()
     await flushUi(2)
 
     section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-create]')!.click()

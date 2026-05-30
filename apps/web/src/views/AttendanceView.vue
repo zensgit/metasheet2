@@ -1351,31 +1351,155 @@
                 <div class="attendance__admin-grid">
                   <label class="attendance__field" for="attendance-scheduler-scope-target-departments">
                     <span>{{ tr('Departments', '部门') }}</span>
-                    <textarea id="attendance-scheduler-scope-target-departments" v-model="schedulerScopeForm.departments" rows="1" :placeholder="tr('dept-a, dept-b', 'dept-a, dept-b')"></textarea>
+                    <div class="attendance__scheduler-scope-token-input">
+                      <input
+                        id="attendance-scheduler-scope-target-departments"
+                        v-model="schedulerScopeTargetDrafts.departments"
+                        type="text"
+                        :placeholder="tr('dept-a, dept-b', 'dept-a, dept-b')"
+                        data-attendance-scheduler-scope-target-draft="departments"
+                        @keyup.enter.prevent="addSchedulerScopeTargetDraft('departments')"
+                      />
+                      <button
+                        type="button"
+                        class="attendance__btn"
+                        data-attendance-scheduler-scope-target-add="departments"
+                        @click="addSchedulerScopeTargetDraft('departments')"
+                      >
+                        {{ tr('Add', '添加') }}
+                      </button>
+                    </div>
+                    <div class="attendance__scheduler-scope-chip-list" data-attendance-scheduler-scope-target-chips="departments">
+                      <span v-for="target in schedulerScopeForm.departments" :key="target" class="attendance__scheduler-scope-chip">
+                        {{ target }}
+                        <button type="button" :aria-label="tr('Remove target', '移除目标')" data-attendance-scheduler-scope-target-remove="departments" @click="removeSchedulerScopeTargetValue('departments', target)">×</button>
+                      </span>
+                    </div>
                   </label>
                   <label class="attendance__field" for="attendance-scheduler-scope-target-attendance-groups">
                     <span>{{ tr('Attendance groups', '考勤组') }}</span>
-                    <textarea id="attendance-scheduler-scope-target-attendance-groups" v-model="schedulerScopeForm.attendanceGroupIds" rows="1" :placeholder="tr('attendance group id(s)', '考勤组 ID')"></textarea>
+                    <select
+                      id="attendance-scheduler-scope-target-attendance-groups"
+                      v-model="schedulerScopeForm.attendanceGroupIds"
+                      multiple
+                      size="4"
+                      data-attendance-scheduler-scope-target-select="attendanceGroupIds"
+                    >
+                      <option v-for="group in attendanceGroups" :key="group.id" :value="group.id">
+                        {{ attendanceGroupPickerLabel(group) }}
+                      </option>
+                    </select>
+                    <div class="attendance__scheduler-scope-chip-list" data-attendance-scheduler-scope-target-chips="attendanceGroupIds">
+                      <span v-for="target in schedulerScopeForm.attendanceGroupIds" :key="target" class="attendance__scheduler-scope-chip">
+                        {{ schedulerScopeTargetValueLabel('attendanceGroupIds', target) }}
+                        <button type="button" :aria-label="tr('Remove target', '移除目标')" data-attendance-scheduler-scope-target-remove="attendanceGroupIds" @click="removeSchedulerScopeTargetValue('attendanceGroupIds', target)">×</button>
+                      </span>
+                    </div>
                   </label>
                   <label class="attendance__field" for="attendance-scheduler-scope-target-schedule-groups">
                     <span>{{ tr('Schedule groups', '排班组') }}</span>
-                    <textarea id="attendance-scheduler-scope-target-schedule-groups" v-model="schedulerScopeForm.scheduleGroupIds" rows="1" :placeholder="tr('schedule group id(s)', '排班组 ID')"></textarea>
+                    <select
+                      id="attendance-scheduler-scope-target-schedule-groups"
+                      v-model="schedulerScopeForm.scheduleGroupIds"
+                      multiple
+                      size="4"
+                      data-attendance-scheduler-scope-target-select="scheduleGroupIds"
+                    >
+                      <option v-for="group in advancedSchedulingWorkbenchGroups" :key="group.id" :value="group.id">
+                        {{ scheduleGroupPickerLabel(group) }}
+                      </option>
+                    </select>
+                    <div class="attendance__scheduler-scope-chip-list" data-attendance-scheduler-scope-target-chips="scheduleGroupIds">
+                      <span v-for="target in schedulerScopeForm.scheduleGroupIds" :key="target" class="attendance__scheduler-scope-chip">
+                        {{ schedulerScopeTargetValueLabel('scheduleGroupIds', target) }}
+                        <button type="button" :aria-label="tr('Remove target', '移除目标')" data-attendance-scheduler-scope-target-remove="scheduleGroupIds" @click="removeSchedulerScopeTargetValue('scheduleGroupIds', target)">×</button>
+                      </span>
+                    </div>
                   </label>
-                  <label class="attendance__field" for="attendance-scheduler-scope-target-users">
+                  <div class="attendance__field attendance__scheduler-scope-target-user" data-attendance-scheduler-scope-target-user>
                     <span>{{ tr('Users', '员工') }}</span>
-                    <textarea id="attendance-scheduler-scope-target-users" v-model="schedulerScopeForm.userIds" rows="1" :placeholder="tr('user id(s)', '员工 ID')"></textarea>
-                  </label>
+                    <AttendanceUserPickerField
+                      v-model="schedulerScopeTargetUserId"
+                      :tr="tr"
+                      :label="tr('Search user target', '搜索员工目标')"
+                      name="attendanceSchedulerScopeTargetUser"
+                      :search-placeholder="tr('Search a target user', '搜索目标员工')"
+                      input-id="attendance-scheduler-scope-target-users"
+                      full-width
+                    />
+                    <button
+                      type="button"
+                      class="attendance__btn"
+                      :disabled="!schedulerScopeTargetUserId"
+                      data-attendance-scheduler-scope-target-user-add
+                      @click="addSchedulerScopeTargetUser"
+                    >
+                      {{ tr('Add user', '添加员工') }}
+                    </button>
+                    <div class="attendance__scheduler-scope-chip-list" data-attendance-scheduler-scope-target-chips="userIds">
+                      <span v-for="target in schedulerScopeForm.userIds" :key="target" class="attendance__scheduler-scope-chip">
+                        {{ target }}
+                        <button type="button" :aria-label="tr('Remove target', '移除目标')" data-attendance-scheduler-scope-target-remove="userIds" @click="removeSchedulerScopeTargetValue('userIds', target)">×</button>
+                      </span>
+                    </div>
+                  </div>
                   <label class="attendance__field" for="attendance-scheduler-scope-target-roles">
                     <span>{{ tr('Roles', '角色') }}</span>
-                    <textarea id="attendance-scheduler-scope-target-roles" v-model="schedulerScopeForm.roles" rows="1" :placeholder="tr('role(s)', '角色')"></textarea>
+                    <div class="attendance__scheduler-scope-token-input">
+                      <input
+                        id="attendance-scheduler-scope-target-roles"
+                        v-model="schedulerScopeTargetDrafts.roles"
+                        type="text"
+                        :placeholder="tr('role(s)', '角色')"
+                        data-attendance-scheduler-scope-target-draft="roles"
+                        @keyup.enter.prevent="addSchedulerScopeTargetDraft('roles')"
+                      />
+                      <button
+                        type="button"
+                        class="attendance__btn"
+                        data-attendance-scheduler-scope-target-add="roles"
+                        @click="addSchedulerScopeTargetDraft('roles')"
+                      >
+                        {{ tr('Add', '添加') }}
+                      </button>
+                    </div>
+                    <div class="attendance__scheduler-scope-chip-list" data-attendance-scheduler-scope-target-chips="roles">
+                      <span v-for="target in schedulerScopeForm.roles" :key="target" class="attendance__scheduler-scope-chip">
+                        {{ target }}
+                        <button type="button" :aria-label="tr('Remove target', '移除目标')" data-attendance-scheduler-scope-target-remove="roles" @click="removeSchedulerScopeTargetValue('roles', target)">×</button>
+                      </span>
+                    </div>
                   </label>
                   <label class="attendance__field" for="attendance-scheduler-scope-target-role-tags">
                     <span>{{ tr('Role tags', '角色标签') }}</span>
-                    <textarea id="attendance-scheduler-scope-target-role-tags" v-model="schedulerScopeForm.roleTags" rows="1" :placeholder="tr('role tag(s)', '角色标签')"></textarea>
+                    <div class="attendance__scheduler-scope-token-input">
+                      <input
+                        id="attendance-scheduler-scope-target-role-tags"
+                        v-model="schedulerScopeTargetDrafts.roleTags"
+                        type="text"
+                        :placeholder="tr('role tag(s)', '角色标签')"
+                        data-attendance-scheduler-scope-target-draft="roleTags"
+                        @keyup.enter.prevent="addSchedulerScopeTargetDraft('roleTags')"
+                      />
+                      <button
+                        type="button"
+                        class="attendance__btn"
+                        data-attendance-scheduler-scope-target-add="roleTags"
+                        @click="addSchedulerScopeTargetDraft('roleTags')"
+                      >
+                        {{ tr('Add', '添加') }}
+                      </button>
+                    </div>
+                    <div class="attendance__scheduler-scope-chip-list" data-attendance-scheduler-scope-target-chips="roleTags">
+                      <span v-for="target in schedulerScopeForm.roleTags" :key="target" class="attendance__scheduler-scope-chip">
+                        {{ target }}
+                        <button type="button" :aria-label="tr('Remove target', '移除目标')" data-attendance-scheduler-scope-target-remove="roleTags" @click="removeSchedulerScopeTargetValue('roleTags', target)">×</button>
+                      </span>
+                    </div>
                   </label>
                 </div>
                 <p class="attendance__field-hint">
-                  {{ tr('Separate multiple values with commas or new lines. At least one target and one action are required.', '多个值用逗号或换行分隔；至少需要一个目标和一个动作。') }}
+                  {{ tr('At least one target and one action are required.', '至少需要一个目标和一个动作。') }}
                 </p>
                 <div class="attendance__scheduler-scope-form-actions">
                   <button type="submit" class="attendance__btn" :disabled="schedulerScopeCreating" data-attendance-scheduler-scope-create>
@@ -7926,6 +8050,8 @@ type AttendanceSchedulerScopeTargets = {
   roles: string[]
   roleTags: string[]
 }
+type AttendanceSchedulerScopeTargetKey = keyof AttendanceSchedulerScopeTargets
+type AttendanceSchedulerScopeTextTargetKey = 'departments' | 'roles' | 'roleTags'
 type AttendanceSchedulerScope = {
   id: string
   subjectType: string
@@ -7934,23 +8060,34 @@ type AttendanceSchedulerScope = {
   scope: AttendanceSchedulerScopeTargets
   isActive: boolean
 }
+type AttendanceSchedulerScopeForm = {
+  subjectType: 'user' | 'role' | 'role_tag'
+  subjectRef: string
+  actions: string[]
+} & AttendanceSchedulerScopeTargets
 const schedulerScopes = ref<AttendanceSchedulerScope[]>([])
 const schedulerScopesLoading = ref(false)
 const schedulerScopesTotal = ref(0)
 const ATTENDANCE_SCHEDULER_SCOPE_ALL_ACTIONS = ['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'] as const
-// T2 "new scope" create form. Targets are free-text (comma / new-line) this slice; each field
-// maps to one scope key — picker-based targets land in a later slice.
-const schedulerScopeForm = reactive({
+// Scheduler-scope form targets are arrays so the UI can render pickers/chips while preserving the
+// backend's six-key scope contract exactly.
+const schedulerScopeForm = reactive<AttendanceSchedulerScopeForm>({
   subjectType: 'user' as 'user' | 'role' | 'role_tag',
   subjectRef: '',
   actions: [] as string[],
-  scheduleGroupIds: '',
-  attendanceGroupIds: '',
-  userIds: '',
+  scheduleGroupIds: [] as string[],
+  attendanceGroupIds: [] as string[],
+  userIds: [] as string[],
+  departments: [] as string[],
+  roles: [] as string[],
+  roleTags: [] as string[],
+})
+const schedulerScopeTargetDrafts = reactive<Record<AttendanceSchedulerScopeTextTargetKey, string>>({
   departments: '',
   roles: '',
   roleTags: '',
 })
+const schedulerScopeTargetUserId = ref('')
 const schedulerScopeCreating = ref(false)
 const schedulerScopeEditingId = ref<string | null>(null)
 const schedulerScopeDeactivatingId = ref<string | null>(null)
@@ -18975,19 +19112,77 @@ function normalizeSchedulerScope(value: unknown): AttendanceSchedulerScope | nul
 // Read-only registry of scheduler scopes (T1). Mirrors loadAttendanceGroups: defensive,
 // 403 -> adminForbidden, non-ok -> caught. Scopes are administrative intent and are NOT
 // enforced at runtime yet (see design-lock §5); the section banner says so.
-// Create one scheduler scope (T2, create-only). Maps the 6 free-text target fields to the 6
-// scope keys (names MUST match the backend normalizer; a wrong key is silently dropped).
+function normalizeSchedulerScopeTargetValues(values: string[]): string[] {
+  return Array.from(new Set(values.map(item => item.trim()).filter(Boolean)))
+}
+
+function setSchedulerScopeTargetValues(key: AttendanceSchedulerScopeTargetKey, values: string[]): void {
+  schedulerScopeForm[key].splice(0, schedulerScopeForm[key].length, ...normalizeSchedulerScopeTargetValues(values))
+}
+
+function addSchedulerScopeTargetValues(key: AttendanceSchedulerScopeTargetKey, values: string[]): void {
+  setSchedulerScopeTargetValues(key, [...schedulerScopeForm[key], ...values])
+}
+
+function addSchedulerScopeTargetDraft(key: AttendanceSchedulerScopeTextTargetKey): void {
+  const values = parseUserIdList(schedulerScopeTargetDrafts[key])
+  if (values.length === 0) return
+  addSchedulerScopeTargetValues(key, values)
+  schedulerScopeTargetDrafts[key] = ''
+}
+
+function addSchedulerScopeTargetUser(): void {
+  const userId = schedulerScopeTargetUserId.value.trim()
+  if (!userId) return
+  addSchedulerScopeTargetValues('userIds', [userId])
+  schedulerScopeTargetUserId.value = ''
+}
+
+function removeSchedulerScopeTargetValue(key: AttendanceSchedulerScopeTargetKey, value: string): void {
+  setSchedulerScopeTargetValues(key, schedulerScopeForm[key].filter(item => item !== value))
+}
+
+function resetSchedulerScopeTargetDrafts(): void {
+  schedulerScopeTargetDrafts.departments = ''
+  schedulerScopeTargetDrafts.roles = ''
+  schedulerScopeTargetDrafts.roleTags = ''
+  schedulerScopeTargetUserId.value = ''
+}
+
+function attendanceGroupPickerLabel(group: AttendanceGroup): string {
+  return [group.name, group.code || group.id].filter(Boolean).join(' · ')
+}
+
+function scheduleGroupPickerLabel(group: AttendanceAdvancedSchedulingGroupItem): string {
+  return [group.name, group.code || group.id].filter(Boolean).join(' · ')
+}
+
+function schedulerScopeTargetValueLabel(key: AttendanceSchedulerScopeTargetKey, value: string): string {
+  if (key === 'attendanceGroupIds') {
+    const group = attendanceGroups.value.find(item => item.id === value)
+    return group ? attendanceGroupPickerLabel(group) : value
+  }
+  if (key === 'scheduleGroupIds') {
+    const group = advancedSchedulingWorkbenchGroups.value.find(item => item.id === value)
+    return group ? scheduleGroupPickerLabel(group) : value
+  }
+  return value
+}
+
+// Create or update one scheduler scope. The 6 target controls map to the backend scope keys
+// exactly (names MUST match the backend normalizer; a wrong key is silently dropped).
 // Mirrors the backend validation (>=1 action, >=1 target) client-side before POSTing.
 function resetSchedulerScopeForm(): void {
   schedulerScopeForm.subjectType = 'user'
   schedulerScopeForm.subjectRef = ''
   schedulerScopeForm.actions = []
-  schedulerScopeForm.scheduleGroupIds = ''
-  schedulerScopeForm.attendanceGroupIds = ''
-  schedulerScopeForm.userIds = ''
-  schedulerScopeForm.departments = ''
-  schedulerScopeForm.roles = ''
-  schedulerScopeForm.roleTags = ''
+  setSchedulerScopeTargetValues('scheduleGroupIds', [])
+  setSchedulerScopeTargetValues('attendanceGroupIds', [])
+  setSchedulerScopeTargetValues('userIds', [])
+  setSchedulerScopeTargetValues('departments', [])
+  setSchedulerScopeTargetValues('roles', [])
+  setSchedulerScopeTargetValues('roleTags', [])
+  resetSchedulerScopeTargetDrafts()
   schedulerScopeEditingId.value = null
 }
 
@@ -19004,12 +19199,13 @@ function editSchedulerScope(scope: AttendanceSchedulerScope): void {
     : 'user'
   schedulerScopeForm.subjectRef = scope.subjectRef
   schedulerScopeForm.actions = [...scope.actions]
-  schedulerScopeForm.scheduleGroupIds = scope.scope.scheduleGroupIds.join(', ')
-  schedulerScopeForm.attendanceGroupIds = scope.scope.attendanceGroupIds.join(', ')
-  schedulerScopeForm.userIds = scope.scope.userIds.join(', ')
-  schedulerScopeForm.departments = scope.scope.departments.join(', ')
-  schedulerScopeForm.roles = scope.scope.roles.join(', ')
-  schedulerScopeForm.roleTags = scope.scope.roleTags.join(', ')
+  setSchedulerScopeTargetValues('scheduleGroupIds', scope.scope.scheduleGroupIds)
+  setSchedulerScopeTargetValues('attendanceGroupIds', scope.scope.attendanceGroupIds)
+  setSchedulerScopeTargetValues('userIds', scope.scope.userIds)
+  setSchedulerScopeTargetValues('departments', scope.scope.departments)
+  setSchedulerScopeTargetValues('roles', scope.scope.roles)
+  setSchedulerScopeTargetValues('roleTags', scope.scope.roleTags)
+  resetSchedulerScopeTargetDrafts()
   schedulerScopeEditingId.value = scope.id
   void nextTick(() => {
     schedulerScopeFormHydrating = false
@@ -19031,12 +19227,12 @@ async function submitSchedulerScope() {
     return
   }
   const scope = {
-    scheduleGroupIds: parseUserIdList(schedulerScopeForm.scheduleGroupIds),
-    attendanceGroupIds: parseUserIdList(schedulerScopeForm.attendanceGroupIds),
-    userIds: parseUserIdList(schedulerScopeForm.userIds),
-    departments: parseUserIdList(schedulerScopeForm.departments),
-    roles: parseUserIdList(schedulerScopeForm.roles),
-    roleTags: parseUserIdList(schedulerScopeForm.roleTags),
+    scheduleGroupIds: normalizeSchedulerScopeTargetValues(schedulerScopeForm.scheduleGroupIds),
+    attendanceGroupIds: normalizeSchedulerScopeTargetValues(schedulerScopeForm.attendanceGroupIds),
+    userIds: normalizeSchedulerScopeTargetValues(schedulerScopeForm.userIds),
+    departments: normalizeSchedulerScopeTargetValues(schedulerScopeForm.departments),
+    roles: normalizeSchedulerScopeTargetValues(schedulerScopeForm.roles),
+    roleTags: normalizeSchedulerScopeTargetValues(schedulerScopeForm.roleTags),
   }
   if (!Object.values(scope).some(ids => ids.length > 0)) {
     setStatus(tr('Add at least one scope target.', '请至少添加一个范围目标。'), 'error')
@@ -21861,6 +22057,44 @@ const holidaySectionBindings = {
   padding: 0 4px;
   font-size: 12px;
   color: #5b6b7b;
+}
+.attendance__scheduler-scope-token-input {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.attendance__scheduler-scope-token-input input {
+  flex: 1 1 180px;
+}
+.attendance__scheduler-scope-target-user {
+  gap: 8px;
+}
+.attendance__scheduler-scope-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 24px;
+}
+.attendance__scheduler-scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid #d9e2ec;
+  border-radius: 10px;
+  background: #f6f9fc;
+  color: #243447;
+  font-size: 12px;
+}
+.attendance__scheduler-scope-chip button {
+  border: 0;
+  background: transparent;
+  color: #5b6b7b;
+  cursor: pointer;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
 }
 .attendance__scheduler-scope-form-actions {
   display: flex;
