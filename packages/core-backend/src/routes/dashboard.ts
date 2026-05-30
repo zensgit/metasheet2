@@ -49,12 +49,6 @@ export function getDashboardService(): DashboardService {
   return dashboardService
 }
 
-function getUserId(req: Request): string {
-  const user = (req as unknown as { user?: { id?: unknown } }).user
-  const raw = user?.id ?? req.headers['x-user-id']
-  return raw ? String(raw) : 'anonymous'
-}
-
 function getQuery(): QueryFn {
   const pool = poolManager.get()
   return pool.query.bind(pool) as QueryFn
@@ -198,10 +192,9 @@ export function dashboardRouter() {
     try {
       const auth = await requireSheetManageViews(req, res, req.params.sheetId)
       if (!auth) return
-      const userId = getUserId(req)
       const chart = await dashboardService.createChart(req.params.sheetId, {
         ...req.body,
-        createdBy: userId,
+        createdBy: auth.userId,
       })
       res.status(201).json(chart)
     } catch (err: unknown) {
@@ -307,11 +300,10 @@ export function dashboardRouter() {
     try {
       const auth = await requireSheetManageViews(req, res, req.params.sheetId)
       if (!auth) return
-      const userId = getUserId(req)
       const dashboard = await dashboardService.createDashboard({
         name: req.body.name,
         sheetId: req.params.sheetId,
-        createdBy: userId,
+        createdBy: auth.userId,
       })
       res.status(201).json(dashboard)
     } catch (err: unknown) {

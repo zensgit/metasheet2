@@ -109,7 +109,7 @@ describe('dashboardRouter HTTP mounting', () => {
   })
 
   it('POST /api/multitable/sheets/:sheetId/charts creates and returns a chart', async () => {
-    vi.spyOn(service, 'createChart').mockResolvedValue({
+    const createChart = vi.spyOn(service, 'createChart').mockResolvedValue({
       id: 'new-chart',
       sheetId: 'sheet-a',
       name: 'New',
@@ -123,6 +123,9 @@ describe('dashboardRouter HTTP mounting', () => {
       .expect(201)
 
     expect(res.body).toMatchObject({ id: 'new-chart', name: 'New', type: 'bar' })
+    expect(createChart).toHaveBeenCalledWith('sheet-a', expect.objectContaining({
+      createdBy: 'unit-user',
+    }))
   })
 
   it('GET /api/multitable/sheets/:sheetId/charts/:id/data returns the computed data', async () => {
