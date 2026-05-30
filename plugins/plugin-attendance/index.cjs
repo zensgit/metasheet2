@@ -8299,21 +8299,28 @@ function mapImportBatchRow(row) {
 	  return snapshot
 	}
 
-	async function loadIdempotentImportBatch(client, orgId, idempotencyKey) {
+	async function loadIdempotentImportBatch(client, orgId, idempotencyKey, options = {}) {
 	  const hasColumn = await hasImportBatchIdempotencyColumn(client)
+	  const createdBy = typeof options?.createdBy === 'string' ? options.createdBy.trim() : ''
+	  const createdByClause = createdBy ? 'AND created_by = $4' : ''
+	  const params = createdBy
+	    ? [orgId, idempotencyKey, 'committed', createdBy]
+	    : [orgId, idempotencyKey, 'committed']
 	  const rows = await client.query(
 	    hasColumn
 	      ? `SELECT id, meta
 	         FROM attendance_import_batches
 	         WHERE org_id = $1 AND idempotency_key = $2 AND status = $3
+	         ${createdByClause}
 	         ORDER BY created_at DESC
 	         LIMIT 1`
 	      : `SELECT id, meta
 	         FROM attendance_import_batches
 	         WHERE org_id = $1 AND (meta->>'idempotencyKey') = $2 AND status = $3
+	         ${createdByClause}
 	         ORDER BY created_at DESC
 	         LIMIT 1`,
-	    [orgId, idempotencyKey, 'committed']
+	    params
 	  )
 	  if (!rows.length) return null
 	  const batch = rows[0]
@@ -23032,7 +23039,7 @@ module.exports = {
 		        const idempotencyKey = typeof parsed.data.idempotencyKey === 'string'
 		          ? parsed.data.idempotencyKey.trim()
 		          : ''
-	        if (idempotencyKey) {
+	        if (importAccess.fullImport && idempotencyKey) {
 	          const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
 	          if (existing) {
 	            const existingRowCount = existing.imported + existing.skipped
@@ -23144,8 +23151,38 @@ module.exports = {
             payload: parsed.data,
             fallbackUserId: parsed.data.userId ?? requesterId,
             actorAccess: importAccess,
-          })
-          if (!scopedAccess) return
+	          })
+	          if (!scopedAccess) return
+	        if (!importAccess.fullImport && idempotencyKey) {
+	          const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey, { createdBy: requesterId })
+	          if (existing) {
+	            const existingRowCount = existing.imported + existing.skipped
+	            const existingEngine = resolveImportEngineFromMeta(existing.meta, existingRowCount)
+	            res.json({
+	              ok: true,
+	              data: {
+	                batchId: existing.batchId,
+	                imported: existing.imported,
+	                processedRows: existing.imported,
+	                failedRows: existing.skipped,
+	                elapsedMs: 0,
+	                engine: existingEngine,
+	                recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
+	                  existing.meta,
+	                  existingRowCount,
+	                  existingEngine
+	                ),
+	                items: [],
+	                skipped: [],
+	                csvWarnings: [],
+	                groupWarnings: [],
+	                meta: existing.meta,
+	                idempotent: true,
+	              },
+	            })
+	            return
+	          }
+	        }
 	        if (commitToken) {
 	          let tokenOk = false
             try {
@@ -23228,9 +23265,14 @@ module.exports = {
 
           await db.transaction(async (trx) => {
 	            await applyImportHeavyTransactionTimeout(trx)
-            if (idempotencyKey) {
-              await acquireImportIdempotencyLock(trx, orgId, idempotencyKey)
-              const existing = await loadIdempotentImportBatch(trx, orgId, idempotencyKey)
+	            if (idempotencyKey) {
+	              await acquireImportIdempotencyLock(trx, orgId, idempotencyKey)
+	              const existing = await loadIdempotentImportBatch(
+	                trx,
+	                orgId,
+	                idempotencyKey,
+	                importAccess.fullImport ? undefined : { createdBy: requesterId }
+	              )
               if (existing) {
                 idempotentInTransaction = existing
                 return
@@ -23997,7 +24039,12 @@ module.exports = {
           if ((isIdempotencyUnique || isConcurrentUploadCleanupRace) && await hasImportBatchIdempotencyColumn(db)) {
             try {
               for (let attempt = 0; attempt < 4; attempt += 1) {
-                const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
+	                const existing = await loadIdempotentImportBatch(
+	                  db,
+	                  orgId,
+	                  idempotencyKey,
+	                  importAccess.fullImport ? undefined : { createdBy: requesterId }
+	                )
                 if (existing) {
                   const existingRowCount = existing.imported + existing.skipped
                   const existingEngine = resolveImportEngineFromMeta(existing.meta, existingRowCount)

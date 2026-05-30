@@ -1501,6 +1501,11 @@ describe('attendance UUID route validation', () => {
       if (rbac !== undefined) return rbac
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
+      if (sql.includes('information_schema.columns') && sql.includes('attendance_import_batches')) return [{ ok: 1 }]
+      if (sql.includes('FROM attendance_import_batches')) {
+        return [{ id: 'external-batch-1', meta: { idempotencyKey: 'external-key' } }]
+      }
+      if (sql.includes('FROM attendance_import_items')) return [{ imported: 7, skipped: 1 }]
       if (sql.includes('FROM attendance_scheduler_scopes')) {
         return [schedulerScopeImportRow({
           scope: {
@@ -1522,6 +1527,7 @@ describe('attendance UUID route validation', () => {
 
     const res = await invokeRoute(routes, 'POST /api/attendance/import/commit', {
       body: {
+        idempotencyKey: 'external-key',
         commitToken: 'commit-token-1',
         rows: [
           {
@@ -1544,7 +1550,122 @@ describe('attendance UUID route validation', () => {
       ['default', 'worker-1', '2026-06-10', '2026-06-10'],
     )
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('DELETE FROM attendance_import_tokens'))).toBe(false)
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_import_batches'))).toBe(false)
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_import_items'))).toBe(false)
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_rules'))).toBe(false)
+    expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it('replays scoped import commit idempotency only after target scope and creator checks', async () => {
+    const { db, routes } = await createHarness('false')
+    let batchLookups = 0
+
+    db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
+      const sql = typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query)
+      const params = typeof query === 'string'
+        ? paramsArg
+        : ((query as { values?: unknown[] })?.values ?? paramsArg)
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
+      if (sql.includes('SELECT DISTINCT group_id') && sql.includes('FROM attendance_group_members')) return []
+      if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
+        return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
+      }
+      if (sql.includes('information_schema.columns') && sql.includes('attendance_import_batches')) return [{ ok: 1 }]
+      if (sql.includes('FROM attendance_import_batches')) {
+        batchLookups += 1
+        expect(sql).toContain('created_by = $4')
+        expect(params).toEqual(['default', 'repeat-scope', 'committed', 'scheduler-1'])
+        return [{ id: 'batch-scope-1', meta: { idempotencyKey: 'repeat-scope' } }]
+      }
+      if (sql.includes('FROM attendance_import_items')) {
+        expect(params).toEqual(['batch-scope-1', 'default'])
+        return [{ imported: 3, skipped: 1 }]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/import/commit', {
+      body: {
+        idempotencyKey: 'repeat-scope',
+        rows: [
+          {
+            userId: 'worker-1',
+            workDate: '2026-06-10',
+            fields: {
+              firstInAt: '2026-06-10T09:00:00.000Z',
+              lastOutAt: '2026-06-10T18:00:00.000Z',
+            },
+          },
+        ],
+      },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: {
+        batchId: 'batch-scope-1',
+        imported: 3,
+        processedRows: 3,
+        failedRows: 1,
+        idempotent: true,
+      },
+    })
+    expect(batchLookups).toBe(1)
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
+      ['default', 'worker-1', '2026-06-10', '2026-06-10'],
+    )
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('DELETE FROM attendance_import_tokens'))).toBe(false)
+    expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it('keeps full import admins on idempotent commit replay without row scope hydration', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
+      const sql = typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query)
+      const params = typeof query === 'string'
+        ? paramsArg
+        : ((query as { values?: unknown[] })?.values ?? paramsArg)
+      const rbac = rbacQueryResult(sql, params, true)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('information_schema.columns') && sql.includes('attendance_import_batches')) return [{ ok: 1 }]
+      if (sql.includes('FROM attendance_import_batches')) {
+        expect(sql).not.toContain('created_by = $4')
+        expect(params).toEqual(['default', 'repeat-admin', 'committed'])
+        return [{ id: 'batch-admin-1', meta: { idempotencyKey: 'repeat-admin' } }]
+      }
+      if (sql.includes('FROM attendance_import_items')) {
+        expect(params).toEqual(['batch-admin-1', 'default'])
+        return [{ imported: 5, skipped: 2 }]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/import/commit', {
+      body: { idempotencyKey: 'repeat-admin' },
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: {
+        batchId: 'batch-admin-1',
+        imported: 5,
+        processedRows: 5,
+        failedRows: 2,
+        idempotent: true,
+      },
+    })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_scheduler_scopes'))).toBe(false)
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('SELECT DISTINCT m.schedule_group_id'))).toBe(false)
     expect(db.transaction).not.toHaveBeenCalled()
   })
 
