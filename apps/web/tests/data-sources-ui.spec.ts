@@ -2,16 +2,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { createApp, nextTick } from 'vue'
 
-import { buildCreatePayload, type CreateFormState } from '../src/data-sources/buildPayload'
+import { buildCreatePayload, buildUpdatePayload, type CreateFormState } from '../src/data-sources/buildPayload'
 
 // Mock the api client so the store is tested in isolation.
 const listMock = vi.hoisted(() => vi.fn())
+const getMock = vi.hoisted(() => vi.fn())
 const createMock = vi.hoisted(() => vi.fn())
+const updateMock = vi.hoisted(() => vi.fn())
 const deleteMock = vi.hoisted(() => vi.fn())
 const testConnectionMock = vi.hoisted(() => vi.fn())
 vi.mock('../src/data-sources/api', () => ({
   listDataSources: listMock,
+  getDataSource: getMock,
   createDataSource: createMock,
+  updateDataSource: updateMock,
   deleteDataSource: deleteMock,
   testDataSourceConnection: testConnectionMock,
 }))
@@ -59,6 +63,35 @@ describe('buildCreatePayload — credential safety (omit blank, never send empty
   })
 })
 
+describe('buildUpdatePayload — non-secret update safety', () => {
+  it('updates name / connection / options without sending id, type, or credentials', () => {
+    const p = buildUpdatePayload(form({
+      id: 'db',
+      name: 'Renamed',
+      type: 'postgres',
+      host: 'h',
+      port: 5432,
+      database: 'd',
+      username: 'u',
+      password: 'secret',
+      readOnly: false,
+    }))
+    expect(p).toEqual({
+      name: 'Renamed',
+      connection: { host: 'h', port: 5432, database: 'd' },
+      options: { readOnly: false },
+    })
+    expect(p).not.toHaveProperty('id')
+    expect(p).not.toHaveProperty('type')
+    expect(p).not.toHaveProperty('credentials')
+  })
+
+  it('omits a blank update port instead of sending port: ""', () => {
+    const p = buildUpdatePayload(form({ type: 'sqlserver', host: 'h', port: '', database: 'd' }))
+    expect(p.connection).toEqual({ host: 'h', database: 'd' })
+  })
+})
+
 describe('useDataSourcesStore (UI-1)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -100,6 +133,41 @@ describe('useDataSourcesStore (UI-1)', () => {
     const ok = await store.create({ id: 'x', name: 'X', type: 'postgres', connection: {} })
     expect(ok).toBe(false)
     expect(store.error).toBe('Unsupported data source type')
+  })
+
+  it('loadDetail returns a sanitized data source detail', async () => {
+    getMock.mockResolvedValue({
+      id: 'a',
+      name: 'A',
+      type: 'postgres',
+      connected: false,
+      hasCredentials: true,
+      connection: { host: 'h', database: 'd' },
+      options: { readOnly: true },
+    })
+    const store = useDataSourcesStore()
+    const detail = await store.loadDetail('a')
+    expect(getMock).toHaveBeenCalledWith('a')
+    expect(detail?.hasCredentials).toBe(true)
+    expect(detail).not.toHaveProperty('credentials')
+  })
+
+  it('update posts non-secret config, clears stale test result, and refetches', async () => {
+    updateMock.mockResolvedValue(undefined)
+    listMock.mockResolvedValue([{ id: 'a', name: 'Renamed', type: 'postgres', connected: false }])
+    const store = useDataSourcesStore()
+    store.testResults.a = { id: 'a', success: false }
+
+    const payload = {
+      name: 'Renamed',
+      connection: { host: 'h', database: 'd' },
+      options: { readOnly: true },
+    }
+    const ok = await store.update('a', payload)
+    expect(ok).toBe(true)
+    expect(updateMock).toHaveBeenCalledWith('a', payload)
+    expect(store.testResults.a).toBeUndefined()
+    expect(store.items[0].name).toBe('Renamed')
   })
 
   it('remove deletes by id and refetches', async () => {
@@ -190,5 +258,50 @@ describe('DataSourcesView (UI-2 connection test reachability)', () => {
     const result = container.querySelector('[data-testid="ds-test-result"]')
     expect(result?.textContent).toContain('失败')
     expect(result?.textContent).toContain('timeout')
+  })
+
+  it('opens edit mode from a sanitized detail and submits a credential-free update payload', async () => {
+    listMock.mockResolvedValue([{ id: 'a', name: 'A', type: 'postgres', connected: false }])
+    getMock.mockResolvedValue({
+      id: 'a',
+      name: 'A',
+      type: 'postgres',
+      connected: false,
+      hasCredentials: true,
+      connection: { host: 'db.internal', port: 5432, database: 'erp' },
+      options: { readOnly: true },
+    })
+    updateMock.mockResolvedValue(undefined)
+
+    const container = await mountView()
+    const editButton = container.querySelector('[data-testid="ds-edit"]') as HTMLButtonElement | null
+    expect(editButton).not.toBeNull()
+
+    editButton!.click()
+    await flush()
+    await flush()
+    await flush()
+
+    expect(getMock).toHaveBeenCalledWith('a')
+    expect(container.querySelector('[data-testid="ds-field-password"]')).toBeNull()
+    expect(container.querySelector('[data-testid="ds-field-id"]')?.getAttribute('disabled')).not.toBeNull()
+
+    const nameInput = container.querySelector('[data-testid="ds-field-name"]') as HTMLInputElement
+    nameInput.value = 'Renamed'
+    nameInput.dispatchEvent(new Event('input'))
+    await flush()
+
+    const submit = container.querySelector('[data-testid="ds-submit"]') as HTMLButtonElement
+    submit.click()
+    await flush()
+    await flush()
+    await flush()
+
+    expect(updateMock).toHaveBeenCalledWith('a', {
+      name: 'Renamed',
+      connection: { host: 'db.internal', port: 5432, database: 'erp' },
+      options: { readOnly: true },
+    })
+    expect(updateMock.mock.calls[0][1]).not.toHaveProperty('credentials')
   })
 })

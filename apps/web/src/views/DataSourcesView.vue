@@ -11,9 +11,9 @@
         type="button"
         class="data-sources__btn data-sources__btn--primary"
         data-testid="ds-new-button"
-        @click="toggleForm"
+        @click="toggleCreateForm"
       >
-        {{ formOpen ? '取消' : '新建数据源' }}
+        {{ formOpen && formMode === 'create' ? '取消' : '新建数据源' }}
       </button>
     </header>
 
@@ -24,13 +24,13 @@
     <form v-if="formOpen" class="data-sources__form" data-testid="ds-create-form" @submit.prevent="submit">
       <div class="data-sources__grid">
         <label>ID
-          <input v-model.trim="form.id" required data-testid="ds-field-id" placeholder="my-erp-db" />
+          <input v-model.trim="form.id" required data-testid="ds-field-id" :disabled="formMode === 'edit'" placeholder="my-erp-db" />
         </label>
         <label>名称 Name
           <input v-model.trim="form.name" required data-testid="ds-field-name" placeholder="客户 ERP 库" />
         </label>
         <label>类型 Type
-          <select v-model="form.type" data-testid="ds-field-type">
+          <select v-model="form.type" data-testid="ds-field-type" :disabled="formMode === 'edit'">
             <option v-for="t in DATA_SOURCE_TYPES" :key="t" :value="t">{{ DATA_SOURCE_TYPE_LABELS[t] }}</option>
           </select>
         </label>
@@ -47,10 +47,10 @@
         <label>Database
           <input v-model.trim="form.database" required data-testid="ds-field-database" placeholder="erp" />
         </label>
-        <label>Username
+        <label v-if="formMode === 'create'">Username
           <input v-model.trim="form.username" autocomplete="off" data-testid="ds-field-username" />
         </label>
-        <label>Password
+        <label v-if="formMode === 'create'">Password
           <input v-model="form.password" type="password" autocomplete="new-password" data-testid="ds-field-password" />
         </label>
       </div>
@@ -60,10 +60,14 @@
         <label>Base URL
           <input v-model.trim="form.baseURL" required data-testid="ds-field-baseurl" placeholder="https://api.example.com" />
         </label>
-        <label>API Key
+        <label v-if="formMode === 'create'">API Key
           <input v-model="form.apiKey" type="password" autocomplete="off" data-testid="ds-field-apikey" />
         </label>
       </div>
+
+      <p v-if="formMode === 'edit'" class="data-sources__muted" data-testid="ds-edit-secret-note">
+        凭据保持不变;如需轮换凭据,请走单独的凭据更新流程。
+      </p>
 
       <label class="data-sources__checkbox">
         <input v-model="form.readOnly" type="checkbox" data-testid="ds-field-readonly" />
@@ -72,7 +76,7 @@
 
       <div class="data-sources__form-actions">
         <button type="submit" class="data-sources__btn data-sources__btn--primary" :disabled="submitting" data-testid="ds-submit">
-          {{ submitting ? '创建中…' : '创建' }}
+          {{ submitting ? '保存中…' : formMode === 'edit' ? '保存' : '创建' }}
         </button>
       </div>
     </form>
@@ -118,6 +122,13 @@
               <div class="data-sources__actions">
                 <button
                   type="button"
+                  class="data-sources__btn"
+                  data-testid="ds-edit"
+                  :disabled="detailLoading"
+                  @click="openEditForm(ds.id)"
+                >编辑</button>
+                <button
+                  type="button"
                   class="data-sources__btn data-sources__btn--danger"
                   data-testid="ds-delete"
                   @click="confirmRemove(ds.id, ds.name)"
@@ -137,13 +148,17 @@ import { useDataSourcesStore } from '../stores/dataSources'
 import {
   DATA_SOURCE_TYPES,
   DATA_SOURCE_TYPE_LABELS,
+  type DataSourceDetail,
   type DataSourceType,
 } from '../data-sources/types'
-import { buildCreatePayload } from '../data-sources/buildPayload'
+import { buildCreatePayload, buildUpdatePayload } from '../data-sources/buildPayload'
 
 const store = useDataSourcesStore()
 const formOpen = ref(false)
+const formMode = ref<'create' | 'edit'>('create')
+const editingId = ref<string | null>(null)
 const submitting = ref(false)
+const detailLoading = ref(false)
 
 const form = reactive({
   id: '',
@@ -175,8 +190,15 @@ function testResultText(id: string): string {
   return `失败${result.error?.message ? ` · ${result.error.message}` : ''}`
 }
 
-function toggleForm(): void {
-  formOpen.value = !formOpen.value
+function toggleCreateForm(): void {
+  if (formOpen.value && formMode.value === 'create') {
+    formOpen.value = false
+    return
+  }
+  resetForm()
+  formMode.value = 'create'
+  editingId.value = null
+  formOpen.value = true
   store.error = null
 }
 
@@ -187,12 +209,45 @@ function resetForm(): void {
   })
 }
 
+function fillFormFromDetail(detail: DataSourceDetail): void {
+  resetForm()
+  const connection = detail.connection ?? {}
+  form.id = detail.id
+  form.name = detail.name
+  form.type = DATA_SOURCE_TYPES.includes(detail.type as DataSourceType)
+    ? detail.type as DataSourceType
+    : 'postgres'
+  form.host = String(connection.host ?? '')
+  form.port = typeof connection.port === 'number' ? connection.port : undefined
+  form.database = String(connection.database ?? '')
+  form.baseURL = String(connection.baseURL ?? '')
+  form.readOnly = detail.options?.readOnly !== false
+}
+
+async function openEditForm(id: string): Promise<void> {
+  detailLoading.value = true
+  try {
+    const detail = await store.loadDetail(id)
+    if (!detail) return
+    fillFormFromDetail(detail)
+    formMode.value = 'edit'
+    editingId.value = id
+    formOpen.value = true
+  } finally {
+    detailLoading.value = false
+  }
+}
+
 async function submit(): Promise<void> {
   submitting.value = true
   try {
-    const ok = await store.create(buildCreatePayload(form))
+    const ok = formMode.value === 'edit' && editingId.value
+      ? await store.update(editingId.value, buildUpdatePayload(form))
+      : await store.create(buildCreatePayload(form))
     if (ok) {
       resetForm()
+      formMode.value = 'create'
+      editingId.value = null
       formOpen.value = false
     }
   } finally {
@@ -238,7 +293,7 @@ onMounted(() => {
 .data-sources__status { font-size: 12px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
 .data-sources__status.is-on { background: #f6ffed; color: #389e0d; }
 .data-sources__status.is-off { background: #f5f5f5; color: #8c8c8c; }
-.data-sources__actions { display: flex; justify-content: flex-end; }
+.data-sources__actions { display: flex; justify-content: flex-end; gap: 8px; }
 .data-sources__test-result { margin: 6px 0 0; font-size: 12px; max-width: 260px; overflow-wrap: anywhere; }
 .data-sources__test-result.is-ok { color: #237804; }
 .data-sources__test-result.is-fail { color: #cf1322; }
