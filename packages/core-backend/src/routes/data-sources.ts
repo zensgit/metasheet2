@@ -187,6 +187,55 @@ export function dataSourcesRouter(): Router {
   })
 
   /**
+   * GET /api/data-sources/health
+   * Get health status of the caller's data sources
+   *
+   * Keep this route before /api/data-sources/:id. Otherwise Express treats
+   * "health" as a data-source id and the endpoint becomes unreachable.
+   */
+  router.get('/api/data-sources/health', rbacGuard('data_sources', 'read'), async (req: Request, res: Response) => {
+    try {
+      const userId = resolveUserId(req)
+      if (!userId) {
+        return res.status(401).json({
+          ok: false,
+          error: { code: 'UNAUTHENTICATED', message: 'Authentication required' }
+        })
+      }
+
+      const manager = getManager()
+      const healthMap = await manager.healthCheck({ ownerId: userId })
+
+      const health: Array<{
+        id: string
+        connected: boolean
+        responsive: boolean
+        latency?: number
+      }> = []
+
+      healthMap.forEach((status, id) => {
+        health.push({ id, ...status })
+      })
+
+      return res.json({
+        ok: true,
+        data: {
+          items: health,
+          timestamp: new Date().toISOString()
+        }
+      })
+    } catch (error) {
+      return res.status(500).json({
+        ok: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: error instanceof Error ? error.message : 'Health check failed'
+        }
+      })
+    }
+  })
+
+  /**
    * GET /api/data-sources/:id
    * Get details of a specific data source
    */
@@ -515,44 +564,6 @@ export function dataSourcesRouter(): Router {
         error: {
           code: 'TEST_FAILED',
           message: error instanceof Error ? error.message : 'Connection test failed'
-        }
-      })
-    }
-  })
-
-  /**
-   * GET /api/data-sources/health
-   * Get health status of all data sources
-   */
-  router.get('/api/data-sources/health', rbacGuard('data_sources', 'read'), async (_req: Request, res: Response) => {
-    try {
-      const manager = getManager()
-      const healthMap = await manager.healthCheck()
-
-      const health: Array<{
-        id: string
-        connected: boolean
-        responsive: boolean
-        latency?: number
-      }> = []
-
-      healthMap.forEach((status, id) => {
-        health.push({ id, ...status })
-      })
-
-      return res.json({
-        ok: true,
-        data: {
-          items: health,
-          timestamp: new Date().toISOString()
-        }
-      })
-    } catch (error) {
-      return res.status(500).json({
-        ok: false,
-        error: {
-          code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Health check failed'
         }
       })
     }

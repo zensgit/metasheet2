@@ -156,6 +156,16 @@ describe('DataSourceManager ownership scope (A0.1)', () => {
     expect(m.listDataSources().map((s) => s.id).sort()).toEqual(['a1', 'b1'])
   })
 
+  it('healthCheck filters by owner', async () => {
+    const m = new DataSourceManager()
+    await m.addDataSource(pgConfig('health-a'), { ownerId: 'alice' })
+    await m.addDataSource(pgConfig('health-b'), { ownerId: 'bob' })
+
+    expect([...((await m.healthCheck({ ownerId: 'alice' })).keys())]).toEqual(['health-a'])
+    expect([...((await m.healthCheck({ ownerId: 'bob' })).keys())]).toEqual(['health-b'])
+    expect([...((await m.healthCheck()).keys())].sort()).toEqual(['health-a', 'health-b'])
+  })
+
   it('removeDataSource clears the scope entry', async () => {
     const m = new DataSourceManager()
     await m.addDataSource(pgConfig('ds1'), { ownerId: 'alice' })
@@ -223,6 +233,20 @@ describe('data-sources route ownership scope (A0.1)', () => {
     const ids = (list.body.data.items as Array<{ id: string }>).map((i) => i.id)
     expect(ids).toContain('ds-list-a')
     expect(ids).not.toContain('ds-list-b')
+  })
+
+  it('health route is reachable and returns only the caller’s own data sources', async () => {
+    currentUser = admin('alice-health')
+    await request(app).post('/api/data-sources').send(pgConfig('ds-health-a'))
+    currentUser = admin('bob-health')
+    await request(app).post('/api/data-sources').send(pgConfig('ds-health-b'))
+
+    currentUser = admin('alice-health')
+    const res = await request(app).get('/api/data-sources/health')
+    expect(res.status).toBe(200)
+    const ids = (res.body.data.items as Array<{ id: string }>).map((i) => i.id)
+    expect(ids).toContain('ds-health-a')
+    expect(ids).not.toContain('ds-health-b')
   })
 
   it('PUT preserves the owner — a non-owner still gets 404 after the update', async () => {
