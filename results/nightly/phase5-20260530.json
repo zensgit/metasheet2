@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-05-30T12:50:33Z",
+  "timestamp": "2026-05-30T17:26:30Z",
   "metrics_url": "http://23.254.236.11:8081/metrics/prom",
   "configuration": {
     "count_cache_miss_as_fallback": false,
@@ -17,7 +17,7 @@
     "fallback_effective_ratio": 0,
     "http_success_rate": 100.00,
     "error_rate": 0,
-    "memory_rss_mb": 262.80,
+    "memory_rss_mb": 253.89,
     "redis_recent_failures": 0,
     "fallback_by_reason": {"http_timeout":0,"http_error":0,"message_timeout":0,"message_error":0,"cache_miss":0,"circuit_breaker":0,"upstream_error":0,"unknown":0}
   },
@@ -95,7 +95,7 @@
   "status": "pass"
 },{
   "metric": "memory_rss",
-  "actual": 262.80,
+  "actual": 253.89,
   "threshold": 500.0,
   "unit": "megabytes",
   "type": "upper_bound",
