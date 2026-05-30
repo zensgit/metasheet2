@@ -1395,6 +1395,13 @@
                         <button type="button" :aria-label="tr('Remove target', '移除目标')" data-attendance-scheduler-scope-target-remove="attendanceGroupIds" @click="removeSchedulerScopeTargetValue('attendanceGroupIds', target)">×</button>
                       </span>
                     </div>
+                    <span
+                      v-if="schedulerScopeAttendanceGroupsTruncated"
+                      class="attendance__scheduler-scope-truncated"
+                      data-attendance-scheduler-scope-attendance-groups-truncated
+                    >
+                      {{ tr(`Showing first ${attendanceGroups.length} of ${attendanceGroupsTotal} attendance groups; pick the rest from the attendance-groups manager.`, `仅显示前 ${attendanceGroups.length}/${attendanceGroupsTotal} 个考勤组；其余请在考勤组管理中选择。`) }}
+                    </span>
                   </label>
                   <label class="attendance__field" for="attendance-scheduler-scope-target-schedule-groups">
                     <span>{{ tr('Schedule groups', '排班组') }}</span>
@@ -9186,6 +9193,14 @@ const selectedRuleTemplateVersion = computed(
   () => ruleTemplateVersions.value.find(item => item.id === selectedRuleTemplateVersionId.value) ?? null,
 )
 const attendanceGroups = ref<AttendanceGroup[]>([])
+// No-silent-caps for the scheduler-scope attendance-group picker: the loader caps at pageSize 200
+// while the endpoint reports the real COUNT(*) total, so warn when the loaded options are short of
+// the total — otherwise a group past the cap would be silently un-pickable. (Schedule groups are
+// returned uncapped by the workbench, so the schedule-group picker needs no such guard.)
+const attendanceGroupsTotal = ref(0)
+const schedulerScopeAttendanceGroupsTruncated = computed(
+  () => attendanceGroupsTotal.value > attendanceGroups.value.length,
+)
 const attendanceGroupMembers = ref<AttendanceGroupMember[]>([])
 const attendanceGroupManagers = ref<AttendanceGroupManager[]>([])
 const attendanceGroupSearch = ref('')
@@ -17865,6 +17880,7 @@ async function loadAttendanceGroups() {
     adminForbidden.value = false
     const selectedId = attendanceGroupEditingId.value || attendanceGroupMemberGroupId.value
     attendanceGroups.value = data.data?.items ?? []
+    attendanceGroupsTotal.value = typeof data.data?.total === 'number' ? data.data.total : attendanceGroups.value.length
     const selected = selectedId ? attendanceGroups.value.find(item => item.id === selectedId) : null
     if (selected) {
       editAttendanceGroup(selected)
@@ -22028,6 +22044,7 @@ const holidaySectionBindings = {
   color: #5b6b7b;
 }
 .attendance__scheduler-scope-truncated {
+  display: block;
   margin: 10px 0 0;
   font-size: 12px;
   color: #8a6d3b;
