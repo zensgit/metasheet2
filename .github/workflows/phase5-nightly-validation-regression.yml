@@ -166,12 +166,18 @@ jobs:
         run: |
           bash scripts/phase5-slo-tighten-suggestions.sh results/nightly claudedocs/PHASE5_SLO_SUGGESTIONS.json 30 || echo "tighten suggestions skipped"
 
+      - name: Resolve nightly branch date
+        id: nightly_date
+        if: success() && steps.probe.outputs.available == 'true'
+        shell: bash
+        run: echo "date=$(date -u '+%Y%m%d')" >> "$GITHUB_OUTPUT"
+
       - name: Create PR with nightly JSON (for trend, suggestions & baseline rotation)
         if: success() && steps.probe.outputs.available == 'true'
         uses: peter-evans/create-pull-request@v5
         with:
-          commit-message: "chore(phase5): nightly JSON, weekly trend & SLO suggestions $(date -u '+%Y-%m-%d')"
-          title: "Phase5 Nightly: JSON + Trend + SLO Suggestions $(date -u '+%Y-%m-%d')"
+          commit-message: "chore(phase5): nightly JSON, weekly trend & SLO suggestions ${{ steps.nightly_date.outputs.date }}"
+          title: "Phase5 Nightly: JSON + Trend + SLO Suggestions ${{ steps.nightly_date.outputs.date }}"
           body: |
             Automated nightly Phase 5 validation.
             Includes:
@@ -179,7 +185,7 @@ jobs:
             - Weekly trend (last 7): claudedocs/PHASE5_WEEKLY_TREND.md
             - SLO tightening suggestions (window 30d): claudedocs/PHASE5_SLO_SUGGESTIONS.json
             Supports future baseline rotation after sustained PASS streak.
-          branch: chore/phase5-nightly-$(date -u '+%Y%m%d')
+          branch: chore/phase5-nightly-${{ steps.nightly_date.outputs.date }}
 
       - name: Auto-rotate baseline (if streak met)
         if: success() && steps.probe.outputs.available == 'true'
