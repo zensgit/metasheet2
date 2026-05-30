@@ -3525,11 +3525,13 @@
                       <ul
                         v-if="card.policyLines && card.policyLines.length > 0"
                         class="attendance__group-summary-policy"
+                        data-attendance-group-policy
                         data-attendance-group-punch-policy
                       >
                         <li
                           v-for="line in card.policyLines"
                           :key="line.key"
+                          :data-attendance-group-policy-line="line.key"
                           :data-attendance-group-punch-line="line.key"
                         >
                           <span class="attendance__group-summary-policy-label">{{ line.label }}</span>:
@@ -3551,6 +3553,92 @@
                       </div>
                     </div>
                   </section>
+
+                  <div
+                    v-if="attendanceGroupRulePolicyDrawerOpen"
+                    class="attendance__drawer-backdrop"
+                    data-attendance-group-rule-policy-drawer
+                    @click.self="closeAttendanceGroupRulePolicyDrawer"
+                  >
+                    <aside
+                      class="attendance__work-time-drawer"
+                      role="dialog"
+                      aria-modal="true"
+                      aria-labelledby="attendance-group-rule-policy-drawer-title"
+                    >
+                      <div class="attendance__work-time-drawer-header">
+                        <div>
+                          <h6 id="attendance-group-rule-policy-drawer-title">{{ tr('Rule policy settings', '规则策略设置') }}</h6>
+                          <span class="attendance__field-hint">
+                            {{ tr('This drawer summarizes the group rule link; rule contents remain in Rule Sets.', '此抽屉汇总考勤组关联的规则；规则内容仍在规则集中维护。') }}
+                          </span>
+                        </div>
+                        <button
+                          class="attendance__btn attendance__btn--compact"
+                          type="button"
+                          data-attendance-group-rule-policy-close
+                          @click="closeAttendanceGroupRulePolicyDrawer"
+                        >
+                          {{ tr('Close', '关闭') }}
+                        </button>
+                      </div>
+
+                      <div class="attendance__work-time-drawer-body" data-attendance-group-rule-policy-scope>
+                        <strong>{{ tr('Group rule link', '考勤组规则关联') }}</strong>
+                        <span>
+                          {{ tr('The selected rule set is reused by the group; this panel does not create group-owned rule overrides.', '考勤组复用已选规则集；此面板不会创建考勤组级规则覆盖。') }}
+                        </span>
+                      </div>
+
+                      <ul class="attendance__group-summary-policy" data-attendance-group-rule-policy-lines>
+                        <li
+                          v-for="line in attendanceGroupRulePolicyLines"
+                          :key="`rule-policy-drawer-${line.key}`"
+                          :data-attendance-group-rule-policy-line="line.key"
+                        >
+                          <span class="attendance__group-summary-policy-label">{{ line.label }}</span>:
+                          <span class="attendance__group-summary-policy-value">{{ line.value }}</span>
+                        </li>
+                      </ul>
+
+                      <div class="attendance__work-time-holiday-callout" data-attendance-group-rule-policy-priority>
+                        <div>
+                          <strong>{{ tr('Date-specific priority preview', '特殊日期优先级预览') }}</strong>
+                          <span>
+                            {{ tr('Review special-date and holiday calendar overrides before relying on the ordinary working-day rule set.', '依赖普通工作日规则集前，请先复核特殊日期与节假日日历覆盖。') }}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div class="attendance__work-time-holiday-callout" data-attendance-group-rule-policy-boundary>
+                        <div>
+                          <strong>{{ tr('Group-owned rule editing deferred', '考勤组级规则编辑暂缓') }}</strong>
+                          <span>
+                            {{ tr('Late, early-leave, overtime, and special-date rule authoring still needs the Rule Sets and Holidays surfaces in this slice.', '本切片中迟到、早退、加班与特殊日期规则编写仍需进入规则集与节假日界面。') }}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div class="attendance__work-time-drawer-actions">
+                        <button
+                          class="attendance__btn"
+                          type="button"
+                          data-attendance-group-rule-policy-rule-sets-open
+                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets); closeAttendanceGroupRulePolicyDrawer()"
+                        >
+                          {{ tr('Open Rule Sets', '打开规则集') }}
+                        </button>
+                        <button
+                          class="attendance__btn"
+                          type="button"
+                          data-attendance-group-rule-policy-holidays-open
+                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidays); closeAttendanceGroupRulePolicyDrawer()"
+                        >
+                          {{ tr('Open Holidays', '打开节假日') }}
+                        </button>
+                      </div>
+                    </aside>
+                  </div>
 
                   <div
                     v-if="attendanceGroupWorkTimeDrawerOpen"
@@ -7121,7 +7209,7 @@ type AttendanceGroupSummaryAction = {
   key: string
   label: string
   sectionId?: string
-  drawer?: 'work-time' | 'punch-method'
+  drawer?: 'rule-policy' | 'work-time' | 'punch-method'
 }
 
 type AttendanceGroupSummaryPolicyLine = {
@@ -8839,6 +8927,7 @@ const attendanceGroupCopyingId = ref<string | null>(null)
 const attendanceGroupDeletingId = ref<string | null>(null)
 const attendanceGroupManagerLoading = ref(false)
 const attendanceGroupManagerSaving = ref(false)
+const attendanceGroupRulePolicyDrawerOpen = ref(false)
 const attendanceGroupWorkTimeDrawerOpen = ref(false)
 const attendanceGroupPunchMethodDrawerOpen = ref(false)
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
@@ -9133,6 +9222,115 @@ function attendanceAssignmentUserSecondaryLabel(userId: string): string {
   return parts.join(' · ')
 }
 
+const selectedAttendanceGroupRuleSet = computed(() => {
+  const ruleSetId = attendanceGroupForm.ruleSetId.trim()
+  if (!ruleSetId) return null
+  return ruleSets.value.find(item => item.id === ruleSetId) ?? null
+})
+
+function normalizeAttendanceRuleSetConfig(ruleSet?: AttendanceRuleSet | null): Record<string, unknown> | null {
+  const config = ruleSet?.config
+  if (typeof config === 'string') return parseJsonConfig(config)
+  return asPlainObject(config)
+}
+
+function formatAttendanceRuleSetWorkingDays(rule: Record<string, unknown> | null): string {
+  const workingDays = normalizeStringList(rule?.workingDays)
+  if (workingDays.length === 0) return tr('Not set', '未设置')
+  return formatRuleBuilderWorkingDaysLabel(workingDays.join(', '))
+}
+
+function formatAttendanceRuleSetGrace(rule: Record<string, unknown> | null): string {
+  if (!rule || (rule.lateGraceMinutes === undefined && rule.earlyGraceMinutes === undefined)) {
+    return tr('Not set', '未设置')
+  }
+  const lateGraceMinutes = normalizeInteger(rule.lateGraceMinutes, 0)
+  const earlyGraceMinutes = normalizeInteger(rule.earlyGraceMinutes, 0)
+  return tr(`${lateGraceMinutes} / ${earlyGraceMinutes} min`, `${lateGraceMinutes} / ${earlyGraceMinutes} 分钟`)
+}
+
+function buildAttendanceGroupRulePolicyLines(): AttendanceGroupSummaryPolicyLine[] {
+  if (!attendanceGroupEditingId.value) {
+    return [
+      {
+        key: 'status',
+        label: tr('Rule link', '规则关联'),
+        value: tr('Choose or save a group first', '先选择或保存考勤组'),
+      },
+    ]
+  }
+  const ruleSetId = attendanceGroupForm.ruleSetId.trim()
+  if (!ruleSetId) {
+    return [
+      {
+        key: 'rule-set',
+        label: tr('Rule set', '规则集'),
+        value: tr('Default workspace rule', '工作区默认规则'),
+      },
+      {
+        key: 'scope',
+        label: tr('Scope', '范围'),
+        value: tr('No group-specific rule set linked', '未关联考勤组专属规则集'),
+      },
+    ]
+  }
+  const ruleSet = selectedAttendanceGroupRuleSet.value
+  if (!ruleSet) {
+    return [
+      {
+        key: 'rule-set',
+        label: tr('Rule set', '规则集'),
+        value: ruleSetId,
+      },
+      {
+        key: 'status',
+        label: tr('Rule config', '规则配置'),
+        value: tr('Linked rule set is not loaded', '关联规则集尚未加载'),
+      },
+    ]
+  }
+  const config = normalizeAttendanceRuleSetConfig(ruleSet)
+  const rule = asPlainObject(config?.rule)
+  const workStartTime = normalizeText(rule?.workStartTime)
+  const workEndTime = normalizeText(rule?.workEndTime)
+  return [
+    {
+      key: 'rule-set',
+      label: tr('Rule set', '规则集'),
+      value: ruleSet.name,
+    },
+    {
+      key: 'scope',
+      label: tr('Scope', '范围'),
+      value: tr(`${ruleSet.scope || 'org'} · v${ruleSet.version ?? 1}${ruleSet.isDefault ? ' · Default' : ''}`, `${ruleSet.scope || 'org'} · v${ruleSet.version ?? 1}${ruleSet.isDefault ? ' · 默认' : ''}`),
+    },
+    {
+      key: 'source',
+      label: tr('Source', '来源'),
+      value: normalizeText(config?.source ?? rule?.source) || tr('Not set', '未设置'),
+    },
+    {
+      key: 'work-window',
+      label: tr('Work window', '工作时间窗'),
+      value: workStartTime && workEndTime
+        ? `${workStartTime} - ${workEndTime}`
+        : tr('Not set', '未设置'),
+    },
+    {
+      key: 'working-days',
+      label: tr('Working days', '工作日'),
+      value: formatAttendanceRuleSetWorkingDays(rule),
+    },
+    {
+      key: 'grace',
+      label: tr('Grace', '宽限'),
+      value: formatAttendanceRuleSetGrace(rule),
+    },
+  ]
+}
+
+const attendanceGroupRulePolicyLines = computed(() => buildAttendanceGroupRulePolicyLines())
+
 // Read-only, workspace-level punch policy surfaced from the already-loaded
 // org settings (no group scope). Mirrors what enforcePunchConstraints applies.
 function buildAttendanceGroupPunchPolicyLines(): AttendanceGroupSummaryPolicyLine[] {
@@ -9233,7 +9431,13 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
       detail: attendanceGroupForm.ruleSetId
         ? tr('Rule set contents stay in the Policies section.', '规则集内容仍在规则策略中维护。')
         : tr('Falls back to the workspace default rule until a rule set is linked.', '未关联规则集时使用工作区默认规则。'),
+      policyLines: attendanceGroupRulePolicyLines.value,
       actions: [
+        {
+          key: 'open-rule-policy-drawer',
+          label: tr('Open Rule policy', '打开规则策略'),
+          drawer: 'rule-policy',
+        },
         {
           key: 'open-rule-sets',
           label: tr('Open Rule Sets', '打开规则集'),
@@ -9352,6 +9556,10 @@ const attendanceGroupFixedSchedulePreviewAvailable = computed(() =>
 )
 
 function handleAttendanceGroupSummaryAction(action: AttendanceGroupSummaryAction) {
+  if (action.drawer === 'rule-policy') {
+    openAttendanceGroupRulePolicyDrawer()
+    return
+  }
   if (action.drawer === 'work-time') {
     openAttendanceGroupWorkTimeDrawer()
     return
@@ -9363,6 +9571,14 @@ function handleAttendanceGroupSummaryAction(action: AttendanceGroupSummaryAction
   if (action.sectionId) {
     selectAdminSection(action.sectionId)
   }
+}
+
+function openAttendanceGroupRulePolicyDrawer() {
+  attendanceGroupRulePolicyDrawerOpen.value = true
+}
+
+function closeAttendanceGroupRulePolicyDrawer() {
+  attendanceGroupRulePolicyDrawerOpen.value = false
 }
 
 function openAttendanceGroupWorkTimeDrawer() {

@@ -898,7 +898,10 @@ describe('Attendance admin regressions', () => {
     expect(groupsSection!.querySelector('[data-attendance-group-manager-count]')?.textContent).toContain('1 owner')
     const summaryGrid = groupsSection!.querySelector<HTMLElement>('[data-attendance-group-summaries]')
     expect(summaryGrid).toBeTruthy()
-    expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Ops Rules')
+    const rulePolicyCard = summaryGrid!.querySelector<HTMLElement>('[data-attendance-group-summary-card="rule-policy"]')
+    expect(rulePolicyCard?.textContent).toContain('Ops Rules')
+    expect(rulePolicyCard?.querySelector('[data-attendance-group-policy-line="work-window"]')?.textContent).toContain('09:00 - 18:00')
+    expect(rulePolicyCard?.querySelector('[data-attendance-group-policy-line="working-days"]')?.textContent).toContain('Mon')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="work-time"]')?.textContent).toContain('Fixed shift')
     expect(groupsSection!.querySelector<HTMLSelectElement>('[data-attendance-group-type]')?.disabled).toBe(true)
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="scheduling-coverage"]')?.textContent).toContain('Advanced scheduling owns rotation and coverage checks')
@@ -907,6 +910,27 @@ describe('Attendance admin regressions', () => {
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="advanced-controls"]')?.textContent).toContain('No disabled fake controls')
     expect(summaryGrid!.querySelectorAll('input, textarea, select').length).toBe(0)
     expect(Array.from(summaryGrid!.querySelectorAll('button')).every(button => button.textContent?.trim().startsWith('Open'))).toBe(true)
+
+    const beforeRuleDrawerCalls = vi.mocked(apiFetch).mock.calls.length
+    const openRulePolicy = summaryGrid!.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-rule-policy-drawer"]')
+    expect(openRulePolicy).toBeTruthy()
+    openRulePolicy!.click()
+    await flushUi(2)
+
+    const ruleDrawer = groupsSection!.querySelector<HTMLElement>('[data-attendance-group-rule-policy-drawer]')
+    expect(ruleDrawer).toBeTruthy()
+    expect(ruleDrawer!.querySelector('[data-attendance-group-rule-policy-scope]')?.textContent).toContain('Group rule link')
+    expect(ruleDrawer!.querySelector('[data-attendance-group-rule-policy-line="rule-set"]')?.textContent).toContain('Ops Rules')
+    expect(ruleDrawer!.querySelector('[data-attendance-group-rule-policy-line="work-window"]')?.textContent).toContain('09:00 - 18:00')
+    expect(ruleDrawer!.querySelector('[data-attendance-group-rule-policy-line="working-days"]')?.textContent).toContain('Mon')
+    expect(ruleDrawer!.querySelector('[data-attendance-group-rule-policy-priority]')?.textContent).toContain('Date-specific priority preview')
+    expect(ruleDrawer!.querySelector('[data-attendance-group-rule-policy-boundary]')?.textContent).toContain('Group-owned rule editing deferred')
+    expect(ruleDrawer!.querySelectorAll('input, select, textarea').length).toBe(0)
+    expect(vi.mocked(apiFetch).mock.calls.slice(beforeRuleDrawerCalls)).toHaveLength(0)
+
+    ruleDrawer!.querySelector<HTMLButtonElement>('[data-attendance-group-rule-policy-close]')!.click()
+    await flushUi(2)
+    expect(groupsSection!.querySelector('[data-attendance-group-rule-policy-drawer]')).toBeNull()
 
     const beforeSavedDrawerCalls = vi.mocked(apiFetch).mock.calls.length
     const openWorkTime = summaryGrid!.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-work-time-drawer"]')
@@ -1643,7 +1667,7 @@ describe('Attendance admin regressions', () => {
 
     const summaryGrid = container!.querySelector<HTMLElement>('[data-attendance-group-summaries]')
     expect(summaryGrid).toBeTruthy()
-    expect(summaryGrid!.querySelectorAll('[data-attendance-group-summary-action]').length).toBe(8)
+    expect(summaryGrid!.querySelectorAll('[data-attendance-group-summary-action]').length).toBe(9)
 
     const beforeCalls = vi.mocked(apiFetch).mock.calls.length
     const openWorkTime = summaryGrid!.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-work-time-drawer"]')
