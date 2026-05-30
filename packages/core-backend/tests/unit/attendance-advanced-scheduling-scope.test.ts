@@ -83,6 +83,7 @@ describe('attendance advanced scheduling scope foundation', () => {
     expect(pluginSource).toContain('assertAttendanceRecordExportAllowed')
     expect(pluginSource).toContain('assertAttendanceImportPrepareAllowed')
     expect(pluginSource).toContain('assertAttendanceImportPreviewAllowed')
+    expect(pluginSource).toContain('assertAttendanceImportCommitAllowed')
     expect(pluginSource).toContain('resolveAttendanceRequestApprovalScopeFacts')
     expect(pluginSource).toContain('resolveAttendanceUserSchedulerScopeFacts')
     expect(pluginSource).toContain('buildAttendanceAssignmentViewSql')
