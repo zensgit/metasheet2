@@ -22,8 +22,12 @@ jobs:
           METRICS_URL_INPUT: ${{ github.event.inputs.metrics_url }}
           METRICS_URL_SECRET: ${{ secrets.METRICS_URL }}
           METRICS_AUTH_HEADER_SECRET: ${{ secrets.METRICS_AUTH_HEADER }}
-          ATTENDANCE_ADMIN_JWT: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
           METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || vars.ATTENDANCE_WEB_BASE_URL || '' }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
         run: |
           URL_SOURCE=""
           if [ -n "$METRICS_URL_INPUT" ]; then
@@ -49,9 +53,18 @@ jobs:
           fi
 
           AUTH_HEADER="$METRICS_AUTH_HEADER_SECRET"
-          if [ -z "$AUTH_HEADER" ] && [ "$URL_SOURCE" = "metasheet_base_url" ] && [ -n "$ATTENDANCE_ADMIN_JWT" ]; then
-            echo "::add-mask::$ATTENDANCE_ADMIN_JWT"
-            AUTH_HEADER="Authorization: Bearer $ATTENDANCE_ADMIN_JWT"
+          if [ -z "$AUTH_HEADER" ] && [ "$URL_SOURCE" = "metasheet_base_url" ]; then
+            token_fallback_log="/tmp/phase5-metrics-token-fallback.log"
+            set +e
+            metrics_token="$(METRICS_SCRAPE_TOKEN_RESOLVE_REQUIRED=false bash scripts/ops/resolve-metrics-scrape-token.sh 2> >(tee "$token_fallback_log" >&2))"
+            token_resolve_status=$?
+            set -e
+            if [ "$token_resolve_status" -ne 0 ]; then
+              echo "::warning::deploy-host metrics token fallback failed (exit $token_resolve_status); metrics probe will continue without derived auth"
+            elif [ -n "$metrics_token" ]; then
+              echo "::add-mask::$metrics_token"
+              AUTH_HEADER="Authorization: Bearer $metrics_token"
+            fi
           fi
           if [ -n "$AUTH_HEADER" ]; then
             echo "::add-mask::$AUTH_HEADER"

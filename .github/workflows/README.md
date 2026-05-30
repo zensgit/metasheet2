@@ -45,12 +45,12 @@ This folder contains GitHub Actions that validate Phase 5 SLOs against a Prometh
 ## Required Secrets
 
  - `METRICS_URL` (optional for scheduled Phase 5 workflows when `METASHEET_BASE_URL` is set): e.g., `https://staging.example.com/metrics/prom`.
- - `METRICS_AUTH_HEADER` (optional): e.g., `Authorization: Bearer <token>`. Scheduled Phase 5 workflows can derive this from `ATTENDANCE_ADMIN_JWT` only when they fall back to the trusted `METASHEET_BASE_URL` `/api/metrics/prom` endpoint.
+ - `METRICS_AUTH_HEADER` (optional): e.g., `Authorization: Bearer <token>`. Scheduled Phase 5 workflows can derive this from the deploy-host backend `METRICS_SCRAPE_TOKEN` only when they fall back to the trusted `METASHEET_BASE_URL` `/api/metrics/prom` endpoint.
  - `ALERTMANAGER_WEBHOOK_URL`, `ALERT_WEBHOOK_URL`, `SLACK_WEBHOOK_URL`, or `ATTENDANCE_ALERT_SLACK_WEBHOOK_URL` (one optional webhook secret is used to self-heal on-prem Alertmanager config before DingTalk OAuth stability checks; `SLACK_WEBHOOK_URL` also powers older nightly notification workflows).
  - `SLACK_CHANNEL` (optional): e.g., `alerts`.
  - `GRAFANA_API_TOKEN` (ops deploy only, for dashboard upload).
  - `REDIS_URL` (optional: enables Redis-backed cache validation).
- - `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY_B64` (required for `dingtalk-oauth-stability-recording-lite.yml`).
+ - `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY_B64` (required for `dingtalk-oauth-stability-recording-lite.yml`; optional fallback inputs for scheduled Phase 5 app metrics auth).
 
 ## Runtime Readiness
 ```bash
@@ -121,7 +121,7 @@ REDIS_GET_P95_MAX=0.08 REDIS_SET_P95_MAX=0.08 bash scripts/phase5-regression-che
 ## Notes
 
 - If the metrics endpoint is unreachable or not configured, runs are marked as skipped and do not block PRs.
-- If the endpoint requires auth, set `METRICS_AUTH_HEADER` (full header string), or let scheduled Phase 5 runs use the existing `ATTENDANCE_ADMIN_JWT` fallback for the repository `METASHEET_BASE_URL` app metrics endpoint.
+- If the endpoint requires auth, set `METRICS_AUTH_HEADER` (full header string), or let scheduled Phase 5 runs use the deploy-host `METRICS_SCRAPE_TOKEN` fallback for the repository `METASHEET_BASE_URL` app metrics endpoint.
 - Validation scripts expect a Prometheus exposition at the given URL.
 - `phase5-ops-deploy.yml`
   - Manual dispatch for Prometheus rule + Grafana dashboard deployment.
