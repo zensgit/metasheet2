@@ -794,7 +794,9 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
 
     expect(created).toHaveLength(1)
-    expect(created[0]).toMatchObject({
+    // toEqual (not toMatchObject) so an extra body key — e.g. a re-added orgId, which the
+    // backend's .strict() schema rejects with 400 — fails the test instead of slipping through.
+    expect(created[0]).toEqual({
       subjectType: 'role',
       subjectRef: 'attendance_admin',
       actions: ['view'],

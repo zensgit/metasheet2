@@ -1375,7 +1375,7 @@
                   </label>
                 </div>
                 <p class="attendance__field-hint">
-                  {{ tr('Separate multiple IDs with commas or new lines. At least one target and one action are required. Picker-based targets land in a later slice; this slice accepts free-text.', '多个 ID 用逗号或换行分隔；至少需要一个目标和一个动作。下拉选择器在后续切片提供，本切片用 free-text。') }}
+                  {{ tr('Separate multiple values with commas or new lines. At least one target and one action are required.', '多个值用逗号或换行分隔；至少需要一个目标和一个动作。') }}
                 </p>
                 <button type="submit" class="attendance__btn" :disabled="schedulerScopeCreating" data-attendance-scheduler-scope-create>
                   {{ schedulerScopeCreating ? tr('Creating...', '创建中...') : tr('Create scope', '创建范围') }}
@@ -18966,14 +18966,16 @@ async function createSchedulerScope() {
   }
   schedulerScopeCreating.value = true
   try {
-    const response = await apiFetch('/api/attendance/scheduler-scopes', {
+    // orgId rides the query string (same as the GET); the POST body must match the backend's
+    // .strict() schedulerScopeCreateSchema exactly — an extra key (incl. orgId) is a 400.
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/scheduler-scopes?${query.toString()}`, {
       method: 'POST',
       body: JSON.stringify({
         subjectType: schedulerScopeForm.subjectType,
         subjectRef,
         actions,
         scope,
-        orgId: normalizedOrgId(),
       }),
     })
     if (response.status === 403) {
