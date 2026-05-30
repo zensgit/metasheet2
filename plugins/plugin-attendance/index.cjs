@@ -15283,6 +15283,143 @@ module.exports = {
       }
     }
 
+    async function loadAttendanceSchedulerScopesForAction(req, res, { action, actorAccess } = {}) {
+      const access = actorAccess ?? await resolveAttendanceSchedulerScopeActor(req, res)
+      if (!access) return null
+      if (access.fullAdmin) return { access, scopes: [] }
+
+      try {
+        const actorContext = await loadAttendanceScopeContextForUser(db, access.orgId, access.userId)
+        const scopes = (await loadActiveAttendanceSchedulerScopesForActor(access.orgId, actorContext))
+          .filter(scope => normalizeStringArray(scope.actions).includes(action))
+        return { access, scopes }
+      } catch (error) {
+        if (isDatabaseSchemaError(error)) {
+          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+          return null
+        }
+        logger.error('Attendance scheduler scope action load failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Scheduler scope check failed' } })
+        return null
+      }
+    }
+
+    function schedulerScopeUuidArray(values) {
+      return normalizeStringArray(values)
+        .map(value => normalizeUuidString(value))
+        .filter(Boolean)
+    }
+
+    function schedulerScopeSqlBody(scopeRow) {
+      const scope = normalizeAttendanceSchedulerScopeBody(scopeRow?.scope ?? scopeRow)
+      return {
+        scheduleGroupIds: schedulerScopeUuidArray(scope.scheduleGroupIds),
+        attendanceGroupIds: schedulerScopeUuidArray(scope.attendanceGroupIds),
+        userIds: normalizeStringArray(scope.userIds),
+        departments: normalizeStringArray(scope.departments),
+      }
+    }
+
+    function addScopeArrayParam(params, values, cast) {
+      params.push(values)
+      return `$${params.length}::${cast}[]`
+    }
+
+    function buildAttendanceScheduleGroupViewSql(scopes, params, alias = 'g') {
+      const clauses = []
+      for (const scopeRow of scopes) {
+        const scope = schedulerScopeSqlBody(scopeRow)
+        const conditions = []
+        if (scope.scheduleGroupIds.length) {
+          conditions.push(`${alias}.id = ANY(${addScopeArrayParam(params, scope.scheduleGroupIds, 'uuid')})`)
+        }
+        if (scope.attendanceGroupIds.length) {
+          conditions.push(`${alias}.attendance_group_id = ANY(${addScopeArrayParam(params, scope.attendanceGroupIds, 'uuid')})`)
+        }
+        if (scope.departments.length) {
+          conditions.push(`${alias}.department_ref = ANY(${addScopeArrayParam(params, scope.departments, 'text')})`)
+        }
+        if (conditions.length) clauses.push(`(${conditions.join(' AND ')})`)
+      }
+      return clauses.length ? `(${clauses.join(' OR ')})` : 'FALSE'
+    }
+
+    function attendanceSchedulerScopeMatchesScheduleGroupRow(scopeRow, groupRow) {
+      const scope = schedulerScopeSqlBody(scopeRow)
+      let constrained = false
+      if (scope.scheduleGroupIds.length) {
+        constrained = true
+        if (!scope.scheduleGroupIds.includes(groupRow.id)) return false
+      }
+      if (scope.attendanceGroupIds.length) {
+        constrained = true
+        if (!groupRow.attendance_group_id || !scope.attendanceGroupIds.includes(groupRow.attendance_group_id)) return false
+      }
+      if (scope.departments.length) {
+        constrained = true
+        if (!groupRow.department_ref || !scope.departments.includes(groupRow.department_ref)) return false
+      }
+      return constrained
+    }
+
+    function resolveAttendanceScheduleGroupMemberViewFilter(scopes, groupRow) {
+      const userIds = new Set()
+      let fullGroup = false
+      for (const scopeRow of scopes) {
+        if (!attendanceSchedulerScopeMatchesScheduleGroupRow(scopeRow, groupRow)) continue
+        const scope = schedulerScopeSqlBody(scopeRow)
+        if (scope.userIds.length === 0) {
+          fullGroup = true
+        } else {
+          for (const userId of scope.userIds) userIds.add(userId)
+        }
+      }
+      return { allowed: fullGroup || userIds.size > 0, fullGroup, userIds: [...userIds].sort() }
+    }
+
+    function buildAttendanceAssignmentViewSql(scopes, params, alias = 'a') {
+      const clauses = []
+      for (const scopeRow of scopes) {
+        const scope = schedulerScopeSqlBody(scopeRow)
+        const conditions = []
+        if (scope.userIds.length) {
+          conditions.push(`${alias}.user_id = ANY(${addScopeArrayParam(params, scope.userIds, 'text')})`)
+        }
+
+        const groupConditions = []
+        if (scope.scheduleGroupIds.length) {
+          groupConditions.push(`m.schedule_group_id = ANY(${addScopeArrayParam(params, scope.scheduleGroupIds, 'uuid')})`)
+        }
+        if (scope.attendanceGroupIds.length) {
+          groupConditions.push(`g.attendance_group_id = ANY(${addScopeArrayParam(params, scope.attendanceGroupIds, 'uuid')})`)
+        }
+        if (scope.departments.length) {
+          groupConditions.push(`g.department_ref = ANY(${addScopeArrayParam(params, scope.departments, 'text')})`)
+        }
+        if (groupConditions.length) {
+          conditions.push(
+            `EXISTS (
+               SELECT 1
+               FROM attendance_schedule_group_members m
+               JOIN attendance_schedule_groups g
+                 ON g.id = m.schedule_group_id
+                AND g.org_id = m.org_id
+                AND COALESCE(g.is_active, true) = true
+               WHERE m.org_id = ${alias}.org_id
+                 AND m.user_id = ${alias}.user_id
+                 AND m.schedule_group_id IS NOT NULL
+                 AND COALESCE(m.effective_from, DATE '0001-01-01') <= COALESCE(${alias}.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}')
+                 AND COALESCE(m.effective_to, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= ${alias}.start_date
+                 AND ${groupConditions.join(' AND ')}
+             )`
+          )
+        }
+
+        if (conditions.length) clauses.push(`(${conditions.join(' AND ')})`)
+      }
+      return clauses.length ? `AND (${clauses.join(' OR ')})` : 'AND FALSE'
+    }
+
     async function resolveAttendanceScheduleAssignmentScopeTarget(orgId, payload) {
       const userId = payload?.userId ?? payload?.user_id
       const startDate = normalizeDateOnly(payload?.startDate ?? payload?.start_date) ?? payload?.startDate ?? payload?.start_date
@@ -20803,7 +20940,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/rotation-assignments',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const schema = z.object({
           orgId: z.string().optional(),
         })
@@ -20819,26 +20956,37 @@ module.exports = {
 
         const { page, pageSize, offset } = parsePagination(req.query)
         const orgId = getOrgId(req)
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        if (!viewAccess) return
 
         try {
+          const countParams = [orgId]
+          const countScopeClause = viewAccess.access.fullAdmin
+            ? ''
+            : buildAttendanceAssignmentViewSql(viewAccess.scopes, countParams, 'a')
           const countRows = await db.query(
             `SELECT COUNT(*)::int AS total
-             FROM attendance_rotation_assignments
-             WHERE org_id = $1`,
-            [orgId]
+             FROM attendance_rotation_assignments a
+             WHERE a.org_id = $1 ${countScopeClause}`,
+            countParams
           )
           const total = Number(countRows[0]?.total ?? 0)
 
+          const rowParams = [orgId]
+          const rowScopeClause = viewAccess.access.fullAdmin
+            ? ''
+            : buildAttendanceAssignmentViewSql(viewAccess.scopes, rowParams, 'a')
+          rowParams.push(pageSize, offset)
           const rows = await db.query(
             `SELECT a.id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date, a.is_active,
                     r.name AS rotation_name, r.timezone AS rotation_timezone, r.shift_sequence AS rotation_shift_sequence,
                     r.is_active AS rotation_is_active
              FROM attendance_rotation_assignments a
              JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
-             WHERE a.org_id = $1
+             WHERE a.org_id = $1 ${rowScopeClause}
              ORDER BY a.start_date DESC, a.created_at DESC
-             LIMIT $2 OFFSET $3`,
-            [orgId, pageSize, offset]
+             LIMIT $${rowParams.length - 1} OFFSET $${rowParams.length}`,
+            rowParams
           )
 
           const items = rows.map(row => ({
@@ -20863,7 +21011,7 @@ module.exports = {
           logger.error('Attendance rotation assignments query failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rotation assignments' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
@@ -27343,26 +27491,37 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/schedule-groups',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const orgId = getOrgId(req)
         const { page, pageSize, offset } = parsePagination(req.query)
         const includeInactive = parseBoolean(req.query.includeInactive, false)
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        if (!viewAccess) return
         try {
-          const activeClause = includeInactive ? '' : 'AND is_active = true'
+          const activeClause = includeInactive ? '' : 'AND g.is_active = true'
+          const countParams = [orgId]
+          const countScopeClause = viewAccess.access.fullAdmin
+            ? ''
+            : `AND ${buildAttendanceScheduleGroupViewSql(viewAccess.scopes, countParams, 'g')}`
           const countRows = await db.query(
             `SELECT COUNT(*)::int AS total
-             FROM attendance_schedule_groups
-             WHERE org_id = $1 ${activeClause}`,
-            [orgId]
+             FROM attendance_schedule_groups g
+             WHERE g.org_id = $1 ${activeClause} ${countScopeClause}`,
+            countParams
           )
           const total = Number(countRows[0]?.total ?? 0)
+          const rowParams = [orgId]
+          const rowScopeClause = viewAccess.access.fullAdmin
+            ? ''
+            : `AND ${buildAttendanceScheduleGroupViewSql(viewAccess.scopes, rowParams, 'g')}`
+          rowParams.push(pageSize, offset)
           const rows = await db.query(
             `SELECT *
-             FROM attendance_schedule_groups
-             WHERE org_id = $1 ${activeClause}
-             ORDER BY is_active DESC, name ASC, created_at DESC
-             LIMIT $2 OFFSET $3`,
-            [orgId, pageSize, offset]
+             FROM attendance_schedule_groups g
+             WHERE g.org_id = $1 ${activeClause} ${rowScopeClause}
+             ORDER BY g.is_active DESC, g.name ASC, g.created_at DESC
+             LIMIT $${rowParams.length - 1} OFFSET $${rowParams.length}`,
+            rowParams
           )
           res.json({ ok: true, data: { items: rows.map(mapAttendanceScheduleGroupRow), total, page, pageSize } })
         } catch (error) {
@@ -27373,26 +27532,36 @@ module.exports = {
           logger.error('Attendance schedule groups fetch failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load schedule groups' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'GET',
       '/api/attendance/schedule-groups/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
           return
         }
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        if (!viewAccess) return
         try {
           const rows = await db.query(
             'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
             [groupId, orgId]
           )
           if (!rows.length) {
+            if (!viewAccess.access.fullAdmin) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule group not found' } })
+            return
+          }
+          if (!viewAccess.access.fullAdmin && !viewAccess.scopes.some(scope => attendanceSchedulerScopeMatchesScheduleGroupRow(scope, rows[0]))) {
+            respondAttendanceSchedulerScopeForbidden(res)
             return
           }
           res.json({ ok: true, data: mapAttendanceScheduleGroupRow(rows[0]) })
@@ -27404,7 +27573,7 @@ module.exports = {
           logger.error('Attendance schedule group lookup failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load schedule group' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
@@ -27599,7 +27768,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/schedule-groups/:id/members',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
@@ -27607,20 +27776,47 @@ module.exports = {
           return
         }
         const { page, pageSize, offset } = parsePagination(req.query)
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        if (!viewAccess) return
         try {
+          let memberFilter = { fullGroup: true, userIds: [] }
+          if (!viewAccess.access.fullAdmin) {
+            const groupRows = await db.query(
+              'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
+              [groupId, orgId]
+            )
+            if (!groupRows.length) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
+            memberFilter = resolveAttendanceScheduleGroupMemberViewFilter(viewAccess.scopes, groupRows[0])
+            if (!memberFilter.allowed) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
+          }
+          const countParams = [orgId, groupId]
+          const memberUserClause = !viewAccess.access.fullAdmin && !memberFilter.fullGroup
+            ? `AND user_id = ANY(${addScopeArrayParam(countParams, memberFilter.userIds, 'text')})`
+            : ''
           const countRows = await db.query(
             `SELECT COUNT(*)::int AS total
              FROM attendance_schedule_group_members
-             WHERE org_id = $1 AND schedule_group_id = $2`,
-            [orgId, groupId]
+             WHERE org_id = $1 AND schedule_group_id = $2 ${memberUserClause}`,
+            countParams
           )
+          const rowParams = [orgId, groupId]
+          const rowUserClause = !viewAccess.access.fullAdmin && !memberFilter.fullGroup
+            ? `AND user_id = ANY(${addScopeArrayParam(rowParams, memberFilter.userIds, 'text')})`
+            : ''
+          rowParams.push(pageSize, offset)
           const rows = await db.query(
             `SELECT *
              FROM attendance_schedule_group_members
-             WHERE org_id = $1 AND schedule_group_id = $2
+             WHERE org_id = $1 AND schedule_group_id = $2 ${rowUserClause}
              ORDER BY effective_from ASC NULLS FIRST, user_id ASC, created_at DESC
-             LIMIT $3 OFFSET $4`,
-            [orgId, groupId, pageSize, offset]
+             LIMIT $${rowParams.length - 1} OFFSET $${rowParams.length}`,
+            rowParams
           )
           res.json({
             ok: true,
@@ -27634,7 +27830,7 @@ module.exports = {
           logger.error('Attendance schedule group members fetch failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load schedule group members' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
@@ -28559,7 +28755,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/assignments',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const schema = z.object({
           orgId: z.string().optional(),
           userId: z.string().optional(),
@@ -28579,24 +28775,38 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const { page, pageSize, offset } = parsePagination(req.query)
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        if (!viewAccess) return
 
         try {
-          const params = [orgId]
+          const countParams = [orgId]
           let userFilter = ''
           if (parsed.data.userId) {
-            params.push(parsed.data.userId)
-            userFilter = `AND a.user_id = $${params.length}`
+            countParams.push(parsed.data.userId)
+            userFilter = `AND a.user_id = $${countParams.length}`
           }
+          const countScopeClause = viewAccess.access.fullAdmin
+            ? ''
+            : buildAttendanceAssignmentViewSql(viewAccess.scopes, countParams, 'a')
 
           const countRows = await db.query(
             `SELECT COUNT(*)::int AS total
              FROM attendance_shift_assignments a
-             WHERE a.org_id = $1 ${userFilter}`,
-            params
+             WHERE a.org_id = $1 ${userFilter} ${countScopeClause}`,
+            countParams
           )
           const total = Number(countRows[0]?.total ?? 0)
 
-          params.push(pageSize, offset)
+          const rowParams = [orgId]
+          let rowUserFilter = ''
+          if (parsed.data.userId) {
+            rowParams.push(parsed.data.userId)
+            rowUserFilter = `AND a.user_id = $${rowParams.length}`
+          }
+          const rowScopeClause = viewAccess.access.fullAdmin
+            ? ''
+            : buildAttendanceAssignmentViewSql(viewAccess.scopes, rowParams, 'a')
+          rowParams.push(pageSize, offset)
           const rows = await db.query(
             `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
                     s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
@@ -28605,10 +28815,10 @@ module.exports = {
                     s.working_days AS shift_working_days
              FROM attendance_shift_assignments a
              JOIN attendance_shifts s ON s.id = a.shift_id
-             WHERE a.org_id = $1 ${userFilter}
+             WHERE a.org_id = $1 ${rowUserFilter} ${rowScopeClause}
              ORDER BY a.start_date DESC, a.created_at DESC
-             LIMIT $${params.length - 1} OFFSET $${params.length}`,
-            params
+             LIMIT $${rowParams.length - 1} OFFSET $${rowParams.length}`,
+            rowParams
           )
 
           res.json({
@@ -28631,7 +28841,7 @@ module.exports = {
           logger.error('Attendance assignments query failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load assignments' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(

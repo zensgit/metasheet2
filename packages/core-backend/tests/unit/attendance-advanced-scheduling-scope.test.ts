@@ -42,32 +42,35 @@ describe('attendance advanced scheduling scope foundation', () => {
 
   it('guards the new scheduling group and scheduler-scope routes behind attendance admin or scoped scheduler actions', () => {
     [
-      ['GET', '/api/attendance/schedule-groups'],
       ['POST', '/api/attendance/schedule-groups'],
-      ['GET', '/api/attendance/schedule-groups/:id'],
-      ['GET', '/api/attendance/schedule-groups/:id/members'],
       ['GET', '/api/attendance/scheduler-scopes'],
       ['POST', '/api/attendance/scheduler-scopes'],
       ['PUT', '/api/attendance/scheduler-scopes/:id'],
       ['DELETE', '/api/attendance/scheduler-scopes/:id'],
     ].forEach(([method, path]) => expectAdminRoute(method, path))
     expect(pluginSource).toContain('SCHEDULER_SCOPE_FORBIDDEN')
+    expectDirectAsyncRoute('GET', '/api/attendance/schedule-groups')
+    expectDirectAsyncRoute('GET', '/api/attendance/schedule-groups/:id')
+    expectDirectAsyncRoute('GET', '/api/attendance/schedule-groups/:id/members')
     expectDirectAsyncRoute('POST', '/api/attendance/schedule-groups/:id/members')
     expectDirectAsyncRoute('DELETE', '/api/attendance/schedule-groups/:id/members/:memberId')
     expectDirectAsyncRoute('PUT', '/api/attendance/schedule-groups/:id')
     expectDirectAsyncRoute('DELETE', '/api/attendance/schedule-groups/:id')
-    const scopedDispatchRoutes = [
+    const scopedSchedulerRoutes = [
+      ['GET', '/api/attendance/assignments'],
       ['POST', '/api/attendance/assignments'],
       ['PUT', '/api/attendance/assignments/:id'],
       ['DELETE', '/api/attendance/assignments/:id'],
+      ['GET', '/api/attendance/rotation-assignments'],
       ['POST', '/api/attendance/rotation-assignments'],
       ['PUT', '/api/attendance/rotation-assignments/:id'],
       ['DELETE', '/api/attendance/rotation-assignments/:id'],
     ]
-    scopedDispatchRoutes.forEach(([method, path]) => expectDirectAsyncRoute(method, path))
+    scopedSchedulerRoutes.forEach(([method, path]) => expectDirectAsyncRoute(method, path))
     expect(pluginSource).toContain('resolveAttendanceScheduleAssignmentScopeTarget')
     expect(pluginSource).toContain('assertAttendanceScheduleAssignmentDispatchAllowed')
     expect(pluginSource).toContain('assertAttendanceScheduleGroupEditAllowed')
+    expect(pluginSource).toContain('buildAttendanceAssignmentViewSql')
   })
 
   it('normalizes schedule groups without overloading attendance_groups semantics', () => {

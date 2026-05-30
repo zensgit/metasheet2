@@ -169,6 +169,21 @@ function schedulerScopeEditRow(overrides: Record<string, unknown> = {}) {
   })
 }
 
+function schedulerScopeViewRow(overrides: Record<string, unknown> = {}) {
+  return schedulerScopeRow({
+    actions: ['view'],
+    scope: {
+      scheduleGroupIds: [scheduleGroupId],
+      attendanceGroupIds: [],
+      userIds: [],
+      departments: [],
+      roles: [],
+      roleTags: [],
+    },
+    ...overrides,
+  })
+}
+
 function scheduleGroupMemberRow(overrides: Record<string, unknown> = {}) {
   return {
     id: scheduleGroupMemberId,
@@ -219,6 +234,22 @@ function shiftAssignmentRow(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function shiftAssignmentListRow(overrides: Record<string, unknown> = {}) {
+  return {
+    ...shiftAssignmentRow(),
+    shift_name: 'Day Shift',
+    shift_timezone: 'UTC',
+    shift_work_start_time: '09:00',
+    shift_work_end_time: '18:00',
+    shift_is_overnight: false,
+    shift_late_grace_minutes: 10,
+    shift_early_grace_minutes: 10,
+    shift_rounding_minutes: 5,
+    shift_working_days: [1, 2, 3, 4, 5],
+    ...overrides,
+  }
+}
+
 function rotationAssignmentRow(overrides: Record<string, unknown> = {}) {
   return {
     id: rotationAssignmentId,
@@ -230,6 +261,17 @@ function rotationAssignmentRow(overrides: Record<string, unknown> = {}) {
     is_active: true,
     created_at: '2026-05-30T10:00:00.000Z',
     updated_at: '2026-05-30T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function rotationAssignmentListRow(overrides: Record<string, unknown> = {}) {
+  return {
+    ...rotationAssignmentRow(),
+    rotation_name: 'Weekly Rotation',
+    rotation_timezone: 'UTC',
+    rotation_shift_sequence: [shiftId],
+    rotation_is_active: true,
     ...overrides,
   }
 }
@@ -955,6 +997,200 @@ describe('attendance UUID route validation', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toEqual({ ok: true, data: { id: scheduleGroupMemberId } })
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('DELETE FROM attendance_schedule_group_members'))).toBe(true)
+  })
+
+  it('filters schedule group lists for scoped view actors before pagination', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeViewRow()]
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('FROM attendance_schedule_groups g')) {
+        expect(sql).toContain('g.id = ANY')
+        expect(params).toEqual(['default', [scheduleGroupId]])
+        return [{ total: 1 }]
+      }
+      if (sql.includes('FROM attendance_schedule_groups g') && sql.includes('ORDER BY g.is_active')) {
+        expect(sql).toContain('g.id = ANY')
+        expect(params).toEqual(['default', [scheduleGroupId], 50, 0])
+        return [scheduleGroupRow()]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/schedule-groups', {
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { total: 1, items: [{ id: scheduleGroupId }] } })
+  })
+
+  it('does not disclose schedule group lookup outside scoped view targets', async () => {
+    const { db, routes } = await createHarness('false')
+    const otherGroupId = '00000000-0000-4000-8000-000000000399'
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) {
+        return [schedulerScopeViewRow({ scope: { scheduleGroupIds: [otherGroupId] } })]
+      }
+      if (sql.includes('SELECT * FROM attendance_schedule_groups WHERE id = $1')) return [scheduleGroupRow()]
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/schedule-groups/:id', {
+      params: { id: scheduleGroupId },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+  })
+
+  it('filters schedule group member lists by scoped view user targets', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) {
+        return [schedulerScopeViewRow({
+          scope: {
+            scheduleGroupIds: [scheduleGroupId],
+            attendanceGroupIds: [],
+            userIds: ['worker-1'],
+            departments: [],
+            roles: [],
+            roleTags: [],
+          },
+        })]
+      }
+      if (sql.includes('SELECT * FROM attendance_schedule_groups WHERE id = $1')) return [scheduleGroupRow()]
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('FROM attendance_schedule_group_members')) {
+        expect(sql).toContain('user_id = ANY')
+        expect(params).toEqual(['default', scheduleGroupId, ['worker-1']])
+        return [{ total: 1 }]
+      }
+      if (sql.includes('FROM attendance_schedule_group_members') && sql.includes('ORDER BY effective_from')) {
+        expect(sql).toContain('user_id = ANY')
+        expect(params).toEqual(['default', scheduleGroupId, ['worker-1'], 50, 0])
+        return [scheduleGroupMemberRow()]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/schedule-groups/:id/members', {
+      params: { id: scheduleGroupId },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { total: 1, items: [{ userId: 'worker-1' }] } })
+  })
+
+  it('filters shift assignment lists through scoped schedule group membership windows', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeViewRow()]
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('FROM attendance_shift_assignments a')) {
+        expect(sql).toContain('EXISTS')
+        expect(sql).toContain('attendance_schedule_group_members')
+        expect(params).toEqual(['default', [scheduleGroupId]])
+        return [{ total: 1 }]
+      }
+      if (sql.includes('FROM attendance_shift_assignments a') && sql.includes('JOIN attendance_shifts')) {
+        expect(sql).toContain('EXISTS')
+        expect(sql).toContain('m.schedule_group_id = ANY')
+        expect(params).toEqual(['default', [scheduleGroupId], 50, 0])
+        return [shiftAssignmentListRow()]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/assignments', {
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: { total: 1, items: [{ assignment: { userId: 'worker-1', shiftId } }] },
+    })
+  })
+
+  it('filters rotation assignment lists through scoped schedule group membership windows', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeViewRow()]
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('FROM attendance_rotation_assignments a')) {
+        expect(sql).toContain('attendance_schedule_group_members')
+        expect(params).toEqual(['default', [scheduleGroupId]])
+        return [{ total: 1 }]
+      }
+      if (sql.includes('FROM attendance_rotation_assignments a') && sql.includes('JOIN attendance_rotation_rules')) {
+        expect(sql).toContain('m.schedule_group_id = ANY')
+        expect(params).toEqual(['default', [scheduleGroupId], 50, 0])
+        return [rotationAssignmentListRow()]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/rotation-assignments', {
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: { total: 1, items: [{ assignment: { userId: 'worker-1', rotationRuleId } }] },
+    })
+  })
+
+  it('keeps full attendance admin assignment lists unfiltered by scheduler scopes', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, true)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('FROM attendance_shift_assignments a')) {
+        expect(sql).not.toContain('attendance_schedule_group_members')
+        expect(params).toEqual(['default'])
+        return [{ total: 1 }]
+      }
+      if (sql.includes('FROM attendance_shift_assignments a') && sql.includes('JOIN attendance_shifts')) {
+        expect(sql).not.toContain('attendance_schedule_group_members')
+        expect(params).toEqual(['default', 50, 0])
+        return [shiftAssignmentListRow()]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/assignments', {
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { total: 1 } })
+    expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining('FROM attendance_scheduler_scopes'), expect.anything())
   })
 
   it('keeps schedule group creation admin-only because new groups have no scoped target id yet', async () => {
