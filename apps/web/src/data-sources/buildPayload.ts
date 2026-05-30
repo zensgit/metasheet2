@@ -12,6 +12,7 @@ export interface CreateFormState {
   name: string
   type: DataSourceType
   host: string
+  server: string
   port: number | '' | undefined
   database: string
   username: string
@@ -32,6 +33,9 @@ export function buildCreatePayload(form: CreateFormState): CreateDataSourcePaylo
 
   if (isSql) {
     if (form.host) connection.host = form.host
+    // ONLY SQL Server uses `server` (named instance) as a host alternative — Postgres ignores it, so
+    // scope it to sqlserver. Otherwise a server-only Postgres source would bypass the host requirement.
+    if (form.type === 'sqlserver' && form.server) connection.server = form.server
     if (typeof form.port === 'number' && Number.isFinite(form.port)) connection.port = form.port
     if (form.database) connection.database = form.database
     if (form.username) credentials.username = form.username
@@ -63,6 +67,7 @@ export function buildUpdatePayload(form: CreateFormState): UpdateDataSourcePaylo
 
   if (isSql) {
     if (form.host) connection.host = form.host
+    if (form.type === 'sqlserver' && form.server) connection.server = form.server
     if (typeof form.port === 'number' && Number.isFinite(form.port)) connection.port = form.port
     if (form.database) connection.database = form.database
   } else if (form.baseURL) {

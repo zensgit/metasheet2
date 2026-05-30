@@ -32,7 +32,7 @@ import DataSourcesView from '../src/views/DataSourcesView.vue'
 
 function form(overrides: Partial<CreateFormState> = {}): CreateFormState {
   return {
-    id: 'db', name: 'DB', type: 'postgres', host: '', port: undefined, database: '',
+    id: 'db', name: 'DB', type: 'postgres', host: '', server: '', port: undefined, database: '',
     username: '', password: '', baseURL: '', apiKey: '', readOnly: true, ...overrides,
   }
 }
@@ -68,6 +68,19 @@ describe('buildCreatePayload — credential safety (omit blank, never send empty
     expect(p.connection).toEqual({ baseURL: 'https://x' })
     expect(p.credentials).toEqual({ apiKey: 'k' })
   })
+
+  it('P2: a SQL Server source can connect by `server` instead of `host`', () => {
+    const p = buildCreatePayload(form({ type: 'sqlserver', server: 'sql-prod', database: 'd' }))
+    expect(p.connection).toEqual({ server: 'sql-prod', database: 'd' })
+    expect(p.connection).not.toHaveProperty('host')
+  })
+
+  it('P2 follow-up: Postgres does NOT send `server` (it is sqlserver-only)', () => {
+    // A stale `server` (e.g. from switching type) must not let a Postgres source skip host.
+    const p = buildCreatePayload(form({ type: 'postgres', server: 'stale', host: '', database: 'd' }))
+    expect(p.connection).toEqual({ database: 'd' })
+    expect(p.connection).not.toHaveProperty('server')
+  })
 })
 
 describe('buildUpdatePayload — non-secret update safety', () => {
@@ -96,6 +109,11 @@ describe('buildUpdatePayload — non-secret update safety', () => {
   it('omits a blank update port instead of sending port: ""', () => {
     const p = buildUpdatePayload(form({ type: 'sqlserver', host: 'h', port: '', database: 'd' }))
     expect(p.connection).toEqual({ host: 'h', database: 'd' })
+  })
+
+  it('P2: update can carry `server` (no host) for a server-only source', () => {
+    const p = buildUpdatePayload(form({ type: 'sqlserver', server: 'sql-prod', database: 'd' }))
+    expect(p.connection).toEqual({ server: 'sql-prod', database: 'd' })
   })
 })
 
