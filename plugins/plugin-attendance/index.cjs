@@ -15474,15 +15474,56 @@ module.exports = {
       })
     }
 
-    async function assertAttendanceGroupFixedScheduleClearAllowed(req, res, { groupId, actorAccess } = {}) {
+    async function assertAttendanceGroupFixedScheduleActionsAllowed(req, res, { groupId, actions, actorAccess } = {}) {
       const access = actorAccess ?? await resolveAttendanceSchedulerScopeActor(req, res)
       if (!access) return null
       if (access.fullAdmin) return access
 
-      return assertAttendanceSchedulerScopeAllowed(req, res, {
-        action: 'clear',
-        target: { attendanceGroupIds: [groupId] },
-        actorAccess: access,
+      const requiredActions = normalizeStringArray(actions)
+      const target = { attendanceGroupIds: [groupId] }
+      try {
+        const actorContext = await loadAttendanceScopeContextForUser(db, access.orgId, access.userId)
+        const scopes = await loadActiveAttendanceSchedulerScopesForActor(access.orgId, actorContext)
+        const allowed = requiredActions.length > 0 && requiredActions.every(action =>
+          scopes.some(scope => attendanceSchedulerScopeAllowsActorActionTarget(scope, actorContext, action, target))
+        )
+        if (!allowed) {
+          respondAttendanceSchedulerScopeForbidden(res)
+          return null
+        }
+        return access
+      } catch (error) {
+        if (isDatabaseSchemaError(error)) {
+          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+          return null
+        }
+        logger.error('Attendance fixed schedule scheduler scope guard failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Scheduler scope check failed' } })
+        return null
+      }
+    }
+
+    async function assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId, actorAccess } = {}) {
+      return assertAttendanceGroupFixedScheduleActionsAllowed(req, res, {
+        groupId,
+        actions: ['dispatch'],
+        actorAccess,
+      })
+    }
+
+    async function assertAttendanceGroupFixedScheduleRebuildAllowed(req, res, { groupId, actorAccess } = {}) {
+      return assertAttendanceGroupFixedScheduleActionsAllowed(req, res, {
+        groupId,
+        actions: ['clear', 'dispatch'],
+        actorAccess,
+      })
+    }
+
+    async function assertAttendanceGroupFixedScheduleClearAllowed(req, res, { groupId, actorAccess } = {}) {
+      return assertAttendanceGroupFixedScheduleActionsAllowed(req, res, {
+        groupId,
+        actions: ['clear'],
+        actorAccess,
       })
     }
 
@@ -27241,7 +27282,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/apply',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -27282,6 +27323,9 @@ module.exports = {
         }
 
         try {
+          const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId })
+          if (!access) return
+
           const result = await db.transaction((trx) => applyAttendanceGroupFixedSchedule(trx, {
             orgId,
             groupId,
@@ -27312,13 +27356,13 @@ module.exports = {
           logger.error('Attendance group fixed schedule apply failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to apply fixed schedule' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/rebuild',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -27359,6 +27403,9 @@ module.exports = {
         }
 
         try {
+          const access = await assertAttendanceGroupFixedScheduleRebuildAllowed(req, res, { groupId })
+          if (!access) return
+
           const result = await db.transaction((trx) => rebuildAttendanceGroupFixedSchedule(trx, {
             orgId,
             groupId,
@@ -27392,7 +27439,7 @@ module.exports = {
           logger.error('Attendance group fixed schedule rebuild failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rebuild fixed schedule' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(

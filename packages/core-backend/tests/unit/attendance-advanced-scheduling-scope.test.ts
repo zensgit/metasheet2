@@ -48,10 +48,10 @@ describe('attendance advanced scheduling scope foundation', () => {
       ['PUT', '/api/attendance/scheduler-scopes/:id'],
       ['DELETE', '/api/attendance/scheduler-scopes/:id'],
       ['POST', '/api/attendance/groups/:id/fixed-schedule/preview'],
-      ['POST', '/api/attendance/groups/:id/fixed-schedule/apply'],
-      ['POST', '/api/attendance/groups/:id/fixed-schedule/rebuild'],
     ].forEach(([method, path]) => expectAdminRoute(method, path))
     expect(pluginSource).toContain('SCHEDULER_SCOPE_FORBIDDEN')
+    expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/apply')
+    expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/rebuild')
     expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/clear')
     expectDirectAsyncRoute('GET', '/api/attendance/schedule-groups')
     expectDirectAsyncRoute('GET', '/api/attendance/schedule-groups/:id')
@@ -74,6 +74,8 @@ describe('attendance advanced scheduling scope foundation', () => {
     expect(pluginSource).toContain('resolveAttendanceScheduleAssignmentScopeTarget')
     expect(pluginSource).toContain('assertAttendanceScheduleAssignmentDispatchAllowed')
     expect(pluginSource).toContain('assertAttendanceScheduleGroupEditAllowed')
+    expect(pluginSource).toContain('assertAttendanceGroupFixedScheduleDispatchAllowed')
+    expect(pluginSource).toContain('assertAttendanceGroupFixedScheduleRebuildAllowed')
     expect(pluginSource).toContain('assertAttendanceGroupFixedScheduleClearAllowed')
     expect(pluginSource).toContain('buildAttendanceAssignmentViewSql')
   })
