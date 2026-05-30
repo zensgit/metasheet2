@@ -875,6 +875,183 @@ describe('Attendance admin regressions', () => {
     expect(section.querySelector<HTMLInputElement>('#attendance-scheduler-scope-subject-ref')!.value).toBe('')
   })
 
+  it('edits a scope: prefills the form then PUTs the full strict body to the scope id', async () => {
+    const puts: Array<{ url: string; body: Record<string, unknown> }> = []
+    const existing = {
+      id: 'scope-7',
+      subjectType: 'role',
+      subjectRef: 'attendance_admin',
+      actions: ['view', 'edit'],
+      scope: { scheduleGroupIds: [], attendanceGroupIds: [], userIds: [], departments: ['dept-x'], roles: [], roleTags: [] },
+      isActive: true,
+    }
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/scheduler-scopes/scope-7') && method === 'PUT') {
+        puts.push({ url, body: JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')) })
+        return jsonResponse(200, { ok: true, data: { ...existing } })
+      }
+      if (url.includes('/api/attendance/scheduler-scopes')) {
+        return jsonResponse(200, { ok: true, data: { items: [existing], total: 1, page: 1, pageSize: 200 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')!
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-item] [data-attendance-scheduler-scope-edit]')!.click()
+    await flushUi(2)
+    const dept = section.querySelector<HTMLTextAreaElement>('#attendance-scheduler-scope-target-departments')!
+    expect(dept.value).toContain('dept-x') // prefilled from the existing scope
+    dept.value = 'dept-y'
+    dept.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-create]')!.click()
+    await flushUi(4)
+
+    expect(puts).toHaveLength(1)
+    expect(puts[0].url).toContain('/api/attendance/scheduler-scopes/scope-7')
+    // toEqual: no orgId (rides the query) and no isActive (backend merge preserves the flag).
+    expect(puts[0].body).toEqual({
+      subjectType: 'role',
+      subjectRef: 'attendance_admin',
+      actions: ['view', 'edit'],
+      scope: {
+        scheduleGroupIds: [],
+        attendanceGroupIds: [],
+        userIds: [],
+        departments: ['dept-y'],
+        roles: [],
+        roleTags: [],
+      },
+    })
+  })
+
+  it('keeps the user subject ref through edit hydration (PUTs the original UUID, not blank)', async () => {
+    const uuid = '11111111-1111-1111-1111-111111111111'
+    const puts: Array<Record<string, unknown>> = []
+    const existing = {
+      id: 'scope-u',
+      subjectType: 'user',
+      subjectRef: uuid,
+      actions: ['view'],
+      scope: { scheduleGroupIds: [], attendanceGroupIds: [], userIds: ['u-1'], departments: [], roles: [], roleTags: [] },
+      isActive: true,
+    }
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/scheduler-scopes/scope-u') && method === 'PUT') {
+        puts.push(JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')))
+        return jsonResponse(200, { ok: true, data: { ...existing } })
+      }
+      if (url.includes('/api/attendance/scheduler-scopes')) {
+        return jsonResponse(200, { ok: true, data: { items: [existing], total: 1, page: 1, pageSize: 200 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')!
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-item] [data-attendance-scheduler-scope-edit]')!.click()
+    await flushUi(4) // hydration nextTick + the subjectType watcher must both flush
+
+    // Submit unchanged. If the hydration guard had let the watcher wipe subjectRef, it would be ''
+    // and client validation would block the PUT. A PUT carrying the original UUID proves the guard.
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-create]')!.click()
+    await flushUi(4)
+
+    expect(puts).toHaveLength(1)
+    expect(puts[0].subjectType).toBe('user')
+    expect(puts[0].subjectRef).toBe(uuid)
+  })
+
+  it('deactivates a scope: DELETEs its id and drops it from the active list', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const deletes: string[] = []
+    let items: Array<Record<string, unknown>> = [
+      { id: 'scope-d', subjectType: 'role', subjectRef: 'r1', actions: ['view'], scope: { scheduleGroupIds: [], attendanceGroupIds: [], userIds: [], departments: ['d1'], roles: [], roleTags: [] }, isActive: true },
+    ]
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/scheduler-scopes/scope-d') && method === 'DELETE') {
+        deletes.push(url)
+        items = [] // soft-deactivated rows leave the active-only list
+        return jsonResponse(200, { ok: true, data: { id: 'scope-d', isActive: false } })
+      }
+      if (url.includes('/api/attendance/scheduler-scopes')) {
+        return jsonResponse(200, { ok: true, data: { items, total: items.length, page: 1, pageSize: 200 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')!
+    expect(section.querySelector('[data-attendance-scheduler-scope-item]')).toBeTruthy()
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-item] [data-attendance-scheduler-scope-deactivate]')!.click()
+    await flushUi(4)
+
+    expect(confirmSpy).toHaveBeenCalled() // gated behind a confirm, like the file's other destructive admin actions
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0]).toContain('/api/attendance/scheduler-scopes/scope-d') // the specific id, not just "a DELETE"
+    // reactivation / an inactive view is a follow-up slice — the deactivated row is gone here.
+    expect(section.querySelector('[data-attendance-scheduler-scope-item]')).toBeNull()
+    confirmSpy.mockRestore()
+  })
+
+  it('does not deactivate a scope when the confirmation is dismissed', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const deletes: string[] = []
+    const items = [
+      { id: 'scope-d', subjectType: 'role', subjectRef: 'r1', actions: ['view'], scope: { scheduleGroupIds: [], attendanceGroupIds: [], userIds: [], departments: ['d1'], roles: [], roleTags: [] }, isActive: true },
+    ]
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/scheduler-scopes/scope-d') && method === 'DELETE') {
+        deletes.push(url)
+        return jsonResponse(200, { ok: true, data: { id: 'scope-d', isActive: false } })
+      }
+      if (url.includes('/api/attendance/scheduler-scopes')) {
+        return jsonResponse(200, { ok: true, data: { items, total: items.length, page: 1, pageSize: 200 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')!
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-scheduler-scope-item] [data-attendance-scheduler-scope-deactivate]')!.click()
+    await flushUi(4)
+
+    expect(confirmSpy).toHaveBeenCalled() // the confirm IS consulted...
+    expect(deletes).toHaveLength(0) // ...and dismissing it sends no DELETE
+    expect(section.querySelector('[data-attendance-scheduler-scope-item]')).toBeTruthy() // the row stays in the active list
+    confirmSpy.mockRestore()
+  })
+
   it('keeps the clicked admin section focused and retires the show-all toggle', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
