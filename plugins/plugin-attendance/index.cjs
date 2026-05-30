@@ -15551,9 +15551,13 @@ module.exports = {
       return target ? attendanceSchedulerScopeMatchesTarget(scopeRow, target) : false
     }
 
-    async function resolveAttendanceRequestApprovalScopeFacts(client, orgId, requestRow) {
-      const userId = normalizeAttendanceSchedulerScopeRef(requestRow?.user_id)
-      const workDate = normalizeDateOnly(requestRow?.work_date) ?? requestRow?.work_date
+    async function resolveAttendanceUserSchedulerScopeFacts(client, orgId, userIdValue, { workDate, from, to } = {}) {
+      const userId = normalizeAttendanceSchedulerScopeRef(userIdValue)
+      const normalizedWorkDate = normalizeDateOnly(workDate) ?? workDate
+      const normalizedFrom = normalizeDateOnly(from) ?? from
+      const normalizedTo = normalizeDateOnly(to) ?? to
+      const rangeFrom = normalizedFrom ?? normalizedWorkDate
+      const rangeTo = normalizedTo ?? normalizedWorkDate ?? rangeFrom
       const facts = {
         scheduleGroupIds: [],
         attendanceGroupIds: [],
@@ -15580,7 +15584,8 @@ module.exports = {
       )
       facts.attendanceGroupIds = attendanceGroupRows.map(row => row.group_id).filter(Boolean)
 
-      if (workDate) {
+      if (rangeFrom && rangeTo) {
+        // Range exports must not be authorized by a partial membership overlap.
         const scheduleGroupRows = await client.query(
           `SELECT DISTINCT m.schedule_group_id, g.department_ref
            FROM attendance_schedule_group_members m
@@ -15592,15 +15597,20 @@ module.exports = {
              AND m.user_id = $2
              AND m.schedule_group_id IS NOT NULL
              AND COALESCE(m.effective_from, DATE '0001-01-01') <= $3::date
-             AND COALESCE(m.effective_to, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+             AND COALESCE(m.effective_to, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $4::date
            ORDER BY m.schedule_group_id ASC`,
-          [orgId, userId, workDate]
+          [orgId, userId, rangeFrom, rangeTo]
         )
         facts.scheduleGroupIds = scheduleGroupRows.map(row => row.schedule_group_id).filter(Boolean)
         facts.departments = sortedUnique(scheduleGroupRows.map(row => row.department_ref).filter(Boolean))
       }
 
       return facts
+    }
+
+    async function resolveAttendanceRequestApprovalScopeFacts(client, orgId, requestRow) {
+      const workDate = normalizeDateOnly(requestRow?.work_date) ?? requestRow?.work_date
+      return resolveAttendanceUserSchedulerScopeFacts(client, orgId, requestRow?.user_id, { workDate })
     }
 
     async function assertAttendanceRequestApprovalAllowed(req, { client, requestRow }) {
@@ -15624,6 +15634,34 @@ module.exports = {
           'SCHEDULER_SCOPE_FORBIDDEN',
           'Scheduler scope does not allow this attendance approval action'
         )
+      }
+    }
+
+    async function assertAttendanceRecordExportAllowed(req, res, { orgId, userId, from, to }) {
+      const access = await resolveAttendanceSchedulerScopeActor(req, res)
+      if (!access) return null
+      if (access.fullAdmin) return access
+
+      try {
+        const actorContext = await loadAttendanceScopeContextForUser(db, orgId, access.userId)
+        const scopes = await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext)
+        const facts = await resolveAttendanceUserSchedulerScopeFacts(db, orgId, userId, { from, to })
+        const allowed = scopes.some(scope =>
+          attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'export', facts)
+        )
+        if (!allowed) {
+          respondAttendanceSchedulerScopeForbidden(res)
+          return null
+        }
+        return access
+      } catch (error) {
+        if (isDatabaseSchemaError(error)) {
+          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+          return null
+        }
+        logger.error('Attendance export scheduler scope guard failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Scheduler scope check failed' } })
+        return null
       }
     }
 
@@ -30460,20 +30498,25 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const targetUserId = parsed.data.userId ?? requesterId
+        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+        if (!dateRange.ok) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+          return
+        }
+        const { from, to } = dateRange
         if (targetUserId !== requesterId) {
           const allowed = await canAccessOtherUsers(requesterId)
           if (!allowed) {
-            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'No access to other users' } })
-            return
+            const scopedAccess = await assertAttendanceRecordExportAllowed(req, res, {
+              orgId,
+              userId: targetUserId,
+              from,
+              to,
+            })
+            if (!scopedAccess) return
           }
         }
 
-	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
-	        if (!dateRange.ok) {
-	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
-	          return
-	        }
-	        const { from, to } = dateRange
         const requestedLimit = parseNumber(parsed.data.limit, 1000)
         const limit = Math.min(Math.max(requestedLimit, 1), 5000)
 

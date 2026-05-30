@@ -232,6 +232,21 @@ function schedulerScopeApproveRow(overrides: Record<string, unknown> = {}) {
   })
 }
 
+function schedulerScopeExportRow(overrides: Record<string, unknown> = {}) {
+  return schedulerScopeRow({
+    actions: ['export'],
+    scope: {
+      scheduleGroupIds: [scheduleGroupId],
+      attendanceGroupIds: [],
+      userIds: [],
+      departments: [],
+      roles: [],
+      roleTags: [],
+    },
+    ...overrides,
+  })
+}
+
 function scheduleGroupMemberRow(overrides: Record<string, unknown> = {}) {
   return {
     id: scheduleGroupMemberId,
@@ -369,6 +384,30 @@ function attendanceRequestRow(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function attendanceRecordRow(overrides: Record<string, unknown> = {}) {
+  return {
+    user_id: 'worker-1',
+    org_id: 'default',
+    work_date: '2026-06-10',
+    timezone: 'UTC',
+    first_in_at: '2026-06-10T09:00:00.000Z',
+    last_out_at: '2026-06-10T18:00:00.000Z',
+    work_minutes: 480,
+    late_minutes: 0,
+    early_leave_minutes: 0,
+    status: 'normal',
+    is_workday: true,
+    meta: {},
+    user_name: 'Worker One',
+    username: 'worker1',
+    employee_no: 'E001',
+    department: 'Ops',
+    position: 'Operator',
+    hire_date: null,
+    ...overrides,
+  }
+}
+
 function approvalInstanceRow(overrides: Record<string, unknown> = {}) {
   return {
     id: approvalInstanceId,
@@ -399,6 +438,14 @@ function fixedScheduleQueryResult(sql: string) {
 
 function rbacQueryResult(sql: string, params: unknown[] = [], admin = false) {
   if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return admin ? [{ ok: 1 }] : []
+  if (sql.includes('FROM user_permissions')) return []
+  if (sql.includes('JOIN role_permissions')) return []
+  return undefined
+}
+
+function attendanceReadOnlyRbacQueryResult(sql: string, params: unknown[] = []) {
+  if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return []
+  if (sql.includes('FROM user_permissions') && params[1] === 'attendance:read') return [{ ok: 1 }]
   if (sql.includes('FROM user_permissions')) return []
   if (sql.includes('JOIN role_permissions')) return []
   return undefined
@@ -1067,7 +1114,7 @@ describe('attendance UUID route validation', () => {
     )
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
-      ['default', 'worker-1', '2026-06-10'],
+      ['default', 'worker-1', '2026-06-10', '2026-06-10'],
     )
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('INSERT INTO approval_records'))).toBe(true)
   })
@@ -1110,6 +1157,108 @@ describe('attendance UUID route validation', () => {
     expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('SELECT * FROM approval_instances'))).toBe(false)
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('UPDATE attendance_requests'))).toBe(false)
+  })
+
+  it('lets scoped non-admin schedulers export records inside their scheduler export scope', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = attendanceReadOnlyRbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeExportRow()]
+      if (sql.includes('SELECT DISTINCT group_id') && sql.includes('FROM attendance_group_members')) return []
+      if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
+        return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
+      }
+      if (sql.includes('FROM attendance_records ar')) return [attendanceRecordRow()]
+      if (sql.includes('FROM attendance_requests') && sql.includes('GROUP BY work_date, request_type')) return []
+      if (sql.includes('FROM attendance_leave_types')) return []
+      if (sql.includes('FROM attendance_overtime_rules')) return []
+      if (sql.includes('SELECT value FROM system_configs')) return []
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/export', {
+      query: {
+        userId: 'worker-1',
+        from: '2026-06-01',
+        to: '2026-06-30',
+        format: 'json',
+      },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: {
+        total: 1,
+        from: '2026-06-01',
+        to: '2026-06-30',
+        format: 'json',
+      },
+    })
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM attendance_scheduler_scopes'),
+      ['default', 'scheduler-1', [], []],
+    )
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
+      ['default', 'worker-1', '2026-06-01', '2026-06-30'],
+    )
+    const scheduleScopeSql = db.query.mock.calls
+      .map(([sql]) => String(sql))
+      .find(sql => sql.includes('SELECT DISTINCT m.schedule_group_id')) ?? ''
+    expect(scheduleScopeSql).toContain("COALESCE(m.effective_from, DATE '0001-01-01') <= $3::date")
+    expect(scheduleScopeSql).toContain("COALESCE(m.effective_to, DATE '9999-12-31') >= $4::date")
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM attendance_records ar'),
+      ['worker-1', 'default', '2026-06-01', '2026-06-30', 1000],
+    )
+  })
+
+  it('rejects scoped attendance export outside scheduler scope before reading records', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = attendanceReadOnlyRbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) {
+        return [schedulerScopeExportRow({
+          scope: {
+            scheduleGroupIds: ['00000000-0000-4000-8000-000000009999'],
+            attendanceGroupIds: [],
+            userIds: [],
+            departments: [],
+            roles: [],
+            roleTags: [],
+          },
+        })]
+      }
+      if (sql.includes('SELECT DISTINCT group_id') && sql.includes('FROM attendance_group_members')) return []
+      if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
+        return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/export', {
+      query: {
+        userId: 'worker-1',
+        from: '2026-06-01',
+        to: '2026-06-30',
+        format: 'json',
+      },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_records ar'))).toBe(false)
   })
 
   it('lets full attendance admins add schedule group members without scheduler scopes', async () => {
