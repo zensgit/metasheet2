@@ -132,7 +132,7 @@
 - ✅ A3 query/testConnection 错误不吞,保留错因(#2034):`testConnection` 返回 `{success,error?}`;错因经 `redactSecrets` 脱敏(`password`/`token` 不入 response/log);manager 仅转发 redacted `connectionError`;真 wire 集成测试覆盖
 - ✅ A4 enum↔registry↔驱动三方对齐(#1976 `f5013324e`):`SUPPORTED_DATA_SOURCE_TYPES` 单一支持矩阵 + 非法 type 400 + load 跳过不支持行
 - ✅ A5 结果边界策略(本刀,取「明确上限保护」而非真 cursor):共享 `DATA_SOURCE_DEFAULT_LIMIT=1000` / `DATA_SOURCE_MAX_ROWS=10000`;**适配器层 `select()` 硬防线**(omit→MAX cap、>MAX→抛、非法→抛,经 `resolveEffectiveLimit`),挡住绕过路由的直连内部调用(`DataSourceManager` 复制循环已显式分页,不受影响);路由 `/select` 入口补默认 limit、超限 400(zod);raw `/query` 无法安全自动限界 → 标为非大表导出通道 + 无 `LIMIT/TOP/OFFSET/FETCH` 时 best-effort warning + audit;`stream()`(raw SQL、未经路由暴露、内部唯一)仍为非流式,真 cursor 留作后续 thorough。测试 `data-source-result-boundary.test.ts`(13 例:常量 + resolveEffectiveLimit + PG/MSSQL select 真 wire + 路由默认/400/warning)
-- ⬜ A6 Postgres connect/query/transaction/错误路径单测
+- ✅ A6 Postgres 适配器单测(#2139 `0e35ae94e`,并行会话):connect/query/transaction/错误路径覆盖 —— `packages/core-backend/tests/unit/postgres-adapter.test.ts`
 
 ### Phase B — MSSQL 连接器(Lane B 已 opt-in 2026-05-28;contracts-first)
 - ⬜ B0 抽共享 mssql helper(连接/TLS/类型映射)—— PR1 暂内联在 `MSSQLAdapter`,helper 抽取留作收口项(不碰 integration-core)
