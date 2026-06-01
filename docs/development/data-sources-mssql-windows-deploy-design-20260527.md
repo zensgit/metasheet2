@@ -114,7 +114,7 @@
 
 ## 4. 门控 TODO 清单(✅ 完成 / 🔒 硬件或独立闸 / ⬜ 可选债务)
 
-> **状态回填 2026-05-31**:按 `origin/main` 至 #2161 核准。外接数据源 / SQL Server 连接器已从 API-only 走到**后端安全闭环 + Windows 部署/验证 kit + UI list/create/delete/test/edit/credential rotation**。剩余项不再阻塞"连接客户 SQL Server"目标:仅客户硬件证据(C3-env、2008R2/2012)与可选技术债(B0/B6/UI-schema/UI-preview/真 cursor/Knex)。
+> **状态回填 2026-06-01**:按 `origin/main` 至 #2171 + stacked UI-schema/UI-preview 切片核准。外接数据源 / SQL Server 连接器已从 API-only 走到**后端安全闭环 + Windows 部署/验证 kit + UI list/create/delete/test/edit/credential rotation/schema/preview**。剩余项不再阻塞"连接客户 SQL Server"目标:仅客户硬件证据(C3-env、2008R2/2012)与可选技术债(B0/B6/真 cursor/Knex)。
 
 ### Phase 0 — 决策与开闸(裁示见 §5)
 - ✅ P0-3 Lane A 放行(归入内核打磨/安全修复)
@@ -155,10 +155,10 @@
 - ✅ UI-2 test connection(#2151):列表行测试连接,展示 A3 脱敏错误与 latency。
 - ✅ UI-3 edit non-secret config(#2154 + #2155 + #2161):编辑 name/connection/readOnly;后端深合并 `connection` 防止丢 TLS/security keys;前端支持 server-only MSSQL 且不削弱 Postgres host 规则。
 - ✅ Credential rotation(#2160 `82d6317b2`):独立凭据模式/接口,只提交填写字段,留空不覆盖旧凭据。
-- ⬜ UI-schema 库表/字段浏览:surface `GET /api/data-sources/:id/schema` + `GET /api/data-sources/:id/tables/:table`;后端端点已就位,前端尚未暴露。
-- ⬜ UI-preview bounded read preview:surface `POST /api/data-sources/:id/select`;A5 已在后端提供上限保护,前端预览不是连接器可用性的硬门槛。
+- ✅ UI-schema 库表/字段浏览(本刀,stacked on #2172):surface `GET /api/data-sources/:id/schema` + `GET /api/data-sources/:id/tables/:table`;展示表/视图与字段明细,不读取业务数据。
+- ✅ UI-preview bounded read preview(#2172):surface `POST /api/data-sources/:id/select`;A5 已在后端提供上限保护,只读预览最多 100 行。
 
-**完成态判定(2026-05-31)**:A/B/C-code + UI 管理主线(连/测/改/删/轮换)均已合并;独立管理工具完整性还剩 UI-schema + UI-preview 两个 surface-only 前端切片。继续推进只应围绕:(1)客户/VM 实跑证据回填;(2)独立 opt-in 的可选债务,不要再把它们并入连接器核心完成标准。
+**完成态判定(2026-06-01)**:A/B/C-code + UI 管理主线(连/测/改/删/轮换/浏览/预览)均已闭环。继续推进只应围绕:(1)客户/VM 实跑证据回填;(2)独立 opt-in 的可选债务;(3)阶段二 gated 的 read→multitable/import 设计,不要再把它们并入连接器核心完成标准。
 
 ---
 

@@ -18,6 +18,7 @@ const rotateCredentialsMock = vi.hoisted(() => vi.fn())
 const deleteMock = vi.hoisted(() => vi.fn())
 const testConnectionMock = vi.hoisted(() => vi.fn())
 const getSchemaMock = vi.hoisted(() => vi.fn())
+const getTableInfoMock = vi.hoisted(() => vi.fn())
 const previewRowsMock = vi.hoisted(() => vi.fn())
 vi.mock('../src/data-sources/api', () => ({
   listDataSources: listMock,
@@ -28,6 +29,7 @@ vi.mock('../src/data-sources/api', () => ({
   deleteDataSource: deleteMock,
   testDataSourceConnection: testConnectionMock,
   getDataSourceSchema: getSchemaMock,
+  getDataSourceTableInfo: getTableInfoMock,
   previewDataSourceRows: previewRowsMock,
 }))
 
@@ -298,6 +300,21 @@ describe('useDataSourcesStore (UI-1)', () => {
     expect(store.previewErrors.pg).toBe('')
   })
 
+  it('loads table details through schema-scoped table info', async () => {
+    getTableInfoMock.mockResolvedValue({
+      name: 'items',
+      schema: 'public',
+      columns: [{ name: 'id', type: 'int', nullable: false, primaryKey: true }],
+    })
+    const store = useDataSourcesStore()
+
+    const detail = await store.loadTableInfo('pg', 'items', 'public')
+
+    expect(getTableInfoMock).toHaveBeenCalledWith('pg', 'items', 'public')
+    expect(detail?.columns?.[0].primaryKey).toBe(true)
+    expect(store.tableDetails[store.tableDetailKey('pg', 'items', 'public')].columns?.[0].name).toBe('id')
+    expect(store.schemaErrors.pg).toBe('')
+  })
 })
 
 describe('DataSourcesView (UI-2 connection test reachability)', () => {
@@ -449,6 +466,46 @@ describe('DataSourcesView (UI-2 connection test reachability)', () => {
     })
     expect(rotateCredentialsMock.mock.calls[0][1]).not.toHaveProperty('connection')
     expect(rotateCredentialsMock.mock.calls[0][1]).not.toHaveProperty('options')
+  })
+
+  it('opens a SQL schema browser and renders table columns without previewing rows', async () => {
+    listMock.mockResolvedValue([
+      { id: 'pg', name: 'Warehouse DB', type: 'postgres', connected: true },
+      { id: 'api', name: 'API', type: 'http', connected: true },
+    ])
+    getSchemaMock.mockResolvedValue({
+      tables: [{
+        name: 'items',
+        schema: 'public',
+        columns: [{ name: 'id', type: 'int' }],
+      }],
+      views: [{ name: 'active_items', schema: 'public', columns: [] }],
+    })
+    getTableInfoMock.mockResolvedValue({
+      name: 'items',
+      schema: 'public',
+      columns: [
+        { name: 'id', type: 'int', nullable: false, primaryKey: true },
+        { name: 'name', type: 'text', nullable: true },
+      ],
+    })
+
+    const container = await mountView()
+    const schemaButtons = container.querySelectorAll('[data-testid="ds-schema"]')
+    expect(schemaButtons).toHaveLength(1)
+
+    ;(schemaButtons[0] as HTMLButtonElement).click()
+    await flush()
+    await flush()
+    await flush()
+
+    expect(getSchemaMock).toHaveBeenCalledWith('pg')
+    expect(getTableInfoMock).toHaveBeenCalledWith('pg', 'items', 'public')
+    expect(previewRowsMock).not.toHaveBeenCalled()
+    expect(container.querySelector('[data-testid="ds-schema-panel"]')?.textContent).toContain('库表结构')
+    expect(container.querySelector('[data-testid="ds-schema-detail"]')?.textContent).toContain('public.items')
+    expect(container.querySelector('[data-testid="ds-schema-detail"]')?.textContent).toContain('NOT NULL')
+    expect(container.querySelectorAll('[data-testid="ds-schema-column"]')).toHaveLength(2)
   })
 
   it('opens a read-only SQL table preview via schema + bounded select and renders rows', async () => {

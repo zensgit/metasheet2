@@ -7,6 +7,7 @@ import type {
   DataSourceSchemaInfo,
   DataSourceSelectPayload,
   DataSourceSelectResult,
+  DataSourceTableInfo,
   DataSourceTestResult,
   RotateDataSourceCredentialsPayload,
   UpdateDataSourcePayload,
@@ -30,6 +31,11 @@ interface TestEnvelope {
 interface SchemaEnvelope {
   ok: boolean
   data?: DataSourceSchemaInfo
+}
+
+interface TableInfoEnvelope {
+  ok: boolean
+  data?: DataSourceTableInfo
 }
 
 interface SelectEnvelope {
@@ -117,6 +123,27 @@ export async function getDataSourceSchema(id: string): Promise<DataSourceSchemaI
   const body = await res.json() as SchemaEnvelope
   if (!body.data) {
     throw new Error('Failed to load data source schema: empty response')
+  }
+  return body.data
+}
+
+export async function getDataSourceTableInfo(
+  id: string,
+  table: string,
+  schema?: string,
+): Promise<DataSourceTableInfo> {
+  const params = new URLSearchParams()
+  if (schema) params.set('schema', schema)
+  const query = params.toString()
+  const res = await apiFetch(
+    `/api/data-sources/${encodeURIComponent(id)}/tables/${encodeURIComponent(table)}${query ? `?${query}` : ''}`,
+  )
+  if (!res.ok) {
+    throw new Error(await errorFrom(res, 'Failed to load data source table info'))
+  }
+  const body = await res.json() as TableInfoEnvelope
+  if (!body.data) {
+    throw new Error('Failed to load data source table info: empty response')
   }
   return body.data
 }

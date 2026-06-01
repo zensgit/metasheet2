@@ -77,7 +77,8 @@ The dependency order is fixed, but it is not a schedule.
 | Step | Name | First deliverable after opt-in | Gate |
 |---|---|---|---|
 | A6-0 | Scout / scope gate | This docs-only document | done by this slice |
-| A6-1 | Persistent WorkflowJob runtime | design scout recorded; next is feature-flagged linear job persistence | named demand |
+| A6-1 | Persistent WorkflowJob runtime | ✅ LANDED #2130 (dormant; enable path deferred) | done (dormant) |
+| A6-1e | Enable-writer (API/UI sets `execution_mode`) | makes A6-1 live in production | named demand |
 | A6-2 | Suspend/resume | external-event/webhook resume before delay/timer resume | named demand |
 | A6-3 | Branch/parallel DAG | condition/parallel nodes with upstream/downstream graph fields | named demand |
 | A6-4 | BPMN adapter | compile/preview + gap report only; no live BPMN runtime | named demand |

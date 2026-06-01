@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed through retry runtime + redaction invariant hardening (2026-05-29); A6-0 and A6-1 docs-only scouts recorded; A6 runtime remains frozen / demand-gated
+Status: A0-A5 closed through retry runtime + redaction invariant hardening (2026-05-29); A6-0/A6-1 scouts recorded; A6-1 persistent WorkflowJob runtime LANDED (#2130, 2026-05-30) but DORMANT (enable path deferred); A6-1 enable-writer + A6-2..A6-5 remain frozen / demand-gated
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, read-boundary wired only); RFC #1885
 
@@ -18,12 +18,17 @@ The governance half and named A5 retry runtime are complete on `origin/main`:
 - A4 retry scope gate / design lock: #2039.
 - A5 whole-execution retry runtime: #2047.
 - A1/A5 HTTP serialization hardening: #2051 + #2053.
-- A6-0 convergence scout and A6-1 persistent `WorkflowJob` runtime scout are
-  recorded as docs-only planning artifacts. Runtime remains unstarted.
+- A6-0 convergence scout + A6-1 runtime scout: docs-only planning artifacts.
+- A6-1 persistent `WorkflowJob` runtime: LANDED #2130 (2026-05-30) — opt-in linear
+  job plane (new `multitable_automation_jobs`, rule-level `execution_mode`, fail-closed,
+  A1-redaction reuse, A2 detail prefer-jobs). **DORMANT**: createRule/updateRule do not
+  accept `execution_mode`, so no rule is opt-in-able via the API (DB/fixture only) →
+  existing rules unaffected.
 
-This closeout does NOT mark the convergence engine complete. A6 remains frozen /
-demand-gated: persistent WorkflowJob runtime, suspend/resume, branch/parallel,
-BPMN adapter, and approval-as-job are still separate future unlocks.
+This closeout does NOT mark the convergence engine complete. A6-1 runtime landed but is
+dormant; the rest remains frozen / demand-gated: A6-1 enable-writer (API/UI to set
+`execution_mode`), suspend/resume, branch/parallel, BPMN adapter, and approval-as-job are
+still separate future unlocks.
 
 ## Doctrine — Two Gates (definition of "not lopsided")
 
@@ -97,9 +102,12 @@ Completed by the named A4/A5 retry line:
 - whole-execution retry route, provenance, and side-effect confirmation — #2047.
 - HTTP response serialization invariant for `/test` + retry — #2051 + #2053.
 
-Deferred (capability half — A6, frozen/demand-gated; A6-0/A6-1 scouts only are recorded):
+Landed (capability half):
+- A6-1 persistent WorkflowJob runtime — #2130 (DORMANT; enable path deferred).
 
-- persistent automation_jobs runtime; suspend/resume; branch/parallel
+Deferred (capability half — A6, frozen/demand-gated):
+- A6-1 enable-writer (API/UI to set `execution_mode` → make A6-1 live in production)
+- suspend/resume; branch/parallel
 - BPMN compile/preview adapter; approval-as-job bridge
 
 ## Milestones
@@ -248,7 +256,8 @@ mark the convergence engine complete.
 - [x] No runtime in this milestone.
 - [x] A6-1 persistent WorkflowJob runtime scout recorded in
       `multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md`.
-- [ ] A6-1 persistent WorkflowJob runtime implementation — not started.
+- [x] A6-1 persistent WorkflowJob runtime — LANDED #2130 (dormant; enable path deferred).
+- [ ] A6-1 enable-writer (API/UI to set `execution_mode` → make A6-1 live) — not started.
 - [ ] A6-2 suspend/resume runtime — not started.
 - [ ] A6-3 branch/parallel DAG runtime — not started.
 - [ ] A6-4 BPMN compile/preview adapter — not started.
