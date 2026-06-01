@@ -5,7 +5,9 @@ import {
   createDataSource,
   deleteDataSource,
   getDataSource,
+  getDataSourceSchema,
   listDataSources,
+  previewDataSourceRows,
   rotateDataSourceCredentials,
   testDataSourceConnection,
   updateDataSource,
@@ -14,6 +16,9 @@ import type {
   CreateDataSourcePayload,
   DataSourceDetail,
   DataSourceListItem,
+  DataSourceSchemaInfo,
+  DataSourceSelectPayload,
+  DataSourceSelectResult,
   DataSourceTestResult,
   RotateDataSourceCredentialsPayload,
   UpdateDataSourcePayload,
@@ -25,6 +30,11 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
   const error = ref<string | null>(null)
   const testing = ref<Record<string, boolean>>({})
   const testResults = ref<Record<string, DataSourceTestResult>>({})
+  const schemaLoading = ref<Record<string, boolean>>({})
+  const previewLoading = ref<Record<string, boolean>>({})
+  const schemas = ref<Record<string, DataSourceSchemaInfo>>({})
+  const previewResults = ref<Record<string, DataSourceSelectResult>>({})
+  const previewErrors = ref<Record<string, string>>({})
 
   async function fetchAll(): Promise<void> {
     loading.value = true
@@ -131,13 +141,69 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
     }
   }
 
+  function isSchemaLoading(id: string): boolean {
+    return schemaLoading.value[id] === true
+  }
+
+  function isPreviewLoading(id: string): boolean {
+    return previewLoading.value[id] === true
+  }
+
+  function clearPreviewError(id: string): void {
+    previewErrors.value = { ...previewErrors.value, [id]: '' }
+  }
+
+  async function loadSchema(id: string): Promise<DataSourceSchemaInfo | null> {
+    clearPreviewError(id)
+    schemaLoading.value = { ...schemaLoading.value, [id]: true }
+    try {
+      const schema = await getDataSourceSchema(id)
+      schemas.value = { ...schemas.value, [id]: schema }
+      return schema
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Failed to load data source schema'
+      previewErrors.value = { ...previewErrors.value, [id]: message }
+      return null
+    } finally {
+      const remaining = { ...schemaLoading.value }
+      delete remaining[id]
+      schemaLoading.value = remaining
+    }
+  }
+
+  async function previewRows(id: string, payload: DataSourceSelectPayload): Promise<DataSourceSelectResult | null> {
+    clearPreviewError(id)
+    previewLoading.value = { ...previewLoading.value, [id]: true }
+    try {
+      const result = await previewDataSourceRows(id, payload)
+      previewResults.value = { ...previewResults.value, [id]: result }
+      return result
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Failed to preview data source rows'
+      previewErrors.value = { ...previewErrors.value, [id]: message }
+      return null
+    } finally {
+      const remaining = { ...previewLoading.value }
+      delete remaining[id]
+      previewLoading.value = remaining
+    }
+  }
+
   return {
     items,
     loading,
     error,
     testing,
     testResults,
+    schemaLoading,
+    previewLoading,
+    schemas,
+    previewResults,
+    previewErrors,
     isTesting,
+    isSchemaLoading,
+    isPreviewLoading,
+    clearPreviewError,
     fetchAll,
     create,
     loadDetail,
@@ -145,5 +211,7 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
     rotateCredentials,
     remove,
     testConnection,
+    loadSchema,
+    previewRows,
   }
 })

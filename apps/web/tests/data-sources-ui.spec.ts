@@ -17,6 +17,8 @@ const updateMock = vi.hoisted(() => vi.fn())
 const rotateCredentialsMock = vi.hoisted(() => vi.fn())
 const deleteMock = vi.hoisted(() => vi.fn())
 const testConnectionMock = vi.hoisted(() => vi.fn())
+const getSchemaMock = vi.hoisted(() => vi.fn())
+const previewRowsMock = vi.hoisted(() => vi.fn())
 vi.mock('../src/data-sources/api', () => ({
   listDataSources: listMock,
   getDataSource: getMock,
@@ -25,6 +27,8 @@ vi.mock('../src/data-sources/api', () => ({
   rotateDataSourceCredentials: rotateCredentialsMock,
   deleteDataSource: deleteMock,
   testDataSourceConnection: testConnectionMock,
+  getDataSourceSchema: getSchemaMock,
+  previewDataSourceRows: previewRowsMock,
 }))
 
 import { useDataSourcesStore } from '../src/stores/dataSources'
@@ -273,6 +277,27 @@ describe('useDataSourcesStore (UI-1)', () => {
     expect(store.testResults.a.success).toBe(false)
     expect(store.testResults.a.error?.message).toBe('timeout')
   })
+
+  it('loads schema and previews rows through the bounded structured select path', async () => {
+    getSchemaMock.mockResolvedValue({
+      tables: [{ name: 'items', schema: 'public', columns: [{ name: 'id', type: 'int' }] }],
+    })
+    previewRowsMock.mockResolvedValue({
+      data: [{ id: 1, name: 'Widget' }],
+      metadata: { columns: [{ name: 'id', type: 'int' }, { name: 'name', type: 'text' }] },
+    })
+    const store = useDataSourcesStore()
+
+    const schema = await store.loadSchema('pg')
+    const result = await store.previewRows('pg', { table: 'public.items', limit: 100 })
+
+    expect(schema?.tables?.[0].name).toBe('items')
+    expect(result?.data[0].name).toBe('Widget')
+    expect(getSchemaMock).toHaveBeenCalledWith('pg')
+    expect(previewRowsMock).toHaveBeenCalledWith('pg', { table: 'public.items', limit: 100 })
+    expect(store.previewErrors.pg).toBe('')
+  })
+
 })
 
 describe('DataSourcesView (UI-2 connection test reachability)', () => {
@@ -424,5 +449,56 @@ describe('DataSourcesView (UI-2 connection test reachability)', () => {
     })
     expect(rotateCredentialsMock.mock.calls[0][1]).not.toHaveProperty('connection')
     expect(rotateCredentialsMock.mock.calls[0][1]).not.toHaveProperty('options')
+  })
+
+  it('opens a read-only SQL table preview via schema + bounded select and renders rows', async () => {
+    listMock.mockResolvedValue([
+      { id: 'pg', name: 'Warehouse DB', type: 'postgres', connected: true },
+      { id: 'api', name: 'API', type: 'http', connected: true },
+    ])
+    getSchemaMock.mockResolvedValue({
+      tables: [{
+        name: 'items',
+        schema: 'public',
+        columns: [{ name: 'id', type: 'int' }, { name: 'name', type: 'text' }],
+      }],
+    })
+    previewRowsMock.mockResolvedValue({
+      data: [{ id: 1, name: 'Widget' }],
+      metadata: { columns: [{ name: 'id', type: 'int' }, { name: 'name', type: 'text' }] },
+    })
+
+    const container = await mountView()
+    const previewButtons = container.querySelectorAll('[data-testid="ds-preview"]')
+    expect(previewButtons).toHaveLength(1)
+
+    ;(previewButtons[0] as HTMLButtonElement).click()
+    await flush()
+    await flush()
+    await flush()
+
+    expect(getSchemaMock).toHaveBeenCalledWith('pg')
+    expect(previewRowsMock).toHaveBeenCalledWith('pg', { table: 'public.items', limit: 100 })
+    expect(container.querySelector('[data-testid="ds-preview-panel"]')?.textContent).toContain('只读数据预览')
+    expect(container.querySelector('[data-testid="ds-preview-result"]')?.textContent).toContain('Widget')
+    expect(container.querySelector('[data-testid="ds-preview-panel"]')?.textContent).toContain('limit=100')
+  })
+
+  it('clears stale preview errors through the cached empty-schema preview path', async () => {
+    listMock.mockResolvedValue([{ id: 'pg', name: 'Warehouse DB', type: 'postgres', connected: true }])
+
+    const container = await mountView()
+    const store = useDataSourcesStore()
+    store.schemas.pg = { tables: [], views: [] }
+    store.previewErrors.pg = 'previous schema error'
+
+    ;(container.querySelector('[data-testid="ds-preview"]') as HTMLButtonElement).click()
+    await flush()
+    await flush()
+
+    expect(getSchemaMock).not.toHaveBeenCalled()
+    expect(previewRowsMock).not.toHaveBeenCalled()
+    expect(store.previewErrors.pg).toBe('')
+    expect(container.querySelector('[data-testid="ds-preview-empty-schema"]')?.textContent).toContain('没有可预览')
   })
 })

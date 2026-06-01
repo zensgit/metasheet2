@@ -38,6 +38,38 @@ export interface DataSourceTestResult {
   error?: { message?: string }
 }
 
+export interface DataSourceColumnInfo {
+  name: string
+  type?: string
+  nullable?: boolean
+}
+
+export interface DataSourceTableInfo {
+  name: string
+  schema?: string
+  columns?: DataSourceColumnInfo[]
+}
+
+export interface DataSourceSchemaInfo {
+  tables?: DataSourceTableInfo[]
+  views?: DataSourceTableInfo[]
+}
+
+export interface DataSourceSelectPayload {
+  table: string
+  select?: string[]
+  limit?: number
+  offset?: number
+}
+
+export interface DataSourceSelectResult {
+  data: Array<Record<string, unknown>>
+  metadata?: {
+    totalCount?: number
+    columns?: DataSourceColumnInfo[]
+  }
+}
+
 /** Connection fields — a free-form record on the wire; these are the common typed keys the form uses. */
 export interface DataSourceConnectionInput {
   host?: string

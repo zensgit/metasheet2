@@ -142,6 +142,14 @@
             <td>
               <div class="data-sources__actions">
                 <button
+                  v-if="isSqlSource(ds.type)"
+                  type="button"
+                  class="data-sources__btn"
+                  data-testid="ds-preview"
+                  :disabled="store.isSchemaLoading(ds.id) || store.isPreviewLoading(ds.id)"
+                  @click="openPreview(ds.id)"
+                >{{ activePreviewId === ds.id ? '刷新预览' : '预览' }}</button>
+                <button
                   type="button"
                   class="data-sources__btn"
                   data-testid="ds-edit"
@@ -166,6 +174,77 @@
           </tr>
         </tbody>
       </table>
+
+      <section v-if="activePreviewId" class="data-sources__preview" data-testid="ds-preview-panel">
+        <header class="data-sources__preview-header">
+          <div>
+            <h2>只读数据预览</h2>
+            <p class="data-sources__muted">只读预览 · 最多 {{ PREVIEW_ROW_LIMIT }} 行。</p>
+          </div>
+          <button type="button" class="data-sources__btn" @click="closePreview">关闭</button>
+        </header>
+
+        <div class="data-sources__preview-controls">
+          <label>表 / 视图
+            <select
+              v-model="previewTable"
+              data-testid="ds-preview-table"
+              :disabled="previewTableChoices.length === 0 || activePreviewBusy"
+              @change="runActivePreview"
+            >
+              <option value="" disabled>选择表</option>
+              <option v-for="choice in previewTableChoices" :key="choice.value" :value="choice.value">
+                {{ choice.label }}
+              </option>
+            </select>
+          </label>
+          <button
+            type="button"
+            class="data-sources__btn data-sources__btn--primary"
+            data-testid="ds-preview-refresh"
+            :disabled="!previewTable || activePreviewBusy"
+            @click="runActivePreview"
+          >
+            {{ activePreviewBusy ? '读取中…' : '读取预览' }}
+          </button>
+        </div>
+
+        <p
+          v-if="activePreviewId && store.previewErrors[activePreviewId]"
+          class="data-sources__error"
+          data-testid="ds-preview-error"
+          role="alert"
+        >
+          {{ store.previewErrors[activePreviewId] }}
+        </p>
+        <p v-else-if="activePreviewBusy" class="data-sources__muted" data-testid="ds-preview-loading">读取中…</p>
+        <p v-else-if="previewTableChoices.length === 0" class="data-sources__muted" data-testid="ds-preview-empty-schema">
+          当前数据源没有可预览的表或视图。
+        </p>
+
+        <div v-if="activePreviewResult" class="data-sources__preview-result" data-testid="ds-preview-result">
+          <p class="data-sources__muted">
+            {{ previewRows.length }} 行 · {{ previewColumns.length }} 列 · limit={{ PREVIEW_ROW_LIMIT }}
+          </p>
+          <div v-if="previewRows.length > 0 && previewColumns.length > 0" class="data-sources__preview-scroll">
+            <table class="data-sources__table data-sources__preview-table">
+              <thead>
+                <tr>
+                  <th v-for="column in previewColumns" :key="column">{{ column }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, rowIndex) in previewRows" :key="rowIndex">
+                  <td v-for="column in previewColumns" :key="column" data-testid="ds-preview-cell">
+                    {{ formatCell(row[column]) }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="data-sources__muted" data-testid="ds-preview-empty-result">该表暂无返回行。</p>
+        </div>
+      </section>
     </div>
   </section>
 </template>
@@ -177,16 +256,20 @@ import {
   DATA_SOURCE_TYPES,
   DATA_SOURCE_TYPE_LABELS,
   type DataSourceDetail,
+  type DataSourceTableInfo,
   type DataSourceType,
 } from '../data-sources/types'
 import { buildCreatePayload, buildCredentialRotationPayload, buildUpdatePayload } from '../data-sources/buildPayload'
 
+const PREVIEW_ROW_LIMIT = 100
 const store = useDataSourcesStore()
 const formOpen = ref(false)
 const formMode = ref<'create' | 'edit' | 'credentials'>('create')
 const editingId = ref<string | null>(null)
 const submitting = ref(false)
 const detailLoading = ref(false)
+const activePreviewId = ref<string | null>(null)
+const previewTable = ref('')
 
 const form = reactive({
   id: '',
@@ -228,6 +311,62 @@ watch(() => form.type, (type) => {
 function typeLabel(type: string): string {
   return DATA_SOURCE_TYPE_LABELS[type as DataSourceType] ?? type
 }
+
+function isSqlSource(type: string): boolean {
+  // Keep this in step with backend SUPPORTED_DATA_SOURCE_TYPES. It is intentionally fail-safe:
+  // an unknown future SQL type simply hides table preview until the UI mapping is reviewed.
+  return type === 'postgres' || type === 'postgresql' || type === 'sqlserver'
+}
+
+function tableValue(table: DataSourceTableInfo): string {
+  return table.schema ? `${table.schema}.${table.name}` : table.name
+}
+
+function tableLabel(table: DataSourceTableInfo, kind: 'table' | 'view'): string {
+  const qualified = tableValue(table)
+  return `${qualified} · ${kind === 'view' ? '视图' : '表'}`
+}
+
+const activeSchema = computed(() => (
+  activePreviewId.value ? store.schemas[activePreviewId.value] : null
+))
+
+const previewTableChoices = computed(() => {
+  const schema = activeSchema.value
+  const tables = (schema?.tables ?? []).map((table) => ({
+    value: tableValue(table),
+    label: tableLabel(table, 'table'),
+  }))
+  const views = (schema?.views ?? []).map((view) => ({
+    value: tableValue(view),
+    label: tableLabel(view, 'view'),
+  }))
+  return [...tables, ...views]
+})
+
+const activePreviewResult = computed(() => (
+  activePreviewId.value ? store.previewResults[activePreviewId.value] : null
+))
+
+const activePreviewBusy = computed(() => {
+  const id = activePreviewId.value
+  return !!id && (store.isSchemaLoading(id) || store.isPreviewLoading(id))
+})
+
+const previewRows = computed(() => activePreviewResult.value?.data ?? [])
+
+const previewColumns = computed(() => {
+  const metadataColumns = activePreviewResult.value?.metadata?.columns
+    ?.map((column) => column.name)
+    .filter(Boolean) ?? []
+  if (metadataColumns.length > 0) return metadataColumns
+
+  const names = new Set<string>()
+  for (const row of previewRows.value) {
+    Object.keys(row).forEach((key) => names.add(key))
+  }
+  return Array.from(names)
+})
 
 function testResultText(id: string): string {
   const result = store.testResults[id]
@@ -335,6 +474,48 @@ async function testConnection(id: string): Promise<void> {
   await store.testConnection(id)
 }
 
+async function openPreview(id: string): Promise<void> {
+  activePreviewId.value = id
+  store.clearPreviewError(id)
+  const schema = store.schemas[id] ?? await store.loadSchema(id)
+  const firstChoice = [
+    ...(schema?.tables ?? []),
+    ...(schema?.views ?? []),
+  ][0]
+  previewTable.value = firstChoice ? tableValue(firstChoice) : ''
+  if (previewTable.value) {
+    await runActivePreview()
+  }
+}
+
+async function runActivePreview(): Promise<void> {
+  const id = activePreviewId.value
+  if (!id || !previewTable.value) return
+  await store.previewRows(id, {
+    table: previewTable.value,
+    limit: PREVIEW_ROW_LIMIT,
+  })
+}
+
+function closePreview(): void {
+  activePreviewId.value = null
+  previewTable.value = ''
+}
+
+function formatCell(value: unknown): string {
+  if (value === null) return 'NULL'
+  if (value === undefined) return ''
+  if (value instanceof Date) return value.toISOString()
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
+}
+
 async function confirmRemove(id: string, name: string): Promise<void> {
   if (typeof window !== 'undefined' && !window.confirm(`删除数据源「${name}」?此操作不可撤销。`)) return
   await store.remove(id)
@@ -346,7 +527,7 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.data-sources { padding: 24px; max-width: 960px; margin: 0 auto; }
+.data-sources { padding: 24px; max-width: 1180px; margin: 0 auto; }
 .data-sources__header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 .data-sources__header h1 { font-size: 22px; margin: 0 0 4px; }
 .data-sources__sub { font-size: 13px; color: #8a8f99; font-weight: 400; }
@@ -369,8 +550,17 @@ onMounted(() => {
 .data-sources__status { font-size: 12px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
 .data-sources__status.is-on { background: #f6ffed; color: #389e0d; }
 .data-sources__status.is-off { background: #f5f5f5; color: #8c8c8c; }
-.data-sources__actions { display: flex; justify-content: flex-end; gap: 8px; }
+.data-sources__actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .data-sources__test-result { margin: 6px 0 0; font-size: 12px; max-width: 260px; overflow-wrap: anywhere; }
 .data-sources__test-result.is-ok { color: #237804; }
 .data-sources__test-result.is-fail { color: #cf1322; }
+.data-sources__preview { margin-top: 16px; padding: 16px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; }
+.data-sources__preview-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.data-sources__preview-header h2 { font-size: 16px; margin: 0 0 4px; }
+.data-sources__preview-controls { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.data-sources__preview-controls label { display: flex; flex-direction: column; gap: 4px; min-width: 260px; font-size: 13px; color: #374151; }
+.data-sources__preview-controls select { padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; }
+.data-sources__preview-result { margin-top: 10px; }
+.data-sources__preview-scroll { max-width: 100%; overflow: auto; border: 1px solid #f0f0f0; border-radius: 6px; }
+.data-sources__preview-table th, .data-sources__preview-table td { white-space: nowrap; max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
 </style>

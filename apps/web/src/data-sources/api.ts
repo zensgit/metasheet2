@@ -4,6 +4,9 @@ import type {
   CreateDataSourcePayload,
   DataSourceDetail,
   DataSourceListItem,
+  DataSourceSchemaInfo,
+  DataSourceSelectPayload,
+  DataSourceSelectResult,
   DataSourceTestResult,
   RotateDataSourceCredentialsPayload,
   UpdateDataSourcePayload,
@@ -22,6 +25,16 @@ interface DetailEnvelope {
 interface TestEnvelope {
   ok: boolean
   data?: DataSourceTestResult
+}
+
+interface SchemaEnvelope {
+  ok: boolean
+  data?: DataSourceSchemaInfo
+}
+
+interface SelectEnvelope {
+  ok: boolean
+  data?: DataSourceSelectResult
 }
 
 interface ErrorEnvelope {
@@ -92,6 +105,36 @@ export async function testDataSourceConnection(id: string): Promise<DataSourceTe
   const body = await res.json() as TestEnvelope
   if (!body.data) {
     throw new Error('Failed to test data source: empty response')
+  }
+  return body.data
+}
+
+export async function getDataSourceSchema(id: string): Promise<DataSourceSchemaInfo> {
+  const res = await apiFetch(`/api/data-sources/${encodeURIComponent(id)}/schema`)
+  if (!res.ok) {
+    throw new Error(await errorFrom(res, 'Failed to load data source schema'))
+  }
+  const body = await res.json() as SchemaEnvelope
+  if (!body.data) {
+    throw new Error('Failed to load data source schema: empty response')
+  }
+  return body.data
+}
+
+export async function previewDataSourceRows(
+  id: string,
+  payload: DataSourceSelectPayload,
+): Promise<DataSourceSelectResult> {
+  const res = await apiFetch(`/api/data-sources/${encodeURIComponent(id)}/select`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    throw new Error(await errorFrom(res, 'Failed to preview data source rows'))
+  }
+  const body = await res.json() as SelectEnvelope
+  if (!body.data) {
+    throw new Error('Failed to preview data source rows: empty response')
   }
   return body.data
 }
