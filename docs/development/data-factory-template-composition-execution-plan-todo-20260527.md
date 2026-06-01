@@ -4,9 +4,9 @@
 > This file is the **execution ordering + trackable checklist**, not an authorization to build.
 > Markers: ✅ done · ⬜ open / ready (still needs its own opt-in) · 🔒 gated (blocked on a prior gate AND a separate explicit opt-in).
 >
-> **Constraints (non-negotiable):** K3 PoC Stage-1 lock holds; every phase below is a **separate explicit opt-in** — never auto-start the next one. Any phase that edits `plugin-integration-core` (adapter or HTTP route), even no-write, is integration-core and gated like #1912. Formal docs state our own product principles, not external brand names (external benchmarking lives in internal research MDs).
+> **Constraints (non-negotiable):** the K3 Stage-1 **blanket** lock is **RETIRED** — GATE #1792 (M1 one-record Material Save-only PASS) closed 2026-05-28; #1993 — replaced by **post-GATE scoped gates** (`k3-post-gate-scoped-governance-20260528.md`). Every phase below is still a **separate explicit named opt-in / demand gate** — never auto-start the next one. Any phase that edits `plugin-integration-core` (adapter or HTTP route), even no-write, is integration-core and takes its own scoped opt-in. Formal docs state our own product principles, not external brand names (external benchmarking lives in internal research MDs).
 >
-> **状态回填 2026-06-01:** the ladder below predated the **DF-T3 reference-mapping sub-chain** that actually shipped. DF-T3 is refreshed in place to its real T3a→picker sub-phases; **the DF-T3b preview/resolve line is CLOSED end-to-end (#2036 → #2122)**, leaving only **DF-T3b-2c** (real-Save — gated on a live operator-validation run) and **DF-T3c** (mapping-sheet authoring). The executed chain **leapfrogged DF-T2** (orthogonal — reference-mapping ≠ customer-profile authoring). DF-T1-0 / DF-T1 / DF-T1.5 remain DONE as recorded below.
+> **状态回填 2026-06-01:** the original status markers were stale — refreshed here against `origin/main`. **DONE:** DF-T1-0 / DF-T1 / DF-T1.5; **DF-T1A** contract (#2012, latent); **DF-T2** customer-profile authoring, full chain #2017 → #2035 (read-only derive/preview); the **DF-T3b preview/resolve line** (#2036 → #2122); and **DF-N2-2 provenance runtime** (#1981 → #1988 → #1990) + **DF-N2-3** timeline (#1998). **Genuinely remaining:** **DF-T3b-2c** (real-Save — its own post-GATE scoped gate, gated on a live operator-validation run) · **DF-T3c** (mapping-sheet authoring) · DF-T4 / T5 / T6 · DF-N3+. **DF-T2 shipped before DF-T3 — there was no leapfrog**, and there is no global lock anymore (the earlier draft of this note wrongly said both).
 
 ## The one hard rule: payload trust before UI
 
@@ -93,11 +93,11 @@ Read-only display over the `targetPayloadPreview.fieldProvenance` DF-T1 emits; n
 - [x] No new persisted provenance runtime field in this slice.
 - [x] **Reachability wired** (follow-up): the preview panel sends an optional `payloadTemplate` (+ derived `fieldRules`) so the DF-T1 backend returns `targetPayloadPreview` — the panel is live-triggerable, not just display-capable. Locks a request-body wire assertion. Verification: `data-factory-df-t1_5-reachability-wire-verification-20260528.md`.
 
-### 🔒 DF-T1A — Connector action metadata
-Gated on: DF-T1 + opt-in.
-- [ ] Action metadata around existing adapter methods (no generic HTTP client / no user JS / no SQL / no new connector runtime).
-- [ ] Inputs grouped `path` / `query` / `header` / `body`; response unwrap (success/error/record path).
-- [ ] Save-only and write actions hidden/disabled unless their explicit gate is satisfied.
+### ✅ DF-T1A — Connector action metadata (DONE — contract latent, PR #2012 `18c242622`)
+The action-metadata **contract** landed, **latent** (not wired to UI/runtime — describes existing adapter methods only).
+- [x] Action metadata around existing adapter methods (no generic HTTP client / no user JS / no SQL / no new connector runtime).
+- [x] Inputs grouped `path` / `query` / `header` / `body`; response unwrap (success/error/record path).
+- [x] Save-only and write actions hidden/disabled unless their explicit gate is satisfied.
 
 Minimum action contract:
 
@@ -111,16 +111,14 @@ Minimum action contract:
 This contract wraps existing adapter methods first. It must not become a user
 authored HTTP client in this phase.
 
-### 🔒 DF-T2 — K3 customer-profile authoring surface
-Gated on: DF-T1 (+ DF-T1.5 helpful) + opt-in; **and the live K3 GATE should have a proven Save** before investing heavily here (else risk reworking UX for a still-changing profile).
-- [ ] Operator turns a sanitized `GetDetail` body sample into `payloadTemplate`.
-- [ ] Operator chooses replace/preserve per field; validates full reference-object shapes.
-- [ ] Shows why a row is not ready before Save. Customer profile stays opt-in; default template never silently switched.
-
-> Note: DF-T3's **preview line shipped ahead of this** (reference-mapping is orthogonal to customer-profile authoring). DF-T2 itself is still 🔒 — the K3 GATE wants a proven Save before this UX investment.
+### ✅ DF-T2 — K3 customer-profile authoring surface (DONE — 2026-05; shipped BEFORE DF-T3)
+Full sub-chain, all **read-only** derive/preview (no Save change): design (#2017 `1bcb85aed`) → **DF-T2a** template-derive helper, latent (#2023 `b64e2c202`) → **DF-T2b** per-field replace/preserve authoring UI, no wire (#2027 `d1e445fc5`) → **DF-T2c** wire authoring → real read-only derive/preview route (#2032 `81e8975d5`) → operator runbook closeout (#2035 `6841389bb`).
+- [x] Operator turns a sanitized `GetDetail` body sample into `payloadTemplate`.
+- [x] Operator chooses replace/preserve per field; validates full reference-object shapes.
+- [x] Shows why a row is not ready before Save. Customer profile stays opt-in; default template never silently switched.
 
 ### 🟡 DF-T3 — Multitable reference-mapping sheet templates (preview line CLOSED; 2c + T3c remain)
-Built ahead of DF-T2 (reference-mapping is orthogonal to customer-profile authoring). The **preview/resolve line is closed end-to-end**; the only remaining work is the real-Save keystone (2c — **gated on the operator-validation runbook**) and mapping-sheet authoring (T3c).
+Built **after** DF-T2 (DF-T3 design #2036 follows the #2035 DF-T2 closeout). The **preview/resolve line is closed end-to-end**; the only remaining work is the real-Save keystone (2c — **gated on the operator-validation runbook**) and mapping-sheet authoring (T3c).
 
 Shipped sub-chain (each was a separate opt-in, in order):
 - [x] **DF-T3 design** — reference-mapping sheet templates, design-first (#2036, `e8f1da5f8`).
@@ -196,7 +194,7 @@ processors, or streaming cluster in this track.
 
 ## Sequencing rule
 
-One explicit opt-in per phase. Do not auto-start the next. **DONE:** DF-T1-0 (#1936), DF-T1 (#1945), DF-T1.5 (preview provenance display), and the **entire DF-T3b preview/resolve line** (#2036 → #2122 — see DF-T3 above). **The single remaining DF-T3 link is DF-T3b-2c (real-Save), gated on a passing operator-validation run (#2122 runbook) + its own focused re-review** — do not open it until that run passes and it is separately opted in. Other separately-opt-in-able next steps (independent of 2c): **DF-T3c** (mapping-sheet authoring), **DF-T1A** (connector action metadata), or **DF-N2-2** (provenance runtime). Everything else stays 🔒 until its predecessor gate is green and it is separately opted in.
+One explicit opt-in per phase. Do not auto-start the next. **DONE** (verified on `origin/main`): DF-T1-0 (#1936) · DF-T1 (#1945) · DF-T1.5 · **DF-T1A** contract (#2012, latent) · **DF-T2** full chain (#2017 → #2035) · the **entire DF-T3b preview/resolve line** (#2036 → #2122) · **DF-N2-2** runtime (#1981 → #1990) + **DF-N2-3** (#1998). **Genuinely-remaining next steps (each its own post-GATE scoped opt-in):** **DF-T3b-2c** (real-Save — gated on a passing operator-validation run (#2122 runbook) + its own focused re-review; do not open until that run passes) · **DF-T3c** (mapping-sheet authoring) · **DF-T4** (pipeline binding) · **DF-T5** (template center) · **DF-T6** (help panel) · **DF-N3+**. Nothing here is blocked by a global lock — the blanket Stage-1 freeze is retired; each is a separate named opt-in.
 
 ## Definition of done — DF-T1-0 (the immediate gate)
 
