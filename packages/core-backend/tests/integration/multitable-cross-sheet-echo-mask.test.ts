@@ -143,9 +143,11 @@ describeIfDatabase('#2176 cross-sheet related echo field mask (real DB)', () => 
     expect(res.status).toBe(200)
     const b = relatedRec(res, REC_B)
     expect(b).toBeDefined() // B is a readable related sheet → record envelope present (D1/D2)
-    // R2 positive control: a VISIBLE computed field on B survives the mask (else the impl over-masked B by A's ids)
-    expect(b?.data?.[B_VISIBLE]).toBeDefined()
-    // R1 THE LEAK: the denied computed field is omitted (RED pre-fix — present; GREEN post-fix — undefined)
+    // R2 positive control: a VISIBLE computed field on B survives the mask (else the impl over-masked B by A's
+    // ids). Pin the VALUE (sum of the single linked A_SRC=11) so the recompute is proven to have fired —
+    // a vacuous undefined could otherwise masquerade as a clean run.
+    expect(b?.data?.[B_VISIBLE]).toBe(11)
+    // R1 THE LEAK: the denied computed field is omitted (RED pre-fix — present value 11; GREEN post-fix — undefined)
     expect(b?.data?.[B_SECRET]).toBeUndefined()
     expect(JSON.stringify(res.body)).not.toContain(`"${B_SECRET}"`)
   })
@@ -184,19 +186,25 @@ describeIfDatabase('#2176 cross-sheet related echo field mask (real DB)', () => 
     currentUser = { id: USER_DENIED, roles: ['member'], perms: ['multitable:write'] }
   })
 
-  test('R6 (same-sheet regression): editing a sheet still echoes its OWN computed dependents masked', async () => {
-    // The fix now double-masks same-sheet lookup/rollup dependents (producer here + RWS :858). That is
-    // idempotent only because both composites are layer-2 ∧ layer-3 for the same sheet+subject. Pin it: a
-    // same-sheet computed dependent must still arrive, masked by the editor's own field gate. Sheet B edits
-    // its OWN B_VISIBLE-bearing record; B_SECRET (denied) must not echo, B_VISIBLE must.
+  test('R6 (same-sheet regression): editing sheet B still echoes B own computed masked, visible kept', async () => {
+    // Regression guard that the same-sheet write echo (F3) still masks correctly while #2176 changes the
+    // CROSS-sheet producer. NOTE on which path this exercises: editing REC_B finds no dependents via the
+    // producer (no meta_links row has foreign_record_id=REC_B), so computeDependentLookupRollupRecords
+    // returns [] here — B own recomputed fields travel in `records` (mergedRecords) masked by RWS
+    // readableEchoFieldIds (record-write-service.ts:832/838), NOT the producer's allowedFieldIds. So this
+    // pins the F3 same-sheet echo is intact post-#2176; the producer's same-sheet double-mask is covered by
+    // construction (identical layer-2 ∧ layer-3 composite), not directly here.
     currentUser = { id: USER_DENIED, roles: ['member'], perms: ['multitable:write'] }
+    // Pin the positive control against the LIVE A_SRC (prior tests mutate it via shared REC_A), not a stale
+    // constant — the rollup sums the single linked A_SRC, so B_VISIBLE must equal whatever A_SRC currently is.
+    const srcRow = await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])
+    const liveSrc = (srcRow.rows[0]?.data as Record<string, unknown>)?.[A_SRC]
     const res = await batchPatch({ sheetId: SHEET_B, changes: [{ recordId: REC_B, fieldId: B_LINK, value: [REC_A] }] })
     expect(res.status).toBe(200)
-    // same-sheet computed echo travels in `records` (mergedRecords), not `relatedRecords`
     const self = res.body.data?.records?.find((r: { recordId: string }) => r.recordId === REC_B)
-    if (self) {
-      expect(self.data?.[B_SECRET]).toBeUndefined() // denied same-sheet computed stays masked (F3 + this slice)
-    }
+    expect(self).toBeDefined() // a same-sheet computed echo record IS produced (version bump → recompute)
+    expect(self?.data?.[B_VISIBLE]).toBe(liveSrc) // positive control: readable computed survives + value pinned to live source
+    expect(self?.data?.[B_SECRET]).toBeUndefined() // denied same-sheet computed stays masked (F3 + this slice)
     expect(JSON.stringify(res.body)).not.toContain(`"${B_SECRET}":`)
     currentUser = { id: USER_DENIED, roles: ['member'], perms: ['multitable:write'] }
   })
