@@ -1868,10 +1868,20 @@ async function computeDependentLookupRollupRecords(
     fieldsBySheet.set(sheetId, list)
   }
 
+  const allowedFieldIdsBySheet = new Map<string, Set<string>>()
+  for (const sheetId of rowsBySheet.keys()) {
+    const fields = fieldsBySheet.get(sheetId) ?? []
+    if (fields.length === 0) continue
+    const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
+    if (!access.userId || !capabilities.canRead) continue
+    const fieldScopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
+    allowedFieldIdsBySheet.set(sheetId, computeAllowedFieldIds(fields, capabilities, fieldScopeMap))
+  }
+
   const results: RelatedComputedRecord[] = []
-  const readableSheetIds = await resolveReadableSheetIds(req, query, rowsBySheet.keys())
   for (const [sheetId, rows] of rowsBySheet.entries()) {
-    if (!readableSheetIds.has(sheetId)) continue
+    const allowedFieldIds = allowedFieldIdsBySheet.get(sheetId)
+    if (!allowedFieldIds) continue
     const fields = fieldsBySheet.get(sheetId) ?? []
     if (fields.length === 0) continue
     const hasComputed = fields.some((f) => f.type === 'lookup' || f.type === 'rollup')
@@ -1893,7 +1903,7 @@ async function computeDependentLookupRollupRecords(
       results.push({
         sheetId,
         recordId: row.id,
-        data: extractLookupRollupData(fields, row.data),
+        data: filterRecordDataByFieldIds(extractLookupRollupData(fields, row.data), allowedFieldIds),
       })
     }
   }

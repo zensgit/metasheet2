@@ -160,7 +160,7 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for after-sales integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/after-sales-plugin.install.test.ts --reporter=dot
 
-      - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + dashboard authz + automation retry provenance)
+      - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + dashboard authz + cross-sheet related echo + automation retry provenance)
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
@@ -180,6 +180,7 @@ jobs:
             tests/integration/multitable-records-summary-field-mask.test.ts \
             tests/integration/multitable-dashboard-chart-authz.test.ts \
             tests/integration/multitable-write-echo-field-mask.test.ts \
+            tests/integration/multitable-cross-sheet-related-echo-mask.test.ts \
             tests/integration/multitable-automation-retry.test.ts \
             tests/integration/multitable-automation-jobs.test.ts \
             --reporter=dot
