@@ -1,6 +1,6 @@
 # 外接数据源 + SQL Server 连接器 — 部署 runbook(A/B/C 三档)
 
-> **范围**:本 runbook 对应设计稿 Lane C 的 **C2**(A/B/C 三档部署操作手册)。配套 **C1**(`ScriptSandbox` workDir `/tmp/sandbox` → `os.tmpdir()`,去掉运行时唯一的 POSIX 假设)在同一刀落地。**C3**(Windows 原生运行时验证)仍 **🔒 未验证** —— 见 §7。
+> **范围**:本 runbook 对应设计稿 Lane C 的 **C2**(A/B/C 三档部署操作手册)。配套 **C1**(`ScriptSandbox` workDir `/tmp/sandbox` → `os.tmpdir()`)与 **C3-code**(`python3` 二进制解析)已落地并经 Windows CI 验证;**C3-env**(PG/RESP/Windows 服务/端到端启动)仍需客户 Windows 主机实跑回填证据 —— 见 §7。
 > **权威设计稿**:`docs/development/data-sources-mssql-windows-deploy-design-20260527.md`。本 runbook 只讲"**怎么部署**";为什么三档都可行、治理/裁示/降级决策树看设计稿 §0/§1/§5。
 > **承袭原则**(设计稿 §1):① 对客户数据源**零改动、零风险**;② **只读优先**(MVP 强制,框架级);③ **适配器与部署形态解耦** —— 连 SQL Server 的能力**不依赖后端跑在哪**(A/B/C 三档对 Lane B 连接能力无影响)。
 
@@ -9,9 +9,9 @@
 ## 0. 为何三档都可行(关键事实)
 
 - 生产启动即 `node packages/core-backend/dist/src/index.js`(见 `Dockerfile.backend` CMD),**不 spawn 任何 shell 脚本**(仓库 `.sh` 全是 CI/部署/开发工具,非运行时)。
-- `src` 内**唯一**的运行时 POSIX 假设是 `ScriptSandbox.ts` 的 workDir 默认值 `'/tmp/sandbox'` —— **本刀 C1 已改为 `path.join(os.tmpdir(),'sandbox')`**,原生 Windows 落 `%TEMP%\sandbox`,不再有 `/tmp` 依赖。
+- 历史上已发现并修复两处运行时 POSIX 假设:`ScriptSandbox.ts` 默认 workDir `'/tmp/sandbox'` 已改为 `path.join(os.tmpdir(),'sandbox')`;两处 `spawn('python3')` 已改为平台感知 `resolvePythonBinary()`(`win32 → python`,并支持 `PYTHON_BIN` 逃生口)。详见 `data-sources-windows-c3-validation-plan-20260529.md`。
 - `pg` / `redis` / `mssql(tedious)` 驱动**纯 JS,无原生编译** → 不挑 OS/CPU。
-- 因此"原生 Windows 跑"成本远低于初估;**唯一真麻烦是依赖侧的 Redis**(见 §5)。
+- 因此"原生 Windows 跑"的代码可移植层已闭环;真正仍需客户主机验证的是依赖/服务层:PostgreSQL、RESP 缓存(Garnet/Memurai)、Windows 服务化与端到端启动。
 
 依赖侧:后端需 **PostgreSQL** + **Redis**。Postgres 三档都有现成形态;Redis 在原生 Windows 无官方版,故 C 档需替代实现(§5)。
 
@@ -23,7 +23,7 @@
 |---|---|---|---|
 | **A(首选)** | 客户给一台**同网段 Linux VM**,跑现有镜像 / `docker-compose.app.yml` | **零移植** | 能给内网 Linux VM |
 | **B** | **Windows + Docker/WSL2**,`docker compose` 起 app+PG+Redis | 客户需接受 Docker(注意 Docker Desktop 企业授权) | 允许 Docker/WSL2 |
-| **C(兜底)** | **全原生 Windows**:Node 注册为 Windows 服务 + PostgreSQL Windows 安装包 + Garnet/Memurai 替代 Redis | C1(本刀已修)+ 一次 Windows 运行时验证(C3,🔒)+ 引入 Garnet/Memurai | Windows 且**禁** Docker |
+| **C(兜底)** | **全原生 Windows**:Node 注册为 Windows 服务 + PostgreSQL Windows 安装包 + Garnet/Memurai 替代 Redis | C1 + C3-code 已修并 CI 验证;C3-env kit 已落地;客户主机实跑待回填 | Windows 且**禁** Docker |
 
 > 选档只看**客户 IT 接受度**,与"能不能连客户的 SQL Server"无关 —— 后者三档一致。**先问两件事**:① 客户能否给内网 Linux VM?能 → A。② 否则,允许 Docker/WSL2 吗?允许 → B,不允许 → C。
 
@@ -76,9 +76,9 @@
 
 > B 档本质是"把 A 档的 Linux 容器跑在 Windows 的 Docker 里",故移植代价仍≈零;真正的成本是**客户是否接受 Docker**。
 
-## 5. 档 C — 全原生 Windows(兜底;⚠️ C3 🔒 未验证)
+## 5. 档 C — 全原生 Windows(兜底;C3-code 已证,C3-env 待实跑)
 
-> **状态标注(勿当已签收)**:C1(workDir 可移植)**本刀已落**;但 **C3(Windows 原生运行时整体验证)仍 🔒 未做** —— 路径/文件操作/服务化/PG+Garnet/Memurai 连通**未在真实 Windows 上跑通过**。本节是**设计 + 已修可移植性**的部署指引,**不是已验证的签收路径**。真实落 C 档前必须先完成 §7 的 C3。
+> **状态标注(勿当已签收)**:C1/C3-code 的代码可移植层已落地并经 `windows-latest` 真实 Windows CI 验证;但 **C3-env**(PG+Garnet/Memurai 连通、Node-as-service、端到端启动与只读数据源 smoke)仍需在客户 Windows 主机/VM 上运行 validation kit 回填证据。本节是**部署指引 + 已修可移植性**,不是客户环境签收记录。
 
 1. **Node 运行时**:装 Node ≥18;`pnpm --filter @metasheet/core-backend build` 出 `dist/`。
 2. **注册为 Windows 服务**:**推荐默认 `nssm`**(`node-windows` 为附录/备选,见研究文档)把 `node packages/core-backend/dist/src/index.js` 注册为服务(开机自启、崩溃重启);服务环境注入 §2.2 的全部变量。可用 kit 的 `-RegisterService`(显式 opt-in)机械化此步。
@@ -107,7 +107,7 @@
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| **C3 Windows 原生运行时验证** | 🔒 未做 | 走 C 档前必须验:路径/文件操作(含 `%TEMP%\sandbox`)、Node-as-service、PG + RESP 缓存连通、端到端只读拉数。**需 Windows VM/快照**,本预算未含。**机械化跑证据 = C3-env validation kit**(`scripts/ops/validate-windows-runtime.ps1`,§6);判读细项见 `data-sources-windows-c3-validation-plan-20260529.md`。 |
+| **C3-env 原生 Windows 环境执行** | 🔒 待客户主机 | C1/C3-code 已在 Windows CI 验证;走 C 档前还必须在目标主机验 Node-as-service、PostgreSQL、RESP 缓存、auth round-trip、端到端只读拉数。**机械化跑证据 = C3-env validation kit**(`scripts/ops/validate-windows-runtime.ps1`,§6);判读细项见 `data-sources-windows-c3-validation-plan-20260529.md`。 |
 | **2008R2 / 2012 真实验证** | ⬜ follow-up | B4 已覆盖 2019/2022 真容器;2008R2/2012 是 Windows-only 二进制无 Linux 容器,真实验证需 **Windows VM**。兼容矩阵 + legacy smoke recipe(B3 TLS 降级)见 `data-sources-windows-2008r2-2012-compat-matrix-20260529.md`(**只到协议级 + recipe,不承诺 CI/本机验证**)。 |
 | **B6 Windows 集成认证** | 🔒 独立切片 | `authType:'windows'`(Kerberos/keytab/AD)未做;本期连接器只支持 `authType:'sql'`。 |
 | **共享 workDir 跨实例** | ⬜ 观察项 | C1 只改 base path(`/tmp/sandbox` → `os.tmpdir()/sandbox`),**语义不变**:多个 `ScriptSandbox` 实例仍共享同一 `<tmpdir>/sandbox`,`cleanup()` 递归删该目录。per-instance 隔离不在 C1 范围,留作后续独立项(非本刀引入)。 |
