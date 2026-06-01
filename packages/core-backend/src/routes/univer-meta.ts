@@ -7371,17 +7371,24 @@ export function univerMetaRouter(): Router {
         data: normalizeJson(row.data),
       }
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
-      const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
+      // F3 (#2106 §3 F3): the write already happened above; this set gates ONLY the read-back echo, so it must
+      // honor layer-3 field_permissions, not just layer-2 (property.hidden). Same composite as the #2028 read
+      // mask. The write gate (canEditRecord + RecordService) is unchanged — a write-only-no-read field is still
+      // writable, just omitted from the echo.
+      const echoFieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
+      const echoFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap: echoFieldScopeMap })
+      const readableEchoFields = visiblePropertyFields.filter((field) => echoFieldPermissions[field.id]?.visible !== false)
+      const readableEchoFieldIds = new Set(readableEchoFields.map((field) => field.id))
 
       const relationalLinkFields = fields
         .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
         .filter((value): value is RelationalLinkField => !!value && !!value.cfg)
-      const attachmentFields = visiblePropertyFields.filter((field) => field.type === 'attachment')
+      const attachmentFields = readableEchoFields.filter((field) => field.type === 'attachment')
       const linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), [record.id], relationalLinkFields)
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
-      record.data = filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds)
+      record.data = filterRecordDataByFieldIds(record.data, readableEchoFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
             serializeAttachmentSummaryMap(
@@ -7393,7 +7400,7 @@ export function univerMetaRouter(): Router {
                 attachmentFields,
               ),
             )[record.id] ?? {},
-            visiblePropertyFieldIds,
+            readableEchoFieldIds,
           )
         : undefined
 
@@ -8319,8 +8326,16 @@ export function univerMetaRouter(): Router {
 
       const fields = (fieldRes.rows as any[]).map(serializeFieldRow)
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
-      const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
-      const attachmentFields = visiblePropertyFields.filter((field) => field.type === 'attachment')
+      // F3 (#2106 §3 F3): RecordWriteService uses these ONLY for the read-back echo (it masks record / related /
+      // formula data + summaries at record-write-service.ts:828/854/882/914/929), so narrow them to the
+      // layer-2 ∧ layer-3 readable set — a field_permissions-denied value must not be echoed. fieldById (the
+      // write gate, below) stays from ALL fields, so a write-only-no-read field remains writable. (crossSheetRelated
+      // @record-write-service.ts:985 is returned UNMASKED — a separate finding, see the verification doc.)
+      const echoFieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
+      const echoFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap: echoFieldScopeMap })
+      const readableEchoFields = visiblePropertyFields.filter((field) => echoFieldPermissions[field.id]?.visible !== false)
+      const readableEchoFieldIds = new Set(readableEchoFields.map((field) => field.id))
+      const attachmentFields = readableEchoFields.filter((field) => field.type === 'attachment')
       const fieldById = buildFieldMutationGuardMap(fields)
 
       const changesByRecord = new Map<string, typeof parsed.data.changes>()
@@ -8372,8 +8387,8 @@ export function univerMetaRouter(): Router {
               changesByRecord: new Map([[recordId, recordChanges]]) as Map<string, Array<{ fieldId: string; value: unknown; expectedVersion?: number }>>,
               actorId: getRequestActorId(req),
               fields,
-              visiblePropertyFields,
-              visiblePropertyFieldIds,
+              visiblePropertyFields: readableEchoFields,
+              visiblePropertyFieldIds: readableEchoFieldIds,
               attachmentFields,
               fieldById,
               capabilities,
@@ -8414,8 +8429,8 @@ export function univerMetaRouter(): Router {
         changesByRecord: changesByRecord as Map<string, Array<{ fieldId: string; value: unknown; expectedVersion?: number }>>,
         actorId: getRequestActorId(req),
         fields,
-        visiblePropertyFields,
-        visiblePropertyFieldIds,
+        visiblePropertyFields: readableEchoFields,
+        visiblePropertyFieldIds: readableEchoFieldIds,
         attachmentFields,
         fieldById,
         capabilities,
