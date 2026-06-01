@@ -1869,13 +1869,37 @@ async function computeDependentLookupRollupRecords(
   }
 
   const results: RelatedComputedRecord[] = []
-  const readableSheetIds = await resolveReadableSheetIds(req, query, rowsBySheet.keys())
   for (const [sheetId, rows] of rowsBySheet.entries()) {
-    if (!readableSheetIds.has(sheetId)) continue
     const fields = fieldsBySheet.get(sheetId) ?? []
     if (fields.length === 0) continue
     const hasComputed = fields.some((f) => f.type === 'lookup' || f.type === 'rollup')
     if (!hasComputed) continue
+
+    // #2176 cross-sheet related echo mask (design D2/D3/D4/D5). This helper recomputes lookup/rollup
+    // values for records on OTHER sheets that depend on the edited record; those values are echoed to the
+    // writer (record-write-service.ts:860/989) unmasked unless gated here at the producer seam. The single
+    // resolveReadableSheetIds() call is upgraded into a per-related-sheet resolveSheetReadableCapabilities()
+    // pass so the SAME pass supplies (a) the sheet-read drop (D2) and (b) the layer-2 ∧ layer-3 field mask
+    // keyed to the RELATED sheet (D3) — never the edited sheet's readable set, whose field ids are wrong here.
+    const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
+    if (!capabilities.canRead) continue // D2: requester cannot read the related sheet → drop it entirely
+
+    // D3: allowed-field ids for THIS related sheet = visible-property (layer-2 ∧ property.hidden) ∧
+    // field_permissions.visible (layer-3, subject-scoped). Mirrors the same-sheet readableEchoFields
+    // composite at the POST /patch route (:8336). D5 fail-closed: a MISSING request subject yields an empty
+    // scope map AND we never derive against it — allowedFieldIds stays empty so no computed value leaks. (A
+    // present subject with zero field_permissions rows is the normal case → all visible fields allowed.)
+    const visiblePropertyFields = filterVisiblePropertyFields(fields)
+    let allowedFieldIds: Set<string>
+    if (!access.userId) {
+      allowedFieldIds = new Set() // D5: no subject → fail closed, expose nothing
+    } else {
+      const fieldScopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
+      const fieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
+      allowedFieldIds = new Set(
+        visiblePropertyFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => field.id),
+      )
+    }
 
     const relationalLinkFields = fields
       .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
@@ -1893,7 +1917,10 @@ async function computeDependentLookupRollupRecords(
       results.push({
         sheetId,
         recordId: row.id,
-        data: extractLookupRollupData(fields, row.data),
+        // D1: mask the recomputed lookup/rollup payload to the related sheet's allowed fields. A fully
+        // denied record keeps its {sheetId, recordId} envelope with data:{} (the "a dependent recomputed"
+        // signal) rather than being dropped — mirrors same-sheet computed-echo behavior.
+        data: filterRecordDataByFieldIds(extractLookupRollupData(fields, row.data), allowedFieldIds),
       })
     }
   }
