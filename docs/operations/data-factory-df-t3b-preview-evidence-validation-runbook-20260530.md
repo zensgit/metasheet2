@@ -65,3 +65,78 @@ payload JSON.
 DF-T3b-2c may be opened (design-first, its own focused re-review against: same bindings as preview ·
 per-row fail-closed → dead-letter/provenance · no batch-abort · no auto-retry loop · adapter `read` I/O
 failure as its own category). **Fail** = file the divergence (field/domain/error-type only) before 2c.
+
+---
+
+## Operator quick-run (turnkey) — added 2026-06-01
+
+> Turnkey layer over the checks above: a **values-free preflight**, exactly **where to read the
+> evidence**, and a **fill-in capture template**. UI-driven (validate through the workbench, not raw
+> API) — nothing here sends a Save. Placeholders only; never paste real hosts, tokens, or customer
+> values into the run record.
+
+### Preflight (before any check)
+
+A validation run is meaningless against a stale bundle or a mismatched token — a silent 401 reads as a
+"failure" that is really an auth/schema gap, not a resolver gap. Confirm, in order:
+
+1. **Bundle fingerprint** — the running stack serves the `main` that contains **#2122** (this runbook's
+   slice) and the picker **#2110**. Confirm the deployed commit/build id matches the expected `main` tip.
+   If the stack is staging, recall it uses a **distinct `JWT_SECRET`** and its lane does **not**
+   auto-mirror `main` pushes.
+2. **Auth round-trip** — an authenticated read (e.g. list data sources / current user) returns **200**
+   with the operator's token, not **401**. A 401 here is a deploy/secret gap — fix it before reading any
+   resolver result.
+3. **Pending migrations** — none outstanding for the running image (image-pull deploys must diff pending
+   migrations; a schema gap surfaces as a spurious resolver failure).
+4. **Fixtures present** — the `metasheet:staging` mapping-sheet object from *Setup* exists with the
+   one-enabled-complete / ambiguous-pair / incomplete rows, and the sample record's sourceCode column is
+   populated.
+
+### Where to read the evidence (values-free source)
+
+For each preview run, read the **`targetPayloadPreview.referenceResolutions`** array from the preview
+response (devtools → Network → the `templates/preview` response) **plus** the read-only **field-provenance
+summary** in the workbench preview panel (DF-T1.5). Both are values-free by design — **not** the resolved
+`FNumber`/`FID`/`FName`. **Never** open or copy the `payload-preview` JSON — that one carries the composed
+payload **with** the resolved values.
+
+Exact entry shape (so you record the right path): each `referenceResolutions[]` entry is
+**`{ field, status, evidence }`**.
+- **`status`** (top-level) is the outcome enum: `resolved` / `unresolved` / `ambiguous` / `incomplete`.
+- **`errorType`** lives **under `evidence`** (`evidence.errorType`): `unresolved` / `ambiguous` /
+  **`incomplete-row`** — note `incomplete` *status* maps to `incomplete-row` *errorType* (intentionally not
+  the same string; `resolved` has no errorType).
+- **`domain`** is **your own per-rule binding** (what you authored), not echoed on the entry — record it
+  from the rule you set up.
+
+### Capture template (fill in — values-free)
+
+Copy this block back as the run record. `sourceCode?` = whether a sourceCode was present (Y/N), **not** its value.
+
+```
+DF-T3b preview-evidence validation — run record
+stack/bundle: <build-id or main tip>   auth: 200 OK   migrations: none pending   date: <YYYY-MM-DD>
+
+Check 1 — resolved (headline)
+  field=<FUnitID>  domain=<unit>  sourceCode?=Y  status=resolved   preview.valid=true
+  per-material distinct? <Y/N>   (two different sample sourceCodes -> two different resolved objects)
+
+Check 2 — three-state fail-closed (preview.valid=false for each)
+  case=0-match            field=<>  domain=<>  sourceCode?=Y  status=unresolved  errorType=unresolved
+  case=2+-enabled         field=<>  domain=<>  sourceCode?=Y  status=ambiguous   errorType=ambiguous
+  case=missing-component  field=<>  domain=<>  sourceCode?=Y  status=incomplete  errorType=incomplete-row
+
+Check 3 — stale binding / drop
+  bound domain=<unit>, then field -> preserve  =>  referenceMappingSources entry dropped? <Y/N>
+  field falls back to template-preserve? <Y/N>
+
+verdict: PASS / FAIL
+divergences (field/domain/error-type only, no values): <none | ...>
+```
+
+### On PASS
+
+File this run record (values-free) and open **DF-T3b-2c** as a fresh design-first slice with its **own**
+focused re-review against the nine locks (see *Pass / fail* above). 2c is the first slice in this line
+that changes the bytes sent to K3 — it does **not** inherit this runbook's approval; it earns its own.
