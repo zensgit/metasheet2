@@ -42,6 +42,8 @@ export interface DataSourceColumnInfo {
   name: string
   type?: string
   nullable?: boolean
+  primaryKey?: boolean
+  defaultValue?: unknown
 }
 
 export interface DataSourceTableInfo {

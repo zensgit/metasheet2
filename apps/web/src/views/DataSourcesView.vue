@@ -145,6 +145,14 @@
                   v-if="isSqlSource(ds.type)"
                   type="button"
                   class="data-sources__btn"
+                  data-testid="ds-schema"
+                  :disabled="store.isSchemaLoading(ds.id)"
+                  @click="openSchemaBrowser(ds.id)"
+                >结构</button>
+                <button
+                  v-if="isSqlSource(ds.type)"
+                  type="button"
+                  class="data-sources__btn"
                   data-testid="ds-preview"
                   :disabled="store.isSchemaLoading(ds.id) || store.isPreviewLoading(ds.id)"
                   @click="openPreview(ds.id)"
@@ -174,6 +182,76 @@
           </tr>
         </tbody>
       </table>
+
+      <section v-if="activeSchemaId" class="data-sources__preview" data-testid="ds-schema-panel">
+        <header class="data-sources__preview-header">
+          <div>
+            <h2>库表结构</h2>
+            <p class="data-sources__muted">只读浏览 schema / table / columns,不读取业务数据。</p>
+          </div>
+          <button type="button" class="data-sources__btn" @click="closeSchemaBrowser">关闭</button>
+        </header>
+
+        <div class="data-sources__preview-controls">
+          <label>表 / 视图
+            <select
+              v-model="schemaTable"
+              data-testid="ds-schema-table"
+              :disabled="schemaTableChoices.length === 0 || activeSchemaBusy"
+              @change="loadActiveTableInfo"
+            >
+              <option value="" disabled>选择表</option>
+              <option v-for="choice in schemaTableChoices" :key="choice.value" :value="choice.value">
+                {{ choice.label }}
+              </option>
+            </select>
+          </label>
+          <button
+            type="button"
+            class="data-sources__btn data-sources__btn--primary"
+            data-testid="ds-schema-refresh"
+            :disabled="!schemaTable || activeSchemaBusy"
+            @click="loadActiveTableInfo"
+          >
+            {{ activeSchemaBusy ? '读取中…' : '读取字段' }}
+          </button>
+        </div>
+
+        <p
+          v-if="activeSchemaId && store.schemaErrors[activeSchemaId]"
+          class="data-sources__error"
+          data-testid="ds-schema-error"
+          role="alert"
+        >
+          {{ store.schemaErrors[activeSchemaId] }}
+        </p>
+        <p v-else-if="activeSchemaBusy" class="data-sources__muted" data-testid="ds-schema-loading">读取中…</p>
+        <p v-else-if="schemaTableChoices.length === 0" class="data-sources__muted" data-testid="ds-schema-empty">
+          当前数据源未返回表或视图。
+        </p>
+
+        <div v-if="activeTableDetail" class="data-sources__preview-result" data-testid="ds-schema-detail">
+          <p class="data-sources__muted">
+            {{ tableDisplayName(activeTableDetail) }} · {{ activeTableDetail.columns?.length ?? 0 }} 个字段
+          </p>
+          <div v-if="(activeTableDetail.columns?.length ?? 0) > 0" class="data-sources__preview-scroll">
+            <table class="data-sources__table data-sources__preview-table">
+              <thead>
+                <tr><th>字段</th><th>类型</th><th>约束</th><th>默认值</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="column in activeTableDetail.columns" :key="column.name">
+                  <td data-testid="ds-schema-column">{{ column.name }}</td>
+                  <td>{{ column.type || '-' }}</td>
+                  <td>{{ columnConstraintText(column) }}</td>
+                  <td>{{ formatCell(column.defaultValue) || '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="data-sources__muted" data-testid="ds-schema-empty-columns">该表未返回字段信息。</p>
+        </div>
+      </section>
 
       <section v-if="activePreviewId" class="data-sources__preview" data-testid="ds-preview-panel">
         <header class="data-sources__preview-header">
@@ -255,6 +333,7 @@ import { useDataSourcesStore } from '../stores/dataSources'
 import {
   DATA_SOURCE_TYPES,
   DATA_SOURCE_TYPE_LABELS,
+  type DataSourceColumnInfo,
   type DataSourceDetail,
   type DataSourceTableInfo,
   type DataSourceType,
@@ -268,8 +347,18 @@ const formMode = ref<'create' | 'edit' | 'credentials'>('create')
 const editingId = ref<string | null>(null)
 const submitting = ref(false)
 const detailLoading = ref(false)
+const activeSchemaId = ref<string | null>(null)
+const schemaTable = ref('')
 const activePreviewId = ref<string | null>(null)
 const previewTable = ref('')
+
+interface TableChoice {
+  value: string
+  label: string
+  name: string
+  schema?: string
+  kind: 'table' | 'view'
+}
 
 const form = reactive({
   id: '',
@@ -327,26 +416,56 @@ function tableLabel(table: DataSourceTableInfo, kind: 'table' | 'view'): string 
   return `${qualified} · ${kind === 'view' ? '视图' : '表'}`
 }
 
-const activeSchema = computed(() => (
+function tableChoice(table: DataSourceTableInfo, kind: 'table' | 'view'): TableChoice {
+  return {
+    value: tableValue(table),
+    label: tableLabel(table, kind),
+    name: table.name,
+    schema: table.schema,
+    kind,
+  }
+}
+
+function tableChoicesFor(schema: { tables?: DataSourceTableInfo[]; views?: DataSourceTableInfo[] } | null): TableChoice[] {
+  const tables = (schema?.tables ?? []).map((table) => tableChoice(table, 'table'))
+  const views = (schema?.views ?? []).map((view) => tableChoice(view, 'view'))
+  return [...tables, ...views]
+}
+
+const activePreviewSchema = computed(() => (
   activePreviewId.value ? store.schemas[activePreviewId.value] : null
 ))
 
-const previewTableChoices = computed(() => {
-  const schema = activeSchema.value
-  const tables = (schema?.tables ?? []).map((table) => ({
-    value: tableValue(table),
-    label: tableLabel(table, 'table'),
-  }))
-  const views = (schema?.views ?? []).map((view) => ({
-    value: tableValue(view),
-    label: tableLabel(view, 'view'),
-  }))
-  return [...tables, ...views]
+const activeSchemaInfo = computed(() => (
+  activeSchemaId.value ? store.schemas[activeSchemaId.value] : null
+))
+
+const previewTableChoices = computed(() => tableChoicesFor(activePreviewSchema.value))
+
+const schemaTableChoices = computed(() => tableChoicesFor(activeSchemaInfo.value))
+
+const selectedSchemaChoice = computed(() => (
+  schemaTableChoices.value.find((choice) => choice.value === schemaTable.value) ?? null
+))
+
+const activeTableDetail = computed(() => {
+  const id = activeSchemaId.value
+  const choice = selectedSchemaChoice.value
+  if (!id || !choice) return null
+  return store.tableDetails[store.tableDetailKey(id, choice.name, choice.schema)] ?? null
 })
 
 const activePreviewResult = computed(() => (
   activePreviewId.value ? store.previewResults[activePreviewId.value] : null
 ))
+
+const activeSchemaBusy = computed(() => {
+  const id = activeSchemaId.value
+  const choice = selectedSchemaChoice.value
+  if (!id) return false
+  const tableBusy = choice ? store.isTableInfoLoading(store.tableDetailKey(id, choice.name, choice.schema)) : false
+  return store.isSchemaLoading(id) || tableBusy
+})
 
 const activePreviewBusy = computed(() => {
   const id = activePreviewId.value
@@ -375,6 +494,17 @@ function testResultText(id: string): string {
     return `通过${result.latency ? ` · ${result.latency}` : ''}`
   }
   return `失败${result.error?.message ? ` · ${result.error.message}` : ''}`
+}
+
+function tableDisplayName(table: DataSourceTableInfo): string {
+  return table.schema ? `${table.schema}.${table.name}` : table.name
+}
+
+function columnConstraintText(column: DataSourceColumnInfo): string {
+  const parts = []
+  if (column.primaryKey) parts.push('PK')
+  parts.push(column.nullable === false ? 'NOT NULL' : 'NULL')
+  return parts.join(' · ')
 }
 
 function toggleCreateForm(): void {
@@ -472,6 +602,28 @@ async function submit(): Promise<void> {
 
 async function testConnection(id: string): Promise<void> {
   await store.testConnection(id)
+}
+
+async function openSchemaBrowser(id: string): Promise<void> {
+  activeSchemaId.value = id
+  const schema = store.schemas[id] ?? await store.loadSchema(id)
+  const firstChoice = tableChoicesFor(schema)[0]
+  schemaTable.value = firstChoice?.value ?? ''
+  if (firstChoice) {
+    await store.loadTableInfo(id, firstChoice.name, firstChoice.schema)
+  }
+}
+
+async function loadActiveTableInfo(): Promise<void> {
+  const id = activeSchemaId.value
+  const choice = selectedSchemaChoice.value
+  if (!id || !choice) return
+  await store.loadTableInfo(id, choice.name, choice.schema)
+}
+
+function closeSchemaBrowser(): void {
+  activeSchemaId.value = null
+  schemaTable.value = ''
 }
 
 async function openPreview(id: string): Promise<void> {
