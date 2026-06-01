@@ -95,6 +95,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
       yjsInvalidator: yjsInvalidatorSpy,
       queryHandler: async (sql, params) => {
         if (sql.includes('FROM spreadsheet_permissions')) return { rows: [] }
+        if (sql.includes('field_permissions')) return { rows: [] } // F3: echo read-back resolves field perms (no denials in this mock)
         if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
           expect(params).toEqual(['rec_1', 'sheet_ops'])
           return { rows: [{ id: 'rec_1', sheet_id: 'sheet_ops' }] }
@@ -187,6 +188,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, _params) => {
         if (sql.includes('FROM spreadsheet_permissions')) return { rows: [] }
+        if (sql.includes('field_permissions')) return { rows: [] } // F3: echo read-back resolves field perms (no denials in this mock)
         if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
           return { rows: [{ id: 'rec_1', sheet_id: 'sheet_ops' }] }
         }
@@ -224,6 +226,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, _params) => {
         if (sql.includes('FROM spreadsheet_permissions')) return { rows: [] }
+        if (sql.includes('field_permissions')) return { rows: [] } // F3: echo read-back resolves field perms (no denials in this mock)
         if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
           return { rows: [{ id: 'rec_1', sheet_id: 'sheet_ops' }] }
         }
@@ -259,6 +262,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, _params) => {
         if (sql.includes('FROM spreadsheet_permissions')) return { rows: [] }
+        if (sql.includes('field_permissions')) return { rows: [] } // F3: echo read-back resolves field perms (no denials in this mock)
         if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
           return { rows: [{ id: 'rec_1', sheet_id: 'sheet_ops' }] }
         }
@@ -297,6 +301,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
       queryHandler: async (sql, params) => {
         captured.push({ sql, ...(params !== undefined ? { params } : {}) })
         if (sql.includes('FROM spreadsheet_permissions')) return { rows: [] }
+        if (sql.includes('field_permissions')) return { rows: [] } // F3: echo read-back resolves field perms (no denials in this mock)
         if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
           return { rows: [{ id: 'rec_1', sheet_id: 'sheet_ops' }] }
         }
@@ -416,6 +421,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
       yjsInvalidator: yjsInvalidatorSpy,
       queryHandler: async (sql, _params) => {
         if (sql.includes('FROM spreadsheet_permissions')) return { rows: [] }
+        if (sql.includes('field_permissions')) return { rows: [] } // F3: echo read-back resolves field perms (no denials in this mock)
         if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
           return { rows: [{ id: 'rec_1', sheet_id: 'sheet_ops' }] }
         }

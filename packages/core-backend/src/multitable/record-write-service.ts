@@ -209,6 +209,10 @@ export interface RecordPatchInput {
   changesByRecord: Map<string, RecordChange[]>
   actorId: string | null
   fields: UniverMetaField[]
+  /**
+   * Echo / read-back field set ONLY (NOT the writable set). Callers pass the layer-2 ∧ layer-3 readable
+   * fields (F3, #2106 §3 F3) so a field_permissions-denied value is never echoed. Write gating is `fieldById`.
+   */
   visiblePropertyFields: UniverMetaField[]
   visiblePropertyFieldIds: Set<string>
   attachmentFields: UniverMetaField[]
