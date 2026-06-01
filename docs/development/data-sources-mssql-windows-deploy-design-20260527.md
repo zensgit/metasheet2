@@ -114,7 +114,7 @@
 
 ## 4. 门控 TODO 清单(✅ 完成 / 🔒 硬件或独立闸 / ⬜ 可选债务)
 
-> **状态回填 2026-05-31**:按 `origin/main` 至 #2161 核准。外接数据源 / SQL Server 连接器已从 API-only 走到**后端安全闭环 + Windows 部署/验证 kit + UI list/create/delete/test/edit/credential rotation**。剩余项不再阻塞"连接客户 SQL Server"目标:仅客户硬件证据(C3-env、2008R2/2012)与可选技术债(B0/B6/UI-4/真 cursor/Knex)。
+> **状态回填 2026-05-31**:按 `origin/main` 至 #2161 核准。外接数据源 / SQL Server 连接器已从 API-only 走到**后端安全闭环 + Windows 部署/验证 kit + UI list/create/delete/test/edit/credential rotation**。剩余项不再阻塞"连接客户 SQL Server"目标:仅客户硬件证据(C3-env、2008R2/2012)与可选技术债(B0/B6/UI-schema/UI-preview/真 cursor/Knex)。
 
 ### Phase 0 — 决策与开闸(裁示见 §5)
 - ✅ P0-3 Lane A 放行(归入内核打磨/安全修复)
@@ -150,14 +150,15 @@
 - ✅ **C3-env kit**(#2111 `656a57f93`):`scripts/ops/validate-windows-runtime.ps1` + Windows OSS 选型研究 + C3 validation plan + 2008R2/2012 matrix;默认 probe-only/零改动,安装与服务注册显式 opt-in。
 - 🔒 **C3-env execution**(需客户 Windows 主机):PG/Garnet\|Memurai 连通 + nssm/node-windows 服务化 + 端到端启动 + auth/data-source smoke 证据回填。
 
-### Phase UI — 用户可操作面(后补 tracker)
+### Phase UI — 用户可操作面(唯一 tracker)
 - ✅ UI-1 list/create/delete(#2147 `1054444a8`):首个 `/data-sources` 页面,凭据空值省略、必填 host/database/baseURL、delete confirm。
 - ✅ UI-2 test connection(#2151):列表行测试连接,展示 A3 脱敏错误与 latency。
 - ✅ UI-3 edit non-secret config(#2154 + #2155 + #2161):编辑 name/connection/readOnly;后端深合并 `connection` 防止丢 TLS/security keys;前端支持 server-only MSSQL 且不削弱 Postgres host 规则。
 - ✅ Credential rotation(#2160 `82d6317b2`):独立凭据模式/接口,只提交填写字段,留空不覆盖旧凭据。
-- ⬜ UI-4 bounded read preview:可选增强。A5 已在后端提供上限保护;UI 预览不是连接器可用性的硬门槛,若做需独立 opt-in 并确认无并行分支碰撞。
+- ⬜ UI-schema 库表/字段浏览:surface `GET /api/data-sources/:id/schema` + `GET /api/data-sources/:id/tables/:table`;后端端点已就位,前端尚未暴露。
+- ⬜ UI-preview bounded read preview:surface `POST /api/data-sources/:id/select`;A5 已在后端提供上限保护,前端预览不是连接器可用性的硬门槛。
 
-**完成态判定(2026-05-31)**:A/B/C-code/UI 主线均已合并。继续推进只应围绕:(1)客户/VM 实跑证据回填;(2)独立 opt-in 的可选债务,不要再把它们并入连接器核心完成标准。
+**完成态判定(2026-05-31)**:A/B/C-code + UI 管理主线(连/测/改/删/轮换)均已合并;独立管理工具完整性还剩 UI-schema + UI-preview 两个 surface-only 前端切片。继续推进只应围绕:(1)客户/VM 实跑证据回填;(2)独立 opt-in 的可选债务,不要再把它们并入连接器核心完成标准。
 
 ---
 
