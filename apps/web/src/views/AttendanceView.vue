@@ -1305,7 +1305,7 @@
                 </div>
               </div>
               <p class="attendance__scheduler-scope-notice" data-attendance-scheduler-scopes-intent>
-                {{ tr('These scopes are an administrative registry only and are not yet enforced at runtime. Runtime enforcement is a separate later capability.', '此处仅为管理登记，运行时尚未强制执行；运行时强制为后续独立能力。') }}
+                {{ tr('These scopes now enforce selected runtime paths: schedule group and assignment dispatch, schedule group edits, fixed-schedule operations, approvals, exports, and sync imports. Async import jobs, batches, rollback, templates, uploads, and integrations remain admin/importer-only follow-ups.', '这些范围已在部分运行时路径生效：排班组/班次分派、排班组编辑、固定排班操作、审批、导出和同步导入。异步导入任务、批次、回滚、模板、上传和集成仍属后续独立能力，当前保持管理员/导入员权限。') }}
               </p>
               <form class="attendance__scheduler-scope-form" data-attendance-scheduler-scope-form @submit.prevent="submitSchedulerScope">
                 <h5>{{ schedulerScopeEditingId ? tr('Edit scope', '编辑范围') : tr('New scope', '新建范围') }}</h5>
@@ -19125,9 +19125,9 @@ function normalizeSchedulerScope(value: unknown): AttendanceSchedulerScope | nul
   }
 }
 
-// Read-only registry of scheduler scopes (T1). Mirrors loadAttendanceGroups: defensive,
-// 403 -> adminForbidden, non-ok -> caught. Scopes are administrative intent and are NOT
-// enforced at runtime yet (see design-lock §5); the section banner says so.
+// Scheduler scope registry/workbench. Mirrors loadAttendanceGroups: defensive,
+// 403 -> adminForbidden, non-ok -> caught. Runtime enforcement is partial; keep
+// the section banner explicit about covered and deferred surfaces.
 function normalizeSchedulerScopeTargetValues(values: string[]): string[] {
   return Array.from(new Set(values.map(item => item.trim()).filter(Boolean)))
 }

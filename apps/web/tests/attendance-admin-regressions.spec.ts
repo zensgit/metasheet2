@@ -703,8 +703,10 @@ describe('Attendance admin regressions', () => {
     const section = container!.querySelector<HTMLElement>('#attendance-admin-scheduler-scopes')
     expect(section).toBeTruthy()
     expect(window.getComputedStyle(section!).display).not.toBe('none')
-    // The intent banner must ship — it keeps a not-yet-enforced registry honest.
-    expect(section!.querySelector('[data-attendance-scheduler-scopes-intent]')?.textContent || '').toContain('administrative registry')
+    // The intent banner must ship — it keeps partial enforcement and deferred surfaces honest.
+    const schedulerScopeIntentText = section!.querySelector('[data-attendance-scheduler-scopes-intent]')?.textContent || ''
+    expect(schedulerScopeIntentText).toContain('selected runtime paths')
+    expect(schedulerScopeIntentText).toContain('Async import jobs')
     // The mocked scope row renders by subjectRef (real wire render, not a vacuous mount).
     expect(section!.querySelector('[data-attendance-scheduler-scopes-list]')?.textContent || '').toContain('Alice')
     // Request the full first page so the registry is not silently capped at the backend default (no-silent-caps).
