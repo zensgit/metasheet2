@@ -42,6 +42,7 @@ const C_REC = `rec_xrel_c_${TS}`
 
 const USER_DENIED = `u_xrel_denied_${TS}`
 const USER_SHEET_A_ONLY = `u_xrel_a_only_${TS}`
+const USER_GRANTED = `u_xrel_granted_${TS}` // no deny row → per-subject positive control
 
 const VISIBLE_CANARY = `visible-cross-related-${TS}`
 const SECRET_CANARY = `do-not-leak-cross-related-${TS}`
@@ -147,5 +148,22 @@ describeIfDatabase('cross-sheet related write echo field mask (real DB)', () => 
     expect(related(res.body, SHEET_B, B_REC)).toBeUndefined()
     expect(related(res.body, SHEET_C, C_REC)).toBeUndefined()
     expect(JSON.stringify(res.body)).not.toContain(SECRET_CANARY)
+  })
+
+  test('per-subject: a user WITHOUT the deny row receives B_LOOKUP_SECRET — the mask is subject-scoped, not global', async () => {
+    // Direct contrast to R1: the SAME B_LOOKUP_SECRET that is masked for USER_DENIED is delivered to a user
+    // who has no field_permissions deny row. This proves the omission in R1 is the field-read gate firing for
+    // that subject — not the field being structurally absent / the lookup failing to resolve. USER_GRANTED has
+    // no deny row and (like USER_DENIED) reads sheet B under the default-allow sheet model, so the cross-sheet
+    // echo must carry the resolved value verbatim.
+    currentUser = { id: USER_GRANTED, roles: ['member'], perms: ['multitable:write'] }
+    const res = await batchPatch(`edit-${TS}-3`)
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    const b = related(res.body, SHEET_B, B_REC)
+    expect(b).toBeDefined()
+    expect(b.data[B_LOOKUP_SECRET]).toEqual([SECRET_CANARY]) // present for the granted subject (was masked for USER_DENIED)
+    expect(b.data[B_LOOKUP_VISIBLE]).toEqual([VISIBLE_CANARY]) // visible field unchanged across subjects
+    expect(b.data[B_LOOKUP_HIDDEN]).toBeUndefined() // layer-2 static-hidden stays omitted for everyone (not subject-scoped)
+    currentUser = { id: USER_DENIED, roles: ['member'], perms: ['multitable:write'] }
   })
 })
