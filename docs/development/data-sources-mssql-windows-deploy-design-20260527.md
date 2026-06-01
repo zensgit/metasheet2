@@ -1,6 +1,6 @@
 # 外接适配器完善 + MSSQL 多版本支持 + Windows 部署形态 — 设计稿(已落仓)
 
-> 状态:**已落仓 v2(并入 2026-05-27 三轮 review findings + 裁示)**,提交 `7dea4c685`,分支 `codex/data-sources-lane-a-hardening-20260527`(基于 origin/main,未 push)。
+> 状态:**已落仓并完成收口回填(2026-05-31,按 `origin/main` 至 #2161 核准)**。本稿最初提交为 `7dea4c685`;当前 §4 为完成态 tracker,不再代表初稿快照。
 > 本稿对应需求:把现有"外接数据源适配器"做实并修复质量缺口;新增对客户 **Windows Server + SQL Server(多版本)** 环境的连接与部署支持。
 > v2 关键变更:现状盘点纠正(真正可用仅 postgresql/postgres+http)、新增 A0 持久化接线 + A-RO 框架级只读、A1 改用真正 crypto service、A4 扩为 enum↔registry↔驱动三方对齐、Lane B 明确不动 K3 通道只抽共享 helper + gated 在 A 之后。
 
@@ -12,9 +12,9 @@
 
 | 工作 | 性质 | 闸门 |
 |---|---|---|
-| 新增 MSSQL 连接器 / 给连接配置加"版本维度" | **阶段二 connector** | 🔒 GATE/解锁后单独 opt-in(每个连接器都是独立闸) |
-| 后端在客户 Windows 上的部署形态 | 基础设施 | 🔒 撞 K3 lock"不开新战线";但见 §5,运行时其实可移植,成本低于预期 |
-| 现有适配器 P0/P1 修复(凭据加密 / 注入 / 错误吞咽 / 测试) | 可论证为**内核打磨 + 安全修复** | ⚠️ 由你拍板是否归入"内核打磨"放行 |
+| 新增 MSSQL 连接器 / 给连接配置加"版本维度" | **阶段二 connector** | ✅ 已 opt-in 并落地(#1985 + 后续 B3/B4/B5A/smoke) |
+| 后端在客户 Windows 上的部署形态 | 基础设施 | ✅ C1/C2/C3-code/C3-env kit 已落地;🔒 客户 Windows 主机实跑证据待回填 |
+| 现有适配器 P0/P1 修复(凭据加密 / 注入 / 错误吞咽 / 测试) | 可论证为**内核打磨 + 安全修复** | ✅ 已按 Lane A 完成 |
 
 **绝不触碰**:`plugin-integration-core`、中央 RBAC/auth(K3 lock 红线)。
 
@@ -112,13 +112,13 @@
 
 ---
 
-## 4. 门控 TODO 清单(🔒 待开闸 / ⬜ 待办未阻塞 / ✅ 完成)
+## 4. 门控 TODO 清单(✅ 完成 / 🔒 硬件或独立闸 / ⬜ 可选债务)
 
-> **状态回填 2026-05-28**:本清单原为 #1960 落仓时的快照、之后未更新。现按 `origin/main` 真实状态回填:Lane A 安全核心(A0/A0.1/A-RO/A1/A4)与 Lane B B1/B2/B3 已落地;剩余待办 = A2/A3/A5/A6、B0(共享 helper)、B4(真容器/legacy 矩阵)、B5 的真 wire 集成测试;B6 + Lane C(C3)仍 gated。
+> **状态回填 2026-05-31**:按 `origin/main` 至 #2161 核准。外接数据源 / SQL Server 连接器已从 API-only 走到**后端安全闭环 + Windows 部署/验证 kit + UI list/create/delete/test/edit/credential rotation**。剩余项不再阻塞"连接客户 SQL Server"目标:仅客户硬件证据(C3-env、2008R2/2012)与可选技术债(B0/B6/UI-4/真 cursor/Knex)。
 
 ### Phase 0 — 决策与开闸(裁示见 §5)
 - ✅ P0-3 Lane A 放行(归入内核打磨/安全修复)
-- ✅ P0-4 Lane B 已 opt-in(A0/A0.1/A-RO/A1/A4 定住后,2026-05-28):通用连接器 PR1 #1985 + B3 legacy-TLS 本刀
+- ✅ P0-4 Lane B 已 opt-in(A0/A0.1/A-RO/A1/A4 定住后,2026-05-28):通用连接器 PR1 #1985 + B3 legacy-TLS #1997
 - ✅ P0-5 落点 `docs/development/data-sources-mssql-windows-deploy-design-20260527.md` + 新分支 `codex/data-sources-lane-a-hardening-20260527`(从 `origin/main`)
 - ✅ P0-6 现做协议 mock + 2017+ 容器真测;legacy VM 延后
 - ✅ P0-1/P0-2 优先级 A>B>C(C 兜底);客户 Linux VM / Docker 事实执行期回填
@@ -131,41 +131,47 @@
 - ✅ A2 `sanitizeIdentifier` 违规即抛 + schema-qualified 支持(#2037 `bf0eefc78`):按 `.` 分段校验、非法即抛(不再静默改写);MSSQL/MySQL per-segment quote;`[dbo].[table]` schema-qualified 经 SQL Server 容器 matrix 真 wire 证
 - ✅ A3 query/testConnection 错误不吞,保留错因(#2034):`testConnection` 返回 `{success,error?}`;错因经 `redactSecrets` 脱敏(`password`/`token` 不入 response/log);manager 仅转发 redacted `connectionError`;真 wire 集成测试覆盖
 - ✅ A4 enum↔registry↔驱动三方对齐(#1976 `f5013324e`):`SUPPORTED_DATA_SOURCE_TYPES` 单一支持矩阵 + 非法 type 400 + load 跳过不支持行
-- ✅ A5 结果边界策略(本刀,取「明确上限保护」而非真 cursor):共享 `DATA_SOURCE_DEFAULT_LIMIT=1000` / `DATA_SOURCE_MAX_ROWS=10000`;**适配器层 `select()` 硬防线**(omit→MAX cap、>MAX→抛、非法→抛,经 `resolveEffectiveLimit`),挡住绕过路由的直连内部调用(`DataSourceManager` 复制循环已显式分页,不受影响);路由 `/select` 入口补默认 limit、超限 400(zod);raw `/query` 无法安全自动限界 → 标为非大表导出通道 + 无 `LIMIT/TOP/OFFSET/FETCH` 时 best-effort warning + audit;`stream()`(raw SQL、未经路由暴露、内部唯一)仍为非流式,真 cursor 留作后续 thorough。测试 `data-source-result-boundary.test.ts`(13 例:常量 + resolveEffectiveLimit + PG/MSSQL select 真 wire + 路由默认/400/warning)
+- ✅ A5 结果边界策略(#2079,取「明确上限保护」而非真 cursor):共享 `DATA_SOURCE_DEFAULT_LIMIT=1000` / `DATA_SOURCE_MAX_ROWS=10000`;**适配器层 `select()` 硬防线**(omit→MAX cap、>MAX→抛、非法→抛,经 `resolveEffectiveLimit`),挡住绕过路由的直连内部调用(`DataSourceManager` 复制循环已显式分页,不受影响);路由 `/select` 入口补默认 limit、超限 400(zod);raw `/query` 无法安全自动限界 → 标为非大表导出通道 + 无 `LIMIT/TOP/FETCH` 时 best-effort warning + audit(裸 `OFFSET` 不算上限);`stream()`(raw SQL、未经路由暴露、内部唯一)仍为非流式,真 cursor 留作后续 thorough。测试 `data-source-result-boundary.test.ts`(14 例:常量 + resolveEffectiveLimit + PG/MSSQL select 真 wire + 路由默认/400/warning)
 - ✅ A6 Postgres 适配器单测(#2139 `0e35ae94e`,并行会话):connect/query/transaction/错误路径覆盖 —— `packages/core-backend/tests/unit/postgres-adapter.test.ts`
 
 ### Phase B — MSSQL 连接器(Lane B 已 opt-in 2026-05-28;contracts-first)
-- ⬜ B0 抽共享 mssql helper(连接/TLS/类型映射)—— PR1 暂内联在 `MSSQLAdapter`,helper 抽取留作收口项(不碰 integration-core)
+- ⬜ B0 抽共享 mssql helper(连接/TLS/类型映射)—— 可选债务。当前 `MSSQLAdapter` 内联实现已稳定,不阻塞客户连接;若后续复用到更多 SQL Server 通道再抽,且不碰 integration-core。
 - ✅ B1 契约(#1985 `ff0bcd0cc`):`type=sqlserver` zod enum + registry 同步注册(`SUPPORTED_DATA_SOURCE_TYPES`)+ config 旋钮(encrypt/trustServerCertificate)+ 非法 type 400;`readOnly` 用 A-RO 默认 true;`authType` 仅 `sql`
 - ✅ B2 `MSSQLAdapter`(mssql 驱动,池化生命周期)实现(#1985):connect/query/select/getSchema/stream + 继承 A-RO 只读 guard + `[ ]`/TOP/OFFSET-FETCH/`@pN`
-- ✅ B3 per-connection TLS 降级旋钮(本刀):`cryptoCredentialsDetails.minVersion`/`ciphers`(经 `tlsMinVersion`/`tlsCiphers`/`legacyTls` 便捷开关),secure-by-default,非法 minVersion 即抛,降级 `emit('tls-downgrade')` 审计 + warn;仍加密(明文/legacy-provider 仍走 sidecar)
-- ⬜ B4 版本兼容矩阵:2017/2019/2022 真容器测 + 2008R2/2012 协议级 mock(真实 legacy 验证需 Windows VM,依 P0-6,**follow-up**)
-- ⬜ B5 单测 ✅(#1985 + 本刀 B3 共 24 例:config/SQL 生成/路由/TLS 旋钮);**经真实 wire 的集成测试待 B4 容器**(wire-vs-fixture 纪律:fake-driver 单测不替代真 wire)
+- ✅ B3 per-connection TLS 降级旋钮(#1997):`cryptoCredentialsDetails.minVersion`/`ciphers`(经 `tlsMinVersion`/`tlsCiphers`/`legacyTls` 便捷开关),secure-by-default,非法 minVersion 即抛,降级 `emit('tls-downgrade')` 审计 + warn;仍加密(明文/legacy-provider 仍走 sidecar)
+- ✅ B4 版本兼容矩阵与现代真 wire 证据:2019/2022 SQL Server service-container CI matrix 已落(#2030 `524f89576`);旧版 2008R2/2012 兼容矩阵 + legacy smoke recipe 已落(`data-sources-windows-2008r2-2012-compat-matrix-20260529.md`)。🔒 真实 2008R2/2012 执行仍需客户 Windows VM/快照。
+- ✅ B5 单测 + 真 wire smoke:fake-driver/SQL 生成/TLS 旋钮单测 + B5A opt-in smoke gate(#2026) + 2019/2022 CI real-wire matrix(#2030) + B3 TLS env smoke(#2131/#2132)。🔒 legacy 旧库真跑证据待客户 VM。
 - 🔒 B6(后续切片)Windows 集成认证 `authType:'windows'` —— Kerberos/keytab/AD,独立设计
 
 ### Phase C — 部署形态(随 A/B 决策)
 - ✅ **C1** `'/tmp/sandbox'` → `path.join(os.tmpdir(),'sandbox')`(`ScriptSandbox.ts` + `script-sandbox-workdir.test.ts`;测试 mock `os.tmpdir()` 到非 `/tmp` sentinel,断言 workDir 派生自 `os.tmpdir()` 而非硬编码字面量 —— 否则 Linux CI 上 `os.tmpdir()===/tmp` 会让回退到字面量仍然 pass)
 - ✅ **C2** A/B/C 三档部署 runbook —— `docs/development/data-sources-mssql-windows-deploy-runbook-20260529.md`
-- ✅ **C3-code** 代码可移植层(本刀):`ScriptSandbox` 两处 `spawn('python3')` → `resolvePythonBinary()`(平台感知 `win32→python` + `PYTHON_BIN` 逃生口)+ `executePython` error-path 临时文件 cleanup;`script-sandbox-python-portability.test.ts`(resolve 纯测 + bogus-binary error path + 真 wire `validateScript`)+ **`windows-latest` CI lane**(`sandbox-windows-portability.yml`,path-filtered + targeted,真 win32 证 workDir/python 解析/真 wire/error-path,无 PG/Redis)。审计纠正了"唯一 `/tmp/sandbox`"说法
-- 🔒 **C3-env** 环境集成层(仍 🔒,需客户 Windows 主机):PG/Garnet\|Memurai 连通 + nssm/node-windows 服务化 + 端到端启动,无法 CI → 手动 checklist 见 `docs/development/data-sources-windows-c3-validation-plan-20260529.md`
+- ✅ **C3-code** 代码可移植层(#2054):`ScriptSandbox` 两处 `spawn('python3')` → `resolvePythonBinary()`(平台感知 `win32→python` + `PYTHON_BIN` 逃生口)+ `executePython` error-path 临时文件 cleanup;`script-sandbox-python-portability.test.ts`(resolve 纯测 + bogus-binary error path + 真 wire `validateScript`)+ **`windows-latest` CI lane**(`sandbox-windows-portability.yml`,path-filtered + targeted,真 win32 证 workDir/python 解析/真 wire/error-path,无 PG/Redis)。审计纠正了"唯一 `/tmp/sandbox`"说法
+- ✅ **C3-env kit**(#2111 `656a57f93`):`scripts/ops/validate-windows-runtime.ps1` + Windows OSS 选型研究 + C3 validation plan + 2008R2/2012 matrix;默认 probe-only/零改动,安装与服务注册显式 opt-in。
+- 🔒 **C3-env execution**(需客户 Windows 主机):PG/Garnet\|Memurai 连通 + nssm/node-windows 服务化 + 端到端启动 + auth/data-source smoke 证据回填。
 
-**推进顺序(已按裁示更新)**:Phase 0 → **A0 + A0.1(持久化 + scope 收口)→ A-RO + A1 + A4(基础面安全)→ A2/A3/A5/A6** → **B(仅当 A0/A0.1/A-RO/A1/A4 定住后才 opt-in)** → C(随部署形态)。
-- **Lane B 不再与 A 并行**:MSSQL 连接器必须落在已安全的框架上,故 gated 在 A0/A0.1/A-RO/A1/A4 之后(P0-4 裁示)。
-- B 内部严格 contracts-first(B1 在 B2 之前)。
-- 第一可执行 slice = **A0**(不是 B)。
+### Phase UI — 用户可操作面(后补 tracker)
+- ✅ UI-1 list/create/delete(#2147 `1054444a8`):首个 `/data-sources` 页面,凭据空值省略、必填 host/database/baseURL、delete confirm。
+- ✅ UI-2 test connection(#2151):列表行测试连接,展示 A3 脱敏错误与 latency。
+- ✅ UI-3 edit non-secret config(#2154 + #2155 + #2161):编辑 name/connection/readOnly;后端深合并 `connection` 防止丢 TLS/security keys;前端支持 server-only MSSQL 且不削弱 Postgres host 规则。
+- ✅ Credential rotation(#2160 `82d6317b2`):独立凭据模式/接口,只提交填写字段,留空不覆盖旧凭据。
+- ⬜ UI-4 bounded read preview:可选增强。A5 已在后端提供上限保护;UI 预览不是连接器可用性的硬门槛,若做需独立 opt-in 并确认无并行分支碰撞。
+
+**完成态判定(2026-05-31)**:A/B/C-code/UI 主线均已合并。继续推进只应围绕:(1)客户/VM 实跑证据回填;(2)独立 opt-in 的可选债务,不要再把它们并入连接器核心完成标准。
 
 ---
 
 ## 5. 裁示(已定 — 2026-05-27 review)
-- **P0-3 ✅ Lane A 放行**,但 **A0(持久化接线)最前置**;无 A0,A1/A4 无法真正完成。
-- **P0-4 🔒 Lane B 继续 hold**,先别开工;待 **A0 + A0.1(持久化 + scope 收口)+ A-RO(只读/raw-query 防线)+ A1 + A4** 定住后再做 MSSQL,避免新连接器落在不安全的基础面上。
-- **P0-6 ✅ 现在只做协议 mock + 2017+ 容器真测**;仅当客户明确是 2008R2/2012 或进入最终 signoff,才为 legacy 投 Windows VM/快照(现在上 VM 太早)。
+- **P0-3 ✅ Lane A 放行并完成**:A0/A0.1/A-RO/A1/A2/A3/A4/A5/A6 均已落。
+- **P0-4 ✅ Lane B 已按条件 opt-in 并完成主线**:MSSQL 通用连接器、TLS 旋钮、现代真 wire smoke 均已落;B6 Windows 集成认证仍是独立冻结切片。
+- **P0-6 ✅ 现代路径已真测;legacy 真实证据待 VM**:2019/2022 容器 CI 已证;2008R2/2012 有矩阵 + B3 smoke recipe,真实执行需客户 Windows VM/快照。
 - **P0-1/P0-2 ✅ 部署优先级 A(Linux VM)> B(Windows+Docker/WSL2)> C(原生 Windows)**;C 作兜底,非默认目标。
 - **P0-5 ✅ 落点**:`docs/development/data-sources-mssql-windows-deploy-design-20260527.md`;新分支 `codex/data-sources-lane-a-hardening-20260527` 从 `origin/main` 切;第一可执行 slice = **A**(A0 起)。
 
 ### 仍待确认(执行期)
 - 客户 SQL Server 具体版本(影响 P0-6 是否升级为投 Windows VM)。
 - 客户是否能给 Linux VM(P0-1)/ 是否允许 Docker/WSL2(P0-2)的事实回填(影响最终走 A/B/C 哪档)。
+- 若客户要求原生 Windows C 档,需运行 `scripts/ops/validate-windows-runtime.ps1` 回填 C3-env evidence。
 
 ---
 
