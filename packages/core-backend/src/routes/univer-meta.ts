@@ -8356,8 +8356,10 @@ export function univerMetaRouter(): Router {
       // F3 (#2106 §3 F3): RecordWriteService uses these ONLY for the read-back echo (it masks record / related /
       // formula data + summaries at record-write-service.ts:828/854/882/914/929), so narrow them to the
       // layer-2 ∧ layer-3 readable set — a field_permissions-denied value must not be echoed. fieldById (the
-      // write gate, below) stays from ALL fields, so a write-only-no-read field remains writable. (crossSheetRelated
-      // @record-write-service.ts:985 is returned UNMASKED — a separate finding, see the verification doc.)
+      // write gate, below) stays from ALL fields, so a write-only-no-read field remains writable. (The
+      // crossSheetRelated echo @record-write-service.ts:860/989 is masked SEPARATELY — by the related sheet's
+      // own field permissions at the producer seam, computeDependentLookupRollupRecords; see #2176. These
+      // edited-sheet echo ids are deliberately NOT used for it, as the field ids are scoped to this sheet.)
       const echoFieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
       const echoFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap: echoFieldScopeMap })
       const readableEchoFields = visiblePropertyFields.filter((field) => echoFieldPermissions[field.id]?.visible !== false)
