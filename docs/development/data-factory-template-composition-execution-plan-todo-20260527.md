@@ -4,7 +4,9 @@
 > This file is the **execution ordering + trackable checklist**, not an authorization to build.
 > Markers: ✅ done · ⬜ open / ready (still needs its own opt-in) · 🔒 gated (blocked on a prior gate AND a separate explicit opt-in).
 >
-> **Constraints (non-negotiable):** K3 PoC Stage-1 lock holds; every phase below is a **separate explicit opt-in** — never auto-start the next one. Any phase that edits `plugin-integration-core` (adapter or HTTP route), even no-write, is integration-core and gated like #1912. Formal docs state our own product principles, not external brand names (external benchmarking lives in internal research MDs).
+> **Constraints (non-negotiable):** the K3 Stage-1 **blanket** lock is **RETIRED** — GATE #1792 (M1 one-record Material Save-only PASS) closed 2026-05-28; #1993 — replaced by **post-GATE scoped gates** (`k3-post-gate-scoped-governance-20260528.md`). Every phase below is still a **separate explicit named opt-in / demand gate** — never auto-start the next one. Any phase that edits `plugin-integration-core` (adapter or HTTP route), even no-write, is integration-core and takes its own scoped opt-in. Formal docs state our own product principles, not external brand names (external benchmarking lives in internal research MDs).
+>
+> **状态回填 2026-06-01:** the original status markers were stale — refreshed here against `origin/main`. **DONE:** DF-T1-0 / DF-T1 / DF-T1.5; **DF-T1A** contract (#2012, latent); **DF-T2** customer-profile authoring, full chain #2017 → #2035 (read-only derive/preview); the **DF-T3b preview/resolve line** (#2036 → #2122); and **DF-N2-2 provenance runtime** (#1981 → #1988 → #1990) + **DF-N2-3** timeline (#1998). **Genuinely remaining:** **DF-T3b-2c** (real-Save — its own post-GATE scoped gate, gated on a live operator-validation run) · **DF-T3c** (mapping-sheet authoring) · DF-T4 / T5 / T6 · DF-N3+. **DF-T2 shipped before DF-T3 — there was no leapfrog**, and there is no global lock anymore (the earlier draft of this note wrongly said both).
 
 ## The one hard rule: payload trust before UI
 
@@ -91,11 +93,11 @@ Read-only display over the `targetPayloadPreview.fieldProvenance` DF-T1 emits; n
 - [x] No new persisted provenance runtime field in this slice.
 - [x] **Reachability wired** (follow-up): the preview panel sends an optional `payloadTemplate` (+ derived `fieldRules`) so the DF-T1 backend returns `targetPayloadPreview` — the panel is live-triggerable, not just display-capable. Locks a request-body wire assertion. Verification: `data-factory-df-t1_5-reachability-wire-verification-20260528.md`.
 
-### 🔒 DF-T1A — Connector action metadata
-Gated on: DF-T1 + opt-in.
-- [ ] Action metadata around existing adapter methods (no generic HTTP client / no user JS / no SQL / no new connector runtime).
-- [ ] Inputs grouped `path` / `query` / `header` / `body`; response unwrap (success/error/record path).
-- [ ] Save-only and write actions hidden/disabled unless their explicit gate is satisfied.
+### ✅ DF-T1A — Connector action metadata (DONE — contract latent, PR #2012 `18c242622`)
+The action-metadata **contract** landed, **latent** (not wired to UI/runtime — describes existing adapter methods only).
+- [x] Action metadata around existing adapter methods (no generic HTTP client / no user JS / no SQL / no new connector runtime).
+- [x] Inputs grouped `path` / `query` / `header` / `body`; response unwrap (success/error/record path).
+- [x] Save-only and write actions hidden/disabled unless their explicit gate is satisfied.
 
 Minimum action contract:
 
@@ -109,16 +111,30 @@ Minimum action contract:
 This contract wraps existing adapter methods first. It must not become a user
 authored HTTP client in this phase.
 
-### 🔒 DF-T2 — K3 customer-profile authoring surface
-Gated on: DF-T1 (+ DF-T1.5 helpful) + opt-in; **and the live K3 GATE should have a proven Save** before investing heavily here (else risk reworking UX for a still-changing profile).
-- [ ] Operator turns a sanitized `GetDetail` body sample into `payloadTemplate`.
-- [ ] Operator chooses replace/preserve per field; validates full reference-object shapes.
-- [ ] Shows why a row is not ready before Save. Customer profile stays opt-in; default template never silently switched.
+### ✅ DF-T2 — K3 customer-profile authoring surface (DONE — 2026-05; shipped BEFORE DF-T3)
+Full sub-chain, all **read-only** derive/preview (no Save change): design (#2017 `1bcb85aed`) → **DF-T2a** template-derive helper, latent (#2023 `b64e2c202`) → **DF-T2b** per-field replace/preserve authoring UI, no wire (#2027 `d1e445fc5`) → **DF-T2c** wire authoring → real read-only derive/preview route (#2032 `81e8975d5`) → operator runbook closeout (#2035 `6841389bb`).
+- [x] Operator turns a sanitized `GetDetail` body sample into `payloadTemplate`.
+- [x] Operator chooses replace/preserve per field; validates full reference-object shapes.
+- [x] Shows why a row is not ready before Save. Customer profile stays opt-in; default template never silently switched.
 
-### 🔒 DF-T3 — Multitable reference-mapping sheet templates
-Gated on: DF-T2 + opt-in.
-- [ ] "Create from template" for reference-mapping sheets (unit / unit-group / account / warehouse / category).
-- [ ] Dictionary content stays customer-owned; manifest import/export without secrets.
+### 🟡 DF-T3 — Multitable reference-mapping sheet templates (preview line CLOSED; 2c + T3c remain)
+Built **after** DF-T2 (DF-T3 design #2036 follows the #2035 DF-T2 closeout). The **preview/resolve line is closed end-to-end**; the only remaining work is the real-Save keystone (2c — **gated on the operator-validation runbook**) and mapping-sheet authoring (T3c).
+
+Shipped sub-chain (each was a separate opt-in, in order):
+- [x] **DF-T3 design** — reference-mapping sheet templates, design-first (#2036, `e8f1da5f8`).
+- [x] **DF-T3a** — sheet template manifest, schema-only / latent: **12 domains** (`unit` · `unit-group` · `account` · `warehouse` · `manager` → `FNumber`; `category` · `use-state` · `track` · `planning-strategy` · `order-strategy` · `inspection-level` · `inspection-mode` → `FID`) (#2043, `6ca5fc82c`).
+- [x] **DF-T3b design** — `from_reference_table` resolver design + the nine acceptance locks (#2048, `66bf3c490`).
+- [x] **DF-T3b-1** — pure resolver + index, unit-tested, **latent** (no wiring): enabled-only · blank-`sourceCode` ignored · 0→`unresolved` · 2+→`ambiguous` (fail-closed, never pick-first) · missing component→`incomplete-row` (#2055, `681457fb1`).
+- [x] **DF-T3b-2a** — wire the resolver into the **shared** preview composition + resolved-record parity (invariant: read snapshot = original record, write = materialized out) (#2063, `0549effe9`).
+- [x] **DF-T3b-2b** — live mapping-sheet **bulk-read** → preview resolve (read-only, API-reachable; `metasheet:staging`-kind guard + duplicate-domain 400) (#2073, `1ba8f6381`).
+- [x] **DF-T3b-2b UI-wire** — preview sends `referenceMappingSources` (operator-UI-reachable) (#2080, `fd7489177`).
+- [x] **DF-T3b-2d** — `from_reference_table` **authoring** opt-in (reference → resolve-via-mapping; must pick a domain from the 12; gated-locked; no backend) (#2088, `486b0f612`).
+- [x] **DF-T3b dual-binding picker** — structured picker replacing the JSON textarea, **both** bindings: **(1)** `referenceMappingSources` sheet binding (domain → staging system/object) **and (2)** per-rule `rule.sourceField` sourceCode-column binding (sheet-only would resolve the wrong column) (#2110, `47cba2df1`).
+- [x] **DF-T3b preview-evidence validation runbook** — the operator's live, **values-free** confirmation that resolve / three-state fail-close / stale-drop behave as designed (#2122, `a6d450b58`).
+
+Remaining:
+- 🔒 **DF-T3b-2c** — real-Save **compose-before-`upsert`** (changes the K3 Save bytes — the byte-parity-gated moment). **Gated on:** a **passing operator-validation run** (the #2122 runbook — only the maintainer can run it on a live stack) **AND** a separate focused re-review against the nine locks (same bindings as preview · per-row fail-closed → dead-letter/provenance · no batch-abort · no auto-retry loop · adapter `read` I/O failure as its own category). Write scope stays **M1 one-record Material Save-only** — no Submit / Audit / BOM / multi-record / new endpoint.
+- 🔒 **DF-T3c** — mapping-sheet **manifest import/export + authoring** (schema-only; dictionary rows stay customer-owned, never in Git). This is the original DF-T3 second bullet ("manifest import/export without secrets") — authoring ergonomics, ranked **below 2c** (rows are enterable as tenant data without it).
 
 ### 🔒 DF-T4 — Pipeline template binding
 Gated on: DF-T3 + opt-in.
@@ -178,7 +194,7 @@ processors, or streaming cluster in this track.
 
 ## Sequencing rule
 
-One explicit opt-in per phase. Do not auto-start the next. **DF-T1-0 (#1936), DF-T1 (#1945), and DF-T1.5 (preview provenance display) are DONE.** The next step is a separate explicit opt-in — either **DF-N2-2 (provenance runtime)** or **DF-T1A (connector action metadata)**; everything below stays 🔒 until its predecessor gate is green and it is separately opted in.
+One explicit opt-in per phase. Do not auto-start the next. **DONE** (verified on `origin/main`): DF-T1-0 (#1936) · DF-T1 (#1945) · DF-T1.5 · **DF-T1A** contract (#2012, latent) · **DF-T2** full chain (#2017 → #2035) · the **entire DF-T3b preview/resolve line** (#2036 → #2122) · **DF-N2-2** runtime (#1981 → #1990) + **DF-N2-3** (#1998). **Genuinely-remaining next steps (each its own post-GATE scoped opt-in):** **DF-T3b-2c** (real-Save — gated on a passing operator-validation run (#2122 runbook) + its own focused re-review; do not open until that run passes) · **DF-T3c** (mapping-sheet authoring) · **DF-T4** (pipeline binding) · **DF-T5** (template center) · **DF-T6** (help panel) · **DF-N3+**. Nothing here is blocked by a global lock — the blanket Stage-1 freeze is retired; each is a separate named opt-in.
 
 ## Definition of done — DF-T1-0 (the immediate gate)
 
