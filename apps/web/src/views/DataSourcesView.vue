@@ -605,8 +605,14 @@ async function testConnection(id: string): Promise<void> {
 }
 
 async function openSchemaBrowser(id: string): Promise<void> {
+  const requestedId = id
   activeSchemaId.value = id
+  // Clear the prior panel's selection up front so it cannot linger while the new schema loads.
+  schemaTable.value = ''
   const schema = store.schemas[id] ?? await store.loadSchema(id)
+  // A newer panel may have opened while loadSchema was in flight (fast A→B switch). Drop this
+  // stale response so it cannot clobber schemaTable or load the wrong source's table info.
+  if (activeSchemaId.value !== requestedId) return
   const firstChoice = tableChoicesFor(schema)[0]
   schemaTable.value = firstChoice?.value ?? ''
   if (firstChoice) {
