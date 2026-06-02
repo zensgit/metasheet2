@@ -255,6 +255,23 @@ describe('MultitableApiClient', () => {
     expect(rule.executionMode).toBe('workflow_job_v1')
   })
 
+  it('A6-1: updateAutomationRule sends executionMode in the PATCH body', async () => {
+    // Symmetric guard for the update path: if the client ever grows a body whitelist, this
+    // catches a dropped executionMode on PATCH the same way the create test guards POST.
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ ok: true, data: { rule: {} } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.updateAutomationRule('sheet_1', 'atr_1', { executionMode: 'workflow_job_v1' })
+
+    expect(fetchFn).toHaveBeenCalledWith(
+      '/api/multitable/sheets/sheet_1/automations/atr_1',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ executionMode: 'workflow_job_v1' }),
+      }),
+    )
+  })
+
   it('updates and deletes comments through dedicated endpoints', async () => {
     const fetchFn = vi.fn(async (input: string, init?: RequestInit) => {
       if (input === '/api/comments/c1' && init?.method === 'PATCH') {
