@@ -2522,6 +2522,87 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('blocks an unscheduled punch (punchPolicy.unscheduled.mode=block) before any attendance_event INSERT', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const adminUserId = `attendance-punchpolicy-admin-${runSuffix}`
+    const employeeUserId = `attendance-punchpolicy-employee-${runSuffix}`
+    const workDate = '2026-05-20'
+    const occurredAt = `${workDate}T03:00:00.000Z`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    let adminToken: string | undefined
+    let originalSettings: Record<string, unknown> = {}
+    let groupId: string | undefined
+    try {
+      process.env.RBAC_BYPASS = 'false'
+      await pool.query(
+        `INSERT INTO permissions (code, name, description)
+         VALUES ('attendance:read', 'Attendance Read', 'r'), ('attendance:write', 'Attendance Write', 'w'), ('attendance:admin', 'Attendance Admin', 'a')
+         ON CONFLICT (code) DO NOTHING`,
+      )
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES ($1, 'attendance:read'), ($1, 'attendance:write'), ($1, 'attendance:admin'), ($2, 'attendance:read'), ($2, 'attendance:write')
+         ON CONFLICT DO NOTHING`,
+        [adminUserId, employeeUserId],
+      )
+      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const employeeTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&roles=user&perms=attendance:read,attendance:write`)
+      adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+      const employeeToken = (employeeTokenRes.body as { token?: string } | undefined)?.token
+      if (!adminToken || !employeeToken) return
+      const adminHeaders = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+      const employeeHeaders = { Authorization: `Bearer ${employeeToken}`, 'Content-Type': 'application/json' }
+
+      // Save original settings, opt the org into block, and confirm the PUT round-trips through GET.
+      const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+      originalSettings = ((origRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+      const putBlockRes = await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: adminHeaders, body: JSON.stringify({ punchPolicy: { unscheduled: { mode: 'block' } } }) })
+      expect(putBlockRes.status).toBe(200)
+      const roundTripRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+      expect((roundTripRes.body as { data?: { punchPolicy?: { unscheduled?: { mode?: string } } } } | undefined)?.data?.punchPolicy?.unscheduled?.mode).toBe('block')
+
+      // scheduled_shift group + employee member, but NO schedule-group membership / shift assignment.
+      const groupRes = await requestJson(`${baseUrl}/api/attendance/groups`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ name: `punchpolicy-${runSuffix}`, timezone: 'UTC', attendanceType: 'scheduled_shift', description: 'integration-test' }) })
+      expect(groupRes.status).toBe(200)
+      groupId = (groupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      const memberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ userIds: [employeeUserId] }) })
+      expect(memberRes.status).toBe(200)
+
+      // Unscheduled punch -> 422, and crucially NO event written (blocked before the INSERT).
+      const blockedRes = await requestJson(`${baseUrl}/api/attendance/punch`, { method: 'POST', headers: employeeHeaders, body: JSON.stringify({ eventType: 'check_in', occurredAt }) })
+      expect(blockedRes.status).toBe(422)
+      expect((blockedRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('PUNCH_UNSCHEDULED_BLOCKED')
+      const afterBlock = await pool.query('SELECT 1 FROM attendance_events WHERE user_id = $1 AND work_date = $2', [employeeUserId, workDate])
+      expect(afterBlock.rows.length).toBe(0)
+
+      // Positive control: switch to allow -> the same unscheduled punch now succeeds and IS written.
+      const putAllowRes = await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: adminHeaders, body: JSON.stringify({ punchPolicy: { unscheduled: { mode: 'allow' } } }) })
+      expect(putAllowRes.status).toBe(200)
+      const allowedRes = await requestJson(`${baseUrl}/api/attendance/punch`, { method: 'POST', headers: employeeHeaders, body: JSON.stringify({ eventType: 'check_in', occurredAt }) })
+      expect(allowedRes.status).toBe(200)
+      const afterAllow = await pool.query('SELECT 1 FROM attendance_events WHERE user_id = $1 AND work_date = $2', [employeeUserId, workDate])
+      expect(afterAllow.rows.length).toBeGreaterThan(0)
+    } finally {
+      if (adminToken) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      }
+      await pool.query('DELETE FROM attendance_events WHERE user_id = $1', [employeeUserId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1', [employeeUserId]).catch(() => undefined)
+      if (groupId) {
+        await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1', [groupId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_groups WHERE id = $1', [groupId]).catch(() => undefined)
+      }
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[adminUserId, employeeUserId]]).catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('rejects non-UUID shift references for rotation rules, including UUID-like shift names', async () => {
     if (!baseUrl) return
 
