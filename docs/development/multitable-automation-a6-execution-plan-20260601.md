@@ -1,0 +1,211 @@
+# Multitable Automation A6 — Convergence Engine Execution Plan (2026-06-01)
+
+> Type: **execution plan** (per-rung implementation detail), NOT a status tracker and
+> NOT a schedule.
+>
+> **Status source-of-truth** is the checklist in
+> `multitable-automation-run-governance-todo-20260527.md` (the A6 items). Rationale /
+> demand-gate ledger is `run-governance-forward-plan-20260528.md`. Rung decomposition +
+> per-rung test surface is `multitable-automation-a6-convergence-scout-20260529.md`
+> (A6-0). Runtime detail for the landed first slice is
+> `multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md` +
+> `…-verification-20260530.md` (#2130).
+>
+> This document adds ONLY execution detail and points back at those for status and
+> rationale. Do not duplicate rung status here — update the TODO checklist instead.
+
+## 0. Depth calibration (why this plan is deep in one place and shallow elsewhere)
+
+The remaining ladder splits cleanly into two kinds of work, and they get different
+treatment **on purpose**:
+
+- **A6-1 enable-writer EXPOSES capability that already exists.** The persistent
+  WorkflowJob runtime landed in #2130 but is DORMANT — `execution_mode` is read by the
+  executor (`persistJobs = rule.executionMode === 'workflow_job_v1'`) but cannot be set
+  through the rule create/update API, so in production no rule can opt in. Finishing that
+  wiring adds **no new engine semantics**. Its shape is fully known, so it is planned
+  **deep** below (this section doubles as its scout).
+- **A6-2 … A6-5 ADD capability** (durable wait, graph execution, modeling import,
+  approval coupling). Their *shape* is undefined until a concrete use-case names it
+  (webhook-resume vs timer-resume; join-all vs join-any; the approval-completion
+  contract). Designing them before that is premature engineering. They are planned
+  **plan-level only**: scope boundary, dependency order, gate posture, and a pointer to
+  the test surface the A6-0 scout already enumerated. Detailed design is deferred to each
+  rung's own scout, written when its use-case is named.
+
+Dependency order is fixed (each rung is the next one's floor):
+**A6-1 enable-writer → A6-2 suspend/resume → A6-3 branch/parallel DAG → A6-4 BPMN
+compile/preview adapter → A6-5 approval-as-job.**
+
+---
+
+## 1. A6-1 enable-writer — BUILD-READY (deep; serves as its §7 scout)
+
+**Goal:** let an automation rule opt into the already-landed persistent WorkflowJob
+runtime through the normal create/update API (and, optionally, a minimal admin toggle),
+so #2130 stops being dead code in production. No new runtime behavior — purely the
+on-switch for behavior that already ships.
+
+### 1.1 Reuse (verified on `origin/main` @ ea7938930 — no migration needed)
+
+| Piece | Location | State |
+|---|---|---|
+| `execution_mode` column | migration `zzzz20260530120000_create_automation_jobs_and_execution_mode.ts` | present |
+| DB row type | `db/types.ts:1247` (`execution_mode: string \| null`) | present |
+| Domain field | `automation-service.ts:136` (`AutomationRule.execution_mode`) | present |
+| DB→executor map | `automation-service.ts:218` (`toExecutorRule` → `executionMode`) | present |
+| Runtime gate | `automation-service.ts:688` (`persistJobs = rule.executionMode === 'workflow_job_v1'`) | present |
+| Job persistence | `AutomationJobService` + `multitable_automation_jobs` | present (#2130) |
+
+So the runtime path DB→domain→executor→jobs is complete and tested. The on-switch is the
+only missing link.
+
+### 1.2 The gap (what is genuinely not done)
+
+- `CreateRuleInput` / `UpdateRuleInput` (`automation-service.ts:168–190`) have **no**
+  `executionMode` field.
+- `createRule()` (`:351`) INSERT and `updateRule()` (`:455`) UPDATE do **not** write the
+  `execution_mode` column.
+- The rule create/update routes in `routes/univer-meta.ts` (which call
+  `automationService.createRule` / `updateRule`) do **not** parse `execution_mode` from
+  the request body.
+- No UI affordance to set it.
+
+### 1.3 Minimal change set
+
+1. Add `executionMode?: string | null` to `CreateRuleInput` and `UpdateRuleInput`.
+2. **Enum-strict validation in the service** (single source): accept only `'legacy'` and
+   `'workflow_job_v1'`; an unrecognized value is **rejected** (caller surfaces 400), never
+   silently coerced to a default. (Silent fallback to default is a contract bug — the
+   exact class caught after the #1774 review and fixed in #1776.)
+3. `createRule` INSERT writes `execution_mode`; `updateRule` UPDATE writes it when the
+   field is present (absent = unchanged; explicit `null`/`'legacy'` = off).
+4. `routes/univer-meta.ts` create/update handlers read `execution_mode` (or
+   `executionMode`) off the body into the input.
+5. Expose `execution_mode` on the rule GET/read response so a toggle can reflect current
+   state (confirm it is not already projected away by a whitelist — see 1.5).
+6. **UI: API-first.** A minimal admin toggle in the rule editor can ship in the same PR or
+   as a thin follow slice; the backend on-switch is the load-bearing part.
+7. **OpenAPI:** automation rules are not in the multitable OpenAPI parity surface
+   (grep-empty in `packages/openapi/`). Confirm in impl; if they are spec'd, add
+   `execution_mode` to the request/response schema and keep
+   `verify:multitable-openapi:parity` green. If not, no spec delta.
+
+### 1.4 Test surface
+
+- **Unit:** `createRule` persists `execution_mode`; `updateRule` toggles it on/off; an
+  unset rule stores `null` (→ no jobs); an **invalid** `execution_mode` value is rejected,
+  not defaulted.
+- **Integration / real wire (mandatory — wire-vs-fixture drift guard):** create a rule
+  with `executionMode: 'workflow_job_v1'` through the **real HTTP app**, then trigger it
+  and assert job rows are persisted; create a legacy/unset rule and assert **no** job rows
+  and the unchanged execution/log shape. A unit test against a hand-built input does not
+  prove the field survives route parsing → service INSERT → DB → `toExecutorRule` → the
+  `persistJobs` gate. Any field added to an object serialized via field-by-field copying /
+  whitelist / `pick` / `select` projection MUST be asserted to round-trip through the real
+  wire.
+
+### 1.5 Risks
+
+- **Whitelist/projection drop:** if the rule INSERT/UPDATE or the read response builds
+  columns explicitly, `execution_mode` can be silently dropped while unit tests pass. The
+  1.4 wire test is the guard.
+- **Accidental default-on:** the default for unset MUST remain `legacy` (no jobs).
+  Existing fire-and-forget rules must be provably unaffected.
+
+### 1.6 Gate posture & acceptance
+
+- **Gate:** lowest on the ladder. Demand = owner asking to advance + a built-but-dormant
+  runtime that is otherwise dead code. No third-party use-case required to finish wiring
+  something already shipped.
+- **Acceptance:** an opted-in rule persists jobs end-to-end through the real wire; a
+  non-opted rule is byte-for-byte unchanged; invalid mode rejected; governance (A1
+  redaction, A2 read boundary, fail-closed) inherited unchanged.
+
+### 1.7 Open decisions for the impl PR body
+
+1. UI toggle in the same PR, or API-first with a follow slice?
+2. Read response exposes `execution_mode` (needed for a stateful toggle) — confirm shape
+   impact on A2/A3.
+3. Update semantics for an absent field: leave unchanged (recommended) vs reset to legacy.
+
+---
+
+## 2. A6-2 suspend/resume — PLAN-LEVEL (design deferred to its scout)
+
+- **Adds:** the `suspended` C1 status, a resume token, and an **external-event/webhook
+  resume endpoint first**; delay/timer resume (and the durable scheduler + worker/claim
+  semantics it forces) come later, as a sub-step.
+- **Must not (this rung):** no delay/timer or worker in the first slice; no branch/parallel;
+  no approval bridge.
+- **Depends on:** A6-1 live (a persisted job to suspend).
+- **Gate:** a named human-in-the-loop demand — e.g. a pipeline that must pause for an
+  external callback before continuing. The use-case decides webhook-vs-timer shape, so the
+  schema/token mechanics are **not** designed here.
+- **Test surface:** see A6-0 scout "Required Test Surface → A6-2" (suspended-with-token,
+  duplicate-resume idempotent/rejected, resume-after-completion rejected, invalid/expired
+  token rejected without leak, later: survives process restart).
+
+## 3. A6-3 branch/parallel DAG — PLAN-LEVEL (design deferred to its scout)
+
+- **Adds:** graph fields (upstream/downstream edges, branch discriminator, join mode,
+  branch result aggregation) and generalizes the linear executor into a DAG. This is the
+  **largest single engine change** on the ladder.
+- **Must not (this rung):** no BPMN import; no approval coupling.
+- **Depends on:** A6-2 (job persistence + resume stable before fan-out/join).
+- **Gate:** a named per-record branch/parallel demand with audit.
+- **Test surface:** see A6-0 scout "→ A6-3" (branch picks exactly one, parallel fan-out
+  independent, join-all waits, join-any cancels with explicit audit, branch failures
+  isolated).
+
+## 4. A6-4 BPMN compile/preview adapter — PLAN-LEVEL (design deferred to its scout)
+
+- **Adds:** parse a constrained BPMN subset, compile-**preview** into automation/approval
+  definitions, and return a gap report for unsupported nodes.
+- **Must not — permanent positioning:** never execute BPMN, never a second status model,
+  never a separate audit/log store, no side-effecting preview. BPMN is a modeling/preview
+  input, never a fourth runtime.
+- **Depends on:** A6-3 (gateways map onto branch/parallel; without it, gateways can only be
+  reported as unsupported).
+- **Gate:** a named modeling/preview demand.
+- **Test surface:** see A6-0 scout "→ A6-4" (preview side-effect-free, deterministic gap
+  report, gateway mappings backed by A6-3 tests, no live BPMN route).
+
+## 5. A6-5 approval-as-job — PLAN-LEVEL (double-gated; last; design deferred)
+
+- **Adds:** an automation job that starts an approval instance and resumes after the
+  approval completes; approve/reject/return/cancel map to C1 statuses explicitly.
+- **Must not:** fold approval state into automation tables; pull in approval trigger
+  bindings or result backwrite implicitly. Approval remains source-of-truth for graphs,
+  assignments, permissions, and version freezing; automation stores only the waiting job
+  and resume linkage. The **approval-completion event contract lands first**, before any
+  bridge.
+- **Depends on:** A6-2 (suspend/resume) and the completion-event contract.
+- **Gate:** **double-gated** — highest value + highest risk; explicitly last.
+- **Test surface:** see A6-0 scout "→ A6-5" (start_approval creates suspended job + one
+  instance, status mapping unambiguous, version-freezing stays with approval, completion
+  resumes exactly one job, missing/deleted instance fails closed).
+
+---
+
+## 6. Execution discipline (every rung)
+
+1. **One rung per explicit opt-in.** A rung landing does not auto-start the next. For
+   A6-2+, the opt-in must NAME which rung and why A5/A3 cannot solve it (the A6-0 scout's
+   "continue automation is not enough" rule).
+2. **§7 standard entry:** fresh worktree off `origin/main` → scout reads real code and
+   answers reuse / minimal-change / tests → design-review → owner confirms → gated impl PR
+   (just-in-time rebase, CI green, admin-squash). A6-1 enable-writer's scout is §1 above.
+3. **Governance inheritance (hard contract):** every rung reuses this line's
+   run/job/status/provenance/redaction substrate (C1 statuses + `normalizeWorkflowJob`,
+   A1 redaction, A2 read boundary). No second-class observability plane.
+4. **Merge discipline:** runtime PRs hold for explicit owner approval, not CI-green alone;
+   feature PRs that are BEHIND rebase → wait CI green → admin-squash.
+
+## 7. Acceptance for this plan doc
+
+- Docs-only.
+- References the TODO checklist for status (does not re-derive or duplicate it) and the
+  A6-0/A6-1 scouts for test surface and runtime rationale.
+- Only A6-1 enable-writer is build-ready; A6-2 … A6-5 remain design-deferred and
+  demand-gated, with no schema/mechanics designed here.
