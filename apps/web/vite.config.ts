@@ -4,19 +4,21 @@ import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
 
 /**
- * Resolve the Vite `base` (public path) from VITE_BASE_PATH so the app can be deployed under a
- * sub-path (e.g. behind nginx at `/metasheet/`) without the built index.html referencing
- * `/assets/...` at the domain root. Defaults to `/` (root deploy — unchanged). Normalized to a
- * leading + trailing slash, which is what Vite expects.
+ * Resolve the Vite `base` from VITE_BASE_PATH for sub-path deploys (e.g. behind nginx at
+ * `/metasheet/`). PATH-ONLY by design: this value is also consumed as the Vue Router history
+ * base via `createWebHistory(import.meta.env.BASE_URL)`, which only accepts an absolute
+ * pathname. A full-URL (`https://cdn/`) or relative (`./`) base would yield a broken router
+ * base (`/https://cdn/`, `/./`), so those are rejected at build time. Defaults to `/`.
  */
 function resolveBasePath(raw?: string): string {
   const value = (raw || '').trim()
   if (!value || value === '/') return '/'
-  // Preserve Vite-compatible full-URL (CDN) and relative bases; only ensure a trailing slash.
-  if (/^https?:\/\//i.test(value) || value.startsWith('./') || value.startsWith('../')) {
-    return value.endsWith('/') ? value : `${value}/`
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith('.')) {
+    throw new Error(
+      `VITE_BASE_PATH must be an absolute path (e.g. "/metasheet/"), got "${value}". Full-URL and ` +
+        'relative bases are unsupported because this value is also the Vue Router history base.',
+    )
   }
-  // Path-only base (the common sub-path case): normalize to a leading + trailing slash.
   const withLeading = value.startsWith('/') ? value : `/${value}`
   return withLeading.endsWith('/') ? withLeading : `${withLeading}/`
 }
