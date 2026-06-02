@@ -4849,10 +4849,12 @@ export function univerMetaRouter(): Router {
         return res.json({ ok: true, data: { items: [] } })
       }
 
-      const { capabilities } = await resolveSheetReadableCapabilities(req, query, peopleSheetId)
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, peopleSheetId)
       if (!capabilities.canRead) return sendForbidden(res)
 
-      const summary = await loadRecordSummaries(query, peopleSheetId, { search: q, limit, offset: 0 })
+      // F5 (#2106 §3 F5): gate the people sheet's default display field by its own layer-2 ∧ layer-3 allowed set.
+      const peopleAllowedFieldIds = await loadAllowedFieldIds(query, peopleSheetId, access.userId, capabilities)
+      const summary = await loadRecordSummaries(query, peopleSheetId, { search: q, limit, offset: 0, allowedFieldIds: peopleAllowedFieldIds })
       return res.json({ ok: true, data: { items: summary.records } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
@@ -7850,7 +7852,7 @@ export function univerMetaRouter(): Router {
       if (!targetSheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Target sheet not found: ${linkConfig.foreignSheetId}` } })
       }
-      const { capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
+      const { access: foreignAccess, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
       if (!capabilities.canRead) return sendForbidden(res)
 
       let selected: LinkedRecordSummary[] = []
@@ -7878,10 +7880,15 @@ export function univerMetaRouter(): Router {
         selected = linkSummaries.get(recordId)?.get(fieldId) ?? []
       }
 
+      // F5 (#2106 §3 F5): gate the FOREIGN sheet's default display field by ITS OWN layer-2 ∧ layer-3 allowed
+      // set (keyed to the foreign sheet, not the caller's) so a field_permissions-denied display value never
+      // leaks via the summary `display`.
+      const foreignAllowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), linkConfig.foreignSheetId, foreignAccess.userId, capabilities)
       const summary = await loadRecordSummaries(pool.query.bind(pool), linkConfig.foreignSheetId, {
         search,
         limit,
         offset,
+        allowedFieldIds: foreignAllowedFieldIds,
       })
 
       return res.json({

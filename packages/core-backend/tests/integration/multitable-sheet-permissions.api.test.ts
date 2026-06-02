@@ -2588,6 +2588,13 @@ describe('Multitable sheet-scoped permissions API', () => {
             ],
           }
         }
+        // F5: link-options now resolves the FOREIGN sheet's allowed-field set (loadFieldsForSheet + field_permissions; no denials here).
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          return { rows: [{ id: 'fld_vendor_name', name: 'Vendor Name', type: 'string', property: {}, order: 1 }] }
+        }
+        if (sql.includes('field_permissions')) {
+          return { rows: [] }
+        }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
