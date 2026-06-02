@@ -92,10 +92,22 @@ async function main() {
     assert.equal(f.calls.select[0].table, 'public.items')
   }
 
-  // 5. Read-only-source binding required: a writable source is refused.
+  // 5. Read-only-source guard now lives in the host facade and fires on EVERY read path: a facade
+  //    that rejects a writable binding makes read / listObjects / getSchema / testConnection all fail
+  //    closed — NOT only when testConnection() runs first (the dry-run/pipeline paths skip it).
   {
-    const f = fakeFacade({ test: () => ({ success: true, readOnly: false }) })
-    await assert.rejects(() => adapterWith(f).testConnection(), /writable|read-only/i, 'a writable data source binding must be rejected')
+    const writableErr = new Error("data source 'pg-1' is writable; the read-only bridge refuses a writable binding")
+    const f = fakeFacade({
+      test: () => { throw writableErr },
+      getSchema: () => { throw writableErr },
+      getTableInfo: () => { throw writableErr },
+      select: () => { throw writableErr },
+    })
+    const a = adapterWith(f)
+    await assert.rejects(() => a.read({ object: 'items', limit: 5 }), /writable/, 'read fails closed on a writable source')
+    await assert.rejects(() => a.listObjects(), /writable/, 'listObjects fails closed on a writable source')
+    await assert.rejects(() => a.getSchema({ object: 'items' }), /writable/, 'getSchema fails closed on a writable source')
+    await assert.rejects(() => a.testConnection(), /writable/, 'testConnection fails closed on a writable source')
   }
 
   // 6. Offset paging: cursor->offset, short page => done + null nextCursor.

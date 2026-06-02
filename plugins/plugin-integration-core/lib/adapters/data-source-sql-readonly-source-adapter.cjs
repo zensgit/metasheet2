@@ -108,16 +108,11 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal }
   return {
     async testConnection() {
       const api = getDataSourcesApi(context)
+      // The read-only-source guard lives in the host facade: a writable data source fails closed in
+      // authorize() on EVERY read method (test/listObjects/getSchema/read), not just here — so the
+      // dry-run / pipeline read paths that never call testConnection() are covered too.
       const result = await api.test(dataSourceId, principal)
-      // Read-only-source lock: refuse to bind a writable data source (defense in depth — this is
-      // a read-only source).
-      if (!result || result.readOnly !== true) {
-        throw new AdapterValidationError(
-          'data-source:sql-readonly requires a read-only data source binding; the referenced data source is writable',
-          { field: 'config.dataSourceId' }
-        )
-      }
-      const ok = result.success === true
+      const ok = Boolean(result && result.success === true)
       return {
         ok,
         status: ok ? 'connected' : 'error',

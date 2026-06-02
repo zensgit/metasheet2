@@ -18,7 +18,6 @@ import type { DbValue, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
  */
 export interface DataSourceReadOnlyFacadeTestResult {
   success: boolean
-  readOnly: boolean
 }
 
 export interface DataSourceReadOnlyFacade {
@@ -39,6 +38,10 @@ export interface DataSourceReadOnlyFacade {
 }
 
 export const MISSING_PRINCIPAL_MESSAGE = 'data source read requires an owner principal (none provided)'
+
+export function writableSourceMessage(dataSourceId: string): string {
+  return `data source '${dataSourceId}' is writable; the read-only bridge refuses a writable binding`
+}
 
 function requirePrincipal(principal: string | undefined): string {
   // Fail-closed: a read MUST carry an owner principal. We deliberately do NOT fall back to a
@@ -64,6 +67,12 @@ export function createDataSourcePluginFacade(
     // Throws the uniform "not found" on owner mismatch — no existence leak.
     manager.assertAccess(dataSourceId, owner)
     const adapter = manager.getDataSource(dataSourceId)
+    // Read-only-source guard at the choke point: EVERY read method routes through authorize, so a
+    // writable data source fails closed here — on getSchema/getTableInfo/select/test alike, not only
+    // when testConnection happens to run first. Checked before connecting (it is a config flag).
+    if (!adapter.isReadOnly()) {
+      throw new Error(writableSourceMessage(dataSourceId))
+    }
     if (!adapter.isConnected()) {
       await manager.connectDataSource(dataSourceId)
     }
@@ -74,7 +83,8 @@ export function createDataSourcePluginFacade(
     async test(dataSourceId, principal) {
       const { adapter } = await authorize(dataSourceId, principal)
       const healthy = await adapter.testConnection()
-      return { success: healthy === true, readOnly: adapter.isReadOnly() }
+      // A writable source already failed closed in authorize(); reaching here means read-only.
+      return { success: healthy === true }
     },
     async getSchema(dataSourceId, principal, schema) {
       const { adapter } = await authorize(dataSourceId, principal)
