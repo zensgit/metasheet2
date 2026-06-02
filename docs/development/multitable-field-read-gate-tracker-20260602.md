@@ -46,12 +46,13 @@ The **locking test** is the real-DB integration test wired into `.github/workflo
 | ✅🔒 | **F4** `POST /records` create-echo mask | Low-Med | #2186 | `multitable-create-echo-field-mask` |
 | ✅🔒 | **F5** `loadRecordSummaries` display: `link-options` `data.records` + `people-search` `items` (foreign/people default-display value) | Low | #2198 | `multitable-summary-display-field-mask` |
 | ✅🔒 | **linkSummaries** (`buildLinkSummaries`) foreign default-display value across `GET /view` · single-record read · link-options `data.selected` · write-echo (review follow-up to F5) | Med | #2198 | `multitable-link-summary-display-field-mask` |
-| ⬜ | **D1** `form-context` + form-submit layer-3 (anonymous-form design question — likely intentional) | Design-Q | — | *(decide first)* |
+| ✅🔒 | **D1** `form-context` (recordId load) + `POST /views/:id/submit` echo layer-3 mask — **identified-path leak (NOT no-op)**; anonymous moot (no subject) | Med | #2210 | `multitable-form-context-submit-field-mask` |
 | ✅ | **kanban / gallery / calendar** view-data egress scan — **scan-clean, no live egress** (standalone view plugins are dead-sample/unreachable; product reuses the gated `/view`) | Diligence | #2206 | *scan-clean — no test (no live egress); see scan doc + §3 latent-risk note* |
 
 ### Completion
-- **By item: 11 / 12 findings closed (≈ 92 %)** — 10 **CI-locked masks** (each with a real-DB locking test) + 1 **scan-clean** (kanban/gallery/calendar view-data: scanned, **no live egress found → no locking test**, see scan doc). The scan-clean item is a *coverage conclusion*, not a CI-enforced mask — its continued validity rests on §3 Layer-3 (the latent-risk re-scan trigger), not a test.
-- **By risk: every High + Med + Low leak channel is closed.** Remaining = 1 **design question** (D1, anonymous forms have no subject to scope to). Residual attack surface ≈ retired.
+- **By item: 12 / 12 findings closed (100 %) — ARC COMPLETE.** 11 **CI-locked masks** (each with a real-DB locking test) + 1 **scan-clean** (kanban/gallery/calendar view-data: scanned, **no live egress found → no locking test**, see scan doc). The scan-clean item is a *coverage conclusion*, not a CI-enforced mask — its continued validity rests on §3 Layer-3 (the latent-risk re-scan trigger), not a test.
+- **By risk: every High + Med + Low leak channel is closed.** D1 turned out to be a **real identified-path layer-3 leak** (not the presumed no-op) — fixed + locked. Anonymous form callers remain correctly out of layer-3 (no subject to scope to). Residual attack surface ≈ retired.
+- **Open follow-ups are optional hardening only** (§4): delete the dead sample view plugins; build the §3 egress-coverage guard. Neither is an open leak.
 
 ---
 
@@ -84,11 +85,14 @@ Layers 1–2 protect *known* channels. A *new* record-data egress endpoint could
 
 ---
 
-## 4. Remaining work (each a separate, explicit opt-in)
+## 4. Remaining work (optional hardening only — the arc's leak findings are all closed)
 
-1. **D1** — decide whether `form-context`/form-submit should apply layer-3 for *identified* (non-anonymous) form callers. Product decision first; likely no code (anonymous submitter has no subject to scope to).
-2. *(optional hardening)* — **delete the dead sample view plugins** (`plugins/plugin-view-kanban` / `plugin-view-gallery` / `plugin-view-calendar`) to remove the latent ungated `/records` egress routes outright. Deferred from the scan-closure (separate code/product cleanup; touches the plugin-sample retention policy) — its own opt-in.
-3. *(optional hardening)* — build the §3 "egress coverage guard".
+The 12 findings are closed (§2). What remains is **non-leak hardening**, each a separate explicit opt-in:
+
+1. *(optional hardening)* — **delete the dead sample view plugins** (`plugins/plugin-view-kanban` / `plugin-view-gallery` / `plugin-view-calendar`) to remove the latent ungated `/records` egress routes outright. Deferred from the scan-closure (separate code/product cleanup; touches the plugin-sample retention policy) — its own opt-in.
+2. *(optional hardening)* — build the §3 "egress coverage guard".
+
+> **D1 closed** (#2210): the presumed no-op turned out to be a **real identified-path layer-3 leak** on `form-context` (recordId load) + `POST /views/:id/submit` echo — masked by layer-1∧2 only, leaking a denied field's value to an authenticated caller (anonymous moot). Fixed with the #2015 composite + locking test `multitable-form-context-submit-field-mask`. Design: `multitable-form-context-submit-field-mask-design-20260602.md`.
 
 ---
 
