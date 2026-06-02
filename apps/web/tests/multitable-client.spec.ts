@@ -147,6 +147,7 @@ describe('MultitableApiClient', () => {
       createdAt: '2026-04-21T00:00:00.000Z',
       updatedAt: '2026-04-21T00:01:00.000Z',
       createdBy: 'user_1',
+      executionMode: null,
       conditions: { conjunction: 'AND', conditions: [] },
       actions: [{
         type: 'send_dingtalk_group_message',
@@ -219,6 +220,39 @@ describe('MultitableApiClient', () => {
       method: 'POST',
       body: JSON.stringify(input),
     }))
+  })
+
+  it('A6-1: createAutomationRule sends executionMode in the body and reads execution_mode back', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: {
+        rule: {
+          id: 'atr_job', sheetId: 'sheet_1', name: 'job rule',
+          triggerType: 'record.created', triggerConfig: {},
+          actionType: 'update_record', actionConfig: {}, enabled: true,
+          execution_mode: 'workflow_job_v1', // server response (snake_case tolerated by the mapper)
+        },
+      },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+    const input: Omit<AutomationRule, 'id' | 'sheetId' | 'enabled' | 'createdAt' | 'updatedAt' | 'createdBy'> = {
+      name: 'job rule',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'update_record',
+      actionConfig: {},
+      executionMode: 'workflow_job_v1',
+    }
+
+    const rule = await client.createAutomationRule('sheet_1', input)
+
+    // outbound: the opt-in survives in the request body verbatim (exact-match guards the drop).
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/sheets/sheet_1/automations', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify(input),
+    }))
+    // inbound: the mapper reads execution_mode → executionMode so the editor can reflect state.
+    expect(rule.executionMode).toBe('workflow_job_v1')
   })
 
   it('updates and deletes comments through dedicated endpoints', async () => {

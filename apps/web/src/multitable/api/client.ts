@@ -260,6 +260,7 @@ function normalizeAutomationRulePayload(value: unknown): AutomationRule {
     createdAt: optionalStringValue(record.createdAt ?? record.created_at),
     updatedAt: optionalStringValue(record.updatedAt ?? record.updated_at),
     createdBy: optionalStringValue(record.createdBy ?? record.created_by),
+    executionMode: optionalStringValue(record.executionMode ?? record.execution_mode) ?? null,
   }
 }
 

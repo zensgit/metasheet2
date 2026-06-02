@@ -805,6 +805,8 @@ export interface AutomationRule {
   actionType: AutomationActionType
   actionConfig: Record<string, unknown>
   enabled: boolean
+  // A6-1 opt-in: 'workflow_job_v1' persists a per-action WorkflowJob plane; null/'legacy' = off.
+  executionMode?: string | null
   createdAt?: string
   updatedAt?: string
   createdBy?: string

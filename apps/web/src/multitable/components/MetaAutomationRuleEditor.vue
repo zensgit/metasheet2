@@ -13,6 +13,18 @@
         <label class="meta-rule-editor__label">{{ automationLabel('editor.name', isZh) }}</label>
         <input v-model="draft.name" class="meta-rule-editor__input" type="text" :placeholder="automationLabel('editor.namePlaceholder', isZh)" data-field="name" />
 
+        <!-- Execution mode (A6-1 opt-in): persist a per-action WorkflowJob plane -->
+        <label class="meta-rule-editor__label" data-field="executionModeToggle">
+          <input
+            type="checkbox"
+            :checked="draft.executionMode === 'workflow_job_v1'"
+            data-field="executionMode"
+            @change="setExecutionMode(($event.target as HTMLInputElement).checked)"
+          />
+          {{ automationLabel('editor.executionModeLabel', isZh) }}
+        </label>
+        <div class="meta-rule-editor__hint" data-field="executionModeHint">{{ automationLabel('editor.executionModeHint', isZh) }}</div>
+
         <!-- 1. Trigger selector -->
         <section class="meta-rule-editor__section">
           <div class="meta-rule-editor__section-title">{{ automationLabel('trigger.title', isZh) }}</div>
@@ -1025,6 +1037,7 @@ interface Draft {
   triggerConfig: Record<string, unknown>
   conditions: ConditionGroup & { conjunction: 'AND' | 'OR' }
   actions: DraftAction[]
+  executionMode: string | null
 }
 
 type FieldOption = { value: string; label?: string; color?: string }
@@ -1482,6 +1495,7 @@ function emptyDraft(): Draft {
     triggerConfig: {},
     conditions: { conjunction: 'AND', conditions: [] },
     actions: [{ type: 'update_record', config: defaultConfigForActionType('update_record') }],
+    executionMode: null,
   }
 }
 
@@ -1540,11 +1554,17 @@ function draftFromRule(rule: AutomationRule): Draft {
     actions: rule.actions && rule.actions.length
       ? rule.actions.map((a) => ({ type: a.type, config: draftConfigFromAction(a.type, a.config) }))
       : [{ type: rule.actionType, config: draftConfigFromAction(rule.actionType, rule.actionConfig) }],
+    executionMode: rule.executionMode ?? null,
   }
 }
 
 const draft = ref<Draft>(emptyDraft())
 const conditionEditorEntries = computed(() => collectConditionEditorEntries(draft.value.conditions.conditions))
+
+function setExecutionMode(checked: boolean): void {
+  // A6-1 opt-in: checkbox → the rule's persistent WorkflowJob mode (off = legacy/null).
+  draft.value.executionMode = checked ? 'workflow_job_v1' : null
+}
 
 function conditionPathKey(path: ConditionPath): string {
   return path.join('-') || 'root'
@@ -2405,6 +2425,7 @@ function buildPayload(): Partial<AutomationRule> {
     actions,
     actionType: actions[0]?.type ?? 'update_record',
     actionConfig: actions[0]?.config ?? {},
+    executionMode: d.executionMode,
   }
 }
 

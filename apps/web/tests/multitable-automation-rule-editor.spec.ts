@@ -516,6 +516,54 @@ describe('MetaAutomationRuleEditor', () => {
     })
   })
 
+  it('A6-1: execution-mode toggle is off by default and emits workflow_job_v1 when enabled', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'job rule'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const toggle = container.querySelector('[data-field="executionMode"]') as HTMLInputElement
+    expect(toggle).not.toBeNull()
+    expect(toggle.checked).toBe(false) // default off — existing rules unaffected
+
+    toggle.checked = true
+    toggle.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].executionMode).toBe('workflow_job_v1')
+  })
+
+  it('A6-1: reflects a saved opt-in rule (checked) and can toggle back to off (null)', async () => {
+    const saved = vi.fn()
+    const rule: AutomationRule = {
+      id: 'atr_x', sheetId: 'sheet_1', name: 'existing', triggerType: 'record.created',
+      triggerConfig: {}, actionType: 'update_record', actionConfig: {}, enabled: true,
+      executionMode: 'workflow_job_v1',
+    }
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+
+    const toggle = container.querySelector('[data-field="executionMode"]') as HTMLInputElement
+    expect(toggle.checked).toBe(true) // draftFromRule reflected the saved opt-in
+
+    toggle.checked = false
+    toggle.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].executionMode).toBeNull()
+  })
+
   it('serializes numeric condition values as numbers', async () => {
     const saved = vi.fn()
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
