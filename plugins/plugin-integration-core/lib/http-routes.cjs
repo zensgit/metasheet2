@@ -100,6 +100,15 @@ function getUser(req) {
   return req.user || req.authUser || null
 }
 
+// C2b: the owner principal for a per-source-owner-scoped read (the data-source:sql-readonly bridge
+// facade authorizes reads with it). Direct external-system test/objects/schema calls run AS the
+// request user; a missing user yields undefined → the facade fails closed (never a system/admin
+// fallback). Adapters that don't need a principal (staging/k3/http) ignore the extra dep.
+function requestPrincipal(req) {
+  const user = getUser(req)
+  return user ? (user.id || user.email) : undefined
+}
+
 function listUserPermissions(user) {
   const permissions = []
   if (Array.isArray(user && user.permissions)) permissions.push(...user.permissions)
@@ -1023,7 +1032,7 @@ function createHandlers(services) {
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
       const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
-      const adapter = adapterRegistry.createAdapter(system)
+      const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       let result
       try {
         result = normalizeTestConnectionResult(await adapter.testConnection(requestBody(req)))
@@ -1043,7 +1052,7 @@ function createHandlers(services) {
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
       const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
-      const adapter = adapterRegistry.createAdapter(system)
+      const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       const adapterObjects = typeof adapter.listObjects === 'function'
         ? await adapter.listObjects()
         : []
@@ -1073,7 +1082,7 @@ function createHandlers(services) {
           template: template.template,
         }))
       }
-      const adapter = adapterRegistry.createAdapter(system)
+      const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       const schema = typeof adapter.getSchema === 'function'
         ? await adapter.getSchema({ object })
         : { object, fields: [] }

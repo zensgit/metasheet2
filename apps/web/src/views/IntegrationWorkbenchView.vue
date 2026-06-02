@@ -174,13 +174,28 @@
             </select>
           </label>
         </div>
+        <div v-if="isDataSourceBridgeKind" class="integration-workbench__grid integration-workbench__grid--compact" data-testid="data-source-bridge-picker">
+          <label>
+            <span>数据源(只读)</span>
+            <select v-model="connectionDraft.dataSourceId" data-testid="data-source-bridge-id">
+              <option value="">请选择已配置的数据源</option>
+              <option v-for="ds in bridgeDataSources" :key="ds.id" :value="ds.id">{{ ds.name }} · {{ ds.type }}</option>
+            </select>
+          </label>
+          <label>
+            <span>对象(表 / 视图)</span>
+            <input v-model="connectionDraft.dataSourceObject" data-testid="data-source-bridge-object" placeholder="例如 public.items" />
+          </label>
+          <p class="integration-workbench__hint" data-testid="data-source-bridge-hint">凭据由 /data-sources 管理,这里只引用 dataSourceId,不复制账号密码。</p>
+          <p v-if="bridgeDataSourcesError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-error">{{ bridgeDataSourcesError }}</p>
+        </div>
         <div v-if="connectionDraftDuplicateWarning" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="connection-duplicate-warning">
           {{ connectionDraftDuplicateWarning }}
         </div>
         <div v-if="connectionDraftRoleWarning" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="connection-role-warning">
           {{ connectionDraftRoleWarning }}
         </div>
-        <details class="integration-workbench__details">
+        <details v-if="!isDataSourceBridgeKind" class="integration-workbench__details">
           <summary>高级 JSON 配置（不会显示或保存凭证）</summary>
           <div class="integration-workbench__grid integration-workbench__grid--compact">
             <label>
@@ -928,6 +943,8 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
+import { listDataSources } from '../data-sources/api'
+import type { DataSourceListItem } from '../data-sources/types'
 import {
   canReadFromSystem,
   canWriteToSystem,
@@ -1022,6 +1039,10 @@ interface ConnectionDraft {
   status: ConnectionDraftStatus
   configText: string
   capabilitiesText: string
+  // C2b: structured config for the read-only data-source bridge (kind 'data-source:sql-readonly').
+  // The connection only ever references a data_sources id — credentials stay in /data-sources.
+  dataSourceId: string
+  dataSourceObject: string
 }
 
 type ExportCell = string | number | boolean | null
@@ -1162,10 +1183,49 @@ const connectionDraft = reactive<ConnectionDraft>({
   status: 'active',
   configText: '{}',
   capabilitiesText: '{}',
+  dataSourceId: '',
+  dataSourceObject: '',
 })
 const connectionDraftMode = ref<'new' | 'edit' | 'copy'>('new')
 const savingConnectionDraft = ref(false)
 const deletingConnectionId = ref('')
+
+// C2b — read-only data-source bridge connection (kind 'data-source:sql-readonly'): a structured
+// picker that references an existing /data-sources connection by id (never copies credentials).
+const DATA_SOURCE_BRIDGE_KIND = 'data-source:sql-readonly'
+const bridgeDataSources = ref<DataSourceListItem[]>([])
+const bridgeDataSourcesError = ref('')
+const bridgeDataSourcesLoaded = ref(false)
+const isDataSourceBridgeKind = computed(() => connectionDraft.kind === DATA_SOURCE_BRIDGE_KIND)
+
+async function loadBridgeDataSources(): Promise<void> {
+  if (bridgeDataSourcesLoaded.value) return
+  try {
+    bridgeDataSources.value = await listDataSources()
+    bridgeDataSourcesLoaded.value = true
+  } catch (error) {
+    bridgeDataSourcesError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+// Lazy: only fetch the data-source list when the operator actually picks the bridge kind.
+watch(() => connectionDraft.kind, (kind) => {
+  if (kind === DATA_SOURCE_BRIDGE_KIND) void loadBridgeDataSources()
+})
+
+function buildDataSourceBridgeConfig(): Record<string, unknown> {
+  const object = connectionDraft.dataSourceObject.trim()
+  // Only the data_sources reference + object — NO credentials are ever entered for this kind.
+  return {
+    dataSourceId: connectionDraft.dataSourceId.trim(),
+    ...(object ? { object } : {}),
+  }
+}
+
+function bridgeConfigString(config: unknown, key: string): string {
+  const value = config && typeof config === 'object' ? (config as Record<string, unknown>)[key] : undefined
+  return typeof value === 'string' ? value : ''
+}
 
 const adapterMetadataByKind = computed(() => new Map(adapters.value.map((adapter) => [adapter.kind, adapter])))
 const inventorySummary = computed(() => `已配置连接 ${systems.value.length} 个（可编辑 / 复制 / 停用 / 删除） · ${adapters.value.length} 个适配器 · ${stagingDescriptors.value.length} 个 staging 表`)
@@ -1278,11 +1338,14 @@ const connectionDraftJsonError = computed(() => {
   }
 })
 const canSaveConnectionDraft = computed(() => {
+  // The bridge kind requires BOTH a picked data source AND an object (table/view) — without the
+  // object the source is not readable (v1 has no schema dropdown, so the text input is load-bearing).
+  if (isDataSourceBridgeKind.value && (!connectionDraft.dataSourceId.trim() || !connectionDraft.dataSourceObject.trim())) return false
   return Boolean(
     connectionDraft.name.trim()
     && connectionDraft.kind
     && !connectionDraftRoleWarning.value
-    && !connectionDraftJsonError.value,
+    && (isDataSourceBridgeKind.value || !connectionDraftJsonError.value),
   )
 })
 const sourceDatasetTitle = computed(() => selectedObjectLabel('source') || '请选择来源数据集')
@@ -1565,6 +1628,8 @@ function resetConnectionDraft(): void {
   connectionDraft.status = 'active'
   connectionDraft.configText = '{}'
   connectionDraft.capabilitiesText = '{}'
+  connectionDraft.dataSourceId = ''
+  connectionDraft.dataSourceObject = ''
   connectionDraftMode.value = 'new'
 }
 
@@ -1576,6 +1641,8 @@ function editConnection(system: WorkbenchExternalSystem): void {
   connectionDraft.status = system.status
   connectionDraft.configText = stringifyConnectionDraftJson(system.config)
   connectionDraft.capabilitiesText = stringifyConnectionDraftJson(system.capabilities)
+  connectionDraft.dataSourceId = bridgeConfigString(system.config, 'dataSourceId')
+  connectionDraft.dataSourceObject = bridgeConfigString(system.config, 'object')
   connectionDraftMode.value = 'edit'
   inventoryExpanded.value = true
   setStatus(`已载入连接草稿：${system.name}`, 'idle')
@@ -1589,6 +1656,8 @@ function copyConnection(system: WorkbenchExternalSystem): void {
   connectionDraft.status = 'inactive'
   connectionDraft.configText = stringifyConnectionDraftJson(system.config)
   connectionDraft.capabilitiesText = stringifyConnectionDraftJson(system.capabilities)
+  connectionDraft.dataSourceId = bridgeConfigString(system.config, 'dataSourceId')
+  connectionDraft.dataSourceObject = bridgeConfigString(system.config, 'object')
   connectionDraftMode.value = 'copy'
   inventoryExpanded.value = true
   setStatus(`已复制 ${system.name} 为新连接草稿；保存前请改名并确认用途。`, 'idle')
@@ -1703,7 +1772,9 @@ async function saveConnectionDraft(): Promise<void> {
       kind: connectionDraft.kind,
       role: connectionDraft.role,
       status: connectionDraft.status,
-      config: parseConnectionDraftJson(connectionDraft.configText, 'config JSON'),
+      config: isDataSourceBridgeKind.value
+        ? buildDataSourceBridgeConfig()
+        : parseConnectionDraftJson(connectionDraft.configText, 'config JSON'),
       capabilities: parseConnectionDraftJson(connectionDraft.capabilitiesText, 'capabilities JSON'),
     })
     replaceSystem(system)
