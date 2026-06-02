@@ -187,6 +187,10 @@ describe('Multitable sheet realtime events', () => {
         if (sql.includes('FROM formula_dependencies')) {
           return { rows: [] }
         }
+        // D1 (#2106): the form-submit echo now loads field_permissions (loadFieldPermissionScopeMap); no denials in this mock.
+        if (sql.includes('field_permissions')) {
+          return { rows: [] }
+        }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })

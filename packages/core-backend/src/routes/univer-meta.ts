@@ -6767,6 +6767,12 @@ export function univerMetaRouter(): Router {
         allowCreateOnly: !record,
         fieldScopeMap,
       })
+      // D1 (#2106): the record-value echo must honor layer-3 (field_permissions), not just layer-1∧2 — the
+      // same composite /view + /records enforce (#2028). visibleFields already applied layer-1 (view.hidden) ∧
+      // layer-2 (property.hidden); fieldPermissions[].visible adds layer-3. For an ANONYMOUS public-form caller
+      // effectiveAccess.userId='' → fieldScopeMap is empty → this equals visibleFieldIds (the public path is
+      // unchanged; anonymous has no subject to scope to).
+      const readableFieldIds = new Set(visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => field.id))
       const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], effectiveCapabilities, viewScopeMap) : {}
       const rowActions = record
         ? deriveRecordRowActions(effectiveCapabilities, effectiveSheetScope, effectiveAccess, record.createdBy)
@@ -6787,11 +6793,11 @@ export function univerMetaRouter(): Router {
                 attachmentFields,
               ),
             )[record.id] ?? {},
-            visibleFieldIds,
+            readableFieldIds,
           )
         : undefined
       if (record) {
-        record.data = filterRecordDataByFieldIds(record.data, visibleFieldIds)
+        record.data = filterRecordDataByFieldIds(record.data, readableFieldIds)
       }
 
       return res.json({
@@ -7186,6 +7192,13 @@ export function univerMetaRouter(): Router {
       }
       const visibleFormFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
       const visibleFormFieldIds = new Set(visibleFormFields.map((field) => field.id))
+      // D1 (#2106): gate the write echo by layer-2 ∧ layer-3 (the #2028 composite), not just layer-1∧2. This
+      // covers a denied field the submitter never sent — a server-assigned / recalculated formula value. The
+      // submit handler loads no fieldScopeMap today; add one. ANONYMOUS (effectiveAccess.userId='') → empty
+      // scope map → readableEchoFieldIds equals visibleFormFieldIds, so the public-form echo is unchanged.
+      const echoFieldScopeMap = effectiveAccess.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), view.sheetId, effectiveAccess.userId) : new Map()
+      const echoFieldPermissions = deriveFieldPermissions(fields, effectiveCapabilities, { hiddenFieldIds: view.hiddenFieldIds ?? [], fieldScopeMap: echoFieldScopeMap })
+      const readableEchoFieldIds = new Set(visibleFormFields.filter((field) => echoFieldPermissions[field.id]?.visible !== false).map((field) => field.id))
 
       const relationalLinkFields = fields
         .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
@@ -7195,7 +7208,7 @@ export function univerMetaRouter(): Router {
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
-      record.data = filterRecordDataByFieldIds(record.data, visibleFormFieldIds)
+      record.data = filterRecordDataByFieldIds(record.data, readableEchoFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
             serializeAttachmentSummaryMap(
@@ -7207,7 +7220,7 @@ export function univerMetaRouter(): Router {
                 attachmentFields,
               ),
             )[record.id] ?? {},
-            visibleFormFieldIds,
+            readableEchoFieldIds,
           )
         : undefined
 
@@ -7235,7 +7248,7 @@ export function univerMetaRouter(): Router {
               // visible formula fields rather than replacing it (avoids clobbering the
               // normalized link values).
               for (const field of fields) {
-                if (field.type === 'formula' && field.id in recalculated && visibleFormFieldIds.has(field.id)) {
+                if (field.type === 'formula' && field.id in recalculated && readableEchoFieldIds.has(field.id)) {
                   record.data[field.id] = recalculated[field.id]
                 }
               }
