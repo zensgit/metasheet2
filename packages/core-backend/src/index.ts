@@ -102,7 +102,8 @@ import { spreadsheetsRouter } from './routes/spreadsheets'
 import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
-import { dataSourcesRouter } from './routes/data-sources'
+import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
+import { createDataSourcePluginFacade } from './data-adapters/data-source-plugin-facade'
 import { federationRouter } from './routes/federation'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
@@ -1517,6 +1518,15 @@ export class MetaSheetServer {
       },
     }
 
+    // Least-privilege host→plugin capability: only the integration plugin receives the read-only
+    // data-source facade (the `data-source:sql-readonly` bridge source), mirroring how the scoped
+    // multitable api is provided. The facade is read-only by construction and principal-gated; an
+    // unknown plugin gets the unchanged api. (A drifted allowlist key fails LOUD in the adapter's
+    // context.api.dataSources guard, not silently.)
+    const pluginApiSurface = manifest.name === 'plugin-integration-core'
+      ? { ...pluginCoreApi, dataSources: createDataSourcePluginFacade(getDataSourceManager) }
+      : pluginCoreApi
+
     return {
       metadata: {
         name: manifest.name,
@@ -1526,8 +1536,8 @@ export class MetaSheetServer {
         author: typeof manifest.author === 'string' ? manifest.author : manifest.author?.name,
         path: loaded.path,
       },
-      api: pluginCoreApi,
-      core: pluginCoreApi,
+      api: pluginApiSurface,
+      core: pluginApiSurface,
       services: {
         notification: notificationService,
         automationRegistry,

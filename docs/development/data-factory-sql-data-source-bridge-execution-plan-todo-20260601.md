@@ -36,29 +36,30 @@ real generic source.
 - [x] Three seams locked: (1) host→plugin **narrow read-only facade** `context.api.dataSources` (NOT the full `DataSourceManager`); (2) **owner-scope** via `assertAccess` using `pipeline.createdBy` (run) / request-user (direct), **fail-closed**, no fallback; (3) **read v1 = full/manual offset paging**, 10k/page cap, `maxPages` fail-closed, watermark deferred.
 - [x] Guardrails + 9-item acceptance checklist recorded; owner-principal seam corrected to the real `integration_pipelines.created_by` (external-system has no owner column).
 
-### ⬜ C1 — Impl-1: backend adapter + read-only facade (latent)
-The first buildable slice. **Latent**: registered + unit-tested, but **no pipeline auto-created** and no UI. Backend-only, integration-core (scoped, read-only opt-in).
+### 🟢 C1 — Impl-1: backend adapter + read-only facade (latent) — BACKEND LANDED 2026-06-02
+**Latent**: registered + unit-tested, **no pipeline auto-created** and no UI. Backend-only, integration-core (scoped, read-only opt-in). The runner principal-threading (a shared-runtime touch that nothing exercises while latent) is deliberately **deferred to C2**, where a real run happens.
 
 Work items:
-- [ ] **Host read-only facade** `context.api.dataSources = { test(id,principal), getSchema(id,principal), getTableInfo(id,object,principal), select(id,table,{limit,offset},principal) }` — a thin pass-through to `DataSourceManager.getSchema/select`; **no** create/update/delete/credentials/rotate/connect method exposed. Injected via the plugin context (same pattern as `context.api.multitable.records`).
-- [ ] **The adapter** `data-source:sql-readonly` (mirror `metasheet-staging-source-adapter.cjs`): `testConnection / listObjects / getSchema / read`; `upsert` → throw `NotSupported`. `read({object,limit,cursor})` → `offset = parseOffsetCursor(cursor)` → `facade.select(...)` → `{records, nextCursor, done}` (`done` when rows < limit).
-- [ ] **Owner-principal wiring** (the load-bearing seam — the runner references `created_by` nowhere today): thread `pipeline.createdBy` (loaded via `pipelines.cjs:302`) on a run, or the request user for direct test/schema, into the facade's `assertAccess`. Missing principal → **fail-closed config error** (no fallback to system/tenant/workspace/admin/service).
-- [ ] **External-system row shape**: `kind='data-source:sql-readonly'`, `role='source'`, `config={ dataSourceId, object?, schema? }`, `capabilities={read:true, introspect:true, write:false, watermarkFields:[]}`. **No credentials** stored on the integration row — only the `dataSourceId` reference.
-- [ ] **Registration** at `index.cjs` adapter registry.
+- [x] **Host read-only facade** — extracted as its own host module `data-adapters/data-source-plugin-facade.ts` (kernel-free unit-testable), injected as `context.api.dataSources` for **`plugin-integration-core` only** (allowlist), lazily resolving `getDataSourceManager()`. Exposes only `test/getSchema/getTableInfo/select`; **no** create/update/delete/credentials/rotate/connect method.
+- [x] **The adapter** `data-source:sql-readonly` (mirrors `metasheet-staging-source-adapter.cjs`): `testConnection/listObjects/getSchema/read`; `upsert` → `NotSupported`. `read` = `parseOffsetCursor(cursor)` → `facade.select` → `{records, nextCursor, done}`. Fail-closed `getDataSourcesApi` guard if the facade is absent.
+- [x] **Owner-principal handling**: the adapter **accepts** a principal (factory param) and forwards it to the facade; a missing principal **fails closed** in the facade (no fallback to system/tenant/workspace/admin/service). *(Threading `pipeline.createdBy` from the runner → C2.)*
+- [x] **External-system row shape**: `kind='data-source:sql-readonly'`, `role='source'`, `config={ dataSourceId, object?, schema? }`; **no credentials** on the integration row — only the `dataSourceId` reference.
+- [x] **Registration** at `index.cjs` adapter registry.
 
-Acceptance locks (each a test, several with a negative control):
-- [ ] Contract conformance: `testConnection/listObjects/getSchema/read` work; `upsert` throws `NotSupported` (pipeline targeting this kind as a **target** is rejected).
-- [ ] **Facade read-only by construction** — negative control: no write/CRUD/credential method is reachable from the plugin.
-- [ ] **Run uses `pipeline.createdBy`** as the principal (not request user, not null) — asserted on a run.
-- [ ] **Cross-owner read fail-closed** (`assertAccess` honored through the facade) — negative control: a non-owner principal → uniform "not found", no existence leak.
-- [ ] **Missing principal fail-closed** — a NULL-`createdBy` pipeline → legible config error (distinct from "not found"); **no fallback** to system/tenant/workspace/admin — negative control.
-- [ ] **Writable `data_sources` binding rejected** (read-only source only).
-- [ ] Offset paging: full/manual page loop, fewer-than-limit ⇒ `done`; `maxPages` **fail-closed** (no silent truncation); stable-order required or single-page fail-closed.
-- [ ] **No credentials** in config / preview / provenance / logs (redaction self-check).
-- [ ] **No raw `/query`** (only structured `select`); **no K3** Save/Submit/Audit/BOM reachable.
+Acceptance locks (covered by `tests/unit/data-source-plugin-facade.test.ts` + `__tests__/data-source-sql-readonly-source-adapter.test.cjs`):
+- [x] Contract conformance: `testConnection/listObjects/getSchema/read`; `upsert` throws `NotSupported`.
+- [x] **Facade read-only by construction** — negative control: the facade exposes only the 4 read methods; no write/CRUD/credential key.
+- [x] **Missing principal fail-closed, NO fallback** (keystone) — undefined/blank principal throws *before the manager is even resolved*; never substitutes a system/tenant/admin identity.
+- [x] **Cross-owner read fail-closed** — a mismatched principal → `assertAccess` "not found" propagates; no existence leak.
+- [x] **Writable `data_sources` binding rejected** (read-only source only).
+- [x] Offset paging at the adapter: full page ⇒ `nextCursor`/not-done; short page ⇒ `done`/null; a facade `select` error **surfaces** (never a silent empty page).
+- [x] **No credentials** anywhere (adapter carries only `dataSourceId`; facade exposes none); **no raw `/query`** (only structured `select`); **no K3** surface reachable.
+- [ ] **Run uses `pipeline.createdBy`** (not request user, not null) — **moved to C2** (needs a real run).
+- [ ] `maxPages` loop fail-closed — **C2** (the pipeline-runner page loop bounds it; the adapter already returns correct `done`/`nextCursor`).
 
-### ⬜ C2 — Impl-2: workbench source-system wiring (frontend)
-Gated on: C1 + opt-in. Frontend-only.
+### ⬜ C2 — Impl-2: workbench source-system wiring + runner principal-threading
+Gated on: C1 + opt-in. Frontend + the one runner seam.
+- [ ] **Runner provides the principal**: `createAdapter(sourceSystem, { role:'source', principal: pipeline.createdBy })` (pipeline loaded via `pipelines.cjs:302`); direct external-system test/schema uses the request user. **Lock: a run uses `pipeline.createdBy` (not request user, not null); a NULL-`createdBy` pipeline fails closed with a legible config error.** Also bounds the page loop (`maxPages` fail-closed, no silent truncation).
 - [ ] Workbench "select source system" surfaces a `data-source:sql-readonly` system; pick the data source → object (table/view) → fields.
 - [ ] Enters the **existing** dry-run / staging / provenance flow (no new pipeline machinery).
 - [ ] **Reachability test**: author a source → dry-run → rows appear in staging/provenance — read-only, no write.
