@@ -8199,13 +8199,25 @@ export function univerMetaRouter(): Router {
         data,
       })
 
+      // F4 (#2106 §3 F4): the create echo previously returned result.data UNMASKED, so a field_permissions-
+      // denied value — whether the creator wrote it (the create write gate is layer-2 only) or the server
+      // assigned it (e.g. an auto-number) — was handed back. Apply the layer-2 ∧ layer-3 read mask (the #2028
+      // composite); the create write itself is unchanged. access.userId is guaranteed truthy past the 401 above.
+      const fields = await loadSheetFields(pool as unknown as { query: QueryFn }, sheetId)
+      const visiblePropertyFields = filterVisiblePropertyFields(fields)
+      const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
+      const securityFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
+      const allowedFieldIds = new Set(
+        visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id),
+      )
+
       return res.json({
         ok: true,
         data: {
           record: {
             id: result.recordId,
             version: result.version,
-            data: result.data,
+            data: filterRecordDataByFieldIds(result.data, allowedFieldIds),
           },
         },
       })

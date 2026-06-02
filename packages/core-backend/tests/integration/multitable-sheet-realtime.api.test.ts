@@ -91,6 +91,14 @@ describe('Multitable sheet realtime events', () => {
         if (sql.includes('INSERT INTO meta_record_revisions')) {
           return { rows: [], rowCount: 1 }
         }
+        // F4: the create echo now resolves the layer-2 ∧ layer-3 field-read mask
+        // (loadSheetFields with "order" + field_permissions); no denials in this mock.
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
+        }
+        if (sql.includes('field_permissions')) {
+          return { rows: [] }
+        }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
