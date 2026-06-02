@@ -70,13 +70,15 @@
 ## 3. H2 执行排序（产品负责人 2026-06-01）
 
 ① **排班修改窗**（✅ #2197 已落；纯 write-time 校验，不碰 scheduler/notifier 新基座；治理价值高）
-② **打卡策略组**（外勤审批 + 内外勤合并 + 未排班打卡策略；一个 punch-policy 配置基座 design-lock）
+② **打卡策略组**（design-lock #2203）：S0 基座 ✅#2204 · S1 未排班打卡 ✅#2209 · **子序修正 → S1→S3→S2**（S2 内外勤合并依赖 S3 先建"外勤打卡"事实类型）· **S3 外勤 + S2 产品 2026-06-02 暂缓**（外勤=重刀/移动现场）→ 组在 S1 后暂停
 ③ **排班合规引擎**（招牌）
 ④ **加班调休 + 假期过期**（假勤闭环；假期过期提醒在此**首建** scheduler/notifier 基座）
 ⑤ **未排班提醒**（**复用 ④ 的 scheduler+notifier 基座**；镜像 `ApprovalSlaScheduler`）
 ⑥ **自动对班**（灰度门，feature-flag 默认关 → preview → 自动写）
 
 > **回填（2026-06-01 pre-flight 发现）**：原排序把"未排班提醒"列首，依据"渠道已有/最便宜"——**verify 证伪**（attendance 无调度器、无事件→通知消费者）。故改：**排班修改窗为首刀**（真·最便宜 + 治理高）；未排班提醒降级为后续"scheduler+notifier 基座"基础设施刀（2–3pd，与假期过期提醒共建）；未排班处理策略归 ③ 打卡策略组。
+
+> **回填（2026-06-02 决定）**：打卡策略组 S0 ✅#2204 + S1 ✅#2209 后**暂停**。pre-flight 证 **S2 内外勤合并依赖 S3 外勤**（当前模型无内/外勤打卡区分——geofence 只在围栏外拒绝、不分类保留；打卡 → first-in/last-out）→ #2203 子序改为 **S1→S3→S2**（S2 可并入 S3 后半段）。S3 外勤=重刀（外勤动作/审批流/报表口径/移动现场），**暂缓**；**下一主线转 ③ 排班合规引擎**（钉钉硬招牌、无此依赖、直接服务"排班保存时禁止越界"）。
 
 > **⚠️ schema 成组迁移，别一刀一迁。** 首刀"排班修改窗"已按 #2197 路线**无 DDL 落地**：policy 先进 org-level attendance settings JSON（`shiftEditPolicy`），write-time 按受影响日期判窗。后续若要把排班合规（`shift_constraints`）、发布（`status`）、多班次（`slot`）、或持久锁窗（`locked_at`）落到 `attendance_shift_assignments`/`rule_sets`，这些 schema 变更再打一个协调 migration，再分层叠 service/UI（v1 阶段2 已是此意）。
 
