@@ -95,6 +95,10 @@ const DEFAULT_SETTINGS = {
   ipAllowlist: [],
   geoFence: null,
   minPunchIntervalMinutes: 1,
+  shiftEditPolicy: {
+    mode: 'unrestricted',
+    windowDays: 0,
+  },
   formula: {
     allowRawAliases: true,
   },
@@ -5913,6 +5917,33 @@ function addDaysToDateKey(dateKey, days) {
   return date.toISOString().slice(0, 10)
 }
 
+// 排班修改窗 (schedule-edit window): pure evaluator. Given the org shiftEditPolicy, the dates a
+// write touches, and today's date-key, returns a violation when the EARLIEST touched date falls
+// before the editable boundary — so editing / creating / deleting a past-dated assignment is
+// blocked uniformly (guard the write, not the verb). Unset / unrestricted / unknown mode => null
+// (no regression). Org-level for v1; per-rule_set granularity is a follow-up.
+function evaluateShiftEditWindow(policy, dates, todayKey) {
+  const mode = policy && typeof policy === 'object' ? policy.mode : undefined
+  if (!mode || mode === 'unrestricted') return null
+  const today = normalizeDateOnly(todayKey)
+  if (!today) return null
+  const affected = (Array.isArray(dates) ? dates : [dates])
+    .map((value) => normalizeDateOnly(value))
+    .filter(Boolean)
+  if (affected.length === 0) return null
+  const earliest = affected.reduce((min, value) => (value < min ? value : min))
+  let boundary
+  if (mode === 'past_locked') {
+    boundary = today
+  } else if (mode === 'past_within_window') {
+    const windowDays = Math.max(0, Math.floor(parseNumber(policy.windowDays, 0)))
+    boundary = addDaysToDateKey(today, -windowDays) ?? today
+  } else {
+    return null
+  }
+  return earliest < boundary ? { earliest, boundary, mode } : null
+}
+
 function inferOvernightFlag(workStartTime, workEndTime) {
   const normalizedStart = normalizeTimeString(workStartTime)
   const normalizedEnd = normalizeTimeString(workEndTime)
@@ -10773,6 +10804,7 @@ function normalizeSettings(raw) {
     ipAllowlist,
     geoFence,
     minPunchIntervalMinutes: Math.max(0, parseNumber(raw.minPunchIntervalMinutes, DEFAULT_SETTINGS.minPunchIntervalMinutes)),
+    shiftEditPolicy: normalizeShiftEditPolicySetting(raw.shiftEditPolicy),
     formula: {
       allowRawAliases: parseBoolean(formula.allowRawAliases, DEFAULT_SETTINGS.formula.allowRawAliases),
     },
@@ -10799,6 +10831,18 @@ function normalizeAttendanceComprehensiveHoursSettings(raw) {
   }
 }
 
+function normalizeShiftEditPolicySetting(raw) {
+  const policy = raw && typeof raw === 'object' ? raw : {}
+  const modeRaw = typeof policy.mode === 'string' ? policy.mode.trim() : ''
+  const mode = ['unrestricted', 'past_locked', 'past_within_window'].includes(modeRaw)
+    ? modeRaw
+    : DEFAULT_SETTINGS.shiftEditPolicy.mode
+  return {
+    mode,
+    windowDays: Math.max(0, Math.floor(parseNumber(policy.windowDays, DEFAULT_SETTINGS.shiftEditPolicy.windowDays))),
+  }
+}
+
 function mergeSettings(base, update) {
   return normalizeSettings({
     ...base,
@@ -10822,6 +10866,10 @@ function mergeSettings(base, update) {
     formula: {
       ...(base?.formula || {}),
       ...(update?.formula || {}),
+    },
+    shiftEditPolicy: {
+      ...(base?.shiftEditPolicy || {}),
+      ...(update?.shiftEditPolicy || {}),
     },
     comprehensiveHours: {
       ...(base?.comprehensiveHours || {}),
@@ -15120,6 +15168,8 @@ module.exports = {
     resolveEffectiveCalendar,
     resolveAttendanceComprehensiveHoursPeriod,
     normalizeAttendanceComprehensiveHoursSettings,
+    normalizeShiftEditPolicySetting,
+    evaluateShiftEditWindow,
     bridgeAttendanceDateRangeToComprehensiveHoursPeriod,
     resolveAttendanceComprehensiveHoursCap,
     buildAttendanceComprehensiveHoursCapEffectiveKey,
@@ -15229,6 +15279,29 @@ module.exports = {
           message: 'Scheduler scope does not allow this attendance scheduling action',
         },
       })
+    }
+
+    function respondShiftEditWindowExceeded(res, violation) {
+      res.status(422).json({
+        ok: false,
+        error: {
+          code: 'SHIFT_EDIT_WINDOW_EXCEEDED',
+          message: `Schedule edit window exceeded: ${violation.earliest} is before the earliest editable date ${violation.boundary}`,
+          details: {
+            earliestDate: violation.earliest,
+            boundaryDate: violation.boundary,
+            mode: violation.mode,
+          },
+        },
+      })
+    }
+
+    async function enforceShiftEditWindow(res, dates) {
+      const settings = await getSettings(db)
+      const violation = evaluateShiftEditWindow(settings?.shiftEditPolicy, dates, normalizeDateOnly(new Date()))
+      if (!violation) return true
+      respondShiftEditWindowExceeded(res, violation)
+      return false
     }
 
     async function resolveAttendanceSchedulerScopeActor(req, res) {
@@ -15943,6 +16016,15 @@ module.exports = {
         radiusMeters: z.number().int().min(1),
       }).nullable().optional(),
       minPunchIntervalMinutes: z.number().int().min(0).optional(),
+      // Org-level schedule-edit window (排班修改窗): governs how far back assignment writes
+      // (create / update / delete) may reach. Default unrestricted = current behaviour (no
+      // regression). past_locked blocks any past-dated write; past_within_window allows the last
+      // windowDays. Applies to the earliest date the write touches; org-level for v1 (per-rule_set
+      // granularity is a follow-up).
+      shiftEditPolicy: z.object({
+        mode: z.enum(['unrestricted', 'past_locked', 'past_within_window']).optional(),
+        windowDays: z.number().int().min(0).optional(),
+      }).optional(),
       formula: z.object({
         allowRawAliases: z.boolean().optional(),
       }).optional(),
@@ -21348,6 +21430,9 @@ module.exports = {
         }
 
         try {
+          const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
+          if (!windowAccess) return
+
           const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
           if (!access) return
 
@@ -21465,6 +21550,9 @@ module.exports = {
             return
           }
 
+          const windowAccess = await enforceShiftEditWindow(res, [existing.start_date, payload.startDate])
+          if (!windowAccess) return
+
           const existingAccess = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
             orgId,
             payload: existing,
@@ -21570,6 +21658,9 @@ module.exports = {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation assignment not found' } })
             return
           }
+
+          const windowAccess = await enforceShiftEditWindow(res, [existingRows[0].start_date])
+          if (!windowAccess) return
 
           const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
             orgId,
@@ -29255,6 +29346,9 @@ module.exports = {
         }
 
         try {
+          const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
+          if (!windowAccess) return
+
           const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
           if (!access) return
 
@@ -29372,6 +29466,9 @@ module.exports = {
             return
           }
 
+          const windowAccess = await enforceShiftEditWindow(res, [existing.start_date, payload.startDate])
+          if (!windowAccess) return
+
           const existingAccess = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
             orgId,
             payload: existing,
@@ -29477,6 +29574,9 @@ module.exports = {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Assignment not found' } })
             return
           }
+
+          const windowAccess = await enforceShiftEditWindow(res, [existingRows[0].start_date])
+          if (!windowAccess) return
 
           const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
             orgId,

@@ -92,6 +92,45 @@ describe('attendance scheduling assignment conflict guard', () => {
     expect(helpers.resolveAttendanceScheduleAssignmentUpdateEndDate({ endDate: '2026-06-20' }, '2026-06-10')).toBe('2026-06-20')
   })
 
+  it('evaluates schedule-edit windows from the earliest affected date', () => {
+    expect(helpers.evaluateShiftEditWindow(undefined, ['2026-05-01'], '2026-06-01')).toBeNull()
+    expect(helpers.evaluateShiftEditWindow({ mode: 'unrestricted' }, ['2026-05-01'], '2026-06-01')).toBeNull()
+    expect(helpers.evaluateShiftEditWindow({ mode: 'past_locked' }, ['2026-06-01'], '2026-06-01')).toBeNull()
+    expect(helpers.evaluateShiftEditWindow({ mode: 'past_locked' }, ['2026-05-31'], '2026-06-01')).toEqual({
+      earliest: '2026-05-31',
+      boundary: '2026-06-01',
+      mode: 'past_locked',
+    })
+    expect(helpers.evaluateShiftEditWindow(
+      { mode: 'past_within_window', windowDays: 7 },
+      ['2026-05-25', '2026-06-10'],
+      '2026-06-01',
+    )).toBeNull()
+    expect(helpers.evaluateShiftEditWindow(
+      { mode: 'past_within_window', windowDays: 7 },
+      ['2026-05-24', '2026-06-10'],
+      '2026-06-01',
+    )).toEqual({
+      earliest: '2026-05-24',
+      boundary: '2026-05-25',
+      mode: 'past_within_window',
+    })
+  })
+
+  it('normalizes and deep-merges schedule-edit policy settings', () => {
+    expect(helpers.normalizeShiftEditPolicySetting(undefined)).toEqual({ mode: 'unrestricted', windowDays: 0 })
+    expect(helpers.normalizeShiftEditPolicySetting({ mode: 'past_within_window', windowDays: '3.9' }))
+      .toEqual({ mode: 'past_within_window', windowDays: 3 })
+    expect(helpers.normalizeShiftEditPolicySetting({ mode: 'surprise', windowDays: -1 }))
+      .toEqual({ mode: 'unrestricted', windowDays: 0 })
+
+    const merged = helpers.mergeSettings(
+      { shiftEditPolicy: { mode: 'past_within_window', windowDays: 14 } },
+      { shiftEditPolicy: { mode: 'past_locked' } },
+    )
+    expect(merged.shiftEditPolicy).toEqual({ mode: 'past_locked', windowDays: 14 })
+  })
+
   it('takes a per-org/user advisory lock before transactional writes', async () => {
     const db = { query: vi.fn().mockResolvedValue([]) }
 

@@ -83,6 +83,15 @@ function randomUuidV4(): string {
   })
 }
 
+function localDateKeyOffset(days: number): string {
+  const date = new Date()
+  date.setDate(date.getDate() + days)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
 function resolvePositiveIntEnvForTest(name: string, fallback: number, min: number, max?: number): number {
   const raw = process.env[name]
   if (raw == null || raw === '') return fallback
@@ -2316,6 +2325,201 @@ attendanceIntegrationDescribe(
     expect(invalidRotationRangeRes.status).toBe(400)
     const invalidRangeError = (invalidRotationRangeRes.body as { error?: { code?: string } } | undefined)?.error
     expect(invalidRangeError?.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('enforces schedule-edit windows on shift and rotation assignment writes', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const adminUserId = `attendance-shift-edit-window-admin-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    expect(settingsRes.status).toBe(200)
+    const originalSettings = ((settingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+
+    const pastDate = '2020-01-10'
+    const yesterday = localDateKeyOffset(-1)
+
+    async function saveShiftEditPolicy(shiftEditPolicy: Record<string, unknown>) {
+      const res = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ shiftEditPolicy }),
+      })
+      expect(res.status).toBe(200)
+      return (res.body as { data?: { shiftEditPolicy?: Record<string, unknown> } } | undefined)?.data?.shiftEditPolicy
+    }
+
+    async function createShift(name: string): Promise<string> {
+      const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name,
+          timezone: 'Asia/Shanghai',
+          workStartTime: '09:00',
+          workEndTime: '18:00',
+          workingDays: [1, 2, 3, 4, 5],
+        }),
+      })
+      expect(shiftRes.status).toBe(201)
+      const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(shiftId).toBeTruthy()
+      if (!shiftId) throw new Error('missing shift id')
+      return shiftId
+    }
+
+    async function createRotationRule(shiftId: string): Promise<string> {
+      const ruleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: `Edit Window Rotation ${runSuffix}`,
+          timezone: 'Asia/Shanghai',
+          shiftSequence: [shiftId],
+          isActive: true,
+        }),
+      })
+      expect(ruleRes.status).toBe(201)
+      const ruleId = (ruleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(ruleId).toBeTruthy()
+      if (!ruleId) throw new Error('missing rotation rule id')
+      return ruleId
+    }
+
+    async function createShiftAssignment(userId: string, shiftId: string, startDate: string) {
+      return requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ userId, shiftId, startDate, isActive: true }),
+      })
+    }
+
+    async function createRotationAssignment(userId: string, rotationRuleId: string, startDate: string) {
+      return requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ userId, rotationRuleId, startDate, isActive: true }),
+      })
+    }
+
+    function expectShiftEditWindowExceeded(res: HttpResponse) {
+      expect(res.status).toBe(422)
+      const error = (res.body as { error?: { code?: string; details?: { earliestDate?: string } } } | undefined)?.error
+      expect(error?.code).toBe('SHIFT_EDIT_WINDOW_EXCEEDED')
+      expect(error?.details?.earliestDate).toBe(pastDate)
+    }
+
+    try {
+      await saveShiftEditPolicy({ mode: 'unrestricted', windowDays: 0 })
+      const shiftId = await createShift(`Edit Window Shift ${runSuffix}`)
+      const rotationRuleId = await createRotationRule(shiftId)
+
+      const existingShiftUpdateRes = await createShiftAssignment(`${adminUserId}-shift-update`, shiftId, pastDate)
+      expect(existingShiftUpdateRes.status).toBe(201)
+      const existingShiftUpdateId = (existingShiftUpdateRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+      expect(existingShiftUpdateId).toBeTruthy()
+      if (!existingShiftUpdateId) return
+
+      const existingShiftDeleteRes = await createShiftAssignment(`${adminUserId}-shift-delete`, shiftId, pastDate)
+      expect(existingShiftDeleteRes.status).toBe(201)
+      const existingShiftDeleteId = (existingShiftDeleteRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+      expect(existingShiftDeleteId).toBeTruthy()
+      if (!existingShiftDeleteId) return
+
+      const existingRotationUpdateRes = await createRotationAssignment(`${adminUserId}-rotation-update`, rotationRuleId, pastDate)
+      expect(existingRotationUpdateRes.status).toBe(201)
+      const existingRotationUpdateId = (existingRotationUpdateRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+      expect(existingRotationUpdateId).toBeTruthy()
+      if (!existingRotationUpdateId) return
+
+      const existingRotationDeleteRes = await createRotationAssignment(`${adminUserId}-rotation-delete`, rotationRuleId, pastDate)
+      expect(existingRotationDeleteRes.status).toBe(201)
+      const existingRotationDeleteId = (existingRotationDeleteRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+      expect(existingRotationDeleteId).toBeTruthy()
+      if (!existingRotationDeleteId) return
+
+      await saveShiftEditPolicy({ mode: 'past_locked', windowDays: 0 })
+
+      expectShiftEditWindowExceeded(await createShiftAssignment(`${adminUserId}-shift-create-blocked`, shiftId, pastDate))
+      expectShiftEditWindowExceeded(await createRotationAssignment(`${adminUserId}-rotation-create-blocked`, rotationRuleId, pastDate))
+
+      const blockedShiftUpdateRes = await requestJson(`${baseUrl}/api/attendance/assignments/${existingShiftUpdateId}`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ endDate: pastDate }),
+      })
+      expectShiftEditWindowExceeded(blockedShiftUpdateRes)
+
+      const blockedShiftDeleteRes = await requestJson(`${baseUrl}/api/attendance/assignments/${existingShiftDeleteId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expectShiftEditWindowExceeded(blockedShiftDeleteRes)
+
+      const blockedRotationUpdateRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments/${existingRotationUpdateId}`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ endDate: pastDate }),
+      })
+      expectShiftEditWindowExceeded(blockedRotationUpdateRes)
+
+      const blockedRotationDeleteRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments/${existingRotationDeleteId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expectShiftEditWindowExceeded(blockedRotationDeleteRes)
+
+      const policy = await saveShiftEditPolicy({ mode: 'past_within_window', windowDays: 7 })
+      expect(policy).toEqual({ mode: 'past_within_window', windowDays: 7 })
+
+      const windowShiftRes = await createShiftAssignment(`${adminUserId}-shift-window-ok`, shiftId, yesterday)
+      expect(windowShiftRes.status).toBe(201)
+      const windowRotationRes = await createRotationAssignment(`${adminUserId}-rotation-window-ok`, rotationRuleId, yesterday)
+      expect(windowRotationRes.status).toBe(201)
+
+      await saveShiftEditPolicy({ mode: 'unrestricted', windowDays: 0 })
+      const unrestrictedPastRes = await createShiftAssignment(`${adminUserId}-shift-unrestricted-ok`, shiftId, pastDate)
+      expect(unrestrictedPastRes.status).toBe(201)
+    } finally {
+      await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(originalSettings),
+      }).catch(() => undefined)
+    }
   })
 
   it('rejects non-UUID shift references for rotation rules, including UUID-like shift names', async () => {
