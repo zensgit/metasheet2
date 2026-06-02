@@ -1338,8 +1338,9 @@ const connectionDraftJsonError = computed(() => {
   }
 })
 const canSaveConnectionDraft = computed(() => {
-  // The bridge kind requires a picked data source (config is built from it, not the JSON textarea).
-  if (isDataSourceBridgeKind.value && !connectionDraft.dataSourceId.trim()) return false
+  // The bridge kind requires BOTH a picked data source AND an object (table/view) — without the
+  // object the source is not readable (v1 has no schema dropdown, so the text input is load-bearing).
+  if (isDataSourceBridgeKind.value && (!connectionDraft.dataSourceId.trim() || !connectionDraft.dataSourceObject.trim())) return false
   return Boolean(
     connectionDraft.name.trim()
     && connectionDraft.kind

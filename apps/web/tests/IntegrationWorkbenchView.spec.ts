@@ -1955,6 +1955,9 @@ describe('IntegrationWorkbenchView', () => {
         upsertBodies.push(body)
         return jsonResponse({ id: 'ds_bridge_1', ...body })
       }
+      if (url.startsWith('/api/integration/external-systems/ds_bridge_1/objects')) {
+        return jsonResponse([{ name: 'public.items', label: 'public.items', operations: ['read'], source: 'data-source:sql-readonly' }])
+      }
       throw new Error(`unexpected URL ${url}`)
     })
 
@@ -2016,5 +2019,70 @@ describe('IntegrationWorkbenchView', () => {
     expect(saved).not.toHaveProperty('credentials')
     expect(JSON.stringify(saved.config)).not.toMatch(/password|token|secret|credential/i)
     expect(container.textContent).toContain('连接已保存：Warehouse bridge')
+
+    // Reachability: the saved bridge source is selectable as a Data Factory source, and loading its
+    // objects routes through the (now principal-threaded) objects endpoint — not fail-closed.
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    expect(Array.from(sourceSystemSelect.options).some((option) => option.value === 'ds_bridge_1')).toBe(true)
+    sourceSystemSelect.value = 'ds_bridge_1'
+    sourceSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="load-source-objects"]') as HTMLButtonElement).click()
+    await flushUi(8)
+    expect(apiFetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/integration/external-systems/ds_bridge_1/objects'))).toBe(true)
+    const objectSelect = container.querySelector('[data-testid="source-object"]') as HTMLSelectElement
+    expect(Array.from(objectSelect.options).map((option) => option.value)).toContain('public.items')
+  })
+
+  it('C2b: the save gate requires an object (no half-config without a table/view)', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target', 'bidirectional'], supports: ['read', 'upsert'], advanced: false },
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: true, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      throw new Error(`unexpected URL ${url}`)
+    })
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') return { ok: true, data: { items: [{ id: 'pg-1', name: 'Warehouse PG', type: 'postgres', connected: true }] } }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).checked = true
+    container.querySelector('[data-testid="show-advanced-connectors"]')!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    const kindSelect = container.querySelector('[data-testid="connection-draft-kind"]') as HTMLSelectElement
+    kindSelect.value = 'data-source:sql-readonly'
+    kindSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    const nameInput = container.querySelector('[data-testid="connection-draft-name"]') as HTMLInputElement
+    nameInput.value = 'Half config'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    const dsSelect = container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement
+    dsSelect.value = 'pg-1'
+    dsSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    // dataSourceId picked but object empty → save must stay disabled.
+    expect((container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).disabled).toBe(true)
+
+    const objInput = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLInputElement
+    objInput.value = 'public.items'
+    objInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect((container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).disabled).toBe(false)
   })
 })

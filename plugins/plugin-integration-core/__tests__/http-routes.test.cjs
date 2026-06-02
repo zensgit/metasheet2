@@ -724,9 +724,13 @@ async function testDiscoveryRoutes() {
         calls.push(['listAdapterKinds'])
         return ['http', 'erp:k3-wise-sqlserver', 'bridge:legacy-sql-readonly', 'metasheet:staging', 'metasheet:multitable', 'data-source:sql-readonly', 'custom:unknown']
       },
-      createAdapter(input) {
-        calls.push(['createAdapter', input])
+      createAdapter(input, deps) {
+        calls.push(['createAdapter', input, deps])
         return {
+          async testConnection() {
+            calls.push(['testConnection'])
+            return { ok: true }
+          },
           async listObjects() {
             calls.push(['listObjects'])
             return [
@@ -859,6 +863,10 @@ async function testDiscoveryRoutes() {
   assert.equal(supplierObject.template.endpointPath, '/api/suppliers/save')
   assert.equal(JSON.stringify(res.body).includes('template-secret-should-not-leak'), false)
   assert.equal(JSON.stringify(res.body).includes('secret-token'), false)
+  // C2b: the objects route runs the adapter AS the request user — the owner principal is threaded
+  // into createAdapter (so the data-source:sql-readonly bridge's facade authorizes), and it is the
+  // request user, NOT a system/admin fallback.
+  assert.deepEqual(findCall(calls, 'createAdapter')[2], { principal: 'user_read' }, 'objects route threads the request principal to createAdapter')
 
   calls.length = 0
   res = await invoke(routes, 'GET', '/api/integration/external-systems/:id/schema', {
@@ -871,6 +879,7 @@ async function testDiscoveryRoutes() {
   assert.deepEqual(findCall(calls, 'getSchema')[1], { object: 'customers_raw' })
   assert.equal(JSON.stringify(res.body).includes('schema-secret-should-not-leak'), false)
   assert.equal(res.body.data.raw.credentials, '[redacted]')
+  assert.deepEqual(findCall(calls, 'createAdapter')[2], { principal: 'user_read' }, 'schema route threads the request principal to createAdapter')
 
   calls.length = 0
   res = await invoke(routes, 'GET', '/api/integration/external-systems/:id/schema', {
