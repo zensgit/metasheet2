@@ -99,6 +99,14 @@ const DEFAULT_SETTINGS = {
     mode: 'unrestricted',
     windowDays: 0,
   },
+  // 打卡策略组 (punch-policy group) — LATENT foundation (design-lock #2203 / S0). NOTHING reads this
+  // yet; each enforcement slice wires + exposes its own field (S1 unscheduled-punch / S2 in-out merge /
+  // S3 outdoor approval). All defaults = current behaviour (no regression).
+  punchPolicy: {
+    unscheduled: { mode: 'allow' },
+    merge: { internalWinsOnIn: false, externalWinsOnOut: false },
+    outdoor: { requireApproval: false, requireNote: false, requirePhoto: false, approvalFlowId: '' },
+  },
   formula: {
     allowRawAliases: true,
   },
@@ -10805,6 +10813,7 @@ function normalizeSettings(raw) {
     geoFence,
     minPunchIntervalMinutes: Math.max(0, parseNumber(raw.minPunchIntervalMinutes, DEFAULT_SETTINGS.minPunchIntervalMinutes)),
     shiftEditPolicy: normalizeShiftEditPolicySetting(raw.shiftEditPolicy),
+    punchPolicy: normalizePunchPolicySetting(raw.punchPolicy),
     formula: {
       allowRawAliases: parseBoolean(formula.allowRawAliases, DEFAULT_SETTINGS.formula.allowRawAliases),
     },
@@ -10843,6 +10852,35 @@ function normalizeShiftEditPolicySetting(raw) {
   }
 }
 
+// Punch-policy group (design-lock #2203 / S0). Pure normalize of the latent foundation: validates
+// the nested shape (unscheduled / merge / outdoor) and fills every field from DEFAULT_SETTINGS so an
+// unset / partial / malformed value can never change behaviour. require_approval & outdoor.* are part
+// of the shape but stay at their defaults until the S3 slice exposes them.
+function normalizePunchPolicySetting(raw) {
+  const policy = raw && typeof raw === 'object' ? raw : {}
+  const unscheduled = policy.unscheduled && typeof policy.unscheduled === 'object' ? policy.unscheduled : {}
+  const merge = policy.merge && typeof policy.merge === 'object' ? policy.merge : {}
+  const outdoor = policy.outdoor && typeof policy.outdoor === 'object' ? policy.outdoor : {}
+  const unscheduledModeRaw = typeof unscheduled.mode === 'string' ? unscheduled.mode.trim() : ''
+  const unscheduledMode = ['allow', 'block', 'require_approval'].includes(unscheduledModeRaw)
+    ? unscheduledModeRaw
+    : DEFAULT_SETTINGS.punchPolicy.unscheduled.mode
+  const bool = (value, fallback) => (typeof value === 'boolean' ? value : fallback)
+  return {
+    unscheduled: { mode: unscheduledMode },
+    merge: {
+      internalWinsOnIn: bool(merge.internalWinsOnIn, DEFAULT_SETTINGS.punchPolicy.merge.internalWinsOnIn),
+      externalWinsOnOut: bool(merge.externalWinsOnOut, DEFAULT_SETTINGS.punchPolicy.merge.externalWinsOnOut),
+    },
+    outdoor: {
+      requireApproval: bool(outdoor.requireApproval, DEFAULT_SETTINGS.punchPolicy.outdoor.requireApproval),
+      requireNote: bool(outdoor.requireNote, DEFAULT_SETTINGS.punchPolicy.outdoor.requireNote),
+      requirePhoto: bool(outdoor.requirePhoto, DEFAULT_SETTINGS.punchPolicy.outdoor.requirePhoto),
+      approvalFlowId: typeof outdoor.approvalFlowId === 'string' ? outdoor.approvalFlowId.trim() : DEFAULT_SETTINGS.punchPolicy.outdoor.approvalFlowId,
+    },
+  }
+}
+
 function mergeSettings(base, update) {
   return normalizeSettings({
     ...base,
@@ -10870,6 +10908,13 @@ function mergeSettings(base, update) {
     shiftEditPolicy: {
       ...(base?.shiftEditPolicy || {}),
       ...(update?.shiftEditPolicy || {}),
+    },
+    // Nested 2-level merge so a partial update (e.g. only { unscheduled }) does not clear the
+    // other punch-policy sub-objects (merge / outdoor).
+    punchPolicy: {
+      unscheduled: { ...(base?.punchPolicy?.unscheduled || {}), ...(update?.punchPolicy?.unscheduled || {}) },
+      merge: { ...(base?.punchPolicy?.merge || {}), ...(update?.punchPolicy?.merge || {}) },
+      outdoor: { ...(base?.punchPolicy?.outdoor || {}), ...(update?.punchPolicy?.outdoor || {}) },
     },
     comprehensiveHours: {
       ...(base?.comprehensiveHours || {}),
@@ -15169,6 +15214,7 @@ module.exports = {
     resolveAttendanceComprehensiveHoursPeriod,
     normalizeAttendanceComprehensiveHoursSettings,
     normalizeShiftEditPolicySetting,
+    normalizePunchPolicySetting,
     evaluateShiftEditWindow,
     bridgeAttendanceDateRangeToComprehensiveHoursPeriod,
     resolveAttendanceComprehensiveHoursCap,

@@ -131,6 +131,29 @@ describe('attendance scheduling assignment conflict guard', () => {
     expect(merged.shiftEditPolicy).toEqual({ mode: 'past_locked', windowDays: 14 })
   })
 
+  it('normalizes and nested-deep-merges punch-policy settings (latent S0 foundation)', () => {
+    expect(helpers.normalizePunchPolicySetting(undefined)).toEqual({
+      unscheduled: { mode: 'allow' },
+      merge: { internalWinsOnIn: false, externalWinsOnOut: false },
+      outdoor: { requireApproval: false, requireNote: false, requirePhoto: false, approvalFlowId: '' },
+    })
+    // invalid unscheduled mode -> default allow (no regression); partial fields filled from defaults
+    expect(helpers.normalizePunchPolicySetting({ unscheduled: { mode: 'surprise' } }).unscheduled.mode).toBe('allow')
+    expect(helpers.normalizePunchPolicySetting({ unscheduled: { mode: 'block' } }).unscheduled.mode).toBe('block')
+    expect(helpers.normalizePunchPolicySetting({ outdoor: { requireApproval: true } }).outdoor.requireApproval).toBe(true)
+
+    // nested 2-level merge: updating only `merge` must NOT clear unscheduled / outdoor
+    const merged = helpers.mergeSettings(
+      { punchPolicy: { unscheduled: { mode: 'block' }, outdoor: { requireApproval: true } } },
+      { punchPolicy: { merge: { internalWinsOnIn: true } } },
+    )
+    expect(merged.punchPolicy).toEqual({
+      unscheduled: { mode: 'block' },
+      merge: { internalWinsOnIn: true, externalWinsOnOut: false },
+      outdoor: { requireApproval: true, requireNote: false, requirePhoto: false, approvalFlowId: '' },
+    })
+  })
+
   it('takes a per-org/user advisory lock before transactional writes', async () => {
     const db = { query: vi.fn().mockResolvedValue([]) }
 
