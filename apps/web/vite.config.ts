@@ -3,6 +3,19 @@ import { loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
 
+/**
+ * Resolve the Vite `base` (public path) from VITE_BASE_PATH so the app can be deployed under a
+ * sub-path (e.g. behind nginx at `/metasheet/`) without the built index.html referencing
+ * `/assets/...` at the domain root. Defaults to `/` (root deploy — unchanged). Normalized to a
+ * leading + trailing slash, which is what Vite expects.
+ */
+function resolveBasePath(raw?: string): string {
+  const value = (raw || '').trim()
+  if (!value || value === '/') return '/'
+  const withLeading = value.startsWith('/') ? value : `/${value}`
+  return withLeading.endsWith('/') ? withLeading : `${withLeading}/`
+}
+
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const envDir = process.env.METASHEET_ENV_DIR?.trim() || process.cwd()
@@ -10,9 +23,11 @@ export default defineConfig(({ mode }) => {
   const apiBase = env.VITE_API_URL || env.VITE_API_BASE || 'http://127.0.0.1:7778'
   const portValue = Number(env.VITE_PORT)
   const serverPort = Number.isFinite(portValue) && portValue > 0 ? portValue : 8899
+  const basePath = resolveBasePath(env.VITE_BASE_PATH)
 
   return {
     envDir,
+    base: basePath,
     plugins: [vue()],
     server: {
       port: serverPort,
