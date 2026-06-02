@@ -47,11 +47,11 @@ The **locking test** is the real-DB integration test wired into `.github/workflo
 | ✅🔒 | **F5** `loadRecordSummaries` display: `link-options` `data.records` + `people-search` `items` (foreign/people default-display value) | Low | #2198 | `multitable-summary-display-field-mask` |
 | ✅🔒 | **linkSummaries** (`buildLinkSummaries`) foreign default-display value across `GET /view` · single-record read · link-options `data.selected` · write-echo (review follow-up to F5) | Med | #2198 | `multitable-link-summary-display-field-mask` |
 | ⬜ | **D1** `form-context` + form-submit layer-3 (anonymous-form design question — likely intentional) | Design-Q | — | *(decide first)* |
-| ⬜ | **kanban / gallery / calendar** view-data egress scan (deferred coverage scan) | Diligence | — | *(scan → maybe add)* |
+| ✅ | **kanban / gallery / calendar** view-data egress scan — **scan-clean, no live egress** (standalone view plugins are dead-sample/unreachable; product reuses the gated `/view`) | Diligence | #2206 | *scan-clean — no test (no live egress); see scan doc + §3 latent-risk note* |
 
 ### Completion
-- **By item: 10 / 12 findings closed (≈ 83 %)** — through F5 + its `buildLinkSummaries` review follow-up.
-- **By risk: every High + Med + Low leak channel is closed.** Remaining = 1 **design question** (D1, anonymous forms have no subject to scope to) + 1 **coverage scan** (kanban/gallery/calendar). Residual attack surface ≈ retired.
+- **By item: 11 / 12 findings closed (≈ 92 %)** — 10 **CI-locked masks** (each with a real-DB locking test) + 1 **scan-clean** (kanban/gallery/calendar view-data: scanned, **no live egress found → no locking test**, see scan doc). The scan-clean item is a *coverage conclusion*, not a CI-enforced mask — its continued validity rests on §3 Layer-3 (the latent-risk re-scan trigger), not a test.
+- **By risk: every High + Med + Low leak channel is closed.** Remaining = 1 **design question** (D1, anonymous forms have no subject to scope to). Residual attack surface ≈ retired.
 
 ---
 
@@ -75,7 +75,8 @@ Layers 1–2 protect *known* channels. A *new* record-data egress endpoint could
 - **Trigger:** whenever a new endpoint returns record cell values (new read, echo, summary, export, broadcast), **re-run the #2106 egress inventory method** (grep every `res.json`/`filterRecordDataByFieldIds`/`loadRecordSummaries`/`buildLinkSummaries`/`linkSummaries`/raw `data[fieldId]` egress; classify gated vs ungated).
   - **Lesson (the `buildLinkSummaries` follow-up):** a cell value can leak even when it is *not* a direct `data[fieldId]` egress — `buildLinkSummaries` reads a *foreign* sheet's display field into a computed `display`, and the `filter*FieldSummaryMap` wrappers only drop unreadable *link fields* (caller-side), never the foreign display *value*. So the grep set must include **derived/summary display values keyed to another sheet**, masked by *that* sheet's `allowedFieldIds` (per-sheet keying), not just first-class `data[fieldId]` writes.
 - **Forward-defense (proposed, not yet built):** an "egress coverage guard" — a test that enumerates the record-data egress sites and asserts each one routes through `allowedFieldIds`, so a new *ungated* egress fails CI by construction. Tracked as a future hardening item (see §4).
-- **Pending re-scan:** the kanban/gallery/calendar view-data scan (matrix §2b, last row).
+- **Done re-scan:** the kanban/gallery/calendar view-data scan — **scan-clean** (2026-06-02, `multitable-view-data-egress-scan-20260602.md`): no live egress; the standalone view plugins are dead-sample (sample-kanban's `records` table doesn't exist; gallery/calendar forward to an **unhandled** `spreadsheet:records:query` event) and unreachable (gallery/calendar have no manifest), and the product renders these view-types client-side off the gated `/view`.
+  - **Lesson (sample-plugin latent egress):** "scan-clean" on a *dead* path is NOT "no egress code exists." The gallery/calendar samples ship fully-formed `/records` + `/records/:recordId` egress routes with **no authz and no field mask** — inert only because nothing wires them. **Adding a manifest, wiring a `spreadsheet:records:query` handler, or creating the bare `records` table re-arms them → any such change MUST re-enter this egress inventory and route record data through the target sheet's `allowedFieldIds` before shipping.** (Same shape as F0b latent-not-live.)
 
 ### Confirmation checklist
 - **Per PR (automatic):** CI `test (20.x)` real-DB step green ⇒ all locking tests pass ⇒ no regression. Reviewer confirms any new egress has a locking test.
@@ -86,7 +87,7 @@ Layers 1–2 protect *known* channels. A *new* record-data egress endpoint could
 ## 4. Remaining work (each a separate, explicit opt-in)
 
 1. **D1** — decide whether `form-context`/form-submit should apply layer-3 for *identified* (non-anonymous) form callers. Product decision first; likely no code (anonymous submitter has no subject to scope to).
-2. **kanban / gallery / calendar scan** (kanban first, then gallery/calendar) — Layer-3 re-scan of these view-data egress paths; add a locking test only if a real ungated egress is found.
+2. *(optional hardening)* — **delete the dead sample view plugins** (`plugins/plugin-view-kanban` / `plugin-view-gallery` / `plugin-view-calendar`) to remove the latent ungated `/records` egress routes outright. Deferred from the scan-closure (separate code/product cleanup; touches the plugin-sample retention policy) — its own opt-in.
 3. *(optional hardening)* — build the §3 "egress coverage guard".
 
 ---
