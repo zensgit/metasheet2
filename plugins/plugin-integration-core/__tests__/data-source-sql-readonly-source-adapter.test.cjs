@@ -150,6 +150,18 @@ async function main() {
     const schema = await a.getSchema({ object: 'public.t' })
     assert.equal(schema.object, 'public.t')
     assert.deepEqual(schema.fields, [{ name: 'id', type: 'int', nullable: false }])
+    // A schema-qualified object is split back into table + schema for getTableInfo (the entity-machine
+    // follow-up: getTableInfo/getSchema want bare table + separate schema; read/select take schema.table).
+    assert.equal(f.calls.getTableInfo[0].object, 't', 'getSchema splits schema.table → bare table for getTableInfo')
+    assert.equal(f.calls.getTableInfo[0].schema, 'public', 'getSchema passes the qualified schema to getTableInfo')
+  }
+
+  // 9b. A bare object passes through unsplit (uses config.schema, here unset → undefined).
+  {
+    const f = fakeFacade()
+    await adapterWith(f).getSchema({ object: 'items' })
+    assert.equal(f.calls.getTableInfo[0].object, 'items', 'bare object → table only')
+    assert.equal(f.calls.getTableInfo[0].schema, undefined, 'bare object → no schema split')
   }
 
   // 10. The factory threads the principal through to the adapter.
