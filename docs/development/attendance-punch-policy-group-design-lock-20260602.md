@@ -52,7 +52,10 @@ punchPolicy: {
 | **S2** | 内外勤卡合并 | `punchPolicy.merge` | record-write/summary：内/外勤打卡谁赢上/下班卡 | 现状合并逻辑 |
 | **S3** | 外勤审批 | `punchPolicy.outdoor` | 外勤打卡→（requireApproval 时）经 `attendance_approval_flows` 进 pending，approved 才算考勤；报表只算 approved。**复用 attendance approval，不新建 flow 表/状态机** | 全 false |
 
-**切片序**（各独立 gated opt-in，CONTRACTS/默认不回归先行）：**S1 未排班打卡（最简、建共享原语、清晰 allow/block）→ S2 内外勤合并 → S3 外勤审批（最重，碰审批流）**。`require_approval`/外勤 pending 的对外配置随 S3 一起开放。
+**切片序**（**修正 2026-06-02：S2 依赖 S3，原 S1→S2→S3 排序作废**）：**S1 未排班打卡 ✅(#2209) → S3 外勤审批 → S2 内外勤合并**。
+> **⚠️ S2 依赖 S3**：内外勤合并需要"外勤打卡"这个**事实类型**才有可合并对象，而当前模型**无内/外勤区分**——geofence 只在围栏外**拒绝**打卡（`!isGeoAllowed → reject`，`index.cjs:~14511`），不分类保留；打卡是无类型 `check_in/check_out` → `first_in_at`/`last_out_at`（最早 in / 最晚 out）。"外勤打卡"由 **S3** 建立，故 **S2 必须在 S3 之后，或并入 S3 后半段**（外勤打卡落地时一起做"谁赢上/下班卡"）。`require_approval`/外勤 pending 的对外配置随 S3 一起开放。
+>
+> **产品决定 2026-06-02**：S0/S1 已落；**S3 外勤暂缓**（重刀，碰外勤动作 / 审批流 / 报表口径 / 移动现场场景），**下一主线转排班合规引擎**（钉钉对标硬招牌、无此依赖）。punch-policy 组在 S1 后暂停。
 
 ## 5. 默认 / 不回归锁（钉死）
 
@@ -80,10 +83,10 @@ punchPolicy: {
 - ✅ D3 钉死默认全保持现状 + `require_approval`/外勤 pending 仅随 S3 暴露。
 
 **实现阶段（全 🔒，须显式 opt-in）**
-- 🔒 S0 `punchPolicy` settings schema + normalize + deep-merge（latent，默认现状，require_approval/outdoor 不暴露）。
-- 🔒 S1 `isUserScheduledForDate` 共享原语 + 未排班打卡 allow/block 强制（punch 路由）+ 测试。
-- 🔒 S2 内外勤卡合并策略 + 强制 + 测试。
-- 🔒 S3 外勤审批（复用 attendance_approval_flows）+ pending/approved 报表过滤 + 暴露 require_approval/outdoor 配置 + 测试。
+- ✅ S0 `punchPolicy` settings schema + normalize + deep-merge（latent）— **#2204**。
+- ✅ S1 `isUserScheduledForDate` 共享原语 + 未排班打卡 allow/block 强制（punch 路由）+ unit + route-level real-DB integration — **#2209**。
+- 🔒 S3 外勤审批（复用 attendance_approval_flows）+ pending/approved 报表过滤 + 暴露 require_approval/outdoor 配置 + 测试 — **建立"外勤打卡"事实类型（= S2 的前置）；产品 2026-06-02 暂缓**。
+- 🔒 S2 内外勤卡合并策略 + 强制 + 测试 — **依赖 S3（无外勤打卡则无可合并对象）；可并入 S3 后半段**。
 
 ## 9. Owner 决策（LOCKED 2026-06-02）
 1. **配置粒度 = org 级 v1**（镜像 geoFence/ipAllowlist；per-group follow-up）。
