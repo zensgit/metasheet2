@@ -13,10 +13,11 @@ import { resolve } from 'path'
 function resolveBasePath(raw?: string): string {
   const value = (raw || '').trim()
   if (!value || value === '/') return '/'
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith('.')) {
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith('//') || value.startsWith('.')) {
     throw new Error(
-      `VITE_BASE_PATH must be an absolute path (e.g. "/metasheet/"), got "${value}". Full-URL and ` +
-        'relative bases are unsupported because this value is also the Vue Router history base.',
+      `VITE_BASE_PATH must be an absolute path (e.g. "/metasheet/"), got "${value}". Full-URL, ` +
+        'protocol-relative (//host), and relative bases are unsupported because this value is also ' +
+        'the Vue Router history base.',
     )
   }
   const withLeading = value.startsWith('/') ? value : `/${value}`
