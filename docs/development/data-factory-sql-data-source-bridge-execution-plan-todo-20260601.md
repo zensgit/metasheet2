@@ -67,12 +67,12 @@ Gated on: C1 + opt-in. The one shared-runtime seam, isolated for focused review.
 - [x] **Lock — NULL `createdBy` fails closed**: a null-`createdBy` pipeline fails closed (facade missing-principal error surfaced via the run failure); **no read is performed** (no fallback identity) and nothing is written.
 - The `maxPages` page-loop bound is the existing pipeline-runner behavior; the adapter returns correct `done`/`nextCursor` (C1). No new paging logic added here.
 
-### ⬜ C2b — Impl-2b: workbench source picker (frontend)
+### 🟢 C2b — Impl-2b: workbench source picker (frontend) — LANDED 2026-06-02
 Gated on: C2a + opt-in. Frontend-only.
-- [ ] Workbench "select source system" surfaces a `data-source:sql-readonly` system; pick the data source → object (table/view) → fields.
-- [ ] Enters the **existing** dry-run / staging / provenance flow (no new pipeline machinery).
-- [ ] **Reachability test (UI)**: author a source via the picker → dry-run → rows appear — read-only, no write.
-- [ ] `/data-sources` stays the sole connection/credential surface; the workbench **references** it (a `dataSourceId` picker, **no credential copy**), does not embed connection CRUD.
+- [x] The connection-manager surfaces a **structured picker** for `data-source:sql-readonly`: when that kind is selected, a data-source `<select>` (lazy-loaded from `/api/data-sources`) + an **object** text input (v1; schema/table dropdown deferred) replace the raw-JSON config. The created source then appears in the source selector and enters the **existing** dry-run/staging/provenance flow (backend read proven by C2a).
+- [x] **No credential copy**: for this kind the saved `config` is built from exactly `{ dataSourceId, object }` (the raw-JSON config field is hidden), so credentials can never be entered here — `/data-sources` stays the sole credential surface; the workbench only **references** `dataSourceId`.
+- [x] **UI test** (`IntegrationWorkbenchView.spec.ts`): select the bridge kind → picker lists the data sources (lazy; not fetched before) → pick one + object → the upsert payload is `config: { dataSourceId, object }`, `role: 'source'`, **no `credentials`**, no secret-shaped values.
+- Deferred (post-v1): schema/table dropdown (object is a text input for now); a full end-to-end dry-run-reads-rows assertion lives at the backend (C2a runner test).
 
 ### 🔒 C3 — Incremental / watermark reads
 Gated on: C1/C2 + a watermark-column convention + opt-in.

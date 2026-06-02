@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App as VueApp, type Component } from 'vue'
 
 const apiFetchMock = vi.fn()
+const apiGetMock = vi.fn()
 
 vi.mock('../src/utils/api', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
+  apiGet: (...args: unknown[]) => apiGetMock(...args),
 }))
 
 function jsonResponse(data: unknown): Response {
@@ -1925,5 +1927,94 @@ describe('IntegrationWorkbenchView', () => {
     ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
     await flushUi()
     expect(previewBodies.at(-1)!).not.toHaveProperty('referenceMappingSources')
+  })
+
+  it('C2b: data-source:sql-readonly connection uses the structured picker and references a data source by id (no credentials)', async () => {
+    const upsertBodies: Array<Record<string, unknown>> = []
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') {
+        return { ok: true, data: { items: [
+          { id: 'pg-1', name: 'Warehouse PG', type: 'postgres', connected: true },
+          { id: 'mssql-2', name: 'ERP MSSQL', type: 'sqlserver', connected: true },
+        ] } }
+      }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target', 'bidirectional'], supports: ['read', 'upsert'], advanced: false },
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: true, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/external-systems' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as Record<string, unknown>
+        upsertBodies.push(body)
+        return jsonResponse({ id: 'ds_bridge_1', ...body })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('RouterLink', {
+      props: { to: { type: [String, Object], required: false, default: '' } },
+      setup(_props, { slots }) { return () => h('a', slots.default?.()) },
+    })
+    app.mount(container)
+    await flushUi()
+
+    // Picker is hidden until the operator picks the bridge kind, and the data-source list is NOT fetched yet (lazy).
+    expect(container.querySelector('[data-testid="data-source-bridge-picker"]')).toBeNull()
+    expect(apiGetMock.mock.calls.some(([url]) => url === '/api/data-sources')).toBe(false)
+
+    // data-source:sql-readonly is an advanced connector — reveal it via the advanced toggle first.
+    const advancedToggle = container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement
+    advancedToggle.checked = true
+    advancedToggle.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    const kindSelect = container.querySelector('[data-testid="connection-draft-kind"]') as HTMLSelectElement
+    kindSelect.value = 'data-source:sql-readonly'
+    kindSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    // Picker appears + lists the data sources; the raw-JSON config is hidden for this kind.
+    expect(container.querySelector('[data-testid="data-source-bridge-picker"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="connection-draft-config"]')).toBeNull()
+    const dsSelect = container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement
+    const dsOptions = Array.from(dsSelect.options).map((option) => option.textContent?.trim())
+    expect(dsOptions).toContain('Warehouse PG · postgres')
+    expect(dsOptions).toContain('ERP MSSQL · sqlserver')
+    expect(container.querySelector('[data-testid="data-source-bridge-hint"]')?.textContent).toContain('凭据由 /data-sources 管理')
+
+    const nameInput = container.querySelector('[data-testid="connection-draft-name"]') as HTMLInputElement
+    nameInput.value = 'Warehouse bridge'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    dsSelect.value = 'pg-1'
+    dsSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const objInput = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLInputElement
+    objInput.value = 'public.items'
+    objInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    // The saved connection references the data source by id (+ object) and carries NO credentials.
+    expect(upsertBodies).toHaveLength(1)
+    const saved = upsertBodies[0]
+    expect(saved.kind).toBe('data-source:sql-readonly')
+    expect(saved.role).toBe('source')
+    expect(saved.config).toEqual({ dataSourceId: 'pg-1', object: 'public.items' })
+    expect(saved).not.toHaveProperty('credentials')
+    expect(JSON.stringify(saved.config)).not.toMatch(/password|token|secret|credential/i)
+    expect(container.textContent).toContain('连接已保存：Warehouse bridge')
   })
 })
