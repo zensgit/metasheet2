@@ -633,9 +633,16 @@ function closeSchemaBrowser(): void {
 }
 
 async function openPreview(id: string): Promise<void> {
+  const requestedId = id
   activePreviewId.value = id
+  // Clear the prior panel's selection up front so it cannot linger while the new schema loads.
+  previewTable.value = ''
   store.clearPreviewError(id)
   const schema = store.schemas[id] ?? await store.loadSchema(id)
+  // A newer preview may have opened while loadSchema was in flight (fast A→B switch). Drop this
+  // stale response so it cannot set previewTable to the wrong source's table and then run a
+  // cross-source query — runActivePreview() reads the *current* activePreviewId.
+  if (activePreviewId.value !== requestedId) return
   const firstChoice = [
     ...(schema?.tables ?? []),
     ...(schema?.views ?? []),
