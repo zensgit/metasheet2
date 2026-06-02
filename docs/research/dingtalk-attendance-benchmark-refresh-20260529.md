@@ -1,6 +1,8 @@
 # 钉钉考勤对标 — delta 刷新（完整手册重抓 + 状态翻转 + 字段/公式细节）
 
-> Date: 2026-05-29 · Author: Claude (manual re-crawl + code re-verify) · Status: **research / delta 刷新 — 非开工承诺**
+> 🔴 **当前执行账本 = `docs/development/attendance-dingtalk-benchmark-target-and-tracker-20260601.md`（PR #2190）。** 本文是 2026-05-29 的 research 对标快照，已被该 tracker 取代为唯一 ledger；**RBAC / 排序 / 估时 / MUST 口径一律以 tracker 为准**；本文与 v1 仅作 archived 设计参考。
+
+> Date: 2026-05-29 · Author: Claude (manual re-crawl + code re-verify) · Status: **research / delta 刷新 — 非开工承诺（已被 tracker 取代为执行账本）**
 > Scope: 在三份前序文档基础上做 **delta**，不重复推导排班/调度/假期/RBAC 的完整 gap 矩阵。
 > 受 **K3 PoC Stage-1 锁** 约束：阅读/对标属允许的内核打磨研究；实施任何项均为独立 opt-in，涉及 integration-core/RBAC/auth 一律不碰。
 > 竞品名仅限本研究稿（按 `feedback_formal_docs_own_principles_not_brand_names`）；正式设计文档只写 MetaSheet 自己的口径。
@@ -16,7 +18,7 @@
 ## 前序文档（权威基线，本文不重复推导，仅引用并刷新状态）
 
 1. `dingtalk-attendance-vs-metasheet2-comparison-20260514.md` — 考勤高级版/假期高级版/假勤增强版/AI算薪 全量 gap 矩阵（A 排班/B 假期/C 加班/D 防作弊/E 算薪/F 通知/G UX）+ L2 细节（RBAC 4 层、外勤 9 开关、假期基础 4 发放方式…）。**未在本文翻转的项，一律以它为准。**
-2. `dingtalk-attendance-optimization-plan-20260514.md` — 6 阶段落地计划（完整 SQL/API/PR 拆分）。**实施细节仍以它为模板。**
+2. `dingtalk-attendance-optimization-plan-20260514.md`（v1，**已 archived**）— 6 阶段落地计划（SQL/API/PR 拆分）。**⚠️ 仅作 archived 设计参考；当前执行账本 = `docs/development/attendance-dingtalk-benchmark-target-and-tracker-20260601.md`（PR #2190），RBAC / 排序 / 估时一律以 tracker 为准（v1 的 RBAC 一节已被 `scheduler_scopes` 取代作废）。**
 3. `dingtalk-advanced-scheduling-vs-metasheet2-20260522.md` — 付费「高级排班」12 章矩阵；明确声明「截图为登录态占位图，未消化视觉证据」。
 
 **本文的 4 项 delta**：① 新信源（完整手册 + 截图，补 #3 的截图局限）；② 状态翻转（#1/#2/#3 标为「缺失」的几项已落）；③ 字段/公式细节下钻（#1 §7.8 延后的部分 + 专家模式洞察 + 修正）；④ 代码层新发现（computed-only 不落库的脆弱性）。
@@ -172,6 +174,7 @@
 ## 参考
 
 - 手册离线包：`/Users/chouhua/Downloads/alidocs-admin-manual-package/alidocs-admin-manual/`（412 图本地化）
-- 前序文档：`dingtalk-attendance-vs-metasheet2-comparison-20260514.md` · `dingtalk-attendance-optimization-plan-20260514.md` · `dingtalk-advanced-scheduling-vs-metasheet2-20260522.md`
+- **当前执行账本（唯一 ledger）**：`docs/development/attendance-dingtalk-benchmark-target-and-tracker-20260601.md`（PR #2190）
+- 前序文档（archived 设计参考，估时 / 排序 / RBAC 以 tracker 为准）：`dingtalk-attendance-vs-metasheet2-comparison-20260514.md` · `dingtalk-attendance-optimization-plan-20260514.md`（v1）· `dingtalk-advanced-scheduling-vs-metasheet2-20260522.md`
 - 代码证据（origin/main）：`plugins/plugin-attendance/index.cjs`（`:925` 分级字段目录 · `:4357-4362` meta 透传 · `:9260` 迟到一等算 · `:11908` resolveEffectiveCalendar · `:12584-12660` 综合工时 cap）· `packages/core-backend/src/formula/engine.ts`（`:214-217` lookup 家族）
 - 相关 memory：[[project_attendance_effective_calendar_complete]] · [[project_attendance_multitable_report_boundary]] · [[project_attendance_group_admin_ux_chain]] · [[project_k3_poc_stage1_lock]] · [[feedback_metasheet2_skip_when_unreachable_blind_spot]] · [[feedback_formal_docs_own_principles_not_brand_names]]
