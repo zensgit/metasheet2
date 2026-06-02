@@ -91,6 +91,8 @@ export type AutomationLabelKey =
   | 'editor.moveUpTitle'
   | 'editor.moveDownTitle'
   | 'editor.removeActionTitle'
+  | 'editor.executionModeLabel'
+  | 'editor.executionModeHint'
   | 'trigger.title'
   | 'trigger.watchField'
   | 'trigger.selectField'
@@ -296,6 +298,8 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'editor.moveUpTitle',
   'editor.moveDownTitle',
   'editor.removeActionTitle',
+  'editor.executionModeLabel',
+  'editor.executionModeHint',
   'trigger.title',
   'trigger.watchField',
   'trigger.selectField',
@@ -502,6 +506,14 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'editor.moveUpTitle': { en: 'Move up', zh: '上移' },
   'editor.moveDownTitle': { en: 'Move down', zh: '下移' },
   'editor.removeActionTitle': { en: 'Remove action', zh: '移除动作' },
+  'editor.executionModeLabel': {
+    en: 'Persist a per-action run record (advanced)',
+    zh: '持久化每步运行记录（高级）',
+  },
+  'editor.executionModeHint': {
+    en: 'When on, each action run for this rule is saved as a durable WorkflowJob record. Leave off for the default lightweight log.',
+    zh: '开启后，本规则每个动作的运行都会保存为持久的 WorkflowJob 记录；关闭则使用默认的轻量日志。',
+  },
   'trigger.title': { en: 'Trigger', zh: '触发器' },
   'trigger.watchField': { en: 'Watch field', zh: '监听字段' },
   'trigger.selectField': { en: '-- select field --', zh: '-- 选择字段 --' },
