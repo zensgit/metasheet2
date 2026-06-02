@@ -61,3 +61,51 @@ the admin runs view**. That is environment-bound (needs a running stack), so it 
 If all pass, A6-1 is verified **operable**, not just dev-complete. A6-2 (suspend/resume) and beyond
 remain demand-gated — open only on a named human-in-the-loop use-case (webhook/external resume FIRST,
 not delay/timer).
+
+## Execution outcome — 2026-06-02 (live operator smoke: INFRA-DEFERRED)
+
+The loop was exercised against the on-prem package deployed on the shared host `23.254.236.11`,
+served at **root** (`location / → 172.20.0.1:8081`, the MetaSheet all-in-one; web built with
+`VITE_BASE_PATH=/`, see #2207). Result:
+
+- **SPA boots at root.** `https://23.254.236.11/login` renders the MetaSheet login form (expected
+  selectors present) — assets + Vue Router base resolve correctly. Root is the default base, so the
+  #2207 sub-path landmines (asset 404s, root-absolute redirects escaping a sub-path) do **not** apply.
+- **Login blocked at step 1.** Form login through the public URL returns **401** even with a
+  verified-good admin. Root cause is **neither the credentials nor A6-1**: nginx routes `/api/*` to a
+  *different backend* (the co-tenant Athena app), not the MetaSheet instance on `:8081`. Evidence:
+  - `POST https://23.254.236.11/api/auth/login` → 401 carrying `x-tenant-id: default` (Athena's
+    tenant middleware — MetaSheet **never sets** `x-tenant-id` on a response; it only *reads* it as a
+    request header for sharding, verified by source scan) + duplicated security headers
+    (`x-frame-options: DENY` *and* `SAMEORIGIN`) + an **empty** body (MetaSheet always returns a
+    JSON 401 via `res.status(401).json(...)`).
+  - `POST http://127.0.0.1:8081/api/auth/login` (backend-direct, bypassing nginx) → **200** with the
+    same `smoke-admin` creds (operator-verified). So the account is valid; the public `/api` simply
+    reaches the wrong backend.
+
+**Disposition: the live operator smoke is INFRA-DEFERRED** — blocked purely by shared-host `/api`
+routing (co-tenancy with Athena), not by the feature. A6-1 ships **verified three ways** regardless:
+1. every-PR unit (editor toggle → `executionMode`; rule create/update persists + rejects invalid;
+   opt-in routes to the job-persisting executor; A2 prefers persisted jobs);
+2. CI real-DB (`AutomationJobService` lifecycle → jobs + `listByExecution`; `createRule` → `getRule`
+   round-trip on real Postgres) plus the `executeRule`→jobs acceptance seam (#2202);
+3. structural build (web bundle + backend build).
+
+**Exact unblock (then re-run steps 1–6 above).** In the server block that serves MetaSheet at root,
+add an `/api/` location pointing at the same upstream as `location /`, taking priority over any
+pre-existing Athena `/api` (the `^~` makes nginx skip regex locations):
+
+```nginx
+location ^~ /api/ {
+    proxy_pass http://172.20.0.1:8081;   # same upstream as `location /`
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+`nginx -t && nginx -s reload`, then the public `POST /api/auth/login` flips to 200 and the loop
+proceeds. **Caveat:** if Athena still serves on this host, a global `/api` repoint will break it —
+give MetaSheet its own `server_name`/subdomain instead (the standing recommendation for not
+co-tenanting MetaSheet behind another app's root).
