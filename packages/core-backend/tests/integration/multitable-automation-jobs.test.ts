@@ -12,6 +12,9 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { AutomationJobService } from '../../src/multitable/automation-job-service'
+import { AutomationService } from '../../src/multitable/automation-service'
+import { EventBus } from '../../src/integration/events/event-bus'
+import { db } from '../../src/db/db'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -70,5 +73,37 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
   test('listByExecution returns [] for an execution with no jobs (legacy fallback signal)', async () => {
     const views = await jobs.listByExecution(`axe_none_${TS}`)
     expect(views).toEqual([])
+  })
+
+  // A6-1 enable-writer: the opt-in flag must round-trip through the REAL automation_rules
+  // column. Mock-db unit tests assert the INSERT payload; only this proves the migration
+  // column exists, Kysely accepts it, and mapRow reads it back (the wire-vs-fixture gap).
+  test('enable-writer: createRule persists execution_mode and getRule reads it back; off-path is null', async () => {
+    const sheetId = `sheet_enable_${TS}`
+    const svc = new AutomationService(
+      new EventBus(),
+      db as never,
+      (async () => ({ rows: [], rowCount: 0 })) as never,
+    )
+    const createdIds: string[] = []
+    try {
+      const optIn = await svc.createRule(sheetId, {
+        name: 'opt-in', triggerType: 'record.created', triggerConfig: {},
+        actionType: 'update_record', actionConfig: { fields: { status: 'done' } },
+        executionMode: 'workflow_job_v1',
+      })
+      createdIds.push(optIn.id)
+      expect(optIn.execution_mode).toBe('workflow_job_v1')
+      expect((await svc.getRule(optIn.id))?.execution_mode).toBe('workflow_job_v1')
+
+      const legacy = await svc.createRule(sheetId, {
+        name: 'legacy', triggerType: 'record.created', triggerConfig: {},
+        actionType: 'update_record', actionConfig: { fields: { status: 'done' } },
+      })
+      createdIds.push(legacy.id)
+      expect((await svc.getRule(legacy.id))?.execution_mode).toBeNull()
+    } finally {
+      for (const id of createdIds) await q('DELETE FROM automation_rules WHERE id = $1', [id])
+    }
   })
 })

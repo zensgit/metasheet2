@@ -385,6 +385,7 @@ describe('M5 — Automation route helpers', () => {
         createdAt: '2026-01-02T03:04:05Z',
         updatedAt: '2026-01-02T03:04:05Z',
         createdBy: 'user_a',
+        executionMode: null,
       })
     })
 
@@ -393,6 +394,13 @@ describe('M5 — Automation route helpers', () => {
       const out = serializeAutomationRule(rule)
       expect(out.name).toBe('')
       expect(out.createdBy).toBeUndefined()
+    })
+
+    it('A6-1: emits executionMode (null when unset, the opt-in value when set)', () => {
+      expect(serializeAutomationRule(createMockRule({})).executionMode).toBeNull()
+      expect(
+        serializeAutomationRule(createMockRule({ execution_mode: 'workflow_job_v1' })).executionMode,
+      ).toBe('workflow_job_v1')
     })
   })
 
@@ -524,6 +532,22 @@ describe('M5 — Automation route helpers', () => {
       expect(input.conditions).toBeNull()
       expect(input.actions).toBeNull()
     })
+
+    it('A6-1: forwards executionMode raw for the service to validate', () => {
+      expect(
+        parseCreateRuleInput(
+          { triggerType: 'record.created', actionType: 'send_notification', executionMode: 'workflow_job_v1' },
+          null,
+        ).executionMode,
+      ).toBe('workflow_job_v1')
+      // Absent → undefined (createRule normalizes to null = off).
+      expect(
+        parseCreateRuleInput(
+          { triggerType: 'record.created', actionType: 'send_notification' },
+          null,
+        ).executionMode,
+      ).toBeUndefined()
+    })
   })
 
   describe('parseUpdateRuleInput', () => {
@@ -587,6 +611,14 @@ describe('M5 — Automation route helpers', () => {
     it('accepts the legacy `notify` and `update_field` action types', () => {
       expect(parseUpdateRuleInput({ actionType: 'notify' })?.actionType).toBe('notify')
       expect(parseUpdateRuleInput({ actionType: 'update_field' })?.actionType).toBe('update_field')
+    })
+
+    it('A6-1: forwards executionMode (incl. explicit null) as a touched field', () => {
+      expect(parseUpdateRuleInput({ executionMode: 'workflow_job_v1' })?.executionMode).toBe('workflow_job_v1')
+      // Explicit null is a real update (reset to off), so the body is touched, not null-returned.
+      const reset = parseUpdateRuleInput({ executionMode: null })
+      expect(reset).not.toBeNull()
+      expect(reset?.executionMode).toBeNull()
     })
   })
 
