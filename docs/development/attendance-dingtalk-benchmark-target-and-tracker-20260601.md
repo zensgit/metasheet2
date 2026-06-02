@@ -51,7 +51,7 @@
 | 固定班 preview/apply + provenance + managed controls · 周矩阵展示 · 打卡只读抽屉 · HR 字段/onboarding/work-time drawer · FormulaEngine（仅差 4–5 函数） | （红利） | ✅ | 并行 session 两天内落地 |
 | 排班合规引擎（超出禁止保存） | MUST | ⬜ | 综合工时仅报表 warn；排班时 block = 0 |
 | 未排班提醒（= scheduler+notifier 基座刀） | MUST | ⬜ | **verify 2026-06-01 证伪"渠道已有"**：attendance 无调度器、无事件→通知消费者 → 镜像 `ApprovalSlaScheduler`+notifier；2–3pd；与假期过期提醒共建。处理策略已移入 ③ |
-| 排班修改窗 | MUST | ⬜ | **greenfield**（2026-06-01 轻核：原标的 5 hits 经核为无关的 report-sync job-locking，并非排班修改窗）；可**免迁移**——policy 入现有 `ruleSet.config` JSONB + update-time 按日期判窗，hook 在 assignment PUT/DELETE 路由 |
+| 排班修改窗 | MUST | ✅ | #2197（squash `2d4808fe`，2026-06-02）：org-level `shiftEditPolicy` 入 attendance settings JSON（默认 `unrestricted`，无 DDL）+ shift/rotation assignment POST/PUT/DELETE 6 写路由显式 422 `SHIFT_EDIT_WINDOW_EXCEEDED`；PUT/DELETE 同看 existing start date + next start date 防历史绕窗；unit + CI real-DB attendance integration 绿 |
 | 外勤审批 | MUST | ⬜ | 0 |
 | 内外勤卡合并 | MUST | ⬜ | 0（打卡抽屉只读） |
 | 加班↔调休 | MUST | ⬜ | 0 |
@@ -69,7 +69,7 @@
 
 ## 3. H2 执行排序（产品负责人 2026-06-01）
 
-① **排班修改窗**（**首刀**；纯 update-time 校验，不碰 scheduler/notifier 新基座；治理价值高）
+① **排班修改窗**（✅ #2197 已落；纯 write-time 校验，不碰 scheduler/notifier 新基座；治理价值高）
 ② **打卡策略组**（外勤审批 + 内外勤合并 + 未排班打卡策略；一个 punch-policy 配置基座 design-lock）
 ③ **排班合规引擎**（招牌）
 ④ **加班调休 + 假期过期**（假勤闭环；假期过期提醒在此**首建** scheduler/notifier 基座）
@@ -78,7 +78,7 @@
 
 > **回填（2026-06-01 pre-flight 发现）**：原排序把"未排班提醒"列首，依据"渠道已有/最便宜"——**verify 证伪**（attendance 无调度器、无事件→通知消费者）。故改：**排班修改窗为首刀**（真·最便宜 + 治理高）；未排班提醒降级为后续"scheduler+notifier 基座"基础设施刀（2–3pd，与假期过期提醒共建）；未排班处理策略归 ③ 打卡策略组。
 
-> **⚠️ schema 成组迁移，别一刀一迁。** 首刀"排班修改窗"按当前实现路线**不做 DDL**：policy 先落现有 `ruleSet.config` JSONB，write-time 按受影响日期判窗。后续若要把排班合规（`shift_constraints`）、发布（`status`）、多班次（`slot`）、或持久锁窗（`locked_at`）落到 `attendance_shift_assignments`/`rule_sets`，这些 schema 变更再打一个协调 migration，再分层叠 service/UI（v1 阶段2 已是此意）。
+> **⚠️ schema 成组迁移，别一刀一迁。** 首刀"排班修改窗"已按 #2197 路线**无 DDL 落地**：policy 先进 org-level attendance settings JSON（`shiftEditPolicy`），write-time 按受影响日期判窗。后续若要把排班合规（`shift_constraints`）、发布（`status`）、多班次（`slot`）、或持久锁窗（`locked_at`）落到 `attendance_shift_assignments`/`rule_sets`，这些 schema 变更再打一个协调 migration，再分层叠 service/UI（v1 阶段2 已是此意）。
 
 ---
 
