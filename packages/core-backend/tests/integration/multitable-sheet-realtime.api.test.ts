@@ -76,6 +76,9 @@ describe('Multitable sheet realtime events', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {} }] }
         }
+        if (sql.includes('SELECT pg_advisory_xact_lock')) {
+          return { rows: [] }
+        }
         if (sql.includes('INSERT INTO meta_records') && sql.includes('RETURNING version')) {
           expect(params).toEqual([
             expect.stringMatching(/^rec_/),
@@ -84,6 +87,9 @@ describe('Multitable sheet realtime events', () => {
             'user_realtime_1',
           ])
           return { rows: [{ version: 1 }] }
+        }
+        if (sql.includes('INSERT INTO meta_record_revisions')) {
+          return { rows: [], rowCount: 1 }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
@@ -101,7 +107,8 @@ describe('Multitable sheet realtime events', () => {
       version: 1,
       data: { fld_title: 'Alpha' },
     })
-    expect(publishSpy).toHaveBeenCalledWith('spreadsheet.cell.updated', expect.objectContaining({
+    const payload = publishSpy.mock.calls[0]?.[1]
+    expect(payload).toMatchObject({
       spreadsheetId: 'sheet_ops',
       actorId: 'user_realtime_1',
       source: 'multitable',
@@ -109,12 +116,9 @@ describe('Multitable sheet realtime events', () => {
       recordId: response.body.data.record.id,
       recordIds: [response.body.data.record.id],
       fieldIds: ['fld_title'],
-      recordPatches: [{
-        recordId: response.body.data.record.id,
-        version: 1,
-        patch: { fld_title: 'Alpha' },
-      }],
-    }))
+    })
+    expect(payload).not.toHaveProperty('recordPatches')
+    expect(JSON.stringify(payload)).not.toContain('Alpha')
   })
 
   test('publishes spreadsheet.cell.updated after form submit updates a record', async () => {
@@ -149,17 +153,31 @@ describe('Multitable sheet realtime events', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
         }
+        if (sql.includes('SELECT pg_advisory_xact_lock')) {
+          return { rows: [] }
+        }
         if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_1', 'sheet_ops'])
           return { rows: [{ id: 'rec_1', version: 4, created_by: 'user_realtime_1' }] }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
-          expect(params).toEqual([JSON.stringify({ fld_title: 'Updated title' }), 'rec_1', 'sheet_ops'])
+          expect(params).toEqual([
+            JSON.stringify({ fld_title: 'Updated title' }),
+            'rec_1',
+            'sheet_ops',
+            'user_realtime_1',
+          ])
           return { rows: [{ version: 5 }] }
+        }
+        if (sql.includes('INSERT INTO meta_record_revisions')) {
+          return { rows: [], rowCount: 1 }
         }
         if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
           expect(params).toEqual(['rec_1', 'sheet_ops'])
           return { rows: [{ id: 'rec_1', version: 5, data: { fld_title: 'Updated title' } }] }
+        }
+        if (sql.includes('FROM formula_dependencies')) {
+          return { rows: [] }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
@@ -175,7 +193,8 @@ describe('Multitable sheet realtime events', () => {
       .expect(200)
 
     expect(response.body.data.mode).toBe('update')
-    expect(publishSpy).toHaveBeenCalledWith('spreadsheet.cell.updated', {
+    const payload = publishSpy.mock.calls[0]?.[1]
+    expect(payload).toEqual({
       spreadsheetId: 'sheet_ops',
       actorId: 'user_realtime_1',
       source: 'multitable',
@@ -183,12 +202,9 @@ describe('Multitable sheet realtime events', () => {
       recordId: 'rec_1',
       recordIds: ['rec_1'],
       fieldIds: ['fld_title'],
-      recordPatches: [{
-        recordId: 'rec_1',
-        version: 5,
-        patch: { fld_title: 'Updated title' },
-      }],
     })
+    expect(payload).not.toHaveProperty('recordPatches')
+    expect(JSON.stringify(payload)).not.toContain('Updated title')
   })
 
   test('publishes aggregate update events for bulk patch', async () => {
@@ -203,21 +219,38 @@ describe('Multitable sheet realtime events', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'sheet_ops' }] }
         }
-        if (sql.includes('SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1')) {
+        if (sql.includes('SELECT id, name, type, property')) {
           expect(params).toEqual(['sheet_ops'])
-          return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {} }] }
+          return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
         }
-        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+        if (sql.includes('FROM field_permissions')) {
+          return { rows: [] }
+        }
+        if (sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
           expect(params).toEqual(['sheet_ops', 'rec_1'])
-          return { rows: [{ id: 'rec_1', version: 2, created_by: 'user_realtime_1' }] }
+          return { rows: [{ id: 'rec_1', version: 2, data: { fld_title: 'Original title' }, created_by: 'user_realtime_1' }] }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('WHERE sheet_id = $2 AND id = $3')) {
-          expect(params).toEqual([JSON.stringify({ fld_title: 'Bulk patched' }), 'sheet_ops', 'rec_1'])
+          expect(params).toEqual([
+            JSON.stringify({ fld_title: 'Bulk patched' }),
+            'sheet_ops',
+            'rec_1',
+            'user_realtime_1',
+          ])
           return { rows: [{ version: 3 }] }
+        }
+        if (sql.includes('INSERT INTO meta_record_revisions')) {
+          return { rows: [], rowCount: 1 }
         }
         if (sql.includes('SELECT record_id FROM meta_links WHERE foreign_record_id = ANY($1::text[])')) {
           expect(params).toEqual([['rec_1']])
           return { rows: [] }
+        }
+        if (sql.includes('FROM meta_record_subscriptions')) {
+          return { rows: [] }
+        }
+        if (sql.includes('INSERT INTO meta_record_subscription_notifications')) {
+          return { rows: [], rowCount: 0 }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
@@ -232,18 +265,16 @@ describe('Multitable sheet realtime events', () => {
       .expect(200)
 
     expect(response.body.data.updated).toEqual([{ recordId: 'rec_1', version: 3 }])
-    expect(publishSpy).toHaveBeenCalledWith('spreadsheet.cell.updated', {
+    const payload = publishSpy.mock.calls[0]?.[1]
+    expect(payload).toEqual({
       spreadsheetId: 'sheet_ops',
       actorId: 'user_realtime_1',
       source: 'multitable',
       kind: 'record-updated',
       recordIds: ['rec_1'],
       fieldIds: ['fld_title'],
-      recordPatches: [{
-        recordId: 'rec_1',
-        version: 3,
-        patch: { fld_title: 'Bulk patched' },
-      }],
     })
+    expect(payload).not.toHaveProperty('recordPatches')
+    expect(JSON.stringify(payload)).not.toContain('Bulk patched')
   })
 })

@@ -107,11 +107,12 @@ export function useMultitableCommentRealtime(options: UseMultitableCommentRealti
         const userId = await auth.getCurrentUserId().catch(() => null)
         if (disconnected) return null
         currentUserId = userId
+        const token = auth.getToken()
 
         const nextSocket = io(getApiBase() || window.location.origin, {
           autoConnect: true,
           transports: ['websocket'],
-          query: userId ? { userId } : undefined,
+          auth: token ? { token } : undefined,
         })
 
         nextSocket.on('comment:created', (payload: CommentEventPayload) => {

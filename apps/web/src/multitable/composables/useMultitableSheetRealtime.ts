@@ -14,18 +14,7 @@ type SheetOpEvent = {
     recordId?: string
     recordIds?: string[]
     fieldIds?: string[]
-    recordPatches?: Array<{
-      recordId?: string
-      version?: number
-      patch?: Record<string, unknown> | null
-    }>
   } | null
-}
-
-type SheetOpRecordPatch = {
-  recordId: string
-  version?: number
-  patch: Record<string, unknown>
 }
 
 type NormalizedSheetOpEvent = {
@@ -35,7 +24,6 @@ type NormalizedSheetOpEvent = {
   recordId: string
   recordIds: string[]
   fieldIds: string[]
-  recordPatches: SheetOpRecordPatch[]
 }
 
 type UseMultitableSheetRealtimeOptions = {
@@ -72,21 +60,6 @@ function normalizeSheetOpEvent(payload: SheetOpEvent | null | undefined) {
   const fieldIds = Array.isArray(data?.fieldIds)
     ? data.fieldIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     : []
-  const recordPatches = Array.isArray(data?.recordPatches)
-    ? data.recordPatches.flatMap((entry) => {
-      if (!entry || typeof entry !== 'object') return []
-      const recordId = typeof entry.recordId === 'string' ? entry.recordId.trim() : ''
-      const patch = entry.patch && typeof entry.patch === 'object' && !Array.isArray(entry.patch)
-        ? { ...entry.patch }
-        : null
-      if (!recordId || !patch) return []
-      return [{
-        recordId,
-        version: typeof entry.version === 'number' ? entry.version : undefined,
-        patch,
-      }]
-    })
-    : []
   return {
     spreadsheetId,
     actorId,
@@ -94,7 +67,6 @@ function normalizeSheetOpEvent(payload: SheetOpEvent | null | undefined) {
     recordId,
     recordIds,
     fieldIds,
-    recordPatches,
   }
 }
 
@@ -113,10 +85,6 @@ function buildTargetRecordIds(event: NormalizedSheetOpEvent): string[] {
     ...(event.recordId ? [event.recordId] : []),
     ...event.recordIds,
   ])
-}
-
-function buildRecordPatchMap(event: NormalizedSheetOpEvent): Map<string, SheetOpRecordPatch> {
-  return new Map(event.recordPatches.map((entry) => [entry.recordId, entry]))
 }
 
 export function useMultitableSheetRealtime(options: UseMultitableSheetRealtimeOptions) {
@@ -171,7 +139,6 @@ export function useMultitableSheetRealtime(options: UseMultitableSheetRealtimeOp
     const visibleRecordIds = uniqueIds(readValue(options.visibleRecordIds ?? []) ?? [])
     const structuralFieldIds = uniqueIds(readValue(options.structuralFieldIds ?? []) ?? [])
     const targetRecordIds = buildTargetRecordIds(event)
-    const recordPatchMap = buildRecordPatchMap(event)
     const localTargetRecordIds = targetRecordIds.filter((recordId) => (
       visibleRecordIds.includes(recordId) || (selectedRecordId != null && recordId === selectedRecordId)
     ))
@@ -202,21 +169,9 @@ export function useMultitableSheetRealtime(options: UseMultitableSheetRealtimeOp
       return
     }
 
-    const unresolvedRecordIds: string[] = []
-    for (const recordId of localTargetRecordIds) {
-      const patchEntry = recordPatchMap.get(recordId)
-      if (!patchEntry || !options.applyRemoteRecordPatch) {
-        unresolvedRecordIds.push(recordId)
-        continue
-      }
-      const applied = await options.applyRemoteRecordPatch({
-        recordId,
-        version: patchEntry.version,
-        fieldIds: event.fieldIds,
-        patch: patchEntry.patch,
-      })
-      if (!applied) unresolvedRecordIds.push(recordId)
-    }
+    // Realtime sheet ops are invalidation signals. Do not apply value-bearing
+    // patches even if an old sender accidentally includes them.
+    const unresolvedRecordIds = localTargetRecordIds
 
     if (unresolvedRecordIds.length === 0) return
 
@@ -245,11 +200,12 @@ export function useMultitableSheetRealtime(options: UseMultitableSheetRealtimeOp
         const userId = await auth.getCurrentUserId().catch(() => null)
         if (disconnected) return null
         currentUserId = userId
+        const token = auth.getToken()
 
         const nextSocket = io(getApiBase() || window.location.origin, {
           autoConnect: true,
           transports: ['websocket'],
-          query: userId ? { userId } : undefined,
+          auth: token ? { token } : undefined,
         })
 
         nextSocket.on('sheet:op', (payload: SheetOpEvent) => {
