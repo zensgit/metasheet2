@@ -7,6 +7,7 @@ const { createPipelineRunner } = require(path.join(__dirname, '..', 'lib', 'pipe
 const { createDeadLetterStore } = require(path.join(__dirname, '..', 'lib', 'dead-letter.cjs'))
 const { createWatermarkStore } = require(path.join(__dirname, '..', 'lib', 'watermark.cjs'))
 const { createRunLogger } = require(path.join(__dirname, '..', 'lib', 'run-log.cjs'))
+const { createDataSourceSqlReadonlySourceAdapterFactory } = require(path.join(__dirname, '..', 'lib', 'adapters', 'data-source-sql-readonly-source-adapter.cjs'))
 
 function createMockDb() {
   const tables = new Map([
@@ -229,6 +230,84 @@ function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead
   })
 
   return { adapterSystems, db, pipeline, runner, sourceRecords, targetRows }
+}
+
+// C2a harness: runs a pipeline whose SOURCE is the real `data-source:sql-readonly` bridge adapter,
+// reading through a faithful fake of the host facade (which fails closed on a missing principal,
+// exactly like the real createDataSourcePluginFacade). Proves the runner threads pipeline.createdBy
+// to the source read, that a dry-run reads real rows, and that a NULL createdBy fails closed.
+function createDataSourceBridgeHarness({ rows, createdBy }) {
+  const db = createMockDb()
+  const targetRows = new Map()
+  const facadeCalls = { test: [], getSchema: [], getTableInfo: [], select: [] }
+  function requirePrincipal(principal) {
+    if (typeof principal !== 'string' || principal.trim() === '') {
+      throw new Error('data source read requires an owner principal (none provided)')
+    }
+  }
+  const dataSourcesApi = {
+    async test(id, principal) { requirePrincipal(principal); facadeCalls.test.push({ id, principal }); return { success: true } },
+    async getSchema(id, principal) { requirePrincipal(principal); facadeCalls.getSchema.push({ id, principal }); return { tables: [{ name: 'items', schema: 'public', columns: [] }], views: [] } },
+    async getTableInfo(id, object, principal) { requirePrincipal(principal); facadeCalls.getTableInfo.push({ id, object, principal }); return { columns: [{ name: 'id', type: 'int' }, { name: 'name', type: 'text' }] } },
+    async select(id, table, options, principal) {
+      requirePrincipal(principal)
+      facadeCalls.select.push({ id, table, options, principal })
+      const offset = options.offset || 0
+      const limit = options.limit || rows.length
+      return { data: rows.slice(offset, offset + limit), metadata: {} }
+    },
+  }
+  const pipeline = {
+    id: 'pipe_ds',
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    projectId: 'project_1',
+    createdBy,
+    sourceSystemId: 'source_ds',
+    sourceObject: 'public.items',
+    targetSystemId: 'target_1',
+    targetObject: 'BD_MATERIAL',
+    mode: 'full',
+    status: 'active',
+    idempotencyKeyFields: ['id'],
+    options: { batchSize: 100 },
+    fieldMappings: [
+      { sourceField: 'id', targetField: 'FID', validation: [{ type: 'required' }] },
+      { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },
+    ],
+  }
+  const systems = new Map([
+    ['source_ds', { id: 'source_ds', name: 'DS bridge', kind: 'data-source:sql-readonly', role: 'source', config: { dataSourceId: 'pg-1' } }],
+    ['target_1', { id: 'target_1', name: 'ERP mock', kind: 'mock-target', role: 'target', config: {} }],
+  ])
+  const externalSystemRegistry = {
+    async getExternalSystem(input) { return systems.get(input.id) },
+    async getExternalSystemForAdapter(input) { const s = systems.get(input.id); return s ? { ...s } : null },
+  }
+  const adapterRegistry = createAdapterRegistry()
+    .registerAdapter('data-source:sql-readonly', createDataSourceSqlReadonlySourceAdapterFactory({ context: { api: { dataSources: dataSourcesApi } } }))
+    .registerAdapter('mock-target', ({ system }) => ({
+      system,
+      async testConnection() { return { ok: true } },
+      async listObjects() { return [{ name: 'BD_MATERIAL' }] },
+      async getSchema() { return { fields: [] } },
+      async read() { return createReadResult({ records: [] }) },
+      async upsert(input) {
+        for (const record of input.records) targetRows.set(record._integration_idempotency_key, record)
+        return createUpsertResult({ written: input.records.length, skipped: 0, results: input.records.map((record) => ({ key: record._integration_idempotency_key })) })
+      },
+    }))
+  const pipelineRegistry = createPipelineRegistry(pipeline, db)
+  const runner = createPipelineRunner({
+    pipelineRegistry,
+    externalSystemRegistry,
+    adapterRegistry,
+    deadLetterStore: createDeadLetterStore({ db, idGenerator: () => `dl_${db.tables.get('integration_dead_letters').length + 1}` }),
+    watermarkStore: createWatermarkStore({ db }),
+    runLogger: createRunLogger({ pipelineRegistry }),
+    clock: (() => { let tick = 0; return () => tick++ * 25 })(),
+  })
+  return { db, pipeline, runner, facadeCalls, targetRows }
 }
 
 async function main() {
@@ -1592,8 +1671,49 @@ async function main() {
     assert.equal(captured.details.provenanceWarning.code, 'PROVENANCE_NORMALIZE_FAILED')
   }
 
+  // --- C2a: runner threads pipeline.createdBy to the data-source:sql-readonly source -----------
+  {
+    const h = createDataSourceBridgeHarness({
+      rows: [{ id: 1, name: 'Widget' }, { id: 2, name: 'Gadget' }],
+      createdBy: 'owner-7',
+    })
+    const dry = await h.runner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_ds', mode: 'full', triggeredBy: 'manual', dryRun: true, sampleLimit: 10,
+    })
+    // Reachability keystone: the dry-run read real rows end-to-end through the real bridge adapter -> facade.
+    assert.equal(dry.metrics.rowsRead, 2, 'C2a: dry-run reads rows from the data-source:sql-readonly bridge')
+    assert.ok(dry.preview.records.length >= 1, 'C2a: dry-run produced a cleansed preview')
+    assert.equal(h.targetRows.size, 0, 'C2a: dry-run does not write the target')
+    // Principal keystone: the facade saw pipeline.createdBy, not the request user and not null.
+    assert.ok(h.facadeCalls.select.length >= 1, 'C2a: the source read routed through the host facade')
+    assert.equal(h.facadeCalls.select[0].principal, 'owner-7', 'C2a: run uses pipeline.createdBy as the source principal')
+  }
+
+  // --- C2a: NULL createdBy fails closed (no fallback principal, no read performed) --------------
+  {
+    const h = createDataSourceBridgeHarness({ rows: [{ id: 1, name: 'Widget' }], createdBy: null })
+    let failed = false
+    let message = ''
+    try {
+      const run = await h.runner.runPipeline({
+        tenantId: 'tenant_1', pipelineId: 'pipe_ds', mode: 'full', triggeredBy: 'manual', dryRun: true, sampleLimit: 10,
+      })
+      if (run && run.run && run.run.status === 'failed') { failed = true; message = run.run.errorSummary || '' }
+    } catch (err) {
+      failed = true
+      // The runner wraps a source-read failure in PipelineRunnerError('pipeline run failed') and keeps
+      // the original message under details.cause — here the facade's missing-principal fail-closed.
+      message = (err && err.details && err.details.cause) || (err && err.message) || String(err)
+    }
+    assert.ok(failed, 'C2a: a pipeline with NULL createdBy fails closed (no silent success)')
+    assert.match(message, /owner principal/i, 'C2a: the fail-closed reason is the missing owner principal')
+    assert.equal(h.facadeCalls.select.length, 0, 'C2a: no read is performed without a principal (no fallback identity)')
+    assert.equal(h.targetRows.size, 0, 'C2a: nothing is written when the source principal is missing')
+  }
+
   console.log('✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed')
   console.log('✓ pipeline-runner: DF-N2-2b provenance write tests passed (14-20)')
+  console.log('✓ pipeline-runner: C2a data-source bridge principal-threading tests passed')
 }
 
 main().catch((err) => {

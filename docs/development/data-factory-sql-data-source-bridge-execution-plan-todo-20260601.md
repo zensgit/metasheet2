@@ -59,13 +59,20 @@ Acceptance locks (covered by `tests/unit/data-source-plugin-facade.test.ts` + `_
 
 **Post-merge hardening (review of #2192):** two fixes landed after C1 merged — (a) the **writable-source guard moved into the host facade's `authorize()`**, so a writable `data_sources` binding now fails closed on **every** read method (`test/getSchema/getTableInfo/select`), not only when `testConnection()` ran first (the dry-run/pipeline read paths skip it); (b) **adapter metadata** added in `http-routes.cjs` so `/api/integration/adapters` advertises `data-source:sql-readonly` as **`roles:['source']`, no `upsert`, `write:{supported:false}`** instead of the default `source,target,bidirectional`+`upsert`. Both locked by tests (`data-source-plugin-facade.test.ts` writable-every-method · `http-routes.test.cjs` metadata).
 
-### ⬜ C2 — Impl-2: workbench source-system wiring + runner principal-threading
-Gated on: C1 + opt-in. Frontend + the one runner seam.
-- [ ] **Runner provides the principal**: `createAdapter(sourceSystem, { role:'source', principal: pipeline.createdBy })` (pipeline loaded via `pipelines.cjs:302`); direct external-system test/schema uses the request user. **Lock: a run uses `pipeline.createdBy` (not request user, not null); a NULL-`createdBy` pipeline fails closed with a legible config error.** Also bounds the page loop (`maxPages` fail-closed, no silent truncation).
+### 🟢 C2a — Impl-2a: runner principal-threading (backend) — LANDED 2026-06-02
+Gated on: C1 + opt-in. The one shared-runtime seam, isolated for focused review.
+- [x] **Runner provides the principal**: `createContext` now calls `createAdapter(sourceSystem, { role:'source', principal: pipeline.createdBy })`; the target adapter is unchanged. Adapters that don't need a principal (staging/k3/http) ignore the extra dep (verified: full runner + e2e suite green).
+- [x] **Reachability (backend)**: a runner test runs a `data-source:sql-readonly` pipeline whose source reads through the **real** bridge adapter + a faithful fake facade; **dry-run reads real rows** (`rowsRead=2`, cleansed preview, no target write).
+- [x] **Lock — run uses `pipeline.createdBy`**: the facade receives `principal = pipeline.createdBy` (not the request user, not null).
+- [x] **Lock — NULL `createdBy` fails closed**: a null-`createdBy` pipeline fails closed (facade missing-principal error surfaced via the run failure); **no read is performed** (no fallback identity) and nothing is written.
+- The `maxPages` page-loop bound is the existing pipeline-runner behavior; the adapter returns correct `done`/`nextCursor` (C1). No new paging logic added here.
+
+### ⬜ C2b — Impl-2b: workbench source picker (frontend)
+Gated on: C2a + opt-in. Frontend-only.
 - [ ] Workbench "select source system" surfaces a `data-source:sql-readonly` system; pick the data source → object (table/view) → fields.
 - [ ] Enters the **existing** dry-run / staging / provenance flow (no new pipeline machinery).
-- [ ] **Reachability test**: author a source → dry-run → rows appear in staging/provenance — read-only, no write.
-- [ ] `/data-sources` stays the sole connection/credential surface; the workbench **references** it (a `dataSourceId` picker), does not embed connection CRUD.
+- [ ] **Reachability test (UI)**: author a source via the picker → dry-run → rows appear — read-only, no write.
+- [ ] `/data-sources` stays the sole connection/credential surface; the workbench **references** it (a `dataSourceId` picker, **no credential copy**), does not embed connection CRUD.
 
 ### 🔒 C3 — Incremental / watermark reads
 Gated on: C1/C2 + a watermark-column convention + opt-in.
