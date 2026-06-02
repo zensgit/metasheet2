@@ -154,6 +154,26 @@ describe('attendance scheduling assignment conflict guard', () => {
     })
   })
 
+  it('isUserScheduledForDate locks the fixed/free applicability guard + scheduled_shift coverage', async () => {
+    // 1st db.query -> group-type rows; 2nd (reached only when applicable) -> coverage rows
+    const mkDb = (groups: unknown[], coverage: unknown[]) => ({
+      query: vi.fn().mockResolvedValueOnce(groups).mockResolvedValueOnce(coverage),
+    })
+    const fn = helpers.isUserScheduledForDate
+    // fixed_shift / free_time / mixed-with-non-scheduled / no-group -> NOT applicable -> scheduled (never blocked)
+    expect(await fn(mkDb([{ attendance_type: 'fixed_shift' }], []), 'o', 'u', '2026-06-02')).toBe(true)
+    expect(await fn(mkDb([{ attendance_type: 'free_time' }], []), 'o', 'u', '2026-06-02')).toBe(true)
+    expect(await fn(mkDb([{ attendance_type: 'scheduled_shift' }, { attendance_type: 'fixed_shift' }], []), 'o', 'u', '2026-06-02')).toBe(true)
+    expect(await fn(mkDb([], []), 'o', 'u', '2026-06-02')).toBe(true)
+    // EVERY group scheduled_shift + NO schedule/assignment coverage -> unscheduled (false) -> blockable
+    expect(await fn(mkDb([{ attendance_type: 'scheduled_shift' }], []), 'o', 'u', '2026-06-02')).toBe(false)
+    // EVERY group scheduled_shift + coverage present -> scheduled (true)
+    expect(await fn(mkDb([{ attendance_type: 'scheduled_shift' }], [{ ok: 1 }]), 'o', 'u', '2026-06-02')).toBe(true)
+    // missing user / invalid date -> scheduled (no block), short-circuits before any DB call
+    expect(await fn(mkDb([], []), 'o', '', '2026-06-02')).toBe(true)
+    expect(await fn(mkDb([], []), 'o', 'u', 'not-a-date')).toBe(true)
+  })
+
   it('takes a per-org/user advisory lock before transactional writes', async () => {
     const db = { query: vi.fn().mockResolvedValue([]) }
 
