@@ -72,6 +72,18 @@ function parseOffsetCursor(cursor) {
   return numeric
 }
 
+// getSchema/getTableInfo want a BARE table name + a SEPARATE schema, but listObjects emits (and
+// read/select accept) a `schema.table` qualified name. Split a single-dot qualified object back into
+// { schema, table } so getTableInfo resolves the right table instead of looking for a table literally
+// named "schema.table"; a bare object keeps the connection's config-level schema (if any).
+function splitQualifiedObject(object, defaultSchema) {
+  const dot = object.indexOf('.')
+  if (dot > 0 && dot < object.length - 1 && object.indexOf('.', dot + 1) === -1) {
+    return { schema: object.slice(0, dot), table: object.slice(dot + 1) }
+  }
+  return { schema: defaultSchema, table: object }
+}
+
 function mapColumns(columns) {
   if (!Array.isArray(columns)) return []
   return columns.map((column) => ({
@@ -130,7 +142,10 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal }
     async getSchema(input = {}) {
       const object = requiredString(input.object, 'object')
       const api = getDataSourcesApi(context)
-      const tableInfo = await api.getTableInfo(dataSourceId, object, principal, schema)
+      // A schema-qualified object (e.g. `public.items`, as listObjects emits) is split back into
+      // table + schema for getTableInfo, which takes them separately; a bare object keeps config.schema.
+      const { schema: effectiveSchema, table } = splitQualifiedObject(object, schema)
+      const tableInfo = await api.getTableInfo(dataSourceId, table, principal, effectiveSchema)
       return {
         object,
         fields: mapColumns(tableInfo && tableInfo.columns),
