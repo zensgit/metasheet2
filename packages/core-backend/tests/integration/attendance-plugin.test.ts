@@ -4161,11 +4161,17 @@ attendanceIntegrationDescribe(
           ...originalSettings,
           minPunchIntervalMinutes: 60,
           comprehensiveHours: { capDefaults: { month: 10560, quarter: 31680, year: 126720 } },
+          shiftCompliance: {
+            enforcement: 'warn',
+            dailyMaxMinutes: 480,
+            weeklyMaxMinutes: 2400,
+            monthlyMaxMinutes: 9600,
+          },
         }),
       })
       expect(saveSettingsRes.status).toBe(200)
 
-      // Real-wire round-trip: comprehensiveHours.capDefaults must survive the PUT zod
+      // Real-wire round-trip: config sub-shapes must survive the PUT zod
       // schema + persistence and come back on GET — not be silently stripped. Guards the
       // save-path drift class (a field present in the normalizer but missing from the
       // route schema would persist as nothing).
@@ -4174,9 +4180,18 @@ attendanceIntegrationDescribe(
       })
       expect(reloadRes.status).toBe(200)
       const reloaded = (reloadRes.body as {
-        data?: { comprehensiveHours?: { capDefaults?: Record<string, number | null> } }
+        data?: {
+          comprehensiveHours?: { capDefaults?: Record<string, number | null> }
+          shiftCompliance?: Record<string, unknown>
+        }
       } | undefined)?.data
       expect(reloaded?.comprehensiveHours?.capDefaults).toEqual({ month: 10560, quarter: 31680, year: 126720 })
+      expect(reloaded?.shiftCompliance).toEqual({
+        enforcement: 'warn',
+        dailyMaxMinutes: 480,
+        weeklyMaxMinutes: 2400,
+        monthlyMaxMinutes: 9600,
+      })
 
       const futurePunchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
         method: 'POST',

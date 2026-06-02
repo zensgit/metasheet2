@@ -99,6 +99,14 @@ const DEFAULT_SETTINGS = {
     mode: 'unrestricted',
     windowDays: 0,
   },
+  // 排班合规引擎 (shift-compliance engine) — LATENT foundation (design-lock #2213 / S0).
+  // Nothing enforces this until S1/S2 wire the save-path guards. null caps = no enforcement.
+  shiftCompliance: {
+    enforcement: 'block',
+    dailyMaxMinutes: null,
+    weeklyMaxMinutes: null,
+    monthlyMaxMinutes: null,
+  },
   // 打卡策略组 (punch-policy group) — LATENT foundation (design-lock #2203 / S0). NOTHING reads this
   // yet; each enforcement slice wires + exposes its own field (S1 unscheduled-punch / S2 in-out merge /
   // S3 outdoor approval). All defaults = current behaviour (no regression).
@@ -10813,6 +10821,7 @@ function normalizeSettings(raw) {
     geoFence,
     minPunchIntervalMinutes: Math.max(0, parseNumber(raw.minPunchIntervalMinutes, DEFAULT_SETTINGS.minPunchIntervalMinutes)),
     shiftEditPolicy: normalizeShiftEditPolicySetting(raw.shiftEditPolicy),
+    shiftCompliance: normalizeShiftComplianceSetting(raw.shiftCompliance),
     punchPolicy: normalizePunchPolicySetting(raw.punchPolicy),
     formula: {
       allowRawAliases: parseBoolean(formula.allowRawAliases, DEFAULT_SETTINGS.formula.allowRawAliases),
@@ -10849,6 +10858,27 @@ function normalizeShiftEditPolicySetting(raw) {
   return {
     mode,
     windowDays: Math.max(0, Math.floor(parseNumber(policy.windowDays, DEFAULT_SETTINGS.shiftEditPolicy.windowDays))),
+  }
+}
+
+// Shift-compliance engine (design-lock #2213 / S0). Pure normalize of the latent config:
+// fills defaults, treats invalid caps as unset, and does not enforce anything until S1/S2.
+function normalizeShiftComplianceSetting(raw) {
+  const config = raw && typeof raw === 'object' ? raw : {}
+  const enforcementRaw = typeof config.enforcement === 'string' ? config.enforcement.trim() : ''
+  const enforcement = ['block', 'warn'].includes(enforcementRaw)
+    ? enforcementRaw
+    : DEFAULT_SETTINGS.shiftCompliance.enforcement
+  const normalizeCap = (value) => {
+    if (value == null || value === '') return null
+    const minutes = Number(value)
+    return Number.isFinite(minutes) && minutes > 0 ? Math.floor(minutes) : null
+  }
+  return {
+    enforcement,
+    dailyMaxMinutes: normalizeCap(config.dailyMaxMinutes),
+    weeklyMaxMinutes: normalizeCap(config.weeklyMaxMinutes),
+    monthlyMaxMinutes: normalizeCap(config.monthlyMaxMinutes),
   }
 }
 
@@ -10908,6 +10938,10 @@ function mergeSettings(base, update) {
     shiftEditPolicy: {
       ...(base?.shiftEditPolicy || {}),
       ...(update?.shiftEditPolicy || {}),
+    },
+    shiftCompliance: {
+      ...(base?.shiftCompliance || {}),
+      ...(update?.shiftCompliance || {}),
     },
     // Nested 2-level merge so a partial update (e.g. only { unscheduled }) does not clear the
     // other punch-policy sub-objects (merge / outdoor).
@@ -15265,6 +15299,7 @@ module.exports = {
     resolveAttendanceComprehensiveHoursPeriod,
     normalizeAttendanceComprehensiveHoursSettings,
     normalizeShiftEditPolicySetting,
+    normalizeShiftComplianceSetting,
     normalizePunchPolicySetting,
     isUserScheduledForDate,
     evaluateShiftEditWindow,
@@ -16122,6 +16157,14 @@ module.exports = {
       shiftEditPolicy: z.object({
         mode: z.enum(['unrestricted', 'past_locked', 'past_within_window']).optional(),
         windowDays: z.number().int().min(0).optional(),
+      }).optional(),
+      // Shift-compliance engine (#2213). S0 exposes only the latent org-level config; S1/S2
+      // independently wire enforcement on assignment-save paths. warn is persisted but inert in v1.
+      shiftCompliance: z.object({
+        enforcement: z.enum(['block', 'warn']).optional(),
+        dailyMaxMinutes: z.number().int().positive().nullable().optional(),
+        weeklyMaxMinutes: z.number().int().positive().nullable().optional(),
+        monthlyMaxMinutes: z.number().int().positive().nullable().optional(),
       }).optional(),
       // Punch-policy group (#2203). S1 exposes ONLY unscheduled.mode = allow|block. require_approval
       // is reserved by the design-lock and NOT in this enum until the approval slice (S3); merge /

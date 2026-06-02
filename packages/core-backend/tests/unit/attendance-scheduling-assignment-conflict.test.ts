@@ -154,6 +154,39 @@ describe('attendance scheduling assignment conflict guard', () => {
     })
   })
 
+  it('normalizes and merges shift-compliance settings (latent S0 foundation)', () => {
+    expect(helpers.normalizeShiftComplianceSetting(undefined)).toEqual({
+      enforcement: 'block',
+      dailyMaxMinutes: null,
+      weeklyMaxMinutes: null,
+      monthlyMaxMinutes: null,
+    })
+    expect(helpers.normalizeShiftComplianceSetting({
+      enforcement: 'warn',
+      dailyMaxMinutes: '480.9',
+      weeklyMaxMinutes: 0,
+      monthlyMaxMinutes: -1,
+    })).toEqual({
+      enforcement: 'warn',
+      dailyMaxMinutes: 480,
+      weeklyMaxMinutes: null,
+      monthlyMaxMinutes: null,
+    })
+    expect(helpers.normalizeShiftComplianceSetting({ enforcement: 'surprise', dailyMaxMinutes: '' }))
+      .toEqual({ enforcement: 'block', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null })
+
+    const merged = helpers.mergeSettings(
+      { shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: 480, monthlyMaxMinutes: 9600 } },
+      { shiftCompliance: { weeklyMaxMinutes: 2400 } },
+    )
+    expect(merged.shiftCompliance).toEqual({
+      enforcement: 'warn',
+      dailyMaxMinutes: 480,
+      weeklyMaxMinutes: 2400,
+      monthlyMaxMinutes: 9600,
+    })
+  })
+
   it('isUserScheduledForDate locks the fixed/free applicability guard + scheduled_shift coverage', async () => {
     // 1st db.query -> group-type rows; 2nd (reached only when applicable) -> coverage rows
     const mkDb = (groups: unknown[], coverage: unknown[]) => ({
