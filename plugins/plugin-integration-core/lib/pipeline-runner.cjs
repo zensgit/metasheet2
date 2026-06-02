@@ -280,7 +280,11 @@ function createPipelineRunner(deps = {}) {
       pipeline,
       sourceSystem,
       targetSystem,
-      sourceAdapter: adapterRegistry.createAdapter(sourceSystem, { role: 'source' }),
+      // C2a: thread the pipeline owner (createdBy) as the SOURCE read principal. Source adapters that
+      // read a per-owner-scoped backend (the data-source:sql-readonly bridge) authorize reads with it;
+      // adapters that don't need it (staging/k3/http) ignore the extra dep. A null createdBy stays
+      // null here, so an owner-scoped source fails closed downstream — no fallback identity.
+      sourceAdapter: adapterRegistry.createAdapter(sourceSystem, { role: 'source', principal: pipeline.createdBy }),
       targetAdapter: adapterRegistry.createAdapter(targetSystem, { role: 'target' }),
     }
   }
