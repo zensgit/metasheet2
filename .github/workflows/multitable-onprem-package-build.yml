@@ -7,6 +7,10 @@ on:
         description: 'Optional package tag suffix (default: run number)'
         required: false
         default: ''
+      base_path:
+        description: 'Web base path → Vite VITE_BASE_PATH (e.g. /metasheet/ for a sub-path deploy). Path-only; default / (root).'
+        required: false
+        default: '/'
       publish_release:
         description: 'Publish build outputs to GitHub Releases'
         required: false
@@ -46,6 +50,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build web/backend dist
+        env:
+          # Threads the dispatch input into the web build so sub-path deploys (e.g. /metasheet/)
+          # emit correct asset + Vue Router bases. Default '/' = root (unchanged). See #2207.
+          VITE_BASE_PATH: ${{ inputs.base_path }}
         run: |
           pnpm --filter @metasheet/web build
           pnpm --filter @metasheet/core-backend build
