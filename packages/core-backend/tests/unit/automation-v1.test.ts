@@ -2673,6 +2673,65 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rules).toHaveLength(1)
     expect(rules[0].enabled).toBe(true)
   })
+
+  it('A6-1: createRule writes execution_mode to the INSERT row + returned rule; rejects an invalid mode', async () => {
+    // Self-contained capturing db so we can inspect the INSERT payload — the row whitelist at
+    // createRule 384-396 that a returned-object assertion alone would not catch (wire-vs-fixture).
+    const insertValues: Record<string, unknown>[] = []
+    const chain: Record<string, unknown> = {}
+    const chainFn = () => chain
+    for (const m of [
+      'selectFrom', 'selectAll', 'select', 'where', 'orderBy', 'limit', 'offset', 'groupBy',
+      'insertInto', 'onConflict', 'columns', 'doUpdateSet', 'updateTable', 'set', 'deleteFrom',
+      'returningAll', 'leftJoin',
+    ]) chain[m] = vi.fn(chainFn)
+    chain.values = vi.fn((v: Record<string, unknown>) => { insertValues.push(v); return chain })
+    chain.execute = vi.fn(async () => [])
+    chain.executeTakeFirst = vi.fn(async () => undefined)
+    const localService = new AutomationService(
+      new EventBus(),
+      chain as never,
+      vi.fn(async () => ({ rows: [], rowCount: 0 })) as never,
+    )
+
+    const rule = await localService.createRule('sheet_1', {
+      name: 'opt-in', triggerType: 'record.created', triggerConfig: {},
+      actionType: 'update_record', actionConfig: { fields: { status: 'done' } }, createdBy: 'u1',
+      executionMode: 'workflow_job_v1',
+    })
+    expect(insertValues.at(-1)?.execution_mode).toBe('workflow_job_v1') // INSERT-row whitelist guard
+    expect(rule.execution_mode).toBe('workflow_job_v1')                 // returned-object whitelist guard
+
+    await expect(localService.createRule('sheet_1', {
+      name: 'bad', triggerType: 'record.created', triggerConfig: {},
+      actionType: 'update_record', actionConfig: { fields: { status: 'done' } },
+      executionMode: 'nope' as unknown as string,
+    })).rejects.toThrow(AutomationRuleValidationError)
+  })
+
+  it('A6-1: updateRule writes execution_mode into the UPDATE set payload', async () => {
+    const setPayloads: Record<string, unknown>[] = []
+    const ruleRow = makeRuleRow({ execution_mode: 'workflow_job_v1' })
+    const chain: Record<string, unknown> = {}
+    const chainFn = () => chain
+    for (const m of [
+      'selectFrom', 'selectAll', 'select', 'where', 'orderBy', 'limit', 'offset', 'groupBy',
+      'insertInto', 'values', 'onConflict', 'columns', 'doUpdateSet', 'updateTable', 'deleteFrom',
+      'returningAll', 'leftJoin',
+    ]) chain[m] = vi.fn(chainFn)
+    chain.set = vi.fn((v: Record<string, unknown>) => { setPayloads.push(v); return chain })
+    chain.execute = vi.fn(async () => [ruleRow])
+    chain.executeTakeFirst = vi.fn(async () => undefined)
+    const localService = new AutomationService(
+      new EventBus(),
+      chain as never,
+      vi.fn(async () => ({ rows: [], rowCount: 0 })) as never,
+    )
+
+    const updated = await localService.updateRule('atr_1', 'sheet_1', { executionMode: 'workflow_job_v1' })
+    expect(setPayloads.at(-1)?.execution_mode).toBe('workflow_job_v1') // UPDATE-set whitelist guard
+    expect(updated?.execution_mode).toBe('workflow_job_v1')
+  })
 })
 
 describe('AutomationService — retryExecution (A5)', () => {

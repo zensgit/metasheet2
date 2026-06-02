@@ -67,6 +67,24 @@ const VALID_ACTION_TYPES = new Set([
   'lock_record',
 ])
 
+// A6-1 opt-in (#2130 runtime): a rule may persist one C1 WorkflowJob row per action.
+// `null`/`'legacy'` both mean the legacy fire-and-forget path (no job rows); only
+// `'workflow_job_v1'` switches on persistence (executor gate: `persistJobs === 'workflow_job_v1'`).
+const VALID_EXECUTION_MODES = new Set(['legacy', 'workflow_job_v1'])
+
+/**
+ * Validate the A6-1 `execution_mode` opt-in flag. Lives in the service (not the route
+ * parser) because `createRule`/`updateRule` are the unbypassable persistence boundary —
+ * a direct service caller must not be able to write a junk mode. `undefined`/`null` →
+ * `null` (off); a recognized string passes through; anything else is rejected so the
+ * caller never silently falls back to a default. Throws `AutomationRuleValidationError`.
+ */
+function normalizeExecutionMode(value: unknown): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value === 'string' && VALID_EXECUTION_MODES.has(value)) return value
+  throw new AutomationRuleValidationError(`Invalid execution_mode: ${String(value)}`)
+}
+
 function normalizeStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value
@@ -175,6 +193,8 @@ export interface CreateRuleInput {
   createdBy?: string | null
   conditions?: ConditionGroup | null
   actions?: AutomationAction[] | null
+  // A6-1 opt-in; validated by normalizeExecutionMode in createRule (not here).
+  executionMode?: string | null
 }
 
 /** Input for updating a rule */
@@ -187,6 +207,8 @@ export interface UpdateRuleInput {
   enabled?: boolean
   conditions?: ConditionGroup | null
   actions?: AutomationAction[] | null
+  // A6-1 opt-in; validated by normalizeExecutionMode in updateRule (not here).
+  executionMode?: string | null
 }
 
 /**
@@ -381,6 +403,8 @@ export class AutomationService {
     )
     if (linkValidationError) throw new AutomationRuleValidationError(linkValidationError)
 
+    const executionMode = normalizeExecutionMode(input.executionMode)
+
     const row = {
       id: ruleId,
       sheet_id: sheetId,
@@ -393,6 +417,7 @@ export class AutomationService {
       created_by: input.createdBy ?? null,
       conditions: input.conditions ? JSON.stringify(input.conditions) : null,
       actions: actions ? JSON.stringify(actions) : null,
+      execution_mode: executionMode,
     }
 
     await this.db
@@ -414,6 +439,7 @@ export class AutomationService {
       created_by: input.createdBy ?? null,
       conditions: input.conditions ?? null,
       actions,
+      execution_mode: executionMode,
     }
 
     this.registerSchedule(rule)
@@ -511,6 +537,7 @@ export class AutomationService {
     if (input.enabled !== undefined) updates.enabled = input.enabled
     if (input.conditions !== undefined) updates.conditions = input.conditions ? JSON.stringify(input.conditions) : null
     if (input.actions !== undefined) updates.actions = normalizedActionsForUpdate ? JSON.stringify(normalizedActionsForUpdate) : null
+    if (input.executionMode !== undefined) updates.execution_mode = normalizeExecutionMode(input.executionMode)
 
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)
 
@@ -831,6 +858,7 @@ export type SerializedAutomationRule = {
   createdAt: string
   updatedAt: string
   createdBy: string | undefined
+  executionMode: string | null
 }
 
 /**
@@ -859,6 +887,7 @@ export function serializeAutomationRule(rule: AutomationRule): SerializedAutomat
     createdAt: rule.created_at,
     updatedAt: rule.updated_at,
     createdBy: rule.created_by ?? undefined,
+    executionMode: rule.execution_mode ?? null,
   }
 }
 
@@ -885,7 +914,7 @@ export function parseCreateRuleInput(
   const triggerConfig = body?.triggerConfig && typeof body.triggerConfig === 'object'
     ? body.triggerConfig as Record<string, unknown>
     : {}
-  let actions: unknown[] | null = Array.isArray(body?.actions) ? body!.actions as unknown[] : null
+  const actions: unknown[] | null = Array.isArray(body?.actions) ? body!.actions as unknown[] : null
   const firstAction = actions?.find(
     (item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item),
   )
@@ -925,6 +954,8 @@ export function parseCreateRuleInput(
     createdBy,
     conditions,
     actions: actions as AutomationAction[] | null,
+    // Forwarded raw; createRule's normalizeExecutionMode validates/rejects (single source).
+    executionMode: body?.executionMode as string | null | undefined,
   }
 }
 
@@ -975,6 +1006,12 @@ export function parseUpdateRuleInput(body: Record<string, unknown> | undefined):
   }
   if (body?.actions !== undefined) {
     input.actions = Array.isArray(body.actions) ? (body.actions as AutomationAction[]) : null
+    touched = true
+  }
+  if (body?.executionMode !== undefined) {
+    // Forwarded raw (incl. explicit null = reset to off); updateRule's
+    // normalizeExecutionMode validates/rejects (single source).
+    input.executionMode = body.executionMode as string | null
     touched = true
   }
 
