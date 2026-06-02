@@ -2808,12 +2808,22 @@ async function buildLinkSummaries(
 
   const readableSheetIds = await resolveReadableSheetIds(req, query, idsBySheet.keys())
 
+  // F5-followup (#2106): the foreign-record `display` echoed in link summaries is the value of the foreign
+  // sheet's default display field. resolveReadableSheetIds gates SHEET-level read, but the display field
+  // itself can be field_permissions.visible=false for this caller — so pick it only from the foreign sheet's
+  // OWN layer-2 ∧ layer-3 allowed set (keyed to that sheet + the requester, the crossSheetRelated per-sheet
+  // rule). Otherwise the denied value leaks via every buildLinkSummaries consumer (/view, single-record read,
+  // link-options `selected`, write-echo). Selecting only from allowed fields makes the value read at the
+  // displayValue line below inherently safe.
   const displayFieldBySheet = new Map<string, string | null>()
   for (const [sheetId] of idsBySheet.entries()) {
     if (!readableSheetIds.has(sheetId)) continue
     const fields = await loadFieldsForSheet(query, sheetId)
-    const stringField = fields.find((field) => field.type === 'string')
-    displayFieldBySheet.set(sheetId, stringField?.id ?? fields[0]?.id ?? null)
+    const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
+    const allowedFieldIds = await loadAllowedFieldIds(query, sheetId, access.userId, capabilities)
+    const allowedFields = fields.filter((field) => allowedFieldIds.has(field.id))
+    const stringField = allowedFields.find((field) => field.type === 'string')
+    displayFieldBySheet.set(sheetId, stringField?.id ?? allowedFields[0]?.id ?? null)
   }
 
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()

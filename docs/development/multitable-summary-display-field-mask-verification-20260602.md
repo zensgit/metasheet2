@@ -65,6 +65,8 @@ Real-DB integration test (new): `packages/core-backend/tests/integration/multita
 
 **Result:** RED on unmodified `origin/main` (R1 + R3 canaries present) → **5/5 GREEN** after the fix.
 
+> **Scope note:** this doc covers only the `loadRecordSummaries` egress (`link-options` `data.records` + `people-search` `items`). An independent review of this PR surfaced a **second, distinct** foreign-display leak on `link-options` via a *different* helper (`buildLinkSummaries`, feeding `data.selected` + the `linkSummaries` on `/view` / single-record read / write-echo) — fixed in the same PR and recorded separately in `multitable-link-summary-display-field-mask-verification-20260602.md` (tracker §2b adjacent row). So "link-options is gated" is true only with **both** rows closed.
+
 ## 4. Regression scope
 
 - `tsc` (core-backend) — exit **0**.
