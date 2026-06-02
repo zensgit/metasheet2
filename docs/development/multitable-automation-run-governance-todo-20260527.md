@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed through retry runtime + redaction invariant hardening (2026-05-29); A6-0/A6-1 scouts recorded; A6-1 persistent WorkflowJob runtime LANDED (#2130, 2026-05-30) but DORMANT (enable path deferred); A6-1 enable-writer + A6-2..A6-5 remain frozen / demand-gated
+Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2..A6-5 remain frozen / demand-gated
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, read-boundary wired only); RFC #1885
 
@@ -102,12 +102,15 @@ Completed by the named A4/A5 retry line:
 - whole-execution retry route, provenance, and side-effect confirmation — #2047.
 - HTTP response serialization invariant for `/test` + retry — #2051 + #2053.
 
-Landed (capability half):
-- A6-1 persistent WorkflowJob runtime — #2130 (DORMANT; enable path deferred).
+Landed (capability half) — A6-1 COMPLETE, end-to-end & reachable in production:
+- A6-1 persistent WorkflowJob runtime — #2130.
+- A6-1 enable-writer (createRule/updateRule accept `execution_mode`) — #2191.
+- A6-1 admin UI toggle (rule-editor checkbox) — #2193. No longer dormant: a maintainer can
+  opt a rule onto the per-action WorkflowJob plane from the editor.
 
 Deferred (capability half — A6, frozen/demand-gated):
-- A6-1 enable-writer (API/UI to set `execution_mode` → make A6-1 live in production)
-- suspend/resume; branch/parallel
+- A6-2 suspend/resume — webhook/external resume FIRST (delay/timer later: forces durable
+  scheduler/worker/leader); branch/parallel
 - BPMN compile/preview adapter; approval-as-job bridge
 
 ## Milestones
@@ -256,9 +259,10 @@ mark the convergence engine complete.
 - [x] No runtime in this milestone.
 - [x] A6-1 persistent WorkflowJob runtime scout recorded in
       `multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md`.
-- [x] A6-1 persistent WorkflowJob runtime — LANDED #2130 (dormant; enable path deferred).
-- [ ] A6-1 enable-writer (API/UI to set `execution_mode` → make A6-1 live) — not started.
-- [ ] A6-2 suspend/resume runtime — not started.
+- [x] A6-1 persistent WorkflowJob runtime — LANDED #2130.
+- [x] A6-1 enable-writer (createRule/updateRule accept `execution_mode`) — LANDED #2191.
+- [x] A6-1 admin UI toggle (rule-editor checkbox) — LANDED #2193. **A6-1 COMPLETE end-to-end.**
+- [ ] A6-2 suspend/resume runtime (webhook/external resume FIRST, not delay/timer) — not started.
 - [ ] A6-3 branch/parallel DAG runtime — not started.
 - [ ] A6-4 BPMN compile/preview adapter — not started.
 - [ ] A6-5 approval-as-job bridge — not started.
