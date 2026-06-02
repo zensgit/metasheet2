@@ -78,7 +78,7 @@
 
 > **回填（2026-06-01 pre-flight 发现）**：原排序把"未排班提醒"列首，依据"渠道已有/最便宜"——**verify 证伪**（attendance 无调度器、无事件→通知消费者）。故改：**排班修改窗为首刀**（真·最便宜 + 治理高）；未排班提醒降级为后续"scheduler+notifier 基座"基础设施刀（2–3pd，与假期过期提醒共建）；未排班处理策略归 ③ 打卡策略组。
 
-> **⚠️ schema 成组迁移，别一刀一迁。** 排班合规（`shift_constraints`）/ 修改窗（`locked_at`）/ 发布（`status`）/ 多班次（`slot`）**都 ALTER `attendance_shift_assignments`/`rule_sets`**——拆独立 PR 各迁一次 = 反复热表冲突。**这几项的 schema 打一个协调 migration，再分层叠 service/UI**（v1 阶段2 已是此意）。
+> **⚠️ schema 成组迁移，别一刀一迁。** 首刀"排班修改窗"按当前实现路线**不做 DDL**：policy 先落现有 `ruleSet.config` JSONB，write-time 按受影响日期判窗。后续若要把排班合规（`shift_constraints`）、发布（`status`）、多班次（`slot`）、或持久锁窗（`locked_at`）落到 `attendance_shift_assignments`/`rule_sets`，这些 schema 变更再打一个协调 migration，再分层叠 service/UI（v1 阶段2 已是此意）。
 
 ---
 
