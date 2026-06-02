@@ -53,6 +53,8 @@ export interface ILogger {
 
 export interface ICollabService {
   initialize(httpServer: HttpServer): void;
+  setTokenVerifier(verifier: (token: string) => Promise<string | null>): void;
+  setSheetRoomAuthChecker(checker: (input: { sheetId: string; userId: string; socketId: string }) => Promise<boolean>): void;
   broadcast(event: string, data: unknown): void;
   broadcastTo(room: string, event: string, data: unknown): void;
   sendTo(userId: string, event: string, data: unknown): void;

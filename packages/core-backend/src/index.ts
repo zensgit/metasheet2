@@ -56,6 +56,7 @@ import {
   queryRecords as queryMultitableRecords,
   type MultitableRecordsQueryFn,
 } from './multitable/records'
+import { resolveSheetCapabilitiesForUser } from './multitable/sheet-capabilities'
 import {
   assertPluginOwnsObject,
   assertPluginOwnsSheet,
@@ -1961,6 +1962,23 @@ export class MetaSheetServer {
     // Initialize WebSocket Service
     try {
       const collabService = this.injector.get(ICollabService)
+      collabService.setTokenVerifier(async (token: string) => {
+        const user = await authService.verifyToken(token)
+        return user?.id?.toString() ?? null
+      })
+      collabService.setSheetRoomAuthChecker(async ({ sheetId, userId }) => {
+        try {
+          const pool = poolManager.get()
+          const { capabilities } = await resolveSheetCapabilitiesForUser(
+            pool.query.bind(pool),
+            sheetId,
+            userId,
+          )
+          return capabilities.canRead
+        } catch {
+          return false
+        }
+      })
       collabService.initialize(this.httpServer)
     } catch (e) {
       this.logger.error('Failed to initialize WebSocket service', e as Error)

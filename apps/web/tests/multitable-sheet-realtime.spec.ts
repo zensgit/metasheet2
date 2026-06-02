@@ -20,6 +20,7 @@ vi.mock('socket.io-client', () => ({
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getCurrentUserId: vi.fn().mockResolvedValue('user_self'),
+    getToken: vi.fn(() => 'jwt-self'),
   }),
 }))
 
@@ -54,7 +55,7 @@ describe('useMultitableSheetRealtime', () => {
     container = null
   })
 
-  it('joins sheet rooms and reloads the page for remote record updates only', async () => {
+  it('joins sheet rooms with token auth and refetches for remote record updates only', async () => {
     const reloadCurrentSheetPage = vi.fn().mockResolvedValue(undefined)
     const reloadSelectedRecordContext = vi.fn().mockResolvedValue(undefined)
     const applyRemoteRecordPatch = vi.fn().mockResolvedValue(true)
@@ -85,6 +86,12 @@ describe('useMultitableSheetRealtime', () => {
     await flushUi(6)
 
     expect(ioMock).toHaveBeenCalledTimes(1)
+    expect(ioMock.mock.calls[0]?.[1]).toMatchObject({
+      autoConnect: true,
+      transports: ['websocket'],
+      auth: { token: 'jwt-self' },
+    })
+    expect(ioMock.mock.calls[0]?.[1]).not.toHaveProperty('query')
     expect(emitMock).toHaveBeenCalledWith('join-sheet', 'sheet_ops')
 
     handlers.get('sheet:op')?.({
@@ -104,13 +111,8 @@ describe('useMultitableSheetRealtime', () => {
     })
     await flushUi(4)
 
-    expect(applyRemoteRecordPatch).toHaveBeenCalledWith({
-      recordId: 'rec_1',
-      version: 8,
-      fieldIds: ['fld_title'],
-      patch: { fld_title: 'Remote title' },
-    })
-    expect(mergeRemoteRecord).not.toHaveBeenCalled()
+    expect(applyRemoteRecordPatch).not.toHaveBeenCalled()
+    expect(mergeRemoteRecord).toHaveBeenCalledWith('rec_1')
     expect(reloadCurrentSheetPage).not.toHaveBeenCalled()
     expect(reloadSelectedRecordContext).not.toHaveBeenCalled()
 
@@ -124,8 +126,8 @@ describe('useMultitableSheetRealtime', () => {
       },
     })
     await flushUi(3)
-    expect(applyRemoteRecordPatch).toHaveBeenCalledTimes(1)
-    expect(mergeRemoteRecord).toHaveBeenCalledTimes(0)
+    expect(applyRemoteRecordPatch).not.toHaveBeenCalled()
+    expect(mergeRemoteRecord).toHaveBeenCalledTimes(1)
 
     handlers.get('sheet:op')?.({
       type: 'cell-update',
@@ -185,7 +187,7 @@ describe('useMultitableSheetRealtime', () => {
     expect(emitMock).toHaveBeenCalledWith('join-sheet', 'sheet_finance')
   })
 
-  it('falls back to record merge when local cell patch is rejected', async () => {
+  it('ignores legacy value patches and refetches the changed record', async () => {
     const reloadCurrentSheetPage = vi.fn().mockResolvedValue(undefined)
     const applyRemoteRecordPatch = vi.fn().mockResolvedValue(false)
     const mergeRemoteRecord = vi.fn().mockResolvedValue(true)
@@ -224,7 +226,7 @@ describe('useMultitableSheetRealtime', () => {
     })
     await flushUi(4)
 
-    expect(applyRemoteRecordPatch).toHaveBeenCalledTimes(1)
+    expect(applyRemoteRecordPatch).not.toHaveBeenCalled()
     expect(mergeRemoteRecord).toHaveBeenCalledWith('rec_1')
     expect(reloadCurrentSheetPage).not.toHaveBeenCalled()
   })

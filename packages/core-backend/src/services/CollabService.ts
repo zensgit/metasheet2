@@ -9,16 +9,40 @@ export function buildAuthenticatedUserRoom(userId: string): string {
   return `auth-user:${userId}`
 }
 
+export type SocketTokenVerifier = (token: string) => Promise<string | null>
+export type SheetRoomAuthChecker = (input: { sheetId: string; userId: string; socketId: string }) => Promise<boolean>
+
+type AuthenticatedSocketData = {
+  trustedUserId?: string | null
+  authPromise?: Promise<string | null>
+}
+
 export class CollabService {
   private io: SocketServer | null = null
   private sheetPresenceBySheet = new Map<string, Map<string, Set<string>>>()
   private sheetMembershipBySocket = new Map<string, Set<string>>()
+  private tokenVerifier: SocketTokenVerifier = async (token) => {
+    // AuthService pulls in RBAC/metrics modules; keep it lazy so importing CollabService
+    // does not register global metrics during parallel unit-test collection.
+    const { authService } = await import('../auth/AuthService')
+    const user = await authService.verifyToken(token)
+    return user?.id?.toString().trim() || null
+  }
+  private sheetRoomAuthChecker: SheetRoomAuthChecker = async () => false
 
   constructor(
     private logger: ILogger,
     private eventBus: EventBus,
   ) {
     this.setupEventListeners()
+  }
+
+  setTokenVerifier(verifier: SocketTokenVerifier): void {
+    this.tokenVerifier = verifier
+  }
+
+  setSheetRoomAuthChecker(checker: SheetRoomAuthChecker): void {
+    this.sheetRoomAuthChecker = checker
   }
 
   private setupEventListeners() {
@@ -34,33 +58,57 @@ export class CollabService {
     })
   }
 
-  private getUserIdFromSocket(socket: Socket): string | undefined {
-    const raw = socket.handshake.query.userId
-    const value = Array.isArray(raw) ? raw[0] : raw
-    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
-    return undefined
-  }
-
   private getTokenFromSocket(socket: Socket): string | undefined {
     const authToken = (socket.handshake.auth as { token?: unknown } | undefined)?.token
     if (typeof authToken === 'string' && authToken.trim().length > 0) return authToken.trim()
-    const raw = socket.handshake.query.token
-    const value = Array.isArray(raw) ? raw[0] : raw
-    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
     return undefined
   }
 
-  private async joinAuthenticatedUserRoom(socket: Socket): Promise<void> {
+  private getSocketData(socket: Socket): AuthenticatedSocketData {
+    return socket.data as AuthenticatedSocketData
+  }
+
+  private getTrustedUserId(socket: Socket): string | undefined {
+    const userId = this.getSocketData(socket).trustedUserId
+    return typeof userId === 'string' && userId.trim().length > 0 ? userId.trim() : undefined
+  }
+
+  private async resolveTrustedUserId(socket: Socket): Promise<string | null> {
+    const data = this.getSocketData(socket)
+    if (data.trustedUserId !== undefined) return data.trustedUserId
+    if (data.authPromise) return data.authPromise
+
     const token = this.getTokenFromSocket(socket)
-    if (!token) return
+    if (!token) {
+      data.trustedUserId = null
+      return null
+    }
+
+    data.authPromise = (async () => {
+      try {
+        const userId = await this.tokenVerifier(token)
+        data.trustedUserId = userId?.trim() || null
+        return data.trustedUserId
+      } catch (error) {
+        data.trustedUserId = null
+        this.logger.warn('WebSocket token verification failed', error instanceof Error ? error : undefined)
+        return null
+      } finally {
+        data.authPromise = undefined
+      }
+    })()
+
+    return data.authPromise
+  }
+
+  private async joinAuthenticatedUserRoom(socket: Socket): Promise<void> {
+    const userId = await this.resolveTrustedUserId(socket)
+    if (!userId || !socket.connected) return
     try {
-      // AuthService pulls in RBAC/metrics modules; keep it lazy so importing CollabService
-      // does not register global metrics during parallel unit-test collection.
-      const { authService } = await import('../auth/AuthService')
-      const user = await authService.verifyToken(token)
-      const userId = user?.id?.toString().trim()
-      if (!userId) return
       socket.join(buildAuthenticatedUserRoom(userId))
+      // Legacy plugin APIs address users by raw user id; keep that room, but only
+      // after token verification. Never join it from the spoofable query userId.
+      socket.join(userId)
       this.logger.debug(`WebSocket client ${socket.id} joined authenticated user room for ${userId}`)
     } catch (error) {
       this.logger.warn('WebSocket authenticated user room join failed', error instanceof Error ? error : undefined)
@@ -154,6 +202,43 @@ export class CollabService {
     })
   }
 
+  private denySheetJoin(socket: Socket, sheetId: string, reason: string): void {
+    socket.emit('join-denied', { sheetId, reason })
+    this.logger.warn(`Client ${socket.id} denied joining sheet:${sheetId}: ${reason}`)
+  }
+
+  private async handleJoinSheet(socket: Socket, payload: unknown): Promise<void> {
+    const sheetId = this.normalizeSheetId(payload)
+    if (!sheetId) return
+
+    const userId = await this.resolveTrustedUserId(socket)
+    if (!socket.connected) return
+    if (!userId) {
+      this.denySheetJoin(socket, sheetId, 'unauthorized')
+      return
+    }
+
+    let allowed = false
+    try {
+      allowed = await this.sheetRoomAuthChecker({ sheetId, userId, socketId: socket.id })
+    } catch (error) {
+      this.logger.warn('WebSocket sheet room auth check failed', error instanceof Error ? error : undefined)
+    }
+    if (!socket.connected) return
+    if (!allowed) {
+      this.denySheetJoin(socket, sheetId, 'forbidden')
+      return
+    }
+
+    const room = this.buildSheetRoom(sheetId)
+    socket.join(room)
+    this.trackSocketSheetMembership(socket.id, sheetId)
+    this.addSheetPresence(sheetId, userId, socket.id)
+    this.logger.info(`Client ${socket.id} joined ${room}`)
+    socket.emit('joined', { sheetId })
+    this.emitSheetPresence(sheetId)
+  }
+
   initialize(httpServer: HttpServer): void {
     this.io = new SocketServer(httpServer, {
       cors: {
@@ -168,15 +253,10 @@ export class CollabService {
 
     this.io.on('connection', (socket: Socket) => {
       this.logger.info(`WebSocket client connected: ${socket.id}`)
-      const userId = this.getUserIdFromSocket(socket)
-      if (userId) {
-        socket.join(userId)
-        this.logger.debug(`WebSocket client ${socket.id} joined user room ${userId}`)
-      }
       void this.joinAuthenticatedUserRoom(socket)
 
       socket.on('disconnect', () => {
-        const userId = this.getUserIdFromSocket(socket)
+        const userId = this.getTrustedUserId(socket)
         const sheetIds = [...(this.sheetMembershipBySocket.get(socket.id) ?? [])]
         for (const sheetId of sheetIds) {
           if (userId) this.removeSheetPresence(sheetId, userId, socket.id)
@@ -187,23 +267,14 @@ export class CollabService {
       })
 
       socket.on('join-sheet', (payload: unknown) => {
-        const sheetId = this.normalizeSheetId(payload)
-        if (!sheetId) return
-        const room = this.buildSheetRoom(sheetId)
-        const userId = this.getUserIdFromSocket(socket)
-        socket.join(room)
-        this.trackSocketSheetMembership(socket.id, sheetId)
-        if (userId) this.addSheetPresence(sheetId, userId, socket.id)
-        this.logger.info(`Client ${socket.id} joined ${room}`)
-        socket.emit('joined', { sheetId })
-        this.emitSheetPresence(sheetId)
+        void this.handleJoinSheet(socket, payload)
       })
 
       socket.on('leave-sheet', (payload: unknown) => {
         const sheetId = this.normalizeSheetId(payload)
         if (!sheetId) return
         const room = this.buildSheetRoom(sheetId)
-        const userId = this.getUserIdFromSocket(socket)
+        const userId = this.getTrustedUserId(socket)
         socket.leave(room)
         if (userId) this.removeSheetPresence(sheetId, userId, socket.id)
         this.untrackSocketSheetMembership(socket.id, sheetId)
@@ -335,10 +406,9 @@ export class CollabService {
       const sockets = await this.io.in(room).fetchSockets()
       const userIds = new Set<string>()
       for (const socket of sockets) {
-        const raw = socket.handshake?.query?.userId
-        const value = Array.isArray(raw) ? raw[0] : raw
-        if (typeof value === 'string' && value.trim().length > 0) {
-          userIds.add(value.trim())
+        const raw = (socket.data as AuthenticatedSocketData | undefined)?.trustedUserId
+        if (typeof raw === 'string' && raw.trim().length > 0) {
+          userIds.add(raw.trim())
         }
       }
       return [...userIds]

@@ -20,6 +20,7 @@ vi.mock('socket.io-client', () => ({
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getCurrentUserId: vi.fn().mockResolvedValue('user_self'),
+    getToken: vi.fn(() => 'jwt-self'),
   }),
 }))
 
@@ -69,6 +70,12 @@ describe('useMultitableSheetPresence', () => {
     await flushUi(6)
 
     expect(ioMock).toHaveBeenCalledTimes(1)
+    expect(ioMock.mock.calls[0]?.[1]).toMatchObject({
+      autoConnect: true,
+      transports: ['websocket'],
+      auth: { token: 'jwt-self' },
+    })
+    expect(ioMock.mock.calls[0]?.[1]).not.toHaveProperty('query')
     expect(emitMock).toHaveBeenCalledWith('join-sheet', 'sheet_ops')
     expect(activeCollaboratorCount.value).toBe(0)
 

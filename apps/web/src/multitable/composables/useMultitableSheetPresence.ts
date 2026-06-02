@@ -88,11 +88,12 @@ export function useMultitableSheetPresence(options: UseMultitableSheetPresenceOp
         const userId = await auth.getCurrentUserId().catch(() => null)
         if (disconnected) return null
         currentUserId.value = userId
+        const token = auth.getToken()
 
         const nextSocket = io(getApiBase() || window.location.origin, {
           autoConnect: true,
           transports: ['websocket'],
-          query: userId ? { userId } : undefined,
+          auth: token ? { token } : undefined,
         })
 
         nextSocket.on('sheet:presence', (payload: SheetPresenceEventPayload) => {

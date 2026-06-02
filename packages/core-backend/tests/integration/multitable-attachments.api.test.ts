@@ -491,7 +491,12 @@ describe('Multitable attachment API', () => {
             }
           }
           if (sql.includes('UPDATE meta_records') && sql.includes('version = version + 1')) {
-            expect(params).toEqual([JSON.stringify({ fld_files: ['att_keep'] }), 'rec_ops_1', 'sheet_ops'])
+            expect(params).toEqual([
+              JSON.stringify({ fld_files: ['att_keep'] }),
+              'rec_ops_1',
+              'sheet_ops',
+              'user_multitable_attachments',
+            ])
             return { rows: [{ version: 3 }] }
           }
           if (sql.includes('UPDATE multitable_attachments SET deleted_at = now(), updated_at = now()')) {
@@ -520,7 +525,8 @@ describe('Multitable attachment API', () => {
         ok: true,
         data: { deleted: uploadedAttachmentId },
       })
-      expect(publishSpy).toHaveBeenCalledWith('spreadsheet.cell.updated', {
+      const payload = publishSpy.mock.calls[0]?.[1]
+      expect(payload).toEqual({
         spreadsheetId: 'sheet_ops',
         actorId: 'user_multitable_attachments',
         source: 'multitable',
@@ -528,12 +534,9 @@ describe('Multitable attachment API', () => {
         recordId: 'rec_ops_1',
         recordIds: ['rec_ops_1'],
         fieldIds: ['fld_files'],
-        recordPatches: [{
-          recordId: 'rec_ops_1',
-          version: 3,
-          patch: { fld_files: ['att_keep'] },
-        }],
       })
+      expect(payload).not.toHaveProperty('recordPatches')
+      expect(JSON.stringify(payload)).not.toContain('att_keep')
       await expect(fs.stat(path.join(attachmentPath, storedPath))).rejects.toThrow()
     } finally {
       await fs.rm(attachmentPath, { recursive: true, force: true })
@@ -583,7 +586,12 @@ describe('Multitable attachment API', () => {
             }
           }
           if (sql.includes('UPDATE meta_records') && sql.includes('version = version + 1')) {
-            expect(params).toEqual([JSON.stringify({ fld_files: ['att_keep'] }), 'rec_acl_1', 'sheet_acl'])
+            expect(params).toEqual([
+              JSON.stringify({ fld_files: ['att_keep'] }),
+              'rec_acl_1',
+              'sheet_acl',
+              'user_multitable_attachments',
+            ])
             return { rows: [{ version: 5 }] }
           }
           if (sql.includes('UPDATE multitable_attachments SET deleted_at = now(), updated_at = now()')) {
@@ -602,7 +610,8 @@ describe('Multitable attachment API', () => {
         ok: true,
         data: { deleted: 'att_sheet_write' },
       })
-      expect(publishSpy).toHaveBeenCalledWith('spreadsheet.cell.updated', {
+      const payload = publishSpy.mock.calls[0]?.[1]
+      expect(payload).toEqual({
         spreadsheetId: 'sheet_acl',
         actorId: 'user_multitable_attachments',
         source: 'multitable',
@@ -610,12 +619,9 @@ describe('Multitable attachment API', () => {
         recordId: 'rec_acl_1',
         recordIds: ['rec_acl_1'],
         fieldIds: ['fld_files'],
-        recordPatches: [{
-          recordId: 'rec_acl_1',
-          version: 5,
-          patch: { fld_files: ['att_keep'] },
-        }],
       })
+      expect(payload).not.toHaveProperty('recordPatches')
+      expect(JSON.stringify(payload)).not.toContain('att_keep')
     } finally {
       await fs.rm(attachmentPath, { recursive: true, force: true })
     }

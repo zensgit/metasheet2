@@ -2,10 +2,70 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import net from 'net'
 import { io as ioClient } from 'socket.io-client'
 import { MetaSheetServer } from '../../src/index'
+import { ICollabService, type ICollabService as CollabServicePort } from '../../src/di/identifiers'
+import { eventBus } from '../../src/integration/events/event-bus'
+import { publishMultitableSheetRealtime } from '../../src/multitable/realtime-publish'
+
+function waitForConnect(client: ReturnType<typeof ioClient>, label: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} connect timeout`)), 3000)
+    client.on('connect', () => { clearTimeout(t); resolve() })
+  })
+}
+
+function waitForEvent<T = any>(
+  client: ReturnType<typeof ioClient>,
+  event: string,
+  label: string,
+  timeoutMs = 3000,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timeout`)), timeoutMs)
+    client.once(event, (payload: T) => {
+      clearTimeout(t)
+      resolve(payload)
+    })
+  })
+}
+
+async function expectNoEvent(
+  client: ReturnType<typeof ioClient>,
+  event: string,
+  label: string,
+  timeoutMs = 120,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const t = setTimeout(() => {
+      client.off(event, handler)
+      resolve()
+    }, timeoutMs)
+    const handler = (payload: unknown) => {
+      clearTimeout(t)
+      client.off(event, handler)
+      reject(new Error(`${label} unexpectedly received ${event}: ${JSON.stringify(payload)}`))
+    }
+    client.on(event, handler)
+  })
+}
+
+async function waitForRoomMember(
+  collabService: CollabServicePort,
+  room: string,
+  userId: string,
+): Promise<void> {
+  const deadline = Date.now() + 3000
+  while (Date.now() < deadline) {
+    const members = await collabService.getRoomMembers(room)
+    if (members.includes(userId)) return
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error(`Timed out waiting for ${userId} in room ${room}`)
+}
 
 describe('WebSocket Rooms - basic flow', () => {
   let server: MetaSheetServer | undefined
   let baseUrl: string | undefined
+  let collabService: CollabServicePort | undefined
 
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
@@ -20,6 +80,16 @@ describe('WebSocket Rooms - basic flow', () => {
     const addr = server.getAddress()
     if (!addr || !addr.port) return
     baseUrl = `http://127.0.0.1:${addr.port}`
+    // @ts-expect-error integration test reaches into the server container to keep
+    // Socket.IO tests independent from real JWT/RBAC fixtures.
+    collabService = server.injector.get(ICollabService)
+    collabService.setTokenVerifier(async (token) => {
+      if (!token.startsWith('token:')) return null
+      return token.slice('token:'.length).trim() || null
+    })
+    collabService.setSheetRoomAuthChecker(async ({ sheetId, userId }) => {
+      return sheetId === 'sheet_ops' && ['user_a', 'user_b', 'user_reader', 'a', 'b'].includes(userId)
+    })
   })
 
   afterAll(async () => {
@@ -27,21 +97,14 @@ describe('WebSocket Rooms - basic flow', () => {
   })
 
   it('broadcastTo affects only members of the room', async () => {
-    if (!baseUrl || !server) return
-    // Connect two clients with userIds
-    const a = ioClient(`${baseUrl}?userId=a`, { transports: ['websocket'] })
-    const b = ioClient(`${baseUrl}?userId=b`, { transports: ['websocket'] })
+    if (!baseUrl || !server || !collabService) return
+    const a = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:a' } })
+    const b = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:b' } })
 
-    // Wait for connection
+    await Promise.all([waitForConnect(a, 'A'), waitForConnect(b, 'B')])
     await Promise.all([
-      new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error('A connect timeout')), 3000)
-        a.on('connect', () => { clearTimeout(t); resolve() })
-      }),
-      new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error('B connect timeout')), 3000)
-        b.on('connect', () => { clearTimeout(t); resolve() })
-      })
+      waitForRoomMember(collabService, 'a', 'a'),
+      waitForRoomMember(collabService, 'b', 'b'),
     ])
 
     // Join user a to room R via server API
@@ -68,6 +131,103 @@ describe('WebSocket Rooms - basic flow', () => {
     expect(gotB).toBe(false)
 
     a.close(); b.close()
+  })
+
+  it('rejects unauthenticated sheet joins and keeps the socket out of sheet broadcasts', async () => {
+    if (!baseUrl) return
+    const client = ioClient(baseUrl, { transports: ['websocket'] })
+    await waitForConnect(client, 'unauthenticated')
+
+    const denied = waitForEvent(client, 'join-denied', 'join denied')
+    client.emit('join-sheet', 'sheet_ops')
+    await expect(denied).resolves.toEqual({ sheetId: 'sheet_ops', reason: 'unauthorized' })
+
+    eventBus.publish('spreadsheet.cell.updated', {
+      spreadsheetId: 'sheet_ops',
+      actorId: 'user_editor',
+      source: 'multitable',
+      kind: 'record-updated',
+      recordIds: ['rec_1'],
+      fieldIds: ['fld_secret'],
+      recordPatches: [{ recordId: 'rec_1', patch: { fld_secret: 'SECRET_REALTIME_CANARY' } }],
+    })
+    await expectNoEvent(client, 'sheet:op', 'unauthenticated socket')
+    await expectNoEvent(client, 'sheet:presence', 'unauthenticated socket')
+
+    client.close()
+  })
+
+  it('rejects valid tokens without sheet read access', async () => {
+    if (!baseUrl) return
+    const client = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:user_denied' } })
+    await waitForConnect(client, 'non-reader')
+
+    const denied = waitForEvent(client, 'join-denied', 'join denied')
+    client.emit('join-sheet', 'sheet_ops')
+    await expect(denied).resolves.toEqual({ sheetId: 'sheet_ops', reason: 'forbidden' })
+
+    eventBus.publish('spreadsheet.cell.updated', {
+      spreadsheetId: 'sheet_ops',
+      actorId: 'user_editor',
+      source: 'multitable',
+      kind: 'record-updated',
+      recordIds: ['rec_1'],
+      fieldIds: ['fld_secret'],
+      recordPatches: [{ recordId: 'rec_1', patch: { fld_secret: 'SECRET_REALTIME_CANARY' } }],
+    })
+    await expectNoEvent(client, 'sheet:op', 'non-reader socket')
+
+    client.close()
+  })
+
+  it('uses token identity for presence and broadcasts value-free sheet invalidations to readers', async () => {
+    if (!baseUrl) return
+    const client = ioClient(`${baseUrl}?userId=spoofed_user`, {
+      transports: ['websocket'],
+      auth: { token: 'token:user_reader' },
+    })
+    await waitForConnect(client, 'reader')
+
+    const joined = waitForEvent(client, 'joined', 'reader join')
+    const presence = waitForEvent(client, 'sheet:presence', 'reader presence')
+    client.emit('join-sheet', 'sheet_ops')
+    await expect(joined).resolves.toEqual({ sheetId: 'sheet_ops' })
+    await expect(presence).resolves.toEqual({
+      sheetId: 'sheet_ops',
+      activeCount: 1,
+      users: [{ id: 'user_reader' }],
+    })
+
+    const op = waitForEvent(client, 'sheet:op', 'reader sheet op')
+    publishMultitableSheetRealtime({
+      spreadsheetId: 'sheet_ops',
+      actorId: 'user_editor',
+      source: 'multitable',
+      kind: 'record-updated',
+      recordIds: ['rec_1'],
+      fieldIds: ['fld_visible', 'fld_secret'],
+      recordPatches: [{
+        recordId: 'rec_1',
+        version: 10,
+        patch: { fld_visible: 'VISIBLE_CONTROL', fld_secret: 'SECRET_REALTIME_CANARY' },
+      }],
+    })
+    const payload = await op
+    expect(payload).toEqual({
+      type: 'cell-update',
+      data: {
+        spreadsheetId: 'sheet_ops',
+        actorId: 'user_editor',
+        source: 'multitable',
+        kind: 'record-updated',
+        recordIds: ['rec_1'],
+        fieldIds: ['fld_visible', 'fld_secret'],
+      },
+    })
+    expect(JSON.stringify(payload)).not.toContain('SECRET_REALTIME_CANARY')
+    expect(JSON.stringify(payload)).not.toContain('VISIBLE_CONTROL')
+
+    client.close()
   })
 
   it('join-comment-record scopes comment delivery to a single record room', async () => {
@@ -131,14 +291,9 @@ describe('WebSocket Rooms - basic flow', () => {
   it('join-sheet publishes deduplicated sheet presence for active users', async () => {
     if (!baseUrl || !server) return
 
-    const a1 = ioClient(`${baseUrl}?userId=user_a`, { transports: ['websocket'] })
-    const a2 = ioClient(`${baseUrl}?userId=user_a`, { transports: ['websocket'] })
-    const b = ioClient(`${baseUrl}?userId=user_b`, { transports: ['websocket'] })
-
-    const waitForConnect = (client: ReturnType<typeof ioClient>, label: string) => new Promise<void>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error(`${label} connect timeout`)), 3000)
-      client.on('connect', () => { clearTimeout(t); resolve() })
-    })
+    const a1 = ioClient(`${baseUrl}?userId=spoofed_a1`, { transports: ['websocket'], auth: { token: 'token:user_a' } })
+    const a2 = ioClient(`${baseUrl}?userId=spoofed_a2`, { transports: ['websocket'], auth: { token: 'token:user_a' } })
+    const b = ioClient(`${baseUrl}?userId=spoofed_b`, { transports: ['websocket'], auth: { token: 'token:user_b' } })
 
     const waitForPresence = (
       client: ReturnType<typeof ioClient>,
