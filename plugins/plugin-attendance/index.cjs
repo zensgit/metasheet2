@@ -11867,6 +11867,57 @@ async function loadApprovedRequestsForOverlay(db, orgId, userId, fromDate, toDat
   }
 }
 
+// 未排班判定 — shared primitive for punch-policy S1 (unscheduled-punch) and the future unscheduled
+// reminder (design-lock #2203 §3). Returns true = the user IS scheduled for `date` OR the question
+// is not applicable; callers treat `!isUserScheduledForDate(...)` as "unscheduled".
+//
+// APPLICABILITY GUARD (the locked constraint): a user can be "unscheduled" only when they are in
+// >=1 attendance group AND EVERY active group is `scheduled_shift`. Any `fixed_shift` / `free_time`
+// group — or no group at all — means NOT applicable -> ALWAYS scheduled (never blocked). The guard
+// lives in the all-groups predicate below, not a post-filter, so it can't be forgotten.
+//
+// "Scheduled" = the user has a schedule-group membership OR a shift assignment covering `date`.
+// Fail-safe: any DB-schema error -> return true (do NOT block a punch on uncertainty).
+async function isUserScheduledForDate(db, orgId, userId, date) {
+  const normalizedDate = normalizeDateOnly(date)
+  if (!userId || !normalizedDate) return true
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  try {
+    const groupRows = await db.query(
+      `SELECT g.attendance_type
+       FROM attendance_group_members m
+       JOIN attendance_groups g ON g.id = m.group_id AND g.org_id = m.org_id
+       WHERE m.org_id = $1 AND m.user_id = $2`,
+      [targetOrg, userId],
+    )
+    if (groupRows.length === 0) return true
+    const allScheduledShift = groupRows.every(
+      (row) => normalizeAttendanceGroupType(row.attendance_type) === 'scheduled_shift',
+    )
+    if (!allScheduledShift) return true
+    const coverageRows = await db.query(
+      `SELECT 1 WHERE
+         EXISTS (
+           SELECT 1 FROM attendance_schedule_group_members sgm
+           WHERE sgm.org_id = $1 AND sgm.user_id = $2 AND sgm.schedule_group_id IS NOT NULL
+             AND COALESCE(sgm.effective_from, DATE '0001-01-01') <= $3::date
+             AND COALESCE(sgm.effective_to, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+         )
+         OR EXISTS (
+           SELECT 1 FROM attendance_shift_assignments sa
+           WHERE sa.org_id = $1 AND sa.user_id = $2 AND COALESCE(sa.is_active, true) = true
+             AND sa.start_date <= $3::date
+             AND COALESCE(sa.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+         )`,
+      [targetOrg, userId, normalizedDate],
+    )
+    return coverageRows.length > 0
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return true
+    throw error
+  }
+}
+
 async function loadAttendanceScopeContextForUser(db, orgId, userId) {
   if (!userId) return { userId: null, userName: undefined, attendanceGroups: [], roles: [], roleTags: [] }
   const targetOrg = orgId || DEFAULT_ORG_ID
@@ -15215,6 +15266,7 @@ module.exports = {
     normalizeAttendanceComprehensiveHoursSettings,
     normalizeShiftEditPolicySetting,
     normalizePunchPolicySetting,
+    isUserScheduledForDate,
     evaluateShiftEditWindow,
     bridgeAttendanceDateRangeToComprehensiveHoursPeriod,
     resolveAttendanceComprehensiveHoursCap,
@@ -16070,6 +16122,14 @@ module.exports = {
       shiftEditPolicy: z.object({
         mode: z.enum(['unrestricted', 'past_locked', 'past_within_window']).optional(),
         windowDays: z.number().int().min(0).optional(),
+      }).optional(),
+      // Punch-policy group (#2203). S1 exposes ONLY unscheduled.mode = allow|block. require_approval
+      // is reserved by the design-lock and NOT in this enum until the approval slice (S3); merge /
+      // outdoor are added by their own slices — no half-baked config.
+      punchPolicy: z.object({
+        unscheduled: z.object({
+          mode: z.enum(['allow', 'block']).optional(),
+        }).optional(),
       }).optional(),
       formula: z.object({
         allowRawAliases: z.boolean().optional(),
@@ -18553,6 +18613,24 @@ module.exports = {
                 defaultRule: baseRule,
               })
             }
+          }
+
+          // Punch-policy S1 (#2203): block a punch on a day with no schedule when the org opted into
+          // unscheduled.mode='block'. workDate is the FINAL (tz-recalculated) date. Default 'allow' and
+          // the primitive's fixed/free applicability guard mean this never blocks by default (no regression).
+          const punchPolicySettings = await getSettings(db)
+          if (
+            punchPolicySettings?.punchPolicy?.unscheduled?.mode === 'block'
+            && !(await isUserScheduledForDate(db, orgId, userId, workDate))
+          ) {
+            res.status(422).json({
+              ok: false,
+              error: {
+                code: 'PUNCH_UNSCHEDULED_BLOCKED',
+                message: 'Punch blocked: no schedule is assigned for this day.',
+              },
+            })
+            return
           }
 
           const result = await db.transaction(async (trx) => {
