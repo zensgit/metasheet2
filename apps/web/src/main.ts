@@ -20,7 +20,10 @@ import { useFeatureFlags } from './stores/featureFlags'
 import { normalizePostLoginRedirect, normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './utils/authRedirect'
 
 const router = createRouter({
-  history: createWebHistory(),
+  // Use the Vite base (import.meta.env.BASE_URL, set from `base` in vite.config) so router URLs
+  // stay under a sub-path deploy (e.g. /metasheet/) — otherwise router-links resolve to root
+  // (/attendance) and navigation/deep-links/refresh escape the sub-path. Defaults to '/'.
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes: appRoutes,
 })
 

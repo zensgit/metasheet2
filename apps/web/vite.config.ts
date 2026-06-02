@@ -3,6 +3,27 @@ import { loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
 
+/**
+ * Resolve the Vite `base` from VITE_BASE_PATH for sub-path deploys (e.g. behind nginx at
+ * `/metasheet/`). PATH-ONLY by design: this value is also consumed as the Vue Router history
+ * base via `createWebHistory(import.meta.env.BASE_URL)`, which only accepts an absolute
+ * pathname. A full-URL (`https://cdn/`) or relative (`./`) base would yield a broken router
+ * base (`/https://cdn/`, `/./`), so those are rejected at build time. Defaults to `/`.
+ */
+function resolveBasePath(raw?: string): string {
+  const value = (raw || '').trim()
+  if (!value || value === '/') return '/'
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith('//') || value.startsWith('.')) {
+    throw new Error(
+      `VITE_BASE_PATH must be an absolute path (e.g. "/metasheet/"), got "${value}". Full-URL, ` +
+        'protocol-relative (//host), and relative bases are unsupported because this value is also ' +
+        'the Vue Router history base.',
+    )
+  }
+  const withLeading = value.startsWith('/') ? value : `/${value}`
+  return withLeading.endsWith('/') ? withLeading : `${withLeading}/`
+}
+
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const envDir = process.env.METASHEET_ENV_DIR?.trim() || process.cwd()
@@ -10,9 +31,11 @@ export default defineConfig(({ mode }) => {
   const apiBase = env.VITE_API_URL || env.VITE_API_BASE || 'http://127.0.0.1:7778'
   const portValue = Number(env.VITE_PORT)
   const serverPort = Number.isFinite(portValue) && portValue > 0 ? portValue : 8899
+  const basePath = resolveBasePath(env.VITE_BASE_PATH)
 
   return {
     envDir,
+    base: basePath,
     plugins: [vue()],
     server: {
       port: serverPort,
