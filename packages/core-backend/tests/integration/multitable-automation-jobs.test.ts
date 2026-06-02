@@ -106,4 +106,70 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
       for (const id of createdIds) await q('DELETE FROM automation_rules WHERE id = $1', [id])
     }
   })
+
+  // A6-1 acceptance SEAM: prove the full opt-in path end-to-end on real Postgres — a rule with
+  // execution_mode='workflow_job_v1' run through executeRule() actually persists a per-action
+  // WorkflowJob plane (C1), and a legacy rule writes none. Unit tests mock the executor and the
+  // lifecycle test above drives lifecycleFor directly; only this exercises executeRule's
+  // job-factory wiring (the one path never run as a single chain). A throwing fetchFn makes any
+  // webhook action fail fast; `onStart` writes a job BEFORE the action, so ≥1 job persists
+  // regardless of the action outcome.
+  test('acceptance seam: executeRule opt-in writes per-action jobs (C1); opt-out writes none', async () => {
+    const svc = new AutomationService(
+      new EventBus(),
+      db as never,
+      (async () => ({ rows: [], rowCount: 0 })) as never,
+      (async () => {
+        throw new Error('network blocked in acceptance seam test')
+      }) as never,
+    )
+    const baseRule = {
+      name: 'a6-1 seam',
+      sheetId: `sheet_seam_${TS}`,
+      trigger: { type: 'record.created', config: {} },
+      actions: [{ type: 'send_webhook', config: { url: 'http://127.0.0.1:1/blocked' } }],
+      enabled: true,
+      createdBy: '',
+      createdAt: new Date(TS).toISOString(),
+    }
+    const event = { sheetId: baseRule.sheetId, recordId: `rec_seam_${TS}`, data: {} }
+    const execIds: string[] = []
+    try {
+      const optIn = await svc.executeRule(
+        { ...baseRule, id: `atr_seam_in_${TS}`, executionMode: 'workflow_job_v1' } as never,
+        event,
+      )
+      execIds.push(optIn.id)
+      // Deterministic: one send_webhook action + a throwing fetchFn → the action FAILS, so the
+      // execution and its single job must both SETTLE to `failed` (onStart → action → onSettled).
+      // Asserting the exact failed shape — not ">=1 job / any status" — is the point: a stuck
+      // `running` job (executeRule wiring onStart but never settling) would otherwise look green.
+      expect(optIn.status).toBe('failed')
+      expect(optIn.steps).toHaveLength(1)
+      expect(optIn.steps[0]).toMatchObject({ actionType: 'send_webhook', status: 'failed' })
+      const jobRows = await q(
+        'SELECT status, error FROM multitable_automation_jobs WHERE execution_id = $1',
+        [optIn.id],
+      )
+      expect(jobRows.rows).toHaveLength(1) // exactly one job — settled, not a stuck-running duplicate
+      expect(jobRows.rows[0].status).toBe('failed') // settled to failed, NOT left running
+      expect(jobRows.rows[0].error).toBeTruthy() // onSettled persisted the failure (redacted), not empty
+      const views = await jobs.listByExecution(optIn.id)
+      expect(views).toHaveLength(1)
+      expect(views[0].status).toBe('failed') // C1 view agrees: failed
+
+      const legacy = await svc.executeRule({ ...baseRule, id: `atr_seam_out_${TS}` } as never, event)
+      execIds.push(legacy.id)
+      const none = await q(
+        'SELECT count(*)::int AS n FROM multitable_automation_jobs WHERE execution_id = $1',
+        [legacy.id],
+      )
+      expect(none.rows[0].n).toBe(0) // legacy rule writes zero job rows (opt-out unchanged)
+    } finally {
+      for (const id of execIds) {
+        await q('DELETE FROM multitable_automation_jobs WHERE execution_id = $1', [id])
+        await q('DELETE FROM multitable_automation_executions WHERE id = $1', [id])
+      }
+    }
+  })
 })
