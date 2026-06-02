@@ -24,9 +24,9 @@
 | 档 | 项 | 关键约束 |
 |---|---|---|
 | **MUST** | **排班合规引擎**（日/周/月工时 cap，**超限阻断保存**） | 钉钉最硬护城河。**MUST 口径 = 排班时阻断保存；warning-only 只算报表/预警红利，不算 MUST ✅**（避免实现方交 warning 充数） |
-| | **未排班提醒 + 未排班处理策略**（提醒负责人 + 阻断/允许打卡） | 最便宜高价值；先做"发现+提醒+处理"，自动写入归 SHOULD |
+| | **未排班提醒**（提醒负责人/本人） | ⚠️ **不是小 feature**：attendance 无调度器、无事件→通知消费者（2026-06-01 verify 证伪"渠道已有"）→ 实为"**attendance scheduler + notifier 基座**"基础设施刀（镜像 `ApprovalSlaScheduler`，leader-elected + env 渠道 notifier）；与**假期过期提醒共建/复用同一基座**。估时 **2–3pd**（原 1–2pd 作废）；排序靠后（§3）。**未排班处理策略 → 归 ③ 打卡策略组，不在此单建** |
 | | **排班修改窗**（可改 N 天内、超窗锁；钉钉默认 180） | 与合规引擎 + 历史数据可信度强绑；无它则报表不可信。实现量小、治理价值高 |
-| | **外勤审批 + 内外勤卡合并**（打卡策略组） | 两项同属打卡策略、成组做；抽屉已在只差配置写入 |
+| | **打卡策略组**（外勤审批 + 内外勤卡合并 + **未排班打卡策略**） | 三项同属 punch policy → 一个"**打卡策略配置基座**"design-lock（greenfield，0 现有字段）；抽屉已在只差配置写入；未排班"阻断/允许打卡"默认 **allow**（不回归） |
 | | **加班 ↔ 调休** | 假勤闭环 |
 | | **假期过期管理**（expires_at/延长/提醒） | 假勤闭环 |
 | **SHOULD** | **自动对班**（**feature-flag 默认关，先 preview/建议态，再灰度自动写入**） | 误判会污染考勤/加班/请假/报表全链 → 不直接自动写，灰度门 |
@@ -50,8 +50,8 @@
 | 综合工时（报表侧） | （已成，OUT 之外的红利） | ✅ | #1801 等（113 hits，`enforcement:'warn'`） |
 | 固定班 preview/apply + provenance + managed controls · 周矩阵展示 · 打卡只读抽屉 · HR 字段/onboarding/work-time drawer · FormulaEngine（仅差 4–5 函数） | （红利） | ✅ | 并行 session 两天内落地 |
 | 排班合规引擎（超出禁止保存） | MUST | ⬜ | 综合工时仅报表 warn；排班时 block = 0 |
-| 未排班提醒 + 处理策略 | MUST | ⬜ | 0（notification-channels 已有） |
-| 排班修改窗 | MUST | 🟡 | `shift-edit-policy` 5 hits，需轻核覆盖到哪 |
+| 未排班提醒（= scheduler+notifier 基座刀） | MUST | ⬜ | **verify 2026-06-01 证伪"渠道已有"**：attendance 无调度器、无事件→通知消费者 → 镜像 `ApprovalSlaScheduler`+notifier；2–3pd；与假期过期提醒共建。处理策略已移入 ③ |
+| 排班修改窗 | MUST | ⬜ | **greenfield**（2026-06-01 轻核：原标的 5 hits 经核为无关的 report-sync job-locking，并非排班修改窗）；可**免迁移**——policy 入现有 `ruleSet.config` JSONB + update-time 按日期判窗，hook 在 assignment PUT/DELETE 路由 |
 | 外勤审批 | MUST | ⬜ | 0 |
 | 内外勤卡合并 | MUST | ⬜ | 0（打卡抽屉只读） |
 | 加班↔调休 | MUST | ⬜ | 0 |
@@ -69,12 +69,14 @@
 
 ## 3. H2 执行排序（产品负责人 2026-06-01）
 
-① **未排班提醒/处理策略**（最便宜先开胃）
-② **排班修改窗**（治理基线，便宜）
-③ **打卡策略组**（外勤审批 + 内外勤合并）
-④ **排班合规引擎**（招牌）
-⑤ **加班调休 + 假期过期**（假勤闭环）
+① **排班修改窗**（**首刀**；纯 update-time 校验，不碰 scheduler/notifier 新基座；治理价值高）
+② **打卡策略组**（外勤审批 + 内外勤合并 + 未排班打卡策略；一个 punch-policy 配置基座 design-lock）
+③ **排班合规引擎**（招牌）
+④ **加班调休 + 假期过期**（假勤闭环；假期过期提醒在此**首建** scheduler/notifier 基座）
+⑤ **未排班提醒**（**复用 ④ 的 scheduler+notifier 基座**；镜像 `ApprovalSlaScheduler`）
 ⑥ **自动对班**（灰度门，feature-flag 默认关 → preview → 自动写）
+
+> **回填（2026-06-01 pre-flight 发现）**：原排序把"未排班提醒"列首，依据"渠道已有/最便宜"——**verify 证伪**（attendance 无调度器、无事件→通知消费者）。故改：**排班修改窗为首刀**（真·最便宜 + 治理高）；未排班提醒降级为后续"scheduler+notifier 基座"基础设施刀（2–3pd，与假期过期提醒共建）；未排班处理策略归 ③ 打卡策略组。
 
 > **⚠️ schema 成组迁移，别一刀一迁。** 排班合规（`shift_constraints`）/ 修改窗（`locked_at`）/ 发布（`status`）/ 多班次（`slot`）**都 ALTER `attendance_shift_assignments`/`rule_sets`**——拆独立 PR 各迁一次 = 反复热表冲突。**这几项的 schema 打一个协调 migration，再分层叠 service/UI**（v1 阶段2 已是此意）。
 
