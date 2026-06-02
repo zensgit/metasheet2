@@ -2603,6 +2603,152 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('enforces the daily shift-compliance cap (block) across all assignment-save paths and persists nothing on 422', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const adminUserId = `attendance-compliance-admin-${runSuffix}`
+    const targetUserId = `attendance-compliance-user-${runSuffix}`
+    const memberUserId = `attendance-compliance-member-${runSuffix}`
+    // The shift works all 7 weekdays (540 min/day), so each date is a working day → date-independent.
+    const startA = '2026-07-06' // shift POST
+    const startB = '2026-07-13' // shift PUT (small -> big)
+    const startC = '2026-07-20' // rotation POST
+    const startD = '2026-07-27' // fixed-schedule apply (member)
+    const startE = '2026-08-03' // no-regression: cap with headroom
+    const startF = '2026-08-10' // no-regression: cap unset (null)
+    const startG = '2026-08-17' // rotation PUT
+    const startH = '2026-08-24' // fixed-schedule rebuild
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    let adminToken: string | undefined
+    let originalSettings: Record<string, unknown> = {}
+    let groupId: string | undefined
+    let bigShiftId: string | undefined
+    let smallShiftId: string | undefined
+    let rotationRuleId: string | undefined
+    let smallRotationRuleId: string | undefined
+    try {
+      // Compliance enforcement is orthogonal to RBAC (it runs after the dispatch check, inside the
+      // txn). Bypass RBAC so each save path reaches the guard without per-route permission plumbing.
+      process.env.RBAC_BYPASS = 'true'
+      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+      if (!adminToken) return
+      const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+
+      // Opt the org into block + a tiny daily cap, and confirm the PUT round-trips through GET.
+      const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+      originalSettings = ((origRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+      const putRes = await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ shiftCompliance: { enforcement: 'block', dailyMaxMinutes: 60 } }) })
+      expect(putRes.status).toBe(200)
+      const rt = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+      const rtCompliance = (rt.body as { data?: { shiftCompliance?: { dailyMaxMinutes?: number; enforcement?: string } } } | undefined)?.data?.shiftCompliance
+      expect(rtCompliance?.dailyMaxMinutes).toBe(60)
+      expect(rtCompliance?.enforcement).toBe('block')
+
+      // A 9h shift (540 min planned every day, > 60) and a 30-min shift (< 60).
+      const bigShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, { method: 'POST', headers, body: JSON.stringify({ name: `compliance-big-${runSuffix}`, timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', workingDays: [0, 1, 2, 3, 4, 5, 6] }) })
+      expect(bigShiftRes.status).toBe(201)
+      bigShiftId = (bigShiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      const smallShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, { method: 'POST', headers, body: JSON.stringify({ name: `compliance-small-${runSuffix}`, timezone: 'UTC', workStartTime: '09:00', workEndTime: '09:30', workingDays: [0, 1, 2, 3, 4, 5, 6] }) })
+      expect(smallShiftRes.status).toBe(201)
+      smallShiftId = (smallShiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+
+      // (1) shift POST -> 422, and NO row written (rolled back before commit).
+      const shiftPostRes = await requestJson(`${baseUrl}/api/attendance/assignments`, { method: 'POST', headers, body: JSON.stringify({ userId: targetUserId, shiftId: bigShiftId, startDate: startA, endDate: startA, isActive: true }) })
+      expect(shiftPostRes.status).toBe(422)
+      expect((shiftPostRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_COMPLIANCE_CAP_EXCEEDED')
+      const afterShiftPost = await pool.query('SELECT 1 FROM attendance_shift_assignments WHERE user_id = $1 AND start_date = $2', [targetUserId, startA])
+      expect(afterShiftPost.rows.length).toBe(0)
+
+      // (2) shift PUT -> create with the small shift (under cap) succeeds, PUT to the big shift -> 422
+      // and the row is unchanged (still the small shift) because the txn rolled back.
+      const smallAssignRes = await requestJson(`${baseUrl}/api/attendance/assignments`, { method: 'POST', headers, body: JSON.stringify({ userId: targetUserId, shiftId: smallShiftId, startDate: startB, endDate: startB, isActive: true }) })
+      expect(smallAssignRes.status).toBe(201)
+      const shiftAssignmentId = (smallAssignRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+      const shiftPutRes = await requestJson(`${baseUrl}/api/attendance/assignments/${shiftAssignmentId}`, { method: 'PUT', headers, body: JSON.stringify({ shiftId: bigShiftId }) })
+      expect(shiftPutRes.status).toBe(422)
+      expect((shiftPutRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_COMPLIANCE_CAP_EXCEEDED')
+      const afterShiftPut = await pool.query('SELECT shift_id FROM attendance_shift_assignments WHERE id = $1', [shiftAssignmentId])
+      expect(String(afterShiftPut.rows[0]?.shift_id)).toBe(String(smallShiftId))
+
+      // (3) rotation POST (rotation rule whose only shift is the big one) -> 422, no rotation row.
+      const rotRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, { method: 'POST', headers, body: JSON.stringify({ name: `compliance-rot-${runSuffix}`, timezone: 'UTC', shiftSequence: [bigShiftId], isActive: true }) })
+      expect(rotRuleRes.status).toBe(201)
+      rotationRuleId = (rotRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      const rotPostRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, { method: 'POST', headers, body: JSON.stringify({ userId: targetUserId, rotationRuleId, startDate: startC, isActive: true }) })
+      expect(rotPostRes.status).toBe(422)
+      expect((rotPostRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_COMPLIANCE_CAP_EXCEEDED')
+      const afterRotPost = await pool.query('SELECT 1 FROM attendance_rotation_assignments WHERE user_id = $1 AND start_date = $2', [targetUserId, startC])
+      expect(afterRotPost.rows.length).toBe(0)
+
+      // (3b) rotation PUT -> assign a small-shift rotation (under cap) succeeds, PUT it to the big-shift
+      // rotation rule -> 422 and the row is unchanged (still the small rule) because the txn rolled back.
+      const smallRotRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, { method: 'POST', headers, body: JSON.stringify({ name: `compliance-rot-small-${runSuffix}`, timezone: 'UTC', shiftSequence: [smallShiftId], isActive: true }) })
+      expect(smallRotRuleRes.status).toBe(201)
+      smallRotationRuleId = (smallRotRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      const smallRotAssignRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, { method: 'POST', headers, body: JSON.stringify({ userId: targetUserId, rotationRuleId: smallRotationRuleId, startDate: startG, endDate: startG, isActive: true }) })
+      expect(smallRotAssignRes.status).toBe(201)
+      const rotationAssignmentId = (smallRotAssignRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+      const rotPutRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments/${rotationAssignmentId}`, { method: 'PUT', headers, body: JSON.stringify({ rotationRuleId }) })
+      expect(rotPutRes.status).toBe(422)
+      expect((rotPutRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_COMPLIANCE_CAP_EXCEEDED')
+      const afterRotPut = await pool.query('SELECT rotation_rule_id FROM attendance_rotation_assignments WHERE id = $1', [rotationAssignmentId])
+      expect(String(afterRotPut.rows[0]?.rotation_rule_id)).toBe(String(smallRotationRuleId))
+
+      // (4) fixed-schedule apply (bulk) -> 422, no managed row for the member (whole apply rolled back).
+      const groupRes = await requestJson(`${baseUrl}/api/attendance/groups`, { method: 'POST', headers, body: JSON.stringify({ name: `compliance-grp-${runSuffix}`, timezone: 'UTC', attendanceType: 'fixed_shift', description: 'integration-test' }) })
+      expect(groupRes.status).toBe(200)
+      groupId = (groupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      const memberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, { method: 'POST', headers, body: JSON.stringify({ userIds: [memberUserId] }) })
+      expect(memberRes.status).toBe(200)
+      const applyRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/fixed-schedule/apply`, { method: 'POST', headers, body: JSON.stringify({ shiftId: bigShiftId, startDate: startD, endDate: startD }) })
+      expect(applyRes.status).toBe(422)
+      expect((applyRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_COMPLIANCE_CAP_EXCEEDED')
+      const afterApply = await pool.query('SELECT 1 FROM attendance_shift_assignments WHERE user_id = $1', [memberUserId])
+      expect(afterApply.rows.length).toBe(0)
+
+      // (4b) fixed-schedule REBUILD shares the managed-insert path with apply — guard it too (closes
+      // the rebuild side-door). Big shift -> 422, and no managed row persisted for the member.
+      const rebuildRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/fixed-schedule/rebuild`, { method: 'POST', headers, body: JSON.stringify({ shiftId: bigShiftId, startDate: startH, endDate: startH }) })
+      expect(rebuildRes.status).toBe(422)
+      expect((rebuildRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_COMPLIANCE_CAP_EXCEEDED')
+      const afterRebuild = await pool.query('SELECT 1 FROM attendance_shift_assignments WHERE user_id = $1', [memberUserId])
+      expect(afterRebuild.rows.length).toBe(0)
+
+      // (5) no regression — raise the cap above the shift: the same big-shift POST now succeeds.
+      const putHigh = await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ shiftCompliance: { enforcement: 'block', dailyMaxMinutes: 600 } }) })
+      expect(putHigh.status).toBe(200)
+      const headroomRes = await requestJson(`${baseUrl}/api/attendance/assignments`, { method: 'POST', headers, body: JSON.stringify({ userId: targetUserId, shiftId: bigShiftId, startDate: startE, endDate: startE, isActive: true }) })
+      expect(headroomRes.status).toBe(201)
+
+      // (6) no regression — cap unset (null): enforcement is inert, the big-shift POST succeeds.
+      const putNull = await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ shiftCompliance: { enforcement: 'block', dailyMaxMinutes: null } }) })
+      expect(putNull.status).toBe(200)
+      const unsetRes = await requestJson(`${baseUrl}/api/attendance/assignments`, { method: 'POST', headers, body: JSON.stringify({ userId: targetUserId, shiftId: bigShiftId, startDate: startF, endDate: startF, isActive: true }) })
+      expect(unsetRes.status).toBe(201)
+    } finally {
+      if (adminToken) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      }
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = ANY($1::text[])', [[targetUserId, memberUserId]]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_rotation_assignments WHERE user_id = $1', [targetUserId]).catch(() => undefined)
+      if (rotationRuleId) await pool.query('DELETE FROM attendance_rotation_rules WHERE id = $1', [rotationRuleId]).catch(() => undefined)
+      if (smallRotationRuleId) await pool.query('DELETE FROM attendance_rotation_rules WHERE id = $1', [smallRotationRuleId]).catch(() => undefined)
+      if (groupId) {
+        await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1', [groupId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_groups WHERE id = $1', [groupId]).catch(() => undefined)
+      }
+      if (bigShiftId) await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [bigShiftId]).catch(() => undefined)
+      if (smallShiftId) await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [smallShiftId]).catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('rejects non-UUID shift references for rotation rules, including UUID-like shift names', async () => {
     if (!baseUrl) return
 
