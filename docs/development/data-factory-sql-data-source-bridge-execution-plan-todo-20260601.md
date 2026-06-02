@@ -57,6 +57,8 @@ Acceptance locks (covered by `tests/unit/data-source-plugin-facade.test.ts` + `_
 - [ ] **Run uses `pipeline.createdBy`** (not request user, not null) — **moved to C2** (needs a real run).
 - [ ] `maxPages` loop fail-closed — **C2** (the pipeline-runner page loop bounds it; the adapter already returns correct `done`/`nextCursor`).
 
+**Post-merge hardening (review of #2192):** two fixes landed after C1 merged — (a) the **writable-source guard moved into the host facade's `authorize()`**, so a writable `data_sources` binding now fails closed on **every** read method (`test/getSchema/getTableInfo/select`), not only when `testConnection()` ran first (the dry-run/pipeline read paths skip it); (b) **adapter metadata** added in `http-routes.cjs` so `/api/integration/adapters` advertises `data-source:sql-readonly` as **`roles:['source']`, no `upsert`, `write:{supported:false}`** instead of the default `source,target,bidirectional`+`upsert`. Both locked by tests (`data-source-plugin-facade.test.ts` writable-every-method · `http-routes.test.cjs` metadata).
+
 ### ⬜ C2 — Impl-2: workbench source-system wiring + runner principal-threading
 Gated on: C1 + opt-in. Frontend + the one runner seam.
 - [ ] **Runner provides the principal**: `createAdapter(sourceSystem, { role:'source', principal: pipeline.createdBy })` (pipeline loaded via `pipelines.cjs:302`); direct external-system test/schema uses the request user. **Lock: a run uses `pipeline.createdBy` (not request user, not null); a NULL-`createdBy` pipeline fails closed with a legible config error.** Also bounds the page loop (`maxPages` fail-closed, no silent truncation).

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createDataSourcePluginFacade, MISSING_PRINCIPAL_MESSAGE } from '../../src/data-adapters/data-source-plugin-facade'
+import { createDataSourcePluginFacade, MISSING_PRINCIPAL_MESSAGE, writableSourceMessage } from '../../src/data-adapters/data-source-plugin-facade'
 import type { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
 
 interface AdapterStubOptions {
@@ -93,9 +93,24 @@ describe('createDataSourcePluginFacade', () => {
     expect(m.adapter.getSchema).toHaveBeenCalled()
   })
 
-  it('test reports success + the source readOnly flag (used to refuse a writable binding)', async () => {
-    const m = managerStub({ adapter: adapterStub({ healthy: true, readOnly: false }) })
+  it('test on a read-only source returns { success }', async () => {
+    const m = managerStub({ adapter: adapterStub({ healthy: true, readOnly: true }) })
     const facade = createDataSourcePluginFacade(() => m.manager)
-    expect(await facade.test('pg', 'owner-1')).toEqual({ success: true, readOnly: false })
+    expect(await facade.test('pg', 'owner-1')).toEqual({ success: true })
+  })
+
+  it('fails closed on a WRITABLE source for EVERY read method (not just test) — read never performed', async () => {
+    const m = managerStub({ adapter: adapterStub({ readOnly: false }) })
+    const facade = createDataSourcePluginFacade(() => m.manager)
+    await expect(facade.test('pg', 'owner-1')).rejects.toThrow(writableSourceMessage('pg'))
+    await expect(facade.getSchema('pg', 'owner-1')).rejects.toThrow(writableSourceMessage('pg'))
+    await expect(facade.getTableInfo('pg', 'items', 'owner-1')).rejects.toThrow(writableSourceMessage('pg'))
+    await expect(facade.select('pg', 'items', { limit: 10 }, 'owner-1')).rejects.toThrow(writableSourceMessage('pg'))
+    // The writable source is rejected before any read is performed — and before it is even connected.
+    expect(m.stub.select).not.toHaveBeenCalled()
+    expect(m.adapter.getSchema).not.toHaveBeenCalled()
+    expect(m.adapter.getTableInfo).not.toHaveBeenCalled()
+    expect(m.adapter.testConnection).not.toHaveBeenCalled()
+    expect(m.stub.connectDataSource).not.toHaveBeenCalled()
   })
 })

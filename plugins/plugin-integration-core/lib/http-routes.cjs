@@ -397,6 +397,28 @@ const ADAPTER_METADATA = {
       },
     },
   },
+  'data-source:sql-readonly': {
+    label: 'Read-only SQL data source',
+    roles: ['source'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'read'],
+    advanced: true,
+    guardrails: {
+      read: {
+        readOnlyBindingOnly: true,
+        ownerScoped: true,
+        offsetPagingOnly: true,
+        maxRowsPerPage: 10000,
+        noRawSql: true,
+        dryRunFriendly: true,
+      },
+      write: {
+        supported: false,
+      },
+      ui: {
+        referencesDataSources: true,
+      },
+    },
+  },
 }
 
 // Route-level secret-text redaction delegates to the shared scrubber

@@ -722,7 +722,7 @@ async function testDiscoveryRoutes() {
     adapterRegistry: {
       listAdapterKinds() {
         calls.push(['listAdapterKinds'])
-        return ['http', 'erp:k3-wise-sqlserver', 'bridge:legacy-sql-readonly', 'metasheet:staging', 'metasheet:multitable', 'custom:unknown']
+        return ['http', 'erp:k3-wise-sqlserver', 'bridge:legacy-sql-readonly', 'metasheet:staging', 'metasheet:multitable', 'data-source:sql-readonly', 'custom:unknown']
       },
       createAdapter(input) {
         calls.push(['createAdapter', input])
@@ -825,6 +825,13 @@ async function testDiscoveryRoutes() {
     supportsAppend: true,
     supportsUpsertByKey: true,
   })
+  const dataSourceMetadata = res.body.data.find((adapter) => adapter.kind === 'data-source:sql-readonly')
+  assert.equal(dataSourceMetadata.label, 'Read-only SQL data source')
+  assert.equal(dataSourceMetadata.advanced, true)
+  assert.deepEqual(dataSourceMetadata.roles, ['source'], 'data-source:sql-readonly is source-only (NOT source/target/bidirectional)')
+  assert.deepEqual(dataSourceMetadata.supports, ['testConnection', 'listObjects', 'getSchema', 'read'], 'data-source:sql-readonly supports has no upsert')
+  assert.equal(dataSourceMetadata.supports.includes('upsert'), false, 'data-source:sql-readonly never advertises upsert')
+  assert.deepEqual(dataSourceMetadata.guardrails.write, { supported: false }, 'data-source:sql-readonly write is unsupported')
   const unknownMetadata = res.body.data.find((adapter) => adapter.kind === 'custom:unknown')
   assert.equal(unknownMetadata.label, 'custom:unknown')
   assert.equal(unknownMetadata.advanced, false)
