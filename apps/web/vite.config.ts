@@ -12,6 +12,11 @@ import { resolve } from 'path'
 function resolveBasePath(raw?: string): string {
   const value = (raw || '').trim()
   if (!value || value === '/') return '/'
+  // Preserve Vite-compatible full-URL (CDN) and relative bases; only ensure a trailing slash.
+  if (/^https?:\/\//i.test(value) || value.startsWith('./') || value.startsWith('../')) {
+    return value.endsWith('/') ? value : `${value}/`
+  }
+  // Path-only base (the common sub-path case): normalize to a leading + trailing slash.
   const withLeading = value.startsWith('/') ? value : `/${value}`
   return withLeading.endsWith('/') ? withLeading : `${withLeading}/`
 }
