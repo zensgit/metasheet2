@@ -508,6 +508,59 @@ describe('DataSourcesView (UI-2 connection test reachability)', () => {
     expect(container.querySelectorAll('[data-testid="ds-schema-column"]')).toHaveLength(2)
   })
 
+  it('drops a stale schema response: a fast A→B switch keeps B and never loads A table info', async () => {
+    listMock.mockResolvedValue([
+      { id: 'a', name: 'Alpha DB', type: 'postgres', connected: true },
+      { id: 'b', name: 'Bravo DB', type: 'postgres', connected: true },
+    ])
+    // A's schema load is parked (slow); B's resolves immediately (fast). This is the out-of-order
+    // race: the user clicks A then B before A returns, and A's response arrives last.
+    let resolveA: ((schema: unknown) => void) | null = null
+    const aSchema = new Promise<unknown>((resolve) => {
+      resolveA = resolve
+    })
+    getSchemaMock.mockImplementation((id: string) =>
+      id === 'a'
+        ? aSchema
+        : Promise.resolve({
+            tables: [{ name: 'b_orders', schema: 'public', columns: [{ name: 'id', type: 'int' }] }],
+          }),
+    )
+    getTableInfoMock.mockResolvedValue({
+      name: 'b_orders',
+      schema: 'public',
+      columns: [{ name: 'id', type: 'int', nullable: false, primaryKey: true }],
+    })
+
+    const container = await mountView()
+    const schemaButtons = container.querySelectorAll('[data-testid="ds-schema"]')
+    expect(schemaButtons).toHaveLength(2)
+
+    // Click A (parks on the pending schema), then B (resolves fast) before A returns.
+    ;(schemaButtons[0] as HTMLButtonElement).click()
+    await flush()
+    ;(schemaButtons[1] as HTMLButtonElement).click()
+    await flush()
+    await flush()
+
+    // B is the active panel and only B's table info loaded.
+    const select = container.querySelector('[data-testid="ds-schema-table"]') as HTMLSelectElement
+    expect(select.value).toBe('public.b_orders')
+    expect(getTableInfoMock).toHaveBeenCalledWith('b', 'b_orders', 'public')
+
+    // A's slow response now arrives last — the stale-response guard must drop it.
+    resolveA?.({
+      tables: [{ name: 'a_items', schema: 'public', columns: [{ name: 'id', type: 'int' }] }],
+    })
+    await flush()
+    await flush()
+
+    // Still B: schemaTable not clobbered to A's table, and A's table info was never loaded.
+    expect(select.value).toBe('public.b_orders')
+    expect(getTableInfoMock).not.toHaveBeenCalledWith('a', 'a_items', 'public')
+    expect(container.querySelector('[data-testid="ds-schema-detail"]')?.textContent).toContain('public.b_orders')
+  })
+
   it('opens a read-only SQL table preview via schema + bounded select and renders rows', async () => {
     listMock.mockResolvedValue([
       { id: 'pg', name: 'Warehouse DB', type: 'postgres', connected: true },
@@ -539,6 +592,57 @@ describe('DataSourcesView (UI-2 connection test reachability)', () => {
     expect(container.querySelector('[data-testid="ds-preview-panel"]')?.textContent).toContain('只读数据预览')
     expect(container.querySelector('[data-testid="ds-preview-result"]')?.textContent).toContain('Widget')
     expect(container.querySelector('[data-testid="ds-preview-panel"]')?.textContent).toContain('limit=100')
+  })
+
+  it('drops a stale preview schema response: a fast A→B switch never queries A table against B', async () => {
+    listMock.mockResolvedValue([
+      { id: 'a', name: 'Alpha DB', type: 'postgres', connected: true },
+      { id: 'b', name: 'Bravo DB', type: 'postgres', connected: true },
+    ])
+    // A's schema load is parked (slow); B's resolves immediately (fast).
+    let resolveA: ((schema: unknown) => void) | null = null
+    const aSchema = new Promise<unknown>((resolve) => {
+      resolveA = resolve
+    })
+    getSchemaMock.mockImplementation((id: string) =>
+      id === 'a'
+        ? aSchema
+        : Promise.resolve({
+            tables: [{ name: 'b_orders', schema: 'public', columns: [{ name: 'id', type: 'int' }] }],
+          }),
+    )
+    previewRowsMock.mockResolvedValue({
+      data: [{ id: 1, name: 'BravoWidget' }],
+      metadata: { columns: [{ name: 'id', type: 'int' }, { name: 'name', type: 'text' }] },
+    })
+
+    const container = await mountView()
+    const previewButtons = container.querySelectorAll('[data-testid="ds-preview"]')
+    expect(previewButtons).toHaveLength(2)
+
+    // Click preview A (parks on the pending schema), then preview B (resolves fast) before A returns.
+    ;(previewButtons[0] as HTMLButtonElement).click()
+    await flush()
+    ;(previewButtons[1] as HTMLButtonElement).click()
+    await flush()
+    await flush()
+
+    // Only B's bounded select ran.
+    expect(previewRowsMock).toHaveBeenCalledWith('b', { table: 'public.b_orders', limit: 100 })
+    expect(previewRowsMock).toHaveBeenCalledTimes(1)
+
+    // A's slow response now arrives last. Without the guard it would set previewTable to A's table
+    // and runActivePreview() would query previewRows('b', { table: 'public.a_items' }) — a
+    // cross-source wrong query. The guard must drop it.
+    resolveA?.({
+      tables: [{ name: 'a_items', schema: 'public', columns: [{ name: 'id', type: 'int' }] }],
+    })
+    await flush()
+    await flush()
+
+    expect(previewRowsMock).toHaveBeenCalledTimes(1)
+    expect(previewRowsMock).not.toHaveBeenCalledWith('b', { table: 'public.a_items', limit: 100 })
+    expect(container.querySelector('[data-testid="ds-preview-result"]')?.textContent).toContain('BravoWidget')
   })
 
   it('clears stale preview errors through the cached empty-schema preview path', async () => {
