@@ -2808,12 +2808,22 @@ async function buildLinkSummaries(
 
   const readableSheetIds = await resolveReadableSheetIds(req, query, idsBySheet.keys())
 
+  // F5-followup (#2106): the foreign-record `display` echoed in link summaries is the value of the foreign
+  // sheet's default display field. resolveReadableSheetIds gates SHEET-level read, but the display field
+  // itself can be field_permissions.visible=false for this caller — so pick it only from the foreign sheet's
+  // OWN layer-2 ∧ layer-3 allowed set (keyed to that sheet + the requester, the crossSheetRelated per-sheet
+  // rule). Otherwise the denied value leaks via every buildLinkSummaries consumer (/view, single-record read,
+  // link-options `selected`, write-echo). Selecting only from allowed fields makes the value read at the
+  // displayValue line below inherently safe.
   const displayFieldBySheet = new Map<string, string | null>()
   for (const [sheetId] of idsBySheet.entries()) {
     if (!readableSheetIds.has(sheetId)) continue
     const fields = await loadFieldsForSheet(query, sheetId)
-    const stringField = fields.find((field) => field.type === 'string')
-    displayFieldBySheet.set(sheetId, stringField?.id ?? fields[0]?.id ?? null)
+    const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
+    const allowedFieldIds = await loadAllowedFieldIds(query, sheetId, access.userId, capabilities)
+    const allowedFields = fields.filter((field) => allowedFieldIds.has(field.id))
+    const stringField = allowedFields.find((field) => field.type === 'string')
+    displayFieldBySheet.set(sheetId, stringField?.id ?? allowedFields[0]?.id ?? null)
   }
 
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
@@ -4849,10 +4859,12 @@ export function univerMetaRouter(): Router {
         return res.json({ ok: true, data: { items: [] } })
       }
 
-      const { capabilities } = await resolveSheetReadableCapabilities(req, query, peopleSheetId)
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, peopleSheetId)
       if (!capabilities.canRead) return sendForbidden(res)
 
-      const summary = await loadRecordSummaries(query, peopleSheetId, { search: q, limit, offset: 0 })
+      // F5 (#2106 §3 F5): gate the people sheet's default display field by its own layer-2 ∧ layer-3 allowed set.
+      const peopleAllowedFieldIds = await loadAllowedFieldIds(query, peopleSheetId, access.userId, capabilities)
+      const summary = await loadRecordSummaries(query, peopleSheetId, { search: q, limit, offset: 0, allowedFieldIds: peopleAllowedFieldIds })
       return res.json({ ok: true, data: { items: summary.records } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
@@ -7850,7 +7862,7 @@ export function univerMetaRouter(): Router {
       if (!targetSheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Target sheet not found: ${linkConfig.foreignSheetId}` } })
       }
-      const { capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
+      const { access: foreignAccess, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
       if (!capabilities.canRead) return sendForbidden(res)
 
       let selected: LinkedRecordSummary[] = []
@@ -7878,10 +7890,15 @@ export function univerMetaRouter(): Router {
         selected = linkSummaries.get(recordId)?.get(fieldId) ?? []
       }
 
+      // F5 (#2106 §3 F5): gate the FOREIGN sheet's default display field by ITS OWN layer-2 ∧ layer-3 allowed
+      // set (keyed to the foreign sheet, not the caller's) so a field_permissions-denied display value never
+      // leaks via the summary `display`.
+      const foreignAllowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), linkConfig.foreignSheetId, foreignAccess.userId, capabilities)
       const summary = await loadRecordSummaries(pool.query.bind(pool), linkConfig.foreignSheetId, {
         search,
         limit,
         offset,
+        allowedFieldIds: foreignAllowedFieldIds,
       })
 
       return res.json({

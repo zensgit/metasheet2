@@ -44,13 +44,14 @@ The **locking test** is the real-DB integration test wired into `.github/workflo
 | ✅🔒 | **crossSheetRelated** echo mask (new finding) | Med | #2176 design · #2178 impl | `multitable-cross-sheet-related-echo-mask` |
 | ✅🔒 | **realtime** broadcast: D0 `join-sheet` authz + D1 value-free invalidation (new finding) | **High** (no-auth room) | #2181 design · #2183 impl | `multitable-sheet-realtime.api` + `rooms.basic` |
 | ✅🔒 | **F4** `POST /records` create-echo mask | Low-Med | #2186 | `multitable-create-echo-field-mask` |
-| ⬜ | **F5** `link-options` + `person-fields/prepare` (`loadRecordSummaries` foreign/source display value) | Low | — | *(to add)* |
+| ✅🔒 | **F5** `loadRecordSummaries` display: `link-options` `data.records` + `people-search` `items` (foreign/people default-display value) | Low | #2198 | `multitable-summary-display-field-mask` |
+| ✅🔒 | **linkSummaries** (`buildLinkSummaries`) foreign default-display value across `GET /view` · single-record read · link-options `data.selected` · write-echo (review follow-up to F5) | Med | #2198 | `multitable-link-summary-display-field-mask` |
 | ⬜ | **D1** `form-context` + form-submit layer-3 (anonymous-form design question — likely intentional) | Design-Q | — | *(decide first)* |
 | ⬜ | **kanban / gallery / calendar** view-data egress scan (deferred coverage scan) | Diligence | — | *(scan → maybe add)* |
 
 ### Completion
-- **By item: 8 / 11 findings closed (≈ 73 %)** — through F4 (#2186).
-- **By risk: every High + Med leak channel is closed.** Remaining = 1 **Low** (F5), 1 **design question** (D1, anonymous forms have no subject to scope to), 1 **coverage scan** (kanban). Residual attack surface ≈ retired.
+- **By item: 10 / 12 findings closed (≈ 83 %)** — through F5 + its `buildLinkSummaries` review follow-up.
+- **By risk: every High + Med + Low leak channel is closed.** Remaining = 1 **design question** (D1, anonymous forms have no subject to scope to) + 1 **coverage scan** (kanban/gallery/calendar). Residual attack surface ≈ retired.
 
 ---
 
@@ -71,7 +72,8 @@ A finding is only ticked ✅🔒 here when **all** of:
 
 ### Layer 3 — New-surface detection (the gap to watch)
 Layers 1–2 protect *known* channels. A *new* record-data egress endpoint could reintroduce the leak class. To confirm continuously:
-- **Trigger:** whenever a new endpoint returns record cell values (new read, echo, summary, export, broadcast), **re-run the #2106 egress inventory method** (grep every `res.json`/`filterRecordDataByFieldIds`/`loadRecordSummaries`/raw `data[fieldId]` egress; classify gated vs ungated).
+- **Trigger:** whenever a new endpoint returns record cell values (new read, echo, summary, export, broadcast), **re-run the #2106 egress inventory method** (grep every `res.json`/`filterRecordDataByFieldIds`/`loadRecordSummaries`/`buildLinkSummaries`/`linkSummaries`/raw `data[fieldId]` egress; classify gated vs ungated).
+  - **Lesson (the `buildLinkSummaries` follow-up):** a cell value can leak even when it is *not* a direct `data[fieldId]` egress — `buildLinkSummaries` reads a *foreign* sheet's display field into a computed `display`, and the `filter*FieldSummaryMap` wrappers only drop unreadable *link fields* (caller-side), never the foreign display *value*. So the grep set must include **derived/summary display values keyed to another sheet**, masked by *that* sheet's `allowedFieldIds` (per-sheet keying), not just first-class `data[fieldId]` writes.
 - **Forward-defense (proposed, not yet built):** an "egress coverage guard" — a test that enumerates the record-data egress sites and asserts each one routes through `allowedFieldIds`, so a new *ungated* egress fails CI by construction. Tracked as a future hardening item (see §4).
 - **Pending re-scan:** the kanban/gallery/calendar view-data scan (matrix §2b, last row).
 
@@ -83,10 +85,9 @@ Layers 1–2 protect *known* channels. A *new* record-data egress endpoint could
 
 ## 4. Remaining work (each a separate, explicit opt-in)
 
-1. **F5** — gate `loadRecordSummaries`' display value in `link-options` (foreign-sheet primary field) + `person-fields/prepare`. Direct impl slice (design-locked in #2106 §F5); fail-first like F2.
-2. **D1** — decide whether `form-context`/form-submit should apply layer-3 for *identified* (non-anonymous) form callers. Product decision first; likely no code (anonymous submitter has no subject to scope to).
-3. **kanban / gallery / calendar scan** (kanban first, then gallery/calendar) — Layer-3 re-scan of these view-data egress paths; add a locking test only if a real ungated egress is found.
-4. *(optional hardening)* — build the §3 "egress coverage guard".
+1. **D1** — decide whether `form-context`/form-submit should apply layer-3 for *identified* (non-anonymous) form callers. Product decision first; likely no code (anonymous submitter has no subject to scope to).
+2. **kanban / gallery / calendar scan** (kanban first, then gallery/calendar) — Layer-3 re-scan of these view-data egress paths; add a locking test only if a real ungated egress is found.
+3. *(optional hardening)* — build the §3 "egress coverage guard".
 
 ---
 

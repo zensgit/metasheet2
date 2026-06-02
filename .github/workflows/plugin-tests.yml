@@ -178,6 +178,8 @@ jobs:
             tests/integration/multitable-records-list-authz.test.ts \
             tests/integration/multitable-record-history-field-mask.test.ts \
             tests/integration/multitable-records-summary-field-mask.test.ts \
+            tests/integration/multitable-summary-display-field-mask.test.ts \
+            tests/integration/multitable-link-summary-display-field-mask.test.ts \
             tests/integration/multitable-dashboard-chart-authz.test.ts \
             tests/integration/multitable-write-echo-field-mask.test.ts \
             tests/integration/multitable-create-echo-field-mask.test.ts \
