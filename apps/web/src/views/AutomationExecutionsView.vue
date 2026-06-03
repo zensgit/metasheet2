@@ -71,6 +71,15 @@
               <span class="automation-runs__badge automation-runs__badge--sm" :class="`automation-runs__badge--${step.status}`">
                 {{ automationStatusLabel(step.status, isZh) }}
               </span>
+              <!-- A6-2: resume a suspended step (admin detail only; token used internally, never shown). -->
+              <button
+                v-if="step.status === 'suspended' && step.suspend?.resumeToken"
+                class="automation-runs__btn automation-runs__btn--sm"
+                type="button"
+                data-action="resume"
+                :disabled="resuming === step.id"
+                @click.stop="resumeStep(step)"
+              >{{ automationLabel('runs.resume', isZh) }}</button>
               <div v-if="step.error" class="automation-runs__step-error" data-field="step-error">
                 {{ summarizeStepError(step.error) }}
               </div>
@@ -78,6 +87,9 @@
                 {{ summarizeStepOutput(step.result) }}
               </div>
             </div>
+
+            <!-- A6-2: resume failures map the discriminated code to an INLINE message (never a generic toast). -->
+            <div v-if="resumeError" class="automation-runs__step-error" data-field="resume-error" role="alert">{{ resumeError }}</div>
 
             <h2 class="automation-runs__detail-h">{{ automationLabel('runs.triggerEvent', isZh) }}</h2>
             <pre class="automation-runs__json" data-field="trigger-event">{{ jsonView(detail.triggerEvent) }}</pre>
@@ -95,8 +107,8 @@ import { ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
 import { multitableClient, type MultitableApiClient } from '../multitable/api/client'
-import type { AutomationRunView, WorkflowJobStatus } from '../multitable/types'
-import { automationLabel, automationStatusLabel } from '../multitable/utils/meta-automation-labels'
+import type { AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from '../multitable/types'
+import { automationLabel, automationStatusLabel, type AutomationLabelKey } from '../multitable/utils/meta-automation-labels'
 import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
 
 const props = defineProps<{ client?: MultitableApiClient }>()
@@ -119,6 +131,8 @@ const sheetFilter = ref('')
 const expandedId = ref<string | null>(null)
 const detail = ref<AutomationRunView | null>(null)
 const detailLoading = ref(false)
+const resuming = ref<string | null>(null)
+const resumeError = ref<string | null>(null)
 
 async function loadData() {
   loading.value = true
@@ -141,6 +155,7 @@ async function loadData() {
 }
 
 async function toggleExpand(id: string) {
+  resumeError.value = null
   if (expandedId.value === id) {
     expandedId.value = null
     detail.value = null
@@ -165,6 +180,46 @@ async function toggleExpand(id: string) {
     expandedId.value = null // detail failed for the still-current row → collapse
   }
   detailLoading.value = false
+}
+
+const RESUME_ERROR_LABELS: Record<string, AutomationLabelKey> = {
+  NOT_FOUND: 'runs.resumeError.notFound',
+  ALREADY_RESUMED: 'runs.resumeError.alreadyResumed',
+  RULE_CHANGED: 'runs.resumeError.ruleChanged',
+  RULE_MISSING_OR_DISABLED: 'runs.resumeError.ruleMissingOrDisabled',
+  RECORD_GONE: 'runs.resumeError.recordGone',
+}
+
+/** Map the resume endpoint's discriminated code → an inline localized message (never a generic toast). */
+function mapResumeError(err: unknown): string {
+  const code = (err as { code?: string })?.code
+  if (code && RESUME_ERROR_LABELS[code]) return automationLabel(RESUME_ERROR_LABELS[code], isZh.value)
+  const msg = err instanceof Error ? err.message : String(err)
+  return redactString(msg) || automationLabel('runs.resumeError.generic', isZh.value)
+}
+
+/**
+ * A6-2: resume a suspended step. Confirm-gated (the remaining actions re-run, with possible external
+ * side effects — same mental model as A5 retry's confirmSideEffects). The token is used internally and
+ * never displayed. On success the run detail reloads in place; on failure the code maps to INLINE error.
+ */
+async function resumeStep(step: AutomationRunStepView) {
+  if (resuming.value || !step.suspend?.resumeToken) return
+  if (!window.confirm(automationLabel('runs.resumeConfirm', isZh.value))) return
+  const runId = expandedId.value
+  resumeError.value = null
+  resuming.value = step.id
+  try {
+    await client.resumeAutomation(step.suspend.resumeToken)
+    if (runId && expandedId.value === runId) {
+      const refreshed = await client.getAutomationRun(runId).catch(() => null)
+      if (expandedId.value === runId && refreshed) detail.value = refreshed
+    }
+  } catch (err) {
+    resumeError.value = mapResumeError(err)
+  } finally {
+    resuming.value = null
+  }
 }
 
 function formatTime(ts: string): string {

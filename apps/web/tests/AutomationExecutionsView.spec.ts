@@ -32,6 +32,22 @@ const RUN_DETAIL: AutomationRunView = {
   ruleSnapshot: { id: 'rule-1', name: 'Notify' },
 }
 
+// A6-2: a suspended run — legacy status stays `running` (D2); the C1 job step carries the suspend
+// descriptor with the resume token (admin-detail-only; used by the Resume button, never displayed).
+const SUSPENDED_TOKEN = 'rt_secret_should_not_render_123'
+const SUSPENDED_LIST: AutomationRunView = {
+  ...RUN_LIST, id: 'axe_s', status: 'running', statusLegacy: 'running', finishedAt: null,
+}
+const SUSPENDED_DETAIL: AutomationRunView = {
+  ...SUSPENDED_LIST,
+  triggerEvent: { recordId: 'recS' },
+  ruleSnapshot: { id: 'rule-1', name: 'Notify' },
+  steps: [
+    { id: 'axe_s:step:0', executionId: 'axe_s', stepKey: '0', status: 'resolved', upstreamJobId: null, result: {} },
+    { id: 'axe_s:step:1', executionId: 'axe_s', stepKey: '1', status: 'suspended', upstreamJobId: 'axe_s:step:0', suspend: { reason: 'external_event', resumeToken: SUSPENDED_TOKEN } },
+  ],
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function makeClient(over: Record<string, any> = {}): any {
   return {
@@ -82,13 +98,17 @@ describe('AutomationExecutionsView (A3 admin runs view)', () => {
     expect(mounted.container.textContent ?? '').toContain('resolved')
   })
 
-  it('shows the admin-only notice and does NOT call the API when not admin', async () => {
+  it('shows the admin-only notice and does NOT call the API (list/detail/resume) when not admin', async () => {
     mockIsAdmin = false
-    const client = makeClient()
+    const client = makeClient({ resumeAutomation: vi.fn() })
     mounted = mount(client)
     await nextTick()
     expect(mounted.container.querySelector('[data-denied="true"]')).not.toBeNull()
     expect(client.listAutomationRuns).not.toHaveBeenCalled()
+    expect(client.getAutomationRun).not.toHaveBeenCalled()
+    // A6-2: no admin surface for a non-admin → resume is unreachable + never requested.
+    expect(client.resumeAutomation).not.toHaveBeenCalled()
+    expect(mounted.container.querySelector('[data-action="resume"]')).toBeNull()
   })
 
   it('expanding a run fetches detail and renders C1 steps + redacted snapshot', async () => {
@@ -146,5 +166,66 @@ describe('AutomationExecutionsView (A3 admin runs view)', () => {
     const trigger = mounted.container.querySelector('[data-field="trigger-event"]')?.textContent ?? ''
     expect(trigger).toContain('recB')
     expect(trigger).not.toContain('recA')
+  })
+
+  it('A6-2: a suspended step shows a confirm-gated Resume → resumeAutomation(token) + reloads detail; token never rendered', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const client = makeClient({
+      listAutomationRuns: vi.fn().mockResolvedValue([SUSPENDED_LIST]),
+      getAutomationRun: vi.fn().mockResolvedValue(SUSPENDED_DETAIL),
+      resumeAutomation: vi.fn().mockResolvedValue({ ...SUSPENDED_DETAIL, status: 'resolved', statusLegacy: 'success' }),
+    })
+    mounted = mount(client)
+    await settle()
+    expect(mounted.container.textContent ?? '').not.toContain(SUSPENDED_TOKEN) // list view: no token
+    ;(mounted.container.querySelector('[data-run-id="axe_s"]') as HTMLElement).click()
+    await settle()
+    const resumeBtn = mounted.container.querySelector('[data-action="resume"]') as HTMLElement
+    expect(resumeBtn).not.toBeNull()
+    expect(mounted.container.textContent ?? '').not.toContain(SUSPENDED_TOKEN) // detail: token used internally, not shown
+    resumeBtn.click()
+    await settle()
+    expect(confirmSpy).toHaveBeenCalled() // confirm-gated (side-effects warning)
+    expect(client.resumeAutomation).toHaveBeenCalledWith(SUSPENDED_TOKEN)
+    expect(client.getAutomationRun).toHaveBeenCalledTimes(2) // expand + post-resume reload
+    confirmSpy.mockRestore()
+  })
+
+  it('A6-2: cancelling the resume confirm does NOT call resumeAutomation', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const client = makeClient({
+      listAutomationRuns: vi.fn().mockResolvedValue([SUSPENDED_LIST]),
+      getAutomationRun: vi.fn().mockResolvedValue(SUSPENDED_DETAIL),
+      resumeAutomation: vi.fn(),
+    })
+    mounted = mount(client)
+    await settle()
+    ;(mounted.container.querySelector('[data-run-id="axe_s"]') as HTMLElement).click()
+    await settle()
+    ;(mounted.container.querySelector('[data-action="resume"]') as HTMLElement).click()
+    await settle()
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(client.resumeAutomation).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
+  })
+
+  it('A6-2: a discriminated resume error (409 RULE_CHANGED) maps to an INLINE message, not a toast', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const err = Object.assign(new Error('x'), { code: 'RULE_CHANGED' })
+    const client = makeClient({
+      listAutomationRuns: vi.fn().mockResolvedValue([SUSPENDED_LIST]),
+      getAutomationRun: vi.fn().mockResolvedValue(SUSPENDED_DETAIL),
+      resumeAutomation: vi.fn().mockRejectedValue(err),
+    })
+    mounted = mount(client)
+    await settle()
+    ;(mounted.container.querySelector('[data-run-id="axe_s"]') as HTMLElement).click()
+    await settle()
+    ;(mounted.container.querySelector('[data-action="resume"]') as HTMLElement).click()
+    await settle()
+    const inline = mounted.container.querySelector('[data-field="resume-error"]')
+    expect(inline).not.toBeNull()
+    expect(inline?.textContent ?? '').toContain('changed') // RULE_CHANGED → localized inline message
+    confirmSpy.mockRestore()
   })
 })

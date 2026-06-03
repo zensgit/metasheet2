@@ -564,6 +564,34 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saved.mock.calls[0][0].executionMode).toBeNull()
   })
 
+  it('A6-2b: wait_for_callback is selectable with INFO-ONLY config (zero params) and serializes {type, config:{}}', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'wait rule'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    expect(Array.from(actionSelect.options).map((o) => o.value)).toContain('wait_for_callback')
+    actionSelect.value = 'wait_for_callback'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    // Info-only: the hint renders and there are ZERO param inputs (no webhook-URL/timer/manual-task fields).
+    const cfg = container.querySelector('[data-action-config="wait_for_callback"]') as HTMLElement
+    expect(cfg).not.toBeNull()
+    expect(container.querySelector('[data-field="wait-for-callback-hint"]')).not.toBeNull()
+    expect(cfg.querySelectorAll('input, textarea, select').length).toBe(0)
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].actions).toEqual([{ type: 'wait_for_callback', config: {} }])
+  })
+
   it('serializes numeric condition values as numbers', async () => {
     const saved = vi.fn()
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })

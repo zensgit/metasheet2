@@ -243,6 +243,7 @@
                 <option value="send_dingtalk_group_message">{{ automationActionTypeLabel('send_dingtalk_group_message', isZh) }}</option>
                 <option value="send_dingtalk_person_message">{{ automationActionTypeLabel('send_dingtalk_person_message', isZh) }}</option>
                 <option value="lock_record">{{ automationActionTypeLabel('lock_record', isZh) }}</option>
+                <option value="wait_for_callback">{{ automationActionTypeLabel('wait_for_callback', isZh) }}</option>
               </select>
               <div class="meta-rule-editor__action-btns">
                 <button v-if="idx > 0" class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="moveAction(idx, -1)" :title="automationLabel('editor.moveUpTitle', isZh)">&#x2191;</button>
@@ -888,6 +889,12 @@
                 <input type="checkbox" v-model="action.config.locked" />
                 {{ automationLabel('actionConfig.lockRecord', isZh) }}
               </label>
+            </div>
+
+            <!-- wait_for_callback config (A6-2: info-only, ZERO params — the suspend point; no
+                 webhook-URL / timer / manual-task fields. An admin resumes from the runs detail.) -->
+            <div v-if="action.type === 'wait_for_callback'" class="meta-rule-editor__action-config" data-action-config="wait_for_callback">
+              <div class="meta-rule-editor__hint" data-field="wait-for-callback-hint">{{ automationLabel('actionConfig.waitForCallbackHint', isZh) }}</div>
             </div>
           </div>
           <button
@@ -2295,6 +2302,8 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
       }
     case 'lock_record':
       return { locked: true }
+    case 'wait_for_callback':
+      return {} // A6-2: zero-param suspend point (no webhook-URL/timer/manual-task fields)
     default:
       return {}
   }
