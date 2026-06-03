@@ -9215,6 +9215,18 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
   const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, randomUUID())
   const created = await insertAttendanceGroupFixedScheduleAssignments(db, input, plan.wouldCreate, producerMetadata)
 
+  // S1 daily compliance cap: project every user that received a managed row over the apply window and
+  // roll the whole apply back (throw → txn rollback → 422) if any day would exceed the cap. Guards the
+  // bulk side-door alongside the per-record save routes (no known bypass window).
+  for (const targetUserId of new Set(plan.wouldCreate.map((item) => item.userId))) {
+    await enforceShiftComplianceCap(db, {
+      orgId: input.orgId,
+      userId: targetUserId,
+      fromDate: input.startDate,
+      toDate: input.endDate,
+    })
+  }
+
   return {
     ok: true,
     data: {
@@ -9253,6 +9265,17 @@ async function rebuildAttendanceGroupFixedSchedule(db, input) {
   const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, randomUUID())
   const created = await insertAttendanceGroupFixedScheduleAssignments(db, input, plan.wouldCreate, producerMetadata)
   const deactivated = await softDeactivateAttendanceGroupFixedScheduleManagedRows(db, input, deactivateIds)
+
+  // S1 daily compliance cap: project after BOTH insert + deactivate so the resolver sees the final
+  // active set (stale managed rows already deactivated). Throw → txn rollback → 422 on any over-cap day.
+  for (const targetUserId of new Set(plan.wouldCreate.map((item) => item.userId))) {
+    await enforceShiftComplianceCap(db, {
+      orgId: input.orgId,
+      userId: targetUserId,
+      fromDate: input.startDate,
+      toDate: input.endDate,
+    })
+  }
 
   return {
     ok: true,
@@ -13221,6 +13244,87 @@ async function loadAttendanceComprehensivePlannedMinutesByUser(db, orgId, userId
     plannedDetailsByUser.set(userId, planned)
   }
   return { plannedMinutesByUser, plannedDetailsByUser }
+}
+
+// Shift-compliance engine (design-lock #2213). S1 = DAILY cap, block-on-save. Thrown inside an
+// assignment-save transaction (after the write, before commit) when a user's projected scheduled
+// minutes for any calendar day in the affected window would exceed shiftCompliance.dailyMaxMinutes.
+// The throw rolls the write back; each save route's catch maps it to 422 via
+// respondShiftComplianceCapExceeded. S2 will extend the same guard to weekly/monthly windows.
+class ShiftComplianceCapExceeded extends Error {
+  constructor(detail) {
+    super('Shift compliance cap exceeded')
+    this.name = 'ShiftComplianceCapExceeded'
+    this.detail = detail
+  }
+}
+
+// Bound the DAILY projection window. The assigned shift (or rotation cycle) repeats per working day,
+// so projecting at most this many days from the change still surfaces the worst single day (covers
+// all weekday types + a rotation cycle + month-boundary holidays) while keeping the in-txn read
+// bounded for open-ended / very long assignments.
+const SHIFT_COMPLIANCE_DAILY_WINDOW_DAYS = 62
+
+// Project one user's effective planned minutes per day over the affected window THROUGH the shared
+// effective-calendar resolver (loadAttendanceComprehensivePlannedMinutesByUser → the SAME compute
+// comprehensiveHours uses → no wire-vs-fixture drift; it reads BOTH shift + rotation sources and owns
+// day-level precedence). Pass the transaction as `db` so it sees the uncommitted post-write state.
+// No-op (no regression) when the daily cap is unset OR enforcement !== 'block' (warn is persisted but
+// inert in v1). Throws ShiftComplianceCapExceeded when any day exceeds the cap.
+async function enforceShiftComplianceCap(db, { orgId, userId, fromDate, toDate }) {
+  const settings = await getSettings(db)
+  const compliance = settings?.shiftCompliance
+  const dailyCap = compliance?.dailyMaxMinutes
+  if (compliance?.enforcement !== 'block' || dailyCap == null || !userId) return
+  // Use the lenient normalizer: PUT paths pass `existing.start_date`/`end_date`, which pg returns as
+  // Date objects (normalizeDateOnlyStrict only accepts 'YYYY-MM-DD' strings → would silently skip).
+  const from = normalizeDateOnly(fromDate)
+  if (!from) return
+  const explicitTo = normalizeDateOnly(toDate)
+  const boundedTo = addDaysToDateKey(from, SHIFT_COMPLIANCE_DAILY_WINDOW_DAYS) || from
+  const to = explicitTo && explicitTo >= from && explicitTo < boundedTo ? explicitTo : boundedTo
+  const { plannedDetailsByUser } = await loadAttendanceComprehensivePlannedMinutesByUser(
+    db,
+    orgId,
+    [userId],
+    { from, to },
+  )
+  const detail = plannedDetailsByUser.get(userId)
+  // The per-day breakdown is `items` (array of {date, plannedMinutes, ...}); `days` on this shape is
+  // a COUNT, not the array — reading `days` here silently disables the cap.
+  const perDay = Array.isArray(detail?.items) ? detail.items : []
+  let worst = null
+  for (const day of perDay) {
+    const minutes = Number(day?.plannedMinutes ?? 0)
+    if (minutes > dailyCap && (worst == null || minutes > worst.plannedMinutes)) {
+      worst = { plannedMinutes: minutes, date: day?.date ?? null }
+    }
+  }
+  if (worst) {
+    throw new ShiftComplianceCapExceeded({
+      granularity: 'daily',
+      capMinutes: dailyCap,
+      projectedMinutes: worst.plannedMinutes,
+      periodStart: worst.date,
+      periodEnd: worst.date,
+      userId,
+    })
+  }
+}
+
+// Shared 422 responder — each assignment-save route's catch calls this first. Returns true when it
+// handled a ShiftComplianceCapExceeded (caller then returns), false otherwise.
+function respondShiftComplianceCapExceeded(res, error) {
+  if (!(error instanceof ShiftComplianceCapExceeded)) return false
+  res.status(422).json({
+    ok: false,
+    error: {
+      code: 'SHIFT_COMPLIANCE_CAP_EXCEEDED',
+      message: 'Saving this schedule would exceed the configured shift compliance cap',
+      ...error.detail,
+    },
+  })
+  return true
 }
 
 async function loadAttendanceComprehensiveActualMinutesByUser(db, orgId, userIds, period) {
@@ -21639,6 +21743,12 @@ module.exports = {
                 payload.isActive,
               ]
             )
+            await enforceShiftComplianceCap(trx, {
+              orgId,
+              userId: payload.userId,
+              fromDate: payload.startDate,
+              toDate: payload.endDate,
+            })
             return { row: rows[0] }
           })
 
@@ -21652,6 +21762,7 @@ module.exports = {
           emitEvent('attendance.rotationAssignment.created', { orgId, rotationAssignmentId: assignment.id })
           res.status(201).json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -21775,6 +21886,12 @@ module.exports = {
                 payload.isActive,
               ]
             )
+            await enforceShiftComplianceCap(trx, {
+              orgId,
+              userId: payload.userId,
+              fromDate: payload.startDate,
+              toDate: payload.endDate,
+            })
             return { row: rows[0] }
           })
 
@@ -21788,6 +21905,7 @@ module.exports = {
           emitEvent('attendance.rotationAssignment.updated', { orgId, rotationAssignmentId: assignment.id })
           res.json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -27926,6 +28044,7 @@ module.exports = {
           }
           res.status(201).json({ ok: true, data: result.data })
         } catch (error) {
+          if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -28009,6 +28128,7 @@ module.exports = {
           }
           res.json({ ok: true, data: result.data })
         } catch (error) {
+          if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -29555,6 +29675,12 @@ module.exports = {
                 payload.isActive,
               ]
             )
+            await enforceShiftComplianceCap(trx, {
+              orgId,
+              userId: payload.userId,
+              fromDate: payload.startDate,
+              toDate: payload.endDate,
+            })
             return { row: rows[0] }
           })
 
@@ -29568,6 +29694,7 @@ module.exports = {
           emitEvent('attendance.assignment.created', { orgId, assignmentId: assignment.id })
           res.status(201).json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -29691,6 +29818,12 @@ module.exports = {
                 payload.isActive,
               ]
             )
+            await enforceShiftComplianceCap(trx, {
+              orgId,
+              userId: payload.userId,
+              fromDate: payload.startDate,
+              toDate: payload.endDate,
+            })
             return { row: rows[0] }
           })
 
@@ -29704,6 +29837,7 @@ module.exports = {
           emitEvent('attendance.assignment.updated', { orgId, assignmentId: assignment.id })
           res.json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
