@@ -471,10 +471,10 @@ export class MySQLAdapter extends BaseDataAdapter {
         IS_NULLABLE as is_nullable,
         COLUMN_DEFAULT as column_default,
         CHARACTER_MAXIMUM_LENGTH as max_length,
-        NUMERIC_PRECISION as precision,
-        NUMERIC_SCALE as scale,
-        COLUMN_COMMENT as comment,
-        EXTRA as extra
+        NUMERIC_PRECISION as numeric_precision,
+        NUMERIC_SCALE as numeric_scale,
+        COLUMN_COMMENT as column_comment,
+        EXTRA as extra_info
       FROM information_schema.COLUMNS
       WHERE TABLE_SCHEMA = ?
         AND TABLE_NAME = ?
@@ -487,10 +487,10 @@ export class MySQLAdapter extends BaseDataAdapter {
       is_nullable: string
       column_default: string | null
       max_length: number | null
-      precision: number | null
-      scale: number | null
-      comment: string | null
-      extra: string
+      numeric_precision: number | null
+      numeric_scale: number | null
+      column_comment: string | null
+      extra_info: string
     }>(query, [database, table])
 
     return result.data.map(row => ({
@@ -498,8 +498,8 @@ export class MySQLAdapter extends BaseDataAdapter {
       type: this.formatColumnType(row),
       nullable: row.is_nullable === 'YES',
       defaultValue: row.column_default,
-      autoIncrement: row.extra.includes('auto_increment'),
-      comment: row.comment || undefined
+      autoIncrement: row.extra_info.includes('auto_increment'),
+      comment: row.column_comment || undefined
     }))
   }
 
@@ -603,17 +603,17 @@ export class MySQLAdapter extends BaseDataAdapter {
   private formatColumnType(column: {
     data_type: string
     max_length: number | null
-    precision: number | null
-    scale: number | null
+    numeric_precision: number | null
+    numeric_scale: number | null
   }): string {
     let type = column.data_type
 
     if (column.max_length && ['varchar', 'char'].includes(column.data_type)) {
       type += `(${column.max_length})`
-    } else if (column.precision && ['decimal', 'numeric'].includes(column.data_type)) {
-      type += `(${column.precision}`
-      if (column.scale) {
-        type += `,${column.scale}`
+    } else if (column.numeric_precision && ['decimal', 'numeric'].includes(column.data_type)) {
+      type += `(${column.numeric_precision}`
+      if (column.numeric_scale) {
+        type += `,${column.numeric_scale}`
       }
       type += ')'
     }

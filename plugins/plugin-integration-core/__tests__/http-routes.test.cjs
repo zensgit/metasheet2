@@ -901,6 +901,47 @@ async function testDiscoveryRoutes() {
   assert.equal(missingObject.body.error.code, 'OBJECT_REQUIRED')
 }
 
+async function testDiscoveryObjectsRouteDoesNotDefaultTruncateAdapterObjects() {
+  const largeObjects = Array.from({ length: 109 }, (_, index) => ({
+    name: index === 87 ? 'stockorder.stock_info' : `stockorder.table_${String(index + 1).padStart(3, '0')}`,
+    label: `table ${index + 1}`,
+    operations: ['read'],
+    accessToken: index === 0 ? 'secret-token-should-not-leak' : undefined,
+  }))
+  const { services } = createMockServices({
+    adapterRegistry: {
+      createAdapter() {
+        return {
+          async listObjects() {
+            return largeObjects
+          },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+
+  const res = await invoke(routes, 'GET', '/api/integration/external-systems/:id/objects', {
+    user: READ_USER,
+    params: { id: 'mysql_bridge_1' },
+    query: { workspaceId: 'workspace_1' },
+  })
+
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.length, 109, 'object discovery returns the full metadata list, not the default 50-item redaction cap')
+  assert.ok(
+    res.body.data.some((object) => object.name === 'stockorder.stock_info'),
+    'business tables beyond the first 50 stay discoverable',
+  )
+  assert.equal(
+    res.body.data.some((object) => typeof object === 'string' && object.includes('more items truncated')),
+    false,
+    'object discovery does not include the default array truncation marker',
+  )
+  assert.equal(JSON.stringify(res.body).includes('secret-token-should-not-leak'), false, 'object metadata still runs through redaction')
+  assert.equal(res.body.data[0].accessToken, '[redacted]')
+}
+
 async function testDiscoveryRoutesRejectUnknownSystem() {
   const { calls, services } = createMockServices()
   services.externalSystemRegistry.getExternalSystemForAdapter = async (input) => {
@@ -2129,6 +2170,7 @@ async function main() {
   await testExternalSystemTestRequiresSavedSystem()
   await testExternalSystemTestRedactsAdapterResultSecrets()
   await testDiscoveryRoutes()
+  await testDiscoveryObjectsRouteDoesNotDefaultTruncateAdapterObjects()
   await testDiscoveryRoutesRejectUnknownSystem()
   await testDocumentTemplateValidation()
   await testPipelineRoutes()
