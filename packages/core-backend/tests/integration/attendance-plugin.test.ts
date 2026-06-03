@@ -2828,6 +2828,98 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④ C1 leave-balance ledger — source_key uniqueness + not-null backstop + events FK (latent schema)', async () => {
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = 'default'
+    const userId = `c1-${runSuffix}`
+    const sourceKey = `overtime_conversion:c1-${runSuffix}`
+    let balanceId: string | undefined
+    try {
+      // A grant lot inserts.
+      const ins = await pool.query(
+        `INSERT INTO attendance_leave_balances
+           (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key)
+         VALUES ($1, $2, 'comp_time', 480, 480, 'overtime_conversion', $3, $4) RETURNING id`,
+        [orgId, userId, `req-${runSuffix}`, sourceKey],
+      )
+      balanceId = ins.rows[0]?.id as string | undefined
+      expect(balanceId).toBeTruthy()
+
+      // (1) double-credit backstop: same (org_id, source_key) -> unique violation (23505).
+      let dupErr: { code?: string } | null = null
+      try {
+        await pool.query(
+          `INSERT INTO attendance_leave_balances
+             (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key)
+           VALUES ($1, $2, 'comp_time', 60, 60, 'overtime_conversion', $3)`,
+          [orgId, userId, sourceKey],
+        )
+      } catch (e) { dupErr = e as { code?: string } }
+      expect(dupErr?.code).toBe('23505')
+
+      // (2) source_key is the backstop precisely because it is NOT NULL -> null rejected (23502).
+      let nullErr: { code?: string } | null = null
+      try {
+        await pool.query(
+          `INSERT INTO attendance_leave_balances
+             (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key)
+           VALUES ($1, $2, 'comp_time', 60, 60, 'manual_grant', NULL)`,
+          [orgId, `${userId}-n`],
+        )
+      } catch (e) { nullErr = e as { code?: string } }
+      expect(nullErr?.code).toBe('23502')
+
+      // (3) events ledger row references the lot; a dangling balance_id -> FK violation (23503).
+      const ev = await pool.query(
+        `INSERT INTO attendance_leave_balance_events
+           (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+         VALUES ($1, $2, $3, 'grant', 480, 'overtime_conversion', $4) RETURNING id`,
+        [orgId, userId, balanceId, `req-${runSuffix}`],
+      )
+      expect(ev.rows[0]?.id).toBeTruthy()
+      let fkErr: { code?: string } | null = null
+      try {
+        await pool.query(
+          `INSERT INTO attendance_leave_balance_events
+             (org_id, user_id, balance_id, event_type, delta_minutes)
+           VALUES ($1, $2, '00000000-0000-4000-8000-000000000000', 'deduct', -60)`,
+          [orgId, userId],
+        )
+      } catch (e) { fkErr = e as { code?: string } }
+      expect(fkErr?.code).toBe('23503')
+
+      // (4) DB-level balance math + enum invariants (#2230) — every impossible balance is a 23514
+      // check_violation, so a future code bug can't persist one. Each insert is valid except the
+      // field under test (distinct user/source_key so unique/not-null don't fire first).
+      const rejects = async (text: string, params: unknown[], code: string, label: string) => {
+        let err: { code?: string } | null = null
+        try { await pool.query(text, params) } catch (e) { err = e as { code?: string } }
+        expect({ label, code: err?.code }).toEqual({ label, code })
+      }
+      const balanceInsert = `INSERT INTO attendance_leave_balances
+        (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status)
+        VALUES ($1, $2, 'comp_time', $3, $4, 'manual_grant', $5, $6)`
+      await rejects(balanceInsert, [orgId, `${userId}-a`, 0, 0, `mk:${runSuffix}:a`, 'active'], '23514', 'amount_minutes must be > 0')
+      await rejects(balanceInsert, [orgId, `${userId}-b`, 10, -5, `mk:${runSuffix}:b`, 'active'], '23514', 'remaining_minutes must be >= 0')
+      await rejects(balanceInsert, [orgId, `${userId}-c`, 10, 20, `mk:${runSuffix}:c`, 'active'], '23514', 'remaining_minutes must be <= amount_minutes')
+      await rejects(balanceInsert, [orgId, `${userId}-d`, 10, 10, `mk:${runSuffix}:d`, 'bogus'], '23514', 'status must be a valid enum')
+
+      const eventInsert = `INSERT INTO attendance_leave_balance_events
+        (org_id, user_id, balance_id, event_type, delta_minutes) VALUES ($1, $2, $3, $4, $5)`
+      await rejects(eventInsert, [orgId, userId, balanceId, 'bogus', 10], '23514', 'event_type must be a valid enum')
+      await rejects(eventInsert, [orgId, userId, balanceId, 'grant', 0], '23514', 'delta_minutes <> 0 (grant)')
+      await rejects(eventInsert, [orgId, userId, balanceId, 'grant', -5], '23514', 'grant delta must be > 0')
+      await rejects(eventInsert, [orgId, userId, balanceId, 'deduct', 5], '23514', 'deduct delta must be < 0')
+    } finally {
+      await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id LIKE $1', [`c1-${runSuffix}%`]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_balances WHERE user_id LIKE $1', [`c1-${runSuffix}%`]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('rejects non-UUID shift references for rotation rules, including UUID-like shift names', async () => {
     if (!baseUrl) return
 
