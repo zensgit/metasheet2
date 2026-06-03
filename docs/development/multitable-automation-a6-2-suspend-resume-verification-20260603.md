@@ -75,6 +75,18 @@ Owner diff-review flagged 3 state-consistency / C1-contract blockers; all fixed 
   failure (the wait-step settle moved INSIDE the try) instead of bubbling a 500 with the token consumed
   and the tail unrun.
 
+## Review round 2 — B1 race + token-surface (2026-06-03)
+- **B1 race (blocking, fixed):** round-1 hydrated the descriptor only from `status='pending'`
+  suspensions, but resume claims the token (`pending`→`resumed`) BEFORE it settles the wait job — so a
+  still-`suspended` job can coexist with a `resumed` suspension (the post-claim window, or a durable
+  wait-settle failure) and lose its descriptor again. Fix: hydrate by `execution_id`/`step_index`
+  **regardless of suspension status**. New **T10** asserts a `resumed` suspension + a still-`suspended`
+  job → `listByExecution` returns a valid C1 (descriptor present, `normalizeWorkflowJob` does not throw).
+- **Token surface (owner-accepted option 1):** the `resume_token` is surfaced **admin-detail-only** —
+  the C1 suspend descriptor rides the detail route (`GET /automation-executions/:id`); the LIST route uses
+  legacy steps and never carries it. Stale code comments updated to the real contract ("admin detail is
+  the v1 token surface", not "never in the read plane / emitted on suspend").
+
 ## Red lines honored
 No delay/timer · no worker/claim · no branch/parallel · no BPMN · no approval-as-job · **no public
 endpoint / no token emitter** (admin-gated only) · no K3 / central RBAC / integration-core / contract.

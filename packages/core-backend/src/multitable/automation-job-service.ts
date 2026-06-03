@@ -108,9 +108,11 @@ export class AutomationJobService {
   /**
    * A6-2: write the wait step's job row as `suspended` (the out-of-band suspended state, D2).
    * Mirrors onStart's insert (started, observable) but with C1 status `suspended` and no finish.
-   * The suspend descriptor (reason / resume token) lives in the suspension table, NOT here — the
-   * token is a capability secret and must never enter the job/read plane. On resume the existing
-   * onSettled flips this row → `resolved` (success→resolved bridge).
+   * The suspend descriptor (reason / resume token) is NOT stored on this row — it lives in the
+   * suspension table (single source of truth) and is hydrated into the C1 view by listByExecution.
+   * The token's v1 read surface is the admin-gated execution DETAIL only (the list route uses legacy
+   * steps); it is how an admin obtains it to resume. On resume the existing onSettled flips this row
+   * → `resolved` (success→resolved bridge).
    */
   async writeSuspendedJob(
     executionId: string,
@@ -166,10 +168,14 @@ export class AutomationJobService {
       .execute()
 
     // B1: a `suspended` job MUST carry its C1 suspend descriptor — the contract enforces
-    // `suspended ⇔ { reason, resumeToken }` (normalizeWorkflowJob throws otherwise). The descriptor
-    // lives in the suspension table (single source of truth); attach it here so the view is a VALID
-    // C1 WorkflowJob, not a descriptor-less shape that only resembles one. (The token in this
-    // admin-gated read is also how a v1 admin obtains it to resume — there is no external emitter.)
+    // `suspended ⇔ { reason, resumeToken }` (normalizeWorkflowJob throws otherwise). Hydrate it from
+    // the suspension table (single source of truth) by step — **regardless of suspension status**:
+    // resume claims the token (suspension `pending`→`resumed`) BEFORE it settles the wait job, so a
+    // still-`suspended` job can coexist with an already-`resumed` suspension — briefly (the post-claim
+    // window) or durably (a wait-settle failure leaves job=suspended). A `pending`-only lookup would
+    // then return a descriptor-less suspended job again. Matching by step (any status) closes that.
+    // (The token in this admin-gated read is also the v1 token surface — how an admin obtains it to
+    // resume; there is no external emitter. Detail-only — the list route uses legacy steps.)
     const hasSuspended = rows.some((r) => r.status === 'suspended')
     const suspendByStep = new Map<number, { reason: WorkflowJobSuspendReason; resumeToken: string }>()
     if (hasSuspended) {
@@ -177,7 +183,7 @@ export class AutomationJobService {
         .selectFrom('multitable_automation_suspensions')
         .select(['step_index', 'reason', 'resume_token'])
         .where('execution_id', '=', executionId)
-        .where('status', '=', 'pending')
+        .orderBy('created_at', 'asc') // latest suspension per step wins (defensive; v1 has one per step)
         .execute()
       for (const s of susps) {
         suspendByStep.set(Number(s.step_index), {

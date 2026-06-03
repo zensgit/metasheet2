@@ -93,8 +93,9 @@ export interface LockRecordConfig {
  * Config shape for wait_for_callback (A6-2 suspend/resume).
  *
  * v1 has NO required params — reaching this action in an opted-in
- * (`execution_mode='workflow_job_v1'`) rule suspends the execution; the callback
- * URL/token is *emitted* on suspend, not configured here. `reason` is fixed to
+ * (`execution_mode='workflow_job_v1'`) rule suspends the execution. v1 has NO external
+ * emitter: the resume token is persisted on the suspension row and surfaced (admin-detail-only,
+ * via the C1 suspend descriptor) as the way an admin obtains it to resume. `reason` is fixed to
  * `external_event` in v1 (delay/manual_task are red-lined out — see design doc).
  */
 export interface WaitForCallbackConfig {

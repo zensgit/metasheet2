@@ -212,4 +212,19 @@ describeIfDatabase('multitable automation suspend/resume (A6-2, real DB)', () =>
     const token = await tokenFor(exec.id)
     expect(await svc.resumeExecution(token, 'admin_t9')).toMatchObject({ status: 404, code: 'RECORD_GONE' })
   })
+
+  test('T10: B1 race — resumed suspension + still-suspended job → listByExecution stays a valid C1', async () => {
+    const svc = makeService()
+    const ruleId = await createWaitRule(svc, 't10')
+    const exec = await suspend(svc, ruleId)
+    // Simulate the post-claim window (or a durable wait-settle failure): the suspension is flipped to
+    // 'resumed' while the job row is STILL 'suspended'. A pending-only descriptor lookup would regress
+    // to a descriptor-less suspended job here (would fail normalizeWorkflowJob) — assert it does not.
+    await q(`UPDATE multitable_automation_suspensions SET status = 'resumed', resumed_at = NOW() WHERE execution_id = $1`, [exec.id])
+    const views = await svc.jobs.listByExecution(exec.id)
+    const suspendedView = views.find((v) => v.status === 'suspended')
+    expect(suspendedView).toMatchObject({ status: 'suspended', suspend: { reason: 'external_event' } })
+    expect((suspendedView as { suspend?: { resumeToken?: string } } | undefined)?.suspend?.resumeToken).toBeTruthy()
+    expect(() => normalizeWorkflowJob(suspendedView)).not.toThrow() // STILL a valid C1 job after the claim
+  })
 })
