@@ -659,10 +659,10 @@
       </div>
 
       <div class="integration-workbench__actions">
-        <button type="button" class="integration-workbench__button" data-testid="run-dry-run" :disabled="runningPipeline !== '' || !canRunDryRun" @click="executePipeline(true)">
+        <button type="button" class="integration-workbench__button" data-testid="run-dry-run" :disabled="runningPipeline !== '' || !canRunPipeline" @click="executePipeline(true)">
           {{ runningPipeline === 'dry-run' ? 'Dry-run 中' : 'Dry-run' }}
         </button>
-        <button type="button" class="integration-workbench__button integration-workbench__button--danger" data-testid="run-save-only" :disabled="runningPipeline !== '' || !allowSaveOnlyRun || !canRunDryRun" @click="executePipeline(false)">
+        <button type="button" class="integration-workbench__button integration-workbench__button--danger" data-testid="run-save-only" :disabled="runningPipeline !== '' || !allowSaveOnlyRun || !canRunPipeline" @click="executePipeline(false)">
           {{ runningPipeline === 'run' ? '推送中' : 'Save-only 推送' }}
         </button>
       </div>
@@ -1527,7 +1527,11 @@ const dryRunReadinessItems = computed(() => [
     detail: savedPipelineId.value.trim() || 'Payload 预览通过不等于 pipeline dry-run；请先保存 pipeline。',
   },
 ])
-const canRunDryRun = computed(() => dryRunReadinessItems.value.every((item) => item.ready))
+// The dry-run / save-only run buttons drive executePipeline(), which only needs a saved (or pasted)
+// pipeline ID — the pipeline already holds target/mapping/idempotency server-side. So the run gate is
+// decoupled from the full BUILD checklist (dryRunReadinessItems, kept as authoring guidance): an operator
+// re-running an existing pipeline by pasting its ID must not be blocked by an unfilled builder. See #2232.
+const canRunPipeline = computed(() => savedPipelineId.value.trim() !== '')
 const dryRunBlockedSummary = computed(() => {
   const missing = dryRunReadinessItems.value.filter((item) => !item.ready)
   if (missing.length === 0) return '已满足 dry-run 前置条件。Dry-run 只生成 preview，不写外部系统。'

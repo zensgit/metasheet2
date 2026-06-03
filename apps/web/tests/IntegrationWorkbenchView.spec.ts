@@ -1107,6 +1107,81 @@ describe('IntegrationWorkbenchView', () => {
     expect((container.querySelector('[data-testid="run-dry-run"]') as HTMLButtonElement).disabled).toBe(true)
   })
 
+  it('#2232: enables the run buttons for a pasted existing pipeline ID even when the build checklist is incomplete', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target'], supports: ['read', 'upsert'], advanced: false },
+          { kind: 'erp:k3-wise-webapi', label: 'K3 WISE WebAPI', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          { id: 'plm_1', tenantId: 'default', workspaceId: null, name: 'PLM Source', kind: 'http', role: 'source', status: 'active' },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    // Mirror the #2205 re-run flow: a source is selected (mid-build, NOT a blank form), but the rest of the
+    // build checklist (target system/object, mapping rules, idempotency fields) is intentionally left unset.
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'plm_1'
+    sourceSystemSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    const runDryRunButton = container.querySelector('[data-testid="run-dry-run"]') as HTMLButtonElement
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+
+    // The BUILD checklist is genuinely incomplete (this is what makes the test discriminate against the old
+    // full-checklist gate), yet without a pipeline ID the run buttons stay disabled.
+    expect(container.querySelector('[data-testid="dry-run-readiness-summary"]')?.textContent).toContain('还缺')
+    const unreadyBefore = Array.from(container.querySelectorAll('[data-testid="pipeline-readiness"] li[data-ready="false"]'))
+    expect(unreadyBefore.length).toBeGreaterThan(0)
+    expect(runDryRunButton.disabled).toBe(true)
+
+    // Paste an existing pipeline ID (server already holds its target/mapping/idempotency) → run-dry-run enables
+    // even though the build checklist is still incomplete.
+    pipelineIdInput.value = '485b1a40-0000-0000-0000-000000002205'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    expect(container.querySelector('[data-testid="dry-run-readiness-summary"]')?.textContent).toContain('还缺')
+    expect(runDryRunButton.disabled).toBe(false)
+
+    // The danger save-only run button gates additionally on the explicit allow-toggle, but the pipeline-ID gate
+    // is likewise decoupled from the build checklist: ticking allow enables it.
+    const runSaveOnlyButton = container.querySelector('[data-testid="run-save-only"]') as HTMLButtonElement
+    expect(runSaveOnlyButton.disabled).toBe(true)
+    ;(container.querySelector('[data-testid="allow-save-only-run"]') as HTMLInputElement).click()
+    await flushUi()
+    expect(runSaveOnlyButton.disabled).toBe(false)
+
+    // Clearing the pipeline ID re-disables both run buttons (empty ID → no run target).
+    pipelineIdInput.value = '   '
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(runDryRunButton.disabled).toBe(true)
+    expect(runSaveOnlyButton.disabled).toBe(true)
+  })
+
   it('marks SQL Server source option as disabled when queryExecutor is missing', async () => {
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') {
