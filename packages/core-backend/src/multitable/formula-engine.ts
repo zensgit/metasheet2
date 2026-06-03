@@ -244,7 +244,10 @@ export class MultitableFormulaEngine {
 
   /**
    * Recalculate all formula fields for a given record.
-   * Loads the record, finds formula fields, evaluates them, and writes computed values back.
+   * Loads the record (raw) and delegates to recalculateRecordFromData. Use this for callers
+   * without an already-hydrated row (e.g. form-submit). The PATCH write-path uses
+   * recalculateRecordFromData directly with a row whose lookup/rollup values were hydrated
+   * in-memory, so formula-over-lookup sees the actual lookup value (A-min, design #2246).
    */
   async recalculateRecord(
     query: MultitableRecordsQueryFn,
@@ -263,6 +266,30 @@ export class MultitableFormulaEngine {
       const data: Record<string, unknown> =
         typeof row.data === 'string' ? JSON.parse(row.data) : (row.data ?? {})
 
+      return await this.recalculateRecordFromData(query, sheetId, recordId, data, fields)
+    } catch (error) {
+      logger.error('recalculateRecord failed:', error as Error)
+      return null
+    }
+  }
+
+  /**
+   * Evaluate + materialize a record's formula fields against PROVIDED `data` (no DB reload).
+   * The write-path recalc passes a row whose lookup/rollup values were already hydrated
+   * in-memory (via applyLookupRollup) so formulas reference the actual lookup value instead of
+   * the absent-on-reload `undefined → '0'` (A-min, design #2246). Only formula keys are written
+   * back (`data || $keys`) — lookup/rollup values are NOT materialized. Note: a scalar-array
+   * lookup reaches `evaluateField` as a joined string literal per the existing A2b contract;
+   * exact numeric arithmetic over lookups is Option D (parser), out of A-min scope.
+   */
+  async recalculateRecordFromData(
+    query: MultitableRecordsQueryFn,
+    sheetId: string,
+    recordId: string,
+    data: Record<string, unknown>,
+    fields: MultitableField[],
+  ): Promise<Record<string, unknown> | null> {
+    try {
       // Resolve each formula field's expression. Field-defined formulas store the
       // expression in `field.property.expression` (the authoring surface + the
       // source `formula_dependencies` is built from). Fall back to a legacy `=…`
@@ -309,7 +336,7 @@ export class MultitableFormulaEngine {
       )
       return { ...data, ...updates }
     } catch (error) {
-      logger.error('recalculateRecord failed:', error as Error)
+      logger.error('recalculateRecordFromData failed:', error as Error)
       return null
     }
   }

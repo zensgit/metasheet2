@@ -244,12 +244,15 @@ describe('RecordWriteService', () => {
     const result = await service.patchRecords(input)
 
     // Helper is invoked with the changed field ids so it can gate on formula_dependencies.
+    // 6th arg = hydratedDataByRecord (A-min): undefined here since this sheet has no lookup/rollup
+    // fields, so the write-path Step-4 hydration block does not run.
     expect(recalculateFormulaFields).toHaveBeenCalledWith(
       expect.any(Function),
       'sheet1',
       fields,
       ['rec1'],
       ['fld_name'],
+      undefined,
     )
     // Editing client: the computed formula value rides back in the response records.
     expect(result.records).toEqual(

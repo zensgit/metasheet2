@@ -300,6 +300,9 @@ export interface RecordWriteHelpers {
     fields: UniverMetaField[],
     updatedRecordIds: string[],
     changedFieldIds: string[],
+    // A-min (design #2246): optional pre-hydrated row data per record (lookup/rollup resolved
+    // in-memory) so formula-over-lookup evals against the actual value. Absent → raw reload.
+    hydratedDataByRecord?: Map<string, Record<string, unknown>>,
   ) => Promise<Array<{ recordId: string; data: Record<string, unknown> }>>
   loadLinkValuesByRecord: (
     query: QueryFn,
@@ -795,6 +798,9 @@ export class RecordWriteService {
     // -----------------------------------------------------------------------
     let computedRecords: Array<{ recordId: string; data: Record<string, unknown> }> | undefined
     let updatedRowsForSummaries: UniverMetaRecord[] = []
+    // A-min (design #2246): full hydrated row data (lookup/rollup resolved in-memory) for the
+    // updated records, captured in Step 4 and fed into the Step 4c formula recalc.
+    let hydratedDataByRecord: Map<string, Record<string, unknown>> | undefined
     const computedFieldIds = visiblePropertyFields.filter((f) => f.type === 'lookup' || f.type === 'rollup')
 
     if (updates.length > 0 && (computedFieldIds.length > 0 || attachmentFields.length > 0)) {
@@ -827,6 +833,11 @@ export class RecordWriteService {
         relationalLinkFields,
         linkValuesByRecord,
       )
+
+      // A-min: snapshot the FULL hydrated data BEFORE the visibility filter below mutates
+      // row.data — the formula recalc (Step 4c) evals against this so a formula referencing a
+      // lookup sees the actual lookup value instead of the absent-on-reload `undefined → '0'`.
+      hydratedDataByRecord = new Map(rows.map((row) => [row.id, { ...row.data }]))
 
       for (const row of rows) {
         row.data = h.filterRecordDataByFieldIds(row.data, visiblePropertyFieldIds)
@@ -880,6 +891,7 @@ export class RecordWriteService {
               fields,
               updates.map((update) => update.recordId),
               changedFieldIds,
+              hydratedDataByRecord,
             )
           ).map((record) => ({
             recordId: record.recordId,
