@@ -114,16 +114,43 @@ shiftCompliance: {
 
 ## 8. 实现切片（各独立 gated opt-in；CONTRACTS/默认不回归先行）
 
-- 🔒 **S0 latent config**：`DEFAULT_SETTINGS.shiftCompliance` + `normalizeShiftComplianceSetting` + `mergeSettings` 接线 + `settingsSchema` 暴露（enforcement warn|block + 三 maxMinutes）。**latent，无强制**，node --check + unit（normalize 边界）。镜像 punch-policy S0(#2204)。
-- 🔒 **S1 daily cap**：`enforceShiftComplianceCap` 共享 guard（事务内投影，仅受影响日窗口）+ 接入**全部** save 路径 + `dailyMaxMinutes` block + unit + **真 DB route-level integration**（PUT 设 cap → 保存超限 → 422 + 无行持久 → 窗内 → 200）。derisk 机制（in-txn 投影/rollback/422/全路径）于最小窗口。
-- 🔒 **S2 weekly + monthly cap**：扩 guard 到周/月窗口（受影响日所在周/月，org tz，开口派班仅触及周期）+ `weeklyMaxMinutes`/`monthlyMaxMinutes` block + 全路径 + integration（含跨派班累计：他派班占周前段 + 本次占后段 → 周和超限）。**S2 合入后③才满足完成口径（§7）。**
+- ✅ **S0 latent config**：`DEFAULT_SETTINGS.shiftCompliance` + `normalizeShiftComplianceSetting` + `mergeSettings` 接线 + `settingsSchema` 暴露（enforcement warn|block + 三 maxMinutes）。**latent，无强制**，node --check + unit（normalize 边界）。镜像 punch-policy S0(#2204)。落地 #2214。
+- ✅ **S1 daily cap**：`enforceShiftComplianceCap` 共享 guard（事务内投影，仅受影响日窗口）+ 接入**全部** save 路径 + `dailyMaxMinutes` block + unit + **真 DB route-level integration**（PUT 设 cap → 保存超限 → 422 + 无行持久 → 窗内 → 200）。derisk 机制（in-txn 投影/rollback/422/全路径）于最小窗口。落地 #2218。
+- ✅ **S2 weekly + monthly cap**：扩 guard 到周/月窗口（受影响日所在周/月，org tz，开口派班仅触及周期）+ `weeklyMaxMinutes`/`monthlyMaxMinutes` block + 全路径 + integration（含跨派班累计：他派班占周前段 + 本次占后段 → 周和超限）。S2 按 owner 决策 A 使用 explicit scheduled-load 语义，落地 #2221。
 - （`warn` 模式 = 预留，v1 不建；未来单独 slice 建 warn 通道时再激活。）
 
 > **schema-batch 提醒**（账本 §"成组迁移"）：本引擎 config + 投影**无需 DDL**（投影读既有派班/班次行）。若未来某 slice 真要给热表 `attendance_shift_assignments`/`rule_sets` 加 `shift_constraints` 列，须与 edit-window/publish/multi-slot 的待迁 ALTER 协调一次性迁。
 
 ---
 
-## 9. 反漂移
+## 9. staging closeout（2026-06-03）
+
+**结果：PASS 13/13。** staging backend/web 部署到 #2221 squash `0fd25d3ed` 后，通过 `/tmp/staging-shift-compliance-smoke-20260603.mjs` 做 API-only 联调：
+
+- `shiftCompliance` PUT→GET round-trip，防旧 runtime 假绿；
+- weekly cap `2400` + 一个显式 540 分钟排班 → `201`，证明默认 Mon–Fri baseline 不计入（owner 决策 A）；
+- daily / weekly / monthly 显式排班超 cap → `422 SHIFT_COMPLIANCE_CAP_EXCEEDED`，且 GET 确认无 assignment 持久化；
+- fixed-schedule apply 批量路径超 daily cap → `422 SHIFT_COMPLIANCE_CAP_EXCEEDED`，且无 managed row 持久化；
+- finally 恢复原 settings；清理后 staging `sc-lianodiao-*` shift/group/assignment/member 残留均为 0。
+
+联调过程中暴露 staging schema drift：#2221 runtime 已要求 `attendance_groups.attendance_type` 与 `attendance_shift_assignments.producer_*` provenance columns，但 staging DB 缺列。为完成 staging gate，已在 staging 做最小 schema alignment：
+
+```sql
+ALTER TABLE attendance_groups
+  ADD COLUMN IF NOT EXISTS attendance_type TEXT NOT NULL DEFAULT 'fixed_shift';
+
+ALTER TABLE attendance_shift_assignments
+  ADD COLUMN IF NOT EXISTS producer_type TEXT,
+  ADD COLUMN IF NOT EXISTS producer_ref_id UUID,
+  ADD COLUMN IF NOT EXISTS producer_key TEXT,
+  ADD COLUMN IF NOT EXISTS producer_run_id UUID;
+```
+
+这是环境补齐，不是 ③ 合规引擎新增 DDL；后续应补正式 migration/ops 记录，避免其它环境在固定班组/固定排班 apply 路径复现 `DB_NOT_READY`。
+
+---
+
+## 10. 反漂移
 
 - 投影**只**经 `loadAttendanceComprehensivePlannedMinutesByUser` / `resolveWorkContextFromPrefetch`；**禁止**手搓第二套两表 union（漂移陷阱）。
 - 任何新强制点（未来若新增 save 路径）须同样接 `enforceShiftComplianceCap`，否则即 §1 决策2 的"侧门"。

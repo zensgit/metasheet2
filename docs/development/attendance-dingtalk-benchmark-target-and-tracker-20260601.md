@@ -23,7 +23,7 @@
 
 | 档 | 项 | 关键约束 |
 |---|---|---|
-| **MUST** | **排班合规引擎**（日/周/月工时 cap，**超限阻断保存**） | 钉钉最硬护城河。**MUST 口径 = 排班时阻断保存；warning-only 只算报表/预警红利，不算 MUST ✅**（避免实现方交 warning 充数）。**design-lock 2026-06-02（本 PR）**：新建 `shiftCompliance`（不并入 comprehensiveHours）/ 全 save 路径事务内投影 / 首版 block / 完成口径 = 日周月三粒度×全路径 |
+| **MUST** | **排班合规引擎**（日/周/月工时 cap，**超限阻断保存**） | 钉钉最硬护城河。**MUST 口径 = 排班时阻断保存；warning-only 只算报表/预警红利，不算 MUST ✅**（避免实现方交 warning 充数）。**design-lock #2213（2026-06-02）**：新建 `shiftCompliance`（不并入 comprehensiveHours）/ 全 save 路径事务内投影 / 首版 block / 完成口径 = 日周月三粒度×全路径 |
 | | **未排班提醒**（提醒负责人/本人） | ⚠️ **不是小 feature**：attendance 无调度器、无事件→通知消费者（2026-06-01 verify 证伪"渠道已有"）→ 实为"**attendance scheduler + notifier 基座**"基础设施刀（镜像 `ApprovalSlaScheduler`，leader-elected + env 渠道 notifier）；与**假期过期提醒共建/复用同一基座**。估时 **2–3pd**（原 1–2pd 作废）；排序靠后（§3）。**未排班处理策略 → 归 ③ 打卡策略组，不在此单建** |
 | | **排班修改窗**（可改 N 天内、超窗锁；钉钉默认 180） | 与合规引擎 + 历史数据可信度强绑；无它则报表不可信。实现量小、治理价值高 |
 | | **打卡策略组**（外勤审批 + 内外勤卡合并 + **未排班打卡策略**） | 三项同属 punch policy → 一个"**打卡策略配置基座**"design-lock（greenfield，0 现有字段）；抽屉已在只差配置写入；未排班"阻断/允许打卡"默认 **allow**（不回归） |
@@ -49,7 +49,7 @@
 | 主/子负责人 | （已成） | ✅ | group owner roster/panel/scope（#2099–2103） |
 | 综合工时（报表侧） | （已成，OUT 之外的红利） | ✅ | #1801 等（113 hits，`enforcement:'warn'`） |
 | 固定班 preview/apply + provenance + managed controls · 周矩阵展示 · 打卡只读抽屉 · HR 字段/onboarding/work-time drawer · FormulaEngine（仅差 4–5 函数） | （红利） | ✅ | 并行 session 两天内落地 |
-| 排班合规引擎（超出禁止保存） | MUST | ⬜ | **design-lock ✅ 2026-06-02**（`attendance-shift-compliance-engine-design-lock-20260602.md`，本 PR）；impl S0/S1/S2 gated **未开**，排班时 block 仍 = 0。完成口径 = 日周月三粒度×全路径（见下方合规回填注） |
+| 排班合规引擎（超出禁止保存） | MUST | ✅ | **完成 2026-06-03**：design-lock #2213 → S0 latent settings #2214 → S1 daily cap #2218 → S2 weekly/monthly explicit scheduled-load cap #2221；staging 联调 PASS 13/13（`/tmp/staging-shift-compliance-smoke-20260603.mjs` against `0fd25d3ed`）。日/周/月三粒度 × shift/rotation/fixed-apply 全 save 路径均运行时 block；`warn` 仍为惰性预留 |
 | 未排班提醒（= scheduler+notifier 基座刀） | MUST | ⬜ | **verify 2026-06-01 证伪"渠道已有"**：attendance 无调度器、无事件→通知消费者 → 镜像 `ApprovalSlaScheduler`+notifier；2–3pd；与假期过期提醒共建。处理策略已移入 ③ |
 | 排班修改窗 | MUST | ✅ | #2197（squash `2d4808fe`，2026-06-02）：org-level `shiftEditPolicy` 入 attendance settings JSON（默认 `unrestricted`，无 DDL）+ shift/rotation assignment POST/PUT/DELETE 6 写路由显式 422 `SHIFT_EDIT_WINDOW_EXCEEDED`；PUT/DELETE 同看 existing start date + next start date 防历史绕窗；unit + CI real-DB attendance integration 绿 |
 | 外勤审批 | MUST | ⬜ | 0 |
@@ -71,7 +71,7 @@
 
 ① **排班修改窗**（✅ #2197 已落；纯 write-time 校验，不碰 scheduler/notifier 新基座；治理价值高）
 ② **打卡策略组**（design-lock #2203）：S0 基座 ✅#2204 · S1 未排班打卡 ✅#2209 · **子序修正 → S1→S3→S2**（S2 内外勤合并依赖 S3 先建"外勤打卡"事实类型）· **S3 外勤 + S2 产品 2026-06-02 暂缓**（外勤=重刀/移动现场）→ 组在 S1 后暂停
-③ **排班合规引擎**（招牌）— **← 当前主线（2026-06-02）**；**design-lock 已落**（`attendance-shift-compliance-engine-design-lock-20260602.md`，本 PR）：新建 `shiftCompliance` / 全 save 路径事务内投影经 `loadAttendanceComprehensivePlannedMinutesByUser`（复用 effective-calendar，零漂移）/ 首版 block / 切片 S0 latent→S1 daily→S2 weekly+monthly / **完成口径 = 三粒度×全路径才算 ③ ✅，daily-only 是切片**（见下方合规回填注）
+③ **排班合规引擎**（✅ #2213/#2214/#2218/#2221 + staging 2026-06-03）：`shiftCompliance` 日/周/月 cap 已按 **explicit scheduled load** 口径在全部 save 路径运行时阻断；staging smoke 13/13 通过，③ 正式关闭
 ④ **加班调休 + 假期过期**（假勤闭环；假期过期提醒在此**首建** scheduler/notifier 基座）
 ⑤ **未排班提醒**（**复用 ④ 的 scheduler+notifier 基座**；镜像 `ApprovalSlaScheduler`）
 ⑥ **自动对班**（灰度门，feature-flag 默认关 → preview → 自动写）
@@ -80,7 +80,9 @@
 
 > **回填（2026-06-02 决定）**：打卡策略组 S0 ✅#2204 + S1 ✅#2209 后**暂停**。pre-flight 证 **S2 内外勤合并依赖 S3 外勤**（当前模型无内/外勤打卡区分——geofence 只在围栏外拒绝、不分类保留；打卡 → first-in/last-out）→ #2203 子序改为 **S1→S3→S2**（S2 可并入 S3 后半段）。S3 外勤=重刀（外勤动作/审批流/报表口径/移动现场），**暂缓**；**下一主线转 ③ 排班合规引擎**（钉钉硬招牌、无此依赖、直接服务"排班保存时禁止越界"）。
 
-> **回填（2026-06-02 合规引擎 design-lock）**：③ 排班合规引擎 design-lock 落地（`attendance-shift-compliance-engine-design-lock-20260602.md`，本 PR）。owner 决策锁定：(1) 新建 `shiftCompliance`（日/周/月 maxMinutes + enforcement warn|block，**不并入** comprehensiveHours——save-time/planned/日周月 vs report/actual/月季年）；(2) 强制 = **全部** save 路径（shift POST/PUT `29445/29538` + rotation POST/PUT `21452` + fixed-apply `27818/9193`，DELETE 不拦）；(3) **首版只 block**，warn 预留惰性。**keystone**：投影**复用** `loadAttendanceComprehensivePlannedMinutesByUser`（`13163`，经 effective-calendar resolver，与 comprehensiveHours **同一套** planned-minutes 算法 → 零漂移），**事务内写后投影 → 超限 throw → rollback → 422**（PUT 排除自身自动成立）。切片 **S0 latent config → S1 daily → S2 weekly+monthly**（各 gated + 真 DB route-level 反向 integration）。**完成口径（partial-MUST bar）：③ 仅在 daily∧weekly∧monthly × 全路径 + 反向 integration + staging 全满足才 ✅；daily-only 的 S1 是切片不是"引擎完成"**（防 P2 式 warning/切片充数）。
+> **回填（2026-06-02 合规引擎 design-lock）**：③ 排班合规引擎 design-lock 落地（`attendance-shift-compliance-engine-design-lock-20260602.md`，#2213）。owner 决策锁定：(1) 新建 `shiftCompliance`（日/周/月 maxMinutes + enforcement warn|block，**不并入** comprehensiveHours——save-time/planned/日周月 vs report/actual/月季年）；(2) 强制 = **全部** save 路径（shift POST/PUT `29445/29538` + rotation POST/PUT `21452` + fixed-apply `27818/9193`，DELETE 不拦）；(3) **首版只 block**，warn 预留惰性。**keystone**：投影**复用** `loadAttendanceComprehensivePlannedMinutesByUser`（`13163`，经 effective-calendar resolver，与 comprehensiveHours **同一套** planned-minutes 算法 → 零漂移），**事务内写后投影 → 超限 throw → rollback → 422**（PUT 排除自身自动成立）。切片 **S0 latent config → S1 daily → S2 weekly+monthly**（各 gated + 真 DB route-level 反向 integration）。**完成口径（partial-MUST bar）：③ 仅在 daily∧weekly∧monthly × 全路径 + 反向 integration + staging 全满足才 ✅；daily-only 的 S1 是切片不是"引擎完成"**（防 P2 式 warning/切片充数）。
+
+> **回填（2026-06-03 合规引擎 closeout）**：S0 ✅ #2214（`shiftCompliance` latent settings）· S1 ✅ #2218（daily cap，全部 save 路径）· S2 ✅ #2221（weekly/monthly cap，owner 决策 A：只统计 explicit scheduled load，排除默认兜底工作制 baseline）。staging 部署到 `0fd25d3ed` 后运行 `/tmp/staging-shift-compliance-smoke-20260603.mjs`：**PASS 13/13**。覆盖：(1) `shiftCompliance` PUT→GET round-trip；(2) weekly cap 2400 + 单个显式 540 分钟排班 → 201，证明默认 Mon–Fri baseline 不计入；(3) daily/weekly/monthly 超 cap → `422 SHIFT_COMPLIANCE_CAP_EXCEEDED` 且无 assignment 持久化；(4) fixed-schedule apply 批量路径超 cap → 422 且无 managed row。联调中发现 staging schema drift 并做最小 alignment：`attendance_groups.attendance_type` + `attendance_shift_assignments.producer_*`；这是 staging 环境补齐，不改变 ③ 完成口径，但后续应补正式 migration/ops 记录避免其它环境复现。
 
 > **⚠️ schema 成组迁移，别一刀一迁。** 首刀"排班修改窗"已按 #2197 路线**无 DDL 落地**：policy 先进 org-level attendance settings JSON（`shiftEditPolicy`），write-time 按受影响日期判窗。后续若要把排班合规（`shift_constraints`）、发布（`status`）、多班次（`slot`）、或持久锁窗（`locked_at`）落到 `attendance_shift_assignments`/`rule_sets`，这些 schema 变更再打一个协调 migration，再分层叠 service/UI（v1 阶段2 已是此意）。
 
