@@ -131,7 +131,12 @@ only missing link.
 
 ---
 
-## 2. A6-2 suspend/resume — PLAN-LEVEL (design deferred to its scout)
+## 2. A6-2 suspend/resume — ✅ LANDED 2026-06-03 (#2236 design-lock + #2237 impl)
+
+> **✅ LANDED 2026-06-03 — PR #2237 (squash `c363a78db`); design-lock #2236.** Admin-gated v1, webhook-
+> first (delay/timer + worker/claim still deferred/red-lined). As-built detail + the 2 review rounds live
+> in `multitable-automation-a6-2-suspend-resume-{design,verification}-20260603.md` — **not re-derived
+> here**. Remaining sub-step = A6-2b frontend (separate opt-in). Original plan retained below for the record.
 
 - **Adds:** the `suspended` C1 status, a resume token, and an **external-event/webhook
   resume endpoint first**; delay/timer resume (and the durable scheduler + worker/claim
@@ -207,5 +212,6 @@ only missing link.
 - Docs-only.
 - References the TODO checklist for status (does not re-derive or duplicate it) and the
   A6-0/A6-1 scouts for test surface and runtime rationale.
-- Only A6-1 enable-writer is build-ready; A6-2 … A6-5 remain design-deferred and
-  demand-gated, with no schema/mechanics designed here.
+- A6-1 enable-writer **landed** (#2130/#2191/#2193) and A6-2 suspend/resume **landed**
+  2026-06-03 (#2236 design-lock + #2237 impl, admin-gated v1); A6-3 … A6-5 remain
+  design-deferred and demand-gated, with no schema/mechanics designed here.
