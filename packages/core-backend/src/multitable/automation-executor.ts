@@ -667,14 +667,16 @@ export class AutomationExecutor {
     const startTime = Date.now()
     execution.status = 'running'
 
-    // Settle the wait step itself: a legacy 'success' result (keeps steps index-aligned, D2)
-    // + flip its `suspended` C1 job → `resolved` (success→resolved via the bridge in onSettled).
-    const waitAction = rule.actions[suspendIndex]
-    const waitResult: AutomationStepResult = { actionType: 'wait_for_callback', status: 'success', durationMs: 0 }
-    execution.steps.push(waitResult)
-    if (jobLifecycle) await jobLifecycle.onSettled(suspendIndex, waitAction, waitResult)
-
     try {
+      // Settle the wait step (INSIDE the try, B3): a legacy 'success' result (keeps steps
+      // index-aligned, D2) + flip its `suspended` C1 job → `resolved` (success→resolved via the
+      // bridge in onSettled). If this settle throws (e.g. a DB error), it now fails the execution
+      // terminally below — NOT a bubbled 500 that leaves the token consumed and the tail unrun.
+      const waitAction = rule.actions[suspendIndex]
+      const waitResult: AutomationStepResult = { actionType: 'wait_for_callback', status: 'success', durationMs: 0 }
+      execution.steps.push(waitResult)
+      if (jobLifecycle) await jobLifecycle.onSettled(suspendIndex, waitAction, waitResult)
+
       const { suspended } = await this.executeActions(
         rule.actions, context, execution.steps, jobLifecycle, suspendIndex + 1,
       )

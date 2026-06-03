@@ -155,17 +155,17 @@ describe('A2 runs API — GET /automation-executions/:id (detail)', () => {
     expect(svc.logs.getById).toHaveBeenCalledWith('axe_1')
   })
 
-  it('A6-2: renders a SUSPENDED execution (out-of-band) — 200, status running, suspended step visible, no throw', async () => {
-    // D2: the execution stays `running` while parked; the C1 job plane carries the `suspended`
-    // state with NO suspend descriptor. The read mappers must surface it (the runs detail an admin
-    // opens mid-wait) without invoking normalizeWorkflowJob (which would reject a descriptor-less suspended job).
+  it('A6-2: renders a SUSPENDED execution (out-of-band) — 200, status running, suspended step + C1 descriptor visible', async () => {
+    // D2: the execution stays `running` while parked; the C1 job plane carries the `suspended` state.
+    // B1: listByExecution returns a VALID C1 suspended job (with the suspend descriptor); the detail
+    // route surfaces it as-is. The runs detail an admin opens mid-wait must render without throwing.
     const suspendedExec = {
       ...sampleExec, id: 'axe_susp', status: 'running', finishedAt: null,
       steps: [{ actionType: 'update_record', status: 'success', output: {}, durationMs: 1 }],
     }
     const suspendedJobs = [
       { id: 'axe_susp:job:0', executionId: 'axe_susp', stepKey: '0', status: 'resolved', upstreamJobId: null, result: null },
-      { id: 'axe_susp:job:1', executionId: 'axe_susp', stepKey: '1', status: 'suspended', upstreamJobId: 'axe_susp:job:0', result: null },
+      { id: 'axe_susp:job:1', executionId: 'axe_susp', stepKey: '1', status: 'suspended', upstreamJobId: 'axe_susp:job:0', result: null, suspend: { reason: 'external_event', resumeToken: 'rt_mock' } },
     ]
     const svc = makeMockService(
       { getById: vi.fn().mockResolvedValue(suspendedExec) },
@@ -174,9 +174,9 @@ describe('A2 runs API — GET /automation-executions/:id (detail)', () => {
     const res = await request(buildApp(svc)).get('/api/multitable/automation-executions/axe_susp').expect(200)
     expect(res.body.statusLegacy).toBe('running') // execution stays running (D2)
     expect(res.body.status).toBe('running')        // legacy bridge: running → running
-    // prefer-jobs: the descriptor-less `suspended` job view is surfaced as-is, no throw.
+    // prefer-jobs: the valid C1 `suspended` job (with descriptor) is surfaced as-is, no throw.
     expect(res.body.steps).toHaveLength(2)
-    expect(res.body.steps[1]).toMatchObject({ id: 'axe_susp:job:1', status: 'suspended' })
+    expect(res.body.steps[1]).toMatchObject({ id: 'axe_susp:job:1', status: 'suspended', suspend: { reason: 'external_event' } })
   })
 
   it('404 when the execution is missing', async () => {

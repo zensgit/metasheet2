@@ -73,31 +73,38 @@ export class AutomationSuspensionService {
   }): Promise<string> {
     const resumeToken = randomUUID()
     const fingerprint = computeActionFingerprint(input.rule.actions)
-    // Capability + re-derive inputs first (the source of truth for resume).
-    await db
-      .insertInto('multitable_automation_suspensions')
-      .values({
-        id: `asp_${randomUUID()}`,
-        execution_id: input.executionId,
-        rule_id: input.rule.id,
-        sheet_id: input.rule.sheetId ?? null,
-        record_id: input.recordId || null,
-        step_index: input.stepIndex,
-        resume_token: resumeToken,
-        reason: 'external_event',
-        action_fingerprint: toJsonValue(fingerprint) as never,
-        // A1-redacted trigger event (D4 — no unredacted recordData persisted).
-        trigger_event: input.triggerEvent == null ? null : (toJsonValue(redactValue(input.triggerEvent)) as never),
-        status: 'pending',
-      })
-      .execute()
-    // Out-of-band suspended state (D2): the wait step's C1 job row.
-    await this.jobService.writeSuspendedJob(
-      input.executionId,
-      { id: input.rule.id, sheetId: input.rule.sheetId },
-      input.stepIndex,
-      input.action,
-    )
+    // B2: the suspension row (resume capability + re-derive inputs) and the out-of-band
+    // `suspended` C1 job row MUST be atomic — a half-written suspend (pending suspension with no
+    // suspended job, or vice versa) is a dangling state a later resume token could observe. One
+    // transaction → both commit or neither; on failure the executor's onSuspend throws → the
+    // execution fails closed with nothing half-persisted.
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto('multitable_automation_suspensions')
+        .values({
+          id: `asp_${randomUUID()}`,
+          execution_id: input.executionId,
+          rule_id: input.rule.id,
+          sheet_id: input.rule.sheetId ?? null,
+          record_id: input.recordId || null,
+          step_index: input.stepIndex,
+          resume_token: resumeToken,
+          reason: 'external_event',
+          action_fingerprint: toJsonValue(fingerprint) as never,
+          // A1-redacted trigger event (D4 — no unredacted recordData persisted).
+          trigger_event: input.triggerEvent == null ? null : (toJsonValue(redactValue(input.triggerEvent)) as never),
+          status: 'pending',
+        })
+        .execute()
+      // Out-of-band suspended state (D2): the wait step's C1 job row, SAME transaction.
+      await this.jobService.writeSuspendedJob(
+        input.executionId,
+        { id: input.rule.id, sheetId: input.rule.sheetId },
+        input.stepIndex,
+        input.action,
+        trx,
+      )
+    })
     return resumeToken
   }
 

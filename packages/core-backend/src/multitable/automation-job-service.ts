@@ -17,7 +17,7 @@
 
 import { db } from '../db/db'
 import { toJsonValue } from '../db/type-helpers'
-import { legacyAutomationStatusToJobStatus, normalizeWorkflowJobStatus, type WorkflowJobStatus } from './workflow-job-contract'
+import { legacyAutomationStatusToJobStatus, normalizeWorkflowJobStatus, type WorkflowJobStatus, type WorkflowJobSuspendReason } from './workflow-job-contract'
 import type { ActionJobLifecycle } from './automation-executor'
 import type { AutomationAction } from './automation-actions'
 import { redactString, redactValue } from './automation-log-redact'
@@ -117,9 +117,10 @@ export class AutomationJobService {
     rule: { id: string; sheetId?: string },
     stepIndex: number,
     action: AutomationAction,
+    executor: typeof db = db,
   ): Promise<void> {
     const now = new Date().toISOString()
-    await db
+    await executor
       .insertInto('multitable_automation_jobs')
       .values({
         id: `${executionId}:job:${stepIndex}`,
@@ -155,6 +156,7 @@ export class AutomationJobService {
     upstreamJobId: string | null
     result: unknown
     error?: string
+    suspend?: { reason: WorkflowJobSuspendReason; resumeToken: string }
   }>> {
     const rows = await db
       .selectFrom('multitable_automation_jobs')
@@ -163,17 +165,46 @@ export class AutomationJobService {
       .orderBy('step_index', 'asc')
       .execute()
 
-    return rows.map((row) => ({
-      id: row.id as string,
-      executionId: row.execution_id as string,
-      stepKey: row.step_key as string,
-      // Stored status is a C1 value (running on start; resolved/failed via bridge on settle; skipped) —
-      // normalize (validates / fail-loud on a corrupt status) so the read boundary stays enum-strict.
-      status: normalizeWorkflowJobStatus(row.status),
-      upstreamJobId: (row.upstream_job_id as string) ?? null,
-      result: typeof row.result === 'string' ? JSON.parse(row.result) : (row.result ?? null),
-      // error string-or-ABSENT to satisfy the C1 normalizeWorkflowJob contract (never null).
-      ...(typeof row.error === 'string' ? { error: row.error } : {}),
-    }))
+    // B1: a `suspended` job MUST carry its C1 suspend descriptor — the contract enforces
+    // `suspended ⇔ { reason, resumeToken }` (normalizeWorkflowJob throws otherwise). The descriptor
+    // lives in the suspension table (single source of truth); attach it here so the view is a VALID
+    // C1 WorkflowJob, not a descriptor-less shape that only resembles one. (The token in this
+    // admin-gated read is also how a v1 admin obtains it to resume — there is no external emitter.)
+    const hasSuspended = rows.some((r) => r.status === 'suspended')
+    const suspendByStep = new Map<number, { reason: WorkflowJobSuspendReason; resumeToken: string }>()
+    if (hasSuspended) {
+      const susps = await db
+        .selectFrom('multitable_automation_suspensions')
+        .select(['step_index', 'reason', 'resume_token'])
+        .where('execution_id', '=', executionId)
+        .where('status', '=', 'pending')
+        .execute()
+      for (const s of susps) {
+        suspendByStep.set(Number(s.step_index), {
+          reason: s.reason as WorkflowJobSuspendReason,
+          resumeToken: s.resume_token as string,
+        })
+      }
+    }
+
+    return rows.map((row) => {
+      // Stored status is a C1 value (running on start; resolved/failed via bridge on settle; skipped;
+      // suspended via writeSuspendedJob) — normalize (fail-loud on a corrupt status) so the read
+      // boundary stays enum-strict.
+      const status = normalizeWorkflowJobStatus(row.status)
+      const descriptor = status === 'suspended' ? suspendByStep.get(Number(row.step_index)) : undefined
+      return {
+        id: row.id as string,
+        executionId: row.execution_id as string,
+        stepKey: row.step_key as string,
+        status,
+        upstreamJobId: (row.upstream_job_id as string) ?? null,
+        result: typeof row.result === 'string' ? JSON.parse(row.result) : (row.result ?? null),
+        // error string-or-ABSENT to satisfy the C1 normalizeWorkflowJob contract (never null).
+        ...(typeof row.error === 'string' ? { error: row.error } : {}),
+        // suspended ⇔ descriptor (C1): attach so the view passes normalizeWorkflowJob.
+        ...(descriptor ? { suspend: descriptor } : {}),
+      }
+    })
   }
 }

@@ -14,6 +14,7 @@ import { afterAll, describe, expect, test } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { AutomationService } from '../../src/multitable/automation-service'
 import { EventBus } from '../../src/integration/events/event-bus'
+import { normalizeWorkflowJob } from '../../src/multitable/workflow-job-contract'
 import { db } from '../../src/db/db'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -108,11 +109,14 @@ describeIfDatabase('multitable automation suspend/resume (A6-2, real DB)', () =>
     const jr = await q('SELECT step_index, status FROM multitable_automation_jobs WHERE execution_id = $1 ORDER BY step_index', [exec.id])
     expect(jr.rows.map((r) => [r.step_index, r.status])).toEqual([[0, 'resolved'], [1, 'suspended']])
 
-    // READ path while suspended: listByExecution must surface the `suspended` job view (no suspend
-    // descriptor) WITHOUT throwing — this is what the admin runs detail renders while a run is parked.
+    // READ path while suspended: listByExecution surfaces the `suspended` job view — and (B1) it is a
+    // VALID C1 WorkflowJob: it carries the suspend descriptor and PASSES normalizeWorkflowJob (rather
+    // than a descriptor-less shape that only resembles C1 and would be rejected by the normalizer).
     const views = await svc.jobs.listByExecution(exec.id)
     expect(views.map((v) => v.status)).toEqual(['resolved', 'suspended'])
-    expect(views[1]).toMatchObject({ status: 'suspended' })
+    expect(views[1]).toMatchObject({ status: 'suspended', suspend: { reason: 'external_event' } })
+    expect((views[1] as { suspend?: { resumeToken?: string } }).suspend?.resumeToken).toBeTruthy()
+    expect(() => normalizeWorkflowJob(views[1])).not.toThrow() // valid C1 contract shape
   })
 
   test('T2: resume continues the tail — execution success, all jobs resolved, suspension resumed', async () => {

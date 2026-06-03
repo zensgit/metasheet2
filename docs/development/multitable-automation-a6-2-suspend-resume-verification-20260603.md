@@ -59,6 +59,22 @@
 4. **T9 reframed.** `meta_records` has a FK to `meta_sheets`, so insert-then-delete needs a sheet; a
    recordId absent at resume exercises the **same** `404 record_gone` code path (re-fetch → 0 rows).
 
+## Review round 1 — REQUEST CHANGES addressed (2026-06-03)
+Owner diff-review flagged 3 state-consistency / C1-contract blockers; all fixed and re-verified (counts above):
+- **B1 — C1 contract:** a `suspended` job view was descriptor-less, so it would be rejected by
+  `normalizeWorkflowJob` (a shape that only *resembled* C1). Fix: `listByExecution` attaches the
+  `suspend: { reason, resumeToken }` descriptor from the suspension table (single source of truth) → a
+  VALID C1 WorkflowJob. T1 now asserts `normalizeWorkflowJob(suspendedView)` does **not** throw. The token
+  in this admin-gated read is also how a v1 admin obtains it to resume (no external emitter).
+- **B2 — atomicity:** the suspension row + the `suspended` C1 job are now written in ONE transaction
+  (`AutomationSuspensionService.create` via `db.transaction`), so a half-written suspend can't leave a
+  dangling pending-suspension-without-job (or vice versa) that a later resume could observe.
+- **B3 — token consumed too early:** `resumeExecution` now reads the execution row **before** the claim
+  (a missing/unreadable execution no longer consumes the single-use token — it stays `pending`,
+  recoverable), and `continueExecution` settles the execution to a terminal `failed` on ANY post-claim
+  failure (the wait-step settle moved INSIDE the try) instead of bubbling a 500 with the token consumed
+  and the tail unrun.
+
 ## Red lines honored
 No delay/timer · no worker/claim · no branch/parallel · no BPMN · no approval-as-job · **no public
 endpoint / no token emitter** (admin-gated only) · no K3 / central RBAC / integration-core / contract.

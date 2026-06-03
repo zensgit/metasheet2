@@ -843,14 +843,18 @@ export class AutomationService {
       }
       recordData = (row.data as Record<string, unknown>) ?? {}
     }
-    // Single-use claim (D8) — the last gate; a concurrent resume loses here.
-    const claimed = await this.suspensionService.claim(resumeToken)
-    if (!claimed) {
-      return { status: 409, code: 'ALREADY_RESUMED', message: 'Suspension was already resumed' }
-    }
+    // B3: read the execution BEFORE claiming — a missing/unreadable execution must NOT consume the
+    // single-use token (it stays `pending`, recoverable). ALL validation precedes the claim.
     const execution = await this.logService.getById(suspension.executionId)
     if (!execution) {
       return { status: 409, code: 'EXECUTION_GONE', message: 'Suspended execution record is missing; cannot resume' }
+    }
+    // Single-use claim (D8) — the LAST gate; a concurrent resume loses here. After the claim the tail
+    // runs and ANY failure settles the execution to a terminal `failed` (continueExecution catches it),
+    // never a 500 with the token consumed and the tail unrun.
+    const claimed = await this.suspensionService.claim(resumeToken)
+    if (!claimed) {
+      return { status: 409, code: 'ALREADY_RESUMED', message: 'Suspension was already resumed' }
     }
     execution.initiatedBy = initiatedBy
     // Re-derived context (D4): current record data + stored (redacted) trigger event.
