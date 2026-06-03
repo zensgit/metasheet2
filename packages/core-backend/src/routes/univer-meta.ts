@@ -1457,7 +1457,19 @@ function parseMetaSortRules(sortInfo: unknown): MetaSortRule[] {
   return rules
 }
 
-function compareMetaSortValue(type: UniverMetaField['type'], valueA: unknown, valueB: unknown, desc: boolean): number {
+/**
+ * Numeric query semantics: these field types sort + range-filter as JS numbers
+ * via toComparableNumber. `date` is intentionally excluded — it has its own
+ * epoch branch (toEpoch). `rollup` is pre-normalized to `number` by callers
+ * (effectiveType), so it need not appear here. Shared by compareMetaSortValue
+ * (sort) and evaluateMetaFilterCondition (filter) so the two cannot drift.
+ * See docs/development/multitable-typed-query-polish-design-20260603.md.
+ */
+export function isNumericQueryFieldType(type: string): boolean {
+  return type === 'number' || type === 'currency' || type === 'percent' || type === 'rating'
+}
+
+export function compareMetaSortValue(type: UniverMetaField['type'], valueA: unknown, valueB: unknown, desc: boolean): number {
   const effectiveType = type === 'rollup' ? 'number' : type
   const aNull = isNullishSortValue(valueA)
   const bNull = isNullishSortValue(valueB)
@@ -1466,7 +1478,7 @@ function compareMetaSortValue(type: UniverMetaField['type'], valueA: unknown, va
   if (bNull) return -1
 
   let cmp = 0
-  if (effectiveType === 'number' || effectiveType === 'date') {
+  if (isNumericQueryFieldType(effectiveType) || effectiveType === 'date') {
     const toComparable = effectiveType === 'date' ? toEpoch : toComparableNumber
     const leftValue = toComparable(valueA)
     const rightValue = toComparable(valueB)
@@ -1911,7 +1923,7 @@ async function computeDependentLookupRollupRecords(
   return results
 }
 
-function evaluateMetaFilterCondition(
+export function evaluateMetaFilterCondition(
   type: UniverMetaField['type'],
   cellValue: unknown,
   condition: MetaFilterCondition,
@@ -1924,7 +1936,7 @@ function evaluateMetaFilterCondition(
   if (opNorm === 'isempty') return isNullishSortValue(cellValue)
   if (opNorm === 'isnotempty') return !isNullishSortValue(cellValue)
 
-  if (effectiveType === 'number' || effectiveType === 'date') {
+  if (isNumericQueryFieldType(effectiveType) || effectiveType === 'date') {
     const toComparable = effectiveType === 'date' ? toEpoch : toComparableNumber
     const left = toComparable(cellValue)
     const right = toComparable(value)
@@ -1935,6 +1947,11 @@ function evaluateMetaFilterCondition(
     if (opNorm === 'greaterequal' || opNorm === 'isgreaterequal') return left !== null && right !== null && left >= right
     if (opNorm === 'less' || opNorm === 'isless') return left !== null && right !== null && left < right
     if (opNorm === 'lessequal' || opNorm === 'islessequal') return left !== null && right !== null && left <= right
+    // Unrecognized operator on a numeric field → no-op (pre-existing catch-all). Accepted
+    // reclassification effect: a `contains`/`doesNotContain` filter persisted on currency/
+    // percent/rating BEFORE Slice 1 (when they fell back to the string operator set) now lands
+    // here and shows all rows. The operator menu no longer offers text ops for these types, so
+    // new filters can't reach this branch. See multitable-typed-query-polish-design-20260603.md.
     return true
   }
 
