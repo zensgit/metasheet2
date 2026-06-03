@@ -2148,7 +2148,7 @@ async function refreshBootstrap(): Promise<void> {
 function connectionStatusLabel(system: WorkbenchExternalSystem | null): string {
   if (!system) return '未选择'
   if (system.status === 'active') return system.lastTestedAt ? '已连接' : '可用'
-  if (system.status === 'error') return system.lastError ? `异常：${system.lastError}` : '异常'
+  if (system.status === 'error') return system.lastError ? `异常：${system.lastError}（点击"测试连接"重新激活）` : '异常（点击"测试连接"重新激活）'
   return '未启用'
 }
 
@@ -2167,11 +2167,18 @@ async function testSystem(side: WorkbenchSide): Promise<void> {
     setStatus(`${side === 'source' ? '数据源' : '目标'}系统未选择`, 'error')
     return
   }
+  const label = side === 'source' ? '数据源' : '目标'
+  // Capture the status BEFORE the test so a recovery (error → active) can be reported explicitly —
+  // result.system already carries the post-test status, so it can't tell us where we came from.
+  const priorStatus = (side === 'source' ? selectedSourceSystem.value : selectedTargetSystem.value)?.status
   try {
     const result = await testExternalSystemConnection(systemId, currentScope())
     if (result.system) replaceSystem(result.system)
-    const label = side === 'source' ? '数据源' : '目标'
-    setStatus(result.ok ? `${label}连接测试通过` : `${label}连接测试失败：${result.message || result.code || 'unknown error'}`, result.ok ? 'success' : 'error')
+    if (result.ok) {
+      setStatus(priorStatus === 'error' ? `${label}连接已恢复，已重新激活` : `${label}连接测试通过`, 'success')
+    } else {
+      setStatus(`${label}连接测试失败：${result.message || result.code || 'unknown error'}`, 'error')
+    }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
   }

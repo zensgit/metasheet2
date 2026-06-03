@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict')
 const path = require('node:path')
 const { createAdapterRegistry, createReadResult, createUpsertResult } = require(path.join(__dirname, '..', 'lib', 'contracts.cjs'))
-const { createPipelineRunner } = require(path.join(__dirname, '..', 'lib', 'pipeline-runner.cjs'))
+const { createPipelineRunner, assertActiveSystem } = require(path.join(__dirname, '..', 'lib', 'pipeline-runner.cjs'))
 const { createDeadLetterStore } = require(path.join(__dirname, '..', 'lib', 'dead-letter.cjs'))
 const { createWatermarkStore } = require(path.join(__dirname, '..', 'lib', 'watermark.cjs'))
 const { createRunLogger } = require(path.join(__dirname, '..', 'lib', 'run-log.cjs'))
@@ -1711,9 +1711,39 @@ async function main() {
     assert.equal(h.targetRows.size, 0, 'C2a: nothing is written when the source principal is missing')
   }
 
+  // --- C2-recovery (#2223): assertActiveSystem stale-status legibility hint ------------------
+  // A recovered-but-not-retested source sits in `error`; the run must point the operator at the
+  // retest/reactivate action (not read as "the dry-run itself broke"), while PRESERVING the
+  // {field, systemId, status} details #2205's evidence references. `inactive` gets a distinct hint
+  // (a connection test deliberately won't reactivate an inactive system). `active` does not throw.
+  {
+    assert.doesNotThrow(
+      () => assertActiveSystem({ id: 'sys_ok', status: 'active' }, 'sourceSystem'),
+      'active system passes',
+    )
+    const tryAssert = (system) => {
+      try { assertActiveSystem(system, 'sourceSystem'); return null } catch (e) { return e }
+    }
+
+    const errThrown = tryAssert({ id: 'sys_err', status: 'error' })
+    assert.ok(errThrown, 'error-status system throws')
+    assert.match(errThrown.message, /external system is not active/, 'keeps the base reason')
+    assert.match(errThrown.message, /retest\/reactivate/i, 'error status points at the retest/reactivate action')
+    assert.equal(errThrown.details.field, 'sourceSystem', 'details preserve field')
+    assert.equal(errThrown.details.systemId, 'sys_err', 'details preserve systemId (#2205 evidence)')
+    assert.equal(errThrown.details.status, 'error', 'details preserve status')
+
+    const inactiveThrown = tryAssert({ id: 'sys_inact', status: 'inactive' })
+    assert.ok(inactiveThrown, 'inactive-status system throws')
+    assert.match(inactiveThrown.message, /activate it before running/i, 'inactive status says activate')
+    assert.doesNotMatch(inactiveThrown.message, /retest/i, 'inactive must NOT tell the operator to retest (a test will not reactivate it)')
+    assert.equal(inactiveThrown.details.status, 'inactive', 'details preserve inactive status')
+  }
+
   console.log('✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed')
   console.log('✓ pipeline-runner: DF-N2-2b provenance write tests passed (14-20)')
   console.log('✓ pipeline-runner: C2a data-source bridge principal-threading tests passed')
+  console.log('✓ pipeline-runner: C2-recovery stale-status hint tests passed (#2223)')
 }
 
 main().catch((err) => {

@@ -209,7 +209,16 @@ function assertActiveSystem(system, field) {
     throw new PipelineRunnerError(`${field} external system not found`, { field })
   }
   if (system.status && system.status !== 'active') {
-    throw new PipelineRunnerError(`${field} external system is not active`, {
+    // Stale-status legibility: an `error` source usually means a recovered-but-not-retested connection
+    // (e.g. the Bridge Agent was restarted) — point the operator at the retest/reactivate action rather
+    // than letting them think the dry-run itself broke. `inactive` is deliberate (a test won't reactivate
+    // it), so it gets a different hint.
+    const hint = system.status === 'error'
+      ? ' — the source connection last failed its test; retest/reactivate it (Workbench 测试连接) then re-run'
+      : system.status === 'inactive'
+        ? ' — the source is inactive; activate it before running'
+        : ` (status=${system.status})`
+    throw new PipelineRunnerError(`${field} external system is not active${hint}`, {
       field,
       systemId: system.id,
       status: system.status,
@@ -835,4 +844,6 @@ function createPipelineRunner(deps = {}) {
 module.exports = {
   PipelineRunnerError,
   createPipelineRunner,
+  // Exported for unit tests of the stale-status legibility hint (error→retest / inactive→activate).
+  assertActiveSystem,
 }
