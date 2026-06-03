@@ -2749,6 +2749,85 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('enforces weekly and monthly shift-compliance caps (block) independently of the daily cap', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const adminUserId = `attendance-comp2-admin-${runSuffix}`
+    const uWeekOk = `attendance-comp2-wk-ok-${runSuffix}`
+    const uWeekOver = `attendance-comp2-wk-over-${runSuffix}`
+    const uMonthOver = `attendance-comp2-mo-over-${runSuffix}`
+    const uMonthOk = `attendance-comp2-mo-ok-${runSuffix}`
+    // The cap is EXPLICIT scheduled load (default-rule baseline excluded). With the org default of
+    // Mon–Fri 09:00–18:00 (540 min/day → 2700/week), a weekly cap of 2400 would block EVERY save if the
+    // baseline counted; under explicit-only a single 540-min assignment is 540 < 2400 → must pass. The
+    // 9h shift works all 7 days, so each explicit assignment day contributes 540.
+    const dWeekOkMon = '2026-10-05' // Monday — single explicit day, under the 2400 cap
+    const dWeekOverMon = '2026-10-05' // Mon; the over-cap user assigns Mon+Tue (same ISO week)
+    const dWeekOverTue = '2026-10-06' // Tue
+    const dMonthOverA = '2026-11-09' // both in November — two explicit days over the monthly cap
+    const dMonthOverB = '2026-11-10'
+    const dMonthOk = '2026-12-07' // single explicit day, under the 2400 cap
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    let adminToken: string | undefined
+    let originalSettings: Record<string, unknown> = {}
+    let shiftId: string | undefined
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+      if (!adminToken) return
+      const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+      const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+      originalSettings = ((origRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+
+      const bigShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, { method: 'POST', headers, body: JSON.stringify({ name: `comp2-big-${runSuffix}`, timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', workingDays: [0, 1, 2, 3, 4, 5, 6] }) })
+      expect(bigShiftRes.status).toBe(201)
+      shiftId = (bigShiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+
+      const postAssignment = (userId: string, startDate: string, endDate: string = startDate) => requestJson(`${baseUrl}/api/attendance/assignments`, { method: 'POST', headers, body: JSON.stringify({ userId, shiftId, startDate, endDate, isActive: true }) })
+      // Each PUT fully specifies all caps (explicit nulls) so only the granularity under test is active.
+      const putCaps = (patch: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ shiftCompliance: { enforcement: 'block', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null, ...patch } }) })
+      const errorOf = (res: HttpResponse) => (res.body as { error?: { code?: string; granularity?: string } } | undefined)?.error
+      const rowCount = async (userId: string) => (await pool.query('SELECT 1 FROM attendance_shift_assignments WHERE user_id = $1', [userId])).rows.length
+
+      // WEEKLY — daily/monthly unset, so only the weekly cap can fire.
+      // (1) Anti-false-block: a 2400 cap + ONE explicit 540 day passes — the Mon–Fri default baseline
+      //     (2700) is NOT counted. This would 422 if the projection counted the effective calendar.
+      expect((await putCaps({ weeklyMaxMinutes: 2400 })).status).toBe(200)
+      expect((await postAssignment(uWeekOk, dWeekOkMon)).status).toBe(201)
+      // (2) Cumulative explicit over: two explicit days in one ISO week (1080) over a 1000 cap → 422.
+      expect((await putCaps({ weeklyMaxMinutes: 1000 })).status).toBe(200)
+      const wkOver = await postAssignment(uWeekOver, dWeekOverMon, dWeekOverTue)
+      expect(wkOver.status).toBe(422)
+      expect(errorOf(wkOver)?.code).toBe('SHIFT_COMPLIANCE_CAP_EXCEEDED')
+      expect(errorOf(wkOver)?.granularity).toBe('weekly')
+      expect(await rowCount(uWeekOver)).toBe(0)
+
+      // MONTHLY — daily/weekly unset, so only the monthly cap can fire.
+      // (3) Cumulative explicit over: two explicit days in one month (1080) over a 1000 cap → 422.
+      expect((await putCaps({ monthlyMaxMinutes: 1000 })).status).toBe(200)
+      const moOver = await postAssignment(uMonthOver, dMonthOverA, dMonthOverB)
+      expect(moOver.status).toBe(422)
+      expect(errorOf(moOver)?.granularity).toBe('monthly')
+      expect(await rowCount(uMonthOver)).toBe(0)
+      // (4) Within: a 2400 cap + one explicit 540 day passes (baseline not counted).
+      expect((await putCaps({ monthlyMaxMinutes: 2400 })).status).toBe(200)
+      expect((await postAssignment(uMonthOk, dMonthOk)).status).toBe(201)
+    } finally {
+      if (adminToken) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      }
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = ANY($1::text[])', [[uWeekOk, uWeekOver, uMonthOver, uMonthOk]]).catch(() => undefined)
+      if (shiftId) await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [shiftId]).catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('rejects non-UUID shift references for rotation rules, including UUID-like shift names', async () => {
     if (!baseUrl) return
 

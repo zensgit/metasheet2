@@ -13,6 +13,8 @@
 
 与已有 `comprehensiveHours`（报表侧、**事后累计 `actualMinutes`**、月/季/年 warn）**语义并行但不同**：本引擎是 **保存时、计划 `plannedMinutes`、日/周/月、block**。两者共用底层工时算法，但**不是同一配置对象**。
 
+> **口径修正 2026-06-03（owner 决策 A，S2 amend #2221）：cap = explicit scheduled load，不是 effective-calendar total。** 投影**只统计显式 assignment / rotation / fixed-apply 产生的 planned minutes**，**排除无显式排班的兜底天**（resolver context 的 `assignment` / `rotationAssignment` 引用均为空——用原始引用而非 `source`，避免 calendarPolicy override 改写 `source` 误判）。否则 org 默认工作制（如 Mon–Fri 09:00–18:00 = 2700/周）本身就占满额度，一旦设个真实 weekly cap（如 2400）就会**挡掉所有保存**、像功能坏了。投影**仍复用** resolver primitives（`buildWorkContextPrefetch` + `resolveWorkContextFromPrefetch` + `calculateAttendanceComprehensiveShiftPlannedMinutes`，见 `projectExplicitScheduledMinutesByUser`），只是按显式 assignment 引用过滤掉默认兜底天——非手搓 union。日/周/月统一此口径。
+
 ---
 
 ## 1. owner 决策（2026-06-02 锁定，不再 re-litigate）

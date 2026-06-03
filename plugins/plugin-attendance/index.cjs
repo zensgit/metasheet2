@@ -13265,50 +13265,123 @@ class ShiftComplianceCapExceeded extends Error {
 // bounded for open-ended / very long assignments.
 const SHIFT_COMPLIANCE_DAILY_WINDOW_DAYS = 62
 
-// Project one user's effective planned minutes per day over the affected window THROUGH the shared
-// effective-calendar resolver (loadAttendanceComprehensivePlannedMinutesByUser → the SAME compute
-// comprehensiveHours uses → no wire-vs-fixture drift; it reads BOTH shift + rotation sources and owns
-// day-level precedence). Pass the transaction as `db` so it sees the uncommitted post-write state.
-// No-op (no regression) when the daily cap is unset OR enforcement !== 'block' (warn is persisted but
-// inert in v1). Throws ShiftComplianceCapExceeded when any day exceeds the cap.
+// Period helpers for the weekly/monthly caps (S2). Weeks are ISO (Mon–Sun); months are calendar
+// months. All arithmetic is on org-local date keys (YYYY-MM-DD) — the same space the resolver and
+// assignment rows use — so no timezone conversion is needed here.
+function attendanceWeekStartKey(dateKey) {
+  const key = normalizeDateOnly(dateKey)
+  if (!key) return null
+  const weekday = getWeekdayFromDateKey(key) // 0=Sun … 6=Sat
+  return addDaysToDateKey(key, -(weekday === 0 ? 6 : weekday - 1))
+}
+
+function attendanceMonthStartKey(dateKey) {
+  const key = normalizeDateOnly(dateKey)
+  return key ? `${key.slice(0, 7)}-01` : null
+}
+
+function attendanceMonthEndKey(dateKey) {
+  const start = attendanceMonthStartKey(dateKey)
+  if (!start) return null
+  const [year, month] = start.split('-').map(Number)
+  const nextYear = month === 12 ? year + 1 : year
+  const nextMonth = month === 12 ? 1 : month + 1
+  const nextStart = `${String(nextYear).padStart(4, '0')}-${String(nextMonth).padStart(2, '0')}-01`
+  return addDaysToDateKey(nextStart, -1)
+}
+
+// Distinct period-start keys (week or month) that the [from, to] window touches.
+function attendanceDistinctPeriodStarts(from, to, startFn) {
+  const starts = []
+  const seen = new Set()
+  let cursor = from
+  while (cursor && cursor <= to) {
+    const start = startFn(cursor)
+    if (start && !seen.has(start)) {
+      seen.add(start)
+      starts.push(start)
+    }
+    cursor = addDaysToDateKey(cursor, 1)
+  }
+  return starts
+}
+
+// Project a user's EXPLICITLY-scheduled planned minutes over [from, to]. The cap is an "explicit
+// scheduled load" ceiling, NOT an effective-calendar total: it counts only days a shift OR rotation
+// assignment covers (fixed-apply writes shift assignments too) and SKIPS default-rule fallback days
+// (no explicit assignment ref). Otherwise the org default (e.g. Mon–Fri 09:00–18:00) would consume the
+// whole cap and block every save — so caps must measure scheduled load the admin added, not the baseline.
+// Reuses the SAME resolver primitives as comprehensiveHours (buildWorkContextPrefetch +
+// resolveWorkContextFromPrefetch + calculateAttendanceComprehensiveShiftPlannedMinutes) — no hand-rolled
+// two-table union. Pass the transaction as `db` so it sees the uncommitted post-write state.
+async function projectExplicitScheduledMinutesByUser(db, orgId, userId, from, to) {
+  const workDates = enumerateAttendanceCalendarDateRange(from, to)
+  const defaultRule = await loadDefaultRule(db, orgId)
+  const { prefetched } = await buildWorkContextPrefetch(db, { orgId, userIds: [userId], workDates, defaultRule })
+  const items = []
+  let total = 0
+  for (const date of workDates) {
+    const context = resolveWorkContextFromPrefetch({ orgId, userId, workDate: date, defaultRule, prefetched })
+    // Only days an explicit shift OR rotation assignment covers count toward the cap (fixed-apply writes
+    // shift assignments too). Use the raw assignment refs — not `context.source` — so the calendarPolicy
+    // override layer (which runs after `source` is set) can't flip the classification.
+    if (!context || (!context.assignment && !context.rotationAssignment)) continue
+    const minutes = context.isWorkingDay ? calculateAttendanceComprehensiveShiftPlannedMinutes(context.rule) : 0
+    items.push({ date, plannedMinutes: minutes })
+    total += minutes
+  }
+  return { total, items }
+}
+
+// Enforce every configured shift-compliance cap on an assignment save, in-txn after the write:
+//   - daily   → the worst single explicitly-scheduled day in the affected window > dailyMaxMinutes
+//   - weekly  → any ISO week the window touches has an explicit-load total > weeklyMaxMinutes
+//   - monthly → any calendar month the window touches has an explicit-load total > monthlyMaxMinutes
+// No-op (no regression) when a cap is unset; nothing runs unless enforcement === 'block' (warn is
+// persisted-but-inert in v1). Throws ShiftComplianceCapExceeded on the first cap exceeded → rollback.
 async function enforceShiftComplianceCap(db, { orgId, userId, fromDate, toDate }) {
   const settings = await getSettings(db)
   const compliance = settings?.shiftCompliance
-  const dailyCap = compliance?.dailyMaxMinutes
-  if (compliance?.enforcement !== 'block' || dailyCap == null || !userId) return
+  if (compliance?.enforcement !== 'block' || !userId) return
+  const dailyCap = compliance.dailyMaxMinutes
+  const weeklyCap = compliance.weeklyMaxMinutes
+  const monthlyCap = compliance.monthlyMaxMinutes
+  if (dailyCap == null && weeklyCap == null && monthlyCap == null) return
   // Use the lenient normalizer: PUT paths pass `existing.start_date`/`end_date`, which pg returns as
   // Date objects (normalizeDateOnlyStrict only accepts 'YYYY-MM-DD' strings → would silently skip).
   const from = normalizeDateOnly(fromDate)
   if (!from) return
   const explicitTo = normalizeDateOnly(toDate)
   const boundedTo = addDaysToDateKey(from, SHIFT_COMPLIANCE_DAILY_WINDOW_DAYS) || from
-  const to = explicitTo && explicitTo >= from && explicitTo < boundedTo ? explicitTo : boundedTo
-  const { plannedDetailsByUser } = await loadAttendanceComprehensivePlannedMinutesByUser(
-    db,
-    orgId,
-    [userId],
-    { from, to },
-  )
-  const detail = plannedDetailsByUser.get(userId)
-  // The per-day breakdown is `items` (array of {date, plannedMinutes, ...}); `days` on this shape is
-  // a COUNT, not the array — reading `days` here silently disables the cap.
-  const perDay = Array.isArray(detail?.items) ? detail.items : []
-  let worst = null
-  for (const day of perDay) {
-    const minutes = Number(day?.plannedMinutes ?? 0)
-    if (minutes > dailyCap && (worst == null || minutes > worst.plannedMinutes)) {
-      worst = { plannedMinutes: minutes, date: day?.date ?? null }
+  const affectedTo = explicitTo && explicitTo >= from && explicitTo < boundedTo ? explicitTo : boundedTo
+
+  const exceeded = (granularity, capMinutes, projectedMinutes, periodStart, periodEnd) =>
+    new ShiftComplianceCapExceeded({ granularity, capMinutes, projectedMinutes, periodStart, periodEnd, userId })
+
+  // DAILY — the worst single explicitly-scheduled day in the affected window.
+  if (dailyCap != null) {
+    const { items } = await projectExplicitScheduledMinutesByUser(db, orgId, userId, from, affectedTo)
+    for (const day of items) {
+      if (day.plannedMinutes > dailyCap) throw exceeded('daily', dailyCap, day.plannedMinutes, day.date, day.date)
     }
   }
-  if (worst) {
-    throw new ShiftComplianceCapExceeded({
-      granularity: 'daily',
-      capMinutes: dailyCap,
-      projectedMinutes: worst.plannedMinutes,
-      periodStart: worst.date,
-      periodEnd: worst.date,
-      userId,
-    })
+
+  // WEEKLY — each ISO week (Mon–Sun) the affected window touches; explicit load over the full week.
+  if (weeklyCap != null) {
+    for (const weekStart of attendanceDistinctPeriodStarts(from, affectedTo, attendanceWeekStartKey)) {
+      const weekEnd = addDaysToDateKey(weekStart, 6)
+      const { total } = await projectExplicitScheduledMinutesByUser(db, orgId, userId, weekStart, weekEnd)
+      if (total > weeklyCap) throw exceeded('weekly', weeklyCap, total, weekStart, weekEnd)
+    }
+  }
+
+  // MONTHLY — each calendar month the affected window touches.
+  if (monthlyCap != null) {
+    for (const monthStart of attendanceDistinctPeriodStarts(from, affectedTo, attendanceMonthStartKey)) {
+      const monthEnd = attendanceMonthEndKey(monthStart)
+      const { total } = await projectExplicitScheduledMinutesByUser(db, orgId, userId, monthStart, monthEnd)
+      if (total > monthlyCap) throw exceeded('monthly', monthlyCap, total, monthStart, monthEnd)
+    }
   }
 }
 
