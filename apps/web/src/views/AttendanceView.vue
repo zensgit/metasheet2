@@ -1978,6 +1978,68 @@
               <button class="attendance__btn attendance__btn--primary" :disabled="settingsLoading" @click="saveSettings">
                 {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save settings', '保存设置') }}
               </button>
+
+              <div class="attendance__admin-subsection" data-admin-card="shift-compliance">
+                <h4>{{ tr('Shift compliance', '排班合规') }}</h4>
+                <p class="attendance__field-hint">
+                  {{ tr('Block saving a schedule when projected scheduled minutes exceed the cap. Empty = not enforced.', '保存排班时，计划工时超过上限则阻断保存。留空＝不启用。') }}
+                </p>
+                <label class="attendance__field" for="attendance-shift-compliance-enforcement">
+                  <span>{{ tr('Enforcement', '强制方式') }}</span>
+                  <select
+                    id="attendance-shift-compliance-enforcement"
+                    v-model="shiftComplianceForm.enforcement"
+                    data-shift-compliance="enforcement"
+                  >
+                    <option value="block">{{ tr('Block on save', '保存时阻断') }}</option>
+                    <option value="warn">{{ tr('Warn (reserved, not yet enforced)', '预警（预留，暂未生效）') }}</option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-shift-compliance-daily">
+                  <span>{{ tr('Daily cap (minutes)', '每日上限（分钟）') }}</span>
+                  <input
+                    id="attendance-shift-compliance-daily"
+                    v-model="shiftComplianceForm.dailyMaxMinutes"
+                    type="number"
+                    min="1"
+                    inputmode="numeric"
+                    data-shift-compliance="daily"
+                    :placeholder="tr('Empty = not enforced', '留空＝不启用')"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-shift-compliance-weekly">
+                  <span>{{ tr('Weekly cap (minutes)', '每周上限（分钟）') }}</span>
+                  <input
+                    id="attendance-shift-compliance-weekly"
+                    v-model="shiftComplianceForm.weeklyMaxMinutes"
+                    type="number"
+                    min="1"
+                    inputmode="numeric"
+                    data-shift-compliance="weekly"
+                    :placeholder="tr('Empty = not enforced', '留空＝不启用')"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-shift-compliance-monthly">
+                  <span>{{ tr('Monthly cap (minutes)', '每月上限（分钟）') }}</span>
+                  <input
+                    id="attendance-shift-compliance-monthly"
+                    v-model="shiftComplianceForm.monthlyMaxMinutes"
+                    type="number"
+                    min="1"
+                    inputmode="numeric"
+                    data-shift-compliance="monthly"
+                    :placeholder="tr('Empty = not enforced', '留空＝不启用')"
+                  />
+                </label>
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="settingsLoading"
+                  data-shift-compliance="save"
+                  @click="saveShiftCompliance"
+                >
+                  {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save shift compliance', '保存排班合规') }}
+                </button>
+              </div>
             </div>
 
             <div
@@ -7178,6 +7240,12 @@ interface AttendanceSettings {
     radiusMeters: number
   } | null
   minPunchIntervalMinutes?: number
+  shiftCompliance?: {
+    enforcement?: 'block' | 'warn'
+    dailyMaxMinutes?: number | null
+    weeklyMaxMinutes?: number | null
+    monthlyMaxMinutes?: number | null
+  }
 }
 
 interface HolidayPolicyOverride {
@@ -10925,6 +10993,16 @@ const settingsForm = reactive({
   geoFenceLng: '',
   geoFenceRadius: '',
   minPunchIntervalMinutes: 1,
+})
+
+// 排班合规 (shift-compliance) config card — block-on-save day/week/month caps. Caps held as strings:
+// '' = unset = not enforced (no behaviour change). Saved via saveShiftCompliance, which PUTs ONLY
+// { shiftCompliance } so the backend per-key merge leaves every other policy field untouched.
+const shiftComplianceForm = reactive({
+  enforcement: 'block' as 'block' | 'warn',
+  dailyMaxMinutes: '',
+  weeklyMaxMinutes: '',
+  monthlyMaxMinutes: '',
 })
 
 const calendarPolicyOverrideDiagnostics = computed(() => buildCalendarPolicyOverrideDiagnostics(settingsForm.calendarPolicyOverrides))
@@ -16241,9 +16319,62 @@ async function loadSettings() {
     adminForbidden.value = false
     attendanceSettings.value = (data.data as AttendanceSettings | null) ?? null
     applySettingsToForm(data.data || {})
+    applyShiftComplianceToForm(data.data || {})
   } catch (error: any) {
     attendanceSettings.value = null
     setStatusFromError(error, tr('Failed to load settings', '加载设置失败'), 'admin')
+  } finally {
+    settingsLoading.value = false
+  }
+}
+
+function applyShiftComplianceToForm(settings: AttendanceSettings) {
+  const sc = settings.shiftCompliance || {}
+  shiftComplianceForm.enforcement = sc.enforcement === 'warn' ? 'warn' : 'block'
+  const capStr = (value: number | null | undefined) =>
+    typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+  shiftComplianceForm.dailyMaxMinutes = capStr(sc.dailyMaxMinutes)
+  shiftComplianceForm.weeklyMaxMinutes = capStr(sc.weeklyMaxMinutes)
+  shiftComplianceForm.monthlyMaxMinutes = capStr(sc.monthlyMaxMinutes)
+}
+
+async function saveShiftCompliance() {
+  settingsLoading.value = true
+  try {
+    // v-model on <input type="number"> coerces to a number; an empty field stays ''. Accept both.
+    const cap = (value: string | number): number | null => {
+      const trimmed = String(value).trim()
+      if (!trimmed) return null
+      const minutes = Number(trimmed)
+      return Number.isFinite(minutes) && minutes > 0 ? Math.floor(minutes) : null
+    }
+    // PUT ONLY shiftCompliance — the backend merges per top-level key, so punchPolicy / shiftEditPolicy
+    // / holidayPolicy / … are preserved untouched. Empty cap -> null -> that granularity not enforced.
+    const payload = {
+      shiftCompliance: {
+        enforcement: shiftComplianceForm.enforcement === 'warn' ? 'warn' : 'block',
+        dailyMaxMinutes: cap(shiftComplianceForm.dailyMaxMinutes),
+        weeklyMaxMinutes: cap(shiftComplianceForm.weeklyMaxMinutes),
+        monthlyMaxMinutes: cap(shiftComplianceForm.monthlyMaxMinutes),
+      },
+    }
+    const response = await apiFetchWithTimeout('/api/attendance/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw createForbiddenError()
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to save shift compliance', '保存排班合规失败'))
+    }
+    adminForbidden.value = false
+    applyShiftComplianceToForm((data.data || payload) as AttendanceSettings)
+    setStatus(tr('Shift compliance updated.', '排班合规已更新。'))
+  } catch (error: any) {
+    setStatusFromError(error, tr('Failed to save shift compliance', '保存排班合规失败'), 'save-settings')
   } finally {
     settingsLoading.value = false
   }

@@ -2015,6 +2015,59 @@ describe('Attendance admin regressions', () => {
     expect(refreshed.textContent).not.toContain('100 m radius')
   })
 
+  it('loads shiftCompliance into the config card, edits/clears caps, and PUTs only { shiftCompliance }', async () => {
+    attendanceSettingsData = {
+      shiftCompliance: { enforcement: 'block', dailyMaxMinutes: 480, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    // Drain BOTH admin loads — fetchPlugins→loadAdminData and the orgId-watch reload — before reading or
+    // editing, so settingsLoading has settled (a late load would otherwise disable the save button and
+    // reset the form).
+    await flushUi(16)
+
+    // Load: existing shiftCompliance maps into the card (number → string; null → '').
+    const daily = container!.querySelector<HTMLInputElement>('[data-shift-compliance="daily"]')
+    const weekly = container!.querySelector<HTMLInputElement>('[data-shift-compliance="weekly"]')
+    const monthly = container!.querySelector<HTMLInputElement>('[data-shift-compliance="monthly"]')
+    const enforcement = container!.querySelector<HTMLSelectElement>('[data-shift-compliance="enforcement"]')
+    expect(Boolean(daily && weekly && monthly && enforcement)).toBe(true)
+    expect(daily!.value).toBe('480')
+    expect(weekly!.value).toBe('')
+    expect(monthly!.value).toBe('')
+    expect(enforcement!.value).toBe('block')
+
+    // Edit: clear the daily cap (empty = not enforced) and set a weekly cap; leave enforcement = block.
+    daily!.value = ''
+    daily!.dispatchEvent(new Event('input'))
+    weekly!.value = '1200'
+    weekly!.dispatchEvent(new Event('input'))
+    await flushUi(2)
+
+    // Sanity: the edit survived (no late load reset it) before we save.
+    expect(weekly!.value).toBe('1200')
+    const saveButton = container!.querySelector<HTMLButtonElement>('[data-shift-compliance="save"]')
+    expect(saveButton).toBeTruthy()
+    saveButton!.click()
+    await flushUi(6)
+
+    // The PUT body must be EXACTLY { shiftCompliance: {...} } — toEqual (not toMatchObject) so any other
+    // policy key (autoAbsence / punchPolicy / …) leaking in would fail. Cleared cap -> null; edited -> int.
+    const settingsPuts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(settingsPuts).toHaveLength(1)
+    const body = JSON.parse(String((settingsPuts[0][1] as { body?: string } | undefined)?.body || '{}'))
+    expect(body).toEqual({
+      shiftCompliance: {
+        enforcement: 'block',
+        dailyMaxMinutes: null,
+        weeklyMaxMinutes: 1200,
+        monthlyMaxMinutes: null,
+      },
+    })
+  })
+
   it('keeps the group punch-method card read-only with only an Open drawer action', async () => {
     const card = await openAttendanceGroupPunchCard()
     // PM4: no inputs/toggles/save controls inside the punch card
