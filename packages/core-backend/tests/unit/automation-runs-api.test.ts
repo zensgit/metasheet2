@@ -136,11 +136,11 @@ describe('A2 runs API — GET /automation-executions (list)', () => {
     expect(svc.logs.listExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 1 }))
   })
 
-  it('all runs routes (list + detail + retry) are gated by requireAdminRole()', () => {
+  it('all runs routes (list + detail + retry + resume) are gated by requireAdminRole()', () => {
     vi.mocked(requireAdminRole).mockClear()
     buildApp(makeMockService())
-    // exactly two guarded routes were constructed: list + detail
-    expect(vi.mocked(requireAdminRole)).toHaveBeenCalledTimes(3)
+    // exactly four guarded routes: list + detail + retry + A6-2 resume (POST /automation/resume)
+    expect(vi.mocked(requireAdminRole)).toHaveBeenCalledTimes(4)
   })
 })
 
@@ -153,6 +153,30 @@ describe('A2 runs API — GET /automation-executions/:id (detail)', () => {
     expect(res.body.triggerEvent).toEqual({ recordId: 'rec1' }) // detail includes snapshot
     expect(res.body.ruleSnapshot).toEqual({ id: 'rule-1', name: 'Notify' })
     expect(svc.logs.getById).toHaveBeenCalledWith('axe_1')
+  })
+
+  it('A6-2: renders a SUSPENDED execution (out-of-band) — 200, status running, suspended step visible, no throw', async () => {
+    // D2: the execution stays `running` while parked; the C1 job plane carries the `suspended`
+    // state with NO suspend descriptor. The read mappers must surface it (the runs detail an admin
+    // opens mid-wait) without invoking normalizeWorkflowJob (which would reject a descriptor-less suspended job).
+    const suspendedExec = {
+      ...sampleExec, id: 'axe_susp', status: 'running', finishedAt: null,
+      steps: [{ actionType: 'update_record', status: 'success', output: {}, durationMs: 1 }],
+    }
+    const suspendedJobs = [
+      { id: 'axe_susp:job:0', executionId: 'axe_susp', stepKey: '0', status: 'resolved', upstreamJobId: null, result: null },
+      { id: 'axe_susp:job:1', executionId: 'axe_susp', stepKey: '1', status: 'suspended', upstreamJobId: 'axe_susp:job:0', result: null },
+    ]
+    const svc = makeMockService(
+      { getById: vi.fn().mockResolvedValue(suspendedExec) },
+      { jobs: { listByExecution: vi.fn().mockResolvedValue(suspendedJobs) } },
+    )
+    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions/axe_susp').expect(200)
+    expect(res.body.statusLegacy).toBe('running') // execution stays running (D2)
+    expect(res.body.status).toBe('running')        // legacy bridge: running → running
+    // prefer-jobs: the descriptor-less `suspended` job view is surfaced as-is, no throw.
+    expect(res.body.steps).toHaveLength(2)
+    expect(res.body.steps[1]).toMatchObject({ id: 'axe_susp:job:1', status: 'suspended' })
   })
 
   it('404 when the execution is missing', async () => {
@@ -339,5 +363,38 @@ describe('A5 runs API — POST /automation-executions/:id/retry', () => {
     const serialized = JSON.stringify(res.body)
     expect(serialized).not.toContain('LIVE-SECRET-TOKEN')
     expect(serialized).not.toContain('SECRETPW')
+  })
+})
+
+describe('A6-2 — POST /automation/resume (admin-gated)', () => {
+  it('400 when confirmSideEffects is not true (resume runs the tail\'s real side effects)', async () => {
+    await request(buildApp(makeMockService())).post('/api/multitable/automation/resume')
+      .send({ resumeToken: 'tok' }).expect(400)
+  })
+
+  it('400 when resumeToken is missing', async () => {
+    await request(buildApp(makeMockService())).post('/api/multitable/automation/resume')
+      .send({ confirmSideEffects: true }).expect(400)
+  })
+
+  it('maps the discriminated 404 (unknown token) to HTTP 404', async () => {
+    const svc = makeMockService({}, {
+      resumeExecution: vi.fn().mockResolvedValue({ status: 404, code: 'NOT_FOUND', message: 'Unknown resume token' }),
+    })
+    const res = await request(buildApp(svc)).post('/api/multitable/automation/resume')
+      .send({ resumeToken: 'nope', confirmSideEffects: true }).expect(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+  })
+
+  it('200 + run view (persisted-redacted) when resumeExecution returns an execution', async () => {
+    const resumed = { ...sampleExec, status: 'success', initiatedBy: 'admin1' }
+    const svc = makeMockService(
+      { getById: vi.fn().mockResolvedValue(resumed) },
+      { resumeExecution: vi.fn().mockResolvedValue({ execution: resumed }) },
+    )
+    const res = await request(buildApp(svc)).post('/api/multitable/automation/resume')
+      .send({ resumeToken: 'tok', confirmSideEffects: true }).expect(200)
+    expect(res.body.statusLegacy).toBe('success')
+    expect(res.body.initiatedBy).toBe('admin1')
   })
 })

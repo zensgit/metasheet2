@@ -12,6 +12,7 @@ export type AutomationActionType =
   | 'send_dingtalk_group_message'
   | 'send_dingtalk_person_message'
   | 'lock_record'
+  | 'wait_for_callback'
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'update_record',
@@ -22,6 +23,7 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
   'lock_record',
+  'wait_for_callback',
 ]
 
 /** Config shape for update_record */
@@ -85,6 +87,18 @@ export interface SendDingTalkPersonMessageConfig {
 /** Config shape for lock_record */
 export interface LockRecordConfig {
   locked: boolean
+}
+
+/**
+ * Config shape for wait_for_callback (A6-2 suspend/resume).
+ *
+ * v1 has NO required params — reaching this action in an opted-in
+ * (`execution_mode='workflow_job_v1'`) rule suspends the execution; the callback
+ * URL/token is *emitted* on suspend, not configured here. `reason` is fixed to
+ * `external_event` in v1 (delay/manual_task are red-lined out — see design doc).
+ */
+export interface WaitForCallbackConfig {
+  reason?: 'external_event'
 }
 
 export interface AutomationAction {

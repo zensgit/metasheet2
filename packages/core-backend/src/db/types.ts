@@ -107,6 +107,7 @@ export interface Database {
   // Multitable automation & dashboard
   automation_rules: AutomationRulesTable
   multitable_automation_jobs: MultitableAutomationJobsTable
+  multitable_automation_suspensions: MultitableAutomationSuspensionsTable
   multitable_automation_executions: MultitableAutomationExecutionsTable
   multitable_charts: MultitableChartsTable
   multitable_dashboards: MultitableDashboardsTable
@@ -1266,6 +1267,23 @@ export interface MultitableAutomationJobsTable {
   schema_version: number
   created_at: CreatedAt
   updated_at: UpdatedAt
+}
+
+/** A6-2 suspend/resume — durable suspension state (resume capability + re-derive inputs). */
+export interface MultitableAutomationSuspensionsTable {
+  id: string
+  execution_id: string
+  rule_id: string
+  sheet_id: string | null
+  record_id: string | null
+  step_index: number
+  resume_token: string
+  reason: string
+  action_fingerprint: JsonValueColumn
+  trigger_event: JsonValueColumn
+  status: string
+  created_at: CreatedAt
+  resumed_at: Date | string | null
 }
 
 export interface MultitableAutomationExecutionsTable {

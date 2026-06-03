@@ -106,6 +106,42 @@ export class AutomationJobService {
   }
 
   /**
+   * A6-2: write the wait step's job row as `suspended` (the out-of-band suspended state, D2).
+   * Mirrors onStart's insert (started, observable) but with C1 status `suspended` and no finish.
+   * The suspend descriptor (reason / resume token) lives in the suspension table, NOT here — the
+   * token is a capability secret and must never enter the job/read plane. On resume the existing
+   * onSettled flips this row → `resolved` (success→resolved bridge).
+   */
+  async writeSuspendedJob(
+    executionId: string,
+    rule: { id: string; sheetId?: string },
+    stepIndex: number,
+    action: AutomationAction,
+  ): Promise<void> {
+    const now = new Date().toISOString()
+    await db
+      .insertInto('multitable_automation_jobs')
+      .values({
+        id: `${executionId}:job:${stepIndex}`,
+        execution_id: executionId,
+        rule_id: rule.id,
+        sheet_id: rule.sheetId ?? null,
+        step_index: stepIndex,
+        step_key: String(stepIndex),
+        action_type: action.type,
+        status: 'suspended', // C1 'suspended' (non-terminal); excluded from TERMINAL_JOB_STATUSES
+        upstream_job_id: stepIndex > 0 ? `${executionId}:job:${stepIndex - 1}` : null,
+        result: null,
+        error: null,
+        started_at: now,
+        finished_at: null,
+        duration_ms: null,
+        schema_version: JOB_SCHEMA_VERSION,
+      })
+      .execute()
+  }
+
+  /**
    * Read persisted jobs for an execution as C1 WorkflowJob views, ordered by step.
    * Returns [] when the execution has no jobs (legacy execution → caller falls back
    * to AutomationExecution.steps). The shape matches the A2 step view (id/executionId/
