@@ -43,6 +43,29 @@ export function writableSourceMessage(dataSourceId: string): string {
   return `data source '${dataSourceId}' is writable; the read-only bridge refuses a writable binding`
 }
 
+/**
+ * A bound data source is dangling / not visible to the principal — i.e. `assertAccess` or
+ * `getDataSource` rejected because the row was deleted OR is not owned by the caller. This is a
+ * **config** error (the external-system row points at a source that isn't there for this caller),
+ * not a server fault, so it must surface as a clean 4xx rather than a 500.
+ *
+ * It is a HTTP-agnostic *domain* error (it carries no status) — the integration plugin's central
+ * `inferHttpStatus` maps the name to 422 DATA_SOURCE_UNAVAILABLE. We deliberately do NOT name it
+ * `*NotFoundError`: the route URL's `:id` addresses the external system (which exists); a 404 there
+ * would falsely read as "no such external system" and collide with the genuine system-missing 404.
+ *
+ * **No-existence-leak invariant preserved.** `assertAccess` throws the SAME uniform "not found"
+ * wording for "deleted" and "not yours" so a non-owner cannot learn a source exists; this wrapper
+ * re-raises that message **verbatim** (it adds a name/type only, never altering the message), so the
+ * deleted-vs-not-mine cases stay indistinguishable to the caller.
+ */
+export class DataSourceUnavailableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DataSourceUnavailableError'
+  }
+}
+
 function requirePrincipal(principal: string | undefined): string {
   // Fail-closed: a read MUST carry an owner principal. We deliberately do NOT fall back to a
   // default / system / tenant / admin identity — that would bypass per-source ownership.
@@ -64,9 +87,19 @@ export function createDataSourcePluginFacade(
   async function authorize(dataSourceId: string, principal: string | undefined) {
     const owner = requirePrincipal(principal)
     const manager = getManager()
-    // Throws the uniform "not found" on owner mismatch — no existence leak.
-    manager.assertAccess(dataSourceId, owner)
-    const adapter = manager.getDataSource(dataSourceId)
+    // A dangling / not-visible binding (deleted row OR owner mismatch) is a CONFIG error, not a
+    // server fault. assertAccess + getDataSource each have exactly one throw — the uniform
+    // "not found" — so wrap just these two and re-raise the message VERBATIM as a named domain
+    // error the integration host maps to a clean 4xx (422). Preserving the message keeps the
+    // deleted-vs-not-yours cases indistinguishable: no existence leak.
+    let adapter
+    try {
+      // Throws the uniform "not found" on owner mismatch — no existence leak.
+      manager.assertAccess(dataSourceId, owner)
+      adapter = manager.getDataSource(dataSourceId)
+    } catch (err) {
+      throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+    }
     // Read-only-source guard at the choke point: EVERY read method routes through authorize, so a
     // writable data source fails closed here — on getSchema/getTableInfo/select/test alike, not only
     // when testConnection happens to run first. Checked before connecting (it is a config flag).

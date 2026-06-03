@@ -1026,6 +1026,90 @@ async function testDiscoveryRoutesRejectUnknownSystem() {
   assert.equal(findCalls(calls, 'createAdapter').length, 0, 'unknown system schema lookup does not create an adapter')
 }
 
+// #2205 legibility nit: a `data-source:sql-readonly` external system EXISTS, but its bound data
+// source (config.dataSourceId) is deleted / not-visible to the principal — so the host facade
+// (assertAccess / getDataSource) rejects with a uniform "not found" surfaced as the named
+// DataSourceUnavailableError. That is a CONFIG error, not a server crash: the objects/schema routes
+// must return a clean 4xx (422), NOT 500, and stay UNIFORM (no existence leak between
+// deleted-vs-not-mine). We mock the adapter's listObjects/getSchema to throw the SAME error shape the
+// real facade emits (an Error named 'DataSourceUnavailableError' with the verbatim manager message)
+// and drive the live route → inferHttpStatus mapping end-to-end.
+async function testBridgeDanglingDataSourceMapsTo4xxNot500() {
+  // The exact uniform wording DataSourceManager.assertAccess + getDataSource throw — re-raised
+  // verbatim by the facade wrapper; identical for "deleted" and "not yours" → no existence leak.
+  const UNIFORM_NOT_FOUND = "Data source with id 'ds_gone' not found"
+  const danglingError = () => {
+    const error = new Error(UNIFORM_NOT_FOUND)
+    error.name = 'DataSourceUnavailableError'
+    return error
+  }
+
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Read-only SQL bridge',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          // No documentTemplates: the schema route must NOT fall back to a template and mask the
+          // dangling-source 422 with a 200.
+          config: { dataSourceId: 'ds_gone' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(input, deps) {
+        calls.push(['createAdapter', input, deps])
+        return {
+          // Both discovery methods route through the host facade, which throws on a dangling bind.
+          async listObjects() {
+            calls.push(['listObjects'])
+            throw danglingError()
+          },
+          async getSchema(schemaInput) {
+            calls.push(['getSchema', schemaInput])
+            throw danglingError()
+          },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+
+  // objects route
+  let res = await invoke(routes, 'GET', '/api/integration/external-systems/:id/objects', {
+    user: READ_USER,
+    params: { id: 'sql_bridge_1' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assert.notEqual(res.statusCode, 500, 'a dangling data-source binding is a config error, not a 500')
+  assert.equal(res.statusCode, 422, 'objects route maps the dangling-source not-found to 422')
+  assert.equal(res.body.ok, false)
+  assert.equal(res.body.error.code, 'DataSourceUnavailableError', 'distinct code (NOT ExternalSystemNotFoundError) — the system exists, its bound source does not')
+  // No-existence-leak: the message is the uniform "not found", unchanged from the facade — it does
+  // not reveal whether the source was deleted or simply not owned by this principal.
+  assert.equal(res.body.error.message, UNIFORM_NOT_FOUND, 'message stays the uniform not-found (no existence leak)')
+  assert.ok(findCall(calls, 'listObjects'), 'objects route reached the adapter (the facade is where it failed)')
+
+  // schema route — same dangling source, same uniform 422 surface (no leak divergence)
+  calls.length = 0
+  res = await invoke(routes, 'GET', '/api/integration/external-systems/:id/schema', {
+    user: READ_USER,
+    params: { id: 'sql_bridge_1' },
+    query: { workspaceId: 'workspace_1', object: 'public.customers' },
+  })
+  assert.notEqual(res.statusCode, 500, 'schema route also avoids 500 for a dangling source')
+  assert.equal(res.statusCode, 422, 'schema route maps the dangling-source not-found to 422')
+  assert.equal(res.body.ok, false)
+  assert.equal(res.body.error.code, 'DataSourceUnavailableError')
+  assert.equal(res.body.error.message, UNIFORM_NOT_FOUND, 'schema route keeps the identical uniform message (no leak)')
+  assert.ok(findCall(calls, 'getSchema'), 'schema route reached the adapter getSchema')
+}
+
 async function testDocumentTemplateValidation() {
   const cases = [
     {
@@ -2222,6 +2306,7 @@ async function main() {
   await testDiscoveryRoutes()
   await testDiscoveryObjectsRouteDoesNotDefaultTruncateAdapterObjects()
   await testDiscoveryRoutesRejectUnknownSystem()
+  await testBridgeDanglingDataSourceMapsTo4xxNot500()
   await testDocumentTemplateValidation()
   await testPipelineRoutes()
   await testTemplatePreviewRoute()
