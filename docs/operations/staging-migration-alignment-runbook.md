@@ -327,3 +327,36 @@ This is why the §Pre-flight pg_dump is non-negotiable.
   is the only tracking system in this codebase right now.
 - **Multi-tenant database scope-isolation issues** — different problem,
   see Stage 3 roadmap.
+
+---
+
+## Incident appendix
+
+### 2026-06-03 — attendance shift-compliance staging smoke hit `DB_NOT_READY`
+
+- **What happened**: during the shift-compliance engine ③ staging 联调
+  (staging deployed to the #2221 image `0fd25d3ed`), the fixed-schedule
+  apply (batch) path returned `503 DB_NOT_READY`. Staging's DB lacked
+  `attendance_groups.attendance_type` and
+  `attendance_shift_assignments.producer_*`.
+- **Root cause**: **staging's migration ledger trailed `main`** — it had
+  never applied the late-May attendance migrations
+  `zzzz20260528200000_add_attendance_shift_assignment_provenance` and
+  `zzzz20260529213000_add_attendance_group_type`. These migrations **are
+  on `main`** and are correct (idempotent `addColumnIfNotExists`, ordered
+  after the create-table migrations — which is why a fresh CI DB has the
+  columns and the real-DB integration passes). **This was NOT a missing
+  migration on `main`; do not open a code/migration fix for it.**
+- **Temporary unblock (not alignment)**: a minimal manual `ALTER TABLE`
+  added just those columns so the smoke could finish (13/13 PASS). That
+  hand-patch is **not** "staging is migration-aligned" — `kysely_migration`
+  was not updated, and any constraints / backfill / indexes those two
+  migrations carry may still be absent. **Do not treat a hand-patched
+  staging as aligned.**
+- **Proper fix**: run this runbook (synthetic ledger catch-up → clean
+  `pnpm migrate`). The attendance columns are one symptom of the broader
+  trailing gap this runbook exists to close.
+- **Prevention**: the deploy SOP (`staging-deploy-sop.md`) must perform a
+  **pending-migration diff + `migrate` BEFORE the image pull/`up`** — a
+  silent `DB_NOT_READY` (or `401`) after a staging deploy is a schema gap,
+  not the image. This incident is exactly that check being skipped.
