@@ -4,7 +4,7 @@
       <div>
         <h1>外接数据源 <span class="data-sources__sub">Data Sources</span></h1>
         <p class="data-sources__lead">
-          连接外部 PostgreSQL / SQL Server / HTTP 数据源(只读优先,凭据加密落库)。
+          连接外部 PostgreSQL / SQL Server / MySQL / HTTP 数据源(只读优先,凭据加密落库)。
         </p>
       </div>
       <button
@@ -376,7 +376,11 @@ const form = reactive({
 })
 
 const isSql = computed(() => form.type !== 'http')
-const defaultPort = computed(() => (form.type === 'sqlserver' ? '1433' : '5432'))
+const defaultPort = computed(() => {
+  if (form.type === 'sqlserver') return '1433'
+  if (form.type === 'mysql') return '3306'
+  return '5432'
+})
 const credentialFieldsFilled = computed(() => (
   form.type === 'http'
     ? form.apiKey.length > 0
@@ -404,7 +408,7 @@ function typeLabel(type: string): string {
 function isSqlSource(type: string): boolean {
   // Keep this in step with backend SUPPORTED_DATA_SOURCE_TYPES. It is intentionally fail-safe:
   // an unknown future SQL type simply hides table preview until the UI mapping is reviewed.
-  return type === 'postgres' || type === 'postgresql' || type === 'sqlserver'
+  return type === 'postgres' || type === 'postgresql' || type === 'sqlserver' || type === 'mysql'
 }
 
 function tableValue(table: DataSourceTableInfo): string {
