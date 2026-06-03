@@ -14,8 +14,8 @@ No view uses `/api/views/:viewId/data` for multitable data.
 | Grid | `meta_views.config` JSON | No | `plugin-view-grid` (component only, no config provider) |
 | Form | `meta_views.config` JSON | No | None |
 | Kanban | `meta_views.config` JSON + `kanban_configs` table | Yes (legacy fallback in `views.ts`) | None |
-| Gallery | `meta_views.config` JSON + `gallery_configs` table | Yes | `plugin-view-gallery` (GalleryViewConfigProvider) |
-| Calendar | `meta_views.config` JSON + `calendar_configs` table | Yes | `plugin-view-calendar` (CalendarViewConfigProvider) |
+| Gallery | `meta_views.config` JSON + `gallery_configs` table | Yes | None (sample `plugin-view-gallery` removed in #2224 — it never loaded: no manifest) |
+| Calendar | `meta_views.config` JSON + `calendar_configs` table | Yes | None (sample `plugin-view-calendar` removed in #2224 — it never loaded: no manifest) |
 | Timeline | `meta_views.config` JSON | No | `plugin-view-gantt` (component only) |
 
 ## Field Rendering Consistency
@@ -50,11 +50,9 @@ The legacy bridge at `/api/views/:viewId/config` serves the old Univer spreadshe
 Multitable views do NOT depend on it for data fetching or rendering.
 It is relevant only for:
 - Kanban: reads `kanban_configs` table as fallback when no plugin provider is registered
-- Gallery: `plugin-view-gallery` registers a ViewConfigProvider
-- Calendar: `plugin-view-calendar` registers a ViewConfigProvider
+- Gallery / Calendar: the sample `plugin-view-gallery` / `plugin-view-calendar` provider plugins were **removed in #2224** (they never loaded — no manifest), so no plugin provider is registered for these; their config lives in `meta_views.config` + the `gallery_configs` / `calendar_configs` tables.
 
-Any changes to multitable view rendering do NOT need to regression-test the legacy bridge,
-unless the change also modifies the plugin view config providers.
+Any changes to multitable view rendering do NOT need to regression-test the legacy bridge.
 
 ## Conclusion
 

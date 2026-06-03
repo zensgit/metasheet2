@@ -781,12 +781,11 @@ Entry points:
   - Run: `pnpm --filter @metasheet/core-backend test:integration`
   - Report: `docs/verification-integration-2025-12-28.md`
 
-- Plugin integration (Kanban):
-  - Run: `SKIP_PLUGINS=false pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/kanban-plugin.test.ts tests/integration/kanban.mvp.api.test.ts tests/integration/plugins-api.contract.test.ts --reporter=dot`
-  - Report: `docs/verification-kanban-plugins-2025-12-28.md`
+- Plugin integration (Kanban): _sample `plugin-view-kanban` + its 3 fixture tests removed in #2224 — no longer runnable._
+  - Historical report: `docs/verification-kanban-plugins-2025-12-28.md`
 
 - Plugin scan suppression (non-plugin tests):
-  - Run: `SKIP_PLUGINS=false pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/rooms.basic.test.ts tests/integration/snapshot-protection.test.ts tests/integration/kanban-plugin.test.ts tests/integration/kanban.mvp.api.test.ts tests/integration/plugins-api.contract.test.ts --reporter=dot`
+  - Run: `SKIP_PLUGINS=false pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/rooms.basic.test.ts tests/integration/snapshot-protection.test.ts --reporter=dot` _(kanban-plugin/kanban.mvp.api/plugins-api.contract tests removed in #2224)_
   - Report: `docs/verification-plugin-scan-suppression-2025-12-28.md`
 
 - Editable demo smoke (Grid + Kanban drag/write-back):
