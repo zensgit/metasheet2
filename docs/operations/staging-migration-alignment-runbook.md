@@ -257,13 +257,42 @@ sudo docker exec "$STAGING_PG" psql -U metasheet -d metasheet -c \
 # Look for columns the new image's auth code expects (e.g. username,
 # dingtalk_open_id, must_change_password)
 
-# 3. Authenticated round-trip
+# 3. Product-critical schema probes for the deploy that triggered alignment.
+# For attendance ④/C0, this must prove the #2226 columns and the C1 ledger
+# tables exist; an auth-only round-trip would not catch that DB_NOT_READY class.
+sudo docker exec "$STAGING_PG" psql -U metasheet -d metasheet -c \
+  "SELECT
+     EXISTS (
+       SELECT 1 FROM information_schema.tables
+       WHERE table_schema = current_schema()
+         AND table_name = 'attendance_leave_balances'
+     ) AS has_leave_balances,
+     EXISTS (
+       SELECT 1 FROM information_schema.tables
+       WHERE table_schema = current_schema()
+         AND table_name = 'attendance_leave_balance_events'
+     ) AS has_leave_balance_events,
+     EXISTS (
+       SELECT 1 FROM information_schema.columns
+       WHERE table_schema = current_schema()
+         AND table_name = 'attendance_groups'
+         AND column_name = 'attendance_type'
+     ) AS has_attendance_groups_attendance_type,
+     (
+       SELECT count(*) = 4 FROM information_schema.columns
+       WHERE table_schema = current_schema()
+         AND table_name = 'attendance_shift_assignments'
+         AND column_name IN ('producer_type', 'producer_ref_id', 'producer_key', 'producer_run_id')
+     ) AS has_shift_assignment_provenance_columns;"
+# Expect every field to return true before treating attendance ④ staging as aligned.
+
+# 4. Authenticated round-trip
 TOKEN=$(cat /path/to/admin-token.jwt)
 curl -s -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
   http://localhost:<port>/api/auth/me
 # Expect 200
 
-# 4. (Optional) re-deploy the failed image
+# 5. (Optional) re-deploy the failed image
 # Follow staging-deploy-sop.md from step 6 onwards now that the
 # tracking table aligns with what the new image expects.
 ```
