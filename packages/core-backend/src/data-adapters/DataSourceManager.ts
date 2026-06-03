@@ -4,13 +4,14 @@ import type { BaseDataAdapter, DataSourceConfig, QueryOptions, QueryResult, DbVa
 import { PostgresAdapter } from './PostgresAdapter'
 import { HTTPAdapter } from './HTTPAdapter'
 import { MSSQLAdapter } from './MSSQLAdapter'
+import { MySQLAdapter } from './MySQLAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
 
 // Credential fields that hold secrets and are encrypted at rest. Identifiers
 // like `username` are left as-is (matching the codebase's encrypt-secrets-only
 // convention).
 const SENSITIVE_CREDENTIAL_KEYS = ['password', 'apiKey', 'token']
-export const SUPPORTED_DATA_SOURCE_TYPES = ['postgresql', 'postgres', 'http', 'sqlserver'] as const
+export const SUPPORTED_DATA_SOURCE_TYPES = ['postgresql', 'postgres', 'http', 'sqlserver', 'mysql'] as const
 
 type AdapterConstructor = new (config: DataSourceConfig) => BaseDataAdapter
 
@@ -212,6 +213,7 @@ export class DataSourceManager extends EventEmitter {
     this.registerAdapterType('postgres', PostgresAdapter as unknown as AdapterConstructor)
     this.registerAdapterType('http', HTTPAdapter as unknown as AdapterConstructor)
     this.registerAdapterType('sqlserver', MSSQLAdapter as unknown as AdapterConstructor)
+    this.registerAdapterType('mysql', MySQLAdapter as unknown as AdapterConstructor)
   }
 
   registerAdapterType(type: string, adapterClass: AdapterConstructor): void {

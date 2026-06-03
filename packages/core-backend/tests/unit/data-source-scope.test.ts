@@ -185,12 +185,13 @@ describe('DataSourceManager ownership scope (A0.1)', () => {
 
   it('skips persisted rows whose type is no longer in the supported runtime set', async () => {
     const m = new DataSourceManager()
+    // `mongodb` stands in for an unsupported persisted type here (mysql is now supported — #2227).
     await m.initialize(fakeDb([
       dbRecord('pg-ok', 'alice', null, 'postgres'),
-      dbRecord('legacy-mysql', 'alice', null, 'mysql'),
+      dbRecord('legacy-mongo', 'alice', null, 'mongodb'),
     ]) as never)
     expect(() => m.getDataSource('pg-ok')).not.toThrow()
-    expect(() => m.getDataSource('legacy-mysql')).toThrow(/not found/)
+    expect(() => m.getDataSource('legacy-mongo')).toThrow(/not found/)
     expect(m.listDataSources({ ownerId: 'alice' }).map((s) => s.id)).toEqual(['pg-ok'])
   })
 })
@@ -273,7 +274,8 @@ describe('data-sources route ownership scope (A0.1)', () => {
 
   it('rejects unsupported create types at validation time', async () => {
     currentUser = admin('alice4')
-    for (const unsupportedType of ['mysql', 'mongodb', 'redis', 'elasticsearch']) {
+    // mysql is now supported (#2227); mongodb/redis/elasticsearch remain out of the verified runtime set.
+    for (const unsupportedType of ['mongodb', 'redis', 'elasticsearch']) {
       const res = await request(app)
         .post('/api/data-sources')
         .send({ ...pgConfig(`bad-${unsupportedType}`), type: unsupportedType })
@@ -281,6 +283,33 @@ describe('data-sources route ownership scope (A0.1)', () => {
       expect(res.body.error.code).toBe('VALIDATION_ERROR')
       expect(res.body.error.message).toContain('Unsupported data source type')
     }
+  })
+
+  it('accepts a mysql create type and constructs a read-only MySQLAdapter (#2227)', async () => {
+    // Route accepts type=mysql (no longer "Unsupported data source type").
+    currentUser = admin('alice-mysql')
+    const res = await request(app)
+      .post('/api/data-sources')
+      .send({ ...pgConfig('legacy-stockorder'), type: 'mysql' })
+    expect(res.status).toBe(201)
+
+    // Manager registers mysql → a real MySQLAdapter. Construction needs NO driver (only connect() does),
+    // and the read-only default holds — the BaseDataAdapter write guard is inherited, not relaxed.
+    const m = new DataSourceManager()
+    const adapter = await m.addDataSource(
+      {
+        id: 'mysql-1', name: 'mysql-1', type: 'mysql',
+        connection: { host: 'localhost', port: 3306, database: 'stockorder' },
+        options: { autoConnect: false },
+      } as never,
+      { ownerId: 'alice' },
+    )
+    expect(adapter.constructor.name).toBe('MySQLAdapter')
+    expect(adapter.isReadOnly()).toBe(true)
+  })
+
+  it('bundles the mysql2 driver — the missing-driver packaging gap is closed (#2227)', async () => {
+    await expect(import('mysql2/promise')).resolves.toBeDefined()
   })
 })
 
