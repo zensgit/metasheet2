@@ -211,6 +211,49 @@ async function main() {
     UnsupportedAdapterOperationError,
   )
 
+  // --- 7. A down Bridge Agent (unreachable localhost) → clear operator message, not generic fetch fail (#2223)
+  // The fixture throws the VERIFIED real undici shape on a dead port: `TypeError: fetch failed`
+  // (cause.code / cause.errors are NOT populated on every Node version → detection keys on the message,
+  // with codes as enrichment; the fixture matches the verified shape so test ≡ production).
+  {
+    const fetchFailed = () => {
+      const err = new TypeError('fetch failed')
+      err.cause = new Error('connect ECONNREFUSED 127.0.0.1:19091')
+      throw err
+    }
+    const downAgent = createBridgeAgentReadonlyAdapter({ system: createSystem(), fetchImpl: fetchFailed })
+
+    const test = await downAgent.testConnection()
+    assert.equal(test.ok, false, 'unreachable agent → connection test red')
+    assert.equal(test.connected, false)
+    assert.equal(test.code, 'BRIDGE_AGENT_UNREACHABLE', 'unreachable surfaces a specific code, not a generic fetch failure')
+    assert.match(test.message, /not reachable/i, 'message names the unreachable agent')
+    assert.match(test.message, /retest the source connection/i, 'message names the recovery action')
+
+    // The same clear error reaches the objects read path (operators hit it there too, not only on test).
+    const objErr = await downAgent.listObjects().then(() => null, (e) => e)
+    assert.ok(objErr instanceof BridgeAgentReadonlyAdapterError, 'objects read wraps unreachable in the adapter error')
+    assert.equal(objErr.code, 'BRIDGE_AGENT_UNREACHABLE')
+
+    // Enrichment shapes also detected: code-bearing cause (older Node) and dual-stack AggregateError.
+    for (const [label, impl] of [
+      ['cause.code', () => { const e = new Error('boom'); e.cause = { code: 'ECONNREFUSED' }; throw e }],
+      ['cause.errors[]', () => { const e = new TypeError('x'); e.cause = { errors: [{ code: 'ECONNREFUSED' }] }; throw e }],
+    ]) {
+      const t = await createBridgeAgentReadonlyAdapter({ system: createSystem(), fetchImpl: impl }).testConnection()
+      assert.equal(t.code, 'BRIDGE_AGENT_UNREACHABLE', `unreachable detected via ${label}`)
+    }
+
+    // Negative control: a genuine HTTP error from a REACHABLE agent must NOT be mislabeled unreachable.
+    const http500 = createBridgeAgentReadonlyAdapter({
+      system: createSystem(),
+      fetchImpl: async () => jsonResponse(500, { error: { code: 'BRIDGE_DB_ERROR', message: 'boom' } }),
+    })
+    const httpErr = await http500.listObjects().then(() => null, (e) => e)
+    assert.ok(httpErr, 'a 500 from a reachable agent still errors')
+    assert.notEqual(httpErr.code, 'BRIDGE_AGENT_UNREACHABLE', 'a reachable-agent HTTP error is NOT labeled unreachable')
+  }
+
   console.log('✓ bridge-agent-readonly-adapter: BA-M2 source contract tests passed')
 }
 

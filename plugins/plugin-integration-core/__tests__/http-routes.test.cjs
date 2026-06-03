@@ -588,6 +588,55 @@ async function testExternalSystemTestPersistsFailureAndPreservesInactive() {
   assert.equal(inactiveUpdate.lastError, null)
 }
 
+async function testExternalSystemTestClearsErrorToActiveOnSuccess() {
+  // #2223 recovery: a source that went to `error` (e.g. the Bridge Agent was down) returns to `active`
+  // on a successful retest — the symmetric lock to inactive-preservation above (error clears; inactive
+  // does NOT auto-activate).
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          projectId: 'project_err',
+          name: 'Recovered Source',
+          kind: 'erp',
+          role: 'source',
+          status: 'error',
+          credentials: { bearerToken: 'secret-token' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(input) {
+        calls.push(['createAdapter', input])
+        return {
+          async testConnection() {
+            calls.push(['testConnection'])
+            return { ok: true, status: 200 }
+          },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+
+  const res = await invoke(routes, 'POST', '/api/integration/external-systems/:id/test', {
+    user: WRITE_USER,
+    params: { id: 'sys_err' },
+    query: { workspaceId: 'workspace_1' },
+  })
+
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.ok, true)
+  assert.equal(res.body.data.system.status, 'active', 'a successful retest clears error → active')
+  const update = findCall(calls, 'upsertExternalSystem')[1]
+  assert.equal(update.status, 'active', 'recovery persists status=active')
+  assert.equal(update.lastError, null, 'recovery clears lastError')
+}
+
 async function testExternalSystemTestRequiresSavedSystem() {
   const { calls, services } = createMockServices({
     externalSystemRegistry: {
@@ -2167,6 +2216,7 @@ async function main() {
   await testExternalSystemRoutes()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
+  await testExternalSystemTestClearsErrorToActiveOnSuccess()
   await testExternalSystemTestRequiresSavedSystem()
   await testExternalSystemTestRedactsAdapterResultSecrets()
   await testDiscoveryRoutes()

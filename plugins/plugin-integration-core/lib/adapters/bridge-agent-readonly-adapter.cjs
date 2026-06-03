@@ -41,6 +41,36 @@ function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
+// Network-layer codes that mean the localhost Bridge Agent endpoint is not reachable
+// (process down / wrong port / not listening) — distinct from an HTTP error the agent itself returned.
+const CONNECTION_ERROR_CODES = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EHOSTUNREACH', 'EHOSTDOWN', 'ENETUNREACH', 'EADDRNOTAVAIL', 'EPIPE',
+])
+
+// Collect error codes across the shapes Node/undici uses for a failed fetch: the error itself, its
+// `cause`, and (dual-stack localhost → AggregateError) `cause.errors[]`.
+function collectErrorCodes(error) {
+  const codes = []
+  const push = (code) => { if (typeof code === 'string') codes.push(code) }
+  if (error) push(error.code)
+  const cause = error && error.cause
+  if (cause) {
+    push(cause.code)
+    if (Array.isArray(cause.errors)) for (const inner of cause.errors) push(inner && inner.code)
+  }
+  return codes
+}
+
+// True when the failure is "the Bridge Agent endpoint is unreachable" rather than an HTTP/application
+// error. Primary signal is undici's `TypeError: fetch failed` — the verified shape on a dead localhost
+// port (where `cause.code` / `cause.errors` are NOT populated on every Node version, so they are
+// secondary enrichment, not the gate).
+function isAgentUnreachable(error) {
+  if (!error) return false
+  if (error.name === 'TypeError' && /fetch failed/i.test(String(error.message || ''))) return true
+  return collectErrorCodes(error).some((code) => CONNECTION_ERROR_CODES.has(code))
+}
+
 function requiredString(value, field) {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new AdapterValidationError(`${field} is required`, { field })
@@ -295,6 +325,14 @@ function createBridgeAgentReadonlyAdapter({ system, fetchImpl = globalThis.fetch
         })
       }
       if (error instanceof BridgeAgentReadonlyAdapterError) throw error
+      if (isAgentUnreachable(error)) {
+        // Operator-facing: a generic "fetch failed" here means the localhost agent isn't listening, not a
+        // backend bug. Name the recovery action so the source can be retested back to `active`.
+        throw new BridgeAgentReadonlyAdapterError(
+          `Bridge Agent is not reachable at ${baseUrl} — the readonly Bridge Agent service may not be running. Start its scheduled task / process, then retest the source connection.`,
+          { code: 'BRIDGE_AGENT_UNREACHABLE', method, path },
+        )
+      }
       if (logger && typeof logger.warn === 'function') {
         logger.warn(`[plugin-integration-core] Bridge Agent request failed: ${method} ${path}`)
       }

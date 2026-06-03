@@ -493,6 +493,9 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi(8)
     expect(container.textContent).toContain('目标连接测试失败：ERP endpoint unavailable')
     expect(container.textContent).toContain('异常：ERP endpoint unavailable')
+    // #2223: a stale `error` connection names the recovery action, so an operator retests it rather than
+    // assuming the dry-run itself is broken.
+    expect(container.textContent).toContain('点击"测试连接"重新激活')
     expect(container.textContent).toContain('不要手写 /grid 或 /spreadsheets/standard_materials')
     const refreshStagingLinkButton = container.querySelector('[data-testid="refresh-staging-link-standard_materials"]') as HTMLButtonElement
     expect(refreshStagingLinkButton.disabled).toBe(false)
