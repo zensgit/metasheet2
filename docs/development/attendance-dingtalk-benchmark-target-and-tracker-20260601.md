@@ -72,7 +72,7 @@
 ① **排班修改窗**（✅ #2197 已落；纯 write-time 校验，不碰 scheduler/notifier 新基座；治理价值高）
 ② **打卡策略组**（design-lock #2203）：S0 基座 ✅#2204 · S1 未排班打卡 ✅#2209 · **子序修正 → S1→S3→S2**（S2 内外勤合并依赖 S3 先建"外勤打卡"事实类型）· **S3 外勤 + S2 产品 2026-06-02 暂缓**（外勤=重刀/移动现场）→ 组在 S1 后暂停
 ③ **排班合规引擎**（✅ #2213/#2214/#2218/#2221 + staging 2026-06-03）：`shiftCompliance` 日/周/月 cap 已按 **explicit scheduled load** 口径在全部 save 路径运行时阻断；staging smoke 13/13 通过，③ 正式关闭
-④ **加班调休 + 假期过期**（假勤闭环；假期过期提醒在此**首建** scheduler/notifier 基座）
+④ **加班调休 + 假期过期**（假勤闭环；假期过期提醒在此**首建** scheduler/notifier 基座）— **design-lock 已落**（`attendance-comp-leave-expiry-design-lock-20260603.md`，本 PR；owner 决策 2026-06-03 锁定）：余额=**grant-lot ledger**（`attendance_leave_balances`，非 mutable aggregate）+ **必需审计流水 `attendance_leave_balance_events`**（不可只改 remaining）· 入账=OT approve **transition** 幂等（**`source_key` NOT NULL + `UNIQUE(org,source_key)` 兜底**，不锁可空 source_id）· 撤销**首版不自动反冲但不静默错账** · 调度=**首建 `AttendanceScheduler`**（镜像 `ApprovalSlaScheduler`，leader-elected，⑤ 复用）。子链 C0 staging-align（**硬前置**）→C1 ledger DDL→C2 入账→C3 扣减→C4 过期+调度→C5 提醒+notifier，实现 PR 拆开。**比 ③ 重一档（有 DDL）。**
 ⑤ **未排班提醒**（**复用 ④ 的 scheduler+notifier 基座**；镜像 `ApprovalSlaScheduler`）
 ⑥ **自动对班**（灰度门，feature-flag 默认关 → preview → 自动写）
 
