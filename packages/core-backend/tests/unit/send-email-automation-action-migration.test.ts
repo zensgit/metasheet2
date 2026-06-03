@@ -1,17 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { ALL_ACTION_TYPES } from '../../src/multitable/automation-actions'
 import {
   AUTOMATION_ACTION_TYPES_BEFORE_SEND_EMAIL,
   AUTOMATION_ACTION_TYPES_WITH_SEND_EMAIL,
 } from '../../src/db/migrations/zzzz20260508120000_add_send_email_automation_action'
 
 describe('send_email automation action migration', () => {
-  it('keeps the database action constraint in sync with app-level action types', () => {
+  // The app-level ⇄ DB-constraint SYNC check now lives with the LATEST constraint migration
+  // (wait-for-callback-automation-action-migration.test.ts). This file locks the send_email delta.
+  it('adds send_email on top of the prior action set (and nothing else)', () => {
     expect(AUTOMATION_ACTION_TYPES_WITH_SEND_EMAIL).toContain('send_email')
-
-    for (const actionType of ALL_ACTION_TYPES) {
-      expect(AUTOMATION_ACTION_TYPES_WITH_SEND_EMAIL).toContain(actionType)
-    }
+    expect(AUTOMATION_ACTION_TYPES_BEFORE_SEND_EMAIL).not.toContain('send_email')
+    expect(AUTOMATION_ACTION_TYPES_WITH_SEND_EMAIL.filter((a) => a !== 'send_email'))
+      .toEqual([...AUTOMATION_ACTION_TYPES_BEFORE_SEND_EMAIL])
   })
 
   it('preserves legacy action types that are still accepted by automation_rules', () => {

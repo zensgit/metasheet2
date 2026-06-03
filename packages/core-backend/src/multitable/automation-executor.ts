@@ -484,6 +484,12 @@ export interface ActionJobLifecycle {
   onSettled(stepIndex: number, action: AutomationAction, result: AutomationStepResult): Promise<void>
   /** A fail-stop-skipped action — record a terminal `skipped` job. */
   onSkipped(stepIndex: number, action: AutomationAction): Promise<void>
+  /**
+   * A6-2: a `wait_for_callback` step in an opted-in rule — persist the suspension row
+   * + a `suspended` C1 job, then the executor STOPS (the tail runs on admin resume).
+   * Optional: legacy rules supply no lifecycle, so a legacy `wait_for_callback` fails closed (D7).
+   */
+  onSuspend?(stepIndex: number, action: AutomationAction): Promise<void>
 }
 
 /** Builds the per-execution job lifecycle once the executionId is known (service-supplied for opt-in rules). */
@@ -613,7 +619,14 @@ export class AutomationExecutor {
 
     // Execute actions in sequence
     try {
-      await this.executeActions(rule.actions, context, execution.steps, jobLifecycle)
+      const { suspended } = await this.executeActions(rule.actions, context, execution.steps, jobLifecycle)
+      if (suspended) {
+        // A6-2 (D2): paused waiting on an external callback. Leave status 'running' (the suspended
+        // state lives out-of-band in the C1 job + suspension table) and do NOT stamp finishedAt —
+        // it is not finished. The tail runs on admin resume via continueExecution().
+        execution.duration = Date.now() - startTime
+        return execution
+      }
 
       const hasFailed = execution.steps.some((s) => s.status === 'failed')
       const allSkipped = execution.steps.length > 0 && execution.steps.every((s) => s.status === 'skipped')
@@ -633,6 +646,64 @@ export class AutomationExecutor {
   }
 
   /**
+   * A6-2 resume: continue a suspended execution from the step AFTER the wait
+   * (`suspendIndex + 1`). The caller (AutomationSuspensionService) has already
+   * claimed the token, re-loaded the CURRENT rule, verified the action fingerprint
+   * (D4b), and re-derived `context` (current record + redacted trigger event, D4).
+   *
+   * `execution` carries the persisted prior steps `[0..suspendIndex-1]` (all succeeded —
+   * a failure would have fail-stopped before the wait). We settle the wait step
+   * (`suspendIndex`) to success — pushing its legacy step result so the steps array stays
+   * index-aligned, and settling the `suspended` C1 job → `resolved` via onSettled — then
+   * run the tail. A tail that throws settles the execution `failed` (D8: no auto-retry).
+   */
+  async continueExecution(
+    execution: AutomationExecution,
+    rule: AutomationRule,
+    context: ExecutionContext,
+    suspendIndex: number,
+    jobLifecycle?: ActionJobLifecycle,
+  ): Promise<AutomationExecution> {
+    const startTime = Date.now()
+    execution.status = 'running'
+
+    try {
+      // Settle the wait step (INSIDE the try, B3): a legacy 'success' result (keeps steps
+      // index-aligned, D2) + flip its `suspended` C1 job → `resolved` (success→resolved via the
+      // bridge in onSettled). If this settle throws (e.g. a DB error), it now fails the execution
+      // terminally below — NOT a bubbled 500 that leaves the token consumed and the tail unrun.
+      const waitAction = rule.actions[suspendIndex]
+      const waitResult: AutomationStepResult = { actionType: 'wait_for_callback', status: 'success', durationMs: 0 }
+      execution.steps.push(waitResult)
+      if (jobLifecycle) await jobLifecycle.onSettled(suspendIndex, waitAction, waitResult)
+
+      const { suspended } = await this.executeActions(
+        rule.actions, context, execution.steps, jobLifecycle, suspendIndex + 1,
+      )
+      if (suspended) {
+        // A sequential second wait in the tail — suspend again (leave 'running', new suspension row).
+        execution.duration = (execution.duration ?? 0) + (Date.now() - startTime)
+        return execution
+      }
+
+      const hasFailed = execution.steps.some((s) => s.status === 'failed')
+      const allSkipped = execution.steps.length > 0 && execution.steps.every((s) => s.status === 'skipped')
+      execution.status = hasFailed ? 'failed' : allSkipped ? 'skipped' : 'success'
+      if (hasFailed) {
+        const failedStep = execution.steps.find((s) => s.status === 'failed')
+        execution.error = failedStep?.error ?? 'Action failed'
+      }
+    } catch (err) {
+      execution.status = 'failed'
+      execution.error = err instanceof Error ? err.message : String(err)
+    }
+
+    execution.duration = (execution.duration ?? 0) + (Date.now() - startTime)
+    execution.finishedAt = new Date().toISOString()
+    return execution
+  }
+
+  /**
    * Execute actions in sequence. Stop on first failure.
    */
   private async executeActions(
@@ -640,9 +711,32 @@ export class AutomationExecutor {
     context: ExecutionContext,
     results: AutomationStepResult[],
     jobLifecycle?: ActionJobLifecycle,
-  ): Promise<AutomationStepResult[]> {
-    for (let index = 0; index < actions.length; index++) {
+    startIndex = 0,
+  ): Promise<{ suspended: boolean }> {
+    for (let index = startIndex; index < actions.length; index++) {
       const action = actions[index]
+
+      // A6-2 suspend point: a `wait_for_callback` in an opted-in rule suspends here.
+      if (action.type === 'wait_for_callback') {
+        if (jobLifecycle?.onSuspend) {
+          // Persist the suspension + a `suspended` C1 job (D2 out-of-band), then STOP. No legacy
+          // step result is pushed for the wait yet — it settles to `success` on resume (D2).
+          await jobLifecycle.onSuspend(index, action)
+          return { suspended: true }
+        }
+        // D7 fail-closed: a legacy rule (no job plane) cannot suspend → fail the step + skip the rest.
+        results.push({
+          actionType: 'wait_for_callback',
+          status: 'failed',
+          error: 'wait_for_callback requires execution_mode workflow_job_v1',
+          durationMs: 0,
+        })
+        for (let i = index + 1; i < actions.length; i++) {
+          results.push({ actionType: actions[i].type, status: 'skipped', durationMs: 0 })
+        }
+        return { suspended: false }
+      }
+
       // A6-1 fail-closed: onStart runs BEFORE the inner try, so a job-create failure propagates
       // to execute()'s outer catch (execution fails) — and the action's side effect never runs.
       if (jobLifecycle) await jobLifecycle.onStart(index, action)
@@ -728,7 +822,7 @@ export class AutomationExecutor {
       }
     }
 
-    return results
+    return { suspended: false }
   }
 
   private async notifyRuleCreatorOfDingTalkGroupFailure(

@@ -10,7 +10,7 @@ import {
   type AutomationConditionField,
   type ConditionGroup,
 } from './automation-conditions'
-import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps } from './automation-executor'
+import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext } from './automation-executor'
 import type { AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
 import {
@@ -23,6 +23,7 @@ import { getRedisClient } from '../db/redis'
 import { randomBytes } from 'crypto'
 import { AutomationLogService } from './automation-log-service'
 import { AutomationJobService } from './automation-job-service'
+import { AutomationSuspensionService, computeActionFingerprint } from './automation-suspension-service'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -295,6 +296,7 @@ export class AutomationService {
   private scheduler: AutomationScheduler
   private logService: AutomationLogService
   private jobService: AutomationJobService
+  private suspensionService: AutomationSuspensionService
   /** Kept for backward-compat with raw SQL in executor actions */
   private queryFn: AutomationQueryFn
 
@@ -320,6 +322,7 @@ export class AutomationService {
     this.executor = new AutomationExecutor(deps)
     this.logService = new AutomationLogService()
     this.jobService = new AutomationJobService()
+    this.suspensionService = new AutomationSuspensionService(this.jobService)
     this.scheduler = new AutomationScheduler(
       async (rule) => {
         await this.executeRule(rule, { _triggeredBy: 'schedule' })
@@ -720,6 +723,18 @@ export class AutomationService {
       ? (executionId: string) => ({
           onExecutionStarted: (execution: AutomationExecution) => this.logService.record(execution),
           ...this.jobService.lifecycleFor(executionId, { id: rule.id, sheetId: rule.sheetId }),
+          // A6-2: a wait_for_callback step persists the suspension + suspended job, then the executor stops.
+          onSuspend: (stepIndex: number, action: AutomationAction): Promise<void> =>
+            this.suspensionService
+              .create({
+                executionId,
+                rule: { id: rule.id, sheetId: rule.sheetId, actions: rule.actions },
+                recordId: ((triggerEvent as Record<string, unknown>)?.recordId as string) ?? '',
+                triggerEvent,
+                stepIndex,
+                action,
+              })
+              .then(() => undefined),
         })
       : undefined
     const execution = await this.executor.execute(rule, triggerEvent, jobLifecycleFactory)
@@ -783,6 +798,98 @@ export class AutomationService {
       initiatedBy,
     })
     return { execution }
+  }
+
+  /**
+   * A6-2 — resume a suspended execution (admin-gated). Mirrors {@link retryExecution}'s
+   * discriminated result so the route maps precise status codes. Re-derives context from the
+   * CURRENT rule + a re-fetched record + the stored (redacted) trigger event (D4); guards
+   * rule-drift via the action fingerprint (D4b); claims the token single-use (D8); then
+   * continues the tail from the step AFTER the wait. Validation failures (404/409) do NOT
+   * consume the token — the claim is the last gate before continuing.
+   */
+  async resumeExecution(
+    resumeToken: string,
+    initiatedBy: string,
+  ): Promise<{ execution: AutomationExecution } | { status: number; code: string; message: string }> {
+    const suspension = await this.suspensionService.findByToken(resumeToken)
+    if (!suspension) {
+      return { status: 404, code: 'NOT_FOUND', message: 'Unknown resume token' }
+    }
+    if (suspension.status !== 'pending') {
+      return { status: 409, code: 'ALREADY_RESUMED', message: `Suspension is ${suspension.status}, not resumable` }
+    }
+    // Re-load the CURRENT rule (D4); fail closed if missing/disabled (T7).
+    const rule = await this.getRule(suspension.ruleId)
+    if (!rule || !rule.enabled) {
+      return { status: 409, code: 'RULE_MISSING_OR_DISABLED', message: `Rule ${suspension.ruleId} is missing or disabled; cannot resume` }
+    }
+    const execRule = toExecutorRule(rule)
+    // D4b rule-drift guard: step_index is only valid against the suspend-time action array.
+    const currentFp = computeActionFingerprint(execRule.actions)
+    if (currentFp.count !== suspension.actionFingerprint.count || currentFp.hash !== suspension.actionFingerprint.hash) {
+      return { status: 409, code: 'RULE_CHANGED', message: 'Rule actions changed since suspend; cannot resume safely' }
+    }
+    // Re-fetch the live record (D4); fail closed if it was deleted during the wait (T9).
+    let recordData: Record<string, unknown> = {}
+    if (suspension.recordId) {
+      const rec = await this.queryFn(
+        `SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2`,
+        [suspension.recordId, suspension.sheetId ?? execRule.sheetId],
+      )
+      const row = (rec.rows[0] ?? null) as { data?: Record<string, unknown> } | null
+      if (!row) {
+        return { status: 404, code: 'RECORD_GONE', message: 'Record no longer exists; cannot resume' }
+      }
+      recordData = (row.data as Record<string, unknown>) ?? {}
+    }
+    // B3: read the execution BEFORE claiming — a missing/unreadable execution must NOT consume the
+    // single-use token (it stays `pending`, recoverable). ALL validation precedes the claim.
+    const execution = await this.logService.getById(suspension.executionId)
+    if (!execution) {
+      return { status: 409, code: 'EXECUTION_GONE', message: 'Suspended execution record is missing; cannot resume' }
+    }
+    // Single-use claim (D8) — the LAST gate; a concurrent resume loses here. After the claim the tail
+    // runs and ANY failure settles the execution to a terminal `failed` (continueExecution catches it),
+    // never a 500 with the token consumed and the tail unrun.
+    const claimed = await this.suspensionService.claim(resumeToken)
+    if (!claimed) {
+      return { status: 409, code: 'ALREADY_RESUMED', message: 'Suspension was already resumed' }
+    }
+    execution.initiatedBy = initiatedBy
+    // Re-derived context (D4): current record data + stored (redacted) trigger event.
+    const triggerEvent = suspension.triggerEvent ?? {}
+    const context: ExecutionContext = {
+      ruleId: execRule.id,
+      sheetId: execRule.sheetId,
+      recordId: suspension.recordId ?? '',
+      recordData,
+      ruleCreatedBy: execRule.createdBy,
+      actorId: ((triggerEvent as Record<string, unknown>)?.actorId as string) ?? null,
+      triggerEvent,
+    }
+    const jobLifecycle = {
+      ...this.jobService.lifecycleFor(execution.id, { id: execRule.id, sheetId: execRule.sheetId }),
+      // A sequential second wait in the tail suspends again (new suspension row).
+      onSuspend: (stepIndex: number, action: AutomationAction): Promise<void> =>
+        this.suspensionService
+          .create({
+            executionId: execution.id,
+            rule: { id: execRule.id, sheetId: execRule.sheetId, actions: execRule.actions },
+            recordId: suspension.recordId ?? '',
+            triggerEvent,
+            stepIndex,
+            action,
+          })
+          .then(() => undefined),
+    }
+    const continued = await this.executor.continueExecution(execution, execRule, context, suspension.stepIndex, jobLifecycle)
+    try {
+      await this.logService.updateRecordedExecution(continued)
+    } catch (err) {
+      logger.error('Resume execution log persistence failed', err instanceof Error ? err : undefined)
+    }
+    return { execution: continued }
   }
 
   /**

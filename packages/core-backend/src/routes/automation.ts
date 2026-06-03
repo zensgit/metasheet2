@@ -357,6 +357,50 @@ export function createAutomationRoutes(
     }
   })
 
+  // A6-2 — resume a suspended execution (admin-gated v1; runs the remaining actions' real side
+  // effects). The single-use resume_token (D5/D8) is in the body; the public/webhook surface is
+  // DEFERRED until a real token-emitter + consumer exist (design D5). Mirrors retry's confirm + shape.
+  router.post('/automation/resume', requireAdminRole(), async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as { resumeToken?: unknown; confirmSideEffects?: unknown }
+    const resumeToken = typeof body.resumeToken === 'string' ? body.resumeToken : ''
+    if (!resumeToken) {
+      return res.status(400).json({ error: 'resumeToken is required' })
+    }
+    // Resume runs the remaining actions' external side effects — require explicit confirmation.
+    if (body.confirmSideEffects !== true) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'CONFIRM_SIDE_EFFECTS_REQUIRED', message: "confirmSideEffects must be true to resume (runs the remaining actions' side effects)" },
+      })
+    }
+
+    const svc = getService(res)
+    if (!svc) return undefined
+
+    const initiatedBy = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
+
+    try {
+      const result = await svc.resumeExecution(resumeToken, initiatedBy)
+      if ('status' in result) {
+        return res.status(result.status).json({ ok: false, error: { code: result.code, message: result.message } })
+      }
+      // Same as retry: serialize the PERSISTED (redacted) row, never the raw in-memory execution.
+      const persisted = await safeGetPersistedExecution(svc, result.execution.id)
+      if (persisted) {
+        return res.json(toRunView(persisted, { includeSnapshot: true }))
+      }
+      return res.json({
+        id: result.execution.id,
+        status: legacyAutomationStatusToJobStatus(result.execution.status),
+        statusLegacy: result.execution.status,
+        initiatedBy: result.execution.initiatedBy ?? null,
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Resume failed'
+      return res.status(500).json({ error: message })
+    }
+  })
+
   return router
 }
 
