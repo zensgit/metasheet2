@@ -1624,24 +1624,48 @@ async function recalculateFormulaFields(
   fields: UniverMetaField[],
   updatedRecordIds: string[],
   changedFieldIds: string[],
+  // A-min (design #2246): per-record rows whose lookup/rollup were already hydrated in-memory
+  // (write-path Step 4). When provided, eval formulas against the hydrated data so a
+  // formula-over-lookup sees the actual lookup value instead of the absent-on-reload `0`.
+  // Same-record / same-sheet only; absent → raw reload (unchanged for form-submit).
+  hydratedDataByRecord?: Map<string, Record<string, unknown>>,
 ): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
   if (updatedRecordIds.length === 0 || changedFieldIds.length === 0) return []
   const formulaFieldIds = fields.filter((f) => f.type === 'formula').map((f) => f.id)
   if (formulaFieldIds.length === 0) return []
 
-  // Gate: only recompute when a changed field actually feeds a formula here.
+  // A-min trigger: a lookup/rollup's value changes when its underlying LINK field is edited, but
+  // changedFieldIds carries the link id, not the derived lookup id — so the dependency gate
+  // (formula → lookup) would miss. Expand the changed set with the SAME-RECORD lookup/rollup ids
+  // whose linkFieldId is in changedFieldIds. This stays bounded to updatedRecordIds (the patched
+  // records) → it never reaches foreign/related records' formulas (that is A-full, gated).
+  const changedSet = new Set(changedFieldIds)
+  const effectiveChangedFieldIds = [...changedSet]
+  for (const field of fields) {
+    if (field.type !== 'lookup' && field.type !== 'rollup') continue
+    if (changedSet.has(field.id)) continue
+    const cfg = field.type === 'lookup' ? parseLookupFieldConfig(field.property) : parseRollupFieldConfig(field.property)
+    if (cfg && changedSet.has(cfg.linkFieldId)) {
+      effectiveChangedFieldIds.push(field.id)
+    }
+  }
+
+  // Gate: only recompute when a changed (or dependent-lookup) field actually feeds a formula here.
   const depRes = await query(
     `SELECT DISTINCT field_id FROM formula_dependencies
      WHERE depends_on_field_id = ANY($1::text[])
        AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $2)
        AND sheet_id = $2`,
-    [changedFieldIds, sheetId],
+    [effectiveChangedFieldIds, sheetId],
   )
   if (depRes.rows.length === 0) return []
 
   const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
   for (const recordId of updatedRecordIds) {
-    const nextData = await multitableFormulaEngine.recalculateRecord(query, sheetId, recordId, fields)
+    const hydrated = hydratedDataByRecord?.get(recordId)
+    const nextData = hydrated
+      ? await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, recordId, hydrated, fields)
+      : await multitableFormulaEngine.recalculateRecord(query, sheetId, recordId, fields)
     if (!nextData) continue
     const formulaData: Record<string, unknown> = {}
     for (const fieldId of formulaFieldIds) {
