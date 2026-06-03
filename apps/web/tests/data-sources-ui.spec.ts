@@ -35,6 +35,7 @@ vi.mock('../src/data-sources/api', () => ({
 
 import { useDataSourcesStore } from '../src/stores/dataSources'
 import DataSourcesView from '../src/views/DataSourcesView.vue'
+import { DATA_SOURCE_TYPES, DATA_SOURCE_TYPE_LABELS } from '../src/data-sources/types'
 
 function form(overrides: Partial<CreateFormState> = {}): CreateFormState {
   return {
@@ -85,6 +86,30 @@ describe('buildCreatePayload — credential safety (omit blank, never send empty
     // A stale `server` (e.g. from switching type) must not let a Postgres source skip host.
     const p = buildCreatePayload(form({ type: 'postgres', server: 'stale', host: '', database: 'd' }))
     expect(p.connection).toEqual({ database: 'd' })
+    expect(p.connection).not.toHaveProperty('server')
+  })
+
+  it('supports MySQL as an operator-facing SQL type without SQL Server-only fields (#2227)', () => {
+    expect(DATA_SOURCE_TYPES).toContain('mysql')
+    expect(DATA_SOURCE_TYPE_LABELS.mysql).toContain('MySQL')
+
+    const p = buildCreatePayload(form({
+      type: 'mysql',
+      host: 'mysql.internal',
+      server: 'stale-sqlserver-instance',
+      port: 3306,
+      database: 'stockorder',
+      username: 'readonly',
+      password: 'secret',
+    }))
+    expect(p).toEqual({
+      id: 'db',
+      name: 'DB',
+      type: 'mysql',
+      connection: { host: 'mysql.internal', port: 3306, database: 'stockorder' },
+      credentials: { username: 'readonly', password: 'secret' },
+      options: { readOnly: true },
+    })
     expect(p.connection).not.toHaveProperty('server')
   })
 })
@@ -506,6 +531,52 @@ describe('DataSourcesView (UI-2 connection test reachability)', () => {
     expect(container.querySelector('[data-testid="ds-schema-detail"]')?.textContent).toContain('public.items')
     expect(container.querySelector('[data-testid="ds-schema-detail"]')?.textContent).toContain('NOT NULL')
     expect(container.querySelectorAll('[data-testid="ds-schema-column"]')).toHaveLength(2)
+  })
+
+  it('treats MySQL as a SQL source in the UI: create option, default port, schema, and preview (#2227)', async () => {
+    listMock.mockResolvedValue([
+      { id: 'my', name: 'Stockorder MySQL', type: 'mysql', connected: true },
+      { id: 'api', name: 'API', type: 'http', connected: true },
+    ])
+    getSchemaMock.mockResolvedValue({
+      tables: [{ name: 'stock_info', schema: 'stockorder', columns: [{ name: 'id', type: 'int' }] }],
+      views: [],
+    })
+    previewRowsMock.mockResolvedValue({
+      data: [{ id: 1 }],
+      metadata: { columns: [{ name: 'id', type: 'int' }] },
+    })
+
+    const container = await mountView()
+
+    const newButton = container.querySelector('[data-testid="ds-new-button"]') as HTMLButtonElement
+    newButton.click()
+    await flush()
+    const typeSelect = container.querySelector('[data-testid="ds-field-type"]') as HTMLSelectElement
+    expect([...typeSelect.options].map((option) => option.value)).toContain('mysql')
+    typeSelect.value = 'mysql'
+    typeSelect.dispatchEvent(new Event('change'))
+    await flush()
+    expect((container.querySelector('[data-testid="ds-field-port"]') as HTMLInputElement).placeholder).toBe('3306')
+    expect(container.querySelector('[data-testid="ds-field-server"]')).toBeNull()
+
+    const schemaButtons = container.querySelectorAll('[data-testid="ds-schema"]')
+    const previewButtons = container.querySelectorAll('[data-testid="ds-preview"]')
+    expect(schemaButtons).toHaveLength(1)
+    expect(previewButtons).toHaveLength(1)
+
+    ;(schemaButtons[0] as HTMLButtonElement).click()
+    await flush()
+    await flush()
+    await flush()
+    expect(getSchemaMock).toHaveBeenCalledWith('my')
+    expect(getTableInfoMock).toHaveBeenCalledWith('my', 'stock_info', 'stockorder')
+
+    ;(previewButtons[0] as HTMLButtonElement).click()
+    await flush()
+    await flush()
+    await flush()
+    expect(previewRowsMock).toHaveBeenCalledWith('my', { table: 'stockorder.stock_info', limit: 100 })
   })
 
   it('drops a stale schema response: a fast A→B switch keeps B and never loads A table info', async () => {

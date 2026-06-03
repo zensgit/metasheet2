@@ -5,13 +5,14 @@
 // only appear in the CREATE / credential-rotation payloads.
 
 // Keep in sync with backend SUPPORTED_DATA_SOURCE_TYPES (postgresql is an accepted alias of postgres;
-// the UI offers the three distinct kinds).
-export const DATA_SOURCE_TYPES = ['postgres', 'sqlserver', 'http'] as const
+// the UI offers the distinct operator-facing kinds).
+export const DATA_SOURCE_TYPES = ['postgres', 'sqlserver', 'mysql', 'http'] as const
 export type DataSourceType = (typeof DATA_SOURCE_TYPES)[number]
 
 export const DATA_SOURCE_TYPE_LABELS: Record<DataSourceType, string> = {
   postgres: 'PostgreSQL',
   sqlserver: 'SQL Server',
+  mysql: 'MySQL / MariaDB',
   http: 'HTTP / REST',
 }
 
