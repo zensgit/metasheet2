@@ -32,6 +32,7 @@ const ROUTES = [
   ['GET', '/api/integration/dead-letters', 'deadLettersList'],
   ['POST', '/api/integration/dead-letters/:id/replay', 'deadLettersReplay'],
 ]
+const EXTERNAL_SYSTEM_OBJECTS_MAX_ITEMS = 1000
 const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
 const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
 // DF-T1-0/DF-T1: compose the no-write preview through the SAME K3 Save-body composer the
@@ -1057,10 +1058,13 @@ function createHandlers(services) {
         ? await adapter.listObjects()
         : []
       const documentTemplateObjects = listDocumentTemplates(system)
-      return sendOk(res, sanitizeIntegrationPayload([
+      const objects = [
         ...(Array.isArray(adapterObjects) ? adapterObjects : []),
         ...documentTemplateObjects,
-      ]))
+      ]
+      return sendOk(res, sanitizeIntegrationPayload(objects, {
+        maxArrayItems: EXTERNAL_SYSTEM_OBJECTS_MAX_ITEMS,
+      }))
     },
 
     async externalSystemSchema(req, res) {
