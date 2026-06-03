@@ -93,7 +93,11 @@ function inferHttpStatus(error) {
   if (/NotFound/.test(name)) return 404
   if (/Conflict/.test(name)) return 409
   if (/Validation|Transform|Watermark|DeadLetter/.test(name)) return 400
-  if (/PipelineRunner/.test(name)) return 422
+  // A `data-source:sql-readonly` external system bound to a deleted / not-visible data source is a
+  // CONFIG error (its config.dataSourceId dangles), NOT a server fault — map to 422, not 500.
+  // Deliberately NOT 404: the route's `:id` addresses the external system (which exists), so a 404
+  // would falsely read as "no such external system" and collide with ExternalSystemNotFoundError.
+  if (/PipelineRunner|DataSourceUnavailable/.test(name)) return 422
   return 500
 }
 

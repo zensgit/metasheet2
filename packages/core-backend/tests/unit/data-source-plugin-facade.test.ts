@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createDataSourcePluginFacade, MISSING_PRINCIPAL_MESSAGE, writableSourceMessage } from '../../src/data-adapters/data-source-plugin-facade'
+import { createDataSourcePluginFacade, DataSourceUnavailableError, MISSING_PRINCIPAL_MESSAGE, writableSourceMessage } from '../../src/data-adapters/data-source-plugin-facade'
 import type { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
 
 interface AdapterStubOptions {
@@ -27,8 +27,10 @@ interface ManagerStubOptions {
 function managerStub(opts: ManagerStubOptions = {}) {
   const adapter = opts.adapter ?? adapterStub()
   const stub = {
+    // Mirror DataSourceManager's uniform not-found wording verbatim — the wrapper must re-raise it
+    // unchanged (no existence leak), so the test asserts against the real message shape.
     assertAccess: vi.fn((id: string, _owner: string | undefined) => {
-      if (opts.deny) throw new Error(`Data source '${id}' not found`)
+      if (opts.deny) throw new Error(`Data source with id '${id}' not found`)
     }),
     getDataSource: vi.fn(() => adapter),
     connectDataSource: vi.fn(async () => undefined),
@@ -74,6 +76,34 @@ describe('createDataSourcePluginFacade', () => {
     const facade = createDataSourcePluginFacade(() => m.manager)
     await expect(facade.getSchema('pg', 'intruder')).rejects.toThrow(/not found/)
     expect(m.stub.assertAccess).toHaveBeenCalledWith('pg', 'intruder')
+  })
+
+  it('re-raises a dangling / not-visible binding as a NAMED DataSourceUnavailableError with the message VERBATIM (no existence leak)', async () => {
+    // This pins the name the integration host's inferHttpStatus keys on to map 500→422. The CJS
+    // plugin route test fakes this error shape; if this name drifts, the route silently reverts to
+    // 500 while that fixture test stays green — so the contract is pinned HERE, against the real TS.
+    const m = managerStub({ deny: true })
+    const facade = createDataSourcePluginFacade(() => m.manager)
+    // assertAccess throws the uniform "not found"; the wrapper must add only a name, keeping the
+    // message identical so a non-owner cannot distinguish "deleted" from "not yours".
+    await expect(facade.getSchema('pg', 'intruder')).rejects.toMatchObject({
+      name: 'DataSourceUnavailableError',
+      message: "Data source with id 'pg' not found",
+    })
+    await expect(facade.getSchema('pg', 'intruder')).rejects.toBeInstanceOf(DataSourceUnavailableError)
+    // Same uniform surface from a deleted-source (getDataSource miss) — message stays identical.
+    const deleted = createDataSourcePluginFacade(() => ({
+      assertAccess: vi.fn(() => undefined),
+      getDataSource: vi.fn((id: string) => {
+        throw new Error(`Data source with id '${id}' not found`)
+      }),
+      connectDataSource: vi.fn(async () => undefined),
+      select: vi.fn(async () => ({ data: [], metadata: {} })),
+    } as unknown as DataSourceManager))
+    await expect(deleted.getSchema('pg', 'owner-1')).rejects.toMatchObject({
+      name: 'DataSourceUnavailableError',
+      message: "Data source with id 'pg' not found",
+    })
   })
 
   it('select authorizes then maps to manager.select with {limit, offset}', async () => {
