@@ -87,6 +87,20 @@ export function buildFilterInfo(
 
 // --- Operator map by field type ---
 
+// Numeric field types (number/currency/percent/rating) share one operator set so
+// the menu can't drift. Mirrors the backend isNumericQueryFieldType predicate
+// (univer-meta.ts). See docs/development/multitable-typed-query-polish-design-20260603.md.
+const NUMERIC_FILTER_OPERATORS: Array<{ value: string; label: string }> = [
+  { value: 'is', label: '=' },
+  { value: 'isNot', label: '≠' },
+  { value: 'greater', label: '>' },
+  { value: 'greaterEqual', label: '≥' },
+  { value: 'less', label: '<' },
+  { value: 'lessEqual', label: '≤' },
+  { value: 'isEmpty', label: 'is empty' },
+  { value: 'isNotEmpty', label: 'is not empty' },
+]
+
 export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; label: string }>> = {
   string: [
     { value: 'is', label: 'is' },
@@ -120,16 +134,10 @@ export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; lab
     { value: 'isEmpty', label: 'is empty' },
     { value: 'isNotEmpty', label: 'is not empty' },
   ],
-  number: [
-    { value: 'is', label: '=' },
-    { value: 'isNot', label: '\u2260' },
-    { value: 'greater', label: '>' },
-    { value: 'greaterEqual', label: '\u2265' },
-    { value: 'less', label: '<' },
-    { value: 'lessEqual', label: '\u2264' },
-    { value: 'isEmpty', label: 'is empty' },
-    { value: 'isNotEmpty', label: 'is not empty' },
-  ],
+  number: NUMERIC_FILTER_OPERATORS,
+  currency: NUMERIC_FILTER_OPERATORS,
+  percent: NUMERIC_FILTER_OPERATORS,
+  rating: NUMERIC_FILTER_OPERATORS,
   boolean: [
     { value: 'is', label: 'is' },
     { value: 'isNot', label: 'is not' },
