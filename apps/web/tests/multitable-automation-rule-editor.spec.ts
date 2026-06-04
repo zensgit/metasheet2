@@ -1541,6 +1541,160 @@ describe('MetaAutomationRuleEditor', () => {
     })
   })
 
+  it('emits executor-shaped update_record config for UI-created post-wait follow-up actions', async () => {
+    const saved = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Wait then update'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const firstActionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    firstActionSelect.value = 'wait_for_callback'
+    firstActionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="add-action"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const followUpRow = container.querySelector('[data-action-index="1"]') as HTMLElement
+    ;(followUpRow.querySelector('.meta-rule-editor__action-config .meta-rule-editor__btn') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const fieldSelect = followUpRow.querySelector('.meta-rule-editor__field-pair select') as HTMLSelectElement
+    fieldSelect.value = 'fld_1'
+    fieldSelect.dispatchEvent(new Event('change'))
+    const valueInput = followUpRow.querySelector('.meta-rule-editor__field-pair input') as HTMLInputElement
+    valueInput.value = 'Done'
+    valueInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    const payload = saved.mock.calls[0][0]
+    expect(payload.executionMode).toBe('workflow_job_v1')
+    expect(payload.actions).toEqual([
+      { type: 'wait_for_callback', config: {} },
+      { type: 'update_record', config: { fields: { fld_1: 'Done' } } },
+    ])
+    expect(payload.actionType).toBe('wait_for_callback')
+    expect(payload.actionConfig).toEqual({})
+  })
+
+  it('emits executor-shaped create_record config for UI-created post-wait follow-up actions', async () => {
+    const saved = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Wait then create'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const firstActionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    firstActionSelect.value = 'wait_for_callback'
+    firstActionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="add-action"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const followUpRow = container.querySelector('[data-action-index="1"]') as HTMLElement
+    const followUpSelect = followUpRow.querySelector('.meta-rule-editor__action-header select') as HTMLSelectElement
+    followUpSelect.value = 'create_record'
+    followUpSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const targetSheetInput = followUpRow.querySelector('.meta-rule-editor__action-config > input') as HTMLInputElement
+    targetSheetInput.value = 'sheet_target'
+    targetSheetInput.dispatchEvent(new Event('input'))
+    ;(followUpRow.querySelector('.meta-rule-editor__action-config .meta-rule-editor__btn') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const [fieldInput, valueInput] = Array.from(followUpRow.querySelectorAll('.meta-rule-editor__field-pair input')) as HTMLInputElement[]
+    fieldInput.value = 'fld_status'
+    fieldInput.dispatchEvent(new Event('input'))
+    valueInput.value = 'New'
+    valueInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    const payload = saved.mock.calls[0][0]
+    expect(payload.executionMode).toBe('workflow_job_v1')
+    expect(payload.actions).toEqual([
+      { type: 'wait_for_callback', config: {} },
+      { type: 'create_record', config: { sheetId: 'sheet_target', data: { fld_status: 'New' } } },
+    ])
+  })
+
+  it('emits executor-shaped send_notification config for UI-created post-wait follow-up actions', async () => {
+    const saved = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Wait then notify'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const firstActionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    firstActionSelect.value = 'wait_for_callback'
+    firstActionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="add-action"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const followUpRow = container.querySelector('[data-action-index="1"]') as HTMLElement
+    const followUpSelect = followUpRow.querySelector('.meta-rule-editor__action-header select') as HTMLSelectElement
+    followUpSelect.value = 'send_notification'
+    followUpSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const [userInput, messageInput] = Array.from(followUpRow.querySelectorAll('input, textarea')) as Array<HTMLInputElement | HTMLTextAreaElement>
+    userInput.value = 'user_1, user_2'
+    userInput.dispatchEvent(new Event('input'))
+    messageInput.value = 'Resume completed'
+    messageInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    const payload = saved.mock.calls[0][0]
+    expect(payload.executionMode).toBe('workflow_job_v1')
+    expect(payload.actions).toEqual([
+      { type: 'wait_for_callback', config: {} },
+      { type: 'send_notification', config: { userIds: ['user_1', 'user_2'], message: 'Resume completed' } },
+    ])
+  })
+
   it('keeps save disabled for incomplete send_email action', async () => {
     const saved = vi.fn()
     const { container } = mount({
