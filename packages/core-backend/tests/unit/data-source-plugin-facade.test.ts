@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createDataSourcePluginFacade, DataSourceUnavailableError, MISSING_PRINCIPAL_MESSAGE, writableSourceMessage } from '../../src/data-adapters/data-source-plugin-facade'
+import {
+  createDataSourcePluginFacade,
+  DATA_SOURCE_NOT_FOUND_CODE,
+  DATA_SOURCE_NOT_READ_ONLY_CODE,
+  DATA_SOURCE_PRINCIPAL_REQUIRED_CODE,
+  DataSourceUnavailableError,
+  MISSING_PRINCIPAL_MESSAGE,
+  writableSourceMessage,
+} from '../../src/data-adapters/data-source-plugin-facade'
 import type { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
 
 interface AdapterStubOptions {
@@ -63,7 +71,11 @@ describe('createDataSourcePluginFacade', () => {
   it('fails closed on a missing principal and NEVER falls back (manager not even resolved)', async () => {
     const getManager = vi.fn(() => managerStub().manager)
     const facade = createDataSourcePluginFacade(getManager)
-    await expect(facade.select('pg', 't', { limit: 10 }, undefined)).rejects.toThrow(MISSING_PRINCIPAL_MESSAGE)
+    await expect(facade.select('pg', 't', { limit: 10 }, undefined)).rejects.toMatchObject({
+      status: 422,
+      code: DATA_SOURCE_PRINCIPAL_REQUIRED_CODE,
+      message: MISSING_PRINCIPAL_MESSAGE,
+    })
     await expect(facade.getSchema('pg', '   ')).rejects.toThrow(MISSING_PRINCIPAL_MESSAGE)
     await expect(facade.getTableInfo('pg', 'items', undefined)).rejects.toThrow(MISSING_PRINCIPAL_MESSAGE)
     await expect(facade.test('pg', undefined)).rejects.toThrow(MISSING_PRINCIPAL_MESSAGE)
@@ -88,6 +100,8 @@ describe('createDataSourcePluginFacade', () => {
     // message identical so a non-owner cannot distinguish "deleted" from "not yours".
     await expect(facade.getSchema('pg', 'intruder')).rejects.toMatchObject({
       name: 'DataSourceUnavailableError',
+      status: 422,
+      code: DATA_SOURCE_NOT_FOUND_CODE,
       message: "Data source with id 'pg' not found",
     })
     await expect(facade.getSchema('pg', 'intruder')).rejects.toBeInstanceOf(DataSourceUnavailableError)
@@ -102,6 +116,8 @@ describe('createDataSourcePluginFacade', () => {
     } as unknown as DataSourceManager))
     await expect(deleted.getSchema('pg', 'owner-1')).rejects.toMatchObject({
       name: 'DataSourceUnavailableError',
+      status: 422,
+      code: DATA_SOURCE_NOT_FOUND_CODE,
       message: "Data source with id 'pg' not found",
     })
   })
@@ -132,7 +148,11 @@ describe('createDataSourcePluginFacade', () => {
   it('fails closed on a WRITABLE source for EVERY read method (not just test) — read never performed', async () => {
     const m = managerStub({ adapter: adapterStub({ readOnly: false }) })
     const facade = createDataSourcePluginFacade(() => m.manager)
-    await expect(facade.test('pg', 'owner-1')).rejects.toThrow(writableSourceMessage('pg'))
+    await expect(facade.test('pg', 'owner-1')).rejects.toMatchObject({
+      status: 422,
+      code: DATA_SOURCE_NOT_READ_ONLY_CODE,
+      message: writableSourceMessage('pg'),
+    })
     await expect(facade.getSchema('pg', 'owner-1')).rejects.toThrow(writableSourceMessage('pg'))
     await expect(facade.getTableInfo('pg', 'items', 'owner-1')).rejects.toThrow(writableSourceMessage('pg'))
     await expect(facade.select('pg', 'items', { limit: 10 }, 'owner-1')).rejects.toThrow(writableSourceMessage('pg'))

@@ -38,6 +38,9 @@ export interface DataSourceReadOnlyFacade {
 }
 
 export const MISSING_PRINCIPAL_MESSAGE = 'data source read requires an owner principal (none provided)'
+export const DATA_SOURCE_PRINCIPAL_REQUIRED_CODE = 'DATA_SOURCE_PRINCIPAL_REQUIRED'
+export const DATA_SOURCE_NOT_FOUND_CODE = 'DATA_SOURCE_NOT_FOUND'
+export const DATA_SOURCE_NOT_READ_ONLY_CODE = 'DATA_SOURCE_NOT_READ_ONLY'
 
 export function writableSourceMessage(dataSourceId: string): string {
   return `data source '${dataSourceId}' is writable; the read-only bridge refuses a writable binding`
@@ -59,9 +62,20 @@ export function writableSourceMessage(dataSourceId: string): string {
  * re-raises that message **verbatim** (it adds a name/type only, never altering the message), so the
  * deleted-vs-not-mine cases stay indistinguishable to the caller.
  */
-export class DataSourceUnavailableError extends Error {
-  constructor(message: string) {
+export class DataSourceBridgeConfigError extends Error {
+  status = 422
+  code: string
+
+  constructor(code: string, message: string, name = 'DataSourceBridgeConfigError') {
     super(message)
+    this.name = name
+    this.code = code
+  }
+}
+
+export class DataSourceUnavailableError extends DataSourceBridgeConfigError {
+  constructor(message: string) {
+    super(DATA_SOURCE_NOT_FOUND_CODE, message)
     this.name = 'DataSourceUnavailableError'
   }
 }
@@ -70,7 +84,11 @@ function requirePrincipal(principal: string | undefined): string {
   // Fail-closed: a read MUST carry an owner principal. We deliberately do NOT fall back to a
   // default / system / tenant / admin identity — that would bypass per-source ownership.
   if (typeof principal !== 'string' || principal.trim() === '') {
-    throw new Error(MISSING_PRINCIPAL_MESSAGE)
+    throw new DataSourceBridgeConfigError(
+      DATA_SOURCE_PRINCIPAL_REQUIRED_CODE,
+      MISSING_PRINCIPAL_MESSAGE,
+      'DataSourcePrincipalRequiredError'
+    )
   }
   return principal
 }
@@ -104,7 +122,11 @@ export function createDataSourcePluginFacade(
     // writable data source fails closed here — on getSchema/getTableInfo/select/test alike, not only
     // when testConnection happens to run first. Checked before connecting (it is a config flag).
     if (!adapter.isReadOnly()) {
-      throw new Error(writableSourceMessage(dataSourceId))
+      throw new DataSourceBridgeConfigError(
+        DATA_SOURCE_NOT_READ_ONLY_CODE,
+        writableSourceMessage(dataSourceId),
+        'DataSourceNotReadOnlyError'
+      )
     }
     if (!adapter.isConnected()) {
       await manager.connectDataSource(dataSourceId)

@@ -75,7 +75,7 @@ function sendOk(res, data, status = 200) {
 
 function sendError(res, error) {
   const status = Number.isInteger(error.status) ? error.status : inferHttpStatus(error)
-  const code = error.code || error.name || 'INTERNAL_ERROR'
+  const code = inferErrorCode(error)
   const message = error.message || 'Internal server error'
   const details = error.details ? sanitizeIntegrationPayload(error.details) : undefined
   return sendJson(res, status, {
@@ -88,8 +88,31 @@ function sendError(res, error) {
   })
 }
 
+function inferDataSourceBridgeErrorCode(error) {
+  const code = error && error.code ? String(error.code) : ''
+  if (/^DATA_SOURCE_/.test(code)) return code
+  const message = error && error.message ? String(error.message) : ''
+  if (message === 'data source read requires an owner principal (none provided)') {
+    return 'DATA_SOURCE_PRINCIPAL_REQUIRED'
+  }
+  if (/^Data source with id '[^']+' not found$/.test(message)) {
+    return 'DATA_SOURCE_NOT_FOUND'
+  }
+  if (/^data source '[^']+' is writable; the read-only bridge refuses a writable binding$/.test(message)) {
+    return 'DATA_SOURCE_NOT_READ_ONLY'
+  }
+  return ''
+}
+
+function inferErrorCode(error) {
+  const dataSourceCode = inferDataSourceBridgeErrorCode(error)
+  if (dataSourceCode) return dataSourceCode
+  return error.code || error.name || 'INTERNAL_ERROR'
+}
+
 function inferHttpStatus(error) {
   const name = error && error.name ? String(error.name) : ''
+  if (inferDataSourceBridgeErrorCode(error)) return 422
   if (/NotFound/.test(name)) return 404
   if (/Conflict/.test(name)) return 409
   if (/Validation|Transform|Watermark|DeadLetter/.test(name)) return 400
