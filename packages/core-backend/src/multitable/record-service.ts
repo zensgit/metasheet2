@@ -389,7 +389,21 @@ function buildDirectValidationFields(rows: unknown[]) {
   })
 }
 
+/**
+ * Optional hook (A-min-create, design #2255) to compute a NEW record's same-record formula
+ * fields after insert + meta_links. Injected by the route layer with a req-bound implementation
+ * (hydrate lookup/rollup → recalculateRecordFromData); the service never learns req / RBAC /
+ * applyLookupRollup. Returns the recomputed formula values per record. Unset = current behavior.
+ */
+export type FormulaRecalcHook = (
+  query: QueryFn,
+  sheetId: string,
+  recordIds: string[],
+) => Promise<Array<{ recordId: string; data: Record<string, unknown> }>>
+
 export class RecordService {
+  private formulaRecalcHook?: FormulaRecalcHook
+
   constructor(
     private pool: ConnectionPool,
     private eventBus: EventBus,
@@ -398,6 +412,11 @@ export class RecordService {
 
   setPostCommitHooks(hooks: RecordPostCommitHook[]): void {
     this.postCommitHooks = [...hooks]
+  }
+
+  /** A-min-create: inject the route-supplied formula recalc hook (null clears it). */
+  setFormulaRecalcHook(hook: FormulaRecalcHook | null): void {
+    this.formulaRecalcHook = hook ?? undefined
   }
 
   setYjsInvalidator(invalidator: YjsInvalidator | null): void {
@@ -598,6 +617,24 @@ export class RecordService {
 
     const version = Number((recordRes.rows[0] as { version?: unknown } | undefined)?.version ?? 1)
 
+    // A-min-create (#2255): compute the new record's same-record formula fields (lookup/rollup
+    // hydrated) now that insert + meta_links are committed, and merge the formula values into the
+    // response echo. Persistence is done by the hook (recalculateRecordFromData writes formula keys
+    // only — lookups are NOT materialized). Best-effort: the record is already committed, so a
+    // recalc failure must not fail the create. Hook unset → unchanged behavior.
+    let responseData: Record<string, unknown> = patch
+    if (this.formulaRecalcHook) {
+      try {
+        const recomputed = await this.formulaRecalcHook(this.pool.query.bind(this.pool), sheetId, [recordId])
+        const formulaValues = recomputed.find((entry) => entry.recordId === recordId)?.data
+        if (formulaValues && Object.keys(formulaValues).length > 0) {
+          responseData = { ...patch, ...formulaValues }
+        }
+      } catch (err) {
+        console.error(`[record-service] formula recalc hook failed for ${recordId}:`, err)
+      }
+    }
+
     publishMultitableSheetRealtime({
       spreadsheetId: sheetId,
       actorId,
@@ -622,7 +659,7 @@ export class RecordService {
     return {
       recordId,
       version,
-      data: patch,
+      data: responseData,
     }
   }
 
