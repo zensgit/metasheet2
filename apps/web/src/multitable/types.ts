@@ -927,6 +927,8 @@ export interface ChartAggregation {
 export interface ChartDataSource {
   sheetId: string
   groupByFieldId?: string
+  dateFieldId?: string
+  dateGrouping?: 'day' | 'week' | 'month' | 'quarter' | 'year'
   aggregation: ChartAggregation
 }
 

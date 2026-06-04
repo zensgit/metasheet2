@@ -46,6 +46,7 @@ function fakeChart(overrides: Partial<ChartConfig> = {}): ChartConfig {
 const chartFields: MetaField[] = [
   { id: 'fld_status', name: 'Status', type: 'select' },
   { id: 'fld_amount', name: 'Amount', type: 'number' },
+  { id: 'fld_date', name: 'Created', type: 'date' },
   { id: 'fld_hidden', name: 'Hidden', type: 'string', property: { hidden: true } },
   { id: 'fld_link', name: 'Link', type: 'link' },
 ]
@@ -439,6 +440,49 @@ describe('MetaDashboardView', () => {
     expect(body.display.title).toBe('Renamed') // form owns the title
     expect(body.dataSource.filter).toEqual([{ fieldId: 'fld_status', operator: 'is', value: 'open' }]) // preserved
     expect(body.dataSource.groupByFieldId).toBe('fld_status') // form owns grouping
+  })
+
+  it('edits a date-grouped chart without requiring a group field and preserves date grouping', async () => {
+    const chart = fakeChart({
+      dataSource: {
+        sheetId: 'sheet_1',
+        dateFieldId: 'fld_date',
+        dateGrouping: 'month',
+        aggregation: { function: 'count' },
+      },
+    })
+    const { client, fetchFn } = mockClient([fakeDashboard()], [chart])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="add-panel"]') as HTMLButtonElement).click()
+    await nextTick()
+    ;(container.querySelector(`[data-edit-chart="${chart.id}"]`) as HTMLButtonElement).click()
+    await nextTick()
+
+    const groupSelect = container.querySelector('[data-field="chart-group-by"]') as HTMLSelectElement
+    expect(groupSelect.disabled).toBe(true)
+    expect(groupSelect.value).toBe('')
+    expect(container.querySelector('[data-hint="date-grouping-locked"]')?.textContent).toContain('Grouped by date')
+
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Renamed date chart'
+    nameInput.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    const submit = container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement
+    expect(submit.disabled).toBe(false)
+    submit.click()
+    await flushPromises()
+
+    const patch = fetchFn.mock.calls.find(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'PATCH' && url.includes(`/charts/${chart.id}`),
+    )
+    const body = JSON.parse(patch![1].body as string)
+    expect(body.name).toBe('Renamed date chart')
+    expect(body.dataSource.dateFieldId).toBe('fld_date')
+    expect(body.dataSource.dateGrouping).toBe('month')
+    expect(body.dataSource.groupByFieldId).toBeUndefined()
   })
 
   it('deletes a chart from the chart list (after confirm) and prunes the panel that showed it', async () => {

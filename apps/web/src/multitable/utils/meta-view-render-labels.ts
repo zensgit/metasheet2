@@ -96,6 +96,7 @@ export type MetaViewRenderLabelKey =
   | 'dashboard.createChart'
   | 'dashboard.cancel'
   | 'dashboard.noGroupableFields'
+  | 'dashboard.dateGroupingLocked'
   | 'dashboard.noNumericFields'
   | 'dashboard.createChartError'
   | 'dashboard.editChartTitle'
@@ -197,6 +198,7 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'dashboard.createChart',
   'dashboard.cancel',
   'dashboard.noGroupableFields',
+  'dashboard.dateGroupingLocked',
   'dashboard.noNumericFields',
   'dashboard.createChartError',
   'dashboard.editChartTitle',
@@ -302,6 +304,10 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'dashboard.createChart': { en: 'Create chart', zh: '创建图表' },
   'dashboard.cancel': { en: 'Cancel', zh: '取消' },
   'dashboard.noGroupableFields': { en: 'No readable groupable fields available.', zh: '没有可读取的可分组字段。' },
+  'dashboard.dateGroupingLocked': {
+    en: 'Grouped by date; date grouping is preserved in this editor.',
+    zh: '已按日期分组；此编辑器会保留现有日期分组。',
+  },
   'dashboard.noNumericFields': { en: 'No readable numeric fields available.', zh: '没有可读取的数值字段。' },
   'dashboard.createChartError': { en: 'Failed to create chart.', zh: '创建图表失败。' },
   'dashboard.editChartTitle': { en: 'Edit chart', zh: '编辑图表' },
