@@ -38,6 +38,13 @@
         >{{ viewRenderLabel('dashboard.rename', isZh) }}</button>
       </div>
       <div class="meta-dashboard__actions">
+        <button
+          class="meta-dashboard__btn meta-dashboard__btn--primary"
+          type="button"
+          data-action="create-chart"
+          :disabled="!activeDashboard"
+          @click="openCreateChart"
+        >{{ viewRenderLabel('dashboard.newChart', isZh) }}</button>
         <button class="meta-dashboard__btn" type="button" data-action="add-panel" @click="showAddPanel = true">{{ viewRenderLabel('dashboard.addPanel', isZh) }}</button>
         <button class="meta-dashboard__btn meta-dashboard__btn--primary" type="button" data-action="create-dashboard" @click="onCreateDashboard">{{ viewRenderLabel('dashboard.newDashboard', isZh) }}</button>
       </div>
@@ -111,20 +118,94 @@
         </div>
       </div>
     </div>
+
+    <!-- Create chart modal -->
+    <div v-if="showCreateChart" class="meta-dashboard__modal-overlay" @click.self="showCreateChart = false">
+      <form class="meta-dashboard__modal" data-modal="create-chart" @submit.prevent="onCreateChart">
+        <div class="meta-dashboard__modal-header">
+          <h4>{{ viewRenderLabel('dashboard.createChartTitle', isZh) }}</h4>
+          <button class="meta-dashboard__btn meta-dashboard__btn--icon" type="button" @click="showCreateChart = false">&times;</button>
+        </div>
+        <div class="meta-dashboard__modal-body">
+          <label class="meta-dashboard__field">
+            <span>{{ viewRenderLabel('dashboard.chartName', isZh) }}</span>
+            <input
+              v-model="chartDraft.name"
+              class="meta-dashboard__input"
+              type="text"
+              data-field="chart-name"
+            />
+          </label>
+          <label class="meta-dashboard__field">
+            <span>{{ viewRenderLabel('dashboard.chartType', isZh) }}</span>
+            <select v-model="chartDraft.chartType" class="meta-dashboard__select" data-field="chart-type">
+              <option value="bar">bar</option>
+              <option value="line">line</option>
+              <option value="pie">pie</option>
+              <option value="number">number</option>
+              <option value="table">table</option>
+            </select>
+          </label>
+          <label class="meta-dashboard__field">
+            <span>{{ viewRenderLabel('dashboard.groupBy', isZh) }}</span>
+            <select v-model="chartDraft.groupByFieldId" class="meta-dashboard__select" data-field="chart-group-by">
+              <option value="">{{ viewRenderLabel('common.chooseField', isZh) }}</option>
+              <option v-for="field in groupableFields" :key="field.id" :value="field.id">
+                {{ field.name }} · {{ fieldTypeLabel(field.type, isZh) }}
+              </option>
+            </select>
+            <small v-if="!groupableFields.length" class="meta-dashboard__hint">{{ viewRenderLabel('dashboard.noGroupableFields', isZh) }}</small>
+          </label>
+          <label class="meta-dashboard__field">
+            <span>{{ viewRenderLabel('dashboard.aggregation', isZh) }}</span>
+            <select v-model="chartDraft.aggregation" class="meta-dashboard__select" data-field="chart-aggregation">
+              <option value="count">count</option>
+              <option value="sum">sum</option>
+              <option value="avg">avg</option>
+              <option value="min">min</option>
+              <option value="max">max</option>
+            </select>
+          </label>
+          <label v-if="requiresValueField" class="meta-dashboard__field">
+            <span>{{ viewRenderLabel('dashboard.valueField', isZh) }}</span>
+            <select v-model="chartDraft.valueFieldId" class="meta-dashboard__select" data-field="chart-value-field">
+              <option value="">{{ viewRenderLabel('common.chooseField', isZh) }}</option>
+              <option v-for="field in numericFields" :key="field.id" :value="field.id">
+                {{ field.name }} · {{ fieldTypeLabel(field.type, isZh) }}
+              </option>
+            </select>
+            <small v-if="!numericFields.length" class="meta-dashboard__hint">{{ viewRenderLabel('dashboard.noNumericFields', isZh) }}</small>
+          </label>
+          <div v-if="createChartError" class="meta-dashboard__error" data-error="create-chart">{{ createChartError }}</div>
+        </div>
+        <div class="meta-dashboard__modal-footer">
+          <button class="meta-dashboard__btn" type="button" @click="showCreateChart = false">{{ viewRenderLabel('dashboard.cancel', isZh) }}</button>
+          <button
+            class="meta-dashboard__btn meta-dashboard__btn--primary"
+            type="submit"
+            data-action="submit-create-chart"
+            :disabled="createChartDisabled || creatingChart"
+          >{{ viewRenderLabel('dashboard.createChart', isZh) }}</button>
+        </div>
+      </form>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import type { Dashboard, DashboardPanel, ChartConfig, ChartData } from '../types'
+import type { AggregationFunction, ChartType, Dashboard, DashboardPanel, ChartConfig, ChartData, MetaField, MetaFieldType } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import MetaChartRenderer from './MetaChartRenderer.vue'
 import { useLocale } from '../../composables/useLocale'
 import { dashboardDefaultName, viewRenderLabel, viewSizeLabel } from '../utils/meta-view-render-labels'
+import { fieldTypeLabel } from '../utils/meta-core-labels'
+import { filterPropertyVisibleFields } from '../utils/field-permissions'
 
 const props = defineProps<{
   sheetId: string
   dashboardId?: string
+  fields?: MetaField[]
   client?: MultitableApiClient
 }>()
 
@@ -135,12 +216,52 @@ const chartDataMap = ref<Record<string, ChartData>>({})
 const chartConfigMap = ref<Record<string, ChartConfig>>({})
 const activeDashboardId = ref<string>(props.dashboardId ?? '')
 const showAddPanel = ref(false)
+const showCreateChart = ref(false)
+const creatingChart = ref(false)
+const createChartError = ref('')
 const editingName = ref(false)
 const nameInput = ref('')
 const nameInputRef = ref<HTMLInputElement | null>(null)
 const { isZh } = useLocale()
 
+const GROUPABLE_FIELD_TYPES = new Set<MetaFieldType>([
+  'string',
+  'number',
+  'currency',
+  'percent',
+  'rating',
+  'boolean',
+  'date',
+  'dateTime',
+  'formula',
+  'select',
+  'lookup',
+  'rollup',
+])
+const NUMERIC_FIELD_TYPES = new Set<MetaFieldType>(['number', 'currency', 'percent', 'rating', 'rollup'])
+const AGGREGATIONS_REQUIRING_VALUE = new Set<AggregationFunction>(['sum', 'avg', 'min', 'max'])
+
+const chartDraft = ref({
+  name: '',
+  chartType: 'bar' as ChartType,
+  groupByFieldId: '',
+  aggregation: 'count' as AggregationFunction,
+  valueFieldId: '',
+})
+
 const activeDashboard = computed(() => dashboards.value.find((d) => d.id === activeDashboardId.value) ?? dashboards.value[0] ?? null)
+
+const chartFields = computed(() => filterPropertyVisibleFields(props.fields ?? []))
+const groupableFields = computed(() => chartFields.value.filter((field) => GROUPABLE_FIELD_TYPES.has(field.type)))
+const numericFields = computed(() => chartFields.value.filter((field) => NUMERIC_FIELD_TYPES.has(field.type)))
+const requiresValueField = computed(() => AGGREGATIONS_REQUIRING_VALUE.has(chartDraft.value.aggregation))
+const createChartDisabled = computed(() => {
+  if (!activeDashboard.value) return true
+  if (!chartDraft.value.name.trim()) return true
+  if (!chartDraft.value.groupByFieldId) return true
+  if (requiresValueField.value && !chartDraft.value.valueFieldId) return true
+  return false
+})
 
 const sortedPanels = computed(() => {
   if (!activeDashboard.value) return []
@@ -149,6 +270,22 @@ const sortedPanels = computed(() => {
 
 function chartNameById(chartId: string): string {
   return chartConfigMap.value[chartId]?.name ?? chartId
+}
+
+function resetChartDraft() {
+  chartDraft.value = {
+    name: '',
+    chartType: 'bar',
+    groupByFieldId: groupableFields.value[0]?.id ?? '',
+    aggregation: 'count',
+    valueFieldId: '',
+  }
+  createChartError.value = ''
+}
+
+function openCreateChart() {
+  resetChartDraft()
+  showCreateChart.value = true
 }
 
 async function loadData() {
@@ -205,6 +342,11 @@ async function onCreateDashboard() {
 async function onAddPanel(chartId: string) {
   if (!props.client || !activeDashboard.value) return
   showAddPanel.value = false
+  await addPanelForChart(chartId)
+}
+
+async function addPanelForChart(chartId: string) {
+  if (!props.client || !activeDashboard.value) return
   const db = activeDashboard.value
   const newPanel: DashboardPanel = {
     id: `panel_${Date.now()}`,
@@ -227,6 +369,37 @@ async function onAddPanel(chartId: string) {
     }
   } catch {
     // skip
+  }
+}
+
+async function onCreateChart() {
+  if (!props.client || createChartDisabled.value) return
+  creatingChart.value = true
+  createChartError.value = ''
+  try {
+    const chart = await props.client.createChart(props.sheetId, {
+      name: chartDraft.value.name.trim(),
+      chartType: chartDraft.value.chartType,
+      dataSource: {
+        sheetId: props.sheetId,
+        groupByFieldId: chartDraft.value.groupByFieldId,
+        aggregation: {
+          function: chartDraft.value.aggregation,
+          ...(requiresValueField.value ? { fieldId: chartDraft.value.valueFieldId } : {}),
+        },
+      },
+      displayConfig: {
+        title: chartDraft.value.name.trim(),
+      },
+    })
+    charts.value = [...charts.value, chart]
+    chartConfigMap.value[chart.id] = chart
+    showCreateChart.value = false
+    await addPanelForChart(chart.id)
+  } catch {
+    createChartError.value = viewRenderLabel('dashboard.createChartError', isZh.value)
+  } finally {
+    creatingChart.value = false
   }
 }
 
@@ -286,6 +459,12 @@ watch(
   () => { void loadData() },
   { immediate: true },
 )
+
+watch(groupableFields, () => {
+  if (!chartDraft.value.groupByFieldId && groupableFields.value[0]) {
+    chartDraft.value.groupByFieldId = groupableFields.value[0].id
+  }
+})
 </script>
 
 <style scoped>
@@ -327,6 +506,7 @@ watch(
   cursor: pointer;
 }
 
+.meta-dashboard__btn:disabled { cursor: not-allowed; opacity: 0.55; }
 .meta-dashboard__btn--primary { border-color: #2563eb; background: #2563eb; color: #fff; }
 .meta-dashboard__btn--danger { border-color: #ef4444; color: #b91c1c; }
 .meta-dashboard__btn--sm { padding: 3px 8px; font-size: 11px; }
@@ -412,6 +592,35 @@ watch(
   flex-direction: column;
   gap: 6px;
 }
+
+.meta-dashboard__modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px 14px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.meta-dashboard__field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.meta-dashboard__input {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.meta-dashboard__hint { color: #94a3b8; font-weight: 400; }
+.meta-dashboard__error { color: #b91c1c; font-size: 12px; }
 
 .meta-dashboard__chart-option {
   display: flex;

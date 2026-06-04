@@ -86,6 +86,18 @@ export type MetaViewRenderLabelKey =
   | 'dashboard.loadingChart'
   | 'dashboard.addChartPanel'
   | 'dashboard.noCharts'
+  | 'dashboard.newChart'
+  | 'dashboard.createChartTitle'
+  | 'dashboard.chartName'
+  | 'dashboard.chartType'
+  | 'dashboard.groupBy'
+  | 'dashboard.aggregation'
+  | 'dashboard.valueField'
+  | 'dashboard.createChart'
+  | 'dashboard.cancel'
+  | 'dashboard.noGroupableFields'
+  | 'dashboard.noNumericFields'
+  | 'dashboard.createChartError'
   | 'chart.label'
   | 'chart.value'
   | 'chart.restrictedTitle'
@@ -169,6 +181,18 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'dashboard.loadingChart',
   'dashboard.addChartPanel',
   'dashboard.noCharts',
+  'dashboard.newChart',
+  'dashboard.createChartTitle',
+  'dashboard.chartName',
+  'dashboard.chartType',
+  'dashboard.groupBy',
+  'dashboard.aggregation',
+  'dashboard.valueField',
+  'dashboard.createChart',
+  'dashboard.cancel',
+  'dashboard.noGroupableFields',
+  'dashboard.noNumericFields',
+  'dashboard.createChartError',
   'chart.label',
   'chart.value',
   'chart.restrictedTitle',
@@ -256,6 +280,18 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'dashboard.loadingChart': { en: 'Loading chart...', zh: '正在加载图表...' },
   'dashboard.addChartPanel': { en: 'Add Chart Panel', zh: '添加图表面板' },
   'dashboard.noCharts': { en: 'No charts available. Create a chart first.', zh: '暂无可用图表。请先创建一个图表。' },
+  'dashboard.newChart': { en: '+ New Chart', zh: '+ 新建图表' },
+  'dashboard.createChartTitle': { en: 'Create chart', zh: '新建图表' },
+  'dashboard.chartName': { en: 'Chart name', zh: '图表名称' },
+  'dashboard.chartType': { en: 'Chart type', zh: '图表类型' },
+  'dashboard.groupBy': { en: 'Group by', zh: '分组字段' },
+  'dashboard.aggregation': { en: 'Aggregation', zh: '聚合方式' },
+  'dashboard.valueField': { en: 'Value field', zh: '数值字段' },
+  'dashboard.createChart': { en: 'Create chart', zh: '创建图表' },
+  'dashboard.cancel': { en: 'Cancel', zh: '取消' },
+  'dashboard.noGroupableFields': { en: 'No readable groupable fields available.', zh: '没有可读取的可分组字段。' },
+  'dashboard.noNumericFields': { en: 'No readable numeric fields available.', zh: '没有可读取的数值字段。' },
+  'dashboard.createChartError': { en: 'Failed to create chart.', zh: '创建图表失败。' },
   'chart.label': { en: 'Label', zh: '标签' },
   'chart.value': { en: 'Value', zh: '值' },
   'chart.restrictedTitle': { en: 'Chart data restricted', zh: '图表数据受限' },

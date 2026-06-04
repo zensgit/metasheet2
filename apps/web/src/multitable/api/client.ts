@@ -83,6 +83,23 @@ type ApiErrorPayload = {
   serverVersion?: number
 }
 
+type ChartConfigWire = Omit<ChartConfig, 'chartType' | 'displayConfig'> & {
+  type?: ChartConfig['chartType']
+  chartType?: ChartConfig['chartType']
+  display?: ChartConfig['displayConfig']
+  displayConfig?: ChartConfig['displayConfig']
+}
+
+type ChartCreateInputWire = Omit<ChartCreateInput, 'chartType' | 'displayConfig'> & {
+  type: ChartCreateInput['chartType']
+  display?: ChartCreateInput['displayConfig']
+}
+
+type ChartUpdateInputWire = Omit<Partial<ChartCreateInput>, 'chartType' | 'displayConfig'> & {
+  type?: ChartCreateInput['chartType']
+  display?: ChartCreateInput['displayConfig']
+}
+
 let globalApiErrorLocaleResolver: ApiErrorLocaleResolver | undefined
 
 export function setMultitableApiErrorLocaleResolver(
@@ -115,6 +132,34 @@ function qs(params: Record<string, string | number | boolean | undefined>): stri
     .filter(([, v]) => v !== undefined && v !== '')
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
   return entries.length ? `?${entries.join('&')}` : ''
+}
+
+function normalizeChartConfig(chart: ChartConfig | ChartConfigWire): ChartConfig {
+  const wire = chart as ChartConfigWire
+  const chartType = wire.chartType ?? wire.type ?? chart.chartType
+  return {
+    ...(chart as ChartConfig),
+    chartType: chartType as ChartConfig['chartType'],
+    displayConfig: wire.displayConfig ?? wire.display,
+  }
+}
+
+function toChartCreateWire(input: ChartCreateInput): ChartCreateInputWire {
+  const { chartType, displayConfig, ...rest } = input
+  return {
+    ...rest,
+    type: chartType,
+    display: displayConfig,
+  }
+}
+
+function toChartUpdateWire(input: Partial<ChartCreateInput>): ChartUpdateInputWire {
+  const { chartType, displayConfig, ...rest } = input
+  return {
+    ...rest,
+    ...(chartType ? { type: chartType } : {}),
+    ...(displayConfig ? { display: displayConfig } : {}),
+  }
 }
 
 async function parseJson<T>(res: Response, isZh = false): Promise<T> {
@@ -1633,17 +1678,17 @@ export class MultitableApiClient {
   // --- Charts ---
   async listCharts(sheetId: string): Promise<ChartConfig[]> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts`)
-    const data = await this.parseJson<{ charts: ChartConfig[] }>(res)
-    return Array.isArray(data?.charts) ? data.charts : []
+    const data = await this.parseJson<{ charts: Array<ChartConfig | ChartConfigWire> }>(res)
+    return Array.isArray(data?.charts) ? data.charts.map(normalizeChartConfig) : []
   }
 
   async createChart(sheetId: string, input: ChartCreateInput): Promise<ChartConfig> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
+      body: JSON.stringify(toChartCreateWire(input)),
     })
-    return this.parseJson<ChartConfig>(res)
+    return normalizeChartConfig(await this.parseJson<ChartConfig | ChartConfigWire>(res))
   }
 
   async updateChart(sheetId: string, chartId: string, input: Partial<ChartCreateInput>): Promise<ChartConfig> {
@@ -1652,10 +1697,10 @@ export class MultitableApiClient {
       {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
+        body: JSON.stringify(toChartUpdateWire(input)),
       },
     )
-    return this.parseJson<ChartConfig>(res)
+    return normalizeChartConfig(await this.parseJson<ChartConfig | ChartConfigWire>(res))
   }
 
   async deleteChart(sheetId: string, chartId: string): Promise<void> {

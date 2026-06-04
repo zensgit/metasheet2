@@ -919,11 +919,15 @@ export type ChartType = 'bar' | 'line' | 'pie' | 'number' | 'table'
 
 export type AggregationFunction = 'count' | 'sum' | 'avg' | 'min' | 'max' | 'count_distinct'
 
+export interface ChartAggregation {
+  function: AggregationFunction
+  fieldId?: string
+}
+
 export interface ChartDataSource {
   sheetId: string
-  fieldId: string
-  groupFieldId?: string
-  aggregation: AggregationFunction
+  groupByFieldId?: string
+  aggregation: ChartAggregation
 }
 
 export interface ChartDisplayConfig {
