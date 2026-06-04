@@ -119,6 +119,9 @@ export TOKEN='<staging-admin-jwt>'           # attendance:read,write,admin
 export PGURL='<staging-postgres-dsn>'        # reachable via the tunnel; psql "$PGURL" must connect
 export SUF="c4smoke-$(date +%s)"
 H=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json')
+ORIG_COMP_TIME=$(curl -s -H "Authorization: Bearer $TOKEN" "$BASE/api/attendance/settings" \
+  | jq -c '.data.compTimeFromOvertime // {"enabled":false,"expiresInDays":null}')
+echo "ORIG_COMP_TIME=$ORIG_COMP_TIME"
 ```
 
 ### 4.1 Enable expiry + create an OT rule
@@ -126,8 +129,6 @@ H=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json')
 ```bash
 curl -s "${H[@]}" -X PUT "$BASE/api/attendance/settings" \
   -d '{"compTimeFromOvertime":{"enabled":true,"expiresInDays":30}}' | jq .
-# capture the original compTimeFromOvertime first if you want a clean restore:
-#   curl -s -H "Authorization: Bearer $TOKEN" "$BASE/api/attendance/settings" | jq '.data.compTimeFromOvertime'
 
 OT_RULE=$(curl -s "${H[@]}" -X POST "$BASE/api/attendance/overtime-rules" \
   -d "{\"name\":\"$SUF-ot\",\"minMinutes\":30}" | jq -r '.data.id')
@@ -207,11 +208,13 @@ DELETE FROM attendance_leave_balances
   WHERE source_key IN ('overtime_conversion:$OT_REQ','overtime_conversion:$OT_NULL');
 DELETE FROM attendance_requests WHERE id = ANY (ARRAY['$OT_REQ','$OT_NULL']::uuid[]);
 SQL
-# restore the original compTimeFromOvertime setting (use the value captured in 4.1), then:
+curl -s "${H[@]}" -X PUT "$BASE/api/attendance/settings" \
+  -d "$(jq -cn --argjson comp "$ORIG_COMP_TIME" '{compTimeFromOvertime:$comp}')" | jq '.data.compTimeFromOvertime'
+curl -s "${H[@]}" -X DELETE "$BASE/api/attendance/overtime-rules/$OT_RULE" | jq '.ok'
 psql "$PGURL" -c "SELECT count(*) AS residue FROM attendance_leave_balances
   WHERE source_key IN ('overtime_conversion:$OT_REQ','overtime_conversion:$OT_NULL');"
 ```
-**PASS:** `residue = 0`. Delete the `$SUF-ot` overtime rule too if your staging org should stay pristine.
+**PASS:** settings are restored, the temporary OT rule delete returns `true`, and `residue = 0`.
 
 ---
 
