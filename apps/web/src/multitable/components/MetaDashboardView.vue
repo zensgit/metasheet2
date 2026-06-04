@@ -114,6 +114,22 @@
           >
             <span>{{ chart.name }}</span>
             <span class="meta-dashboard__chart-type">{{ chart.chartType }}</span>
+            <span class="meta-dashboard__chart-option-actions">
+              <button
+                class="meta-dashboard__btn meta-dashboard__btn--icon"
+                type="button"
+                data-action="edit-chart"
+                :data-edit-chart="chart.id"
+                @click.stop="openEditChart(chart.id)"
+              >{{ viewRenderLabel('dashboard.editChart', isZh) }}</button>
+              <button
+                class="meta-dashboard__btn meta-dashboard__btn--icon meta-dashboard__btn--danger"
+                type="button"
+                data-action="delete-chart"
+                :data-delete-chart="chart.id"
+                @click.stop="onDeleteChart(chart.id)"
+              >{{ viewRenderLabel('dashboard.deleteChart', isZh) }}</button>
+            </span>
           </div>
         </div>
       </div>
@@ -121,9 +137,9 @@
 
     <!-- Create chart modal -->
     <div v-if="showCreateChart" class="meta-dashboard__modal-overlay" @click.self="showCreateChart = false">
-      <form class="meta-dashboard__modal" data-modal="create-chart" @submit.prevent="onCreateChart">
+      <form class="meta-dashboard__modal" data-modal="create-chart" @submit.prevent="onSubmitChart">
         <div class="meta-dashboard__modal-header">
-          <h4>{{ viewRenderLabel('dashboard.createChartTitle', isZh) }}</h4>
+          <h4>{{ viewRenderLabel(editingChartId ? 'dashboard.editChartTitle' : 'dashboard.createChartTitle', isZh) }}</h4>
           <button class="meta-dashboard__btn meta-dashboard__btn--icon" type="button" @click="showCreateChart = false">&times;</button>
         </div>
         <div class="meta-dashboard__modal-body">
@@ -185,7 +201,7 @@
             type="submit"
             data-action="submit-create-chart"
             :disabled="createChartDisabled || creatingChart"
-          >{{ viewRenderLabel('dashboard.createChart', isZh) }}</button>
+          >{{ viewRenderLabel(editingChartId ? 'dashboard.saveChart' : 'dashboard.createChart', isZh) }}</button>
         </div>
       </form>
     </div>
@@ -194,7 +210,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import type { AggregationFunction, ChartType, Dashboard, DashboardPanel, ChartConfig, ChartData, MetaField, MetaFieldType } from '../types'
+import type { AggregationFunction, ChartType, Dashboard, DashboardPanel, ChartConfig, ChartCreateInput, ChartData, MetaField, MetaFieldType } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import MetaChartRenderer from './MetaChartRenderer.vue'
 import { useLocale } from '../../composables/useLocale'
@@ -217,6 +233,7 @@ const chartConfigMap = ref<Record<string, ChartConfig>>({})
 const activeDashboardId = ref<string>(props.dashboardId ?? '')
 const showAddPanel = ref(false)
 const showCreateChart = ref(false)
+const editingChartId = ref<string | null>(null)
 const creatingChart = ref(false)
 const createChartError = ref('')
 const editingName = ref(false)
@@ -284,7 +301,25 @@ function resetChartDraft() {
 }
 
 function openCreateChart() {
+  editingChartId.value = null
   resetChartDraft()
+  showCreateChart.value = true
+}
+
+// v2-b1: open the (reused) chart form pre-filled to EDIT an existing chart's config.
+function openEditChart(chartId: string) {
+  const cfg = chartConfigMap.value[chartId]
+  if (!cfg) return
+  editingChartId.value = chartId
+  chartDraft.value = {
+    name: cfg.name,
+    chartType: cfg.chartType,
+    groupByFieldId: cfg.dataSource.groupByFieldId ?? '',
+    aggregation: cfg.dataSource.aggregation.function,
+    valueFieldId: cfg.dataSource.aggregation.fieldId ?? '',
+  }
+  createChartError.value = ''
+  showAddPanel.value = false
   showCreateChart.value = true
 }
 
@@ -372,34 +407,98 @@ async function addPanelForChart(chartId: string) {
   }
 }
 
-async function onCreateChart() {
+// Build a chart create/update payload from the form. For EDIT, pass the existing config as `base`:
+// the server shallow-replaces dataSource/displayConfig with what we send ({ ...existing, ...input }),
+// so we OVERLAY onto the existing objects to PRESERVE fields this minimal form does not model —
+// displayConfig options (showLegend / colorScheme / showValues) and dataSource.filter / date-grouping.
+// The form owns only name / chartType / groupByFieldId / aggregation. (v2-b1 boundary: a date-grouped
+// chart keeps its date-grouping — full grouping-mode editing is a later slice.)
+function buildChartInput(base?: ChartConfig): ChartCreateInput {
+  const name = chartDraft.value.name.trim()
+  return {
+    name,
+    chartType: chartDraft.value.chartType,
+    dataSource: {
+      ...(base?.dataSource ?? {}),
+      sheetId: props.sheetId,
+      groupByFieldId: chartDraft.value.groupByFieldId,
+      aggregation: {
+        function: chartDraft.value.aggregation,
+        ...(requiresValueField.value ? { fieldId: chartDraft.value.valueFieldId } : {}),
+      },
+    },
+    displayConfig: {
+      ...(base?.displayConfig ?? {}),
+      title: name,
+    },
+  }
+}
+
+// v2-a create + v2-b1 edit share one form. editingChartId === null → create; else → update.
+async function onSubmitChart() {
   if (!props.client || createChartDisabled.value) return
+  const isEdit = editingChartId.value !== null
   creatingChart.value = true
   createChartError.value = ''
   try {
-    const chart = await props.client.createChart(props.sheetId, {
-      name: chartDraft.value.name.trim(),
-      chartType: chartDraft.value.chartType,
-      dataSource: {
-        sheetId: props.sheetId,
-        groupByFieldId: chartDraft.value.groupByFieldId,
-        aggregation: {
-          function: chartDraft.value.aggregation,
-          ...(requiresValueField.value ? { fieldId: chartDraft.value.valueFieldId } : {}),
-        },
-      },
-      displayConfig: {
-        title: chartDraft.value.name.trim(),
-      },
-    })
-    charts.value = [...charts.value, chart]
-    chartConfigMap.value[chart.id] = chart
-    showCreateChart.value = false
-    await addPanelForChart(chart.id)
+    if (isEdit) {
+      const chartId = editingChartId.value as string
+      // overlay onto the existing config so unmodeled fields survive the server's shallow replace
+      const input = buildChartInput(chartConfigMap.value[chartId])
+      const updated = await props.client.updateChart(props.sheetId, chartId, input)
+      charts.value = charts.value.map((c) => (c.id === chartId ? updated : c))
+      chartConfigMap.value[chartId] = updated
+      // v2-b1: re-pull chart data so any panel showing it re-renders with the new config
+      // (loadPanelData skips already-loaded charts, so refetch explicitly here).
+      try {
+        chartDataMap.value[chartId] = await props.client.getChartData(props.sheetId, chartId)
+      } catch {
+        delete chartDataMap.value[chartId]
+      }
+      showCreateChart.value = false
+      editingChartId.value = null
+    } else {
+      const chart = await props.client.createChart(props.sheetId, buildChartInput())
+      charts.value = [...charts.value, chart]
+      chartConfigMap.value[chart.id] = chart
+      showCreateChart.value = false
+      await addPanelForChart(chart.id)
+    }
   } catch {
-    createChartError.value = viewRenderLabel('dashboard.createChartError', isZh.value)
+    createChartError.value = viewRenderLabel(isEdit ? 'dashboard.editChartError' : 'dashboard.createChartError', isZh.value)
   } finally {
     creatingChart.value = false
+  }
+}
+
+// v2-b1: delete a chart (confirm), then prune any active-dashboard panels that referenced it
+// so the dashboard does not leave a dangling "loading" panel.
+async function onDeleteChart(chartId: string) {
+  if (!props.client) return
+  const message = viewRenderLabel('dashboard.deleteChartConfirm', isZh.value)
+  if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(message)) return
+  try {
+    await props.client.deleteChart(props.sheetId, chartId)
+    charts.value = charts.value.filter((c) => c.id !== chartId)
+    delete chartConfigMap.value[chartId]
+    delete chartDataMap.value[chartId]
+    const db = activeDashboard.value
+    if (db && db.panels.some((p) => p.chartId === chartId)) {
+      const updated = db.panels.filter((p) => p.chartId !== chartId)
+      try {
+        const result = await props.client.updateDashboard(props.sheetId, db.id, { panels: updated })
+        const idx = dashboards.value.findIndex((d) => d.id === db.id)
+        if (idx >= 0) dashboards.value[idx] = result
+      } catch {
+        // skip
+      }
+    }
+    if (editingChartId.value === chartId) {
+      showCreateChart.value = false
+      editingChartId.value = null
+    }
+  } catch {
+    // skip
   }
 }
 

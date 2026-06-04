@@ -84,6 +84,14 @@ function mockClient(dashboards: Dashboard[] = [], charts: ChartConfig[] = [], ch
         display: body.display,
       })
     }
+    if (method === 'PATCH' && url.includes('/charts/')) {
+      const body = JSON.parse(init?.body as string)
+      const chartId = url.split('/charts/')[1]
+      return ok({ id: chartId, sheetId: 'sheet_1', name: body.name, chartType: body.chartType, dataSource: body.dataSource, displayConfig: body.displayConfig })
+    }
+    if (method === 'DELETE' && url.includes('/charts/')) {
+      return noContent()
+    }
     if (method === 'POST' && url.includes('/dashboards')) {
       const body = JSON.parse(init?.body as string)
       return ok({ id: 'dash_new', sheetId: 'sheet_1', panels: [], ...body })
@@ -349,5 +357,134 @@ describe('MetaDashboardView', () => {
     expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
     expect(container.querySelectorAll('[title]')).toHaveLength(1)
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(0)
+  })
+
+  // ---- v2-b1: edit / delete an existing chart from the chart list ----
+
+  it('edits an existing chart from the chart list (reuses the form) and re-pulls its data', async () => {
+    const chart = fakeChart()
+    const { client, fetchFn } = mockClient([fakeDashboard()], [chart])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    // open the chart list (add-panel modal) and click edit on the chart row
+    ;(container.querySelector('[data-action="add-panel"]') as HTMLButtonElement).click()
+    await nextTick()
+    const editBtn = container.querySelector(`[data-edit-chart="${chart.id}"]`) as HTMLButtonElement
+    expect(editBtn).toBeTruthy()
+    editBtn.click()
+    await nextTick()
+
+    // form is pre-filled from the existing chart config (reused create form, edit mode)
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    expect(nameInput.value).toBe('Sales Chart')
+    expect(container.querySelector('[data-modal="create-chart"]')?.textContent).toContain('Edit chart')
+
+    nameInput.value = 'Renamed Chart'
+    nameInput.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    // updateChart → PATCH /charts/<id> with the edited config
+    const patchChart = fetchFn.mock.calls.filter(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'PATCH' && url.includes(`/charts/${chart.id}`),
+    )
+    expect(patchChart.length).toBe(1)
+    expect(JSON.parse(patchChart[0][1].body as string).name).toBe('Renamed Chart')
+
+    // its chart data is re-pulled (initial panel load + the post-edit refetch)
+    const dataLoads = fetchFn.mock.calls.filter(
+      ([url, init]: [string, RequestInit?]) => (init?.method ?? 'GET') === 'GET' && url.includes(`/charts/${chart.id}/data`),
+    )
+    expect(dataLoads.length).toBeGreaterThanOrEqual(2)
+
+    // edit path must NOT create a new chart
+    const chartPosts = fetchFn.mock.calls.filter(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'POST' && url.includes('/charts'),
+    )
+    expect(chartPosts.length).toBe(0)
+  })
+
+  it('edit preserves config the minimal form does not model (display options + dataSource extras)', async () => {
+    // The server shallow-replaces dataSource/displayConfig with the sent objects, so edit must
+    // overlay onto the existing config. Carry display options (typed) + a dataSource extra
+    // (filter — a backend runtime field absent from the frontend type) and assert both survive.
+    const chart = fakeChart({
+      displayConfig: { title: 'Sales Chart', showLegend: false, colorScheme: 'cool' },
+      dataSource: { sheetId: 'sheet_1', groupByFieldId: 'fld_status', aggregation: { function: 'count' }, filter: [{ fieldId: 'fld_status', operator: 'is', value: 'open' }] } as ChartConfig['dataSource'],
+    })
+    const { client, fetchFn } = mockClient([fakeDashboard()], [chart])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="add-panel"]') as HTMLButtonElement).click()
+    await nextTick()
+    ;(container.querySelector(`[data-edit-chart="${chart.id}"]`) as HTMLButtonElement).click()
+    await nextTick()
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Renamed'
+    nameInput.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const patch = fetchFn.mock.calls.find(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'PATCH' && url.includes(`/charts/${chart.id}`),
+    )
+    const body = JSON.parse(patch![1].body as string)
+    // client maps displayConfig→`display` on the wire; the overlay must preserve unmodeled fields
+    expect(body.display.showLegend).toBe(false) // preserved (not in the form)
+    expect(body.display.colorScheme).toBe('cool') // preserved
+    expect(body.display.title).toBe('Renamed') // form owns the title
+    expect(body.dataSource.filter).toEqual([{ fieldId: 'fld_status', operator: 'is', value: 'open' }]) // preserved
+    expect(body.dataSource.groupByFieldId).toBe('fld_status') // form owns grouping
+  })
+
+  it('deletes a chart from the chart list (after confirm) and prunes the panel that showed it', async () => {
+    const chart = fakeChart()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { client, fetchFn } = mockClient([fakeDashboard()], [chart])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="add-panel"]') as HTMLButtonElement).click()
+    await nextTick()
+    const delBtn = container.querySelector(`[data-delete-chart="${chart.id}"]`) as HTMLButtonElement
+    expect(delBtn).toBeTruthy()
+    delBtn.click()
+    await flushPromises()
+
+    const delCalls = fetchFn.mock.calls.filter(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'DELETE' && url.includes(`/charts/${chart.id}`),
+    )
+    expect(delCalls.length).toBe(1)
+
+    // the only panel referenced the deleted chart → pruned via updateDashboard
+    const patchDb = fetchFn.mock.calls.filter(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'PATCH' && url.includes('/dashboards/'),
+    )
+    expect(patchDb.length).toBe(1)
+    expect(JSON.parse(patchDb[0][1].body as string).panels).toEqual([])
+    confirmSpy.mockRestore()
+  })
+
+  it('does not delete a chart when confirm is declined', async () => {
+    const chart = fakeChart()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { client, fetchFn } = mockClient([fakeDashboard()], [chart])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="add-panel"]') as HTMLButtonElement).click()
+    await nextTick()
+    ;(container.querySelector(`[data-delete-chart="${chart.id}"]`) as HTMLButtonElement).click()
+    await flushPromises()
+
+    const delCalls = fetchFn.mock.calls.filter(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'DELETE' && url.includes(`/charts/${chart.id}`),
+    )
+    expect(delCalls.length).toBe(0)
+    confirmSpy.mockRestore()
   })
 })
