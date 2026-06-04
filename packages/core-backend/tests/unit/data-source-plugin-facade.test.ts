@@ -131,6 +131,19 @@ describe('createDataSourcePluginFacade', () => {
     expect(res.data).toEqual([{ id: 1 }])
   })
 
+  it('select forwards where filters to DataSourceManager for parameterized readonly reads', async () => {
+    const m = managerStub()
+    const facade = createDataSourcePluginFacade(() => m.manager)
+    const where = { FileCode: 'P-001', parent_id: 'OBJ-7', active: true }
+    await facade.select('pg', 'DN_PDM_PathExAttrInfo', { limit: 100, offset: 0, where }, 'owner-1')
+    expect(m.stub.assertAccess).toHaveBeenCalledWith('pg', 'owner-1')
+    expect(m.stub.select).toHaveBeenCalledWith('pg', 'DN_PDM_PathExAttrInfo', {
+      limit: 100,
+      offset: 0,
+      where,
+    })
+  })
+
   it('connects the adapter when not already connected, before reading schema', async () => {
     const m = managerStub({ adapter: adapterStub({ connected: false }) })
     const facade = createDataSourcePluginFacade(() => m.manager)
