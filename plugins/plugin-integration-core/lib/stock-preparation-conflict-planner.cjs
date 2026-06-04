@@ -82,7 +82,13 @@ function normalizeIsoTime(value) {
     return new Date().toISOString()
   }
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString()
-  if (typeof value === 'string' && value.trim() !== '') return value.trim()
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed !== '') {
+      const timestamp = Date.parse(trimmed)
+      if (!Number.isNaN(timestamp)) return new Date(timestamp).toISOString()
+    }
+  }
   throw new StockPreparationConflictPlannerError('plannedAt must be an ISO string or Date', { field: 'plannedAt' })
 }
 
@@ -147,8 +153,20 @@ function groupByKey(rows) {
   return { keyed, missing }
 }
 
+function comparableValue(value) {
+  return value === undefined ? null : value
+}
+
+function isPrimitiveComparable(value) {
+  return value === null || ['string', 'number', 'boolean'].includes(typeof value)
+}
+
 function valuesEqual(left, right) {
-  return JSON.stringify(left === undefined ? null : left) === JSON.stringify(right === undefined ? null : right)
+  const normalizedLeft = comparableValue(left)
+  const normalizedRight = comparableValue(right)
+  if (normalizedLeft === normalizedRight) return true
+  if (isPrimitiveComparable(normalizedLeft) && isPrimitiveComparable(normalizedRight)) return false
+  return JSON.stringify(normalizedLeft) === JSON.stringify(normalizedRight)
 }
 
 function changedFields(nextRow, existingRow, fields) {
@@ -172,6 +190,15 @@ function assertNoHumanFields(payload, humanFields, context) {
       })
     }
   }
+}
+
+function sameStringSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false
+  const leftSet = new Set(left)
+  if (leftSet.size !== left.length) return false
+  const rightSet = new Set(right)
+  if (rightSet.size !== right.length) return false
+  return right.every((value) => leftSet.has(value))
 }
 
 function runPatch(runId, plannedAt, decision, conflictSummary = '') {
@@ -268,7 +295,7 @@ function planStockPreparationConflicts(input = {}) {
 
   const humanFields = HUMAN_PRESERVED_FIELD_IDS.slice()
   const templateHumanFields = fieldIdsByOwnership(template, 'human_preserved')
-  if (JSON.stringify(humanFields) !== JSON.stringify(templateHumanFields)) {
+  if (!sameStringSet(humanFields, templateHumanFields)) {
     throw new StockPreparationConflictPlannerError('human field whitelist drifted from template', {
       field: 'template.fields',
     })
@@ -447,7 +474,9 @@ module.exports = {
     changedFields,
     groupByKey,
     normalizeStrategy,
+    normalizeIsoTime,
     plmRefreshFieldIds,
+    sameStringSet,
     valuesEqual,
   },
 }
