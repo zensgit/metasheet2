@@ -49,7 +49,7 @@ regression blocks #2253 runtime, but it does not change the C0 design scope.
 
 ## Phase ladder
 
-### ⬜ C0 - Design + TODO (this PR)
+### ✅ C0 - Design + TODO (DONE - PR #2258, `313a31d31`)
 
 Docs-only.
 
@@ -58,7 +58,7 @@ Docs-only.
 - [x] Define recursive expansion contract and fail-closed guards.
 - [x] Define dry-run evidence shape and values-free issue evidence rule.
 - [x] Decompose implementation into C1-C6.
-- [ ] Review/accept C0 before any runtime starts.
+- [x] Review/accept C0 before any runtime starts.
 
 Definition of done:
 
@@ -66,7 +66,7 @@ Definition of done:
 - No runtime, route, migration, UI, package, or K3 change.
 - #2253 linked from the PR.
 
-### 🔒 C1 - Stock-preparation table template / field model manifest
+### 🟡 C1 - Stock-preparation table template / field model manifest (this PR)
 
 Gated on: C0 accepted + explicit opt-in.
 
@@ -92,6 +92,12 @@ Acceptance locks:
 - Manifest contains idempotency key fields.
 - Manifest contains run/decision/conflict fields.
 - Procurement/warehouse stay views or deferred; no child-table generation.
+
+Implementation note: C1 does **not** claim live PLM feasibility is already
+confirmed, because the customer PLM table/view and relation descriptors are not
+available in this repo. Instead, this slice turns the feasibility gate into a
+schema-only contract (`requires_customer_schema`) that C2 must satisfy before
+runtime can proceed.
 
 ### 🔒 C2 - `projectNo -> PLM BOM` dry-run expansion helper
 
