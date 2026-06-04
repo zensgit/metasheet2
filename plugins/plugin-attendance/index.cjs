@@ -129,10 +129,13 @@ const DEFAULT_SETTINGS = {
     },
   },
   // ④ C2 (#2230 design-lock): overtime approval → comp-time (调休) leave grant.
-  // Opt-in; default OFF. v1 = 1:1 minutes, no expiry. The grant lot is written in the
-  // approval txn's final-approval branch (see resolveRequest); nothing accrues until enabled.
+  // Opt-in; default OFF. v1 = 1:1 minutes. The grant lot is written in the approval txn's
+  // final-approval branch (see resolveRequest); nothing accrues until enabled. ④ C4:
+  // expiresInDays (default null = no expiry) — when set, a grant stamps expires_at = granted_at +
+  // expiresInDays×24h and the AttendanceScheduler's expiry job (AttendanceExpiryService) reaps it.
   compTimeFromOvertime: {
     enabled: false,
+    expiresInDays: null,
   },
 }
 
@@ -10864,8 +10867,13 @@ function normalizeSettings(raw) {
 // default OFF. Only `enabled` is honoured (boolean); anything else falls back to the default.
 function normalizeCompTimeFromOvertimeSetting(raw) {
   const config = raw && typeof raw === 'object' ? raw : {}
+  // ④ C4: expiresInDays is a positive integer (validity in days) or null (no expiry). Anything
+  // else — 0, negative, non-numeric — normalizes to null so it can never shorten/garble expiry.
+  const expiresInDaysRaw = Number(config.expiresInDays)
+  const expiresInDays = Number.isInteger(expiresInDaysRaw) && expiresInDaysRaw > 0 ? expiresInDaysRaw : null
   return {
     enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_SETTINGS.compTimeFromOvertime.enabled,
+    expiresInDays,
   }
 }
 
@@ -16434,9 +16442,11 @@ module.exports = {
           year: z.number().int().min(0).nullable().optional(),
         }).optional(),
       }).optional(),
-      // ④ C2 (#2230): overtime→comp-time opt-in. Only the boolean switch is settable here.
+      // ④ overtime→comp-time opt-in: the C2 enable switch + the C4 expiry validity (positive int days,
+      // or null = no expiry).
       compTimeFromOvertime: z.object({
         enabled: z.boolean().optional(),
+        expiresInDays: z.number().int().positive().nullable().optional(),
       }).optional(),
     })
 
@@ -20411,13 +20421,19 @@ module.exports = {
                 const amountMinutes = Math.floor(Number(requestMetadata.minutes) || 0)
                 if (amountMinutes > 0) {
                   const compTimeSourceKey = `overtime_conversion:${requestId}`
+                  // ④ C4 (#2267): when expiresInDays is configured (positive int), stamp the grant with
+                  // expires_at = granted_at + N×24h — a FIXED 24h-per-day duration, computed in SQL from
+                  // the statement's now() (granted_at also defaults to now() → exact). null = no expiry
+                  // (unchanged C2 behaviour). The AttendanceExpiryService (C4-1) reaps these.
+                  const expiresInDays = compTimeSettings.compTimeFromOvertime.expiresInDays ?? null
                   const lotRows = await trx.query(
                     `INSERT INTO attendance_leave_balances
-                       (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status)
-                     VALUES ($1, $2, 'comp_time', $3, $3, 'overtime_conversion', $4, $5, 'active')
+                       (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status, expires_at)
+                     VALUES ($1, $2, 'comp_time', $3, $3, 'overtime_conversion', $4, $5, 'active',
+                             CASE WHEN $6::int IS NULL THEN NULL ELSE now() + ($6::int * interval '24 hours') END)
                      ON CONFLICT (org_id, source_key) DO NOTHING
                      RETURNING id`,
-                    [orgId, requestRow.user_id, amountMinutes, requestId, compTimeSourceKey]
+                    [orgId, requestRow.user_id, amountMinutes, requestId, compTimeSourceKey, expiresInDays]
                   )
                   const newLotId = lotRows[0]?.id
                   if (newLotId) {

@@ -88,6 +88,12 @@ import {
   startApprovalSlaScheduler,
   stopApprovalSlaScheduler,
 } from './services/ApprovalSlaScheduler'
+import {
+  resolveAttendanceSchedulerIntervalMs,
+  resolveAttendanceSchedulerLeaderOptions,
+  startAttendanceScheduler,
+  stopAttendanceScheduler,
+} from './services/AttendanceScheduler'
 import { ApprovalBreachNotifier } from './services/ApprovalBreachNotifier'
 import {
   createApprovalBreachChannelsFromEnv,
@@ -1786,6 +1792,14 @@ export class MetaSheetServer {
       }
     })())
 
+    shutdownTasks.push((async () => {
+      try {
+        stopAttendanceScheduler()
+      } catch (err) {
+        this.logger.warn(`Attendance scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 4. Destroy API Gateway resources (only if one was constructed during start()).
     shutdownTasks.push((async () => {
       try {
@@ -1952,6 +1966,20 @@ export class MetaSheetServer {
       this.logger.info('Approval SLA scheduler initialized')
     } catch (e) {
       this.logger.error('Approval SLA scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // ④ C4 — attendance comp-time expiry scheduler. Opt-in (ATTENDANCE_SCHEDULER_ENABLED=true, default
+    // OFF); returns null and no-ops when disabled. The expiry claim is idempotent + concurrency-safe on
+    // its own, so the optional Redis leader lock only sheds load.
+    try {
+      const attendanceLeaderOptions = await resolveAttendanceSchedulerLeaderOptions()
+      const scheduler = startAttendanceScheduler({
+        leaderOptions: attendanceLeaderOptions,
+        intervalMs: resolveAttendanceSchedulerIntervalMs(),
+      })
+      this.logger.info(scheduler ? 'Attendance scheduler initialized' : 'Attendance scheduler disabled (ATTENDANCE_SCHEDULER_ENABLED!=true)')
+    } catch (e) {
+      this.logger.error('Attendance scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
     // 加载插件并启动 HTTP 服务
