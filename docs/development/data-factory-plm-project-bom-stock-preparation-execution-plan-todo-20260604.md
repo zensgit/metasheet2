@@ -66,9 +66,9 @@ Definition of done:
 - No runtime, route, migration, UI, package, or K3 change.
 - #2253 linked from the PR.
 
-### 🟡 C1 - Stock-preparation table template / field model manifest (this PR)
+### ✅ C1 - Stock-preparation table template / field model manifest (DONE - PR #2260, `3ffe6f32c`)
 
-Gated on: C0 accepted + explicit opt-in.
+Gated on: C0 accepted + explicit opt-in. Done in #2260.
 
 Scope:
 
@@ -226,6 +226,8 @@ These are not blockers for C0, but they must be pinned before runtime:
 
 ## Sequencing rule
 
-C0 must be reviewed before C1 starts. After C0, the next buildable slice is
-C1 (schema-only stock-preparation field model manifest). C2-C6 remain locked
-until their predecessor lands and the owner explicitly opts in.
+C0 and C1 are complete. The next runtime slice is C2, but it remains locked
+until the customer PLM relation descriptors prove app-side recursion over flat
+parameterized readonly SQL reads, or the track pivots to a customer flat BOM
+view / deferred PLM adapter per the C0 feasibility gate. C2-C6 still require
+their predecessor to land and the owner to explicitly opt in.
