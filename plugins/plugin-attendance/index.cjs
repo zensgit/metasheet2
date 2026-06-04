@@ -13420,6 +13420,59 @@ function respondShiftComplianceCapExceeded(res, error) {
   return true
 }
 
+// ④ C3 (#2230 design-lock): deduct comp-time (调休) balance on a comp_time leave's final approval.
+// FIFO by soonest expiry then oldest grant, over active lots with remaining_minutes > 0. Runs entirely
+// inside the caller's approval txn: lots are SELECT … FOR UPDATE (no concurrent double-spend), each
+// touched lot's remaining_minutes is reduced (status → 'exhausted' at zero) and a 'deduct' event is
+// written (delta < 0, back-linked to the leave request for reconciliation). When the active balance is
+// short of the requested minutes the whole call throws → the approval txn rolls back → 422
+// COMP_TIME_BALANCE_INSUFFICIENT (no partial approval in v1). Idempotency comes from the pending→approved
+// transition guard: resolveRequest locks the request row FOR UPDATE and rejects re-approve before reaching
+// here, so a repeated approve never double-deducts.
+async function deductCompTimeBalance(trx, { orgId, userId, requestId, minutes }) {
+  const deductMinutes = Math.floor(Number(minutes) || 0)
+  if (deductMinutes <= 0) return { deducted: 0, lots: 0 }
+  const lots = (await trx.query(
+    `SELECT id, remaining_minutes, status
+       FROM attendance_leave_balances
+      WHERE org_id = $1 AND user_id = $2 AND leave_type_code = 'comp_time'
+        AND status = 'active' AND remaining_minutes > 0
+      ORDER BY expires_at ASC NULLS LAST, granted_at ASC
+      FOR UPDATE`,
+    [orgId, userId]
+  )).map((row) => ({ id: row.id, remaining: Number(row.remaining_minutes), status: row.status }))
+  const available = lots.reduce((sum, lot) => sum + lot.remaining, 0)
+  if (available < deductMinutes) {
+    throw new HttpError(
+      422,
+      'COMP_TIME_BALANCE_INSUFFICIENT',
+      `Comp-time balance insufficient: requested ${deductMinutes} min, available ${available} min`
+    )
+  }
+  let remaining = deductMinutes
+  let touched = 0
+  for (const lot of lots) {
+    if (remaining <= 0) break
+    const take = Math.min(lot.remaining, remaining)
+    const newRemaining = lot.remaining - take
+    await trx.query(
+      `UPDATE attendance_leave_balances
+          SET remaining_minutes = $1, status = $2, updated_at = now()
+        WHERE id = $3`,
+      [newRemaining, newRemaining === 0 ? 'exhausted' : lot.status, lot.id]
+    )
+    await trx.query(
+      `INSERT INTO attendance_leave_balance_events
+         (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+       VALUES ($1, $2, $3, 'deduct', $4, 'comp_time_leave', $5)`,
+      [orgId, userId, lot.id, -take, requestId]
+    )
+    remaining -= take
+    touched += 1
+  }
+  return { deducted: deductMinutes, lots: touched }
+}
+
 async function loadAttendanceComprehensiveActualMinutesByUser(db, orgId, userIds, period) {
   const actualMinutesByUser = new Map()
   const actualDetailsByUser = new Map()
@@ -20377,6 +20430,18 @@ module.exports = {
                   }
                 }
               }
+            }
+            // ④ C3 (#2230 design-lock): comp_time leave approval → deduct comp-time balance (FIFO).
+            // Same approval txn; an insufficient active balance throws → 422 + full rollback (the request
+            // stays pending — no partial approval). Only comp_time leave, identified by the request's
+            // persisted leaveType.code; the deduction amount is the request's metadata.minutes.
+            if (requestType === 'leave' && requestMetadata.leaveType?.code === 'comp_time') {
+              await deductCompTimeBalance(trx, {
+                orgId,
+                userId: requestRow.user_id,
+                requestId,
+                minutes: requestMetadata.minutes,
+              })
             }
             const baseRule = await loadDefaultRule(trx, orgId)
             const context = await resolveWorkContext({
