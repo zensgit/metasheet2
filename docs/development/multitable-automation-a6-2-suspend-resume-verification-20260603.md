@@ -1,7 +1,8 @@
 # A6-2 — suspend/resume runtime (admin-gated v1) — verification (2026-06-03)
 
 > Verifies the impl against the design-lock `multitable-automation-a6-2-suspend-resume-design-20260603.md`
-> (#2236). Backend-first; frontend (A6-2b) deferred. Built on a fresh worktree off `origin/main`.
+> (#2236). Initial backend-first verification was followed by A6-2b frontend and operator UAT closeout.
+> Built on a fresh worktree off `origin/main`.
 
 ## What shipped
 
@@ -32,7 +33,7 @@
   `resumed`, `initiatedBy` stamped · T3 double-resume → 409 · T4 unknown token → 404 · T5 legacy
   fail-closed (no suspension) · T6 trigger_event redacted · T7 rule-disabled → 409 (token NOT consumed) ·
   T8 rule-changed → 409 (D4b) · T9 record-missing → 404. **T1 also asserts the suspended READ path** —
-  `listByExecution` surfaces the descriptor-less `suspended` job view without throwing.
+  `listByExecution` surfaces a valid C1 `suspended` job view with the admin-detail suspend descriptor.
 - **No regressions:** A6-1 jobs real-DB **5/5**; action-type migration tests **6/6** (send_email delta +
   new wait_for_callback sync); `automation-runs-api` **24/24** (admin-gate count 3→4 confirms the resume
   route IS gated; **a suspended execution renders via the detail route** — 200, status `running`, suspended
@@ -87,10 +88,32 @@ Owner diff-review flagged 3 state-consistency / C1-contract blockers; all fixed 
   legacy steps and never carries it. Stale code comments updated to the real contract ("admin detail is
   the v1 token surface", not "never in the read plane / emitted on suspend").
 
+## Frontend + operator UAT closeout (2026-06-04)
+
+- **A6-2b frontend landed:** PR #2245 added the `wait_for_callback` rule-editor action,
+  auto-enables + locks `workflow_job_v1`, and exposes the admin Resume control from the
+  run detail view. PR #2248 reconciled the execution-plan tracker.
+- **Create/update reachability blocker fixed:** PR #2264 derived `AutomationService` action validation
+  from canonical `ALL_ACTION_TYPES`, closing the UI-save failure
+  `Invalid action_type: wait_for_callback`.
+- **Post-wait follow-up payload drift fixed:** PR #2272 makes UI-created `update_record`,
+  `create_record`, and `send_notification` follow-up actions emit the executor-shaped configs.
+- **Unsupported `lock_record` footgun removed:** PR #2278 hides `lock_record` from new advanced
+  action selections while its `meta_records.locked` storage contract is unsupported; existing
+  `lock_record` actions remain visible but disabled for compatibility.
+- **Operator UAT PASS:** issue #2257 was rerun against package
+  `metasheet-multitable-onprem-v2.5.0-a6-2-uat-followup-lock-gate-b37ff906`
+  (source `b37ff9066b4d1e78927393eb6317d2efefd2c1fe`). The values-free checklist verified
+  `wait_for_callback -> update_record` through the real UI: rule save, real record-created
+  trigger, suspended run detail with token, admin Resume, terminal `resolved`, both steps
+  resolved, and the target field updated. Negative guards passed for missing
+  `confirmSideEffects` (400), repeat resume (409), invalid token (404), and unauthenticated
+  admin execution API access (401).
+
 ## Red lines honored
 No delay/timer · no worker/claim · no branch/parallel · no BPMN · no approval-as-job · **no public
 endpoint / no token emitter** (admin-gated only) · no K3 / central RBAC / integration-core / contract.
 
 ## Remaining (separate opt-ins)
-A6-2b frontend (configure the action + surface suspended runs) · public webhook endpoint + token emitter
-(when a real consumer exists) · sequential-multi-wait stress · A6-3+ (branch / BPMN / approval-as-job).
+Public webhook endpoint + token emitter (when a real consumer exists) · delay/timer resume ·
+sequential-multi-wait stress · A6-3+ (branch / BPMN / approval-as-job).
