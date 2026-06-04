@@ -99,9 +99,27 @@ available in this repo. Instead, this slice turns the feasibility gate into a
 schema-only contract (`requires_customer_schema`) that C2 must satisfy before
 runtime can proceed.
 
-### 🔒 C2 - `projectNo -> PLM BOM` dry-run expansion helper
+### 🟡 C2-0 - Filtered readonly SQL bridge for PLM lookups (this PR)
 
 Gated on: C1 + explicit opt-in.
+
+Scope:
+
+- Thread `read.filters` through `data-source:sql-readonly` as structured
+  `where` filters.
+- Keep filters equality-only: string / number / boolean / null.
+- No raw SQL, joins, stored procedures, operator objects, arrays, UI, PLM BOM
+  expansion, MetaSheet write, or K3.
+
+Acceptance locks:
+
+- `FileCode` / parent-id filters reach `DataSourceManager.select(..., { where })`.
+- Invalid structured filters fail closed before any data-source read.
+- Existing offset pagination remains unchanged.
+
+### 🔒 C2 - `projectNo -> PLM BOM` dry-run expansion helper
+
+Gated on: C2-0 + confirmed customer PLM relation descriptors + explicit opt-in.
 
 Scope:
 
@@ -226,8 +244,10 @@ These are not blockers for C0, but they must be pinned before runtime:
 
 ## Sequencing rule
 
-C0 and C1 are complete. The next runtime slice is C2, but it remains locked
-until the customer PLM relation descriptors prove app-side recursion over flat
-parameterized readonly SQL reads, or the track pivots to a customer flat BOM
-view / deferred PLM adapter per the C0 feasibility gate. C2-C6 still require
-their predecessor to land and the owner to explicitly opt in.
+C0 and C1 are complete. The next bridge prerequisite is C2-0, which only enables
+equality-filtered `data-source:sql-readonly` reads. The C2 PLM BOM expansion
+runtime still remains locked until C2-0 lands and the customer PLM relation
+descriptors prove app-side recursion over flat parameterized readonly SQL reads,
+or the track pivots to a customer flat BOM view / deferred PLM adapter per the
+C0 feasibility gate. C2-C6 still require their predecessor to land and the owner
+to explicitly opt in.

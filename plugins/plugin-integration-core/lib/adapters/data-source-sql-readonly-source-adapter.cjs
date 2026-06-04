@@ -42,6 +42,27 @@ function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
+function hasOwnKeys(value) {
+  return isPlainObject(value) && Object.keys(value).length > 0
+}
+
+function normalizeEqualityFilters(filters = {}) {
+  if (!hasOwnKeys(filters)) return undefined
+  const out = {}
+  for (const [key, value] of Object.entries(filters)) {
+    if (typeof key !== 'string' || key.trim() === '') {
+      throw new AdapterValidationError('filters keys must be non-empty strings', { field: 'filters' })
+    }
+    if (value !== null && !['string', 'number', 'boolean'].includes(typeof value)) {
+      throw new AdapterValidationError('data-source:sql-readonly filters support equality primitives only', {
+        field: `filters.${key}`,
+      })
+    }
+    out[key] = value
+  }
+  return out
+}
+
 // Fail-closed guard: the host injects the read-only data-source facade as
 // `context.api.dataSources`. If it is absent (e.g. the plugin allowlist key drifted), surface a
 // clear error instead of a confusing `undefined` access. Mirrors the staging adapter's
@@ -156,10 +177,13 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal }
       const request = normalizeReadRequest(input)
       const api = getDataSourcesApi(context)
       const offset = parseOffsetCursor(request.cursor)
+      const selectOptions = { limit: request.limit, offset }
+      const where = normalizeEqualityFilters(request.filters)
+      if (where) selectOptions.where = where
       const result = await api.select(
         dataSourceId,
         request.object,
-        { limit: request.limit, offset },
+        selectOptions,
         principal
       )
       if (result && result.error) {

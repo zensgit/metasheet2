@@ -92,6 +92,42 @@ async function main() {
     assert.equal(f.calls.select[0].table, 'public.items')
   }
 
+  // 4b. Equality filters are forwarded as `where`, enabling parameterized flat reads for
+  //     FileCode / parent-id lookups without raw SQL or full-table local filtering.
+  {
+    const f = fakeFacade()
+    const a = adapterWith(f, 'owner-42')
+    await a.read({
+      object: 'DN_PDM_PathExAttrInfo',
+      limit: 25,
+      cursor: '5',
+      filters: { FileCode: 'P-001', active: true, optional: null },
+    })
+    assert.deepEqual(f.calls.select[0].options, {
+      limit: 25,
+      offset: 5,
+      where: { FileCode: 'P-001', active: true, optional: null },
+    })
+  }
+
+  // 4c. Filters are equality-only primitives. Structured operators/arrays remain out of scope for
+  //     the readonly bridge; C2 gets parameterized equality reads, not a generic query surface.
+  {
+    const f = fakeFacade()
+    const a = adapterWith(f)
+    await assert.rejects(
+      () => a.read({ object: 'items', filters: { FileCode: { $like: 'P%' } } }),
+      /equality primitives only/,
+      'operator-shaped filter rejected',
+    )
+    await assert.rejects(
+      () => a.read({ object: 'items', filters: { FileCode: ['P-001'] } }),
+      /equality primitives only/,
+      'array filter rejected',
+    )
+    assert.equal(f.calls.select.length, 0, 'invalid filters fail before any facade read')
+  }
+
   // 5. Read-only-source guard now lives in the host facade and fires on EVERY read path: a facade
   //    that rejects a writable binding makes read / listObjects / getSchema / testConnection all fail
   //    closed — NOT only when testConnection() runs first (the dry-run/pipeline paths skip it).

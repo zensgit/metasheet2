@@ -1,5 +1,5 @@
 import type { DataSourceManager } from './DataSourceManager'
-import type { DbValue, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
+import type { DbValue, QueryOptions, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
 
 /**
  * Narrow, READ-ONLY data-source surface handed to the integration plugin so the Data
@@ -32,7 +32,7 @@ export interface DataSourceReadOnlyFacade {
   select(
     dataSourceId: string,
     table: string,
-    options: { limit?: number; offset?: number },
+    options: Pick<QueryOptions, 'limit' | 'offset' | 'where'>,
     principal: string | undefined
   ): Promise<QueryResult<Record<string, DbValue>>>
 }
@@ -152,10 +152,14 @@ export function createDataSourcePluginFacade(
     async select(dataSourceId, table, options, principal) {
       const { manager } = await authorize(dataSourceId, principal)
       // manager.select enforces the A5 row caps and is read-only; no write path is reachable here.
-      return manager.select<Record<string, DbValue>>(dataSourceId, table, {
+      const queryOptions: QueryOptions = {
         limit: options.limit,
         offset: options.offset,
-      })
+      }
+      if (options.where && Object.keys(options.where).length > 0) {
+        queryOptions.where = options.where
+      }
+      return manager.select<Record<string, DbValue>>(dataSourceId, table, queryOptions)
     },
   }
 }
