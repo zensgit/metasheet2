@@ -186,6 +186,48 @@ describe('RecordService', () => {
     )
   })
 
+  it('A-min-create: invokes the formula recalc hook once post-insert and merges formula values into the echo', async () => {
+    const service = new RecordService(pool, eventBus as any)
+    const hook = vi.fn(async (_q: unknown, _sid: string, ids: string[]) => [{ recordId: ids[0], data: { fld_total: 42 } }])
+    service.setFormulaRecalcHook(hook as any)
+
+    const result = await service.createRecord({
+      sheetId: 'sheet_ops',
+      data: { fld_title: 'Alpha' },
+      actorId: 'user_1',
+      capabilities: { ...fullCapabilities },
+    })
+
+    expect(hook).toHaveBeenCalledTimes(1)
+    expect(hook).toHaveBeenCalledWith(expect.any(Function), 'sheet_ops', [result.recordId])
+    // formula value merged into the response echo (route then applies the field-read mask)
+    expect(result.data).toEqual({ fld_title: 'Alpha', fld_total: 42 })
+  })
+
+  it('A-min-create: hook UNSET leaves create unchanged (no recalc, data = patch)', async () => {
+    const service = new RecordService(pool, eventBus as any)
+    const result = await service.createRecord({
+      sheetId: 'sheet_ops',
+      data: { fld_title: 'Alpha' },
+      actorId: 'user_1',
+      capabilities: { ...fullCapabilities },
+    })
+    expect(result.data).toEqual({ fld_title: 'Alpha' })
+  })
+
+  it('A-min-create: a hook failure does NOT fail the create (best-effort); echo falls back to patch', async () => {
+    const service = new RecordService(pool, eventBus as any)
+    service.setFormulaRecalcHook((async () => { throw new Error('boom') }) as any)
+    const result = await service.createRecord({
+      sheetId: 'sheet_ops',
+      data: { fld_title: 'Alpha' },
+      actorId: 'user_1',
+      capabilities: { ...fullCapabilities },
+    })
+    expect(result.recordId).toMatch(/^rec_/)
+    expect(result.data).toEqual({ fld_title: 'Alpha' }) // record committed; echo unmerged
+  })
+
   it('creates a record with normalized multiSelect values', async () => {
     pool = createMockPool({
       SELECT_FIELDS: {

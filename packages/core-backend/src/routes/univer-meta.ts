@@ -1676,6 +1676,60 @@ async function recalculateFormulaFields(
   return results
 }
 
+/**
+ * A-min-create (design #2255): compute a NEWLY created / submitted record's same-record formulas
+ * for the FIRST time, with lookup/rollup hydrated in-memory so a formula-over-lookup sees the
+ * actual value instead of the absent-on-reload `0`. Run only AFTER insert + meta_links exist.
+ * NO dependency gate — a fresh record computes ALL its formula fields once. Loads the record(s),
+ * hydrates via applyLookupRollup, then recalculateRecordFromData (writes back ONLY formula keys —
+ * lookup/rollup are NOT materialized). Same-record / same-sheet only (no foreign/related
+ * propagation — that is A-full, gated). Returns the recomputed formula values per record so the
+ * CALLER can surface them in echo/realtime under its own field-read mask. Route-layer: owns `req`
+ * + applyLookupRollup so the service layer never learns either. Reused by the createRecord hook
+ * (POST /records + import-xlsx) and the form-submit handler.
+ */
+async function recalcNewRecordFormulas(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+  recordIds: string[],
+): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
+  if (recordIds.length === 0) return []
+  const fields = await loadSheetFields({ query }, sheetId)
+  const formulaFieldIds = fields.filter((f) => f.type === 'formula').map((f) => f.id)
+  if (formulaFieldIds.length === 0) return []
+
+  const recordRes = await query(
+    'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+    [sheetId, recordIds],
+  )
+  const rows = (recordRes.rows as any[]).map((r) => ({
+    id: String(r.id),
+    version: Number(r.version ?? 1),
+    data: normalizeJson(r.data),
+  })) as UniverMetaRecord[]
+  if (rows.length === 0) return []
+
+  const relationalLinkFields = fields
+    .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
+    .filter((v): v is RelationalLinkField => !!v && !!v.cfg)
+  const linkValuesByRecord = await loadLinkValuesByRecord(query, recordIds, relationalLinkFields)
+  // Hydrate same-record lookup/rollup into row.data (perm-scoped foreign read inside).
+  await applyLookupRollup(req, query, fields, rows, relationalLinkFields, linkValuesByRecord)
+
+  const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
+  for (const row of rows) {
+    const nextData = await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, row.id, row.data, fields)
+    if (!nextData) continue
+    const formulaData: Record<string, unknown> = {}
+    for (const fieldId of formulaFieldIds) {
+      if (fieldId in nextData) formulaData[fieldId] = nextData[fieldId]
+    }
+    results.push({ recordId: row.id, data: formulaData })
+  }
+  return results
+}
+
 async function applyLookupRollup(
   req: Request,
   query: QueryFn,
@@ -5944,6 +5998,8 @@ export function univerMetaRouter(): Router {
 
         const built = buildXlsxImportRecords(parsed, columnMapping.mapping)
         const recordService = new RecordService(pool, eventBus)
+        // A-min-create (#2255): import-xlsx inherits create-time formula-over-lookup recalc via createRecord.
+        recordService.setFormulaRecalcHook((q, sid, ids) => recalcNewRecordFormulas(req, q, sid, ids))
         if (yjsInvalidator) {
           recordService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
         }
@@ -7265,34 +7321,22 @@ export function univerMetaRouter(): Router {
           )
         : undefined
 
-      // Recalculate dependent formula fields after record update
+      // Recalculate the submitted record's formula fields (A-min-create #2255). Reuse the shared
+      // route helper: it hydrates same-record lookup/rollup FIRST so a formula-over-lookup computes
+      // against the actual value instead of the absent-on-reload `0`. NO dependency gate — the
+      // submitted record computes ALL its formulas once. Echo + realtime stay behind the D1 field
+      // mask (readableEchoFieldIds); `formulaEcho` carries the masked values into the broadcast.
+      const formulaEcho: Record<string, unknown> = {}
       try {
-        const changedFieldIds = Object.keys(patch)
-        if (changedFieldIds.length > 0) {
-          const depRes = await pool.query(
-            `SELECT DISTINCT field_id FROM formula_dependencies
-             WHERE (depends_on_field_id = ANY($1::text[]))
-               AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $2)
-               AND sheet_id = $2`,
-            [changedFieldIds, view.sheetId],
-          )
-          if (depRes.rows.length > 0) {
-            const recalculated = await multitableFormulaEngine.recalculateRecord(
-              pool.query.bind(pool),
-              view.sheetId,
-              record.id,
-              fields,
-            )
-            if (recalculated) {
-              // Surface freshly materialized formula values in the response/broadcast.
-              // record.data was already filtered + link-merged above, so overlay only
-              // visible formula fields rather than replacing it (avoids clobbering the
-              // normalized link values).
-              for (const field of fields) {
-                if (field.type === 'formula' && field.id in recalculated && readableEchoFieldIds.has(field.id)) {
-                  record.data[field.id] = recalculated[field.id]
-                }
-              }
+        const recomputed = await recalcNewRecordFormulas(req, pool.query.bind(pool), view.sheetId, [record.id])
+        const formulaValues = recomputed.find((entry) => entry.recordId === record.id)?.data
+        if (formulaValues) {
+          // record.data was already filtered + link-merged above; overlay only the visible formula
+          // fields (avoids clobbering normalized link values, and never surfaces a masked field).
+          for (const field of fields) {
+            if (field.type === 'formula' && field.id in formulaValues && readableEchoFieldIds.has(field.id)) {
+              record.data[field.id] = formulaValues[field.id]
+              formulaEcho[field.id] = formulaValues[field.id]
             }
           }
         }
@@ -7318,11 +7362,11 @@ export function univerMetaRouter(): Router {
         kind: 'record-updated',
         recordId: record.id,
         recordIds: [record.id],
-        fieldIds: Object.keys(patch),
+        fieldIds: [...new Set([...Object.keys(patch), ...Object.keys(formulaEcho)])],
         recordPatches: [{
           recordId: record.id,
           version: record.version,
-          patch,
+          patch: { ...patch, ...formulaEcho },
         }],
       })
 
@@ -8263,6 +8307,8 @@ export function univerMetaRouter(): Router {
         return res.status(401).json({ error: 'Authentication required' })
       }
       const recordService = new RecordService(pool, eventBus)
+      // A-min-create (#2255): compute the new record's same-record formula-over-lookup on create.
+      recordService.setFormulaRecalcHook((q, sid, ids) => recalcNewRecordFormulas(req, q, sid, ids))
       const result = await recordService.createRecord({
         sheetId,
         capabilities,
