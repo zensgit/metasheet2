@@ -1508,6 +1508,43 @@ function emptyDraft(): Draft {
 }
 
 function draftConfigFromAction(type: AutomationActionType, config: Record<string, unknown>): DraftActionConfig {
+  if (type === 'update_record') {
+    const fields = isPlainRecord(config.fields)
+      ? config.fields
+      : isPlainRecord(config.fieldUpdates)
+        ? config.fieldUpdates
+        : {}
+    const fieldUpdates = Array.isArray(config.fieldUpdates)
+      ? config.fieldUpdates
+      : Object.entries(fields).map(([fieldId, value]) => ({ fieldId, value: String(value ?? '') }))
+    return { ...config, fieldUpdates }
+  }
+  if (type === 'create_record') {
+    const data = isPlainRecord(config.data)
+      ? config.data
+      : isPlainRecord(config.fieldValues)
+        ? config.fieldValues
+        : {}
+    const fieldValues = Array.isArray(config.fieldValues)
+      ? config.fieldValues
+      : Object.entries(data).map(([fieldId, value]) => ({ fieldId, value: String(value ?? '') }))
+    return {
+      ...config,
+      targetSheetId: typeof config.sheetId === 'string' ? config.sheetId : typeof config.targetSheetId === 'string' ? config.targetSheetId : '',
+      fieldValues,
+    }
+  }
+  if (type === 'send_notification') {
+    return {
+      ...config,
+      userId: Array.isArray(config.userIds)
+        ? config.userIds.join(', ')
+        : typeof config.userId === 'string'
+          ? config.userId
+          : '',
+      message: typeof config.message === 'string' ? config.message : '',
+    }
+  }
   if (type === 'send_dingtalk_group_message') {
     return {
       ...config,
@@ -1760,6 +1797,22 @@ function parseUserIdsText(value: unknown): string[] {
     .split(/[\n,]+/)
     .map((entry) => entry.trim())
     .filter(Boolean)
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function fieldPairsToRecord(value: unknown): Record<string, unknown> {
+  if (!Array.isArray(value)) return {}
+  const fields: Record<string, unknown> = {}
+  for (const pair of value) {
+    if (!isPlainRecord(pair)) continue
+    const fieldId = typeof pair.fieldId === 'string' ? pair.fieldId.trim() : ''
+    if (!fieldId) continue
+    fields[fieldId] = pair.value ?? ''
+  }
+  return fields
 }
 
 function parseGroupDestinationIds(value: unknown): string[] {
@@ -2363,6 +2416,34 @@ function buildPayload(): Partial<AutomationRule> {
     triggerConfig.cron = cronPreset.value
   }
   const actions = d.actions.map((action) => {
+    if (action.type === 'update_record') {
+      return {
+        type: action.type,
+        config: {
+          fields: fieldPairsToRecord(action.config.fieldUpdates),
+        },
+      }
+    }
+    if (action.type === 'create_record') {
+      return {
+        type: action.type,
+        config: {
+          sheetId: typeof action.config.targetSheetId === 'string' && action.config.targetSheetId.trim()
+            ? action.config.targetSheetId.trim()
+            : undefined,
+          data: fieldPairsToRecord(action.config.fieldValues),
+        },
+      }
+    }
+    if (action.type === 'send_notification') {
+      return {
+        type: action.type,
+        config: {
+          userIds: parseUserIdsText(action.config.userId),
+          message: typeof action.config.message === 'string' ? action.config.message.trim() : '',
+        },
+      }
+    }
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
       const destinationIdFieldPaths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
