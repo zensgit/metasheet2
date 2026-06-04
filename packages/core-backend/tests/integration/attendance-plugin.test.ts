@@ -3029,6 +3029,120 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④ C3 — comp_time leave approval deducts balance FIFO; insufficient blocks (422) with no deduction; replay no double-deduct', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const uOk = `attendance-c3-ok-${runSuffix}`
+    const uShort = `attendance-c3-short-${runSuffix}`
+    const uFifo = `attendance-c3-fifo-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdRequestIds: string[] = []
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenFor = async (uid: string) => {
+        const r = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+        return (r.body as { token?: string } | undefined)?.token
+      }
+      const tokenOk = await tokenFor(uOk)
+      const tokenShort = await tokenFor(uShort)
+      const tokenFifo = await tokenFor(uFifo)
+      if (!tokenOk || !tokenShort || !tokenFifo) return
+      const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
+
+      // comp_time leave type (explicit code='comp_time'); idempotent across reruns (409 -> look it up).
+      const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr(tokenOk), body: JSON.stringify({ code: 'comp_time', name: `Comp Time ${runSuffix}`, paid: false, requiresApproval: true }) })
+      expect([201, 409]).toContain(ltRes.status)
+      let leaveTypeId = (ltRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!leaveTypeId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers: { Authorization: `Bearer ${tokenOk}` } })
+        const items = (list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []
+        leaveTypeId = items.find(i => i.code === 'comp_time')?.id
+      }
+      expect(leaveTypeId).toBeTruthy()
+
+      const insertLot = async (userId: string, opts: { amount: number; remaining: number; expiresAt: string | null; grantedAt: string; tag: string }) => {
+        const r = await pool.query(
+          `INSERT INTO attendance_leave_balances
+             (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, expires_at)
+           VALUES ('default', $1, 'comp_time', $2, $3, 'overtime_conversion', $4, 'active', $5, $6) RETURNING id`,
+          [userId, opts.amount, opts.remaining, `c3:${runSuffix}:${opts.tag}`, opts.grantedAt, opts.expiresAt],
+        )
+        return r.rows[0].id as string
+      }
+      const createLeave = async (token: string, workDate: string, minutes: number) => {
+        const r = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr(token), body: JSON.stringify({ workDate, requestType: 'leave', leaveTypeId, minutes }) })
+        expect(r.status).toBe(201)
+        const id = (r.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+        expect(id).toBeTruthy()
+        createdRequestIds.push(id as string)
+        return id as string
+      }
+      const approve = (token: string, id: string) => requestJson(`${baseUrl}/api/attendance/requests/${id}/approve`, { method: 'POST', headers: hdr(token), body: JSON.stringify({ comment: 'ok' }) })
+      const lotRow = async (id: string) => (await pool.query('SELECT remaining_minutes, status FROM attendance_leave_balances WHERE id = $1', [id])).rows[0] as { remaining_minutes: number; status: string }
+      const deductEvents = async (reqId: string) => (await pool.query(
+        `SELECT balance_id, delta_minutes, event_type FROM attendance_leave_balance_events
+           WHERE source_type = 'comp_time_leave' AND source_id = $1 ORDER BY delta_minutes ASC`,
+        [reqId],
+      )).rows as { balance_id: string; delta_minutes: number; event_type: string }[]
+
+      // (a) sufficient → FIFO across two lots. Lot A expires sooner (consumed first); Lot B no-expiry.
+      const lotA = await insertLot(uOk, { amount: 120, remaining: 120, expiresAt: '2099-06-01', grantedAt: '2026-01-01', tag: 'A' })
+      const lotB = await insertLot(uOk, { amount: 120, remaining: 120, expiresAt: null, grantedAt: '2026-02-01', tag: 'B' })
+      const reqOk = await createLeave(tokenOk, '2026-09-10', 180)
+      expect((await approve(tokenOk, reqOk)).status).toBe(200)
+      expect(await lotRow(lotA)).toMatchObject({ remaining_minutes: 0, status: 'exhausted' })
+      expect(await lotRow(lotB)).toMatchObject({ remaining_minutes: 60, status: 'active' })
+      const evOk = await deductEvents(reqOk)
+      expect(evOk.map(e => ({ balance_id: e.balance_id, delta: Number(e.delta_minutes), type: e.event_type }))).toEqual([
+        { balance_id: lotA, delta: -120, type: 'deduct' }, // FIFO: soonest-expiry lot drained first
+        { balance_id: lotB, delta: -60, type: 'deduct' },
+      ])
+
+      // (c) replay: re-approving the resolved request is rejected; balance + events unchanged.
+      expect((await approve(tokenOk, reqOk)).status).toBe(400)
+      expect(await lotRow(lotA)).toMatchObject({ remaining_minutes: 0, status: 'exhausted' })
+      expect(await lotRow(lotB)).toMatchObject({ remaining_minutes: 60, status: 'active' })
+      expect(await deductEvents(reqOk)).toHaveLength(2)
+
+      // (b) insufficient → 422, approval blocked, request stays pending, balance untouched, no deduct event.
+      const lotShort = await insertLot(uShort, { amount: 60, remaining: 60, expiresAt: null, grantedAt: '2026-01-01', tag: 'S' })
+      const reqShort = await createLeave(tokenShort, '2026-09-11', 120)
+      const shortRes = await approve(tokenShort, reqShort)
+      expect(shortRes.status).toBe(422)
+      expect((shortRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('COMP_TIME_BALANCE_INSUFFICIENT')
+      const reqRow = (await pool.query('SELECT status FROM attendance_requests WHERE id = $1', [reqShort])).rows[0] as { status: string } | undefined
+      expect(reqRow?.status).toBe('pending')
+      expect(await lotRow(lotShort)).toMatchObject({ remaining_minutes: 60, status: 'active' })
+      expect(await deductEvents(reqShort)).toHaveLength(0)
+
+      // (d) FIFO tiebreak by granted_at among NULL-expiry lots — this is the ordering that actually
+      // fires in production today (every C2 grant has expires_at=NULL, so all lots fall in the
+      // NULLS-LAST bucket and only granted_at ASC discriminates). Older grant must drain first.
+      const lotOld = await insertLot(uFifo, { amount: 120, remaining: 120, expiresAt: null, grantedAt: '2026-01-01', tag: 'old' })
+      const lotNew = await insertLot(uFifo, { amount: 120, remaining: 120, expiresAt: null, grantedAt: '2026-02-01', tag: 'new' })
+      const reqFifo = await createLeave(tokenFifo, '2026-09-12', 180)
+      expect((await approve(tokenFifo, reqFifo)).status).toBe(200)
+      expect(await lotRow(lotOld)).toMatchObject({ remaining_minutes: 0, status: 'exhausted' })
+      expect(await lotRow(lotNew)).toMatchObject({ remaining_minutes: 60, status: 'active' })
+      expect((await deductEvents(reqFifo)).map(e => ({ balance_id: e.balance_id, delta: Number(e.delta_minutes) }))).toEqual([
+        { balance_id: lotOld, delta: -120 }, // oldest grant drained first
+        { balance_id: lotNew, delta: -60 },
+      ])
+    } finally {
+      await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])', [[uOk, uShort, uFifo]]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])', [[uOk, uShort, uFifo]]).catch(() => undefined)
+      if (createdRequestIds.length > 0) {
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::text[])', [createdRequestIds]).catch(() => undefined)
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('rejects non-UUID shift references for rotation rules, including UUID-like shift names', async () => {
     if (!baseUrl) return
 
