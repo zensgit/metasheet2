@@ -236,15 +236,14 @@
             <div class="meta-rule-editor__action-header">
               <span class="meta-rule-editor__action-num">{{ idx + 1 }}.</span>
               <select v-model="action.type" class="meta-rule-editor__select" @change="onDraftActionTypeChange(action)">
-                <option value="update_record">{{ automationActionTypeLabel('update_record', isZh) }}</option>
-                <option value="create_record">{{ automationActionTypeLabel('create_record', isZh) }}</option>
-                <option value="send_webhook">{{ automationActionTypeLabel('send_webhook', isZh) }}</option>
-                <option value="send_notification">{{ automationActionTypeLabel('send_notification', isZh) }}</option>
-                <option value="send_email">{{ automationActionTypeLabel('send_email', isZh) }}</option>
-                <option value="send_dingtalk_group_message">{{ automationActionTypeLabel('send_dingtalk_group_message', isZh) }}</option>
-                <option value="send_dingtalk_person_message">{{ automationActionTypeLabel('send_dingtalk_person_message', isZh) }}</option>
-                <option value="lock_record">{{ automationActionTypeLabel('lock_record', isZh) }}</option>
-                <option value="wait_for_callback">{{ automationActionTypeLabel('wait_for_callback', isZh) }}</option>
+                <option
+                  v-for="type in selectableActionTypes(action.type)"
+                  :key="type"
+                  :value="type"
+                  :disabled="isUnsupportedSelectableActionType(type)"
+                >
+                  {{ automationActionTypeLabel(type, isZh) }}
+                </option>
               </select>
               <div class="meta-rule-editor__action-btns">
                 <button v-if="idx > 0" class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="moveAction(idx, -1)" :title="automationLabel('editor.moveUpTitle', isZh)">&#x2191;</button>
@@ -1098,6 +1097,30 @@ const copiedPreviewKey = ref('')
 let personRecipientSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 const { isZh } = useLocale()
+
+const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
+  'update_record',
+  'create_record',
+  'send_webhook',
+  'send_notification',
+  'send_email',
+  'send_dingtalk_group_message',
+  'send_dingtalk_person_message',
+  'wait_for_callback',
+]
+
+const UNSUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = ['lock_record']
+
+function isUnsupportedSelectableActionType(type: AutomationActionType): boolean {
+  return UNSUPPORTED_SELECTABLE_ACTION_TYPES.includes(type)
+}
+
+function selectableActionTypes(currentType: AutomationActionType): AutomationActionType[] {
+  if (isUnsupportedSelectableActionType(currentType)) {
+    return [...SUPPORTED_SELECTABLE_ACTION_TYPES, currentType]
+  }
+  return SUPPORTED_SELECTABLE_ACTION_TYPES
+}
 
 const formViews = computed(() => (props.views ?? []).filter((view) =>
   view.type === 'form' && (!view.sheetId || view.sheetId === props.sheetId),

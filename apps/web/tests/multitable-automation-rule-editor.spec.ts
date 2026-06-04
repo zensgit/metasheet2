@@ -308,6 +308,43 @@ describe('MetaAutomationRuleEditor', () => {
       .toBe('记录 {{recordId}} 已变更。状态：{{record.status}}')
   })
 
+  it('does not offer unsupported lock_record actions for new automation rules', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    const actionValues = Array.from(actionSelect.options).map((option) => option.value)
+    expect(actionValues).toContain('update_record')
+    expect(actionValues).toContain('create_record')
+    expect(actionValues).toContain('send_webhook')
+    expect(actionValues).toContain('send_notification')
+    expect(actionValues).toContain('send_email')
+    expect(actionValues).toContain('send_dingtalk_group_message')
+    expect(actionValues).toContain('send_dingtalk_person_message')
+    expect(actionValues).toContain('wait_for_callback')
+    expect(actionValues).not.toContain('lock_record')
+  })
+
+  it('keeps existing lock_record actions visible but disabled for compatibility', async () => {
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      rule: fakeRule({
+        actionType: 'lock_record',
+        actionConfig: { locked: true },
+        actions: [{ type: 'lock_record', config: { locked: true } }],
+      }),
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    const lockOption = Array.from(actionSelect.options).find((option) => option.value === 'lock_record')
+    expect(actionSelect.value).toBe('lock_record')
+    expect(lockOption).toBeTruthy()
+    expect(lockOption?.disabled).toBe(true)
+  })
+
   it('localizes test-run warning and confirm text while leaving runtime status messages raw', async () => {
     useLocale().setLocale('zh-CN')
     const tested = vi.fn()
