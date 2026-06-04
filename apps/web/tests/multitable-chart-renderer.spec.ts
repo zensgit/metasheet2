@@ -75,6 +75,13 @@ const tableData: ChartData = {
   ],
 }
 
+const restrictedBarData: ChartData = {
+  chartType: 'bar',
+  dataPoints: [],
+  total: 0,
+  metadata: { restricted: true, recordCount: 0 },
+}
+
 describe('MetaChartRenderer', () => {
   // jsdom has no ResizeObserver — stub it so the renderer's resize wiring is exercisable.
   const realResizeObserver = (globalThis as unknown as { ResizeObserver?: unknown }).ResizeObserver
@@ -184,6 +191,28 @@ describe('MetaChartRenderer', () => {
     expect(affixes[1].textContent).toBe('USD')
   })
 
+  it('renders restricted chart data as a permission notice without initializing ECharts', async () => {
+    const { container } = mount({ chartData: restrictedBarData })
+    await flushPromises()
+
+    expect(container.querySelector('[data-chart-restricted]')).toBeTruthy()
+    expect(container.querySelector('[data-chart-canvas]')).toBeNull()
+    expect(container.textContent).toContain('Chart data restricted')
+    expect(container.textContent).toContain('fields you cannot read')
+    expect(mocks.init).not.toHaveBeenCalled()
+    expect(mocks.setOption).not.toHaveBeenCalled()
+  })
+
+  it('localizes the restricted chart notice', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mount({ chartData: restrictedBarData })
+    await flushPromises()
+
+    expect(container.querySelector('[data-chart-restricted]')).toBeTruthy()
+    expect(container.textContent).toContain('图表数据受限')
+    expect(container.textContent).toContain('无权读取')
+  })
+
   it('shows the HTML title from display config (single source, no ECharts title)', async () => {
     const config: ChartDisplayConfig = { title: 'Sales Overview' }
     const { container } = mount({ chartData: barData, displayConfig: config })
@@ -238,6 +267,18 @@ describe('MetaChartRenderer', () => {
     state.chartData = numberData
     await flushPromises()
     expect(mocks.dispose).toHaveBeenCalled()
+  })
+
+  it('disposes the canvas when switching bar → restricted', async () => {
+    const { container, state } = mountReactive({ chartData: barData })
+    await flushPromises()
+    expect(mocks.init).toHaveBeenCalledTimes(1)
+
+    state.chartData = restrictedBarData
+    await flushPromises()
+    expect(mocks.dispose).toHaveBeenCalled()
+    expect(container.querySelector('[data-chart-restricted]')).toBeTruthy()
+    expect(container.querySelector('[data-chart-canvas]')).toBeNull()
   })
 
   it('wires the resize observer to chart.resize()', async () => {

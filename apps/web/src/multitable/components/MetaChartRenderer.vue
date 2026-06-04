@@ -2,8 +2,13 @@
   <div class="meta-chart" :data-chart-type="chartData.chartType">
     <div v-if="displayConfig?.title" class="meta-chart__title">{{ displayConfig.title }}</div>
 
+    <div v-if="isRestricted" class="meta-chart__restricted" data-chart-restricted="true">
+      <strong>{{ viewRenderLabel('chart.restrictedTitle', isZh) }}</strong>
+      <span>{{ viewRenderLabel('chart.restrictedHint', isZh) }}</span>
+    </div>
+
     <!-- bar / line / pie → ECharts canvas. Title + (pie) legend stay as HTML chrome. -->
-    <template v-if="isEChartsType">
+    <template v-else-if="isEChartsType">
       <div class="meta-chart__plot" :class="{ 'meta-chart__plot--pie': chartData.chartType === 'pie' }">
         <div ref="chartEl" class="meta-chart__echarts" data-chart-canvas="true"></div>
         <div
@@ -76,6 +81,7 @@ const isEChartsType = computed(() =>
   || props.chartData.chartType === 'line'
   || props.chartData.chartType === 'pie',
 )
+const isRestricted = computed(() => props.chartData.metadata?.restricted === true)
 
 // Legend swatch fallback color — same palette as buildChartOption so canvas + HTML legend match.
 function defaultColor(idx: number): string {
@@ -102,6 +108,10 @@ function teardownChart(): void {
 }
 
 function renderChart(): void {
+  if (isRestricted.value) {
+    teardownChart()
+    return
+  }
   // non-chart type (number/table) → release any canvas instance + observer
   if (!isEChartsType.value) {
     teardownChart()
@@ -133,6 +143,23 @@ onBeforeUnmount(teardownChart)
   margin-bottom: 8px;
   text-align: center;
 }
+
+.meta-chart__restricted {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  gap: 6px;
+  padding: 24px 18px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  background: #f8fafc;
+  text-align: center;
+}
+
+.meta-chart__restricted strong { color: #0f172a; font-size: 14px; }
+.meta-chart__restricted span { color: #64748b; font-size: 12px; }
 
 .meta-chart__plot { width: 100%; }
 .meta-chart__plot--pie { display: flex; align-items: flex-start; gap: 16px; }
