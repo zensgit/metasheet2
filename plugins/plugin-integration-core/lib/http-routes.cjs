@@ -23,6 +23,9 @@ const ROUTES = [
   ['GET', '/api/integration/pipelines/:id', 'pipelinesGet'],
   ['POST', '/api/integration/pipelines/:id/run', 'pipelinesRun'],
   ['POST', '/api/integration/pipelines/:id/dry-run', 'pipelinesDryRun'],
+  ['GET', '/api/integration/table-actions', 'tableActionsList'],
+  ['POST', '/api/integration/table-actions/:actionId/dry-run', 'tableActionDryRun'],
+  ['POST', '/api/integration/table-actions/:actionId/apply', 'tableActionApply'],
   ['POST', '/api/integration/templates/preview', 'templatesPreview'],
   ['POST', '/api/integration/templates/derive', 'templatesDerive'],
   ['GET', '/api/integration/staging/descriptors', 'stagingDescriptors'],
@@ -50,6 +53,13 @@ const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-template
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
 const { deriveK3MaterialTemplateDraft, summarizeTemplateForEvidence, TemplateDeriveError } = require('./connector-template-derive.cjs')
 const { validateRecord } = require('./validator.cjs')
+const {
+  PLM_STOCK_PREPARATION_ACTION_ID,
+  StockPreparationTableActionError,
+  applyStockPreparationAction,
+  createStockPreparationTableActionRegistry,
+  dryRunStockPreparationAction,
+} = require('./stock-preparation-table-actions.cjs')
 
 class HttpRouteError extends Error {
   constructor(status, code, message, details = {}) {
@@ -113,6 +123,7 @@ function inferErrorCode(error) {
 function inferHttpStatus(error) {
   const name = error && error.name ? String(error.name) : ''
   if (inferDataSourceBridgeErrorCode(error)) return 422
+  if (error instanceof StockPreparationTableActionError) return error.status
   if (/NotFound/.test(name)) return 404
   if (/Conflict/.test(name)) return 409
   if (/Validation|Transform|Watermark|DeadLetter/.test(name)) return 400
@@ -291,6 +302,20 @@ function publicRunInput(body = {}) {
     if (input[key] === undefined || input[key] === null || input[key] === '') delete input[key]
   }
   return input
+}
+
+const VALID_TABLE_ACTION_BODY_KEYS = new Set(['parameters', 'confirm'])
+
+function normalizeTableActionBody(body = {}) {
+  if (!isPlainObject(body)) {
+    throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', 'request body must be an object')
+  }
+  for (const key of Object.keys(body)) {
+    if (!VALID_TABLE_ACTION_BODY_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return body
 }
 
 function redactDeadLetter(deadLetter, fullPayload = false) {
@@ -995,7 +1020,7 @@ async function persistExternalSystemTestResult(externalSystems, req, system, res
   }))
 }
 
-function createHandlers(services) {
+function createHandlers(services, options = {}) {
   function requireService(name, methods) {
     const service = services[name]
     if (!service) throw new Error(`registerIntegrationRoutes: ${name} is required`)
@@ -1013,6 +1038,40 @@ function createHandlers(services) {
   const runner = requireService('pipelineRunner', ['runPipeline'])
   const deadLetters = requireService('deadLetterStore', ['listDeadLetters'])
   const stagingInstaller = requireService('stagingInstaller', ['installStaging', 'listStagingDescriptors'])
+  const context = options.context || {}
+  const configuredTableActions = context && context.config
+    ? (context.config.stockPreparationTableActions || context.config.tableActions)
+    : undefined
+  const tableActions = createStockPreparationTableActionRegistry({
+    actions: configuredTableActions,
+  })
+
+  function getMultitableRecordsApi() {
+    const records = context && context.api && context.api.multitable && context.api.multitable.records
+    if (!records || typeof records.queryRecords !== 'function') {
+      throw new HttpRouteError(501, 'TABLE_ACTION_RECORDS_API_UNAVAILABLE', 'multitable records API is not available')
+    }
+    return records
+  }
+
+  async function loadTableActionSourceAdapter(req, action) {
+    const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+      ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+      : externalSystems.getExternalSystem.bind(externalSystems)
+    const system = await loadSystem(scopedInput(req, { id: action.source.externalSystemId }))
+    if (!system || system.kind !== action.source.kind) {
+      throw new HttpRouteError(422, 'TABLE_ACTION_SOURCE_INVALID', `table action source must be ${action.source.kind}`, {
+        actionId: action.actionId,
+        sourceSystemId: action.source.externalSystemId,
+        actualKind: system && system.kind,
+      })
+    }
+    return adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
+  }
+
+  function applyPermissionForUser(user) {
+    return isAdmin(user) ? 'admin' : 'write'
+  }
 
   const handlers = {
     async status(req, res) {
@@ -1170,6 +1229,48 @@ function createHandlers(services) {
         triggeredBy: 'api',
         dryRun: true,
       })), 200)
+    },
+
+    async tableActionsList(req, res) {
+      requireAccess(req, 'read')
+      const query = requestQuery(req)
+      return sendOk(res, await tableActions.listTableActions(scopedInput(req, {
+        actionId: query.actionId,
+      })))
+    },
+
+    async tableActionDryRun(req, res) {
+      requireAccess(req, 'read')
+      const body = normalizeTableActionBody(requestBody(req))
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const action = await tableActions.getTableAction(scopedInput(req, { actionId }))
+      const sourceAdapter = await loadTableActionSourceAdapter(req, action)
+      return sendOk(res, await dryRunStockPreparationAction({
+        action,
+        parameters: body.parameters,
+        sourceAdapter,
+        recordsApi: getMultitableRecordsApi(),
+        tokenStore: context.storage,
+      }))
+    },
+
+    async tableActionApply(req, res) {
+      const user = requireAccess(req, 'write')
+      const body = normalizeTableActionBody(requestBody(req))
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const action = await tableActions.getTableAction(scopedInput(req, { actionId }))
+      const sourceAdapter = await loadTableActionSourceAdapter(req, action)
+      const confirm = isPlainObject(body.confirm) ? body.confirm : {}
+      return sendOk(res, await applyStockPreparationAction({
+        action,
+        parameters: body.parameters,
+        dryRunToken: confirm.dryRunToken,
+        acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
+        permission: applyPermissionForUser(user),
+        sourceAdapter,
+        recordsApi: getMultitableRecordsApi(),
+        tokenStore: context.storage,
+      }))
     },
 
     async templatesPreview(req, res) {
@@ -1333,7 +1434,7 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
   if (!context || !context.api || !context.api.http || typeof context.api.http.addRoute !== 'function') {
     throw new Error('registerIntegrationRoutes: context.api.http.addRoute is required')
   }
-  const handlers = createHandlers(services || {})
+  const handlers = createHandlers(services || {}, { context })
   const registered = []
   for (const [method, path, handlerName] of ROUTES) {
     const handler = handlers[handlerName]

@@ -219,9 +219,9 @@ Acceptance locks:
 - Partial failure is reported with row-level decisions.
 - Re-running the same accepted plan is idempotent.
 
-### 🟡 C5-0 - Parameterized workbench action design (this PR)
+### ✅ C5-0 - Parameterized workbench action design (DONE - PR #2280, `d48936b2f`)
 
-Gated on: C4 + explicit opt-in.
+Gated on: C4 + explicit opt-in. Done in #2280.
 
 Scope:
 
@@ -248,7 +248,7 @@ Acceptance locks:
 - Dry-run/read and apply/write permissions are separated.
 - Issue/customer evidence stays values-free.
 
-### ⬜ C5-1 - Backend parameterized action routes
+### 🟡 C5-1 - Backend parameterized action routes (this PR)
 
 Gated on: C5-0 accepted + explicit opt-in.
 
