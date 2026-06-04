@@ -51,7 +51,7 @@ const fakeChartData: ChartData = {
   ],
 }
 
-function mockClient(dashboards: Dashboard[] = [], charts: ChartConfig[] = []) {
+function mockClient(dashboards: Dashboard[] = [], charts: ChartConfig[] = [], chartData: ChartData = fakeChartData) {
   const ok = (body: unknown) => new Response(JSON.stringify({ data: body }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   const noContent = () => new Response(null, { status: 204 })
 
@@ -61,7 +61,7 @@ function mockClient(dashboards: Dashboard[] = [], charts: ChartConfig[] = []) {
       return ok({ dashboards })
     }
     if (method === 'GET' && url.includes('/charts') && url.includes('/data')) {
-      return ok(fakeChartData)
+      return ok(chartData)
     }
     if (method === 'GET' && url.includes('/charts')) {
       return ok({ charts })
@@ -115,6 +115,22 @@ describe('MetaDashboardView', () => {
     expect(grid).toBeTruthy()
     const panels = container.querySelectorAll('[data-panel-id]')
     expect(panels.length).toBe(1)
+  })
+
+  it('renders a restricted chart-data notice in a dashboard panel', async () => {
+    const restrictedData: ChartData = {
+      chartType: 'bar',
+      dataPoints: [],
+      total: 0,
+      metadata: { restricted: true, recordCount: 0 },
+    }
+    const { client } = mockClient([fakeDashboard()], [fakeChart()], restrictedData)
+    const { container } = mount({ sheetId: 'sheet_1', client })
+    await flushPromises()
+
+    expect(container.querySelector('[data-chart-restricted]')).toBeTruthy()
+    expect(container.textContent).toContain('Chart data restricted')
+    expect(container.textContent).toContain('fields you cannot read')
   })
 
   it('creates a new dashboard', async () => {

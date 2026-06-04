@@ -88,6 +88,8 @@ export type MetaViewRenderLabelKey =
   | 'dashboard.noCharts'
   | 'chart.label'
   | 'chart.value'
+  | 'chart.restrictedTitle'
+  | 'chart.restrictedHint'
 
 export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'common.loading',
@@ -169,6 +171,8 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'dashboard.noCharts',
   'chart.label',
   'chart.value',
+  'chart.restrictedTitle',
+  'chart.restrictedHint',
 ]
 
 const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
@@ -254,6 +258,11 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'dashboard.noCharts': { en: 'No charts available. Create a chart first.', zh: '暂无可用图表。请先创建一个图表。' },
   'chart.label': { en: 'Label', zh: '标签' },
   'chart.value': { en: 'Value', zh: '值' },
+  'chart.restrictedTitle': { en: 'Chart data restricted', zh: '图表数据受限' },
+  'chart.restrictedHint': {
+    en: 'This chart references fields you cannot read.',
+    zh: '此图表引用了你无权读取的字段。',
+  },
 }
 
 export function viewRenderLabel(key: MetaViewRenderLabelKey, isZh: boolean): string {
