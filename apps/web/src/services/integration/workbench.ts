@@ -779,6 +779,100 @@ export interface IntegrationDeadLetterReplayResult {
   [key: string]: unknown
 }
 
+export interface IntegrationTableActionParameter {
+  id: string
+  label?: string
+  type?: string
+  required?: boolean
+  trim?: boolean
+  binding?: Record<string, unknown>
+}
+
+export interface IntegrationTableActionMetadata {
+  actionId: string
+  kind: string
+  label: string
+  configured: boolean
+  parameters: IntegrationTableActionParameter[]
+  permissions?: {
+    dryRun?: string
+    apply?: string
+  }
+  evidence?: Record<string, unknown>
+}
+
+export interface IntegrationTableActionDryRunResult {
+  action?: IntegrationTableActionMetadata
+  status: string
+  dryRunToken?: string | null
+  revision?: string
+  canApply?: boolean
+  counts?: Record<string, number>
+  evidence?: Record<string, unknown>
+}
+
+export interface IntegrationTableActionApplyResult {
+  action?: IntegrationTableActionMetadata
+  status: string
+  permission?: string
+  dryRunRevision?: string
+  apply?: Record<string, unknown>
+  evidence?: Record<string, unknown>
+}
+
+export interface IntegrationTableActionRequestPayload {
+  parameters: Record<string, unknown>
+  confirm?: {
+    dryRunToken?: string
+    acceptManualConfirmHold?: boolean
+  }
+}
+
+export async function listIntegrationTableActions(scope: IntegrationScope = {}): Promise<IntegrationTableActionMetadata[]> {
+  const query = buildQueryString({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+  })
+  const response = await apiFetch(`/api/integration/table-actions${query ? `?${query}` : ''}`)
+  const data = await parseIntegrationResponse<IntegrationTableActionMetadata[]>(response)
+  return Array.isArray(data) ? data : []
+}
+
+export async function dryRunIntegrationTableAction(
+  actionId: string,
+  payload: IntegrationScope & Pick<IntegrationTableActionRequestPayload, 'parameters'>,
+): Promise<IntegrationTableActionDryRunResult> {
+  const query = buildQueryString({
+    tenantId: payload.tenantId,
+    workspaceId: payload.workspaceId,
+  })
+  const response = await apiFetch(`/api/integration/table-actions/${encodeURIComponent(actionId)}/dry-run${query ? `?${query}` : ''}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      parameters: payload.parameters,
+    }),
+  })
+  return parseIntegrationResponse<IntegrationTableActionDryRunResult>(response)
+}
+
+export async function applyIntegrationTableAction(
+  actionId: string,
+  payload: IntegrationScope & IntegrationTableActionRequestPayload,
+): Promise<IntegrationTableActionApplyResult> {
+  const query = buildQueryString({
+    tenantId: payload.tenantId,
+    workspaceId: payload.workspaceId,
+  })
+  const response = await apiFetch(`/api/integration/table-actions/${encodeURIComponent(actionId)}/apply${query ? `?${query}` : ''}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      parameters: payload.parameters,
+      confirm: payload.confirm,
+    }),
+  })
+  return parseIntegrationResponse<IntegrationTableActionApplyResult>(response)
+}
+
 // Only 'open' letters are replayable — the server enforces the same, but the UI
 // must not even offer replay for replayed/discarded letters (a second live ERP
 // write). Keep this in lock-step with the backend guard in pipeline-runner.cjs.
