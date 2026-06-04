@@ -11,9 +11,14 @@ const path = require('node:path')
 const {
   DECISIONS,
   StockPreparationConflictPlannerError,
+  __internals,
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-planner.cjs'))
+
+const {
+  STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 
 function row(overrides = {}) {
   const componentSourceId = overrides.componentSourceId || 'PART-A'
@@ -50,6 +55,10 @@ function assertNoHumanFields(payload, message) {
   for (const field of ['materialType', 'blankType', 'stockPreparationStatus', 'demandDate', 'leadTimeDays', 'notes', 'procurementReply', 'warehouseConfirmation']) {
     assert.equal(Object.prototype.hasOwnProperty.call(payload, field), false, `${message}: ${field} must not be present`)
   }
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value))
 }
 
 function testAddUpdateSkipInactive() {
@@ -180,6 +189,45 @@ function testMissingKeysAndStrategyGuards() {
     StockPreparationConflictPlannerError,
     'delete missing rows rejected',
   )
+  assert.throws(
+    () => planStockPreparationConflicts({ expandedRows: [], existingRows: [], plannedAt: 'not-a-date' }),
+    StockPreparationConflictPlannerError,
+    'invalid plannedAt string rejected',
+  )
+  const plannedAtPlan = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [],
+    plannedAt: '2026-06-04T09:00:00Z',
+  })
+  assert.equal(plannedAtPlan.plannedAt, '2026-06-04T09:00:00.000Z', 'valid plannedAt string is normalized')
+}
+
+function testHumanFieldWhitelistOrderIndependent() {
+  const template = clone(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
+  const humanFields = template.fields.filter((field) => field.ownership === 'human_preserved').reverse()
+  const systemFields = template.fields.filter((field) => field.ownership !== 'human_preserved')
+  template.fields = [...humanFields, ...systemFields]
+
+  const plan = planStockPreparationConflicts({
+    template,
+    expandedRows: [row({ componentSourceId: 'PART-ORDER', pathTokens: ['PART-ORDER'] })],
+    existingRows: [],
+    runId: 'run-order',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+
+  assert.equal(plan.valid, true)
+  assert.equal(plan.counts.add, 1, 'same human field set is accepted even when template order changes')
+  assert.equal(__internals.sameStringSet(['a', 'b', 'c'], ['a', 'a', 'b']), false, 'duplicate right-side entries are not set-equal')
+}
+
+function testPrimitiveValueComparisonFastPath() {
+  assert.equal(__internals.valuesEqual(undefined, null), true, 'undefined and null retain legacy equivalence')
+  assert.equal(__internals.valuesEqual(1, 1), true)
+  assert.equal(__internals.valuesEqual(1, '1'), false, 'primitive comparisons stay type-sensitive')
+  assert.equal(__internals.valuesEqual(true, false), false)
+  assert.equal(__internals.valuesEqual({ a: 1 }, { a: 1 }), true, 'object fallback keeps structural comparison')
+  assert.equal(__internals.valuesEqual(['a'], ['a']), true, 'array fallback keeps structural comparison')
 }
 
 function testValuesFreeEvidence() {
@@ -207,6 +255,8 @@ function main() {
   testRowErrorsDoNotAbortGoodRows()
   testDuplicatesAndConflictsFailClosed()
   testMissingKeysAndStrategyGuards()
+  testHumanFieldWhitelistOrderIndependent()
+  testPrimitiveValueComparisonFastPath()
   testValuesFreeEvidence()
 
   console.log('stock-preparation-conflict-planner.test.cjs OK')
