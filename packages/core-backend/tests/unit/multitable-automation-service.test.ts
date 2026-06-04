@@ -349,6 +349,7 @@ import {
   preflightDingTalkAutomationUpdate,
   serializeAutomationRule,
 } from '../../src/multitable/automation-service'
+import { ALL_ACTION_TYPES } from '../../src/multitable/automation-actions'
 
 describe('M5 — Automation route helpers', () => {
   describe('serializeAutomationRule', () => {
@@ -498,6 +499,14 @@ describe('M5 — Automation route helpers', () => {
       ).toThrow(AutomationRuleValidationError)
     })
 
+    it('accepts every canonical automation action type (drift guard)', () => {
+      for (const actionType of ALL_ACTION_TYPES) {
+        expect(
+          parseCreateRuleInput({ triggerType: 'record.created', actionType }, null).actionType,
+        ).toBe(actionType)
+      }
+    })
+
     it('throws AutomationRuleValidationError for malformed condition payloads', () => {
       expect(() =>
         parseCreateRuleInput(
@@ -611,6 +620,12 @@ describe('M5 — Automation route helpers', () => {
     it('accepts the legacy `notify` and `update_field` action types', () => {
       expect(parseUpdateRuleInput({ actionType: 'notify' })?.actionType).toBe('notify')
       expect(parseUpdateRuleInput({ actionType: 'update_field' })?.actionType).toBe('update_field')
+    })
+
+    it('accepts every canonical automation action type (drift guard)', () => {
+      for (const actionType of ALL_ACTION_TYPES) {
+        expect(parseUpdateRuleInput({ actionType })?.actionType).toBe(actionType)
+      }
     })
 
     it('A6-1: forwards executionMode (incl. explicit null) as a touched field', () => {
