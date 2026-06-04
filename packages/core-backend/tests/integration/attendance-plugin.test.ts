@@ -2920,6 +2920,115 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④ C2 — overtime approval credits a comp-time grant lot (opt-in OFF=no credit; ON=lot+event; replay no double-credit)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-c2-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    let token: string | undefined
+    let originalSettings: Record<string, unknown> = {}
+    const createdRequestIds: string[] = []
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) return
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+
+      const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
+      originalSettings = ((origRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+
+      const overtimeRuleRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, { method: 'POST', headers, body: JSON.stringify({ name: `c2-ot-${runSuffix}`, minMinutes: 30 }) })
+      expect([201, 409]).toContain(overtimeRuleRes.status)
+      let overtimeRuleId = (overtimeRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!overtimeRuleId) {
+        const listRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, { headers: { Authorization: `Bearer ${token}` } })
+        const items = (listRes.body as { data?: { items?: { id?: string; name?: string }[] } } | undefined)?.data?.items ?? []
+        overtimeRuleId = items.find(item => item.name === `c2-ot-${runSuffix}`)?.id
+      }
+      expect(overtimeRuleId).toBeTruthy()
+
+      const setFlag = (enabled: boolean) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ compTimeFromOvertime: { enabled } }) })
+      const createOvertime = async (workDate: string, minutes: number) => {
+        const res = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers, body: JSON.stringify({ workDate, requestType: 'overtime', overtimeRuleId, minutes }) })
+        expect(res.status).toBe(201)
+        const id = (res.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+        expect(id).toBeTruthy()
+        createdRequestIds.push(id as string)
+        return id as string
+      }
+      const approve = (id: string) => requestJson(`${baseUrl}/api/attendance/requests/${id}/approve`, { method: 'POST', headers, body: JSON.stringify({ comment: 'ok' }) })
+      const lotsFor = async (reqId: string) => (await pool.query(
+        `SELECT id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, status
+           FROM attendance_leave_balances WHERE org_id = 'default' AND source_key = $1`,
+        [`overtime_conversion:${reqId}`],
+      )).rows as { id: string; leave_type_code: string; amount_minutes: number; remaining_minutes: number; source_type: string; source_id: string; status: string }[]
+      const eventsFor = async (balanceId: string) => (await pool.query(
+        `SELECT event_type, delta_minutes, source_type, source_id FROM attendance_leave_balance_events WHERE balance_id = $1`,
+        [balanceId],
+      )).rows as { event_type: string; delta_minutes: number; source_type: string; source_id: string }[]
+
+      // (1) flag OFF → approving an overtime request writes NO comp-time lot or event.
+      expect((await setFlag(false)).status).toBe(200)
+      const offId = await createOvertime('2026-09-07', 90)
+      expect((await approve(offId)).status).toBe(200)
+      expect(await lotsFor(offId)).toHaveLength(0)
+
+      // (2) flag ON → approving credits exactly one 1:1 comp-time lot + one grant event.
+      expect((await setFlag(true)).status).toBe(200)
+      const onId = await createOvertime('2026-09-08', 90)
+      expect((await approve(onId)).status).toBe(200)
+      const lots = await lotsFor(onId)
+      expect(lots).toHaveLength(1)
+      expect(lots[0]).toMatchObject({
+        leave_type_code: 'comp_time',
+        amount_minutes: 90,
+        remaining_minutes: 90,
+        source_type: 'overtime_conversion',
+        source_id: onId,
+        status: 'active',
+      })
+      const events = await eventsFor(lots[0].id)
+      expect(events).toHaveLength(1)
+      expect(events[0]).toMatchObject({ event_type: 'grant', delta_minutes: 90, source_type: 'overtime_conversion', source_id: onId })
+
+      // (3a) replay via route: re-approving an already-resolved request is rejected and never re-credits.
+      const reapprove = await approve(onId)
+      expect(reapprove.status).toBe(400)
+      expect(await lotsFor(onId)).toHaveLength(1)
+      expect(await eventsFor(lots[0].id)).toHaveLength(1)
+
+      // (3b) idempotency backstop: re-running the hook's exact grant INSERT with the same
+      // (org_id, source_key) is a no-op — ON CONFLICT DO NOTHING returns no row, so no second lot
+      // and (because the event is written only when a new lot is returned) no second grant event.
+      const replayLot = await pool.query(
+        `INSERT INTO attendance_leave_balances
+           (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status)
+         VALUES ('default', $1, 'comp_time', 90, 90, 'overtime_conversion', $2, $3, 'active')
+         ON CONFLICT (org_id, source_key) DO NOTHING
+         RETURNING id`,
+        [userId, onId, `overtime_conversion:${onId}`],
+      )
+      expect(replayLot.rows).toHaveLength(0)
+      expect(await lotsFor(onId)).toHaveLength(1)
+    } finally {
+      if (token && Object.keys(originalSettings).length > 0) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      }
+      await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdRequestIds.length > 0) {
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::text[])', [createdRequestIds]).catch(() => undefined)
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('rejects non-UUID shift references for rotation rules, including UUID-like shift names', async () => {
     if (!baseUrl) return
 
@@ -4484,6 +4593,7 @@ attendanceIntegrationDescribe(
             weeklyMaxMinutes: 2400,
             monthlyMaxMinutes: 9600,
           },
+          compTimeFromOvertime: { enabled: true },
         }),
       })
       expect(saveSettingsRes.status).toBe(200)
@@ -4500,6 +4610,7 @@ attendanceIntegrationDescribe(
         data?: {
           comprehensiveHours?: { capDefaults?: Record<string, number | null> }
           shiftCompliance?: Record<string, unknown>
+          compTimeFromOvertime?: Record<string, unknown>
         }
       } | undefined)?.data
       expect(reloaded?.comprehensiveHours?.capDefaults).toEqual({ month: 10560, quarter: 31680, year: 126720 })
@@ -4509,6 +4620,7 @@ attendanceIntegrationDescribe(
         weeklyMaxMinutes: 2400,
         monthlyMaxMinutes: 9600,
       })
+      expect(reloaded?.compTimeFromOvertime).toEqual({ enabled: true })
 
       const futurePunchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
         method: 'POST',
