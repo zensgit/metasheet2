@@ -97,6 +97,10 @@ export type MetaViewRenderLabelKey =
   | 'dashboard.cancel'
   | 'dashboard.noGroupableFields'
   | 'dashboard.dateGroupingLocked'
+  | 'dashboard.chartVariant'
+  | 'dashboard.variantStandard'
+  | 'dashboard.variantDonut'
+  | 'dashboard.variantArea'
   | 'dashboard.noNumericFields'
   | 'dashboard.livePreview'
   | 'dashboard.previewFillRequired'
@@ -204,6 +208,10 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'dashboard.cancel',
   'dashboard.noGroupableFields',
   'dashboard.dateGroupingLocked',
+  'dashboard.chartVariant',
+  'dashboard.variantStandard',
+  'dashboard.variantDonut',
+  'dashboard.variantArea',
   'dashboard.noNumericFields',
   'dashboard.livePreview',
   'dashboard.previewFillRequired',
@@ -318,6 +326,10 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
     en: 'Grouped by date; date grouping is preserved in this editor.',
     zh: '已按日期分组；此编辑器会保留现有日期分组。',
   },
+  'dashboard.chartVariant': { en: 'Chart style', zh: '图表样式' },
+  'dashboard.variantStandard': { en: 'Standard', zh: '标准' },
+  'dashboard.variantDonut': { en: 'Donut', zh: '环形图' },
+  'dashboard.variantArea': { en: 'Area', zh: '面积图' },
   'dashboard.noNumericFields': { en: 'No readable numeric fields available.', zh: '没有可读取的数值字段。' },
   'dashboard.livePreview': { en: 'Live preview', zh: '实时预览' },
   'dashboard.previewFillRequired': { en: 'Complete the chart fields to preview.', zh: '填写完整图表字段后可预览。' },

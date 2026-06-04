@@ -940,6 +940,9 @@ export interface ChartDisplayConfig {
   prefix?: string
   suffix?: string
   orientation?: 'horizontal' | 'vertical'
+  // v2-c single-series render variant: 'donut' (pie + inner radius) / 'area' (line + areaStyle).
+  // Only honored for the matching chartType (pie/line); inert otherwise.
+  variant?: 'donut' | 'area'
 }
 
 export interface ChartConfig {

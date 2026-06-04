@@ -154,12 +154,21 @@
           </label>
           <label class="meta-dashboard__field">
             <span>{{ viewRenderLabel('dashboard.chartType', isZh) }}</span>
-            <select v-model="chartDraft.chartType" class="meta-dashboard__select" data-field="chart-type">
+            <select v-model="chartDraft.chartType" class="meta-dashboard__select" data-field="chart-type" @change="chartDraft.variant = ''">
               <option value="bar">bar</option>
               <option value="line">line</option>
               <option value="pie">pie</option>
               <option value="number">number</option>
               <option value="table">table</option>
+            </select>
+          </label>
+          <!-- v2-c: single-series render variant; shown only for pie (donut) / line (area). -->
+          <label v-if="chartDraft.chartType === 'pie' || chartDraft.chartType === 'line'" class="meta-dashboard__field">
+            <span>{{ viewRenderLabel('dashboard.chartVariant', isZh) }}</span>
+            <select v-model="chartDraft.variant" class="meta-dashboard__select" data-field="chart-variant">
+              <option value="">{{ viewRenderLabel('dashboard.variantStandard', isZh) }}</option>
+              <option v-if="chartDraft.chartType === 'pie'" value="donut">{{ viewRenderLabel('dashboard.variantDonut', isZh) }}</option>
+              <option v-if="chartDraft.chartType === 'line'" value="area">{{ viewRenderLabel('dashboard.variantArea', isZh) }}</option>
             </select>
           </label>
           <label class="meta-dashboard__field">
@@ -296,6 +305,8 @@ const chartDraft = ref({
   groupByFieldId: '',
   aggregation: 'count' as AggregationFunction,
   valueFieldId: '',
+  // v2-c: single-series render variant; only meaningful for pie ('donut') / line ('area').
+  variant: '' as '' | 'donut' | 'area',
 })
 
 const activeDashboard = computed(() => dashboards.value.find((d) => d.id === activeDashboardId.value) ?? dashboards.value[0] ?? null)
@@ -331,6 +342,7 @@ function resetChartDraft() {
     groupByFieldId: groupableFields.value[0]?.id ?? '',
     aggregation: 'count',
     valueFieldId: '',
+    variant: '',
   }
   createChartError.value = ''
   resetChartPreview()
@@ -353,6 +365,7 @@ function openEditChart(chartId: string) {
     groupByFieldId: cfg.dataSource.groupByFieldId ?? '',
     aggregation: cfg.dataSource.aggregation.function,
     valueFieldId: cfg.dataSource.aggregation.fieldId ?? '',
+    variant: cfg.displayConfig?.variant ?? '',
   }
   createChartError.value = ''
   resetChartPreview()
@@ -463,6 +476,12 @@ function buildChartInput(base?: ChartConfig): ChartCreateInput {
   if (!editingDateGrouped.value) {
     dataSource.groupByFieldId = chartDraft.value.groupByFieldId
   }
+  // v2-c: a render variant is valid only for its matching chartType (donut→pie, area→line).
+  // Resolve it explicitly so switching chartType clears a now-inapplicable variant carried by base.
+  const variant: 'donut' | 'area' | undefined =
+    chartDraft.value.chartType === 'pie' && chartDraft.value.variant === 'donut' ? 'donut'
+      : chartDraft.value.chartType === 'line' && chartDraft.value.variant === 'area' ? 'area'
+        : undefined
   return {
     name,
     chartType: chartDraft.value.chartType,
@@ -470,6 +489,7 @@ function buildChartInput(base?: ChartConfig): ChartCreateInput {
     displayConfig: {
       ...(base?.displayConfig ?? {}),
       title: name,
+      variant,
     },
   }
 }

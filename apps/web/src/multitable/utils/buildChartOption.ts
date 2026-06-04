@@ -52,7 +52,8 @@ export function buildChartOption(
       series: [
         {
           type: 'pie',
-          radius: '70%',
+          // v2-c: displayConfig.variant 'donut' renders the pie with an inner radius (a hole).
+          radius: displayConfig?.variant === 'donut' ? ['45%', '70%'] : '70%',
           // sectors stay label-less; value is shown by the renderer's HTML legend
           label: { show: false },
           data: dataPoints.map((p) => ({
@@ -104,6 +105,8 @@ export function buildChartOption(
       {
         type: 'line',
         label: { show: false },
+        // v2-c: displayConfig.variant 'area' fills the area under the line.
+        ...(displayConfig?.variant === 'area' ? { areaStyle: {} } : {}),
         data: seriesData,
       },
     ],

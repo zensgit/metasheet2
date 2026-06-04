@@ -615,4 +615,141 @@ describe('MetaDashboardView', () => {
     expect(delCalls.length).toBe(0)
     confirmSpy.mockRestore()
   })
+
+  // ---- v2-c: donut / area single-series render variants (displayConfig.variant) ----
+
+  const openCreateForm = async (container: HTMLElement) => {
+    ;(container.querySelector('[data-action="create-chart"]') as HTMLButtonElement).click()
+    await nextTick()
+  }
+  const setSelect = async (el: HTMLSelectElement, value: string) => {
+    el.value = value
+    el.dispatchEvent(new Event('change'))
+    await nextTick()
+  }
+  const typeSelectOf = (c: HTMLElement) => c.querySelector('[data-field="chart-type"]') as HTMLSelectElement
+  const variantSelectOf = (c: HTMLElement) => c.querySelector('[data-field="chart-variant"]') as HTMLSelectElement | null
+
+  it('v2-c: variant select shows only for pie/line and offers donut/area respectively', async () => {
+    const { client } = mockClient([fakeDashboard({ panels: [] })], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    await openCreateForm(container)
+    const typeSelect = typeSelectOf(container)
+
+    await setSelect(typeSelect, 'bar')
+    expect(variantSelectOf(container)).toBeNull()
+    await setSelect(typeSelect, 'pie')
+    expect(Array.from(variantSelectOf(container)!.options).map((o) => o.value)).toEqual(['', 'donut'])
+    await setSelect(typeSelect, 'line')
+    expect(Array.from(variantSelectOf(container)!.options).map((o) => o.value)).toEqual(['', 'area'])
+    await setSelect(typeSelect, 'number')
+    expect(variantSelectOf(container)).toBeNull()
+  })
+
+  it('v2-c: create carries displayConfig.variant (pie + donut)', async () => {
+    const { client, fetchFn } = mockClient([fakeDashboard({ panels: [] })], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    await openCreateForm(container)
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Donut'; nameInput.dispatchEvent(new Event('input')); await nextTick()
+    await setSelect(typeSelectOf(container), 'pie')
+    await setSelect(variantSelectOf(container)!, 'donut')
+    ;(container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const post = fetchFn.mock.calls.find(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'POST' && url.includes('/charts') && !url.includes('preview-data'),
+    )
+    const body = JSON.parse(post![1].body as string)
+    expect(body.type).toBe('pie')
+    expect(body.display.variant).toBe('donut') // wire maps displayConfig -> display
+  })
+
+  it('v2-c: switching chartType clears an inapplicable variant (donut -> bar drops it)', async () => {
+    const { client, fetchFn } = mockClient([fakeDashboard({ panels: [] })], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    await openCreateForm(container)
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Switcher'; nameInput.dispatchEvent(new Event('input')); await nextTick()
+    await setSelect(typeSelectOf(container), 'pie')
+    await setSelect(variantSelectOf(container)!, 'donut')
+    await setSelect(typeSelectOf(container), 'bar') // @change clears variant
+    ;(container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const post = fetchFn.mock.calls.find(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'POST' && url.includes('/charts') && !url.includes('preview-data'),
+    )
+    const body = JSON.parse(post![1].body as string)
+    expect(body.type).toBe('bar')
+    expect(body.display.variant).toBeUndefined()
+  })
+
+  it('v2-c: edit carries displayConfig.variant', async () => {
+    const chart = fakeChart({ chartType: 'pie' })
+    const { client, fetchFn } = mockClient([fakeDashboard()], [chart])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    ;(container.querySelector('[data-action="add-panel"]') as HTMLButtonElement).click()
+    await nextTick()
+    ;(container.querySelector(`[data-edit-chart="${chart.id}"]`) as HTMLButtonElement).click()
+    await nextTick()
+    await setSelect(variantSelectOf(container)!, 'donut')
+    ;(container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const patch = fetchFn.mock.calls.find(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'PATCH' && url.includes(`/charts/${chart.id}`),
+    )
+    expect(JSON.parse(patch![1].body as string).display.variant).toBe('donut')
+  })
+
+  it('v2-c: editing an existing donut chart preserves variant on a no-op (round-trip)', async () => {
+    // The v2-b1 config-loss trap: openEditChart must pre-fill the variant, else a
+    // name-only edit would drop it (buildChartInput always sets variant explicitly).
+    const chart = fakeChart({ chartType: 'pie', displayConfig: { title: 'Sales Chart', variant: 'donut' } })
+    const { client, fetchFn } = mockClient([fakeDashboard()], [chart])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    ;(container.querySelector('[data-action="add-panel"]') as HTMLButtonElement).click()
+    await nextTick()
+    ;(container.querySelector(`[data-edit-chart="${chart.id}"]`) as HTMLButtonElement).click()
+    await nextTick()
+    // change ONLY the name; never touch the variant select
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Renamed'; nameInput.dispatchEvent(new Event('input')); await nextTick()
+    ;(container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const patch = fetchFn.mock.calls.find(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'PATCH' && url.includes(`/charts/${chart.id}`),
+    )
+    const body = JSON.parse(patch![1].body as string)
+    expect(body.display.variant).toBe('donut') // preserved, not dropped
+    expect(body.name).toBe('Renamed')
+  })
+
+  it('v2-c: live preview carries displayConfig.variant (same config as save)', async () => {
+    const { client } = mockClient([fakeDashboard({ panels: [] })], [])
+    const previewSpy = vi.spyOn(client, 'previewChartData').mockResolvedValue({ chartType: 'pie', dataPoints: [{ label: 'A', value: 1 }] })
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    vi.useFakeTimers()
+    await openCreateForm(container)
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Preview donut'; nameInput.dispatchEvent(new Event('input')); await nextTick()
+    await setSelect(typeSelectOf(container), 'pie')
+    await setSelect(variantSelectOf(container)!, 'donut')
+
+    await vi.advanceTimersByTimeAsync(300)
+    await nextTick()
+    expect(previewSpy).toHaveBeenLastCalledWith('sheet_1', expect.objectContaining({
+      chartType: 'pie',
+      displayConfig: expect.objectContaining({ variant: 'donut' }),
+    }))
+    vi.useRealTimers()
+  })
 })
