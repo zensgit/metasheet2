@@ -2257,6 +2257,24 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rule.enabled).toBe(true)
   })
 
+  it('A6-2: createRule accepts wait_for_callback with workflow_job_v1', async () => {
+    dbExecuteResults.push([]) // for insertInto().execute()
+    const rule = await service.createRule('sheet_1', {
+      name: 'Wait rule',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'wait_for_callback',
+      actionConfig: {},
+      actions: [{ type: 'wait_for_callback', config: {} }],
+      executionMode: 'workflow_job_v1',
+      createdBy: 'user_1',
+    })
+
+    expect(rule.action_type).toBe('wait_for_callback')
+    expect(rule.actions).toEqual([{ type: 'wait_for_callback', config: {} }])
+    expect(rule.execution_mode).toBe('workflow_job_v1')
+  })
+
   it('createRule normalizes legacy DingTalk title and content fields', async () => {
     dbExecuteResults.push([])
     const rule = await service.createRule('sheet_1', {
@@ -2509,6 +2527,31 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rule).not.toBeNull()
     expect(rule!.name).toBe('Updated')
     expect(queryFn).not.toHaveBeenCalled()
+  })
+
+  it('A6-2: updateRule accepts wait_for_callback with workflow_job_v1', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'update_record',
+      action_config: { fields: { status: 'before' } },
+      actions: [{ type: 'update_record', config: { fields: { status: 'before' } } }],
+    }))
+    dbExecuteResults.push([makeRuleRow({
+      action_type: 'wait_for_callback',
+      action_config: {},
+      actions: [{ type: 'wait_for_callback', config: {} }],
+      execution_mode: 'workflow_job_v1',
+    })])
+
+    const rule = await service.updateRule('atr_1', 'sheet_1', {
+      actionType: 'wait_for_callback',
+      actionConfig: {},
+      actions: [{ type: 'wait_for_callback', config: {} }],
+      executionMode: 'workflow_job_v1',
+    })
+
+    expect(rule?.action_type).toBe('wait_for_callback')
+    expect(rule?.actions).toEqual([{ type: 'wait_for_callback', config: {} }])
+    expect(rule?.execution_mode).toBe('workflow_job_v1')
   })
 
   it('updateRule validates the merged state when only actionType changes to DingTalk', async () => {

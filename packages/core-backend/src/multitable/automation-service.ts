@@ -11,7 +11,7 @@ import {
   type ConditionGroup,
 } from './automation-conditions'
 import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext } from './automation-executor'
-import type { AutomationAction } from './automation-actions'
+import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
 import {
   AutomationScheduler,
@@ -55,17 +55,14 @@ const VALID_TRIGGER_TYPES = new Set([
   'webhook.received',
 ])
 
-const VALID_ACTION_TYPES = new Set([
+const LEGACY_ACTION_TYPES = [
   'notify',
   'update_field',
-  'update_record',
-  'create_record',
-  'send_webhook',
-  'send_notification',
-  'send_email',
-  'send_dingtalk_group_message',
-  'send_dingtalk_person_message',
-  'lock_record',
+] as const
+
+const VALID_ACTION_TYPES = new Set<string>([
+  ...LEGACY_ACTION_TYPES,
+  ...ALL_ACTION_TYPES,
 ])
 
 // A6-1 opt-in (#2130 runtime): a rule may persist one C1 WorkflowJob row per action.
