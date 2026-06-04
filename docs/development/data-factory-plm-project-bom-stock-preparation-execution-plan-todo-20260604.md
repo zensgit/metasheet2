@@ -99,7 +99,7 @@ available in this repo. Instead, this slice turns the feasibility gate into a
 schema-only contract (`requires_customer_schema`) that C2 must satisfy before
 runtime can proceed.
 
-### 🟡 C2-0 - Filtered readonly SQL bridge for PLM lookups (this PR)
+### ✅ C2-0 - Filtered readonly SQL bridge for PLM lookups (DONE - PR #2265, `2be099bd8`)
 
 Gated on: C1 + explicit opt-in.
 
@@ -117,7 +117,7 @@ Acceptance locks:
 - Invalid structured filters fail closed before any data-source read.
 - Existing offset pagination remains unchanged.
 
-### 🔒 C2 - `projectNo -> PLM BOM` dry-run expansion helper
+### 🟡 C2 - `projectNo -> PLM BOM` dry-run expansion helper (this PR)
 
 Gated on: C2-0 + confirmed customer PLM relation descriptors + explicit opt-in.
 
@@ -128,6 +128,23 @@ Scope:
 - Match exact `FileCode`.
 - Expand recursive BOM rows into normalized logical rows.
 - No MetaSheet write.
+- Use the #2253 relation candidate as the default read plan:
+  - project path: `DN_PDM_PathExAttrInfo.FileCode` ->
+    `DN_PDM_PathExAttrInfo.Parent_OBJ_ID` ->
+    `DN_PDM_PathInfo.OBJ_ID`;
+  - root BOM: `DN_PDM_OrderHeadInfo.path_id` ->
+    `DN_PDM_OrderHeadInfo.OBJ_ID` ->
+    `DN_PDM_OrderDetailInfo.order_id`;
+  - component lookup: `DN_PDM_OrderDetailInfo.part_id` /
+    `DN_PDM_BomDetailsInfo.part_id` ->
+    `DN_PDM_PartLibraryInfo.OBJ_ID`;
+  - child recursion: `DN_PDM_BomHeadInfo.part_id` +
+    optional `DN_PDM_BomHeadInfo.SysVer` ->
+    `DN_PDM_BomHeadInfo.bom_id` ->
+    `DN_PDM_BomDetailsInfo.bom_pid`;
+  - quantity fields: root `DN_PDM_OrderDetailInfo.quantity`, child
+    `DN_PDM_BomDetailsInfo.Bom_ExAttr1`;
+  - display fields: `IdentityNo`, `IdentityName`, `Material`, `SysVer`.
 
 Acceptance locks:
 
@@ -137,8 +154,11 @@ Acceptance locks:
 - Same component under different parents produces distinct rows.
 - Idempotency key includes project number, component source id, and parent/path.
 - `maxDepth`, `maxRows`, and cycle guard fail closed.
-- No raw SQL is accepted; read plan is configured/known.
+- No raw SQL / joins / stored procedures / vendor API calls are accepted; the
+  read plan is object + equality-filter only.
 - Values-free dry-run summary can be emitted.
+- Conflict actions are not computed in C2; `candidateRows` is exposed and C3 is
+  still responsible for `add/update/skip/inactive/manual_confirm`.
 
 ### 🔒 C3 - Conflict planner
 
@@ -159,6 +179,9 @@ Acceptance locks:
 - PLM-missing existing rows become `inactive`, not deleted.
 - Dry-run counts include add/update/skip/inactive/manual-confirm.
 - Planner output includes run id, decision, conflict summary shape for C4.
+- C2 `rowErrors` are planned as `manual_confirm` while valid expanded rows are
+  still eligible for add/update/skip planning; one bad row must not abort the
+  whole conflict plan.
 
 ### 🔒 C4 - Apply writer to stock-preparation main table
 
