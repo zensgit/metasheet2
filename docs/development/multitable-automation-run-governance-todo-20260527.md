@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3..A6-5 remain frozen / demand-gated
+Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3..A6-5 remain frozen / demand-gated
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, read-boundary wired only); RFC #1885
 
@@ -269,6 +269,7 @@ mark the convergence engine complete.
 - [x] A6-1 admin UI toggle (rule-editor checkbox) — LANDED #2193. **A6-1 COMPLETE end-to-end.**
 - [x] A6-2 suspend/resume runtime (backend, admin-gated v1; webhook/external resume) — LANDED #2237 c363a78db (2026-06-03).
 - [x] A6-2b suspend/resume frontend (admin Resume UI + `wait_for_callback` editor) — LANDED #2245 cee99c8e4 (2026-06-04). **A6-2 closed end-to-end.** delay/timer resume still deferred / demand-gated.
+- [x] A6-2 UI/operator UAT — PASS #2257 on package `metasheet-multitable-onprem-v2.5.0-a6-2-uat-followup-lock-gate-b37ff906`: `wait_for_callback -> update_record` saved through the UI, suspended, resumed from admin detail, reached terminal `resolved`, and passed the listed negative guards. UAT blockers cleared by #2264 (service validation), #2272 (executor-shaped follow-up configs), and #2278 (`lock_record` hidden/disabled while storage contract is unsupported).
 - [ ] A6-3 branch/parallel DAG runtime — not started.
 - [ ] A6-4 BPMN compile/preview adapter — not started.
 - [ ] A6-5 approval-as-job bridge — not started.

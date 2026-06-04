@@ -131,13 +131,15 @@ only missing link.
 
 ---
 
-## 2. A6-2 suspend/resume — ✅ LANDED 2026-06-03 (#2236 design-lock + #2237 impl + #2245 frontend)
+## 2. A6-2 suspend/resume — ✅ LANDED (#2236 design-lock + #2237 impl + #2245 frontend + #2257 UAT)
 
 > **✅ LANDED 2026-06-03 — PR #2237 (squash `c363a78db`); design-lock #2236.** Admin-gated v1, webhook-
 > first (delay/timer + worker/claim still deferred/red-lined). As-built detail + the 2 review rounds live
 > in `multitable-automation-a6-2-suspend-resume-{design,verification}-20260603.md` — **not re-derived
-> here**. A6-2b frontend (admin Resume UI + `wait_for_callback` editor) **landed 2026-06-03 — PR #2245
-> (squash `cee99c8e4`)**, frontend-only/no contract change. Original plan retained below for the record.
+> here**. A6-2b frontend (admin Resume UI + `wait_for_callback` editor) **landed 2026-06-04 — PR #2245
+> (squash `cee99c8e4`)**, frontend-only/no contract change. Operator UAT **PASS #2257** on the refreshed
+> package from `b37ff906` after #2264/#2272/#2278 cleared the save, follow-up-shape, and `lock_record`
+> footgun blockers. Original plan retained below for the record.
 
 - **Adds:** the `suspended` C1 status, a resume token, and an **external-event/webhook
   resume endpoint first**; delay/timer resume (and the durable scheduler + worker/claim
