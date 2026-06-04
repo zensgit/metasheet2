@@ -6,6 +6,7 @@ const path = require('node:path')
 const HTTP_ROUTES_PATH = path.join(__dirname, '..', 'lib', 'http-routes.cjs')
 const httpRoutes = require(HTTP_ROUTES_PATH)
 const { MAX_LIST_LIMIT } = httpRoutes
+const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 
 const READ_USER = {
   id: 'user_read',
@@ -27,8 +28,29 @@ const ADMIN_USER = {
   permissions: ['integration:admin'],
 }
 
-function createMockContext() {
+function createMemoryStorage() {
+  const map = new Map()
+  return {
+    map,
+    async get(key) {
+      return map.get(key) || null
+    },
+    async set(key, value) {
+      map.set(key, JSON.parse(JSON.stringify(value)))
+    },
+    async delete(key) {
+      map.delete(key)
+    },
+  }
+}
+
+function createMockContext(options = {}) {
   const routes = new Map()
+  const records = options.recordsApi || {
+    async queryRecords() { return [] },
+    async createRecord() { throw new Error('createRecord not configured in test context') },
+    async patchRecord() { throw new Error('patchRecord not configured in test context') },
+  }
 
   return {
     context: {
@@ -41,7 +63,12 @@ function createMockContext() {
             routes.set(`${method.toUpperCase()} ${routePath}`, { method, path: routePath, handler })
           },
         },
+        multitable: {
+          records,
+        },
       },
+      storage: options.storage || createMemoryStorage(),
+      config: options.config || {},
     },
     routes,
   }
@@ -245,8 +272,8 @@ function createMockServices(overrides = {}) {
   }
 }
 
-function mountRoutes(services) {
-  const { context, routes } = createMockContext()
+function mountRoutes(services, contextOptions = {}) {
+  const { context, routes } = createMockContext(contextOptions)
   const registerRoutes = httpRoutes.registerIntegrationRoutes || httpRoutes.createIntegrationHttpRouter
   assert.equal(typeof registerRoutes, 'function', 'HTTP routes module exports a registration function')
 
@@ -261,6 +288,10 @@ function mountRoutes(services) {
   })
 
   return { routes, registered }
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value))
 }
 
 function getRoute(routes, method, routePath) {
@@ -2290,8 +2321,211 @@ async function testTemplatePreviewBulkReadGuards() {
   assert.ok(queryCalls >= 1, 'a valid staging source DOES read')
 }
 
+function tableActionConfig() {
+  return {
+    actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+    source: {
+      externalSystemId: 'plm_sql_source',
+      kind: 'data-source:sql-readonly',
+    },
+    target: {
+      sheetId: 'sheet_stock_configured',
+      objectId: 'stockPreparationMain',
+    },
+  }
+}
+
+function tableActionPlmData() {
+  return {
+    DN_PDM_PathExAttrInfo: [{ FileCode: 'P-001', Parent_OBJ_ID: 'PATH-1' }],
+    DN_PDM_PathInfo: [{ OBJ_ID: 'PATH-1' }],
+    DN_PDM_OrderHeadInfo: [{ OBJ_ID: 'ORDER-1', path_id: 'PATH-1' }],
+    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2' }],
+    DN_PDM_PartLibraryInfo: [{ OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' }],
+    DN_PDM_BomHeadInfo: [],
+    DN_PDM_BomDetailsInfo: [],
+  }
+}
+
+function createTableActionSourceAdapter(data = tableActionPlmData(), calls = []) {
+  return {
+    async read(input = {}) {
+      calls.push(['sourceRead', clone(input)])
+      const rows = Array.isArray(data[input.object]) ? data[input.object] : []
+      const matches = rows.filter((row) =>
+        Object.entries(input.filters || {}).every(([field, expected]) => row[field] === expected),
+      )
+      const offset = input.cursor ? Number(input.cursor) : 0
+      const limit = input.limit || 1000
+      const records = matches.slice(offset, offset + limit).map(clone)
+      return {
+        records,
+        done: offset + records.length >= matches.length,
+        nextCursor: offset + records.length < matches.length ? String(offset + records.length) : null,
+      }
+    },
+  }
+}
+
+function createTableActionRecordsApi() {
+  const rows = []
+  const calls = []
+  const recordsApi = {
+    async queryRecords(input = {}) {
+      calls.push(['queryRecords', clone(input)])
+      return rows
+        .filter((row) => row.sheetId === input.sheetId)
+        .filter((row) => Object.entries(input.filters || {}).every(([field, expected]) => row.data[field] === expected))
+        .slice(input.offset || 0, (input.offset || 0) + (input.limit || 1000))
+        .map(clone)
+    },
+    async createRecord(input = {}) {
+      calls.push(['createRecord', clone(input)])
+      const record = {
+        id: `rec_${rows.length + 1}`,
+        sheetId: input.sheetId,
+        version: 1,
+        data: { ...(input.data || {}) },
+      }
+      rows.push(record)
+      return clone(record)
+    },
+    async patchRecord(input = {}) {
+      calls.push(['patchRecord', clone(input)])
+      const row = rows.find((entry) => entry.sheetId === input.sheetId && entry.id === input.recordId)
+      if (!row) throw new Error(`record not found: ${input.recordId}`)
+      row.version += 1
+      row.data = { ...row.data, ...(input.changes || {}) }
+      return clone(row)
+    },
+  }
+  return { rows, calls, recordsApi }
+}
+
+async function testTableActionRoutes() {
+  const adapterCalls = []
+  const records = createTableActionRecordsApi()
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['createAdapter', system, deps])
+        adapterCalls.push({ system, deps })
+        return createTableActionSourceAdapter(tableActionPlmData(), calls)
+      },
+    },
+  })
+  const { routes } = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    config: {
+      stockPreparationTableActions: [tableActionConfig()],
+    },
+  })
+
+  let res = await invoke(routes, 'GET', '/api/integration/table-actions', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data[0].actionId, PLM_STOCK_PREPARATION_ACTION_ID)
+  assert.equal(res.body.data[0].configured, true)
+  assert.equal(JSON.stringify(res.body).includes('sheet_stock_configured'), false, 'list route does not expose target sheetId')
+  assert.equal(JSON.stringify(res.body).includes('plm_sql_source'), false, 'list route does not expose source binding')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: {
+      parameters: { projectNo: 'P-001' },
+      sheetId: 'evil_sheet',
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'client-supplied sheetId is rejected at the route boundary')
+  assert.equal(adapterCalls.length, 0, 'rejected body does not create a source adapter')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: ' P-001 ' } },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'ready')
+  assert.equal(typeof res.body.data.dryRunToken, 'string', 'dry-run returns a server token')
+  assert.equal(adapterCalls[0].deps.principal, 'user_read', 'dry-run source read runs as the request user')
+  assert.equal(records.calls[0][1].sheetId, 'sheet_stock_configured', 'existing-row read is scoped to configured target sheet')
+  assert.deepEqual(records.calls[0][1].filters, { projectNo: 'P-001' }, 'existing-row read is project-scoped')
+  assert.equal(JSON.stringify(res.body.data.evidence).includes('P-001'), false, 'dry-run evidence is values-free')
+  const dryRunToken = res.body.data.dryRunToken
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/apply', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: {
+      parameters: { projectNo: 'P-001' },
+      confirm: { dryRunToken },
+    },
+  })
+  assert.equal(res.statusCode, 403, 'read-only user cannot apply')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/apply', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: {
+      parameters: { projectNo: 'P-001' },
+      confirm: { dryRunToken },
+      plan: { decisions: [] },
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'client-supplied C3 plan is rejected')
+
+  // The prior rejected apply did not consume the token because the body was rejected before token validation.
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/apply', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: {
+      parameters: { projectNo: 'P-001' },
+      confirm: { dryRunToken },
+    },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.permission, 'admin', 'apply passes the authenticated admin permission, not hardcoded write')
+  assert.equal(res.body.data.apply.counts.created, 1)
+  const createCall = records.calls.find((call) => call[0] === 'createRecord')
+  assert.equal(createCall[1].sheetId, 'sheet_stock_configured', 'apply writes only the configured target sheet')
+  assert.equal(JSON.stringify(res.body.data.evidence).includes('P-001'), false, 'apply evidence is values-free')
+  assert.equal(JSON.stringify(res.body.data.evidence).includes('A-001'), false, 'apply evidence hides component code')
+}
+
+async function testTableActionUnconfiguredFailsClosed() {
+  const { routes } = mountRoutes(createMockServices().services)
+  const res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'TABLE_ACTION_NOT_CONFIGURED')
+}
+
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
+  await testTableActionRoutes()
+  await testTableActionUnconfiguredFailsClosed()
   await testTemplatePreviewReferenceMappingResolution()
   await testTemplatePreviewLiveBulkRead()
   await testTemplatePreviewBulkReadGuards()
