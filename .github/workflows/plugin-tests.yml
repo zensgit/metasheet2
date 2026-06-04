@@ -245,7 +245,10 @@ jobs:
           ATTENDANCE_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for attendance integration}"
-          pnpm --filter @metasheet/core-backend test:integration:attendance
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/attendance-plugin.test.ts \
+            tests/integration/attendance-expiry-service.test.ts \
+            --reporter=dot
 
       - name: Upload test results
         if: always()
