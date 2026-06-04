@@ -128,6 +128,12 @@ const DEFAULT_SETTINGS = {
       year: null,
     },
   },
+  // ④ C2 (#2230 design-lock): overtime approval → comp-time (调休) leave grant.
+  // Opt-in; default OFF. v1 = 1:1 minutes, no expiry. The grant lot is written in the
+  // approval txn's final-approval branch (see resolveRequest); nothing accrues until enabled.
+  compTimeFromOvertime: {
+    enabled: false,
+  },
 }
 
 const allowRbacDegradation = process.env.RBAC_OPTIONAL === '1'
@@ -10850,6 +10856,16 @@ function normalizeSettings(raw) {
       allowRawAliases: parseBoolean(formula.allowRawAliases, DEFAULT_SETTINGS.formula.allowRawAliases),
     },
     comprehensiveHours: normalizeAttendanceComprehensiveHoursSettings(raw.comprehensiveHours),
+    compTimeFromOvertime: normalizeCompTimeFromOvertimeSetting(raw.compTimeFromOvertime),
+  }
+}
+
+// ④ C2 (#2230 design-lock): overtime→comp-time grant switch. Pure normalize of the opt-in flag;
+// default OFF. Only `enabled` is honoured (boolean); anything else falls back to the default.
+function normalizeCompTimeFromOvertimeSetting(raw) {
+  const config = raw && typeof raw === 'object' ? raw : {}
+  return {
+    enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_SETTINGS.compTimeFromOvertime.enabled,
   }
 }
 
@@ -10982,6 +10998,10 @@ function mergeSettings(base, update) {
         ...(base?.comprehensiveHours?.capDefaults || {}),
         ...(update?.comprehensiveHours?.capDefaults || {}),
       },
+    },
+    compTimeFromOvertime: {
+      ...(base?.compTimeFromOvertime || {}),
+      ...(update?.compTimeFromOvertime || {}),
     },
   })
 }
@@ -16361,6 +16381,10 @@ module.exports = {
           year: z.number().int().min(0).nullable().optional(),
         }).optional(),
       }).optional(),
+      // ④ C2 (#2230): overtime→comp-time opt-in. Only the boolean switch is settable here.
+      compTimeFromOvertime: z.object({
+        enabled: z.boolean().optional(),
+      }).optional(),
     })
 
     const punchSchema = z.object({
@@ -20322,6 +20346,38 @@ module.exports = {
           const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
           const requestType = requestRow.request_type
           if (action === 'approve' && isFinalApproval) {
+            // ④ C2 (#2230 design-lock): overtime approval → comp-time (调休) grant.
+            // Opt-in (compTimeFromOvertime.enabled, default OFF); v1 = 1:1 minutes, no expiry.
+            // Idempotent by (org_id, source_key): ON CONFLICT DO NOTHING means a replay / repeated
+            // final-approve never double-credits, and the grant event is written ONLY when a NEW lot
+            // was inserted. Same txn as the status flip → the grant is atomic with the approval.
+            // Skip (no credit, no rollback) when minutes <= 0.
+            if (requestType === 'overtime') {
+              const compTimeSettings = await getSettings(trx)
+              if (compTimeSettings?.compTimeFromOvertime?.enabled === true) {
+                const amountMinutes = Math.floor(Number(requestMetadata.minutes) || 0)
+                if (amountMinutes > 0) {
+                  const compTimeSourceKey = `overtime_conversion:${requestId}`
+                  const lotRows = await trx.query(
+                    `INSERT INTO attendance_leave_balances
+                       (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status)
+                     VALUES ($1, $2, 'comp_time', $3, $3, 'overtime_conversion', $4, $5, 'active')
+                     ON CONFLICT (org_id, source_key) DO NOTHING
+                     RETURNING id`,
+                    [orgId, requestRow.user_id, amountMinutes, requestId, compTimeSourceKey]
+                  )
+                  const newLotId = lotRows[0]?.id
+                  if (newLotId) {
+                    await trx.query(
+                      `INSERT INTO attendance_leave_balance_events
+                         (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+                       VALUES ($1, $2, $3, 'grant', $4, 'overtime_conversion', $5)`,
+                      [orgId, requestRow.user_id, newLotId, amountMinutes, requestId]
+                    )
+                  }
+                }
+              }
+            }
             const baseRule = await loadDefaultRule(trx, orgId)
             const context = await resolveWorkContext({
               db: trx,
