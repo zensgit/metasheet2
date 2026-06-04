@@ -1,10 +1,11 @@
 # ④ C4-2 staging smoke runbook + CI evidence (comp-time expiry scheduler)
 
 **Status:** C4-2 code is **merged** (#2274, merge commit `4b3108737`, on `origin/main`); CI is
-**fresh-green** and the attendance DB step genuinely ran the C4 spec (evidence §2). The **`④ C4 ✅`
-graduation is still gated on the staging C4 smoke below** — per the #2267 design-lock and #2230 governing
-("`④ C4 ✅` is gated on C4-2 + a staging C4 smoke"). This doc is that smoke, **prepared but not yet run**:
-it could not be executed from the dev sandbox (§3). It stays in `⬜` on the tracker until the smoke PASSES.
+**fresh-green** and the attendance DB step genuinely ran the C4 spec (evidence §2). The **staging C4 smoke
+PASSED on 2026-06-04** after deploying build `8701c46e00c68ed19c226e7206f5456866f6b8ba` to staging
+(`https://23.254.236.11/`) with `ATTENDANCE_SCHEDULER_ENABLED=true` and
+`ATTENDANCE_SCHEDULER_INTERVAL_MS=5000`. Per the #2267 design-lock and #2230 governing
+("`④ C4 ✅` is gated on C4-2 + a staging C4 smoke"), **④ C4 is now ✅**.
 
 Refs: #2274 (C4-2 impl), #2270 (C4-1 inert expiry fn), #2267 (C4 execution design-lock),
 #2230 (④ governing design-lock), #2226 (staging migration-align runbook — the hard prereq).
@@ -67,30 +68,45 @@ Other gates on #2274: `migration-replay`, `coverage`, `contracts (openapi/strict
 
 ---
 
-## 3. Why this smoke was NOT run from the dev sandbox (the blocker — report, don't force)
+## 3. Staging smoke result — PASS (2026-06-04)
 
-Three independent blockers, any one of which stops a sandbox-driven run:
+The previous network blocker was resolved by the new staging IP (`https://23.254.236.11/`). The smoke then ran
+against the live staging stack, not a local fixture:
 
-1. **Staging `:8082`/`:22` are not usable from the sandbox in the current route state.** Probed two ways:
-   a plain `curl http://142.171.239.56:8082/health` times out at HTTP `000`; and although `nc -z` to both
-   `:22` and `:8082` *succeeds* (TCP SYN-ACK), the application handshakes do **not** complete —
-   `curl :8082` still returns HTTP `000` and `ssh -i ~/.ssh/metasheet2_deploy mainuser@…` is
-   `Connection closed by …:22` before auth. "TCP-open but HTTP/SSH die at handshake" = the local route is
-   not going through the working **v2ray** path. The fix is `use-v2ray-142-ssh.command` (it
-   `sudo route delete`s the static host route so traffic uses v2ray, then SSH-tests) — that needs **sudo +
-   the operator's v2ray**, so the tunnel cannot be brought up from an unattended sandbox. (`github.com`
-   returns HTTP `200` from the same shell, so general outbound is fine — this is host-route-specific.)
-2. **Staging is not yet running C4-2.** Staging does not auto-mirror `main`; the last staging deploy was
-   `0fd25d3ed` (③ shift-compliance, 2026-06-03) — **before** C4-2 (`4b3108737`) merged on 2026-06-04. So a
-   deploy/image-bump is required first, and that is an owner-authorized live-infra action, not a sandbox one.
-3. **The smoke is not pure-HTTP** (unlike ③). `expiresInDays` minimum is **1 day** (fixed 24 h) and the
-   scheduler default tick is hourly — you cannot "grant then wait it out" inside a smoke window. The lot's
-   `expires_at` must be **aged in SQL** and the **deployed background scheduler** must be running on a short
-   interval. So the run needs **both** an HTTP path (grant) **and** psql on the staging DB (age + assert the
-   `expire` event) — i.e. an SSH session into staging, which is the owner's to drive.
+- Public health: `https://23.254.236.11/health` returned `healthy`.
+- SSH target: `mainuser@23.254.236.11` (`racknerd-0de8668`).
+- Staging repo / compose project: `/home/mainuser/metasheet2-dingtalk-staging` /
+  `metasheet2-dingtalk-staging`.
+- Migration state before smoke: `kysely_migration` count `177`; C1 tables
+  `attendance_leave_balances` / `attendance_leave_balance_events` present; C1 columns including `expires_at`,
+  `granted_at`, `remaining_minutes`, and `source_key` present.
+- Deployed build: `8701c46e00c68ed19c226e7206f5456866f6b8ba` (contains #2274).
+- Scheduler env in the staging backend: `ATTENDANCE_SCHEDULER_ENABLED=true`,
+  `ATTENDANCE_SCHEDULER_INTERVAL_MS=5000`.
+- Startup log evidence: `Attendance scheduler initialized` and
+  `Attendance scheduler starting with interval 5000ms`.
 
-Per the goal's guardrail ("如果 staging/migration/CI blocker 出现，停止并报告，不要扩大范围"): this is reported,
-not forced. The procedure below is ready to copy-paste once staging is deployed.
+Smoke output:
+
+```text
+PASS: backend build is 8701c46e
+ORIG_COMP={"enabled":false,"expiresInDays":null}
+PASS: enabled compTimeFromOvertime expiresInDays=30
+OT_RULE=f92ad711-1703-4da9-8e79-5fe7d76f8579
+OT_REQ=f1f5ace0-763e-44c4-bb70-be2fc589a0d7 source_key=overtime_conversion:f1f5ace0-763e-44c4-bb70-be2fc589a0d7
+PASS: 30d grant exact: lot=0b92579c-049a-4e49-a52e-df1baa6d3e85 remaining=120 exact_720h=true
+OT_NULL=430cfc0d-0f2d-4125-bd7b-77e11bb4eda7 source_key=overtime_conversion:430cfc0d-0f2d-4125-bd7b-77e11bb4eda7
+PASS: null-expiry control remains NULL
+PASS: background scheduler expired aged lot once: expired|0|1|-120:comp_time_expiry
+PASS: NULL lot survived scheduler scan
+PASS: repeat scheduler tick is idempotent
+PASS: cleanup residue=0 and settings restored
+C4_STAGING_SMOKE_PASS commit=8701c46e00c68ed19c226e7206f5456866f6b8ba lot=0b92579c-049a-4e49-a52e-df1baa6d3e85 ot=f1f5ace0-763e-44c4-bb70-be2fc589a0d7 null_ot=430cfc0d-0f2d-4125-bd7b-77e11bb4eda7
+```
+
+This closes the §2 caveat: CI already proved the expiry SQL + grant wiring; this staging run proves the
+deployed env-gated background scheduler path (`index.ts` startup → scheduler env → periodic tick →
+`AttendanceExpiryService`) end to end.
 
 ---
 
@@ -218,7 +234,7 @@ psql "$PGURL" -c "SELECT count(*) AS residue FROM attendance_leave_balances
 
 ---
 
-## 5. Pass criteria (all must hold) → only then flip `④ C4 ✅`
+## 5. Pass criteria (all held on 2026-06-04) → `④ C4 ✅`
 
 1. 4.3 `exact_30d = t` (grant stamps `granted_at + 720h`, DST-free).
 2. 4.4 null-expiry lot `expires_at = NULL` (no behaviour change when unset).
@@ -228,19 +244,17 @@ psql "$PGURL" -c "SELECT count(*) AS residue FROM attendance_leave_balances
 5. 4.6 second tick → still exactly one event (idempotent).
 6. 4.7 `residue = 0` and settings restored.
 
-On all-PASS: backfill the tracker rows `加班↔调休` / `假期过期管理` to `✅` with `#2274` + this smoke's
-evidence, and add a `回填（C4 closeout）` line. **Until then they stay `⬜`.**
+Tracker rows `加班↔调休` / `假期过期管理` were backfilled to `✅` with `#2274` + the smoke evidence above.
 
 ---
 
-## 6. Risks / deferred (carried into the report)
+## 6. Risks / deferred after C4 closeout
 
-- **R1 — background-scheduler wiring is only proven by this staging smoke.** CI proves the expiry SQL +
-  grant; it does not start the env-gated timer. If the smoke is skipped, the startup wiring
-  (`src/index.ts` → `startAttendanceScheduler` → `ATTENDANCE_SCHEDULER_ENABLED`) is unverified in a
-  deployed process. (Mitigated only by running §4.)
-- **R2 — staging migration state.** Assumes staging is migrated through C1–C3. If not, §4.0's pure-image-bump
-  assumption is false and the #2226 align + C1 DDL must land first (heavier blocker → STOP + report).
+- **R1 — background-scheduler wiring is now staging-proven.** The 2026-06-04 smoke closed the CI caveat by
+  proving startup wiring + env-gated periodic tick in a deployed process.
+- **R2 — staging migration state.** The 2026-06-04 pre-smoke check confirmed staging is migrated through
+  C1–C3 (`kysely_migration` count `177`, C1 tables/columns present). Future staging runs should still repeat
+  the same schema probe before treating C4-2 as a pure image bump.
 - **R3 — C5 not in scope.** No reminders, no notifier channels (scaffold only), no 未排班提醒. Deferred.
 - **R4 — leader lock untested here.** Single staging instance ⇒ `ENABLE_ATTENDANCE_SCHEDULER_LEADER_LOCK`
   left off; the load-shed path is unexercised on staging (correctness does not depend on it by design §2.2).

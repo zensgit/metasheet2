@@ -24,7 +24,7 @@
 | 档 | 项 | 关键约束 |
 |---|---|---|
 | **MUST** | **排班合规引擎**（日/周/月工时 cap，**超限阻断保存**） | 钉钉最硬护城河。**MUST 口径 = 排班时阻断保存；warning-only 只算报表/预警红利，不算 MUST ✅**（避免实现方交 warning 充数）。**design-lock #2213（2026-06-02）**：新建 `shiftCompliance`（不并入 comprehensiveHours）/ 全 save 路径事务内投影 / 首版 block / 完成口径 = 日周月三粒度×全路径 |
-| | **未排班提醒**（提醒负责人/本人） | ⚠️ **不是小 feature**：attendance 无调度器、无事件→通知消费者（2026-06-01 verify 证伪"渠道已有"）→ 实为"**attendance scheduler + notifier 基座**"基础设施刀（镜像 `ApprovalSlaScheduler`，leader-elected + env 渠道 notifier）；与**假期过期提醒共建/复用同一基座**。估时 **2–3pd**（原 1–2pd 作废）；排序靠后（§3）。**未排班处理策略 → 归 ③ 打卡策略组，不在此单建** |
+| | **未排班提醒**（提醒负责人/本人） | ⚠️ **不是小 feature**：2026-06-01 verify 证伪"渠道已有"（attendance 当时无调度器、无事件→通知消费者）。截至 2026-06-04，**attendance scheduler 基座已由 ④ C4 建成并 staging-proven**（镜像 `ApprovalSlaScheduler`，leader-elected/env-gated），但未排班 reminder/notifier 业务逻辑仍未接；⑤ 复用该基座。**未排班处理策略 → 归 ③ 打卡策略组，不在此单建** |
 | | **排班修改窗**（可改 N 天内、超窗锁；钉钉默认 180） | 与合规引擎 + 历史数据可信度强绑；无它则报表不可信。实现量小、治理价值高 |
 | | **打卡策略组**（外勤审批 + 内外勤卡合并 + **未排班打卡策略**） | 三项同属 punch policy → 一个"**打卡策略配置基座**"design-lock（greenfield，0 现有字段）；抽屉已在只差配置写入；未排班"阻断/允许打卡"默认 **allow**（不回归） |
 | | **加班 ↔ 调休** | 假勤闭环 |
@@ -50,12 +50,12 @@
 | 综合工时（报表侧） | （已成，OUT 之外的红利） | ✅ | #1801 等（113 hits，`enforcement:'warn'`） |
 | 固定班 preview/apply + provenance + managed controls · 周矩阵展示 · 打卡只读抽屉 · HR 字段/onboarding/work-time drawer · FormulaEngine（仅差 4–5 函数） | （红利） | ✅ | 并行 session 两天内落地 |
 | 排班合规引擎（超出禁止保存） | MUST | ✅ | **完成 2026-06-03**：design-lock #2213 → S0 latent settings #2214 → S1 daily cap #2218 → S2 weekly/monthly explicit scheduled-load cap #2221；staging 联调 PASS 13/13（`/tmp/staging-shift-compliance-smoke-20260603.mjs` against `0fd25d3ed`）。日/周/月三粒度 × shift/rotation/fixed-apply 全 save 路径均运行时 block；`warn` 仍为惰性预留 |
-| 未排班提醒（= scheduler+notifier 基座刀） | MUST | ⬜ | **verify 2026-06-01 证伪"渠道已有"**：attendance 无调度器、无事件→通知消费者 → 镜像 `ApprovalSlaScheduler`+notifier；2–3pd；与假期过期提醒共建。处理策略已移入 ③ |
+| 未排班提醒（复用 attendance scheduler 基座） | MUST | ⬜ | **verify 2026-06-01 证伪"渠道已有"**；scheduler 基座已由 ④ C4 建成并 staging-proven，但未排班 reminder scan + notifier channels 未接。处理策略已移入 ③ |
 | 排班修改窗 | MUST | ✅ | #2197（squash `2d4808fe`，2026-06-02）：org-level `shiftEditPolicy` 入 attendance settings JSON（默认 `unrestricted`，无 DDL）+ shift/rotation assignment POST/PUT/DELETE 6 写路由显式 422 `SHIFT_EDIT_WINDOW_EXCEEDED`；PUT/DELETE 同看 existing start date + next start date 防历史绕窗；unit + CI real-DB attendance integration 绿 |
 | 外勤审批 | MUST | ⬜ | 0 |
 | 内外勤卡合并 | MUST | ⬜ | 0（打卡抽屉只读） |
-| 加班↔调休 | MUST | ⬜ | C0–C3 + C4-1(#2270 inert) + **C4-2 merged #2274**（`4b3108737`：expiry scheduler + `expiresInDays` grant 写 `expires_at` + notifier scaffold，**无 DDL**）。CI real-DB attendance step 真跑且绿（`④ C4` 用例在 `attendance-plugin.test.ts` 88-test 文件 + `attendance-expiry-service.test.ts`）。**staging C4 smoke 未跑 → 未 ✅**（runbook `attendance-comp-leave-c4-2-staging-smoke-runbook-20260604.md`；staging:8082 sandbox 不可达 + 未部署 C4-2 + 需 SSH+SQL aging，按"停止并报告"处置） |
-| 假期过期管理 | MUST | ⬜ | 同上 C4 子链：`expires_at` 写入 + 过期 state-flow + 调度基座 merge #2274 / CI 绿；**未 ✅**（gated on staging smoke，见 runbook） |
+| 加班↔调休 | MUST | ✅ | C0–C3 staging-validated + C4-1(#2270 inert) + **C4-2 #2274**（`4b3108737`：expiry scheduler + `expiresInDays` grant 写 `expires_at` + notifier scaffold，**无 DDL**）。CI real-DB attendance step 真跑且绿（`④ C4` 用例在 `attendance-plugin.test.ts` 88-test 文件 + `attendance-expiry-service.test.ts`）。**staging C4 smoke PASS 2026-06-04**：staging deploy `8701c46e00c68ed19c226e7206f5456866f6b8ba` on `https://23.254.236.11/`，scheduler env `ATTENDANCE_SCHEDULER_ENABLED=true` / interval `5000ms`，30d grant 精确 720h，后台 scheduler 过期 aged lot 一次且 repeat tick 幂等，NULL-expiry lot 保持 active，cleanup residue=0（见 runbook `attendance-comp-leave-c4-2-staging-smoke-runbook-20260604.md`） |
+| 假期过期管理 | MUST | ✅ | C4 子链已 staging-validated：`expires_at` 写入 + 过期 state-flow + env-gated `AttendanceScheduler` 调度基座均已证实；C5 通知/提醒仍按 #2230 作为后续扩展，不影响 C4 完成口径 |
 | 自动对班 | SHOULD | ⬜ | 0 |
 | 一天多班次 | SHOULD | ⬜ | 0 |
 | 排班发布/草稿 | SHOULD | ⬜ | 0 |
@@ -73,7 +73,7 @@
 ② **打卡策略组**（design-lock #2203）：S0 基座 ✅#2204 · S1 未排班打卡 ✅#2209 · **子序修正 → S1→S3→S2**（S2 内外勤合并依赖 S3 先建"外勤打卡"事实类型）· **S3 外勤 + S2 产品 2026-06-02 暂缓**（外勤=重刀/移动现场）→ 组在 S1 后暂停
 ③ **排班合规引擎**（✅ #2213/#2214/#2218/#2221 + staging 2026-06-03）：`shiftCompliance` 日/周/月 cap 已按 **explicit scheduled load** 口径在全部 save 路径运行时阻断；staging smoke 13/13 通过，③ 正式关闭
 ④ **加班调休 + 假期过期**（假勤闭环；假期过期提醒在此**首建** scheduler/notifier 基座）— **design-lock 已落**（`attendance-comp-leave-expiry-design-lock-20260603.md`，本 PR；owner 决策 2026-06-03 锁定）：余额=**grant-lot ledger**（`attendance_leave_balances`，非 mutable aggregate）+ **必需审计流水 `attendance_leave_balance_events`**（不可只改 remaining）· 入账=OT approve **transition** 幂等（**`source_key` NOT NULL + `UNIQUE(org,source_key)` 兜底**，不锁可空 source_id）· 撤销**首版不自动反冲但不静默错账** · 调度=**首建 `AttendanceScheduler`**（镜像 `ApprovalSlaScheduler`，leader-elected，⑤ 复用）。子链 C0 staging-align（**硬前置**）→C1 ledger DDL→C2 入账→C3 扣减→C4 过期+调度→C5 提醒+notifier，实现 PR 拆开。**比 ③ 重一档（有 DDL）。**
-⑤ **未排班提醒**（**复用 ④ 的 scheduler+notifier 基座**；镜像 `ApprovalSlaScheduler`）
+⑤ **未排班提醒**（**复用 ④ C4 已建成的 scheduler 基座**；补 scan + notifier channels）
 ⑥ **自动对班**（灰度门，feature-flag 默认关 → preview → 自动写）
 
 > **回填（2026-06-01 pre-flight 发现）**：原排序把"未排班提醒"列首，依据"渠道已有/最便宜"——**verify 证伪**（attendance 无调度器、无事件→通知消费者）。故改：**排班修改窗为首刀**（真·最便宜 + 治理高）；未排班提醒降级为后续"scheduler+notifier 基座"基础设施刀（2–3pd，与假期过期提醒共建）；未排班处理策略归 ③ 打卡策略组。
@@ -83,6 +83,8 @@
 > **回填（2026-06-02 合规引擎 design-lock）**：③ 排班合规引擎 design-lock 落地（`attendance-shift-compliance-engine-design-lock-20260602.md`，#2213）。owner 决策锁定：(1) 新建 `shiftCompliance`（日/周/月 maxMinutes + enforcement warn|block，**不并入** comprehensiveHours——save-time/planned/日周月 vs report/actual/月季年）；(2) 强制 = **全部** save 路径（shift POST/PUT `29445/29538` + rotation POST/PUT `21452` + fixed-apply `27818/9193`，DELETE 不拦）；(3) **首版只 block**，warn 预留惰性。**keystone**：投影**复用** `loadAttendanceComprehensivePlannedMinutesByUser`（`13163`，经 effective-calendar resolver，与 comprehensiveHours **同一套** planned-minutes 算法 → 零漂移），**事务内写后投影 → 超限 throw → rollback → 422**（PUT 排除自身自动成立）。切片 **S0 latent config → S1 daily → S2 weekly+monthly**（各 gated + 真 DB route-level 反向 integration）。**完成口径（partial-MUST bar）：③ 仅在 daily∧weekly∧monthly × 全路径 + 反向 integration + staging 全满足才 ✅；daily-only 的 S1 是切片不是"引擎完成"**（防 P2 式 warning/切片充数）。
 
 > **回填（2026-06-03 合规引擎 closeout）**：S0 ✅ #2214（`shiftCompliance` latent settings）· S1 ✅ #2218（daily cap，全部 save 路径）· S2 ✅ #2221（weekly/monthly cap，owner 决策 A：只统计 explicit scheduled load，排除默认兜底工作制 baseline）。staging 部署到 `0fd25d3ed` 后运行 `/tmp/staging-shift-compliance-smoke-20260603.mjs`：**PASS 13/13**。覆盖：(1) `shiftCompliance` PUT→GET round-trip；(2) weekly cap 2400 + 单个显式 540 分钟排班 → 201，证明默认 Mon–Fri baseline 不计入；(3) daily/weekly/monthly 超 cap → `422 SHIFT_COMPLIANCE_CAP_EXCEEDED` 且无 assignment 持久化；(4) fixed-schedule apply 批量路径超 cap → 422 且无 managed row。联调中发现 staging schema drift 并做最小 alignment：`attendance_groups.attendance_type` + `attendance_shift_assignments.producer_*`；这是 staging 环境补齐，不改变 ③ 完成口径，但后续应补正式 migration/ops 记录避免其它环境复现。
+
+> **回填（2026-06-04 C4 closeout）**：④ C4-2 #2274（`4b3108737`）已部署 staging build `8701c46e00c68ed19c226e7206f5456866f6b8ba`（`https://23.254.236.11/`），并以 `ATTENDANCE_SCHEDULER_ENABLED=true` / `ATTENDANCE_SCHEDULER_INTERVAL_MS=5000` 运行后台 scheduler。C4 staging smoke **PASS**：`compTimeFromOvertime.expiresInDays=30` 的 OT grant 写出 `expires_at - granted_at = interval '720 hours'`；`expiresInDays=null` 的 control lot 保持 `expires_at=NULL`；SQL aging 后由**部署态后台 scheduler**把 aged lot 过期为 `status=expired, remaining=0` 并写 exactly one `-120:comp_time_expiry` event；repeat tick 不重复；cleanup residue=0 且 settings restored。至此 ④ 的 C0/C1/C2/C3/C4 全部完成；C5 通知/提醒仍为后续扩展。
 
 > **⚠️ schema 成组迁移，别一刀一迁。** 首刀"排班修改窗"已按 #2197 路线**无 DDL 落地**：policy 先进 org-level attendance settings JSON（`shiftEditPolicy`），write-time 按受影响日期判窗。后续若要把排班合规（`shift_constraints`）、发布（`status`）、多班次（`slot`）、或持久锁窗（`locked_at`）落到 `attendance_shift_assignments`/`rule_sets`，这些 schema 变更再打一个协调 migration，再分层叠 service/UI（v1 阶段2 已是此意）。
 
