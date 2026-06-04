@@ -160,7 +160,7 @@ Acceptance locks:
 - Conflict actions are not computed in C2; `candidateRows` is exposed and C3 is
   still responsible for `add/update/skip/inactive/manual_confirm`.
 
-### 🟡 C3 - Conflict planner (this PR)
+### ✅ C3 - Conflict planner (DONE - PR #2269, `e0e3ffe30`; hardening #2271, `734893342`)
 
 Gated on: C2 + explicit opt-in.
 
@@ -189,7 +189,15 @@ Acceptance locks:
 - Unsupported conflict strategies (`deleteByDefault`, non-`mark_inactive`
   missing policy, or overwriting human fields) reject fail-closed.
 
-### 🔒 C4 - Apply writer to stock-preparation main table
+Follow-up hardening in #2271:
+
+- `plannedAt` string inputs validate and canonicalize to ISO;
+- human-preserved field whitelist comparison is order-independent and rejects
+  duplicate/missing pseudo-matches;
+- primitive value comparison no longer relies on `JSON.stringify` for common
+  scalar fields while preserving legacy null/undefined equivalence.
+
+### 🟡 C4 - Apply writer to stock-preparation main table (this PR)
 
 Gated on: C3 + explicit opt-in.
 
@@ -216,7 +224,8 @@ Gated on: C4 + explicit opt-in.
 
 Scope:
 
-- Add a named PLM project BOM stock-preparation action in the workbench.
+- Add a reusable parameterized table action in the workbench, with the PLM
+  project BOM pull as the first configured action instance.
 - Operator enters `projectNo`.
 - UI shows dry-run summary and conflict counts.
 - Apply confirmation calls C4 only when allowed.
@@ -224,6 +233,14 @@ Scope:
 Acceptance locks:
 
 - No raw SQL textarea.
+- Normal users fill only admin-allowed parameters; they cannot change source,
+  object, mappings, or filter fields.
+- v1 parameters remain equality-filtered and allowlist-driven.
+- Apply wiring must pass the authenticated user's real Data Factory write/admin
+  authorization into C4; no hardcoded `"write"` permission.
+- Apply wiring must inject a records API scoped to the intended
+  stock-preparation sheet/object; normal users must not be able to point C4 at
+  an arbitrary `sheetId`.
 - Dry-run and apply permissions are visibly separated.
 - Values shown in the tenant UI are not copied to issue evidence.
 - No K3 button/action is introduced.
