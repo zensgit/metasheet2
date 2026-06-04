@@ -62,3 +62,17 @@ test('regression workflow limits nightly artifact PR contents', () => {
   assert.doesNotMatch(raw, /add-paths:[\s\S]*node_modules/)
   assert.doesNotMatch(raw, /add-paths:[\s\S]*package\.json/)
 })
+
+test('attendance remote metrics reuses metrics scrape auth fallback', () => {
+  const raw = readWorkflow('.github/workflows/attendance-remote-metrics-prod.yml')
+
+  assert.match(raw, /uses: actions\/checkout@v4/)
+  assert.match(raw, /METRICS_AUTH_HEADER_SECRET:\s+\$\{\{\s*secrets\.METRICS_AUTH_HEADER\s*\}\}/)
+  assert.match(raw, /DEPLOY_COMPOSE_FILE:\s+\$\{\{\s*secrets\.DEPLOY_COMPOSE_FILE\s*\}\}/)
+  assert.match(raw, /METRICS_SCRAPE_TOKEN_RESOLVE_REQUIRED=false bash scripts\/ops\/resolve-metrics-scrape-token\.sh/)
+  assert.match(raw, /METRICS_AUTH_HEADER="Authorization: Bearer \$metrics_token"/)
+  assert.match(raw, /METRICS_AUTH_HEADER=\$\(quote_for_remote "\$\{METRICS_AUTH_HEADER\}"\)/)
+  assert.match(raw, /METRICS_AUTH_HEADER="\$\{METRICS_AUTH_HEADER\}" scripts\/ops\/attendance-check-metrics\.sh/)
+  assert.match(raw, /metrics_auth_configured/)
+  assert.doesNotMatch(raw, /ATTENDANCE_ADMIN_JWT/)
+})

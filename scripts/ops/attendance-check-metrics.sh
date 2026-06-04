@@ -7,6 +7,8 @@ set -euo pipefail
 
 METRICS_URL="${METRICS_URL:-http://127.0.0.1:8900/metrics/prom}"
 MAX_TIME="${MAX_TIME:-10}"
+METRICS_AUTH_HEADER="${METRICS_AUTH_HEADER:-}"
+METRICS_SCRAPE_TOKEN="${METRICS_SCRAPE_TOKEN:-}"
 
 function die() {
   echo "[attendance-check-metrics] ERROR: $*" >&2
@@ -22,7 +24,16 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 info "Fetching: ${METRICS_URL}"
-raw="$(curl -fsS --max-time "$MAX_TIME" "$METRICS_URL")"
+curl_args=(-fsS --max-time "$MAX_TIME")
+if [[ -n "$METRICS_AUTH_HEADER" ]]; then
+  curl_args+=(-H "$METRICS_AUTH_HEADER")
+  info "Using metrics auth header"
+elif [[ -n "$METRICS_SCRAPE_TOKEN" ]]; then
+  curl_args+=(-H "x-metrics-token: $METRICS_SCRAPE_TOKEN")
+  info "Using metrics scrape token"
+fi
+
+raw="$(curl "${curl_args[@]}" "$METRICS_URL")"
 
 # Basic Prometheus sanity.
 if ! grep -qE '^# (HELP|TYPE) ' <<<"$raw"; then
