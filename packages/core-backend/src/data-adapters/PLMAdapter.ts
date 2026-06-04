@@ -632,6 +632,39 @@ const YUANTUS_SUPPORTED_OPERATIONS = [
   'cad_review_update',
 ]
 
+/**
+ * PLM-COLLAB Phase 2.5 (Integration Handshake) consumer types: the advisory capability
+ * manifest returned by the provider's `GET /api/v1/integrations/capabilities`. ADVISORY
+ * ONLY -- used to decide UI degradation / entry display; NEVER an authorization decision
+ * (the PLM provider still enforces is_entitled at every feature endpoint).
+ */
+export interface IntegrationFeatureCapability {
+  supported: boolean;
+  api_version: string | null;
+  entitled: boolean;
+  cache_scope?: { supported?: string; entitled?: string };
+  scenarios?: string[];
+  actions?: string[];
+  action_status?: string;
+}
+
+export interface IntegrationCapabilityManifest {
+  schema_version: string;
+  provider: string;
+  advisory: boolean;
+  features: Record<string, IntegrationFeatureCapability>;
+}
+
+/**
+ * Result of querying the manifest. The handshake degrades gracefully: a legacy/non-yuantus
+ * PLM yields `unsupported-mode`, and an older PLM without the endpoint (404/error) yields
+ * `unavailable`. The consumer's safe default for both is to HIDE the automation entries
+ * rather than assume support.
+ */
+export type IntegrationCapabilitiesResult =
+  | { available: true; manifest: IntegrationCapabilityManifest }
+  | { available: false; reason: 'unsupported-mode' | 'unavailable' };
+
 export class PLMAdapter extends HTTPAdapter {
   private mockMode = false;
   private apiMode: PLMApiMode = 'legacy';
@@ -762,6 +795,10 @@ export class PLMAdapter extends HTTPAdapter {
 
     this.logger.info(`PLM Adapter connecting to ${this.config.connection.url}`);
     await super.connect();
+    // PLM-COLLAB P2.5: warm/refresh the integration capability cache after a real connect
+    // (fire-and-forget; refreshIntegrationCapabilities degrades gracefully and never throws,
+    // so this never blocks or fails connect).
+    void this.refreshIntegrationCapabilities();
   }
 
   private withTrailingSlash(path: string): string {
@@ -959,6 +996,92 @@ export class PLMAdapter extends HTTPAdapter {
     } catch (_err) {
       return this.testConnection()
     }
+  }
+
+  // PLM-COLLAB Phase 2.5 (Integration Handshake) consumer: advisory capability manifest.
+  private cachedIntegrationCapabilities: IntegrationCapabilitiesResult | null = null;
+
+  /**
+   * Fetch the PLM integration capability manifest so the UI can degrade gracefully
+   * (show/hide automation entries by supported/entitled). ADVISORY ONLY -- it never
+   * authorizes anything; the PLM still enforces entitlement at each feature endpoint.
+   *
+   * Successful results are cached on the instance (cleared on (re)connect via
+   * refreshIntegrationCapabilities). Failures are NOT cached, so a transient error or a
+   * just-upgraded PLM is retried on the next call. Graceful degradation (F1): a
+   * legacy/non-yuantus PLM -> `unsupported-mode`; a PLM without the endpoint (404/error)
+   * -> `unavailable`. The consumer's safe default for both is to HIDE the entries.
+   */
+  async getIntegrationCapabilities(): Promise<IntegrationCapabilitiesResult> {
+    if (this.cachedIntegrationCapabilities) {
+      return this.cachedIntegrationCapabilities;
+    }
+    if (this.mockMode) {
+      const mock: IntegrationCapabilitiesResult = {
+        available: true,
+        manifest: {
+          schema_version: 'v1',
+          provider: 'yuantus-plm',
+          advisory: true,
+          features: {
+            approval_automation: {
+              supported: true,
+              api_version: 'v1',
+              entitled: true,
+              cache_scope: { supported: 'global', entitled: 'tenant' },
+              scenarios: ['eco'],
+              actions: ['notify'],
+              action_status: 'stubbed',
+            },
+          },
+        },
+      };
+      this.cachedIntegrationCapabilities = mock;
+      return mock;
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { available: false, reason: 'unsupported-mode' };
+    }
+    try {
+      const result = await this.query<IntegrationCapabilityManifest>(
+        '/api/v1/integrations/capabilities',
+      );
+      const manifest =
+        result.data && result.data.length > 0 ? result.data[0] : null;
+      // Top-level shape validation: confirm this really is the yuantus-plm advisory
+      // manifest, so a misconfigured proxy or an unrelated/old endpoint that happens to
+      // return JSON with a `features` key is not a false positive. schema_version is only
+      // required to be PRESENT (not exactly "v1"): the provider commits to additive-only
+      // schema evolution, so a v1 consumer must still accept a forward-compatible future
+      // version rather than degrade on it.
+      if (
+        !manifest ||
+        manifest.provider !== 'yuantus-plm' ||
+        manifest.advisory !== true ||
+        typeof manifest.schema_version !== 'string' ||
+        manifest.schema_version.length === 0 ||
+        !manifest.features ||
+        typeof manifest.features !== 'object'
+      ) {
+        return { available: false, reason: 'unavailable' };
+      }
+      const resolved: IntegrationCapabilitiesResult = { available: true, manifest };
+      this.cachedIntegrationCapabilities = resolved;
+      return resolved;
+    } catch (_err) {
+      // F1: older PLM / no endpoint / transient error -> advertise unavailable, do not
+      // cache (retry next call), never throw (the handshake must not break the consumer).
+      return { available: false, reason: 'unavailable' };
+    }
+  }
+
+  /**
+   * Clear the cached manifest and re-fetch. Called after (re)connect so a reconnect (or a
+   * PLM upgrade) refreshes the advertised capabilities. Never throws.
+   */
+  async refreshIntegrationCapabilities(): Promise<void> {
+    this.cachedIntegrationCapabilities = null;
+    await this.getIntegrationCapabilities();
   }
 
   async getProducts(options?: PLMQueryOptions): Promise<QueryResult<PLMProduct>> {
