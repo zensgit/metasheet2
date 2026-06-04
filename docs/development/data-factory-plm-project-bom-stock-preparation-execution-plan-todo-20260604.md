@@ -5,8 +5,9 @@
 > This file is the trackable execution ladder for issue #2253. It is **not**
 > an authorization to implement runtime.
 >
-> Markers: ✅ done · ⬜ open / ready (still needs its own opt-in) · 🔒 gated
-> (blocked on a prior gate and a separate explicit opt-in).
+> Markers: ✅ done · 🟡 in design / active review · ⬜ open / ready (still
+> needs its own opt-in) · 🔒 gated (blocked on a prior gate and a separate
+> explicit opt-in).
 
 ## Non-negotiables
 
@@ -197,9 +198,9 @@ Follow-up hardening in #2271:
 - primitive value comparison no longer relies on `JSON.stringify` for common
   scalar fields while preserving legacy null/undefined equivalence.
 
-### 🟡 C4 - Apply writer to stock-preparation main table (this PR)
+### ✅ C4 - Apply writer to stock-preparation main table (DONE - PR #2275, `75d3a44a1`)
 
-Gated on: C3 + explicit opt-in.
+Gated on: C3 + explicit opt-in. Done in #2275.
 
 Scope:
 
@@ -218,9 +219,72 @@ Acceptance locks:
 - Partial failure is reported with row-level decisions.
 - Re-running the same accepted plan is idempotent.
 
-### 🔒 C5 - Workbench UI action
+### 🟡 C5-0 - Parameterized workbench action design (this PR)
 
 Gated on: C4 + explicit opt-in.
+
+Scope:
+
+- Design the reusable parameterized table action surface.
+- Use the PLM project BOM pull as the first configured action instance.
+- Lock the route/UI/apply safety contracts before runtime starts.
+- Split runtime into C5-1/C5-2/C5-3.
+- No route, UI, helper, migration, package, MetaSheet write, PLM write, or K3.
+
+Acceptance locks:
+
+- Browser requests carry only `actionId`, allowlisted parameters, and apply
+  confirmation metadata; never target `sheetId`, source bindings, raw filters,
+  C3 plan payloads, or C4 writer payloads.
+- Apply recomputes C2/C3 server-side before calling C4.
+- Apply derives C4 permission from the authenticated user; no hardcoded
+  `"write"`.
+- Apply injects a records API scoped to the configured stock-preparation target.
+- Apply requires a fresh server-generated dry-run token / revision marker; no
+  caller can jump directly to apply.
+- Target sheet authorization is action-as-authorization: Data Factory write/admin
+  may run the configured action, and only admins may create/edit the action
+  config that binds the target sheet.
+- Dry-run/read and apply/write permissions are separated.
+- Issue/customer evidence stays values-free.
+
+### ⬜ C5-1 - Backend parameterized action routes
+
+Gated on: C5-0 accepted + explicit opt-in.
+
+Scope:
+
+- Add generic table-action route contract:
+  - `GET /api/integration/table-actions`;
+  - `POST /api/integration/table-actions/:actionId/dry-run`;
+  - `POST /api/integration/table-actions/:actionId/apply`.
+- Add the static first action config: `plm.stock-preparation.pull-bom.v1`.
+- Dry-run: validate allowlisted parameters, run C2 expansion, read current
+  stock-preparation rows, run C3 planner, return summary.
+- Apply: validate parameters again, recompute C2/C3 server-side, then call C4
+  through a scoped records API.
+
+Acceptance locks:
+
+- No client-supplied source, target, raw SQL, filter field, `sheetId`, C3 plan,
+  or C4 payload is accepted.
+- Dry-run uses `requireAccess(read)`.
+- Apply uses `requireAccess(write)` and passes the real write/admin permission
+  into C4.
+- Dry-run direct source reads use the request user's principal; missing
+  principal fails closed.
+- Target records API is server-scoped to the configured stock-preparation
+  sheet/object.
+- Action config create/edit is admin-only; normal operators cannot rebind source
+  systems, read plans, or target sheets.
+- Apply requires a server-generated dry-run token / revision marker and
+  recomputes the plan before writing.
+- Manual-confirm rows are held while clean rows can still apply.
+- Values-free summary is available for issue evidence.
+
+### ⬜ C5-2 - Workbench parameterized action UI
+
+Gated on: C5-1 + explicit opt-in.
 
 Scope:
 
@@ -245,6 +309,25 @@ Acceptance locks:
 - Values shown in the tenant UI are not copied to issue evidence.
 - No K3 button/action is introduced.
 - No batch/multi-project mode in v1.
+
+### ⬜ C5-3 - Operator validation runbook
+
+Gated on: C5-1/C5-2 + explicit opt-in.
+
+Scope:
+
+- Document a values-free entity-machine smoke for the workbench action.
+- Validate one project dry-run and, only with explicit approval, one apply to
+  the configured MetaSheet stock-preparation main table.
+- Capture evidence using summary counts/status/error codes only.
+
+Acceptance locks:
+
+- No raw PLM rows, component values, materials, quantities, target row values,
+  or apply payloads in issues.
+- K3 remains not invoked.
+- External DB write remains not invoked.
+- Manual-confirm rows remain held.
 
 ### 🔒 C6 - `config_info` -> select/dropdown option sync
 
@@ -273,27 +356,32 @@ Acceptance locks:
 - External DB write.
 - K3 Save / Submit / Audit / BOM.
 
-## Open details to confirm in C1/C2
+## Details carried forward
 
-These are not blockers for C0, but they must be pinned before runtime:
+Some C0/C1 details are now encoded by C2/C3/C4 helpers. The remaining live
+operator checks stay in later validation slices:
 
-- **Feasibility gate:** exact PLM table/view object and relation descriptors
-  must support app-side recursion over flat parameterized reads. If not, pivot
-  to a flat customer BOM view or deferred PLM adapter/API.
-- Exact PLM source id column when `OBJ_ID` is absent or aliased.
-- Exact parent/child relation columns.
-- Default `maxDepth` and `maxRows` values.
-- Exact stock-preparation field ids and labels.
-- Exact human-owned preserve whitelist.
-- Exact `config_info` option source and target fields.
-- Which critical conflicts require manual confirmation in v1.
+- **Live PLM feasibility:** C2 has a default DN-PDM read plan, but entity-machine
+  validation still must prove the customer schema supports the configured flat
+  reads without raw SQL, stored procedures, or vendor API calls.
+- **Target binding:** C5 route wiring must scope C4 to the intended
+  stock-preparation sheet/object; browser-supplied sheet ids are forbidden.
+- **Option sources:** exact `config_info` option source and target fields remain
+  deferred to C6.
+- **Validation evidence:** tenant UI may show values to authorized users, but
+  issue/customer evidence must stay values-free.
 
 ## Sequencing rule
 
-C0 and C1 are complete. The next bridge prerequisite is C2-0, which only enables
-equality-filtered `data-source:sql-readonly` reads. The C2 PLM BOM expansion
-runtime still remains locked until C2-0 lands and the customer PLM relation
-descriptors prove app-side recursion over flat parameterized readonly SQL reads,
-or the track pivots to a customer flat BOM view / deferred PLM adapter per the
-C0 feasibility gate. C2-C6 still require their predecessor to land and the owner
-to explicitly opt in.
+C0, C1, C2-0, C2, C3, and C4 are complete. The next step is C5, but it is split
+because it crosses from latent helpers into operator-triggered writes:
+
+1. C5-0 design locks the reusable parameterized action contract.
+2. C5-1 adds backend action routes and server-side recompute/apply wiring.
+3. C5-2 adds the workbench operator surface.
+4. C5-3 validates the flow on an entity machine.
+
+C6 option sync remains after C5. All later slices still require their
+predecessor to land and the owner to explicitly opt in. K3 Save / Submit /
+Audit / BOM, external database write, and multi-project/batch mode remain out
+of scope.
