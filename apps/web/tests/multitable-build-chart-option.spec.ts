@@ -90,4 +90,31 @@ describe('buildChartOption', () => {
     expect(o.series[0].data).toEqual([])
     expect(o.xAxis.data).toEqual([])
   })
+
+  // --- v2-c single-series render variants (displayConfig.variant) ---
+
+  it('donut: pie + variant "donut" uses an inner radius; plain pie keeps radius "70%" (regression)', () => {
+    const donut = opt(buildChartOption(chart('pie', [{ label: 'A', value: 1 }]), { variant: 'donut' }))
+    expect(Array.isArray(donut.series[0].radius)).toBe(true) // [inner, outer] hole
+    const plain = opt(buildChartOption(chart('pie', [{ label: 'A', value: 1 }])))
+    expect(plain.series[0].radius).toBe('70%')
+  })
+
+  it('area: line + variant "area" fills the area; plain line has no areaStyle (regression)', () => {
+    const area = opt(buildChartOption(chart('line', [{ label: 'A', value: 1 }]), { variant: 'area' }))
+    expect(area.series[0].areaStyle).toBeDefined()
+    const plain = opt(buildChartOption(chart('line', [{ label: 'A', value: 1 }])))
+    expect(plain.series[0].areaStyle).toBeUndefined()
+  })
+
+  it('variant is inert on non-matching types (donut only pies, area only lines)', () => {
+    const barDonut = opt(buildChartOption(chart('bar', [{ label: 'A', value: 1 }]), { variant: 'donut' }))
+    expect(barDonut.series[0].type).toBe('bar')
+    expect(barDonut.series[0].areaStyle).toBeUndefined()
+    const lineDonut = opt(buildChartOption(chart('line', [{ label: 'A', value: 1 }]), { variant: 'donut' }))
+    expect(lineDonut.series[0].areaStyle).toBeUndefined() // 'donut' does not area-fill a line
+    const pieArea = opt(buildChartOption(chart('pie', [{ label: 'A', value: 1 }]), { variant: 'area' }))
+    expect(pieArea.series[0].radius).toBe('70%') // 'area' does not donut-ify a pie
+    expect(buildChartOption(chart('number', [{ label: 'x', value: 1 }]), { variant: 'donut' })).toBeNull()
+  })
 })
