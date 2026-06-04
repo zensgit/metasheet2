@@ -235,6 +235,10 @@ export class DashboardService {
     const chart = await this.getChart(chartId)
     if (!chart) throw new Error(`Chart not found: ${chartId}`)
 
+    return this.computeChartDataForConfig(chart)
+  }
+
+  async computeChartDataForConfig(chart: ChartConfig): Promise<ChartData> {
     let records: Array<{ data: Record<string, unknown> }> = []
     if (this.recordProvider) {
       records = await this.recordProvider(chart.sheetId)

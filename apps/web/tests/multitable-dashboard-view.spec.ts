@@ -5,6 +5,12 @@ function flushPromises() {
   return new Promise<void>((resolve) => setTimeout(resolve, 0)).then(() => nextTick())
 }
 
+async function settleMicrotasksAndRender() {
+  await Promise.resolve()
+  await Promise.resolve()
+  await nextTick()
+}
+
 // MetaDashboardView renders MetaChartRenderer, which now uses ECharts (needs a canvas absent in
 // jsdom) → mock the runtime entry points so the dashboard mounts cleanly.
 vi.mock('echarts/core', () => ({
@@ -120,6 +126,7 @@ function mount(props: Record<string, unknown>) {
 
 describe('MetaDashboardView', () => {
   afterEach(() => {
+    vi.useRealTimers()
     useLocale().setLocale('en')
     document.body.innerHTML = ''
     vi.restoreAllMocks()
@@ -253,6 +260,83 @@ describe('MetaDashboardView', () => {
     ])
     const dataLoads = fetchFn.mock.calls.filter(([url]: [string]) => url.includes('/charts/chart_new/data'))
     expect(dataLoads.length).toBe(1)
+  })
+
+  it('loads a debounced live preview without gating chart save', async () => {
+    const dashboard = fakeDashboard({ panels: [] })
+    const { client } = mockClient([dashboard], [])
+    const previewSpy = vi.spyOn(client, 'previewChartData').mockResolvedValue({
+      chartType: 'number',
+      dataPoints: [{ label: 'Preview total', value: 42 }],
+      total: 42,
+    })
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    vi.useFakeTimers()
+    ;(container.querySelector('[data-action="create-chart"]') as HTMLButtonElement).click()
+    await nextTick()
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Preview chart'
+    nameInput.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    const submit = container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement
+    expect(submit.disabled).toBe(false)
+    expect(previewSpy).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(300)
+    await nextTick()
+
+    expect(previewSpy).toHaveBeenCalledTimes(1)
+    expect(previewSpy).toHaveBeenCalledWith('sheet_1', expect.objectContaining({
+      name: 'Preview chart',
+      dataSource: expect.objectContaining({ groupByFieldId: 'fld_status' }),
+    }))
+    const previewNumber = container.querySelector('[data-chart-preview-result] [data-chart="number"]')
+    expect(previewNumber?.textContent).toContain('42')
+    expect(submit.disabled).toBe(false)
+  })
+
+  it('drops stale live-preview responses when chart draft changes quickly', async () => {
+    const dashboard = fakeDashboard({ panels: [] })
+    const { client } = mockClient([dashboard], [])
+    const resolvers: Array<(value: ChartData) => void> = []
+    vi.spyOn(client, 'previewChartData').mockImplementation(() => new Promise((resolve) => {
+      resolvers.push(resolve)
+    }))
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    vi.useFakeTimers()
+    ;(container.querySelector('[data-action="create-chart"]') as HTMLButtonElement).click()
+    await nextTick()
+    const typeSelect = container.querySelector('[data-field="chart-type"]') as HTMLSelectElement
+    typeSelect.value = 'number'
+    typeSelect.dispatchEvent(new Event('change'))
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'First preview'
+    nameInput.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    await vi.advanceTimersByTimeAsync(300)
+    expect(resolvers).toHaveLength(1)
+
+    nameInput.value = 'Second preview'
+    nameInput.dispatchEvent(new Event('input'))
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(300)
+    expect(resolvers).toHaveLength(2)
+
+    resolvers[1]({ chartType: 'number', dataPoints: [{ label: 'new', value: 2 }], total: 2 })
+    await settleMicrotasksAndRender()
+    const previewNumber = () => container.querySelector('[data-chart-preview-result] [data-chart="number"]')?.textContent ?? ''
+    expect(previewNumber()).toContain('2')
+
+    resolvers[0]({ chartType: 'number', dataPoints: [{ label: 'old', value: 1 }], total: 1 })
+    await settleMicrotasksAndRender()
+    expect(previewNumber()).toContain('2')
+    expect(previewNumber()).not.toContain('1')
   })
 
   it('offers only chart-compatible fields and blocks value aggregations without a numeric field', async () => {

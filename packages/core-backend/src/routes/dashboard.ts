@@ -27,9 +27,10 @@
 
 import type { Request, Response } from 'express'
 import { Router } from 'express'
+import { randomUUID } from 'crypto'
 import { poolManager } from '../integration/db/connection-pool'
 import type { MultitableCapabilities } from '../multitable/access'
-import type { ChartConfig } from '../multitable/charts'
+import type { AggregationFunction, ChartConfig, ChartCreateInput, ChartType } from '../multitable/charts'
 import type { ChartData } from '../multitable/chart-aggregation-service'
 import { DashboardService } from '../multitable/dashboard-service'
 import type { MultitableField } from '../multitable/field-codecs'
@@ -43,6 +44,10 @@ import {
 } from '../multitable/permission-service'
 
 const dashboardService = new DashboardService()
+const CHART_TYPES = new Set<ChartType>(['bar', 'line', 'pie', 'number', 'table'])
+const AGGREGATION_FUNCTIONS = new Set<AggregationFunction>(['count', 'sum', 'avg', 'min', 'max', 'count_distinct'])
+const AGGREGATIONS_REQUIRING_FIELD = new Set<AggregationFunction>(['sum', 'avg', 'min', 'max', 'count_distinct'])
+const DATE_GROUPINGS = new Set(['day', 'week', 'month', 'quarter', 'year'])
 
 /** Expose the shared service for tests or external wiring. */
 export function getDashboardService(): DashboardService {
@@ -168,6 +173,59 @@ function restrictedChartData(chart: ChartConfig): ChartData {
   }
 }
 
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+}
+
+function buildPreviewChart(sheetId: string, userId: string, body: unknown): ChartConfig {
+  const input = (body ?? {}) as Partial<ChartCreateInput> & {
+    chartType?: unknown
+    type?: unknown
+    displayConfig?: unknown
+    display?: unknown
+  }
+  const chartType = readString(input.type) ?? readString(input.chartType)
+  if (!chartType || !CHART_TYPES.has(chartType as ChartType)) {
+    throw new Error('Invalid chart type')
+  }
+  const source = input.dataSource
+  if (!source || typeof source !== 'object') {
+    throw new Error('dataSource is required')
+  }
+  const aggregation = (source as ChartConfig['dataSource']).aggregation
+  if (!aggregation || typeof aggregation !== 'object') {
+    throw new Error('aggregation is required')
+  }
+  const aggregationFunction = readString(aggregation.function)
+  if (!aggregationFunction || !AGGREGATION_FUNCTIONS.has(aggregationFunction as AggregationFunction)) {
+    throw new Error('Invalid aggregation function')
+  }
+  const dateFieldId = readString((source as ChartConfig['dataSource']).dateFieldId)
+  const dateGrouping = readString((source as ChartConfig['dataSource']).dateGrouping)
+  const groupByFieldId = readString((source as ChartConfig['dataSource']).groupByFieldId)
+  if (dateGrouping && !DATE_GROUPINGS.has(dateGrouping)) {
+    throw new Error('Invalid date grouping')
+  }
+  if ((!dateFieldId || !dateGrouping) && !groupByFieldId) {
+    throw new Error('groupByFieldId or date grouping is required')
+  }
+  if (AGGREGATIONS_REQUIRING_FIELD.has(aggregationFunction as AggregationFunction) && !readString(aggregation.fieldId)) {
+    throw new Error('value field is required for this aggregation')
+  }
+  const now = new Date().toISOString()
+  return {
+    id: `chart_preview_${randomUUID()}`,
+    name: readString(input.name) ?? 'Preview chart',
+    type: chartType as ChartType,
+    sheetId,
+    viewId: readString(input.viewId),
+    dataSource: source as ChartConfig['dataSource'],
+    display: (input.display ?? input.displayConfig ?? {}) as ChartConfig['display'],
+    createdBy: userId,
+    createdAt: now,
+  }
+}
+
 export function dashboardRouter() {
   const router = Router()
 
@@ -197,6 +255,29 @@ export function dashboardRouter() {
         createdBy: auth.userId,
       })
       res.status(201).json(chart)
+    } catch (err: unknown) {
+      res.status(400).json({ error: (err as Error).message })
+    }
+  })
+
+  /** POST /api/multitable/sheets/:sheetId/charts/preview-data — compute unsaved chart preview data */
+  router.post('/sheets/:sheetId/charts/preview-data', async (req: Request, res: Response) => {
+    try {
+      const auth = await requireSheetRead(req, res, req.params.sheetId)
+      if (!auth) return
+      const chart = buildPreviewChart(req.params.sheetId, auth.userId, req.body)
+      const allowedFieldIds = await loadAllowedFieldIds(
+        auth.query,
+        req.params.sheetId,
+        auth.userId,
+        auth.capabilities,
+      )
+      if (isChartDataRestricted(chart, allowedFieldIds)) {
+        res.json(restrictedChartData(chart))
+        return
+      }
+      const data = await dashboardService.computeChartDataForConfig(chart)
+      res.json(data)
     } catch (err: unknown) {
       res.status(400).json({ error: (err as Error).message })
     }

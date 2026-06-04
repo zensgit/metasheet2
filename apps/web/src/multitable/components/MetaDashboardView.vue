@@ -201,6 +201,27 @@
             <small v-if="!numericFields.length" class="meta-dashboard__hint">{{ viewRenderLabel('dashboard.noNumericFields', isZh) }}</small>
           </label>
           <div v-if="createChartError" class="meta-dashboard__error" data-error="create-chart">{{ createChartError }}</div>
+          <section class="meta-dashboard__preview" data-chart-preview="true">
+            <div class="meta-dashboard__preview-title">{{ viewRenderLabel('dashboard.livePreview', isZh) }}</div>
+            <div v-if="createChartDisabled" class="meta-dashboard__preview-empty" data-chart-preview-empty="true">
+              {{ viewRenderLabel('dashboard.previewFillRequired', isZh) }}
+            </div>
+            <div v-else-if="previewLoading" class="meta-dashboard__panel-loading" data-chart-preview-loading="true">
+              {{ viewRenderLabel('dashboard.loadingPreview', isZh) }}
+            </div>
+            <div v-else-if="previewError" class="meta-dashboard__error" data-chart-preview-error="true">
+              {{ viewRenderLabel('dashboard.previewError', isZh) }}
+            </div>
+            <div v-else-if="previewChartData" class="meta-dashboard__preview-chart" data-chart-preview-result="true">
+              <MetaChartRenderer
+                :chart-data="previewChartData"
+                :display-config="previewDisplayConfig"
+              />
+            </div>
+            <div v-else class="meta-dashboard__preview-empty" data-chart-preview-empty="true">
+              {{ viewRenderLabel('dashboard.previewWaiting', isZh) }}
+            </div>
+          </section>
         </div>
         <div class="meta-dashboard__modal-footer">
           <button class="meta-dashboard__btn" type="button" @click="showCreateChart = false">{{ viewRenderLabel('dashboard.cancel', isZh) }}</button>
@@ -217,7 +238,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import type { AggregationFunction, ChartType, Dashboard, DashboardPanel, ChartConfig, ChartCreateInput, ChartData, ChartDataSource, MetaField, MetaFieldType } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import MetaChartRenderer from './MetaChartRenderer.vue'
@@ -244,6 +265,9 @@ const showCreateChart = ref(false)
 const editingChartId = ref<string | null>(null)
 const creatingChart = ref(false)
 const createChartError = ref('')
+const previewChartData = ref<ChartData | null>(null)
+const previewLoading = ref(false)
+const previewError = ref('')
 const editingName = ref(false)
 const nameInput = ref('')
 const nameInputRef = ref<HTMLInputElement | null>(null)
@@ -289,6 +313,7 @@ const createChartDisabled = computed(() => {
   if (requiresValueField.value && !chartDraft.value.valueFieldId) return true
   return false
 })
+const previewDisplayConfig = computed(() => buildChartInput(editingChart.value ?? undefined).displayConfig)
 
 const sortedPanels = computed(() => {
   if (!activeDashboard.value) return []
@@ -308,6 +333,7 @@ function resetChartDraft() {
     valueFieldId: '',
   }
   createChartError.value = ''
+  resetChartPreview()
 }
 
 function openCreateChart() {
@@ -329,6 +355,7 @@ function openEditChart(chartId: string) {
     valueFieldId: cfg.dataSource.aggregation.fieldId ?? '',
   }
   createChartError.value = ''
+  resetChartPreview()
   showAddPanel.value = false
   showCreateChart.value = true
 }
@@ -444,6 +471,54 @@ function buildChartInput(base?: ChartConfig): ChartCreateInput {
       ...(base?.displayConfig ?? {}),
       title: name,
     },
+  }
+}
+
+let previewTimer: ReturnType<typeof setTimeout> | null = null
+let previewSeq = 0
+
+function clearPreviewTimer() {
+  if (previewTimer) {
+    clearTimeout(previewTimer)
+    previewTimer = null
+  }
+}
+
+function resetChartPreview() {
+  clearPreviewTimer()
+  previewSeq += 1
+  previewChartData.value = null
+  previewLoading.value = false
+  previewError.value = ''
+}
+
+function scheduleChartPreview() {
+  clearPreviewTimer()
+  if (!showCreateChart.value || !props.client || createChartDisabled.value) {
+    resetChartPreview()
+    return
+  }
+  previewError.value = ''
+  previewTimer = setTimeout(() => {
+    void runChartPreview()
+  }, 300)
+}
+
+async function runChartPreview() {
+  if (!props.client || createChartDisabled.value) return
+  const seq = ++previewSeq
+  previewLoading.value = true
+  previewError.value = ''
+  try {
+    const data = await props.client.previewChartData(props.sheetId, buildChartInput(editingChart.value ?? undefined))
+    if (seq !== previewSeq) return
+    previewChartData.value = data
+  } catch {
+    if (seq !== previewSeq) return
+    previewChartData.value = null
+    previewError.value = 'preview_failed'
+  } finally {
+    if (seq === previewSeq) previewLoading.value = false
   }
 }
 
@@ -578,6 +653,21 @@ watch(groupableFields, () => {
     chartDraft.value.groupByFieldId = groupableFields.value[0].id
   }
 })
+
+watch(
+  () => [
+    showCreateChart.value,
+    chartDraft.value.name,
+    chartDraft.value.chartType,
+    chartDraft.value.groupByFieldId,
+    chartDraft.value.aggregation,
+    chartDraft.value.valueFieldId,
+    editingDateGrouped.value,
+  ],
+  scheduleChartPreview,
+)
+
+onBeforeUnmount(resetChartPreview)
 </script>
 
 <style scoped>
@@ -734,6 +824,18 @@ watch(groupableFields, () => {
 
 .meta-dashboard__hint { color: #94a3b8; font-weight: 400; }
 .meta-dashboard__error { color: #b91c1c; font-size: 12px; }
+
+.meta-dashboard__preview {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.meta-dashboard__preview-title { font-size: 12px; font-weight: 700; color: #334155; margin-bottom: 8px; }
+.meta-dashboard__preview-empty { font-size: 12px; color: #94a3b8; }
+.meta-dashboard__preview-chart { background: #fff; border-radius: 8px; padding: 10px; }
 
 .meta-dashboard__chart-option {
   display: flex;

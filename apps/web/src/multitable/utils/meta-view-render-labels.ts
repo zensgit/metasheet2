@@ -98,6 +98,11 @@ export type MetaViewRenderLabelKey =
   | 'dashboard.noGroupableFields'
   | 'dashboard.dateGroupingLocked'
   | 'dashboard.noNumericFields'
+  | 'dashboard.livePreview'
+  | 'dashboard.previewFillRequired'
+  | 'dashboard.loadingPreview'
+  | 'dashboard.previewWaiting'
+  | 'dashboard.previewError'
   | 'dashboard.createChartError'
   | 'dashboard.editChartTitle'
   | 'dashboard.editChart'
@@ -200,6 +205,11 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'dashboard.noGroupableFields',
   'dashboard.dateGroupingLocked',
   'dashboard.noNumericFields',
+  'dashboard.livePreview',
+  'dashboard.previewFillRequired',
+  'dashboard.loadingPreview',
+  'dashboard.previewWaiting',
+  'dashboard.previewError',
   'dashboard.createChartError',
   'dashboard.editChartTitle',
   'dashboard.editChart',
@@ -309,6 +319,11 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
     zh: '已按日期分组；此编辑器会保留现有日期分组。',
   },
   'dashboard.noNumericFields': { en: 'No readable numeric fields available.', zh: '没有可读取的数值字段。' },
+  'dashboard.livePreview': { en: 'Live preview', zh: '实时预览' },
+  'dashboard.previewFillRequired': { en: 'Complete the chart fields to preview.', zh: '填写完整图表字段后可预览。' },
+  'dashboard.loadingPreview': { en: 'Loading preview...', zh: '正在加载预览...' },
+  'dashboard.previewWaiting': { en: 'Preview will appear here.', zh: '预览将显示在这里。' },
+  'dashboard.previewError': { en: 'Preview failed. Save is not blocked.', zh: '预览失败，不影响保存。' },
   'dashboard.createChartError': { en: 'Failed to create chart.', zh: '创建图表失败。' },
   'dashboard.editChartTitle': { en: 'Edit chart', zh: '编辑图表' },
   'dashboard.editChart': { en: 'Edit', zh: '编辑' },
