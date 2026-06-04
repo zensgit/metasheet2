@@ -164,13 +164,21 @@
           </label>
           <label class="meta-dashboard__field">
             <span>{{ viewRenderLabel('dashboard.groupBy', isZh) }}</span>
-            <select v-model="chartDraft.groupByFieldId" class="meta-dashboard__select" data-field="chart-group-by">
+            <select
+              v-model="chartDraft.groupByFieldId"
+              class="meta-dashboard__select"
+              data-field="chart-group-by"
+              :disabled="editingDateGrouped"
+            >
               <option value="">{{ viewRenderLabel('common.chooseField', isZh) }}</option>
               <option v-for="field in groupableFields" :key="field.id" :value="field.id">
                 {{ field.name }} · {{ fieldTypeLabel(field.type, isZh) }}
               </option>
             </select>
-            <small v-if="!groupableFields.length" class="meta-dashboard__hint">{{ viewRenderLabel('dashboard.noGroupableFields', isZh) }}</small>
+            <small v-if="editingDateGrouped" class="meta-dashboard__hint" data-hint="date-grouping-locked">
+              {{ viewRenderLabel('dashboard.dateGroupingLocked', isZh) }}
+            </small>
+            <small v-else-if="!groupableFields.length" class="meta-dashboard__hint">{{ viewRenderLabel('dashboard.noGroupableFields', isZh) }}</small>
           </label>
           <label class="meta-dashboard__field">
             <span>{{ viewRenderLabel('dashboard.aggregation', isZh) }}</span>
@@ -210,7 +218,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import type { AggregationFunction, ChartType, Dashboard, DashboardPanel, ChartConfig, ChartCreateInput, ChartData, MetaField, MetaFieldType } from '../types'
+import type { AggregationFunction, ChartType, Dashboard, DashboardPanel, ChartConfig, ChartCreateInput, ChartData, ChartDataSource, MetaField, MetaFieldType } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import MetaChartRenderer from './MetaChartRenderer.vue'
 import { useLocale } from '../../composables/useLocale'
@@ -267,6 +275,8 @@ const chartDraft = ref({
 })
 
 const activeDashboard = computed(() => dashboards.value.find((d) => d.id === activeDashboardId.value) ?? dashboards.value[0] ?? null)
+const editingChart = computed(() => editingChartId.value ? chartConfigMap.value[editingChartId.value] ?? null : null)
+const editingDateGrouped = computed(() => Boolean(editingChart.value?.dataSource.dateFieldId))
 
 const chartFields = computed(() => filterPropertyVisibleFields(props.fields ?? []))
 const groupableFields = computed(() => chartFields.value.filter((field) => GROUPABLE_FIELD_TYPES.has(field.type)))
@@ -275,7 +285,7 @@ const requiresValueField = computed(() => AGGREGATIONS_REQUIRING_VALUE.has(chart
 const createChartDisabled = computed(() => {
   if (!activeDashboard.value) return true
   if (!chartDraft.value.name.trim()) return true
-  if (!chartDraft.value.groupByFieldId) return true
+  if (!editingDateGrouped.value && !chartDraft.value.groupByFieldId) return true
   if (requiresValueField.value && !chartDraft.value.valueFieldId) return true
   return false
 })
@@ -415,18 +425,21 @@ async function addPanelForChart(chartId: string) {
 // chart keeps its date-grouping — full grouping-mode editing is a later slice.)
 function buildChartInput(base?: ChartConfig): ChartCreateInput {
   const name = chartDraft.value.name.trim()
+  const dataSource: ChartDataSource = {
+    ...(base?.dataSource ?? {}),
+    sheetId: props.sheetId,
+    aggregation: {
+      function: chartDraft.value.aggregation,
+      ...(requiresValueField.value ? { fieldId: chartDraft.value.valueFieldId } : {}),
+    },
+  }
+  if (!editingDateGrouped.value) {
+    dataSource.groupByFieldId = chartDraft.value.groupByFieldId
+  }
   return {
     name,
     chartType: chartDraft.value.chartType,
-    dataSource: {
-      ...(base?.dataSource ?? {}),
-      sheetId: props.sheetId,
-      groupByFieldId: chartDraft.value.groupByFieldId,
-      aggregation: {
-        function: chartDraft.value.aggregation,
-        ...(requiresValueField.value ? { fieldId: chartDraft.value.valueFieldId } : {}),
-      },
-    },
+    dataSource,
     displayConfig: {
       ...(base?.displayConfig ?? {}),
       title: name,
@@ -560,6 +573,7 @@ watch(
 )
 
 watch(groupableFields, () => {
+  if (editingDateGrouped.value) return
   if (!chartDraft.value.groupByFieldId && groupableFields.value[0]) {
     chartDraft.value.groupByFieldId = groupableFields.value[0].id
   }
