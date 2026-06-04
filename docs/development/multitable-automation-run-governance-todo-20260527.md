@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2..A6-5 remain frozen / demand-gated
+Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3..A6-5 remain frozen / demand-gated
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, read-boundary wired only); RFC #1885
 
@@ -107,11 +107,16 @@ Landed (capability half) — A6-1 COMPLETE, end-to-end & reachable in production
 - A6-1 enable-writer (createRule/updateRule accept `execution_mode`) — #2191.
 - A6-1 admin UI toggle (rule-editor checkbox) — #2193. No longer dormant: a maintainer can
   opt a rule onto the per-action WorkflowJob plane from the editor.
+- A6-2 suspend/resume runtime (backend, admin-gated v1; `wait_for_callback` + admin resume route,
+  webhook/external resume) — LANDED #2237 c363a78db (2026-06-03).
+- A6-2b suspend/resume FRONTEND (admin Resume UI on suspended steps + `wait_for_callback` editor that
+  auto-locks `workflow_job_v1`; token admin-detail-only, never rendered) — LANDED #2245 cee99c8e4
+  (2026-06-04). **A6-2 now closed end-to-end.**
 
 Deferred (capability half — A6, frozen/demand-gated):
-- A6-2 suspend/resume — webhook/external resume FIRST (delay/timer later: forces durable
-  scheduler/worker/leader); branch/parallel
-- BPMN compile/preview adapter; approval-as-job bridge
+- A6-2 delay/timer resume (v1 was webhook/external only; delay/timer later forces a durable
+  scheduler/worker/leader)
+- A6-3 branch/parallel; A6-4 BPMN compile/preview adapter; A6-5 approval-as-job bridge
 
 ## Milestones
 
@@ -262,7 +267,8 @@ mark the convergence engine complete.
 - [x] A6-1 persistent WorkflowJob runtime — LANDED #2130.
 - [x] A6-1 enable-writer (createRule/updateRule accept `execution_mode`) — LANDED #2191.
 - [x] A6-1 admin UI toggle (rule-editor checkbox) — LANDED #2193. **A6-1 COMPLETE end-to-end.**
-- [ ] A6-2 suspend/resume runtime (webhook/external resume FIRST, not delay/timer) — not started.
+- [x] A6-2 suspend/resume runtime (backend, admin-gated v1; webhook/external resume) — LANDED #2237 c363a78db (2026-06-03).
+- [x] A6-2b suspend/resume frontend (admin Resume UI + `wait_for_callback` editor) — LANDED #2245 cee99c8e4 (2026-06-04). **A6-2 closed end-to-end.** delay/timer resume still deferred / demand-gated.
 - [ ] A6-3 branch/parallel DAG runtime — not started.
 - [ ] A6-4 BPMN compile/preview adapter — not started.
 - [ ] A6-5 approval-as-job bridge — not started.
