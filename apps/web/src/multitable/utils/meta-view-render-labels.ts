@@ -98,6 +98,12 @@ export type MetaViewRenderLabelKey =
   | 'dashboard.noGroupableFields'
   | 'dashboard.noNumericFields'
   | 'dashboard.createChartError'
+  | 'dashboard.editChartTitle'
+  | 'dashboard.editChart'
+  | 'dashboard.saveChart'
+  | 'dashboard.deleteChart'
+  | 'dashboard.deleteChartConfirm'
+  | 'dashboard.editChartError'
   | 'chart.label'
   | 'chart.value'
   | 'chart.restrictedTitle'
@@ -193,6 +199,12 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'dashboard.noGroupableFields',
   'dashboard.noNumericFields',
   'dashboard.createChartError',
+  'dashboard.editChartTitle',
+  'dashboard.editChart',
+  'dashboard.saveChart',
+  'dashboard.deleteChart',
+  'dashboard.deleteChartConfirm',
+  'dashboard.editChartError',
   'chart.label',
   'chart.value',
   'chart.restrictedTitle',
@@ -292,6 +304,12 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'dashboard.noGroupableFields': { en: 'No readable groupable fields available.', zh: '没有可读取的可分组字段。' },
   'dashboard.noNumericFields': { en: 'No readable numeric fields available.', zh: '没有可读取的数值字段。' },
   'dashboard.createChartError': { en: 'Failed to create chart.', zh: '创建图表失败。' },
+  'dashboard.editChartTitle': { en: 'Edit chart', zh: '编辑图表' },
+  'dashboard.editChart': { en: 'Edit', zh: '编辑' },
+  'dashboard.saveChart': { en: 'Save chart', zh: '保存图表' },
+  'dashboard.deleteChart': { en: 'Delete', zh: '删除' },
+  'dashboard.deleteChartConfirm': { en: 'Delete this chart? Panels showing it will be removed.', zh: '删除此图表？引用它的面板将被移除。' },
+  'dashboard.editChartError': { en: 'Failed to save chart.', zh: '保存图表失败。' },
   'chart.label': { en: 'Label', zh: '标签' },
   'chart.value': { en: 'Value', zh: '值' },
   'chart.restrictedTitle': { en: 'Chart data restricted', zh: '图表数据受限' },
