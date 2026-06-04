@@ -282,17 +282,18 @@ Acceptance locks:
 - Manual-confirm rows are held while clean rows can still apply.
 - Values-free summary is available for issue evidence.
 
-### ⬜ C5-2 - Workbench parameterized action UI
+### 🟡 C5-2 - Workbench parameterized action UI (this PR)
 
 Gated on: C5-1 + explicit opt-in.
 
 Scope:
 
-- Add a reusable parameterized table action in the workbench, with the PLM
+- Add a reusable parameterized table action panel in the workbench, with the PLM
   project BOM pull as the first configured action instance.
-- Operator enters `projectNo`.
-- UI shows dry-run summary and conflict counts.
-- Apply confirmation calls C4 only when allowed.
+- Operator enters only `projectNo`.
+- UI shows dry-run status, conflict counts, a token-present state, and
+  values-free evidence.
+- Apply confirmation uses the dry-run token and calls C4 only when allowed.
 
 Acceptance locks:
 
@@ -309,6 +310,8 @@ Acceptance locks:
 - Values shown in the tenant UI are not copied to issue evidence.
 - No K3 button/action is introduced.
 - No batch/multi-project mode in v1.
+- Request-body wire test asserts dry-run/apply send no browser-supplied
+  `sheetId`, source/target binding, C3 plan, or C4 payload.
 
 ### ⬜ C5-3 - Operator validation runbook
 

@@ -670,6 +670,81 @@
         {{ dryRunEmptyPreviewNotice }}
       </div>
 
+      <div class="integration-workbench__table-action" data-testid="table-action-panel">
+        <div class="integration-workbench__panel-head">
+          <div>
+            <h3>参数化表动作</h3>
+            <p>面向已由管理员配置的安全动作。浏览器只填写 allowlist 参数；来源、目标表和写入计划由服务端决定。</p>
+          </div>
+          <span class="integration-workbench__badge" data-testid="table-action-permission-note">dry-run=read · apply=write/admin</span>
+        </div>
+        <div v-if="tableActions.length === 0" class="integration-workbench__empty" data-testid="table-action-empty">
+          当前部署没有暴露表动作。
+        </div>
+        <template v-else>
+          <div class="integration-workbench__grid integration-workbench__grid--compact">
+            <label>
+              <span>动作</span>
+              <select v-model="selectedTableActionId" data-testid="table-action-id">
+                <option v-for="action in tableActions" :key="action.actionId" :value="action.actionId">
+                  {{ action.label }} · {{ action.configured ? '已配置' : '未配置' }}
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>项目号 projectNo</span>
+              <input v-model="tableActionProjectNo" data-testid="table-action-project-no" placeholder="例如 P2026-001" />
+            </label>
+          </div>
+          <p class="integration-workbench__hint" data-testid="table-action-boundary">
+            不提供 raw SQL、source/object、sheetId、C3 plan 或 C4 payload 输入；apply 会用 dry-run token 触发服务端重新计算。
+          </p>
+          <div class="integration-workbench__actions">
+            <button
+              type="button"
+              class="integration-workbench__button"
+              data-testid="table-action-dry-run"
+              :disabled="!tableActionCanDryRun"
+              @click="dryRunTableAction"
+            >
+              {{ runningTableAction === 'dry-run' ? 'Dry-run 中' : 'Dry-run 表动作' }}
+            </button>
+            <button
+              type="button"
+              class="integration-workbench__button integration-workbench__button--danger"
+              data-testid="table-action-apply"
+              :disabled="!tableActionCanApply"
+              @click="applyTableAction"
+            >
+              {{ runningTableAction === 'apply' ? 'Apply 中' : 'Apply 到备料表' }}
+            </button>
+          </div>
+          <div v-if="tableActionDryRunResult" class="integration-workbench__table-action-review" data-testid="table-action-review">
+            <strong>{{ tableActionReviewSummary }}</strong>
+            <div class="integration-workbench__metric-row">
+              <span>add {{ tableActionCounts.add || 0 }}</span>
+              <span>update {{ tableActionCounts.update || 0 }}</span>
+              <span>skip {{ tableActionCounts.skip || 0 }}</span>
+              <span>inactive {{ tableActionCounts.inactive || 0 }}</span>
+              <span>manual {{ tableActionCounts.manual_confirm || 0 }}</span>
+            </div>
+            <p class="integration-workbench__hint" data-testid="table-action-token-state">
+              {{ tableActionDryRunToken ? 'dry-run token 已签发；token 仅保存在当前页面内存，不展示、不复制到 evidence。' : '本次 dry-run 不可 apply；请处理失败项后重跑。' }}
+            </p>
+            <label v-if="tableActionManualConfirmCount > 0" class="integration-workbench__inline-check">
+              <input v-model="tableActionAcceptManualConfirmHold" type="checkbox" data-testid="table-action-accept-manual-hold" />
+              <span>确认 manual_confirm 行保持不写，只应用 clean add/update/inactive 决策。</span>
+            </label>
+          </div>
+          <div v-if="tableActionApplyResult" class="integration-workbench__table-action-review" data-testid="table-action-apply-result">
+            <strong>apply {{ tableActionApplyResult.status }}</strong>
+            <p class="integration-workbench__hint">已消费 dry-run token；如需再次 apply，必须重新 dry-run。</p>
+          </div>
+          <pre v-if="tableActionEvidenceText" data-testid="table-action-evidence">{{ tableActionEvidenceText }}</pre>
+          <p class="integration-workbench__hint">Issue / 客户证据只粘贴 values-free summary counts、status、error code；不要粘贴 PLM 行、备料表值或 payload。</p>
+        </template>
+      </div>
+
       <div class="integration-workbench__export">
         <div>
           <strong>导出清洗结果</strong>
@@ -942,13 +1017,16 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useAuth } from '../composables/useAuth'
 import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
 import { listDataSources } from '../data-sources/api'
 import type { DataSourceListItem } from '../data-sources/types'
 import {
   canReadFromSystem,
   canWriteToSystem,
+  applyIntegrationTableAction,
   deleteWorkbenchExternalSystem,
+  dryRunIntegrationTableAction,
   getDefaultIntegrationScope,
   isIntegrationScopedProjectId,
   normalizeIntegrationProjectId,
@@ -959,6 +1037,7 @@ import {
   listIntegrationPipelineRuns,
   listIntegrationProvenanceByRow,
   listIntegrationStagingDescriptors,
+  listIntegrationTableActions,
   listExternalSystemObjects,
   listIntegrationAdapters,
   listWorkbenchExternalSystems,
@@ -987,6 +1066,9 @@ import {
   type IntegrationSystemObject,
   type IntegrationFieldRule,
   type IntegrationReferenceMappingSource,
+  type IntegrationTableActionApplyResult,
+  type IntegrationTableActionDryRunResult,
+  type IntegrationTableActionMetadata,
   type IntegrationTemplatePreviewRequest,
   type WorkbenchExternalSystem,
 } from '../services/integration/workbench'
@@ -1054,6 +1136,7 @@ const flowSteps = [
   { title: '3. 多维表清洗', description: '业务人员在表格里修正、审核、补字段' },
   { title: '4. Dry-run / 推送', description: '预览 payload 后导出或 Save-only 写回' },
 ]
+const auth = useAuth()
 
 const stagingDatasetCopy: Record<string, { area: string; name: string; description: string }> = {
   plm_raw_items: {
@@ -1128,6 +1211,13 @@ const previewText = ref('尚未生成预览')
 const previewProvenance = ref<ReturnType<typeof summarizeFieldProvenance>>(null)
 const pipelineResultText = ref('尚未执行')
 const lastDryRunResult = ref<IntegrationPipelineRunResult | null>(null)
+const tableActions = ref<IntegrationTableActionMetadata[]>([])
+const selectedTableActionId = ref('')
+const tableActionProjectNo = ref('')
+const runningTableAction = ref<'dry-run' | 'apply' | ''>('')
+const tableActionDryRunResult = ref<IntegrationTableActionDryRunResult | null>(null)
+const tableActionApplyResult = ref<IntegrationTableActionApplyResult | null>(null)
+const tableActionAcceptManualConfirmHold = ref(false)
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
 const expandedRunIds = ref<Set<string>>(new Set())
@@ -1536,6 +1626,37 @@ const dryRunBlockedSummary = computed(() => {
   const missing = dryRunReadinessItems.value.filter((item) => !item.ready)
   if (missing.length === 0) return '已满足 dry-run 前置条件。Dry-run 只生成 preview，不写外部系统。'
   return `还缺 ${missing.length} 项：${missing.map((item) => item.label).join('、')}`
+})
+const configuredTableActions = computed(() => tableActions.value.filter((action) => action.configured === true))
+const selectedTableAction = computed(() => tableActions.value.find((action) => action.actionId === selectedTableActionId.value) || configuredTableActions.value[0] || tableActions.value[0] || null)
+const tableActionCounts = computed(() => tableActionDryRunResult.value?.counts || {})
+const tableActionManualConfirmCount = computed(() => Number(tableActionCounts.value.manual_confirm || 0))
+const tableActionDryRunToken = computed(() => tableActionDryRunResult.value?.dryRunToken || '')
+const tableActionEvidenceText = computed(() => {
+  const evidence = tableActionApplyResult.value?.evidence || tableActionDryRunResult.value?.evidence
+  return evidence ? JSON.stringify(evidence, null, 2) : ''
+})
+const tableActionCanDryRun = computed(() => Boolean(
+  selectedTableAction.value?.configured
+  && tableActionProjectNo.value.trim()
+  && runningTableAction.value === '',
+))
+const tableActionCanApply = computed(() => Boolean(
+  selectedTableAction.value?.configured
+  && tableActionProjectNo.value.trim()
+  && tableActionDryRunResult.value?.canApply === true
+  && tableActionDryRunToken.value
+  && auth.hasPermission('integration:write')
+  && runningTableAction.value === ''
+  && (tableActionManualConfirmCount.value === 0 || tableActionAcceptManualConfirmHold.value),
+))
+const tableActionReviewSummary = computed(() => {
+  if (!selectedTableAction.value) return '当前部署没有可用表动作。'
+  if (!selectedTableAction.value.configured) return '该动作尚未由管理员配置源/目标绑定，不能运行。'
+  if (!tableActionDryRunResult.value) return '输入项目号后先 dry-run；apply 必须使用本次 dry-run token，并由服务端重新计算计划。'
+  const status = tableActionDryRunResult.value.status || 'unknown'
+  const counts = tableActionCounts.value
+  return `dry-run ${status} · add ${counts.add || 0} / update ${counts.update || 0} / skip ${counts.skip || 0} / inactive ${counts.inactive || 0} / manual ${counts.manual_confirm || 0}`
 })
 
 function setStatus(message: string, kind: 'success' | 'error' | 'idle' = 'idle'): void {
@@ -2144,8 +2265,22 @@ async function refreshBootstrap(): Promise<void> {
     normalizeSystemSelections()
     if (!stagingSheetId.value) stagingSheetId.value = descriptorList.find((descriptor) => descriptor.id === 'standard_materials')?.id || descriptorList[0]?.id || ''
     setStatus(`已加载 ${systemList.length} 个连接、${adapterList.length} 个适配器和 ${descriptorList.length} 个 staging 表`, 'success')
+    void refreshTableActions(resolvedScope)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
+  }
+}
+
+async function refreshTableActions(resolvedScope = currentScope()): Promise<void> {
+  try {
+    const actionList = await listIntegrationTableActions(resolvedScope)
+    tableActions.value = actionList
+    if (!selectedTableActionId.value) {
+      selectedTableActionId.value = actionList.find((action) => action.configured)?.actionId || actionList[0]?.actionId || ''
+    }
+  } catch {
+    tableActions.value = []
+    selectedTableActionId.value = ''
   }
 }
 
@@ -2810,6 +2945,82 @@ async function executePipeline(dryRun: boolean): Promise<void> {
   }
 }
 
+function resetTableActionReview(): void {
+  tableActionDryRunResult.value = null
+  tableActionApplyResult.value = null
+  tableActionAcceptManualConfirmHold.value = false
+}
+
+function buildTableActionParameters(): Record<string, unknown> {
+  const projectNo = tableActionProjectNo.value.trim()
+  if (!projectNo) throw new Error('请填写项目号 projectNo')
+  return { projectNo }
+}
+
+async function dryRunTableAction(): Promise<void> {
+  const action = selectedTableAction.value
+  if (!action?.configured) {
+    setStatus('表动作尚未由管理员配置，不能 dry-run。', 'error')
+    return
+  }
+  runningTableAction.value = 'dry-run'
+  tableActionDryRunResult.value = null
+  tableActionApplyResult.value = null
+  tableActionAcceptManualConfirmHold.value = false
+  try {
+    const result = await dryRunIntegrationTableAction(action.actionId, {
+      ...currentScope(),
+      parameters: buildTableActionParameters(),
+    })
+    tableActionDryRunResult.value = result
+    const manualCount = Number(result.counts?.manual_confirm || 0)
+    const message = manualCount > 0
+      ? `表动作 dry-run 完成：${manualCount} 行需要人工确认，apply 会保持这些行不写。`
+      : '表动作 dry-run 完成，可进入 apply 确认。'
+    setStatus(message, result.canApply ? 'success' : 'error')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    runningTableAction.value = ''
+  }
+}
+
+async function applyTableAction(): Promise<void> {
+  const action = selectedTableAction.value
+  if (!action?.configured) {
+    setStatus('表动作尚未由管理员配置，不能 apply。', 'error')
+    return
+  }
+  if (!auth.hasPermission('integration:write')) {
+    setStatus('当前用户只有 dry-run 读取权限，不能 apply 到备料表。', 'error')
+    return
+  }
+  if (!tableActionDryRunToken.value) {
+    setStatus('请先执行 dry-run；apply 必须使用服务端返回的一次性 dry-run token。', 'error')
+    return
+  }
+  runningTableAction.value = 'apply'
+  tableActionApplyResult.value = null
+  try {
+    const result = await applyIntegrationTableAction(action.actionId, {
+      ...currentScope(),
+      parameters: buildTableActionParameters(),
+      confirm: {
+        dryRunToken: tableActionDryRunToken.value,
+        acceptManualConfirmHold: tableActionAcceptManualConfirmHold.value === true,
+      },
+    })
+    tableActionApplyResult.value = result
+    tableActionDryRunResult.value = null
+    tableActionAcceptManualConfirmHold.value = false
+    setStatus(`表动作 apply 完成：${result.status}`, result.status === 'failed' ? 'error' : 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    runningTableAction.value = ''
+  }
+}
+
 const PROVENANCE_SOURCE_LABELS: Record<string, string> = {
   staging: '暂存源',
   template: '模板',
@@ -2931,6 +3142,10 @@ onMounted(() => {
 watch(showAdvancedConnectors, () => {
   normalizeSystemSelections()
 })
+
+watch([selectedTableActionId, tableActionProjectNo], () => {
+  resetTableActionReview()
+})
 </script>
 
 <style scoped>
@@ -2967,6 +3182,30 @@ watch(showAdvancedConnectors, () => {
   font-size: 12px;
   background: #eef2ff;
   color: #3730a3;
+}
+
+.integration-workbench__table-action {
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.integration-workbench__table-action h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.integration-workbench__table-action p {
+  margin: 0;
+}
+
+.integration-workbench__table-action-review {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .integration-workbench {

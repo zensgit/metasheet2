@@ -2163,4 +2163,199 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi()
     expect((container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).disabled).toBe(false)
   })
+
+  it('C5-2: runs a configured table action via dry-run token without client-supplied plan or sheet scope', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    const dryRunBodies: Array<{ url: string; body: Record<string, unknown> }> = []
+    const applyBodies: Array<{ url: string; body: Record<string, unknown> }> = []
+    const publicAction = {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      kind: 'parameterized_table_action',
+      label: 'PLM project BOM -> stock preparation',
+      configured: true,
+      parameters: [{
+        id: 'projectNo',
+        label: 'Project number',
+        type: 'string',
+        required: true,
+        trim: true,
+        binding: { type: 'equality_filter', field: 'FileCode' },
+      }],
+      permissions: { dryRun: 'read', apply: 'write' },
+      evidence: { valuesFreeIssueEvidence: true },
+    }
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source'], supports: ['read'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([publicAction])
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run?tenantId=default') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        dryRunBodies.push({ url, body })
+        return jsonResponse({
+          action: publicAction,
+          status: 'manual_confirm_required',
+          dryRunToken: 'dry-token-secret',
+          revision: 'rev-1',
+          canApply: true,
+          counts: { add: 1, update: 2, skip: 3, inactive: 1, manual_confirm: 1 },
+          evidence: {
+            actionId: publicAction.actionId,
+            projectNoPresent: true,
+            dryRunRevision: 'rev-1',
+            expansion: { status: 'expanded', rows: 4, errorTypes: [] },
+            plan: { counts: { add: 1, update: 2, skip: 3, inactive: 1, manual_confirm: 1 }, errorTypes: [] },
+          },
+        })
+      }
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/apply?tenantId=default') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        applyBodies.push({ url, body })
+        return jsonResponse({
+          action: publicAction,
+          status: 'partial',
+          permission: 'write',
+          dryRunRevision: 'rev-1',
+          apply: { status: 'partial', created: 1, patched: 2, skipped: 3, manualConfirmHeld: 1 },
+          evidence: {
+            actionId: publicAction.actionId,
+            projectNoPresent: true,
+            dryRunRevision: 'rev-1',
+            apply: { status: 'partial', errorCodes: [] },
+          },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(12)
+
+    expect(container.querySelector('[data-testid="table-action-panel"]')?.textContent).toContain('PLM project BOM -> stock preparation')
+    expect(container.querySelector('[data-testid="table-action-boundary"]')?.textContent).toContain('不提供 raw SQL')
+    expect((container.querySelector('[data-testid="table-action-dry-run"]') as HTMLButtonElement).disabled).toBe(true)
+
+    const projectInput = container.querySelector('[data-testid="table-action-project-no"]') as HTMLInputElement
+    projectInput.value = 'P-001'
+    projectInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="table-action-dry-run"]') as HTMLButtonElement).click()
+    await flushUi(10)
+    expect(dryRunBodies).toHaveLength(1)
+    expect(dryRunBodies[0].body).toEqual({
+      parameters: { projectNo: 'P-001' },
+    })
+    expect(dryRunBodies[0].body).not.toHaveProperty('sheetId')
+    expect(dryRunBodies[0].body).not.toHaveProperty('source')
+    expect(dryRunBodies[0].body).not.toHaveProperty('target')
+    expect(dryRunBodies[0].body).not.toHaveProperty('plan')
+    expect(dryRunBodies[0].body).not.toHaveProperty('payload')
+    expect(container.querySelector('[data-testid="table-action-review"]')?.textContent).toContain('manual 1')
+    expect(container.querySelector('[data-testid="table-action-token-state"]')?.textContent).toContain('token 已签发')
+    expect(container.querySelector('[data-testid="table-action-panel"]')?.textContent).not.toContain('dry-token-secret')
+    expect((container.querySelector('[data-testid="table-action-apply"]') as HTMLButtonElement).disabled).toBe(true)
+
+    ;(container.querySelector('[data-testid="table-action-accept-manual-hold"]') as HTMLInputElement).click()
+    await flushUi()
+    expect((container.querySelector('[data-testid="table-action-apply"]') as HTMLButtonElement).disabled).toBe(false)
+    ;(container.querySelector('[data-testid="table-action-apply"]') as HTMLButtonElement).click()
+    await flushUi(10)
+
+    expect(applyBodies).toHaveLength(1)
+    expect(applyBodies[0].body).toEqual({
+      parameters: { projectNo: 'P-001' },
+      confirm: {
+        dryRunToken: 'dry-token-secret',
+        acceptManualConfirmHold: true,
+      },
+    })
+    expect(applyBodies[0].body).not.toHaveProperty('sheetId')
+    expect(applyBodies[0].body).not.toHaveProperty('source')
+    expect(applyBodies[0].body).not.toHaveProperty('target')
+    expect(applyBodies[0].body).not.toHaveProperty('plan')
+    expect(applyBodies[0].body).not.toHaveProperty('payload')
+    expect(container.querySelector('[data-testid="table-action-apply-result"]')?.textContent).toContain('apply partial')
+    expect(container.querySelector('[data-testid="table-action-evidence"]')?.textContent).not.toContain('P-001')
+    expect(container.querySelector('[data-testid="table-action-evidence"]')?.textContent).not.toContain('dry-token-secret')
+  })
+
+  it('C5-2: keeps apply disabled for read-only users after a successful dry-run', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:read']))
+    const applyBodies: Array<Record<string, unknown>> = []
+    const publicAction = {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      kind: 'parameterized_table_action',
+      label: 'PLM project BOM -> stock preparation',
+      configured: true,
+      parameters: [{ id: 'projectNo', label: 'Project number', type: 'string', required: true }],
+      permissions: { dryRun: 'read', apply: 'write' },
+      evidence: { valuesFreeIssueEvidence: true },
+    }
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([publicAction])
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run?tenantId=default') {
+        return jsonResponse({
+          action: publicAction,
+          status: 'ready',
+          dryRunToken: 'read-only-dry-token',
+          revision: 'rev-read-only',
+          canApply: true,
+          counts: { add: 1, update: 0, skip: 0, inactive: 0, manual_confirm: 0 },
+          evidence: { actionId: publicAction.actionId, projectNoPresent: true, dryRunRevision: 'rev-read-only' },
+        })
+      }
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/apply?tenantId=default') {
+        applyBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({ status: 'succeeded' })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(12)
+
+    const projectInput = container.querySelector('[data-testid="table-action-project-no"]') as HTMLInputElement
+    projectInput.value = 'P-READ'
+    projectInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="table-action-dry-run"]') as HTMLButtonElement).click()
+    await flushUi(10)
+
+    expect(container.querySelector('[data-testid="table-action-review"]')?.textContent).toContain('add 1')
+    expect(container.querySelector('[data-testid="table-action-token-state"]')?.textContent).toContain('token 已签发')
+    const applyButton = container.querySelector('[data-testid="table-action-apply"]') as HTMLButtonElement
+    expect(applyButton.disabled).toBe(true)
+    applyButton.click()
+    await flushUi()
+    expect(applyBodies).toHaveLength(0)
+  })
 })
