@@ -117,7 +117,7 @@ Acceptance locks:
 - Invalid structured filters fail closed before any data-source read.
 - Existing offset pagination remains unchanged.
 
-### 🟡 C2 - `projectNo -> PLM BOM` dry-run expansion helper (this PR)
+### ✅ C2 - `projectNo -> PLM BOM` dry-run expansion helper (DONE - PR #2268, `2e41927c9`)
 
 Gated on: C2-0 + confirmed customer PLM relation descriptors + explicit opt-in.
 
@@ -160,7 +160,7 @@ Acceptance locks:
 - Conflict actions are not computed in C2; `candidateRows` is exposed and C3 is
   still responsible for `add/update/skip/inactive/manual_confirm`.
 
-### 🔒 C3 - Conflict planner
+### 🟡 C3 - Conflict planner (this PR)
 
 Gated on: C2 + explicit opt-in.
 
@@ -170,6 +170,9 @@ Scope:
 - Compute decisions: `add`, `update`, `skip`, `inactive`, `manual_confirm`.
 - Preserve human-owned fields.
 - No write.
+- Accept C2 `expandedRows`, existing stock-preparation rows, and C2
+  `rowErrors`.
+- Produce a write-free plan for C4 with per-row decision records and counts.
 
 Acceptance locks:
 
@@ -182,6 +185,9 @@ Acceptance locks:
 - C2 `rowErrors` are planned as `manual_confirm` while valid expanded rows are
   still eligible for add/update/skip planning; one bad row must not abort the
   whole conflict plan.
+- `add`, `update`, and `inactive` payloads never include human-preserved fields.
+- Unsupported conflict strategies (`deleteByDefault`, non-`mark_inactive`
+  missing policy, or overwriting human fields) reject fail-closed.
 
 ### 🔒 C4 - Apply writer to stock-preparation main table
 
