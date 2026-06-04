@@ -1718,6 +1718,15 @@ export class MultitableApiClient {
     return this.parseJson<ChartData>(res)
   }
 
+  async previewChartData(sheetId: string, input: ChartCreateInput): Promise<ChartData> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts/preview-data`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(toChartCreateWire(input)),
+    })
+    return this.parseJson<ChartData>(res)
+  }
+
   // --- Dashboards ---
   async listDashboards(sheetId: string): Promise<Dashboard[]> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/dashboards`)
