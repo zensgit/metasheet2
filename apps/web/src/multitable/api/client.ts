@@ -1598,6 +1598,22 @@ export class MultitableApiClient {
     return this.parseJson<AutomationRunView>(res)
   }
 
+  /**
+   * A6-2: resume a suspended execution (admin-only; re-runs the remaining actions' side effects).
+   * The single-use `resumeToken` comes from the suspended step's C1 descriptor in the run detail.
+   * `confirmSideEffects:true` is always sent (the UI confirm-gates this call). parseJson throws an
+   * Error with `.code` (NOT_FOUND / ALREADY_RESUMED / RULE_CHANGED / RULE_MISSING_OR_DISABLED /
+   * RECORD_GONE) so the caller can map it to an inline message rather than a generic toast.
+   */
+  async resumeAutomation(resumeToken: string): Promise<AutomationRunView> {
+    const res = await this.fetch('/api/multitable/automation/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resumeToken, confirmSideEffects: true }),
+    })
+    return this.parseJson<AutomationRunView>(res)
+  }
+
   async getAutomationDingTalkPersonDeliveries(sheetId: string, ruleId: string, limit?: number): Promise<DingTalkPersonDelivery[]> {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-person-deliveries${qs({ limit })}`,

@@ -779,6 +779,7 @@ export type AutomationActionType =
   | 'send_dingtalk_group_message'
   | 'send_dingtalk_person_message'
   | 'lock_record'
+  | 'wait_for_callback'
   // Legacy aliases
   | 'notify'
   | 'update_field'
@@ -872,6 +873,9 @@ export interface AutomationRunStepView {
   upstreamJobId: string | null
   result?: unknown
   error?: string
+  /** A6-2: present iff status === 'suspended' — the C1 suspend descriptor. The resume token is
+   * admin-detail-only (the runs detail uses it for the Resume action; never shown in the list). */
+  suspend?: { reason: string; resumeToken: string }
 }
 
 /**

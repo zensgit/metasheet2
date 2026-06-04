@@ -17,13 +17,14 @@
         <label class="meta-rule-editor__label" data-field="executionModeToggle">
           <input
             type="checkbox"
-            :checked="draft.executionMode === 'workflow_job_v1'"
+            :checked="draft.executionMode === 'workflow_job_v1' || requiresJobMode"
+            :disabled="requiresJobMode"
             data-field="executionMode"
             @change="setExecutionMode(($event.target as HTMLInputElement).checked)"
           />
           {{ automationLabel('editor.executionModeLabel', isZh) }}
         </label>
-        <div class="meta-rule-editor__hint" data-field="executionModeHint">{{ automationLabel('editor.executionModeHint', isZh) }}</div>
+        <div class="meta-rule-editor__hint" data-field="executionModeHint">{{ requiresJobMode ? automationLabel('editor.executionModeRequiredHint', isZh) : automationLabel('editor.executionModeHint', isZh) }}</div>
 
         <!-- 1. Trigger selector -->
         <section class="meta-rule-editor__section">
@@ -243,6 +244,7 @@
                 <option value="send_dingtalk_group_message">{{ automationActionTypeLabel('send_dingtalk_group_message', isZh) }}</option>
                 <option value="send_dingtalk_person_message">{{ automationActionTypeLabel('send_dingtalk_person_message', isZh) }}</option>
                 <option value="lock_record">{{ automationActionTypeLabel('lock_record', isZh) }}</option>
+                <option value="wait_for_callback">{{ automationActionTypeLabel('wait_for_callback', isZh) }}</option>
               </select>
               <div class="meta-rule-editor__action-btns">
                 <button v-if="idx > 0" class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="moveAction(idx, -1)" :title="automationLabel('editor.moveUpTitle', isZh)">&#x2191;</button>
@@ -888,6 +890,12 @@
                 <input type="checkbox" v-model="action.config.locked" />
                 {{ automationLabel('actionConfig.lockRecord', isZh) }}
               </label>
+            </div>
+
+            <!-- wait_for_callback config (A6-2: info-only, ZERO params — the suspend point; no
+                 webhook-URL / timer / manual-task fields. An admin resumes from the runs detail.) -->
+            <div v-if="action.type === 'wait_for_callback'" class="meta-rule-editor__action-config" data-action-config="wait_for_callback">
+              <div class="meta-rule-editor__hint" data-field="wait-for-callback-hint">{{ automationLabel('actionConfig.waitForCallbackHint', isZh) }}</div>
             </div>
           </div>
           <button
@@ -1561,8 +1569,18 @@ function draftFromRule(rule: AutomationRule): Draft {
 const draft = ref<Draft>(emptyDraft())
 const conditionEditorEntries = computed(() => collectConditionEditorEntries(draft.value.conditions.conditions))
 
+// A6-2b: a wait_for_callback action REQUIRES execution_mode 'workflow_job_v1' — the backend
+// fail-closes a legacy rule that contains a wait step. So whenever a wait action is present the
+// job-mode toggle is forced on (and disabled), and buildPayload enforces it regardless.
+const requiresJobMode = computed(() => draft.value.actions.some((a) => a.type === 'wait_for_callback'))
+
 function setExecutionMode(checked: boolean): void {
   // A6-1 opt-in: checkbox → the rule's persistent WorkflowJob mode (off = legacy/null).
+  // A6-2b: cannot turn it off while a wait_for_callback step is present.
+  if (requiresJobMode.value) {
+    draft.value.executionMode = 'workflow_job_v1'
+    return
+  }
   draft.value.executionMode = checked ? 'workflow_job_v1' : null
 }
 
@@ -2295,6 +2313,8 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
       }
     case 'lock_record':
       return { locked: true }
+    case 'wait_for_callback':
+      return {} // A6-2: zero-param suspend point (no webhook-URL/timer/manual-task fields)
     default:
       return {}
   }
@@ -2302,6 +2322,9 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
 
 function onDraftActionTypeChange(action: DraftAction) {
   action.config = defaultConfigForActionType(action.type)
+  // A6-2b: selecting wait_for_callback auto-enables the REQUIRED job mode (the backend fail-closes a
+  // legacy rule containing a wait step) — so the UI can't create a "suspends" rule that fails at runtime.
+  if (action.type === 'wait_for_callback') draft.value.executionMode = 'workflow_job_v1'
 }
 
 function removeAction(idx: number) {
@@ -2425,7 +2448,9 @@ function buildPayload(): Partial<AutomationRule> {
     actions,
     actionType: actions[0]?.type ?? 'update_record',
     actionConfig: actions[0]?.config ?? {},
-    executionMode: d.executionMode,
+    // A6-2b: a wait_for_callback action forces workflow_job_v1 (backend fail-closes legacy waits) —
+    // enforced here so the payload is correct regardless of toggle state.
+    executionMode: requiresJobMode.value ? 'workflow_job_v1' : d.executionMode,
   }
 }
 

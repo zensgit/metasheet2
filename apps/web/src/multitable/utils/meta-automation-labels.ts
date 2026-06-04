@@ -93,6 +93,7 @@ export type AutomationLabelKey =
   | 'editor.removeActionTitle'
   | 'editor.executionModeLabel'
   | 'editor.executionModeHint'
+  | 'editor.executionModeRequiredHint'
   | 'trigger.title'
   | 'trigger.watchField'
   | 'trigger.selectField'
@@ -128,6 +129,7 @@ export type AutomationLabelKey =
   | 'actionConfig.bodyTemplate'
   | 'actionConfig.emailBodyPlaceholder'
   | 'actionConfig.lockRecord'
+  | 'actionConfig.waitForCallbackHint'
   | 'testRun.warning'
   | 'testRun.confirmSuffix'
   | 'testRun.unsavedHint'
@@ -257,6 +259,14 @@ export type AutomationLabelKey =
   | 'runs.ruleSnapshot'
   | 'runs.steps'
   | 'runs.loadingDetail'
+  | 'runs.resume'
+  | 'runs.resumeConfirm'
+  | 'runs.resumeError.notFound'
+  | 'runs.resumeError.alreadyResumed'
+  | 'runs.resumeError.ruleChanged'
+  | 'runs.resumeError.ruleMissingOrDisabled'
+  | 'runs.resumeError.recordGone'
+  | 'runs.resumeError.generic'
 
 export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'log.title',
@@ -300,6 +310,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'editor.removeActionTitle',
   'editor.executionModeLabel',
   'editor.executionModeHint',
+  'editor.executionModeRequiredHint',
   'trigger.title',
   'trigger.watchField',
   'trigger.selectField',
@@ -335,6 +346,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'actionConfig.bodyTemplate',
   'actionConfig.emailBodyPlaceholder',
   'actionConfig.lockRecord',
+  'actionConfig.waitForCallbackHint',
   'testRun.warning',
   'testRun.confirmSuffix',
   'testRun.unsavedHint',
@@ -464,6 +476,14 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.ruleSnapshot',
   'runs.steps',
   'runs.loadingDetail',
+  'runs.resume',
+  'runs.resumeConfirm',
+  'runs.resumeError.notFound',
+  'runs.resumeError.alreadyResumed',
+  'runs.resumeError.ruleChanged',
+  'runs.resumeError.ruleMissingOrDisabled',
+  'runs.resumeError.recordGone',
+  'runs.resumeError.generic',
 ]
 
 const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
@@ -514,6 +534,10 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     en: 'When on, each action run for this rule is saved as a durable WorkflowJob record. Leave off for the default lightweight log.',
     zh: '开启后，本规则每个动作的运行都会保存为持久的 WorkflowJob 记录；关闭则使用默认的轻量日志。',
   },
+  'editor.executionModeRequiredHint': {
+    en: 'Required and locked on: this rule has a "wait for callback" action, and suspend/resume needs the WorkflowJob record.',
+    zh: '已强制开启并锁定：本规则包含“等待回调”动作，挂起/恢复依赖 WorkflowJob 记录，无法关闭。',
+  },
   'trigger.title': { en: 'Trigger', zh: '触发器' },
   'trigger.watchField': { en: 'Watch field', zh: '监听字段' },
   'trigger.selectField': { en: '-- select field --', zh: '-- 选择字段 --' },
@@ -549,6 +573,10 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'actionConfig.bodyTemplate': { en: 'Body template', zh: '正文模板' },
   'actionConfig.emailBodyPlaceholder': { en: 'Record {{recordId}} changed. Status: {{record.status}}', zh: '记录 {{recordId}} 已变更。状态：{{record.status}}' },
   'actionConfig.lockRecord': { en: 'Lock record', zh: '锁定记录' },
+  'actionConfig.waitForCallbackHint': {
+    en: 'Suspends the run until an admin resumes it from the runs view. No parameters in v1 (no external webhook/timer).',
+    zh: '挂起执行，直到管理员在运行视图中手动恢复。v1 无参数（暂无外部 webhook/定时器）。',
+  },
   'testRun.warning': { en: 'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users.', zh: '测试运行会执行已保存规则，并可能向已配置的钉钉群或用户发送真实消息。' },
   'testRun.confirmSuffix': { en: 'Unsaved changes are not included. Continue?', zh: '未保存的更改不会包含在内。是否继续？' },
   'testRun.unsavedHint': { en: 'Save this automation before running a test.', zh: '请先保存此自动化，再运行测试。' },
@@ -678,6 +706,17 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.ruleSnapshot': { en: 'Rule snapshot', zh: '规则快照' },
   'runs.steps': { en: 'Steps', zh: '步骤' },
   'runs.loadingDetail': { en: 'Loading detail…', zh: '加载详情…' },
+  'runs.resume': { en: 'Resume', zh: '恢复执行' },
+  'runs.resumeConfirm': {
+    en: 'Resume this run? It continues the remaining actions and may cause external side effects.',
+    zh: '恢复这条执行？将继续执行剩余动作，可能产生外部副作用。',
+  },
+  'runs.resumeError.notFound': { en: 'Resume token not found.', zh: '恢复令牌不存在。' },
+  'runs.resumeError.alreadyResumed': { en: 'This run was already resumed.', zh: '该执行已被恢复。' },
+  'runs.resumeError.ruleChanged': { en: 'The rule changed since it was suspended; cannot resume safely.', zh: '规则在挂起后已变更，无法安全恢复。' },
+  'runs.resumeError.ruleMissingOrDisabled': { en: 'The rule is missing or disabled; cannot resume.', zh: '规则缺失或已停用，无法恢复。' },
+  'runs.resumeError.recordGone': { en: 'The record no longer exists; cannot resume.', zh: '记录已不存在，无法恢复。' },
+  'runs.resumeError.generic': { en: 'Resume failed.', zh: '恢复失败。' },
 }
 
 export function automationLabel(key: AutomationLabelKey, isZh: boolean): string {
@@ -717,6 +756,8 @@ export function automationActionTypeLabel(type: AutomationActionType | (string &
       return isZh ? '发送钉钉个人消息' : 'Send DingTalk person message'
     case 'lock_record':
       return isZh ? '锁定记录' : 'Lock record'
+    case 'wait_for_callback':
+      return isZh ? '等待回调（挂起）' : 'Wait for callback (suspend)'
     case 'update_field':
       return isZh ? '更新字段值' : 'Update field value'
     default:

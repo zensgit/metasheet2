@@ -564,6 +564,65 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saved.mock.calls[0][0].executionMode).toBeNull()
   })
 
+  it('A6-2b: wait_for_callback is info-only (zero params), AUTO-ENABLES + LOCKS workflow_job_v1, and saves both', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'wait rule'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const toggle = container.querySelector('[data-field="executionMode"]') as HTMLInputElement
+    expect(toggle.checked).toBe(false) // off by default
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    expect(Array.from(actionSelect.options).map((o) => o.value)).toContain('wait_for_callback')
+    actionSelect.value = 'wait_for_callback'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    // Info-only: the hint renders and there are ZERO param inputs (no webhook-URL/timer/manual-task fields).
+    const cfg = container.querySelector('[data-action-config="wait_for_callback"]') as HTMLElement
+    expect(cfg).not.toBeNull()
+    expect(container.querySelector('[data-field="wait-for-callback-hint"]')).not.toBeNull()
+    expect(cfg.querySelectorAll('input, textarea, select').length).toBe(0)
+
+    // BLOCKING FIX: selecting wait_for_callback auto-enables AND LOCKS workflow_job_v1 (can't turn it off
+    // into the runtime-fail-closed state).
+    expect(toggle.checked).toBe(true)
+    expect(toggle.disabled).toBe(true)
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].actions).toEqual([{ type: 'wait_for_callback', config: {} }])
+    expect(saved.mock.calls[0][0].executionMode).toBe('workflow_job_v1') // never a legacy wait_for_callback rule
+  })
+
+  it('A6-2b: a loaded wait_for_callback rule with null executionMode is force-corrected to workflow_job_v1 on save', async () => {
+    const saved = vi.fn()
+    const rule: AutomationRule = {
+      id: 'atr_w', sheetId: 'sheet_1', name: 'legacy wait', triggerType: 'record.created',
+      triggerConfig: {}, actionType: 'wait_for_callback', actionConfig: {}, enabled: true,
+      actions: [{ type: 'wait_for_callback', config: {} }],
+      executionMode: null, // inconsistent: a wait step but legacy mode
+    }
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+
+    const toggle = container.querySelector('[data-field="executionMode"]') as HTMLInputElement
+    expect(toggle.checked).toBe(true) // forced on
+    expect(toggle.disabled).toBe(true) // locked
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].executionMode).toBe('workflow_job_v1') // enforced by buildPayload, not null
+  })
+
   it('serializes numeric condition values as numbers', async () => {
     const saved = vi.fn()
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
