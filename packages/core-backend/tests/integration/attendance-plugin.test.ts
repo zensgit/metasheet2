@@ -5,6 +5,8 @@ import net from 'net'
 import fs from 'fs/promises'
 import { Pool } from 'pg'
 import http from 'http'
+import { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
+import { AttendanceScheduler } from '../../src/services/AttendanceScheduler'
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
 
@@ -3021,7 +3023,7 @@ attendanceIntegrationDescribe(
       await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [userId]).catch(() => undefined)
       if (createdRequestIds.length > 0) {
-        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::text[])', [createdRequestIds]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
       }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
@@ -3135,7 +3137,112 @@ attendanceIntegrationDescribe(
       await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])', [[uOk, uShort, uFifo]]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])', [[uOk, uShort, uFifo]]).catch(() => undefined)
       if (createdRequestIds.length > 0) {
-        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::text[])', [createdRequestIds]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
+  it('④ C4 — grant stamps expires_at iff expiresInDays set; scheduler tick expires aged lots once (NULL/future survive)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-c4wire-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const scheduler = new AttendanceScheduler({
+      expiryService: new AttendanceExpiryService(async <T = unknown>(sql, params = []) => {
+        const result = await pool.query<T>(sql, params)
+        return { rows: result.rows, rowCount: result.rowCount }
+      }),
+    })
+    let token: string | undefined
+    let originalSettings: Record<string, unknown> = {}
+    const createdRequestIds: string[] = []
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) return
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+      const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
+      originalSettings = ((origRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+
+      const otRuleRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, { method: 'POST', headers, body: JSON.stringify({ name: `c4wire-ot-${runSuffix}`, minMinutes: 30 }) })
+      expect([201, 409]).toContain(otRuleRes.status)
+      let overtimeRuleId = (otRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!overtimeRuleId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, { headers: { Authorization: `Bearer ${token}` } })
+        overtimeRuleId = ((list.body as { data?: { items?: { id?: string; name?: string }[] } } | undefined)?.data?.items ?? []).find(i => i.name === `c4wire-ot-${runSuffix}`)?.id
+      }
+      expect(overtimeRuleId).toBeTruthy()
+      const setCompTime = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ compTimeFromOvertime: body }) })
+      const approveOvertime = async (workDate: string, minutes: number) => {
+        const create = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers, body: JSON.stringify({ workDate, requestType: 'overtime', overtimeRuleId, minutes }) })
+        expect(create.status).toBe(201)
+        const id = (create.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
+        createdRequestIds.push(id)
+        expect((await requestJson(`${baseUrl}/api/attendance/requests/${id}/approve`, { method: 'POST', headers, body: JSON.stringify({ comment: 'c4' }) })).status).toBe(200)
+        return id
+      }
+      const lotFor = async (otId: string) => (await pool.query(
+        `SELECT id, remaining_minutes, status, expires_at,
+                (expires_at - granted_at = interval '720 hours') AS exact_30d
+           FROM attendance_leave_balances WHERE org_id = 'default' AND source_key = $1`,
+        [`overtime_conversion:${otId}`],
+      )).rows[0] as { id: string; remaining_minutes: number; status: string; expires_at: string | null; exact_30d: boolean | null }
+      const expireEvents = async (balanceId: string) => (await pool.query(
+        `SELECT delta_minutes, source_type FROM attendance_leave_balance_events WHERE balance_id = $1 AND event_type = 'expire'`,
+        [balanceId],
+      )).rows as { delta_minutes: number; source_type: string }[]
+
+      // (1) enabled + expiresInDays=30 → grant stamps expires_at = granted_at + 30×24h (exact).
+      expect((await setCompTime({ enabled: true, expiresInDays: 30 })).status).toBe(200)
+      const otFuture = await approveOvertime('2026-09-25', 120)
+      const lotFuture = await lotFor(otFuture)
+      expect(lotFuture.status).toBe('active')
+      expect(lotFuture.expires_at).not.toBeNull()
+      expect(lotFuture.exact_30d).toBe(true) // expires_at - granted_at === 720h (DST-free fixed duration)
+
+      // (2) enabled + expiresInDays=null → grant keeps expires_at NULL (unchanged C2 behaviour).
+      expect((await setCompTime({ enabled: true, expiresInDays: null })).status).toBe(200)
+      const otNull = await approveOvertime('2026-09-26', 60)
+      const lotNull = await lotFor(otNull)
+      expect(lotNull.expires_at).toBeNull()
+
+      // (3) a scan with nothing of OURS past-due → our future + NULL lots both survive. The scan is
+      //     global (all orgs/users), so we assert OUR lots are absent from the result rather than the
+      //     whole result being empty — a stray past-due lot from another test must not flake this.
+      const tick3 = (await scheduler.tick()).map(r => r.balanceId)
+      expect(tick3).not.toContain(lotFuture.id)
+      expect(tick3).not.toContain(lotNull.id)
+      expect((await lotFor(otFuture)).status).toBe('active')
+      expect((await lotFor(otNull)).status).toBe('active')
+
+      // (4) age the future lot past its expiry, then tick → it expires once (remaining=0 + one expire event);
+      //     the NULL lot is still untouched.
+      await pool.query("UPDATE attendance_leave_balances SET expires_at = now() - interval '1 hour' WHERE id = $1", [lotFuture.id])
+      const firstTick = await scheduler.tick()
+      expect(firstTick.find(r => r.balanceId === lotFuture.id)).toEqual({ orgId: 'default', userId, balanceId: lotFuture.id, expiredMinutes: 120 })
+      expect(await lotFor(otFuture)).toMatchObject({ remaining_minutes: 0, status: 'expired' })
+      expect(await expireEvents(lotFuture.id)).toEqual([{ delta_minutes: -120, source_type: 'comp_time_expiry' }])
+      expect((await lotFor(otNull)).status).toBe('active')
+
+      // (5) repeat tick → our lot is not re-expired. Idempotency is proven by OUR expire-event count
+      //     staying 1 (user-scoped), not by the global scan being empty.
+      expect((await scheduler.tick()).map(r => r.balanceId)).not.toContain(lotFuture.id)
+      expect(await expireEvents(lotFuture.id)).toHaveLength(1)
+    } finally {
+      if (token && Object.keys(originalSettings).length > 0) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      }
+      await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdRequestIds.length > 0) {
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
       }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
@@ -4707,7 +4814,7 @@ attendanceIntegrationDescribe(
             weeklyMaxMinutes: 2400,
             monthlyMaxMinutes: 9600,
           },
-          compTimeFromOvertime: { enabled: true },
+          compTimeFromOvertime: { enabled: true, expiresInDays: 45 },
         }),
       })
       expect(saveSettingsRes.status).toBe(200)
@@ -4734,7 +4841,7 @@ attendanceIntegrationDescribe(
         weeklyMaxMinutes: 2400,
         monthlyMaxMinutes: 9600,
       })
-      expect(reloaded?.compTimeFromOvertime).toEqual({ enabled: true })
+      expect(reloaded?.compTimeFromOvertime).toEqual({ enabled: true, expiresInDays: 45 })
 
       const futurePunchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
         method: 'POST',
