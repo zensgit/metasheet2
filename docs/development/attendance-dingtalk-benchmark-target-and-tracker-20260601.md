@@ -54,8 +54,8 @@
 | 排班修改窗 | MUST | ✅ | #2197（squash `2d4808fe`，2026-06-02）：org-level `shiftEditPolicy` 入 attendance settings JSON（默认 `unrestricted`，无 DDL）+ shift/rotation assignment POST/PUT/DELETE 6 写路由显式 422 `SHIFT_EDIT_WINDOW_EXCEEDED`；PUT/DELETE 同看 existing start date + next start date 防历史绕窗；unit + CI real-DB attendance integration 绿 |
 | 外勤审批 | MUST | ⬜ | 0 |
 | 内外勤卡合并 | MUST | ⬜ | 0（打卡抽屉只读） |
-| 加班↔调休 | MUST | ⬜ | 0 |
-| 假期过期管理 | MUST | ⬜ | 0 |
+| 加班↔调休 | MUST | ⬜ | C0–C3 + C4-1(#2270 inert) + **C4-2 merged #2274**（`4b3108737`：expiry scheduler + `expiresInDays` grant 写 `expires_at` + notifier scaffold，**无 DDL**）。CI real-DB attendance step 真跑且绿（`④ C4` 用例在 `attendance-plugin.test.ts` 88-test 文件 + `attendance-expiry-service.test.ts`）。**staging C4 smoke 未跑 → 未 ✅**（runbook `attendance-comp-leave-c4-2-staging-smoke-runbook-20260604.md`；staging:8082 sandbox 不可达 + 未部署 C4-2 + 需 SSH+SQL aging，按"停止并报告"处置） |
+| 假期过期管理 | MUST | ⬜ | 同上 C4 子链：`expires_at` 写入 + 过期 state-flow + 调度基座 merge #2274 / CI 绿；**未 ✅**（gated on staging smoke，见 runbook） |
 | 自动对班 | SHOULD | ⬜ | 0 |
 | 一天多班次 | SHOULD | ⬜ | 0 |
 | 排班发布/草稿 | SHOULD | ⬜ | 0 |
