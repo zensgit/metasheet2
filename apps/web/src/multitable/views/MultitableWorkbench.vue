@@ -130,6 +130,7 @@
         <MetaDashboardView
           v-if="showDashboardView"
           :sheet-id="workbench.activeSheetId.value"
+          :fields="scopedAllFields"
           :client="workbench.client"
         />
         <MetaFormView
