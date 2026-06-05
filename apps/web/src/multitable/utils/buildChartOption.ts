@@ -117,6 +117,27 @@ export function buildChartOption(
   }
 
   // line — category labels come from the x-axis; no per-point value labels (matches old SVG)
+  const area = displayConfig?.variant === 'area'
+  // v2-d-b2: multi-series line — one overlaid line per seriesByFieldId value (never stacked).
+  // Categories (xAxis) come from dataPoints; each series.data is dense + aligned to that order.
+  // The area variant is preserved: every line keeps its areaStyle.
+  const lineSeries = chartData.series
+  if (lineSeries && lineSeries.length > 0) {
+    return {
+      ...base,
+      tooltip: { trigger: 'axis' },
+      grid,
+      xAxis: categoryAxis,
+      yAxis: valueAxis,
+      series: lineSeries.map((s) => ({
+        type: 'line',
+        name: s.name,
+        label: { show: false },
+        ...(area ? { areaStyle: {} } : {}),
+        data: s.data,
+      })),
+    }
+  }
   return {
     ...base,
     tooltip: { trigger: 'axis' },
@@ -128,7 +149,7 @@ export function buildChartOption(
         type: 'line',
         label: { show: false },
         // v2-c: displayConfig.variant 'area' fills the area under the line.
-        ...(displayConfig?.variant === 'area' ? { areaStyle: {} } : {}),
+        ...(area ? { areaStyle: {} } : {}),
         data: seriesData,
       },
     ],

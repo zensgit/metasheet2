@@ -351,12 +351,14 @@ const requiresValueField = computed(() => AGGREGATIONS_REQUIRING_VALUE.has(chart
 // v2-d / v2-d-b1: the series-split picker is offered for any bar chart with a non-date-grouped
 // primary axis (grouped layout accepts any aggregation). Whether STACKED is a legal layout depends
 // on the aggregation being additive (sum/count) — see `stackedAllowed` + the producer/validator.
+// v2-d-b2: line carries a series split too (overlaid lines). The series picker is offered for any
+// bar OR line chart with a non-date-grouped primary axis.
 const seriesByAllowed = computed(() =>
-  chartDraft.value.chartType === 'bar' && !editingDateGrouped.value,
+  (chartDraft.value.chartType === 'bar' || chartDraft.value.chartType === 'line') && !editingDateGrouped.value,
 )
 const stackedAllowed = computed(() => ADDITIVE_AGGREGATIONS.has(chartDraft.value.aggregation))
-// The layout (barMode) control appears once a series field is chosen.
-const barModeShown = computed(() => seriesByAllowed.value && !!chartDraft.value.seriesByFieldId)
+// The layout (barMode) control is bar-only (lines never stack/group); appears once a series is chosen.
+const barModeShown = computed(() => chartDraft.value.chartType === 'bar' && !!chartDraft.value.seriesByFieldId)
 // Clear an inapplicable series field, and fall back to grouped when stacked is illegal, whenever the
 // gating inputs change (type/aggregation/groupBy/date).
 watch(
@@ -534,17 +536,17 @@ function buildChartInput(base?: ChartConfig): ChartCreateInput {
   if (!editingDateGrouped.value) {
     dataSource.groupByFieldId = chartDraft.value.groupByFieldId
   }
-  // v2-d: bar series split only when bar + a primary groupBy. Set explicitly (or delete the base
-  // value) so switching chartType/groupBy/date clears a now-inapplicable series.
+  // v2-d / v2-d-b2: bar OR line series split, only with a primary groupBy. Set explicitly (or delete
+  // the base value) so switching chartType/groupBy/date clears a now-inapplicable series.
   const hasSeriesSplit = seriesByAllowed.value && !!chartDraft.value.groupByFieldId && !!chartDraft.value.seriesByFieldId
   if (hasSeriesSplit) {
     dataSource.seriesByFieldId = chartDraft.value.seriesByFieldId
   } else {
     delete dataSource.seriesByFieldId
   }
-  // v2-d-b1: bar layout is meaningful only with a series split; stacked falls back to grouped for a
+  // v2-d-b1: barMode is BAR-only (lines never stack/group); stacked falls back to grouped for a
   // non-additive aggregation (the server enforces the same). Explicit so a switch clears a base value.
-  const barMode: 'stacked' | 'grouped' | undefined = hasSeriesSplit
+  const barMode: 'stacked' | 'grouped' | undefined = (chartDraft.value.chartType === 'bar' && hasSeriesSplit)
     ? (stackedAllowed.value ? chartDraft.value.barMode : 'grouped')
     : undefined
   // v2-c: a render variant is valid only for its matching chartType (donut→pie, area→line).
