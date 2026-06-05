@@ -12,8 +12,11 @@
  * Default OFF: the scheduler starts only when ATTENDANCE_SCHEDULER_ENABLED=true. Until then, and until an
  * org sets compTimeFromOvertime.expiresInDays (which makes grants stamp expires_at), expiry never runs.
  *
- * v1 wires only the expiry job. ⑤ unscheduled-reminder will reuse this base as a second job; the
- * notification path lives in AttendanceNotifier (C5) — this scheduler sends nothing.
+ * Jobs per cycle (each independently guarded, one failing never affects the other):
+ *   - the comp-time EXPIRY job (④ C4, always present);
+ *   - the ⑤ UNSCHEDULED-REMINDER job, present only when ATTENDANCE_UNSCHEDULED_REMINDER_ENABLED=true.
+ * Reuses THIS scheduler base — never a second scheduler. The notification path lives in AttendanceNotifier
+ * (no channels by default ⇒ the scheduler sends nothing externally; ⑤'s reminder record is internal).
  */
 
 import { randomBytes } from 'crypto'
@@ -25,13 +28,22 @@ import {
   type AttendanceExpiryService,
   type ExpiredCompTimeBalance,
 } from './AttendanceExpiryService'
+import { AttendanceNotifier, createAttendanceNotifierChannelsFromEnv } from './AttendanceNotifier'
+import { UnscheduledReminderService } from './UnscheduledReminderService'
 
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000
 const MIN_INTERVAL_MS = 5000
 const DEFAULT_LOCK_TTL_MS = 30_000
 
+/** A time-driven attendance job the scheduler runs each cycle (alongside expiry). */
+export interface AttendanceReminderJob {
+  run(): Promise<unknown>
+}
+
 export interface AttendanceSchedulerOptions {
   expiryService?: AttendanceExpiryService
+  /** ⑤ optional second job; null/undefined ⇒ scheduler runs expiry only (④ behaviour unchanged). */
+  reminderJob?: AttendanceReminderJob | null
   intervalMs?: number
   leaderOptions?: AttendanceSchedulerLeaderOptions | null
   runtime?: AttendanceSchedulerRuntimeOptions
@@ -58,6 +70,7 @@ export interface AttendanceSchedulerRuntimeOptions {
 export class AttendanceScheduler {
   private readonly logger: Logger
   private readonly expiryService: AttendanceExpiryService
+  private readonly reminderJob: AttendanceReminderJob | null
   private readonly intervalMs: number
   private readonly leaderOptions: AttendanceSchedulerLeaderOptions | null
   private readonly lockKey: string
@@ -75,6 +88,7 @@ export class AttendanceScheduler {
 
   constructor(options: AttendanceSchedulerOptions = {}) {
     this.expiryService = options.expiryService ?? getAttendanceExpiryService()
+    this.reminderJob = options.reminderJob ?? null
     this.intervalMs = Math.max(MIN_INTERVAL_MS, options.intervalMs ?? DEFAULT_INTERVAL_MS)
     this.leaderOptions = options.leaderOptions ?? null
     this.lockKey = this.leaderOptions?.lockKey ?? 'attendance-scheduler:leader'
@@ -153,6 +167,22 @@ export class AttendanceScheduler {
     }
   }
 
+  /**
+   * One scheduler cycle = the expiry job, then the optional ⑤ reminder job. Each is independently
+   * try/caught so a failure in one never skips the other. `tick()` stays the public expiry entry point
+   * (signature/return unchanged → ④ tests untouched); the reminder runs only when wired AND on the leader.
+   */
+  async runCycle(): Promise<void> {
+    await this.tick()
+    if (this.reminderJob && this.isLeader) {
+      try {
+        await this.reminderJob.run()
+      } catch (error) {
+        this.logger.error(`Attendance unscheduled-reminder job failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+
   get leader(): boolean {
     return this.isLeader
   }
@@ -188,7 +218,7 @@ export class AttendanceScheduler {
   private startTickLoop(): void {
     if (!this.started || !this.isLeader || this.timer) return
     this.logger.info(`Attendance scheduler starting with interval ${this.intervalMs}ms`)
-    this.timer = setInterval(() => { void this.tick() }, this.intervalMs)
+    this.timer = setInterval(() => { void this.runCycle() }, this.intervalMs)
     if (typeof this.timer.unref === 'function') this.timer.unref()
   }
 
@@ -287,4 +317,20 @@ export async function resolveAttendanceSchedulerLeaderOptions(): Promise<Attenda
 export function resolveAttendanceSchedulerIntervalMs(): number | undefined {
   const raw = Number(process.env.ATTENDANCE_SCHEDULER_INTERVAL_MS)
   return Number.isFinite(raw) && raw > 0 ? raw : undefined
+}
+
+/**
+ * ⑤ Opt-in: the unscheduled-reminder job, only when ATTENDANCE_UNSCHEDULED_REMINDER_ENABLED=true
+ * (default OFF → null → the scheduler runs expiry only, ④ unchanged). The notifier is built from env
+ * channels (createAttendanceNotifierChannelsFromEnv → [] today), so the job's only effect is the internal
+ * dispatch record — no external send until a channel is configured (C5). Lookahead defaults to 1 day and
+ * is clamped inside the service.
+ */
+export function resolveUnscheduledReminderJob(): AttendanceReminderJob | null {
+  if (process.env.ATTENDANCE_UNSCHEDULED_REMINDER_ENABLED !== 'true') return null
+  const notifier = new AttendanceNotifier({ channels: createAttendanceNotifierChannelsFromEnv() })
+  return new UnscheduledReminderService({
+    notifier,
+    lookaheadDays: Number(process.env.ATTENDANCE_UNSCHEDULED_REMINDER_LOOKAHEAD_DAYS),
+  })
 }
