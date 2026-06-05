@@ -114,12 +114,14 @@ describe('Attendance admin regressions', () => {
   let attendanceSettingsData: Record<string, unknown> | null = null
   let attendanceSettingsFail = false
   let attendanceSettingsSaveData: Record<string, unknown> | null = null
+  let attendanceApprovalFlowsData: unknown[] | null = null
 
   beforeEach(() => {
     vi.clearAllMocks()
     attendanceSettingsData = null
     attendanceSettingsFail = false
     attendanceSettingsSaveData = null
+    attendanceApprovalFlowsData = null
     exportReportFieldFingerprint = 'records-unit-test-fingerprint'
     exportReportFieldCodes = 'work_date,employee_name'
     exportReportFieldCount = '2'
@@ -593,6 +595,12 @@ describe('Attendance admin regressions', () => {
           return jsonResponse(500, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'settings unavailable' } })
         }
         return jsonResponse(200, { ok: true, data: attendanceSettingsData ?? {} })
+      }
+      if (url.includes('/api/attendance/approval-flows')
+        && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'GET') {
+        // Default [] keeps existing behaviour (loadApprovalFlows reads data.data.items || []); the outdoor
+        // flow-select test seeds this to assert the active-outdoor_punch filter.
+        return jsonResponse(200, { ok: true, data: { items: attendanceApprovalFlowsData ?? [] } })
       }
       if (url.includes('/api/attendance/scheduler-scopes')) {
         return jsonResponse(200, {
@@ -2145,6 +2153,34 @@ describe('Attendance admin regressions', () => {
 
     expect(lastSettingsPutBody()).toEqual({
       punchPolicy: { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '' } },
+    })
+  })
+
+  it('the approval-flow select lists ONLY active outdoor_punch flows and saves the chosen id', async () => {
+    attendanceApprovalFlowsData = [
+      { id: 'flow-out-active', name: 'Outdoor Active', requestType: 'outdoor_punch', isActive: true, steps: [] },
+      { id: 'flow-out-inactive', name: 'Outdoor Inactive', requestType: 'outdoor_punch', isActive: false, steps: [] },
+      { id: 'flow-leave', name: 'Leave Flow', requestType: 'leave', isActive: true, steps: [] },
+    ]
+    attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: true, requireNote: false, approvalFlowId: '' } } }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const flow = container!.querySelector<HTMLSelectElement>('[data-outdoor="approval-flow"]')
+    expect(flow).toBeTruthy()
+    // The select offers '' (auto) + ONLY the active outdoor_punch flow — the inactive outdoor flow and the
+    // non-outdoor (leave) flow are filtered out by outdoorApprovalFlowOptions.
+    expect(Array.from(flow!.querySelectorAll('option')).map((o) => o.value)).toEqual(['', 'flow-out-active'])
+
+    // Choose the active outdoor flow and save → the chosen id is in the PUT body.
+    flow!.value = 'flow-out-active'
+    flow!.dispatchEvent(new Event('change'))
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')!.click()
+    await flushUi(6)
+    expect(lastSettingsPutBody()).toEqual({
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: false, approvalFlowId: 'flow-out-active' } },
     })
   })
 
