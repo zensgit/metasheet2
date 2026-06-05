@@ -28,6 +28,7 @@ const ROUTES = [
   ['POST', '/api/integration/table-actions/:actionId/apply', 'tableActionApply'],
   ['GET', '/api/integration/stock-preparation/target/readiness', 'stockPreparationTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
+  ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
   ['POST', '/api/integration/templates/preview', 'templatesPreview'],
   ['POST', '/api/integration/templates/derive', 'templatesDerive'],
   ['GET', '/api/integration/staging/descriptors', 'stagingDescriptors'],
@@ -67,6 +68,10 @@ const {
   inspectStockPreparationCanonicalTarget,
   ensureStockPreparationCanonicalTarget,
 } = require('./stock-preparation-target-provisioning.cjs')
+const {
+  StockPreparationOptionSyncError,
+  syncStockPreparationOptions,
+} = require('./stock-preparation-option-sync.cjs')
 
 class HttpRouteError extends Error {
   constructor(status, code, message, details = {}) {
@@ -131,6 +136,7 @@ function inferHttpStatus(error) {
   const name = error && error.name ? String(error.name) : ''
   if (inferDataSourceBridgeErrorCode(error)) return 422
   if (error instanceof StockPreparationTableActionError) return error.status
+  if (error instanceof StockPreparationOptionSyncError) return error.status
   if (/NotFound/.test(name)) return 404
   if (/Conflict/.test(name)) return 409
   if (/Validation|Transform|Watermark|DeadLetter/.test(name)) return 400
@@ -313,6 +319,14 @@ function publicRunInput(body = {}) {
 
 const VALID_TABLE_ACTION_BODY_KEYS = new Set(['parameters', 'confirm'])
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
+const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'optionSets',
+  'optionSources',
+  'configInfo',
+])
 
 function normalizeTableActionBody(body = {}) {
   if (!isPlainObject(body)) {
@@ -352,6 +366,35 @@ function stockPreparationTargetInput(req, rawInput = {}) {
     workspaceId: input.workspaceId,
     projectId,
     baseId: input.baseId,
+  }
+}
+
+function normalizeStockPreparationOptionSyncRequest(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_OPTION_SYNC_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_OPTION_SYNC_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    tenantId: firstString(input.tenantId),
+    workspaceId: firstString(input.workspaceId),
+    projectId: firstString(input.projectId),
+    optionSets: input.optionSets || input.optionSources || input.configInfo || {},
+  }
+}
+
+function stockPreparationOptionSyncInput(req, rawInput = {}) {
+  const input = normalizeStockPreparationOptionSyncRequest(rawInput)
+  const tenantId = resolveTenantId(req, input)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    projectId,
+    optionSets: input.optionSets,
   }
 }
 
@@ -1340,6 +1383,18 @@ function createHandlers(services, options = {}) {
         permission: 'admin',
       })
       return sendOk(res, publicStockPreparationTargetResult(result), result.mode === 'canonical_create' ? 201 : 200)
+    },
+
+    async stockPreparationOptionsSync(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationOptionSyncInput(req, requestBody(req))
+      const result = await syncStockPreparationOptions({
+        context,
+        projectId: input.projectId,
+        permission: 'admin',
+        optionSets: input.optionSets,
+      })
+      return sendOk(res, result)
     },
 
     async templatesPreview(req, res) {

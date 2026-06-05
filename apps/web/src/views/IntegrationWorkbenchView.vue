@@ -763,6 +763,40 @@
         </template>
       </div>
 
+      <div v-if="auth.hasPermission('integration:admin')" class="integration-workbench__table-action" data-testid="stock-option-sync-panel">
+        <div class="integration-workbench__panel-head">
+          <div>
+            <h3>备料选项同步</h3>
+            <p>管理员同步 select/dropdown 选项，并可把选项绑定到后端白名单里的预定义动作。</p>
+          </div>
+          <span class="integration-workbench__badge">admin · metadata-only</span>
+        </div>
+        <label>
+          <span>optionSets JSON</span>
+          <textarea
+            v-model="stockPreparationOptionSyncText"
+            data-testid="stock-option-sync-json"
+            rows="8"
+            :placeholder="stockPreparationOptionSyncPlaceholder"
+          />
+        </label>
+        <p class="integration-workbench__hint" data-testid="stock-option-sync-boundary">
+          这里只写字段选项和 optionActionBindings 元数据；不执行动作，不接受 SQL/JS/URL/function body，不写 PLM/K3/业务行。
+        </p>
+        <div class="integration-workbench__actions">
+          <button
+            type="button"
+            class="integration-workbench__button"
+            data-testid="stock-option-sync-run"
+            :disabled="!stockPreparationOptionSyncCanRun"
+            @click="syncStockPreparationOptions"
+          >
+            {{ syncingStockPreparationOptions ? '同步中' : '同步备料选项' }}
+          </button>
+        </div>
+        <pre v-if="stockPreparationOptionSyncEvidenceText" data-testid="stock-option-sync-evidence">{{ stockPreparationOptionSyncEvidenceText }}</pre>
+      </div>
+
       <div class="integration-workbench__export">
         <div>
           <strong>导出清洗结果</strong>
@@ -1066,6 +1100,7 @@ import {
   deriveFieldRulesFromMappings,
   deriveIntegrationTemplate,
   summarizeFieldProvenance,
+  syncIntegrationStockPreparationOptions,
   testExternalSystemConnection,
   upsertWorkbenchExternalSystem,
   upsertIntegrationPipeline,
@@ -1090,6 +1125,7 @@ import {
   type IntegrationTableActionApplyResult,
   type IntegrationTableActionDryRunResult,
   type IntegrationTableActionMetadata,
+  type IntegrationStockPreparationOptionSyncResult,
   type IntegrationTemplatePreviewRequest,
   type WorkbenchExternalSystem,
 } from '../services/integration/workbench'
@@ -1248,6 +1284,9 @@ const runningTableAction = ref<'dry-run' | 'apply' | ''>('')
 const tableActionDryRunResult = ref<IntegrationTableActionDryRunResult | null>(null)
 const tableActionApplyResult = ref<IntegrationTableActionApplyResult | null>(null)
 const tableActionAcceptManualConfirmHold = ref(false)
+const stockPreparationOptionSyncText = ref('')
+const stockPreparationOptionSyncResult = ref<IntegrationStockPreparationOptionSyncResult | null>(null)
+const syncingStockPreparationOptions = ref(false)
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
 const expandedRunIds = ref<Set<string>>(new Set())
@@ -1763,6 +1802,32 @@ const tableActionEvidenceText = computed(() => {
   const evidence = tableActionApplyResult.value?.evidence || tableActionDryRunResult.value?.evidence
   return evidence ? JSON.stringify(evidence, null, 2) : ''
 })
+const stockPreparationOptionSyncPlaceholder = JSON.stringify({
+  optionSets: {
+    material_type: [
+      { value: 'plate', label: 'Plate' },
+    ],
+    blank_type: [
+      { value: 'casting', label: 'Casting' },
+    ],
+    stock_preparation_status: [
+      {
+        value: 'pending',
+        label: 'Pending',
+        actionBindings: [{ actionId: 'plm.stock-preparation.pull-bom.v1' }],
+      },
+    ],
+  },
+}, null, 2)
+const stockPreparationOptionSyncEvidenceText = computed(() => {
+  const evidence = stockPreparationOptionSyncResult.value?.evidence
+  return evidence ? JSON.stringify(evidence, null, 2) : ''
+})
+const stockPreparationOptionSyncCanRun = computed(() => Boolean(
+  auth.hasPermission('integration:admin')
+  && stockPreparationOptionSyncText.value.trim()
+  && syncingStockPreparationOptions.value === false,
+))
 const tableActionCanDryRun = computed(() => Boolean(
   selectedTableAction.value?.configured
   && tableActionProjectNo.value.trim()
@@ -3085,6 +3150,40 @@ function buildTableActionParameters(): Record<string, unknown> {
   const projectNo = tableActionProjectNo.value.trim()
   if (!projectNo) throw new Error('请填写项目号 projectNo')
   return { projectNo }
+}
+
+function buildStockPreparationOptionSyncPayload(): Record<string, unknown> {
+  const text = stockPreparationOptionSyncText.value.trim()
+  if (!text) throw new Error('请填写 optionSets JSON')
+  const parsed = JSON.parse(text) as unknown
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('optionSets JSON 必须是对象')
+  }
+  const record = parsed as Record<string, unknown>
+  if ('optionSets' in record || 'optionSources' in record || 'configInfo' in record) return record
+  return { optionSets: record }
+}
+
+async function syncStockPreparationOptions(): Promise<void> {
+  if (!auth.hasPermission('integration:admin')) {
+    setStatus('只有管理员可以同步备料选项。', 'error')
+    return
+  }
+  syncingStockPreparationOptions.value = true
+  stockPreparationOptionSyncResult.value = null
+  try {
+    const result = await syncIntegrationStockPreparationOptions({
+      ...currentScope(),
+      ...buildStockPreparationOptionSyncPayload(),
+    })
+    stockPreparationOptionSyncResult.value = result
+    const fieldCount = Number(result.target?.fieldCount || 0)
+    setStatus(`备料选项同步完成：${fieldCount} 个字段已更新。`, 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    syncingStockPreparationOptions.value = false
+  }
 }
 
 async function dryRunTableAction(): Promise<void> {
