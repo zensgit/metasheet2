@@ -497,6 +497,17 @@ describe('TemplateCenterView — WP4 slice 1 category filter + clone', () => {
     expect(pushSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_clone_new' })
   })
 
+  it('routes template managers to the new authoring view', async () => {
+    await mountView()
+    const newButton = container!.querySelector('[data-testid="template-center-new-button"]') as HTMLButtonElement
+    expect(newButton).toBeTruthy()
+
+    newButton.click()
+    await flushUi()
+
+    expect(pushSpy).toHaveBeenCalledWith({ path: '/approval-templates/new' })
+  })
+
   it('does not route when cloneTemplate rejects', async () => {
     cloneTemplateSpy.mockRejectedValueOnce(new Error('boom'))
     await mountView()

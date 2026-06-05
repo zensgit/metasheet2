@@ -22,6 +22,13 @@
       >
         发起审批
       </el-button>
+      <el-button
+        v-if="template && canManageTemplates"
+        data-testid="template-detail-edit-button"
+        @click="editTemplate"
+      >
+        编辑模板
+      </el-button>
     </header>
 
     <el-alert
@@ -637,6 +644,11 @@ function startApproval() {
   if (template.value) {
     router.push({ path: `/approvals/new/${template.value.id}` })
   }
+}
+
+function editTemplate() {
+  if (!template.value || !canManageTemplates.value) return
+  router.push({ path: `/approval-templates/${template.value.id}/edit` })
 }
 
 onMounted(() => {
