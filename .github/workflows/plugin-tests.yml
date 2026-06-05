@@ -249,6 +249,7 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/attendance-plugin.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
+            tests/integration/attendance-unscheduled-reminder.test.ts \
             --reporter=dot
 
       - name: Upload test results
