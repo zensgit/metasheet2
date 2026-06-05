@@ -129,6 +129,10 @@ New `packages/core-backend/tests/integration/attendance-unscheduled-reminder.tes
 `plugin-tests.yml` (same DB hard-guard step as expiry), mirror the exact `ATTENDANCE_TEST_DATABASE_URL ||
 DATABASE_URL` + `describe` vs `describe.skip` gate, and after CI **grep the job log for the execution line**
 (`✓ …unscheduled-reminder.test.ts (N tests) …ms`) — report that, not merely "CI green".
+**Also exclude the file from the default `vitest.config.ts`** (next to `attendance-plugin` /
+`attendance-expiry-service`): otherwise the no-DB `Run core-backend tests` step loads it and lets it
+`describe.skip` to green — the skip-when-unreachable trap. It must run **only** via the DB-gated integration
+step, not pass silently in the default run.
 
 ## 7. Out of scope / deferred (explicit)
 
@@ -136,13 +140,23 @@ DATABASE_URL` + `describe` vs `describe.skip` gate, and after CI **grep the job 
   With 0 channels (the default) there is **no external delivery and no consumer reads the table yet** — it's
   a deliberately inert, staged-opt-in engine ("DB event, 避免误发"). A real channel behind an explicit env
   is a trivial C5 follow-up; this PR does not add one.
+- **`dispatched_at` is NOT a delivery-success timestamp — a hard constraint on C5.** v1 is
+  *claim-then-notify*: the row is inserted (claim) and `dispatched_at` defaults to `now()` at claim time,
+  *before* `notifier.notify()`. With 0 channels this is correct (the row IS the record). But because the
+  claim consumes the `UNIQUE(org,user,target_date,reminder_type)` key, **a C5 channel that fails will NOT
+  retry** and the same (user, date) is blocked for the day. So **C5 must not reuse this row's `dispatched_at`
+  as "externally delivered at"** — reliable external delivery needs C5 to add explicit delivery-status +
+  retry semantics (e.g. a `delivery_status`/`delivered_at` column, or a separate outbox with at-least-once
+  retry), keeping the claim row as the *dedup/intent* ledger only. Locked here so C5 doesn't silently
+  conflate "claimed" with "sent".
 - **Recipient — deliberate deferral:** the goal named "提醒负责人/本人". v1 records the **unscheduled user
   (本人)** as the recipient; **负责人/owner fan-out is deferred** (the dispatch row carries `user_id`; an
   owner-routing layer is additive later). Flagged here, not buried.
 - Per-org enable + per-org lookahead (v1 is env-global) = deferred. Org-timezone-aware `target_date`
   (v1 = UTC date + lookahead) = deferred residual risk.
-- **Staging debt:** the new migration **adds to the staging-migration-align debt** that is already part of
-  why ④'s staging smoke is blocked — ⑤'s own staging smoke inherits the same gate.
+- **Staging debt:** the new migration **adds to the staging-migration-align debt** (④'s own C4 staging
+  smoke already PASSED 2026-06-04, #2274 closeout); ⑤'s own staging smoke (required for ✅) will need this
+  table migrated on staging.
 - S2 in/out merge, S3 outdoor, auto-match, payroll, anti-cheat, native, AI = **not touched**.
 
 ## 8. Graduation
