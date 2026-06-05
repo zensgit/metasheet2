@@ -93,8 +93,30 @@ wire boundary:
   target preflight fails;
 - the error does not expose the configured source binding or target sheet id.
 
+## Entity-machine retest closeout
+
+The refreshed package
+`metasheet-multitable-onprem-v2.5.0-plm-stock-c5-3b-17feef2f` was deployed on
+the entity machine and the C5-3b guard passed:
+
+- the temporary table-action config reached `configured:true`;
+- a partial explicit `target.fieldIdMap` returned HTTP `422` with
+  `TARGET_SCHEMA_INCOMPLETE`;
+- the error exposed logical schema metadata only;
+- the source-read log delta was `0`, proving the target preflight ran before any
+  PLM/data-source read;
+- no K3 Save / Submit / Audit / BOM, no MetaSheet apply/write, no external PLM
+  DB write, and no raw/user-authored SQL were executed.
+
+This closes the C5-3b code/package fix.
+
 ## Remaining gate
 
-After this slice lands, cut a refreshed on-prem package and rerun #2253 C5-3
-entity-machine smoke. The operator still needs to bind the PLM source as
-`data-source:sql-readonly` or explicitly pivot to a separate source design.
+Full C5 smoke still needs two gates:
+
+- target readiness: use a canonical C1 stock-preparation target or a complete
+  explicit `fieldIdMap`; C1b owns the preferred canonical target
+  provisioning/binding path;
+- source readiness: bind the real PLM source as `data-source:sql-readonly`, or
+  explicitly pivot to a separate source design if the Bridge Agent route is the
+  desired production path.

@@ -100,6 +100,37 @@ available in this repo. Instead, this slice turns the feasibility gate into a
 schema-only contract (`requires_customer_schema`) that C2 must satisfy before
 runtime can proceed.
 
+### 🟡 C1b - Canonical target provisioning / binding design (this PR)
+
+Gated on: C5-3b entity-machine finding + explicit opt-in.
+
+Scope:
+
+- Design the target readiness path discovered by the C5-3b onsite retest:
+  the existing onsite stock-preparation table is a business/manual table and is
+  not a canonical C1 target.
+- Prefer a canonical C1 target table over retrofitting a large explicit
+  deployment-env `fieldIdMap`.
+- Define create/bind modes for a stock-preparation main table that carries all
+  C1 PLM/system fields and human-preserved fields.
+- Keep this slice docs-only; no route, UI, table creation, PLM read, MetaSheet
+  row write, or K3 path.
+- Keep the PLM source gate separate: full C5 smoke still needs a real PLM source
+  registered/bound as `data-source:sql-readonly`, or a separate Bridge-source
+  design pivot.
+
+Acceptance locks:
+
+- The C1 manifest remains the single source of truth for target fields.
+- Canonical targets may omit `target.fieldIdMap`; logical field ids are used.
+- Legacy/non-canonical targets with partial explicit maps still fail as
+  `TARGET_SCHEMA_INCOMPLETE`.
+- Any create/bind implementation is admin-only and metadata-only; it writes no
+  business rows.
+- C6 custom option sync remains a later separate opt-in; C1b only carries
+  `optionSource` metadata.
+- Issue evidence is values-free: field names/counts and readiness status only.
+
 ### ✅ C2-0 - Filtered readonly SQL bridge for PLM lookups (DONE - PR #2265, `2be099bd8`)
 
 Gated on: C1 + explicit opt-in.
@@ -342,7 +373,7 @@ Acceptance locks:
 - The deployment config path is scoped to `plugin-integration-core`; unrelated
   plugins do not receive the table-action config.
 
-### 🟡 C5-3b - Target schema/config preflight (this PR)
+### ✅ C5-3b - Target schema/config preflight (DONE - PR #2298, `17feef2fa`)
 
 Gated on: C5-3a entity-machine smoke finding + explicit opt-in.
 
@@ -372,7 +403,8 @@ Acceptance locks:
 ### ⬜ C5-3 - Operator validation runbook / entity-machine smoke
 
 Gated on: C5-1/C5-2 + C5-3a package deployed + C5-3b package deployed +
-explicit opt-in.
+C1b target readiness + real PLM `data-source:sql-readonly` binding + explicit
+opt-in.
 
 Scope:
 
@@ -389,6 +421,19 @@ Acceptance locks:
 - External DB write remains not invoked.
 - Manual-confirm rows remain held.
 
+Current entity-machine state after C5-3b:
+
+- C5-3b target-schema preflight PASSed: partial explicit `fieldIdMap` returns
+  values-free `422 TARGET_SCHEMA_INCOMPLETE` before any source read.
+- Full C5 smoke remains blocked on target readiness and source binding, not on
+  the preflight code.
+- Target readiness: use a canonical C1 target table or a complete explicit
+  field map. The recommended next path is C1b canonical target
+  provisioning/binding.
+- Source readiness: bind the real PLM SQL Server source as
+  `data-source:sql-readonly`; `bridge:legacy-sql-readonly` support is a
+  separate source-design pivot, not a silent fallback.
+
 ### 🔒 C6 - `config_info` -> select/dropdown option sync
 
 Gated on: C5 + explicit opt-in.
@@ -397,6 +442,8 @@ Scope:
 
 - Sync selected option sets used by stock-preparation fields.
 - Keep options aligned for fields such as material type / blank type / status.
+- Support a controlled user-facing/admin-facing "sync options" action after the
+  target table exists.
 - This is MetaSheet configuration sync only.
 
 Acceptance locks:
@@ -405,6 +452,7 @@ Acceptance locks:
 - No K3 write.
 - Option evidence is values-free when posted to issues.
 - Missing/ambiguous option mapping fails closed.
+- C6 must not auto-create unknown options during C5 apply.
 
 ## Deferred tracks
 
@@ -433,18 +481,22 @@ operator checks stay in later validation slices:
 
 ## Sequencing rule
 
-C0, C1, C2-0, C2, C3, C4, C5-0, C5-1, C5-2, and C5-3a are complete. C5-3b is
-the current entity-machine unblocker found during C5-3 smoke: an explicit
-target `fieldIdMap` must fail closed when it omits C5 PLM/system fields.
+C0, C1, C2-0, C2, C3, C4, C5-0, C5-1, C5-2, C5-3a, and C5-3b are complete.
+C5-3b closed the target-schema fail-closed bug found during C5-3 smoke. The next
+target-side blocker is C1b canonical target provisioning/binding; the next
+source-side blocker is binding the real PLM source as `data-source:sql-readonly`
+or explicitly opening a Bridge-source design.
 
 1. C5-0 design locks the reusable parameterized action contract.
 2. C5-1 adds backend action routes and server-side recompute/apply wiring.
 3. C5-2 adds the workbench operator surface.
 4. C5-3a injects server-owned plugin action config for on-prem deployment.
 5. C5-3b rejects incomplete target schema/config before any PLM read.
-6. C5-3 validates the flow on an entity machine.
+6. C1b prepares a canonical target table/binding so full C5 smoke no longer
+   depends on a large explicit legacy `fieldIdMap`.
+7. C5-3 validates the flow on an entity machine.
 
-C6 option sync remains after C5. All later slices still require their
-predecessor to land and the owner to explicitly opt in. K3 Save / Submit /
-Audit / BOM, external database write, and multi-project/batch mode remain out
-of scope.
+C6 option sync remains after C1b/C5 target readiness. All later slices still
+require their predecessor to land and the owner to explicitly opt in. K3 Save /
+Submit / Audit / BOM, external database write, and multi-project/batch mode
+remain out of scope.

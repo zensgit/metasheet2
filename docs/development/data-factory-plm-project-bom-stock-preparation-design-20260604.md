@@ -307,11 +307,12 @@ Each implementation slice is a separate explicit opt-in.
 |---|---|
 | C0 | Design + TODO docs only. No runtime. |
 | C1 | Stock-preparation table template / field model manifest. Schema-only; no PLM read, no write. |
+| C1b | Canonical stock-preparation target provisioning/binding. Metadata create/bind only; no PLM read and no business-row write. |
 | C2 | `projectNo -> PLM BOM` dry-run expansion helper. Recursive read + normalized rows; no MetaSheet write. |
 | C3 | Conflict planner. Computes `add/update/skip/inactive/manual_confirm`; preserves human fields; no write. |
 | C4 | Apply writer. Writes only the MetaSheet stock-preparation main table; records run id, decision, and conflict summary. |
 | C5 | Workbench UI action. Project number input, dry-run summary, apply confirmation; no K3. |
-| C6 | `config_info` option sync. Keeps select/dropdown options aligned for configured stock-preparation fields. |
+| C6 | `config_info` option sync. Keeps select/dropdown options aligned for configured stock-preparation fields through a controlled sync action. |
 
 Deferred:
 
@@ -337,4 +338,10 @@ Deferred:
 - Apply writes MetaSheet only; no external DB write and no K3 call.
 - Permissions separate dry-run read/source-read from apply write/admin.
 - Issue/customer evidence is values-free.
+- C1b target create/bind uses the C1 manifest as the single field contract; a
+  full C5 smoke should prefer a canonical target over a large legacy-table
+  `fieldIdMap`.
+- C6 may expose a user-facing/admin-facing custom option sync action, but C5
+  apply must not auto-create unknown select/dropdown options while writing BOM
+  refresh rows.
 - Each C1-C6 slice remains a separate PR-level opt-in.
