@@ -131,7 +131,7 @@ Acceptance locks:
   `optionSource` metadata.
 - Issue evidence is values-free: field names/counts and readiness status only.
 
-### 🟡 C1b-1 - Canonical target provisioning helper (this PR)
+### ✅ C1b-1 - Canonical target provisioning helper (DONE - PR #2307, `61633c634`)
 
 Gated on: C1b-0 + explicit opt-in.
 
@@ -157,6 +157,36 @@ Acceptance locks:
   writes to an external database.
 - C1b-2 UI/runbook, C1b-3 entity-machine readiness smoke, and C6 option sync
   remain separate opt-ins.
+
+### 🟡 C1b-2 - Admin target readiness/provisioning workflow (this PR)
+
+Gated on: C1b-1 + explicit opt-in.
+
+Scope:
+
+- Expose a narrow admin-only backend workflow:
+  - `GET /api/integration/stock-preparation/target/readiness`
+  - `POST /api/integration/stock-preparation/target/ensure`
+- Derive admin permission from `requireAccess(req, 'admin')`; never accept
+  client-supplied permission, sheet id, field map, target config, PLM source, or
+  action payload.
+- Use the C1b-1 helper to inspect/bind/create only table/field metadata.
+- Return a private `targetBinding` for admin config and a separate values-free
+  `evidence` object for issue/customer evidence.
+- Add an operator runbook for entity-machine target readiness.
+
+Acceptance locks:
+
+- Non-admin users cannot inspect or ensure the target.
+- Unsupported client fields fail closed before provisioning.
+- Missing target creates canonical metadata only; no records API, PLM read, K3,
+  or external DB write.
+- Existing complete canonical target binds without recreating.
+- Existing incomplete canonical target fails closed as
+  `TARGET_SCHEMA_INCOMPLETE` and is not repaired in place.
+- Issue evidence must copy only `data.evidence`, never `data.targetBinding`.
+- C1b-3 entity-machine target readiness smoke, the PLM source gate, and C6
+  option sync remain separate opt-ins.
 
 ### ✅ C2-0 - Filtered readonly SQL bridge for PLM lookups (DONE - PR #2265, `2be099bd8`)
 

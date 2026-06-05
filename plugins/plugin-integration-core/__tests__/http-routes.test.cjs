@@ -7,6 +7,7 @@ const HTTP_ROUTES_PATH = path.join(__dirname, '..', 'lib', 'http-routes.cjs')
 const httpRoutes = require(HTTP_ROUTES_PATH)
 const { MAX_LIST_LIMIT } = httpRoutes
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
+const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 
 const READ_USER = {
   id: 'user_read',
@@ -51,6 +52,11 @@ function createMockContext(options = {}) {
     async createRecord() { throw new Error('createRecord not configured in test context') },
     async patchRecord() { throw new Error('patchRecord not configured in test context') },
   }
+  const provisioning = options.provisioningApi || {
+    async findObjectSheet() { return null },
+    async resolveFieldIds() { return {} },
+    async ensureObject() { throw new Error('ensureObject not configured in test context') },
+  }
 
   return {
     context: {
@@ -64,6 +70,7 @@ function createMockContext(options = {}) {
           },
         },
         multitable: {
+          provisioning,
           records,
         },
       },
@@ -2416,6 +2423,149 @@ function createTableActionRecordsApi() {
   return { rows, calls, recordsApi }
 }
 
+function createStockPreparationTargetProvisioningApi({
+  sheetExists = false,
+  missingFields = [],
+} = {}) {
+  const calls = []
+  let sheet = sheetExists
+    ? { id: 'sheet_stock_canonical_private', baseId: 'base_stock', name: 'PLM Stock Preparation Main', description: null }
+    : null
+  let missing = new Set(missingFields)
+  const api = {
+    async findObjectSheet(input) {
+      calls.push(['findObjectSheet', clone(input)])
+      return sheet ? clone(sheet) : null
+    },
+    async resolveFieldIds(input) {
+      calls.push(['resolveFieldIds', clone(input)])
+      const out = {}
+      for (const fieldId of input.fieldIds || []) {
+        if (!missing.has(fieldId)) out[fieldId] = `fld_${fieldId}`
+      }
+      return out
+    },
+    async ensureObject(input) {
+      calls.push(['ensureObject', clone(input)])
+      sheet = { id: 'sheet_stock_canonical_created', baseId: input.baseId || 'base_default', name: input.descriptor.name, description: input.descriptor.description || null }
+      missing = new Set()
+      return {
+        baseId: sheet.baseId,
+        sheet: clone(sheet),
+        fields: input.descriptor.fields.map((field, index) => ({
+          id: `physical_${index}_${field.id}`,
+          sheetId: sheet.id,
+          name: field.name,
+          type: field.type,
+          property: field.property || {},
+          order: index,
+        })),
+      }
+    },
+  }
+  return { api, calls }
+}
+
+async function testStockPreparationTargetProvisioningRoutes() {
+  const provisioning = createStockPreparationTargetProvisioningApi()
+  const records = createTableActionRecordsApi()
+  const { routes, registered } = mountRoutes(createMockServices().services, {
+    provisioningApi: provisioning.api,
+    recordsApi: records.recordsApi,
+  })
+
+  assert.ok(
+    registered.includes('GET /api/integration/stock-preparation/target/readiness'),
+    'stock-preparation target readiness route registered',
+  )
+  assert.ok(
+    registered.includes('POST /api/integration/stock-preparation/target/ensure'),
+    'stock-preparation target ensure route registered',
+  )
+
+  let res = await invoke(routes, 'GET', '/api/integration/stock-preparation/target/readiness', {
+    user: WRITE_USER,
+    query: { projectId: 'tenant_1:integration-core' },
+  })
+  assert.equal(res.statusCode, 403, 'write user cannot inspect target readiness')
+  assert.equal(provisioning.calls.length, 0, 'non-admin request does not reach provisioning API')
+
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/target/ensure', {
+    user: ADMIN_USER,
+    body: { projectId: 'tenant_1:integration-core', sheetId: 'evil_sheet', permission: 'admin' },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_TARGET_REQUEST_INVALID')
+  assert.equal(provisioning.calls.length, 0, 'client-supplied sheetId/permission is rejected before provisioning')
+
+  res = await invoke(routes, 'GET', '/api/integration/stock-preparation/target/readiness', {
+    user: ADMIN_USER,
+    query: { projectId: 'tenant_1:integration-core' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.ready, false)
+  assert.equal(res.body.data.mode, 'canonical_missing')
+  assert.equal(res.body.data.targetBinding, null)
+  assert.equal(res.body.data.evidence.status, 'missing')
+  assert.equal(res.body.data.evidence.missingFields.length, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.length)
+  assert.equal(JSON.stringify(res.body.data.evidence).includes('sheet_stock'), false, 'readiness evidence hides sheet id')
+  assert.equal(records.calls.length, 0, 'readiness route never uses records API')
+
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/target/ensure', {
+    user: ADMIN_USER,
+    body: { projectId: 'tenant_1:integration-core', baseId: 'base_stock' },
+  })
+  assertOkResponse(res, 201)
+  assert.equal(res.body.data.ready, true)
+  assert.equal(res.body.data.mode, 'canonical_create')
+  assert.deepEqual(res.body.data.targetBinding, {
+    sheetId: 'sheet_stock_canonical_created',
+    objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+    keyField: 'idempotencyKey',
+    fieldIdMap: {},
+  })
+  assert.equal(JSON.stringify(res.body.data.evidence).includes('sheet_stock_canonical_created'), false, 'ensure evidence hides sheet id')
+  const ensureCall = findCalls(provisioning.calls, 'ensureObject')[0]
+  assert.equal(ensureCall[1].projectId, 'tenant_1:integration-core')
+  assert.equal(ensureCall[1].baseId, 'base_stock')
+  assert.deepEqual(
+    ensureCall[1].descriptor.fields.map((field) => field.id),
+    STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id),
+    'ensure descriptor is manifest-derived',
+  )
+  assert.equal(records.calls.length, 0, 'ensure route never uses records API')
+
+  const existing = createStockPreparationTargetProvisioningApi({ sheetExists: true })
+  const existingMount = mountRoutes(createMockServices().services, {
+    provisioningApi: existing.api,
+    recordsApi: createTableActionRecordsApi().recordsApi,
+  })
+  res = await invoke(existingMount.routes, 'POST', '/api/integration/stock-preparation/target/ensure', {
+    user: ADMIN_USER,
+    body: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.mode, 'canonical_existing')
+  assert.deepEqual(res.body.data.targetBinding.fieldIdMap, {})
+  assert.equal(findCalls(existing.calls, 'ensureObject').length, 0, 'existing complete target is bound, not recreated')
+  assert.equal(findCalls(existing.calls, 'findObjectSheet')[0][1].projectId, 'tenant_1:integration-core', 'default projectId is integration-core scoped')
+
+  const incomplete = createStockPreparationTargetProvisioningApi({ sheetExists: true, missingFields: ['path'] })
+  const incompleteMount = mountRoutes(createMockServices().services, {
+    provisioningApi: incomplete.api,
+    recordsApi: createTableActionRecordsApi().recordsApi,
+  })
+  res = await invoke(incompleteMount.routes, 'POST', '/api/integration/stock-preparation/target/ensure', {
+    user: ADMIN_USER,
+    body: { projectId: 'tenant_1:integration-core' },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
+  assert.deepEqual(res.body.error.details.missingFields, ['path'])
+  assert.equal(JSON.stringify(res.body.error).includes('sheet_stock_canonical_private'), false, 'incomplete error hides sheet id')
+  assert.equal(findCalls(incomplete.calls, 'ensureObject').length, 0, 'incomplete existing target is not repaired in place')
+}
+
 async function testTableActionRoutes() {
   const adapterCalls = []
   const records = createTableActionRecordsApi()
@@ -2586,6 +2736,7 @@ async function testTableActionUnconfiguredFailsClosed() {
 
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
+  await testStockPreparationTargetProvisioningRoutes()
   await testTableActionRoutes()
   await testTableActionTargetPreflightBeforeSourceAdapter()
   await testTableActionUnconfiguredFailsClosed()

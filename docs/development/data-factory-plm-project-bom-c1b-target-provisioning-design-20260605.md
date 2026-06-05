@@ -201,8 +201,8 @@ Forbidden issue evidence:
 | Slice | Scope |
 |---|---|
 | C1b-0 | This design + TODO reconcile. Docs-only. |
-| C1b-1 | Backend manifest-to-target readiness/provisioning helper. Admin-only, metadata only, no rows. |
-| C1b-2 | Optional admin UI or runbook to create/bind the canonical target. No PLM read. |
+| C1b-1 | Backend manifest-to-target readiness/provisioning helper. Admin-only, metadata only, no rows. Done in #2307. |
+| C1b-2 | Admin-only route/runbook to inspect or create/bind the canonical target. No PLM read. |
 | C1b-3 | Entity-machine target readiness smoke: canonical target present and C5 action can be configured without explicit `fieldIdMap`. |
 
 C5 full smoke resumes only after C1b target readiness and the PLM source gate are
@@ -222,6 +222,24 @@ admin workflow or runbook:
   trusting returned physical field ids;
 - helper uses only `context.api.multitable.provisioning`; it does not use the
   records API and writes no business rows.
+
+## C1b-2 implementation note
+
+C1b-2 wires the helper through a narrow admin-only backend workflow, not a broad
+authoring UI:
+
+- `GET /api/integration/stock-preparation/target/readiness` inspects target
+  readiness only;
+- `POST /api/integration/stock-preparation/target/ensure` creates missing
+  canonical table/field metadata or binds an existing complete canonical target;
+- both routes derive permission from `requireAccess(req, 'admin')` and reject
+  client-supplied `permission`, `sheetId`, `target`, `fieldIdMap`, source
+  bindings, C3 plans, or C4 payloads;
+- responses separate private `targetBinding` from values-free `evidence`;
+- operator/customer evidence must copy only `data.evidence`, never
+  `data.targetBinding`;
+- C1b-2 still does not read PLM, use the records API, write business rows, call
+  K3, write an external database, or sync custom options.
 
 ## Acceptance locks for C1b implementation
 
