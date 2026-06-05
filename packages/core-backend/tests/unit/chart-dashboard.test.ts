@@ -946,4 +946,8 @@ describe('assertSeriesConstraints (v2-d input validation)', () => {
       expect(() => assertSeriesConstraints(ds({ aggregation: { function: fn, fieldId: 'amt' } }), 'bar')).toThrow(/sum or count/)
     }
   })
+
+  it('throws when combined with date grouping (matches the producer giving the date axis precedence)', () => {
+    expect(() => assertSeriesConstraints(ds({ dateFieldId: 'd', dateGrouping: 'month' }), 'bar')).toThrow(/date grouping/)
+  })
 })

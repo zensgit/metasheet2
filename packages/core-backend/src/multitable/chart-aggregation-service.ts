@@ -96,7 +96,7 @@ export class ChartAggregationService {
    * Compute chart data from a chart config + record set.
    */
   async computeChartData(chart: ChartConfig, records: RecordRow[]): Promise<ChartData> {
-    let filtered = this.filterRecords(records, chart.dataSource)
+    const filtered = this.filterRecords(records, chart.dataSource)
     const aggFn = chart.dataSource.aggregation.function
     const aggFieldId = chart.dataSource.aggregation.fieldId
 
