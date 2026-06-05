@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3..A6-5 remain frozen / demand-gated
+Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3 design-lock opened (`multitable-automation-a6-3-branch-parallel-design-20260605.md`), runtime still not started; A6-4..A6-5 remain frozen / demand-gated
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, read-boundary wired only); RFC #1885
 
@@ -21,14 +21,13 @@ The governance half and named A5 retry runtime are complete on `origin/main`:
 - A6-0 convergence scout + A6-1 runtime scout: docs-only planning artifacts.
 - A6-1 persistent `WorkflowJob` runtime: LANDED #2130 (2026-05-30) — opt-in linear
   job plane (new `multitable_automation_jobs`, rule-level `execution_mode`, fail-closed,
-  A1-redaction reuse, A2 detail prefer-jobs). **DORMANT**: createRule/updateRule do not
-  accept `execution_mode`, so no rule is opt-in-able via the API (DB/fixture only) →
-  existing rules unaffected.
+  A1-redaction reuse, A2 detail prefer-jobs). Historical note: this runtime initially
+  landed **DORMANT** because createRule/updateRule did not accept `execution_mode`; that
+  dormant state was later closed by #2191 enable-writer + #2193 admin UI toggle.
 
-This closeout does NOT mark the convergence engine complete. A6-1 runtime landed but is
-dormant; the rest remains frozen / demand-gated: A6-1 enable-writer (API/UI to set
-`execution_mode`), suspend/resume, branch/parallel, BPMN adapter, and approval-as-job are
-still separate future unlocks.
+This closeout did NOT mark the convergence engine complete at the time. Current status:
+A6-1 and A6-2 are now complete end-to-end; A6-3 only has a docs-only design-lock opened,
+and A6-4/A6-5 remain separate future unlocks.
 
 ## Doctrine — Two Gates (definition of "not lopsided")
 
@@ -42,20 +41,21 @@ still separate future unlocks.
   its own status vocabulary.
 
 This line is the governance half. The capability half (convergence engine) is a
-frozen, demand-gated separate track (see A6 + RFC #1885 + contract #1889).
+separate demand-gated track (see A6 + RFC #1885 + contract #1889).
 
 ## Scope Boundary
 
-This line improves automation execution observability, and aligns its data model
-with the landed C1 WorkflowJob contract (#1889) by boundary mapping — NOT by
-changing storage and NOT by persisting jobs.
+The original governance-half line improves automation execution observability, and aligns
+its data model with the landed C1 WorkflowJob contract (#1889) by boundary mapping — NOT
+by changing storage and NOT by persisting jobs. Later A6 runtime slices are separate,
+explicit opt-ins and are tracked below.
 
-It does not unlock:
+By itself, the governance-half line did not unlock:
 
 - approval_trigger_bindings / approval result backwrite / automation start_approval
 - approval completion event bridge
-- persistent automation_jobs runtime
-- suspend/resume, branch/parallel, cross-engine orchestration
+- persistent automation_jobs runtime (later A6-1 opt-in)
+- suspend/resume (later A6-2 opt-in), branch/parallel, cross-engine orchestration
 - Workflow Designer / BPMN live execution mapping
 
 The K3 Stage-1 blanket lock is retired (#1993; #1792 = M1 one-record Material Save-only PASS) — replaced by post-GATE scoped gates (see `k3-post-gate-scoped-governance-20260528.md`). This does NOT open the capability half: each item above still requires a separate named unlock / demand gate.
@@ -67,7 +67,8 @@ The K3 Stage-1 blanket lock is retired (#1993; #1792 = M1 one-record Material Sa
   (explicit opt-in; not "read-only so no review needed").
 - A4 / A5: completed by explicit opt-in (#2039 + #2047); retry UI,
   idempotency keys, and re-fetch-current-record context remain future opt-ins.
-- A6: docs only; all runtime frozen / demand-gated.
+- A6: A6-0/A6-3 design-locks are docs-only; A6-1 and A6-2 runtime/frontend slices
+  landed by explicit opt-in; A6-3 runtime and A6-4/A6-5 remain frozen / demand-gated.
 
 ## Current Baseline
 
@@ -81,9 +82,9 @@ Already present before this line:
 - frontend redacted support packet utility
 - scheduler leader lock for in-memory timers
 - DingTalk-specific redactor in executor (redactDingTalkFailureAlertText) — to be CONSOLIDATED, not extended
-- C1 WorkflowJob contract (workflow-job-contract.ts, #1889) — LANDED, wired only
-  at the A2 read boundary; not runtime-wired into the executor
-  (WorkflowJobStatus 8-state; legacyAutomationStatusToJobStatus: success->resolved, rest identity)
+- C1 WorkflowJob contract (workflow-job-contract.ts, #1889) — LANDED. Initially wired
+  only at the A2 read boundary; now also used by A6-1 persisted jobs and A6-2 suspended
+  job/resume surfaces.
 
 Completed by this governance-half line:
 
@@ -247,21 +248,23 @@ Acceptance:
 - [x] Retry rejects missing / empty / invalid trigger events without loading rule or executing actions.
 - [x] Retry response and `/test` response never serialize raw in-memory ruleSnapshot / steps.
 
-### A6 — Capability-half Bridge  (lock: A6-0 design only; runtime frozen / demand-gated)
+### A6 — Capability-half Bridge  (A6-0 historical scope gate + current checklist)
 
-Checklist status below records the docs-only A6-0 scout/scope gate. It does NOT
-mark the convergence engine complete.
+Checklist status below starts with the docs-only A6-0 scout/scope gate, then records
+later A6-1/A6-2 completions and the current A6-3 design-lock. A6 is still not fully
+complete.
 
 - [x] A6-0 docs-only scout/scope gate recorded in
       `multitable-automation-a6-convergence-scout-20260529.md`.
-- [x] Runtime remains frozen / demand-gated; this milestone is not complete.
+- [x] At A6-0 time, runtime remained frozen / demand-gated; that milestone did not
+      authorize implementation.
 - [x] Record convergence sequence: persist job -> suspend/resume [webhook before delay]
       -> branch/parallel -> BPMN compile/preview adapter -> approval-as-job.
 - [x] Each step references a concrete integration use-case before unlock (demand gate).
 - [x] Graph fields (upstreamStepKey/branchIndex) introduced in A6-3, not in A1/A5.
 - [x] Governance inheritance: any capability reuses this line's
       run/job/status/provenance/redaction/replay substrate (no second-class layer).
-- [x] No runtime in this milestone.
+- [x] No runtime in the A6-0 milestone.
 - [x] A6-1 persistent WorkflowJob runtime scout recorded in
       `multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md`.
 - [x] A6-1 persistent WorkflowJob runtime — LANDED #2130.
@@ -270,6 +273,9 @@ mark the convergence engine complete.
 - [x] A6-2 suspend/resume runtime (backend, admin-gated v1; webhook/external resume) — LANDED #2237 c363a78db (2026-06-03).
 - [x] A6-2b suspend/resume frontend (admin Resume UI + `wait_for_callback` editor) — LANDED #2245 cee99c8e4 (2026-06-04). **A6-2 closed end-to-end.** delay/timer resume still deferred / demand-gated.
 - [x] A6-2 UI/operator UAT — PASS #2257 on package `metasheet-multitable-onprem-v2.5.0-a6-2-uat-followup-lock-gate-b37ff906`: `wait_for_callback -> update_record` saved through the UI, suspended, resumed from admin detail, reached terminal `resolved`, and passed the listed negative guards. UAT blockers cleared by #2264 (service validation), #2272 (executor-shaped follow-up configs), and #2278 (`lock_record` hidden/disabled while storage contract is unsupported).
-- [ ] A6-3 branch/parallel DAG runtime — not started.
+- [ ] A6-3 branch/parallel DAG runtime — design-lock opened in
+      `multitable-automation-a6-3-branch-parallel-design-20260605.md`;
+      runtime not started. First runtime slice is explicitly
+      `condition_branch` / exclusive branch v1 only.
 - [ ] A6-4 BPMN compile/preview adapter — not started.
 - [ ] A6-5 approval-as-job bridge — not started.
