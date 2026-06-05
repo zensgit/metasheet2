@@ -12,7 +12,9 @@
 ## Non-negotiables
 
 - No raw SQL and no user-authored SQL.
-- Source is `data-source:sql-readonly` in v1.
+- Source is an explicitly configured readonly PLM source:
+  `data-source:sql-readonly` or `bridge:legacy-sql-readonly`. The two paths
+  must never silently fall back to each other.
 - Project match is single `projectNo` exact on `FileCode`.
 - Apply writes MetaSheet stock-preparation main table only.
 - No external database write.
@@ -33,7 +35,7 @@ regression blocks #2253 runtime, but it does not change the C0 design scope.
 
 | Question | Locked answer |
 |---|---|
-| PLM source | `data-source:sql-readonly` / readonly SQL source. |
+| PLM source | Explicit readonly SQL source: `data-source:sql-readonly` or `bridge:legacy-sql-readonly`. |
 | Query | Parameterized `projectNo`; no raw SQL. |
 | Match | Single exact `FileCode = projectNo`; no fuzzy/prefix/batch. |
 | No-hit | Dry-run `0 rows` + not-found summary; no project row write. |
@@ -116,8 +118,9 @@ Scope:
 - Keep this slice docs-only; no route, UI, table creation, PLM read, MetaSheet
   row write, or K3 path.
 - Keep the PLM source gate separate: full C5 smoke still needs a real PLM source
-  registered/bound as `data-source:sql-readonly`, or a separate Bridge-source
-  design pivot.
+  registered/bound through an explicitly configured readonly source. Onsite
+  validation later chose the Bridge-source path because the PLM SQL Server is
+  represented as `bridge:legacy-sql-readonly`.
 
 Acceptance locks:
 
@@ -158,7 +161,7 @@ Acceptance locks:
 - C1b-2 UI/runbook, C1b-3 entity-machine readiness smoke, and C6 option sync
   remain separate opt-ins.
 
-### 🟡 C1b-2 - Admin target readiness/provisioning workflow (this PR)
+### ✅ C1b-2 - Admin target readiness/provisioning workflow (DONE - PR #2309, `8bf7b38a6`)
 
 Gated on: C1b-1 + explicit opt-in.
 
@@ -212,7 +215,8 @@ Gated on: C2-0 + confirmed customer PLM relation descriptors + explicit opt-in.
 
 Scope:
 
-- Build a pure or service-layer helper that reads through `data-source:sql-readonly`.
+- Build a pure or service-layer helper that reads through the configured
+  readonly PLM source adapter.
 - Accept parameterized `projectNo`.
 - Match exact `FileCode`.
 - Expand recursive BOM rows into normalized logical rows.
@@ -447,6 +451,11 @@ Scope:
 - Keep the C5 source kind unchanged: `data-source:sql-readonly` only. Do not
   widen this slice to `bridge:legacy-sql-readonly`.
 
+Historical note: that source-kind boundary was correct for C5-3b. A later
+onsite source inventory showed the PLM SQL Server source is available as
+`bridge:legacy-sql-readonly`, so the explicit C5-source-gate slice below widens
+the source contract deliberately rather than silently falling back.
+
 Acceptance locks:
 
 - Incomplete explicit target maps fail before PLM reads, target reads, target
@@ -460,8 +469,8 @@ Acceptance locks:
 ### ⬜ C5-3 - Operator validation runbook / entity-machine smoke
 
 Gated on: C5-1/C5-2 + C5-3a package deployed + C5-3b package deployed +
-C1b target readiness + real PLM `data-source:sql-readonly` binding + explicit
-opt-in.
+C1b target readiness + explicit PLM readonly source binding
+(`data-source:sql-readonly` or `bridge:legacy-sql-readonly`) + explicit opt-in.
 
 Scope:
 
@@ -478,18 +487,49 @@ Acceptance locks:
 - External DB write remains not invoked.
 - Manual-confirm rows remain held.
 
-Current entity-machine state after C5-3b:
+Current entity-machine state after C1b-2:
 
 - C5-3b target-schema preflight PASSed: partial explicit `fieldIdMap` returns
   values-free `422 TARGET_SCHEMA_INCOMPLETE` before any source read.
-- Full C5 smoke remains blocked on target readiness and source binding, not on
-  the preflight code.
-- Target readiness: use a canonical C1 target table or a complete explicit
-  field map. The recommended next path is C1b canonical target
-  provisioning/binding.
-- Source readiness: bind the real PLM SQL Server source as
-  `data-source:sql-readonly`; `bridge:legacy-sql-readonly` support is a
-  separate source-design pivot, not a silent fallback.
+- C1b-2 target readiness PASSed on the entity machine: admin readiness/ensure
+  works, non-admin returns 403, and no PLM/C2/C3/C4/K3/row writes occur.
+- Full C5 smoke remains blocked on the explicit PLM source gate and source
+  validation, not on target readiness.
+- Source readiness: onsite inventory showed the PLM SQL Server source is
+  represented as active `bridge:legacy-sql-readonly`, not as a generic
+  `data-source:sql-readonly` datasource. The next source-side slice is explicit
+  Bridge support.
+
+### 🟡 C5-source-gate - Explicit Bridge readonly source support (this PR)
+
+Gated on: C1b-2 entity-machine target readiness PASS + onsite source inventory
+showing the PLM source is `bridge:legacy-sql-readonly` + explicit opt-in.
+
+Scope:
+
+- Allow `plm.stock-preparation.pull-bom.v1` to use
+  `bridge:legacy-sql-readonly` only when the server-side action config names
+  that source kind.
+- Require `source.readPlan.sourceKind` to match `source.kind`; no
+  `data-source`/Bridge drift.
+- Keep the route's saved external-system kind check before adapter creation.
+- Teach the readonly Bridge Agent and adapter to accept structured equality
+  filters over allowlisted object fields.
+- Keep Bridge filters primitive-only and parameterized; no raw SQL, operator
+  objects, arrays, joins, CTEs, stored procedures, or vendor API calls.
+- Update package verification and the Bridge Agent runbook so future packages
+  validate the new filter contract instead of the retired
+  `UNSUPPORTED_FILTERS` behavior.
+
+Acceptance locks:
+
+- Bridge C5 dry-run reaches the source adapter through equality-filtered flat
+  reads.
+- A source-kind mismatch returns 422 before adapter creation.
+- Invalid Bridge filters fail closed before SQL execution.
+- Bridge Agent SQL uses allowlisted identifiers and bound parameters.
+- No PLM write, MetaSheet apply, K3, external database write, raw SQL, or
+  source credential copy is introduced.
 
 ### 🔒 C6 - `config_info` -> select/dropdown option sync
 
@@ -538,20 +578,22 @@ operator checks stay in later validation slices:
 
 ## Sequencing rule
 
-C0, C1, C2-0, C2, C3, C4, C5-0, C5-1, C5-2, C5-3a, and C5-3b are complete.
-C5-3b closed the target-schema fail-closed bug found during C5-3 smoke. The next
-target-side blocker is C1b canonical target provisioning/binding; the next
-source-side blocker is binding the real PLM source as `data-source:sql-readonly`
-or explicitly opening a Bridge-source design.
+C0, C1, C2-0, C2, C3, C4, C5-0, C5-1, C5-2, C5-3a, C5-3b, C1b-1, and C1b-2
+are complete. C5-3b closed the target-schema fail-closed bug found during C5-3
+smoke. C1b-2 closed the target-readiness gate on the entity machine. The next
+source-side blocker is the explicit Bridge-source gate, because the onsite PLM
+SQL Server source is available as `bridge:legacy-sql-readonly`.
 
 1. C5-0 design locks the reusable parameterized action contract.
 2. C5-1 adds backend action routes and server-side recompute/apply wiring.
 3. C5-2 adds the workbench operator surface.
 4. C5-3a injects server-owned plugin action config for on-prem deployment.
 5. C5-3b rejects incomplete target schema/config before any PLM read.
-6. C1b prepares a canonical target table/binding so full C5 smoke no longer
-   depends on a large explicit legacy `fieldIdMap`.
-7. C5-3 validates the flow on an entity machine.
+6. C1b prepares and validates a canonical target table/binding so full C5 smoke
+   no longer depends on a large explicit legacy `fieldIdMap`.
+7. C5-source-gate enables the explicitly configured Bridge readonly source path
+   with parameterized equality filters.
+8. C5-3 validates the flow on an entity machine.
 
 C6 option sync remains after C1b/C5 target readiness. All later slices still
 require their predecessor to land and the owner to explicitly opt in. K3 Save /

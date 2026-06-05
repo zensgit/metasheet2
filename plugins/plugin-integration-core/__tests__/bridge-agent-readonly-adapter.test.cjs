@@ -157,7 +157,7 @@ async function main() {
   assert.equal(schema.fields.find((field) => field.name === 'FNumber').required, true)
   assert.deepEqual(schema.raw, { source: 'bridge:legacy-sql-readonly' })
 
-  // --- 3. read() posts only a capped limit, never SQL/filter state --------
+  // --- 3. read() posts capped limit + allowlisted equality filters, never SQL state --------
   const preview = await adapter.read({ object: 'material' })
   assert.equal(preview.records.length, 2)
   assert.equal(preview.metadata.limit, 3)
@@ -169,9 +169,23 @@ async function main() {
   const cappedCall = calls.filter((call) => call.pathname === '/query/material').at(-1)
   assert.deepEqual(cappedCall.body, { limit: 20 }, 'adapter caps reads to Bridge Agent maxLimit before sending')
 
+  await adapter.read({ object: 'material', limit: 5, filters: { FNumber: 'MAT-001', active: true, optional: null } })
+  const filteredCall = calls.filter((call) => call.pathname === '/query/material').at(-1)
+  assert.deepEqual(
+    filteredCall.body,
+    { limit: 5, filters: { FNumber: 'MAT-001', active: true, optional: null } },
+    'adapter forwards primitive equality filters to the Bridge Agent',
+  )
+
   await assert.rejects(
-    () => adapter.read({ object: 'material', filters: { status: 'approved' } }),
-    (error) => error instanceof AdapterValidationError && /filters/.test(error.message),
+    () => adapter.read({ object: 'material', filters: { FNumber: { $like: 'MAT%' } } }),
+    (error) => error instanceof AdapterValidationError && /equality primitives/.test(error.message),
+    'operator-shaped filters stay rejected',
+  )
+  await assert.rejects(
+    () => adapter.read({ object: 'material', filters: { FNumber: ['MAT-001'] } }),
+    (error) => error instanceof AdapterValidationError && /equality primitives/.test(error.message),
+    'array filters stay rejected',
   )
   await assert.rejects(
     () => adapter.read({ object: 'material', options: { sql: 'SELECT * FROM t' } }),

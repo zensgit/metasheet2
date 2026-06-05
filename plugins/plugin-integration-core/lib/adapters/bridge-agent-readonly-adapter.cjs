@@ -225,10 +225,22 @@ function hasOwnKeys(value) {
   return isPlainObject(value) && Object.keys(value).length > 0
 }
 
-function assertNoUnsupportedReadOptions(request) {
-  if (hasOwnKeys(request.filters)) {
-    throw new AdapterValidationError('Bridge Agent read does not support filters yet', { field: 'filters' })
+function normalizeEqualityFilters(filters = {}) {
+  if (!hasOwnKeys(filters)) return undefined
+  const out = {}
+  for (const [key, value] of Object.entries(filters)) {
+    const normalizedKey = assertSafeObjectName(key)
+    if (value !== null && !['string', 'number', 'boolean'].includes(typeof value)) {
+      throw new AdapterValidationError('Bridge Agent filters support equality primitives only', {
+        field: `filters.${normalizedKey}`,
+      })
+    }
+    out[normalizedKey] = value
   }
+  return out
+}
+
+function assertNoUnsupportedReadOptions(request) {
   if (hasOwnKeys(request.watermark)) {
     throw new AdapterValidationError('Bridge Agent read does not support watermarks yet', { field: 'watermark' })
   }
@@ -390,10 +402,13 @@ function createBridgeAgentReadonlyAdapter({ system, fetchImpl = globalThis.fetch
     const request = normalizeReadRequest(input)
     const object = assertSafeObjectName(request.object)
     assertNoUnsupportedReadOptions(request)
+    const filters = normalizeEqualityFilters(request.filters)
     const limit = normalizeBridgeLimit(input.limit, request.limit, limits)
+    const body = { limit }
+    if (filters) body.filters = filters
     const { data } = await requestJson(`/query/${encodeURIComponent(object)}`, {
       method: 'POST',
-      body: { limit },
+      body,
     })
     const records = isPlainObject(data) && Array.isArray(data.records) ? data.records : []
     return createReadResult({
@@ -434,6 +449,7 @@ module.exports = {
     bridgeAuthHeaders,
     normalizeBaseUrl,
     normalizeBridgeLimit,
+    normalizeEqualityFilters,
     normalizeObjectsResponse,
     normalizeFields,
     redactSecretText,

@@ -12,6 +12,10 @@ const DEFAULT_PAGE_LIMIT = 1000
 const DEFAULT_MAX_PAGES = 100
 const DEFAULT_MAX_DEPTH = 20
 const DEFAULT_MAX_ROWS = 10000
+const STOCK_PREPARATION_BOM_SOURCE_KINDS = Object.freeze([
+  'data-source:sql-readonly',
+  'bridge:legacy-sql-readonly',
+])
 
 const FORBIDDEN_PLAN_KEYS = Object.freeze([
   'sql',
@@ -193,8 +197,8 @@ function normalizeStockPreparationBomReadPlan(input = PLM_STOCK_PREPARATION_BOM_
   assertNoForbiddenPlanKeys(source)
   const plan = requiredObject(source, 'readPlan')
   const sourceKind = requiredString(plan.sourceKind || 'data-source:sql-readonly', 'readPlan.sourceKind', { identifier: false })
-  if (sourceKind !== 'data-source:sql-readonly') {
-    throw new StockPreparationBomExpansionError('readPlan.sourceKind must be data-source:sql-readonly', {
+  if (!STOCK_PREPARATION_BOM_SOURCE_KINDS.includes(sourceKind)) {
+    throw new StockPreparationBomExpansionError('readPlan.sourceKind must be data-source:sql-readonly or bridge:legacy-sql-readonly', {
       field: 'readPlan.sourceKind',
       value: sourceKind,
     })
@@ -715,6 +719,7 @@ module.exports = {
   DEFAULT_MAX_ROWS,
   FORBIDDEN_PLAN_KEYS,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
+  STOCK_PREPARATION_BOM_SOURCE_KINDS,
   StockPreparationBomExpansionError,
   normalizeStockPreparationBomReadPlan,
   expandPlmProjectBom,

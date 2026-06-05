@@ -8,6 +8,7 @@ const crypto = require('node:crypto')
 
 const {
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
+  STOCK_PREPARATION_BOM_SOURCE_KINDS,
   expandPlmProjectBom,
   summarizeBomExpansionForEvidence,
 } = require('./stock-preparation-bom-expansion.cjs')
@@ -114,15 +115,27 @@ function normalizeSource(input = {}) {
     throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'source must be an object', { field: 'source' })
   }
   const kind = optionalString(input.kind) || 'data-source:sql-readonly'
-  if (kind !== 'data-source:sql-readonly') {
-    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'source.kind must be data-source:sql-readonly', {
+  if (!STOCK_PREPARATION_BOM_SOURCE_KINDS.includes(kind)) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'source.kind must be data-source:sql-readonly or bridge:legacy-sql-readonly', {
       field: 'source.kind',
+    })
+  }
+  const readPlan = cloneJson(input.readPlan || PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  if (!isPlainObject(readPlan)) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'source.readPlan must be an object', { field: 'source.readPlan' })
+  }
+  if (!input.readPlan || !optionalString(input.readPlan.sourceKind)) {
+    readPlan.sourceKind = kind
+  }
+  if (optionalString(readPlan.sourceKind) !== kind) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'source.readPlan.sourceKind must match source.kind', {
+      field: 'source.readPlan.sourceKind',
     })
   }
   return {
     externalSystemId: requiredString(input.externalSystemId, 'source.externalSystemId'),
     kind,
-    readPlan: cloneJson(input.readPlan || PLM_STOCK_PREPARATION_BOM_READ_PLAN),
+    readPlan,
   }
 }
 
