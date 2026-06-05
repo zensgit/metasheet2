@@ -752,4 +752,122 @@ describe('MetaDashboardView', () => {
     }))
     vi.useRealTimers()
   })
+
+  // ---- v2-d: stacked-bar series picker (seriesByFieldId) ----
+
+  const aggSelectOf = (c: HTMLElement) => c.querySelector('[data-field="chart-aggregation"]') as HTMLSelectElement
+  const groupBySelectOf = (c: HTMLElement) => c.querySelector('[data-field="chart-group-by"]') as HTMLSelectElement
+  const seriesSelectOf = (c: HTMLElement) => c.querySelector('[data-field="chart-series-by"]') as HTMLSelectElement | null
+
+  it('v2-d: series picker shows only for bar + additive aggregation (sum/count)', async () => {
+    const { client } = mockClient([fakeDashboard({ panels: [] })], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    await openCreateForm(container)
+    const typeSelect = typeSelectOf(container)
+    const aggSelect = aggSelectOf(container)
+
+    expect(seriesSelectOf(container)).toBeTruthy()             // default bar + count → shown
+    await setSelect(aggSelect, 'avg')
+    expect(seriesSelectOf(container)).toBeNull()               // bar + avg → hidden
+    await setSelect(aggSelect, 'sum')
+    expect(seriesSelectOf(container)).toBeTruthy()             // bar + sum → shown
+    await setSelect(typeSelect, 'line')
+    expect(seriesSelectOf(container)).toBeNull()               // non-bar → hidden
+    await setSelect(typeSelect, 'number')
+    expect(seriesSelectOf(container)).toBeNull()
+  })
+
+  it('v2-d: series picker is disabled without a primary groupBy', async () => {
+    const { client } = mockClient([fakeDashboard({ panels: [] })], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    await openCreateForm(container)
+    expect(seriesSelectOf(container)!.disabled).toBe(false)    // groupBy defaults to first groupable field
+    await setSelect(groupBySelectOf(container), '')
+    expect(seriesSelectOf(container)!.disabled).toBe(true)
+  })
+
+  it('v2-d: create carries dataSource.seriesByFieldId', async () => {
+    const { client, fetchFn } = mockClient([fakeDashboard({ panels: [] })], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    await openCreateForm(container)
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Stacked'; nameInput.dispatchEvent(new Event('input')); await nextTick()
+    // bar + count (defaults), groupBy = fld_status (default), series = fld_amount
+    await setSelect(seriesSelectOf(container)!, 'fld_amount')
+    ;(container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const post = fetchFn.mock.calls.find(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'POST' && url.includes('/charts') && !url.includes('preview-data'),
+    )
+    expect(JSON.parse(post![1].body as string).dataSource.seriesByFieldId).toBe('fld_amount')
+  })
+
+  it('v2-d: switching to a non-additive aggregation clears the series field', async () => {
+    const { client, fetchFn } = mockClient([fakeDashboard({ panels: [] })], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    await openCreateForm(container)
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Switcher'; nameInput.dispatchEvent(new Event('input')); await nextTick()
+    await setSelect(seriesSelectOf(container)!, 'fld_amount')
+    await setSelect(aggSelectOf(container), 'avg')             // non-additive → picker hidden + series cleared
+    const valueSelect = container.querySelector('[data-field="chart-value-field"]') as HTMLSelectElement
+    await setSelect(valueSelect, 'fld_amount')                // avg requires a value field
+    ;(container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const post = fetchFn.mock.calls.find(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'POST' && url.includes('/charts') && !url.includes('preview-data'),
+    )
+    const ds = JSON.parse(post![1].body as string).dataSource
+    expect(ds.aggregation.function).toBe('avg')
+    expect(ds.seriesByFieldId).toBeUndefined()
+  })
+
+  it('v2-d: editing a stacked chart preserves seriesByFieldId on a name-only edit (round-trip)', async () => {
+    const chart = fakeChart({
+      chartType: 'bar',
+      dataSource: { sheetId: 'sheet_1', groupByFieldId: 'fld_status', seriesByFieldId: 'fld_amount', aggregation: { function: 'count' } },
+    })
+    const { client, fetchFn } = mockClient([fakeDashboard()], [chart])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    ;(container.querySelector('[data-action="add-panel"]') as HTMLButtonElement).click()
+    await nextTick()
+    ;(container.querySelector(`[data-edit-chart="${chart.id}"]`) as HTMLButtonElement).click()
+    await nextTick()
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Renamed'; nameInput.dispatchEvent(new Event('input')); await nextTick()
+    ;(container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const patch = fetchFn.mock.calls.find(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'PATCH' && url.includes(`/charts/${chart.id}`),
+    )
+    expect(JSON.parse(patch![1].body as string).dataSource.seriesByFieldId).toBe('fld_amount')
+  })
+
+  it('v2-d: live preview carries dataSource.seriesByFieldId', async () => {
+    const { client } = mockClient([fakeDashboard({ panels: [] })], [])
+    const previewSpy = vi.spyOn(client, 'previewChartData').mockResolvedValue({ chartType: 'bar', dataPoints: [{ label: 'A', value: 1 }] })
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    vi.useFakeTimers()
+    await openCreateForm(container)
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Preview stacked'; nameInput.dispatchEvent(new Event('input')); await nextTick()
+    await setSelect(seriesSelectOf(container)!, 'fld_amount')
+
+    await vi.advanceTimersByTimeAsync(300)
+    await nextTick()
+    expect(previewSpy).toHaveBeenLastCalledWith('sheet_1', expect.objectContaining({
+      chartType: 'bar',
+      dataSource: expect.objectContaining({ seriesByFieldId: 'fld_amount' }),
+    }))
+    vi.useRealTimers()
+  })
 })

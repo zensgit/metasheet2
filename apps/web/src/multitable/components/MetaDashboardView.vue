@@ -209,6 +209,22 @@
             </select>
             <small v-if="!numericFields.length" class="meta-dashboard__hint">{{ viewRenderLabel('dashboard.noNumericFields', isZh) }}</small>
           </label>
+          <!-- v2-d: stack-by (series) — only for a bar chart with an additive aggregation; needs a primary groupBy. -->
+          <label v-if="seriesByAllowed" class="meta-dashboard__field">
+            <span>{{ viewRenderLabel('dashboard.seriesBy', isZh) }}</span>
+            <select
+              v-model="chartDraft.seriesByFieldId"
+              class="meta-dashboard__select"
+              data-field="chart-series-by"
+              :disabled="!chartDraft.groupByFieldId"
+            >
+              <option value="">{{ viewRenderLabel('dashboard.seriesByNone', isZh) }}</option>
+              <option v-for="field in groupableFields" :key="field.id" :value="field.id">
+                {{ field.name }} · {{ fieldTypeLabel(field.type, isZh) }}
+              </option>
+            </select>
+            <small class="meta-dashboard__hint" data-hint="series-stacked">{{ viewRenderLabel('dashboard.seriesByHint', isZh) }}</small>
+          </label>
           <div v-if="createChartError" class="meta-dashboard__error" data-error="create-chart">{{ createChartError }}</div>
           <section class="meta-dashboard__preview" data-chart-preview="true">
             <div class="meta-dashboard__preview-title">{{ viewRenderLabel('dashboard.livePreview', isZh) }}</div>
@@ -298,6 +314,8 @@ const GROUPABLE_FIELD_TYPES = new Set<MetaFieldType>([
 ])
 const NUMERIC_FIELD_TYPES = new Set<MetaFieldType>(['number', 'currency', 'percent', 'rating', 'rollup'])
 const AGGREGATIONS_REQUIRING_VALUE = new Set<AggregationFunction>(['sum', 'avg', 'min', 'max'])
+// v2-d: only additive aggregations make a stacked total meaningful (Σ segments == the single bar).
+const ADDITIVE_AGGREGATIONS = new Set<AggregationFunction>(['sum', 'count'])
 
 const chartDraft = ref({
   name: '',
@@ -307,6 +325,8 @@ const chartDraft = ref({
   valueFieldId: '',
   // v2-c: single-series render variant; only meaningful for pie ('donut') / line ('area').
   variant: '' as '' | 'donut' | 'area',
+  // v2-d: stacked-bar series split; only meaningful for bar + additive aggregation.
+  seriesByFieldId: '',
 })
 
 const activeDashboard = computed(() => dashboards.value.find((d) => d.id === activeDashboardId.value) ?? dashboards.value[0] ?? null)
@@ -317,6 +337,22 @@ const chartFields = computed(() => filterPropertyVisibleFields(props.fields ?? [
 const groupableFields = computed(() => chartFields.value.filter((field) => GROUPABLE_FIELD_TYPES.has(field.type)))
 const numericFields = computed(() => chartFields.value.filter((field) => NUMERIC_FIELD_TYPES.has(field.type)))
 const requiresValueField = computed(() => AGGREGATIONS_REQUIRING_VALUE.has(chartDraft.value.aggregation))
+// v2-d: the stack-by picker is offered only for a bar chart with an additive aggregation and a
+// non-date-grouped primary axis (matches the backend producer + assertSeriesConstraints).
+const seriesByAllowed = computed(() =>
+  chartDraft.value.chartType === 'bar'
+  && ADDITIVE_AGGREGATIONS.has(chartDraft.value.aggregation)
+  && !editingDateGrouped.value,
+)
+// Clear an inapplicable series field when the gating inputs change (type/aggregation/groupBy/date).
+watch(
+  () => [chartDraft.value.chartType, chartDraft.value.aggregation, chartDraft.value.groupByFieldId, editingDateGrouped.value],
+  () => {
+    if (chartDraft.value.seriesByFieldId && !(seriesByAllowed.value && chartDraft.value.groupByFieldId)) {
+      chartDraft.value.seriesByFieldId = ''
+    }
+  },
+)
 const createChartDisabled = computed(() => {
   if (!activeDashboard.value) return true
   if (!chartDraft.value.name.trim()) return true
@@ -343,6 +379,7 @@ function resetChartDraft() {
     aggregation: 'count',
     valueFieldId: '',
     variant: '',
+    seriesByFieldId: '',
   }
   createChartError.value = ''
   resetChartPreview()
@@ -366,6 +403,7 @@ function openEditChart(chartId: string) {
     aggregation: cfg.dataSource.aggregation.function,
     valueFieldId: cfg.dataSource.aggregation.fieldId ?? '',
     variant: cfg.displayConfig?.variant ?? '',
+    seriesByFieldId: cfg.dataSource.seriesByFieldId ?? '',
   }
   createChartError.value = ''
   resetChartPreview()
@@ -475,6 +513,13 @@ function buildChartInput(base?: ChartConfig): ChartCreateInput {
   }
   if (!editingDateGrouped.value) {
     dataSource.groupByFieldId = chartDraft.value.groupByFieldId
+  }
+  // v2-d: stacked series only when bar + additive + a primary groupBy. Set explicitly (or delete the
+  // base value) so switching chartType/aggregation/groupBy clears a now-inapplicable series.
+  if (seriesByAllowed.value && chartDraft.value.groupByFieldId && chartDraft.value.seriesByFieldId) {
+    dataSource.seriesByFieldId = chartDraft.value.seriesByFieldId
+  } else {
+    delete dataSource.seriesByFieldId
   }
   // v2-c: a render variant is valid only for its matching chartType (donut→pie, area→line).
   // Resolve it explicitly so switching chartType clears a now-inapplicable variant carried by base.

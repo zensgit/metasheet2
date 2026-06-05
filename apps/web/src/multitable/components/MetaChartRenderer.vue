@@ -22,6 +22,17 @@
             <span class="meta-chart__legend-value">{{ pt.value }}</span>
           </div>
         </div>
+        <!-- v2-d: stacked-bar legend over series names (colors map to the palette by series index). -->
+        <div
+          v-if="hasStackedSeries && displayConfig?.showLegend !== false"
+          class="meta-chart__legend meta-chart__legend--inline"
+          data-legend="series"
+        >
+          <div v-for="(s, idx) in chartData.series" :key="s.name" class="meta-chart__legend-item">
+            <span class="meta-chart__legend-swatch" :style="{ background: defaultColor(idx) }"></span>
+            <span class="meta-chart__legend-label">{{ s.name }}</span>
+          </div>
+        </div>
       </div>
     </template>
 
@@ -82,6 +93,9 @@ const isEChartsType = computed(() =>
   || props.chartData.chartType === 'pie',
 )
 const isRestricted = computed(() => props.chartData.metadata?.restricted === true)
+const hasStackedSeries = computed(() =>
+  props.chartData.chartType === 'bar' && (props.chartData.series?.length ?? 0) > 0,
+)
 
 // Legend swatch fallback color — same palette as buildChartOption so canvas + HTML legend match.
 function defaultColor(idx: number): string {
@@ -168,6 +182,7 @@ onBeforeUnmount(teardownChart)
 .meta-chart__echarts { width: 100%; height: 250px; }
 
 .meta-chart__legend { display: flex; flex-direction: column; gap: 4px; }
+.meta-chart__legend--inline { flex-direction: row; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
 .meta-chart__legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .meta-chart__legend-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
 .meta-chart__legend-label { color: #475569; }
