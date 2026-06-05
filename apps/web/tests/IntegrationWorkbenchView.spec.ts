@@ -16,6 +16,13 @@ function jsonResponse(data: unknown): Response {
   })
 }
 
+function rawJsonResponse(data: unknown): Response {
+  return new Response(JSON.stringify(data), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
 async function flushUi(cycles = 5): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
@@ -2162,6 +2169,224 @@ describe('IntegrationWorkbenchView', () => {
     objInput.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
     expect((container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('C3: shows an enabled approval automation entry for an entitled Yuantus PLM data-source bridge and marks stubbed actions', async () => {
+    const capabilityCalls: string[] = []
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source'], supports: ['read'], advanced: false },
+          { kind: 'data-source:sql-readonly', label: 'Read-only PLM data source', roles: ['source'], supports: ['read'], advanced: true },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          { id: 'http_1', tenantId: 'default', workspaceId: null, name: 'HTTP Source', kind: 'http', role: 'source', status: 'active' },
+          {
+            id: 'plm_bridge',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'Yuantus PLM bridge',
+            kind: 'data-source:sql-readonly',
+            role: 'source',
+            status: 'active',
+            config: { dataSourceId: 'plm-ds', object: 'eco' },
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/plm-workbench/data-sources/plm-ds/capabilities') {
+        capabilityCalls.push(url)
+        return rawJsonResponse({
+          data_source_id: 'plm-ds',
+          available: true,
+          manifest: {
+            schema_version: 'v1',
+            provider: 'yuantus-plm',
+            advisory: true,
+            features: {
+              approval_automation: {
+                supported: true,
+                api_version: 'v1',
+                entitled: true,
+                scenarios: ['eco'],
+                actions: ['notify'],
+                action_status: 'stubbed',
+              },
+              bom_multitable: { supported: false, api_version: null, entitled: false },
+            },
+          },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) { return () => h('a', slots.default?.()) },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    expect(container.querySelector('[data-testid="plm-approval-capability-entry"]')).toBeNull()
+
+    ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).click()
+    await flushUi()
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'plm_bridge'
+    sourceSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+
+    const entry = container.querySelector('[data-testid="plm-approval-capability-entry"]') as HTMLElement | null
+    expect(entry).not.toBeNull()
+    expect(entry!.dataset.state).toBe('enabled')
+    expect(entry!.dataset.actionStatus).toBe('stubbed')
+    expect(entry!.textContent).toContain('ECO 审批自动化')
+    expect(entry!.textContent).toContain('notify 当前仍是占位动作')
+    expect(entry!.textContent).toContain('approval_automation · API v1')
+    expect(capabilityCalls).toEqual(['/api/plm-workbench/data-sources/plm-ds/capabilities'])
+  })
+
+  it('C3: shows only the upgrade affordance for supported but not entitled approval automation', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'Read-only PLM data source', roles: ['source'], supports: ['read'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'plm_bridge',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'Yuantus PLM bridge',
+            kind: 'data-source:sql-readonly',
+            role: 'source',
+            status: 'active',
+            config: { dataSourceId: 'plm-ds', object: 'eco' },
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/plm-workbench/data-sources/plm-ds/capabilities') {
+        return rawJsonResponse({
+          data_source_id: 'plm-ds',
+          available: true,
+          manifest: {
+            schema_version: 'v1',
+            provider: 'yuantus-plm',
+            advisory: true,
+            features: {
+              approval_automation: {
+                supported: true,
+                api_version: 'v1',
+                entitled: false,
+                scenarios: ['eco'],
+                actions: ['notify'],
+                action_status: 'stubbed',
+              },
+            },
+          },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) { return () => h('a', slots.default?.()) },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    const entry = container.querySelector('[data-testid="plm-approval-capability-entry"]') as HTMLElement | null
+    expect(entry).not.toBeNull()
+    expect(entry!.dataset.state).toBe('upgrade')
+    expect(entry!.textContent).toContain('升级审批自动化')
+    expect(entry!.textContent).toContain('尚未开通 approval_automation')
+    expect(entry!.textContent).not.toContain('ECO 审批自动化')
+  })
+
+  it('C3: hides approval automation entry for unsupported or unavailable PLM capability manifests', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'Read-only PLM data source', roles: ['source'], supports: ['read'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'plm_bridge',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'Yuantus PLM bridge',
+            kind: 'data-source:sql-readonly',
+            role: 'source',
+            status: 'active',
+            config: { dataSourceId: 'plm-ds', object: 'eco' },
+          },
+          {
+            id: 'plm_unavailable',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'Unavailable PLM bridge',
+            kind: 'data-source:sql-readonly',
+            role: 'source',
+            status: 'active',
+            config: { dataSourceId: 'plm-ds-unavailable', object: 'eco' },
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/plm-workbench/data-sources/plm-ds/capabilities') {
+        return rawJsonResponse({
+          data_source_id: 'plm-ds',
+          available: true,
+          manifest: {
+            schema_version: 'v1',
+            provider: 'yuantus-plm',
+            advisory: true,
+            features: {
+              approval_automation: { supported: false, api_version: null, entitled: false },
+            },
+          },
+        })
+      }
+      if (url === '/api/plm-workbench/data-sources/plm-ds-unavailable/capabilities') {
+        return rawJsonResponse({ data_source_id: 'plm-ds-unavailable', available: false, reason: 'unavailable' })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) { return () => h('a', slots.default?.()) },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    expect(container.querySelector('[data-testid="plm-approval-capability-entry"]')).toBeNull()
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'plm_unavailable'
+    sourceSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+    expect(container.querySelector('[data-testid="plm-approval-capability-entry"]')).toBeNull()
   })
 
   it('C5-2: runs a configured table action via dry-run token without client-supplied plan or sheet scope', async () => {
