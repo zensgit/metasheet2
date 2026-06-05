@@ -885,11 +885,23 @@ describe('ChartAggregationService — v2-d stacked series', () => {
     expect(result.dataPoints.find((d) => d.label === 'open')?.value).toBe(80 / 3)
   })
 
-  it('inert: seriesByFieldId on a non-bar chart omits series', async () => {
-    for (const type of ['line', 'pie'] as const) {
+  it('inert: seriesByFieldId on a series-incompatible chart (pie/number/table) omits series', async () => {
+    for (const type of ['pie', 'number', 'table'] as const) {
       const result = await service.computeChartData(stackedChart({}, type), sampleRecords)
       expect(result.series).toBeUndefined()
     }
+  })
+
+  // v2-d-b2: line carries a series split (overlaid lines, no stack), any aggregation.
+  it('line: emits series (multi-line) for any aggregation', async () => {
+    const result = await service.computeChartData(
+      stackedChart({ aggregation: { function: 'avg', fieldId: 'amount' } }, 'line'),
+      sampleRecords,
+    )
+    expect(result.chartType).toBe('line')
+    expect(result.series).toBeDefined()
+    expect(result.series!.map((s) => s.name)).toEqual(['A', 'B'])
+    expect(result.series!.find((s) => s.name === 'A')!.data).toEqual([30, 30]) // avg per (status × category)
   })
 
   it('inert: no series without a primary groupByFieldId (date-grouped or ungrouped)', async () => {
@@ -951,9 +963,21 @@ describe('assertSeriesConstraints (v2-d input validation)', () => {
     expect(() => assertSeriesConstraints(ds({ aggregation: { function: 'count' } }), 'bar')).not.toThrow()
   })
 
-  it('throws for a non-bar chart', () => {
-    expect(() => assertSeriesConstraints(ds(), 'line')).toThrow(/bar charts/)
-    expect(() => assertSeriesConstraints(ds(), 'pie')).toThrow(/bar charts/)
+  it('throws for a series-incompatible chart type (pie/number/table)', () => {
+    for (const type of ['pie', 'number', 'table'] as const) {
+      expect(() => assertSeriesConstraints(ds(), type)).toThrow(/bar and line charts/)
+    }
+  })
+
+  // v2-d-b2: line accepts a series split with any aggregation (lines never stack).
+  it('line accepts any aggregation (no additive requirement)', () => {
+    for (const fn of ['avg', 'min', 'max', 'count_distinct', 'sum', 'count'] as const) {
+      expect(() => assertSeriesConstraints(ds({ aggregation: { function: fn, fieldId: 'amt' } }), 'line')).not.toThrow()
+    }
+  })
+
+  it('line + date grouping is still rejected (deferred to b3)', () => {
+    expect(() => assertSeriesConstraints(ds({ dateFieldId: 'd', dateGrouping: 'month' }), 'line')).toThrow(/date grouping/)
   })
 
   it('throws without a primary groupByFieldId', () => {

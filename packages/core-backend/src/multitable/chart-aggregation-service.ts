@@ -146,22 +146,25 @@ export class ChartAggregationService {
 
     const total = dataPoints.reduce((sum, dp) => sum + dp.value, 0)
 
-    // v2-d: bar series split. Built AFTER sort+limit, so it only covers the surviving categories in
-    // their final order (building before limit would leak limited-out categories). Emitted for
-    // bar + seriesByFieldId + groupBy-primary (no date axis) when EITHER barMode 'grouped' (v2-d-b1:
-    // side-by-side, any aggregation) OR an additive aggregation (stacked). The producer branches on
-    // `barMode` — not validation alone — so a persisted stacked+non-additive config still can't RENDER
-    // a misleading stack; it just omits series. Grouped vs stacked differ only at render.
+    // v2-d: bar/line series split. Built AFTER sort+limit, so it only covers the surviving categories
+    // in their final order (building before limit would leak limited-out categories). Emitted for
+    // bar OR line (v2-d-b2) + seriesByFieldId + groupBy-primary (no date axis). Additive aggregation is
+    // required ONLY for a STACKED bar (its sum is the bar height); grouped bars (v2-d-b1) and lines are
+    // independent → any aggregation. The producer branches on type/`barMode` — not validation alone —
+    // so a persisted stacked+non-additive config still can't RENDER a misleading stack; it just omits
+    // series. Stacked vs grouped vs multi-line differ only at render; the series math is identical.
     const seriesByFieldId = chart.dataSource.seriesByFieldId
     const dateGrouped = !!(chart.dataSource.dateFieldId && chart.dataSource.dateGrouping)
     const grouped = chart.display.barMode === 'grouped'
+    const seriesType = chart.type === 'bar' || chart.type === 'line'
+    const requiresAdditive = chart.type === 'bar' && !grouped // only a stacked bar
     let series: ChartSeries[] | undefined
     if (
-      chart.type === 'bar' &&
+      seriesType &&
       seriesByFieldId &&
       chart.dataSource.groupByFieldId &&
       !dateGrouped &&
-      (grouped || ADDITIVE_AGGREGATIONS.has(aggFn))
+      (!requiresAdditive || ADDITIVE_AGGREGATIONS.has(aggFn))
     ) {
       const seriesNames: string[] = []
       const byName = new Map<string, number[]>() // series name -> data[] aligned to dataPoints

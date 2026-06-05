@@ -228,7 +228,7 @@ describeIfDatabase('Dashboard BI v2-b2 preview-data endpoint (real DB)', () => {
     })
   })
 
-  test('P6 (v2-d): non-additive or non-bar series config is rejected with 400 (server-side, not UI-only)', async () => {
+  test('P6 (v2-d): a stacked bar with a non-additive aggregation is rejected with 400 (server-side, not UI-only)', async () => {
     const avg = await preview({
       name: 'avg stacked',
       type: 'bar',
@@ -237,13 +237,14 @@ describeIfDatabase('Dashboard BI v2-b2 preview-data endpoint (real DB)', () => {
     expect(avg.status).toBe(400)
     expect(JSON.stringify(avg.body)).toContain('sum or count')
 
-    const line = await preview({
-      name: 'line stacked',
-      type: 'line',
+    // series on a series-incompatible type (pie) → 400
+    const pie = await preview({
+      name: 'pie series',
+      type: 'pie',
       dataSource: { groupByFieldId: FLD_STATUS, seriesByFieldId: FLD_SECRET, aggregation: { function: 'count' } },
     })
-    expect(line.status).toBe(400)
-    expect(JSON.stringify(line.body)).toContain('bar charts')
+    expect(pie.status).toBe(400)
+    expect(JSON.stringify(pie.body)).toContain('bar and line')
   })
 
   test('P7 (v2-d-b1): grouped barMode accepts a non-additive aggregation and emits series', async () => {
@@ -256,5 +257,27 @@ describeIfDatabase('Dashboard BI v2-b2 preview-data endpoint (real DB)', () => {
     expect(res.status).toBe(200) // same config 400s when stacked (P6) — grouped relaxes additive-only
     expect(Array.isArray(res.body.series)).toBe(true)
     expect(res.body.series.length).toBeGreaterThan(0)
+  })
+
+  test('P8 (v2-d-b2): a multi-series line is accepted (any aggregation) and emits series', async () => {
+    const res = await preview({
+      name: 'multi line',
+      type: 'line',
+      dataSource: { groupByFieldId: FLD_STATUS, seriesByFieldId: FLD_SECRET, aggregation: { function: 'avg', fieldId: FLD_AMOUNT } },
+    })
+    expect(res.status).toBe(200) // line never stacks → non-additive is fine
+    expect(res.body.chartType).toBe('line')
+    expect(Array.isArray(res.body.series)).toBe(true)
+    expect(res.body.series.length).toBeGreaterThan(0)
+
+    // line + date grouping is still rejected (deferred to b3). groupBy present too, so the date check
+    // (not the groupBy-required check) is what fires.
+    const dated = await preview({
+      name: 'line date series',
+      type: 'line',
+      dataSource: { groupByFieldId: FLD_STATUS, dateFieldId: FLD_DATE, dateGrouping: 'month', seriesByFieldId: FLD_SECRET, aggregation: { function: 'count' } },
+    })
+    expect(dated.status).toBe(400)
+    expect(JSON.stringify(dated.body)).toContain('date grouping')
   })
 })
