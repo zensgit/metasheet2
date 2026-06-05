@@ -175,6 +175,12 @@ function restrictedChartData(chart: ChartConfig): ChartData {
   }
 }
 
+// v2-d-b1: sanitize barMode off a loosely-typed display object (unknown values → undefined = stacked).
+function readBarMode(display: unknown): 'stacked' | 'grouped' | undefined {
+  const mode = (display as { barMode?: unknown } | null | undefined)?.barMode
+  return mode === 'grouped' || mode === 'stacked' ? mode : undefined
+}
+
 function readString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
 }
@@ -214,7 +220,7 @@ function buildPreviewChart(sheetId: string, userId: string, body: unknown): Char
   if (AGGREGATIONS_REQUIRING_FIELD.has(aggregationFunction as AggregationFunction) && !readString(aggregation.fieldId)) {
     throw new Error('value field is required for this aggregation')
   }
-  assertSeriesConstraints(source as ChartConfig['dataSource'], chartType as ChartType)
+  assertSeriesConstraints(source as ChartConfig['dataSource'], chartType as ChartType, readBarMode(input.display ?? input.displayConfig))
   const now = new Date().toISOString()
   return {
     id: `chart_preview_${randomUUID()}`,
@@ -254,7 +260,7 @@ export function dashboardRouter() {
       const auth = await requireSheetManageViews(req, res, req.params.sheetId)
       if (!auth) return
       // v2-d: validate series constraints on the persisted path too — the UI is never the sole guard.
-      assertSeriesConstraints(req.body?.dataSource as ChartConfig['dataSource'] | undefined, req.body?.type as ChartType)
+      assertSeriesConstraints(req.body?.dataSource as ChartConfig['dataSource'] | undefined, req.body?.type as ChartType, readBarMode(req.body?.display))
       const chart = await dashboardService.createChart(req.params.sheetId, {
         ...req.body,
         createdBy: auth.userId,
@@ -319,6 +325,7 @@ export function dashboardRouter() {
       assertSeriesConstraints(
         (req.body?.dataSource ?? chart.dataSource) as ChartConfig['dataSource'],
         (req.body?.type ?? chart.type) as ChartType,
+        readBarMode(req.body?.display ?? chart.display),
       )
       const updated = await dashboardService.updateChart(req.params.id, req.body)
       res.json(updated)

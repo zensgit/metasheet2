@@ -146,20 +146,22 @@ export class ChartAggregationService {
 
     const total = dataPoints.reduce((sum, dp) => sum + dp.value, 0)
 
-    // v2-d: stacked-bar series split. Built AFTER sort+limit, so it only covers the surviving
-    // categories in their final order (building before limit would leak limited-out categories).
-    // Additive-only (sum/count) + bar + groupBy-primary (no date axis) — the producer is the uniform
-    // safety net mirroring `assertSeriesConstraints`; any other combination omits `series`, so a
-    // misleading stack can never be produced even from a hand-crafted/persisted bad config.
+    // v2-d: bar series split. Built AFTER sort+limit, so it only covers the surviving categories in
+    // their final order (building before limit would leak limited-out categories). Emitted for
+    // bar + seriesByFieldId + groupBy-primary (no date axis) when EITHER barMode 'grouped' (v2-d-b1:
+    // side-by-side, any aggregation) OR an additive aggregation (stacked). The producer branches on
+    // `barMode` — not validation alone — so a persisted stacked+non-additive config still can't RENDER
+    // a misleading stack; it just omits series. Grouped vs stacked differ only at render.
     const seriesByFieldId = chart.dataSource.seriesByFieldId
     const dateGrouped = !!(chart.dataSource.dateFieldId && chart.dataSource.dateGrouping)
+    const grouped = chart.display.barMode === 'grouped'
     let series: ChartSeries[] | undefined
     if (
       chart.type === 'bar' &&
       seriesByFieldId &&
       chart.dataSource.groupByFieldId &&
       !dateGrouped &&
-      ADDITIVE_AGGREGATIONS.has(aggFn)
+      (grouped || ADDITIVE_AGGREGATIONS.has(aggFn))
     ) {
       const seriesNames: string[] = []
       const byName = new Map<string, number[]>() // series name -> data[] aligned to dataPoints

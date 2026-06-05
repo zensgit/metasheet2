@@ -50,6 +50,12 @@ export interface ChartDisplayConfig {
   /** For number chart */
   prefix?: string
   suffix?: string
+  /**
+   * v2-d-b1: bar series layout when `seriesByFieldId` is set. 'stacked' (default) sums segments
+   * into one bar; 'grouped' renders them side-by-side (and, being independent, allows non-additive
+   * aggregations). Inert unless `seriesByFieldId` is set on a bar chart.
+   */
+  barMode?: 'stacked' | 'grouped'
 }
 
 export interface ChartConfig {
@@ -93,7 +99,11 @@ export const ADDITIVE_AGGREGATIONS: ReadonlySet<AggregationFunction> = new Set<A
  * silently omits `series` for anything else, so a hand-crafted/persisted bad config still can't
  * render a misleading stack.
  */
-export function assertSeriesConstraints(dataSource: ChartDataSource | undefined, type: ChartType): void {
+export function assertSeriesConstraints(
+  dataSource: ChartDataSource | undefined,
+  type: ChartType,
+  barMode?: ChartDisplayConfig['barMode'],
+): void {
   const seriesByFieldId = dataSource?.seriesByFieldId
   if (!seriesByFieldId) return
   if (type !== 'bar') {
@@ -103,12 +113,15 @@ export function assertSeriesConstraints(dataSource: ChartDataSource | undefined,
     throw new Error('seriesByFieldId requires groupByFieldId (a primary category axis)')
   }
   if (dataSource.dateFieldId && dataSource.dateGrouping) {
-    // The producer gives date grouping precedence over groupByFieldId, so a stacked split is not
-    // applied here — reject rather than silently produce a non-stacked chart (v2-d-a is groupBy-primary;
-    // date-axis × series is deferred to v2-d-b).
+    // The producer gives date grouping precedence over groupByFieldId, so a series split is not
+    // applied here — reject rather than silently produce a non-split chart (groupBy-primary only;
+    // date-axis × series is deferred to v2-d-b3).
     throw new Error('seriesByFieldId (stacked series) is not supported with date grouping')
   }
-  if (!ADDITIVE_AGGREGATIONS.has(dataSource.aggregation?.function)) {
-    throw new Error('seriesByFieldId (stacked series) requires a sum or count aggregation')
+  // v2-d-b1: additive aggregation is required ONLY when the segments are STACKED (their sum is the
+  // bar height, which must be meaningful). Grouped (side-by-side) bars are independent → any
+  // aggregation is honest.
+  if (barMode !== 'grouped' && !ADDITIVE_AGGREGATIONS.has(dataSource.aggregation?.function)) {
+    throw new Error('stacked series require a sum or count aggregation (use barMode "grouped" for others)')
   }
 }
