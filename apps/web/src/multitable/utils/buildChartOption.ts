@@ -77,21 +77,23 @@ export function buildChartOption(
 
   if (chartType === 'bar') {
     const horizontal = displayConfig?.orientation === 'horizontal'
-    // v2-d: stacked bar — one ECharts series per seriesByFieldId value, all on the same stack.
-    // Categories (xAxis) come from dataPoints; each series.data is dense + aligned to that order.
-    // colored by series (palette), not per-bar; values read via the HTML legend + axis tooltip.
-    const stacked = chartData.series
-    if (stacked && stacked.length > 0) {
+    // v2-d: multi-series bar — one ECharts series per seriesByFieldId value. Categories (xAxis) come
+    // from dataPoints; each series.data is dense + aligned to that order. Colored by series (palette),
+    // values read via the HTML legend + axis tooltip. v2-d-b1: barMode 'grouped' renders them
+    // side-by-side (no stack); default 'stacked' shares one stack.
+    const multiSeries = chartData.series
+    if (multiSeries && multiSeries.length > 0) {
+      const grouped = displayConfig?.barMode === 'grouped'
       return {
         ...base,
         tooltip: { trigger: 'axis' },
         grid,
         xAxis: horizontal ? valueAxis : categoryAxis,
         yAxis: horizontal ? categoryAxis : valueAxis,
-        series: stacked.map((s) => ({
+        series: multiSeries.map((s) => ({
           type: 'bar',
           name: s.name,
-          stack: 'total',
+          ...(grouped ? {} : { stack: 'total' }),
           label: { show: false },
           data: s.data,
         })),

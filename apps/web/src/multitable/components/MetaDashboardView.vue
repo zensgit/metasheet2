@@ -209,7 +209,7 @@
             </select>
             <small v-if="!numericFields.length" class="meta-dashboard__hint">{{ viewRenderLabel('dashboard.noNumericFields', isZh) }}</small>
           </label>
-          <!-- v2-d: stack-by (series) — only for a bar chart with an additive aggregation; needs a primary groupBy. -->
+          <!-- v2-d: series split — for any bar chart (grouped or stacked); needs a primary groupBy. -->
           <label v-if="seriesByAllowed" class="meta-dashboard__field">
             <span>{{ viewRenderLabel('dashboard.seriesBy', isZh) }}</span>
             <select
@@ -223,7 +223,16 @@
                 {{ field.name }} · {{ fieldTypeLabel(field.type, isZh) }}
               </option>
             </select>
-            <small class="meta-dashboard__hint" data-hint="series-stacked">{{ viewRenderLabel('dashboard.seriesByHint', isZh) }}</small>
+            <small class="meta-dashboard__hint" data-hint="series-split">{{ viewRenderLabel('dashboard.seriesByHint', isZh) }}</small>
+          </label>
+          <!-- v2-d-b1: series layout (stacked vs grouped). Stacked offered only for an additive aggregation. -->
+          <label v-if="barModeShown" class="meta-dashboard__field">
+            <span>{{ viewRenderLabel('dashboard.barMode', isZh) }}</span>
+            <select v-model="chartDraft.barMode" class="meta-dashboard__select" data-field="chart-bar-mode">
+              <option v-if="stackedAllowed" value="stacked">{{ viewRenderLabel('dashboard.barModeStacked', isZh) }}</option>
+              <option value="grouped">{{ viewRenderLabel('dashboard.barModeGrouped', isZh) }}</option>
+            </select>
+            <small v-if="!stackedAllowed" class="meta-dashboard__hint" data-hint="bar-mode-grouped-only">{{ viewRenderLabel('dashboard.barModeAdditiveOnly', isZh) }}</small>
           </label>
           <div v-if="createChartError" class="meta-dashboard__error" data-error="create-chart">{{ createChartError }}</div>
           <section class="meta-dashboard__preview" data-chart-preview="true">
@@ -325,8 +334,10 @@ const chartDraft = ref({
   valueFieldId: '',
   // v2-c: single-series render variant; only meaningful for pie ('donut') / line ('area').
   variant: '' as '' | 'donut' | 'area',
-  // v2-d: stacked-bar series split; only meaningful for bar + additive aggregation.
+  // v2-d: bar series split (groupBy × seriesBy); only meaningful for a bar chart.
   seriesByFieldId: '',
+  // v2-d-b1: bar series layout — 'stacked' (default) or 'grouped' (side-by-side, allows non-additive).
+  barMode: 'stacked' as 'stacked' | 'grouped',
 })
 
 const activeDashboard = computed(() => dashboards.value.find((d) => d.id === activeDashboardId.value) ?? dashboards.value[0] ?? null)
@@ -337,19 +348,26 @@ const chartFields = computed(() => filterPropertyVisibleFields(props.fields ?? [
 const groupableFields = computed(() => chartFields.value.filter((field) => GROUPABLE_FIELD_TYPES.has(field.type)))
 const numericFields = computed(() => chartFields.value.filter((field) => NUMERIC_FIELD_TYPES.has(field.type)))
 const requiresValueField = computed(() => AGGREGATIONS_REQUIRING_VALUE.has(chartDraft.value.aggregation))
-// v2-d: the stack-by picker is offered only for a bar chart with an additive aggregation and a
-// non-date-grouped primary axis (matches the backend producer + assertSeriesConstraints).
+// v2-d / v2-d-b1: the series-split picker is offered for any bar chart with a non-date-grouped
+// primary axis (grouped layout accepts any aggregation). Whether STACKED is a legal layout depends
+// on the aggregation being additive (sum/count) — see `stackedAllowed` + the producer/validator.
 const seriesByAllowed = computed(() =>
-  chartDraft.value.chartType === 'bar'
-  && ADDITIVE_AGGREGATIONS.has(chartDraft.value.aggregation)
-  && !editingDateGrouped.value,
+  chartDraft.value.chartType === 'bar' && !editingDateGrouped.value,
 )
-// Clear an inapplicable series field when the gating inputs change (type/aggregation/groupBy/date).
+const stackedAllowed = computed(() => ADDITIVE_AGGREGATIONS.has(chartDraft.value.aggregation))
+// The layout (barMode) control appears once a series field is chosen.
+const barModeShown = computed(() => seriesByAllowed.value && !!chartDraft.value.seriesByFieldId)
+// Clear an inapplicable series field, and fall back to grouped when stacked is illegal, whenever the
+// gating inputs change (type/aggregation/groupBy/date).
 watch(
   () => [chartDraft.value.chartType, chartDraft.value.aggregation, chartDraft.value.groupByFieldId, editingDateGrouped.value],
   () => {
     if (chartDraft.value.seriesByFieldId && !(seriesByAllowed.value && chartDraft.value.groupByFieldId)) {
       chartDraft.value.seriesByFieldId = ''
+    }
+    // v2-d-b1: stacked requires an additive aggregation; if it's no longer additive, fall back to grouped.
+    if (!stackedAllowed.value && chartDraft.value.barMode === 'stacked') {
+      chartDraft.value.barMode = 'grouped'
     }
   },
 )
@@ -380,6 +398,7 @@ function resetChartDraft() {
     valueFieldId: '',
     variant: '',
     seriesByFieldId: '',
+    barMode: 'stacked',
   }
   createChartError.value = ''
   resetChartPreview()
@@ -404,6 +423,7 @@ function openEditChart(chartId: string) {
     valueFieldId: cfg.dataSource.aggregation.fieldId ?? '',
     variant: cfg.displayConfig?.variant ?? '',
     seriesByFieldId: cfg.dataSource.seriesByFieldId ?? '',
+    barMode: cfg.displayConfig?.barMode ?? 'stacked',
   }
   createChartError.value = ''
   resetChartPreview()
@@ -514,13 +534,19 @@ function buildChartInput(base?: ChartConfig): ChartCreateInput {
   if (!editingDateGrouped.value) {
     dataSource.groupByFieldId = chartDraft.value.groupByFieldId
   }
-  // v2-d: stacked series only when bar + additive + a primary groupBy. Set explicitly (or delete the
-  // base value) so switching chartType/aggregation/groupBy clears a now-inapplicable series.
-  if (seriesByAllowed.value && chartDraft.value.groupByFieldId && chartDraft.value.seriesByFieldId) {
+  // v2-d: bar series split only when bar + a primary groupBy. Set explicitly (or delete the base
+  // value) so switching chartType/groupBy/date clears a now-inapplicable series.
+  const hasSeriesSplit = seriesByAllowed.value && !!chartDraft.value.groupByFieldId && !!chartDraft.value.seriesByFieldId
+  if (hasSeriesSplit) {
     dataSource.seriesByFieldId = chartDraft.value.seriesByFieldId
   } else {
     delete dataSource.seriesByFieldId
   }
+  // v2-d-b1: bar layout is meaningful only with a series split; stacked falls back to grouped for a
+  // non-additive aggregation (the server enforces the same). Explicit so a switch clears a base value.
+  const barMode: 'stacked' | 'grouped' | undefined = hasSeriesSplit
+    ? (stackedAllowed.value ? chartDraft.value.barMode : 'grouped')
+    : undefined
   // v2-c: a render variant is valid only for its matching chartType (donut→pie, area→line).
   // Resolve it explicitly so switching chartType clears a now-inapplicable variant carried by base.
   const variant: 'donut' | 'area' | undefined =
@@ -535,6 +561,7 @@ function buildChartInput(base?: ChartConfig): ChartCreateInput {
       ...(base?.displayConfig ?? {}),
       title: name,
       variant,
+      barMode,
     },
   }
 }
