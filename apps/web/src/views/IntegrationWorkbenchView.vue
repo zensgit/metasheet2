@@ -262,6 +262,24 @@
           <div class="integration-workbench__hint" data-testid="source-selector-explanation">
             {{ sourceSelectorExplanation }}
           </div>
+          <div
+            v-if="selectedPlmApprovalCapabilityEntry"
+            class="integration-workbench__capability-entry"
+            :data-state="selectedPlmApprovalCapabilityEntry.state"
+            :data-action-status="selectedPlmApprovalCapabilityEntry.actionStatus || 'none'"
+            data-testid="plm-approval-capability-entry"
+          >
+            <div>
+              <span class="integration-workbench__badge" :data-status="selectedPlmApprovalCapabilityEntry.state">
+                {{ selectedPlmApprovalCapabilityEntry.badge }}
+              </span>
+              <strong>{{ selectedPlmApprovalCapabilityEntry.title }}</strong>
+            </div>
+            <p>{{ selectedPlmApprovalCapabilityEntry.detail }}</p>
+            <small v-if="selectedPlmApprovalCapabilityEntry.apiVersion">
+              {{ PLM_APPROVAL_AUTOMATION_FEATURE_KEY }} · API {{ selectedPlmApprovalCapabilityEntry.apiVersion }}
+            </small>
+          </div>
           <div v-if="!hasRunnableSourceSystem" class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="source-empty-state">
             <strong>还没有可读取的数据源。</strong>
             <p>连接 PLM、HTTP API 或启用 SQL 只读通道后，可将数据导入 staging 多维表再清洗。</p>
@@ -1031,6 +1049,7 @@ import {
   isIntegrationScopedProjectId,
   normalizeIntegrationProjectId,
   getExternalSystemSchema,
+  getPlmDataSourceCapabilities,
   installIntegrationStaging,
   isDeadLetterReplayable,
   listIntegrationDeadLetters,
@@ -1054,6 +1073,8 @@ import {
   type IntegrationFieldMapping,
   type IntegrationObjectSchema,
   type IntegrationObjectSchemaField,
+  type PlmIntegrationCapabilitiesResult,
+  type PlmIntegrationCapabilityFeature,
   type IntegrationDeadLetter,
   type IntegrationPipelineMode,
   type IntegrationPipelineRun,
@@ -1125,6 +1146,15 @@ interface ConnectionDraft {
   // The connection only ever references a data_sources id — credentials stay in /data-sources.
   dataSourceId: string
   dataSourceObject: string
+}
+
+interface PlmApprovalCapabilityEntry {
+  state: 'enabled' | 'upgrade' | 'loading'
+  badge: string
+  title: string
+  detail: string
+  apiVersion: string
+  actionStatus: string
 }
 
 type ExportCell = string | number | boolean | null
@@ -1283,9 +1313,12 @@ const deletingConnectionId = ref('')
 // C2b — read-only data-source bridge connection (kind 'data-source:sql-readonly'): a structured
 // picker that references an existing /data-sources connection by id (never copies credentials).
 const DATA_SOURCE_BRIDGE_KIND = 'data-source:sql-readonly'
+const PLM_APPROVAL_AUTOMATION_FEATURE_KEY = 'approval_automation'
 const bridgeDataSources = ref<DataSourceListItem[]>([])
 const bridgeDataSourcesError = ref('')
 const bridgeDataSourcesLoaded = ref(false)
+const plmCapabilitiesBySystemId = ref<Record<string, PlmIntegrationCapabilitiesResult>>({})
+const plmCapabilitiesLoadingSystemIds = ref<Set<string>>(new Set())
 const isDataSourceBridgeKind = computed(() => connectionDraft.kind === DATA_SOURCE_BRIDGE_KIND)
 
 async function loadBridgeDataSources(): Promise<void> {
@@ -1315,6 +1348,50 @@ function buildDataSourceBridgeConfig(): Record<string, unknown> {
 function bridgeConfigString(config: unknown, key: string): string {
   const value = config && typeof config === 'object' ? (config as Record<string, unknown>)[key] : undefined
   return typeof value === 'string' ? value : ''
+}
+
+function bridgeDataSourceIdForSystem(system: WorkbenchExternalSystem | null): string {
+  if (!system || system.kind !== DATA_SOURCE_BRIDGE_KIND) return ''
+  return bridgeConfigString(system.config, 'dataSourceId').trim()
+}
+
+function prunePlmCapabilities(systemList: WorkbenchExternalSystem[]): void {
+  const ids = new Set(systemList.map((system) => system.id))
+  plmCapabilitiesBySystemId.value = Object.fromEntries(
+    Object.entries(plmCapabilitiesBySystemId.value).filter(([systemId]) => ids.has(systemId)),
+  )
+}
+
+function setPlmCapabilitiesLoading(systemId: string, loading: boolean): void {
+  const next = new Set(plmCapabilitiesLoadingSystemIds.value)
+  if (loading) {
+    next.add(systemId)
+  } else {
+    next.delete(systemId)
+  }
+  plmCapabilitiesLoadingSystemIds.value = next
+}
+
+async function refreshPlmCapabilitiesForSystem(system: WorkbenchExternalSystem | null): Promise<void> {
+  const dataSourceId = bridgeDataSourceIdForSystem(system)
+  if (!system || !dataSourceId) return
+  const cached = plmCapabilitiesBySystemId.value[system.id]
+  if (cached?.data_source_id === dataSourceId || plmCapabilitiesLoadingSystemIds.value.has(system.id)) return
+  setPlmCapabilitiesLoading(system.id, true)
+  try {
+    const result = await getPlmDataSourceCapabilities(dataSourceId)
+    plmCapabilitiesBySystemId.value = {
+      ...plmCapabilitiesBySystemId.value,
+      [system.id]: result,
+    }
+  } catch {
+    plmCapabilitiesBySystemId.value = {
+      ...plmCapabilitiesBySystemId.value,
+      [system.id]: { data_source_id: dataSourceId, available: false, reason: 'unavailable' },
+    }
+  } finally {
+    setPlmCapabilitiesLoading(system.id, false)
+  }
 }
 
 const adapterMetadataByKind = computed(() => new Map(adapters.value.map((adapter) => [adapter.kind, adapter])))
@@ -1350,6 +1427,13 @@ const selectedTargetObject = computed(() => targetObjects.value.find((object) =>
 const selectedSourceSystem = computed(() => systems.value.find((system) => system.id === sourceSystemId.value) || null)
 const selectedTargetSystem = computed(() => systems.value.find((system) => system.id === targetSystemId.value) || null)
 const selectedStagingDescriptor = computed(() => stagingDescriptors.value.find((descriptor) => descriptor.id === stagingSheetId.value) || null)
+const selectedSourcePlmDataSourceId = computed(() => bridgeDataSourceIdForSystem(selectedSourceSystem.value))
+const selectedSourcePlmCapabilities = computed(() => (
+  selectedSourceSystem.value ? plmCapabilitiesBySystemId.value[selectedSourceSystem.value.id] || null : null
+))
+const selectedSourcePlmCapabilitiesLoading = computed(() => (
+  Boolean(selectedSourceSystem.value && plmCapabilitiesLoadingSystemIds.value.has(selectedSourceSystem.value.id))
+))
 const sourceConnectionStatus = computed(() => selectedSourceSystem.value?.status || 'inactive')
 const targetConnectionStatus = computed(() => selectedTargetSystem.value?.status || 'inactive')
 const sourceConnectionLabel = computed(() => connectionStatusLabel(selectedSourceSystem.value))
@@ -1371,6 +1455,49 @@ const targetSelectorExplanation = computed(() => {
     return '当前只有 K3 WISE WebAPI 目标连接可写入。创建清洗表后，也可把 MetaSheet 多维表设为目标输出；真实推送仍按 Save-only 显式确认。'
   }
   return '这里显示已保存且具备写入能力的连接。Save-only 推送仍需显式勾选，不会自动 Submit / Audit。'
+})
+const selectedApprovalAutomationFeature = computed<PlmIntegrationCapabilityFeature | null>(() => {
+  const result = selectedSourcePlmCapabilities.value
+  if (!result?.available) return null
+  const feature = result.manifest.features[PLM_APPROVAL_AUTOMATION_FEATURE_KEY]
+  return feature && typeof feature === 'object' ? feature : null
+})
+const selectedPlmApprovalCapabilityEntry = computed<PlmApprovalCapabilityEntry | null>(() => {
+  if (!selectedSourcePlmDataSourceId.value) return null
+  if (selectedSourcePlmCapabilitiesLoading.value && !selectedSourcePlmCapabilities.value) {
+    return {
+      state: 'loading',
+      badge: '检测中',
+      title: '正在读取 PLM 能力',
+      detail: '能力清单只用于界面降级提示，不作为授权来源。',
+      apiVersion: '',
+      actionStatus: '',
+    }
+  }
+  const feature = selectedApprovalAutomationFeature.value
+  if (feature?.supported !== true) return null
+  const apiVersion = typeof feature.api_version === 'string' && feature.api_version.trim() ? feature.api_version.trim() : 'v1'
+  const actionStatus = typeof feature.action_status === 'string' && feature.action_status.trim() ? feature.action_status.trim() : ''
+  if (feature.entitled === true) {
+    return {
+      state: 'enabled',
+      badge: '可用',
+      title: 'ECO 审批自动化',
+      detail: actionStatus === 'stubbed'
+        ? '已开通；notify 当前仍是占位动作，不代表真实钉钉派发。'
+        : '已开通；可按 PLM 能力清单显示审批自动化入口。',
+      apiVersion,
+      actionStatus,
+    }
+  }
+  return {
+    state: 'upgrade',
+    badge: '可升级',
+    title: '升级审批自动化',
+    detail: '当前租户尚未开通 approval_automation；前端只显示升级入口，真实授权仍由 PLM license 判定。',
+    apiVersion,
+    actionStatus,
+  }
 })
 const sqlChannelDisabledHint = computed(() => {
   const hasDisabledSql = systems.value.some((system) => system.kind === 'erp:k3-wise-sqlserver' && runtimeBlockerForSystem(system) !== '')
@@ -2261,10 +2388,12 @@ async function refreshBootstrap(): Promise<void> {
       connectionDraft.kind = adapterList.find((adapter) => !adapter.advanced)?.kind || adapterList[0]?.kind || ''
     }
     systems.value = systemList
+    prunePlmCapabilities(systemList)
     stagingDescriptors.value = descriptorList
     normalizeSystemSelections()
     if (!stagingSheetId.value) stagingSheetId.value = descriptorList.find((descriptor) => descriptor.id === 'standard_materials')?.id || descriptorList[0]?.id || ''
     setStatus(`已加载 ${systemList.length} 个连接、${adapterList.length} 个适配器和 ${descriptorList.length} 个 staging 表`, 'success')
+    void refreshPlmCapabilitiesForSystem(selectedSourceSystem.value)
     void refreshTableActions(resolvedScope)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
@@ -2298,6 +2427,7 @@ function replaceSystem(updated: WorkbenchExternalSystem): void {
   } else {
     systems.value.push(updated)
   }
+  void refreshPlmCapabilitiesForSystem(updated)
 }
 
 async function testSystem(side: WorkbenchSide): Promise<void> {
@@ -3143,6 +3273,10 @@ watch(showAdvancedConnectors, () => {
   normalizeSystemSelections()
 })
 
+watch(sourceSystemId, () => {
+  void refreshPlmCapabilitiesForSystem(selectedSourceSystem.value)
+})
+
 watch([selectedTableActionId, tableActionProjectNo], () => {
   resetTableActionReview()
 })
@@ -3199,6 +3333,34 @@ watch([selectedTableActionId, tableActionProjectNo], () => {
 
 .integration-workbench__table-action p {
   margin: 0;
+}
+
+.integration-workbench__capability-entry {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #d7deea;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.integration-workbench__capability-entry > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.integration-workbench__capability-entry strong {
+  color: #1f3551;
+}
+
+.integration-workbench__capability-entry p,
+.integration-workbench__capability-entry small {
+  margin: 0;
+  color: #5c6878;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .integration-workbench__table-action-review {
@@ -3569,6 +3731,21 @@ watch([selectedTableActionId, tableActionProjectNo], () => {
 .integration-workbench__badge[data-status="error"] {
   background: #fff0f0;
   color: #9b1c1c;
+}
+
+.integration-workbench__badge[data-status="enabled"] {
+  background: #edf7ef;
+  color: #17622f;
+}
+
+.integration-workbench__badge[data-status="upgrade"] {
+  background: #fff8e8;
+  color: #744600;
+}
+
+.integration-workbench__badge[data-status="loading"] {
+  background: #eef2f7;
+  color: #3c4b60;
 }
 
 .integration-workbench__grid {

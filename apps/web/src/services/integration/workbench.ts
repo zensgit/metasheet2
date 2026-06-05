@@ -44,6 +44,36 @@ export interface WorkbenchExternalSystem {
   lastError?: string | null
 }
 
+export interface PlmIntegrationCapabilityFeature {
+  supported: boolean
+  api_version?: string | null
+  entitled?: boolean
+  cache_scope?: Record<string, unknown>
+  scenarios?: string[]
+  actions?: string[]
+  action_status?: string | null
+  [key: string]: unknown
+}
+
+export interface PlmIntegrationCapabilitiesManifest {
+  schema_version: string
+  provider: string
+  advisory: boolean
+  features: Record<string, PlmIntegrationCapabilityFeature>
+}
+
+export type PlmIntegrationCapabilitiesResult =
+  | {
+    data_source_id: string
+    available: true
+    manifest: PlmIntegrationCapabilitiesManifest
+  }
+  | {
+    data_source_id: string
+    available: false
+    reason?: string
+  }
+
 export interface WorkbenchExternalSystemUpsertRequest extends IntegrationScope {
   id?: string
   projectId?: string | null
@@ -419,8 +449,8 @@ export interface IntegrationTargetPayloadPreview {
   unresolvedPlaceholders?: string[]
   unresolvedReferenceComponents?: Array<Record<string, unknown>>
   missingRequiredFields?: string[]
-  // target field name -> provenance source ((string & {}) keeps autocomplete + tolerates new sources)
-  fieldProvenance?: Record<string, IntegrationFieldProvenanceSource | (string & {})>
+  // target field name -> provenance source (string keeps this additive for backend-introduced sources).
+  fieldProvenance?: Record<string, IntegrationFieldProvenanceSource | string>
   compositionSource?: string
   redactionSelfCheck?: { applied?: boolean; clean?: boolean }
 }
@@ -490,6 +520,43 @@ async function parseIntegrationResponse<T>(response: Response): Promise<T> {
     throw new Error(message || 'Integration API request failed')
   }
   return payload?.data as T
+}
+
+function isPlmCapabilitiesManifest(value: unknown): value is PlmIntegrationCapabilitiesManifest {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.schema_version === 'string'
+    && record.schema_version.length > 0
+    && record.provider === 'yuantus-plm'
+    && record.advisory === true
+    && Boolean(record.features && typeof record.features === 'object' && !Array.isArray(record.features))
+  )
+}
+
+function normalizePlmCapabilitiesResult(
+  dataSourceId: string,
+  value: unknown,
+): PlmIntegrationCapabilitiesResult {
+  if (!value || typeof value !== 'object') {
+    return { data_source_id: dataSourceId, available: false, reason: 'unavailable' }
+  }
+  const record = value as Record<string, unknown>
+  const resultDataSourceId = typeof record.data_source_id === 'string' && record.data_source_id.trim()
+    ? record.data_source_id.trim()
+    : dataSourceId
+  if (record.available === true && isPlmCapabilitiesManifest(record.manifest)) {
+    return {
+      data_source_id: resultDataSourceId,
+      available: true,
+      manifest: record.manifest,
+    }
+  }
+  return {
+    data_source_id: resultDataSourceId,
+    available: false,
+    reason: typeof record.reason === 'string' && record.reason.trim() ? record.reason.trim() : 'unavailable',
+  }
 }
 
 function buildQueryString(input: Record<string, unknown>): string {
@@ -562,6 +629,19 @@ export async function listWorkbenchExternalSystems(scope: IntegrationScope = {})
   const response = await apiFetch(`/api/integration/external-systems${query ? `?${query}` : ''}`)
   const data = await parseIntegrationResponse<WorkbenchExternalSystem[]>(response)
   return Array.isArray(data) ? data : []
+}
+
+export async function getPlmDataSourceCapabilities(dataSourceId: string): Promise<PlmIntegrationCapabilitiesResult> {
+  const normalizedId = dataSourceId.trim()
+  if (!normalizedId) {
+    return { data_source_id: '', available: false, reason: 'unavailable' }
+  }
+  const response = await apiFetch(`/api/plm-workbench/data-sources/${encodeURIComponent(normalizedId)}/capabilities`)
+  const payload = await response.json().catch(() => null) as unknown
+  if (!response.ok) {
+    return { data_source_id: normalizedId, available: false, reason: 'unavailable' }
+  }
+  return normalizePlmCapabilitiesResult(normalizedId, payload)
 }
 
 export async function upsertWorkbenchExternalSystem(
