@@ -479,17 +479,26 @@ export interface ActionJobLifecycle {
   /** Before any condition/action side effects — persist a visible parent execution row. */
   onExecutionStarted?(execution: AutomationExecution): Promise<void>
   /** Before the action's side effect runs — create the job as `running` (observable on crash). */
-  onStart(stepIndex: number, action: AutomationAction): Promise<void>
+  onStart(stepIndex: number, action: AutomationAction, meta?: ActionJobLifecycleMeta): Promise<void>
   /** After the action settled — update the job to resolved/failed. */
-  onSettled(stepIndex: number, action: AutomationAction, result: AutomationStepResult): Promise<void>
+  onSettled(stepIndex: number, action: AutomationAction, result: AutomationStepResult, meta?: ActionJobLifecycleMeta): Promise<void>
   /** A fail-stop-skipped action — record a terminal `skipped` job. */
-  onSkipped(stepIndex: number, action: AutomationAction): Promise<void>
+  onSkipped(stepIndex: number, action: AutomationAction, meta?: ActionJobLifecycleMeta): Promise<void>
   /**
    * A6-2: a `wait_for_callback` step in an opted-in rule — persist the suspension row
    * + a `suspended` C1 job, then the executor STOPS (the tail runs on admin resume).
    * Optional: legacy rules supply no lifecycle, so a legacy `wait_for_callback` fails closed (D7).
    */
   onSuspend?(stepIndex: number, action: AutomationAction): Promise<void>
+}
+
+export interface ActionJobLifecycleMeta {
+  /** Stable C1 step key. Defaults to the top-level step index. */
+  stepKey?: string
+  /** Deterministic job id. Defaults to `${executionId}:job:${stepIndex}`. */
+  jobId?: string
+  /** Explicit graph edge. Defaults to the previous top-level job. */
+  upstreamJobId?: string | null
 }
 
 /** Builds the per-execution job lifecycle once the executionId is known (service-supplied for opt-in rules). */
@@ -534,6 +543,7 @@ export interface AutomationStepResult {
 }
 
 export interface ExecutionContext {
+  executionId: string
   ruleId: string
   sheetId: string
   recordId: string
@@ -597,6 +607,7 @@ export class AutomationExecutor {
     // Build execution context from trigger event
     const payload = triggerEvent as Record<string, unknown>
     const context: ExecutionContext = {
+      executionId,
       ruleId: rule.id,
       sheetId: rule.sheetId,
       recordId: (payload?.recordId as string) ?? '',
@@ -713,8 +724,14 @@ export class AutomationExecutor {
     jobLifecycle?: ActionJobLifecycle,
     startIndex = 0,
   ): Promise<{ suspended: boolean }> {
+    let nextTopLevelUpstreamJobId: string | null | undefined
+
     for (let index = startIndex; index < actions.length; index++) {
       const action = actions[index]
+      const topLevelMeta = nextTopLevelUpstreamJobId !== undefined
+        ? { upstreamJobId: nextTopLevelUpstreamJobId }
+        : undefined
+      nextTopLevelUpstreamJobId = undefined
 
       // A6-2 suspend point: a `wait_for_callback` in an opted-in rule suspends here.
       if (action.type === 'wait_for_callback') {
@@ -737,67 +754,43 @@ export class AutomationExecutor {
         return { suspended: false }
       }
 
+      // A6-3-1 exclusive branch. It requires the persisted job plane so nested
+      // branch jobs can be observed as C1 jobs; legacy/off-path rules fail closed.
+      if (action.type === 'condition_branch') {
+        if (!jobLifecycle) {
+          results.push({
+            actionType: 'condition_branch',
+            status: 'failed',
+            error: 'condition_branch requires execution_mode workflow_job_v1',
+            durationMs: 0,
+          })
+          for (let i = index + 1; i < actions.length; i++) {
+            results.push({ actionType: actions[i].type, status: 'skipped', durationMs: 0 })
+          }
+          return { suspended: false }
+        }
+
+        await jobLifecycle.onStart(index, action, topLevelMeta)
+        const branchResult = await this.executeConditionBranch(index, action, context, jobLifecycle)
+        results.push(branchResult.result)
+        await jobLifecycle.onSettled(index, action, branchResult.result)
+
+        if (branchResult.result.status === 'failed') {
+          for (let i = index + 1; i < actions.length; i++) {
+            await jobLifecycle.onSkipped(i, actions[i])
+            results.push({ actionType: actions[i].type, status: 'skipped', durationMs: 0 })
+          }
+          break
+        }
+
+        nextTopLevelUpstreamJobId = branchResult.lastJobId
+        continue
+      }
+
       // A6-1 fail-closed: onStart runs BEFORE the inner try, so a job-create failure propagates
       // to execute()'s outer catch (execution fails) — and the action's side effect never runs.
-      if (jobLifecycle) await jobLifecycle.onStart(index, action)
-      const startMs = Date.now()
-      let result: AutomationStepResult
-
-      try {
-        switch (action.type) {
-          case 'update_record':
-            result = await this.executeUpdateRecord(action.config, context)
-            break
-          case 'create_record':
-            result = await this.executeCreateRecord(action.config, context)
-            break
-          case 'send_webhook':
-            result = await this.executeSendWebhook(action.config, context)
-            break
-          case 'send_notification':
-            result = await this.executeSendNotification(action.config, context)
-            break
-          case 'send_email':
-            result = await this.executeSendEmail(action.config as unknown as SendEmailConfig, context)
-            break
-          case 'send_dingtalk_group_message':
-            result = await this.executeSendDingTalkGroupMessage(action.config as unknown as SendDingTalkGroupMessageConfig, context)
-            break
-          case 'send_dingtalk_person_message':
-            result = await this.executeSendDingTalkPersonMessage(action.config as unknown as SendDingTalkPersonMessageConfig, context)
-            break
-          case 'lock_record':
-            result = await this.executeLockRecord(action.config, context)
-            break
-          default:
-            result = {
-              actionType: action.type,
-              status: 'failed',
-              error: `Unknown action type: ${action.type}`,
-            }
-        }
-      } catch (err) {
-        result = {
-          actionType: action.type,
-          status: 'failed',
-          error: err instanceof Error ? err.message : String(err),
-        }
-      }
-
-      result.durationMs = Date.now() - startMs
-
-      if (action.type === 'send_dingtalk_group_message' && result.status === 'failed') {
-        let failureAlert: Record<string, unknown>
-        try {
-          failureAlert = await this.notifyRuleCreatorOfDingTalkGroupFailure(result, context)
-        } catch (error) {
-          failureAlert = {
-            status: 'failed',
-            reason: redactDingTalkFailureAlertText(error instanceof Error ? error.message : String(error)),
-          }
-        }
-        result.output = mergeFailureAlertOutput(result.output, failureAlert)
-      }
+      if (jobLifecycle) await jobLifecycle.onStart(index, action, topLevelMeta)
+      const result = await this.executeSingleAction(action, context)
 
       results.push(result)
 
@@ -823,6 +816,228 @@ export class AutomationExecutor {
     }
 
     return { suspended: false }
+  }
+
+  private async executeConditionBranch(
+    stepIndex: number,
+    action: AutomationAction,
+    context: ExecutionContext,
+    jobLifecycle: ActionJobLifecycle,
+  ): Promise<{ result: AutomationStepResult; lastJobId: string }> {
+    const startMs = Date.now()
+    const parentJobId = `${context.executionId}:job:${stepIndex}`
+    const config = action.config as {
+      branches?: Array<{
+        key?: unknown
+        label?: unknown
+        conditions?: ConditionGroup
+        actions?: AutomationAction[]
+      }>
+      defaultBranch?: {
+        key?: unknown
+        label?: unknown
+        actions?: AutomationAction[]
+      } | null
+    }
+    const branches = Array.isArray(config.branches) ? config.branches : []
+    let selected: typeof branches[number] | null = null
+    let matched = false
+
+    try {
+      for (const branch of branches) {
+        if (branch.conditions && evaluateConditions(branch.conditions, context.recordData)) {
+          selected = branch
+          matched = true
+          break
+        }
+      }
+    } catch (error) {
+      return {
+        lastJobId: parentJobId,
+        result: {
+          actionType: 'condition_branch',
+          status: 'failed',
+          error: error instanceof Error ? error.message : String(error),
+          durationMs: Date.now() - startMs,
+        },
+      }
+    }
+
+    if (!selected && config.defaultBranch) {
+      selected = config.defaultBranch
+    }
+
+    const selectedBranchKey = typeof selected?.key === 'string' ? selected.key : null
+    const selectedBranchLabel = typeof selected?.label === 'string' ? selected.label : undefined
+    const branchActions = Array.isArray(selected?.actions) ? selected.actions : []
+    const output: Record<string, unknown> = {
+      selectedBranchKey,
+      matched,
+    }
+    if (selectedBranchLabel) output.selectedBranchLabel = selectedBranchLabel
+
+    if (!selected || branchActions.length === 0) {
+      return {
+        lastJobId: parentJobId,
+        result: {
+          actionType: 'condition_branch',
+          status: 'success',
+          output,
+          durationMs: Date.now() - startMs,
+        },
+      }
+    }
+
+    if (!selectedBranchKey) {
+      return {
+        lastJobId: parentJobId,
+        result: {
+          actionType: 'condition_branch',
+          status: 'failed',
+          error: 'condition_branch selected branch key is invalid',
+          output,
+          durationMs: Date.now() - startMs,
+        },
+      }
+    }
+
+    let upstreamJobId: string | null = parentJobId
+    let lastJobId = parentJobId
+    for (let actionIndex = 0; actionIndex < branchActions.length; actionIndex++) {
+      const branchAction = branchActions[actionIndex]
+      const stepKey = `${stepIndex}.branch.${selectedBranchKey}.${actionIndex}`
+      const jobId = `${context.executionId}:job:${stepIndex}:branch:${selectedBranchKey}:${actionIndex}`
+      const meta = { stepKey, jobId, upstreamJobId }
+
+      if (branchAction.type === 'wait_for_callback') {
+        const failed: AutomationStepResult = {
+          actionType: 'condition_branch',
+          status: 'failed',
+          error: 'wait_for_callback inside condition_branch is deferred to A6-3-3',
+          output,
+          durationMs: Date.now() - startMs,
+        }
+        return { result: failed, lastJobId }
+      }
+
+      if (branchAction.type === 'condition_branch') {
+        const failed: AutomationStepResult = {
+          actionType: 'condition_branch',
+          status: 'failed',
+          error: 'Nested condition_branch is not supported in A6-3-1',
+          output,
+          durationMs: Date.now() - startMs,
+        }
+        return { result: failed, lastJobId }
+      }
+
+      await jobLifecycle.onStart(stepIndex, branchAction, meta)
+      const branchActionResult = await this.executeSingleAction(branchAction, context)
+      await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
+      lastJobId = jobId
+      upstreamJobId = jobId
+
+      if (branchActionResult.status === 'failed') {
+        for (let skippedIndex = actionIndex + 1; skippedIndex < branchActions.length; skippedIndex++) {
+          const skippedAction = branchActions[skippedIndex]
+          const skippedStepKey = `${stepIndex}.branch.${selectedBranchKey}.${skippedIndex}`
+          const skippedJobId = `${context.executionId}:job:${stepIndex}:branch:${selectedBranchKey}:${skippedIndex}`
+          await jobLifecycle.onSkipped(stepIndex, skippedAction, {
+            stepKey: skippedStepKey,
+            jobId: skippedJobId,
+            upstreamJobId,
+          })
+          upstreamJobId = skippedJobId
+          lastJobId = skippedJobId
+        }
+        return {
+          lastJobId,
+          result: {
+            actionType: 'condition_branch',
+            status: 'failed',
+            error: branchActionResult.error ?? `Branch action ${actionIndex} failed`,
+            output,
+            durationMs: Date.now() - startMs,
+          },
+        }
+      }
+    }
+
+    return {
+      lastJobId,
+      result: {
+        actionType: 'condition_branch',
+        status: 'success',
+        output,
+        durationMs: Date.now() - startMs,
+      },
+    }
+  }
+
+  private async executeSingleAction(
+    action: AutomationAction,
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult> {
+    const startMs = Date.now()
+    let result: AutomationStepResult
+
+    try {
+      switch (action.type) {
+        case 'update_record':
+          result = await this.executeUpdateRecord(action.config, context)
+          break
+        case 'create_record':
+          result = await this.executeCreateRecord(action.config, context)
+          break
+        case 'send_webhook':
+          result = await this.executeSendWebhook(action.config, context)
+          break
+        case 'send_notification':
+          result = await this.executeSendNotification(action.config, context)
+          break
+        case 'send_email':
+          result = await this.executeSendEmail(action.config as unknown as SendEmailConfig, context)
+          break
+        case 'send_dingtalk_group_message':
+          result = await this.executeSendDingTalkGroupMessage(action.config as unknown as SendDingTalkGroupMessageConfig, context)
+          break
+        case 'send_dingtalk_person_message':
+          result = await this.executeSendDingTalkPersonMessage(action.config as unknown as SendDingTalkPersonMessageConfig, context)
+          break
+        case 'lock_record':
+          result = await this.executeLockRecord(action.config, context)
+          break
+        default:
+          result = {
+            actionType: action.type,
+            status: 'failed',
+            error: `Unknown action type: ${action.type}`,
+          }
+      }
+    } catch (err) {
+      result = {
+        actionType: action.type,
+        status: 'failed',
+        error: err instanceof Error ? err.message : String(err),
+      }
+    }
+
+    result.durationMs = Date.now() - startMs
+
+    if (action.type === 'send_dingtalk_group_message' && result.status === 'failed') {
+      let failureAlert: Record<string, unknown>
+      try {
+        failureAlert = await this.notifyRuleCreatorOfDingTalkGroupFailure(result, context)
+      } catch (error) {
+        failureAlert = {
+          status: 'failed',
+          reason: redactDingTalkFailureAlertText(error instanceof Error ? error.message : String(error)),
+        }
+      }
+      result.output = mergeFailureAlertOutput(result.output, failureAlert)
+    }
+
+    return result
   }
 
   private async notifyRuleCreatorOfDingTalkGroupFailure(

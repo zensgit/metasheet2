@@ -13,6 +13,7 @@ export type AutomationActionType =
   | 'send_dingtalk_person_message'
   | 'lock_record'
   | 'wait_for_callback'
+  | 'condition_branch'
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'update_record',
@@ -24,6 +25,7 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'send_dingtalk_person_message',
   'lock_record',
   'wait_for_callback',
+  'condition_branch',
 ]
 
 /** Config shape for update_record */
