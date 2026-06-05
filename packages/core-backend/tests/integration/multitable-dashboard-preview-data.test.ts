@@ -245,4 +245,16 @@ describeIfDatabase('Dashboard BI v2-b2 preview-data endpoint (real DB)', () => {
     expect(line.status).toBe(400)
     expect(JSON.stringify(line.body)).toContain('bar charts')
   })
+
+  test('P7 (v2-d-b1): grouped barMode accepts a non-additive aggregation and emits series', async () => {
+    const res = await preview({
+      name: 'grouped avg',
+      type: 'bar',
+      dataSource: { groupByFieldId: FLD_STATUS, seriesByFieldId: FLD_SECRET, aggregation: { function: 'avg', fieldId: FLD_AMOUNT } },
+      display: { barMode: 'grouped' },
+    })
+    expect(res.status).toBe(200) // same config 400s when stacked (P6) — grouped relaxes additive-only
+    expect(Array.isArray(res.body.series)).toBe(true)
+    expect(res.body.series.length).toBeGreaterThan(0)
+  })
 })

@@ -912,6 +912,25 @@ describe('ChartAggregationService — v2-d stacked series', () => {
     const result = await service.computeChartData(makeChart(), sampleRecords)
     expect('series' in result).toBe(false)
   })
+
+  // v2-d-b1: grouped barMode emits series for NON-additive aggregations (independent side-by-side bars).
+  it('grouped barMode: emits series for a non-additive aggregation (avg)', async () => {
+    const result = await service.computeChartData(
+      makeChart({
+        type: 'bar',
+        display: { barMode: 'grouped' },
+        dataSource: { groupByFieldId: 'status', seriesByFieldId: 'category', aggregation: { function: 'avg', fieldId: 'amount' } },
+      }),
+      sampleRecords,
+    )
+    expect(result.series).toBeDefined()
+    expect(result.series!.map((s) => s.name)).toEqual(['A', 'B'])
+    // avg per (status × category): open/A = avg(10,50) = 30 ; series A aligned to [open, closed]
+    expect(result.series!.find((s) => s.name === 'A')!.data).toEqual([30, 30])
+    expect(result.series!.find((s) => s.name === 'B')!.data).toEqual([20, 40])
+    // grouped is NOT additive — Σ series ≠ dataPoints (the single-dimension avg)
+    expect(result.dataPoints.find((d) => d.label === 'open')?.value).toBeCloseTo(80 / 3)
+  })
 })
 
 describe('assertSeriesConstraints (v2-d input validation)', () => {
@@ -949,5 +968,21 @@ describe('assertSeriesConstraints (v2-d input validation)', () => {
 
   it('throws when combined with date grouping (matches the producer giving the date axis precedence)', () => {
     expect(() => assertSeriesConstraints(ds({ dateFieldId: 'd', dateGrouping: 'month' }), 'bar')).toThrow(/date grouping/)
+  })
+
+  // v2-d-b1: barMode 'grouped' relaxes the additive requirement (side-by-side bars are independent).
+  it('grouped barMode allows any aggregation', () => {
+    for (const fn of ['avg', 'min', 'max', 'count_distinct'] as const) {
+      expect(() => assertSeriesConstraints(ds({ aggregation: { function: fn, fieldId: 'amt' } }), 'bar', 'grouped')).not.toThrow()
+    }
+  })
+
+  it("stacked barMode (or unset) still requires additive", () => {
+    expect(() => assertSeriesConstraints(ds({ aggregation: { function: 'avg', fieldId: 'amt' } }), 'bar', 'stacked')).toThrow(/sum or count/)
+    expect(() => assertSeriesConstraints(ds({ aggregation: { function: 'avg', fieldId: 'amt' } }), 'bar')).toThrow(/sum or count/)
+  })
+
+  it('barMode is inert without seriesByFieldId (no error)', () => {
+    expect(() => assertSeriesConstraints({ groupByFieldId: 'g', aggregation: { function: 'avg' } }, 'bar', 'grouped')).not.toThrow()
   })
 })
