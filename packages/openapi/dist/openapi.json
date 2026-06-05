@@ -8279,8 +8279,7 @@
                       "missed_check_out",
                       "time_correction",
                       "leave",
-                      "overtime",
-                      "outdoor_punch"
+                      "overtime"
                     ],
                     "description": "Request type."
                   },
@@ -8291,8 +8290,7 @@
                       "missed_check_out",
                       "time_correction",
                       "leave",
-                      "overtime",
-                      "outdoor_punch"
+                      "overtime"
                     ],
                     "description": "Compatibility snake_case alias for requestType."
                   },
@@ -8303,8 +8301,7 @@
                       "missed_check_out",
                       "time_correction",
                       "leave",
-                      "overtime",
-                      "outdoor_punch"
+                      "overtime"
                     ],
                     "description": "Compatibility alias for requestType."
                   },
@@ -8712,8 +8709,7 @@
                       "missed_check_out",
                       "time_correction",
                       "leave",
-                      "overtime",
-                      "outdoor_punch"
+                      "overtime"
                     ]
                   },
                   "type": {
@@ -8723,8 +8719,7 @@
                       "missed_check_out",
                       "time_correction",
                       "leave",
-                      "overtime",
-                      "outdoor_punch"
+                      "overtime"
                     ]
                   },
                   "requestedInAt": {

@@ -18980,11 +18980,21 @@ module.exports = {
                 return
               }
             } else {
-              flow = await loadApprovalFlow(db, orgId, { requestType: 'outdoor_punch' })
-              if (!flow || flow.isActive !== true) {
-                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_APPROVAL_FLOW_REQUIRED', message: '外勤审批流未配置' } })
+              // #2304 §2.5: with no explicit approvalFlowId, require a UNIQUE active outdoor_punch flow.
+              // `loadApprovalFlow` would silently pick the newest (ORDER BY created_at) when several are
+              // active — that could route approvals to the wrong people. Demand exactly one (LIMIT 2 → ≠1
+              // ⇒ 422), so an ambiguous setup is rejected instead of guessed.
+              const activeFlows = await db.query(
+                `SELECT * FROM attendance_approval_flows
+                 WHERE org_id = $1 AND request_type = 'outdoor_punch' AND is_active = true
+                 ORDER BY created_at DESC LIMIT 2`,
+                [orgId]
+              )
+              if (activeFlows.length !== 1) {
+                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_APPROVAL_FLOW_REQUIRED', message: activeFlows.length === 0 ? '外勤审批流未配置' : '存在多个启用的外勤审批流，请指定 approvalFlowId' } })
                 return
               }
+              flow = mapApprovalFlowRow(activeFlows[0])
             }
 
             const draft = {
@@ -19789,6 +19799,19 @@ module.exports = {
           'VALIDATION_ERROR',
           `requestType must be one of: ${REQUEST_TYPES.join(', ')}`,
           singleValidationDetail('requestType', `Must be one of: ${REQUEST_TYPES.join(', ')}`)
+        )
+      }
+      // ② S3 (#2304): outdoor_punch is created ONLY by the /punch route, which enforces geoFence /
+      // requireApproval / note / approval-flow policy and stamps a complete metadata.outdoorPunch. The
+      // generic requests API must NOT mint one — otherwise a client could bypass all outdoor policy and
+      // (on approve) fabricate a real punch event. It is a valid DB request_type (for the punch route +
+      // approval flows), just not user-creatable here.
+      if (requestType === 'outdoor_punch') {
+        throw new HttpError(
+          422,
+          'OUTDOOR_PUNCH_VIA_PUNCH_ONLY',
+          'outdoor_punch requests are created by the attendance punch route, not the requests API',
+          singleValidationDetail('requestType', 'outdoor_punch is not creatable via the requests API')
         )
       }
 
@@ -20623,9 +20646,15 @@ module.exports = {
               // punch event (the original eventType + occurredAt, source='outdoor_approval') and appends the
               // record exactly like a normal punch — NOT a generic 'adjustment'. The status guard above makes
               // re-approve a no-op, so this writes at most once.
+              // Defense-in-depth: a well-formed outdoor_punch ALWAYS carries metadata.outdoorPunch (the punch
+              // route is its only creator). Never fabricate a default punch (check_in @ approval-time) from
+              // missing/malformed metadata — refuse to approve instead, so no policy-bypassing event is written.
               const op = (requestMetadata && requestMetadata.outdoorPunch) || {}
-              const outdoorEventType = op.eventType === 'check_out' ? 'check_out' : 'check_in'
-              const outdoorOccurredAt = op.occurredAt ? new Date(op.occurredAt) : new Date(resolvedAt)
+              if ((op.eventType !== 'check_in' && op.eventType !== 'check_out') || !op.occurredAt) {
+                throw new HttpError(422, 'OUTDOOR_PUNCH_METADATA_INVALID', 'outdoor_punch request is missing a valid outdoorPunch payload; cannot approve')
+              }
+              const outdoorEventType = op.eventType
+              const outdoorOccurredAt = new Date(op.occurredAt)
               await trx.query(
                 `INSERT INTO attendance_events
                  (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)

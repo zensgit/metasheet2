@@ -72,18 +72,24 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
   const reject = (id: string) =>
     requestJson(`${baseUrl}/api/attendance/requests/${id}/reject`, { method: 'POST', headers: authHeaders(adminToken), body: JSON.stringify({ comment: 'no' }) })
 
-  async function createOutdoorFlow(): Promise<string> {
+  const deleteOutdoorFlows = () => pool.query(`DELETE FROM attendance_approval_flows WHERE org_id = $1 AND request_type = 'outdoor_punch'`, [ORG])
+  async function addOutdoorFlow(): Promise<string> {
     const res = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
       method: 'POST', headers: authHeaders(adminToken),
-      body: JSON.stringify({ name: `outdoor-${Date.now().toString(36)}`, requestType: 'outdoor_punch', isActive: true, steps: [] }),
+      body: JSON.stringify({ name: `outdoor-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6)}`, requestType: 'outdoor_punch', isActive: true, steps: [] }),
     })
     return (res.body as { data?: { id?: string } } | undefined)?.data?.id ?? ''
   }
-  const deleteOutdoorFlows = () => pool.query(`DELETE FROM attendance_approval_flows WHERE org_id = $1 AND request_type = 'outdoor_punch'`, [ORG])
+  // Reset to EXACTLY ONE active outdoor flow (the empty-approvalFlowId path now requires a unique flow).
+  async function createOutdoorFlow(): Promise<string> {
+    await deleteOutdoorFlows()
+    return addOutdoorFlow()
+  }
 
-  // settings.outdoor + geofence in one PUT
+  // settings.outdoor + geofence in one PUT. Always send ALL three outdoor fields (defaults below), so a
+  // value left by a previous test never leaks through mergeSettings into this test's policy.
   const setOutdoor = (outdoor: Record<string, unknown> | null, withFence = true) =>
-    putSettings({ geoFence: withFence ? FENCE : null, punchPolicy: outdoor ? { outdoor } : {} })
+    putSettings({ geoFence: withFence ? FENCE : null, punchPolicy: outdoor ? { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '', ...outdoor } } : {} })
 
   async function counts(userId: string) {
     const ev = (await pool.query(`SELECT event_type, source FROM attendance_events WHERE user_id = $1`, [userId])).rows as { event_type: string; source: string }[]
@@ -286,5 +292,55 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
     expect(pp2?.merge).toBeDefined() // sibling preserved
     // restore unscheduled
     await putSettings({ punchPolicy: { unscheduled: { mode: 'allow' } } })
+  })
+
+  it('P1: generic /requests API cannot create or update an outdoor_punch (must go through /punch)', async () => {
+    const u = `out-api-${Date.now().toString(36)}`
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      // direct create via the requests API → 422, nothing persisted (no policy-bypassing pending punch)
+      const create = await requestJson(`${baseUrl}/api/attendance/requests`, {
+        method: 'POST', headers: authHeaders(t),
+        body: JSON.stringify({ workDate: '2026-09-25', requestType: 'outdoor_punch', requestedInAt: '2026-09-25T09:00:00.000Z' }),
+      })
+      expect(create.status).toBe(422)
+      expect((create.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_PUNCH_VIA_PUNCH_ONLY')
+      const c1 = await counts(u)
+      expect(c1.outdoorReqs).toHaveLength(0)
+      expect(c1.events).toHaveLength(0)
+      // create a normal request, then try to UPDATE its type to outdoor_punch → 422 (same chokepoint)
+      const normal = await requestJson(`${baseUrl}/api/attendance/requests`, {
+        method: 'POST', headers: authHeaders(t),
+        body: JSON.stringify({ workDate: '2026-09-26', requestType: 'missed_check_in', requestedInAt: '2026-09-26T09:00:00.000Z' }),
+      })
+      expect(normal.status).toBe(201)
+      const reqId = (normal.body as { data?: { request?: { id?: string } } })?.data?.request?.id as string
+      const upd = await requestJson(`${baseUrl}/api/attendance/requests/${reqId}`, {
+        method: 'PUT', headers: authHeaders(t),
+        body: JSON.stringify({ requestType: 'outdoor_punch' }),
+      })
+      expect(upd.status).toBe(422)
+      expect((upd.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_PUNCH_VIA_PUNCH_ONLY')
+    } finally {
+      await cleanupUser(u)
+    }
+  })
+
+  it('P2: empty approvalFlowId requires a UNIQUE active outdoor flow; two active → 422, nothing written', async () => {
+    await deleteOutdoorFlows()
+    await addOutdoorFlow()
+    await addOutdoorFlow() // two active outdoor_punch flows → ambiguous
+    await setOutdoor({ requireApproval: true, approvalFlowId: '' })
+    const u = `out-amb-${Date.now().toString(36)}`
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE })
+      expect(r.status).toBe(422)
+      expect((r.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_APPROVAL_FLOW_REQUIRED')
+      expect((await counts(u)).outdoorReqs).toHaveLength(0)
+    } finally {
+      await cleanupUser(u)
+      await deleteOutdoorFlows()
+    }
   })
 })
