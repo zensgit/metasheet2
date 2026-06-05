@@ -248,9 +248,9 @@ Acceptance locks:
 - Dry-run/read and apply/write permissions are separated.
 - Issue/customer evidence stays values-free.
 
-### 🟡 C5-1 - Backend parameterized action routes (this PR)
+### ✅ C5-1 - Backend parameterized action routes (DONE - PR #2284)
 
-Gated on: C5-0 accepted + explicit opt-in.
+Gated on: C5-0 accepted + explicit opt-in. Done in #2284.
 
 Scope:
 
@@ -282,9 +282,9 @@ Acceptance locks:
 - Manual-confirm rows are held while clean rows can still apply.
 - Values-free summary is available for issue evidence.
 
-### 🟡 C5-2 - Workbench parameterized action UI (this PR)
+### ✅ C5-2 - Workbench parameterized action UI (DONE - PR #2288)
 
-Gated on: C5-1 + explicit opt-in.
+Gated on: C5-1 + explicit opt-in. Done in #2288.
 
 Scope:
 
@@ -313,9 +313,38 @@ Acceptance locks:
 - Request-body wire test asserts dry-run/apply send no browser-supplied
   `sheetId`, source/target binding, C3 plan, or C4 payload.
 
-### ⬜ C5-3 - Operator validation runbook
+### 🟡 C5-3a - On-prem action config injection unblocker (this PR)
 
-Gated on: C5-1/C5-2 + explicit opt-in.
+Gated on: C5-1/C5-2 + entity-machine smoke finding + explicit opt-in.
+
+Scope:
+
+- Inject server-owned `plugin-integration-core` table-action config into the
+  plugin host context from deployment environment JSON.
+- Keep the PLM action config non-secret: it may contain the integration
+  external-system id, readonly SQL object/read-plan references, target stock
+  sheet id/object id, field maps, and limits; it must not contain datasource
+  credentials or raw PLM/customer row values.
+- Preserve C5's server-side action ownership: the browser still receives only
+  public action metadata and never receives source bindings or target sheet ids.
+- No PLM read, MetaSheet write, UI, K3, migration, raw SQL, or permission model
+  change.
+
+Acceptance locks:
+
+- Without configured action JSON, `GET /api/integration/table-actions` remains
+  fail-closed with `configured:false`.
+- With valid server-side action JSON, the existing route consumer exposes the
+  action as `configured:true` while redacting source/target bindings from public
+  metadata.
+- Invalid JSON or non-object/non-array config fails closed at plugin host
+  startup; no silent empty config.
+- The deployment config path is scoped to `plugin-integration-core`; unrelated
+  plugins do not receive the table-action config.
+
+### ⬜ C5-3 - Operator validation runbook / entity-machine smoke
+
+Gated on: C5-1/C5-2 + C5-3a package deployed + explicit opt-in.
 
 Scope:
 
@@ -376,13 +405,16 @@ operator checks stay in later validation slices:
 
 ## Sequencing rule
 
-C0, C1, C2-0, C2, C3, and C4 are complete. The next step is C5, but it is split
-because it crosses from latent helpers into operator-triggered writes:
+C0, C1, C2-0, C2, C3, C4, C5-0, C5-1, and C5-2 are complete. C5-3a is the
+current entity-machine unblocker found during C5-3 smoke: the host must inject
+server-owned action config so the plugin can report the PLM action as
+`configured:true`.
 
 1. C5-0 design locks the reusable parameterized action contract.
 2. C5-1 adds backend action routes and server-side recompute/apply wiring.
 3. C5-2 adds the workbench operator surface.
-4. C5-3 validates the flow on an entity machine.
+4. C5-3a injects server-owned plugin action config for on-prem deployment.
+5. C5-3 validates the flow on an entity machine.
 
 C6 option sync remains after C5. All later slices still require their
 predecessor to land and the owner to explicitly opt in. K3 Save / Submit /

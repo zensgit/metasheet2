@@ -156,6 +156,7 @@ import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
 import { initObservability } from './observability/otel'
 import { isPlmEnabled } from './config/product-mode'
+import { resolvePluginRuntimeConfig } from './plugin-runtime-config'
 
 type PluginRuntimeState = {
   status: 'active' | 'inactive' | 'failed'
@@ -1552,7 +1553,7 @@ export class MetaSheetServer {
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
-      config: {},
+      config: resolvePluginRuntimeConfig(manifest.name),
       communication,
       logger: new Logger(`Plugin:${manifest.name}`),
     }
