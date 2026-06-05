@@ -186,6 +186,63 @@ async function testDryRunRequiresAllowlistedParametersAndStoresToken() {
   assert.equal(JSON.stringify(dryRun.evidence).includes('Assembly'), false, 'evidence hides component name')
 }
 
+async function testTargetFieldMapIncompleteFailsBeforeReads() {
+  const source = createSourceAdapter()
+  const records = createRecordsApi()
+  const storage = createMemoryStorage()
+  const action = baseAction({
+    target: {
+      sheetId: 'sheet_stock',
+      objectId: 'stockPreparationMain',
+      fieldIdMap: {
+        projectNo: 'fld_project_no',
+        componentSourceId: 'fld_component_source_id',
+      },
+    },
+  })
+
+  function assertTargetSchemaIncomplete(error) {
+    assert.equal(error.name, 'StockPreparationTableActionError')
+    assert.equal(error.status, 422)
+    assert.equal(error.code, 'TARGET_SCHEMA_INCOMPLETE')
+    assert.equal(error.details.fieldMapMode, 'explicit')
+    assert.equal(error.details.targetObjectId, 'stockPreparationMain')
+    assert.ok(error.details.missingFields.includes('idempotencyKey'), 'idempotencyKey is required')
+    assert.ok(error.details.missingFields.includes('path'), 'path is required')
+    assert.ok(error.details.missingFields.includes('lastPlmRefreshDecision'), 'refresh decision is required')
+    assert.equal(JSON.stringify(error.details).includes('sheet_stock'), false, 'error details do not expose sheetId')
+    return true
+  }
+
+  await assert.rejects(
+    () => dryRunStockPreparationAction({
+      action,
+      parameters: { projectNo: 'P-001' },
+      sourceAdapter: source.adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: storage,
+    }),
+    assertTargetSchemaIncomplete,
+  )
+  assert.equal(source.calls.length, 0, 'dry-run target preflight fails before PLM source reads')
+  assert.equal(records.calls.length, 0, 'dry-run target preflight fails before target reads')
+
+  await assert.rejects(
+    () => applyStockPreparationAction({
+      action,
+      parameters: { projectNo: 'P-001' },
+      dryRunToken: 'not-used',
+      sourceAdapter: source.adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: storage,
+      permission: 'write',
+    }),
+    assertTargetSchemaIncomplete,
+  )
+  assert.equal(source.calls.length, 0, 'apply target preflight fails before PLM source reads')
+  assert.equal(records.calls.length, 0, 'apply target preflight fails before target reads or writes')
+}
+
 async function testApplyRequiresTokenRecomputesAndScopesTarget() {
   const storage = createMemoryStorage()
   const source = createSourceAdapter()
@@ -312,6 +369,7 @@ async function testApplyDetectsDataShiftAndManualConfirmHold() {
 async function main() {
   await testRegistryListsConfiguredMetadataWithoutTargetSecrets()
   await testDryRunRequiresAllowlistedParametersAndStoresToken()
+  await testTargetFieldMapIncompleteFailsBeforeReads()
   await testApplyRequiresTokenRecomputesAndScopesTarget()
   await testApplyDetectsDataShiftAndManualConfirmHold()
 
