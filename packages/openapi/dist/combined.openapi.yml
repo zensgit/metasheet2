@@ -5723,6 +5723,7 @@ paths:
                     - time_correction
                     - leave
                     - overtime
+                    - outdoor_punch
                   description: Request type.
                 request_type:
                   type: string
@@ -5732,6 +5733,7 @@ paths:
                     - time_correction
                     - leave
                     - overtime
+                    - outdoor_punch
                   description: Compatibility snake_case alias for requestType.
                 type:
                   type: string
@@ -5741,6 +5743,7 @@ paths:
                     - time_correction
                     - leave
                     - overtime
+                    - outdoor_punch
                   description: Compatibility alias for requestType.
                 requestedInAt:
                   type: string
@@ -6031,6 +6034,7 @@ paths:
                     - time_correction
                     - leave
                     - overtime
+                    - outdoor_punch
                 type:
                   type: string
                   enum:
@@ -6039,6 +6043,7 @@ paths:
                     - time_correction
                     - leave
                     - overtime
+                    - outdoor_punch
                 requestedInAt:
                   type: string
                   format: date-time
