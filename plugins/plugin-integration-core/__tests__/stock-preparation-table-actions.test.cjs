@@ -15,6 +15,13 @@ const {
   dryRunStockPreparationAction,
   normalizeStockPreparationActionConfig,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
+const {
+  STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
+
+const PHYSICAL_FIELD_ID_MAP = Object.fromEntries(
+  STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, `fld_${field.id}`]),
+)
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
@@ -185,6 +192,35 @@ async function testDryRunRequiresAllowlistedParametersAndStoresToken() {
   assert.deepEqual(records.calls[0][1].filters, { projectNo: 'P-001' }, 'existing-row read filters to one project')
   assert.equal(JSON.stringify(dryRun.evidence).includes('P-001'), false, 'evidence hides project value')
   assert.equal(JSON.stringify(dryRun.evidence).includes('Assembly'), false, 'evidence hides component name')
+}
+
+async function testDryRunUsesPhysicalTargetFieldMapForExistingRowFilter() {
+  const source = createSourceAdapter()
+  const records = createRecordsApi()
+  const storage = createMemoryStorage()
+
+  const dryRun = await dryRunStockPreparationAction({
+    action: baseAction({
+      target: {
+        sheetId: 'sheet_stock',
+        objectId: 'stockPreparationMain',
+        fieldIdMap: PHYSICAL_FIELD_ID_MAP,
+      },
+    }),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+
+  assert.equal(dryRun.status, 'ready')
+  assert.deepEqual(
+    records.calls[0][1].filters,
+    { fld_projectNo: 'P-001' },
+    'canonical target bindings with physical ids filter existing rows by the physical project field',
+  )
+  assert.equal(JSON.stringify(dryRun.evidence).includes('P-001'), false, 'field-map dry-run evidence hides project value')
 }
 
 async function testBridgeSourceKindRequiresExplicitMatchingReadPlanAndCanDryRun() {
@@ -410,6 +446,7 @@ async function testApplyDetectsDataShiftAndManualConfirmHold() {
 async function main() {
   await testRegistryListsConfiguredMetadataWithoutTargetSecrets()
   await testDryRunRequiresAllowlistedParametersAndStoresToken()
+  await testDryRunUsesPhysicalTargetFieldMapForExistingRowFilter()
   await testBridgeSourceKindRequiresExplicitMatchingReadPlanAndCanDryRun()
   await testTargetFieldMapIncompleteFailsBeforeReads()
   await testApplyRequiresTokenRecomputesAndScopesTarget()

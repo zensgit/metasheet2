@@ -38,6 +38,11 @@ function createAdapter(data) {
         records,
         nextCursor: records.length >= limit && offset + records.length < matches.length ? String(offset + records.length) : null,
         done: offset + records.length >= matches.length,
+        metadata: {
+          source: 'bridge:legacy-sql-readonly',
+          filtersApplied: true,
+          filterFields: Object.keys(input.filters || {}).sort(),
+        },
       }
     },
   }
@@ -89,9 +94,41 @@ async function testSuccessfulExpansion() {
   const evidenceJson = JSON.stringify(evidence)
   assert.equal(evidence.valid, true)
   assert.equal(evidence.rowsExpanded, 2)
+  assert.ok(evidence.readDiagnostics.some((entry) =>
+    entry.object === 'DN_PDM_PathExAttrInfo' &&
+    entry.status === 'ok' &&
+    entry.filtersApplied === true &&
+    entry.filterFields.includes('FileCode'),
+  ), 'values-free evidence exposes Bridge filtered-read diagnostics')
   assert.ok(!evidenceJson.includes('P-001'), 'evidence hides project value')
   assert.ok(!evidenceJson.includes('PART-A'), 'evidence hides component source ids')
   assert.ok(!evidenceJson.includes('Assembly'), 'evidence hides component names')
+}
+
+async function testReadFailureDiagnosticsAreValuesFree() {
+  const adapter = {
+    async read() {
+      const error = new Error('driver failure for P-001 and PART-A')
+      error.code = 'BRIDGE_DB_QUERY_FAILED'
+      throw error
+    },
+  }
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  const evidence = summarizeBomExpansionForEvidence(result)
+  const text = JSON.stringify(evidence)
+
+  assert.equal(evidence.valid, false)
+  assert.deepEqual(evidence.errorTypes, ['read_failed'])
+  assert.deepEqual(evidence.readDiagnostics, [{
+    object: 'DN_PDM_PathExAttrInfo',
+    filterFields: ['FileCode'],
+    cursor: null,
+    status: 'failed',
+    filtersSent: true,
+    errorCode: 'BRIDGE_DB_QUERY_FAILED',
+  }])
+  assert.equal(text.includes('P-001'), false, 'read failure evidence hides project value')
+  assert.equal(text.includes('PART-A'), false, 'read failure evidence hides error-message row values')
 }
 
 async function testNoHit() {
@@ -222,6 +259,7 @@ function testReadPlanValidation() {
 
 async function main() {
   await testSuccessfulExpansion()
+  await testReadFailureDiagnosticsAreValuesFree()
   await testNoHit()
   await testSameComponentUnderDifferentParentsStaysDistinct()
   await testFailClosedGuards()

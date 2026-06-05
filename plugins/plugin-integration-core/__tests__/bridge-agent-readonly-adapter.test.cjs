@@ -169,13 +169,15 @@ async function main() {
   const cappedCall = calls.filter((call) => call.pathname === '/query/material').at(-1)
   assert.deepEqual(cappedCall.body, { limit: 20 }, 'adapter caps reads to Bridge Agent maxLimit before sending')
 
-  await adapter.read({ object: 'material', limit: 5, filters: { FNumber: 'MAT-001', active: true, optional: null } })
+  const filtered = await adapter.read({ object: 'material', limit: 5, filters: { FNumber: 'MAT-001', active: true, optional: null } })
   const filteredCall = calls.filter((call) => call.pathname === '/query/material').at(-1)
   assert.deepEqual(
     filteredCall.body,
     { limit: 5, filters: { FNumber: 'MAT-001', active: true, optional: null } },
     'adapter forwards primitive equality filters to the Bridge Agent',
   )
+  assert.equal(filtered.metadata.filtersApplied, true)
+  assert.deepEqual(filtered.metadata.filterFields, ['FNumber', 'active', 'optional'])
 
   await assert.rejects(
     () => adapter.read({ object: 'material', filters: { FNumber: { $like: 'MAT%' } } }),
