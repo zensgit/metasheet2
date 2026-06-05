@@ -19,6 +19,7 @@ const {
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-target-provisioning.cjs'))
 
 const LOGICAL_FIELD_IDS = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id)
+const RESOLVED_FIELD_ID_MAP = Object.fromEntries(LOGICAL_FIELD_IDS.map((fieldId) => [fieldId, `fld_${fieldId}`]))
 
 function createContext({
   sheetExists = false,
@@ -184,7 +185,9 @@ async function main() {
   )
   assert.equal(permissionCalls.findObjectSheet.length, 0, 'permission failure happens before provisioning reads')
 
-  // Existing canonical target can be bound with empty fieldIdMap.
+  // Existing canonical target binds resolved logical -> physical fields. The
+  // entity-machine C5 smoke proved that an empty fieldIdMap is not enough when
+  // the records API physical field ids differ from the C1 logical ids.
   const { context: bindCtx, calls: bindCalls } = createContext({ sheetExists: true })
   const bound = await ensureStockPreparationCanonicalTarget({
     context: bindCtx,
@@ -197,10 +200,11 @@ async function main() {
     sheetId: 'sheet_private_stock_target',
     objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
     keyField: 'idempotencyKey',
-    fieldIdMap: {},
+    fieldIdMap: RESOLVED_FIELD_ID_MAP,
   })
   assert.equal(bound.evidence.mode, 'canonical_existing')
   assert.deepEqual(bound.evidence.missingFields, [])
+  assert.equal(bound.evidence.target.fieldIdMapEmpty, false)
   assert.equal(bindCalls.findObjectSheet.length, 1)
   assert.equal(bindCalls.resolveFieldIds.length, 1)
   assert.equal(bindCalls.ensureObject.length, 0, 'existing target bind does not create/repair')
@@ -249,8 +253,9 @@ async function main() {
     sheetId: 'sheet_created_stock_target',
     objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
     keyField: 'idempotencyKey',
-    fieldIdMap: {},
+    fieldIdMap: RESOLVED_FIELD_ID_MAP,
   })
+  assert.equal(created.evidence.target.fieldIdMapEmpty, false)
   assert.equal(createCalls.findObjectSheet.length, 1)
   assert.equal(createCalls.ensureObject.length, 1)
   assert.equal(createCalls.ensureObject[0].descriptor.id, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)

@@ -8,6 +8,9 @@ const httpRoutes = require(HTTP_ROUTES_PATH)
 const { MAX_LIST_LIMIT } = httpRoutes
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
+const STOCK_PREPARATION_RESOLVED_FIELD_ID_MAP = Object.fromEntries(
+  STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, `fld_${field.id}`]),
+)
 
 const READ_USER = {
   id: 'user_read',
@@ -2526,8 +2529,9 @@ async function testStockPreparationTargetProvisioningRoutes() {
     sheetId: 'sheet_stock_canonical_created',
     objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
     keyField: 'idempotencyKey',
-    fieldIdMap: {},
+    fieldIdMap: STOCK_PREPARATION_RESOLVED_FIELD_ID_MAP,
   })
+  assert.equal(res.body.data.evidence.target.fieldIdMapEmpty, false)
   assert.equal(JSON.stringify(res.body.data.evidence).includes('sheet_stock_canonical_created'), false, 'ensure evidence hides sheet id')
   const ensureCall = findCalls(provisioning.calls, 'ensureObject')[0]
   assert.equal(ensureCall[1].projectId, 'tenant_1:integration-core')
@@ -2550,7 +2554,8 @@ async function testStockPreparationTargetProvisioningRoutes() {
   })
   assertOkResponse(res, 200)
   assert.equal(res.body.data.mode, 'canonical_existing')
-  assert.deepEqual(res.body.data.targetBinding.fieldIdMap, {})
+  assert.deepEqual(res.body.data.targetBinding.fieldIdMap, STOCK_PREPARATION_RESOLVED_FIELD_ID_MAP)
+  assert.equal(res.body.data.evidence.target.fieldIdMapEmpty, false)
   assert.equal(findCalls(existing.calls, 'ensureObject').length, 0, 'existing complete target is bound, not recreated')
   assert.equal(findCalls(existing.calls, 'findObjectSheet')[0][1].projectId, 'tenant_1:integration-core', 'default projectId is integration-core scoped')
 

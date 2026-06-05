@@ -124,12 +124,12 @@ function buildStockPreparationTargetDescriptor(input = {}) {
   }
 }
 
-function buildCanonicalTargetBinding({ sheetId, objectId }) {
+function buildCanonicalTargetBinding({ sheetId, objectId, fieldIdMap = {} }) {
   return {
     sheetId,
     objectId,
     keyField: CANONICAL_KEY_FIELD,
-    fieldIdMap: {},
+    fieldIdMap,
   }
 }
 
@@ -158,7 +158,7 @@ function summarizeStockPreparationTargetReadiness(input = {}) {
     target: {
       objectId: template.objectId,
       keyField: CANONICAL_KEY_FIELD,
-      fieldIdMapEmpty: true,
+      fieldIdMapEmpty: input.fieldIdMapEmpty !== false,
     },
   }
 }
@@ -209,12 +209,13 @@ async function inspectStockPreparationCanonicalTarget(input = {}) {
   return {
     ready: true,
     mode: 'canonical_existing',
-    target: buildCanonicalTargetBinding({ sheetId: sheet.id, objectId: template.objectId }),
+    target: buildCanonicalTargetBinding({ sheetId: sheet.id, objectId: template.objectId, fieldIdMap: resolved }),
     evidence: summarizeStockPreparationTargetReadiness({
       template,
       mode: 'canonical_existing',
       status: 'ready',
       missingFields: [],
+      fieldIdMapEmpty: false,
     }),
   }
 }
@@ -273,12 +274,13 @@ async function ensureStockPreparationCanonicalTarget(input = {}) {
   return {
     ready: true,
     mode: 'canonical_create',
-    target: buildCanonicalTargetBinding({ sheetId: ensured.sheet.id, objectId: template.objectId }),
+    target: buildCanonicalTargetBinding({ sheetId: ensured.sheet.id, objectId: template.objectId, fieldIdMap: resolvedAfterCreate }),
     evidence: summarizeStockPreparationTargetReadiness({
       template,
       mode: 'canonical_create',
       status: 'ready',
       missingFields: [],
+      fieldIdMapEmpty: false,
     }),
   }
 }

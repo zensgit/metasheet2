@@ -264,9 +264,30 @@ async function readAll(adapter, object, filters, options, readStats) {
     }
     const input = { object, filters: normalizedFilters, limit: options.pageLimit }
     if (cursor) input.cursor = cursor
-    readStats.push({ object, filterFields: Object.keys(normalizedFilters).sort(), cursor: cursor || null })
-    const result = await adapter.read(input)
+    const stat = {
+      object,
+      filterFields: Object.keys(normalizedFilters).sort(),
+      cursor: cursor || null,
+      status: 'attempted',
+      filtersSent: true,
+    }
+    readStats.push(stat)
+    let result
+    try {
+      result = await adapter.read(input)
+      stat.status = 'ok'
+    } catch (error) {
+      stat.status = 'failed'
+      stat.errorCode = safeErrorCode(error)
+      throw error
+    }
+    if (isPlainObject(result) && isPlainObject(result.metadata)) {
+      stat.source = typeof result.metadata.source === 'string' ? result.metadata.source : undefined
+      stat.filtersApplied = result.metadata.filtersApplied
+      if (Array.isArray(result.metadata.filterFields)) stat.filterFields = result.metadata.filterFields.slice().sort()
+    }
     const records = isPlainObject(result) && Array.isArray(result.records) ? result.records : []
+    stat.count = records.length
     for (const record of records) {
       if (isPlainObject(record)) rows.push(record)
     }
@@ -340,6 +361,28 @@ function makeActions(rowsExpanded) {
   }
 }
 
+function safeErrorCode(error) {
+  if (!error) return undefined
+  if (typeof error.code === 'string' && error.code.trim()) return error.code.trim()
+  if (typeof error.name === 'string' && error.name.trim()) return error.name.trim()
+  return undefined
+}
+
+function readDiagnostic(entry = {}) {
+  const diagnostic = {
+    object: entry.object,
+    filterFields: Array.isArray(entry.filterFields) ? entry.filterFields.slice().sort() : [],
+    cursor: entry.cursor || null,
+    status: entry.status || 'attempted',
+  }
+  if (entry.filtersSent !== undefined) diagnostic.filtersSent = entry.filtersSent === true
+  if (entry.source) diagnostic.source = entry.source
+  if (entry.filtersApplied !== undefined) diagnostic.filtersApplied = entry.filtersApplied === true
+  if (Number.isInteger(entry.count)) diagnostic.count = entry.count
+  if (entry.errorCode) diagnostic.errorCode = entry.errorCode
+  return diagnostic
+}
+
 function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, readStats, errors, rowErrors }) {
   const summary = {
     projectNoPresent,
@@ -351,6 +394,7 @@ function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootM
     maxRows,
     readObjects: Array.from(new Set(readStats.map((entry) => entry.object))).sort(),
     readCount: readStats.length,
+    readDiagnostics: readStats.map(readDiagnostic),
     errorTypes: Array.from(new Set([...(errors || []), ...(rowErrors || [])].map((entry) => entry.type || entry.code).filter(Boolean))).sort(),
     actions: makeActions(status === 'expanded' ? rowsExpanded : 0),
   }
@@ -707,6 +751,7 @@ function summarizeBomExpansionForEvidence(result = {}) {
     maxRows: summary.maxRows,
     readObjects: Array.isArray(summary.readObjects) ? summary.readObjects.slice() : [],
     readCount: Number(summary.readCount || 0),
+    readDiagnostics: Array.isArray(summary.readDiagnostics) ? summary.readDiagnostics.map(readDiagnostic) : [],
     errorTypes: Array.isArray(summary.errorTypes) ? summary.errorTypes.slice() : [],
     actions: isPlainObject(summary.actions) ? { ...summary.actions } : undefined,
   }
