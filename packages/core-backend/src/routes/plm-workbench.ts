@@ -27,7 +27,7 @@ import {
 import { loadValidators } from '../types/validator'
 import { parsePagination } from '../util/response'
 import { getDataSourceManager } from './data-sources'
-import type { IntegrationCapabilitiesResult } from '../data-adapters/PLMAdapter'
+import type { IntegrationCapabilitiesResult, BomMultitableContextResult } from '../data-adapters/PLMAdapter'
 
 // Typed wrapper for temporary tables not yet in main Database interface
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -777,6 +777,86 @@ router.get(
       return res.json({ data_source_id: dataSourceId, available: false, reason: 'unavailable' })
     }
     return res.json({ data_source_id: dataSourceId, ...result })
+  },
+)
+
+// PLM-COLLAB Phase 3 C (P3-C): relay the governed READ-ONLY BOM multi-table review context,
+// GATED by the advisory manifest. Pinned order: resolve adapter (404) -> duck-typed guard ->
+// capabilities pre-check. If bom_multitable is not supported -> hide (old PLM / unlit). If it
+// is supported but the tenant is NOT entitled (per the advisory manifest), return the
+// unentitled affordance WITHOUT calling the data endpoint ("未授权不查资源"). Only an entitled
+// tenant reaches getBomMultitableContext, and the PROVIDER stays the authoritative gate (we
+// reflect its entitled + null its context otherwise). Read-only; never 500s -> degrades.
+interface PlmBomReviewAdapter {
+  getIntegrationCapabilities(): Promise<IntegrationCapabilitiesResult>
+  getBomMultitableContext(partId: string): Promise<BomMultitableContextResult>
+}
+
+function isPlmBomReviewAdapter(adapter: unknown): adapter is PlmBomReviewAdapter {
+  const candidate = adapter as PlmBomReviewAdapter | null
+  return (
+    typeof candidate?.getIntegrationCapabilities === 'function'
+    && typeof candidate?.getBomMultitableContext === 'function'
+  )
+}
+
+router.get(
+  '/api/plm-workbench/data-sources/:id/bom-multitable/:partId/context',
+  authenticate,
+  param('id').isString(),
+  param('partId').isString(),
+  validate,
+  async (req: Request, res: Response) => {
+    const dataSourceId = req.params.id
+    const partId = req.params.partId
+    let adapter: unknown
+    try {
+      adapter = getDataSourceManager().getDataSource(dataSourceId)
+    } catch {
+      return res
+        .status(404)
+        .json({ error: 'Data source not found', data_source_id: dataSourceId })
+    }
+    if (!isPlmBomReviewAdapter(adapter)) {
+      return res.json({ data_source_id: dataSourceId, available: false, reason: 'unsupported-mode' })
+    }
+    // 1) advisory capability pre-check (never 500)
+    let capabilities: IntegrationCapabilitiesResult
+    try {
+      capabilities = await adapter.getIntegrationCapabilities()
+    } catch {
+      return res.json({ data_source_id: dataSourceId, available: false, reason: 'unavailable' })
+    }
+    const feature = capabilities.available ? capabilities.manifest.features.bom_multitable : undefined
+    if (!feature || feature.supported !== true) {
+      // old PLM / feature unlit -> hide the surface entirely
+      return res.json({ data_source_id: dataSourceId, available: false, reason: 'unsupported' })
+    }
+    if (feature.entitled !== true) {
+      // supported but not entitled -> DO NOT query the resource; advisory upgrade affordance
+      return res.json({ data_source_id: dataSourceId, available: true, entitled: false, context: null })
+    }
+    // 2) entitled -> fetch the governed read-only context (never 500 -> degrade)
+    let result: BomMultitableContextResult
+    try {
+      result = await adapter.getBomMultitableContext(partId)
+    } catch {
+      return res.json({
+        data_source_id: dataSourceId,
+        available: true,
+        entitled: true,
+        context: null,
+        reason: 'unavailable',
+      })
+    }
+    // the provider is the authoritative gate: reflect its entitled, null the context otherwise
+    const entitled = result.entitled === true
+    return res.json({
+      data_source_id: dataSourceId,
+      available: true,
+      entitled,
+      context: entitled ? result.context : null,
+    })
   },
 )
 

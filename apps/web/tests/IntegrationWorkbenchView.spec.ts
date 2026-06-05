@@ -2252,6 +2252,65 @@ describe('IntegrationWorkbenchView', () => {
     expect(capabilityCalls).toEqual(['/api/plm-workbench/data-sources/plm-ds/capabilities'])
   })
 
+  it('P3-C: shows an enabled BOM-review entry (with the read-only panel) for an entitled bom_multitable, fetching no BOM until asked', async () => {
+    const calls: string[] = []
+    apiFetchMock.mockImplementation(async (url: string) => {
+      calls.push(url)
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'Read-only PLM data source', roles: ['source'], supports: ['read'], advanced: true },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'plm_bridge', tenantId: 'default', workspaceId: null, name: 'Yuantus PLM bridge',
+            kind: 'data-source:sql-readonly', role: 'source', status: 'active',
+            config: { dataSourceId: 'plm-ds', object: 'eco' },
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/plm-workbench/data-sources/plm-ds/capabilities') {
+        return rawJsonResponse({
+          data_source_id: 'plm-ds',
+          available: true,
+          manifest: {
+            schema_version: 'v1', provider: 'yuantus-plm', advisory: true,
+            features: {
+              bom_multitable: { supported: true, api_version: 'v1', entitled: true, scenarios: ['bom_review'] },
+            },
+          },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi(8)
+
+    ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).click()
+    await flushUi()
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'plm_bridge'
+    sourceSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+
+    const entry = container.querySelector('[data-testid="plm-bom-multitable-capability-entry"]') as HTMLElement | null
+    expect(entry).not.toBeNull()
+    expect(entry!.dataset.state).toBe('enabled')
+    expect(entry!.textContent).toContain('BOM 多维表 Review')
+    expect(entry!.textContent).toContain('bom_multitable · API v1')
+    // the read-only panel is mounted, but it must NOT have fetched any BOM context yet
+    expect(container.querySelector('[data-testid="plm-bom-review-panel"]')).not.toBeNull()
+    expect(calls.some((u) => u.includes('/bom-multitable/'))).toBe(false)
+  })
+
   it('C3: shows only the upgrade affordance for supported but not entitled approval automation', async () => {
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') {
