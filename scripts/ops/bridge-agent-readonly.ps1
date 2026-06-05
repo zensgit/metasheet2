@@ -356,7 +356,8 @@ function New-SqlConnectionString {
 function Invoke-BridgeSqlQuery {
   param(
     $Config,
-    [string]$Sql
+    [string]$Sql,
+    [array]$Parameters = @()
   )
 
   $rows = New-Object System.Collections.Generic.List[object]
@@ -368,6 +369,15 @@ function Invoke-BridgeSqlQuery {
     $command.CommandText = $Sql
     $command.CommandType = [System.Data.CommandType]::Text
     $command.CommandTimeout = $Config.database.queryTimeoutSec
+    foreach ($parameterSpec in @($Parameters)) {
+      $parameterName = [string]$parameterSpec.Name
+      if ($parameterName -notmatch '^@p[0-9]+$') {
+        throw "Unsafe SQL parameter name: $parameterName"
+      }
+      $parameterValue = $parameterSpec.Value
+      if ($null -eq $parameterValue) { $parameterValue = [System.DBNull]::Value }
+      [void]$command.Parameters.AddWithValue($parameterName, $parameterValue)
+    }
     $reader = $command.ExecuteReader()
     try {
       while ($reader.Read()) {
@@ -399,12 +409,44 @@ function Test-BridgeConnection {
 function New-ObjectQuerySql {
   param(
     $ObjectConfig,
-    [int]$Limit
+    [int]$Limit,
+    $Filters = $null
   )
   $fieldNames = @($ObjectConfig.fields | ForEach-Object { $_.name })
   $columns = ($fieldNames | ForEach-Object { ConvertTo-QuotedIdentifier -Name $_ }) -join ', '
   $source = ConvertTo-QuotedSource -Source $ObjectConfig.source
-  return "SELECT TOP $Limit $columns FROM $source"
+  $whereClauses = @()
+  $parameters = @()
+
+  if ($null -ne $Filters) {
+    $filterProps = @($Filters.PSObject.Properties)
+    $index = 0
+    foreach ($filter in $filterProps) {
+      $fieldName = [string]$filter.Name
+      Assert-Name -Name $fieldName -Label 'filter field'
+      if ($fieldNames -notcontains $fieldName) {
+        throw "filter field is not allowlisted for object $($ObjectConfig.id): $fieldName"
+      }
+      $value = $filter.Value
+      if ($null -eq $value) {
+        $whereClauses += "$(ConvertTo-QuotedIdentifier -Name $fieldName) IS NULL"
+        continue
+      }
+      if (-not ($value -is [string] -or $value -is [int] -or $value -is [long] -or $value -is [double] -or $value -is [decimal] -or $value -is [bool])) {
+        throw "filter value must be a primitive equality value for field $fieldName"
+      }
+      $parameterName = "@p$index"
+      $whereClauses += "$(ConvertTo-QuotedIdentifier -Name $fieldName) = $parameterName"
+      $parameters += [ordered]@{ Name = $parameterName; Value = $value }
+      $index += 1
+    }
+  }
+
+  $sql = "SELECT TOP $Limit $columns FROM $source"
+  if ($whereClauses.Count -gt 0) {
+    $sql += " WHERE " + ($whereClauses -join ' AND ')
+  }
+  return [ordered]@{ Sql = $sql; Parameters = $parameters }
 }
 
 function ConvertTo-JsonResponse {
@@ -540,25 +582,28 @@ function Invoke-BridgeRequest {
     if ($limit -lt 1 -or $limit -gt $Config.limits.maxLimit) {
       return [ordered]@{ status = 400; body = [ordered]@{ error = [ordered]@{ code = 'INVALID_LIMIT'; message = "limit must be between 1 and $($Config.limits.maxLimit)." } } }
     }
-    if ($null -ne $body -and $null -ne $body.PSObject.Properties['filters'] -and $null -ne $body.filters) {
-      $filterProps = @($body.filters.PSObject.Properties)
-      if ($filterProps.Count -gt 0) {
-        return [ordered]@{ status = 400; body = [ordered]@{ error = [ordered]@{ code = 'UNSUPPORTED_FILTERS'; message = 'BA-M1 MVP does not accept filters yet.' } } }
-      }
-    }
     if ($null -ne $body -and $null -ne $body.PSObject.Properties['sql']) {
       return [ordered]@{ status = 400; body = [ordered]@{ error = [ordered]@{ code = 'RAW_SQL_REJECTED'; message = 'Raw SQL is not accepted by the readonly Bridge Agent.' } } }
     }
 
     $objectConfig = $Config.objects[$objectId]
-    $sql = New-ObjectQuerySql -ObjectConfig $objectConfig -Limit $limit
-    $rows = Invoke-BridgeSqlQuery -Config $Config -Sql $sql
+    $filters = $null
+    if ($null -ne $body -and $null -ne $body.PSObject.Properties['filters']) {
+      $filters = $body.filters
+    }
+    try {
+      $querySpec = New-ObjectQuerySql -ObjectConfig $objectConfig -Limit $limit -Filters $filters
+    } catch {
+      return [ordered]@{ status = 400; body = [ordered]@{ error = [ordered]@{ code = 'INVALID_FILTERS'; message = 'Filters must be allowlisted primitive equality filters.' } } }
+    }
+    $rows = Invoke-BridgeSqlQuery -Config $Config -Sql $querySpec.Sql -Parameters $querySpec.Parameters
     return [ordered]@{
       status = 200
       body = [ordered]@{
         object = $objectId
         records = @($rows)
         limit = $limit
+        filtersApplied = $null -ne $filters -and @($filters.PSObject.Properties).Count -gt 0
         nextCursor = $null
         done = $true
       }

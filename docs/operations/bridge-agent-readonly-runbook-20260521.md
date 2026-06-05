@@ -24,6 +24,7 @@ In scope:
 - `GET /objects`;
 - `GET /schema/<object>`;
 - `POST /query/<object>`;
+- structured equality filters for allowlisted object fields;
 - allowlisted `material`, `bom`, `bom_child` examples;
 - hard row limits;
 - redacted errors.
@@ -35,6 +36,7 @@ Out of scope:
 - Data Factory UI wiring;
 - raw SQL endpoint;
 - SQL writes;
+- raw/user-authored SQL filters;
 - K3 Save / Submit / Audit;
 - non-localhost deployment.
 
@@ -211,6 +213,13 @@ Invoke-RestMethod `
   -Uri 'http://127.0.0.1:19091/query/material' `
   -ContentType 'application/json' `
   -Body '{"limit":3}'
+
+Invoke-RestMethod `
+  -Headers $headers `
+  -Method Post `
+  -Uri 'http://127.0.0.1:19091/query/material' `
+  -ContentType 'application/json' `
+  -Body '{"limit":3,"filters":{"FNumber":"MAT-001"}}'
 ```
 
 Expected:
@@ -219,6 +228,10 @@ Expected:
 - `/objects`: only allowlisted objects appear.
 - `/schema/material`: only configured fields appear.
 - `/query/material`: at most 3 rows, selected only from configured fields.
+- filtered `/query/material`: at most 3 rows, selected only from configured
+  fields, with `filtersApplied=true`. Use only values-free evidence in issues:
+  object id, filter field names, status, record count, and `filtersApplied`.
+  Do not paste row values.
 
 ## Negative Checks
 
@@ -241,6 +254,17 @@ Invoke-RestMethod `
   -Body '{"sql":"SELECT * FROM t_ICItem"}'
 ```
 
+Invalid filters must fail:
+
+```powershell
+Invoke-RestMethod `
+  -Headers $headers `
+  -Method Post `
+  -Uri 'http://127.0.0.1:19091/query/material' `
+  -ContentType 'application/json' `
+  -Body '{"filters":{"FNumber":{"$like":"MAT%"}}}'
+```
+
 Excessive limit must fail:
 
 ```powershell
@@ -261,6 +285,7 @@ BA-M1 MVP is ready for BA-M2 integration work only when:
 - `/objects` shows only allowlisted objects;
 - `/schema/material`, `/schema/bom`, `/schema/bom_child` return safe schemas;
 - `/query/*` returns capped rows for approved objects;
-- unknown objects, raw SQL, and excessive limits are blocked;
+- structured filters work only as allowlisted primitive equality predicates;
+- unknown objects, raw SQL, invalid filters, and excessive limits are blocked;
 - no secret-shaped values appear in logs or copied evidence;
 - no SQL writes occurred.

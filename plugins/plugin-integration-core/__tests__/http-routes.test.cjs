@@ -2328,16 +2328,20 @@ async function testTemplatePreviewBulkReadGuards() {
   assert.ok(queryCalls >= 1, 'a valid staging source DOES read')
 }
 
-function tableActionConfig() {
+function tableActionConfig(overrides = {}) {
+  const { source: sourceOverrides = {}, target: targetOverrides = {}, ...rest } = overrides
   return {
     actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+    ...rest,
     source: {
       externalSystemId: 'plm_sql_source',
       kind: 'data-source:sql-readonly',
+      ...sourceOverrides,
     },
     target: {
       sheetId: 'sheet_stock_configured',
       objectId: 'stockPreparationMain',
+      ...targetOverrides,
     },
   }
 }
@@ -2675,6 +2679,99 @@ async function testTableActionRoutes() {
   assert.equal(JSON.stringify(res.body.data.evidence).includes('A-001'), false, 'apply evidence hides component code')
 }
 
+async function testTableActionRoutesSupportExplicitBridgeSource() {
+  const adapterCalls = []
+  const records = createTableActionRecordsApi()
+  const bridgeAction = tableActionConfig({
+    source: {
+      externalSystemId: 'bridge_plm_source',
+      kind: 'bridge:legacy-sql-readonly',
+    },
+  })
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly Bridge PLM',
+          kind: 'bridge:legacy-sql-readonly',
+          role: 'source',
+          config: { baseUrl: 'http://127.0.0.1:19091/' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['createAdapter', system, deps])
+        adapterCalls.push({ system, deps })
+        return createTableActionSourceAdapter(tableActionPlmData(), calls)
+      },
+    },
+  })
+  const { routes } = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    config: {
+      stockPreparationTableActions: [bridgeAction],
+    },
+  })
+
+  let res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'ready')
+  assert.equal(adapterCalls[0].system.kind, 'bridge:legacy-sql-readonly', 'Bridge source action creates the Bridge adapter')
+  assert.equal(adapterCalls[0].deps.principal, 'user_read', 'Bridge dry-run source read runs as the request user')
+  const sourceReads = findCalls(calls, 'sourceRead')
+  assert.ok(sourceReads.length > 0, 'Bridge dry-run reaches the source adapter')
+  assert.equal(
+    sourceReads.every((call) => call[1].filters && Object.keys(call[1].filters).length > 0),
+    true,
+    'Bridge dry-run uses equality-filtered flat reads',
+  )
+
+  const mismatch = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['mismatchGetExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Data Source PLM',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['mismatchCreateAdapter', system, deps])
+        return createTableActionSourceAdapter(tableActionPlmData(), calls)
+      },
+    },
+  })
+  const mismatchMount = mountRoutes(mismatch.services, {
+    recordsApi: createTableActionRecordsApi().recordsApi,
+    config: {
+      stockPreparationTableActions: [bridgeAction],
+    },
+  })
+  res = await invoke(mismatchMount.routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'TABLE_ACTION_SOURCE_INVALID', 'source kind mismatch fails closed')
+  assert.equal(findCalls(mismatch.calls, 'mismatchCreateAdapter').length, 0, 'kind mismatch fails before adapter creation')
+}
+
 async function testTableActionTargetPreflightBeforeSourceAdapter() {
   const { calls, services } = createMockServices({
     externalSystemRegistry: {
@@ -2738,6 +2835,7 @@ async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testStockPreparationTargetProvisioningRoutes()
   await testTableActionRoutes()
+  await testTableActionRoutesSupportExplicitBridgeSource()
   await testTableActionTargetPreflightBeforeSourceAdapter()
   await testTableActionUnconfiguredFailsClosed()
   await testTemplatePreviewReferenceMappingResolution()

@@ -13,6 +13,7 @@ const {
   applyStockPreparationAction,
   createStockPreparationTableActionRegistry,
   dryRunStockPreparationAction,
+  normalizeStockPreparationActionConfig,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 
 function clone(value) {
@@ -184,6 +185,46 @@ async function testDryRunRequiresAllowlistedParametersAndStoresToken() {
   assert.deepEqual(records.calls[0][1].filters, { projectNo: 'P-001' }, 'existing-row read filters to one project')
   assert.equal(JSON.stringify(dryRun.evidence).includes('P-001'), false, 'evidence hides project value')
   assert.equal(JSON.stringify(dryRun.evidence).includes('Assembly'), false, 'evidence hides component name')
+}
+
+async function testBridgeSourceKindRequiresExplicitMatchingReadPlanAndCanDryRun() {
+  const source = createSourceAdapter()
+  const records = createRecordsApi()
+  const storage = createMemoryStorage()
+  const action = normalizeStockPreparationActionConfig(baseAction({
+    source: {
+      externalSystemId: 'bridge_source_1',
+      kind: 'bridge:legacy-sql-readonly',
+    },
+  }))
+
+  assert.equal(action.source.kind, 'bridge:legacy-sql-readonly')
+  assert.equal(action.source.readPlan.sourceKind, 'bridge:legacy-sql-readonly', 'omitted readPlan sourceKind inherits the explicit Bridge source kind')
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(source.calls.every((call) => call.filters && Object.keys(call.filters).length > 0), true, 'Bridge C5 dry-run still uses equality-filtered flat reads')
+
+  assert.throws(
+    () => normalizeStockPreparationActionConfig(baseAction({
+      source: {
+        externalSystemId: 'bridge_source_1',
+        kind: 'bridge:legacy-sql-readonly',
+        readPlan: { ...action.source.readPlan, sourceKind: 'data-source:sql-readonly' },
+      },
+    })),
+    /source\.readPlan\.sourceKind must match source\.kind/,
+    'Bridge source cannot carry a data-source readPlan by accident',
+  )
 }
 
 async function testTargetFieldMapIncompleteFailsBeforeReads() {
@@ -369,6 +410,7 @@ async function testApplyDetectsDataShiftAndManualConfirmHold() {
 async function main() {
   await testRegistryListsConfiguredMetadataWithoutTargetSecrets()
   await testDryRunRequiresAllowlistedParametersAndStoresToken()
+  await testBridgeSourceKindRequiresExplicitMatchingReadPlanAndCanDryRun()
   await testTargetFieldMapIncompleteFailsBeforeReads()
   await testApplyRequiresTokenRecomputesAndScopesTarget()
   await testApplyDetectsDataShiftAndManualConfirmHold()

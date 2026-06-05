@@ -192,6 +192,11 @@ async function testFailClosedGuards() {
 function testReadPlanValidation() {
   const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
   assert.equal(normalizeStockPreparationBomReadPlan(plan).matchField, 'FileCode')
+  assert.equal(
+    normalizeStockPreparationBomReadPlan({ ...plan, sourceKind: 'bridge:legacy-sql-readonly' }).sourceKind,
+    'bridge:legacy-sql-readonly',
+    'explicit Bridge source kind is accepted for the C5 source gate',
+  )
 
   assert.throws(
     () => normalizeStockPreparationBomReadPlan({ ...plan, rawSql: 'SELECT * FROM DN_PDM_PathExAttrInfo' }),
@@ -206,7 +211,7 @@ function testReadPlanValidation() {
   assert.throws(
     () => normalizeStockPreparationBomReadPlan({ ...plan, sourceKind: 'plm:adapter' }),
     StockPreparationBomExpansionError,
-    'non-readonly source kind rejected',
+    'unsupported source kind rejected',
   )
   assert.throws(
     () => normalizeStockPreparationBomReadPlan({ ...plan, bomDetail: { ...plan.bomDetail, joins: ['DN_PDM_PartLibraryInfo'] } }),

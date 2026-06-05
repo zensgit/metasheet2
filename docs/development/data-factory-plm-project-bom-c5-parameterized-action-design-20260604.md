@@ -13,6 +13,10 @@ The backend pieces are now latent and test-locked:
 
 - C2-0 filters `data-source:sql-readonly` reads with equality-only `where`
   filters.
+- The explicit Bridge-source follow-up allows the same C5 action contract to
+  read from `bridge:legacy-sql-readonly` when the server-side action config
+  names that kind and the saved external system has the same kind. This is not a
+  silent fallback from the generic data-source path.
 - C2 expands one `projectNo` into normalized stock-preparation candidate rows
   through app-side flat reads.
 - C3 plans `add`, `update`, `skip`, `inactive`, and `manual_confirm` decisions
@@ -107,7 +111,13 @@ Shape:
 Hard locks:
 
 - `kind` is enum-strict. Unknown action kind fails closed.
-- The action source must be `data-source:sql-readonly`.
+- The action source must be one of:
+  - `data-source:sql-readonly`;
+  - `bridge:legacy-sql-readonly`, only when explicitly configured for the
+    action and backed by a saved Bridge external system of the same kind.
+- The route must reject a source-kind mismatch before adapter creation. There
+  is no silent fallback between `data-source:sql-readonly` and
+  `bridge:legacy-sql-readonly`.
 - The action target is configured server-side. The browser never supplies
   `sheetId`, `objectId`, `keyField`, or `fieldIdMap`.
 - Parameter bindings are allowlist-driven. The operator cannot add filters or
@@ -312,6 +322,9 @@ Backend:
 - dry-run passes request user principal to the readonly SQL source;
 - dry-run uses configured action source and target, not client-supplied source
   or sheet ids;
+- if the action is configured for `bridge:legacy-sql-readonly`, dry-run creates
+  the Bridge adapter only when the saved external system has the same kind;
+- a `data-source`/Bridge source-kind mismatch fails before adapter creation;
 - apply recomputes C2/C3 server-side and rejects browser-supplied plan payloads;
 - apply passes `permission: "write"` or `"admin"` derived from the authenticated
   user, not a hardcoded value;
