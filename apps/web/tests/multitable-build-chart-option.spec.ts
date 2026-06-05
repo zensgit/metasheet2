@@ -150,6 +150,18 @@ describe('buildChartOption', () => {
     expect(o.series.every((s: any) => s.stack === 'total')).toBe(true)
   })
 
+  it('v2-d-b1 grouped barMode: multi-series bar has NO stack (side-by-side)', () => {
+    const o = opt(buildChartOption(stackedBar(), { barMode: 'grouped' }))
+    expect(o.series).toHaveLength(2)
+    expect(o.series.map((s: any) => s.name)).toEqual(['A', 'B'])
+    expect(o.series.every((s: any) => s.stack === undefined)).toBe(true)
+  })
+
+  it('v2-d-b1 stacked barMode (default or explicit) keeps stack:total', () => {
+    expect(opt(buildChartOption(stackedBar())).series.every((s: any) => s.stack === 'total')).toBe(true)
+    expect(opt(buildChartOption(stackedBar(), { barMode: 'stacked' })).series.every((s: any) => s.stack === 'total')).toBe(true)
+  })
+
   it('no series ⇒ unchanged single-series bar (regression)', () => {
     const o = opt(buildChartOption(chart('bar', [{ label: 'A', value: 10 }, { label: 'B', value: 20 }])))
     expect(o.series).toHaveLength(1)

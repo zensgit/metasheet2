@@ -104,6 +104,10 @@ export type MetaViewRenderLabelKey =
   | 'dashboard.seriesBy'
   | 'dashboard.seriesByNone'
   | 'dashboard.seriesByHint'
+  | 'dashboard.barMode'
+  | 'dashboard.barModeStacked'
+  | 'dashboard.barModeGrouped'
+  | 'dashboard.barModeAdditiveOnly'
   | 'dashboard.noNumericFields'
   | 'dashboard.livePreview'
   | 'dashboard.previewFillRequired'
@@ -218,6 +222,10 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'dashboard.seriesBy',
   'dashboard.seriesByNone',
   'dashboard.seriesByHint',
+  'dashboard.barMode',
+  'dashboard.barModeStacked',
+  'dashboard.barModeGrouped',
+  'dashboard.barModeAdditiveOnly',
   'dashboard.noNumericFields',
   'dashboard.livePreview',
   'dashboard.previewFillRequired',
@@ -336,9 +344,13 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'dashboard.variantStandard': { en: 'Standard', zh: '标准' },
   'dashboard.variantDonut': { en: 'Donut', zh: '环形图' },
   'dashboard.variantArea': { en: 'Area', zh: '面积图' },
-  'dashboard.seriesBy': { en: 'Stack by (series)', zh: '堆叠分组（系列）' },
-  'dashboard.seriesByNone': { en: 'None (single bar)', zh: '不堆叠（单系列）' },
-  'dashboard.seriesByHint': { en: 'Splits each bar into stacked segments. Sum/count only.', zh: '将每根柱子拆成堆叠分段；仅支持求和/计数。' },
+  'dashboard.seriesBy': { en: 'Split by (series)', zh: '系列分组' },
+  'dashboard.seriesByNone': { en: 'None (single bar)', zh: '不分组（单系列）' },
+  'dashboard.seriesByHint': { en: 'Splits each bar by a second field (stacked or grouped — see layout below).', zh: '按第二个字段拆分每根柱子（堆叠或并排，见下方布局）。' },
+  'dashboard.barMode': { en: 'Series layout', zh: '系列布局' },
+  'dashboard.barModeStacked': { en: 'Stacked', zh: '堆叠' },
+  'dashboard.barModeGrouped': { en: 'Grouped (side by side)', zh: '并排分组' },
+  'dashboard.barModeAdditiveOnly': { en: 'Stacked needs a sum or count aggregation; using grouped.', zh: '堆叠需要求和或计数聚合；已改用并排分组。' },
   'dashboard.noNumericFields': { en: 'No readable numeric fields available.', zh: '没有可读取的数值字段。' },
   'dashboard.livePreview': { en: 'Live preview', zh: '实时预览' },
   'dashboard.previewFillRequired': { en: 'Complete the chart fields to preview.', zh: '填写完整图表字段后可预览。' },

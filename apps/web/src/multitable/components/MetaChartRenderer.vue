@@ -22,9 +22,9 @@
             <span class="meta-chart__legend-value">{{ pt.value }}</span>
           </div>
         </div>
-        <!-- v2-d: stacked-bar legend over series names (colors map to the palette by series index). -->
+        <!-- v2-d: multi-series bar legend over series names (grouped or stacked; colors map to the palette by series index). -->
         <div
-          v-if="hasStackedSeries && displayConfig?.showLegend !== false"
+          v-if="hasSeriesLegend && displayConfig?.showLegend !== false"
           class="meta-chart__legend meta-chart__legend--inline"
           data-legend="series"
         >
@@ -93,7 +93,7 @@ const isEChartsType = computed(() =>
   || props.chartData.chartType === 'pie',
 )
 const isRestricted = computed(() => props.chartData.metadata?.restricted === true)
-const hasStackedSeries = computed(() =>
+const hasSeriesLegend = computed(() =>
   props.chartData.chartType === 'bar' && (props.chartData.series?.length ?? 0) > 0,
 )
 

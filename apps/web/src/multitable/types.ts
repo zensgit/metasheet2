@@ -927,8 +927,9 @@ export interface ChartAggregation {
 export interface ChartDataSource {
   sheetId: string
   groupByFieldId?: string
-  // v2-d: split each groupBy category into stacked series. Honored only for a bar chart with a
-  // primary groupByFieldId + an additive aggregation (sum/count); inert/rejected otherwise.
+  // v2-d: split each groupBy category into bar series (grouped or stacked — see displayConfig.barMode).
+  // Honored only for a bar chart with a primary groupByFieldId; stacked mode additionally requires an
+  // additive aggregation (sum/count), grouped mode accepts any. Inert/rejected otherwise.
   seriesByFieldId?: string
   dateFieldId?: string
   dateGrouping?: 'day' | 'week' | 'month' | 'quarter' | 'year'
@@ -946,6 +947,9 @@ export interface ChartDisplayConfig {
   // v2-c single-series render variant: 'donut' (pie + inner radius) / 'area' (line + areaStyle).
   // Only honored for the matching chartType (pie/line); inert otherwise.
   variant?: 'donut' | 'area'
+  // v2-d-b1: bar series layout when seriesByFieldId is set. 'stacked' (default) | 'grouped'
+  // (side-by-side; allows non-additive aggregations). Inert unless seriesByFieldId is set on a bar chart.
+  barMode?: 'stacked' | 'grouped'
 }
 
 export interface ChartConfig {
@@ -972,7 +976,7 @@ export interface ChartDataPoint {
   color?: string
 }
 
-// v2-d: stacked-bar series. `data` is dense + aligned positionally to ChartData.dataPoints.
+// v2-d: a bar series (grouped or stacked). `data` is dense + aligned positionally to ChartData.dataPoints.
 export interface ChartSeries {
   name: string
   data: number[]
@@ -981,7 +985,8 @@ export interface ChartSeries {
 export interface ChartData {
   chartType: ChartType
   dataPoints: ChartDataPoint[]
-  // v2-d: present for a stacked bar chart; dataPoints/total are unaffected by its presence.
+  // v2-d: present for a bar chart with a series split (grouped or stacked); dataPoints/total are
+  // unaffected by its presence (in non-additive grouped mode, Σ series ≠ dataPoints).
   series?: ChartSeries[]
   total?: number
   metadata?: Record<string, unknown>
