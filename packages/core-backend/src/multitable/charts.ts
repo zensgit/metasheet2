@@ -102,6 +102,12 @@ export function assertSeriesConstraints(dataSource: ChartDataSource | undefined,
   if (!dataSource?.groupByFieldId) {
     throw new Error('seriesByFieldId requires groupByFieldId (a primary category axis)')
   }
+  if (dataSource.dateFieldId && dataSource.dateGrouping) {
+    // The producer gives date grouping precedence over groupByFieldId, so a stacked split is not
+    // applied here — reject rather than silently produce a non-stacked chart (v2-d-a is groupBy-primary;
+    // date-axis × series is deferred to v2-d-b).
+    throw new Error('seriesByFieldId (stacked series) is not supported with date grouping')
+  }
   if (!ADDITIVE_AGGREGATIONS.has(dataSource.aggregation?.function)) {
     throw new Error('seriesByFieldId (stacked series) requires a sum or count aggregation')
   }
