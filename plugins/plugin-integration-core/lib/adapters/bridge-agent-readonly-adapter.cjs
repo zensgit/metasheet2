@@ -421,7 +421,7 @@ function createBridgeAgentReadonlyAdapter({ system, fetchImpl = globalThis.fetch
         limit,
         count: records.length,
         source: 'bridge:legacy-sql-readonly',
-        filtersApplied: Boolean(filters),
+        filtersApplied: data && data.filtersApplied === true,
         filterFields: filters ? Object.keys(filters).sort() : [],
       },
     })

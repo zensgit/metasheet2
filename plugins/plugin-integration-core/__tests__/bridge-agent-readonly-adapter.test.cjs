@@ -60,7 +60,7 @@ function createFetchMock() {
       })
     }
     if (parsed.pathname === '/query/material' && options.method === 'POST') {
-      return jsonResponse(200, {
+      const response = {
         object: 'material',
         records: [
           { FItemID: 1, FNumber: 'MAT-001', FName: 'Bolt' },
@@ -69,7 +69,11 @@ function createFetchMock() {
         limit: body.limit,
         nextCursor: null,
         done: true,
-      })
+      }
+      if (body && body.filters) {
+        response.filtersApplied = body.filters.FNumber !== 'MAT-NOT-APPLIED'
+      }
+      return jsonResponse(200, response)
     }
     if (parsed.pathname === '/schema/failing') {
       return jsonResponse(500, {
@@ -161,6 +165,7 @@ async function main() {
   const preview = await adapter.read({ object: 'material' })
   assert.equal(preview.records.length, 2)
   assert.equal(preview.metadata.limit, 3)
+  assert.equal(preview.metadata.filtersApplied, false, 'absent Bridge filter receipt is treated as not applied')
   const previewCall = calls.find((call) => call.pathname === '/query/material')
   assert.deepEqual(previewCall.body, { limit: 3 })
 
@@ -178,6 +183,16 @@ async function main() {
   )
   assert.equal(filtered.metadata.filtersApplied, true)
   assert.deepEqual(filtered.metadata.filterFields, ['FNumber', 'active', 'optional'])
+
+  const unapplied = await adapter.read({ object: 'material', limit: 5, filters: { FNumber: 'MAT-NOT-APPLIED' } })
+  const unappliedCall = calls.filter((call) => call.pathname === '/query/material').at(-1)
+  assert.deepEqual(
+    unappliedCall.body,
+    { limit: 5, filters: { FNumber: 'MAT-NOT-APPLIED' } },
+    'adapter still sends filters when Bridge reports they were not applied',
+  )
+  assert.equal(unapplied.metadata.filtersApplied, false, 'adapter trusts the Bridge filtersApplied receipt instead of recomputing from the request')
+  assert.deepEqual(unapplied.metadata.filterFields, ['FNumber'])
 
   await assert.rejects(
     () => adapter.read({ object: 'material', filters: { FNumber: { $like: 'MAT%' } } }),
