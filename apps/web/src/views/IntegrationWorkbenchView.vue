@@ -280,6 +280,27 @@
               {{ PLM_APPROVAL_AUTOMATION_FEATURE_KEY }} · API {{ selectedPlmApprovalCapabilityEntry.apiVersion }}
             </small>
           </div>
+          <div
+            v-if="selectedPlmBomMultitableCapabilityEntry"
+            class="integration-workbench__capability-entry"
+            :data-state="selectedPlmBomMultitableCapabilityEntry.state"
+            data-testid="plm-bom-multitable-capability-entry"
+          >
+            <div>
+              <span class="integration-workbench__badge" :data-status="selectedPlmBomMultitableCapabilityEntry.state">
+                {{ selectedPlmBomMultitableCapabilityEntry.badge }}
+              </span>
+              <strong>{{ selectedPlmBomMultitableCapabilityEntry.title }}</strong>
+            </div>
+            <p>{{ selectedPlmBomMultitableCapabilityEntry.detail }}</p>
+            <small v-if="selectedPlmBomMultitableCapabilityEntry.apiVersion">
+              {{ PLM_BOM_MULTITABLE_FEATURE_KEY }} · API {{ selectedPlmBomMultitableCapabilityEntry.apiVersion }}
+            </small>
+            <PlmBomReviewPanel
+              v-if="selectedPlmBomMultitableCapabilityEntry.state === 'enabled' && selectedSourcePlmDataSourceId"
+              :data-source-id="selectedSourcePlmDataSourceId"
+            />
+          </div>
           <div v-if="!hasRunnableSourceSystem" class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="source-empty-state">
             <strong>还没有可读取的数据源。</strong>
             <p>连接 PLM、HTTP API 或启用 SQL 只读通道后，可将数据导入 staging 多维表再清洗。</p>
@@ -1130,6 +1151,7 @@ import {
   type WorkbenchExternalSystem,
 } from '../services/integration/workbench'
 import MetaIntegrationFieldRuleAuthoring from '../components/integration/MetaIntegrationFieldRuleAuthoring.vue'
+import PlmBomReviewPanel from '../components/plm/PlmBomReviewPanel.vue'
 
 type WorkbenchSide = 'source' | 'target'
 type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
@@ -1191,6 +1213,16 @@ interface PlmApprovalCapabilityEntry {
   detail: string
   apiVersion: string
   actionStatus: string
+}
+
+// P3-C: BOM review is a READ surface (no actions), so its capability entry mirrors the
+// approval one minus actionStatus.
+interface PlmBomCapabilityEntry {
+  state: 'enabled' | 'upgrade' | 'loading'
+  badge: string
+  title: string
+  detail: string
+  apiVersion: string
 }
 
 type ExportCell = string | number | boolean | null
@@ -1353,6 +1385,7 @@ const deletingConnectionId = ref('')
 // picker that references an existing /data-sources connection by id (never copies credentials).
 const DATA_SOURCE_BRIDGE_KIND = 'data-source:sql-readonly'
 const PLM_APPROVAL_AUTOMATION_FEATURE_KEY = 'approval_automation'
+const PLM_BOM_MULTITABLE_FEATURE_KEY = 'bom_multitable'
 const bridgeDataSources = ref<DataSourceListItem[]>([])
 const bridgeDataSourcesError = ref('')
 const bridgeDataSourcesLoaded = ref(false)
@@ -1536,6 +1569,38 @@ const selectedPlmApprovalCapabilityEntry = computed<PlmApprovalCapabilityEntry |
     detail: '当前租户尚未开通 approval_automation；前端只显示升级入口，真实授权仍由 PLM license 判定。',
     apiVersion,
     actionStatus,
+  }
+})
+const selectedBomMultitableFeature = computed<PlmIntegrationCapabilityFeature | null>(() => {
+  const result = selectedSourcePlmCapabilities.value
+  if (!result?.available) return null
+  const feature = result.manifest.features[PLM_BOM_MULTITABLE_FEATURE_KEY]
+  return feature && typeof feature === 'object' ? feature : null
+})
+const selectedPlmBomMultitableCapabilityEntry = computed<PlmBomCapabilityEntry | null>(() => {
+  if (!selectedSourcePlmDataSourceId.value) return null
+  if (selectedSourcePlmCapabilitiesLoading.value && !selectedSourcePlmCapabilities.value) {
+    return { state: 'loading', badge: '检测中', title: '正在读取 PLM 能力', detail: '能力清单只用于界面降级提示，不作为授权来源。', apiVersion: '' }
+  }
+  const feature = selectedBomMultitableFeature.value
+  // not supported (old PLM / unlit) -> hide the entry entirely (graceful degradation)
+  if (feature?.supported !== true) return null
+  const apiVersion = typeof feature.api_version === 'string' && feature.api_version.trim() ? feature.api_version.trim() : 'v1'
+  if (feature.entitled === true) {
+    return {
+      state: 'enabled',
+      badge: '可用',
+      title: 'BOM 多维表 Review',
+      detail: '已开通；可加载某个 Part 的只读 BOM review 表（受治理快照，不可写回）。',
+      apiVersion,
+    }
+  }
+  return {
+    state: 'upgrade',
+    badge: '可升级',
+    title: '升级 BOM Review',
+    detail: '当前租户尚未开通 bom_multitable；前端只显示升级入口，真实授权仍由 PLM license 判定。',
+    apiVersion,
   }
 })
 const sqlChannelDisabledHint = computed(() => {

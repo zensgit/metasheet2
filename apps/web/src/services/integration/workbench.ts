@@ -74,6 +74,60 @@ export type PlmIntegrationCapabilitiesResult =
     reason?: string
   }
 
+// PLM-COLLAB P3-C: the governed READ-ONLY BOM multi-table review context (provider's P3-A
+// surface, relayed by the metasheet2 backend behind the advisory capability gate).
+export interface PlmBomMultitableLine {
+  bom_line_id: string
+  part_id: string
+  item_number: string | null
+  name: string | null
+  state: string | null
+  generation: number | null
+  quantity: number | null
+  uom: string | null
+  find_num: string | null
+  refdes: string | null
+  level: number
+  path: string[]
+  path_labels: string[]
+  source_version: number | null
+  source_updated_at: string | null
+  sync_status: string
+}
+
+export interface PlmBomMultitablePart {
+  part_id: string
+  item_number: string | null
+  name: string | null
+  state: string | null
+  generation: number | null
+}
+
+export interface PlmBomMultitableContext {
+  part: PlmBomMultitablePart
+  lines: PlmBomMultitableLine[]
+  source_version: number | null
+  source_updated_at: string | null
+  sync_status: string
+  template_key: string
+}
+
+export type PlmBomMultitableResult =
+  | {
+    data_source_id: string
+    available: true
+    entitled: boolean
+    context: PlmBomMultitableContext | null
+    // a relayed reason on an available+entitled+null-context result means a TRANSIENT
+    // provider fetch failure (retry), NOT "this part has no BOM" -- the UI distinguishes them.
+    reason?: string
+  }
+  | {
+    data_source_id: string
+    available: false
+    reason?: string
+  }
+
 export interface WorkbenchExternalSystemUpsertRequest extends IntegrationScope {
   id?: string
   projectId?: string | null
@@ -559,6 +613,44 @@ function normalizePlmCapabilitiesResult(
   }
 }
 
+// P3-C: a DEDICATED normalizer for the BOM multi-table relay (its own shape, not the
+// capability manifest). Validates only the envelope + that `context`, when present, is a
+// part+lines object; the rows are passed through (forward-compatible with provider additions).
+function isPlmBomMultitableContext(value: unknown): value is PlmBomMultitableContext {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    Boolean(record.part && typeof record.part === 'object' && !Array.isArray(record.part))
+    && Array.isArray(record.lines)
+  )
+}
+
+function normalizePlmBomMultitableResult(
+  dataSourceId: string,
+  value: unknown,
+): PlmBomMultitableResult {
+  if (!value || typeof value !== 'object') {
+    return { data_source_id: dataSourceId, available: false, reason: 'unavailable' }
+  }
+  const record = value as Record<string, unknown>
+  const resolvedId = typeof record.data_source_id === 'string' && record.data_source_id.trim()
+    ? record.data_source_id.trim()
+    : dataSourceId
+  if (record.available !== true) {
+    return {
+      data_source_id: resolvedId,
+      available: false,
+      reason: typeof record.reason === 'string' && record.reason.trim() ? record.reason.trim() : 'unavailable',
+    }
+  }
+  const entitled = record.entitled === true
+  const context = entitled && isPlmBomMultitableContext(record.context) ? record.context : null
+  // keep a relayed reason (e.g. 'unavailable' on a transient provider failure) so the UI can
+  // tell a transient error apart from a genuinely empty/absent part.
+  const reason = typeof record.reason === 'string' && record.reason.trim() ? record.reason.trim() : undefined
+  return { data_source_id: resolvedId, available: true, entitled, context, ...(reason ? { reason } : {}) }
+}
+
 function buildQueryString(input: Record<string, unknown>): string {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(input)) {
@@ -642,6 +734,30 @@ export async function getPlmDataSourceCapabilities(dataSourceId: string): Promis
     return { data_source_id: normalizedId, available: false, reason: 'unavailable' }
   }
   return normalizePlmCapabilitiesResult(normalizedId, payload)
+}
+
+// P3-C: the backend relay (/api/plm-workbench/.../bom-multitable/.../context) returns a BARE
+// object (NOT the {ok,data} integration envelope), so read response.json() directly + a
+// dedicated normalizer -- do NOT route this through parseIntegrationResponse. The relay has
+// already done the advisory gate (unsupported -> available:false; unentitled -> available:true
+// + entitled:false + context:null without querying the resource).
+export async function getPlmBomMultitableContext(
+  dataSourceId: string,
+  partId: string,
+): Promise<PlmBomMultitableResult> {
+  const dsId = dataSourceId.trim()
+  const pid = partId.trim()
+  if (!dsId || !pid) {
+    return { data_source_id: dsId, available: false, reason: 'unavailable' }
+  }
+  const response = await apiFetch(
+    `/api/plm-workbench/data-sources/${encodeURIComponent(dsId)}/bom-multitable/${encodeURIComponent(pid)}/context`,
+  )
+  const payload = await response.json().catch(() => null) as unknown
+  if (!response.ok) {
+    return { data_source_id: dsId, available: false, reason: 'unavailable' }
+  }
+  return normalizePlmBomMultitableResult(dsId, payload)
 }
 
 export async function upsertWorkbenchExternalSystem(

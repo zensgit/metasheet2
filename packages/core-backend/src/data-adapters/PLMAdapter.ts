@@ -616,6 +616,7 @@ const YUANTUS_SUPPORTED_OPERATIONS = [
   'where_used',
   'bom_compare',
   'bom_compare_schema',
+  'bom_multitable_context',
   'substitutes',
   'substitutes_add',
   'substitutes_remove',
@@ -664,6 +665,62 @@ export interface IntegrationCapabilityManifest {
 export type IntegrationCapabilitiesResult =
   | { available: true; manifest: IntegrationCapabilityManifest }
   | { available: false; reason: 'unsupported-mode' | 'unavailable' };
+
+/**
+ * PLM-COLLAB P3-C consumer types: the governed READ-ONLY BOM multi-table review context
+ * returned by the provider's P3-A `GET /api/v1/bom/multitable/{partId}/context`. The whole
+ * BOM tree is flattened into review rows; `bom_line_id` is the STABLE per-row key, `part_id`
+ * the child part id, `level`/`path` the hierarchy, and the provenance markers let the UI flag
+ * staleness. READ-ONLY: there is no write-back from this surface.
+ */
+export interface BomMultitableLine {
+  bom_line_id: string;
+  part_id: string;
+  item_number: string | null;
+  name: string | null;
+  state: string | null;
+  generation: number | null;
+  quantity: number | null;
+  uom: string | null;
+  find_num: string | null;
+  refdes: string | null;
+  level: number;
+  path: string[];
+  path_labels: string[];
+  source_version: number | null;
+  source_updated_at: string | null;
+  sync_status: string;
+}
+
+export interface BomMultitablePart {
+  part_id: string;
+  item_number: string | null;
+  name: string | null;
+  state: string | null;
+  generation: number | null;
+}
+
+export interface BomMultitableContext {
+  part: BomMultitablePart;
+  lines: BomMultitableLine[];
+  source_version: number | null;
+  source_updated_at: string | null;
+  sync_status: string;
+  template_key: string;
+}
+
+/**
+ * The provider's gated response shape. An unentitled tenant gets `entitled:false` + a null
+ * context WITHOUT the part being queried (the provider is the real gate); `upgrade.available`
+ * then drives the consumer's upgrade affordance. ADVISORY: the relay route additionally
+ * pre-checks the manifest so an unentitled call never even reaches the data endpoint.
+ */
+export interface BomMultitableContextResult {
+  feature_key: string;
+  entitled: boolean;
+  upgrade: { available: boolean };
+  context: BomMultitableContext | null;
+}
 
 export class PLMAdapter extends HTTPAdapter {
   private mockMode = false;
@@ -1032,6 +1089,15 @@ export class PLMAdapter extends HTTPAdapter {
               scenarios: ['eco'],
               actions: ['notify'],
               action_status: 'stubbed',
+            },
+            // P3-C: mock the lit bom_multitable SKU so mock-mode dev can exercise the BOM
+            // review panel end to end (a read surface -> no actions).
+            bom_multitable: {
+              supported: true,
+              api_version: 'v1',
+              entitled: true,
+              cache_scope: { supported: 'global', entitled: 'tenant' },
+              scenarios: ['bom_review'],
             },
           },
         },
@@ -1962,6 +2028,54 @@ export class PLMAdapter extends HTTPAdapter {
       return { data: items, metadata: { totalCount: items.length }, error: result.error }
     }
     return this.query<BOMItem>(`/api/products/${productId}/bom`)
+  }
+
+  /**
+   * PLM-COLLAB P3-C: fetch the governed READ-ONLY BOM multi-table review context for a part
+   * (the provider's P3-A `GET /api/v1/bom/multitable/{partId}/context`). Relays the provider's
+   * gated shape `{feature_key, entitled, upgrade, context}` -- the PROVIDER is the real gate
+   * (an unentitled tenant gets context:null without the part being queried). The relay route
+   * additionally pre-checks the advisory manifest so an unentitled call never reaches here.
+   * Read-only: no write-back. A legacy / non-yuantus PLM has no such surface -> unentitled.
+   */
+  async getBomMultitableContext(partId: string): Promise<BomMultitableContextResult> {
+    if (this.mockMode) {
+      const now = new Date().toISOString()
+      return {
+        feature_key: 'bom_multitable',
+        entitled: true,
+        upgrade: { available: false },
+        context: {
+          part: { part_id: partId, item_number: 'P-001', name: 'Mock Assembly', state: 'Released', generation: 1 },
+          lines: [
+            { bom_line_id: 'R1', part_id: 'C1', item_number: 'C-001', name: 'Bracket', state: 'Draft', generation: 1, quantity: 2, uom: 'EA', find_num: '10', refdes: 'R1,R2', level: 1, path: [partId], path_labels: ['P-001'], source_version: 1, source_updated_at: now, sync_status: 'snapshot' },
+            { bom_line_id: 'R2', part_id: 'D1', item_number: 'D-001', name: 'Screw', state: 'Released', generation: 2, quantity: 4, uom: 'EA', find_num: '20', refdes: 'R3', level: 2, path: [partId, 'C1'], path_labels: ['P-001', 'C-001'], source_version: 2, source_updated_at: now, sync_status: 'snapshot' },
+          ],
+          source_version: 1,
+          source_updated_at: now,
+          sync_status: 'snapshot',
+          template_key: 'bom_review',
+        },
+      }
+    }
+    if (this.apiMode === 'yuantus') {
+      const result = await this.query<BomMultitableContextResult>(`/api/v1/bom/multitable/${partId}/context`)
+      const body = result.data && result.data.length > 0 ? result.data[0] : null
+      if (!body || typeof body !== 'object') {
+        // older PLM / unexpected shape -> safe unentitled affordance (no data leaked)
+        return { feature_key: 'bom_multitable', entitled: false, upgrade: { available: true }, context: null }
+      }
+      const entitled = body.entitled === true
+      return {
+        feature_key: typeof body.feature_key === 'string' && body.feature_key ? body.feature_key : 'bom_multitable',
+        entitled,
+        upgrade: { available: !entitled },
+        // context only when the provider says entitled (defence in depth against a stale manifest)
+        context: entitled && body.context && typeof body.context === 'object' ? body.context : null,
+      }
+    }
+    // legacy / non-yuantus PLM has no multitable review surface
+    return { feature_key: 'bom_multitable', entitled: false, upgrade: { available: true }, context: null }
   }
 
   async getApprovals(options?: ApprovalQueryOptions): Promise<QueryResult<ApprovalRequest>> {
