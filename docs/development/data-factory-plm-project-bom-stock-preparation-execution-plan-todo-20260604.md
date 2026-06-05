@@ -313,7 +313,7 @@ Acceptance locks:
 - Request-body wire test asserts dry-run/apply send no browser-supplied
   `sheetId`, source/target binding, C3 plan, or C4 payload.
 
-### 🟡 C5-3a - On-prem action config injection unblocker (this PR)
+### ✅ C5-3a - On-prem action config injection unblocker (DONE - PR #2293)
 
 Gated on: C5-1/C5-2 + entity-machine smoke finding + explicit opt-in.
 
@@ -342,9 +342,37 @@ Acceptance locks:
 - The deployment config path is scoped to `plugin-integration-core`; unrelated
   plugins do not receive the table-action config.
 
+### 🟡 C5-3b - Target schema/config preflight (this PR)
+
+Gated on: C5-3a entity-machine smoke finding + explicit opt-in.
+
+Scope:
+
+- Add a route/helper-level target config preflight for
+  `plm.stock-preparation.pull-bom.v1`.
+- When a deployment uses explicit `target.fieldIdMap`, require it to map every
+  PLM/system field from the C1 stock-preparation template.
+- Return a values-free `422 TARGET_SCHEMA_INCOMPLETE` before PLM source adapter
+  creation when the target binding is partial.
+- Keep canonical logical-id target tables working when `target.fieldIdMap` is
+  empty.
+- Keep the C5 source kind unchanged: `data-source:sql-readonly` only. Do not
+  widen this slice to `bridge:legacy-sql-readonly`.
+
+Acceptance locks:
+
+- Incomplete explicit target maps fail before PLM reads, target reads, target
+  writes, or dry-run token consumption.
+- HTTP dry-run fails before `getExternalSystemForAdapter` / `createAdapter`.
+- Error details expose logical field names only; no source external-system id,
+  target sheet id, PLM row value, or MetaSheet row value.
+- No PLM read, MetaSheet write, K3, UI, migration, raw SQL, or permission model
+  change.
+
 ### ⬜ C5-3 - Operator validation runbook / entity-machine smoke
 
-Gated on: C5-1/C5-2 + C5-3a package deployed + explicit opt-in.
+Gated on: C5-1/C5-2 + C5-3a package deployed + C5-3b package deployed +
+explicit opt-in.
 
 Scope:
 
@@ -405,16 +433,16 @@ operator checks stay in later validation slices:
 
 ## Sequencing rule
 
-C0, C1, C2-0, C2, C3, C4, C5-0, C5-1, and C5-2 are complete. C5-3a is the
-current entity-machine unblocker found during C5-3 smoke: the host must inject
-server-owned action config so the plugin can report the PLM action as
-`configured:true`.
+C0, C1, C2-0, C2, C3, C4, C5-0, C5-1, C5-2, and C5-3a are complete. C5-3b is
+the current entity-machine unblocker found during C5-3 smoke: an explicit
+target `fieldIdMap` must fail closed when it omits C5 PLM/system fields.
 
 1. C5-0 design locks the reusable parameterized action contract.
 2. C5-1 adds backend action routes and server-side recompute/apply wiring.
 3. C5-2 adds the workbench operator surface.
 4. C5-3a injects server-owned plugin action config for on-prem deployment.
-5. C5-3 validates the flow on an entity machine.
+5. C5-3b rejects incomplete target schema/config before any PLM read.
+6. C5-3 validates the flow on an entity machine.
 
 C6 option sync remains after C5. All later slices still require their
 predecessor to land and the owner to explicitly opt in. K3 Save / Submit /

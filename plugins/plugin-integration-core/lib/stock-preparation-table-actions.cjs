@@ -154,6 +154,40 @@ function normalizeStockPreparationActionConfig(input = {}) {
   }
 }
 
+function targetFieldMapHasExplicitBindings(fieldIdMap = {}) {
+  return Object.keys(fieldIdMap || {}).some((field) => optionalString(fieldIdMap[field]))
+}
+
+function plmSystemFieldIds(template) {
+  return template.fields
+    .filter((field) => field.ownership === 'plm_system')
+    .map((field) => field.id)
+}
+
+function assertTargetFieldMapCompleteness(action) {
+  if (!targetFieldMapHasExplicitBindings(action.target.fieldIdMap)) return
+  const requiredFields = plmSystemFieldIds(action.template)
+  const missingFields = requiredFields.filter((field) => !optionalString(action.target.fieldIdMap[field]))
+  if (missingFields.length === 0) return
+  throw new StockPreparationTableActionError(
+    422,
+    'TARGET_SCHEMA_INCOMPLETE',
+    'target.fieldIdMap is missing C5 PLM/system fields',
+    {
+      targetObjectId: action.target.objectId,
+      fieldMapMode: 'explicit',
+      missingFields,
+      requiredFields,
+    },
+  )
+}
+
+function assertStockPreparationTargetReady(input = {}) {
+  const action = normalizeStockPreparationActionConfig(input)
+  assertTargetFieldMapCompleteness(action)
+  return action
+}
+
 function publicActionMetadata(action) {
   const configured = Boolean(action && action.configured === true)
   return {
@@ -453,7 +487,7 @@ function evidenceForDryRun({ action, parameters, expansion, plan, revision, canA
 }
 
 async function dryRunStockPreparationAction(input = {}) {
-  const action = normalizeStockPreparationActionConfig(input.action)
+  const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
   const dryRun = await computeDryRun({
     action,
@@ -494,7 +528,7 @@ async function dryRunStockPreparationAction(input = {}) {
 }
 
 async function applyStockPreparationAction(input = {}) {
-  const action = normalizeStockPreparationActionConfig(input.action)
+  const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
   const dryRun = await computeDryRun({
     action,
@@ -551,6 +585,7 @@ module.exports = {
   TABLE_ACTION_KIND,
   StockPreparationTableActionError,
   applyStockPreparationAction,
+  assertStockPreparationTargetReady,
   createStockPreparationTableActionRegistry,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
@@ -562,8 +597,10 @@ module.exports = {
     consumeDryRunToken,
     createDryRunToken,
     hashJson,
+    plmSystemFieldIds,
     readExistingStockPreparationRows,
     stableStringify,
+    targetFieldMapHasExplicitBindings,
     unmapRecordFields,
   },
 }

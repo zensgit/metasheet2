@@ -2335,6 +2335,20 @@ function tableActionConfig() {
   }
 }
 
+function tableActionConfigWithIncompleteTargetFieldMap() {
+  return {
+    ...tableActionConfig(),
+    target: {
+      sheetId: 'sheet_stock_configured',
+      objectId: 'stockPreparationMain',
+      fieldIdMap: {
+        projectNo: 'fld_project_no',
+        componentSourceId: 'fld_component_source_id',
+      },
+    },
+  }
+}
+
 function tableActionPlmData() {
   return {
     DN_PDM_PathExAttrInfo: [{ FileCode: 'P-001', Parent_OBJ_ID: 'PATH-1' }],
@@ -2511,6 +2525,54 @@ async function testTableActionRoutes() {
   assert.equal(JSON.stringify(res.body.data.evidence).includes('A-001'), false, 'apply evidence hides component code')
 }
 
+async function testTableActionTargetPreflightBeforeSourceAdapter() {
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['createAdapter', system, deps])
+        return createTableActionSourceAdapter(tableActionPlmData(), calls)
+      },
+    },
+  })
+  const records = createTableActionRecordsApi()
+  const { routes } = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    config: {
+      stockPreparationTableActions: [tableActionConfigWithIncompleteTargetFieldMap()],
+    },
+  })
+
+  const res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
+  assert.equal(res.body.error.details.fieldMapMode, 'explicit')
+  assert.ok(res.body.error.details.missingFields.includes('idempotencyKey'), 'missing idempotencyKey is reported')
+  assert.ok(res.body.error.details.missingFields.includes('path'), 'missing path is reported')
+  const errorText = JSON.stringify(res.body.error)
+  assert.equal(errorText.includes('sheet_stock_configured'), false, 'target sheetId is not exposed in target-schema error')
+  assert.equal(errorText.includes('plm_sql_source'), false, 'source binding is not exposed in target-schema error')
+  assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, 0, 'target preflight fails before loading the source system')
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'target preflight fails before creating the source adapter')
+  assert.equal(records.calls.length, 0, 'target preflight fails before target reads')
+}
+
 async function testTableActionUnconfiguredFailsClosed() {
   const { routes } = mountRoutes(createMockServices().services)
   const res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
@@ -2525,6 +2587,7 @@ async function testTableActionUnconfiguredFailsClosed() {
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testTableActionRoutes()
+  await testTableActionTargetPreflightBeforeSourceAdapter()
   await testTableActionUnconfiguredFailsClosed()
   await testTemplatePreviewReferenceMappingResolution()
   await testTemplatePreviewLiveBulkRead()

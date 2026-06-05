@@ -57,6 +57,7 @@ const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
   applyStockPreparationAction,
+  assertStockPreparationTargetReady,
   createStockPreparationTableActionRegistry,
   dryRunStockPreparationAction,
 } = require('./stock-preparation-table-actions.cjs')
@@ -1243,7 +1244,7 @@ function createHandlers(services, options = {}) {
       requireAccess(req, 'read')
       const body = normalizeTableActionBody(requestBody(req))
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
-      const action = await tableActions.getTableAction(scopedInput(req, { actionId }))
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const sourceAdapter = await loadTableActionSourceAdapter(req, action)
       return sendOk(res, await dryRunStockPreparationAction({
         action,
@@ -1258,7 +1259,7 @@ function createHandlers(services, options = {}) {
       const user = requireAccess(req, 'write')
       const body = normalizeTableActionBody(requestBody(req))
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
-      const action = await tableActions.getTableAction(scopedInput(req, { actionId }))
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const sourceAdapter = await loadTableActionSourceAdapter(req, action)
       const confirm = isPlainObject(body.confirm) ? body.confirm : {}
       return sendOk(res, await applyStockPreparationAction({
