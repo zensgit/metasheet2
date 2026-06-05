@@ -110,7 +110,11 @@ function buildNoopMetrics() {
   }
 }
 
-function mockPublishedTemplatePool(runtimeGraph: Record<string, unknown>, requestNo = 'AP-101100') {
+function mockPublishedTemplatePool(
+  runtimeGraph: Record<string, unknown>,
+  requestNo = 'AP-101100',
+  formSchema: Record<string, unknown> = { fields: [] },
+) {
   pgState.pool.query.mockImplementation(async (sql: string) => {
     const statement = normalize(sql)
     if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
@@ -139,7 +143,7 @@ function mockPublishedTemplatePool(runtimeGraph: Record<string, unknown>, reques
           template_id: 'tpl-1',
           version: 1,
           status: 'published',
-          form_schema: { fields: [] },
+          form_schema: formSchema,
           approval_graph: runtimeGraph,
           created_at: new Date(),
           updated_at: new Date(),
@@ -911,6 +915,114 @@ describe('ApprovalProductService', () => {
       fieldId: 'showDetails',
       operator: 'eq',
       value: 'yes',
+    })
+    expect(pgState.client.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('accepts authoring-MVP form-field-user assignee sources when creating a template', async () => {
+    const request = {
+      key: 'expense-authoring',
+      name: 'Expense Authoring',
+      description: 'Template emitted by the frontend authoring MVP',
+      visibilityScope: { type: 'all', ids: [] },
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: 'Amount', required: true },
+          { id: 'reviewer', type: 'user', label: 'Reviewer', required: true },
+        ],
+      },
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: 'Start', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: 'Reviewer',
+            config: {
+              assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+            },
+          },
+          { key: 'end', type: 'end', name: 'End', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_templates')) {
+        return {
+          rows: [{
+            id: 'tpl-authoring',
+            key: String(params?.[0]),
+            name: String(params?.[1]),
+            description: params?.[2] == null ? null : String(params?.[2]),
+            category: null,
+            visibility_scope: JSON.parse(String(params?.[4])),
+            sla_hours: null,
+            status: 'draft',
+            active_version_id: null,
+            latest_version_id: null,
+            created_at: new Date('2026-06-05T00:00:00.000Z'),
+            updated_at: new Date('2026-06-05T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('INSERT INTO approval_template_versions')) {
+        return {
+          rows: [{
+            id: 'ver-authoring',
+            template_id: 'tpl-authoring',
+            version: 1,
+            status: 'draft',
+            form_schema: JSON.parse(String(params?.[1])),
+            approval_graph: JSON.parse(String(params?.[2])),
+            created_at: new Date('2026-06-05T00:00:00.000Z'),
+            updated_at: new Date('2026-06-05T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('UPDATE approval_templates')) {
+        return {
+          rows: [{
+            id: 'tpl-authoring',
+            key: 'expense-authoring',
+            name: 'Expense Authoring',
+            description: 'Template emitted by the frontend authoring MVP',
+            category: null,
+            visibility_scope: { type: 'all', ids: [] },
+            sla_hours: null,
+            status: 'draft',
+            active_version_id: null,
+            latest_version_id: 'ver-authoring',
+            created_at: new Date('2026-06-05T00:00:00.000Z'),
+            updated_at: new Date('2026-06-05T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+    const result = await service.createTemplate(request as never)
+
+    const approvalNode = result.approvalGraph.nodes.find((node) => node.key === 'approval_1')
+    expect(approvalNode?.config).toEqual({
+      assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+      approvalMode: 'single',
+      emptyAssigneePolicy: 'error',
     })
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
   })
@@ -1797,6 +1909,205 @@ describe('ApprovalProductService', () => {
       1,
       'approval_1',
       JSON.stringify({ resolvedFrom: { kind: 'requester', sourceIndex: 0 } }),
+    ])
+  })
+
+  it('creates, publishes, and starts an authoring-MVP template through the compiled runtime graph', async () => {
+    const formSchema = {
+      fields: [
+        { id: 'amount', type: 'number', label: 'Amount', required: true },
+        { id: 'reviewer', type: 'user', label: 'Reviewer', required: true },
+      ],
+    }
+    const approvalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: 'Start', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          name: 'Reviewer',
+          config: {
+            assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        { key: 'end', type: 'end', name: 'End', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+      ],
+    }
+
+    let templateRow: Record<string, unknown> | null = null
+    let versionRow: Record<string, unknown> | null = null
+    let publishedDefinitionRow: Record<string, unknown> | null = null
+
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+        return { rows: templateRow ? [templateRow] : [], rowCount: templateRow ? 1 : 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+        return { rows: versionRow ? [versionRow] : [], rowCount: versionRow ? 1 : 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+        return {
+          rows: publishedDefinitionRow ? [publishedDefinitionRow] : [],
+          rowCount: publishedDefinitionRow ? 1 : 0,
+        }
+      }
+      if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+        return { rows: [{ request_no: 'AP-101010' }], rowCount: 1 }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+
+    pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_templates')) {
+        templateRow = {
+          id: 'tpl-chain',
+          key: String(params?.[0]),
+          name: String(params?.[1]),
+          description: params?.[2] == null ? null : String(params?.[2]),
+          category: null,
+          visibility_scope: JSON.parse(String(params?.[4])),
+          sla_hours: null,
+          status: 'draft',
+          active_version_id: null,
+          latest_version_id: null,
+          created_at: new Date('2026-06-05T00:00:00.000Z'),
+          updated_at: new Date('2026-06-05T00:00:00.000Z'),
+        }
+        return { rows: [templateRow], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_template_versions')) {
+        versionRow = {
+          id: 'ver-chain',
+          template_id: String(params?.[0]),
+          version: 1,
+          status: 'draft',
+          form_schema: JSON.parse(String(params?.[1])),
+          approval_graph: JSON.parse(String(params?.[2])),
+          created_at: new Date('2026-06-05T00:00:00.000Z'),
+          updated_at: new Date('2026-06-05T00:00:00.000Z'),
+        }
+        return { rows: [versionRow], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_templates SET latest_version_id')) {
+        templateRow = {
+          ...templateRow,
+          latest_version_id: String(params?.[0]),
+          updated_at: new Date('2026-06-05T00:01:00.000Z'),
+        }
+        return { rows: [templateRow], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) {
+        return { rows: templateRow ? [templateRow] : [], rowCount: templateRow ? 1 : 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1 AND template_id = $2')) {
+        return { rows: versionRow ? [versionRow] : [], rowCount: versionRow ? 1 : 0 }
+      }
+      if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_published_definitions')) {
+        publishedDefinitionRow = {
+          id: 'pub-chain',
+          template_id: String(params?.[0]),
+          template_version_id: String(params?.[1]),
+          runtime_graph: JSON.parse(String(params?.[2])),
+          is_active: true,
+          published_at: new Date('2026-06-05T00:02:00.000Z'),
+        }
+        return { rows: [publishedDefinitionRow], rowCount: 1 }
+      }
+      if (statement.startsWith("UPDATE approval_template_versions SET status = 'published'")) {
+        versionRow = {
+          ...versionRow,
+          status: 'published',
+          updated_at: new Date('2026-06-05T00:03:00.000Z'),
+        }
+        return { rows: [versionRow], rowCount: 1 }
+      }
+      if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) {
+        templateRow = {
+          ...templateRow,
+          status: 'published',
+          active_version_id: String(params?.[0]),
+          updated_at: new Date('2026-06-05T00:04:00.000Z'),
+        }
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_instances')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT assignment_type, assignee_id, node_key FROM approval_assignments')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      id: 'apr-chain',
+      templateId: 'tpl-chain',
+      templateVersionId: 'ver-chain',
+      publishedDefinitionId: 'pub-chain',
+      currentNodeKey: 'approval_1',
+      formSnapshot: { amount: 1200, reviewer: 'approver-42' },
+      assignments: [{
+        id: 'asg-form-user',
+        type: 'user',
+        assigneeId: 'approver-42',
+        sourceStep: 1,
+        nodeKey: 'approval_1',
+        isActive: true,
+        metadata: { resolvedFrom: { kind: 'form_field_user', sourceIndex: 0, fieldId: 'reviewer' } },
+      }],
+    }))
+
+    const created = await service.createTemplate({
+      key: 'expense-chain',
+      name: 'Expense Chain',
+      visibilityScope: { type: 'all', ids: [] },
+      formSchema,
+      approvalGraph,
+    } as never)
+    const published = await service.publishTemplate(created.id, { policy: { allowRevoke: true } } as never)
+    await service.createApproval(
+      { templateId: created.id, formData: { amount: 1200, reviewer: 'approver-42' } },
+      { userId: 'requester-1', userName: 'Requester One' },
+    )
+
+    const compiledApprovalNode = published.runtimeGraph.nodes.find((node) => node.key === 'approval_1')
+    expect(compiledApprovalNode?.config).toEqual({
+      assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+      approvalMode: 'single',
+      emptyAssigneePolicy: 'error',
+    })
+
+    const assignmentInsert = pgState.client.query.mock.calls.find(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_assignments'))
+    expect(assignmentInsert?.[1]).toEqual([
+      expect.any(String),
+      'user',
+      'approver-42',
+      1,
+      'approval_1',
+      JSON.stringify({ resolvedFrom: { kind: 'form_field_user', sourceIndex: 0, fieldId: 'reviewer' } }),
     ])
   })
 
