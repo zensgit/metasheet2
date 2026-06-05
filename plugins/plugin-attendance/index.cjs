@@ -42,6 +42,8 @@ const REQUEST_TYPES = [
   'time_correction',
   'leave',
   'overtime',
+  // ② S3 外勤审批 (#2304): outdoor field-work punch that needs approval before it counts.
+  'outdoor_punch',
 ]
 const ATTENDANCE_APPROVAL_WORKFLOW_KEY = 'attendance.request'
 const ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS = ['attendance:approve', 'attendance:admin']
@@ -14798,9 +14800,15 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, eventTyp
     }
   }
 
+  // ② S3 外勤审批 (#2304): compute outside-geofence once. When outdoor approval is OFF (default) we throw
+  // LOCATION_RESTRICTED exactly as before (no regression); when it is ON, the punch route turns an
+  // outside-fence punch into a pending outdoor approval instead of rejecting it — so we return the flag
+  // rather than throw. The IP / future / min-interval guards still apply to outdoor punches.
+  let outsideGeofence = false
   if (settings.geoFence) {
     const location = req.body?.location ?? req.body?.meta?.location ?? null
-    if (!isGeoAllowed(location, settings.geoFence)) {
+    outsideGeofence = !isGeoAllowed(location, settings.geoFence)
+    if (outsideGeofence && settings.punchPolicy?.outdoor?.requireApproval !== true) {
       throw new HttpError(403, 'LOCATION_RESTRICTED', 'Punch location outside allowed area')
     }
   }
@@ -14820,7 +14828,7 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, eventTyp
     )
     if (rows.length > 0 && rows[0].occurred_at) {
       if (rows[0].event_type && rows[0].event_type !== eventType) {
-        return
+        return { outsideGeofence }
       }
       const last = new Date(rows[0].occurred_at)
       const diffMinutes = (occurredAt.getTime() - last.getTime()) / 60000
@@ -14829,6 +14837,7 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, eventTyp
       }
     }
   }
+  return { outsideGeofence }
 }
 
 async function generateAbsenceRecords(db, orgId, workDate, timezone, userIds) {
@@ -16424,12 +16433,18 @@ module.exports = {
         weeklyMaxMinutes: z.number().int().positive().nullable().optional(),
         monthlyMaxMinutes: z.number().int().positive().nullable().optional(),
       }).optional(),
-      // Punch-policy group (#2203). S1 exposes ONLY unscheduled.mode = allow|block. require_approval
-      // is reserved by the design-lock and NOT in this enum until the approval slice (S3); merge /
-      // outdoor are added by their own slices — no half-baked config.
+      // Punch-policy group (#2203). S1 exposes unscheduled.mode = allow|block. S3 (#2304) exposes the
+      // outdoor approval controls — requireApproval / requireNote / approvalFlowId only. requirePhoto stays
+      // latent (normalized but NOT wire-settable until an attachment/photo contract exists — no fake
+      // security). `merge` is still added by its own slice (S2).
       punchPolicy: z.object({
         unscheduled: z.object({
           mode: z.enum(['allow', 'block']).optional(),
+        }).optional(),
+        outdoor: z.object({
+          requireApproval: z.boolean().optional(),
+          requireNote: z.boolean().optional(),
+          approvalFlowId: z.string().optional(),
         }).optional(),
       }).optional(),
       formula: z.object({
@@ -18887,7 +18902,7 @@ module.exports = {
 
         try {
           const settings = await getSettings(db)
-          await enforcePunchConstraints({
+          const { outsideGeofence } = await enforcePunchConstraints({
             db,
             userId,
             orgId,
@@ -18938,6 +18953,105 @@ module.exports = {
               },
             })
             return
+          }
+
+          // ② S3 外勤审批 (#2304): when outdoor approval is ON and this punch is an outdoor candidate
+          // (outside the geofence, or an explicit meta.outdoor / meta.outdoorPunch marker), it becomes a
+          // PENDING outdoor_punch approval request — NO attendance_events / attendance_records are written
+          // until final approval. Default (requireApproval false/unset) ⇒ outdoorCandidate is false ⇒ the
+          // normal punch path below runs unchanged (and an outside-fence punch already threw LOCATION_RESTRICTED).
+          const outdoorPolicy = punchPolicySettings?.punchPolicy?.outdoor ?? {}
+          const punchMeta = parsed.data.meta ?? {}
+          const outdoorMarker = punchMeta.outdoor === true || punchMeta.outdoorPunch === true
+          if (outdoorPolicy.requireApproval === true && (outsideGeofence || outdoorMarker)) {
+            const eventType = parsed.data.eventType
+            const note = typeof punchMeta.note === 'string' ? punchMeta.note.trim() : ''
+            if (outdoorPolicy.requireNote === true && !note) {
+              res.status(422).json({ ok: false, error: { code: 'OUTDOOR_NOTE_REQUIRED', message: '外勤打卡需填写备注' } })
+              return
+            }
+            // Resolve + validate the outdoor_punch approval flow. No silent fall-back to auto-approved.
+            const requestedFlowId = typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId.trim() : ''
+            let flow = null
+            if (requestedFlowId) {
+              flow = await loadApprovalFlow(db, orgId, { flowId: requestedFlowId })
+              if (!flow || flow.requestType !== 'outdoor_punch' || flow.isActive !== true) {
+                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_APPROVAL_FLOW_REQUIRED', message: '外勤审批流不存在或未启用' } })
+                return
+              }
+            } else {
+              flow = await loadApprovalFlow(db, orgId, { requestType: 'outdoor_punch' })
+              if (!flow || flow.isActive !== true) {
+                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_APPROVAL_FLOW_REQUIRED', message: '外勤审批流未配置' } })
+                return
+              }
+            }
+
+            const draft = {
+              orgId,
+              workDate,
+              requestType: 'outdoor_punch',
+              requestedInAt: eventType === 'check_in' ? occurredAt : null,
+              requestedOutAt: eventType === 'check_out' ? occurredAt : null,
+              reason: note || null,
+              metadata: {
+                outdoorPunch: {
+                  version: 1,
+                  eventType,
+                  occurredAt: occurredAt.toISOString(),
+                  workDate,
+                  timezone,
+                  source: parsed.data.source ?? 'mobile',
+                  location: parsed.data.location ?? punchMeta.location ?? null,
+                  note: note || null,
+                  detection: outsideGeofence ? 'outside_geofence' : 'marker',
+                },
+                approvalFlow: { id: flow.id, name: flow.name, steps: flow.steps, currentStep: 0 },
+              },
+            }
+            const requestId = randomUUID()
+            const approvalId = `apv_${randomUUID()}`
+            const approvalPayload = buildAttendanceApprovalInstancePayload({
+              approvalId, requestId, orgId, userId, requesterName: getUserLabel(req, userId), draft,
+            })
+            const approvalAssignments = buildAttendanceApprovalAssignments(draft.metadata.approvalFlow.steps, 0)
+            try {
+              const request = await db.transaction(async (trx) => {
+                await acquireAttendanceRequestLock(trx, orgId, userId, workDate, 'outdoor_punch')
+                // Outdoor dedup key includes eventType (#2304 §2.2): same-day outdoor check_in + check_out
+                // can coexist; a 2nd pending/approved of the SAME eventType is the duplicate.
+                const dup = await trx.query(
+                  `SELECT id FROM attendance_requests
+                   WHERE org_id = $1 AND user_id = $2 AND work_date = $3 AND request_type = 'outdoor_punch'
+                     AND status IN ('pending', 'approved')
+                     AND metadata -> 'outdoorPunch' ->> 'eventType' = $4
+                   LIMIT 1`,
+                  [orgId, userId, workDate, eventType]
+                )
+                if (dup.length > 0) {
+                  throw new HttpError(409, 'DUPLICATE_REQUEST', 'Outdoor punch already pending or approved for this day and event type')
+                }
+                await upsertAttendanceApprovalInstance(trx, approvalPayload)
+                await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+                const rows = await trx.query(
+                  `INSERT INTO attendance_requests
+                   (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+                   RETURNING *`,
+                  [requestId, userId, orgId, workDate, 'outdoor_punch', draft.requestedInAt, draft.requestedOutAt, draft.reason, 'pending', approvalId, JSON.stringify(draft.metadata)]
+                )
+                return rows[0]
+              })
+              emitEvent('attendance.outdoorPunch.requested', { orgId, userId, workDate, eventType })
+              res.status(202).json({ ok: true, data: { pendingApproval: true, request: mapAttendanceRequestRow(request) } })
+              return
+            } catch (error) {
+              if (error instanceof HttpError) {
+                res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+                return
+              }
+              throw error
+            }
           }
 
           const result = await db.transaction(async (trx) => {
@@ -20504,35 +20618,78 @@ module.exports = {
                 overtimeMinutes: approvedMinutes.overtimeMinutes,
                 client: trx,
               })
-            }
-
-            const eventMeta = {
-              requestId,
-              requestType,
-              minutes: requestMetadata.minutes ?? null,
-              leaveType: requestMetadata.leaveType ?? null,
-              overtimeRule: requestMetadata.overtimeRule ?? null,
-              requested_in_at: requestRow.requested_in_at,
-              requested_out_at: requestRow.requested_out_at,
-            }
-
-            await trx.query(
-              `INSERT INTO attendance_events
-               (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)`,
-              [
-                randomUUID(),
-                requestRow.user_id,
+            } else if (requestType === 'outdoor_punch') {
+              // ② S3 外勤审批 (#2304): final approve materialises the deferred outdoor punch as ONE real
+              // punch event (the original eventType + occurredAt, source='outdoor_approval') and appends the
+              // record exactly like a normal punch — NOT a generic 'adjustment'. The status guard above makes
+              // re-approve a no-op, so this writes at most once.
+              const op = (requestMetadata && requestMetadata.outdoorPunch) || {}
+              const outdoorEventType = op.eventType === 'check_out' ? 'check_out' : 'check_in'
+              const outdoorOccurredAt = op.occurredAt ? new Date(op.occurredAt) : new Date(resolvedAt)
+              await trx.query(
+                `INSERT INTO attendance_events
+                 (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)`,
+                [
+                  randomUUID(),
+                  requestRow.user_id,
+                  orgId,
+                  requestRow.work_date,
+                  outdoorOccurredAt,
+                  outdoorEventType,
+                  'outdoor_approval',
+                  timezone,
+                  JSON.stringify(op.location ?? {}),
+                  JSON.stringify({ requestId, requestType: 'outdoor_punch', outdoor: true }),
+                ]
+              )
+              record = await upsertAttendanceRecord({
+                userId: requestRow.user_id,
                 orgId,
-                requestRow.work_date,
-                resolvedAt,
-                'adjustment',
-                'request',
+                workDate: requestRow.work_date,
                 timezone,
-                JSON.stringify({}),
-                JSON.stringify(eventMeta),
-              ]
-            )
+                rule: { ...context.rule, timezone },
+                updateFirstInAt: outdoorEventType === 'check_in' ? outdoorOccurredAt : null,
+                updateLastOutAt: outdoorEventType === 'check_out' ? outdoorOccurredAt : null,
+                mode: 'append',
+                isWorkday: context.isWorkingDay,
+                leaveMinutes: 0,
+                overtimeMinutes: 0,
+                client: trx,
+              })
+            }
+
+            // The generic 'adjustment' audit event covers missed/correction/leave/overtime. outdoor_punch
+            // writes its OWN real punch event above, so it must NOT also get an adjustment event.
+            if (requestType !== 'outdoor_punch') {
+              const eventMeta = {
+                requestId,
+                requestType,
+                minutes: requestMetadata.minutes ?? null,
+                leaveType: requestMetadata.leaveType ?? null,
+                overtimeRule: requestMetadata.overtimeRule ?? null,
+                requested_in_at: requestRow.requested_in_at,
+                requested_out_at: requestRow.requested_out_at,
+              }
+
+              await trx.query(
+                `INSERT INTO attendance_events
+                 (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)`,
+                [
+                  randomUUID(),
+                  requestRow.user_id,
+                  orgId,
+                  requestRow.work_date,
+                  resolvedAt,
+                  'adjustment',
+                  'request',
+                  timezone,
+                  JSON.stringify({}),
+                  JSON.stringify(eventMeta),
+                ]
+              )
+            }
           }
 
           return {

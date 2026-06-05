@@ -250,6 +250,7 @@ jobs:
             tests/integration/attendance-plugin.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
+            tests/integration/attendance-outdoor-punch.test.ts \
             --reporter=dot
 
       - name: Upload test results

@@ -286,15 +286,15 @@ paths:
                   description: Compatibility alias for workDate.
                 requestType:
                   type: string
-                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
+                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime, outdoor_punch]
                   description: Request type.
                 request_type:
                   type: string
-                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
+                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime, outdoor_punch]
                   description: Compatibility snake_case alias for requestType.
                 type:
                   type: string
-                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
+                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime, outdoor_punch]
                   description: Compatibility alias for requestType.
                 requestedInAt:
                   type: string
@@ -530,10 +530,10 @@ paths:
                   format: date
                 requestType:
                   type: string
-                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
+                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime, outdoor_punch]
                 type:
                   type: string
-                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
+                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime, outdoor_punch]
                 requestedInAt:
                   type: string
                   format: date-time
