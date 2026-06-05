@@ -114,12 +114,14 @@ describe('Attendance admin regressions', () => {
   let attendanceSettingsData: Record<string, unknown> | null = null
   let attendanceSettingsFail = false
   let attendanceSettingsSaveData: Record<string, unknown> | null = null
+  let attendanceApprovalFlowsData: unknown[] | null = null
 
   beforeEach(() => {
     vi.clearAllMocks()
     attendanceSettingsData = null
     attendanceSettingsFail = false
     attendanceSettingsSaveData = null
+    attendanceApprovalFlowsData = null
     exportReportFieldFingerprint = 'records-unit-test-fingerprint'
     exportReportFieldCodes = 'work_date,employee_name'
     exportReportFieldCount = '2'
@@ -593,6 +595,12 @@ describe('Attendance admin regressions', () => {
           return jsonResponse(500, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'settings unavailable' } })
         }
         return jsonResponse(200, { ok: true, data: attendanceSettingsData ?? {} })
+      }
+      if (url.includes('/api/attendance/approval-flows')
+        && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'GET') {
+        // Default [] keeps existing behaviour (loadApprovalFlows reads data.data.items || []); the outdoor
+        // flow-select test seeds this to assert the active-outdoor_punch filter.
+        return jsonResponse(200, { ok: true, data: { items: attendanceApprovalFlowsData ?? [] } })
       }
       if (url.includes('/api/attendance/scheduler-scopes')) {
         return jsonResponse(200, {
@@ -2065,6 +2073,114 @@ describe('Attendance admin regressions', () => {
         weeklyMaxMinutes: 1200,
         monthlyMaxMinutes: null,
       },
+    })
+  })
+
+  // ② S3-2 外勤打卡审批 (outdoor approval) admin config card.
+  const lastSettingsPutBody = (): unknown => {
+    const puts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(puts).toHaveLength(1)
+    return JSON.parse(String((puts[0][1] as { body?: string } | undefined)?.body || '{}'))
+  }
+
+  it('loads punchPolicy.outdoor into the card and PUTs ONLY { punchPolicy: { outdoor } } (flow id round-trips)', async () => {
+    attendanceSettingsData = {
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: true, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const requireApproval = container!.querySelector<HTMLInputElement>('[data-outdoor="require-approval"]')
+    const requireNote = container!.querySelector<HTMLInputElement>('[data-outdoor="require-note"]')
+    const flow = container!.querySelector<HTMLSelectElement>('[data-outdoor="approval-flow"]')
+    expect(Boolean(requireApproval && requireNote && flow)).toBe(true)
+    // load: booleans → checkboxes; the saved flow id round-trips via the preserve-option even when it is not
+    // in the active-flow list (so a previously-saved flow is never silently reset to '').
+    expect(requireApproval!.checked).toBe(true)
+    expect(requireNote!.checked).toBe(true)
+    expect(flow!.value).toBe('flow-out-7')
+
+    const saveButton = container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')
+    expect(saveButton).toBeTruthy()
+    saveButton!.click()
+    await flushUi(6)
+
+    // EXACTLY { punchPolicy: { outdoor: { requireApproval, requireNote, approvalFlowId } } }: no requirePhoto,
+    // no orgId, no sibling settings. toEqual (not toMatchObject) so any leak fails.
+    expect(lastSettingsPutBody()).toEqual({
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: true, approvalFlowId: 'flow-out-7' } },
+    })
+  })
+
+  it('enabling outdoor approval from off PUTs requireApproval/requireNote=true + auto (empty) flow', async () => {
+    attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '' } } }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const requireApproval = container!.querySelector<HTMLInputElement>('[data-outdoor="require-approval"]')
+    const requireNote = container!.querySelector<HTMLInputElement>('[data-outdoor="require-note"]')
+    expect(requireApproval!.checked).toBe(false)
+    requireApproval!.checked = true
+    requireApproval!.dispatchEvent(new Event('change'))
+    requireNote!.checked = true
+    requireNote!.dispatchEvent(new Event('change'))
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')!.click()
+    await flushUi(6)
+
+    expect(lastSettingsPutBody()).toEqual({
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: true, approvalFlowId: '' } },
+    })
+  })
+
+  it('disabling requireApproval PUTs requireApproval=false (default-off, no regression)', async () => {
+    attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: true, requireNote: false, approvalFlowId: '' } } }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const requireApproval = container!.querySelector<HTMLInputElement>('[data-outdoor="require-approval"]')
+    expect(requireApproval!.checked).toBe(true)
+    requireApproval!.checked = false
+    requireApproval!.dispatchEvent(new Event('change'))
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')!.click()
+    await flushUi(6)
+
+    expect(lastSettingsPutBody()).toEqual({
+      punchPolicy: { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '' } },
+    })
+  })
+
+  it('the approval-flow select lists ONLY active outdoor_punch flows and saves the chosen id', async () => {
+    attendanceApprovalFlowsData = [
+      { id: 'flow-out-active', name: 'Outdoor Active', requestType: 'outdoor_punch', isActive: true, steps: [] },
+      { id: 'flow-out-inactive', name: 'Outdoor Inactive', requestType: 'outdoor_punch', isActive: false, steps: [] },
+      { id: 'flow-leave', name: 'Leave Flow', requestType: 'leave', isActive: true, steps: [] },
+    ]
+    attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: true, requireNote: false, approvalFlowId: '' } } }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const flow = container!.querySelector<HTMLSelectElement>('[data-outdoor="approval-flow"]')
+    expect(flow).toBeTruthy()
+    // The select offers '' (auto) + ONLY the active outdoor_punch flow — the inactive outdoor flow and the
+    // non-outdoor (leave) flow are filtered out by outdoorApprovalFlowOptions.
+    expect(Array.from(flow!.querySelectorAll('option')).map((o) => o.value)).toEqual(['', 'flow-out-active'])
+
+    // Choose the active outdoor flow and save → the chosen id is in the PUT body.
+    flow!.value = 'flow-out-active'
+    flow!.dispatchEvent(new Event('change'))
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')!.click()
+    await flushUi(6)
+    expect(lastSettingsPutBody()).toEqual({
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: false, approvalFlowId: 'flow-out-active' } },
     })
   })
 
