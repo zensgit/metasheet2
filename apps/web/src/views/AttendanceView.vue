@@ -2040,6 +2040,57 @@
                   {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save shift compliance', '保存排班合规') }}
                 </button>
               </div>
+
+              <div class="attendance__admin-subsection" data-admin-card="outdoor-approval">
+                <h4>{{ tr('Outdoor punch approval', '外勤打卡审批') }}</h4>
+                <p class="attendance__field-hint">
+                  {{ tr('When enabled, a punch outside the geofence (or marked as outdoor) needs approval before it counts as attendance. Default off = no change to punching.', '开启后，围栏外（或标记为外勤）的打卡需审批通过后才计入考勤。默认关闭＝不改变打卡行为。') }}
+                </p>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-outdoor-require-approval">
+                  <span>{{ tr('Require approval for outdoor punches', '外勤打卡需审批') }}</span>
+                  <input
+                    id="attendance-outdoor-require-approval"
+                    v-model="outdoorForm.requireApproval"
+                    type="checkbox"
+                    data-outdoor="require-approval"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-outdoor-require-note">
+                  <span>{{ tr('Require a note on the outdoor punch', '外勤打卡需填写备注') }}</span>
+                  <input
+                    id="attendance-outdoor-require-note"
+                    v-model="outdoorForm.requireNote"
+                    type="checkbox"
+                    data-outdoor="require-note"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-outdoor-flow">
+                  <span>{{ tr('Approval flow', '审批流程') }}</span>
+                  <select
+                    id="attendance-outdoor-flow"
+                    v-model="outdoorForm.approvalFlowId"
+                    data-outdoor="approval-flow"
+                  >
+                    <option value="">{{ tr('Auto — use the single active outdoor flow', '自动——使用唯一启用的外勤审批流') }}</option>
+                    <option v-for="flow in outdoorApprovalFlowOptions" :key="flow.id" :value="flow.id">{{ flow.name }}</option>
+                    <option
+                      v-if="outdoorForm.approvalFlowId && !outdoorApprovalFlowOptions.some((f) => f.id === outdoorForm.approvalFlowId)"
+                      :value="outdoorForm.approvalFlowId"
+                    >{{ outdoorForm.approvalFlowId }}</option>
+                  </select>
+                </label>
+                <p v-if="outdoorApprovalFlowOptions.length === 0" class="attendance__field-hint">
+                  {{ tr('No active outdoor approval flow yet — create one under Approval Flows with request type outdoor_punch.', '尚无启用的外勤审批流——请在「审批流」中以请求类型 outdoor_punch 创建。') }}
+                </p>
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="settingsLoading"
+                  data-outdoor="save"
+                  @click="saveOutdoorApproval"
+                >
+                  {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save outdoor approval', '保存外勤审批') }}
+                </button>
+              </div>
             </div>
 
             <div
@@ -7246,6 +7297,16 @@ interface AttendanceSettings {
     weeklyMaxMinutes?: number | null
     monthlyMaxMinutes?: number | null
   }
+  // ② S3 punch-policy outdoor approval (backend #2308). Frontend type only — the admin card reads/writes
+  // these via PUT { punchPolicy: { outdoor: ... } }. requirePhoto stays latent (no UI in S3-2).
+  punchPolicy?: {
+    outdoor?: {
+      requireApproval?: boolean
+      requireNote?: boolean
+      requirePhoto?: boolean
+      approvalFlowId?: string
+    }
+  }
 }
 
 interface HolidayPolicyOverride {
@@ -11004,6 +11065,19 @@ const shiftComplianceForm = reactive({
   weeklyMaxMinutes: '',
   monthlyMaxMinutes: '',
 })
+
+// ② S3-2 外勤打卡审批 (outdoor approval) config card. Mirrors shiftComplianceForm: saved via
+// saveOutdoorApproval, which PUTs ONLY { punchPolicy: { outdoor: ... } } so the backend per-key merge
+// leaves unscheduled / merge / the latent requirePhoto untouched. requireApproval=false ⇒ no regression.
+const outdoorForm = reactive({
+  requireApproval: false,
+  requireNote: false,
+  approvalFlowId: '',
+})
+// Real data source for the flow picker: the org's ACTIVE outdoor_punch approval flows (no fake picker).
+const outdoorApprovalFlowOptions = computed(() =>
+  approvalFlows.value.filter((flow) => flow.requestType === 'outdoor_punch' && flow.isActive),
+)
 
 const calendarPolicyOverrideDiagnostics = computed(() => buildCalendarPolicyOverrideDiagnostics(settingsForm.calendarPolicyOverrides))
 const calendarPolicyPreviewDraftOverrides = computed(() => calendarPolicyOverridesFromForm(settingsForm.calendarPolicyOverrides))
@@ -16320,6 +16394,7 @@ async function loadSettings() {
     attendanceSettings.value = (data.data as AttendanceSettings | null) ?? null
     applySettingsToForm(data.data || {})
     applyShiftComplianceToForm(data.data || {})
+    applyOutdoorToForm(data.data || {})
   } catch (error: any) {
     attendanceSettings.value = null
     setStatusFromError(error, tr('Failed to load settings', '加载设置失败'), 'admin')
@@ -16336,6 +16411,13 @@ function applyShiftComplianceToForm(settings: AttendanceSettings) {
   shiftComplianceForm.dailyMaxMinutes = capStr(sc.dailyMaxMinutes)
   shiftComplianceForm.weeklyMaxMinutes = capStr(sc.weeklyMaxMinutes)
   shiftComplianceForm.monthlyMaxMinutes = capStr(sc.monthlyMaxMinutes)
+}
+
+function applyOutdoorToForm(settings: AttendanceSettings) {
+  const outdoor = settings.punchPolicy?.outdoor || {}
+  outdoorForm.requireApproval = outdoor.requireApproval === true
+  outdoorForm.requireNote = outdoor.requireNote === true
+  outdoorForm.approvalFlowId = typeof outdoor.approvalFlowId === 'string' ? outdoor.approvalFlowId : ''
 }
 
 async function saveShiftCompliance() {
@@ -16375,6 +16457,42 @@ async function saveShiftCompliance() {
     setStatus(tr('Shift compliance updated.', '排班合规已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save shift compliance', '保存排班合规失败'), 'save-settings')
+  } finally {
+    settingsLoading.value = false
+  }
+}
+
+async function saveOutdoorApproval() {
+  settingsLoading.value = true
+  try {
+    // PUT ONLY punchPolicy.outdoor — the backend 2-level merge preserves unscheduled / merge siblings and
+    // the latent requirePhoto (not sent here). requireApproval=false ⇒ no change to existing punching.
+    const payload = {
+      punchPolicy: {
+        outdoor: {
+          requireApproval: outdoorForm.requireApproval === true,
+          requireNote: outdoorForm.requireNote === true,
+          approvalFlowId: String(outdoorForm.approvalFlowId || '').trim(),
+        },
+      },
+    }
+    const response = await apiFetchWithTimeout('/api/attendance/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw createForbiddenError()
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to save outdoor approval', '保存外勤审批失败'))
+    }
+    adminForbidden.value = false
+    applyOutdoorToForm((data.data || payload) as AttendanceSettings)
+    setStatus(tr('Outdoor approval updated.', '外勤审批已更新。'))
+  } catch (error: any) {
+    setStatusFromError(error, tr('Failed to save outdoor approval', '保存外勤审批失败'), 'save-settings')
   } finally {
     settingsLoading.value = false
   }
