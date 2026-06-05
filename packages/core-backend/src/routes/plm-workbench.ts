@@ -26,6 +26,8 @@ import {
 } from '../plm/plmWorkbenchTeamViews'
 import { loadValidators } from '../types/validator'
 import { parsePagination } from '../util/response'
+import { getDataSourceManager } from './data-sources'
+import type { IntegrationCapabilitiesResult } from '../data-adapters/PLMAdapter'
 
 // Typed wrapper for temporary tables not yet in main Database interface
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -725,6 +727,58 @@ async function mapHydratedPlmTeamPresetRow(
   const [mapped] = await mapHydratedPlmTeamPresetRows([row], currentUserId)
   return mapped
 }
+
+// PLM-COLLAB Phase 2.5 C2: relay the C1 advisory capability manifest to the front end.
+// Duck-typed guard rather than `instanceof PLMAdapter` -- instanceof is brittle across
+// module instances / test mocks; we only need the one method C2 calls.
+interface PlmCapabilityAdapter {
+  getIntegrationCapabilities(): Promise<IntegrationCapabilitiesResult>
+}
+
+function isPlmCapabilityAdapter(adapter: unknown): adapter is PlmCapabilityAdapter {
+  return (
+    typeof (adapter as PlmCapabilityAdapter | null)?.getIntegrationCapabilities === 'function'
+  )
+}
+
+// GET /api/plm-workbench/data-sources/:id/capabilities -- ADVISORY-ONLY passthrough of the
+// PLM adapter's integration capability manifest for UI degradation. No entitlement/role
+// judgement, no license read; it just relays the C1 result. Missing data source -> 404;
+// a non-PLM data source -> unsupported-mode (it simply does not speak the PLM handshake).
+router.get(
+  '/api/plm-workbench/data-sources/:id/capabilities',
+  authenticate,
+  param('id').isString(),
+  validate,
+  async (req: Request, res: Response) => {
+    const dataSourceId = req.params.id
+    let adapter: unknown
+    try {
+      adapter = getDataSourceManager().getDataSource(dataSourceId)
+    } catch {
+      // getDataSource throws a not-found error for an unknown id.
+      return res
+        .status(404)
+        .json({ error: 'Data source not found', data_source_id: dataSourceId })
+    }
+    if (!isPlmCapabilityAdapter(adapter)) {
+      return res.json({
+        data_source_id: dataSourceId,
+        available: false,
+        reason: 'unsupported-mode',
+      })
+    }
+    let result: IntegrationCapabilitiesResult
+    try {
+      result = await adapter.getIntegrationCapabilities()
+    } catch {
+      // C1's PLMAdapter promises never-throw, but the guard here is duck-typed -- if some
+      // adapter/mock does throw, keep this advisory route from 500ing and degrade instead.
+      return res.json({ data_source_id: dataSourceId, available: false, reason: 'unavailable' })
+    }
+    return res.json({ data_source_id: dataSourceId, ...result })
+  },
+)
 
 router.get(
   '/api/plm-workbench/audit-logs',
