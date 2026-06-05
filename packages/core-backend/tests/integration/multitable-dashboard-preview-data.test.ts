@@ -23,6 +23,7 @@ const FLD_AMOUNT = `fld_biv2b2_amount_${TS}`
 const FLD_DATE = `fld_biv2b2_date_${TS}`
 const FLD_SECRET = `fld_biv2b2_secret_${TS}`
 const CHART_PARITY_ID = `chart_biv2b2_parity_${TS}`
+const CHART_STACKED_ID = `chart_biv2b2_stacked_${TS}` // v2-d: persisted stacked chart for preview parity
 const USER_ID = `u_biv2b2_reader_${TS}`
 const USER_DENIED = `u_biv2b2_denied_${TS}`
 
@@ -82,6 +83,19 @@ describeIfDatabase('Dashboard BI v2-b2 preview-data endpoint (real DB)', () => {
         SHEET_ID,
         asJson({ groupByFieldId: FLD_STATUS, aggregation: { function: 'sum', fieldId: FLD_AMOUNT } }),
         asJson({ title: 'Persisted parity chart' }),
+        USER_ID,
+      ],
+    )
+    await q(
+      `INSERT INTO multitable_charts (id, name, type, sheet_id, data_source, display, created_by)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7)`,
+      [
+        CHART_STACKED_ID,
+        'Persisted stacked chart',
+        'bar',
+        SHEET_ID,
+        asJson({ groupByFieldId: FLD_STATUS, seriesByFieldId: FLD_SECRET, aggregation: { function: 'sum', fieldId: FLD_AMOUNT } }),
+        asJson({ title: 'Persisted stacked chart' }),
         USER_ID,
       ],
     )
@@ -189,5 +203,46 @@ describeIfDatabase('Dashboard BI v2-b2 preview-data endpoint (real DB)', () => {
     })
     expect(date.status).toBe(400)
     expect(JSON.stringify(date.body)).toContain('date grouping')
+  })
+
+  test('P5 (v2-d): stacked preview emits dense aligned series and matches persisted stacked-chart data', async () => {
+    const persisted = await request(app).get(`/api/multitable/sheets/${SHEET_ID}/charts/${CHART_STACKED_ID}/data`)
+    expect(persisted.status).toBe(200)
+    expect(persisted.body.series).toBeDefined()
+
+    const res = await preview({
+      name: 'Unsaved stacked',
+      type: 'bar',
+      dataSource: { groupByFieldId: FLD_STATUS, seriesByFieldId: FLD_SECRET, aggregation: { function: 'sum', fieldId: FLD_AMOUNT } },
+      display: { title: 'Persisted stacked chart' },
+    })
+    expect(res.status).toBe(200)
+    // preview === saved (same engine + gate)
+    expect(normalizeChartData(res.body)).toEqual(normalizeChartData(persisted.body))
+    // dense + aligned + additive consistency (Σ segments === single-series bar)
+    const body = res.body
+    for (const s of body.series) expect(s.data).toHaveLength(body.dataPoints.length)
+    body.dataPoints.forEach((dp: { value: number }, j: number) => {
+      const col = body.series.reduce((acc: number, s: { data: number[] }) => acc + s.data[j], 0)
+      expect(col).toBe(dp.value)
+    })
+  })
+
+  test('P6 (v2-d): non-additive or non-bar series config is rejected with 400 (server-side, not UI-only)', async () => {
+    const avg = await preview({
+      name: 'avg stacked',
+      type: 'bar',
+      dataSource: { groupByFieldId: FLD_STATUS, seriesByFieldId: FLD_SECRET, aggregation: { function: 'avg', fieldId: FLD_AMOUNT } },
+    })
+    expect(avg.status).toBe(400)
+    expect(JSON.stringify(avg.body)).toContain('sum or count')
+
+    const line = await preview({
+      name: 'line stacked',
+      type: 'line',
+      dataSource: { groupByFieldId: FLD_STATUS, seriesByFieldId: FLD_SECRET, aggregation: { function: 'count' } },
+    })
+    expect(line.status).toBe(400)
+    expect(JSON.stringify(line.body)).toContain('bar charts')
   })
 })

@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { ChartAggregationService } from '../../src/multitable/chart-aggregation-service'
 import type { ChartData } from '../../src/multitable/chart-aggregation-service'
 import type { ChartConfig, ChartCreateInput } from '../../src/multitable/charts'
+import { assertSeriesConstraints } from '../../src/multitable/charts'
 
 // ── DB mock ──────────────────────────────────────────────────────────────────
 
@@ -787,5 +788,162 @@ describe('DashboardService', () => {
       expect(data.dataPoints[0].label).toBe('A')
       expect(data.dataPoints[0].value).toBe(60)
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// v2-d — stacked-bar series split (seriesByFieldId)
+// ---------------------------------------------------------------------------
+
+describe('ChartAggregationService — v2-d stacked series', () => {
+  let service: ChartAggregationService
+  beforeEach(() => {
+    service = new ChartAggregationService()
+  })
+
+  // status × category over sampleRecords:
+  //   open  → A:[10,50], B:[20]   closed → A:[30], B:[40]
+  const stackedChart = (overrides: Partial<ChartConfig['dataSource']> = {}, type: ChartConfig['type'] = 'bar') =>
+    makeChart({
+      type,
+      dataSource: {
+        groupByFieldId: 'status',
+        seriesByFieldId: 'category',
+        aggregation: { function: 'count' },
+        ...overrides,
+      },
+    })
+
+  it('count: emits one series per seriesBy value, dense and positionally aligned to dataPoints', async () => {
+    const result = await service.computeChartData(stackedChart(), sampleRecords)
+    // dataPoints unchanged = single-dimension groupBy count
+    expect(result.dataPoints).toEqual([
+      { label: 'open', value: 3 },
+      { label: 'closed', value: 2 },
+    ])
+    expect(result.series).toBeDefined()
+    expect(result.series!.map((s) => s.name)).toEqual(['A', 'B'])
+    // aligned to [open, closed]
+    expect(result.series!.find((s) => s.name === 'A')!.data).toEqual([2, 1])
+    expect(result.series!.find((s) => s.name === 'B')!.data).toEqual([1, 1])
+    // dense: every series spans every category
+    for (const s of result.series!) expect(s.data).toHaveLength(result.dataPoints.length)
+    expect(result.metadata?.seriesByField).toBe('category')
+  })
+
+  it('additive consistency: Σ series[*].data[j] === dataPoints[j].value (sum)', async () => {
+    const result = await service.computeChartData(
+      stackedChart({ aggregation: { function: 'sum', fieldId: 'amount' } }),
+      sampleRecords,
+    )
+    expect(result.dataPoints).toEqual([
+      { label: 'open', value: 80 },
+      { label: 'closed', value: 70 },
+    ])
+    result.dataPoints.forEach((dp, j) => {
+      const colSum = result.series!.reduce((acc, s) => acc + s.data[j], 0)
+      expect(colSum).toBe(dp.value) // stack height == single-series bar
+    })
+  })
+
+  it('dense 0-fill: a series absent in a category contributes 0, not a gap', async () => {
+    const records = makeRecords([
+      { status: 'open', category: 'A' },
+      { status: 'open', category: 'C' }, // C only in "open"
+      { status: 'closed', category: 'A' },
+    ])
+    const result = await service.computeChartData(stackedChart(), records)
+    expect(result.dataPoints.map((d) => d.label)).toEqual(['open', 'closed'])
+    const c = result.series!.find((s) => s.name === 'C')!
+    expect(c.data).toEqual([1, 0]) // present in open, 0 in closed (not undefined / missing)
+  })
+
+  it('series is built AFTER limit — only surviving categories, aligned', async () => {
+    const records = makeRecords([
+      { status: 'open', category: 'A' },
+      { status: 'open', category: 'A' },
+      { status: 'closed', category: 'B' },
+      { status: 'pending', category: 'A' },
+    ])
+    // sort by value desc + limit 1 → only "open" (value 2) survives
+    const result = await service.computeChartData(
+      stackedChart({ sortBy: 'value', sortOrder: 'desc', limit: 1 }),
+      records,
+    )
+    expect(result.dataPoints).toHaveLength(1)
+    expect(result.dataPoints[0].label).toBe('open')
+    for (const s of result.series!) expect(s.data).toHaveLength(1)
+  })
+
+  it('inert: non-additive aggregation (avg) omits series, dataPoints still computed', async () => {
+    const result = await service.computeChartData(
+      stackedChart({ aggregation: { function: 'avg', fieldId: 'amount' } }),
+      sampleRecords,
+    )
+    expect(result.series).toBeUndefined()
+    expect(result.metadata?.seriesByField).toBeUndefined()
+    expect(result.dataPoints.find((d) => d.label === 'open')?.value).toBe(80 / 3)
+  })
+
+  it('inert: seriesByFieldId on a non-bar chart omits series', async () => {
+    for (const type of ['line', 'pie'] as const) {
+      const result = await service.computeChartData(stackedChart({}, type), sampleRecords)
+      expect(result.series).toBeUndefined()
+    }
+  })
+
+  it('inert: no series without a primary groupByFieldId (date-grouped or ungrouped)', async () => {
+    const dateGrouped = await service.computeChartData(
+      makeChart({
+        type: 'bar',
+        dataSource: {
+          dateFieldId: 'date',
+          dateGrouping: 'month',
+          seriesByFieldId: 'category',
+          aggregation: { function: 'count' },
+        },
+      }),
+      sampleRecords,
+    )
+    expect(dateGrouped.series).toBeUndefined()
+  })
+
+  it('absent seriesByFieldId ⇒ byte-identical to today (no series key)', async () => {
+    const result = await service.computeChartData(makeChart(), sampleRecords)
+    expect('series' in result).toBe(false)
+  })
+})
+
+describe('assertSeriesConstraints (v2-d input validation)', () => {
+  const ds = (over: Partial<ChartConfig['dataSource']> = {}): ChartConfig['dataSource'] => ({
+    groupByFieldId: 'g',
+    seriesByFieldId: 's',
+    aggregation: { function: 'sum', fieldId: 'amt' },
+    ...over,
+  })
+
+  it('no-op when seriesByFieldId unset', () => {
+    expect(() => assertSeriesConstraints({ groupByFieldId: 'g', aggregation: { function: 'avg' } }, 'line')).not.toThrow()
+    expect(() => assertSeriesConstraints(undefined, 'bar')).not.toThrow()
+  })
+
+  it('passes for bar + groupBy + sum/count', () => {
+    expect(() => assertSeriesConstraints(ds(), 'bar')).not.toThrow()
+    expect(() => assertSeriesConstraints(ds({ aggregation: { function: 'count' } }), 'bar')).not.toThrow()
+  })
+
+  it('throws for a non-bar chart', () => {
+    expect(() => assertSeriesConstraints(ds(), 'line')).toThrow(/bar charts/)
+    expect(() => assertSeriesConstraints(ds(), 'pie')).toThrow(/bar charts/)
+  })
+
+  it('throws without a primary groupByFieldId', () => {
+    expect(() => assertSeriesConstraints(ds({ groupByFieldId: undefined }), 'bar')).toThrow(/groupByFieldId/)
+  })
+
+  it('throws for a non-additive aggregation (avg/min/max/count_distinct)', () => {
+    for (const fn of ['avg', 'min', 'max', 'count_distinct'] as const) {
+      expect(() => assertSeriesConstraints(ds({ aggregation: { function: fn, fieldId: 'amt' } }), 'bar')).toThrow(/sum or count/)
+    }
   })
 })

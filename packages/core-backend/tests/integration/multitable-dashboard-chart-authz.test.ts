@@ -30,6 +30,7 @@ const FLD_VISIBLE = `fld_f0b_visible_${TS}`
 const FLD_SECRET = `fld_f0b_secret_${TS}`
 const CHART_ID = `chart_f0b_visible_${TS}`
 const CHART_SECRET_ID = `chart_f0b_secret_${TS}`
+const CHART_SERIES_SECRET_ID = `chart_f0b_series_secret_${TS}` // v2-d: seriesByFieldId points at the denied field
 const DASHBOARD_ID = `dash_f0b_${TS}`
 const USER_ID = `u_f0b_reader_${TS}`
 const USER_ID_DENIED = `u_f0b_denied_${TS}`
@@ -103,6 +104,12 @@ describeIfDatabase('F0b dashboard/chart authz + chart-data mask (real DB)', () =
     await insertChart(CHART_ID)
     await insertChart(CHART_SECRET_ID, {
       groupByFieldId: FLD_SECRET,
+      aggregation: { function: 'count' },
+    })
+    // v2-d: a stacked chart whose SERIES field is the denied one (primary groupBy is visible).
+    await insertChart(CHART_SERIES_SECRET_ID, {
+      groupByFieldId: FLD_VISIBLE,
+      seriesByFieldId: FLD_SECRET,
       aggregation: { function: 'count' },
     })
     await insertDashboard(DASHBOARD_ID)
@@ -258,6 +265,31 @@ describeIfDatabase('F0b dashboard/chart authz + chart-data mask (real DB)', () =
         recordCount: 0,
       },
     })
+    expect(JSON.stringify(denied.body)).not.toContain(SECRET_CANARY)
+  })
+
+  test('R9 (v2-d): a denied seriesByFieldId restricts chart data — the field values do not leak as series names', async () => {
+    // groupBy = visible bucket, seriesBy = the SECRET field → series names would be the secret values.
+    getDashboardService().setRecordProvider(async (sheetId: string) => {
+      if (sheetId !== SHEET_ID) return []
+      return [{ data: { [FLD_VISIBLE]: 'visible bucket', [FLD_SECRET]: SECRET_CANARY } }]
+    })
+
+    // Allowed reader: series IS computed → the secret value surfaces as a series name (proves the leak vector).
+    testUserId = USER_ID
+    testPerms = ['multitable:read']
+    const allowed = await chartData(CHART_SERIES_SECRET_ID)
+    expect(allowed.status).toBe(200)
+    expect(allowed.body.series?.some((s: { name?: string }) => s.name === SECRET_CANARY)).toBe(true)
+    expect(JSON.stringify(allowed.body)).toContain(SECRET_CANARY)
+
+    // Denied reader: restricted, no series, no leak.
+    testUserId = USER_ID_DENIED
+    testPerms = ['multitable:read']
+    const denied = await chartData(CHART_SERIES_SECRET_ID)
+    expect(denied.status).toBe(200)
+    expect(denied.body).toMatchObject({ chartId: CHART_SERIES_SECRET_ID, dataPoints: [], total: 0, metadata: { restricted: true } })
+    expect(denied.body.series).toBeUndefined()
     expect(JSON.stringify(denied.body)).not.toContain(SECRET_CANARY)
   })
 })

@@ -7,6 +7,7 @@
  */
 
 import type { ChartConfig, ChartType, AggregationFunction } from './charts'
+import { ADDITIVE_AGGREGATIONS } from './charts'
 
 export interface ChartDataPoint {
   label: string
@@ -14,13 +15,26 @@ export interface ChartDataPoint {
   color?: string
 }
 
+/**
+ * v2-d stacked-bar series. `data` is dense and aligned POSITIONALLY to `ChartData.dataPoints`
+ * (same length, same order; `0` where a (category × series) cell has no rows). Present only for
+ * a bar chart with `seriesByFieldId` + a primary `groupByFieldId` + an additive aggregation.
+ */
+export interface ChartSeries {
+  name: string
+  data: number[]
+}
+
 export interface ChartData {
   chartId: string
   chartType: ChartType
   dataPoints: ChartDataPoint[]
+  /** v2-d: stacked series split. `dataPoints`/`total` are unchanged by its presence. */
+  series?: ChartSeries[]
   total?: number
   metadata?: {
     groupByField?: string
+    seriesByField?: string
     aggregationFunction?: string
     recordCount?: number
     restricted?: boolean
@@ -132,13 +146,47 @@ export class ChartAggregationService {
 
     const total = dataPoints.reduce((sum, dp) => sum + dp.value, 0)
 
+    // v2-d: stacked-bar series split. Built AFTER sort+limit, so it only covers the surviving
+    // categories in their final order (building before limit would leak limited-out categories).
+    // Additive-only (sum/count) + bar + groupBy-primary (no date axis) — the producer is the uniform
+    // safety net mirroring `assertSeriesConstraints`; any other combination omits `series`, so a
+    // misleading stack can never be produced even from a hand-crafted/persisted bad config.
+    const seriesByFieldId = chart.dataSource.seriesByFieldId
+    const dateGrouped = !!(chart.dataSource.dateFieldId && chart.dataSource.dateGrouping)
+    let series: ChartSeries[] | undefined
+    if (
+      chart.type === 'bar' &&
+      seriesByFieldId &&
+      chart.dataSource.groupByFieldId &&
+      !dateGrouped &&
+      ADDITIVE_AGGREGATIONS.has(aggFn)
+    ) {
+      const seriesNames: string[] = []
+      const byName = new Map<string, number[]>() // series name -> data[] aligned to dataPoints
+      dataPoints.forEach((dp, ci) => {
+        const subGroups = this.groupRecords(groups.get(dp.label) ?? [], seriesByFieldId)
+        for (const [name, subRecords] of subGroups) {
+          let arr = byName.get(name)
+          if (!arr) {
+            arr = new Array(dataPoints.length).fill(0)
+            byName.set(name, arr)
+            seriesNames.push(name)
+          }
+          arr[ci] = this.aggregate(subRecords.map((r) => r.data[aggFieldId ?? '']), aggFn)
+        }
+      })
+      series = seriesNames.map((name) => ({ name, data: byName.get(name) as number[] }))
+    }
+
     return {
       chartId: chart.id,
       chartType: chart.type,
       dataPoints,
+      ...(series ? { series } : {}),
       total,
       metadata: {
         groupByField: chart.dataSource.groupByFieldId ?? chart.dataSource.dateFieldId,
+        ...(series ? { seriesByField: seriesByFieldId } : {}),
         aggregationFunction: aggFn,
         recordCount: filtered.length,
       },

@@ -31,6 +31,7 @@ import { randomUUID } from 'crypto'
 import { poolManager } from '../integration/db/connection-pool'
 import type { MultitableCapabilities } from '../multitable/access'
 import type { AggregationFunction, ChartConfig, ChartCreateInput, ChartType } from '../multitable/charts'
+import { assertSeriesConstraints } from '../multitable/charts'
 import type { ChartData } from '../multitable/chart-aggregation-service'
 import { DashboardService } from '../multitable/dashboard-service'
 import type { MultitableField } from '../multitable/field-codecs'
@@ -150,6 +151,7 @@ function chartReferencedFieldIds(chart: ChartConfig): string[] {
   const ids = [
     source.aggregation.fieldId,
     source.groupByFieldId,
+    source.seriesByFieldId, // v2-d: a denied series field must restrict, not leak its values as series names
     source.dateFieldId,
     source.filterFieldId,
   ]
@@ -212,6 +214,7 @@ function buildPreviewChart(sheetId: string, userId: string, body: unknown): Char
   if (AGGREGATIONS_REQUIRING_FIELD.has(aggregationFunction as AggregationFunction) && !readString(aggregation.fieldId)) {
     throw new Error('value field is required for this aggregation')
   }
+  assertSeriesConstraints(source as ChartConfig['dataSource'], chartType as ChartType)
   const now = new Date().toISOString()
   return {
     id: `chart_preview_${randomUUID()}`,
@@ -250,6 +253,8 @@ export function dashboardRouter() {
     try {
       const auth = await requireSheetManageViews(req, res, req.params.sheetId)
       if (!auth) return
+      // v2-d: validate series constraints on the persisted path too — the UI is never the sole guard.
+      assertSeriesConstraints(req.body?.dataSource as ChartConfig['dataSource'] | undefined, req.body?.type as ChartType)
       const chart = await dashboardService.createChart(req.params.sheetId, {
         ...req.body,
         createdBy: auth.userId,
@@ -309,6 +314,12 @@ export function dashboardRouter() {
         res.status(404).json({ error: 'Chart not found' })
         return
       }
+      // v2-d: validate the EFFECTIVE config (updateChart shallow-merges `{...existing,...input}`),
+      // so a patch that introduces a series field or changes type/aggregation is checked.
+      assertSeriesConstraints(
+        (req.body?.dataSource ?? chart.dataSource) as ChartConfig['dataSource'],
+        (req.body?.type ?? chart.type) as ChartType,
+      )
       const updated = await dashboardService.updateChart(req.params.id, req.body)
       res.json(updated)
     } catch (err: unknown) {
