@@ -927,6 +927,9 @@ export interface ChartAggregation {
 export interface ChartDataSource {
   sheetId: string
   groupByFieldId?: string
+  // v2-d: split each groupBy category into stacked series. Honored only for a bar chart with a
+  // primary groupByFieldId + an additive aggregation (sum/count); inert/rejected otherwise.
+  seriesByFieldId?: string
   dateFieldId?: string
   dateGrouping?: 'day' | 'week' | 'month' | 'quarter' | 'year'
   aggregation: ChartAggregation
@@ -969,9 +972,17 @@ export interface ChartDataPoint {
   color?: string
 }
 
+// v2-d: stacked-bar series. `data` is dense + aligned positionally to ChartData.dataPoints.
+export interface ChartSeries {
+  name: string
+  data: number[]
+}
+
 export interface ChartData {
   chartType: ChartType
   dataPoints: ChartDataPoint[]
+  // v2-d: present for a stacked bar chart; dataPoints/total are unaffected by its presence.
+  series?: ChartSeries[]
   total?: number
   metadata?: Record<string, unknown>
 }

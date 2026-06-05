@@ -101,6 +101,9 @@ export type MetaViewRenderLabelKey =
   | 'dashboard.variantStandard'
   | 'dashboard.variantDonut'
   | 'dashboard.variantArea'
+  | 'dashboard.seriesBy'
+  | 'dashboard.seriesByNone'
+  | 'dashboard.seriesByHint'
   | 'dashboard.noNumericFields'
   | 'dashboard.livePreview'
   | 'dashboard.previewFillRequired'
@@ -212,6 +215,9 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'dashboard.variantStandard',
   'dashboard.variantDonut',
   'dashboard.variantArea',
+  'dashboard.seriesBy',
+  'dashboard.seriesByNone',
+  'dashboard.seriesByHint',
   'dashboard.noNumericFields',
   'dashboard.livePreview',
   'dashboard.previewFillRequired',
@@ -330,6 +336,9 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'dashboard.variantStandard': { en: 'Standard', zh: '标准' },
   'dashboard.variantDonut': { en: 'Donut', zh: '环形图' },
   'dashboard.variantArea': { en: 'Area', zh: '面积图' },
+  'dashboard.seriesBy': { en: 'Stack by (series)', zh: '堆叠分组（系列）' },
+  'dashboard.seriesByNone': { en: 'None (single bar)', zh: '不堆叠（单系列）' },
+  'dashboard.seriesByHint': { en: 'Splits each bar into stacked segments. Sum/count only.', zh: '将每根柱子拆成堆叠分段；仅支持求和/计数。' },
   'dashboard.noNumericFields': { en: 'No readable numeric fields available.', zh: '没有可读取的数值字段。' },
   'dashboard.livePreview': { en: 'Live preview', zh: '实时预览' },
   'dashboard.previewFillRequired': { en: 'Complete the chart fields to preview.', zh: '填写完整图表字段后可预览。' },

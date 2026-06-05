@@ -117,4 +117,59 @@ describe('buildChartOption', () => {
     expect(pieArea.series[0].radius).toBe('70%') // 'area' does not donut-ify a pie
     expect(buildChartOption(chart('number', [{ label: 'x', value: 1 }]), { variant: 'donut' })).toBeNull()
   })
+
+  // --- v2-d: stacked bar (chartData.series) ---
+
+  const stackedBar = (): ChartData => ({
+    chartType: 'bar',
+    dataPoints: [{ label: 'open', value: 3 }, { label: 'closed', value: 2 }],
+    series: [
+      { name: 'A', data: [2, 1] },
+      { name: 'B', data: [1, 1] },
+    ],
+  })
+
+  it('stacked bar: one ECharts bar series per chartData.series entry, all on the same stack', () => {
+    const o = opt(buildChartOption(stackedBar()))
+    expect(o.series).toHaveLength(2)
+    expect(o.series.map((s: any) => s.type)).toEqual(['bar', 'bar'])
+    expect(o.series.map((s: any) => s.name)).toEqual(['A', 'B'])
+    expect(o.series.every((s: any) => s.stack === 'total')).toBe(true)
+    expect(o.series[0].data).toEqual([2, 1])
+    expect(o.series[1].data).toEqual([1, 1])
+    // x-axis categories come from dataPoints (vertical bar)
+    expect(o.xAxis.type).toBe('category')
+    expect(o.xAxis.data).toEqual(['open', 'closed'])
+  })
+
+  it('stacked bar honors horizontal orientation (axes swap, stack preserved)', () => {
+    const o = opt(buildChartOption(stackedBar(), { orientation: 'horizontal' }))
+    expect(o.xAxis.type).toBe('value')
+    expect(o.yAxis.type).toBe('category')
+    expect(o.yAxis.data).toEqual(['open', 'closed'])
+    expect(o.series.every((s: any) => s.stack === 'total')).toBe(true)
+  })
+
+  it('no series ⇒ unchanged single-series bar (regression)', () => {
+    const o = opt(buildChartOption(chart('bar', [{ label: 'A', value: 10 }, { label: 'B', value: 20 }])))
+    expect(o.series).toHaveLength(1)
+    expect(o.series[0].stack).toBeUndefined()
+    expect(o.series[0].data.map((d: any) => d.value)).toEqual([10, 20])
+  })
+
+  it('empty series[] ⇒ falls back to single-series bar (not zero series)', () => {
+    const o = opt(buildChartOption({ chartType: 'bar', dataPoints: [{ label: 'A', value: 5 }], series: [] }))
+    expect(o.series).toHaveLength(1)
+    expect(o.series[0].stack).toBeUndefined()
+  })
+
+  it('series is inert on non-bar types (line/pie ignore it)', () => {
+    const lineWithSeries = opt(buildChartOption({
+      chartType: 'line',
+      dataPoints: [{ label: 'A', value: 1 }],
+      series: [{ name: 'X', data: [1] }],
+    }))
+    expect(lineWithSeries.series[0].type).toBe('line')
+    expect(lineWithSeries.series[0].stack).toBeUndefined()
+  })
 })
