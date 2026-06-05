@@ -779,8 +779,12 @@ describe('MetaDashboardView', () => {
     await setSelect(aggSelect, 'avg')
     expect(seriesSelectOf(container)).toBeTruthy()
     expect(Array.from(barModeSelectOf(container)!.options).map((o) => o.value)).toEqual(['grouped'])
-    // non-bar → both hidden
+    // v2-d-b2: line shows the picker too, but NEVER the barMode control (lines don't stack/group)
     await setSelect(typeSelect, 'line')
+    expect(seriesSelectOf(container)).toBeTruthy()
+    expect(barModeSelectOf(container)).toBeNull()
+    // number → both hidden
+    await setSelect(typeSelect, 'number')
     expect(seriesSelectOf(container)).toBeNull()
     expect(barModeSelectOf(container)).toBeNull()
   })
@@ -926,5 +930,39 @@ describe('MetaDashboardView', () => {
       displayConfig: expect.objectContaining({ barMode: 'grouped' }),
     }))
     vi.useRealTimers()
+  })
+
+  it('v2-d-b2: a line chart carries dataSource.seriesByFieldId but no display.barMode (create + preview)', async () => {
+    const { client, fetchFn } = mockClient([fakeDashboard({ panels: [] })], [])
+    const previewSpy = vi.spyOn(client, 'previewChartData').mockResolvedValue({ chartType: 'line', dataPoints: [{ label: 'A', value: 1 }] })
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    vi.useFakeTimers()
+    await openCreateForm(container)
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Multi line'; nameInput.dispatchEvent(new Event('input')); await nextTick()
+    await setSelect(typeSelectOf(container), 'line')
+    await setSelect(seriesSelectOf(container)!, 'fld_amount')   // line + series; barMode control not shown
+
+    // preview carries the series, no barMode
+    await vi.advanceTimersByTimeAsync(300); await nextTick()
+    expect(previewSpy).toHaveBeenLastCalledWith('sheet_1', expect.objectContaining({
+      chartType: 'line',
+      dataSource: expect.objectContaining({ seriesByFieldId: 'fld_amount' }),
+    }))
+    const previewArg = previewSpy.mock.calls.at(-1)![1] as { displayConfig?: { barMode?: unknown } }
+    expect(previewArg.displayConfig?.barMode).toBeUndefined()
+    vi.useRealTimers()
+
+    // create carries series, no barMode
+    ;(container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const post = fetchFn.mock.calls.find(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'POST' && url.includes('/charts') && !url.includes('preview-data'),
+    )
+    const body = JSON.parse(post![1].body as string)
+    expect(body.type).toBe('line')
+    expect(body.dataSource.seriesByFieldId).toBe('fld_amount')
+    expect(body.display.barMode).toBeUndefined()
   })
 })

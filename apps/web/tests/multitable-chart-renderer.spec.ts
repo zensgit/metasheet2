@@ -165,6 +165,37 @@ describe('MetaChartRenderer', () => {
     expect(container.querySelector('[data-legend]')).toBeNull()
   })
 
+  // v2-d: multi-series legend over series names (bar grouped/stacked) + v2-d-b2 (multi-line).
+  it('renders the multi-series legend (series names) for a bar series split', async () => {
+    const { container } = mount({
+      chartData: { chartType: 'bar', dataPoints: [{ label: 'X', value: 1 }], series: [{ name: 'A', data: [1] }, { name: 'B', data: [0] }] },
+    })
+    await flushPromises()
+    const legend = container.querySelector('[data-legend="series"]')
+    expect(legend).toBeTruthy()
+    expect(legend?.textContent).toContain('A')
+    expect(legend?.textContent).toContain('B')
+  })
+
+  it('v2-d-b2: renders the multi-series legend for a multi-line chart too', async () => {
+    const { container } = mount({
+      chartData: { chartType: 'line', dataPoints: [{ label: 'Jan', value: 1 }], series: [{ name: 'A', data: [1] }, { name: 'B', data: [2] }] },
+    })
+    await flushPromises()
+    const legend = container.querySelector('[data-legend="series"]')
+    expect(legend).toBeTruthy()
+    expect(legend?.textContent).toContain('A')
+  })
+
+  it('hides the multi-series legend when showLegend is false', async () => {
+    const { container } = mount({
+      chartData: { chartType: 'line', dataPoints: [{ label: 'Jan', value: 1 }], series: [{ name: 'A', data: [1] }] },
+      displayConfig: { showLegend: false },
+    })
+    await flushPromises()
+    expect(container.querySelector('[data-legend="series"]')).toBeNull()
+  })
+
   it('does NOT init ECharts for number/table (HTML-rendered)', async () => {
     const num = mount({ chartData: numberData })
     await flushPromises()

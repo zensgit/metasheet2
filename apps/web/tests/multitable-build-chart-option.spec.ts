@@ -175,13 +175,51 @@ describe('buildChartOption', () => {
     expect(o.series[0].stack).toBeUndefined()
   })
 
-  it('series is inert on non-bar types (line/pie ignore it)', () => {
-    const lineWithSeries = opt(buildChartOption({
-      chartType: 'line',
+  it('series is inert on pie (no native multi-series mapping)', () => {
+    // pie ignores series → null/HTML path (number/table also null). bar+line handle series (see below).
+    const pieWithSeries = opt(buildChartOption({
+      chartType: 'pie',
       dataPoints: [{ label: 'A', value: 1 }],
       series: [{ name: 'X', data: [1] }],
     }))
-    expect(lineWithSeries.series[0].type).toBe('line')
-    expect(lineWithSeries.series[0].stack).toBeUndefined()
+    expect(pieWithSeries.series[0].type).toBe('pie') // pie renders its dataPoints, not the series split
+  })
+
+  // --- v2-d-b2: multi-series line ---
+
+  const multiLine = (): ChartData => ({
+    chartType: 'line',
+    dataPoints: [{ label: 'Jan', value: 3 }, { label: 'Feb', value: 5 }],
+    series: [
+      { name: 'A', data: [2, 4] },
+      { name: 'B', data: [1, 1] },
+    ],
+  })
+
+  it('v2-d-b2 multi-line: one line series per chartData.series entry, no stack', () => {
+    const o = opt(buildChartOption(multiLine()))
+    expect(o.series).toHaveLength(2)
+    expect(o.series.map((s: any) => s.type)).toEqual(['line', 'line'])
+    expect(o.series.map((s: any) => s.name)).toEqual(['A', 'B'])
+    expect(o.series.every((s: any) => s.stack === undefined)).toBe(true) // lines never stack
+    expect(o.series[0].data).toEqual([2, 4])
+    expect(o.xAxis.data).toEqual(['Jan', 'Feb'])
+    expect(o.series.every((s: any) => s.areaStyle === undefined)).toBe(true) // no area variant
+  })
+
+  it('v2-d-b2 area + multi-line: EVERY line keeps areaStyle (area-variant compat preserved)', () => {
+    const o = opt(buildChartOption(multiLine(), { variant: 'area' }))
+    expect(o.series).toHaveLength(2)
+    expect(o.series.every((s: any) => s.type === 'line')).toBe(true)
+    expect(o.series.every((s: any) => s.areaStyle !== undefined)).toBe(true)
+    expect(o.series.every((s: any) => s.stack === undefined)).toBe(true)
+  })
+
+  it('v2-d-b2 no series ⇒ single line unchanged; area variant still honored (regression)', () => {
+    const plain = opt(buildChartOption(chart('line', [{ label: 'A', value: 1 }])))
+    expect(plain.series).toHaveLength(1)
+    expect(plain.series[0].areaStyle).toBeUndefined()
+    const area = opt(buildChartOption(chart('line', [{ label: 'A', value: 1 }]), { variant: 'area' }))
+    expect(area.series[0].areaStyle).toBeDefined()
   })
 })
