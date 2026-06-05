@@ -18,6 +18,9 @@ import type {
   ApprovalTemplateStatus,
   ApprovalTemplateVisibilityScope,
   FormField,
+  CreateApprovalTemplateRequest,
+  UpdateApprovalTemplateRequest,
+  PublishApprovalTemplateRequest,
 } from '../types/approval'
 
 // ---------------------------------------------------------------------------
@@ -430,6 +433,78 @@ export async function updateTemplateSlaHours(
     throw new Error(`API error: ${response.status} ${response.statusText}`)
   }
   return response.json()
+}
+
+export async function createTemplate(
+  payload: CreateApprovalTemplateRequest,
+): Promise<ApprovalTemplateDetailDTO> {
+  if (USE_MOCK) {
+    return {
+      ...mockTemplateDetail(`tpl_${Date.now()}`),
+      key: payload.key,
+      name: payload.name,
+      description: payload.description ?? null,
+      category: payload.category ?? null,
+      visibilityScope: payload.visibilityScope ?? { type: 'all', ids: [] },
+      slaHours: payload.slaHours ?? null,
+      status: 'draft',
+      activeVersionId: null,
+      latestVersionId: `ver_${Date.now()}_1`,
+      formSchema: payload.formSchema,
+      approvalGraph: payload.approvalGraph,
+    }
+  }
+  return apiPost('/api/approval-templates', payload)
+}
+
+export async function updateTemplate(
+  templateId: string,
+  payload: UpdateApprovalTemplateRequest,
+): Promise<ApprovalTemplateDetailDTO> {
+  if (USE_MOCK) {
+    const base = mockTemplateDetail(templateId)
+    return {
+      ...base,
+      ...('key' in payload ? { key: payload.key ?? base.key } : {}),
+      ...('name' in payload ? { name: payload.name ?? base.name } : {}),
+      ...('description' in payload ? { description: payload.description ?? null } : {}),
+      ...('category' in payload ? { category: payload.category ?? null } : {}),
+      ...('visibilityScope' in payload ? { visibilityScope: payload.visibilityScope ?? base.visibilityScope } : {}),
+      ...('slaHours' in payload ? { slaHours: payload.slaHours ?? null } : {}),
+      ...(payload.formSchema ? { formSchema: payload.formSchema } : {}),
+      ...(payload.approvalGraph ? { approvalGraph: payload.approvalGraph } : {}),
+      status: 'draft',
+      activeVersionId: base.activeVersionId,
+      latestVersionId: `ver_${templateId}_${Date.now()}`,
+    }
+  }
+  const response = await apiFetch(`/api/approval-templates/${encodeURIComponent(templateId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status} ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function publishTemplate(
+  templateId: string,
+  payload: PublishApprovalTemplateRequest,
+): Promise<ApprovalTemplateVersionDetailDTO> {
+  if (USE_MOCK) {
+    return {
+      ...mockVersionDetail(templateId, `ver_${templateId}_${Date.now()}`),
+      status: 'published',
+      runtimeGraph: {
+        ...mockTemplateDetail(templateId).approvalGraph,
+        policy: payload.policy,
+      },
+      publishedDefinitionId: `def_${Date.now()}`,
+      updatedAt: new Date().toISOString(),
+    }
+  }
+  return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/publish`, payload)
 }
 
 // ---------------------------------------------------------------------------

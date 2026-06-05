@@ -30,19 +30,15 @@
             <el-icon><Search /></el-icon>
           </template>
         </el-input>
-        <el-tooltip
+        <el-button
           v-if="canManageTemplates"
-          content="即将上线"
-          placement="top"
+          type="primary"
+          style="margin-left: 12px"
+          data-testid="template-center-new-button"
+          @click="createTemplate"
         >
-          <el-button
-            type="primary"
-            style="margin-left: 12px"
-            disabled
-          >
-            新建模板
-          </el-button>
-        </el-tooltip>
+          新建模板
+        </el-button>
       </div>
     </header>
 
@@ -271,6 +267,11 @@ function handleRowClick(row: ApprovalTemplateListItemDTO) {
 
 function startApproval(templateId: string) {
   router.push({ path: `/approvals/new/${templateId}` })
+}
+
+function createTemplate() {
+  if (!canManageTemplates.value) return
+  router.push({ path: '/approval-templates/new' })
 }
 
 async function handleClone(row: ApprovalTemplateListItemDTO) {

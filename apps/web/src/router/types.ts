@@ -66,6 +66,8 @@ export const AppRouteNames = {
   APPROVAL_DETAIL: 'approval-detail',
   APPROVAL_CREATE: 'approval-create',
   APPROVAL_TEMPLATE_LIST: 'approval-template-list',
+  APPROVAL_TEMPLATE_CREATE: 'approval-template-create',
+  APPROVAL_TEMPLATE_EDIT: 'approval-template-edit',
   APPROVAL_TEMPLATE_DETAIL: 'approval-template-detail',
   APPROVAL_PENDING: 'approval-pending',
   APPROVAL_HISTORY: 'approval-history',
@@ -129,6 +131,7 @@ export interface AppRouteParams {
   'approval-detail': { id: string }
   'approval-create': { templateId: string }
   'approval-template-detail': { id: string }
+  'approval-template-edit': { id: string }
 
   // User routes
   'user-profile': { id?: string } // optional, defaults to current user
@@ -147,6 +150,7 @@ export interface AppRouteParams {
   'workflow-create': Record<string, never>
   'approval-list': Record<string, never>
   'approval-template-list': Record<string, never>
+  'approval-template-create': Record<string, never>
   'approval-pending': Record<string, never>
   'approval-history': Record<string, never>
   'attendance': Record<string, never>
@@ -437,6 +441,8 @@ export const ROUTE_PATHS = {
   APPROVAL_DETAIL: '/approvals/:id',
   APPROVAL_CREATE: '/approvals/new/:templateId',
   APPROVAL_TEMPLATE_LIST: '/approval-templates',
+  APPROVAL_TEMPLATE_CREATE: '/approval-templates/new',
+  APPROVAL_TEMPLATE_EDIT: '/approval-templates/:id/edit',
   APPROVAL_TEMPLATE_DETAIL: '/approval-templates/:id',
   APPROVAL_PENDING: '/approvals/pending',
   APPROVAL_HISTORY: '/approvals/history',

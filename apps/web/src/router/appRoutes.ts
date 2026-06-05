@@ -256,6 +256,18 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Approval Templates', titleZh: '审批模板', requiresAuth: true }
   },
   {
+    path: '/approval-templates/new',
+    name: 'approval-template-create',
+    component: () => import('../views/approval/TemplateAuthoringView.vue'),
+    meta: { title: 'New Approval Template', titleZh: '新建审批模板', requiresAuth: true, permissions: ['approval-templates:manage'] }
+  },
+  {
+    path: '/approval-templates/:id/edit',
+    name: 'approval-template-edit',
+    component: () => import('../views/approval/TemplateAuthoringView.vue'),
+    meta: { title: 'Edit Approval Template', titleZh: '编辑审批模板', requiresAuth: true, permissions: ['approval-templates:manage'] }
+  },
+  {
     path: '/approval-templates/:id',
     name: 'approval-template-detail',
     component: () => import('../views/approval/TemplateDetailView.vue'),
