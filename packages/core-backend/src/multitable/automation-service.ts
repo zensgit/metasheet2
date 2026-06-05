@@ -64,6 +64,8 @@ const VALID_ACTION_TYPES = new Set<string>([
   ...LEGACY_ACTION_TYPES,
   ...ALL_ACTION_TYPES,
 ])
+const CANONICAL_ACTION_TYPES = new Set<string>(ALL_ACTION_TYPES)
+const SAFE_BRANCH_KEY = /^[A-Za-z0-9_-]{1,64}$/
 
 // A6-1 opt-in (#2130 runtime): a rule may persist one C1 WorkflowJob row per action.
 // `null`/`'legacy'` both mean the legacy fire-and-forget path (no job rows); only
@@ -127,6 +129,119 @@ function parseConditionGroupInput(value: unknown): ConditionGroup {
     }
     throw error
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function validateActionObject(action: unknown, path: string): AutomationAction {
+  if (!isRecord(action)) {
+    throw new AutomationRuleValidationError(`${path} must be an object`)
+  }
+  if (typeof action.type !== 'string' || !CANONICAL_ACTION_TYPES.has(action.type)) {
+    throw new AutomationRuleValidationError(`${path}.type is invalid`)
+  }
+  const config = isRecord(action.config) ? action.config : {}
+  return { type: action.type as AutomationAction['type'], config }
+}
+
+function readBranchActions(value: unknown, path: string): AutomationAction[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) {
+    throw new AutomationRuleValidationError(`${path} must be an array`)
+  }
+  return value.map((action, index) => validateActionObject(action, `${path}[${index}]`))
+}
+
+function validateConditionBranchConfig(config: unknown, path: string): AutomationAction[] {
+  if (!isRecord(config)) {
+    throw new AutomationRuleValidationError(`${path} must be an object`)
+  }
+  if (!Array.isArray(config.branches) || config.branches.length === 0) {
+    throw new AutomationRuleValidationError(`${path}.branches must be a non-empty array`)
+  }
+
+  const seen = new Set<string>()
+  const nestedActions: AutomationAction[] = []
+  for (const [index, branch] of config.branches.entries()) {
+    const branchPath = `${path}.branches[${index}]`
+    if (!isRecord(branch)) {
+      throw new AutomationRuleValidationError(`${branchPath} must be an object`)
+    }
+    if (typeof branch.key !== 'string' || !SAFE_BRANCH_KEY.test(branch.key)) {
+      throw new AutomationRuleValidationError(`${branchPath}.key must be a safe non-empty string`)
+    }
+    if (seen.has(branch.key)) {
+      throw new AutomationRuleValidationError(`${branchPath}.key must be unique`)
+    }
+    seen.add(branch.key)
+    parseConditionGroupInput(branch.conditions)
+    const actions = readBranchActions(branch.actions, `${branchPath}.actions`)
+    for (const nested of actions) {
+      if (nested.type === 'condition_branch') {
+        throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain nested condition_branch in A6-3-1`)
+      }
+      if (nested.type === 'wait_for_callback') {
+        throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain wait_for_callback until A6-3-3`)
+      }
+    }
+    nestedActions.push(...actions)
+  }
+
+  if (config.defaultBranch !== undefined && config.defaultBranch !== null) {
+    const defaultPath = `${path}.defaultBranch`
+    if (!isRecord(config.defaultBranch)) {
+      throw new AutomationRuleValidationError(`${defaultPath} must be an object`)
+    }
+    if (typeof config.defaultBranch.key !== 'string' || !SAFE_BRANCH_KEY.test(config.defaultBranch.key)) {
+      throw new AutomationRuleValidationError(`${defaultPath}.key must be a safe non-empty string`)
+    }
+    if (seen.has(config.defaultBranch.key)) {
+      throw new AutomationRuleValidationError(`${defaultPath}.key must be unique`)
+    }
+    const actions = readBranchActions(config.defaultBranch.actions, `${defaultPath}.actions`)
+    for (const nested of actions) {
+      if (nested.type === 'condition_branch') {
+        throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain nested condition_branch in A6-3-1`)
+      }
+      if (nested.type === 'wait_for_callback') {
+        throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain wait_for_callback until A6-3-3`)
+      }
+    }
+    nestedActions.push(...actions)
+  }
+
+  return nestedActions
+}
+
+function collectNestedAutomationActions(
+  actionType: string,
+  actionConfig: Record<string, unknown>,
+  actions: AutomationAction[] | null | undefined,
+  executionMode: string | null,
+): AutomationAction[] {
+  const collected: AutomationAction[] = []
+  const requiresWorkflowJobMode = actionType === 'condition_branch'
+
+  if (actionType === 'condition_branch') {
+    collected.push(...validateConditionBranchConfig(actionConfig, 'actionConfig'))
+  }
+
+  for (const [index, action] of (actions ?? []).entries()) {
+    const current = validateActionObject(action, `actions[${index}]`)
+    if (current.type === 'condition_branch') {
+      collected.push(...validateConditionBranchConfig(current.config, `actions[${index}].config`))
+    }
+    collected.push(current)
+  }
+
+  const hasBranch = requiresWorkflowJobMode || collected.some((action) => action.type === 'condition_branch')
+  if (hasBranch && executionMode !== 'workflow_job_v1') {
+    throw new AutomationRuleValidationError('condition_branch requires execution_mode workflow_job_v1')
+  }
+
+  return collected
 }
 
 /**
@@ -390,20 +505,20 @@ export class AutomationService {
     const actions = Array.isArray(normalizedDingTalkInputs.actions)
       ? normalizedDingTalkInputs.actions as AutomationAction[]
       : input.actions ?? null
-    const actionConfigValidationError = validateDingTalkAutomationActionConfigs(input.actionType, actionConfig, actions)
+    const executionMode = normalizeExecutionMode(input.executionMode)
+    const actionsForValidation = collectNestedAutomationActions(input.actionType, actionConfig, actions, executionMode)
+    const actionConfigValidationError = validateDingTalkAutomationActionConfigs(input.actionType, actionConfig, actionsForValidation)
     if (actionConfigValidationError) throw new AutomationRuleValidationError(actionConfigValidationError)
-    const sendEmailValidationError = validateSendEmailActionConfigs(input.actionType, actionConfig, actions)
+    const sendEmailValidationError = validateSendEmailActionConfigs(input.actionType, actionConfig, actionsForValidation)
     if (sendEmailValidationError) throw new AutomationRuleValidationError(sendEmailValidationError)
     const linkValidationError = await validateDingTalkAutomationLinks(
       this.queryFn,
       sheetId,
       input.actionType,
       actionConfig,
-      actions,
+      actionsForValidation,
     )
     if (linkValidationError) throw new AutomationRuleValidationError(linkValidationError)
-
-    const executionMode = normalizeExecutionMode(input.executionMode)
 
     const row = {
       id: ruleId,
@@ -486,9 +601,13 @@ export class AutomationService {
       throw new AutomationRuleValidationError(`Invalid action_type: ${input.actionType}`)
     }
     const updates: Record<string, unknown> = {}
-    const shouldValidateActions = input.actionType !== undefined || input.actionConfig !== undefined || input.actions !== undefined
+    const shouldValidateActions = input.actionType !== undefined
+      || input.actionConfig !== undefined
+      || input.actions !== undefined
+      || input.executionMode !== undefined
     let normalizedActionConfigForUpdate: Record<string, unknown> | undefined
     let normalizedActionsForUpdate: AutomationAction[] | null | undefined
+    let normalizedExecutionModeForUpdate: string | null | undefined
 
     if (shouldValidateActions) {
       const existing = await this.getRule(ruleId)
@@ -497,6 +616,9 @@ export class AutomationService {
       const nextActionType = input.actionType ?? existing.action_type
       const nextActionConfig = input.actionConfig ?? existing.action_config
       const nextActions = input.actions !== undefined ? input.actions : existing.actions ?? null
+      const nextExecutionMode = input.executionMode !== undefined
+        ? normalizeExecutionMode(input.executionMode)
+        : existing.execution_mode ?? null
       const normalizedDingTalkInputs = normalizeDingTalkAutomationActionInputs(nextActionType, nextActionConfig, nextActions)
       const normalizedNextActionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
         ? normalizedDingTalkInputs.actionConfig as Record<string, unknown>
@@ -504,16 +626,22 @@ export class AutomationService {
       const normalizedNextActions = Array.isArray(normalizedDingTalkInputs.actions)
         ? normalizedDingTalkInputs.actions as AutomationAction[]
         : nextActions
-      const actionConfigValidationError = validateDingTalkAutomationActionConfigs(
+      const actionsForValidation = collectNestedAutomationActions(
         nextActionType,
         normalizedNextActionConfig,
         normalizedNextActions,
+        nextExecutionMode,
+      )
+      const actionConfigValidationError = validateDingTalkAutomationActionConfigs(
+        nextActionType,
+        normalizedNextActionConfig,
+        actionsForValidation,
       )
       if (actionConfigValidationError) throw new AutomationRuleValidationError(actionConfigValidationError)
       const sendEmailValidationError = validateSendEmailActionConfigs(
         nextActionType,
         normalizedNextActionConfig,
-        normalizedNextActions,
+        actionsForValidation,
       )
       if (sendEmailValidationError) throw new AutomationRuleValidationError(sendEmailValidationError)
       const linkValidationError = await validateDingTalkAutomationLinks(
@@ -521,12 +649,13 @@ export class AutomationService {
         sheetId,
         nextActionType,
         normalizedNextActionConfig,
-        normalizedNextActions,
+        actionsForValidation,
       )
       if (linkValidationError) throw new AutomationRuleValidationError(linkValidationError)
 
       if (input.actionConfig !== undefined) normalizedActionConfigForUpdate = normalizedNextActionConfig
       if (input.actions !== undefined) normalizedActionsForUpdate = Array.isArray(input.actions) ? normalizedNextActions : null
+      if (input.executionMode !== undefined) normalizedExecutionModeForUpdate = nextExecutionMode
     }
 
     if (input.name !== undefined) updates.name = input.name
@@ -537,7 +666,7 @@ export class AutomationService {
     if (input.enabled !== undefined) updates.enabled = input.enabled
     if (input.conditions !== undefined) updates.conditions = input.conditions ? JSON.stringify(input.conditions) : null
     if (input.actions !== undefined) updates.actions = normalizedActionsForUpdate ? JSON.stringify(normalizedActionsForUpdate) : null
-    if (input.executionMode !== undefined) updates.execution_mode = normalizeExecutionMode(input.executionMode)
+    if (input.executionMode !== undefined) updates.execution_mode = normalizedExecutionModeForUpdate ?? normalizeExecutionMode(input.executionMode)
 
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)
 
@@ -857,6 +986,7 @@ export class AutomationService {
     // Re-derived context (D4): current record data + stored (redacted) trigger event.
     const triggerEvent = suspension.triggerEvent ?? {}
     const context: ExecutionContext = {
+      executionId: execution.id,
       ruleId: execRule.id,
       sheetId: execRule.sheetId,
       recordId: suspension.recordId ?? '',

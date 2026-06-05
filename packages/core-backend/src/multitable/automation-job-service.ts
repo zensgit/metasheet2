@@ -18,7 +18,7 @@
 import { db } from '../db/db'
 import { toJsonValue } from '../db/type-helpers'
 import { legacyAutomationStatusToJobStatus, normalizeWorkflowJobStatus, type WorkflowJobStatus, type WorkflowJobSuspendReason } from './workflow-job-contract'
-import type { ActionJobLifecycle } from './automation-executor'
+import type { ActionJobLifecycle, ActionJobLifecycleMeta } from './automation-executor'
 import type { AutomationAction } from './automation-actions'
 import { redactString, redactValue } from './automation-log-redact'
 
@@ -35,12 +35,18 @@ export class AutomationJobService {
   lifecycleFor(executionId: string, rule: { id: string; sheetId?: string }): ActionJobLifecycle {
     // Deterministic id (no random) → idempotent shape, same `${exec}:<kind>:<i>` family as the
     // legacy step-view id (`${exec}:step:i`); jobs use `:job:`.
-    const jobId = (stepIndex: number): string => `${executionId}:job:${stepIndex}`
-    const upstream = (stepIndex: number): string | null => (stepIndex > 0 ? jobId(stepIndex - 1) : null)
+    const jobId = (stepIndex: number, meta?: ActionJobLifecycleMeta): string =>
+      meta?.jobId ?? `${executionId}:job:${stepIndex}`
+    const stepKey = (stepIndex: number, meta?: ActionJobLifecycleMeta): string =>
+      meta?.stepKey ?? String(stepIndex)
+    const upstream = (stepIndex: number, meta?: ActionJobLifecycleMeta): string | null =>
+      meta && Object.prototype.hasOwnProperty.call(meta, 'upstreamJobId')
+        ? meta.upstreamJobId ?? null
+        : stepIndex > 0 ? `${executionId}:job:${stepIndex - 1}` : null
 
     return {
-      onStart: async (stepIndex, action) => {
-        const id = jobId(stepIndex)
+      onStart: async (stepIndex, action, meta) => {
+        const id = jobId(stepIndex, meta)
         const now = new Date().toISOString()
         await db
           .insertInto('multitable_automation_jobs')
@@ -50,10 +56,10 @@ export class AutomationJobService {
             rule_id: rule.id,
             sheet_id: rule.sheetId ?? null,
             step_index: stepIndex,
-            step_key: String(stepIndex),
+            step_key: stepKey(stepIndex, meta),
             action_type: action.type,
             status: 'running', // C1 'running'
-            upstream_job_id: upstream(stepIndex),
+            upstream_job_id: upstream(stepIndex, meta),
             result: null,
             error: null,
             started_at: now,
@@ -63,7 +69,7 @@ export class AutomationJobService {
           })
           .execute()
       },
-      onSettled: async (stepIndex, _action, result) => {
+      onSettled: async (stepIndex, _action, result, meta) => {
         await db
           .updateTable('multitable_automation_jobs')
           .set({
@@ -75,24 +81,24 @@ export class AutomationJobService {
             duration_ms: result.durationMs ?? null,
             updated_at: new Date().toISOString() as never,
           })
-          .where('id', '=', jobId(stepIndex))
+          .where('id', '=', jobId(stepIndex, meta))
           .execute()
       },
-      onSkipped: async (stepIndex, action) => {
+      onSkipped: async (stepIndex, action, meta) => {
         // Fail-stop remainder — a terminal skipped job (created directly, never ran).
         const now = new Date().toISOString()
         await db
           .insertInto('multitable_automation_jobs')
           .values({
-            id: jobId(stepIndex),
+            id: jobId(stepIndex, meta),
             execution_id: executionId,
             rule_id: rule.id,
             sheet_id: rule.sheetId ?? null,
             step_index: stepIndex,
-            step_key: String(stepIndex),
+            step_key: stepKey(stepIndex, meta),
             action_type: action.type,
             status: 'skipped',
-            upstream_job_id: upstream(stepIndex),
+            upstream_job_id: upstream(stepIndex, meta),
             result: null,
             error: null,
             started_at: null,
@@ -165,6 +171,8 @@ export class AutomationJobService {
       .selectAll()
       .where('execution_id', '=', executionId)
       .orderBy('step_index', 'asc')
+      .orderBy('created_at', 'asc')
+      .orderBy('step_key', 'asc')
       .execute()
 
     // B1: a `suspended` job MUST carry its C1 suspend descriptor — the contract enforces

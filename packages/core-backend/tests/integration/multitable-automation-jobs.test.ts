@@ -172,4 +172,148 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
       }
     }
   })
+
+  test('A6-3-1 seam: condition_branch persists parent, selected child, and downstream C1 jobs', async () => {
+    const urls: string[] = []
+    const svc = new AutomationService(
+      new EventBus(),
+      db as never,
+      (async () => ({ rows: [], rowCount: 0 })) as never,
+      (async (url: string) => {
+        urls.push(url)
+        return new Response('OK', { status: 200 })
+      }) as never,
+    )
+    const sheetId = `sheet_branch_${TS}`
+    const branchAction = {
+      type: 'condition_branch',
+      config: {
+        branches: [
+          {
+            key: 'vip',
+            label: 'VIP',
+            conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
+            actions: [{ type: 'send_webhook', config: { url: 'https://example.test/vip' } }],
+          },
+          {
+            key: 'standard',
+            conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'standard' }] },
+            actions: [{ type: 'send_webhook', config: { url: 'https://example.test/standard' } }],
+          },
+        ],
+      },
+    } as const
+    const execIds: string[] = []
+    const ruleIds: string[] = []
+    try {
+      const persisted = await svc.createRule(sheetId, {
+        name: 'A6-3 branch real DB',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'condition_branch',
+        actionConfig: branchAction.config,
+        actions: [branchAction],
+        executionMode: 'workflow_job_v1',
+        createdBy: 'u1',
+      })
+      ruleIds.push(persisted.id)
+      expect(persisted.action_type).toBe('condition_branch')
+      expect(persisted.execution_mode).toBe('workflow_job_v1')
+
+      const optIn = await svc.executeRule(
+        {
+          id: `atr_branch_in_${TS}`,
+          name: 'A6-3 branch opt-in',
+          sheetId,
+          trigger: { type: 'record.created', config: {} },
+          actions: [
+            branchAction,
+            { type: 'send_webhook', config: { url: 'https://example.test/after' } },
+          ],
+          enabled: true,
+          createdBy: 'u1',
+          createdAt: new Date(TS).toISOString(),
+          executionMode: 'workflow_job_v1',
+        } as never,
+        { sheetId, recordId: `rec_branch_${TS}`, data: { tier: 'vip' } },
+      )
+      execIds.push(optIn.id)
+      expect(optIn.status).toBe('success')
+      expect(optIn.steps[0]).toMatchObject({
+        actionType: 'condition_branch',
+        status: 'success',
+        output: { selectedBranchKey: 'vip', selectedBranchLabel: 'VIP', matched: true },
+      })
+      expect(urls).toEqual(['https://example.test/vip', 'https://example.test/after'])
+
+      const raw = await q(
+        `SELECT id, step_index, step_key, action_type, status, upstream_job_id
+           FROM multitable_automation_jobs
+          WHERE execution_id = $1
+          ORDER BY step_index ASC, step_key ASC`,
+        [optIn.id],
+      )
+      expect(raw.rows).toEqual([
+        {
+          id: `${optIn.id}:job:0`,
+          step_index: 0,
+          step_key: '0',
+          action_type: 'condition_branch',
+          status: 'resolved',
+          upstream_job_id: null,
+        },
+        {
+          id: `${optIn.id}:job:0:branch:vip:0`,
+          step_index: 0,
+          step_key: '0.branch.vip.0',
+          action_type: 'send_webhook',
+          status: 'resolved',
+          upstream_job_id: `${optIn.id}:job:0`,
+        },
+        {
+          id: `${optIn.id}:job:1`,
+          step_index: 1,
+          step_key: '1',
+          action_type: 'send_webhook',
+          status: 'resolved',
+          upstream_job_id: `${optIn.id}:job:0:branch:vip:0`,
+        },
+      ])
+      const views = await jobs.listByExecution(optIn.id)
+      expect(views.map((v) => [v.stepKey, v.status, v.upstreamJobId])).toEqual([
+        ['0', 'resolved', null],
+        ['0.branch.vip.0', 'resolved', `${optIn.id}:job:0`],
+        ['1', 'resolved', `${optIn.id}:job:0:branch:vip:0`],
+      ])
+
+      const legacy = await svc.executeRule(
+        {
+          id: `atr_branch_out_${TS}`,
+          name: 'A6-3 branch legacy',
+          sheetId,
+          trigger: { type: 'record.created', config: {} },
+          actions: [branchAction],
+          enabled: true,
+          createdBy: 'u1',
+          createdAt: new Date(TS).toISOString(),
+        } as never,
+        { sheetId, recordId: `rec_branch_${TS}`, data: { tier: 'vip' } },
+      )
+      execIds.push(legacy.id)
+      expect(legacy.status).toBe('failed')
+      const none = await q(
+        'SELECT count(*)::int AS n FROM multitable_automation_jobs WHERE execution_id = $1',
+        [legacy.id],
+      )
+      expect(none.rows[0].n).toBe(0)
+    } finally {
+      for (const id of execIds) {
+        await q('DELETE FROM multitable_automation_jobs WHERE execution_id = $1', [id])
+        await q('DELETE FROM multitable_automation_executions WHERE id = $1', [id])
+      }
+      for (const id of ruleIds) {
+        await q('DELETE FROM automation_rules WHERE id = $1', [id])
+      }
+    }
+  })
 })

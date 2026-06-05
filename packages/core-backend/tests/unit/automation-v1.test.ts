@@ -2275,6 +2275,81 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rule.execution_mode).toBe('workflow_job_v1')
   })
 
+  it('A6-3-1: createRule accepts condition_branch only with workflow_job_v1', async () => {
+    const action = {
+      type: 'condition_branch',
+      config: {
+        branches: [{
+          key: 'vip',
+          conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
+          actions: [{ type: 'update_record', config: { fields: { status: 'vip' } } }],
+        }],
+        defaultBranch: {
+          key: 'fallback',
+          actions: [{ type: 'send_notification', config: { userIds: ['u1'], message: 'fallback' } }],
+        },
+      },
+    } as const
+
+    dbExecuteResults.push([])
+    const rule = await service.createRule('sheet_1', {
+      name: 'Branch rule',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'condition_branch',
+      actionConfig: action.config,
+      actions: [action],
+      executionMode: 'workflow_job_v1',
+      createdBy: 'user_1',
+    })
+
+    expect(rule.action_type).toBe('condition_branch')
+    expect(rule.actions).toEqual([action])
+    expect(rule.execution_mode).toBe('workflow_job_v1')
+
+    const promise = service.createRule('sheet_1', {
+      name: 'Branch rule legacy',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'condition_branch',
+      actionConfig: action.config,
+      actions: [action],
+      createdBy: 'user_1',
+    })
+    await expect(promise).rejects.toThrow('condition_branch requires execution_mode workflow_job_v1')
+  })
+
+  it('A6-3-1: createRule rejects wait_for_callback inside a condition_branch branch', async () => {
+    const promise = service.createRule('sheet_1', {
+      name: 'Nested wait branch',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'condition_branch',
+      actionConfig: {
+        branches: [{
+          key: 'needs_wait',
+          conditions: { logic: 'and', conditions: [{ fieldId: 'status', operator: 'equals', value: 'pending' }] },
+          actions: [{ type: 'wait_for_callback', config: {} }],
+        }],
+      },
+      actions: [{
+        type: 'condition_branch',
+        config: {
+          branches: [{
+            key: 'needs_wait',
+            conditions: { logic: 'and', conditions: [{ fieldId: 'status', operator: 'equals', value: 'pending' }] },
+            actions: [{ type: 'wait_for_callback', config: {} }],
+          }],
+        },
+      }],
+      executionMode: 'workflow_job_v1',
+      createdBy: 'user_1',
+    })
+
+    await expect(promise).rejects.toThrow('cannot contain wait_for_callback until A6-3-3')
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
   it('createRule normalizes legacy DingTalk title and content fields', async () => {
     dbExecuteResults.push([])
     const rule = await service.createRule('sheet_1', {
@@ -2554,6 +2629,30 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rule?.execution_mode).toBe('workflow_job_v1')
   })
 
+  it('A6-3-1: updateRule rejects turning a condition_branch rule back to legacy', async () => {
+    const branchAction = {
+      type: 'condition_branch',
+      config: {
+        branches: [{
+          key: 'vip',
+          conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
+          actions: [{ type: 'update_record', config: { fields: { status: 'vip' } } }],
+        }],
+      },
+    }
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'condition_branch',
+      action_config: branchAction.config,
+      actions: [branchAction],
+      execution_mode: 'workflow_job_v1',
+    }))
+
+    const promise = service.updateRule('atr_1', 'sheet_1', { executionMode: null })
+
+    await expect(promise).rejects.toThrow('condition_branch requires execution_mode workflow_job_v1')
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
   it('updateRule validates the merged state when only actionType changes to DingTalk', async () => {
     dbExecuteTakeFirstResults.push(makeRuleRow({
       action_type: 'notify',
@@ -2764,7 +2863,7 @@ describe('AutomationService — Rule CRUD', () => {
     ]) chain[m] = vi.fn(chainFn)
     chain.set = vi.fn((v: Record<string, unknown>) => { setPayloads.push(v); return chain })
     chain.execute = vi.fn(async () => [ruleRow])
-    chain.executeTakeFirst = vi.fn(async () => undefined)
+    chain.executeTakeFirst = vi.fn(async () => ruleRow)
     const localService = new AutomationService(
       new EventBus(),
       chain as never,
@@ -2981,6 +3080,133 @@ describe('AutomationExecutor — A6-1 job lifecycle hooks', () => {
     const execution = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1' })
     expect(execution.status).toBe('success')
     expect(execution.steps).toHaveLength(1) // legacy steps unchanged; no jobs involved
+  })
+
+  it('A6-3-1: condition_branch selects one branch and wires nested C1 job metadata', async () => {
+    let executionId = ''
+    const events: Array<{
+      phase: string
+      index: number
+      type: string
+      status?: string
+      stepKey?: string
+      jobId?: string
+      upstreamJobId?: string | null
+    }> = []
+    const lifecycle = {
+      factory: (id: string) => {
+        executionId = id
+        return {
+          onStart: async (index: number, action: { type: string }, meta?: { stepKey?: string; jobId?: string; upstreamJobId?: string | null }) => {
+            events.push({ phase: 'start', index, type: action.type, ...meta })
+          },
+          onSettled: async (index: number, action: { type: string }, result: { status: string }, meta?: { stepKey?: string; jobId?: string; upstreamJobId?: string | null }) => {
+            events.push({ phase: 'settled', index, type: action.type, status: result.status, ...meta })
+          },
+          onSkipped: async (index: number, action: { type: string }, meta?: { stepKey?: string; jobId?: string; upstreamJobId?: string | null }) => {
+            events.push({ phase: 'skipped', index, type: action.type, ...meta })
+          },
+        }
+      },
+    }
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'condition_branch',
+          config: {
+            branches: [
+              {
+                key: 'vip',
+                label: 'VIP',
+                conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
+                actions: [{ type: 'update_record', config: { fields: { status: 'vip' } } }],
+              },
+              {
+                key: 'standard',
+                conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'standard' }] },
+                actions: [{ type: 'send_webhook', config: { url: 'https://example.com/standard' } }],
+              },
+            ],
+          },
+        },
+        { type: 'send_webhook', config: { url: 'https://example.com/after' } },
+      ],
+    })
+
+    const execution = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { tier: 'vip' },
+      sheetId: 'sheet_1',
+    }, lifecycle.factory)
+
+    expect(execution.status).toBe('success')
+    expect(execution.steps).toHaveLength(2)
+    expect(execution.steps[0]).toMatchObject({
+      actionType: 'condition_branch',
+      status: 'success',
+      output: { selectedBranchKey: 'vip', selectedBranchLabel: 'VIP', matched: true },
+    })
+    expect(events).toEqual([
+      { phase: 'start', index: 0, type: 'condition_branch' },
+      {
+        phase: 'start',
+        index: 0,
+        type: 'update_record',
+        stepKey: '0.branch.vip.0',
+        jobId: `${executionId}:job:0:branch:vip:0`,
+        upstreamJobId: `${executionId}:job:0`,
+      },
+      {
+        phase: 'settled',
+        index: 0,
+        type: 'update_record',
+        status: 'success',
+        stepKey: '0.branch.vip.0',
+        jobId: `${executionId}:job:0:branch:vip:0`,
+        upstreamJobId: `${executionId}:job:0`,
+      },
+      { phase: 'settled', index: 0, type: 'condition_branch', status: 'success' },
+      {
+        phase: 'start',
+        index: 1,
+        type: 'send_webhook',
+        upstreamJobId: `${executionId}:job:0:branch:vip:0`,
+      },
+      { phase: 'settled', index: 1, type: 'send_webhook', status: 'success' },
+    ])
+    expect(deps.fetchFn).toHaveBeenCalledTimes(1) // non-selected branch webhook did not run; only the after action did.
+  })
+
+  it('A6-3-1: condition_branch fails closed in legacy mode and skips later actions', async () => {
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'condition_branch',
+          config: {
+            branches: [{
+              key: 'vip',
+              conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
+              actions: [{ type: 'update_record', config: { fields: { status: 'vip' } } }],
+            }],
+          },
+        },
+        { type: 'send_webhook', config: { url: 'https://example.com/after' } },
+      ],
+    })
+
+    const execution = await executor.execute(rule, { recordId: 'r1', data: { tier: 'vip' }, sheetId: 'sheet_1' })
+
+    expect(execution.status).toBe('failed')
+    expect(execution.steps).toEqual([
+      {
+        actionType: 'condition_branch',
+        status: 'failed',
+        error: 'condition_branch requires execution_mode workflow_job_v1',
+        durationMs: 0,
+      },
+      { actionType: 'send_webhook', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.fetchFn).not.toHaveBeenCalled()
   })
 })
 
