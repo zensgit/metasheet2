@@ -100,7 +100,7 @@ available in this repo. Instead, this slice turns the feasibility gate into a
 schema-only contract (`requires_customer_schema`) that C2 must satisfy before
 runtime can proceed.
 
-### 🟡 C1b - Canonical target provisioning / binding design (this PR)
+### ✅ C1b-0 - Canonical target provisioning / binding design (DONE - PR #2305, `3e0a37e3a`)
 
 Gated on: C5-3b entity-machine finding + explicit opt-in.
 
@@ -130,6 +130,33 @@ Acceptance locks:
 - C6 custom option sync remains a later separate opt-in; C1b only carries
   `optionSource` metadata.
 - Issue evidence is values-free: field names/counts and readiness status only.
+
+### 🟡 C1b-1 - Canonical target provisioning helper (this PR)
+
+Gated on: C1b-0 + explicit opt-in.
+
+Scope:
+
+- Add a latent backend helper that builds a canonical MetaSheet target descriptor
+  from `STOCK_PREPARATION_MAIN_TABLE_TEMPLATE`.
+- Bind an existing canonical target only when every logical C1 field is present.
+- Create a missing canonical target through
+  `context.api.multitable.provisioning.ensureObject`; metadata only, no rows.
+- Return the server-side target binding shape with empty `fieldIdMap` for
+  canonical targets.
+- Emit values-free readiness evidence.
+
+Acceptance locks:
+
+- Admin permission is required before any provisioning read/create call.
+- Missing provisioning API fails closed.
+- Existing incomplete canonical targets fail closed as
+  `TARGET_SCHEMA_INCOMPLETE` and are not repaired in place.
+- Creation verifies logical fields with `resolveFieldIds` after `ensureObject`.
+- Helper never uses `context.api.multitable.records`, reads PLM, writes K3, or
+  writes to an external database.
+- C1b-2 UI/runbook, C1b-3 entity-machine readiness smoke, and C6 option sync
+  remain separate opt-ins.
 
 ### ✅ C2-0 - Filtered readonly SQL bridge for PLM lookups (DONE - PR #2265, `2be099bd8`)
 

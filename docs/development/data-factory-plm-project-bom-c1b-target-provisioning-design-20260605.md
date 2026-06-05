@@ -208,6 +208,21 @@ Forbidden issue evidence:
 C5 full smoke resumes only after C1b target readiness and the PLM source gate are
 both satisfied.
 
+## C1b-1 implementation note
+
+C1b-1 implements the backend helper only. It is latent until C1b-2 wires an
+admin workflow or runbook:
+
+- existing canonical target + all logical fields present -> bind with empty
+  `fieldIdMap`;
+- missing canonical target -> create table/field metadata from the C1 manifest;
+- existing but incomplete canonical target -> fail closed as
+  `TARGET_SCHEMA_INCOMPLETE` and do not repair in place;
+- post-create verification uses `resolveFieldIds` for logical fields instead of
+  trusting returned physical field ids;
+- helper uses only `context.api.multitable.provisioning`; it does not use the
+  records API and writes no business rows.
+
 ## Acceptance locks for C1b implementation
 
 - Provisioning uses `STOCK_PREPARATION_MAIN_TABLE_TEMPLATE` as the only field
