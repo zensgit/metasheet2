@@ -19,19 +19,19 @@
 The remaining ladder splits cleanly into two kinds of work, and they get different
 treatment **on purpose**:
 
-- **A6-1 enable-writer EXPOSES capability that already exists.** The persistent
-  WorkflowJob runtime landed in #2130 but is DORMANT — `execution_mode` is read by the
-  executor (`persistJobs = rule.executionMode === 'workflow_job_v1'`) but cannot be set
-  through the rule create/update API, so in production no rule can opt in. Finishing that
-  wiring adds **no new engine semantics**. Its shape is fully known, so it is planned
-  **deep** below (this section doubles as its scout).
-- **A6-2 … A6-5 ADD capability** (durable wait, graph execution, modeling import,
-  approval coupling). Their *shape* is undefined until a concrete use-case names it
-  (webhook-resume vs timer-resume; join-all vs join-any; the approval-completion
-  contract). Designing them before that is premature engineering. They are planned
-  **plan-level only**: scope boundary, dependency order, gate posture, and a pointer to
-  the test surface the A6-0 scout already enumerated. Detailed design is deferred to each
-  rung's own scout, written when its use-case is named.
+- **A6-1 enable-writer was the deep-planned slice because it only exposed capability
+  that already existed.** That path is now complete end-to-end (#2130 runtime + #2191
+  enable-writer + #2193 admin UI toggle). The deep section below is retained as the
+  historical implementation plan and acceptance record, not as remaining work.
+- **A6-2 has also landed end-to-end** (#2236 design-lock + #2237 backend + #2245
+  frontend + #2257 UAT). Delay/timer resume remains separate because it forces durable
+  scheduler/worker/leader semantics.
+- **A6-3 … A6-5 ADD capability** (branch/parallel graph execution, modeling import,
+  approval coupling). Their *shape* is undefined until a concrete use-case names it.
+  A6-3 now has its docs-only design-lock, with the first runtime slice pinned to
+  `condition_branch` / exclusive branch v1. A6-4/A6-5 remain plan-level only:
+  scope boundary, dependency order, gate posture, and a pointer to the test surface the
+  A6-0 scout already enumerated.
 
 Dependency order is fixed (each rung is the next one's floor):
 **A6-1 enable-writer → A6-2 suspend/resume → A6-3 branch/parallel DAG → A6-4 BPMN
@@ -115,9 +115,9 @@ only missing link.
 
 ### 1.6 Gate posture & acceptance
 
-- **Gate:** lowest on the ladder. Demand = owner asking to advance + a built-but-dormant
-  runtime that is otherwise dead code. No third-party use-case required to finish wiring
-  something already shipped.
+- **Gate:** lowest on the ladder. Demand = owner asking to advance + an already-built
+  runtime on-switch that was otherwise dead code. No third-party use-case required to
+  finish wiring something already shipped.
 - **Acceptance:** an opted-in rule persists jobs end-to-end through the real wire; a
   non-opted rule is byte-for-byte unchanged; invalid mode rejected; governance (A1
   redaction, A2 read boundary, fail-closed) inherited unchanged.
@@ -154,7 +154,14 @@ only missing link.
   duplicate-resume idempotent/rejected, resume-after-completion rejected, invalid/expired
   token rejected without leak, later: survives process restart).
 
-## 3. A6-3 branch/parallel DAG — PLAN-LEVEL (design deferred to its scout)
+## 3. A6-3 branch/parallel DAG — DESIGN-LOCK OPENED (#A6-3-0; runtime still deferred)
+
+Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
+
+The design-lock pins the first runtime slice as **A6-3-1 `condition_branch` /
+exclusive branch v1**, not full parallel DAG. Parallel fan-out, join-all, and
+join-any stay separate follow rungs. Runtime still requires a named owner
+opt-in; this plan line does not authorize code.
 
 - **Adds:** graph fields (upstream/downstream edges, branch discriminator, join mode,
   branch result aggregation) and generalizes the linear executor into a DAG. This is the
