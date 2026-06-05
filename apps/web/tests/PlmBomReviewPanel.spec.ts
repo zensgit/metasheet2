@@ -101,11 +101,23 @@ describe('PlmBomReviewPanel (P3-C read-only BOM review)', () => {
     expect(stateOf()).toBe('unavailable')
   })
 
-  it('shows empty state when entitled but the context is null (part not found)', async () => {
+  it('shows empty state when entitled but the context is null with NO reason (part not found)', async () => {
     getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: null })
     mountPanel()
     await flushUi()
     await setPartAndLoad('P1')
     expect(stateOf()).toBe('empty')
+    expect(container.querySelector('[data-testid="plm-bom-review-error"]')).toBeNull()
+  })
+
+  it('shows a transient ERROR (not empty) when entitled + null context carries reason:unavailable', async () => {
+    // a transient provider fetch failure must read as "temporarily unavailable, retry", NOT
+    // as "this part has no BOM".
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: null, reason: 'unavailable' })
+    mountPanel()
+    await flushUi()
+    await setPartAndLoad('P1')
+    expect(stateOf()).toBe('error')
+    expect(container.querySelector('[data-testid="plm-bom-review-error"]')).not.toBeNull()
   })
 })

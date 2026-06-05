@@ -37,6 +37,9 @@
       <p v-else-if="reviewState === 'upgrade'" class="bom-review__hint bom-review__hint--strong">
         当前租户尚未开通 BOM review；这里只显示升级入口，真实授权由 PLM license 判定。
       </p>
+      <p v-else-if="reviewState === 'error'" class="bom-review__hint bom-review__hint--strong" data-testid="plm-bom-review-error">
+        加载 BOM review 失败（PLM 暂时不可用），请稍后重试。
+      </p>
       <p v-else-if="reviewState === 'empty'" class="bom-review__hint">
         未找到该 Part 的 BOM 数据。
       </p>
@@ -113,15 +116,19 @@ const context = computed(() =>
 )
 
 // idle (nothing loaded) -> loading -> one of: unavailable (no support / degraded), upgrade
-// (supported but not entitled), empty (entitled but no context), table (entitled + context).
-const reviewState = computed<'idle' | 'loading' | 'unavailable' | 'upgrade' | 'empty' | 'table'>(() => {
+// (supported but not entitled), error (entitled but the provider fetch failed transiently),
+// empty (entitled, no context, no reason = part not found), table (entitled + context).
+const reviewState = computed<'idle' | 'loading' | 'unavailable' | 'upgrade' | 'error' | 'empty' | 'table'>(() => {
   if (loading.value) return 'loading'
   const current = result.value
   if (!current) return 'idle'
   if (!current.available) return 'unavailable'
   if (!current.entitled) return 'upgrade'
-  if (!current.context) return 'empty'
-  return 'table'
+  if (current.context) return 'table'
+  // entitled but no context: a relayed reason means a TRANSIENT provider failure (retry),
+  // NOT "this part has no BOM" -- only a reason-less null context is the empty/not-found case.
+  if (current.reason) return 'error'
+  return 'empty'
 })
 
 function formatQuantity(line: PlmBomMultitableLine): string {

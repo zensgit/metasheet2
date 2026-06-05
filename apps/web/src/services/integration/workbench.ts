@@ -118,6 +118,9 @@ export type PlmBomMultitableResult =
     available: true
     entitled: boolean
     context: PlmBomMultitableContext | null
+    // a relayed reason on an available+entitled+null-context result means a TRANSIENT
+    // provider fetch failure (retry), NOT "this part has no BOM" -- the UI distinguishes them.
+    reason?: string
   }
   | {
     data_source_id: string
@@ -642,7 +645,10 @@ function normalizePlmBomMultitableResult(
   }
   const entitled = record.entitled === true
   const context = entitled && isPlmBomMultitableContext(record.context) ? record.context : null
-  return { data_source_id: resolvedId, available: true, entitled, context }
+  // keep a relayed reason (e.g. 'unavailable' on a transient provider failure) so the UI can
+  // tell a transient error apart from a genuinely empty/absent part.
+  const reason = typeof record.reason === 'string' && record.reason.trim() ? record.reason.trim() : undefined
+  return { data_source_id: resolvedId, available: true, entitled, context, ...(reason ? { reason } : {}) }
 }
 
 function buildQueryString(input: Record<string, unknown>): string {

@@ -63,4 +63,10 @@ describe('getPlmBomMultitableContext (P3-C consumer service)', () => {
     const r = await getPlmBomMultitableContext('ds-1', 'P1')
     expect(r).toEqual({ data_source_id: 'ds-1', available: true, entitled: true, context: null })
   })
+
+  it('carries a relayed reason on an entitled + null-context result (transient failure)', async () => {
+    apiFetchMock.mockResolvedValue(rawJsonResponse({ data_source_id: 'ds-1', available: true, entitled: true, context: null, reason: 'unavailable' }))
+    const r = await getPlmBomMultitableContext('ds-1', 'P1')
+    expect(r).toEqual({ data_source_id: 'ds-1', available: true, entitled: true, context: null, reason: 'unavailable' })
+  })
 })
