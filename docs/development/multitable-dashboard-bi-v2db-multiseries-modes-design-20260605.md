@@ -1,9 +1,10 @@
 # Multitable Dashboard BI — v2-d-b multi-series modes design-lock
 
-**Status:** design-lock (docs-only). Implementation is split into three *separately-gated* opt-ins (b1 / b2 / b3); none started.
+**Status:** design-lock + implementation ledger. b1 and b2 are complete; b3 is intentionally paused / demand-gated, not the automatic next slice.
 **Date:** 2026-06-05
 **Predecessors:** v2-d-a stacked bar — backend #2297 + hardening #2299 + frontend #2303 (all merged).
 **Ground-truth base:** `origin/main` @ `8bf7b38a6` (read via a fresh worktree, not the canonical checkout).
+**Implementation ledger:** b1 grouped bar = backend #2312 (`7e2f60d1f`) + frontend #2315 (`83801c668`); b2 multi-series line = backend #2316 (`f0ebf6bd0`) + frontend #2323 (`4b36444d0`). b3 date-axis × series remains deferred until there is concrete product demand.
 
 > v2-d-a delivered single-axis stacked bar (additive-only, groupBy-primary). v2-d-b adds the three modes the v2-d-a design deferred. Each adds a **semantic layer** v2-d-a doesn't have, which is why this is a fresh design-lock, not just more impl.
 
@@ -11,11 +12,11 @@
 
 ## 0. The three sub-slices (owner-confirmed split)
 
-- **v2-d-b1 — grouped (side-by-side) bar.** `displayConfig.barMode = 'stacked' | 'grouped'`. Grouped bars are independent (not summed), so **non-additive aggregations are allowed** in grouped mode.
-- **v2-d-b2 — multi-series line.** Reuse the `series[]` contract; lines are overlaid, never stacked → **any aggregation**.
-- **v2-d-b3 — date-axis × series.** Lift v2-d-a's date-grouping rejection: a date-bucket primary axis split into series. Define the **ordering / zero-fill / limit** rules (the part v2-d-a had no answer for).
+- **v2-d-b1 — grouped (side-by-side) bar.** ✅ Shipped. `displayConfig.barMode = 'stacked' | 'grouped'`. Grouped bars are independent (not summed), so **non-additive aggregations are allowed** in grouped mode.
+- **v2-d-b2 — multi-series line.** ✅ Shipped. Reuse the `series[]` contract; lines are overlaid, never stacked → **any aggregation**.
+- **v2-d-b3 — date-axis × series.** ⏸ Demand-gated. Lift v2-d-a's date-grouping rejection: a date-bucket primary axis split into series. Define the **ordering / zero-fill / limit** rules (the part v2-d-a had no answer for).
 
-Each is a separate opt-in. Recommended order **b1 → b2 → b3**: b1 introduces `barMode` + the conditional-additive rule; b2 extends series to `line`; b3 (hardest) builds on both and tackles the time-axis rules.
+Each is a separate opt-in. b1 and b2 have now landed and form a usable BI increment (stacked + grouped bar; multi-series + area line; donut/area variants; number/table; create/edit/delete/preview). b3 remains the hardest and narrowest slice, so it is **not** the default next task; reopen it only for a concrete time-series-with-series use case.
 
 ---
 
@@ -68,6 +69,8 @@ Once grouped/multi-line allows non-additive aggregations, **`Σ series ≠ dataP
 
 ## 3. v2-d-b1 — grouped (side-by-side) bar
 
+**Implementation status:** ✅ complete via #2312 (backend) + #2315 (frontend).
+
 - **Types:** `ChartDisplayConfig += barMode?: 'stacked' | 'grouped'` (backend `charts.ts` + frontend `types.ts`).
 - **Validation** (`assertSeriesConstraints`): when `seriesByFieldId` + `type==='bar'`, require additive **only if** `barMode !== 'grouped'`; `barMode==='grouped'` accepts any aggregation. (`barMode` without `seriesByFieldId` is inert — no error.)
 - **Producer:** unchanged series math; the emit-guard's additive check becomes `(barMode === 'grouped' || additive)`.
@@ -79,16 +82,20 @@ Once grouped/multi-line allows non-additive aggregations, **`Σ series ≠ dataP
 
 ## 4. v2-d-b2 — multi-series line
 
+**Implementation status:** ✅ complete via #2316 (backend) + #2323 (frontend).
+
 - **Validation:** `assertSeriesConstraints` allows `type==='line'` with `seriesByFieldId` + `groupByFieldId` (any aggregation; line never stacks). Keep `type` ∈ {bar, line} as the only series-bearing types (pie/number/table still rejected).
 - **Producer:** emit-guard `type ∈ {bar, line}` (was bar-only). Series math unchanged.
-- **Render** (`buildChartOption` line branch): when `series` present → N `line` series (no `stack`, no `areaStyle`). x-axis = `dataPoints` labels; legend over series names (reuse the stacked-bar legend block — generalize `hasStackedSeries` to `hasSeriesLegend = (bar||line) && series.length`).
-- **`variant` interaction (defer):** v2-c `variant:'area'` + multi-series line (stacked area vs overlaid areas) is its own semantic — **out of scope**; for b2, a multi-series line ignores `area` (overlaid plain lines). Note it.
+- **Render** (`buildChartOption` line branch): when `series` present → N `line` series (no `stack`; `variant:'area'` applies `areaStyle` to each line). x-axis = `dataPoints` labels; legend over series names (reuse the stacked-bar legend block — generalize `hasStackedSeries` to `hasSeriesLegend = (bar||line) && series.length`).
+- **`variant` interaction (implemented):** v2-c `variant:'area'` + multi-series line preserves the existing area variant per series (each line keeps `areaStyle`). Stacked-area / 100%-stacked semantics remain deferred; overlaid area lines are the shipped b2 behavior.
 - **Form:** series picker offered for `line` too (any aggregation); no `barMode` for line.
 - **Tests:** line+series → N line series no stack; non-additive accepted; single-series line unchanged (regression); legend renders for multi-line.
 
 ---
 
 ## 5. v2-d-b3 — date-axis × series (the rules v2-d-a deferred)
+
+**Implementation status:** ⏸ paused / demand-gated. Do not treat this as automatically next after b2. It should start only when a concrete dashboard use case needs time-series split by a second field.
 
 Lifts constraint #3: a **date-bucket primary axis** (`dateFieldId + dateGrouping`) split by `seriesByFieldId`. Applies to `line` (the common time-series case) and grouped `bar`; **stacked bar over time stays additive-only** per §2.2.
 
@@ -121,9 +128,9 @@ chronological bucket order; dense 0-fill per existing bucket; missing-bucket NOT
 
 ## 6. Impl plan & sequencing
 Each sub-slice = a separate explicit opt-in, backend-first (type + validation + producer + real-DB tests green before frontend), mirroring v2-d-a.
-- **b1** (grouped bar): `barMode` type + conditional-additive validation + producer guard + render + form. Smallest; establishes `barMode`.
-- **b2** (multi-line): extend series to `line` (validation + producer + render + legend + form). Depends on nothing in b1 except the relaxed-additive framing.
-- **b3** (date×series): lift date rejection + ordering/zero-fill/limit rules. Hardest; do last. The §5.3 limit decision is a prerequisite.
+- **b1** (grouped bar): ✅ complete. `barMode` type + conditional-additive validation + producer guard + render + form.
+- **b2** (multi-line): ✅ complete. Extended series to `line` (validation + producer + render + legend + form), including area-variant preservation.
+- **b3** (date×series): ⏸ demand-gated. Lift date rejection + ordering/zero-fill/limit rules only when product demand justifies the extra time-axis semantics. The §5.3 limit decision remains the prerequisite.
 - No new security gate; each slice adds a "denied seriesByFieldId still restricts in this mode" regression test.
 - Frozen / out of scope: `src/formula/engine.ts`, central RBAC/auth, integration-core, storage/migrations (series computed, only `barMode`/`seriesByFieldId` persist in existing jsonb). No OpenAPI change (chart-data endpoints un-modeled, same as v2-a..v2-d-a).
 
@@ -132,6 +139,6 @@ Each sub-slice = a separate explicit opt-in, backend-first (type + validation + 
 ## 7. Deferred (later, separately-gated)
 - **Synthetic full-range date buckets** (continuous time axis / explicit gap handling) — applies to single- and multi-series date charts alike; the honest fix for §5.2's line-gap limitation.
 - **Series-count cap** if owner picks §5.3 option (A).
-- **`variant` × multi-series** (stacked-area / 100%-stacked / overlaid-area line).
+- **Advanced `variant` × multi-series** (stacked-area / 100%-stacked). Overlaid area multi-line shipped in b2.
 - **Stacked line** (area-stacked time series) — additive, a distinct render.
 - Multi-value-field series (two series = `sum(A)`, `sum(B)`) — still deferred from v2-d-a.
