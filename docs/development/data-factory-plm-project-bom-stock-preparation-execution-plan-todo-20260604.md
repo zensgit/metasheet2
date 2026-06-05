@@ -531,17 +531,23 @@ Acceptance locks:
 - No PLM write, MetaSheet apply, K3, external database write, raw SQL, or
   source credential copy is introduced.
 
-### 🔒 C6 - `config_info` -> select/dropdown option sync
+### 🟡 C6 - `config_info` -> select/dropdown option sync + predefined option-action binding (this PR)
 
-Gated on: C5 + explicit opt-in.
+Gated on: C5 + target readiness + explicit opt-in.
 
 Scope:
 
 - Sync selected option sets used by stock-preparation fields.
 - Keep options aligned for fields such as material type / blank type / status.
-- Support a controlled user-facing/admin-facing "sync options" action after the
+- Support a controlled admin-facing "sync options" action after the canonical
   target table exists.
-- This is MetaSheet configuration sync only.
+- Let admins customize option values/labels/colors and bind an option to a
+  backend predefined action id.
+- Store bindings as field metadata (`stockPreparation.optionActionBindings`);
+  they do not execute directly. Execution still goes through the existing
+  table-action dry-run/apply token and permission gates.
+- This is MetaSheet configuration sync only: field `property.options` and
+  stock-preparation field metadata.
 
 Acceptance locks:
 
@@ -550,6 +556,11 @@ Acceptance locks:
 - Option evidence is values-free when posted to issues.
 - Missing/ambiguous option mapping fails closed.
 - C6 must not auto-create unknown options during C5 apply.
+- No arbitrary SQL, JS, URL, handler/function body, payload, or external call
+  can be supplied by the browser/admin config.
+- Option-action binding must name a predefined backend action from the allowlist;
+  unknown action ids fail closed.
+- Admin-only route/UI. Read/write non-admin users cannot sync options.
 
 ## Deferred tracks
 
@@ -594,8 +605,10 @@ SQL Server source is available as `bridge:legacy-sql-readonly`.
 7. C5-source-gate enables the explicitly configured Bridge readonly source path
    with parameterized equality filters.
 8. C5-3 validates the flow on an entity machine.
+9. C6 syncs configured select/dropdown option sets and predefined
+   option-action bindings into the canonical target field metadata.
 
-C6 option sync remains after C1b/C5 target readiness. All later slices still
-require their predecessor to land and the owner to explicitly opt in. K3 Save /
-Submit / Audit / BOM, external database write, and multi-project/batch mode
-remain out of scope.
+After C6, any richer option authoring UI or option-bound action execution polish
+remains separate. All later slices still require their predecessor to land and
+the owner to explicitly opt in. K3 Save / Submit / Audit / BOM, external
+database write, and multi-project/batch mode remain out of scope.

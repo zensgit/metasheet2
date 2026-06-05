@@ -84,6 +84,7 @@ describe('multitable plugin scope helper', () => {
       sheet: { id: 'sheet_scoped', baseId: 'base_legacy', name: 'Ticket', description: null },
       fields: [],
     }))
+    const assertObjectScope = vi.fn(async () => {})
     const assertSheetScope = vi.fn(async () => {})
     const multitable = {
       provisioning: {
@@ -114,6 +115,14 @@ describe('multitable plugin scope helper', () => {
           hiddenFieldIds: [],
           config: {},
         })),
+        patchObjectFieldProperty: vi.fn(async () => ({
+          id: 'fld_1',
+          sheetId: 'sheet_1',
+          name: 'Status',
+          type: 'select',
+          property: { options: [{ value: 'open' }] },
+          order: 1,
+        })),
       },
       records: {
         listRecords: vi.fn(),
@@ -127,6 +136,7 @@ describe('multitable plugin scope helper', () => {
 
     const scoped = createPluginScopedMultitableApi(multitable as any, 'plugin-after-sales', {
       ensureObjectInScope,
+      assertObjectScope,
       assertSheetScope,
     })
 
@@ -153,6 +163,14 @@ describe('multitable plugin scope helper', () => {
     ).resolves.toMatchObject({
       sheet: { id: 'sheet_scoped' },
     })
+    await expect(
+      scoped.provisioning.patchObjectFieldProperty({
+        projectId: 'tenant_42:after-sales',
+        objectId: 'serviceTicket',
+        fieldId: 'status',
+        propertyPatch: { options: [{ value: 'open' }] },
+      }),
+    ).resolves.toMatchObject({ id: 'fld_1' })
 
     expect(() =>
       scoped.provisioning.getObjectSheetId('tenant_42:attendance', 'serviceTicket'),
@@ -187,6 +205,17 @@ describe('multitable plugin scope helper', () => {
       descriptor: { id: 'serviceTicket', name: 'Ticket', fields: [] },
     })
     expect(multitable.provisioning.ensureObject).not.toHaveBeenCalled()
+    expect(assertObjectScope).toHaveBeenCalledWith({
+      pluginName: 'plugin-after-sales',
+      projectId: 'tenant_42:after-sales',
+      objectId: 'serviceTicket',
+    })
+    expect(multitable.provisioning.patchObjectFieldProperty).toHaveBeenCalledWith({
+      projectId: 'tenant_42:after-sales',
+      objectId: 'serviceTicket',
+      fieldId: 'status',
+      propertyPatch: { options: [{ value: 'open' }] },
+    })
     expect(assertSheetScope).toHaveBeenCalledWith({
       pluginName: 'plugin-after-sales',
       sheetId: 'sheet_1',

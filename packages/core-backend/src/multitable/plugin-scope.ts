@@ -216,6 +216,15 @@ export function createPluginScopedMultitableApi(
         await hooks.assertSheetScope?.({ pluginName, sheetId: input.sheetId })
         return multitable.provisioning.ensureView(input)
       },
+      patchObjectFieldProperty: async (input) => {
+        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        await hooks.assertObjectScope?.({
+          pluginName,
+          projectId: input.projectId,
+          objectId: input.objectId,
+        })
+        return multitable.provisioning.patchObjectFieldProperty(input)
+      },
     },
     records: {
       listRecords: async (input) => {

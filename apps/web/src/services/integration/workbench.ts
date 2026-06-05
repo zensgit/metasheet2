@@ -908,6 +908,19 @@ export interface IntegrationTableActionRequestPayload {
   }
 }
 
+export interface IntegrationStockPreparationOptionSyncPayload extends IntegrationScope {
+  projectId?: string | null
+  optionSets?: Record<string, unknown>
+  optionSources?: Record<string, unknown>
+  configInfo?: Record<string, unknown>
+}
+
+export interface IntegrationStockPreparationOptionSyncResult {
+  ok?: boolean
+  target?: Record<string, unknown>
+  evidence?: Record<string, unknown>
+}
+
 export async function listIntegrationTableActions(scope: IntegrationScope = {}): Promise<IntegrationTableActionMetadata[]> {
   const query = buildQueryString({
     tenantId: scope.tenantId,
@@ -951,6 +964,16 @@ export async function applyIntegrationTableAction(
     }),
   })
   return parseIntegrationResponse<IntegrationTableActionApplyResult>(response)
+}
+
+export async function syncIntegrationStockPreparationOptions(
+  payload: IntegrationStockPreparationOptionSyncPayload,
+): Promise<IntegrationStockPreparationOptionSyncResult> {
+  const response = await apiFetch('/api/integration/stock-preparation/options/sync', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return parseIntegrationResponse<IntegrationStockPreparationOptionSyncResult>(response)
 }
 
 // Only 'open' letters are replayable — the server enforces the same, but the UI

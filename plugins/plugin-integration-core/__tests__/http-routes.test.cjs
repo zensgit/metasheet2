@@ -2469,6 +2469,17 @@ function createStockPreparationTargetProvisioningApi({
         })),
       }
     },
+    async patchObjectFieldProperty(input) {
+      calls.push(['patchObjectFieldProperty', clone(input)])
+      return {
+        id: `fld_${input.fieldId}`,
+        sheetId: sheet ? sheet.id : 'sheet_stock_canonical_private',
+        name: input.fieldId,
+        type: 'select',
+        property: clone(input.propertyPatch || {}),
+        order: calls.length,
+      }
+    },
   }
   return { api, calls }
 }
@@ -2573,6 +2584,76 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.deepEqual(res.body.error.details.missingFields, ['path'])
   assert.equal(JSON.stringify(res.body.error).includes('sheet_stock_canonical_private'), false, 'incomplete error hides sheet id')
   assert.equal(findCalls(incomplete.calls, 'ensureObject').length, 0, 'incomplete existing target is not repaired in place')
+}
+
+async function testStockPreparationOptionSyncRoute() {
+  const provisioning = createStockPreparationTargetProvisioningApi({ sheetExists: true })
+  const records = createTableActionRecordsApi()
+  const { routes, registered } = mountRoutes(createMockServices().services, {
+    provisioningApi: provisioning.api,
+    recordsApi: records.recordsApi,
+  })
+
+  assert.ok(
+    registered.includes('POST /api/integration/stock-preparation/options/sync'),
+    'stock-preparation option sync route registered',
+  )
+
+  let res = await invoke(routes, 'POST', '/api/integration/stock-preparation/options/sync', {
+    user: WRITE_USER,
+    body: { projectId: 'tenant_1:integration-core', optionSets: { material_type: [{ value: 'plate' }] } },
+  })
+  assert.equal(res.statusCode, 403, 'write user cannot sync stock-preparation options')
+  assert.equal(findCalls(provisioning.calls, 'patchObjectFieldProperty').length, 0)
+
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/options/sync', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      optionSets: {
+        material_type: [{
+          value: 'plate',
+          label: 'Plate',
+          actionBindings: [{ actionId: PLM_STOCK_PREPARATION_ACTION_ID }],
+        }],
+        blank_type: [{ value: 'casting', label: 'Casting' }],
+        stock_preparation_status: [{ value: 'pending', label: 'Pending' }],
+      },
+    },
+  })
+  assertOkResponse(res, 200)
+  const patches = findCalls(provisioning.calls, 'patchObjectFieldProperty')
+  assert.equal(patches.length, 4, 'route syncs contract decision + three configured option fields')
+  const materialPatch = patches.find((call) => call[1].fieldId === 'materialType')
+  assert.ok(materialPatch, 'materialType patch is present')
+  assert.deepEqual(materialPatch[1].propertyPatch.options, [{ value: 'plate', label: 'Plate' }])
+  assert.equal(materialPatch[1].propertyPatch.stockPreparation.optionActionBindings[0].actionId, PLM_STOCK_PREPARATION_ACTION_ID)
+  assert.equal(materialPatch[1].propertyPatch.stockPreparation.optionActionBindings[0].requiresDryRun, true)
+  assert.equal(JSON.stringify(res.body.data.evidence).includes('plate'), false, 'route evidence hides option values')
+  assert.equal(JSON.stringify(res.body.data.evidence).includes('Casting'), false, 'route evidence hides option labels')
+  assert.equal(records.calls.length, 0, 'option sync route never uses records API')
+
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/options/sync', {
+    user: ADMIN_USER,
+    body: { projectId: 'tenant_1:integration-core', sql: 'select 1' },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_OPTION_SYNC_REQUEST_INVALID')
+
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/options/sync', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      optionSets: {
+        material_type: [{
+          value: 'plate',
+          actionBindings: [{ actionId: PLM_STOCK_PREPARATION_ACTION_ID, handler: 'runAnything' }],
+        }],
+      },
+    },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'OPTION_SYNC_EXECUTABLE_REJECTED')
 }
 
 async function testTableActionRoutes() {
@@ -2839,6 +2920,7 @@ async function testTableActionUnconfiguredFailsClosed() {
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testStockPreparationTargetProvisioningRoutes()
+  await testStockPreparationOptionSyncRoute()
   await testTableActionRoutes()
   await testTableActionRoutesSupportExplicitBridgeSource()
   await testTableActionTargetPreflightBeforeSourceAdapter()

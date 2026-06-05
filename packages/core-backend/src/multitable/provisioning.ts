@@ -78,6 +78,14 @@ export type EnsureViewInput = {
   descriptor: MultitableProvisioningViewDescriptor
 }
 
+export type PatchObjectFieldPropertyInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  fieldId: string
+  propertyPatch: Record<string, unknown>
+}
+
 export type CreateViewInput = {
   query: MultitableProvisioningQueryFn
   viewId: string
@@ -160,6 +168,31 @@ function buildFieldProperty(
     ...base,
     options: field.options.map((value) => ({ value })),
   }
+}
+
+function mergeJsonObject(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base }
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      throw new Error(`Unsafe field property patch key: ${key}`)
+    }
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      out[key] &&
+      typeof out[key] === 'object' &&
+      !Array.isArray(out[key])
+    ) {
+      out[key] = mergeJsonObject(out[key] as Record<string, unknown>, value as Record<string, unknown>)
+    } else {
+      out[key] = value
+    }
+  }
+  return out
 }
 
 export async function ensureLegacyBase(
@@ -314,6 +347,44 @@ export async function ensureFields(
     property: normalizeJson(row.property),
     order: Number(row.order ?? 0),
   }))
+}
+
+export async function patchObjectFieldProperty(
+  input: PatchObjectFieldPropertyInput,
+): Promise<MultitableProvisioningField> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const physicalFieldId = getObjectFieldId(input.projectId, input.objectId, input.fieldId)
+  const existing = await input.query(
+    `SELECT id, sheet_id, name, type, property, "order"
+     FROM meta_fields
+     WHERE sheet_id = $1 AND id = $2`,
+    [sheetId, physicalFieldId],
+  )
+  const row = (existing.rows as any[])[0]
+  if (!row) {
+    throw new Error(`Provisioned field not found: ${input.objectId}.${input.fieldId}`)
+  }
+
+  const property = mergeJsonObject(normalizeJson(row.property), normalizeJson(input.propertyPatch))
+  const updated = await input.query(
+    `UPDATE meta_fields
+     SET property = $3::jsonb
+     WHERE sheet_id = $1 AND id = $2
+     RETURNING id, sheet_id, name, type, property, "order"`,
+    [sheetId, physicalFieldId, JSON.stringify(property)],
+  )
+  const updatedRow = (updated.rows as any[])[0]
+  if (!updatedRow) {
+    throw new Error(`Failed to patch provisioned field: ${input.objectId}.${input.fieldId}`)
+  }
+  return {
+    id: String(updatedRow.id),
+    sheetId: String(updatedRow.sheet_id),
+    name: String(updatedRow.name),
+    type: String(updatedRow.type) as MultitableProvisioningFieldType,
+    property: normalizeJson(updatedRow.property),
+    order: Number(updatedRow.order ?? 0),
+  }
 }
 
 export async function ensureView(

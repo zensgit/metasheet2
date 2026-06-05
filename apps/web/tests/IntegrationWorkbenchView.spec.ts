@@ -2583,4 +2583,86 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi()
     expect(applyBodies).toHaveLength(0)
   })
+
+  it('C6: lets admins sync stock-preparation options and predefined action bindings without client scope or payload fields', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:admin']))
+    const syncBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/stock-preparation/options/sync') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        syncBodies.push(body)
+        return jsonResponse({
+          ok: true,
+          target: { objectId: 'plm_stock_preparation_main', fieldCount: 2 },
+          evidence: {
+            objectId: 'plm_stock_preparation_main',
+            fields: [
+              { field: 'materialType', optionSource: { type: 'config_info', key: 'material_type' }, optionCount: 1, actionBindingCount: 1 },
+            ],
+            skipped: [],
+          },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(12)
+
+    expect(container.querySelector('[data-testid="stock-option-sync-panel"]')?.textContent).toContain('备料选项同步')
+    expect(container.querySelector('[data-testid="stock-option-sync-boundary"]')?.textContent).toContain('不接受 SQL/JS/URL/function body')
+    const textarea = container.querySelector('[data-testid="stock-option-sync-json"]') as HTMLTextAreaElement
+    textarea.value = JSON.stringify({
+      optionSets: {
+        material_type: [{
+          value: 'plate',
+          label: 'Plate',
+          actionBindings: [{ actionId: 'plm.stock-preparation.pull-bom.v1' }],
+        }],
+      },
+    })
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const syncButton = container.querySelector('[data-testid="stock-option-sync-run"]') as HTMLButtonElement
+    expect(syncButton.disabled).toBe(false)
+    syncButton.click()
+    await flushUi(10)
+
+    expect(syncBodies).toHaveLength(1)
+    expect(syncBodies[0]).toEqual({
+      tenantId: 'default',
+      workspaceId: null,
+      optionSets: {
+        material_type: [{
+          value: 'plate',
+          label: 'Plate',
+          actionBindings: [{ actionId: 'plm.stock-preparation.pull-bom.v1' }],
+        }],
+      },
+    })
+    expect(syncBodies[0]).not.toHaveProperty('sheetId')
+    expect(syncBodies[0]).not.toHaveProperty('source')
+    expect(syncBodies[0]).not.toHaveProperty('target')
+    expect(syncBodies[0]).not.toHaveProperty('plan')
+    expect(syncBodies[0]).not.toHaveProperty('payload')
+    const evidence = container.querySelector('[data-testid="stock-option-sync-evidence"]')?.textContent || ''
+    expect(evidence).toContain('material_type')
+    expect(evidence).not.toContain('plate')
+    expect(evidence).not.toContain('Plate')
+  })
 })

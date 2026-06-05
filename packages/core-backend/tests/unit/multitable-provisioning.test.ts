@@ -7,6 +7,7 @@ import {
   ensureObject,
   ensureView,
   findObjectSheet,
+  patchObjectFieldProperty,
   resolveObjectFieldIds,
   type MultitableProvisioningQueryFn,
 } from '../../src/multitable/provisioning'
@@ -158,6 +159,21 @@ function createQuery(): {
           .filter((field) => field.sheet_id === sheetId && idSet.has(field.id))
           .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id)),
       }
+    }
+
+    if (normalized.includes('FROM meta_fields') && normalized.includes('WHERE sheet_id = $1 AND id = $2')) {
+      const [sheetId, id] = params as [string, string]
+      return {
+        rows: fields.filter((field) => field.sheet_id === sheetId && field.id === id),
+      }
+    }
+
+    if (normalized.startsWith('UPDATE meta_fields SET property = $3::jsonb')) {
+      const [sheetId, id, propertyJson] = params as [string, string, string]
+      const field = fields.find((entry) => entry.sheet_id === sheetId && entry.id === id)
+      if (!field) return { rows: [], rowCount: 0 }
+      field.property = JSON.parse(propertyJson)
+      return { rows: [field], rowCount: 1 }
     }
 
     if (normalized.includes('FROM meta_views') && normalized.includes('WHERE id = $1')) {
@@ -318,6 +334,59 @@ describe('multitable provisioning helper', () => {
         },
       }),
     ])
+  })
+
+  it('patches provisioned field property without accepting prototype-pollution keys', async () => {
+    const { query, fields } = createQuery()
+
+    await ensureObject({
+      query,
+      projectId: 'tenant_42:after-sales',
+      descriptor: {
+        id: 'installedAsset',
+        name: 'Installed Asset',
+        fields: [
+          {
+            id: 'status',
+            name: 'Status',
+            type: 'select',
+            options: ['new'],
+            property: { stockPreparation: { ownership: 'human_preserved' } },
+          },
+        ],
+      },
+    })
+
+    const patched = await patchObjectFieldProperty({
+      query,
+      projectId: 'tenant_42:after-sales',
+      objectId: 'installedAsset',
+      fieldId: 'status',
+      propertyPatch: {
+        options: [{ value: 'done' }],
+        stockPreparation: { optionSync: { optionCount: 1 } },
+      },
+    })
+
+    expect(patched.property).toEqual({
+      options: [{ value: 'done' }],
+      stockPreparation: {
+        ownership: 'human_preserved',
+        optionSync: { optionCount: 1 },
+      },
+    })
+    expect(fields[0]?.property).toEqual(patched.property)
+
+    await expect(
+      patchObjectFieldProperty({
+        query,
+        projectId: 'tenant_42:after-sales',
+        objectId: 'installedAsset',
+        fieldId: 'status',
+        propertyPatch: JSON.parse('{"stockPreparation":{"__proto__":{"polluted":true}}}'),
+      }),
+    ).rejects.toThrow('Unsafe field property patch key')
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
   })
 
   it('ensures one view with deterministic id and normalized config', async () => {

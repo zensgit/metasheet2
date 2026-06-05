@@ -405,6 +405,19 @@ export interface MultitableProvisioningAPI {
     hiddenFieldIds: string[]
     config: Record<string, unknown>
   }>
+  patchObjectFieldProperty(input: {
+    projectId: string
+    objectId: string
+    fieldId: string
+    propertyPatch: Record<string, unknown>
+  }): Promise<{
+    id: string
+    sheetId: string
+    name: string
+    type: MultitableProvisioningFieldType
+    property: Record<string, unknown>
+    order: number
+  }>
 }
 
 export interface MultitableRecordsAPI {

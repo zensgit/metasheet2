@@ -45,6 +45,7 @@ import {
   resolveObjectFieldIds as resolveProvisionedObjectFieldIds,
   ensureObject as ensureMultitableObject,
   ensureView as ensureMultitableView,
+  patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   type MultitableProvisioningQueryFn,
 } from './multitable/provisioning'
 import {
@@ -62,6 +63,7 @@ import {
   assertPluginOwnsSheet,
   claimPluginObjectScope,
   createPluginScopedMultitableApi,
+  MultitableObjectScopeError,
 } from './multitable/plugin-scope'
 import { installMetrics, metrics as promMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { APIGateway } from './gateway/APIGateway'
@@ -449,6 +451,28 @@ export class MetaSheetServer {
                 projectId,
                 sheetId,
                 descriptor,
+              })
+            })
+          },
+          patchObjectFieldProperty: async ({ projectId, objectId, fieldId, propertyPatch }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                    ? (result as { rowCount: number }).rowCount
+                    : undefined,
+                }
+              }
+              return patchProvisionedObjectFieldProperty({
+                query: txQuery,
+                projectId,
+                objectId,
+                fieldId,
+                propertyPatch,
               })
             })
           },
@@ -1322,11 +1346,14 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
-              await assertPluginOwnsObject(txQuery, {
+              const ownsObject = await assertPluginOwnsObject(txQuery, {
                 pluginName,
                 projectId,
                 objectId,
               })
+              if (!ownsObject) {
+                throw new MultitableObjectScopeError(pluginName, projectId, objectId, 'unclaimed')
+              }
             },
             claimObjectScope: async ({ projectId, objectId, sheetId, pluginName }) => {
               await poolManager.get().transaction(async ({ query }) => {
