@@ -16,9 +16,10 @@ export interface ChartDataPoint {
 }
 
 /**
- * v2-d stacked-bar series. `data` is dense and aligned POSITIONALLY to `ChartData.dataPoints`
- * (same length, same order; `0` where a (category × series) cell has no rows). Present only for
- * a bar chart with `seriesByFieldId` + a primary `groupByFieldId` + an additive aggregation.
+ * v2-d bar/line series. `data` is dense and aligned POSITIONALLY to `ChartData.dataPoints` (same
+ * length, same order; `0` where a (bucket × series) cell has no rows). Present for a bar or line chart
+ * with `seriesByFieldId` + a primary axis (`groupByFieldId` or a date axis); a stacked bar additionally
+ * requires an additive aggregation, while grouped bar / multi-series line accept any aggregation.
  */
 export interface ChartSeries {
   name: string
@@ -29,7 +30,7 @@ export interface ChartData {
   chartId: string
   chartType: ChartType
   dataPoints: ChartDataPoint[]
-  /** v2-d: stacked series split. `dataPoints`/`total` are unchanged by its presence. */
+  /** v2-d: series split (stacked/grouped bar or multi-series line). `dataPoints`/`total` are unchanged by its presence. */
   series?: ChartSeries[]
   total?: number
   metadata?: {

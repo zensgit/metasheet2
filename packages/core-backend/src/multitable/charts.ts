@@ -16,9 +16,11 @@ export interface ChartDataSource {
   groupByFieldId?: string
 
   /**
-   * v2-d: split each `groupByFieldId` category into stacked series.
-   * Honored only for a `bar` chart with a primary `groupByFieldId` and an additive
-   * aggregation (sum/count) — see `assertSeriesConstraints`; inert / rejected otherwise.
+   * v2-d: split each primary-axis bucket into series. Honored for a `bar` or `line` chart with a
+   * primary axis — either `groupByFieldId` or a date axis (`dateFieldId` + `dateGrouping`, v2-d-b3).
+   * A STACKED bar additionally requires an additive aggregation (sum/count); a grouped bar
+   * (`display.barMode='grouped'`, v2-d-b1) and a multi-series line (v2-d-b2) accept any aggregation.
+   * See `assertSeriesConstraints`; inert / rejected otherwise.
    */
   seriesByFieldId?: string
 
@@ -91,8 +93,10 @@ export const ADDITIVE_AGGREGATIONS: ReadonlySet<AggregationFunction> = new Set<A
 ])
 
 /**
- * v2-d stacked-series (`seriesByFieldId`) constraints. No-op when unset; otherwise throws unless
- * the chart is a `bar` with a primary `groupByFieldId` and an additive aggregation (sum/count).
+ * v2-d series (`seriesByFieldId`) constraints. No-op when unset; otherwise throws unless the chart is
+ * a `bar` or `line` with a primary axis — `groupByFieldId` OR a date axis (`dateFieldId` +
+ * `dateGrouping`, v2-d-b3). A STACKED bar (default `barMode`) additionally requires an additive
+ * aggregation (sum/count); a grouped bar (`barMode='grouped'`) and a line accept any aggregation.
  *
  * Enforced at EVERY input boundary (preview + persisted create/update) so the UI is never the sole
  * guard; the producer (`ChartAggregationService.computeChartData`) mirrors the same combination and
