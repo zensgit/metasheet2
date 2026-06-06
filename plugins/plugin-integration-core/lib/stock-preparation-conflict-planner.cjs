@@ -131,6 +131,10 @@ function plmRefreshFieldIds(template) {
   return fieldIdsByOwnership(template, 'plm_system').filter((id) => !RUN_FIELD_IDS.includes(id))
 }
 
+function fieldMapForTemplate(template) {
+  return new Map((template.fields || []).map((field) => [field.id, field]))
+}
+
 function keyOf(row) {
   return isPlainObject(row) && typeof row.idempotencyKey === 'string' && row.idempotencyKey.trim() !== ''
     ? row.idempotencyKey
@@ -169,8 +173,41 @@ function valuesEqual(left, right) {
   return JSON.stringify(normalizedLeft) === JSON.stringify(normalizedRight)
 }
 
-function changedFields(nextRow, existingRow, fields) {
-  return fields.filter((field) => !valuesEqual(nextRow[field], existingRow[field]))
+function normalizeComparableValueForField(value, field) {
+  const normalized = comparableValue(value)
+  if (normalized === null || !field || !field.type) return normalized
+  if (field.type === 'string' || field.type === 'date' || field.type === 'select') {
+    if (typeof normalized === 'number' || typeof normalized === 'boolean') return String(normalized)
+    return normalized
+  }
+  if (field.type === 'number') {
+    if (typeof normalized === 'number' && Number.isFinite(normalized)) return normalized
+    if (typeof normalized === 'string' && normalized.trim()) {
+      const parsed = Number(normalized)
+      if (Number.isFinite(parsed)) return parsed
+    }
+    return normalized
+  }
+  if (field.type === 'boolean') {
+    if (typeof normalized === 'boolean') return normalized
+    if (typeof normalized === 'string') {
+      const lowered = normalized.trim().toLowerCase()
+      if (lowered === 'true') return true
+      if (lowered === 'false') return false
+    }
+  }
+  return normalized
+}
+
+function valuesEqualForTemplateField(left, right, field) {
+  return valuesEqual(
+    normalizeComparableValueForField(left, field),
+    normalizeComparableValueForField(right, field),
+  )
+}
+
+function changedFields(nextRow, existingRow, fields, templateFields = new Map()) {
+  return fields.filter((field) => !valuesEqualForTemplateField(nextRow[field], existingRow[field], templateFields.get(field)))
 }
 
 function pickFields(row, fields) {
@@ -301,6 +338,7 @@ function planStockPreparationConflicts(input = {}) {
     })
   }
   const plmFields = plmRefreshFieldIds(template)
+  const templateFields = fieldMapForTemplate(template)
   const counts = {
     [DECISIONS.ADD]: 0,
     [DECISIONS.UPDATE]: 0,
@@ -380,7 +418,7 @@ function planStockPreparationConflicts(input = {}) {
       continue
     }
 
-    const lineageChanges = changedFields(row, existingRow, LINEAGE_FIELD_IDS)
+    const lineageChanges = changedFields(row, existingRow, LINEAGE_FIELD_IDS, templateFields)
     if (lineageChanges.length > 0) {
       manualConfirm(decisions, counts, {
         idempotencyKey: key,
@@ -392,7 +430,7 @@ function planStockPreparationConflicts(input = {}) {
       continue
     }
 
-    const identityChanges = changedFields(row, existingRow, IDENTITY_FIELD_IDS)
+    const identityChanges = changedFields(row, existingRow, IDENTITY_FIELD_IDS, templateFields)
     if (identityChanges.length > 0) {
       manualConfirm(decisions, counts, {
         idempotencyKey: key,
@@ -404,7 +442,7 @@ function planStockPreparationConflicts(input = {}) {
       continue
     }
 
-    const refreshChanges = strategy.refreshPlmSystemFields ? changedFields(row, existingRow, plmFields) : []
+    const refreshChanges = strategy.refreshPlmSystemFields ? changedFields(row, existingRow, plmFields, templateFields) : []
     if (refreshChanges.length === 0) {
       addDecision(decisions, counts, makeSkipDecision(row))
       continue
@@ -472,11 +510,14 @@ module.exports = {
   summarizeConflictPlanForEvidence,
   __internals: {
     changedFields,
+    fieldMapForTemplate,
     groupByKey,
     normalizeStrategy,
     normalizeIsoTime,
+    normalizeComparableValueForField,
     plmRefreshFieldIds,
     sameStringSet,
     valuesEqual,
+    valuesEqualForTemplateField,
   },
 }

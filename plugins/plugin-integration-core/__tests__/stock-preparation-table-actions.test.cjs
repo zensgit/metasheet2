@@ -428,6 +428,20 @@ async function testApplyNormalizesNumericPlmDisplayFieldsBeforeCreate() {
   assert.equal(typeof createCall[1].data.totalQuantity, 'number')
   assert.equal(createCall[1].data.active, true)
   assert.equal(JSON.stringify(result.evidence).includes('1001'), false, 'apply evidence hides component code value')
+
+  const followUp = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: '2026-06-04T10:00:00.000Z',
+  })
+
+  assert.equal(followUp.status, 'ready', 'post-create dry-run should not require manual confirmation for type-only drift')
+  assert.equal(followUp.counts.add, 0, 'post-create dry-run must not duplicate-add')
+  assert.equal(followUp.counts.manual_confirm, 0, 'type-normalized existing rows must not be held')
+  assert.equal(followUp.counts.skip, 1, 'unchanged post-create row skips cleanly')
 }
 
 async function testApplySurfacesTypedValuesFreeRowFailureDiagnostics() {
