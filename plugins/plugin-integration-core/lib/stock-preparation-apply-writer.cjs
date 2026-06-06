@@ -20,6 +20,7 @@ const KNOWN_TARGET_WRITE_ERROR_CODES = Object.freeze(new Set([
   'missing_required_field',
   'patch_record_failed',
   'select_option_not_found',
+  'target_field_type_mismatch',
   'target_record_validation_failed',
   'target_row_not_found',
   'target_scope_violation',
@@ -113,6 +114,60 @@ function mapRecordFields(record, fieldIdMap = {}) {
   return out
 }
 
+function fieldMapForTemplate(template) {
+  return new Map((template.fields || []).map((field) => [field.id, field]))
+}
+
+function typeMismatch(field, expectedType) {
+  return new StockPreparationApplyWriterError('target field value does not match the stock-preparation template type', {
+    code: 'target_field_type_mismatch',
+    field,
+    expectedType,
+    reason: 'type_mismatch',
+  })
+}
+
+function normalizeValueForTemplateField(value, field) {
+  if (value === undefined) return undefined
+  if (value === null) return null
+  if (!field || !field.type) return value
+
+  if (field.type === 'string' || field.type === 'date' || field.type === 'select') {
+    if (typeof value === 'string') return value
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+    throw typeMismatch(field.id, field.type)
+  }
+
+  if (field.type === 'number') {
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value)
+      if (Number.isFinite(parsed)) return parsed
+    }
+    throw typeMismatch(field.id, field.type)
+  }
+
+  if (field.type === 'boolean') {
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase()
+      if (normalized === 'true') return true
+      if (normalized === 'false') return false
+    }
+    throw typeMismatch(field.id, field.type)
+  }
+
+  return value
+}
+
+function normalizePayloadForTemplate(payload, templateFields) {
+  const out = {}
+  for (const [field, value] of Object.entries(payload || {})) {
+    out[field] = normalizeValueForTemplateField(value, templateFields.get(field))
+  }
+  return out
+}
+
 function decisionKey(decision, target) {
   const key = decision && typeof decision.idempotencyKey === 'string' && decision.idempotencyKey.trim()
     ? decision.idempotencyKey.trim()
@@ -188,6 +243,10 @@ function messageMatches(error, pattern) {
   return pattern.test(errorMessage(error))
 }
 
+function isTypeMismatchMessage(error) {
+  return messageMatches(error, /value must be|must be (a )?(string|number|boolean)|Number value must be finite|String value must be string|Boolean value must be boolean/i)
+}
+
 function classifyTargetWriteError(error, operation = 'apply') {
   const detailsCode = typeof (error && error.details && error.details.code) === 'string'
     ? error.details.code
@@ -200,6 +259,7 @@ function classifyTargetWriteError(error, operation = 'apply') {
   }
   if (rawCode === 'VALIDATION_ERROR') {
     if (messageMatches(error, /invalid (multi-)?select option/i)) return 'select_option_not_found'
+    if (isTypeMismatchMessage(error)) return 'target_field_type_mismatch'
     return 'target_record_validation_failed'
   }
 
@@ -208,6 +268,7 @@ function classifyTargetWriteError(error, operation = 'apply') {
   if (name === 'RecordNotFoundError' || name === 'MultitableRecordNotFoundError') return 'target_scope_violation'
   if (name === 'RecordValidationError' || name === 'MultitableRecordValidationError' || name === 'RecordValidationFailedError') {
     if (messageMatches(error, /invalid (multi-)?select option/i)) return 'select_option_not_found'
+    if (isTypeMismatchMessage(error)) return 'target_field_type_mismatch'
     return 'target_record_validation_failed'
   }
   if (name === 'RecordPatchFieldValidationError') {
@@ -218,6 +279,7 @@ function classifyTargetWriteError(error, operation = 'apply') {
   if (messageMatches(error, /unknown field(id)?/i)) return 'field_mapping_failed'
   if (messageMatches(error, /invalid (multi-)?select option/i)) return 'select_option_not_found'
   if (messageMatches(error, /required/i)) return 'missing_required_field'
+  if (isTypeMismatchMessage(error)) return 'target_field_type_mismatch'
   if (messageMatches(error, /insufficient permissions|scope violation|not allowed|readonly|hidden/i)) return 'target_scope_violation'
   if (messageMatches(error, /validation failed|value must|field is|must be/i)) return 'target_record_validation_failed'
 
@@ -252,11 +314,12 @@ async function callRecordsApi(operation, callback) {
   }
 }
 
-async function applyAddDecision({ recordsApi, target, decision, humanFields }) {
+async function applyAddDecision({ recordsApi, target, decision, humanFields, templateFields }) {
   const key = decisionKey(decision, target)
-  const record = copyPayload(decision.record, 'decision.record')
+  let record = copyPayload(decision.record, 'decision.record')
   if (!Object.prototype.hasOwnProperty.call(record, target.keyField)) record[target.keyField] = key
   assertNoHumanFields(record, 'add record', humanFields)
+  record = normalizePayloadForTemplate(record, templateFields)
 
   const existing = await findExistingRecord(recordsApi, target, key)
   if (existing && existing.id) {
@@ -275,10 +338,11 @@ async function applyAddDecision({ recordsApi, target, decision, humanFields }) {
   return { status: 'created', recordId: created && created.id }
 }
 
-async function applyPatchDecision({ recordsApi, target, decision, humanFields }) {
+async function applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields }) {
   const key = decisionKey(decision, target)
-  const patch = copyPayload(decision.patch, 'decision.patch')
+  let patch = copyPayload(decision.patch, 'decision.patch')
   assertNoHumanFields(patch, `${decision.decision} patch`, humanFields)
+  patch = normalizePayloadForTemplate(patch, templateFields)
 
   const existing = await findExistingRecord(recordsApi, target, key)
   if (!existing || !existing.id) {
@@ -309,10 +373,51 @@ function errorCode(error) {
     : classifyTargetWriteError(error)
 }
 
-function errorOperation(error) {
-  return typeof (error && error.details && error.details.operation) === 'string'
-    ? error.details.operation
+function errorDetail(error, field) {
+  return typeof (error && error.details && error.details[field]) === 'string' && error.details[field].trim()
+    ? error.details[field].trim()
     : null
+}
+
+function errorOperation(error) {
+  return errorDetail(error, 'operation')
+}
+
+function errorField(error) {
+  return errorDetail(error, 'field')
+}
+
+function errorReason(error) {
+  return errorDetail(error, 'reason')
+}
+
+function errorExpectedType(error) {
+  return errorDetail(error, 'expectedType')
+}
+
+function sortedArray(set) {
+  return Array.from(set).sort()
+}
+
+function valuesFreeSummarySetEntry(set) {
+  const values = sortedArray(set)
+  return values.length ? values : undefined
+}
+
+function compactSummary(entry) {
+  const out = {
+    code: entry.code,
+    count: entry.count,
+    decisions: sortedArray(entry.decisions),
+    operations: sortedArray(entry.operations),
+  }
+  const fields = valuesFreeSummarySetEntry(entry.fields)
+  const reasons = valuesFreeSummarySetEntry(entry.reasons)
+  const expectedTypes = valuesFreeSummarySetEntry(entry.expectedTypes)
+  if (fields) out.fields = fields
+  if (reasons) out.reasons = reasons
+  if (expectedTypes) out.expectedTypes = expectedTypes
+  return out
 }
 
 function summarizeApplyErrors(errors = []) {
@@ -324,19 +429,20 @@ function summarizeApplyErrors(errors = []) {
       count: 0,
       decisions: new Set(),
       operations: new Set(),
+      fields: new Set(),
+      reasons: new Set(),
+      expectedTypes: new Set(),
     }
     summary.count += 1
     if (entry && entry.decision) summary.decisions.add(entry.decision)
     if (entry && entry.operation) summary.operations.add(entry.operation)
+    if (entry && entry.field) summary.fields.add(entry.field)
+    if (entry && entry.reason) summary.reasons.add(entry.reason)
+    if (entry && entry.expectedType) summary.expectedTypes.add(entry.expectedType)
     byCode.set(code, summary)
   }
   return Array.from(byCode.values())
-    .map((entry) => ({
-      code: entry.code,
-      count: entry.count,
-      decisions: Array.from(entry.decisions).sort(),
-      operations: Array.from(entry.operations).sort(),
-    }))
+    .map(compactSummary)
     .sort((left, right) => left.code.localeCompare(right.code))
 }
 
@@ -353,6 +459,7 @@ async function applyStockPreparationPlan(input = {}) {
   const template = normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
   const recordsApi = getRecordsApi(input.recordsApi)
   const humanFields = template.fields.filter((field) => field.ownership === 'human_preserved').map((field) => field.id)
+  const templateFields = fieldMapForTemplate(template)
   const counts = {
     created: 0,
     updated: 0,
@@ -378,13 +485,13 @@ async function applyStockPreparationPlan(input = {}) {
         continue
       }
       if (decision.decision === DECISIONS.ADD) {
-        const applied = await applyAddDecision({ recordsApi, target, decision, humanFields })
+        const applied = await applyAddDecision({ recordsApi, target, decision, humanFields, templateFields })
         incrementCounts(counts, decision.decision, applied.status)
         results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
         continue
       }
       if (decision.decision === DECISIONS.UPDATE || decision.decision === DECISIONS.INACTIVE) {
-        const applied = await applyPatchDecision({ recordsApi, target, decision, humanFields })
+        const applied = await applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields })
         incrementCounts(counts, decision.decision, applied.status)
         results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
         continue
@@ -397,13 +504,20 @@ async function applyStockPreparationPlan(input = {}) {
       counts.failed += 1
       const code = errorCode(error)
       const operation = errorOperation(error)
-      errors.push({
+      const field = errorField(error)
+      const reason = errorReason(error)
+      const expectedType = errorExpectedType(error)
+      const errorEntry = {
         index,
         decision: decision.decision || null,
         code,
         operation,
         message: sanitizeTargetWriteMessage(code, operation),
-      })
+      }
+      if (field) errorEntry.field = field
+      if (reason) errorEntry.reason = reason
+      if (expectedType) errorEntry.expectedType = expectedType
+      errors.push(errorEntry)
       results.push({
         index,
         decision: decision.decision || null,
