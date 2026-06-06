@@ -13,6 +13,18 @@ const {
 const { DECISIONS } = require('./stock-preparation-conflict-planner.cjs')
 
 const APPLY_PERMISSIONS = Object.freeze(['write', 'admin'])
+const KNOWN_TARGET_WRITE_ERROR_CODES = Object.freeze(new Set([
+  'create_record_failed',
+  'duplicate_target_key',
+  'field_mapping_failed',
+  'missing_required_field',
+  'patch_record_failed',
+  'select_option_not_found',
+  'target_record_validation_failed',
+  'target_row_not_found',
+  'target_scope_violation',
+  'unsupported_decision',
+]))
 
 class StockPreparationApplyWriterError extends Error {
   constructor(message, details = {}) {
@@ -130,12 +142,12 @@ function assertNoHumanFields(payload, context, humanFields = HUMAN_PRESERVED_FIE
 
 async function findExistingRecord(recordsApi, target, key) {
   const physicalKey = mapFieldName(target.keyField, target.fieldIdMap)
-  const records = await recordsApi.queryRecords({
+  const records = await callRecordsApi('queryRecords', () => recordsApi.queryRecords({
     sheetId: target.sheetId,
     filters: { [physicalKey]: key },
     limit: 2,
     offset: 0,
-  })
+  }))
   if (!Array.isArray(records)) {
     throw new StockPreparationApplyWriterError('queryRecords must return an array', { field: 'recordsApi.queryRecords' })
   }
@@ -154,6 +166,92 @@ function copyPayload(value, field) {
   return { ...value }
 }
 
+function errorName(error) {
+  return typeof (error && error.name) === 'string' && error.name.trim()
+    ? error.name.trim()
+    : ''
+}
+
+function errorRawCode(error) {
+  return typeof (error && error.code) === 'string' && error.code.trim()
+    ? error.code.trim()
+    : ''
+}
+
+function errorMessage(error) {
+  return typeof (error && error.message) === 'string'
+    ? error.message
+    : String(error || '')
+}
+
+function messageMatches(error, pattern) {
+  return pattern.test(errorMessage(error))
+}
+
+function classifyTargetWriteError(error, operation = 'apply') {
+  const detailsCode = typeof (error && error.details && error.details.code) === 'string'
+    ? error.details.code
+    : ''
+  if (KNOWN_TARGET_WRITE_ERROR_CODES.has(detailsCode)) return detailsCode
+
+  const rawCode = errorRawCode(error)
+  if (rawCode === 'FIELD_READONLY' || rawCode === 'FIELD_HIDDEN' || rawCode === 'TARGET_SCOPE_VIOLATION') {
+    return 'target_scope_violation'
+  }
+  if (rawCode === 'VALIDATION_ERROR') {
+    if (messageMatches(error, /invalid (multi-)?select option/i)) return 'select_option_not_found'
+    return 'target_record_validation_failed'
+  }
+
+  const name = errorName(error)
+  if (name === 'StockPreparationApplyWriterError') return 'target_record_validation_failed'
+  if (name === 'RecordNotFoundError' || name === 'MultitableRecordNotFoundError') return 'target_scope_violation'
+  if (name === 'RecordValidationError' || name === 'MultitableRecordValidationError' || name === 'RecordValidationFailedError') {
+    if (messageMatches(error, /invalid (multi-)?select option/i)) return 'select_option_not_found'
+    return 'target_record_validation_failed'
+  }
+  if (name === 'RecordPatchFieldValidationError') {
+    if (messageMatches(error, /select/i)) return 'select_option_not_found'
+    return 'target_record_validation_failed'
+  }
+
+  if (messageMatches(error, /unknown field(id)?/i)) return 'field_mapping_failed'
+  if (messageMatches(error, /invalid (multi-)?select option/i)) return 'select_option_not_found'
+  if (messageMatches(error, /required/i)) return 'missing_required_field'
+  if (messageMatches(error, /insufficient permissions|scope violation|not allowed|readonly|hidden/i)) return 'target_scope_violation'
+  if (messageMatches(error, /validation failed|value must|field is|must be/i)) return 'target_record_validation_failed'
+
+  return operation === 'patchRecord' ? 'patch_record_failed' : 'create_record_failed'
+}
+
+function sanitizeTargetWriteMessage(code, operation = 'apply') {
+  const action = operation === 'patchRecord'
+    ? 'patch target row'
+    : operation === 'createRecord'
+      ? 'create target row'
+      : operation === 'queryRecords'
+        ? 'query target rows'
+        : 'apply target row'
+  return `${action} failed: ${code}`
+}
+
+function wrapTargetWriteError(error, operation) {
+  if (error instanceof StockPreparationApplyWriterError) return error
+  const code = classifyTargetWriteError(error, operation)
+  return new StockPreparationApplyWriterError(sanitizeTargetWriteMessage(code, operation), {
+    code,
+    operation,
+  })
+}
+
+async function callRecordsApi(operation, callback) {
+  try {
+    return await callback()
+  } catch (error) {
+    throw wrapTargetWriteError(error, operation)
+  }
+}
+
 async function applyAddDecision({ recordsApi, target, decision, humanFields }) {
   const key = decisionKey(decision, target)
   const record = copyPayload(decision.record, 'decision.record')
@@ -162,18 +260,18 @@ async function applyAddDecision({ recordsApi, target, decision, humanFields }) {
 
   const existing = await findExistingRecord(recordsApi, target, key)
   if (existing && existing.id) {
-    const updated = await recordsApi.patchRecord({
+    const updated = await callRecordsApi('patchRecord', () => recordsApi.patchRecord({
       sheetId: target.sheetId,
       recordId: existing.id,
       changes: mapRecordFields(record, target.fieldIdMap),
-    })
+    }))
     return { status: 'updated', recordId: updated && updated.id ? updated.id : existing.id }
   }
 
-  const created = await recordsApi.createRecord({
+  const created = await callRecordsApi('createRecord', () => recordsApi.createRecord({
     sheetId: target.sheetId,
     data: mapRecordFields(record, target.fieldIdMap),
-  })
+  }))
   return { status: 'created', recordId: created && created.id }
 }
 
@@ -190,11 +288,11 @@ async function applyPatchDecision({ recordsApi, target, decision, humanFields })
     })
   }
 
-  const updated = await recordsApi.patchRecord({
+  const updated = await callRecordsApi('patchRecord', () => recordsApi.patchRecord({
     sheetId: target.sheetId,
     recordId: existing.id,
     changes: mapRecordFields(patch, target.fieldIdMap),
-  })
+  }))
   return { status: 'updated', recordId: updated && updated.id ? updated.id : existing.id }
 }
 
@@ -208,9 +306,38 @@ function incrementCounts(counts, decision, status) {
 function errorCode(error) {
   return error && error.details && error.details.code
     ? error.details.code
-    : error && error.name
-      ? error.name
-      : 'apply_failed'
+    : classifyTargetWriteError(error)
+}
+
+function errorOperation(error) {
+  return typeof (error && error.details && error.details.operation) === 'string'
+    ? error.details.operation
+    : null
+}
+
+function summarizeApplyErrors(errors = []) {
+  const byCode = new Map()
+  for (const entry of errors) {
+    const code = optionalString(entry && entry.code) || 'apply_failed'
+    const summary = byCode.get(code) || {
+      code,
+      count: 0,
+      decisions: new Set(),
+      operations: new Set(),
+    }
+    summary.count += 1
+    if (entry && entry.decision) summary.decisions.add(entry.decision)
+    if (entry && entry.operation) summary.operations.add(entry.operation)
+    byCode.set(code, summary)
+  }
+  return Array.from(byCode.values())
+    .map((entry) => ({
+      code: entry.code,
+      count: entry.count,
+      decisions: Array.from(entry.decisions).sort(),
+      operations: Array.from(entry.operations).sort(),
+    }))
+    .sort((left, right) => left.code.localeCompare(right.code))
 }
 
 function applyStatus(counts, written) {
@@ -269,11 +396,13 @@ async function applyStockPreparationPlan(input = {}) {
     } catch (error) {
       counts.failed += 1
       const code = errorCode(error)
+      const operation = errorOperation(error)
       errors.push({
         index,
         decision: decision.decision || null,
         code,
-        message: error && error.message ? error.message : String(error),
+        operation,
+        message: sanitizeTargetWriteMessage(code, operation),
       })
       results.push({
         index,
@@ -303,6 +432,7 @@ async function applyStockPreparationPlan(input = {}) {
 }
 
 function summarizeApplyResultForEvidence(result = {}) {
+  const errors = Array.isArray(result.errors) ? result.errors : []
   return {
     ok: result.ok === true,
     status: optionalString(result.status) || 'unknown',
@@ -311,9 +441,8 @@ function summarizeApplyResultForEvidence(result = {}) {
     resultStatuses: Array.isArray(result.results)
       ? Array.from(new Set(result.results.map((entry) => entry.status).filter(Boolean))).sort()
       : [],
-    errorCodes: Array.isArray(result.errors)
-      ? Array.from(new Set(result.errors.map((entry) => entry.code).filter(Boolean))).sort()
-      : [],
+    errorCodes: Array.from(new Set(errors.map((entry) => entry.code).filter(Boolean))).sort(),
+    errorSummaries: summarizeApplyErrors(errors),
   }
 }
 
@@ -327,8 +456,10 @@ module.exports = {
     decisionKey,
     findExistingRecord,
     applyStatus,
+    classifyTargetWriteError,
     mapRecordFields,
     normalizeTarget,
     requireApplyPermission,
+    summarizeApplyErrors,
   },
 }

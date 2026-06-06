@@ -86,6 +86,28 @@ function createRecordsApi({ existing = [] } = {}) {
   }
 }
 
+function createFailingCreateRecordsApi({ error, queryError = null } = {}) {
+  const calls = []
+  return {
+    calls,
+    recordsApi: {
+      async queryRecords(input) {
+        calls.push(['queryRecords', input])
+        if (queryError) throw queryError
+        return []
+      },
+      async createRecord(input) {
+        calls.push(['createRecord', input])
+        throw error || new Error('create failed for P-001 / PART-A / SECRET-OPTION')
+      },
+      async patchRecord(input) {
+        calls.push(['patchRecord', input])
+        throw new Error(`unexpected patch for ${input.recordId}`)
+      },
+    },
+  }
+}
+
 function target(overrides = {}) {
   return {
     sheetId: 'sheet_stock_preparation',
@@ -232,8 +254,99 @@ async function testPermissionAndHumanFieldGuards() {
     recordsApi: api.recordsApi,
   })
   assert.equal(result.counts.failed, 1)
-  assert.equal(result.errors[0].code, 'StockPreparationApplyWriterError')
+  assert.equal(result.errors[0].code, 'target_record_validation_failed')
   assert.equal(api.calls.length, 0, 'human-field guard fails before query/create')
+}
+
+async function testPlainCreateErrorsBecomeTypedValuesFreeDiagnostics() {
+  const api = createFailingCreateRecordsApi({
+    error: new Error('Invalid select option for fld_materialType: PART-A / P-001 / SECRET-OPTION'),
+  })
+
+  const result = await applyStockPreparationPlan({
+    permission: 'write',
+    plan: {
+      decisions: [{
+        decision: DECISIONS.ADD,
+        idempotencyKey: 'key-create-fail',
+        record: {
+          idempotencyKey: 'key-create-fail',
+          projectNo: 'P-001',
+          componentSourceId: 'PART-A',
+          path: '["PART-A"]',
+          active: true,
+        },
+      }],
+    },
+    target: target(),
+    recordsApi: api.recordsApi,
+  })
+
+  assert.equal(result.status, 'failed')
+  assert.equal(result.counts.failed, 1)
+  assert.equal(result.errors[0].code, 'select_option_not_found')
+  assert.equal(result.errors[0].operation, 'createRecord')
+  assert.equal(result.errors[0].message, 'create target row failed: select_option_not_found')
+  assert.equal(api.calls.some((call) => call[0] === 'createRecord'), true, 'create path was exercised')
+
+  const evidence = summarizeApplyResultForEvidence(result)
+  assert.deepEqual(evidence.errorCodes, ['select_option_not_found'])
+  assert.deepEqual(evidence.errorSummaries, [{
+    code: 'select_option_not_found',
+    count: 1,
+    decisions: [DECISIONS.ADD],
+    operations: ['createRecord'],
+  }])
+  const text = JSON.stringify({ result, evidence })
+  assert.equal(text.includes('SECRET-OPTION'), false, 'diagnostics must not expose option values')
+  assert.equal(text.includes('PART-A / P-001'), false, 'diagnostics must not expose row/project values')
+  assert.equal(text.includes('Invalid select option for'), false, 'raw error message must not be surfaced')
+  assert.equal(text.includes('"Error"'), false, 'plain Error must not remain the only diagnostic code')
+}
+
+async function testPlainQueryErrorsBecomeTypedValuesFreeDiagnostics() {
+  const api = createFailingCreateRecordsApi({
+    queryError: new Error('Unknown field fld_idempotency_key for project P-001 / component PART-A'),
+  })
+
+  const result = await applyStockPreparationPlan({
+    permission: 'write',
+    plan: {
+      decisions: [{
+        decision: DECISIONS.ADD,
+        idempotencyKey: 'key-query-fail',
+        record: {
+          idempotencyKey: 'key-query-fail',
+          projectNo: 'P-001',
+          componentSourceId: 'PART-A',
+          path: '["PART-A"]',
+          active: true,
+        },
+      }],
+    },
+    target: target(),
+    recordsApi: api.recordsApi,
+  })
+
+  assert.equal(result.status, 'failed')
+  assert.equal(result.counts.failed, 1)
+  assert.equal(result.errors[0].code, 'field_mapping_failed')
+  assert.equal(result.errors[0].operation, 'queryRecords')
+  assert.equal(result.errors[0].message, 'query target rows failed: field_mapping_failed')
+  assert.equal(api.calls.some((call) => call[0] === 'createRecord'), false, 'query failure blocks create')
+
+  const evidence = summarizeApplyResultForEvidence(result)
+  assert.deepEqual(evidence.errorCodes, ['field_mapping_failed'])
+  assert.deepEqual(evidence.errorSummaries, [{
+    code: 'field_mapping_failed',
+    count: 1,
+    decisions: [DECISIONS.ADD],
+    operations: ['queryRecords'],
+  }])
+  const text = JSON.stringify({ result, evidence })
+  assert.equal(text.includes('P-001'), false, 'diagnostics must not expose project values')
+  assert.equal(text.includes('PART-A'), false, 'diagnostics must not expose component values')
+  assert.equal(text.includes('Unknown field'), false, 'raw query error message must not be surfaced')
 }
 
 async function testFieldIdMapAndDuplicateTargetKey() {
@@ -293,6 +406,8 @@ async function main() {
   await testRerunIsIdempotentForAddDecision()
   await testUpdateAndInactiveNeverCreateMissingTargets()
   await testPermissionAndHumanFieldGuards()
+  await testPlainCreateErrorsBecomeTypedValuesFreeDiagnostics()
+  await testPlainQueryErrorsBecomeTypedValuesFreeDiagnostics()
   await testFieldIdMapAndDuplicateTargetKey()
   testInternals()
 
