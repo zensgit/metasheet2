@@ -269,15 +269,34 @@ describeIfDatabase('Dashboard BI v2-b2 preview-data endpoint (real DB)', () => {
     expect(res.body.chartType).toBe('line')
     expect(Array.isArray(res.body.series)).toBe(true)
     expect(res.body.series.length).toBeGreaterThan(0)
+  })
 
-    // line + date grouping is still rejected (deferred to b3). groupBy present too, so the date check
-    // (not the groupBy-required check) is what fires.
-    const dated = await preview({
-      name: 'line date series',
+  test('P9 (v2-d-b3): a date-axis × series line is accepted — chronological buckets + dense series', async () => {
+    const res = await preview({
+      name: 'date series line',
       type: 'line',
-      dataSource: { groupByFieldId: FLD_STATUS, dateFieldId: FLD_DATE, dateGrouping: 'month', seriesByFieldId: FLD_SECRET, aggregation: { function: 'count' } },
+      // pure date axis (no groupByFieldId) + series → b3 lifts the date-grouping rejection
+      dataSource: { dateFieldId: FLD_DATE, dateGrouping: 'month', seriesByFieldId: FLD_SECRET, aggregation: { function: 'count' } },
     })
-    expect(dated.status).toBe(400)
-    expect(JSON.stringify(dated.body)).toContain('date grouping')
+    expect(res.status).toBe(200)
+    expect(res.body.chartType).toBe('line')
+    expect(res.body.dataPoints.map((p: { label: string }) => p.label)).toEqual(['2026-01', '2026-02']) // chronological
+    expect(Array.isArray(res.body.series)).toBe(true)
+    expect(res.body.series.length).toBeGreaterThan(0)
+    for (const s of res.body.series) expect(s.data).toHaveLength(res.body.dataPoints.length) // dense, aligned
+  })
+
+  test('P10 (v2-d-b3 security): a denied seriesByFieldId restricts even in date mode (no leak)', async () => {
+    testUserId = USER_DENIED
+    const res = await preview({
+      name: 'date denied series',
+      type: 'line',
+      dataSource: { dateFieldId: FLD_DATE, dateGrouping: 'month', seriesByFieldId: FLD_SECRET, aggregation: { function: 'count' } },
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.metadata?.restricted).toBe(true)
+    expect(res.body.series).toBeUndefined()
+    expect(res.body.dataPoints).toEqual([])
+    expect(JSON.stringify(res.body)).not.toContain('secret-canary')
   })
 })
