@@ -780,6 +780,7 @@ export type AutomationActionType =
   | 'send_dingtalk_person_message'
   | 'lock_record'
   | 'wait_for_callback'
+  | 'condition_branch'
   // Legacy aliases
   | 'notify'
   | 'update_field'

@@ -896,6 +896,93 @@
             <div v-if="action.type === 'wait_for_callback'" class="meta-rule-editor__action-config" data-action-config="wait_for_callback">
               <div class="meta-rule-editor__hint" data-field="wait-for-callback-hint">{{ automationLabel('actionConfig.waitForCallbackHint', isZh) }}</div>
             </div>
+
+            <!-- A6-3-2a condition_branch builder (form-based; no canvas / BPMN vocab per design-lock §10) -->
+            <div v-if="action.type === 'condition_branch'" class="meta-rule-editor__action-config" data-action-config="condition_branch">
+              <div v-if="action.config.branchUnsupportedReason" class="meta-rule-editor__alert" data-field="condition-branch-readonly">
+                {{ automationLabel('conditionBranch.readOnly', isZh) }}
+              </div>
+              <template v-else>
+                <div class="meta-rule-editor__hint">{{ automationLabel('conditionBranch.hint', isZh) }}</div>
+                <div v-for="(branch, bIdx) in action.config.branches" :key="bIdx" class="meta-rule-editor__branch" :data-branch-index="bIdx">
+                  <div class="meta-rule-editor__branch-header">
+                    <input v-model="branch.key" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.key', isZh)" data-field="branch-key" />
+                    <input v-model="branch.label" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.label', isZh)" data-field="branch-label" />
+                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" data-action="remove-branch" @click="removeBranch(action, bIdx)">&times;</button>
+                  </div>
+                  <div v-if="branch.conditions.length > 1" class="meta-rule-editor__conjunction">
+                    <button type="button" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'AND' }" @click="branch.conjunction = 'AND'">{{ automationLabel('condition.and', isZh) }}</button>
+                    <button type="button" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'OR' }" @click="branch.conjunction = 'OR'">{{ automationLabel('condition.or', isZh) }}</button>
+                  </div>
+                  <div v-for="(cond, cIdx) in branch.conditions" :key="cIdx" class="meta-rule-editor__condition-row" :data-branch-condition-index="cIdx">
+                    <select :value="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onConditionFieldChange(cond, ($event.target as HTMLSelectElement).value)">
+                      <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
+                      <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
+                    </select>
+                    <select :value="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onConditionOperatorChange(cond, ($event.target as HTMLSelectElement).value as ConditionOperator)">
+                      <option v-for="op in conditionOperatorsForField(cond.fieldId)" :key="op.value" :value="op.value">{{ automationConditionOperatorLabel(op.value, isZh) }}</option>
+                    </select>
+                    <input v-if="!isUnaryOperator(cond.operator)" v-model="cond.value" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('condition.selectValue', isZh)" />
+                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchCondition(branch, cIdx)">&times;</button>
+                  </div>
+                  <button class="meta-rule-editor__btn" type="button" data-action="add-branch-condition" @click="addBranchCondition(branch)">{{ automationLabel('condition.addCondition', isZh) }}</button>
+                  <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-branch-action-index="aIdx">
+                    <select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
+                      <option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t">{{ automationActionTypeLabel(t, isZh) }}</option>
+                    </select>
+                    <template v-if="bAct.type === 'update_record'">
+                      <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
+                        <select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm">
+                          <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
+                          <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
+                        </select>
+                        <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.value', isZh)" />
+                        <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchFieldPair(bAct, pIdx)">&times;</button>
+                      </div>
+                      <button class="meta-rule-editor__btn" type="button" data-action="add-branch-field" @click="addBranchFieldPair(bAct)">{{ automationLabel('conditionBranch.addField', isZh) }}</button>
+                    </template>
+                    <template v-else-if="bAct.type === 'send_notification'">
+                      <input v-model="bAct.userId" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" />
+                      <input v-model="bAct.message" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.message', isZh)" />
+                    </template>
+                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchAction(branch, aIdx)">&times;</button>
+                  </div>
+                  <button class="meta-rule-editor__btn" type="button" data-action="add-branch-action" @click="addBranchAction(branch)">{{ automationLabel('conditionBranch.addAction', isZh) }}</button>
+                </div>
+                <button class="meta-rule-editor__btn" type="button" data-action="add-branch" @click="addBranch(action)">{{ automationLabel('conditionBranch.addBranch', isZh) }}</button>
+                <div v-if="action.config.defaultBranch" class="meta-rule-editor__branch" data-field="default-branch">
+                  <div class="meta-rule-editor__branch-header">
+                    <span class="meta-rule-editor__group-label">{{ automationLabel('conditionBranch.default', isZh) }}</span>
+                    <input v-model="action.config.defaultBranch.key" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.key', isZh)" data-field="default-branch-key" />
+                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" data-action="remove-default-branch" @click="removeDefaultBranch(action)">&times;</button>
+                  </div>
+                  <div v-for="(bAct, aIdx) in action.config.defaultBranch.actions" :key="aIdx" class="meta-rule-editor__branch-action">
+                    <select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
+                      <option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t">{{ automationActionTypeLabel(t, isZh) }}</option>
+                    </select>
+                    <template v-if="bAct.type === 'update_record'">
+                      <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
+                        <select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm">
+                          <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
+                          <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
+                        </select>
+                        <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.value', isZh)" />
+                        <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchFieldPair(bAct, pIdx)">&times;</button>
+                      </div>
+                      <button class="meta-rule-editor__btn" type="button" @click="addBranchFieldPair(bAct)">{{ automationLabel('conditionBranch.addField', isZh) }}</button>
+                    </template>
+                    <template v-else-if="bAct.type === 'send_notification'">
+                      <input v-model="bAct.userId" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" />
+                      <input v-model="bAct.message" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.message', isZh)" />
+                    </template>
+                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchAction(action.config.defaultBranch, aIdx)">&times;</button>
+                  </div>
+                  <button class="meta-rule-editor__btn" type="button" @click="addBranchAction(action.config.defaultBranch)">{{ automationLabel('conditionBranch.addAction', isZh) }}</button>
+                </div>
+                <button v-else class="meta-rule-editor__btn" type="button" data-action="add-default-branch" @click="addDefaultBranch(action)">{{ automationLabel('conditionBranch.addDefault', isZh) }}</button>
+                <div v-if="conditionBranchKeyError" class="meta-rule-editor__error" data-field="branch-key-error">{{ conditionBranchKeyError }}</div>
+              </template>
+            </div>
           </div>
           <button
             v-if="draft.actions.length < 3"
@@ -1000,6 +1087,16 @@ import {
   automationTriggerConditionLabel,
   automationTriggerTypeLabel,
 } from '../utils/meta-automation-labels'
+import {
+  type BranchActionDraft,
+  type BranchDraft,
+  type DefaultBranchDraft,
+  BRANCH_AUTHORABLE_ACTION_TYPES,
+  buildConditionBranchConfig,
+  conditionBranchUnsupportedReason,
+  parseConditionBranchDraft,
+  validateConditionBranchKeys,
+} from '../utils/conditionBranchAuthoring'
 
 interface FieldPair {
   fieldId: string
@@ -1031,6 +1128,11 @@ type DraftActionConfig = Record<string, unknown> & {
   publicFormViewId?: string
   internalViewId?: string
   locked?: boolean
+  // A6-3-2a condition_branch authoring (supported → editable draft; unsupported → read-only + original preserved)
+  branches?: BranchDraft[]
+  defaultBranch?: DefaultBranchDraft | null
+  branchUnsupportedReason?: string | null
+  branchOriginal?: Record<string, unknown> | null
 }
 
 interface DraftAction {
@@ -1107,7 +1209,11 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
   'wait_for_callback',
+  'condition_branch',
 ]
+
+// A6-3-2a: BRANCH_AUTHORABLE_ACTION_TYPES (the v1 in-branch action subset) is imported from
+// ../utils/conditionBranchAuthoring — the single source of truth shared with the seam + tests.
 
 const UNSUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = ['lock_record']
 
@@ -1531,6 +1637,16 @@ function emptyDraft(): Draft {
 }
 
 function draftConfigFromAction(type: AutomationActionType, config: Record<string, unknown>): DraftActionConfig {
+  if (type === 'condition_branch') {
+    const reason = conditionBranchUnsupportedReason(config)
+    if (reason) {
+      // A6-3-2a point #3: a loaded shape the v1 UI can't faithfully round-trip → read-only.
+      // Preserve the ORIGINAL config verbatim; buildPayload re-emits it unchanged — never flatten.
+      return { branchUnsupportedReason: reason, branchOriginal: config, branches: [], defaultBranch: null }
+    }
+    const parsed = parseConditionBranchDraft(config)
+    return { branches: parsed.branches, defaultBranch: parsed.defaultBranch, branchUnsupportedReason: null, branchOriginal: null }
+  }
   if (type === 'update_record') {
     const fields = isPlainRecord(config.fields)
       ? config.fields
@@ -1629,10 +1745,91 @@ function draftFromRule(rule: AutomationRule): Draft {
 const draft = ref<Draft>(emptyDraft())
 const conditionEditorEntries = computed(() => collectConditionEditorEntries(draft.value.conditions.conditions))
 
-// A6-2b: a wait_for_callback action REQUIRES execution_mode 'workflow_job_v1' — the backend
-// fail-closes a legacy rule that contains a wait step. So whenever a wait action is present the
-// job-mode toggle is forced on (and disabled), and buildPayload enforces it regardless.
-const requiresJobMode = computed(() => draft.value.actions.some((a) => a.type === 'wait_for_callback'))
+// A6-2b/A6-3-2a: wait_for_callback AND condition_branch both REQUIRE execution_mode
+// 'workflow_job_v1' — the backend fail-closes a legacy rule that contains either. So whenever such
+// an action is present the job-mode toggle is forced on (and disabled), and buildPayload enforces it
+// regardless of toggle/loaded state.
+const JOB_MODE_REQUIRING_ACTION_TYPES: AutomationActionType[] = ['wait_for_callback', 'condition_branch']
+const requiresJobMode = computed(() =>
+  draft.value.actions.some((a) => JOB_MODE_REQUIRING_ACTION_TYPES.includes(a.type)),
+)
+
+// A6-3-2a: empty drafts for a fresh condition_branch action.
+function createEmptyBranchActionDraft(): BranchActionDraft {
+  return { type: 'update_record', fieldUpdates: [] }
+}
+function createEmptyBranchDraft(index = 1): BranchDraft {
+  return { key: `branch_${index}`, label: '', conjunction: 'AND', conditions: [], actions: [createEmptyBranchActionDraft()] }
+}
+function createEmptyDefaultBranchDraft(): DefaultBranchDraft {
+  return { key: 'default', label: '', actions: [createEmptyBranchActionDraft()] }
+}
+
+// A6-3-2a read-only guard (point #3) + branch-key validation (point #1) over the draft's
+// condition_branch actions. Both feed canSave (block-save) and the template (alert).
+const conditionBranchReadOnlyReason = computed<string | null>(() => {
+  for (const a of draft.value.actions) {
+    if (a.type === 'condition_branch' && a.config.branchUnsupportedReason) return a.config.branchUnsupportedReason
+  }
+  return null
+})
+const conditionBranchKeyError = computed<string | null>(() => {
+  for (const a of draft.value.actions) {
+    if (a.type === 'condition_branch' && !a.config.branchUnsupportedReason) {
+      const err = validateConditionBranchKeys({
+        branches: a.config.branches ?? [],
+        defaultBranch: a.config.defaultBranch ?? null,
+      })
+      if (err) return err
+    }
+  }
+  return null
+})
+
+// A6-3-2a branch-builder mutations (operate on the draft action's config in place; Vue deep-reactive).
+function addBranch(action: DraftAction): void {
+  const branches = action.config.branches ?? (action.config.branches = [])
+  branches.push(createEmptyBranchDraft(branches.length + 1))
+}
+function removeBranch(action: DraftAction, index: number): void {
+  action.config.branches?.splice(index, 1)
+}
+function addBranchCondition(branch: BranchDraft): void {
+  branch.conditions.push({ fieldId: '', operator: 'equals', value: '' })
+}
+function removeBranchCondition(branch: BranchDraft, index: number): void {
+  branch.conditions.splice(index, 1)
+}
+function addBranchAction(branch: BranchDraft | DefaultBranchDraft): void {
+  branch.actions.push(createEmptyBranchActionDraft())
+}
+function removeBranchAction(branch: BranchDraft | DefaultBranchDraft, index: number): void {
+  branch.actions.splice(index, 1)
+}
+function onBranchActionTypeChange(action: BranchActionDraft): void {
+  if (action.type === 'update_record') {
+    action.fieldUpdates = action.fieldUpdates ?? []
+    delete action.userId
+    delete action.message
+  } else {
+    action.userId = action.userId ?? ''
+    action.message = action.message ?? ''
+    delete action.fieldUpdates
+  }
+}
+function addBranchFieldPair(action: BranchActionDraft): void {
+  action.fieldUpdates = action.fieldUpdates ?? []
+  action.fieldUpdates.push({ fieldId: '', value: '' })
+}
+function removeBranchFieldPair(action: BranchActionDraft, index: number): void {
+  action.fieldUpdates?.splice(index, 1)
+}
+function addDefaultBranch(action: DraftAction): void {
+  action.config.defaultBranch = createEmptyDefaultBranchDraft()
+}
+function removeDefaultBranch(action: DraftAction): void {
+  action.config.defaultBranch = null
+}
 
 function setExecutionMode(checked: boolean): void {
   // A6-1 opt-in: checkbox → the rule's persistent WorkflowJob mode (off = legacy/null).
@@ -1750,6 +1947,8 @@ watch(
 const canSave = computed(() => {
   if (!draft.value.name.trim()) return false
   if (draft.value.actions.length < 1) return false
+  if (conditionBranchReadOnlyReason.value) return false // A6-3-2a point #3: never save a non-round-trippable loaded branch
+  if (conditionBranchKeyError.value) return false // A6-3-2a point #1: branch key safe/unique mirror
   if (!draft.value.conditions.conditions.every(areConditionsComplete)) return false
   for (const action of draft.value.actions) {
     if (action.type === 'send_dingtalk_group_message') {
@@ -2354,6 +2553,8 @@ function appendPersonTemplateToken(
 
 function defaultConfigForActionType(type: AutomationActionType): DraftActionConfig {
   switch (type) {
+    case 'condition_branch':
+      return { branches: [createEmptyBranchDraft(1)], defaultBranch: null, branchUnsupportedReason: null, branchOriginal: null }
     case 'update_record':
       return { fieldUpdates: [] }
     case 'create_record':
@@ -2439,6 +2640,20 @@ function buildPayload(): Partial<AutomationRule> {
     triggerConfig.cron = cronPreset.value
   }
   const actions = d.actions.map((action) => {
+    if (action.type === 'condition_branch') {
+      // A6-3-2a point #3: read-only (unsupported loaded shape) re-emits the preserved original
+      // verbatim — never flattened. (canSave blocks save here anyway; this is the defensive floor.)
+      if (action.config.branchUnsupportedReason && action.config.branchOriginal) {
+        return { type: action.type, config: action.config.branchOriginal }
+      }
+      return {
+        type: action.type,
+        config: buildConditionBranchConfig({
+          branches: action.config.branches ?? [],
+          defaultBranch: action.config.defaultBranch ?? null,
+        }),
+      }
+    }
     if (action.type === 'update_record') {
       return {
         type: action.type,
