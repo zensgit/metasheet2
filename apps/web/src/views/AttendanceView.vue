@@ -2091,6 +2091,39 @@
                   {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save outdoor approval', '保存外勤审批') }}
                 </button>
               </div>
+
+              <div class="attendance__admin-subsection" data-admin-card="inout-merge">
+                <h4>{{ tr('In/out punch merge', '内外勤卡合并') }}</h4>
+                <p class="attendance__field-hint">
+                  {{ tr('When a day has both an internal punch and an approved outdoor punch, choose which one counts as the first-in (check-in) / last-out (check-out). Both off (default) = first-in stays the earliest punch and last-out the latest — no change to existing attendance.', '当某天同时存在内勤打卡与已审批的外勤打卡时，选择哪一张计为上班卡（签到）/下班卡（签退）。两项均关闭（默认）＝上班卡取最早打卡、下班卡取最晚打卡，不改变现有考勤。') }}
+                </p>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-merge-internal-wins-on-in">
+                  <span>{{ tr('Use the internal punch for the first-in (check-in)', '上班卡以内勤打卡为准') }}</span>
+                  <input
+                    id="attendance-merge-internal-wins-on-in"
+                    v-model="mergeForm.internalWinsOnIn"
+                    type="checkbox"
+                    data-merge="internal-wins-on-in"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-merge-external-wins-on-out">
+                  <span>{{ tr('Use the outdoor punch for the last-out (check-out)', '下班卡以外勤打卡为准') }}</span>
+                  <input
+                    id="attendance-merge-external-wins-on-out"
+                    v-model="mergeForm.externalWinsOnOut"
+                    type="checkbox"
+                    data-merge="external-wins-on-out"
+                  />
+                </label>
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="settingsLoading"
+                  data-merge="save"
+                  @click="saveInOutMerge"
+                >
+                  {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save in/out merge', '保存内外勤合并') }}
+                </button>
+              </div>
             </div>
 
             <div
@@ -7306,6 +7339,12 @@ interface AttendanceSettings {
       requirePhoto?: boolean
       approvalFlowId?: string
     }
+    // ② S2-2 in/out merge (backend #2333/#2336). Frontend type only — the admin card reads/writes these
+    // via PUT { punchPolicy: { merge: ... } }. Both default false ⇒ existing append behaviour (no change).
+    merge?: {
+      internalWinsOnIn?: boolean
+      externalWinsOnOut?: boolean
+    }
   }
 }
 
@@ -11073,6 +11112,13 @@ const outdoorForm = reactive({
   requireApproval: false,
   requireNote: false,
   approvalFlowId: '',
+})
+// ② S2-2 内外勤卡合并 (in/out merge) config card. Mirrors outdoorForm: saved via saveInOutMerge, which
+// PUTs ONLY { punchPolicy: { merge: ... } } so the backend per-key merge leaves unscheduled / outdoor
+// siblings untouched. Both keys default false ⇒ existing append derivation, no regression.
+const mergeForm = reactive({
+  internalWinsOnIn: false,
+  externalWinsOnOut: false,
 })
 // Real data source for the flow picker: the org's ACTIVE outdoor_punch approval flows (no fake picker).
 const outdoorApprovalFlowOptions = computed(() =>
@@ -16395,6 +16441,7 @@ async function loadSettings() {
     applySettingsToForm(data.data || {})
     applyShiftComplianceToForm(data.data || {})
     applyOutdoorToForm(data.data || {})
+    applyInOutMergeToForm(data.data || {})
   } catch (error: any) {
     attendanceSettings.value = null
     setStatusFromError(error, tr('Failed to load settings', '加载设置失败'), 'admin')
@@ -16418,6 +16465,12 @@ function applyOutdoorToForm(settings: AttendanceSettings) {
   outdoorForm.requireApproval = outdoor.requireApproval === true
   outdoorForm.requireNote = outdoor.requireNote === true
   outdoorForm.approvalFlowId = typeof outdoor.approvalFlowId === 'string' ? outdoor.approvalFlowId : ''
+}
+
+function applyInOutMergeToForm(settings: AttendanceSettings) {
+  const merge = settings.punchPolicy?.merge || {}
+  mergeForm.internalWinsOnIn = merge.internalWinsOnIn === true
+  mergeForm.externalWinsOnOut = merge.externalWinsOnOut === true
 }
 
 async function saveShiftCompliance() {
@@ -16493,6 +16546,42 @@ async function saveOutdoorApproval() {
     setStatus(tr('Outdoor approval updated.', '外勤审批已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save outdoor approval', '保存外勤审批失败'), 'save-settings')
+  } finally {
+    settingsLoading.value = false
+  }
+}
+
+async function saveInOutMerge() {
+  settingsLoading.value = true
+  try {
+    // PUT ONLY punchPolicy.merge — the backend 2-level merge preserves outdoor / unscheduled siblings.
+    // Both keys false ⇒ existing append derivation, no change. (Record-only import/override protection is a
+    // backend invariant that only engages when a key is on; it is not controlled by this card.)
+    const payload = {
+      punchPolicy: {
+        merge: {
+          internalWinsOnIn: mergeForm.internalWinsOnIn === true,
+          externalWinsOnOut: mergeForm.externalWinsOnOut === true,
+        },
+      },
+    }
+    const response = await apiFetchWithTimeout('/api/attendance/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw createForbiddenError()
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to save in/out merge', '保存内外勤合并失败'))
+    }
+    adminForbidden.value = false
+    applyInOutMergeToForm((data.data || payload) as AttendanceSettings)
+    setStatus(tr('In/out merge updated.', '内外勤合并已更新。'))
+  } catch (error: any) {
+    setStatusFromError(error, tr('Failed to save in/out merge', '保存内外勤合并失败'), 'save-settings')
   } finally {
     settingsLoading.value = false
   }

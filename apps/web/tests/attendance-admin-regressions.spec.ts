@@ -2115,6 +2115,56 @@ describe('Attendance admin regressions', () => {
     })
   })
 
+  it('loads punchPolicy.merge into the in/out merge card and PUTs ONLY { punchPolicy: { merge } }', async () => {
+    attendanceSettingsData = {
+      punchPolicy: { merge: { internalWinsOnIn: true, externalWinsOnOut: true } },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const internalWinsOnIn = container!.querySelector<HTMLInputElement>('[data-merge="internal-wins-on-in"]')
+    const externalWinsOnOut = container!.querySelector<HTMLInputElement>('[data-merge="external-wins-on-out"]')
+    expect(Boolean(internalWinsOnIn && externalWinsOnOut)).toBe(true)
+    // load: persisted booleans → checkboxes (catches a missing applyInOutMergeToForm wire in the load flow).
+    expect(internalWinsOnIn!.checked).toBe(true)
+    expect(externalWinsOnOut!.checked).toBe(true)
+
+    const saveButton = container!.querySelector<HTMLButtonElement>('[data-merge="save"]')
+    expect(saveButton).toBeTruthy()
+    saveButton!.click()
+    await flushUi(6)
+
+    // EXACTLY { punchPolicy: { merge: { internalWinsOnIn, externalWinsOnOut } } }: no orgId, no sibling
+    // settings (outdoor / unscheduled ride the backend per-sub-key preserve). toEqual so any leak fails.
+    expect(lastSettingsPutBody()).toEqual({
+      punchPolicy: { merge: { internalWinsOnIn: true, externalWinsOnOut: true } },
+    })
+  })
+
+  it('toggles one merge key from off and PUTs the exact partial body (asymmetric, default-off)', async () => {
+    attendanceSettingsData = { punchPolicy: { merge: { internalWinsOnIn: false, externalWinsOnOut: false } } }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const internalWinsOnIn = container!.querySelector<HTMLInputElement>('[data-merge="internal-wins-on-in"]')
+    const externalWinsOnOut = container!.querySelector<HTMLInputElement>('[data-merge="external-wins-on-out"]')
+    // default off = both unchecked (no regression to existing append behaviour)
+    expect(internalWinsOnIn!.checked).toBe(false)
+    expect(externalWinsOnOut!.checked).toBe(false)
+    internalWinsOnIn!.checked = true
+    internalWinsOnIn!.dispatchEvent(new Event('change'))
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-merge="save"]')!.click()
+    await flushUi(6)
+
+    // one key on, one off — the body carries both keys explicitly with the chosen booleans.
+    expect(lastSettingsPutBody()).toEqual({
+      punchPolicy: { merge: { internalWinsOnIn: true, externalWinsOnOut: false } },
+    })
+  })
+
   it('enabling outdoor approval from off PUTs requireApproval/requireNote=true + auto (empty) flow', async () => {
     attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '' } } }
     app = createApp(AttendanceView, { mode: 'admin' })
