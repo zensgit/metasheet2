@@ -69,6 +69,11 @@ It does **NOT**:
 | Boundary | MetaSheet write only. No K3 Save / Submit / Audit / BOM. |
 | Scale | Design for dozens to thousands of rows. Exceeding guard thresholds fails closed or moves to background/paged execution in a later slice. |
 
+Large-BOM behavior is tracked separately in
+`data-factory-plm-stock-preparation-large-bom-c0-design-20260606.md` / #2342.
+That design keeps bounded dry-runs non-authoritative and requires a later
+background/checkpointed lane before very large BOMs can apply.
+
 ## Source contract
 
 The action binds to an existing Integration external system of kind

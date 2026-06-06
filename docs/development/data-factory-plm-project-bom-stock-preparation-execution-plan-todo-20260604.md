@@ -571,6 +571,46 @@ Acceptance locks:
   unknown action ids fail closed.
 - Admin-only route/UI. Read/write non-admin users cannot sync options.
 
+### 🟡 Large-BOM C0 - strategy design for #2342 (ACTIVE - this PR)
+
+Gated on: #2340 large-sample dry-run evidence + explicit opt-in.
+
+Scope:
+
+- Design the large-BOM strategy before implementing more runtime.
+- Preserve the current fail-closed behavior for capped dry-runs:
+  `max_rows_exceeded` / bounded rows / `canApply=false` / no dry-run token.
+- Define a future `largeBom=true` bounded-preview readiness shape that exposes
+  values-free counts/status while clearly saying the plan is not authoritative.
+- Decide that large apply is not unlocked by raising a synchronous cap. Large
+  apply needs a separate background/checkpointed execution mode with explicit
+  owner approval.
+- Lock the relationship to #2343: duplicate analysis on a capped subset is not
+  authoritative; complete expansion is required before duplicate policies are
+  trusted on large samples.
+- Keep this slice docs-only.
+
+Acceptance locks:
+
+- No runtime, route, UI, migration, package, MetaSheet row write, PLM write,
+  external database write, C4 Apply, K3, production rollout, or retry worker.
+- `largeBom=true` always blocks Apply.
+- No dry-run token is issued for bounded/failed large-BOM state.
+- Bounded C3 counts may be shown only as subset/non-authoritative counts.
+- Browser input cannot raise caps or choose Apply mode.
+- Values-free evidence only.
+- #2343 D1 remains ready but should run after #2342 C0 for large samples,
+  because complete expansion is upstream of authoritative duplicate analysis.
+
+Planned follow-up slices after C0 review:
+
+1. C1 bounded dry-run readiness shape (`largeBom=true`, no token, Apply
+   disabled).
+2. C2 operator UI affordance for summary-first bounded review.
+3. C3 background full-expansion design.
+4. C4 checkpointed apply writer design.
+5. C5 entity-machine validation with values-free evidence.
+
 ## Deferred tracks
 
 - New project/sample C4 apply validation after separate explicit approval.
@@ -578,7 +618,8 @@ Acceptance locks:
 - PLM adapter/API source instead of readonly SQL.
 - Fuzzy/prefix/multi-project matching.
 - Procurement/warehouse child-table generation.
-- Background/paged execution for very large BOMs.
+- Large-BOM runtime beyond C0: bounded-readiness implementation, UI affordance,
+  background full expansion, and checkpointed apply remain separate opt-ins.
 - SQL bridge C3 watermark/incremental implementation.
 - External DB write.
 - K3 Save / Submit / Audit / BOM.

@@ -222,4 +222,26 @@ describe('buildChartOption', () => {
     const area = opt(buildChartOption(chart('line', [{ label: 'A', value: 1 }]), { variant: 'area' }))
     expect(area.series[0].areaStyle).toBeDefined()
   })
+
+  // --- v2-d-b3: date-axis × series renders via the same series shape (render is date-agnostic) ---
+
+  it('v2-d-b3: a date-axis × series line renders overlaid lines with date buckets as the x-axis', () => {
+    const o = opt(buildChartOption({
+      chartType: 'line',
+      dataPoints: [{ label: '2026-01', value: 3 }, { label: '2026-02', value: 5 }],
+      series: [{ name: 'A', data: [2, 4] }, { name: 'B', data: [1, 1] }],
+    }))
+    expect(o.series).toHaveLength(2)
+    expect(o.series.every((s: any) => s.type === 'line' && s.stack === undefined)).toBe(true)
+    expect(o.xAxis.data).toEqual(['2026-01', '2026-02']) // date buckets are the x-axis categories
+  })
+
+  it('v2-d-b3: a date-axis × series area line keeps areaStyle on every line', () => {
+    const o = opt(buildChartOption({
+      chartType: 'line',
+      dataPoints: [{ label: '2026-01', value: 3 }, { label: '2026-02', value: 5 }],
+      series: [{ name: 'A', data: [2, 4] }, { name: 'B', data: [1, 1] }],
+    }, { variant: 'area' }))
+    expect(o.series.every((s: any) => s.areaStyle !== undefined && s.stack === undefined)).toBe(true)
+  })
 })
