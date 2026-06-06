@@ -13828,13 +13828,23 @@ async function applyAttendanceInOutMergePolicy(options) {
   let nextFirstInAt = cloneAttendanceDate(record.first_in_at)
   let nextLastOutAt = cloneAttendanceDate(record.last_out_at)
 
-  if (internalWinsOnIn && internalIns.length > 0 && outdoorIns.length > 0) {
-    nextFirstInAt = protectedRecordTime(protectedRecord?.first_in_at, checkIns)
+  // If the admin opted into a side's merge policy, a pre-existing record-only
+  // first/last value from import or correction is part of that side's candidate
+  // set even when this particular day has no outdoor event.
+  const protectedFirstInAt = internalWinsOnIn
+    ? protectedRecordTime(protectedRecord?.first_in_at, checkIns)
+    : null
+  const protectedLastOutAt = externalWinsOnOut
+    ? protectedRecordTime(protectedRecord?.last_out_at, checkOuts)
+    : null
+
+  if (protectedFirstInAt || (internalWinsOnIn && internalIns.length > 0 && outdoorIns.length > 0)) {
+    nextFirstInAt = protectedFirstInAt
       ?? pickEarliestAttendanceEvent(internalIns)
       ?? nextFirstInAt
   }
-  if (externalWinsOnOut && internalOuts.length > 0 && outdoorOuts.length > 0) {
-    nextLastOutAt = protectedRecordTime(protectedRecord?.last_out_at, checkOuts)
+  if (protectedLastOutAt || (externalWinsOnOut && internalOuts.length > 0 && outdoorOuts.length > 0)) {
+    nextLastOutAt = protectedLastOutAt
       ?? pickLatestAttendanceEvent(outdoorOuts)
       ?? nextLastOutAt
   }
