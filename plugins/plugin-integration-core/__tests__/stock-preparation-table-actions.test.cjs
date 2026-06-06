@@ -18,6 +18,9 @@ const {
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
+const {
+  DECISIONS,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-planner.cjs'))
 
 const PHYSICAL_FIELD_ID_MAP = Object.fromEntries(
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, `fld_${field.id}`]),
@@ -97,7 +100,7 @@ function createSourceAdapter(data = basePlmData()) {
   }
 }
 
-function createRecordsApi({ existing = [] } = {}) {
+function createRecordsApi({ existing = [], failCreateWith = null } = {}) {
   const rows = existing.map((entry, index) => ({
     id: entry.id || `rec_${index + 1}`,
     sheetId: entry.sheetId || 'sheet_stock',
@@ -119,6 +122,7 @@ function createRecordsApi({ existing = [] } = {}) {
       },
       async createRecord(input = {}) {
         calls.push(['createRecord', clone(input)])
+        if (failCreateWith) throw failCreateWith
         const record = {
           id: `rec_${rows.length + 1}`,
           sheetId: input.sheetId,
@@ -381,6 +385,49 @@ async function testApplyRequiresTokenRecomputesAndScopesTarget() {
   )
 }
 
+async function testApplySurfacesTypedValuesFreeRowFailureDiagnostics() {
+  const storage = createMemoryStorage()
+  const source = createSourceAdapter()
+  const records = createRecordsApi({
+    failCreateWith: new Error('Invalid select option for fld_material_type: P-001 PART-A secret-label'),
+  })
+  const action = baseAction()
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+
+  const result = await applyStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    permission: 'admin',
+  })
+
+  assert.equal(result.status, 'failed')
+  assert.equal(result.apply.counts.failed, 1)
+  assert.deepEqual(result.apply.errorCodes, ['select_option_not_found'])
+  assert.deepEqual(result.apply.errorSummaries, [{
+    code: 'select_option_not_found',
+    count: 1,
+    decisions: [DECISIONS.ADD],
+    operations: ['createRecord'],
+  }])
+  assert.equal(JSON.stringify(result.evidence).includes('P-001'), false, 'apply evidence hides project value')
+  assert.equal(JSON.stringify(result.evidence).includes('PART-A'), false, 'apply evidence hides component value')
+  assert.equal(JSON.stringify(result.evidence).includes('secret-label'), false, 'apply evidence hides option labels')
+  assert.equal(JSON.stringify(result.evidence).includes('Invalid select option'), false, 'apply evidence hides raw error message')
+  assert.equal(JSON.stringify(result.apply).includes('"Error"'), false, 'plain Error is not the response diagnostic')
+}
+
 async function testApplyDetectsDataShiftAndManualConfirmHold() {
   const storage = createMemoryStorage()
   const originalSource = createSourceAdapter()
@@ -450,6 +497,7 @@ async function main() {
   await testBridgeSourceKindRequiresExplicitMatchingReadPlanAndCanDryRun()
   await testTargetFieldMapIncompleteFailsBeforeReads()
   await testApplyRequiresTokenRecomputesAndScopesTarget()
+  await testApplySurfacesTypedValuesFreeRowFailureDiagnostics()
   await testApplyDetectsDataShiftAndManualConfirmHold()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
