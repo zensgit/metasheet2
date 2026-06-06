@@ -616,7 +616,7 @@ function normalizePlmCapabilitiesResult(
 // P3-C: a DEDICATED normalizer for the BOM multi-table relay (its own shape, not the
 // capability manifest). Validates only the envelope + that `context`, when present, is a
 // part+lines object; the rows are passed through (forward-compatible with provider additions).
-function isPlmBomMultitableContext(value: unknown): value is PlmBomMultitableContext {
+export function isPlmBomMultitableContext(value: unknown): value is PlmBomMultitableContext {
   if (!value || typeof value !== 'object') return false
   const record = value as Record<string, unknown>
   return (

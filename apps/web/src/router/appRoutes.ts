@@ -160,6 +160,15 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'PLM Audit', titleZh: 'PLM 审计', requiresAuth: true, requiredFeature: 'plm' }
   },
   {
+    // PLM-COLLAB P3-D2: token-bound BOM-review embed. Bare page (no shell, no metasheet session) --
+    // it is authed by a PLM-minted embed token delivered via postMessage from an allowlisted parent,
+    // NOT by a metasheet session. Mirrors the public-form route's no-session meta.
+    path: '/plm-embed/bom-review',
+    name: 'plm-embed-bom-review',
+    component: () => import('../views/PlmEmbedBomReviewView.vue'),
+    meta: { title: 'BOM Review', titleZh: 'BOM 评审（嵌入）', hideNavbar: true, requiresAuth: false, skipShellBootstrap: true }
+  },
+  {
     path: '/settings',
     name: 'user-settings',
     component: () => import('../views/SessionCenterView.vue'),

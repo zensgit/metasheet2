@@ -869,3 +869,100 @@ describe('multitable embed host guards', () => {
     })
   })
 })
+
+// P3-D2: positive coverage for the two owner-named origin fixes -- the wildcard is no longer honored
+// on inbound, and outbound posts pin a concrete origin instead of '*'.
+describe('multitable embed host — origin hardening (P3-D2)', () => {
+  let originApp: VueApp<Element> | null = null
+  let originContainer: HTMLDivElement | null = null
+  let parentSpy: ReturnType<typeof vi.fn>
+  let savedParent: WindowProxy
+
+  beforeEach(() => {
+    confirmPageLeaveSpy.mockReset()
+    confirmPageLeaveSpy.mockReturnValue(true)
+    getEmbedHostStateSpy.mockReset()
+    getEmbedHostStateSpy.mockReturnValue({
+      currentContext: { baseId: 'b', sheetId: 's', viewId: 'v' },
+      hasBlockingState: false,
+      blockingReason: null,
+      hasUnsavedDrafts: false,
+      busy: false,
+      pendingContext: null,
+    })
+    requestExternalContextSyncSpy.mockReset()
+    requestExternalContextSyncSpy.mockImplementation(async (input) => ({
+      status: 'applied',
+      context: { baseId: input.baseId ?? '', sheetId: input.sheetId ?? '', viewId: input.viewId ?? '' },
+    }))
+    parentSpy = vi.fn()
+    savedParent = window.parent
+    Object.defineProperty(window, 'parent', { configurable: true, value: { postMessage: parentSpy } })
+  })
+
+  afterEach(() => {
+    if (originApp) originApp.unmount()
+    originApp = null
+    if (originContainer?.parentNode) originContainer.parentNode.removeChild(originContainer)
+    originContainer = null
+    Object.defineProperty(window, 'parent', { configurable: true, value: savedParent })
+  })
+
+  async function mountHostWithOrigins(allowedOrigins: string[]) {
+    originContainer = document.createElement('div')
+    document.body.appendChild(originContainer)
+    const HostWrap = defineComponent({
+      name: 'OriginHostWrap',
+      components: { MultitableEmbedHost },
+      setup() { return { allowedOrigins } },
+      template: `<MultitableEmbedHost base-id="b" sheet-id="s" view-id="v" :allowed-origins="allowedOrigins" />`,
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', name: 'origin-root', component: HostWrap }],
+    })
+    originApp = createApp(defineComponent({ name: 'OriginRoot', render: () => h(RouterView) }))
+    originApp.use(router)
+    await router.push('/')
+    await router.isReady()
+    originApp.mount(originContainer)
+    await nextTick()
+  }
+
+  it('rejects an inbound message from a foreign origin even when allowedOrigins includes "*"', async () => {
+    await mountHostWithOrigins(['*'])
+    parentSpy.mockClear()
+    // the wildcard is no longer a pass -- a foreign origin is rejected, so the host never responds
+    window.dispatchEvent(new MessageEvent('message', {
+      origin: 'https://evil.example.com',
+      data: { type: 'mt:get-navigation-state', requestId: 'rEvil' },
+    }))
+    await nextTick()
+    await nextTick()
+    const responded = parentSpy.mock.calls.some(
+      ([payload]) => (payload as { type?: string })?.type === 'mt:navigation-state',
+    )
+    expect(responded).toBe(false)
+  })
+
+  it('pins outbound postMessage to the allowlisted parent origin and never targets "*"', async () => {
+    await mountHostWithOrigins(['https://plm.example.com'])
+    window.dispatchEvent(new MessageEvent('message', {
+      origin: 'https://plm.example.com',
+      data: { type: 'mt:get-navigation-state', requestId: 'rOk' },
+    }))
+    await vi.waitFor(() => {
+      expect(
+        parentSpy.mock.calls.some(([payload]) => (payload as { type?: string })?.type === 'mt:navigation-state'),
+      ).toBe(true)
+    })
+    // no outbound post -- mount-time or response -- ever targets '*'
+    for (const call of parentSpy.mock.calls) {
+      expect(call[1]).not.toBe('*')
+    }
+    const stateCall = parentSpy.mock.calls.find(
+      ([payload]) => (payload as { type?: string })?.type === 'mt:navigation-state',
+    )
+    expect(stateCall?.[1]).toBe('https://plm.example.com')
+  })
+})
