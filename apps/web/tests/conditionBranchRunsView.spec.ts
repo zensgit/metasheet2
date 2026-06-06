@@ -50,12 +50,12 @@ describe('A6-3-2b condition_branch runs readability', () => {
   it('shows the selected branch on the parent step + indents/labels the nested branch jobs', async () => {
     const c = await expand(detailWith([
       { id: 'axe_cb:step:0', executionId: 'axe_cb', stepKey: '0', status: 'resolved', upstreamJobId: null, result: { ok: true } },
-      { id: 'axe_cb:step:1', executionId: 'axe_cb', stepKey: '1', status: 'resolved', upstreamJobId: 'axe_cb:step:0', result: { selectedBranchKey: 'vip', matched: true } },
+      { id: 'axe_cb:step:1', executionId: 'axe_cb', stepKey: '1', status: 'resolved', upstreamJobId: 'axe_cb:step:0', result: { selectedBranchKey: 'vip', selectedBranchLabel: 'VIP tier', matched: true } },
       { id: 'axe_cb:step:1b', executionId: 'axe_cb', stepKey: '1.branch.vip.0', status: 'resolved', upstreamJobId: 'axe_cb:step:1', result: { updated: 1 } },
     ]))
     const sel = c.querySelector('[data-field="branch-selection"]')
     expect(sel).not.toBeNull()
-    expect(sel?.textContent ?? '').toContain('vip') // selected branch surfaced from result.selectedBranchKey
+    expect(sel?.textContent ?? '').toContain('VIP tier (vip)') // label (key) when selectedBranchLabel present
     const child = c.querySelector('[data-field="branch-child"]')
     expect(child).not.toBeNull()
     expect(child?.textContent ?? '').toContain('vip') // parsed from the nested stepKey

@@ -88,7 +88,7 @@
                 {{ summarizeStepError(step.error) }}
               </div>
               <div v-if="conditionBranchSelection(step)" class="automation-runs__branch-selection" data-field="branch-selection">
-                <template v-if="conditionBranchSelection(step)?.key">{{ automationLabel('runs.selectedBranch', isZh) }} {{ conditionBranchSelection(step)?.key }}</template>
+                <template v-if="conditionBranchSelection(step)?.key">{{ automationLabel('runs.selectedBranch', isZh) }} {{ conditionBranchSelection(step)?.label ? `${conditionBranchSelection(step)?.label} (${conditionBranchSelection(step)?.key})` : conditionBranchSelection(step)?.key }}</template>
                 <template v-else>{{ automationLabel('runs.branchNoMatch', isZh) }}</template>
               </div>
               <div v-if="step.result !== undefined && step.result !== null && !conditionBranchSelection(step)" class="automation-runs__step-output" data-field="step-output">
@@ -145,11 +145,15 @@ const resumeError = ref<string | null>(null)
 // A6-3-2b (read-only): surface condition_branch lineage from the persisted C1 jobs.
 // Parent step's result carries { selectedBranchKey, matched }; nested branch-action jobs use a
 // `${stepIndex}.branch.${key}.${i}` stepKey. Pure readers over the existing run-view shape.
-function conditionBranchSelection(step: AutomationRunStepView): { key: string; matched: boolean } | null {
+function conditionBranchSelection(step: AutomationRunStepView): { key: string; label: string; matched: boolean } | null {
   const r = step.result
   if (r && typeof r === 'object' && !Array.isArray(r) && 'selectedBranchKey' in r) {
-    const key = (r as Record<string, unknown>).selectedBranchKey
-    return { key: typeof key === 'string' ? key : '', matched: Boolean((r as Record<string, unknown>).matched) }
+    const rec = r as Record<string, unknown>
+    return {
+      key: typeof rec.selectedBranchKey === 'string' ? rec.selectedBranchKey : '',
+      label: typeof rec.selectedBranchLabel === 'string' ? rec.selectedBranchLabel : '',
+      matched: Boolean(rec.matched),
+    }
   }
   return null
 }
