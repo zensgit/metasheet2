@@ -3,6 +3,7 @@ import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
 import http from 'http'
+import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
 
 // ② 打卡策略组 S3 外勤审批 — route-level real-DB integration (design-lock
@@ -90,6 +91,8 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
   // value left by a previous test never leaks through mergeSettings into this test's policy.
   const setOutdoor = (outdoor: Record<string, unknown> | null, withFence = true) =>
     putSettings({ geoFence: withFence ? FENCE : null, punchPolicy: outdoor ? { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '', ...outdoor } } : {} })
+  const setMerge = (merge: Record<string, unknown>) =>
+    putSettings({ punchPolicy: { merge: { internalWinsOnIn: false, externalWinsOnOut: false, ...merge } } })
 
   async function counts(userId: string) {
     const ev = (await pool.query(`SELECT event_type, source FROM attendance_events WHERE user_id = $1`, [userId])).rows as { event_type: string; source: string }[]
@@ -98,6 +101,25 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
     const reqs = (await pool.query(`SELECT status, metadata -> 'outdoorPunch' ->> 'eventType' AS event_type FROM attendance_requests WHERE user_id = $1 AND request_type = 'outdoor_punch'`, [userId])).rows as { status: string; event_type: string }[]
     return { events: ev, records: rec, recRow, outdoorReqs: reqs }
   }
+  async function recordFor(userId: string, workDate: string) {
+    return (await pool.query(
+      `SELECT first_in_at, last_out_at, work_minutes, status
+       FROM attendance_records
+       WHERE user_id = $1 AND work_date = $2 AND org_id = $3
+       LIMIT 1`,
+      [userId, workDate, ORG]
+    )).rows[0] ?? null
+  }
+  async function eventRows(userId: string, workDate: string) {
+    return (await pool.query(
+      `SELECT event_type, source, occurred_at
+       FROM attendance_events
+       WHERE user_id = $1 AND work_date = $2 AND org_id = $3
+       ORDER BY occurred_at ASC, event_type ASC`,
+      [userId, workDate, ORG]
+    )).rows as { event_type: string; source: string; occurred_at: Date }[]
+  }
+  const iso = (value: unknown) => new Date(value as string | number | Date).toISOString()
   async function cleanupUser(userId: string) {
     await pool.query(`DELETE FROM approval_instances WHERE business_key IN (SELECT 'attendance-request:' || id FROM attendance_requests WHERE user_id = $1)`, [userId]).catch(() => undefined)
     await pool.query(`DELETE FROM attendance_requests WHERE user_id = $1`, [userId]).catch(() => undefined)
@@ -277,21 +299,27 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
     }
   })
 
-  it('settings wire: PUT→GET round-trip for punchPolicy.outdoor; partial update preserves unscheduled & merge', async () => {
+  it('settings wire: PUT→GET round-trip for punchPolicy.outdoor/merge; partial update preserves siblings', async () => {
     const flowId = await createOutdoorFlow()
-    await setOutdoor({ requireApproval: true, requireNote: true, approvalFlowId: flowId })
+    await putSettings({
+      punchPolicy: {
+        merge: { internalWinsOnIn: true, externalWinsOnOut: true },
+        outdoor: { requireApproval: true, requireNote: true, approvalFlowId: flowId },
+      },
+    })
     const got = await getSettings()
-    const outdoor = (got.body as { data?: { punchPolicy?: { outdoor?: Record<string, unknown> } } })?.data?.punchPolicy?.outdoor
-    expect(outdoor).toMatchObject({ requireApproval: true, requireNote: true, approvalFlowId: flowId })
+    const pp = (got.body as { data?: { punchPolicy?: { outdoor?: Record<string, unknown>; merge?: Record<string, unknown> } } })?.data?.punchPolicy
+    expect(pp?.outdoor).toMatchObject({ requireApproval: true, requireNote: true, approvalFlowId: flowId })
+    expect(pp?.merge).toMatchObject({ internalWinsOnIn: true, externalWinsOnOut: true })
     // partial update of a sibling (unscheduled) must not clear outdoor
     await putSettings({ punchPolicy: { unscheduled: { mode: 'block' } } })
     const got2 = await getSettings()
-    const pp2 = (got2.body as { data?: { punchPolicy?: { outdoor?: Record<string, unknown>; unscheduled?: { mode?: string }; merge?: unknown } } })?.data?.punchPolicy
+    const pp2 = (got2.body as { data?: { punchPolicy?: { outdoor?: Record<string, unknown>; unscheduled?: { mode?: string }; merge?: Record<string, unknown> } } })?.data?.punchPolicy
     expect(pp2?.unscheduled?.mode).toBe('block')
     expect(pp2?.outdoor).toMatchObject({ requireApproval: true, requireNote: true, approvalFlowId: flowId }) // preserved
-    expect(pp2?.merge).toBeDefined() // sibling preserved
+    expect(pp2?.merge).toMatchObject({ internalWinsOnIn: true, externalWinsOnOut: true }) // sibling preserved
     // restore unscheduled
-    await putSettings({ punchPolicy: { unscheduled: { mode: 'allow' } } })
+    await putSettings({ punchPolicy: { unscheduled: { mode: 'allow' }, merge: { internalWinsOnIn: false, externalWinsOnOut: false } } })
   })
 
   it('P1: generic /requests API cannot create or update an outdoor_punch (must go through /punch)', async () => {
@@ -359,6 +387,84 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
       expect(ok.status).toBe(200)
       expect((await counts(u)).events.map((e) => e.source)).toEqual(['mobile'])
     } finally {
+      await cleanupUser(u)
+    }
+  })
+
+  it('S2-1: merge policy independently picks internal check-in and outdoor check-out without rewriting events', async () => {
+    await createOutdoorFlow()
+    await setMerge({ internalWinsOnIn: true, externalWinsOnOut: true })
+    await setOutdoor({ requireApproval: true, requireNote: false, approvalFlowId: '' }, false)
+    const u = `out-merge-${Date.now().toString(36)}`
+    const workDate = '2026-06-05'
+    const outdoorInAt = `${workDate}T08:50:00.000Z`
+    const internalInAt = `${workDate}T09:05:00.000Z`
+    const outdoorOutAt = `${workDate}T18:30:00.000Z`
+    const internalOutAt = `${workDate}T19:00:00.000Z`
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      const outdoorIn = await punch(t, { eventType: 'check_in', occurredAt: outdoorInAt, location: INSIDE, meta: { outdoor: true, note: 'client morning' } })
+      const outdoorOut = await punch(t, { eventType: 'check_out', occurredAt: outdoorOutAt, location: INSIDE, meta: { outdoor: true, note: 'client evening' } })
+      expect(outdoorIn.status).toBe(202)
+      expect(outdoorOut.status).toBe(202)
+      const internalIn = await punch(t, { eventType: 'check_in', occurredAt: internalInAt, source: 'mobile', location: INSIDE })
+      const internalOut = await punch(t, { eventType: 'check_out', occurredAt: internalOutAt, source: 'mobile', location: INSIDE })
+      expect(internalIn.status).toBe(200)
+      expect(internalOut.status).toBe(200)
+
+      const reqIn = (outdoorIn.body as { data?: { request?: { id?: string } } })?.data?.request?.id as string
+      const reqOut = (outdoorOut.body as { data?: { request?: { id?: string } } })?.data?.request?.id as string
+      expect((await approve(reqIn)).status).toBe(200)
+      expect((await approve(reqOut)).status).toBe(200)
+
+      const record = await recordFor(u, workDate)
+      expect(iso(record.first_in_at)).toBe(internalInAt)
+      expect(iso(record.last_out_at)).toBe(outdoorOutAt)
+      expect((await eventRows(u, workDate)).map((row) => `${row.event_type}:${row.source}:${iso(row.occurred_at)}`)).toEqual([
+        `check_in:outdoor_approval:${outdoorInAt}`,
+        `check_in:mobile:${internalInAt}`,
+        `check_out:outdoor_approval:${outdoorOutAt}`,
+        `check_out:mobile:${internalOutAt}`,
+      ])
+    } finally {
+      await setMerge({ internalWinsOnIn: false, externalWinsOnOut: false }).catch(() => undefined)
+      await cleanupUser(u)
+    }
+  })
+
+  it('S2-1: protected record-only first-in survives later mixed internal/outdoor punch recompute', async () => {
+    await setMerge({ internalWinsOnIn: true, externalWinsOnOut: false })
+    await setOutdoor({ requireApproval: false }, false)
+    const u = `out-protect-${Date.now().toString(36)}`
+    const workDate = '2026-06-04'
+    const protectedFirst = `${workDate}T10:00:00.000Z`
+    const outdoorInAt = `${workDate}T08:50:00.000Z`
+    const internalInAt = `${workDate}T09:05:00.000Z`
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      await pool.query(
+        `INSERT INTO attendance_records
+         (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'UTC', $5, NULL, 0, 0, 0, 'adjusted', true, $6::jsonb, NULL, now(), now())`,
+        [randomUUID(), u, ORG, workDate, protectedFirst, JSON.stringify({ source: 'override-protected' })]
+      )
+      await pool.query(
+        `INSERT INTO attendance_events
+         (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
+         VALUES ($1, $2, $3, $4, $5, 'check_in', 'outdoor_approval', 'UTC', '{}'::jsonb, '{}'::jsonb)`,
+        [randomUUID(), u, ORG, workDate, outdoorInAt]
+      )
+
+      const internal = await punch(t, { eventType: 'check_in', occurredAt: internalInAt, source: 'mobile', location: INSIDE })
+      expect(internal.status).toBe(200)
+      const record = await recordFor(u, workDate)
+      expect(iso(record.first_in_at)).toBe(protectedFirst)
+      expect((await eventRows(u, workDate)).map((row) => `${row.event_type}:${row.source}:${iso(row.occurred_at)}`)).toEqual([
+        `check_in:outdoor_approval:${outdoorInAt}`,
+        `check_in:mobile:${internalInAt}`,
+      ])
+    } finally {
+      await setMerge({ internalWinsOnIn: false, externalWinsOnOut: false }).catch(() => undefined)
       await cleanupUser(u)
     }
   })

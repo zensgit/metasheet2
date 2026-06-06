@@ -45,11 +45,12 @@ const REQUEST_TYPES = [
   // ② S3 外勤审批 (#2304): outdoor field-work punch that needs approval before it counts.
   'outdoor_punch',
 ]
+const OUTDOOR_APPROVAL_EVENT_SOURCE = 'outdoor_approval'
 // ② S2-0 (#2325 design-lock): event sources that ONLY a trusted internal writer may set — never accepted
 // from a client. `outdoor_approval` is written solely by the S3 approval path and is the authoritative
-// internal/external classifier for the future S2 in/out merge; if /punch let a client forge it, a normal
+// internal/external classifier for the S2 in/out merge; if /punch let a client forge it, a normal
 // punch would be counted as an approved outdoor punch. Any client-facing event writer must reject these.
-const RESERVED_EVENT_SOURCES = new Set(['outdoor_approval'])
+const RESERVED_EVENT_SOURCES = new Set([OUTDOOR_APPROVAL_EVENT_SOURCE])
 const ATTENDANCE_APPROVAL_WORKFLOW_KEY = 'attendance.request'
 const ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS = ['attendance:approve', 'attendance:admin']
 const ATTENDANCE_SCHEDULE_GROUP_SOURCES = new Set(['manual', 'import', 'integration'])
@@ -114,9 +115,9 @@ const DEFAULT_SETTINGS = {
     weeklyMaxMinutes: null,
     monthlyMaxMinutes: null,
   },
-  // 打卡策略组 (punch-policy group) — LATENT foundation (design-lock #2203 / S0). NOTHING reads this
-  // yet; each enforcement slice wires + exposes its own field (S1 unscheduled-punch / S2 in-out merge /
-  // S3 outdoor approval). All defaults = current behaviour (no regression).
+  // 打卡策略组 (punch-policy group) — shared foundation (design-lock #2203 / S0). Each enforcement
+  // slice wires + exposes its own field (S1 unscheduled-punch / S2 in-out merge / S3 outdoor approval).
+  // All defaults = current behaviour (no regression).
   punchPolicy: {
     unscheduled: { mode: 'allow' },
     merge: { internalWinsOnIn: false, externalWinsOnOut: false },
@@ -13735,6 +13736,131 @@ async function applyImportHeavyTransactionTimeout(client) {
   if (client) client.__attendanceImportStatementTimeoutMs = normalized
 }
 
+async function loadAttendanceRecordForUpdate(client, { userId, workDate, orgId }) {
+  const rows = await client.query(
+    'SELECT * FROM attendance_records WHERE user_id = $1 AND work_date = $2 AND org_id = $3 FOR UPDATE',
+    [userId, workDate, orgId]
+  )
+  return rows[0] ?? null
+}
+
+function attendanceTimeMs(value) {
+  if (!value) return null
+  const date = value instanceof Date ? value : new Date(value)
+  const time = date.getTime()
+  return Number.isFinite(time) ? time : null
+}
+
+function cloneAttendanceDate(value) {
+  const time = attendanceTimeMs(value)
+  return time == null ? null : new Date(time)
+}
+
+function pickEarliestAttendanceEvent(events) {
+  let selected = null
+  for (const event of events) {
+    const time = attendanceTimeMs(event.occurred_at)
+    if (time == null) continue
+    if (!selected || time < selected.time) selected = { time, value: new Date(time) }
+  }
+  return selected?.value ?? null
+}
+
+function pickLatestAttendanceEvent(events) {
+  let selected = null
+  for (const event of events) {
+    const time = attendanceTimeMs(event.occurred_at)
+    if (time == null) continue
+    if (!selected || time > selected.time) selected = { time, value: new Date(time) }
+  }
+  return selected?.value ?? null
+}
+
+function protectedRecordTime(previousValue, eventsForSide) {
+  const previousTime = attendanceTimeMs(previousValue)
+  if (previousTime == null) return null
+  const representedByEvent = eventsForSide.some(event => attendanceTimeMs(event.occurred_at) === previousTime)
+  return representedByEvent ? null : new Date(previousTime)
+}
+
+function sameAttendanceInstant(a, b) {
+  const left = attendanceTimeMs(a)
+  const right = attendanceTimeMs(b)
+  return left === right
+}
+
+async function applyAttendanceInOutMergePolicy(options) {
+  const {
+    client,
+    userId,
+    orgId,
+    workDate,
+    timezone,
+    rule,
+    isWorkday,
+    settings,
+    record,
+    protectedRecord,
+  } = options
+  const mergePolicy = settings?.punchPolicy?.merge ?? DEFAULT_SETTINGS.punchPolicy.merge
+  const internalWinsOnIn = mergePolicy.internalWinsOnIn === true
+  const externalWinsOnOut = mergePolicy.externalWinsOnOut === true
+  if (!internalWinsOnIn && !externalWinsOnOut) return record
+  if (!record) return record
+
+  const events = await client.query(
+    `SELECT event_type, source, occurred_at
+     FROM attendance_events
+     WHERE user_id = $1
+       AND org_id = $2
+       AND work_date = $3
+       AND event_type IN ('check_in', 'check_out')
+     ORDER BY occurred_at ASC, id ASC`,
+    [userId, orgId, workDate]
+  )
+  const checkIns = events.filter(event => event.event_type === 'check_in')
+  const checkOuts = events.filter(event => event.event_type === 'check_out')
+  const internalIns = checkIns.filter(event => event.source !== OUTDOOR_APPROVAL_EVENT_SOURCE)
+  const outdoorIns = checkIns.filter(event => event.source === OUTDOOR_APPROVAL_EVENT_SOURCE)
+  const internalOuts = checkOuts.filter(event => event.source !== OUTDOOR_APPROVAL_EVENT_SOURCE)
+  const outdoorOuts = checkOuts.filter(event => event.source === OUTDOOR_APPROVAL_EVENT_SOURCE)
+
+  let nextFirstInAt = cloneAttendanceDate(record.first_in_at)
+  let nextLastOutAt = cloneAttendanceDate(record.last_out_at)
+
+  if (internalWinsOnIn && internalIns.length > 0 && outdoorIns.length > 0) {
+    nextFirstInAt = protectedRecordTime(protectedRecord?.first_in_at, checkIns)
+      ?? pickEarliestAttendanceEvent(internalIns)
+      ?? nextFirstInAt
+  }
+  if (externalWinsOnOut && internalOuts.length > 0 && outdoorOuts.length > 0) {
+    nextLastOutAt = protectedRecordTime(protectedRecord?.last_out_at, checkOuts)
+      ?? pickLatestAttendanceEvent(outdoorOuts)
+      ?? nextLastOutAt
+  }
+
+  if (sameAttendanceInstant(nextFirstInAt, record.first_in_at) && sameAttendanceInstant(nextLastOutAt, record.last_out_at)) {
+    return record
+  }
+
+  const approvedMinutes = await loadApprovedMinutes(client, orgId, userId, workDate)
+  return upsertAttendanceRecord({
+    userId,
+    orgId,
+    workDate,
+    timezone,
+    rule,
+    updateFirstInAt: nextFirstInAt,
+    updateLastOutAt: nextLastOutAt,
+    mode: 'override',
+    isWorkday,
+    leaveMinutes: approvedMinutes.leaveMinutes,
+    overtimeMinutes: approvedMinutes.overtimeMinutes,
+    existingRow: record,
+    client,
+  })
+}
+
 async function upsertAttendanceRecord(options) {
   const {
     userId,
@@ -13758,12 +13884,8 @@ async function upsertAttendanceRecord(options) {
 
   // Allow callers to prefetch + lock rows in bulk (performance) while keeping
   // this helper backwards compatible.
-  const existing = existingRow
-    ? [existingRow]
-    : await client.query(
-        'SELECT * FROM attendance_records WHERE user_id = $1 AND work_date = $2 AND org_id = $3 FOR UPDATE',
-        [userId, workDate, orgId]
-      )
+  const loadedExistingRow = existingRow ?? await loadAttendanceRecordForUpdate(client, { userId, workDate, orgId })
+  const existing = loadedExistingRow ? [loadedExistingRow] : []
 
   const values = computeAttendanceRecordUpsertValues({
     existingRow: existing[0] ?? null,
@@ -16438,13 +16560,17 @@ module.exports = {
         weeklyMaxMinutes: z.number().int().positive().nullable().optional(),
         monthlyMaxMinutes: z.number().int().positive().nullable().optional(),
       }).optional(),
-      // Punch-policy group (#2203). S1 exposes unscheduled.mode = allow|block. S3 (#2304) exposes the
-      // outdoor approval controls — requireApproval / requireNote / approvalFlowId only. requirePhoto stays
-      // latent (normalized but NOT wire-settable until an attachment/photo contract exists — no fake
-      // security). `merge` is still added by its own slice (S2).
+      // Punch-policy group (#2203). S1 exposes unscheduled.mode = allow|block. S2 exposes merge
+      // controls for in/out card selection. S3 (#2304) exposes the outdoor approval controls —
+      // requireApproval / requireNote / approvalFlowId only. requirePhoto stays latent (normalized but
+      // NOT wire-settable until an attachment/photo contract exists — no fake security).
       punchPolicy: z.object({
         unscheduled: z.object({
           mode: z.enum(['allow', 'block']).optional(),
+        }).optional(),
+        merge: z.object({
+          internalWinsOnIn: z.boolean().optional(),
+          externalWinsOnOut: z.boolean().optional(),
         }).optional(),
         outdoor: z.object({
           requireApproval: z.boolean().optional(),
@@ -19097,7 +19223,8 @@ module.exports = {
               ]
             )
 
-            const record = await upsertAttendanceRecord({
+            const protectedRecord = await loadAttendanceRecordForUpdate(trx, { userId, orgId, workDate })
+            let record = await upsertAttendanceRecord({
               userId,
               orgId,
               workDate,
@@ -19109,7 +19236,20 @@ module.exports = {
               isWorkday: context.isWorkingDay,
               leaveMinutes: 0,
               overtimeMinutes: 0,
+              existingRow: protectedRecord,
               client: trx,
+            })
+            record = await applyAttendanceInOutMergePolicy({
+              client: trx,
+              userId,
+              orgId,
+              workDate,
+              timezone,
+              rule: { ...context.rule, timezone },
+              isWorkday: context.isWorkingDay,
+              settings: punchPolicySettings,
+              record,
+              protectedRecord,
             })
 
             return { event: event[0], record }
@@ -20679,12 +20819,17 @@ module.exports = {
                   requestRow.work_date,
                   outdoorOccurredAt,
                   outdoorEventType,
-                  'outdoor_approval',
+                  OUTDOOR_APPROVAL_EVENT_SOURCE,
                   timezone,
                   JSON.stringify(op.location ?? {}),
                   JSON.stringify({ requestId, requestType: 'outdoor_punch', outdoor: true }),
                 ]
               )
+              const protectedRecord = await loadAttendanceRecordForUpdate(trx, {
+                userId: requestRow.user_id,
+                orgId,
+                workDate: requestRow.work_date,
+              })
               record = await upsertAttendanceRecord({
                 userId: requestRow.user_id,
                 orgId,
@@ -20697,7 +20842,20 @@ module.exports = {
                 isWorkday: context.isWorkingDay,
                 leaveMinutes: 0,
                 overtimeMinutes: 0,
+                existingRow: protectedRecord,
                 client: trx,
+              })
+              record = await applyAttendanceInOutMergePolicy({
+                client: trx,
+                userId: requestRow.user_id,
+                orgId,
+                workDate: requestRow.work_date,
+                timezone,
+                rule: { ...context.rule, timezone },
+                isWorkday: context.isWorkingDay,
+                settings: await getSettings(trx),
+                record,
+                protectedRecord,
               })
             }
 
