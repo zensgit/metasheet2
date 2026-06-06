@@ -1212,14 +1212,8 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'condition_branch',
 ]
 
-// A6-3-2a: the minimal v1 set of action types authorable INSIDE a condition_branch branch.
-// Mirrors the backend (which forbids wait_for_callback + nested condition_branch in branches);
-// kept to simple-config types this slice can faithfully round-trip. Loaded branches whose actions
-// fall outside this set open read-only (never flattened) — see conditionBranchUnsupportedReason.
-const BRANCH_AUTHORABLE_ACTION_TYPES: AutomationActionType[] = [
-  'update_record',
-  'send_notification',
-]
+// A6-3-2a: BRANCH_AUTHORABLE_ACTION_TYPES (the v1 in-branch action subset) is imported from
+// ../utils/conditionBranchAuthoring — the single source of truth shared with the seam + tests.
 
 const UNSUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = ['lock_record']
 

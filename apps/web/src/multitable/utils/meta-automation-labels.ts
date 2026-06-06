@@ -800,6 +800,8 @@ export function automationActionTypeLabel(type: AutomationActionType | (string &
       return isZh ? '锁定记录' : 'Lock record'
     case 'wait_for_callback':
       return isZh ? '等待回调（挂起）' : 'Wait for callback (suspend)'
+    case 'condition_branch':
+      return isZh ? '条件分支' : 'Condition branch'
     case 'update_field':
       return isZh ? '更新字段值' : 'Update field value'
     default:
