@@ -466,11 +466,13 @@ Acceptance locks:
 - No PLM read, MetaSheet write, K3, UI, migration, raw SQL, or permission model
   change.
 
-### ⬜ C5-3 - Operator validation runbook / entity-machine smoke
+### ✅ C5-3 - Operator validation / entity-machine closeout (CLOSED - #2253, 2026-06-06)
 
 Gated on: C5-1/C5-2 + C5-3a package deployed + C5-3b package deployed +
 C1b target readiness + explicit PLM readonly source binding
 (`data-source:sql-readonly` or `bridge:legacy-sql-readonly`) + explicit opt-in.
+This gate is satisfied for the closed #2253 sample; future samples still need
+their own validation/approval.
 
 Scope:
 
@@ -487,20 +489,27 @@ Acceptance locks:
 - External DB write remains not invoked.
 - Manual-confirm rows remain held.
 
-Current entity-machine state after C1b-2:
+Final entity-machine state after the #2253 closeout chain:
 
 - C5-3b target-schema preflight PASSed: partial explicit `fieldIdMap` returns
   values-free `422 TARGET_SCHEMA_INCOMPLETE` before any source read.
 - C1b-2 target readiness PASSed on the entity machine: admin readiness/ensure
   works, non-admin returns 403, and no PLM/C2/C3/C4/K3/row writes occur.
-- Full C5 smoke remains blocked on the explicit PLM source gate and source
-  validation, not on target readiness.
-- Source readiness: onsite inventory showed the PLM SQL Server source is
-  represented as active `bridge:legacy-sql-readonly`, not as a generic
-  `data-source:sql-readonly` datasource. The next source-side slice is explicit
-  Bridge support.
+- C5-source-gate PASSed with an explicitly configured
+  `bridge:legacy-sql-readonly` source.
+- C2 expansion PASSed with `rowsExpanded=44` and no error types.
+- C3 planner PASSed before apply with `add=44`, `manual_confirm=0`.
+- C4 apply was run once for the approved sample only; onsite evidence reported
+  `created=44`, `failed=0`.
+- Readback after apply PASSed with `recordCount=44`.
+- The final #2335 package retest PASSed: dry-run returned `status=ready`,
+  `planValid=true`, `existingRows=44`, `rowsExpanded=44`, `add=0`, `update=0`,
+  `skip=44`, `inactive=0`, `manual_confirm=0`.
+- Stop rule: do not run another C4 apply for this same sample. Future applies
+  require a new sample/project, a new explicit approval, or a production rollout
+  gate.
 
-### 🟡 C5-source-gate - Explicit Bridge readonly source support (this PR)
+### ✅ C5-source-gate - Explicit Bridge readonly source support (DONE - PR #2311, `2d9281cdf`; fixes #2313, `61b13a95b`; receipt #2320, `352ff069e`)
 
 Gated on: C1b-2 entity-machine target readiness PASS + onsite source inventory
 showing the PLM source is `bridge:legacy-sql-readonly` + explicit opt-in.
@@ -531,7 +540,7 @@ Acceptance locks:
 - No PLM write, MetaSheet apply, K3, external database write, raw SQL, or
   source credential copy is introduced.
 
-### 🟡 C6 - `config_info` -> select/dropdown option sync + predefined option-action binding (this PR)
+### ✅ C6 - `config_info` -> select/dropdown option sync + predefined option-action binding (DONE - PR #2326, `fdec5af1c`)
 
 Gated on: C5 + target readiness + explicit opt-in.
 
@@ -564,6 +573,8 @@ Acceptance locks:
 
 ## Deferred tracks
 
+- New project/sample C4 apply validation after separate explicit approval.
+- Production rollout for PLM stock-preparation apply.
 - PLM adapter/API source instead of readonly SQL.
 - Fuzzy/prefix/multi-project matching.
 - Procurement/warehouse child-table generation.
@@ -574,26 +585,27 @@ Acceptance locks:
 
 ## Details carried forward
 
-Some C0/C1 details are now encoded by C2/C3/C4 helpers. The remaining live
-operator checks stay in later validation slices:
+Some C0/C1 details are now encoded by C2/C3/C4/C5/C6 helpers and were also
+validated in the #2253 entity-machine closeout. Remaining live checks are for
+new scenarios, not for the closed sample:
 
-- **Live PLM feasibility:** C2 has a default DN-PDM read plan, but entity-machine
-  validation still must prove the customer schema supports the configured flat
-  reads without raw SQL, stored procedures, or vendor API calls.
-- **Target binding:** C5 route wiring must scope C4 to the intended
-  stock-preparation sheet/object; browser-supplied sheet ids are forbidden.
-- **Option sources:** exact `config_info` option source and target fields remain
-  deferred to C6.
+- **Live PLM feasibility:** the closed sample proved the configured flat reads
+  work through the explicit Bridge source without raw SQL, stored procedures, or
+  vendor API calls. A different customer schema or source kind still needs its
+  own feasibility gate.
+- **Target binding:** C5 route wiring scopes C4 to the server-configured
+  stock-preparation sheet/object; browser-supplied sheet ids remain forbidden.
+- **Option sources:** C6 sync is implemented for the configured stock-preparation
+  option fields and predefined action binding metadata. Richer option authoring
+  or option-trigger execution polish is separate.
 - **Validation evidence:** tenant UI may show values to authorized users, but
   issue/customer evidence must stay values-free.
 
 ## Sequencing rule
 
-C0, C1, C2-0, C2, C3, C4, C5-0, C5-1, C5-2, C5-3a, C5-3b, C1b-1, and C1b-2
-are complete. C5-3b closed the target-schema fail-closed bug found during C5-3
-smoke. C1b-2 closed the target-readiness gate on the entity machine. The next
-source-side blocker is the explicit Bridge-source gate, because the onsite PLM
-SQL Server source is available as `bridge:legacy-sql-readonly`.
+C0, C1, C2-0, C2, C3, C4, C5-0, C5-1, C5-2, C5-3a, C5-3b, C1b-1, C1b-2,
+C5-source-gate, C6, and the #2253 entity-machine closeout are complete for the
+approved sample.
 
 1. C5-0 design locks the reusable parameterized action contract.
 2. C5-1 adds backend action routes and server-side recompute/apply wiring.
@@ -607,8 +619,11 @@ SQL Server source is available as `bridge:legacy-sql-readonly`.
 8. C5-3 validates the flow on an entity machine.
 9. C6 syncs configured select/dropdown option sets and predefined
    option-action bindings into the canonical target field metadata.
+10. #2332/#2334/#2335 close the onsite apply diagnostics, type-normalization,
+    and post-create planner normalization follow-ups.
 
-After C6, any richer option authoring UI or option-bound action execution polish
-remains separate. All later slices still require their predecessor to land and
-the owner to explicitly opt in. K3 Save / Submit / Audit / BOM, external
-database write, and multi-project/batch mode remain out of scope.
+After the #2253 closeout, do not repeat C4 apply for the same sample. Any new
+project/sample apply, production rollout, richer option authoring UI,
+option-bound action execution polish, or multi-project/batch mode remains a
+separate gate with owner opt-in. K3 Save / Submit / Audit / BOM and external
+database write remain out of scope.
