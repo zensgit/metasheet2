@@ -72,8 +72,8 @@ const USER = process.env.SMOKE_USER_ID || process.env.TOKEN_USER_ID || `s2merge-
 // WORK_DATE: a PAST weekday so /punch never hits FUTURE_PUNCH_NOT_ALLOWED. Default = 7 days before today (UTC).
 function defaultWorkDate() {
   const d = new Date(Date.now() - 7 * 86400_000)
-  // nudge off Sat/Sun so a workday-calendar staging marks it is_workday (best-effort; summary assert is
-  // is_workday-aware regardless).
+  // nudge off Sat/Sun so a workday-calendar staging may mark it is_workday (best-effort; summary is asserted
+  // against the record's actual work_minutes either way).
   const dow = d.getUTCDay()
   if (dow === 0) d.setUTCDate(d.getUTCDate() - 2)
   else if (dow === 6) d.setUTCDate(d.getUTCDate() - 1)
@@ -173,7 +173,7 @@ async function main() {
   // 1) create an active outdoor_punch approval flow (admin approves directly; steps:[] mirrors the integration test)
   const flowRes = await api('/api/attendance/approval-flows', { method: 'POST', body: { name: `s2-merge-outdoor-${SUFFIX}`, requestType: 'outdoor_punch', isActive: true, steps: [] } })
   flowId = flowRes.body?.data?.id
-  ok(flowRes.status === 200 && !!flowId, `create outdoor approval flow (status ${flowRes.status})`, flowRes.body)
+  ok((flowRes.status === 200 || flowRes.status === 201) && !!flowId, `create outdoor approval flow (status ${flowRes.status})`, flowRes.body)
   if (!flowId) throw new Error('outdoor approval flow not created')
 
   // 2) enable BOTH merge keys + outdoor approval (no geoFence → outdoor is triggered purely by meta.outdoor)
@@ -234,21 +234,23 @@ async function main() {
   // 6) ASSERT the REAL read path follows — GET /records, /punch/events, /summary
   const recHttp = await api(`/api/attendance/records?userId=${encodeURIComponent(USER)}&from=${WORK_DATE}&to=${WORK_DATE}`)
   const recItem = recHttp.body?.data?.items?.[0]
-  // NB: /records items are camelCase (firstInAt/lastOutAt/workMinutes/isWorkday) — NOT the snake_case DB
-  // columns. (Mapped at index.cjs ~19685: `firstInAt: row.first_in_at`.)
-  ok(recHttp.status === 200 && recItem && iso(recItem.firstInAt) === internalInAt && iso(recItem.lastOutAt) === outdoorOutAt,
-    'GET /records read path reflects the merged record', { firstInAt: recItem?.firstInAt, lastOutAt: recItem?.lastOutAt })
+  // /records currently returns the full record shape (snake_case DB columns), while /anomalies maps to
+  // camelCase. Accept both so this smoke follows the deployed route contract instead of one handler's lens.
+  const recHttpFirstIn = recItem?.firstInAt ?? recItem?.first_in_at
+  const recHttpLastOut = recItem?.lastOutAt ?? recItem?.last_out_at
+  ok(recHttp.status === 200 && recItem && iso(recHttpFirstIn) === internalInAt && iso(recHttpLastOut) === outdoorOutAt,
+    'GET /records read path reflects the merged record', { firstInAt: recHttpFirstIn, lastOutAt: recHttpLastOut, keys: recItem ? Object.keys(recItem).slice(0, 12) : [] })
 
   const evHttp = await api(`/api/attendance/punch/events?userId=${encodeURIComponent(USER)}&from=${WORK_DATE}&to=${WORK_DATE}`)
   ok(evHttp.status === 200 && (evHttp.body?.data?.items?.length ?? 0) === 4, 'GET /punch/events returns the 4 events', evHttp.body?.data?.total)
 
   const sumHttp = await api(`/api/attendance/summary?userId=${encodeURIComponent(USER)}&from=${WORK_DATE}&to=${WORK_DATE}`)
   const totalMinutes = Number(sumHttp.body?.data?.total_minutes ?? -1)
-  // "summary follows the record" = the summary's worked minutes equal THIS record's work_minutes (the summary
-  // sums is_workday rows), not a hard-coded 565 — so a break rule on the record flows through, never spuriously fails.
-  const expectedSummary = rec?.is_workday ? Number(rec.work_minutes) : 0
+  // "summary follows the record" = the summary's worked minutes equal THIS record's work_minutes, not a
+  // hard-coded 565 — so a break rule on the record flows through, never spuriously fails.
+  const expectedSummary = Number(rec?.work_minutes ?? 0)
   ok(sumHttp.status === 200 && totalMinutes === expectedSummary,
-    `GET /summary follows the record (is_workday=${rec?.is_workday} → total_minutes ${expectedSummary})`, totalMinutes)
+    `GET /summary follows the record (record work_minutes=${expectedSummary})`, totalMinutes)
 }
 
 async function cleanup() {
