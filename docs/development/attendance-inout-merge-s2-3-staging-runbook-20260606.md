@@ -8,10 +8,10 @@
 
 It exercises the **real** user-facing flow against staging — `PUT /settings`, create approval-flow, `/punch`, approve — and asserts the merged outcome via the SQL oracle **and** the real HTTP read path:
 
-- With **both** merge keys on, on one workday seed an internal punch pair + an approved-outdoor punch pair, then:
+- With **both** merge keys on, on one workDate seed an internal punch pair + an approved-outdoor punch pair, then:
   - `first_in_at` = the **internal** 09:05 (`internalWinsOnIn`), `last_out_at` = the **outdoor** 18:30 (`externalWinsOnOut`) — the merge *window* is asserted **exactly**; `work_minutes` is `computeMetrics` over that window (asserted **≤ 565**, since a staging break rule may deduct — the un-merged window would be 610);
   - the four `attendance_events` are **unchanged** (the merge never rewrites events);
-  - `GET /records` and `GET /summary` **follow** the recomputed record (`/summary` assert is `is_workday`-aware).
+  - `GET /records` and `GET /summary` **follow** the recomputed record (`/summary` total equals the record's actual `work_minutes`, so break-rule deductions flow through).
 - It restores the original settings and SQL-deletes its own (uniquely-named) user rows → **residue 0**.
 
 **Not re-proven here** (already locked by the merged real-DB integration suite #2333/#2336): default keys-off ≡ no change; the §5.11/§5.12 record-only import/override protection (first + last). S2-3 is the *staging* gate, not a re-run of unit coverage.
@@ -21,7 +21,7 @@ It exercises the **real** user-facing flow against staging — `PUT /settings`, 
 1. **Staging runs a main build containing #2344 (`7542d3679`).** The script fails fast at step 0b if `punchPolicy.merge` does not round-trip through PUT/GET settings — that means the deployed bundle predates #2333/#2344. Verify the deployed bundle fingerprint / migration state first (staging does **not** auto-mirror `main` pushes).
 2. **A token for the smoke subject — which must be a *throwaway* user.** The smoke mints a per-user **dev-token** for a fresh synthetic user (`s2merge-<suffix>`) and uses that one token for everything — punch, settings, approve, reads — including self-approving its own outdoor requests (the proven comp-leave-smoke pattern). The token's own user **is** the subject (punches are attributed by the JWT id; `x-user-id` is only a last-resort fallback, so an admin token can't punch as a third party).
    - **Safety guards (enforced by the script):** cleanup blanket-deletes `WHERE user_id = <subject>`, so the subject must be disposable. The script **refuses** a subject that is not `s2merge-`-prefixed unless you set `ALLOW_NON_SYNTHETIC_SMOKE_USER=1` (**dangerous** — it would delete that user's real attendance), and when you supply `SMOKE_TOKEN` it decodes the JWT and **aborts unless its subject == `SMOKE_USER_ID`**.
-   - If staging **disables dev-token** (`NODE_ENV=production` → `/api/auth/dev-token` 404), mint a `SMOKE_TOKEN` **for a synthetic `s2merge-…` user** (admin role + `attendance:read,write,admin`, staging `JWT_SECRET`) — **not** a real admin — and set `SMOKE_USER_ID` to that synthetic id. Adapt `scripts/ops/resolve-attendance-smoke-token.sh` (which mints inside the staging backend container) to use a synthetic `id` rather than picking a real admin row.
+   - If staging **disables dev-token** (`NODE_ENV=production` → `/api/auth/dev-token` 404), mint a `SMOKE_TOKEN` **for a synthetic `s2merge-…` user** (admin role + `attendance:read,write,admin`, staging `JWT_SECRET`) — **not** a real admin — and set `SMOKE_USER_ID` to that synthetic id. Production auth also hydrates from `users`, so create a temporary synthetic `users` row + `user_roles(user_id,'admin')` for the run and delete them afterwards. Adapt `scripts/ops/resolve-attendance-smoke-token.sh` (which mints inside the staging backend container) to use a synthetic `id` rather than picking a real admin row.
 3. **`DATABASE_URL`** pointing at the staging postgres — used to read assertions and to DELETE the (uniquely-named) smoke user's rows on cleanup (there is **no** DELETE API for `attendance_events`/`attendance_records`).
 4. **`pg` resolvable** — run from the repo root (or set `NODE_PATH`).
 5. Reachability to staging API + DB (e.g. on the host, or through the tunnel).
@@ -47,7 +47,7 @@ The smoke is **self-contained and reversible**: it acts on a uniquely-named subj
 S2-3 in/out-merge staging smoke @ http://127.0.0.1:8082  (user s2merge-…, workDate …, stamp s2-merge-…)
   PASS  auth: GET settings 200 (got 200)
   PASS  S2 deployed: punchPolicy.merge round-trips through PUT/GET
-  PASS  create outdoor approval flow (status 200)
+  PASS  create outdoor approval flow (status 200/201)
   PASS  enable merge keys + outdoor approval (status 200)
   PASS  outdoor punches → pending requests (in 202, out 202)
   PASS  outdoor punches returned request ids
@@ -60,7 +60,7 @@ S2-3 in/out-merge staging smoke @ http://127.0.0.1:8082  (user s2merge-…, work
   PASS  attendance_events are exactly the 4 punched events (no rewrite by the merge)
   PASS  GET /records read path reflects the merged record
   PASS  GET /punch/events returns the 4 events
-  PASS  GET /summary follows the record (is_workday=… → total_minutes = the record's work_minutes)
+  PASS  GET /summary follows the record (record work_minutes=…)
 --- restore + cleanup ---
   settings restored
   PASS  cleanup residue = 0 (events 0, records 0, requests 0)
