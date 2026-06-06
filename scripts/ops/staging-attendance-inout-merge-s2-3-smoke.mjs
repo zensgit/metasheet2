@@ -14,7 +14,7 @@
 //
 // Seed timeline (UTC, all on WORK_DATE — a past weekday, so the /punch future-guard never fires):
 //   outdoor check_in 08:50 · internal check_in 09:05 · outdoor check_out 18:30 · internal check_out 19:00
-//   internalWinsOnIn → first_in_at = 09:05 ; externalWinsOnOut → last_out_at = 18:30 ; work = 565 min.
+//   internalWinsOnIn → first_in_at = 09:05 ; externalWinsOnOut → last_out_at = 18:30 ; window = 565 min (work_minutes = computeMetrics over it, asserted ≤565).
 //
 // HOW IT TALKS TO STAGING:
 //   - Drives the REAL user-facing flow over HTTP: PUT settings, create approval-flow, /punch, approve.
@@ -30,7 +30,10 @@
 // PREREQUISITES:
 //   - Staging runs a main build that contains #2344 (7542d3679) — the script fails fast if punchPolicy.merge
 //     does not round-trip through PUT/GET settings (= S2 not deployed).
-//   - You have an ADMIN bearer token minted with the STAGING JWT_SECRET (a prod token 401s on staging).
+//   - A token for the THROWAWAY subject: by default the script mints a dev-token for a fresh synthetic
+//     `s2merge-…` user; if dev-token is disabled (NODE_ENV=production), pass SMOKE_TOKEN minted with the
+//     STAGING JWT_SECRET for a SYNTHETIC `s2merge-…` user + SMOKE_USER_ID = that subject. The script refuses a
+//     non-synthetic subject (cleanup deletes the subject's rows) unless ALLOW_NON_SYNTHETIC_SMOKE_USER=1.
 //   - DATABASE_URL points at the staging postgres (read for assertions, DELETE for cleanup of the smoke user).
 //   - `pg` is resolvable (run from the repo root, or set NODE_PATH).
 //
@@ -101,6 +104,17 @@ async function api(path, { method = 'GET', body } = {}) {
 }
 const punch = (eventType, occurredAt, extra) =>
   api('/api/attendance/punch', { method: 'POST', body: { eventType, occurredAt, timezone: 'UTC', location: { lat: 0, lng: 0 }, ...extra } })
+
+// Decode (NOT verify) a JWT's subject claim, to confirm a supplied SMOKE_TOKEN actually punches as USER —
+// otherwise the SQL cleanup (DELETE WHERE user_id = USER) would target a user the token never wrote to.
+function jwtSubject(jwt) {
+  try {
+    const seg = String(jwt).split('.')[1]
+    if (!seg) return null
+    const payload = JSON.parse(Buffer.from(seg, 'base64url').toString('utf8'))
+    return payload.id ?? payload.sub ?? payload.userId ?? null
+  } catch { return null }
+}
 const approve = (id) => api(`/api/attendance/requests/${id}/approve`, { method: 'POST', body: { comment: `${STAMP} approve` } })
 
 const pool = new pg.Pool({ connectionString: DATABASE_URL })
@@ -113,14 +127,25 @@ let flowId = null
 async function main() {
   console.log(`S2-3 in/out-merge staging smoke @ ${BASE_URL}  (user ${USER}, workDate ${WORK_DATE}, stamp ${STAMP})`)
 
-  // 0a) resolve the per-user smoke token (dev-token unless a SMOKE_TOKEN was supplied)
+  // 0a) SAFETY — cleanup blanket-deletes WHERE user_id = USER, so the subject MUST be a throwaway. Refuse a
+  //     non-synthetic id unless an explicit dangerous override is set.
+  if (!/^s2merge-/.test(USER) && process.env.ALLOW_NON_SYNTHETIC_SMOKE_USER !== '1') {
+    throw new Error(`refusing to run: subject "${USER}" is not a synthetic s2merge- id. The SQL cleanup deletes ALL of this user's attendance events/records/requests — pointing it at a real user would destroy their data. Use a synthetic SMOKE_USER_ID (or omit it to auto-mint one), or set ALLOW_NON_SYNTHETIC_SMOKE_USER=1 to override (dangerous).`)
+  }
+
+  // 0b) resolve the per-user smoke token (dev-token unless a SMOKE_TOKEN was supplied). The token's user IS
+  //     the subject, so a supplied token's JWT subject MUST equal USER — else punches go to the token's user
+  //     while assertions + cleanup target USER (split-brain: false failures AND a wrong-user delete).
   if (!token) {
     const t = await api(`/api/auth/dev-token?userId=${encodeURIComponent(USER)}&roles=admin&perms=${encodeURIComponent('attendance:read,attendance:write,attendance:admin')}`)
     token = t.body?.token || ''
     if (!token) throw new Error(`could not mint dev-token (status ${t.status}) — set SMOKE_TOKEN + SMOKE_USER_ID for a staging that disables dev-token (NODE_ENV=production)`)
     console.log('  minted dev-token for the smoke subject')
-  } else if (!process.env.SMOKE_USER_ID && !process.env.TOKEN_USER_ID) {
-    console.warn(`  WARN: SMOKE_TOKEN supplied but no SMOKE_USER_ID — assuming the token's subject is "${USER}"; set SMOKE_USER_ID to the token's user or punches/assertions will mismatch.`)
+  } else {
+    const subject = jwtSubject(token)
+    if (subject == null) throw new Error('could not decode SMOKE_TOKEN subject — supply a valid JWT (and set SMOKE_USER_ID to its subject), or omit SMOKE_TOKEN to auto-mint a dev-token.')
+    if (String(subject) !== USER) throw new Error(`SMOKE_TOKEN subject "${subject}" != subject "${USER}". Punches would be attributed to "${subject}" while assertions and the SQL cleanup target "${USER}". Set SMOKE_USER_ID to the token's subject ("${subject}").`)
+    console.log(`  using supplied SMOKE_TOKEN (subject ${subject})`)
   }
 
   // 0b) auth + capture original settings
@@ -201,8 +226,10 @@ async function main() {
   // 6) ASSERT the REAL read path follows — GET /records, /punch/events, /summary
   const recHttp = await api(`/api/attendance/records?userId=${encodeURIComponent(USER)}&from=${WORK_DATE}&to=${WORK_DATE}`)
   const recItem = recHttp.body?.data?.items?.[0]
-  ok(recHttp.status === 200 && recItem && iso(recItem.first_in_at) === internalInAt && iso(recItem.last_out_at) === outdoorOutAt,
-    'GET /records read path reflects the merged record', { first_in_at: recItem?.first_in_at, last_out_at: recItem?.last_out_at })
+  // NB: /records items are camelCase (firstInAt/lastOutAt/workMinutes/isWorkday) — NOT the snake_case DB
+  // columns. (Mapped at index.cjs ~19685: `firstInAt: row.first_in_at`.)
+  ok(recHttp.status === 200 && recItem && iso(recItem.firstInAt) === internalInAt && iso(recItem.lastOutAt) === outdoorOutAt,
+    'GET /records read path reflects the merged record', { firstInAt: recItem?.firstInAt, lastOutAt: recItem?.lastOutAt })
 
   const evHttp = await api(`/api/attendance/punch/events?userId=${encodeURIComponent(USER)}&from=${WORK_DATE}&to=${WORK_DATE}`)
   ok(evHttp.status === 200 && (evHttp.body?.data?.items?.length ?? 0) === 4, 'GET /punch/events returns the 4 events', evHttp.body?.data?.total)
