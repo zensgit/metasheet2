@@ -602,6 +602,35 @@ describe('MetaDashboardView', () => {
     expect(body.display.barMode).toBeUndefined()                // line → no barMode
   })
 
+  it('v2-d-b3: changing ONLY the series field on a date-grouped chart re-requests the live preview', async () => {
+    const chart = fakeChart({
+      chartType: 'line',
+      dataSource: { sheetId: 'sheet_1', dateFieldId: 'fld_date', dateGrouping: 'month', aggregation: { function: 'count' } },
+    })
+    const { client } = mockClient([fakeDashboard()], [chart])
+    const previewSpy = vi.spyOn(client, 'previewChartData').mockResolvedValue({ chartType: 'line', dataPoints: [{ label: '2026-01', value: 1 }] })
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    vi.useFakeTimers()
+    ;(container.querySelector('[data-action="add-panel"]') as HTMLButtonElement).click()
+    await nextTick()
+    ;(container.querySelector(`[data-edit-chart="${chart.id}"]`) as HTMLButtonElement).click()
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(300); await nextTick() // let the on-open preview settle
+    previewSpy.mockClear()
+
+    // change ONLY the series field — must re-trigger the debounced preview (the watcher-dep bug)
+    const series = container.querySelector('[data-field="chart-series-by"]') as HTMLSelectElement
+    series.value = 'fld_amount'; series.dispatchEvent(new Event('change')); await nextTick()
+    await vi.advanceTimersByTimeAsync(300); await nextTick()
+
+    expect(previewSpy).toHaveBeenCalledTimes(1)
+    expect(previewSpy).toHaveBeenLastCalledWith('sheet_1', expect.objectContaining({
+      dataSource: expect.objectContaining({ seriesByFieldId: 'fld_amount' }),
+    }))
+    vi.useRealTimers()
+  })
+
   it('deletes a chart from the chart list (after confirm) and prunes the panel that showed it', async () => {
     const chart = fakeChart()
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
