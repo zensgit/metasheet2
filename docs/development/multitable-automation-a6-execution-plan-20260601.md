@@ -28,8 +28,8 @@ treatment **on purpose**:
   scheduler/worker/leader semantics.
 - **A6-3 … A6-5 ADD capability** (branch/parallel graph execution, modeling import,
   approval coupling). Their *shape* is undefined until a concrete use-case names it.
-  A6-3 now has its docs-only design-lock, with the first runtime slice pinned to
-  `condition_branch` / exclusive branch v1. A6-4/A6-5 remain plan-level only:
+  A6-3's first runtime slice (A6-3-1 `condition_branch` / exclusive branch v1) **landed via #2321**;
+  parallel/join + A6-3-2 frontend + A6-3-3 stay deferred. A6-4/A6-5 remain plan-level only:
   scope boundary, dependency order, gate posture, and a pointer to the test surface the
   A6-0 scout already enumerated.
 
@@ -154,14 +154,24 @@ only missing link.
   duplicate-resume idempotent/rejected, resume-after-completion rejected, invalid/expired
   token rejected without leak, later: survives process restart).
 
-## 3. A6-3 branch/parallel DAG — DESIGN-LOCK OPENED (#A6-3-0; runtime still deferred)
+## 3. A6-3 branch/parallel DAG — A6-3-1 condition_branch runtime ✅ LANDED (#2321); rest deferred
 
 Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
 
+> **✅ A6-3-1 `condition_branch` / exclusive-branch v1 runtime LANDED 2026-06-05 — PR #2321 (squash
+> `127b29dd9`)**, owner-opted on its named trigger ("同一规则按条件走不同动作链"). Backend only: new
+> `condition_branch` action + CHECK migration; **dual-layer fail-closed** (service
+> `validateConditionBranchConfig` + executor) rejecting `wait_for_callback` and nested `condition_branch`
+> inside branches; **exclusive** first-match-or-`defaultBranch` selection; **C1 parent/selected-child/
+> downstream lineage** reusing the existing job plane (no 2nd status vocab). The real-DB lineage seam gates
+> in CI via the blocking `plugin-tests.yml` targeted step (`multitable-automation-jobs.test.ts`, alongside
+> automation-retry/suspend-resume). **Still deferred, each its own opt-in:** A6-3-2 `condition_branch`
+> frontend builder + admin-runs readability; A6-3-3 `wait_for_callback` / nested-`condition_branch` inside
+> branches; A6-3 parallel fan-out / join-all / join-any. Design-lock detail below retained for the record.
+
 The design-lock pins the first runtime slice as **A6-3-1 `condition_branch` /
 exclusive branch v1**, not full parallel DAG. Parallel fan-out, join-all, and
-join-any stay separate follow rungs. Runtime still requires a named owner
-opt-in; this plan line does not authorize code.
+join-any stay separate follow rungs.
 
 - **Adds:** graph fields (upstream/downstream edges, branch discriminator, join mode,
   branch result aggregation) and generalizes the linear executor into a DAG. This is the
