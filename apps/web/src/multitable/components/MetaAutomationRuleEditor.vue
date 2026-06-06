@@ -1000,6 +1000,16 @@ import {
   automationTriggerConditionLabel,
   automationTriggerTypeLabel,
 } from '../utils/meta-automation-labels'
+import {
+  type BranchActionDraft,
+  type BranchDraft,
+  type DefaultBranchDraft,
+  BRANCH_AUTHORABLE_ACTION_TYPES,
+  buildConditionBranchConfig,
+  conditionBranchUnsupportedReason,
+  parseConditionBranchDraft,
+  validateConditionBranchKeys,
+} from '../utils/conditionBranchAuthoring'
 
 interface FieldPair {
   fieldId: string
@@ -1031,6 +1041,11 @@ type DraftActionConfig = Record<string, unknown> & {
   publicFormViewId?: string
   internalViewId?: string
   locked?: boolean
+  // A6-3-2a condition_branch authoring (supported → editable draft; unsupported → read-only + original preserved)
+  branches?: BranchDraft[]
+  defaultBranch?: DefaultBranchDraft | null
+  branchUnsupportedReason?: string | null
+  branchOriginal?: Record<string, unknown> | null
 }
 
 interface DraftAction {
@@ -1541,6 +1556,16 @@ function emptyDraft(): Draft {
 }
 
 function draftConfigFromAction(type: AutomationActionType, config: Record<string, unknown>): DraftActionConfig {
+  if (type === 'condition_branch') {
+    const reason = conditionBranchUnsupportedReason(config)
+    if (reason) {
+      // A6-3-2a point #3: a loaded shape the v1 UI can't faithfully round-trip → read-only.
+      // Preserve the ORIGINAL config verbatim; buildPayload re-emits it unchanged — never flatten.
+      return { branchUnsupportedReason: reason, branchOriginal: config, branches: [], defaultBranch: null }
+    }
+    const parsed = parseConditionBranchDraft(config)
+    return { branches: parsed.branches, defaultBranch: parsed.defaultBranch, branchUnsupportedReason: null, branchOriginal: null }
+  }
   if (type === 'update_record') {
     const fields = isPlainRecord(config.fields)
       ? config.fields
@@ -1647,6 +1672,38 @@ const JOB_MODE_REQUIRING_ACTION_TYPES: AutomationActionType[] = ['wait_for_callb
 const requiresJobMode = computed(() =>
   draft.value.actions.some((a) => JOB_MODE_REQUIRING_ACTION_TYPES.includes(a.type)),
 )
+
+// A6-3-2a: empty drafts for a fresh condition_branch action.
+function createEmptyBranchActionDraft(): BranchActionDraft {
+  return { type: 'update_record', fieldUpdates: [] }
+}
+function createEmptyBranchDraft(index = 1): BranchDraft {
+  return { key: `branch_${index}`, label: '', conjunction: 'AND', conditions: [], actions: [createEmptyBranchActionDraft()] }
+}
+function createEmptyDefaultBranchDraft(): DefaultBranchDraft {
+  return { key: 'default', label: '', actions: [createEmptyBranchActionDraft()] }
+}
+
+// A6-3-2a read-only guard (point #3) + branch-key validation (point #1) over the draft's
+// condition_branch actions. Both feed canSave (block-save) and the template (alert).
+const conditionBranchReadOnlyReason = computed<string | null>(() => {
+  for (const a of draft.value.actions) {
+    if (a.type === 'condition_branch' && a.config.branchUnsupportedReason) return a.config.branchUnsupportedReason
+  }
+  return null
+})
+const conditionBranchKeyError = computed<string | null>(() => {
+  for (const a of draft.value.actions) {
+    if (a.type === 'condition_branch' && !a.config.branchUnsupportedReason) {
+      const err = validateConditionBranchKeys({
+        branches: a.config.branches ?? [],
+        defaultBranch: a.config.defaultBranch ?? null,
+      })
+      if (err) return err
+    }
+  }
+  return null
+})
 
 function setExecutionMode(checked: boolean): void {
   // A6-1 opt-in: checkbox → the rule's persistent WorkflowJob mode (off = legacy/null).
@@ -1764,6 +1821,8 @@ watch(
 const canSave = computed(() => {
   if (!draft.value.name.trim()) return false
   if (draft.value.actions.length < 1) return false
+  if (conditionBranchReadOnlyReason.value) return false // A6-3-2a point #3: never save a non-round-trippable loaded branch
+  if (conditionBranchKeyError.value) return false // A6-3-2a point #1: branch key safe/unique mirror
   if (!draft.value.conditions.conditions.every(areConditionsComplete)) return false
   for (const action of draft.value.actions) {
     if (action.type === 'send_dingtalk_group_message') {
@@ -2368,6 +2427,8 @@ function appendPersonTemplateToken(
 
 function defaultConfigForActionType(type: AutomationActionType): DraftActionConfig {
   switch (type) {
+    case 'condition_branch':
+      return { branches: [createEmptyBranchDraft(1)], defaultBranch: null, branchUnsupportedReason: null, branchOriginal: null }
     case 'update_record':
       return { fieldUpdates: [] }
     case 'create_record':
@@ -2453,6 +2514,20 @@ function buildPayload(): Partial<AutomationRule> {
     triggerConfig.cron = cronPreset.value
   }
   const actions = d.actions.map((action) => {
+    if (action.type === 'condition_branch') {
+      // A6-3-2a point #3: read-only (unsupported loaded shape) re-emits the preserved original
+      // verbatim — never flattened. (canSave blocks save here anyway; this is the defensive floor.)
+      if (action.config.branchUnsupportedReason && action.config.branchOriginal) {
+        return { type: action.type, config: action.config.branchOriginal }
+      }
+      return {
+        type: action.type,
+        config: buildConditionBranchConfig({
+          branches: action.config.branches ?? [],
+          defaultBranch: action.config.defaultBranch ?? null,
+        }),
+      }
+    }
     if (action.type === 'update_record') {
       return {
         type: action.type,
