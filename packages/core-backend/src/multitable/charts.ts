@@ -110,18 +110,16 @@ export function assertSeriesConstraints(
   if (type !== 'bar' && type !== 'line') {
     throw new Error('seriesByFieldId is only supported for bar and line charts')
   }
-  if (!dataSource?.groupByFieldId) {
-    throw new Error('seriesByFieldId requires groupByFieldId (a primary category axis)')
-  }
-  if (dataSource.dateFieldId && dataSource.dateGrouping) {
-    // The producer gives date grouping precedence over groupByFieldId, so a series split is not
-    // applied here — reject rather than silently produce a non-split chart (groupBy-primary only;
-    // date-axis × series is deferred to v2-d-b3).
-    throw new Error('seriesByFieldId is not supported with date grouping')
+  // v2-d-b3: the primary axis is groupByFieldId OR a date axis (dateFieldId + dateGrouping). One of
+  // them must be present; a date axis provides its own primary (groupByFieldId not required there).
+  const dateGrouped = Boolean(dataSource.dateFieldId && dataSource.dateGrouping)
+  if (!dataSource?.groupByFieldId && !dateGrouped) {
+    throw new Error('seriesByFieldId requires groupByFieldId or date grouping (a primary axis)')
   }
   // Additive aggregation is required ONLY for a STACKED bar — its segment heights must sum to a
   // meaningful total. Grouped (side-by-side) bars are independent, and lines never stack, so both
-  // accept any aggregation. (v2-d-b1 = grouped relaxation; v2-d-b2 = line.)
+  // accept any aggregation. This holds for a date axis too: a stacked bar over time still needs an
+  // additive aggregation. (v2-d-b1 = grouped relaxation; v2-d-b2 = line; v2-d-b3 = date axis.)
   if (type === 'bar' && barMode !== 'grouped' && !ADDITIVE_AGGREGATIONS.has(dataSource.aggregation?.function)) {
     throw new Error('stacked series require a sum or count aggregation (use barMode "grouped" for others)')
   }

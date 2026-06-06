@@ -136,34 +136,46 @@ export class ChartAggregationService {
       dataPoints.push({ label, value })
     }
 
-    // Sort
-    dataPoints = this.sortDataPoints(dataPoints, chart.dataSource.sortBy, chart.dataSource.sortOrder)
+    // Sort. v2-d-b3: a date primary axis is ordered CHRONOLOGICALLY (bucket keys — day YYYY-MM-DD /
+    // week / month YYYY-MM / quarter YYYY-Qn / year — sort ascending lexically = chronologically) and
+    // IGNORES sortBy/sortOrder (which sort categories by label/value, meaningless for a time axis).
+    // Applies to ALL date-grouped charts (single- and multi-series), fixing the old encounter-order quirk.
+    const dateGrouped = !!(chart.dataSource.dateFieldId && chart.dataSource.dateGrouping)
+    if (dateGrouped) {
+      dataPoints.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))
+    } else {
+      dataPoints = this.sortDataPoints(dataPoints, chart.dataSource.sortBy, chart.dataSource.sortOrder)
+    }
 
-    // Limit
+    // Limit. v2-d-b3: in date mode `limit` selects the NEWEST N buckets, then renders them chronological
+    // ascending — slice(-limit) since dataPoints is already ascending (NOT slice(0,limit) = oldest N).
+    // groupBy/pie keep top-N after sortBy.
     if (chart.dataSource.limit && chart.dataSource.limit > 0) {
-      dataPoints = dataPoints.slice(0, chart.dataSource.limit)
+      dataPoints = dateGrouped
+        ? dataPoints.slice(-chart.dataSource.limit)
+        : dataPoints.slice(0, chart.dataSource.limit)
     }
 
     const total = dataPoints.reduce((sum, dp) => sum + dp.value, 0)
 
-    // v2-d: bar/line series split. Built AFTER sort+limit, so it only covers the surviving categories
-    // in their final order (building before limit would leak limited-out categories). Emitted for
-    // bar OR line (v2-d-b2) + seriesByFieldId + groupBy-primary (no date axis). Additive aggregation is
-    // required ONLY for a STACKED bar (its sum is the bar height); grouped bars (v2-d-b1) and lines are
-    // independent → any aggregation. The producer branches on type/`barMode` — not validation alone —
-    // so a persisted stacked+non-additive config still can't RENDER a misleading stack; it just omits
-    // series. Stacked vs grouped vs multi-line differ only at render; the series math is identical.
+    // v2-d: bar/line series split. Built AFTER sort+limit, so it only covers the surviving primary
+    // buckets in their final order (building before limit would leak limited-out buckets). Emitted for
+    // bar OR line (v2-d-b2) + seriesByFieldId + a primary axis = groupByFieldId OR a date axis (v2-d-b3).
+    // Additive aggregation is required ONLY for a STACKED bar (its sum is the bar height); grouped bars
+    // (v2-d-b1) and lines are independent → any aggregation. The producer branches on type/`barMode` — not
+    // validation alone — so a persisted stacked+non-additive config still can't RENDER a misleading stack;
+    // it just omits series. The series math is identical for a groupBy category or a date bucket (`groups`
+    // is keyed by the same label `dataPoints` carries, so `groups.get(dp.label)` works for both).
     const seriesByFieldId = chart.dataSource.seriesByFieldId
-    const dateGrouped = !!(chart.dataSource.dateFieldId && chart.dataSource.dateGrouping)
     const grouped = chart.display.barMode === 'grouped'
     const seriesType = chart.type === 'bar' || chart.type === 'line'
     const requiresAdditive = chart.type === 'bar' && !grouped // only a stacked bar
+    const hasPrimaryAxis = !!chart.dataSource.groupByFieldId || dateGrouped
     let series: ChartSeries[] | undefined
     if (
       seriesType &&
       seriesByFieldId &&
-      chart.dataSource.groupByFieldId &&
-      !dateGrouped &&
+      hasPrimaryAxis &&
       (!requiresAdditive || ADDITIVE_AGGREGATIONS.has(aggFn))
     ) {
       const seriesNames: string[] = []
