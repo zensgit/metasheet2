@@ -120,6 +120,38 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
     )).rows as { event_type: string; source: string; occurred_at: Date }[]
   }
   const iso = (value: unknown) => new Date(value as string | number | Date).toISOString()
+  async function seedRecordOnlyFirstIn(userId: string, workDate: string, firstInAt: string, options: { status?: string; source?: string } = {}) {
+    await pool.query(
+      `INSERT INTO attendance_records
+       (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 'UTC', $5, NULL, 0, 0, 0, $6, true, $7::jsonb, NULL, now(), now())`,
+      [
+        randomUUID(),
+        userId,
+        ORG,
+        workDate,
+        firstInAt,
+        options.status ?? 'adjusted',
+        JSON.stringify({ source: options.source ?? 'record-only' }),
+      ],
+    )
+  }
+  async function seedRecordOnlyLastOut(userId: string, workDate: string, lastOutAt: string, options: { status?: string; source?: string } = {}) {
+    await pool.query(
+      `INSERT INTO attendance_records
+       (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 'UTC', NULL, $5, 0, 0, 0, $6, true, $7::jsonb, NULL, now(), now())`,
+      [
+        randomUUID(),
+        userId,
+        ORG,
+        workDate,
+        lastOutAt,
+        options.status ?? 'adjusted',
+        JSON.stringify({ source: options.source ?? 'record-only' }),
+      ],
+    )
+  }
   async function cleanupUser(userId: string) {
     await pool.query(`DELETE FROM approval_instances WHERE business_key IN (SELECT 'attendance-request:' || id FROM attendance_requests WHERE user_id = $1)`, [userId]).catch(() => undefined)
     await pool.query(`DELETE FROM attendance_requests WHERE user_id = $1`, [userId]).catch(() => undefined)
@@ -458,10 +490,142 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
       const internal = await punch(t, { eventType: 'check_in', occurredAt: internalInAt, source: 'mobile', location: INSIDE })
       expect(internal.status).toBe(200)
       const record = await recordFor(u, workDate)
+      // S2-1 preserves the record-only timestamp candidate; status/provenance still
+      // follow the normal record upsert semantics and are not asserted here.
       expect(iso(record.first_in_at)).toBe(protectedFirst)
       expect((await eventRows(u, workDate)).map((row) => `${row.event_type}:${row.source}:${iso(row.occurred_at)}`)).toEqual([
         `check_in:outdoor_approval:${outdoorInAt}`,
         `check_in:mobile:${internalInAt}`,
+      ])
+    } finally {
+      await setMerge({ internalWinsOnIn: false, externalWinsOnOut: false }).catch(() => undefined)
+      await cleanupUser(u)
+    }
+  })
+
+  it('S2-1: keys-off keeps existing append behavior for a record-only first-in', async () => {
+    await setMerge({ internalWinsOnIn: false, externalWinsOnOut: false })
+    await setOutdoor({ requireApproval: false }, false)
+    const u = `off-protect-${Date.now().toString(36)}`
+    const workDate = '2026-06-03'
+    const recordOnlyFirst = `${workDate}T10:00:00.000Z`
+    const internalInAt = `${workDate}T09:05:00.000Z`
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      await seedRecordOnlyFirstIn(u, workDate, recordOnlyFirst, { status: 'normal', source: 'import-batch' })
+      const internal = await punch(t, { eventType: 'check_in', occurredAt: internalInAt, source: 'mobile', location: INSIDE })
+      expect(internal.status).toBe(200)
+      const record = await recordFor(u, workDate)
+      expect(iso(record.first_in_at)).toBe(internalInAt)
+    } finally {
+      await cleanupUser(u)
+    }
+  })
+
+  it('S2-1: keys-off keeps existing append behavior for a record-only last-out', async () => {
+    await setMerge({ internalWinsOnIn: false, externalWinsOnOut: false })
+    await setOutdoor({ requireApproval: false }, false)
+    const u = `off-out-protect-${Date.now().toString(36)}`
+    const workDate = '2026-06-03'
+    const recordOnlyLast = `${workDate}T17:00:00.000Z`
+    const internalOutAt = `${workDate}T19:00:00.000Z`
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      await seedRecordOnlyLastOut(u, workDate, recordOnlyLast, { status: 'normal', source: 'import-batch' })
+      const internal = await punch(t, { eventType: 'check_out', occurredAt: internalOutAt, source: 'mobile', location: INSIDE })
+      expect(internal.status).toBe(200)
+      const record = await recordFor(u, workDate)
+      expect(iso(record.last_out_at)).toBe(internalOutAt)
+    } finally {
+      await cleanupUser(u)
+    }
+  })
+
+  it('S2-1: import record-only first-in survives a later ordinary punch when internal merge is enabled', async () => {
+    await setMerge({ internalWinsOnIn: true, externalWinsOnOut: false })
+    await setOutdoor({ requireApproval: false }, false)
+    const u = `imp-protect-${Date.now().toString(36)}`
+    const workDate = '2026-06-03'
+    const importedFirst = `${workDate}T10:00:00.000Z`
+    const internalInAt = `${workDate}T09:05:00.000Z`
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      await seedRecordOnlyFirstIn(u, workDate, importedFirst, { status: 'normal', source: 'import-batch' })
+      const internal = await punch(t, { eventType: 'check_in', occurredAt: internalInAt, source: 'mobile', location: INSIDE })
+      expect(internal.status).toBe(200)
+      const record = await recordFor(u, workDate)
+      expect(iso(record.first_in_at)).toBe(importedFirst)
+      expect((await eventRows(u, workDate)).map((row) => `${row.event_type}:${row.source}:${iso(row.occurred_at)}`)).toEqual([
+        `check_in:mobile:${internalInAt}`,
+      ])
+    } finally {
+      await setMerge({ internalWinsOnIn: false, externalWinsOnOut: false }).catch(() => undefined)
+      await cleanupUser(u)
+    }
+  })
+
+  it('S2-1: override record-only first-in survives a later ordinary punch when internal merge is enabled', async () => {
+    await setMerge({ internalWinsOnIn: true, externalWinsOnOut: false })
+    await setOutdoor({ requireApproval: false }, false)
+    const u = `ovr-protect-${Date.now().toString(36)}`
+    const workDate = '2026-06-02'
+    const correctedFirst = `${workDate}T10:00:00.000Z`
+    const internalInAt = `${workDate}T09:05:00.000Z`
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      await seedRecordOnlyFirstIn(u, workDate, correctedFirst, { status: 'adjusted', source: 'missed-override' })
+      const internal = await punch(t, { eventType: 'check_in', occurredAt: internalInAt, source: 'mobile', location: INSIDE })
+      expect(internal.status).toBe(200)
+      const record = await recordFor(u, workDate)
+      expect(iso(record.first_in_at)).toBe(correctedFirst)
+      expect((await eventRows(u, workDate)).map((row) => `${row.event_type}:${row.source}:${iso(row.occurred_at)}`)).toEqual([
+        `check_in:mobile:${internalInAt}`,
+      ])
+    } finally {
+      await setMerge({ internalWinsOnIn: false, externalWinsOnOut: false }).catch(() => undefined)
+      await cleanupUser(u)
+    }
+  })
+
+  it('S2-1: import record-only last-out survives a later ordinary punch when external merge is enabled', async () => {
+    await setMerge({ internalWinsOnIn: false, externalWinsOnOut: true })
+    await setOutdoor({ requireApproval: false }, false)
+    const u = `imp-out-protect-${Date.now().toString(36)}`
+    const workDate = '2026-06-03'
+    const importedLast = `${workDate}T17:00:00.000Z`
+    const internalOutAt = `${workDate}T19:00:00.000Z`
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      await seedRecordOnlyLastOut(u, workDate, importedLast, { status: 'normal', source: 'import-batch' })
+      const internal = await punch(t, { eventType: 'check_out', occurredAt: internalOutAt, source: 'mobile', location: INSIDE })
+      expect(internal.status).toBe(200)
+      const record = await recordFor(u, workDate)
+      expect(iso(record.last_out_at)).toBe(importedLast)
+      expect((await eventRows(u, workDate)).map((row) => `${row.event_type}:${row.source}:${iso(row.occurred_at)}`)).toEqual([
+        `check_out:mobile:${internalOutAt}`,
+      ])
+    } finally {
+      await setMerge({ internalWinsOnIn: false, externalWinsOnOut: false }).catch(() => undefined)
+      await cleanupUser(u)
+    }
+  })
+
+  it('S2-1: override record-only last-out survives a later ordinary punch when external merge is enabled', async () => {
+    await setMerge({ internalWinsOnIn: false, externalWinsOnOut: true })
+    await setOutdoor({ requireApproval: false }, false)
+    const u = `ovr-out-protect-${Date.now().toString(36)}`
+    const workDate = '2026-06-02'
+    const correctedLast = `${workDate}T17:00:00.000Z`
+    const internalOutAt = `${workDate}T19:00:00.000Z`
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      await seedRecordOnlyLastOut(u, workDate, correctedLast, { status: 'adjusted', source: 'missed-override' })
+      const internal = await punch(t, { eventType: 'check_out', occurredAt: internalOutAt, source: 'mobile', location: INSIDE })
+      expect(internal.status).toBe(200)
+      const record = await recordFor(u, workDate)
+      expect(iso(record.last_out_at)).toBe(correctedLast)
+      expect((await eventRows(u, workDate)).map((row) => `${row.event_type}:${row.source}:${iso(row.occurred_at)}`)).toEqual([
+        `check_out:mobile:${internalOutAt}`,
       ])
     } finally {
       await setMerge({ internalWinsOnIn: false, externalWinsOnOut: false }).catch(() => undefined)
