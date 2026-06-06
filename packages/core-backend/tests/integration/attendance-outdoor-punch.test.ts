@@ -343,4 +343,23 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
       await deleteOutdoorFlows()
     }
   })
+
+  it('S2-0: a client cannot forge the reserved source `outdoor_approval` on /punch', async () => {
+    await setOutdoor({ requireApproval: false }, false) // no outdoor approval, no geofence → plain punch path
+    const u = `out-resv-${Date.now().toString(36)}`
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      // Forged reserved source → 422, nothing written (so it can never be mis-classified as approved outdoor).
+      const forged = await punch(t, { eventType: 'check_in', source: 'outdoor_approval', location: INSIDE })
+      expect(forged.status).toBe(422)
+      expect((forged.body as { error?: { code?: string } })?.error?.code).toBe('PUNCH_SOURCE_RESERVED')
+      expect((await counts(u)).events).toHaveLength(0)
+      // A normal source still punches fine (no over-block) and lands with its own source — never outdoor_approval.
+      const ok = await punch(t, { eventType: 'check_in', source: 'mobile', location: INSIDE })
+      expect(ok.status).toBe(200)
+      expect((await counts(u)).events.map((e) => e.source)).toEqual(['mobile'])
+    } finally {
+      await cleanupUser(u)
+    }
+  })
 })
