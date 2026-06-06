@@ -130,6 +130,7 @@ import { PluginRuntimeSecurityService } from './security/plugin-runtime-security
 import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
+import plmEmbedRouter from './routes/plm-embed'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
 import { dashboardRouter } from './routes/dashboard'
@@ -1017,8 +1018,10 @@ export class MetaSheetServer {
     const plmEnabled = isPlmEnabled(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
     if (plmEnabled) {
       this.app.use(plmWorkbenchRouter)
+      this.app.use(plmEmbedRouter())
     } else {
       this.app.use('/api/plm-workbench', disabledFeatureHandler('PLM workbench is disabled in this deployment'))
+      this.app.use('/api/plm-embed', disabledFeatureHandler('PLM embed is disabled in this deployment'))
       this.app.use('/api/federation/plm', disabledFeatureHandler('PLM federation APIs are disabled in this deployment'))
       this.app.use('/api/federation/import/plm', disabledFeatureHandler('PLM import APIs are disabled in this deployment'))
     }

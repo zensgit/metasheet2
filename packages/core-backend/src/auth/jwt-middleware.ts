@@ -20,7 +20,11 @@ const AUTH_WHITELIST = [
   '/api/v2/rpc-test',
   '/internal/metrics',
   '/api/cache-test',
-  '/api/permissions/health'
+  '/api/permissions/health',
+  // PLM-COLLAB-P3-D2: embed routes are authenticated by the EdDSA embed token (embedTokenAuth),
+  // NOT the session JWT, so they must bypass the global session gate. embedTokenAuth is their
+  // sole auth; /api/plm-embed/config is intentionally public (it only serves the origin allowlist).
+  '/api/plm-embed/'
 ]
 
 const PASSWORD_CHANGE_WHITELIST = [
