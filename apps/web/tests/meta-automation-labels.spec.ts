@@ -61,6 +61,13 @@ describe('meta-automation-labels', () => {
     expect(automationActionTypeLabel('future_action', true)).toBe('future_action')
   })
 
+  it('explains required WorkflowJob mode for both wait and branch actions', () => {
+    expect(automationLabel('editor.executionModeRequiredHint', false)).toContain('condition branch')
+    expect(automationLabel('editor.executionModeRequiredHint', false)).toContain('wait for callback')
+    expect(automationLabel('editor.executionModeRequiredHint', true)).toContain('条件分支')
+    expect(automationLabel('editor.executionModeRequiredHint', true)).toContain('等待回调')
+  })
+
   it('localizes trigger types, trigger conditions, and cron presets with raw fallbacks', () => {
     expect(automationTriggerTypeLabel('record.created', false)).toBe('When record created')
     expect(automationTriggerTypeLabel('record.created', true)).toBe('当记录创建时')

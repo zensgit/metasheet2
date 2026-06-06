@@ -565,8 +565,8 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     zh: '开启后，本规则每个动作的运行都会保存为持久的 WorkflowJob 记录；关闭则使用默认的轻量日志。',
   },
   'editor.executionModeRequiredHint': {
-    en: 'Required and locked on: this rule has a "wait for callback" action, and suspend/resume needs the WorkflowJob record.',
-    zh: '已强制开启并锁定：本规则包含“等待回调”动作，挂起/恢复依赖 WorkflowJob 记录，无法关闭。',
+    en: 'Required and locked on: this rule has an action that requires durable WorkflowJob records (wait for callback or condition branch).',
+    zh: '已强制开启并锁定：本规则包含需要持久 WorkflowJob 记录的动作（等待回调或条件分支），无法关闭。',
   },
   'trigger.title': { en: 'Trigger', zh: '触发器' },
   'trigger.watchField': { en: 'Watch field', zh: '监听字段' },
