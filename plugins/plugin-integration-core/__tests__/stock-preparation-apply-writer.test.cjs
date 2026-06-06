@@ -349,6 +349,94 @@ async function testPlainQueryErrorsBecomeTypedValuesFreeDiagnostics() {
   assert.equal(text.includes('Unknown field'), false, 'raw query error message must not be surfaced')
 }
 
+async function testPlmStringFieldsAreNormalizedBeforeCreate() {
+  const api = createRecordsApi()
+
+  const result = await applyStockPreparationPlan({
+    permission: 'write',
+    plan: {
+      decisions: [{
+        decision: DECISIONS.ADD,
+        idempotencyKey: 'key-string-normalize',
+        record: {
+          idempotencyKey: 'key-string-normalize',
+          projectNo: 'P-001',
+          componentSourceId: 'PART-A',
+          parentSourceId: 0,
+          path: '["PART-A"]',
+          componentCode: 1001,
+          componentName: 2002,
+          material: 3003,
+          sourceVersion: 7,
+          rawQuantity: '2',
+          totalQuantity: '6',
+          active: 'true',
+        },
+      }],
+    },
+    target: target(),
+    recordsApi: api.recordsApi,
+  })
+
+  assert.equal(result.status, 'succeeded')
+  const createCall = api.calls.find((call) => call[0] === 'createRecord')
+  assert.equal(createCall[1].data.parentSourceId, '0')
+  assert.equal(createCall[1].data.componentCode, '1001')
+  assert.equal(createCall[1].data.componentName, '2002')
+  assert.equal(createCall[1].data.material, '3003')
+  assert.equal(createCall[1].data.sourceVersion, '7')
+  assert.equal(createCall[1].data.rawQuantity, 2)
+  assert.equal(createCall[1].data.totalQuantity, 6)
+  assert.equal(createCall[1].data.active, true)
+}
+
+async function testTemplateTypeMismatchIsValuesFreeAndLogical() {
+  const api = createRecordsApi()
+
+  const result = await applyStockPreparationPlan({
+    permission: 'write',
+    plan: {
+      decisions: [{
+        decision: DECISIONS.ADD,
+        idempotencyKey: 'key-type-mismatch',
+        record: {
+          idempotencyKey: 'key-type-mismatch',
+          projectNo: 'P-001',
+          componentSourceId: 'PART-A',
+          path: '["PART-A"]',
+          componentCode: { raw: 'PART-A / P-001 / SECRET-OPTION' },
+          active: true,
+        },
+      }],
+    },
+    target: target(),
+    recordsApi: api.recordsApi,
+  })
+
+  assert.equal(result.status, 'failed')
+  assert.equal(result.counts.failed, 1)
+  assert.equal(api.calls.length, 0, 'type mismatch fails before any target read/write')
+  assert.equal(result.errors[0].code, 'target_field_type_mismatch')
+  assert.equal(result.errors[0].field, 'componentCode')
+  assert.equal(result.errors[0].reason, 'type_mismatch')
+  assert.equal(result.errors[0].expectedType, 'string')
+
+  const evidence = summarizeApplyResultForEvidence(result)
+  assert.deepEqual(evidence.errorCodes, ['target_field_type_mismatch'])
+  assert.deepEqual(evidence.errorSummaries, [{
+    code: 'target_field_type_mismatch',
+    count: 1,
+    decisions: [DECISIONS.ADD],
+    operations: [],
+    fields: ['componentCode'],
+    reasons: ['type_mismatch'],
+    expectedTypes: ['string'],
+  }])
+  const text = JSON.stringify({ result, evidence })
+  assert.equal(text.includes('SECRET-OPTION'), false, 'diagnostics must not expose nested values')
+  assert.equal(text.includes('PART-A / P-001'), false, 'diagnostics must not expose row/project values')
+}
+
 async function testFieldIdMapAndDuplicateTargetKey() {
   const decision = {
     decision: DECISIONS.UPDATE,
@@ -408,6 +496,8 @@ async function main() {
   await testPermissionAndHumanFieldGuards()
   await testPlainCreateErrorsBecomeTypedValuesFreeDiagnostics()
   await testPlainQueryErrorsBecomeTypedValuesFreeDiagnostics()
+  await testPlmStringFieldsAreNormalizedBeforeCreate()
+  await testTemplateTypeMismatchIsValuesFreeAndLogical()
   await testFieldIdMapAndDuplicateTargetKey()
   testInternals()
 

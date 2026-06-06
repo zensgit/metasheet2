@@ -385,6 +385,51 @@ async function testApplyRequiresTokenRecomputesAndScopesTarget() {
   )
 }
 
+async function testApplyNormalizesNumericPlmDisplayFieldsBeforeCreate() {
+  const storage = createMemoryStorage()
+  const source = createSourceAdapter(basePlmData({
+    DN_PDM_PartLibraryInfo: [{
+      OBJ_ID: 'PART-A',
+      IdentityNo: 1001,
+      IdentityName: 2002,
+      Material: 3003,
+      SysVer: 7,
+    }],
+  }))
+  const records = createRecordsApi()
+  const action = baseAction()
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+
+  const result = await applyStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    permission: 'admin',
+  })
+
+  assert.equal(result.status, 'succeeded')
+  const createCall = records.calls.find((call) => call[0] === 'createRecord')
+  assert.equal(createCall[1].data.componentCode, '1001')
+  assert.equal(createCall[1].data.componentName, '2002')
+  assert.equal(createCall[1].data.material, '3003')
+  assert.equal(createCall[1].data.sourceVersion, '7')
+  assert.equal(typeof createCall[1].data.rawQuantity, 'number')
+  assert.equal(typeof createCall[1].data.totalQuantity, 'number')
+  assert.equal(createCall[1].data.active, true)
+  assert.equal(JSON.stringify(result.evidence).includes('1001'), false, 'apply evidence hides component code value')
+}
+
 async function testApplySurfacesTypedValuesFreeRowFailureDiagnostics() {
   const storage = createMemoryStorage()
   const source = createSourceAdapter()
@@ -497,6 +542,7 @@ async function main() {
   await testBridgeSourceKindRequiresExplicitMatchingReadPlanAndCanDryRun()
   await testTargetFieldMapIncompleteFailsBeforeReads()
   await testApplyRequiresTokenRecomputesAndScopesTarget()
+  await testApplyNormalizesNumericPlmDisplayFieldsBeforeCreate()
   await testApplySurfacesTypedValuesFreeRowFailureDiagnostics()
   await testApplyDetectsDataShiftAndManualConfirmHold()
 
