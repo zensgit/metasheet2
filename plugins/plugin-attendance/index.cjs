@@ -45,6 +45,11 @@ const REQUEST_TYPES = [
   // ② S3 外勤审批 (#2304): outdoor field-work punch that needs approval before it counts.
   'outdoor_punch',
 ]
+// ② S2-0 (#2325 design-lock): event sources that ONLY a trusted internal writer may set — never accepted
+// from a client. `outdoor_approval` is written solely by the S3 approval path and is the authoritative
+// internal/external classifier for the future S2 in/out merge; if /punch let a client forge it, a normal
+// punch would be counted as an approved outdoor punch. Any client-facing event writer must reject these.
+const RESERVED_EVENT_SOURCES = new Set(['outdoor_approval'])
 const ATTENDANCE_APPROVAL_WORKFLOW_KEY = 'attendance.request'
 const ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS = ['attendance:approve', 'attendance:admin']
 const ATTENDANCE_SCHEDULE_GROUP_SOURCES = new Set(['manual', 'import', 'integration'])
@@ -18883,6 +18888,14 @@ module.exports = {
         const parsed = punchSchema.safeParse(req.body)
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        // ② S2-0 (#2325): `outdoor_approval` (and any reserved internal source) must NOT be settable by a
+        // client — only the S3 approval path may write it. Reject a forged source so it cannot be
+        // mis-classified as an approved outdoor punch (a normal /punch never legitimately uses it).
+        if (RESERVED_EVENT_SOURCES.has(String(parsed.data.source ?? '').trim())) {
+          res.status(422).json({ ok: false, error: { code: 'PUNCH_SOURCE_RESERVED', message: 'This punch source is reserved and cannot be set on a punch.' } })
           return
         }
 
