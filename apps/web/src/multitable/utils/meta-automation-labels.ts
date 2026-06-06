@@ -130,6 +130,18 @@ export type AutomationLabelKey =
   | 'actionConfig.emailBodyPlaceholder'
   | 'actionConfig.lockRecord'
   | 'actionConfig.waitForCallbackHint'
+  | 'conditionBranch.readOnly'
+  | 'conditionBranch.hint'
+  | 'conditionBranch.key'
+  | 'conditionBranch.label'
+  | 'conditionBranch.value'
+  | 'conditionBranch.userIds'
+  | 'conditionBranch.message'
+  | 'conditionBranch.addField'
+  | 'conditionBranch.addAction'
+  | 'conditionBranch.addBranch'
+  | 'conditionBranch.default'
+  | 'conditionBranch.addDefault'
   | 'testRun.warning'
   | 'testRun.confirmSuffix'
   | 'testRun.unsavedHint'
@@ -347,6 +359,18 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'actionConfig.emailBodyPlaceholder',
   'actionConfig.lockRecord',
   'actionConfig.waitForCallbackHint',
+  'conditionBranch.readOnly',
+  'conditionBranch.hint',
+  'conditionBranch.key',
+  'conditionBranch.label',
+  'conditionBranch.value',
+  'conditionBranch.userIds',
+  'conditionBranch.message',
+  'conditionBranch.addField',
+  'conditionBranch.addAction',
+  'conditionBranch.addBranch',
+  'conditionBranch.default',
+  'conditionBranch.addDefault',
   'testRun.warning',
   'testRun.confirmSuffix',
   'testRun.unsavedHint',
@@ -577,6 +601,24 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     en: 'Suspends the run until an admin resumes it from the runs view. No parameters in v1 (no external webhook/timer).',
     zh: '挂起执行，直到管理员在运行视图中手动恢复。v1 无参数（暂无外部 webhook/定时器）。',
   },
+  'conditionBranch.readOnly': {
+    en: 'This branch rule uses constructs not editable in this version — read-only (save is disabled to avoid flattening it).',
+    zh: '该分支规则包含本版本不可编辑的结构 —— 只读（已禁用保存以避免压扁丢失）。',
+  },
+  'conditionBranch.hint': {
+    en: 'Run different action chains by condition: exactly one matching branch (or the default) runs. Branch actions are limited to update-record / send-notification in v1.',
+    zh: '按条件走不同动作链：仅命中其一分支（或默认分支）执行。v1 分支内动作限更新记录 / 发送通知。',
+  },
+  'conditionBranch.key': { en: 'Branch key', zh: '分支 key' },
+  'conditionBranch.label': { en: 'Label (optional)', zh: '标签（可选）' },
+  'conditionBranch.value': { en: 'Value', zh: '值' },
+  'conditionBranch.userIds': { en: 'User IDs (comma-separated)', zh: '用户 ID（逗号分隔）' },
+  'conditionBranch.message': { en: 'Message', zh: '消息' },
+  'conditionBranch.addField': { en: '+ Field', zh: '+ 字段' },
+  'conditionBranch.addAction': { en: '+ Action', zh: '+ 动作' },
+  'conditionBranch.addBranch': { en: '+ Branch', zh: '+ 分支' },
+  'conditionBranch.default': { en: 'Default branch (no condition)', zh: '默认分支（无条件）' },
+  'conditionBranch.addDefault': { en: '+ Default branch', zh: '+ 默认分支' },
   'testRun.warning': { en: 'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users.', zh: '测试运行会执行已保存规则，并可能向已配置的钉钉群或用户发送真实消息。' },
   'testRun.confirmSuffix': { en: 'Unsaved changes are not included. Continue?', zh: '未保存的更改不会包含在内。是否继续？' },
   'testRun.unsavedHint': { en: 'Save this automation before running a test.', zh: '请先保存此自动化，再运行测试。' },
