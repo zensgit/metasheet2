@@ -66,8 +66,12 @@
               v-for="step in detail.steps"
               :key="step.id"
               class="automation-runs__step"
+              :class="{ 'automation-runs__step--branch-child': branchChildStep(step.stepKey) }"
             >
               <span class="automation-runs__step-key">{{ step.stepKey }}</span>
+              <span v-if="branchChildStep(step.stepKey)" class="automation-runs__branch-child" data-field="branch-child">
+                ↳ {{ automationLabel('runs.branchStep', isZh) }} {{ branchChildStep(step.stepKey)?.branchKey }} · #{{ branchChildStep(step.stepKey)?.actionIndex }}
+              </span>
               <span class="automation-runs__badge automation-runs__badge--sm" :class="`automation-runs__badge--${step.status}`">
                 {{ automationStatusLabel(step.status, isZh) }}
               </span>
@@ -83,7 +87,11 @@
               <div v-if="step.error" class="automation-runs__step-error" data-field="step-error">
                 {{ summarizeStepError(step.error) }}
               </div>
-              <div v-if="step.result !== undefined && step.result !== null" class="automation-runs__step-output" data-field="step-output">
+              <div v-if="conditionBranchSelection(step)" class="automation-runs__branch-selection" data-field="branch-selection">
+                <template v-if="conditionBranchSelection(step)?.key">{{ automationLabel('runs.selectedBranch', isZh) }} {{ conditionBranchSelection(step)?.label ? `${conditionBranchSelection(step)?.label} (${conditionBranchSelection(step)?.key})` : conditionBranchSelection(step)?.key }}</template>
+                <template v-else>{{ automationLabel('runs.branchNoMatch', isZh) }}</template>
+              </div>
+              <div v-if="step.result !== undefined && step.result !== null && !conditionBranchSelection(step)" class="automation-runs__step-output" data-field="step-output">
                 {{ summarizeStepOutput(step.result) }}
               </div>
             </div>
@@ -133,6 +141,26 @@ const detail = ref<AutomationRunView | null>(null)
 const detailLoading = ref(false)
 const resuming = ref<string | null>(null)
 const resumeError = ref<string | null>(null)
+
+// A6-3-2b (read-only): surface condition_branch lineage from the persisted C1 jobs.
+// Parent step's result carries { selectedBranchKey, matched }; nested branch-action jobs use a
+// `${stepIndex}.branch.${key}.${i}` stepKey. Pure readers over the existing run-view shape.
+function conditionBranchSelection(step: AutomationRunStepView): { key: string; label: string; matched: boolean } | null {
+  const r = step.result
+  if (r && typeof r === 'object' && !Array.isArray(r) && 'selectedBranchKey' in r) {
+    const rec = r as Record<string, unknown>
+    return {
+      key: typeof rec.selectedBranchKey === 'string' ? rec.selectedBranchKey : '',
+      label: typeof rec.selectedBranchLabel === 'string' ? rec.selectedBranchLabel : '',
+      matched: Boolean(rec.matched),
+    }
+  }
+  return null
+}
+function branchChildStep(stepKey: string): { branchKey: string; actionIndex: string } | null {
+  const m = /\.branch\.([A-Za-z0-9_-]+)\.(\d+)$/.exec(stepKey)
+  return m ? { branchKey: m[1], actionIndex: m[2] } : null
+}
 
 async function loadData() {
   loading.value = true
@@ -277,6 +305,9 @@ if (isAdmin) void loadData()
 .automation-runs__detail-h { margin: 6px 0 2px; font-size: 12px; font-weight: 700; color: #475569; text-transform: uppercase; }
 .automation-runs__step { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
 .automation-runs__step-key { font-weight: 700; color: #2563eb; }
+.automation-runs__step--branch-child { margin-left: 20px; border-left: 2px solid #e2e8f0; padding-left: 8px; }
+.automation-runs__branch-child { color: #64748b; font-size: 11px; }
+.automation-runs__branch-selection { width: 100%; padding: 4px 8px; background: #eff6ff; color: #1d4ed8; border-radius: 4px; font-size: 11px; font-weight: 600; }
 .automation-runs__step-error { width: 100%; padding: 4px 8px; background: #fef2f2; color: #dc2626; border-radius: 4px; font-size: 11px; }
 .automation-runs__step-output { width: 100%; padding: 4px 8px; background: #f8fafc; color: #475569; border-radius: 4px; font-size: 11px; word-break: break-all; }
 .automation-runs__json { width: 100%; margin: 0; padding: 8px; background: #f8fafc; color: #334155; border-radius: 6px; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; }

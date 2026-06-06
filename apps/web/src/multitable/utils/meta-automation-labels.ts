@@ -270,6 +270,9 @@ export type AutomationLabelKey =
   | 'runs.triggerEvent'
   | 'runs.ruleSnapshot'
   | 'runs.steps'
+  | 'runs.branchStep'
+  | 'runs.selectedBranch'
+  | 'runs.branchNoMatch'
   | 'runs.loadingDetail'
   | 'runs.resume'
   | 'runs.resumeConfirm'
@@ -499,6 +502,9 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.triggerEvent',
   'runs.ruleSnapshot',
   'runs.steps',
+  'runs.branchStep',
+  'runs.selectedBranch',
+  'runs.branchNoMatch',
   'runs.loadingDetail',
   'runs.resume',
   'runs.resumeConfirm',
@@ -747,6 +753,9 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.triggerEvent': { en: 'Trigger event', zh: '触发事件' },
   'runs.ruleSnapshot': { en: 'Rule snapshot', zh: '规则快照' },
   'runs.steps': { en: 'Steps', zh: '步骤' },
+  'runs.branchStep': { en: 'branch', zh: '分支' },
+  'runs.selectedBranch': { en: 'Selected branch:', zh: '命中分支：' },
+  'runs.branchNoMatch': { en: 'No branch matched (no default)', zh: '无分支命中（无默认分支）' },
   'runs.loadingDetail': { en: 'Loading detail…', zh: '加载详情…' },
   'runs.resume': { en: 'Resume', zh: '恢复执行' },
   'runs.resumeConfirm': {
