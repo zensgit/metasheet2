@@ -85,5 +85,6 @@ Flip the tracker row in `attendance-dingtalk-benchmark-target-and-tracker-202606
 ## Safety
 
 - Touches only a uniquely-named smoke user; restores settings and deletes its own rows in `finally` (even on abort).
+- **The destructive cleanup is gated.** `cleanup()` runs its `DELETE WHERE user_id = <subject>` only after both safety checks have passed (synthetic-or-overridden subject **and** token-subject == subject). If the run is refused at a safety gate, cleanup is **skipped entirely** — nothing was changed or created, so there is nothing to delete, and it will never delete a real user's rows that the run refused to touch.
 - Read-only against everything except the smoke user's own punch/request/record rows + the temporary approval flow it creates.
 - Does not deploy or restart anything — that's a separate operator step before running.

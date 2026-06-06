@@ -123,6 +123,10 @@ const iso = (v) => new Date(v).toISOString()
 
 let originalSettings = null
 let flowId = null
+// Gates the destructive cleanup. The top-level finally ALWAYS runs cleanup(), so a guard that only throws in
+// main() would still hit the blanket DELETE WHERE user_id = USER. cleanup() must DELETE only once this is true,
+// i.e. only after the synthetic-subject + token-subject safety checks have passed for THIS USER.
+let cleanupAllowed = false
 
 async function main() {
   console.log(`S2-3 in/out-merge staging smoke @ ${BASE_URL}  (user ${USER}, workDate ${WORK_DATE}, stamp ${STAMP})`)
@@ -147,6 +151,10 @@ async function main() {
     if (String(subject) !== USER) throw new Error(`SMOKE_TOKEN subject "${subject}" != subject "${USER}". Punches would be attributed to "${subject}" while assertions and the SQL cleanup target "${USER}". Set SMOKE_USER_ID to the token's subject ("${subject}").`)
     console.log(`  using supplied SMOKE_TOKEN (subject ${subject})`)
   }
+  // Both safety gates passed (subject is a synthetic/overridden throwaway AND the token punches as exactly this
+  // USER). ONLY now may cleanup() run its DELETE WHERE user_id = USER. If main() threw before this line, no
+  // settings were mutated and nothing was created, so the finally skips all destructive work.
+  cleanupAllowed = true
 
   // 0b) auth + capture original settings
   const got = await api('/api/attendance/settings')
@@ -245,6 +253,13 @@ async function main() {
 
 async function cleanup() {
   console.log('\n--- restore + cleanup ---')
+  // SAFETY: never DELETE WHERE user_id = USER unless the safety gates confirmed USER is a throwaway and the
+  // token punches as exactly this USER. A pre-gate abort (e.g. non-synthetic subject without override) mutated
+  // nothing, so there is nothing to restore or delete — skip all destructive work rather than run it on a real user.
+  if (!cleanupAllowed) {
+    console.log('  cleanup SKIPPED — safety gate not satisfied (no settings were changed and nothing was created for this subject).')
+    return
+  }
   try { if (originalSettings) await api('/api/attendance/settings', { method: 'PUT', body: originalSettings }); console.log('  settings restored') }
   catch (e) { console.error('  settings restore FAILED:', e.message) }
   // No DELETE API for events/records → remove the smoke user's rows directly (unique user id = safe scope).
