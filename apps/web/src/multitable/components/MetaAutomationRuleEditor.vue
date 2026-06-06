@@ -1107,6 +1107,16 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
   'wait_for_callback',
+  'condition_branch',
+]
+
+// A6-3-2a: the minimal v1 set of action types authorable INSIDE a condition_branch branch.
+// Mirrors the backend (which forbids wait_for_callback + nested condition_branch in branches);
+// kept to simple-config types this slice can faithfully round-trip. Loaded branches whose actions
+// fall outside this set open read-only (never flattened) — see conditionBranchUnsupportedReason.
+const BRANCH_AUTHORABLE_ACTION_TYPES: AutomationActionType[] = [
+  'update_record',
+  'send_notification',
 ]
 
 const UNSUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = ['lock_record']
@@ -1629,10 +1639,14 @@ function draftFromRule(rule: AutomationRule): Draft {
 const draft = ref<Draft>(emptyDraft())
 const conditionEditorEntries = computed(() => collectConditionEditorEntries(draft.value.conditions.conditions))
 
-// A6-2b: a wait_for_callback action REQUIRES execution_mode 'workflow_job_v1' — the backend
-// fail-closes a legacy rule that contains a wait step. So whenever a wait action is present the
-// job-mode toggle is forced on (and disabled), and buildPayload enforces it regardless.
-const requiresJobMode = computed(() => draft.value.actions.some((a) => a.type === 'wait_for_callback'))
+// A6-2b/A6-3-2a: wait_for_callback AND condition_branch both REQUIRE execution_mode
+// 'workflow_job_v1' — the backend fail-closes a legacy rule that contains either. So whenever such
+// an action is present the job-mode toggle is forced on (and disabled), and buildPayload enforces it
+// regardless of toggle/loaded state.
+const JOB_MODE_REQUIRING_ACTION_TYPES: AutomationActionType[] = ['wait_for_callback', 'condition_branch']
+const requiresJobMode = computed(() =>
+  draft.value.actions.some((a) => JOB_MODE_REQUIRING_ACTION_TYPES.includes(a.type)),
+)
 
 function setExecutionMode(checked: boolean): void {
   // A6-1 opt-in: checkbox → the rule's persistent WorkflowJob mode (off = legacy/null).
