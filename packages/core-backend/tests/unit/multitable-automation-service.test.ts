@@ -220,7 +220,7 @@ describe('AutomationService', () => {
     it('runs update_record query and emits follow-up update event', async () => {
       const rule = createMockRule({
         action_type: 'update_record',
-        action_config: { fields: { target_field: 'auto_value' } },
+        action_config: { fields: { target_field: 'auto_value', second_field: 'next_value' } },
       })
       const query = createMockQuery([rule])
       service = new AutomationService(bus, createMockDb([rule]) as never, query)
@@ -234,16 +234,23 @@ describe('AutomationService', () => {
         actorId: 'user1',
       })
 
-      expect(query).toHaveBeenCalledWith(
-        expect.stringContaining('UPDATE meta_records SET'),
-        expect.arrayContaining(['{target_field}', JSON.stringify('auto_value'), 'rec1', 'sheet1']),
+      const updateCall = query.mock.calls.find(([sql]) =>
+        String(sql).includes('UPDATE meta_records') && String(sql).includes('SET data ='),
       )
+      expect(updateCall).toBeTruthy()
+      const [sql, params] = updateCall!
+      expect((String(sql).match(/\bdata\s*=/g) ?? [])).toHaveLength(1)
+      expect(params).toEqual([
+        JSON.stringify({ target_field: 'auto_value', second_field: 'next_value' }),
+        'rec1',
+        'sheet1',
+      ])
 
       // Should emit follow-up update event with incremented depth
       expect(emitSpy).toHaveBeenCalledWith('multitable.record.updated', expect.objectContaining({
         sheetId: 'sheet1',
         recordId: 'rec1',
-        changes: { target_field: 'auto_value' },
+        changes: { target_field: 'auto_value', second_field: 'next_value' },
         _automationDepth: 1,
       }))
     })
