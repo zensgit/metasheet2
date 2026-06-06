@@ -1833,7 +1833,7 @@ function removeDefaultBranch(action: DraftAction): void {
 
 function setExecutionMode(checked: boolean): void {
   // A6-1 opt-in: checkbox → the rule's persistent WorkflowJob mode (off = legacy/null).
-  // A6-2b: cannot turn it off while a wait_for_callback step is present.
+  // A6-2b/A6-3-2a: cannot turn it off while a required-job-mode action is present.
   if (requiresJobMode.value) {
     draft.value.executionMode = 'workflow_job_v1'
     return
@@ -2767,8 +2767,8 @@ function buildPayload(): Partial<AutomationRule> {
     actions,
     actionType: actions[0]?.type ?? 'update_record',
     actionConfig: actions[0]?.config ?? {},
-    // A6-2b: a wait_for_callback action forces workflow_job_v1 (backend fail-closes legacy waits) —
-    // enforced here so the payload is correct regardless of toggle state.
+    // A6-2b/A6-3-2a: required-job-mode actions force workflow_job_v1 (backend fail-closes
+    // legacy waits/branches) — enforced here so the payload is correct regardless of toggle state.
     executionMode: requiresJobMode.value ? 'workflow_job_v1' : d.executionMode,
   }
 }
