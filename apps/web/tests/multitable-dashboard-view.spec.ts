@@ -569,6 +569,39 @@ describe('MetaDashboardView', () => {
     expect(body.dataSource.groupByFieldId).toBeUndefined()
   })
 
+  it('v2-d-b3: editing a date-grouped chart exposes an enabled series picker; PATCH carries the series + preserves date grouping', async () => {
+    const chart = fakeChart({
+      chartType: 'line',
+      dataSource: { sheetId: 'sheet_1', dateFieldId: 'fld_date', dateGrouping: 'month', aggregation: { function: 'count' } },
+    })
+    const { client, fetchFn } = mockClient([fakeDashboard()], [chart])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    ;(container.querySelector('[data-action="add-panel"]') as HTMLButtonElement).click()
+    await nextTick()
+    ;(container.querySelector(`[data-edit-chart="${chart.id}"]`) as HTMLButtonElement).click()
+    await nextTick()
+
+    // groupBy stays disabled (date is the primary), but the series picker is now SHOWN + ENABLED (b3)
+    expect((container.querySelector('[data-field="chart-group-by"]') as HTMLSelectElement).disabled).toBe(true)
+    const series = container.querySelector('[data-field="chart-series-by"]') as HTMLSelectElement
+    expect(series).toBeTruthy()
+    expect(series.disabled).toBe(false) // enabled because the date axis is the primary, even with no groupBy
+    series.value = 'fld_amount'; series.dispatchEvent(new Event('change')); await nextTick()
+
+    ;(container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const patch = fetchFn.mock.calls.find(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'PATCH' && url.includes(`/charts/${chart.id}`),
+    )
+    const body = JSON.parse(patch![1].body as string)
+    expect(body.dataSource.seriesByFieldId).toBe('fld_amount') // series added on a date-grouped chart
+    expect(body.dataSource.dateFieldId).toBe('fld_date')        // date grouping preserved
+    expect(body.dataSource.dateGrouping).toBe('month')
+    expect(body.dataSource.groupByFieldId).toBeUndefined()      // no spurious groupBy
+    expect(body.display.barMode).toBeUndefined()                // line → no barMode
+  })
+
   it('deletes a chart from the chart list (after confirm) and prunes the panel that showed it', async () => {
     const chart = fakeChart()
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)

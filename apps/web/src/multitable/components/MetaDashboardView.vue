@@ -216,7 +216,7 @@
               v-model="chartDraft.seriesByFieldId"
               class="meta-dashboard__select"
               data-field="chart-series-by"
-              :disabled="!chartDraft.groupByFieldId"
+              :disabled="!hasPrimaryAxis"
             >
               <option value="">{{ viewRenderLabel('dashboard.seriesByNone', isZh) }}</option>
               <option v-for="field in groupableFields" :key="field.id" :value="field.id">
@@ -353,9 +353,13 @@ const requiresValueField = computed(() => AGGREGATIONS_REQUIRING_VALUE.has(chart
 // on the aggregation being additive (sum/count) — see `stackedAllowed` + the producer/validator.
 // v2-d-b2: line carries a series split too (overlaid lines). The series picker is offered for any
 // bar OR line chart with a non-date-grouped primary axis.
+// v2-d-b3: the series picker is offered for any bar/line chart — including a date-grouped chart, whose
+// date axis is the primary (groupByFieldId stays disabled there). `hasPrimaryAxis` gates the rest:
+// a series split needs a primary axis = a groupBy field OR an (edited) date axis.
 const seriesByAllowed = computed(() =>
-  (chartDraft.value.chartType === 'bar' || chartDraft.value.chartType === 'line') && !editingDateGrouped.value,
+  chartDraft.value.chartType === 'bar' || chartDraft.value.chartType === 'line',
 )
+const hasPrimaryAxis = computed(() => !!chartDraft.value.groupByFieldId || editingDateGrouped.value)
 const stackedAllowed = computed(() => ADDITIVE_AGGREGATIONS.has(chartDraft.value.aggregation))
 // The layout (barMode) control is bar-only (lines never stack/group); appears once a series is chosen.
 const barModeShown = computed(() => chartDraft.value.chartType === 'bar' && !!chartDraft.value.seriesByFieldId)
@@ -364,7 +368,7 @@ const barModeShown = computed(() => chartDraft.value.chartType === 'bar' && !!ch
 watch(
   () => [chartDraft.value.chartType, chartDraft.value.aggregation, chartDraft.value.groupByFieldId, editingDateGrouped.value],
   () => {
-    if (chartDraft.value.seriesByFieldId && !(seriesByAllowed.value && chartDraft.value.groupByFieldId)) {
+    if (chartDraft.value.seriesByFieldId && !(seriesByAllowed.value && hasPrimaryAxis.value)) {
       chartDraft.value.seriesByFieldId = ''
     }
     // v2-d-b1: stacked requires an additive aggregation; if it's no longer additive, fall back to grouped.
@@ -538,7 +542,7 @@ function buildChartInput(base?: ChartConfig): ChartCreateInput {
   }
   // v2-d / v2-d-b2: bar OR line series split, only with a primary groupBy. Set explicitly (or delete
   // the base value) so switching chartType/groupBy/date clears a now-inapplicable series.
-  const hasSeriesSplit = seriesByAllowed.value && !!chartDraft.value.groupByFieldId && !!chartDraft.value.seriesByFieldId
+  const hasSeriesSplit = seriesByAllowed.value && hasPrimaryAxis.value && !!chartDraft.value.seriesByFieldId
   if (hasSeriesSplit) {
     dataSource.seriesByFieldId = chartDraft.value.seriesByFieldId
   } else {
