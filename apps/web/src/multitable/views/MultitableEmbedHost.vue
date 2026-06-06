@@ -128,18 +128,26 @@ onMounted(() => {
 })
 
 // --- postMessage API ---
+// Pinned to the first allowlisted parent that messages us, so outbound posts target a concrete
+// origin instead of '*'. See postToParent for the fallback when no inbound message has arrived yet.
+const parentOrigin = ref<string | null>(null)
+
 function isOriginAllowed(origin: string): boolean {
   if (!props.allowedOrigins?.length) {
     // Default to same-origin if no restriction specified
     try { return origin === window.location.origin } catch { return false }
   }
-  return props.allowedOrigins.includes(origin) || props.allowedOrigins.includes('*')
+  // Strict exact-match against the configured allowlist -- '*' is NOT a wildcard here.
+  return props.allowedOrigins.includes(origin)
 }
 
 function onMessage(event: MessageEvent) {
   if (!isOriginAllowed(event.origin)) return
   const data = event.data
   if (!data || typeof data !== 'object' || !data.type?.startsWith('mt:')) return
+  // pin the parent origin only after a well-formed mt: message, so an unrelated message from an
+  // allowlisted origin can't occupy the pin first
+  parentOrigin.value = event.origin
 
   switch (data.type) {
     case 'mt:navigate':
@@ -357,7 +365,15 @@ onBeforeRouteLeave(() => {
 
 function postToParent(payload: Record<string, unknown>) {
   try {
-    if (window.parent !== window) window.parent.postMessage(payload, '*')
+    if (window.parent === window) return
+    // Never post to '*'. Prefer the pinned parent origin (captured from the first allowlisted
+    // inbound message); else the single configured allowed origin; else fall back to this frame's
+    // own origin -- which a cross-origin parent will simply not receive, so nothing leaks.
+    const target =
+      parentOrigin.value
+      ?? props.allowedOrigins?.find((origin) => origin && origin !== '*')
+      ?? window.location.origin
+    window.parent.postMessage(payload, target)
   } catch { /* cross-origin guard */ }
 }
 
