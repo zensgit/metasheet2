@@ -68,4 +68,5 @@ A future apply requires a separate gate, for example:
 - Richer option authoring UI or option-trigger execution polish.
 - Procurement/warehouse child-table generation.
 - PLM adapter/API source, if the readonly SQL/Bridge path is insufficient.
-- Background/paged execution for very large BOMs.
+- #2342 large-BOM strategy: bounded-preview readiness, background full
+  expansion, and checkpointed apply for very large BOMs.
