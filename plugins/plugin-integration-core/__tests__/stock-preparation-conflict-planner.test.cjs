@@ -230,6 +230,83 @@ function testPrimitiveValueComparisonFastPath() {
   assert.equal(__internals.valuesEqual(['a'], ['a']), true, 'array fallback keeps structural comparison')
 }
 
+function testTemplateTypeEquivalentValuesSkipAfterCreate() {
+  const expanded = row({
+    componentSourceId: 'PART-TYPE',
+    parentSourceId: 0,
+    pathTokens: ['ROOT', 'PART-TYPE'],
+    depth: '1',
+    componentCode: 1001,
+    componentName: 2002,
+    material: 3003,
+    sourceVersion: 7,
+    rawQuantity: '2',
+    totalQuantity: '6',
+    active: 'true',
+  })
+  const existing = {
+    ...expanded,
+    parentSourceId: '0',
+    depth: 1,
+    componentCode: '1001',
+    componentName: '2002',
+    material: '3003',
+    sourceVersion: '7',
+    rawQuantity: 2,
+    totalQuantity: 6,
+    active: true,
+    lastPlmRefreshDecision: DECISIONS.ADD,
+  }
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [expanded],
+    existingRows: [existing],
+    runId: 'run-type',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+
+  assert.equal(plan.valid, true, 'type-only drift must not force manual confirmation')
+  assert.deepEqual(plan.counts, {
+    add: 0,
+    update: 0,
+    skip: 1,
+    inactive: 0,
+    manual_confirm: 0,
+  })
+  assert.deepEqual(byDecision(plan, DECISIONS.SKIP).map((entry) => entry.conflictSummary.type), ['unchanged'])
+}
+
+function testTemplateNormalizationDoesNotHideRealIdentityOrLineageConflicts() {
+  const identityNext = row({
+    componentSourceId: 'PART-REAL-ID',
+    pathTokens: ['PART-REAL-ID'],
+    componentCode: 1001,
+  })
+  const lineageNext = row({
+    componentSourceId: 'PART-REAL-LINE',
+    parentSourceId: 0,
+    pathTokens: ['ROOT', 'PART-REAL-LINE'],
+  })
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [identityNext, lineageNext],
+    existingRows: [
+      { ...identityNext, componentCode: '1002' },
+      { ...lineageNext, parentSourceId: '1' },
+    ],
+    runId: 'run-real-conflict',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+
+  assert.equal(plan.valid, false)
+  assert.deepEqual(
+    byDecision(plan, DECISIONS.MANUAL_CONFIRM).map((entry) => entry.conflictSummary.type).sort(),
+    ['component_identity_conflict', 'lineage_mismatch'],
+  )
+  assert.equal(plan.counts.add, 0, 'real conflicts must not fall through to add')
+  assert.equal(plan.counts.update, 0, 'real conflicts must not fall through to update')
+}
+
 function testValuesFreeEvidence() {
   const expanded = row({ componentSourceId: 'PART-SECRET', componentName: 'Widget Name', material: 'Copper' })
   const plan = planStockPreparationConflicts({
@@ -257,6 +334,8 @@ function main() {
   testMissingKeysAndStrategyGuards()
   testHumanFieldWhitelistOrderIndependent()
   testPrimitiveValueComparisonFastPath()
+  testTemplateTypeEquivalentValuesSkipAfterCreate()
+  testTemplateNormalizationDoesNotHideRealIdentityOrLineageConflicts()
   testValuesFreeEvidence()
 
   console.log('stock-preparation-conflict-planner.test.cjs OK')
