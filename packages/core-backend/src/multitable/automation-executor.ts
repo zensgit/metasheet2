@@ -1163,23 +1163,16 @@ export class AutomationExecutor {
       return { actionType: 'update_record', status: 'failed', error: 'No fields specified' }
     }
 
-    // Build SET clause
-    const entries = Object.entries(fields)
-    const sets: string[] = []
-    const params: unknown[] = []
-    let idx = 1
-    for (const [key, val] of entries) {
-      sets.push(`data = jsonb_set(COALESCE(data, '{}'), $${idx}::text[], $${idx + 1}::jsonb)`)
-      params.push(`{${key}}`, JSON.stringify(val))
-      idx += 2
-    }
-    params.push(context.recordId, context.sheetId)
+    const patch = Object.fromEntries(Object.entries(fields))
 
     try {
       await this.deps.queryFn(
-        `UPDATE meta_records SET ${sets.join(', ')}, version = version + 1, updated_at = NOW()
-         WHERE id = $${idx} AND sheet_id = $${idx + 1}`,
-        params,
+        `UPDATE meta_records
+         SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb,
+             version = version + 1,
+             updated_at = NOW()
+         WHERE id = $2 AND sheet_id = $3`,
+        [JSON.stringify(patch), context.recordId, context.sheetId],
       )
 
       // Emit event for chaining
