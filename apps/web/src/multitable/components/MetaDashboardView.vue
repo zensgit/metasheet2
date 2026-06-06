@@ -760,6 +760,11 @@ watch(
     chartDraft.value.groupByFieldId,
     chartDraft.value.aggregation,
     chartDraft.value.valueFieldId,
+    // every field buildChartInput reads must re-trigger the preview, else the saved config diverges
+    // from what's shown: variant (v2-c), seriesByFieldId (v2-d), barMode (v2-d-b1).
+    chartDraft.value.variant,
+    chartDraft.value.seriesByFieldId,
+    chartDraft.value.barMode,
     editingDateGrouped.value,
   ],
   scheduleChartPreview,
