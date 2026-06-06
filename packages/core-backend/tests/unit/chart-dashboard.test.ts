@@ -904,20 +904,43 @@ describe('ChartAggregationService — v2-d stacked series', () => {
     expect(result.series!.find((s) => s.name === 'A')!.data).toEqual([30, 30]) // avg per (status × category)
   })
 
-  it('inert: no series without a primary groupByFieldId (date-grouped or ungrouped)', async () => {
-    const dateGrouped = await service.computeChartData(
-      makeChart({
-        type: 'bar',
-        dataSource: {
-          dateFieldId: 'date',
-          dateGrouping: 'month',
-          seriesByFieldId: 'category',
-          aggregation: { function: 'count' },
-        },
-      }),
+  it('inert: no series for an UNGROUPED chart (no groupBy, no date axis)', async () => {
+    const ungrouped = await service.computeChartData(
+      makeChart({ type: 'bar', dataSource: { seriesByFieldId: 'category', aggregation: { function: 'count' } } }),
       sampleRecords,
     )
-    expect(dateGrouped.series).toBeUndefined()
+    expect(ungrouped.series).toBeUndefined()
+  })
+
+  // v2-d-b3: date-axis × series — date buckets are the primary axis, ordered chronologically.
+  const dateSeriesChart = (over: Partial<ChartConfig['dataSource']> = {}) => makeChart({
+    type: 'line',
+    dataSource: { dateFieldId: 'date', dateGrouping: 'month', seriesByFieldId: 'category', aggregation: { function: 'count' }, ...over },
+  })
+
+  it('b3: date-grouped + seriesByFieldId emits series over chronological date buckets (dense, 0-filled)', async () => {
+    const result = await service.computeChartData(dateSeriesChart(), sampleRecords)
+    expect(result.dataPoints.map((d) => d.label)).toEqual(['2026-01', '2026-02', '2026-03', '2026-04']) // chronological, not encounter-order
+    expect(result.series).toBeDefined()
+    expect(result.series!.map((s) => s.name)).toEqual(['A', 'B'])
+    expect(result.series!.find((s) => s.name === 'A')!.data).toEqual([1, 1, 0, 1]) // 0-fill where A absent (2026-03)
+    expect(result.series!.find((s) => s.name === 'B')!.data).toEqual([1, 0, 1, 0])
+    for (const s of result.series!) expect(s.data).toHaveLength(result.dataPoints.length)
+  })
+
+  it('b3 §5.1: a single-series date chart orders chronologically, ignoring sortBy/sortOrder', async () => {
+    const result = await service.computeChartData(
+      makeChart({ type: 'line', dataSource: { dateFieldId: 'date', dateGrouping: 'month', aggregation: { function: 'count' }, sortBy: 'value', sortOrder: 'desc' } }),
+      sampleRecords,
+    )
+    expect(result.dataPoints.map((d) => d.label)).toEqual(['2026-01', '2026-02', '2026-03', '2026-04']) // sortBy:value desc ignored
+  })
+
+  it('b3 §5.3: limit selects the NEWEST N buckets, rendered ascending (not oldest N)', async () => {
+    const result = await service.computeChartData(dateSeriesChart({ limit: 2 }), sampleRecords)
+    expect(result.dataPoints.map((d) => d.label)).toEqual(['2026-03', '2026-04']) // latest 2, ascending — NOT 2026-01/02
+    for (const s of result.series!) expect(s.data).toHaveLength(2) // series aligned to the surviving newest buckets
+    expect(result.series!.find((s) => s.name === 'B')!.data).toEqual([1, 0]) // 2026-03 has B, 2026-04 does not
   })
 
   it('absent seriesByFieldId ⇒ byte-identical to today (no series key)', async () => {
@@ -976,8 +999,10 @@ describe('assertSeriesConstraints (v2-d input validation)', () => {
     }
   })
 
-  it('line + date grouping is still rejected (deferred to b3)', () => {
-    expect(() => assertSeriesConstraints(ds({ dateFieldId: 'd', dateGrouping: 'month' }), 'line')).toThrow(/date grouping/)
+  it('b3: line + date grouping is now allowed (date axis = primary)', () => {
+    expect(() => assertSeriesConstraints(ds({ dateFieldId: 'd', dateGrouping: 'month' }), 'line')).not.toThrow()
+    // date axis alone (no groupByFieldId) is a valid primary
+    expect(() => assertSeriesConstraints(ds({ groupByFieldId: undefined, dateFieldId: 'd', dateGrouping: 'month' }), 'line')).not.toThrow()
   })
 
   it('throws without a primary groupByFieldId', () => {
@@ -990,8 +1015,11 @@ describe('assertSeriesConstraints (v2-d input validation)', () => {
     }
   })
 
-  it('throws when combined with date grouping (matches the producer giving the date axis precedence)', () => {
-    expect(() => assertSeriesConstraints(ds({ dateFieldId: 'd', dateGrouping: 'month' }), 'bar')).toThrow(/date grouping/)
+  it('b3: a STACKED bar over a date axis still requires an additive aggregation (§2.2 holds for date too)', () => {
+    // stacked bar (default barMode) + date + non-additive → rejected
+    expect(() => assertSeriesConstraints(ds({ dateFieldId: 'd', dateGrouping: 'month', aggregation: { function: 'avg', fieldId: 'amt' } }), 'bar')).toThrow(/sum or count/)
+    // grouped bar over date with the same non-additive aggregation → allowed
+    expect(() => assertSeriesConstraints(ds({ dateFieldId: 'd', dateGrouping: 'month', aggregation: { function: 'avg', fieldId: 'amt' } }), 'bar', 'grouped')).not.toThrow()
   })
 
   // v2-d-b1: barMode 'grouped' relaxes the additive requirement (side-by-side bars are independent).
