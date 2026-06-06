@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3 design-lock opened (`multitable-automation-a6-3-branch-parallel-design-20260605.md`), runtime still not started; A6-4..A6-5 remain frozen / demand-gated
+Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3-1 `condition_branch` exclusive-branch runtime LANDED #2321 `127b29dd9` (2026-06-05; design-lock `multitable-automation-a6-3-branch-parallel-design-20260605.md`) — A6-3-2 frontend builder / A6-3-3 (wait/nesting in branches) / parallel fan-out·join still gated; A6-4..A6-5 remain frozen / demand-gated
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, read-boundary wired only); RFC #1885
 
@@ -26,8 +26,9 @@ The governance half and named A5 retry runtime are complete on `origin/main`:
   dormant state was later closed by #2191 enable-writer + #2193 admin UI toggle.
 
 This closeout did NOT mark the convergence engine complete at the time. Current status:
-A6-1 and A6-2 are now complete end-to-end; A6-3 only has a docs-only design-lock opened,
-and A6-4/A6-5 remain separate future unlocks.
+A6-1 and A6-2 are complete end-to-end; A6-3-1 `condition_branch` exclusive-branch runtime
+landed (#2321), with A6-3-2 frontend / A6-3-3 / parallel-join still gated; A6-4/A6-5 remain
+separate future unlocks.
 
 ## Doctrine — Two Gates (definition of "not lopsided")
 
@@ -67,8 +68,8 @@ The K3 Stage-1 blanket lock is retired (#1993; #1792 = M1 one-record Material Sa
   (explicit opt-in; not "read-only so no review needed").
 - A4 / A5: completed by explicit opt-in (#2039 + #2047); retry UI,
   idempotency keys, and re-fetch-current-record context remain future opt-ins.
-- A6: A6-0/A6-3 design-locks are docs-only; A6-1 and A6-2 runtime/frontend slices
-  landed by explicit opt-in; A6-3 runtime and A6-4/A6-5 remain frozen / demand-gated.
+- A6: A6-0/A6-3 design-locks are docs-only; A6-1/A6-2 + A6-3-1 `condition_branch` runtime
+  landed by explicit opt-in; A6-3-2/A6-3-3 + parallel-join and A6-4/A6-5 remain frozen / demand-gated.
 
 ## Current Baseline
 
@@ -273,9 +274,13 @@ complete.
 - [x] A6-2 suspend/resume runtime (backend, admin-gated v1; webhook/external resume) — LANDED #2237 c363a78db (2026-06-03).
 - [x] A6-2b suspend/resume frontend (admin Resume UI + `wait_for_callback` editor) — LANDED #2245 cee99c8e4 (2026-06-04). **A6-2 closed end-to-end.** delay/timer resume still deferred / demand-gated.
 - [x] A6-2 UI/operator UAT — PASS #2257 on package `metasheet-multitable-onprem-v2.5.0-a6-2-uat-followup-lock-gate-b37ff906`: `wait_for_callback -> update_record` saved through the UI, suspended, resumed from admin detail, reached terminal `resolved`, and passed the listed negative guards. UAT blockers cleared by #2264 (service validation), #2272 (executor-shaped follow-up configs), and #2278 (`lock_record` hidden/disabled while storage contract is unsupported).
-- [ ] A6-3 branch/parallel DAG runtime — design-lock opened in
-      `multitable-automation-a6-3-branch-parallel-design-20260605.md`;
-      runtime not started. First runtime slice is explicitly
-      `condition_branch` / exclusive branch v1 only.
+- [x] A6-3-1 `condition_branch` / exclusive-branch v1 runtime (backend) — LANDED #2321 `127b29dd9`
+      (2026-06-05): new `condition_branch` action + CHECK migration; dual-layer fail-closed (service +
+      executor) rejecting `wait_for_callback` / nested `condition_branch` in branches; exclusive
+      first-match-or-`defaultBranch`; C1 parent/selected-child/downstream lineage (no 2nd status vocab).
+      Real-DB lineage seam gates via the blocking `plugin-tests.yml` targeted step.
+- [ ] A6-3-2 `condition_branch` frontend builder + admin-runs readability — not started.
+- [ ] A6-3-3 `wait_for_callback` / nested `condition_branch` inside branches — gated (forbidden in A6-3-1).
+- [ ] A6-3 parallel fan-out / join-all / join-any — gated (separate follow rungs after the exclusive slice).
 - [ ] A6-4 BPMN compile/preview adapter — not started.
 - [ ] A6-5 approval-as-job bridge — not started.
