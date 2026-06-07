@@ -767,6 +767,19 @@
               <span>inactive {{ tableActionCounts.inactive || 0 }}</span>
               <span>manual {{ tableActionCounts.manual_confirm || 0 }}</span>
             </div>
+            <div v-if="tableActionLargeBomBounded" class="integration-workbench__bounded-preview" data-testid="table-action-large-bom-bounded">
+              <div>
+                <strong>大 BOM 有界预览</strong>
+                <span class="integration-workbench__badge" data-status="error">Apply blocked</span>
+              </div>
+              <p>本次只展开了有界子集，冲突/重复计数不是完整计划；不会签发 dry-run token。</p>
+              <div class="integration-workbench__metric-row">
+                <span v-for="metric in tableActionBoundedPreviewMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
+              </div>
+              <p v-if="tableActionBoundedErrorTypes.length" class="integration-workbench__hint">
+                errorTypes: {{ tableActionBoundedErrorTypes.join(', ') }}
+              </p>
+            </div>
             <p class="integration-workbench__hint" data-testid="table-action-token-state">
               {{ tableActionDryRunToken ? 'dry-run token 已签发；token 仅保存在当前页面内存，不展示、不复制到 evidence。' : '本次 dry-run 不可 apply；请处理失败项后重跑。' }}
             </p>
@@ -1863,6 +1876,34 @@ const selectedTableAction = computed(() => tableActions.value.find((action) => a
 const tableActionCounts = computed(() => tableActionDryRunResult.value?.counts || {})
 const tableActionManualConfirmCount = computed(() => Number(tableActionCounts.value.manual_confirm || 0))
 const tableActionDryRunToken = computed(() => tableActionDryRunResult.value?.dryRunToken || '')
+const tableActionLargeBomBounded = computed(() => isLargeBomBoundedTableActionResult(tableActionDryRunResult.value))
+const tableActionBoundedPreview = computed(() => {
+  const result = tableActionDryRunResult.value
+  if (!result) return null
+  if (isRecord(result.boundedPreview)) return result.boundedPreview
+  const evidence = isRecord(result.evidence) ? result.evidence : null
+  const expansion = evidence && isRecord(evidence.expansion) ? evidence.expansion : null
+  return expansion && isRecord(expansion.boundedPreview) ? expansion.boundedPreview : null
+})
+const tableActionBoundedErrorTypes = computed(() => {
+  const preview = tableActionBoundedPreview.value
+  if (Array.isArray(preview?.errorTypes)) return preview.errorTypes.filter((entry): entry is string => typeof entry === 'string')
+  const evidence = isRecord(tableActionDryRunResult.value?.evidence) ? tableActionDryRunResult.value?.evidence : null
+  const expansion = evidence && isRecord(evidence.expansion) ? evidence.expansion : null
+  return Array.isArray(expansion?.errorTypes) ? expansion.errorTypes.filter((entry): entry is string => typeof entry === 'string') : []
+})
+const tableActionBoundedPreviewMetrics = computed(() => {
+  const preview = tableActionBoundedPreview.value
+  if (!preview) return []
+  return [
+    { id: 'rows-expanded', label: 'rows', value: numberMetric(preview.rowsExpanded) },
+    { id: 'read-count', label: 'reads', value: numberMetric(preview.readCount) },
+    { id: 'max-rows', label: 'maxRows', value: numberMetric(preview.maxRows) },
+    { id: 'max-pages', label: 'maxPages', value: numberMetric(preview.maxPages) },
+    { id: 'max-read-count', label: 'maxReadCount', value: numberMetric(preview.maxReadCount) },
+    { id: 'max-elapsed-ms', label: 'maxElapsedMs', value: numberMetric(preview.maxElapsedMs) },
+  ].filter((metric) => metric.value !== '')
+})
 const tableActionEvidenceText = computed(() => {
   const evidence = tableActionApplyResult.value?.evidence || tableActionDryRunResult.value?.evidence
   return evidence ? JSON.stringify(evidence, null, 2) : ''
@@ -1913,6 +1954,11 @@ const tableActionReviewSummary = computed(() => {
   if (!tableActionDryRunResult.value) return '输入项目号后先 dry-run；apply 必须使用本次 dry-run token，并由服务端重新计算计划。'
   const status = tableActionDryRunResult.value.status || 'unknown'
   const counts = tableActionCounts.value
+  if (tableActionLargeBomBounded.value) {
+    const rows = numberMetric(tableActionBoundedPreview.value?.rowsExpanded) || '0'
+    const reads = numberMetric(tableActionBoundedPreview.value?.readCount) || '0'
+    return `dry-run ${status} · bounded rows ${rows} / reads ${reads} · Apply blocked`
+  }
   return `dry-run ${status} · add ${counts.add || 0} / update ${counts.update || 0} / skip ${counts.skip || 0} / inactive ${counts.inactive || 0} / manual ${counts.manual_confirm || 0}`
 })
 
@@ -2367,6 +2413,18 @@ function normalizeStagingOpenTargets(result: IntegrationStagingInstallResult): I
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function numberMetric(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+}
+
+function isLargeBomBoundedTableActionResult(result: IntegrationTableActionDryRunResult | null): boolean {
+  if (!result) return false
+  if (result.largeBom === true || result.status === 'large_bom_bounded') return true
+  const evidence = isRecord(result.evidence) ? result.evidence : null
+  const expansion = evidence && isRecord(evidence.expansion) ? evidence.expansion : null
+  return expansion?.largeBom === true
 }
 
 const SECRET_EXPORT_KEY_PATTERN = /(^|[._-])(password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?id|api[_-]?key|secret|signature|sign|auth|authorization)([._-]|$)/i
@@ -3268,7 +3326,9 @@ async function dryRunTableAction(): Promise<void> {
     })
     tableActionDryRunResult.value = result
     const manualCount = Number(result.counts?.manual_confirm || 0)
-    const message = manualCount > 0
+    const message = isLargeBomBoundedTableActionResult(result)
+      ? '表动作 dry-run 返回大 BOM 有界预览；Apply 已阻塞，请走完整展开/后台通道。'
+      : manualCount > 0
       ? `表动作 dry-run 完成：${manualCount} 行需要人工确认，apply 会保持这些行不写。`
       : '表动作 dry-run 完成，可进入 apply 确认。'
     setStatus(message, result.canApply ? 'success' : 'error')
@@ -3532,6 +3592,26 @@ watch([selectedTableActionId, tableActionProjectNo], () => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.integration-workbench__bounded-preview {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #f3c8a8;
+  border-radius: 6px;
+  background: #fff7ed;
+}
+
+.integration-workbench__bounded-preview > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.integration-workbench__bounded-preview strong {
+  color: #7c2d12;
 }
 
 .integration-workbench {
