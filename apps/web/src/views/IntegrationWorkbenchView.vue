@@ -792,9 +792,57 @@
               <p v-if="tableActionDuplicatePolicies.length" class="integration-workbench__hint">
                 policies: {{ tableActionDuplicatePolicies.join(', ') }}
               </p>
+              <p class="integration-workbench__hint" data-testid="table-action-duplicate-policy-scope">
+                本表已保存策略 {{ tableActionStoredConflictPolicyCount }} 条；未选择时默认 hold。任何策略选择都不会自动写入重复行。
+              </p>
               <ul v-if="tableActionDuplicateGroups.length" class="integration-workbench__mini-list">
                 <li v-for="group in tableActionDuplicateGroups" :key="group.fingerprint">
-                  #{{ group.ordinal }} {{ group.fingerprint }} · rows {{ group.rowCount }} · {{ group.parentShape }} · quantity {{ group.quantityShape }} · attrs {{ group.attributeShape }} · stable {{ group.stableDiscriminator }}
+                  <div>
+                    #{{ group.ordinal }} {{ group.fingerprint }} · rows {{ group.rowCount }} · {{ group.parentShape }} · quantity {{ group.quantityShape }} · attrs {{ group.attributeShape }} · stable {{ group.stableDiscriminator }}
+                  </div>
+                  <div class="integration-workbench__connection-row">
+                    <label class="integration-workbench__inline-field">
+                      <span>策略</span>
+                      <select
+                        :value="group.draftPolicy"
+                        data-testid="table-action-duplicate-policy-select"
+                        @change="onDuplicatePolicyDraftChange(group.fingerprint, $event)"
+                      >
+                        <option v-for="policy in tableActionDuplicatePolicies" :key="policy" :value="policy">
+                          {{ policy }}
+                        </option>
+                      </select>
+                    </label>
+                    <span class="integration-workbench__hint">当前 {{ group.currentPolicy }} · {{ group.currentScope }} · 仍 held</span>
+                    <button
+                      type="button"
+                      class="integration-workbench__button"
+                      data-testid="table-action-duplicate-run-only"
+                      @click="setDuplicateRunOnlyPolicy(group)"
+                    >
+                      只此次有效
+                    </button>
+                    <button
+                      v-if="auth.hasPermission('integration:admin')"
+                      type="button"
+                      class="integration-workbench__button"
+                      data-testid="table-action-duplicate-table-save"
+                      :disabled="tableActionConflictPolicySaving === group.fingerprint"
+                      @click="saveDuplicateTableScopePolicy(group)"
+                    >
+                      保存为本表策略
+                    </button>
+                    <button
+                      v-if="auth.hasPermission('integration:admin')"
+                      type="button"
+                      class="integration-workbench__button"
+                      data-testid="table-action-duplicate-table-revoke"
+                      :disabled="tableActionConflictPolicySaving === group.fingerprint"
+                      @click="revokeDuplicateTableScopePolicy(group)"
+                    >
+                      撤销本表策略
+                    </button>
+                  </div>
                 </li>
               </ul>
             </div>
@@ -1129,6 +1177,7 @@ import {
   canReadFromSystem,
   canWriteToSystem,
   applyIntegrationTableAction,
+  deleteIntegrationTableActionConflictPolicies,
   deleteWorkbenchExternalSystem,
   dryRunIntegrationTableAction,
   getDefaultIntegrationScope,
@@ -1143,6 +1192,7 @@ import {
   listIntegrationProvenanceByRow,
   listIntegrationStagingDescriptors,
   listIntegrationTableActions,
+  listIntegrationTableActionConflictPolicies,
   listExternalSystemObjects,
   listIntegrationAdapters,
   listWorkbenchExternalSystems,
@@ -1152,6 +1202,7 @@ import {
   deriveFieldRulesFromMappings,
   deriveIntegrationTemplate,
   summarizeFieldProvenance,
+  saveIntegrationTableActionConflictPolicies,
   syncIntegrationStockPreparationOptions,
   testExternalSystemConnection,
   upsertWorkbenchExternalSystem,
@@ -1175,6 +1226,7 @@ import {
   type IntegrationFieldRule,
   type IntegrationReferenceMappingSource,
   type IntegrationTableActionApplyResult,
+  type IntegrationTableActionConflictPolicyResult,
   type IntegrationTableActionDryRunResult,
   type IntegrationTableActionMetadata,
   type IntegrationStockPreparationOptionSyncResult,
@@ -1231,6 +1283,9 @@ interface DuplicateExpandedGroupView {
   quantityShape: string
   attributeShape: string
   stableDiscriminator: string
+  currentPolicy: string
+  currentScope: string
+  draftPolicy: string
 }
 
 interface ConnectionDraft {
@@ -1357,6 +1412,11 @@ const runningTableAction = ref<'dry-run' | 'apply' | ''>('')
 const tableActionDryRunResult = ref<IntegrationTableActionDryRunResult | null>(null)
 const tableActionApplyResult = ref<IntegrationTableActionApplyResult | null>(null)
 const tableActionAcceptManualConfirmHold = ref(false)
+const tableActionDuplicatePolicyDrafts = ref<Record<string, string>>({})
+const tableActionDuplicateRunPolicies = ref<Record<string, string>>({})
+const tableActionTableScopePolicies = ref<IntegrationTableActionConflictPolicyResult | null>(null)
+const tableActionConflictPolicySaving = ref('')
+const tableActionConflictPolicyDirty = ref(false)
 const stockPreparationOptionSyncText = ref('')
 const stockPreparationOptionSyncResult = ref<IntegrationStockPreparationOptionSyncResult | null>(null)
 const syncingStockPreparationOptions = ref(false)
@@ -1964,6 +2024,26 @@ const tableActionDuplicatePolicies = computed(() => {
     ? diagnostics.allowedPolicies.filter((policy): policy is string => typeof policy === 'string')
     : []
 })
+const tableActionConflictPolicyReview = computed(() => {
+  const review = tableActionPlanEvidence.value && isRecord(tableActionPlanEvidence.value.conflictPolicyReview)
+    ? tableActionPlanEvidence.value.conflictPolicyReview
+    : null
+  return review && review.conflictType === 'duplicate_expanded_key' ? review : null
+})
+const tableActionConflictPolicySelections = computed(() => {
+  const review = tableActionConflictPolicyReview.value
+  const rows = Array.isArray(review?.selectedPolicies) ? review.selectedPolicies.filter(isRecord) : []
+  const out = new Map<string, { policy: string, scope: string }>()
+  for (const row of rows) {
+    if (typeof row.fingerprint !== 'string' || typeof row.policy !== 'string') continue
+    out.set(row.fingerprint, {
+      policy: row.policy,
+      scope: typeof row.scope === 'string' ? row.scope : 'default',
+    })
+  }
+  return out
+})
+const tableActionStoredConflictPolicyCount = computed(() => Number(tableActionTableScopePolicies.value?.policyCount || 0))
 const tableActionDuplicateGroups = computed<DuplicateExpandedGroupView[]>(() => {
   const diagnostics = tableActionDuplicateDiagnostics.value
   const groups = Array.isArray(diagnostics?.groups) ? diagnostics.groups.filter(isRecord) : []
@@ -1982,6 +2062,9 @@ const tableActionDuplicateGroups = computed<DuplicateExpandedGroupView[]>(() => 
       quantityShape: typeof group.quantityShape === 'string' ? group.quantityShape : 'unknown',
       attributeShape: typeof group.attributeShape === 'string' ? group.attributeShape : 'unknown',
       stableDiscriminator: stableLabels.length ? stableLabels.join('+') : 'none',
+      currentPolicy: tableActionConflictPolicySelections.value.get(typeof group.fingerprint === 'string' ? group.fingerprint : '')?.policy || 'hold',
+      currentScope: tableActionConflictPolicySelections.value.get(typeof group.fingerprint === 'string' ? group.fingerprint : '')?.scope || 'default',
+      draftPolicy: tableActionDuplicatePolicyDrafts.value[typeof group.fingerprint === 'string' ? group.fingerprint : ''] || tableActionConflictPolicySelections.value.get(typeof group.fingerprint === 'string' ? group.fingerprint : '')?.policy || 'hold',
     }
   })
 })
@@ -2027,6 +2110,8 @@ const tableActionCanApply = computed(() => Boolean(
   && tableActionDryRunToken.value
   && auth.hasPermission('integration:write')
   && runningTableAction.value === ''
+  && tableActionConflictPolicyDirty.value === false
+  && Object.keys(tableActionDuplicateRunPolicies.value).length === 0
   && (tableActionManualConfirmCount.value === 0 || tableActionAcceptManualConfirmHold.value),
 ))
 const tableActionReviewSummary = computed(() => {
@@ -2676,9 +2761,22 @@ async function refreshTableActions(resolvedScope = currentScope()): Promise<void
     if (!selectedTableActionId.value) {
       selectedTableActionId.value = actionList.find((action) => action.configured)?.actionId || actionList[0]?.actionId || ''
     }
+    if (selectedTableActionId.value) void refreshTableActionConflictPolicies(selectedTableActionId.value)
   } catch {
     tableActions.value = []
     selectedTableActionId.value = ''
+  }
+}
+
+async function refreshTableActionConflictPolicies(actionId = selectedTableActionId.value): Promise<void> {
+  if (!actionId) {
+    tableActionTableScopePolicies.value = null
+    return
+  }
+  try {
+    tableActionTableScopePolicies.value = await listIntegrationTableActionConflictPolicies(actionId, currentScope())
+  } catch {
+    tableActionTableScopePolicies.value = null
   }
 }
 
@@ -3348,12 +3446,117 @@ function resetTableActionReview(): void {
   tableActionDryRunResult.value = null
   tableActionApplyResult.value = null
   tableActionAcceptManualConfirmHold.value = false
+  tableActionDuplicatePolicyDrafts.value = {}
+  tableActionDuplicateRunPolicies.value = {}
+  tableActionConflictPolicySaving.value = ''
+  tableActionConflictPolicyDirty.value = false
 }
 
 function buildTableActionParameters(): Record<string, unknown> {
   const projectNo = tableActionProjectNo.value.trim()
   if (!projectNo) throw new Error('请填写项目号 projectNo')
   return { projectNo }
+}
+
+function selectedDuplicatePolicy(group: DuplicateExpandedGroupView): string {
+  return tableActionDuplicatePolicyDrafts.value[group.fingerprint] || group.currentPolicy || 'hold'
+}
+
+function onDuplicatePolicyDraftChange(fingerprint: string, event: Event): void {
+  const target = event.target instanceof HTMLSelectElement ? event.target : null
+  if (!target) return
+  tableActionDuplicatePolicyDrafts.value = {
+    ...tableActionDuplicatePolicyDrafts.value,
+    [fingerprint]: target.value,
+  }
+}
+
+function syncDuplicatePolicyDraftsFromResult(result: IntegrationTableActionDryRunResult): void {
+  const plan = isRecord(result.evidence?.plan) ? result.evidence.plan : null
+  const review = plan && isRecord(plan.conflictPolicyReview) ? plan.conflictPolicyReview : null
+  const selections = Array.isArray(review?.selectedPolicies) ? review.selectedPolicies.filter(isRecord) : []
+  const next: Record<string, string> = {}
+  for (const row of selections) {
+    if (typeof row.fingerprint === 'string' && typeof row.policy === 'string') {
+      next[row.fingerprint] = row.policy
+    }
+  }
+  tableActionDuplicatePolicyDrafts.value = next
+}
+
+function buildConflictPolicyReviewPayload() {
+  const policies = Object.entries(tableActionDuplicateRunPolicies.value)
+    .filter(([fingerprint, policy]) => fingerprint && policy)
+    .map(([fingerprint, policy]) => ({ fingerprint, policy }))
+  if (policies.length === 0) return undefined
+  return {
+    conflictType: 'duplicate_expanded_key' as const,
+    scope: 'run_only' as const,
+    policies,
+  }
+}
+
+function setDuplicateRunOnlyPolicy(group: DuplicateExpandedGroupView): void {
+  const policy = selectedDuplicatePolicy(group)
+  tableActionDuplicateRunPolicies.value = {
+    ...tableActionDuplicateRunPolicies.value,
+    [group.fingerprint]: policy,
+  }
+  tableActionConflictPolicyDirty.value = true
+  tableActionApplyResult.value = null
+  setStatus(`已选择 ${group.fingerprint} = ${policy}（只此次有效）；请重新 dry-run 让选择进入 evidence，重复行仍保持不写。`, 'success')
+}
+
+async function saveDuplicateTableScopePolicy(group: DuplicateExpandedGroupView): Promise<void> {
+  const action = selectedTableAction.value
+  if (!action?.configured) return
+  if (!auth.hasPermission('integration:admin')) {
+    setStatus('只有管理员可以保存本表重复行策略。', 'error')
+    return
+  }
+  const policy = selectedDuplicatePolicy(group)
+  tableActionConflictPolicySaving.value = group.fingerprint
+  try {
+    const result = await saveIntegrationTableActionConflictPolicies(action.actionId, {
+      ...currentScope(),
+      conflictType: 'duplicate_expanded_key',
+      scope: 'table_scope',
+      policies: [{ fingerprint: group.fingerprint, policy }],
+    })
+    tableActionTableScopePolicies.value = result
+    tableActionConflictPolicyDirty.value = true
+    tableActionApplyResult.value = null
+    setStatus(`已保存本表策略 ${group.fingerprint} = ${policy}；请重新 dry-run 让本表策略进入 evidence。`, 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    tableActionConflictPolicySaving.value = ''
+  }
+}
+
+async function revokeDuplicateTableScopePolicy(group: DuplicateExpandedGroupView): Promise<void> {
+  const action = selectedTableAction.value
+  if (!action?.configured) return
+  if (!auth.hasPermission('integration:admin')) {
+    setStatus('只有管理员可以撤销本表重复行策略。', 'error')
+    return
+  }
+  tableActionConflictPolicySaving.value = group.fingerprint
+  try {
+    const result = await deleteIntegrationTableActionConflictPolicies(action.actionId, {
+      ...currentScope(),
+      conflictType: 'duplicate_expanded_key',
+      fingerprints: [group.fingerprint],
+    })
+    tableActionTableScopePolicies.value = result
+    tableActionConflictPolicyDirty.value = true
+    tableActionApplyResult.value = null
+    setStatus(`已撤销本表策略 ${group.fingerprint}；默认回到 hold。请重新 dry-run 复核。`, 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    tableActionConflictPolicySaving.value = ''
+  }
 }
 
 function buildStockPreparationOptionSyncPayload(): Record<string, unknown> {
@@ -3404,8 +3607,12 @@ async function dryRunTableAction(): Promise<void> {
     const result = await dryRunIntegrationTableAction(action.actionId, {
       ...currentScope(),
       parameters: buildTableActionParameters(),
+      conflictPolicyReview: buildConflictPolicyReviewPayload(),
     })
     tableActionDryRunResult.value = result
+    tableActionDuplicateRunPolicies.value = {}
+    tableActionConflictPolicyDirty.value = false
+    syncDuplicatePolicyDraftsFromResult(result)
     const manualCount = Number(result.counts?.manual_confirm || 0)
     const planEvidence = isRecord(result.evidence?.plan) ? result.evidence.plan : null
     const duplicateDiagnostics = planEvidence && isRecord(planEvidence.duplicateExpandedKeyDiagnostics)
@@ -3589,8 +3796,14 @@ watch(sourceSystemId, () => {
   void refreshPlmCapabilitiesForSystem(selectedSourceSystem.value)
 })
 
-watch([selectedTableActionId, tableActionProjectNo], () => {
+watch(tableActionProjectNo, () => {
   resetTableActionReview()
+})
+
+watch(selectedTableActionId, (actionId) => {
+  resetTableActionReview()
+  tableActionTableScopePolicies.value = null
+  if (actionId) void refreshTableActionConflictPolicies(actionId)
 })
 </script>
 
