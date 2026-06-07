@@ -20,7 +20,11 @@ const {
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const {
   DECISIONS,
+  __internals: plannerInternals,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-planner.cjs'))
+const {
+  saveTableScopeConflictPolicies,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-policies.cjs'))
 
 const PHYSICAL_FIELD_ID_MAP = Object.fromEntries(
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, `fld_${field.id}`]),
@@ -84,6 +88,25 @@ function childBomPlmData(overrides = {}) {
     DN_PDM_BomDetailsInfo: [{ bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3' }],
     ...overrides,
   })
+}
+
+function duplicateRootPlmData(overrides = {}) {
+  return basePlmData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', sort_id: '10' },
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '3', sort_id: '20' },
+    ],
+    ...overrides,
+  })
+}
+
+function rootPartFingerprint(projectNo = 'P-001', componentSourceId = 'PART-A') {
+  return plannerInternals.stableFingerprint(JSON.stringify({
+    projectNo,
+    componentSourceId,
+    parentSourceId: null,
+    path: [componentSourceId],
+  }))
 }
 
 function createSourceAdapter(data = basePlmData()) {
@@ -397,6 +420,155 @@ async function testApplyRequiresTokenRecomputesAndScopesTarget() {
   )
 }
 
+async function testSavedKeepMultipleRowsPolicyRequiresFreshReviewAndAppliesResolvedRows() {
+  const storage = createMemoryStorage()
+  const source = createSourceAdapter(duplicateRootPlmData())
+  const records = createRecordsApi()
+  const action = normalizeStockPreparationActionConfig(baseAction())
+  const fingerprint = rootPartFingerprint()
+
+  await saveTableScopeConflictPolicies({
+    action,
+    policyStore: storage,
+    approver: 'admin-user',
+    request: {
+      conflictType: 'duplicate_expanded_key',
+      policies: [{ fingerprint, policy: 'keep_multiple_rows' }],
+    },
+  })
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    policyStore: storage,
+    plannedAt: '2026-06-07T09:00:00.000Z',
+  })
+
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.counts.add, 2)
+  assert.equal(dryRun.counts.manual_confirm, 0)
+  assert.equal(typeof dryRun.dryRunToken, 'string')
+  const resolution = dryRun.evidence.plan.duplicateExpandedKeyResolution
+  assert.equal(resolution.resolvedGroupCount, 1)
+  assert.equal(resolution.resolvedRowCount, 2)
+  assert.equal(resolution.tableScopeResolvedGroupCount, 1, 'previously saved table-scope policy is explicitly shown as active')
+  assert.equal(resolution.resolvedPolicies[0].discriminator, 'sortLine')
+  assert.equal(dryRun.evidence.plan.conflictPolicyReview.writeEffect, 'add_decisions_require_ack')
+  assert.equal(dryRun.evidence.plan.conflictPolicyReview.selectedPolicies[0].scope, 'table_scope')
+  assert.equal(dryRun.evidence.plan.conflictPolicyReview.selectedPolicies[0].policy, 'keep_multiple_rows')
+  assert.equal(dryRun.evidence.plan.conflictPolicyReview.selectedPolicies[0].writeEffect, 'add_decisions_require_ack')
+  assert.equal(JSON.stringify(dryRun.evidence).includes('P-001'), false, 'duplicate resolution evidence hides project value')
+  assert.equal(JSON.stringify(dryRun.evidence).includes('sort_id'), false, 'duplicate resolution evidence hides source column internals')
+
+  await saveTableScopeConflictPolicies({
+    action,
+    policyStore: storage,
+    approver: 'admin-user',
+    request: {
+      conflictType: 'duplicate_expanded_key',
+      policies: [{ fingerprint, policy: 'hold' }],
+    },
+  })
+  await assert.rejects(
+    () => applyStockPreparationAction({
+      action,
+      parameters: { projectNo: 'P-001' },
+      dryRunToken: dryRun.dryRunToken,
+      sourceAdapter: source.adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: storage,
+      policyStore: storage,
+      permission: 'write',
+      acceptDuplicateResolution: true,
+    }),
+    /does not match the current dry-run revision/,
+    'saved table-scope policy changes after review invalidate the dry-run token',
+  )
+
+  await saveTableScopeConflictPolicies({
+    action,
+    policyStore: storage,
+    approver: 'admin-user',
+    request: {
+      conflictType: 'duplicate_expanded_key',
+      policies: [{ fingerprint, policy: 'keep_multiple_rows' }],
+    },
+  })
+  const unacknowledgedDryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    policyStore: storage,
+    plannedAt: '2026-06-07T09:00:30.000Z',
+  })
+  await assert.rejects(
+    () => applyStockPreparationAction({
+      action,
+      parameters: { projectNo: 'P-001' },
+      dryRunToken: unacknowledgedDryRun.dryRunToken,
+      sourceAdapter: source.adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: storage,
+      policyStore: storage,
+      permission: 'write',
+    }),
+    /acceptDuplicateResolution=true/,
+    'resolved duplicate groups require explicit apply acknowledgement',
+  )
+
+  const reviewedDryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    policyStore: storage,
+    plannedAt: '2026-06-07T09:01:00.000Z',
+  })
+  const result = await applyStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: reviewedDryRun.dryRunToken,
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    policyStore: storage,
+    permission: 'write',
+    acceptDuplicateResolution: true,
+  })
+
+  assert.equal(result.status, 'succeeded')
+  assert.equal(result.apply.counts.created, 2)
+  const createCalls = records.calls.filter((call) => call[0] === 'createRecord')
+  assert.equal(createCalls.length, 2)
+  assert.equal(new Set(createCalls.map((call) => call[1].data.idempotencyKey)).size, 2)
+  assert.equal(createCalls.every((call) => String(call[1].data.idempotencyKey).includes('::duplicate:sortLine:')), true)
+  assert.equal(JSON.stringify(result.evidence).includes('P-001'), false, 'apply evidence hides project value')
+  assert.equal(JSON.stringify(result.evidence).includes('A-001'), false, 'apply evidence hides component code')
+
+  const repullDryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    policyStore: storage,
+    plannedAt: '2026-06-07T09:02:00.000Z',
+  })
+  const repullResolution = repullDryRun.evidence.plan.duplicateExpandedKeyResolution
+  assert.equal(repullDryRun.status, 'ready')
+  assert.equal(repullDryRun.counts.add, 0, 'resolved duplicate rows re-pull by deterministic keys instead of adding again')
+  assert.equal(repullDryRun.counts.manual_confirm, 0, 'resolved-key rows are not misclassified as base-key clean-to-collision')
+  assert.equal(repullDryRun.counts.skip + repullDryRun.counts.update, 2, 're-pull reaches skip/update, not duplicate add')
+  assert.equal(repullResolution.resolvedGroupCount, 1)
+  assert.equal(repullResolution.heldReasonCounts.clean_to_collision_requires_review || 0, 0)
+}
+
 async function testLargeBomBoundedDryRunBlocksApplyToken() {
   const source = createSourceAdapter(childBomPlmData())
   const records = createRecordsApi()
@@ -642,6 +814,7 @@ async function main() {
   await testBridgeSourceKindRequiresExplicitMatchingReadPlanAndCanDryRun()
   await testTargetFieldMapIncompleteFailsBeforeReads()
   await testApplyRequiresTokenRecomputesAndScopesTarget()
+  await testSavedKeepMultipleRowsPolicyRequiresFreshReviewAndAppliesResolvedRows()
   await testLargeBomBoundedDryRunBlocksApplyToken()
   await testReadPageLimitBoundedDryRunAndDepthHardFailureStayDistinct()
   await testApplyNormalizesNumericPlmDisplayFieldsBeforeCreate()

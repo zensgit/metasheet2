@@ -492,10 +492,10 @@ function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootM
   return summary
 }
 
-function createRow({ projectNo, parentSourceId, pathTokens, depth, partRow, rawQuantity, totalQuantity, active }) {
+function createRow({ projectNo, parentSourceId, pathTokens, depth, partRow, rawQuantity, totalQuantity, active, sortLine }) {
   const componentSourceId = toKey(readField(partRow, 'OBJ_ID'))
   const path = makePath(pathTokens)
-  return {
+  const row = {
     projectNo,
     idempotencyKey: makeIdempotencyKey(projectNo, componentSourceId, parentSourceId, pathTokens),
     componentSourceId,
@@ -510,9 +510,11 @@ function createRow({ projectNo, parentSourceId, pathTokens, depth, partRow, rawQ
     totalQuantity,
     active,
   }
+  if (!isBlank(sortLine)) row.sortLine = sortLine
+  return row
 }
 
-function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partRow, rawQuantity, totalQuantity, active }) {
+function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partRow, rawQuantity, totalQuantity, active, sortLine }) {
   const componentSourceId = toKey(readField(partRow, plan.part.idField))
   if (componentSourceId === null) {
     return {
@@ -536,6 +538,7 @@ function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partR
       rawQuantity,
       totalQuantity,
       active,
+      sortLine,
     }),
     componentSourceId,
     sourceVersion: normalizedPart.SysVer,
@@ -739,6 +742,7 @@ async function expandPlmProjectBom(input = {}) {
           rawQuantity: qty.value,
           totalQuantity: parentRow.totalQuantity * qty.value,
           active: true,
+          sortLine: plan.bomDetail.sortField ? readField(detail, plan.bomDetail.sortField) : undefined,
         })
         if (rowResult.error) {
           addRowError(rowResult.error)
@@ -805,6 +809,7 @@ async function expandPlmProjectBom(input = {}) {
             rawQuantity: qty.value,
             totalQuantity: qty.value,
             active: true,
+            sortLine: plan.orderDetail.sortField ? readField(detail, plan.orderDetail.sortField) : undefined,
           })
           if (rowResult.error) {
             addRowError(rowResult.error)

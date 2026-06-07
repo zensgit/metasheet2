@@ -2772,8 +2772,8 @@ async function testTableActionConflictPolicyRoutes() {
   const duplicateData = {
     ...tableActionPlmData(),
     DN_PDM_OrderDetailInfo: [
-      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2' },
-      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '3' },
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', sort_id: '10' },
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '3', sort_id: '20' },
     ],
   }
   const { services } = createMockServices({
@@ -2853,6 +2853,30 @@ async function testTableActionConflictPolicyRoutes() {
   assert.equal(res.body.data.policies[0].approvedByPresent, true)
   assert.equal(JSON.stringify(res.body.data).includes('sheet_stock_configured'), false, 'policy response hides target sheet id')
   assert.equal(JSON.stringify(res.body.data).includes('user_admin'), false, 'policy response hides approver identity')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'ready', 'saved keep_multiple_rows policy resolves on the next fresh dry-run')
+  assert.equal(res.body.data.counts.add, 2)
+  assert.equal(res.body.data.counts.manual_confirm, 0)
+  assert.equal(res.body.data.evidence.plan.duplicateExpandedKeyResolution.resolvedGroupCount, 1)
+  assert.equal(res.body.data.evidence.plan.duplicateExpandedKeyResolution.tableScopeResolvedGroupCount, 1)
+  const resolvedToken = res.body.data.dryRunToken
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/apply', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: {
+      parameters: { projectNo: 'P-001' },
+      confirm: { dryRunToken: resolvedToken },
+    },
+  })
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.body.error.code, 'TABLE_ACTION_DUPLICATE_RESOLUTION_REVIEW_REQUIRED', 'resolved duplicate groups need explicit apply acknowledgement')
 
   res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
     user: READ_USER,

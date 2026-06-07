@@ -420,6 +420,107 @@ function testDuplicateExpandedKeyDiagnosticsValuesFree() {
   assert.ok(!text.includes('ROOT/PARENT'), 'evidence must not include paths')
 }
 
+function duplicatePolicyReviewFor(baseKey, policy = 'keep_multiple_rows', scope = 'table_scope') {
+  return {
+    conflictType: 'duplicate_expanded_key',
+    selectedPolicies: [{
+      fingerprint: __internals.stableFingerprint(baseKey),
+      policy,
+      scope,
+    }],
+  }
+}
+
+function testKeepMultipleRowsResolvesSurgically() {
+  const duplicateKey = 'DUP-CROSS-PARENT-KEY'
+  const duplicateA = row({
+    idempotencyKey: duplicateKey,
+    componentSourceId: 'PART-DUP-A',
+    parentSourceId: 'PARENT-A',
+    path: 'ROOT/PARENT-A/PART-DUP',
+    pathTokens: ['ROOT', 'PARENT-A', 'PART-DUP'],
+  })
+  const duplicateB = row({
+    ...duplicateA,
+    idempotencyKey: duplicateKey,
+    componentSourceId: 'PART-DUP-B',
+    parentSourceId: 'PARENT-B',
+    path: 'ROOT/PARENT-B/PART-DUP',
+    pathTokens: ['ROOT', 'PARENT-B', 'PART-DUP'],
+  })
+  const clean = row({ componentSourceId: 'PART-CLEAN', pathTokens: ['PART-CLEAN'] })
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [duplicateA, duplicateB, clean],
+    existingRows: [],
+    duplicatePolicyReview: duplicatePolicyReviewFor(duplicateKey, 'keep_multiple_rows', 'table_scope'),
+    runId: 'run-d3-resolve',
+    plannedAt: '2026-06-07T09:00:00.000Z',
+  })
+
+  assert.equal(plan.valid, true, 'resolved duplicate groups should not leave manual_confirm')
+  assert.equal(plan.counts.add, 3)
+  assert.equal(plan.counts.manual_confirm, 0)
+  const addKeys = byDecision(plan, DECISIONS.ADD).map((entry) => entry.idempotencyKey)
+  const duplicateKeys = addKeys.filter((key) => key.startsWith(`${duplicateKey}::duplicate:pathParent:`))
+  assert.equal(duplicateKeys.length, 2, 'only the duplicate group receives surgical discriminator keys')
+  assert.equal(new Set(duplicateKeys).size, 2, 'resolved duplicate keys are distinct')
+  assert.ok(addKeys.includes(clean.idempotencyKey), 'clean row keeps its original idempotency key')
+
+  const resolution = summarizeConflictPlanForEvidence(plan).duplicateExpandedKeyResolution
+  assert.equal(resolution.resolvedGroupCount, 1)
+  assert.equal(resolution.resolvedRowCount, 2)
+  assert.equal(resolution.tableScopeResolvedGroupCount, 1, 'saved table-scope policy activation is explicit')
+  assert.equal(resolution.heldGroupCount, 0)
+  assert.equal(resolution.resolvedPolicies[0].discriminator, 'pathParent')
+  const text = JSON.stringify(resolution)
+  assert.ok(!text.includes('PARENT-A'), 'resolution evidence hides parent values')
+  assert.ok(!text.includes('ROOT/PARENT'), 'resolution evidence hides paths')
+}
+
+function testKeepMultipleRowsCleanToCollisionHolds() {
+  const duplicateKey = 'DUP-CLEAN-TO-COLLISION'
+  const duplicateA = row({ idempotencyKey: duplicateKey, componentSourceId: 'PART-DUP-A', parentSourceId: 'PARENT-A', pathTokens: ['ROOT', 'PARENT-A', 'PART-DUP'] })
+  const duplicateB = row({ ...duplicateA, componentSourceId: 'PART-DUP-B', parentSourceId: 'PARENT-B', pathTokens: ['ROOT', 'PARENT-B', 'PART-DUP'] })
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [duplicateA, duplicateB],
+    existingRows: [{ ...duplicateA, idempotencyKey: duplicateKey, notes: 'already written clean row' }],
+    duplicatePolicyReview: duplicatePolicyReviewFor(duplicateKey, 'keep_multiple_rows', 'table_scope'),
+    runId: 'run-d3-clean-collision',
+    plannedAt: '2026-06-07T09:00:00.000Z',
+  })
+
+  assert.equal(plan.valid, false)
+  assert.equal(plan.counts.add, 0, 'clean-to-collision must not silently add re-keyed rows')
+  assert.equal(plan.counts.inactive, 0, 'clean-to-collision must not orphan the existing base-key row')
+  assert.equal(plan.counts.manual_confirm, 1)
+  const resolution = summarizeConflictPlanForEvidence(plan).duplicateExpandedKeyResolution
+  assert.equal(resolution.heldGroupCount, 1)
+  assert.equal(resolution.heldReasonCounts.clean_to_collision_requires_review, 1)
+}
+
+function testKeepMultipleRowsWithoutStableDiscriminatorHolds() {
+  const duplicateKey = 'DUP-NO-STABLE-DISCRIMINATOR'
+  const duplicateA = row({ idempotencyKey: duplicateKey, componentSourceId: 'PART-DUP', pathTokens: ['PART-DUP'] })
+  const duplicateB = { ...duplicateA }
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [duplicateA, duplicateB],
+    existingRows: [],
+    duplicatePolicyReview: duplicatePolicyReviewFor(duplicateKey, 'keep_multiple_rows', 'run_only'),
+    runId: 'run-d3-no-discriminator',
+    plannedAt: '2026-06-07T09:00:00.000Z',
+  })
+
+  assert.equal(plan.valid, false)
+  assert.equal(plan.counts.add, 0)
+  assert.equal(plan.counts.manual_confirm, 1)
+  const resolution = summarizeConflictPlanForEvidence(plan).duplicateExpandedKeyResolution
+  assert.equal(resolution.runOnlyResolvedGroupCount, 0)
+  assert.equal(resolution.heldReasonCounts.missing_stable_discriminator, 1)
+}
+
 function main() {
   testAddUpdateSkipInactive()
   testRowErrorsDoNotAbortGoodRows()
@@ -431,6 +532,9 @@ function main() {
   testTemplateNormalizationDoesNotHideRealIdentityOrLineageConflicts()
   testValuesFreeEvidence()
   testDuplicateExpandedKeyDiagnosticsValuesFree()
+  testKeepMultipleRowsResolvesSurgically()
+  testKeepMultipleRowsCleanToCollisionHolds()
+  testKeepMultipleRowsWithoutStableDiscriminatorHolds()
 
   console.log('stock-preparation-conflict-planner.test.cjs OK')
 }
