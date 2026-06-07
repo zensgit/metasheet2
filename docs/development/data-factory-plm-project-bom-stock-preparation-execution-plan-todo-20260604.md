@@ -602,7 +602,7 @@ Acceptance locks:
 - #2343 D1 remains ready but should run after #2342 C0 for large samples,
   because complete expansion is upstream of authoritative duplicate analysis.
 
-### 🟡 Large-BOM C1 - bounded dry-run readiness shape (ACTIVE - this PR)
+### 🟡 Large-BOM C1 - bounded dry-run readiness shape (PR #2361, pending review)
 
 Gated on: Large-BOM C0 accepted + explicit opt-in.
 
@@ -631,12 +631,75 @@ Acceptance locks:
 - No UI, route shape redesign, background job, checkpoint writer, package,
   PLM write, external database write, K3, or production rollout.
 
-Planned follow-up slices after C1 review:
+### 🟡 Large-BOM C2 - bounded large-BOM workbench display (PR #2362, pending review)
 
-1. C2 operator UI affordance for summary-first bounded review.
-2. C3 background full-expansion design.
-3. C4 checkpointed apply writer design.
-4. C5 entity-machine validation with values-free evidence.
+Gated on: Large-BOM C1 response shape + explicit opt-in.
+
+Scope:
+
+- Render the C1 bounded state in `IntegrationWorkbenchView`.
+- Show summary-first bounded diagnostics:
+  rows expanded, read count, configured cap fields, and scale error types.
+- Keep Apply disabled because `canApply=false` and no dry-run token exists.
+- Keep the issue/customer evidence path values-free.
+- Do not add browser-controlled caps or Apply mode.
+
+Acceptance locks:
+
+- UI-only; no backend route change, expansion helper change, writer change,
+  background job, checkpoint writer, package, PLM write, external database
+  write, K3, or production rollout.
+- `large_bom_bounded` is displayed as non-authoritative.
+- Apply remains disabled and sends no apply request.
+- The bounded block renders counters/error types only, not project/component
+  values or dry-run tokens.
+
+### 🟡 Large-BOM C3 - background full-expansion design (ACTIVE - this PR)
+
+Gated on: Large-BOM C0/C1/C2 + explicit opt-in.
+
+Scope:
+
+- Design the background full-expansion lane for large BOMs.
+- Define job lifecycle, durable checkpoint requirements, values-free progress
+  evidence, budget policy, and authoritative completion criteria.
+- Preserve app-side recursion over flat reads through the configured source
+  adapter.
+- Require the authenticated read principal; missing principal fails closed with
+  no system/admin/service fallback.
+- Keep C3 read-only and design-only: no runtime, route, UI, worker, migration,
+  MetaSheet row write, PLM write, external database write, K3, or C4 Apply.
+
+Acceptance locks:
+
+- Background mode is a separate job/checkpoint lane, not a longer single HTTP
+  request.
+- Job/checkpoint storage must be durable; memory-only storage is forbidden.
+- Browser input cannot supply caps, source, target, read plan, raw SQL, C3 plan,
+  C4 payload, sheet id, or field id.
+- Scale budget exhaustion does not produce an authoritative artifact.
+- Hard failures (`max_depth_exceeded`, cycles, source failures, invalid rows)
+  stay hard and are not relabeled as large BOM success.
+- Public progress/evidence is values-free.
+- Resume must not duplicate expanded rows.
+- C3 completion alone does not write rows and does not unlock C4 Apply.
+- #2343 duplicate counts on large samples are authoritative only after C3
+  completes a full expansion artifact.
+
+### ⬜ Large-BOM C4 - checkpointed apply writer design (NEXT gated slice)
+
+Gated on: Large-BOM C3 design accepted + explicit opt-in.
+
+Scope preview:
+
+- Design large-BOM Apply as a resumable/checkpointed writer, not a synchronous
+  one-request C4 loop.
+- Consume only a completed authoritative expansion/plan plus explicit owner
+  approval.
+- Preserve C4 find-then-create/patch idempotency, manual-confirm holds, and
+  human-field preservation.
+- Record per-row failures without retry storms.
+- No implementation until C4 design is explicitly opened.
 
 ## Deferred tracks
 
