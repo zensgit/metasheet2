@@ -6,6 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // Controllable DataSourceManager mock.
 const dsMocks = vi.hoisted(() => ({ getDataSource: vi.fn() }))
 
+// Controllable single-use jti store. Default (set in beforeEach) is "first use" -> true, so the
+// existing happy-path tests keep reaching getBomMultitableContext; replay/unavailable are per-test.
+const jtiMocks = vi.hoisted(() => ({ consume: vi.fn() }))
+vi.mock('../../src/auth/embed-jti-store', () => ({
+  consumeEmbedJti: (...args: unknown[]) => jtiMocks.consume(...args),
+  embedJtiKey: (scope: { jti?: unknown }) => `plm-embed:jti:${String(scope.jti)}`,
+}))
+
 // Stub jwt-middleware's heavy deps so importing the REAL isWhitelisted is cheap. We do NOT mock
 // jwt-middleware itself -- we want the REAL whitelist (it must include /api/plm-embed/).
 vi.mock('../../src/db/sharding/tenant-context', () => ({ extractTenantFromHeaders: () => undefined }))
@@ -79,6 +87,8 @@ const URL = '/api/plm-embed/bom-review/context'
 describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
   beforeEach(() => {
     dsMocks.getDataSource.mockReset()
+    jtiMocks.consume.mockReset()
+    jtiMocks.consume.mockResolvedValue(true) // default: first use; replay/unavailable overridden per test
     process.env.YUANTUS_EMBED_PUBLIC_KEY = PUB_B64
     process.env.YUANTUS_EMBED_KEY_ID = KID
     process.env.PLM_EMBED_AUDIENCE = AUD
@@ -244,5 +254,46 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('EMBED_TENANT_MISMATCH')
     expect(spy).not.toHaveBeenCalled()
+    // ordering: the jti is consumed only AFTER the tenant check passes -> a 403 here never consumes it
+    expect(jtiMocks.consume).not.toHaveBeenCalled()
+  })
+
+  // --- single-use jti consume (slice B / B1): consume AFTER all checks, BEFORE the BOM query ---
+
+  it('first use: consumes the (scoped) jti and serves -> 200', async () => {
+    const getBomMultitableContext = vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ jti: 'j-abc' }))
+    expect(res.status).toBe(200)
+    expect(jtiMocks.consume).toHaveBeenCalledWith('plm-embed:jti:j-abc', expect.any(Number))
+    expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
+  })
+
+  it('replay (jti already consumed) -> 401 EMBED_TOKEN_REPLAYED, BOM never queried', async () => {
+    jtiMocks.consume.mockResolvedValue(false)
+    const getBomMultitableContext = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    expect(res.status).toBe(401)
+    expect(res.body.error.code).toBe('EMBED_TOKEN_REPLAYED')
+    expect(getBomMultitableContext).not.toHaveBeenCalled()
+  })
+
+  it('shared replay store unavailable -> 503 fail-closed, BOM never queried', async () => {
+    jtiMocks.consume.mockRejectedValue(new Error('redis down'))
+    const getBomMultitableContext = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    expect(res.status).toBe(503)
+    expect(getBomMultitableContext).not.toHaveBeenCalled()
+  })
+
+  it('a token with no jti -> 401 (cannot be tracked for single-use)', async () => {
+    const getBomMultitableContext = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ jti: undefined }))
+    expect(res.status).toBe(401)
+    expect(jtiMocks.consume).not.toHaveBeenCalled()
+    expect(getBomMultitableContext).not.toHaveBeenCalled()
   })
 })

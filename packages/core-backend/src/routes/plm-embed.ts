@@ -20,6 +20,7 @@ import { Router, type Request, type Response } from 'express'
 import { getDataSourceManager } from './data-sources'
 import { embedTokenAuth } from '../middleware/embed-token-auth'
 import { embedAllowedOrigins, embedDataSourceId, frameAncestorsValue } from '../auth/embed-config'
+import { consumeEmbedJti, embedJtiKey } from '../auth/embed-jti-store'
 import type { BomMultitableContextResult } from '../data-adapters/PLMAdapter'
 
 const BOM_FEATURE_KEY = 'bom_multitable'
@@ -97,6 +98,39 @@ export default function plmEmbedRouter(): Router {
       const servedTenantId = adapter.getEffectiveTenantId()
       if (!servedTenantId || claims.tenant_id !== servedTenantId) {
         return res.status(403).json({ ok: false, error: { code: 'EMBED_TENANT_MISMATCH', message: 'token tenant does not match the embed data source tenant' } })
+      }
+
+      // Single-use: atomically consume the token's jti against the SHARED store BEFORE querying, so a
+      // replay of a still-valid token cannot fetch data a second time. A jti is required (an absent
+      // jti cannot be tracked). The store being unavailable fails CLOSED (503) -- never fail open, and
+      // never a per-instance fallback. Cost (accepted): one data call per token; after the transient
+      // provider-failure degrade below, the parent must RE-MINT + re-post (a retry is NOT a re-call).
+      const jti = typeof claims.jti === 'string' ? claims.jti : ''
+      if (!jti) {
+        return res.status(401).json({ ok: false, error: { code: 'INVALID_EMBED_TOKEN', message: 'missing jti' } })
+      }
+      const now = Math.floor(Date.now() / 1000)
+      const ttl = Math.min(typeof claims.exp === 'number' ? claims.exp - now : 0, 600)
+      if (ttl < 1) {
+        return res.status(401).json({ ok: false, error: { code: 'INVALID_EMBED_TOKEN', message: 'token expired' } })
+      }
+      let firstUse: boolean
+      try {
+        firstUse = await consumeEmbedJti(
+          embedJtiKey({
+            aud: claims.aud ?? '',
+            feature_key: claims.feature_key ?? '',
+            tenant_id: claims.tenant_id ?? '',
+            part_id: claims.part_id,
+            jti,
+          }),
+          ttl,
+        )
+      } catch {
+        return res.status(503).json({ ok: false, error: { code: 'EMBED_UNAVAILABLE', message: 'embed replay store unavailable' } })
+      }
+      if (!firstUse) {
+        return res.status(401).json({ ok: false, error: { code: 'EMBED_TOKEN_REPLAYED', message: 'embed token already used' } })
       }
 
       const partId = claims.part_id // token-bound; never a request input
