@@ -26,9 +26,17 @@ const BOM_FEATURE_KEY = 'bom_multitable'
 
 interface PlmBomAdapter {
   getBomMultitableContext(partId: string): Promise<BomMultitableContextResult>
+  // the tenant actually served (x-tenant-id), used to cross-check the embed token's tenant_id
+  getEffectiveTenantId(): string | undefined
+  isConnected(): boolean
+  connect(): Promise<void>
 }
 function isPlmBomAdapter(adapter: unknown): adapter is PlmBomAdapter {
-  return typeof (adapter as PlmBomAdapter | null)?.getBomMultitableContext === 'function'
+  const a = adapter as Partial<PlmBomAdapter> | null
+  return typeof a?.getBomMultitableContext === 'function'
+    && typeof a?.getEffectiveTenantId === 'function'
+    && typeof a?.isConnected === 'function'
+    && typeof a?.connect === 'function'
 }
 
 export default function plmEmbedRouter(): Router {
@@ -73,6 +81,22 @@ export default function plmEmbedRouter(): Router {
       }
       if (!isPlmBomAdapter(adapter)) {
         return res.status(503).json({ ok: false, error: { code: 'EMBED_UNAVAILABLE', message: 'embed data source unsupported' } })
+      }
+
+      // Ensure the adapter is connected so its effective tenant (resolved in connect()) is readable.
+      try {
+        if (!adapter.isConnected()) await adapter.connect()
+      } catch {
+        return res.status(503).json({ ok: false, error: { code: 'EMBED_UNAVAILABLE', message: 'embed data source unavailable' } })
+      }
+      // Cross-check the token's tenant against the tenant whose data is ACTUALLY served (the
+      // x-tenant-id the adapter sends), BEFORE querying BOM context. Fail-closed: a missing or
+      // mismatched served tenant -> 403, and the resource is NEVER queried (no cross-tenant fetch).
+      // Comparing against the served tenant -- not a lower-precedence config fallback that the
+      // resolution chain can override -- is what makes this sound (avoids false closure).
+      const servedTenantId = adapter.getEffectiveTenantId()
+      if (!servedTenantId || claims.tenant_id !== servedTenantId) {
+        return res.status(403).json({ ok: false, error: { code: 'EMBED_TENANT_MISMATCH', message: 'token tenant does not match the embed data source tenant' } })
       }
 
       const partId = claims.part_id // token-bound; never a request input

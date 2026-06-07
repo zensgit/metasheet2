@@ -17,6 +17,7 @@ vi.mock('../../src/routes/data-sources', () => ({
 
 import { isWhitelisted } from '../../src/auth/jwt-middleware'
 import plmEmbedRouter from '../../src/routes/plm-embed'
+import { PLMAdapter } from '../../src/data-adapters/PLMAdapter'
 
 const KID = 'embed-1'
 const AUD = 'metasheet2.embed'
@@ -39,6 +40,25 @@ function mint(overrides: Record<string, unknown> = {}, kid = KID): string {
 }
 
 const CONTEXT = { part: { part_id: 'P1', item_number: 'P-001', name: 'A', state: 'Released', generation: 3 }, lines: [], source_version: 3, source_updated_at: '2026', sync_status: 'snapshot', template_key: 'bom_review' }
+
+// A COMPLETE PlmBomAdapter mock: the relay's duck-type now also requires the tenant/connect surface
+// (getEffectiveTenantId/isConnected/connect). Default served tenant = 'default' to match the default
+// minted token's tenant_id, so existing happy-path tests keep passing the cross-check.
+function fullAdapter(opts: {
+  getBomMultitableContext?: ReturnType<typeof vi.fn>
+  tenant?: string | undefined
+  connected?: boolean
+  connect?: ReturnType<typeof vi.fn>
+} = {}) {
+  return {
+    getBomMultitableContext:
+      opts.getBomMultitableContext ??
+      vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT }),
+    getEffectiveTenantId: () => ('tenant' in opts ? opts.tenant : 'default'),
+    isConnected: () => opts.connected ?? true,
+    connect: opts.connect ?? vi.fn().mockResolvedValue(undefined),
+  }
+}
 
 function buildApp() {
   const app = express()
@@ -77,7 +97,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
 
   it('REAL CHAIN: an embed-token-only request (no session Bearer) reaches the route -> 200', async () => {
     const getBomMultitableContext = vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
-    dsMocks.getDataSource.mockReturnValue({ getBomMultitableContext })
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
     const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(200)
     expect(res.body.data.entitled).toBe(true)
@@ -139,7 +159,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
   })
 
   it('provider throws -> degrades (context:null), never 500', async () => {
-    dsMocks.getDataSource.mockReturnValue({ getBomMultitableContext: vi.fn().mockRejectedValue(new Error('boom')) })
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext: vi.fn().mockRejectedValue(new Error('boom')) }))
     const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(200)
     expect(res.body.data.context).toBeNull()
@@ -164,5 +184,65 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     process.env.PLM_EMBED_ALLOWED_ORIGINS = '*'
     const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(403) // origin no longer matches an empty allowlist
+  })
+
+  // --- tenant cross-check (slice A): claims.tenant_id must equal the tenant actually served ---
+
+  it('token tenant matches the served (effective) tenant -> 200', async () => {
+    const getBomMultitableContext = vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext, tenant: 'tenant-b' }))
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-b' }))
+    expect(res.status).toBe(200)
+    expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
+  })
+
+  it('FALSE-CLOSURE GUARD: served tenant B (e.g. global wins over options A) but token tenant A -> 403, BOM never queried', async () => {
+    const getBomMultitableContext = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext, tenant: 'tenant-b' }))
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-a' }))
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('EMBED_TENANT_MISMATCH')
+    expect(getBomMultitableContext).not.toHaveBeenCalled()
+  })
+
+  it('absent served tenant -> 403 fail-closed, BOM never queried', async () => {
+    const getBomMultitableContext = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext, tenant: undefined }))
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('EMBED_TENANT_MISMATCH')
+    expect(getBomMultitableContext).not.toHaveBeenCalled()
+  })
+
+  it('an unconnected adapter is connected before its tenant is read', async () => {
+    const connect = vi.fn().mockResolvedValue(undefined)
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ connected: false, connect }))
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    expect(connect).toHaveBeenCalled()
+    expect(res.status).toBe(200)
+  })
+
+  it('an adapter missing the tenant/connect surface -> 503 (stricter duck-type)', async () => {
+    dsMocks.getDataSource.mockReturnValue({ getBomMultitableContext: vi.fn() })
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    expect(res.status).toBe(503)
+  })
+
+  it('END-TO-END (real adapter): global tenant B but a hand-set connection x-tenant-id A, token B -> 403, BOM never queried', async () => {
+    for (const k of ['PLM_TENANT_ID', 'PLM_BASE_URL', 'PLM_URL']) delete process.env[k]
+    // global config says tenant-b, but the data source hand-sets x-tenant-id: tenant-a (served value)
+    const adapter = new PLMAdapter(
+      { get: async (key: string) => (key === 'plm.tenantId' ? 'tenant-b' : undefined) } as never,
+      { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
+      { id: DS_ID, name: 'PLM', type: 'plm', connection: { url: '', headers: { 'x-tenant-id': 'tenant-a' } } } as never,
+    )
+    await adapter.connect() // no URL -> mock mode -> no network; serves x-tenant-id: tenant-a
+    const spy = vi.spyOn(adapter, 'getBomMultitableContext')
+    dsMocks.getDataSource.mockReturnValue(adapter)
+    // a token for tenant-b must NOT be able to read tenant-a's served data
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-b' }))
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('EMBED_TENANT_MISMATCH')
+    expect(spy).not.toHaveBeenCalled()
   })
 })

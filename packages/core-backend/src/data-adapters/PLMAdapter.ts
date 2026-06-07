@@ -752,6 +752,30 @@ export class PLMAdapter extends HTTPAdapter {
     });
   }
 
+  /**
+   * The tenant ACTUALLY sent on data requests: the `x-tenant-id` on config.connection.headers after
+   * connect(), read CASE-INSENSITIVELY. This is the source of truth -- HTTPAdapter sends
+   * connection.headers verbatim, and applyTenantOrgHeaders does NOT overwrite a hand-set header, so a
+   * hand-set value is what is served (even if a higher-precedence config value differs). Reading the
+   * final header -- not the precedence const -- is what makes the embed tenant cross-check sound.
+   *
+   * Returns undefined when no x-tenant-id is set, OR when multiple x-tenant-id casings disagree (an
+   * ambiguous/misconfigured source) -- so the relay fails closed. Callers MUST connect() first.
+   */
+  getEffectiveTenantId(): string | undefined {
+    const headers = this.config.connection.headers as Record<string, unknown> | undefined
+    if (!headers) return undefined
+    const distinct = Array.from(
+      new Set(
+        Object.keys(headers)
+          .filter((key) => key.toLowerCase() === 'x-tenant-id')
+          .map((key) => headers[key])
+          .filter((value): value is string => typeof value === 'string' && value.length > 0),
+      ),
+    )
+    return distinct.length === 1 ? distinct[0] : undefined
+  }
+
   async connect(): Promise<void> {
     const envBaseUrl = process.env.PLM_BASE_URL || process.env.PLM_URL
     const envToken = process.env.PLM_API_TOKEN || process.env.PLM_AUTH_TOKEN || process.env.PLM_TOKEN
@@ -804,16 +828,17 @@ export class PLMAdapter extends HTTPAdapter {
     }
 
     this.mockMode = isMock;
+    // Resolve the EFFECTIVE tenant/org once (the values actually sent as x-tenant-id / x-org-id):
+    // configService plm.tenantId -> PLM_TENANT_ID env -> per-source config.options.tenantId.
+    const effectiveTenantId = tenantId || (typeof this.config.options?.tenantId === 'string' ? this.config.options.tenantId : undefined)
+    const effectiveOrgId = orgId || (typeof this.config.options?.orgId === 'string' ? this.config.options.orgId : undefined)
     this.apiMode = this.resolveApiMode(
       apiMode || (typeof this.config.options?.apiMode === 'string' ? this.config.options.apiMode : undefined),
       this.config.connection.headers as Record<string, string> | undefined,
-      tenantId || (typeof this.config.options?.tenantId === 'string' ? this.config.options.tenantId : undefined),
-      orgId || (typeof this.config.options?.orgId === 'string' ? this.config.options.orgId : undefined)
+      effectiveTenantId,
+      effectiveOrgId
     );
-    this.applyTenantOrgHeaders(
-      tenantId || (typeof this.config.options?.tenantId === 'string' ? this.config.options.tenantId : undefined),
-      orgId || (typeof this.config.options?.orgId === 'string' ? this.config.options.orgId : undefined)
-    );
+    this.applyTenantOrgHeaders(effectiveTenantId, effectiveOrgId);
     this.yuantusCredentials = username && password
       ? { username, password, tenantId: tenantId || undefined, orgId: orgId || undefined }
       : null;
