@@ -1000,6 +1000,18 @@ export interface IntegrationTableActionMetadata {
 export interface IntegrationTableActionDryRunResult {
   action?: IntegrationTableActionMetadata
   status: string
+  largeBom?: boolean
+  boundedPreview?: {
+    complete?: boolean
+    authoritative?: boolean
+    rowsExpanded?: number
+    readCount?: number
+    maxRows?: number
+    maxPages?: number
+    maxReadCount?: number
+    maxElapsedMs?: number
+    errorTypes?: string[]
+  }
   dryRunToken?: string | null
   revision?: string
   canApply?: boolean

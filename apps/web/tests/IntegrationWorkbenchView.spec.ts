@@ -2643,6 +2643,123 @@ describe('IntegrationWorkbenchView', () => {
     expect(applyBodies).toHaveLength(0)
   })
 
+  it('C2 large-BOM: renders bounded dry-run state as non-authoritative and blocks apply', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    const dryRunBodies: Array<Record<string, unknown>> = []
+    const applyBodies: Array<Record<string, unknown>> = []
+    const publicAction = {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      kind: 'parameterized_table_action',
+      label: 'PLM project BOM -> stock preparation',
+      configured: true,
+      parameters: [{ id: 'projectNo', label: 'Project number', type: 'string', required: true }],
+      permissions: { dryRun: 'read', apply: 'write' },
+      evidence: { valuesFreeIssueEvidence: true },
+    }
+    const boundedPreview = {
+      complete: false,
+      authoritative: false,
+      rowsExpanded: 500,
+      readCount: 1068,
+      maxRows: 500,
+      maxPages: 100,
+      maxReadCount: 1200,
+      errorTypes: ['max_rows_exceeded'],
+    }
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([publicAction])
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run?tenantId=default') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        dryRunBodies.push(body)
+        return jsonResponse({
+          action: publicAction,
+          status: 'large_bom_bounded',
+          largeBom: true,
+          boundedPreview,
+          dryRunToken: null,
+          revision: 'large-rev-1',
+          canApply: false,
+          counts: { add: 190, update: 0, skip: 0, inactive: 0, manual_confirm: 28 },
+          evidence: {
+            actionId: publicAction.actionId,
+            projectNoPresent: true,
+            dryRunRevision: 'large-rev-1',
+            expansion: {
+              status: 'failed',
+              largeBom: true,
+              boundedPreview,
+              rowsExpanded: 500,
+              readCount: 1068,
+              errorTypes: ['max_rows_exceeded'],
+            },
+            plan: {
+              counts: { add: 190, update: 0, skip: 0, inactive: 0, manual_confirm: 28 },
+              authoritative: false,
+            },
+          },
+        })
+      }
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/apply?tenantId=default') {
+        applyBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({ status: 'should-not-run' })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(12)
+
+    const projectInput = container.querySelector('[data-testid="table-action-project-no"]') as HTMLInputElement
+    projectInput.value = 'P-LARGE'
+    projectInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="table-action-dry-run"]') as HTMLButtonElement).click()
+    await flushUi(10)
+
+    expect(dryRunBodies).toHaveLength(1)
+    expect(dryRunBodies[0]).toEqual({ parameters: { projectNo: 'P-LARGE' } })
+    const review = container.querySelector('[data-testid="table-action-review"]')?.textContent || ''
+    expect(review).toContain('large_bom_bounded')
+    expect(review).toContain('bounded rows 500')
+    expect(review).toContain('reads 1068')
+    const bounded = container.querySelector('[data-testid="table-action-large-bom-bounded"]')?.textContent || ''
+    expect(bounded).toContain('大 BOM 有界预览')
+    expect(bounded).toContain('Apply blocked')
+    expect(bounded).toContain('rows 500')
+    expect(bounded).toContain('reads 1068')
+    expect(bounded).toContain('maxRows 500')
+    expect(bounded).toContain('maxPages 100')
+    expect(bounded).toContain('maxReadCount 1200')
+    expect(bounded).toContain('max_rows_exceeded')
+    expect(container.querySelector('[data-testid="table-action-token-state"]')?.textContent).toContain('不可 apply')
+    const status = container.querySelector('.integration-workbench__status')?.textContent || ''
+    expect(status).toContain('大 BOM 有界预览')
+    const applyButton = container.querySelector('[data-testid="table-action-apply"]') as HTMLButtonElement
+    expect(applyButton.disabled).toBe(true)
+    applyButton.click()
+    await flushUi()
+    expect(applyBodies).toHaveLength(0)
+    const evidence = container.querySelector('[data-testid="table-action-evidence"]')?.textContent || ''
+    expect(evidence).toContain('max_rows_exceeded')
+    expect(evidence).not.toContain('P-LARGE')
+    expect(evidence).not.toContain('PART-')
+    expect(evidence).not.toContain('dry-token')
+  })
+
   it('C6: lets admins sync stock-preparation options and predefined action bindings without client scope or payload fields', async () => {
     localStorage.setItem('user_permissions', JSON.stringify(['integration:admin']))
     const syncBodies: Array<Record<string, unknown>> = []
