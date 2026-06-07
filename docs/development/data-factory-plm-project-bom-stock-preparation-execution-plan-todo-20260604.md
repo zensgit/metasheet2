@@ -654,7 +654,7 @@ Acceptance locks:
 - The bounded block renders counters/error types only, not project/component
   values or dry-run tokens.
 
-### 🟡 Large-BOM C3 - background full-expansion design (ACTIVE - this PR)
+### 🟡 Large-BOM C3 - background full-expansion design (PR #2363, pending review)
 
 Gated on: Large-BOM C0/C1/C2 + explicit opt-in.
 
@@ -686,20 +686,38 @@ Acceptance locks:
 - #2343 duplicate counts on large samples are authoritative only after C3
   completes a full expansion artifact.
 
-### ⬜ Large-BOM C4 - checkpointed apply writer design (NEXT gated slice)
+### 🟡 Large-BOM C4 - checkpointed apply writer design (ACTIVE - this PR)
 
 Gated on: Large-BOM C3 design accepted + explicit opt-in.
 
-Scope preview:
+Scope:
 
 - Design large-BOM Apply as a resumable/checkpointed writer, not a synchronous
   one-request C4 loop.
-- Consume only a completed authoritative expansion/plan plus explicit owner
-  approval.
+- Consume only a completed authoritative C3 expansion/plan plus explicit owner
+  approval and fresh revision binding.
 - Preserve C4 find-then-create/patch idempotency, manual-confirm holds, and
   human-field preservation.
-- Record per-row failures without retry storms.
-- No implementation until C4 design is explicitly opened.
+- Require authenticated write/admin approval; no hardcoded permission and no
+  browser-supplied target scope.
+- Record per-row failures without retry storms and without erasing clean-row
+  progress.
+
+Acceptance locks:
+
+- No runtime, route, UI, worker, migration, package, MetaSheet row write, PLM
+  write, external database write, K3, or production rollout.
+- Large Apply cannot start from `largeBom=true` bounded preview.
+- Large Apply cannot start without a completed authoritative C3 artifact/plan.
+- Browser input cannot supply plan, payload, source, target, caps, sheet id, or
+  field id.
+- Permission is derived from the authenticated approver, never hardcoded.
+- Durable checkpoint storage is required; memory-only storage is forbidden.
+- Resume after interruption must not duplicate target rows.
+- `update`/`inactive` never create on miss.
+- `manual_confirm` decisions are held and write nothing.
+- Human-preserved fields are never written.
+- Row-level failures are values-free and do not erase clean-row progress.
 
 ## Deferred tracks
 
