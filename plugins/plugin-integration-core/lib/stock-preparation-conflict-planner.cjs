@@ -6,6 +6,8 @@
 // decisions for a later C4 apply writer. No PLM read, MetaSheet write, route,
 // UI, external DB write, or K3 path.
 
+const crypto = require('node:crypto')
+
 const {
   HUMAN_PRESERVED_FIELD_IDS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
@@ -39,6 +41,28 @@ const IDENTITY_FIELD_IDS = Object.freeze([
   'componentName',
   'material',
   'sourceVersion',
+])
+
+const DUPLICATE_EXPANDED_KEY_POLICIES = Object.freeze([
+  'hold',
+  'keep_multiple_rows',
+  'merge_quantity',
+  'select_representative',
+  'skip_selected',
+  'source_correction_required',
+])
+
+const DUPLICATE_SOURCE_DETAIL_FIELDS = Object.freeze([
+  'sourceDetailId',
+  'detailSourceId',
+  'lineSourceId',
+  'bomDetailId',
+])
+
+const DUPLICATE_SORT_LINE_FIELDS = Object.freeze([
+  'sourceSortLine',
+  'sortLine',
+  'lineNo',
 ])
 
 class StockPreparationConflictPlannerError extends Error {
@@ -204,6 +228,154 @@ function valuesEqualForTemplateField(left, right, field) {
     normalizeComparableValueForField(left, field),
     normalizeComparableValueForField(right, field),
   )
+}
+
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function stableFingerprint(value) {
+  return `sha16:${crypto
+    .createHash('sha256')
+    .update('stock-preparation-duplicate-expanded-key-v1\0')
+    .update(String(value))
+    .digest('hex')
+    .slice(0, 16)}`
+}
+
+function firstPresent(row, fields) {
+  for (const field of fields) {
+    const value = row && row[field]
+    if (!isBlank(value)) return value
+  }
+  return undefined
+}
+
+function stableValue(value) {
+  return value === undefined ? null : value
+}
+
+function stableKey(value) {
+  return stableStringify(stableValue(value))
+}
+
+function parentContext(row) {
+  return {
+    parentSourceId: stableValue(row && row.parentSourceId),
+    path: stableValue(row && row.path),
+  }
+}
+
+function parentContextKey(row) {
+  return stableStringify(parentContext(row))
+}
+
+function hasParentContext(row) {
+  return !isBlank(row && row.parentSourceId) || !isBlank(row && row.path)
+}
+
+function allValuesPresent(rows, picker) {
+  return rows.every((row) => !isBlank(picker(row)))
+}
+
+function distinctCount(rows, picker) {
+  return new Set(rows.map((row) => stableKey(picker(row)))).size
+}
+
+function groupQuantityShape(rows) {
+  if (!allValuesPresent(rows, (row) => row && row.totalQuantity)) return 'unknown'
+  return distinctCount(rows, (row) => row.totalQuantity) <= 1 ? 'all_equal' : 'varied'
+}
+
+function groupAttributeShape(rows) {
+  const fields = ['componentCode', 'componentName', 'material', 'sourceVersion']
+  const presentFields = fields.filter((field) => rows.some((row) => !isBlank(row && row[field])))
+  if (presentFields.length === 0) return 'unknown'
+  return presentFields.every((field) => distinctCount(rows, (row) => row && row[field]) <= 1) ? 'all_equal' : 'varied'
+}
+
+function groupParentShape(rows) {
+  if (!rows.every(hasParentContext)) return 'unknown'
+  return distinctCount(rows, parentContextKey) <= 1 ? 'same_parent' : 'cross_parent'
+}
+
+function hasDistinctStableDiscriminator(rows, fields) {
+  if (!allValuesPresent(rows, (row) => firstPresent(row, fields))) return false
+  return distinctCount(rows, (row) => firstPresent(row, fields)) === rows.length
+}
+
+function duplicateExpandedGroupDiagnostic(key, rows, index) {
+  const parentShape = groupParentShape(rows)
+  const quantityShape = groupQuantityShape(rows)
+  const attributeShape = groupAttributeShape(rows)
+  const sourceDetail = hasDistinctStableDiscriminator(rows, DUPLICATE_SOURCE_DETAIL_FIELDS)
+  const sortLine = hasDistinctStableDiscriminator(rows, DUPLICATE_SORT_LINE_FIELDS)
+  const pathParent = parentShape === 'cross_parent'
+  return {
+    ordinal: index + 1,
+    fingerprint: stableFingerprint(key),
+    rowCount: rows.length,
+    parentShape,
+    quantityShape,
+    attributeShape,
+    stableDiscriminators: {
+      sourceDetail,
+      pathParent,
+      sortLine,
+      any: sourceDetail || pathParent || sortLine,
+    },
+    recommendedDefault: 'hold',
+    allowedPolicies: DUPLICATE_EXPANDED_KEY_POLICIES.slice(),
+  }
+}
+
+function increment(map, key) {
+  map.set(key, (map.get(key) || 0) + 1)
+}
+
+function sortedDistribution(map, keyName) {
+  return Array.from(map.entries())
+    .map(([key, count]) => ({ [keyName]: key, groups: count }))
+    .sort((left, right) => Number(left[keyName]) - Number(right[keyName]))
+}
+
+function shapeCounts(groups, field) {
+  const out = {}
+  for (const group of groups) out[group[field]] = (out[group[field]] || 0) + 1
+  return out
+}
+
+function duplicateExpandedKeyDiagnostics(groupedRows) {
+  const groups = []
+  const distribution = new Map()
+  for (const [key, rows] of groupedRows.entries()) {
+    if (rows.length <= 1) continue
+    increment(distribution, rows.length)
+    groups.push(duplicateExpandedGroupDiagnostic(key, rows, groups.length))
+  }
+  if (groups.length === 0) return undefined
+  return {
+    conflictType: 'duplicate_expanded_key',
+    groupCount: groups.length,
+    rowCount: groups.reduce((sum, group) => sum + group.rowCount, 0),
+    rowsPerGroup: sortedDistribution(distribution, 'rowCount'),
+    parentShapeCounts: shapeCounts(groups, 'parentShape'),
+    quantityShapeCounts: shapeCounts(groups, 'quantityShape'),
+    attributeShapeCounts: shapeCounts(groups, 'attributeShape'),
+    stableDiscriminatorCounts: {
+      any: groups.filter((group) => group.stableDiscriminators.any).length,
+      sourceDetail: groups.filter((group) => group.stableDiscriminators.sourceDetail).length,
+      pathParent: groups.filter((group) => group.stableDiscriminators.pathParent).length,
+      sortLine: groups.filter((group) => group.stableDiscriminators.sortLine).length,
+    },
+    defaultPolicy: 'hold',
+    allowedPolicies: DUPLICATE_EXPANDED_KEY_POLICIES.slice(),
+    groups,
+  }
 }
 
 function changedFields(nextRow, existingRow, fields, templateFields = new Map()) {
@@ -480,6 +652,7 @@ function planStockPreparationConflicts(input = {}) {
       humanPreservedFields: humanFields.slice(),
       plmSystemFields: plmFields.slice(),
       conflictTypes: Array.from(new Set(decisions.map((decision) => decision.conflictSummary && decision.conflictSummary.type).filter(Boolean))).sort(),
+      duplicateExpandedKeyDiagnostics: duplicateExpandedKeyDiagnostics(expanded.keyed),
     },
   }
 }
@@ -497,6 +670,9 @@ function summarizeConflictPlanForEvidence(plan = {}) {
     humanPreservedFields: Array.isArray(summary.humanPreservedFields) ? summary.humanPreservedFields.slice() : [],
     plmSystemFields: Array.isArray(summary.plmSystemFields) ? summary.plmSystemFields.slice() : [],
     conflictTypes: Array.isArray(summary.conflictTypes) ? summary.conflictTypes.slice() : [],
+    duplicateExpandedKeyDiagnostics: isPlainObject(summary.duplicateExpandedKeyDiagnostics)
+      ? JSON.parse(JSON.stringify(summary.duplicateExpandedKeyDiagnostics))
+      : undefined,
   }
 }
 
@@ -517,6 +693,7 @@ module.exports = {
     normalizeComparableValueForField,
     plmRefreshFieldIds,
     sameStringSet,
+    stableFingerprint,
     valuesEqual,
     valuesEqualForTemplateField,
   },

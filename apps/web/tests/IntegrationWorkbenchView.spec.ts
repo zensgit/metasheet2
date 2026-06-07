@@ -2643,6 +2643,140 @@ describe('IntegrationWorkbenchView', () => {
     expect(applyBodies).toHaveLength(0)
   })
 
+  it('D1 duplicate-expanded-key: renders values-free grouped duplicate diagnostics', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    const applyBodies: Array<Record<string, unknown>> = []
+    const publicAction = {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      kind: 'parameterized_table_action',
+      label: 'PLM project BOM -> stock preparation',
+      configured: true,
+      parameters: [{ id: 'projectNo', label: 'Project number', type: 'string', required: true }],
+      permissions: { dryRun: 'read', apply: 'write' },
+      evidence: { valuesFreeIssueEvidence: true },
+    }
+    const duplicateDiagnostics = {
+      conflictType: 'duplicate_expanded_key',
+      groupCount: 2,
+      rowCount: 4,
+      rowsPerGroup: [{ rowCount: 2, groups: 2 }],
+      parentShapeCounts: { same_parent: 1, cross_parent: 1 },
+      quantityShapeCounts: { all_equal: 1, varied: 1 },
+      attributeShapeCounts: { all_equal: 2 },
+      stableDiscriminatorCounts: { any: 2, sourceDetail: 1, pathParent: 1, sortLine: 1 },
+      defaultPolicy: 'hold',
+      allowedPolicies: ['hold', 'keep_multiple_rows', 'merge_quantity', 'skip_selected', 'source_correction_required'],
+      groups: [
+        {
+          ordinal: 1,
+          fingerprint: 'sha16:1111222233334444',
+          rowCount: 2,
+          parentShape: 'same_parent',
+          quantityShape: 'varied',
+          attributeShape: 'all_equal',
+          stableDiscriminators: { any: true, sortLine: true },
+        },
+        {
+          ordinal: 2,
+          fingerprint: 'sha16:aaaabbbbccccdddd',
+          rowCount: 2,
+          parentShape: 'cross_parent',
+          quantityShape: 'all_equal',
+          attributeShape: 'all_equal',
+          stableDiscriminators: { any: true, sourceDetail: true, pathParent: true },
+        },
+      ],
+    }
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([publicAction])
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run?tenantId=default') {
+        return jsonResponse({
+          action: publicAction,
+          status: 'manual_confirm_required',
+          dryRunToken: 'duplicate-dry-token',
+          revision: 'dup-rev-1',
+          canApply: true,
+          counts: { add: 190, update: 0, skip: 190, inactive: 0, manual_confirm: 2 },
+          evidence: {
+            actionId: publicAction.actionId,
+            projectNoPresent: true,
+            dryRunRevision: 'dup-rev-1',
+            expansion: { status: 'expanded', rowsExpanded: 246, errorTypes: [] },
+            plan: {
+              counts: { add: 190, update: 0, skip: 190, inactive: 0, manual_confirm: 2 },
+              conflictTypes: ['duplicate_expanded_key'],
+              duplicateExpandedKeyDiagnostics: duplicateDiagnostics,
+            },
+          },
+        })
+      }
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/apply?tenantId=default') {
+        applyBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({ status: 'should-not-run' })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(12)
+
+    const projectInput = container.querySelector('[data-testid="table-action-project-no"]') as HTMLInputElement
+    projectInput.value = 'P-DUP'
+    projectInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="table-action-dry-run"]') as HTMLButtonElement).click()
+    await flushUi(10)
+
+    const status = container.querySelector('.integration-workbench__status')?.textContent || ''
+    expect(status).toContain('2 个重复分组需要 review')
+    const block = container.querySelector('[data-testid="table-action-duplicate-diagnostics"]')?.textContent || ''
+    expect(block).toContain('重复行分组待处理')
+    expect(block).toContain('groups 2')
+    expect(block).toContain('rows 4')
+    expect(block).toContain('sameParent 1')
+    expect(block).toContain('crossParent 1')
+    expect(block).toContain('quantityVaried 1')
+    expect(block).toContain('stableDiscriminator 2')
+    expect(block).toContain('keep_multiple_rows')
+    expect(block).toContain('merge_quantity')
+    expect(block).toContain('skip_selected')
+    expect(block).toContain('sha16:1111222233334444')
+    expect(block).toContain('same_parent')
+    expect(block).toContain('cross_parent')
+    expect(block).not.toContain('P-DUP')
+    expect(block).not.toContain('PART-DUP')
+    expect(block).not.toContain('Secret Alloy')
+    expect(block).not.toContain('DETAIL-A')
+
+    const evidence = container.querySelector('[data-testid="table-action-evidence"]')?.textContent || ''
+    expect(evidence).toContain('duplicate_expanded_key')
+    expect(evidence).toContain('sha16:aaaabbbbccccdddd')
+    expect(evidence).not.toContain('P-DUP')
+    expect(evidence).not.toContain('PART-DUP')
+    expect(evidence).not.toContain('Secret Alloy')
+    expect(evidence).not.toContain('DETAIL-A')
+    expect(container.querySelector('[data-testid="table-action-panel"]')?.textContent).not.toContain('duplicate-dry-token')
+    const applyButton = container.querySelector('[data-testid="table-action-apply"]') as HTMLButtonElement
+    expect(applyButton.disabled).toBe(true)
+    applyButton.click()
+    await flushUi()
+    expect(applyBodies).toHaveLength(0)
+  })
+
   it('C2 large-BOM: renders bounded dry-run state as non-authoritative and blocks apply', async () => {
     localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
     const dryRunBodies: Array<Record<string, unknown>> = []
