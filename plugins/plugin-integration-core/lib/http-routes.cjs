@@ -1366,10 +1366,12 @@ function createHandlers(services, options = {}) {
         parameters: body.parameters,
         dryRunToken: confirm.dryRunToken,
         acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
+        acceptDuplicateResolution: confirm.acceptDuplicateResolution === true,
         permission: applyPermissionForUser(user),
         sourceAdapter,
         recordsApi: getMultitableRecordsApi(),
         tokenStore: context.storage,
+        policyStore: context.storage,
       }))
     },
 

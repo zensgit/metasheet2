@@ -1019,6 +1019,7 @@ export interface IntegrationTableActionDryRunResult {
   evidence?: Record<string, unknown> & {
     plan?: {
       duplicateExpandedKeyDiagnostics?: Record<string, unknown>
+      duplicateExpandedKeyResolution?: Record<string, unknown>
       conflictPolicyReview?: Record<string, unknown>
       [key: string]: unknown
     }
@@ -1040,6 +1041,7 @@ export interface IntegrationTableActionRequestPayload {
   confirm?: {
     dryRunToken?: string
     acceptManualConfirmHold?: boolean
+    acceptDuplicateResolution?: boolean
   }
 }
 

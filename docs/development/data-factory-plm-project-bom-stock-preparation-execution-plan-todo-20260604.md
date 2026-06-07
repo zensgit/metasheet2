@@ -766,7 +766,7 @@ Acceptance locks:
   `skip_selected`, and `source_correction_required` are displayed as candidates
   only; no writer infers or applies them.
 
-### 🟡 Duplicate-expanded-key D2 - run/table-scoped policy review (ACTIVE - this PR)
+### ✅ Duplicate-expanded-key D2 - run/table-scoped policy review (DONE - PR #2368, `1bcbfdc97`)
 
 Gated on: Duplicate D1 + explicit opt-in.
 
@@ -800,6 +800,50 @@ Acceptance locks:
   approver identity, credentials, tokens, payloads, or raw SQL.
 - A pending run-only choice requires a fresh dry-run before Apply can be
   enabled.
+
+### 🟡 Duplicate-expanded-key D3 - keep-multiple resolver + reviewed apply (ACTIVE - this PR)
+
+Gated on: Duplicate D2 + explicit opt-in.
+
+Scope:
+
+- Implement the first executable duplicate policy: `keep_multiple_rows`.
+- Resolve only duplicate groups that have an explicit `keep_multiple_rows`
+  policy and a stable row discriminator.
+- Use surgical idempotency keys only for the resolved collision group rows.
+  Clean rows and already-written clean keys keep their original key.
+- Carry the default fail-closed posture forward: no policy, unsupported policy,
+  stale fingerprint, missing stable discriminator, duplicate existing target
+  key, or clean-to-collision transition all stay held.
+- Make previously saved `table_scope` policies become active only through a
+  fresh dry-run that explicitly reports the resolved group count before apply.
+- Require a fresh dry-run token and explicit duplicate-resolution
+  acknowledgement before applying any resolved duplicate groups.
+
+Acceptance locks:
+
+- `keep_multiple_rows` is the only policy that can change C3 decisions in D3.
+  `merge_quantity`, `select_representative`, `skip_selected`, and
+  `source_correction_required` remain review-only/held.
+- A stored `table_scope` policy must not silently activate. The next dry-run
+  must values-free report how many groups it resolves, split by table/run
+  scope, before Apply can proceed.
+- Surgical keys apply only to rows inside the resolved collision group.
+  Non-collision rows preserve their original `idempotencyKey`.
+- Clean-to-collision transitions default to hold. D3 must not silently re-key,
+  orphan, deactivate, or duplicate a row that was previously written under the
+  clean/base key.
+- Apply recomputes from the reviewed dry-run token. Run-only policy choices are
+  token-bound; table-scope policy changes after dry-run invalidate the token.
+- Resolved duplicate groups require an explicit apply acknowledgement; a token
+  alone is not enough.
+- Public evidence remains values-free: fingerprints, policies, scopes,
+  discriminator type, counts, and hold reasons only. It must not expose project
+  number, raw idempotency key, component values, parent/path values,
+  discriminator values, target sheet id, field id, credentials, tokens,
+  payloads, or raw SQL.
+- No PLM write, external database write, K3 path, migration, package, or new
+  policy execution beyond `keep_multiple_rows`.
 
 ## Deferred tracks
 

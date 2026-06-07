@@ -1,8 +1,8 @@
 'use strict'
 
-// #2343 D2: duplicate-expanded-key policy review/persistence.
-// This module records operator/admin policy intent only. It never changes C3
-// planner decisions or C4 writes; duplicate rows stay manual_confirm held.
+// #2343 D2/D3: duplicate-expanded-key policy review/persistence.
+// This module records operator/admin policy intent only. The D3 planner decides
+// whether a reviewed policy can resolve rows; this module never writes.
 
 const crypto = require('node:crypto')
 

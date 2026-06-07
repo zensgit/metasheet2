@@ -378,6 +378,201 @@ function duplicateExpandedKeyDiagnostics(groupedRows) {
   }
 }
 
+function duplicateExpandedKeyDiagnosticsForRows(rows) {
+  return duplicateExpandedKeyDiagnostics(groupByKey(normalizeRows(rows, 'expandedRows')).keyed)
+}
+
+function duplicatePolicySelections(review) {
+  const selections = new Map()
+  const rows = isPlainObject(review) && Array.isArray(review.selectedPolicies)
+    ? review.selectedPolicies
+    : []
+  for (const row of rows) {
+    if (!isPlainObject(row)) continue
+    if (typeof row.fingerprint !== 'string' || typeof row.policy !== 'string') continue
+    selections.set(row.fingerprint, {
+      policy: row.policy,
+      scope: typeof row.scope === 'string' ? row.scope : 'default',
+    })
+  }
+  return selections
+}
+
+function duplicateGroupDiscriminator(rows) {
+  if (hasDistinctStableDiscriminator(rows, DUPLICATE_SOURCE_DETAIL_FIELDS)) {
+    return {
+      kind: 'sourceDetail',
+      valueForRow: (row) => firstPresent(row, DUPLICATE_SOURCE_DETAIL_FIELDS),
+    }
+  }
+  if (rows.every(hasParentContext) && distinctCount(rows, parentContextKey) === rows.length) {
+    return {
+      kind: 'pathParent',
+      valueForRow: parentContext,
+    }
+  }
+  if (hasDistinctStableDiscriminator(rows, DUPLICATE_SORT_LINE_FIELDS)) {
+    return {
+      kind: 'sortLine',
+      valueForRow: (row) => firstPresent(row, DUPLICATE_SORT_LINE_FIELDS),
+    }
+  }
+  return null
+}
+
+function duplicateResolvedKey(baseKey, groupFingerprint, discriminatorKind, discriminatorValue) {
+  const discriminatorHash = stableFingerprint(`${groupFingerprint}\0${discriminatorKind}\0${stableStringify(stableValue(discriminatorValue))}`)
+  return `${baseKey}::duplicate:${discriminatorKind}:${discriminatorHash}`
+}
+
+function emptyDuplicateResolutionSummary() {
+  return {
+    conflictType: 'duplicate_expanded_key',
+    resolvedPolicy: 'keep_multiple_rows',
+    resolvedGroupCount: 0,
+    resolvedRowCount: 0,
+    heldGroupCount: 0,
+    heldRowCount: 0,
+    tableScopeResolvedGroupCount: 0,
+    runOnlyResolvedGroupCount: 0,
+    heldReasonCounts: {},
+    resolvedPolicies: [],
+    heldPolicies: [],
+  }
+}
+
+function addHeldDuplicateResolution(summary, { fingerprint, rows, policy, scope, reason }) {
+  summary.heldGroupCount += 1
+  summary.heldRowCount += rows.length
+  summary.heldReasonCounts[reason] = (summary.heldReasonCounts[reason] || 0) + 1
+  summary.heldPolicies.push({
+    fingerprint,
+    policy,
+    scope,
+    reason,
+    rowCount: rows.length,
+  })
+}
+
+function addResolvedDuplicateResolution(summary, { fingerprint, rows, policy, scope, discriminatorKind }) {
+  summary.resolvedGroupCount += 1
+  summary.resolvedRowCount += rows.length
+  if (scope === 'table_scope') summary.tableScopeResolvedGroupCount += 1
+  if (scope === 'run_only') summary.runOnlyResolvedGroupCount += 1
+  summary.resolvedPolicies.push({
+    fingerprint,
+    policy,
+    scope,
+    discriminator: discriminatorKind,
+    rowCount: rows.length,
+    writeEffect: 'add_decisions',
+  })
+}
+
+function compactDuplicateResolutionSummary(summary) {
+  if (!summary || (summary.resolvedGroupCount === 0 && summary.heldGroupCount === 0)) return undefined
+  const out = {
+    conflictType: summary.conflictType,
+    resolvedPolicy: summary.resolvedPolicy,
+    resolvedGroupCount: summary.resolvedGroupCount,
+    resolvedRowCount: summary.resolvedRowCount,
+    heldGroupCount: summary.heldGroupCount,
+    heldRowCount: summary.heldRowCount,
+    tableScopeResolvedGroupCount: summary.tableScopeResolvedGroupCount,
+    runOnlyResolvedGroupCount: summary.runOnlyResolvedGroupCount,
+    heldReasonCounts: { ...summary.heldReasonCounts },
+  }
+  if (summary.resolvedPolicies.length) out.resolvedPolicies = summary.resolvedPolicies.map((row) => ({ ...row }))
+  if (summary.heldPolicies.length) out.heldPolicies = summary.heldPolicies.map((row) => ({ ...row }))
+  return out
+}
+
+function resolveDuplicateExpandedRows({ expandedKeyed, existingKeyed, duplicatePolicyReview }) {
+  const selections = duplicatePolicySelections(duplicatePolicyReview)
+  const keyed = new Map()
+  const duplicateExpandedKeys = new Set()
+  const resolution = emptyDuplicateResolutionSummary()
+
+  for (const [key, rows] of expandedKeyed.entries()) {
+    if (rows.length <= 1) {
+      keyed.set(key, rows)
+      continue
+    }
+
+    const fingerprint = stableFingerprint(key)
+    const selected = selections.get(fingerprint) || { policy: 'hold', scope: 'default' }
+    if (selected.policy !== 'keep_multiple_rows') {
+      duplicateExpandedKeys.add(key)
+      addHeldDuplicateResolution(resolution, {
+        fingerprint,
+        rows,
+        policy: selected.policy,
+        scope: selected.scope,
+        reason: selected.policy === 'hold' ? 'default_hold' : 'unsupported_policy',
+      })
+      continue
+    }
+
+    if (existingKeyed.has(key)) {
+      duplicateExpandedKeys.add(key)
+      addHeldDuplicateResolution(resolution, {
+        fingerprint,
+        rows,
+        policy: selected.policy,
+        scope: selected.scope,
+        reason: 'clean_to_collision_requires_review',
+      })
+      continue
+    }
+
+    const discriminator = duplicateGroupDiscriminator(rows)
+    if (!discriminator) {
+      duplicateExpandedKeys.add(key)
+      addHeldDuplicateResolution(resolution, {
+        fingerprint,
+        rows,
+        policy: selected.policy,
+        scope: selected.scope,
+        reason: 'missing_stable_discriminator',
+      })
+      continue
+    }
+
+    const resolvedRows = rows.map((row) => {
+      const discriminatorValue = discriminator.valueForRow(row)
+      const resolvedKey = duplicateResolvedKey(key, fingerprint, discriminator.kind, discriminatorValue)
+      return { ...row, idempotencyKey: resolvedKey }
+    })
+    const uniqueResolvedKeys = new Set(resolvedRows.map((row) => row.idempotencyKey))
+    if (uniqueResolvedKeys.size !== rows.length) {
+      duplicateExpandedKeys.add(key)
+      addHeldDuplicateResolution(resolution, {
+        fingerprint,
+        rows,
+        policy: selected.policy,
+        scope: selected.scope,
+        reason: 'non_unique_resolved_key',
+      })
+      continue
+    }
+
+    for (const row of resolvedRows) keyed.set(row.idempotencyKey, [row])
+    addResolvedDuplicateResolution(resolution, {
+      fingerprint,
+      rows,
+      policy: selected.policy,
+      scope: selected.scope,
+      discriminatorKind: discriminator.kind,
+    })
+  }
+
+  return {
+    keyed,
+    duplicateExpandedKeys,
+    resolution: compactDuplicateResolutionSummary(resolution),
+  }
+}
+
 function changedFields(nextRow, existingRow, fields, templateFields = new Map()) {
   return fields.filter((field) => !valuesEqualForTemplateField(nextRow[field], existingRow[field], templateFields.get(field)))
 }
@@ -522,6 +717,11 @@ function planStockPreparationConflicts(input = {}) {
 
   const expanded = groupByKey(expandedRows)
   const existing = groupByKey(existingRows)
+  const resolvedExpanded = resolveDuplicateExpandedRows({
+    expandedKeyed: expanded.keyed,
+    existingKeyed: existing.keyed,
+    duplicatePolicyReview: input.duplicatePolicyReview,
+  })
 
   for (const row of expanded.missing) {
     manualConfirm(decisions, counts, {
@@ -547,10 +747,10 @@ function planStockPreparationConflicts(input = {}) {
     })
   }
 
-  const duplicateExpandedKeys = new Set()
-  for (const [key, rows] of expanded.keyed.entries()) {
+  const duplicateExpandedKeys = resolvedExpanded.duplicateExpandedKeys
+  for (const key of duplicateExpandedKeys) {
+    const rows = expanded.keyed.get(key) || []
     if (rows.length > 1) {
-      duplicateExpandedKeys.add(key)
       manualConfirm(decisions, counts, {
         idempotencyKey: key,
         type: 'duplicate_expanded_key',
@@ -572,7 +772,7 @@ function planStockPreparationConflicts(input = {}) {
     }
   }
 
-  for (const [key, rows] of expanded.keyed.entries()) {
+  for (const [key, rows] of resolvedExpanded.keyed.entries()) {
     if (duplicateExpandedKeys.has(key) || duplicateExistingKeys.has(key)) continue
     const row = rows[0]
     const existingGroup = existing.keyed.get(key)
@@ -623,7 +823,7 @@ function planStockPreparationConflicts(input = {}) {
   }
 
   for (const [key, rows] of existing.keyed.entries()) {
-    if (expanded.keyed.has(key) || duplicateExistingKeys.has(key)) continue
+    if (expanded.keyed.has(key) || resolvedExpanded.keyed.has(key) || duplicateExistingKeys.has(key)) continue
     const existingRow = rows[0]
     if (existingRow.active === false) {
       addDecision(decisions, counts, {
@@ -653,6 +853,7 @@ function planStockPreparationConflicts(input = {}) {
       plmSystemFields: plmFields.slice(),
       conflictTypes: Array.from(new Set(decisions.map((decision) => decision.conflictSummary && decision.conflictSummary.type).filter(Boolean))).sort(),
       duplicateExpandedKeyDiagnostics: duplicateExpandedKeyDiagnostics(expanded.keyed),
+      duplicateExpandedKeyResolution: resolvedExpanded.resolution,
     },
   }
 }
@@ -673,6 +874,9 @@ function summarizeConflictPlanForEvidence(plan = {}) {
     duplicateExpandedKeyDiagnostics: isPlainObject(summary.duplicateExpandedKeyDiagnostics)
       ? JSON.parse(JSON.stringify(summary.duplicateExpandedKeyDiagnostics))
       : undefined,
+    duplicateExpandedKeyResolution: isPlainObject(summary.duplicateExpandedKeyResolution)
+      ? JSON.parse(JSON.stringify(summary.duplicateExpandedKeyResolution))
+      : undefined,
   }
 }
 
@@ -683,10 +887,14 @@ module.exports = {
   IDENTITY_FIELD_IDS,
   DUPLICATE_EXPANDED_KEY_POLICIES,
   StockPreparationConflictPlannerError,
+  duplicateExpandedKeyDiagnosticsForRows,
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
   __internals: {
     changedFields,
+    duplicateExpandedKeyDiagnosticsForRows,
+    duplicateGroupDiscriminator,
+    duplicateResolvedKey,
     fieldMapForTemplate,
     groupByKey,
     normalizeStrategy,

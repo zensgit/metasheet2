@@ -785,7 +785,7 @@
                 <strong>重复行分组待处理</strong>
                 <span class="integration-workbench__badge" data-status="warning">manual_confirm</span>
               </div>
-              <p>重复行不会被自动挑选、合并或写入；下方仅展示 values-free 分组诊断，策略应用仍需后续显式确认。</p>
+              <p>重复行策略只在 fresh dry-run evidence 中生效；已解决的分组仍需本次显式确认后才能 apply，未解决分组保持不写。</p>
               <div class="integration-workbench__metric-row">
                 <span v-for="metric in tableActionDuplicateMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
               </div>
@@ -793,7 +793,7 @@
                 policies: {{ tableActionDuplicatePolicies.join(', ') }}
               </p>
               <p class="integration-workbench__hint" data-testid="table-action-duplicate-policy-scope">
-                本表已保存策略 {{ tableActionStoredConflictPolicyCount }} 条；未选择时默认 hold。任何策略选择都不会自动写入重复行。
+                本表已保存策略 {{ tableActionStoredConflictPolicyCount }} 条；本次 dry-run 已解决 {{ tableActionResolvedDuplicateGroupCount }} 组，仍 hold {{ tableActionHeldDuplicateGroupCount }} 组；未选择时默认 hold。
               </p>
               <ul v-if="tableActionDuplicateGroups.length" class="integration-workbench__mini-list">
                 <li v-for="group in tableActionDuplicateGroups" :key="group.fingerprint">
@@ -813,7 +813,7 @@
                         </option>
                       </select>
                     </label>
-                    <span class="integration-workbench__hint">当前 {{ group.currentPolicy }} · {{ group.currentScope }} · 仍 held</span>
+                    <span class="integration-workbench__hint">当前 {{ group.currentPolicy }} · {{ group.currentScope }} · {{ group.resolutionLabel }}</span>
                     <button
                       type="button"
                       class="integration-workbench__button"
@@ -852,6 +852,10 @@
             <label v-if="tableActionManualConfirmCount > 0" class="integration-workbench__inline-check">
               <input v-model="tableActionAcceptManualConfirmHold" type="checkbox" data-testid="table-action-accept-manual-hold" />
               <span>确认 manual_confirm 行保持不写，只应用 clean add/update/inactive 决策。</span>
+            </label>
+            <label v-if="tableActionResolvedDuplicateGroupCount > 0" class="integration-workbench__inline-check">
+              <input v-model="tableActionAcceptDuplicateResolution" type="checkbox" data-testid="table-action-accept-duplicate-resolution" />
+              <span>确认已复核本次自动解决的重复分组，只应用 dry-run evidence 中列出的解决结果。</span>
             </label>
           </div>
           <div v-if="tableActionApplyResult" class="integration-workbench__table-action-review" data-testid="table-action-apply-result">
@@ -1286,6 +1290,7 @@ interface DuplicateExpandedGroupView {
   currentPolicy: string
   currentScope: string
   draftPolicy: string
+  resolutionLabel: string
 }
 
 interface ConnectionDraft {
@@ -1412,6 +1417,7 @@ const runningTableAction = ref<'dry-run' | 'apply' | ''>('')
 const tableActionDryRunResult = ref<IntegrationTableActionDryRunResult | null>(null)
 const tableActionApplyResult = ref<IntegrationTableActionApplyResult | null>(null)
 const tableActionAcceptManualConfirmHold = ref(false)
+const tableActionAcceptDuplicateResolution = ref(false)
 const tableActionDuplicatePolicyDrafts = ref<Record<string, string>>({})
 const tableActionDuplicateRunPolicies = ref<Record<string, string>>({})
 const tableActionTableScopePolicies = ref<IntegrationTableActionConflictPolicyResult | null>(null)
@@ -2043,6 +2049,31 @@ const tableActionConflictPolicySelections = computed(() => {
   }
   return out
 })
+const tableActionDuplicateResolution = computed(() => {
+  const resolution = tableActionPlanEvidence.value && isRecord(tableActionPlanEvidence.value.duplicateExpandedKeyResolution)
+    ? tableActionPlanEvidence.value.duplicateExpandedKeyResolution
+    : null
+  return resolution && resolution.conflictType === 'duplicate_expanded_key' ? resolution : null
+})
+const tableActionDuplicateResolutionSelections = computed(() => {
+  const resolution = tableActionDuplicateResolution.value
+  const out = new Map<string, { label: string }>()
+  const resolvedRows = Array.isArray(resolution?.resolvedPolicies) ? resolution.resolvedPolicies.filter(isRecord) : []
+  for (const row of resolvedRows) {
+    if (typeof row.fingerprint !== 'string') continue
+    const discriminator = typeof row.discriminator === 'string' ? row.discriminator : 'stable'
+    out.set(row.fingerprint, { label: `resolved · ${discriminator}` })
+  }
+  const heldRows = Array.isArray(resolution?.heldPolicies) ? resolution.heldPolicies.filter(isRecord) : []
+  for (const row of heldRows) {
+    if (typeof row.fingerprint !== 'string' || out.has(row.fingerprint)) continue
+    const reason = typeof row.reason === 'string' ? row.reason : 'held'
+    out.set(row.fingerprint, { label: `held · ${reason}` })
+  }
+  return out
+})
+const tableActionResolvedDuplicateGroupCount = computed(() => Number(tableActionDuplicateResolution.value?.resolvedGroupCount || 0))
+const tableActionHeldDuplicateGroupCount = computed(() => Number(tableActionDuplicateResolution.value?.heldGroupCount || 0))
 const tableActionStoredConflictPolicyCount = computed(() => Number(tableActionTableScopePolicies.value?.policyCount || 0))
 const tableActionDuplicateGroups = computed<DuplicateExpandedGroupView[]>(() => {
   const diagnostics = tableActionDuplicateDiagnostics.value
@@ -2065,6 +2096,7 @@ const tableActionDuplicateGroups = computed<DuplicateExpandedGroupView[]>(() => 
       currentPolicy: tableActionConflictPolicySelections.value.get(typeof group.fingerprint === 'string' ? group.fingerprint : '')?.policy || 'hold',
       currentScope: tableActionConflictPolicySelections.value.get(typeof group.fingerprint === 'string' ? group.fingerprint : '')?.scope || 'default',
       draftPolicy: tableActionDuplicatePolicyDrafts.value[typeof group.fingerprint === 'string' ? group.fingerprint : ''] || tableActionConflictPolicySelections.value.get(typeof group.fingerprint === 'string' ? group.fingerprint : '')?.policy || 'hold',
+      resolutionLabel: tableActionDuplicateResolutionSelections.value.get(typeof group.fingerprint === 'string' ? group.fingerprint : '')?.label || 'held · default_hold',
     }
   })
 })
@@ -2112,7 +2144,8 @@ const tableActionCanApply = computed(() => Boolean(
   && runningTableAction.value === ''
   && tableActionConflictPolicyDirty.value === false
   && Object.keys(tableActionDuplicateRunPolicies.value).length === 0
-  && (tableActionManualConfirmCount.value === 0 || tableActionAcceptManualConfirmHold.value),
+  && (tableActionManualConfirmCount.value === 0 || tableActionAcceptManualConfirmHold.value)
+  && (tableActionResolvedDuplicateGroupCount.value === 0 || tableActionAcceptDuplicateResolution.value)
 ))
 const tableActionReviewSummary = computed(() => {
   if (!selectedTableAction.value) return '当前部署没有可用表动作。'
@@ -3446,6 +3479,7 @@ function resetTableActionReview(): void {
   tableActionDryRunResult.value = null
   tableActionApplyResult.value = null
   tableActionAcceptManualConfirmHold.value = false
+  tableActionAcceptDuplicateResolution.value = false
   tableActionDuplicatePolicyDrafts.value = {}
   tableActionDuplicateRunPolicies.value = {}
   tableActionConflictPolicySaving.value = ''
@@ -3603,6 +3637,7 @@ async function dryRunTableAction(): Promise<void> {
   tableActionDryRunResult.value = null
   tableActionApplyResult.value = null
   tableActionAcceptManualConfirmHold.value = false
+  tableActionAcceptDuplicateResolution.value = false
   try {
     const result = await dryRunIntegrationTableAction(action.actionId, {
       ...currentScope(),
@@ -3619,8 +3654,15 @@ async function dryRunTableAction(): Promise<void> {
       ? planEvidence.duplicateExpandedKeyDiagnostics
       : null
     const duplicateGroupCount = duplicateDiagnostics ? Number(duplicateDiagnostics.groupCount || 0) : 0
+    const resolution = planEvidence && isRecord(planEvidence.duplicateExpandedKeyResolution)
+      ? planEvidence.duplicateExpandedKeyResolution
+      : null
+    const resolvedDuplicateGroups = Number(resolution?.resolvedGroupCount || 0)
+    const heldDuplicateGroups = Number(resolution?.heldGroupCount || 0)
     const message = isLargeBomBoundedTableActionResult(result)
       ? '表动作 dry-run 返回大 BOM 有界预览；Apply 已阻塞，请走完整展开/后台通道。'
+      : resolvedDuplicateGroups > 0
+      ? `表动作 dry-run 完成：${resolvedDuplicateGroups} 个重复分组已按策略解决，${heldDuplicateGroups} 个仍 hold；请复核后确认 apply。`
       : duplicateGroupCount > 0
       ? `表动作 dry-run 完成：${duplicateGroupCount} 个重复分组需要 review；重复行保持不写。`
       : manualCount > 0
@@ -3657,11 +3699,13 @@ async function applyTableAction(): Promise<void> {
       confirm: {
         dryRunToken: tableActionDryRunToken.value,
         acceptManualConfirmHold: tableActionAcceptManualConfirmHold.value === true,
+        acceptDuplicateResolution: tableActionAcceptDuplicateResolution.value === true,
       },
     })
     tableActionApplyResult.value = result
     tableActionDryRunResult.value = null
     tableActionAcceptManualConfirmHold.value = false
+    tableActionAcceptDuplicateResolution.value = false
     setStatus(`表动作 apply 完成：${result.status}`, result.status === 'failed' ? 'error' : 'success')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')

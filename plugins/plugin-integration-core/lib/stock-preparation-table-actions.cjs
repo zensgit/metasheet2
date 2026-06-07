@@ -15,6 +15,7 @@ const {
 } = require('./stock-preparation-bom-expansion.cjs')
 const {
   DECISIONS,
+  duplicateExpandedKeyDiagnosticsForRows,
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
 } = require('./stock-preparation-conflict-planner.cjs')
@@ -397,7 +398,7 @@ function emptyPlan() {
   }
 }
 
-function buildRevision({ action, parameters, expansion, existingRows }) {
+function buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan }) {
   return hashJson({
     actionId: action.actionId,
     parameters,
@@ -413,7 +414,63 @@ function buildRevision({ action, parameters, expansion, existingRows }) {
       rowErrors: expansion.rowErrors,
     },
     existingRows,
+    conflictPolicyReview: conflictPolicyReview || null,
+    plan: plan
+      ? {
+          counts: plan.counts,
+          valid: plan.valid === true,
+          conflictTypes: plan.summary && plan.summary.conflictTypes,
+          duplicateExpandedKeyResolution: plan.summary && plan.summary.duplicateExpandedKeyResolution,
+        }
+      : null,
   })
+}
+
+function duplicateReviewEffectSummary(resolution) {
+  if (!isPlainObject(resolution) || resolution.conflictType !== 'duplicate_expanded_key') return null
+  const effects = new Map()
+  const resolved = Array.isArray(resolution.resolvedPolicies) ? resolution.resolvedPolicies : []
+  for (const row of resolved) {
+    if (isPlainObject(row) && typeof row.fingerprint === 'string') effects.set(row.fingerprint, 'add_decisions_require_ack')
+  }
+  const held = Array.isArray(resolution.heldPolicies) ? resolution.heldPolicies : []
+  for (const row of held) {
+    if (isPlainObject(row) && typeof row.fingerprint === 'string' && !effects.has(row.fingerprint)) {
+      effects.set(row.fingerprint, 'manual_confirm_held')
+    }
+  }
+  if (effects.size === 0) return null
+  return effects
+}
+
+function conflictPolicyReviewForEvidence(review, plan) {
+  if (!isPlainObject(review)) return review
+  const resolution = plan && plan.summary && plan.summary.duplicateExpandedKeyResolution
+  const effects = duplicateReviewEffectSummary(resolution)
+  if (!effects) return review
+  let resolvedCount = 0
+  let heldCount = 0
+  const selectedPolicies = Array.isArray(review.selectedPolicies)
+    ? review.selectedPolicies.map((row) => {
+        if (!isPlainObject(row) || typeof row.fingerprint !== 'string') return row
+        const writeEffect = effects.get(row.fingerprint)
+        if (!writeEffect) return { ...row }
+        if (writeEffect === 'add_decisions_require_ack') resolvedCount += 1
+        if (writeEffect === 'manual_confirm_held') heldCount += 1
+        return { ...row, writeEffect }
+      })
+    : review.selectedPolicies
+  let writeEffect = review.writeEffect
+  if (resolvedCount > 0 && heldCount > 0) {
+    writeEffect = 'mixed_duplicate_resolution'
+  } else if (resolvedCount > 0) {
+    writeEffect = 'add_decisions_require_ack'
+  }
+  return {
+    ...review,
+    writeEffect,
+    selectedPolicies,
+  }
 }
 
 function tokenStoreKey(token) {
@@ -454,13 +511,13 @@ async function consumeDryRunToken(tokenStore, token, expected) {
   if (!Number.isNaN(expiresAt) && expiresAt < Date.now()) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_INVALID', 'dryRunToken is expired')
   }
-  if (stored.actionId !== expected.actionId || stored.parametersHash !== expected.parametersHash || stored.revision !== expected.revision) {
+  if (stored.actionId !== expected.actionId || stored.parametersHash !== expected.parametersHash || (expected.revision && stored.revision !== expected.revision)) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH', 'dryRunToken does not match the current dry-run revision')
   }
   return stored
 }
 
-async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId }) {
+async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview }) {
   const expansion = await expandPlmProjectBom({
     sourceAdapter,
     projectNo: parameters.projectNo,
@@ -478,7 +535,12 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     return { expansion, existingRows: [], plan: emptyPlan(), revision, canApply: false, hasGlobalErrors }
   }
   const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo)
-  const revision = buildRevision({ action, parameters, expansion, existingRows })
+  const duplicateDiagnostics = duplicateExpandedKeyDiagnosticsForRows(expansion.rows)
+  const conflictPolicyReview = buildConflictPolicyReview({
+    diagnostics: duplicateDiagnostics,
+    runOnlyReview,
+    tableScopeReview,
+  })
   const plan = planStockPreparationConflicts({
     template: action.template,
     conflictStrategy: action.conflictStrategy,
@@ -487,7 +549,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     rowErrors: expansion.rowErrors,
     runId: runId || `table-action:${action.actionId}`,
     plannedAt: plannedAt || new Date().toISOString(),
+    duplicatePolicyReview: conflictPolicyReview,
   })
+  const revision = buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan })
   return {
     expansion,
     existingRows,
@@ -495,12 +559,13 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     revision,
     canApply: !hasGlobalErrors,
     hasGlobalErrors,
+    conflictPolicyReview,
   }
 }
 
 function evidenceForDryRun({ action, parameters, expansion, plan, revision, canApply, conflictPolicyReview }) {
   const planEvidence = summarizeConflictPlanForEvidence(plan)
-  if (planEvidence && conflictPolicyReview) planEvidence.conflictPolicyReview = conflictPolicyReview
+  if (planEvidence && conflictPolicyReview) planEvidence.conflictPolicyReview = conflictPolicyReviewForEvidence(conflictPolicyReview, plan)
   return {
     actionId: action.actionId,
     projectNoPresent: Boolean(parameters.projectNo),
@@ -528,6 +593,9 @@ async function dryRunStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
   const runOnlyReview = normalizeRunOnlyConflictPolicyReview(input.conflictPolicyReview)
+  const tableScopeReview = input.policyStore
+    ? await loadTableScopeConflictPolicies({ action, policyStore: input.policyStore })
+    : null
   const dryRun = await computeDryRun({
     action,
     parameters,
@@ -535,6 +603,8 @@ async function dryRunStockPreparationAction(input = {}) {
     recordsApi: input.recordsApi,
     plannedAt: input.plannedAt,
     runId: input.runId,
+    runOnlyReview,
+    tableScopeReview,
   })
   let dryRunToken = null
   if (dryRun.canApply) {
@@ -542,16 +612,9 @@ async function dryRunStockPreparationAction(input = {}) {
       actionId: action.actionId,
       parametersHash: hashJson(parameters),
       revision: dryRun.revision,
+      conflictPolicyReview: runOnlyReview,
     })
   }
-  const tableScopeReview = input.policyStore
-    ? await loadTableScopeConflictPolicies({ action, policyStore: input.policyStore })
-    : null
-  const conflictPolicyReview = buildConflictPolicyReview({
-    diagnostics: dryRun.plan.summary && dryRun.plan.summary.duplicateExpandedKeyDiagnostics,
-    runOnlyReview,
-    tableScopeReview,
-  })
   return {
     action: publicActionMetadata(action),
     status: dryRunStatus(dryRun),
@@ -568,7 +631,7 @@ async function dryRunStockPreparationAction(input = {}) {
       plan: dryRun.plan,
       revision: dryRun.revision,
       canApply: dryRun.canApply,
-      conflictPolicyReview,
+      conflictPolicyReview: dryRun.conflictPolicyReview,
     }),
   }
 }
@@ -576,6 +639,14 @@ async function dryRunStockPreparationAction(input = {}) {
 async function applyStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
+  const tokenRecord = await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
+    actionId: action.actionId,
+    parametersHash: hashJson(parameters),
+  })
+  const runOnlyReview = normalizeRunOnlyConflictPolicyReview(tokenRecord.conflictPolicyReview)
+  const tableScopeReview = input.policyStore
+    ? await loadTableScopeConflictPolicies({ action, policyStore: input.policyStore })
+    : null
   const dryRun = await computeDryRun({
     action,
     parameters,
@@ -583,17 +654,21 @@ async function applyStockPreparationAction(input = {}) {
     recordsApi: input.recordsApi,
     plannedAt: input.plannedAt,
     runId: input.runId,
+    runOnlyReview,
+    tableScopeReview,
   })
-  await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
-    actionId: action.actionId,
-    parametersHash: hashJson(parameters),
-    revision: dryRun.revision,
-  })
+  if (tokenRecord.revision !== dryRun.revision) {
+    throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH', 'dryRunToken does not match the current dry-run revision')
+  }
   if (!dryRun.canApply) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_NOT_APPLYABLE', 'current dry-run is not applyable')
   }
   if (dryRun.plan.counts[DECISIONS.MANUAL_CONFIRM] > 0 && input.acceptManualConfirmHold !== true) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_MANUAL_CONFIRM_REQUIRED', 'manual-confirm rows require acceptManualConfirmHold=true')
+  }
+  const duplicateResolution = dryRun.plan.summary && dryRun.plan.summary.duplicateExpandedKeyResolution
+  if (duplicateResolution && Number(duplicateResolution.resolvedGroupCount || 0) > 0 && input.acceptDuplicateResolution !== true) {
+    throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DUPLICATE_RESOLUTION_REVIEW_REQUIRED', 'resolved duplicate groups require acceptDuplicateResolution=true')
   }
   const applyResult = await applyStockPreparationPlan({
     permission: input.permission,
@@ -619,6 +694,7 @@ async function applyStockPreparationAction(input = {}) {
         plan: dryRun.plan,
         revision: dryRun.revision,
         canApply: dryRun.canApply,
+        conflictPolicyReview: dryRun.conflictPolicyReview,
       }),
       apply: summarizeApplyResultForEvidence(applyResult),
     },
