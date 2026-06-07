@@ -602,7 +602,7 @@ Acceptance locks:
 - #2343 D1 remains ready but should run after #2342 C0 for large samples,
   because complete expansion is upstream of authoritative duplicate analysis.
 
-### 🟡 Large-BOM C1 - bounded dry-run readiness shape (PR #2361, pending review)
+### ✅ Large-BOM C1 - bounded dry-run readiness shape (DONE - PR #2361, `e096b1a41`)
 
 Gated on: Large-BOM C0 accepted + explicit opt-in.
 
@@ -631,7 +631,7 @@ Acceptance locks:
 - No UI, route shape redesign, background job, checkpoint writer, package,
   PLM write, external database write, K3, or production rollout.
 
-### 🟡 Large-BOM C2 - bounded large-BOM workbench display (PR #2362, pending review)
+### ✅ Large-BOM C2 - bounded large-BOM workbench display (DONE - PR #2362, `a0ff04e91`)
 
 Gated on: Large-BOM C1 response shape + explicit opt-in.
 
@@ -654,7 +654,7 @@ Acceptance locks:
 - The bounded block renders counters/error types only, not project/component
   values or dry-run tokens.
 
-### 🟡 Large-BOM C3 - background full-expansion design (PR #2363, pending review)
+### ✅ Large-BOM C3 - background full-expansion design (DONE - PR #2363, `41c56b7c4`)
 
 Gated on: Large-BOM C0/C1/C2 + explicit opt-in.
 
@@ -686,7 +686,7 @@ Acceptance locks:
 - #2343 duplicate counts on large samples are authoritative only after C3
   completes a full expansion artifact.
 
-### 🟡 Large-BOM C4 - checkpointed apply writer design (ACTIVE - this PR)
+### ✅ Large-BOM C4 - checkpointed apply writer design (DONE - PR #2365, `42eda7ac3`)
 
 Gated on: Large-BOM C3 design accepted + explicit opt-in.
 
@@ -737,7 +737,7 @@ Scope:
 - Lock #2342 dependency: duplicate evidence on large samples is authoritative
   only after complete expansion.
 
-### 🟡 Duplicate-expanded-key D1 - grouped dry-run evidence/UI (ACTIVE - this PR)
+### ✅ Duplicate-expanded-key D1 - grouped dry-run evidence/UI (DONE - PR #2366, `68ea283ef`)
 
 Gated on: Duplicate D0 + Large-BOM C1-C4 chain + explicit opt-in.
 
@@ -765,6 +765,41 @@ Acceptance locks:
 - `keep_multiple_rows`, `merge_quantity`, `select_representative`,
   `skip_selected`, and `source_correction_required` are displayed as candidates
   only; no writer infers or applies them.
+
+### 🟡 Duplicate-expanded-key D2 - run/table-scoped policy review (ACTIVE - this PR)
+
+Gated on: Duplicate D1 + explicit opt-in.
+
+Scope:
+
+- Add a values-free policy-review contract for `duplicate_expanded_key`.
+- Support `run_only` policy choices in the dry-run request body. These choices
+  are bound into the next dry-run evidence only; they do not change C3 decisions
+  or unlock C4 writes.
+- Support admin-only `table_scope` policy persistence with list/save/revoke
+  routes keyed to the server-configured table-action target scope.
+- Render policy selectors in the workbench duplicate review block:
+  “只此次有效” and “保存/撤销本表策略”.
+- Preserve default fail-closed `hold` when no policy is selected or when a saved
+  policy no longer matches the current duplicate fingerprint.
+
+Acceptance locks:
+
+- Duplicate rows remain `manual_confirm` held. D2 must not apply
+  `keep_multiple_rows`, `merge_quantity`, `select_representative`,
+  `skip_selected`, or `source_correction_required`.
+- Apply request bodies continue to reject `conflictPolicyReview`; future
+  duplicate apply must be a separate explicit slice.
+- Table-scope policy save/revoke is admin-only; read/write users cannot persist
+  policies.
+- Policy routes must not load the source adapter, PLM, target records, K3, or
+  external databases.
+- Public evidence exposes only conflict type, deterministic fingerprints,
+  selected policy, scope, counts, and presence flags. It must not expose project
+  number, raw idempotency key, component values, target sheet id, field id,
+  approver identity, credentials, tokens, payloads, or raw SQL.
+- A pending run-only choice requires a fresh dry-run before Apply can be
+  enabled.
 
 ## Deferred tracks
 

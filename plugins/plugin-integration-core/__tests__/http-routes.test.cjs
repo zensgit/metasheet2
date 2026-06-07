@@ -2765,6 +2765,155 @@ async function testTableActionRoutes() {
   assert.equal(JSON.stringify(res.body.data.evidence).includes('A-001'), false, 'apply evidence hides component code')
 }
 
+async function testTableActionConflictPolicyRoutes() {
+  const calls = []
+  const adapterCalls = []
+  const records = createTableActionRecordsApi()
+  const duplicateData = {
+    ...tableActionPlmData(),
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2' },
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '3' },
+    ],
+  }
+  const { services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['createAdapter', system, deps])
+        adapterCalls.push({ system, deps })
+        return createTableActionSourceAdapter(duplicateData, calls)
+      },
+    },
+  })
+  const storage = createMemoryStorage()
+  const { routes } = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage,
+    config: {
+      stockPreparationTableActions: [tableActionConfig()],
+    },
+  })
+
+  let res = await invoke(routes, 'GET', '/api/integration/table-actions/:actionId/conflict-policies', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.scope, 'table_scope')
+  assert.equal(res.body.data.policyCount, 0)
+  assert.equal(calls.length, 0, 'conflict policy list does not load the source adapter')
+  assert.equal(records.calls.length, 0, 'conflict policy list does not read target rows')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'manual_confirm_required')
+  assert.equal(adapterCalls[0].deps.principal, 'user_read')
+  const diagnostics = res.body.data.evidence.plan.duplicateExpandedKeyDiagnostics
+  const fingerprint = diagnostics.groups[0].fingerprint
+  assert.match(fingerprint, /^sha16:[0-9a-f]{16}$/)
+
+  res = await invoke(routes, 'PUT', '/api/integration/table-actions/:actionId/conflict-policies', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: {
+      conflictType: 'duplicate_expanded_key',
+      policies: [{ fingerprint, policy: 'keep_multiple_rows' }],
+    },
+  })
+  assert.equal(res.statusCode, 403, 'write user cannot persist table-scope conflict policy')
+
+  res = await invoke(routes, 'PUT', '/api/integration/table-actions/:actionId/conflict-policies', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: {
+      conflictType: 'duplicate_expanded_key',
+      policies: [{ fingerprint, policy: 'keep_multiple_rows' }],
+    },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.policyCount, 1)
+  assert.equal(res.body.data.policies[0].approvedByPresent, true)
+  assert.equal(JSON.stringify(res.body.data).includes('sheet_stock_configured'), false, 'policy response hides target sheet id')
+  assert.equal(JSON.stringify(res.body.data).includes('user_admin'), false, 'policy response hides approver identity')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: {
+      parameters: { projectNo: 'P-001' },
+      conflictPolicyReview: {
+        conflictType: 'duplicate_expanded_key',
+        scope: 'run_only',
+        policies: [{ fingerprint, policy: 'skip_selected' }],
+      },
+    },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.counts.manual_confirm, 1, 'policy review does not release duplicate rows from manual_confirm')
+  const review = res.body.data.evidence.plan.conflictPolicyReview
+  assert.equal(review.writeEffect, 'manual_confirm_held')
+  assert.equal(review.selectedPolicies[0].policy, 'skip_selected', 'run-only policy overrides table-scope evidence')
+  assert.equal(review.selectedPolicies[0].scope, 'run_only')
+  assert.equal(JSON.stringify(review).includes('P-001'), false, 'policy evidence is values-free')
+  const token = res.body.data.dryRunToken
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/apply', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: {
+      parameters: { projectNo: 'P-001' },
+      confirm: { dryRunToken: token, acceptManualConfirmHold: true },
+      conflictPolicyReview: {
+        conflictType: 'duplicate_expanded_key',
+        scope: 'run_only',
+        policies: [{ fingerprint, policy: 'skip_selected' }],
+      },
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'apply rejects client-supplied conflict policy review')
+
+  res = await invoke(routes, 'DELETE', '/api/integration/table-actions/:actionId/conflict-policies', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: {
+      conflictType: 'duplicate_expanded_key',
+      fingerprints: [],
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'CONFLICT_POLICY_DELETE_EMPTY')
+
+  res = await invoke(routes, 'DELETE', '/api/integration/table-actions/:actionId/conflict-policies', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: {
+      conflictType: 'duplicate_expanded_key',
+      fingerprints: [fingerprint],
+    },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.policyCount, 0)
+}
+
 async function testTableActionRoutesSupportExplicitBridgeSource() {
   const adapterCalls = []
   const records = createTableActionRecordsApi()
@@ -2922,6 +3071,7 @@ async function main() {
   await testStockPreparationTargetProvisioningRoutes()
   await testStockPreparationOptionSyncRoute()
   await testTableActionRoutes()
+  await testTableActionConflictPolicyRoutes()
   await testTableActionRoutesSupportExplicitBridgeSource()
   await testTableActionTargetPreflightBeforeSourceAdapter()
   await testTableActionUnconfiguredFailsClosed()

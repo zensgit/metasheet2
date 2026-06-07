@@ -26,6 +26,9 @@ const ROUTES = [
   ['GET', '/api/integration/table-actions', 'tableActionsList'],
   ['POST', '/api/integration/table-actions/:actionId/dry-run', 'tableActionDryRun'],
   ['POST', '/api/integration/table-actions/:actionId/apply', 'tableActionApply'],
+  ['GET', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesList'],
+  ['PUT', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesSave'],
+  ['DELETE', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesDelete'],
   ['GET', '/api/integration/stock-preparation/target/readiness', 'stockPreparationTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
   ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
@@ -64,6 +67,11 @@ const {
   createStockPreparationTableActionRegistry,
   dryRunStockPreparationAction,
 } = require('./stock-preparation-table-actions.cjs')
+const {
+  deleteTableScopeConflictPolicies,
+  loadTableScopeConflictPolicies,
+  saveTableScopeConflictPolicies,
+} = require('./stock-preparation-conflict-policies.cjs')
 const {
   inspectStockPreparationCanonicalTarget,
   ensureStockPreparationCanonicalTarget,
@@ -317,7 +325,8 @@ function publicRunInput(body = {}) {
   return input
 }
 
-const VALID_TABLE_ACTION_BODY_KEYS = new Set(['parameters', 'confirm'])
+const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
+const VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
 const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
   'tenantId',
@@ -328,12 +337,12 @@ const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
   'configInfo',
 ])
 
-function normalizeTableActionBody(body = {}) {
+function normalizeTableActionBody(body = {}, allowedKeys = VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS) {
   if (!isPlainObject(body)) {
     throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', 'request body must be an object')
   }
   for (const key of Object.keys(body)) {
-    if (!VALID_TABLE_ACTION_BODY_KEYS.has(key)) {
+    if (!allowedKeys.has(key)) {
       throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
     }
   }
@@ -1340,12 +1349,14 @@ function createHandlers(services, options = {}) {
         sourceAdapter,
         recordsApi: getMultitableRecordsApi(),
         tokenStore: context.storage,
+        policyStore: context.storage,
+        conflictPolicyReview: body.conflictPolicyReview,
       }))
     },
 
     async tableActionApply(req, res) {
       const user = requireAccess(req, 'write')
-      const body = normalizeTableActionBody(requestBody(req))
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_APPLY_BODY_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const sourceAdapter = await loadTableActionSourceAdapter(req, action)
@@ -1359,6 +1370,39 @@ function createHandlers(services, options = {}) {
         sourceAdapter,
         recordsApi: getMultitableRecordsApi(),
         tokenStore: context.storage,
+      }))
+    },
+
+    async tableActionConflictPoliciesList(req, res) {
+      requireAccess(req, 'read')
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      return sendOk(res, await loadTableScopeConflictPolicies({
+        action,
+        policyStore: context.storage,
+      }))
+    },
+
+    async tableActionConflictPoliciesSave(req, res) {
+      requireAccess(req, 'admin')
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      return sendOk(res, await saveTableScopeConflictPolicies({
+        action,
+        policyStore: context.storage,
+        request: requestBody(req),
+        approver: requestPrincipal(req),
+      }))
+    },
+
+    async tableActionConflictPoliciesDelete(req, res) {
+      requireAccess(req, 'admin')
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      return sendOk(res, await deleteTableScopeConflictPolicies({
+        action,
+        policyStore: context.storage,
+        request: requestBody(req),
       }))
     },
 

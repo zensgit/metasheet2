@@ -19,6 +19,11 @@ const {
   summarizeConflictPlanForEvidence,
 } = require('./stock-preparation-conflict-planner.cjs')
 const {
+  buildConflictPolicyReview,
+  loadTableScopeConflictPolicies,
+  normalizeRunOnlyConflictPolicyReview,
+} = require('./stock-preparation-conflict-policies.cjs')
+const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
@@ -493,14 +498,16 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
   }
 }
 
-function evidenceForDryRun({ action, parameters, expansion, plan, revision, canApply }) {
+function evidenceForDryRun({ action, parameters, expansion, plan, revision, canApply, conflictPolicyReview }) {
+  const planEvidence = summarizeConflictPlanForEvidence(plan)
+  if (planEvidence && conflictPolicyReview) planEvidence.conflictPolicyReview = conflictPolicyReview
   return {
     actionId: action.actionId,
     projectNoPresent: Boolean(parameters.projectNo),
     dryRunRevision: revision,
     canApply: canApply === true,
     expansion: summarizeBomExpansionForEvidence(expansion),
-    plan: summarizeConflictPlanForEvidence(plan),
+    plan: planEvidence,
   }
 }
 
@@ -520,6 +527,7 @@ function dryRunStatus(dryRun) {
 async function dryRunStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
+  const runOnlyReview = normalizeRunOnlyConflictPolicyReview(input.conflictPolicyReview)
   const dryRun = await computeDryRun({
     action,
     parameters,
@@ -536,6 +544,14 @@ async function dryRunStockPreparationAction(input = {}) {
       revision: dryRun.revision,
     })
   }
+  const tableScopeReview = input.policyStore
+    ? await loadTableScopeConflictPolicies({ action, policyStore: input.policyStore })
+    : null
+  const conflictPolicyReview = buildConflictPolicyReview({
+    diagnostics: dryRun.plan.summary && dryRun.plan.summary.duplicateExpandedKeyDiagnostics,
+    runOnlyReview,
+    tableScopeReview,
+  })
   return {
     action: publicActionMetadata(action),
     status: dryRunStatus(dryRun),
@@ -552,6 +568,7 @@ async function dryRunStockPreparationAction(input = {}) {
       plan: dryRun.plan,
       revision: dryRun.revision,
       canApply: dryRun.canApply,
+      conflictPolicyReview,
     }),
   }
 }

@@ -2777,6 +2777,175 @@ describe('IntegrationWorkbenchView', () => {
     expect(applyBodies).toHaveLength(0)
   })
 
+  it('D2 duplicate-expanded-key: binds run-only and table-scoped policy choices without apply payloads', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:admin', 'integration:write']))
+    const dryRunBodies: Array<Record<string, unknown>> = []
+    const saveBodies: Array<Record<string, unknown>> = []
+    const deleteBodies: Array<Record<string, unknown>> = []
+    const applyBodies: Array<Record<string, unknown>> = []
+    const publicAction = {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      kind: 'parameterized_table_action',
+      label: 'PLM project BOM -> stock preparation',
+      configured: true,
+      parameters: [{ id: 'projectNo', label: 'Project number', type: 'string', required: true }],
+      permissions: { dryRun: 'read', apply: 'write' },
+      evidence: { valuesFreeIssueEvidence: true },
+    }
+    const duplicateDiagnostics = {
+      conflictType: 'duplicate_expanded_key',
+      groupCount: 1,
+      rowCount: 2,
+      rowsPerGroup: [{ rowCount: 2, groups: 1 }],
+      parentShapeCounts: { same_parent: 1 },
+      quantityShapeCounts: { varied: 1 },
+      attributeShapeCounts: { all_equal: 1 },
+      stableDiscriminatorCounts: { any: 1, sourceDetail: 0, pathParent: 1, sortLine: 0 },
+      defaultPolicy: 'hold',
+      allowedPolicies: ['hold', 'keep_multiple_rows', 'merge_quantity', 'skip_selected', 'source_correction_required'],
+      groups: [{
+        ordinal: 1,
+        fingerprint: 'sha16:1111222233334444',
+        rowCount: 2,
+        parentShape: 'same_parent',
+        quantityShape: 'varied',
+        attributeShape: 'all_equal',
+        stableDiscriminators: { any: true, pathParent: true },
+      }],
+    }
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([publicAction])
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/conflict-policies?tenantId=default' && (!init || init.method === undefined)) {
+        return jsonResponse({ conflictType: 'duplicate_expanded_key', scope: 'table_scope', policyCount: 0, policies: [] })
+      }
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/conflict-policies?tenantId=default' && init?.method === 'PUT') {
+        saveBodies.push(JSON.parse(String(init.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({
+          conflictType: 'duplicate_expanded_key',
+          scope: 'table_scope',
+          policyCount: 1,
+          policies: [{ fingerprint: 'sha16:1111222233334444', policy: 'merge_quantity', approvedAtPresent: true, approvedByPresent: true }],
+        })
+      }
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/conflict-policies?tenantId=default' && init?.method === 'DELETE') {
+        deleteBodies.push(JSON.parse(String(init.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({ conflictType: 'duplicate_expanded_key', scope: 'table_scope', policyCount: 0, policies: [] })
+      }
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run?tenantId=default') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        dryRunBodies.push(body)
+        const hasRunOnly = Boolean(body.conflictPolicyReview)
+        return jsonResponse({
+          action: publicAction,
+          status: 'manual_confirm_required',
+          dryRunToken: hasRunOnly ? 'dup-token-run-only' : 'dup-token-default',
+          revision: hasRunOnly ? 'dup-rev-2' : 'dup-rev-1',
+          canApply: true,
+          counts: { add: 190, update: 0, skip: 190, inactive: 0, manual_confirm: 1 },
+          evidence: {
+            actionId: publicAction.actionId,
+            projectNoPresent: true,
+            dryRunRevision: hasRunOnly ? 'dup-rev-2' : 'dup-rev-1',
+            expansion: { status: 'expanded', rowsExpanded: 246, errorTypes: [] },
+            plan: {
+              counts: { add: 190, update: 0, skip: 190, inactive: 0, manual_confirm: 1 },
+              conflictTypes: ['duplicate_expanded_key'],
+              duplicateExpandedKeyDiagnostics: duplicateDiagnostics,
+              conflictPolicyReview: {
+                conflictType: 'duplicate_expanded_key',
+                defaultPolicy: 'hold',
+                writeEffect: 'manual_confirm_held',
+                groupCount: 1,
+                configuredPolicyCount: hasRunOnly ? 1 : 0,
+                policyCounts: { [hasRunOnly ? 'keep_multiple_rows' : 'hold']: 1 },
+                scopeCounts: { [hasRunOnly ? 'run_only' : 'default']: 1 },
+                selectedPolicies: [{
+                  fingerprint: 'sha16:1111222233334444',
+                  policy: hasRunOnly ? 'keep_multiple_rows' : 'hold',
+                  scope: hasRunOnly ? 'run_only' : 'default',
+                  writeEffect: 'manual_confirm_held',
+                }],
+              },
+            },
+          },
+        })
+      }
+      if (url === '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/apply?tenantId=default') {
+        applyBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({ status: 'should-not-run' })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(12)
+
+    const projectInput = container.querySelector('[data-testid="table-action-project-no"]') as HTMLInputElement
+    projectInput.value = 'P-DUP'
+    projectInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="table-action-dry-run"]') as HTMLButtonElement).click()
+    await flushUi(10)
+    expect(dryRunBodies[0]).toEqual({ parameters: { projectNo: 'P-DUP' } })
+
+    const select = container.querySelector('[data-testid="table-action-duplicate-policy-select"]') as HTMLSelectElement
+    select.value = 'keep_multiple_rows'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="table-action-duplicate-run-only"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect((container.querySelector('[data-testid="table-action-apply"]') as HTMLButtonElement).disabled).toBe(true)
+    ;(container.querySelector('[data-testid="table-action-dry-run"]') as HTMLButtonElement).click()
+    await flushUi(10)
+    expect(dryRunBodies[1]).toEqual({
+      parameters: { projectNo: 'P-DUP' },
+      conflictPolicyReview: {
+        conflictType: 'duplicate_expanded_key',
+        scope: 'run_only',
+        policies: [{ fingerprint: 'sha16:1111222233334444', policy: 'keep_multiple_rows' }],
+      },
+    })
+
+    const block = container.querySelector('[data-testid="table-action-duplicate-diagnostics"]')?.textContent || ''
+    expect(block).toContain('keep_multiple_rows')
+    expect(block).toContain('run_only')
+    expect(block).toContain('仍 held')
+    expect(block).not.toContain('P-DUP')
+
+    select.value = 'merge_quantity'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="table-action-duplicate-table-save"]') as HTMLButtonElement).click()
+    await flushUi(4)
+    expect(saveBodies[0]).toEqual({
+      conflictType: 'duplicate_expanded_key',
+      policies: [{ fingerprint: 'sha16:1111222233334444', policy: 'merge_quantity' }],
+    })
+
+    ;(container.querySelector('[data-testid="table-action-duplicate-table-revoke"]') as HTMLButtonElement).click()
+    await flushUi(4)
+    expect(deleteBodies[0]).toEqual({
+      conflictType: 'duplicate_expanded_key',
+      fingerprints: ['sha16:1111222233334444'],
+    })
+    expect(applyBodies).toHaveLength(0)
+  })
+
   it('C2 large-BOM: renders bounded dry-run state as non-authoritative and blocks apply', async () => {
     localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
     const dryRunBodies: Array<Record<string, unknown>> = []

@@ -1019,6 +1019,7 @@ export interface IntegrationTableActionDryRunResult {
   evidence?: Record<string, unknown> & {
     plan?: {
       duplicateExpandedKeyDiagnostics?: Record<string, unknown>
+      conflictPolicyReview?: Record<string, unknown>
       [key: string]: unknown
     }
   }
@@ -1035,10 +1036,39 @@ export interface IntegrationTableActionApplyResult {
 
 export interface IntegrationTableActionRequestPayload {
   parameters: Record<string, unknown>
+  conflictPolicyReview?: IntegrationTableActionConflictPolicyRequest
   confirm?: {
     dryRunToken?: string
     acceptManualConfirmHold?: boolean
   }
+}
+
+export interface IntegrationTableActionConflictPolicySelection {
+  fingerprint: string
+  policy: string
+}
+
+export interface IntegrationTableActionConflictPolicyRequest {
+  conflictType: 'duplicate_expanded_key'
+  scope?: 'run_only' | 'table_scope'
+  policies: IntegrationTableActionConflictPolicySelection[]
+}
+
+export interface IntegrationTableActionConflictPolicyDeleteRequest {
+  conflictType: 'duplicate_expanded_key'
+  fingerprints?: string[]
+}
+
+export interface IntegrationTableActionConflictPolicyResult {
+  conflictType: string
+  scope: string
+  targetScopeFingerprint?: string
+  policyCount?: number
+  policies: Array<IntegrationTableActionConflictPolicySelection & {
+    scope?: string
+    approvedAtPresent?: boolean
+    approvedByPresent?: boolean
+  }>
 }
 
 export interface IntegrationStockPreparationOptionSyncPayload extends IntegrationScope {
@@ -1066,7 +1096,7 @@ export async function listIntegrationTableActions(scope: IntegrationScope = {}):
 
 export async function dryRunIntegrationTableAction(
   actionId: string,
-  payload: IntegrationScope & Pick<IntegrationTableActionRequestPayload, 'parameters'>,
+  payload: IntegrationScope & Pick<IntegrationTableActionRequestPayload, 'parameters' | 'conflictPolicyReview'>,
 ): Promise<IntegrationTableActionDryRunResult> {
   const query = buildQueryString({
     tenantId: payload.tenantId,
@@ -1076,9 +1106,58 @@ export async function dryRunIntegrationTableAction(
     method: 'POST',
     body: JSON.stringify({
       parameters: payload.parameters,
+      ...(payload.conflictPolicyReview ? { conflictPolicyReview: payload.conflictPolicyReview } : {}),
     }),
   })
   return parseIntegrationResponse<IntegrationTableActionDryRunResult>(response)
+}
+
+export async function listIntegrationTableActionConflictPolicies(
+  actionId: string,
+  scope: IntegrationScope = {},
+): Promise<IntegrationTableActionConflictPolicyResult> {
+  const query = buildQueryString({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+  })
+  const response = await apiFetch(`/api/integration/table-actions/${encodeURIComponent(actionId)}/conflict-policies${query ? `?${query}` : ''}`)
+  return parseIntegrationResponse<IntegrationTableActionConflictPolicyResult>(response)
+}
+
+export async function saveIntegrationTableActionConflictPolicies(
+  actionId: string,
+  payload: IntegrationScope & IntegrationTableActionConflictPolicyRequest,
+): Promise<IntegrationTableActionConflictPolicyResult> {
+  const query = buildQueryString({
+    tenantId: payload.tenantId,
+    workspaceId: payload.workspaceId,
+  })
+  const response = await apiFetch(`/api/integration/table-actions/${encodeURIComponent(actionId)}/conflict-policies${query ? `?${query}` : ''}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      conflictType: payload.conflictType,
+      policies: payload.policies,
+    }),
+  })
+  return parseIntegrationResponse<IntegrationTableActionConflictPolicyResult>(response)
+}
+
+export async function deleteIntegrationTableActionConflictPolicies(
+  actionId: string,
+  payload: IntegrationScope & IntegrationTableActionConflictPolicyDeleteRequest,
+): Promise<IntegrationTableActionConflictPolicyResult> {
+  const query = buildQueryString({
+    tenantId: payload.tenantId,
+    workspaceId: payload.workspaceId,
+  })
+  const response = await apiFetch(`/api/integration/table-actions/${encodeURIComponent(actionId)}/conflict-policies${query ? `?${query}` : ''}`, {
+    method: 'DELETE',
+    body: JSON.stringify({
+      conflictType: payload.conflictType,
+      fingerprints: payload.fingerprints,
+    }),
+  })
+  return parseIntegrationResponse<IntegrationTableActionConflictPolicyResult>(response)
 }
 
 export async function applyIntegrationTableAction(
