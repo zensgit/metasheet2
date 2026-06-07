@@ -12,6 +12,12 @@ const DEFAULT_PAGE_LIMIT = 1000
 const DEFAULT_MAX_PAGES = 100
 const DEFAULT_MAX_DEPTH = 20
 const DEFAULT_MAX_ROWS = 10000
+const LARGE_BOM_BOUNDED_ERROR_TYPES = Object.freeze([
+  'max_rows_exceeded',
+  'read_page_limit_exceeded',
+  'read_count_exceeded',
+  'read_time_limit_exceeded',
+])
 const STOCK_PREPARATION_BOM_SOURCE_KINDS = Object.freeze([
   'data-source:sql-readonly',
   'bridge:legacy-sql-readonly',
@@ -119,6 +125,11 @@ function positiveInteger(input, field, defaultValue) {
     throw new StockPreparationBomExpansionError(`${field} must be a positive integer`, { field, value: input })
   }
   return value
+}
+
+function optionalPositiveInteger(input, field) {
+  if (input === undefined || input === null || input === '') return undefined
+  return positiveInteger(input, field, undefined)
 }
 
 function nonNegativeInteger(input, field, defaultValue) {
@@ -250,6 +261,47 @@ function normalizeFilters(filters) {
   return out
 }
 
+function isLargeBomBoundedErrorType(type) {
+  return LARGE_BOM_BOUNDED_ERROR_TYPES.includes(type)
+}
+
+function isReadLimitError(error) {
+  return Boolean(
+    error &&
+    error.name === 'StockPreparationBomExpansionError' &&
+    error.details &&
+    isLargeBomBoundedErrorType(error.details.code),
+  )
+}
+
+function readLimitErrorDetails(error, fallbackObject) {
+  if (!isReadLimitError(error)) return null
+  const details = error.details || {}
+  const { code, ...rest } = details
+  return {
+    type: code,
+    ...(fallbackObject && !rest.object ? { object: fallbackObject } : {}),
+    ...rest,
+  }
+}
+
+function assertReadBudget(options, readStats, object) {
+  if (options.maxReadCount !== undefined && readStats.length >= options.maxReadCount) {
+    throw new StockPreparationBomExpansionError('PLM read exceeded maxReadCount', {
+      code: 'read_count_exceeded',
+      object,
+      maxReadCount: options.maxReadCount,
+    })
+  }
+  if (options.maxElapsedMs !== undefined && options.now() - options.startedAtMs > options.maxElapsedMs) {
+    throw new StockPreparationBomExpansionError('PLM read exceeded maxElapsedMs', {
+      code: 'read_time_limit_exceeded',
+      object,
+      maxElapsedMs: options.maxElapsedMs,
+    })
+  }
+}
+
 async function readAll(adapter, object, filters, options, readStats) {
   const normalizedFilters = normalizeFilters(filters)
   const rows = []
@@ -262,6 +314,7 @@ async function readAll(adapter, object, filters, options, readStats) {
         maxPages: options.maxPages,
       })
     }
+    assertReadBudget(options, readStats, object)
     const input = { object, filters: normalizedFilters, limit: options.pageLimit }
     if (cursor) input.cursor = cursor
     const stat = {
@@ -383,7 +436,33 @@ function readDiagnostic(entry = {}) {
   return diagnostic
 }
 
-function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, readStats, errors, rowErrors }) {
+function scaleErrorTypes(errors = []) {
+  return Array.from(new Set(errors.map((entry) => entry.type).filter(isLargeBomBoundedErrorType))).sort()
+}
+
+function isLargeBomBoundedExpansion(result = {}) {
+  const errors = Array.isArray(result.errors) ? result.errors : []
+  const rowErrors = Array.isArray(result.rowErrors) ? result.rowErrors : []
+  return errors.length > 0 && rowErrors.length === 0 && errors.every((entry) => isLargeBomBoundedErrorType(entry.type))
+}
+
+function boundedPreviewSummary(summary = {}, errorTypes = []) {
+  if (errorTypes.length === 0) return undefined
+  const out = {
+    complete: false,
+    authoritative: false,
+    rowsExpanded: Number(summary.rowsExpanded || 0),
+    readCount: Number(summary.readCount || 0),
+    errorTypes: errorTypes.slice(),
+  }
+  if (summary.maxRows !== undefined) out.maxRows = summary.maxRows
+  if (summary.maxPages !== undefined) out.maxPages = summary.maxPages
+  if (summary.maxReadCount !== undefined) out.maxReadCount = summary.maxReadCount
+  if (summary.maxElapsedMs !== undefined) out.maxElapsedMs = summary.maxElapsedMs
+  return out
+}
+
+function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, readStats, errors, rowErrors }) {
   const summary = {
     projectNoPresent,
     matchField,
@@ -392,6 +471,9 @@ function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootM
     rootMatches,
     maxDepth,
     maxRows,
+    maxPages,
+    maxReadCount,
+    maxElapsedMs,
     readObjects: Array.from(new Set(readStats.map((entry) => entry.object))).sort(),
     readCount: readStats.length,
     readDiagnostics: readStats.map(readDiagnostic),
@@ -460,7 +542,7 @@ function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partR
   }
 }
 
-function failureResult({ projectNoPresent, matchField, status = 'failed', rows, errors, rowErrors, readStats, rootMatches, maxDepth, maxRows }) {
+function failureResult({ projectNoPresent, matchField, status = 'failed', rows, errors, rowErrors, readStats, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs }) {
   return {
     valid: false,
     status,
@@ -475,6 +557,9 @@ function failureResult({ projectNoPresent, matchField, status = 'failed', rows, 
       rootMatches,
       maxDepth,
       maxRows,
+      maxPages,
+      maxReadCount,
+      maxElapsedMs,
       readStats,
       errors,
       rowErrors,
@@ -494,6 +579,10 @@ async function expandPlmProjectBom(input = {}) {
     maxPages: positiveInteger(input.maxPages, 'maxPages', DEFAULT_MAX_PAGES),
     maxDepth: nonNegativeInteger(input.maxDepth, 'maxDepth', DEFAULT_MAX_DEPTH),
     maxRows: positiveInteger(input.maxRows, 'maxRows', DEFAULT_MAX_ROWS),
+    maxReadCount: optionalPositiveInteger(input.maxReadCount, 'maxReadCount'),
+    maxElapsedMs: optionalPositiveInteger(input.maxElapsedMs, 'maxElapsedMs'),
+    startedAtMs: Number.isFinite(input.startedAtMs) ? Number(input.startedAtMs) : Date.now(),
+    now: typeof input.now === 'function' ? input.now : Date.now,
   }
   const readStats = []
   const errors = []
@@ -503,6 +592,14 @@ async function expandPlmProjectBom(input = {}) {
   const read = (object, filters) => readAll(sourceAdapter, object, filters, options, readStats)
   const addGlobalError = (type, details = {}) => {
     errors.push({ type, ...details })
+  }
+  const addReadError = (err, object) => {
+    const bounded = readLimitErrorDetails(err, object)
+    if (bounded) {
+      addGlobalError(bounded.type, bounded)
+      return
+    }
+    addGlobalError('read_failed', { object, message: err && err.message })
   }
   const addRowError = (error) => {
     rowErrors.push(error)
@@ -520,7 +617,7 @@ async function expandPlmProjectBom(input = {}) {
   try {
     pathMatches = await read(plan.pathExAttr.object, { [plan.pathExAttr.matchField]: projectNo })
   } catch (err) {
-    addGlobalError('read_failed', { object: plan.pathExAttr.object, message: err && err.message })
+    addReadError(err, plan.pathExAttr.object)
     return failureResult({
       projectNoPresent: true,
       matchField: plan.matchField,
@@ -531,6 +628,9 @@ async function expandPlmProjectBom(input = {}) {
       rootMatches: 0,
       maxDepth: options.maxDepth,
       maxRows: options.maxRows,
+      maxPages: options.maxPages,
+      maxReadCount: options.maxReadCount,
+      maxElapsedMs: options.maxElapsedMs,
     })
   }
 
@@ -549,6 +649,9 @@ async function expandPlmProjectBom(input = {}) {
         rootMatches: 0,
         maxDepth: options.maxDepth,
         maxRows: options.maxRows,
+        maxPages: options.maxPages,
+        maxReadCount: options.maxReadCount,
+        maxElapsedMs: options.maxElapsedMs,
         readStats,
         errors: [],
         rowErrors: [],
@@ -583,7 +686,7 @@ async function expandPlmProjectBom(input = {}) {
     try {
       heads = (await read(plan.bomHead.object, headFilters)).filter((head) => isActiveBomHead(head, plan.bomHead.activeField))
     } catch (err) {
-      addGlobalError('read_failed', { object: plan.bomHead.object, message: err && err.message })
+      addReadError(err, plan.bomHead.object)
       return
     }
     if (nextDepth > options.maxDepth && heads.length > 0) {
@@ -601,7 +704,7 @@ async function expandPlmProjectBom(input = {}) {
       try {
         details = await read(plan.bomDetail.object, { [plan.bomDetail.bomParentField]: bomId })
       } catch (err) {
-        addGlobalError('read_failed', { object: plan.bomDetail.object, message: err && err.message })
+        addReadError(err, plan.bomDetail.object)
         return
       }
       for (const detail of details) {
@@ -713,7 +816,9 @@ async function expandPlmProjectBom(input = {}) {
       }
     }
   } catch (err) {
-    addGlobalError('read_failed', { message: err && err.message })
+    const bounded = readLimitErrorDetails(err)
+    if (bounded) addGlobalError(bounded.type, bounded)
+    else addGlobalError('read_failed', { message: err && err.message })
   }
 
   const status = errors.length > 0 || rowErrors.length > 0 ? 'failed' : 'expanded'
@@ -731,6 +836,9 @@ async function expandPlmProjectBom(input = {}) {
       rootMatches: pathMatches.length,
       maxDepth: options.maxDepth,
       maxRows: options.maxRows,
+      maxPages: options.maxPages,
+      maxReadCount: options.maxReadCount,
+      maxElapsedMs: options.maxElapsedMs,
       readStats,
       errors,
       rowErrors,
@@ -749,10 +857,15 @@ function summarizeBomExpansionForEvidence(result = {}) {
     rootMatches: Number(summary.rootMatches || 0),
     maxDepth: summary.maxDepth,
     maxRows: summary.maxRows,
+    maxPages: summary.maxPages,
+    maxReadCount: summary.maxReadCount,
+    maxElapsedMs: summary.maxElapsedMs,
     readObjects: Array.isArray(summary.readObjects) ? summary.readObjects.slice() : [],
     readCount: Number(summary.readCount || 0),
     readDiagnostics: Array.isArray(summary.readDiagnostics) ? summary.readDiagnostics.map(readDiagnostic) : [],
     errorTypes: Array.isArray(summary.errorTypes) ? summary.errorTypes.slice() : [],
+    largeBom: isLargeBomBoundedExpansion(result),
+    boundedPreview: isLargeBomBoundedExpansion(result) ? boundedPreviewSummary(summary, scaleErrorTypes(result.errors)) : undefined,
     actions: isPlainObject(summary.actions) ? { ...summary.actions } : undefined,
   }
 }
@@ -762,12 +875,14 @@ module.exports = {
   DEFAULT_MAX_PAGES,
   DEFAULT_MAX_DEPTH,
   DEFAULT_MAX_ROWS,
+  LARGE_BOM_BOUNDED_ERROR_TYPES,
   FORBIDDEN_PLAN_KEYS,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
   StockPreparationBomExpansionError,
   normalizeStockPreparationBomReadPlan,
   expandPlmProjectBom,
+  isLargeBomBoundedExpansion,
   summarizeBomExpansionForEvidence,
   __internals: {
     isBlank,

@@ -226,6 +226,90 @@ async function testFailClosedGuards() {
   }
 }
 
+async function testScaleLimitsRemainDiagnosableAndValuesFree() {
+  {
+    const { adapter } = createAdapter(baseData({
+      DN_PDM_PathExAttrInfo: [
+        { FileCode: 'P-001', Parent_OBJ_ID: 'PATH-1' },
+        { FileCode: 'P-001', Parent_OBJ_ID: 'PATH-2' },
+      ],
+    }))
+    const result = await expandPlmProjectBom({
+      sourceAdapter: adapter,
+      projectNo: 'P-001',
+      pageLimit: 1,
+      maxPages: 1,
+    })
+    const evidence = summarizeBomExpansionForEvidence(result)
+
+    assert.equal(result.valid, false)
+    assert.deepEqual(evidence.errorTypes, ['read_page_limit_exceeded'])
+    assert.equal(evidence.largeBom, true)
+    assert.deepEqual(evidence.boundedPreview.errorTypes, ['read_page_limit_exceeded'])
+    assert.equal(evidence.boundedPreview.complete, false)
+    assert.equal(evidence.boundedPreview.authoritative, false)
+    assert.equal(evidence.boundedPreview.maxPages, 1)
+    assert.equal(JSON.stringify(evidence).includes('PATH-'), false, 'page-limit evidence hides PLM row values')
+  }
+
+  {
+    const { adapter } = createAdapter(baseData())
+    const result = await expandPlmProjectBom({
+      sourceAdapter: adapter,
+      projectNo: 'P-001',
+      maxReadCount: 1,
+    })
+    const evidence = summarizeBomExpansionForEvidence(result)
+
+    assert.equal(result.valid, false)
+    assert.deepEqual(evidence.errorTypes, ['read_count_exceeded'])
+    assert.equal(evidence.readCount, 1)
+    assert.equal(evidence.largeBom, true)
+    assert.equal(evidence.boundedPreview.maxReadCount, 1)
+  }
+
+  {
+    const { adapter } = createAdapter(baseData())
+    const result = await expandPlmProjectBom({
+      sourceAdapter: adapter,
+      projectNo: 'P-001',
+      maxElapsedMs: 1,
+      startedAtMs: 0,
+      now: () => 2,
+    })
+    const evidence = summarizeBomExpansionForEvidence(result)
+
+    assert.equal(result.valid, false)
+    assert.deepEqual(evidence.errorTypes, ['read_time_limit_exceeded'])
+    assert.equal(evidence.readCount, 0)
+    assert.equal(evidence.largeBom, true)
+    assert.equal(evidence.boundedPreview.maxElapsedMs, 1)
+  }
+
+  {
+    const { adapter } = createAdapter(baseData({
+      DN_PDM_OrderDetailInfo: [
+        { order_id: 'ORDER-1', part_id: 'PART-BAD', quantity: 'not-a-number' },
+        { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1' },
+        { order_id: 'ORDER-1', part_id: 'PART-B', quantity: '1' },
+      ],
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+      ],
+      DN_PDM_BomHeadInfo: [],
+      DN_PDM_BomDetailsInfo: [],
+    }))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', maxRows: 1 })
+    const evidence = summarizeBomExpansionForEvidence(result)
+
+    assert.equal(result.valid, false)
+    assert.deepEqual(evidence.errorTypes, ['invalid_quantity', 'max_rows_exceeded'])
+    assert.equal(evidence.largeBom, false, 'row-level correctness errors are not relabeled as bounded large BOM')
+    assert.equal(evidence.boundedPreview, undefined)
+  }
+}
+
 function testReadPlanValidation() {
   const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
   assert.equal(normalizeStockPreparationBomReadPlan(plan).matchField, 'FileCode')
@@ -263,6 +347,7 @@ async function main() {
   await testNoHit()
   await testSameComponentUnderDifferentParentsStaysDistinct()
   await testFailClosedGuards()
+  await testScaleLimitsRemainDiagnosableAndValuesFree()
   testReadPlanValidation()
 
   console.log('stock-preparation-bom-expansion.test.cjs OK')
