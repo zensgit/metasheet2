@@ -801,7 +801,7 @@ Acceptance locks:
 - A pending run-only choice requires a fresh dry-run before Apply can be
   enabled.
 
-### 🟡 Duplicate-expanded-key D3 - keep-multiple resolver + reviewed apply (ACTIVE - this PR)
+### ✅ Duplicate-expanded-key D3 - keep-multiple resolver + reviewed apply (DONE - PR #2372, `b40f0f769`)
 
 Gated on: Duplicate D2 + explicit opt-in.
 
@@ -844,6 +844,39 @@ Acceptance locks:
   payloads, or raw SQL.
 - No PLM write, external database write, K3 path, migration, package, or new
   policy execution beyond `keep_multiple_rows`.
+
+### 🟡 Duplicate-expanded-key D3 validation - #2340 sample keep-multiple closeout (PENDING - validation runbook)
+
+Gated on: D3 runtime (#2372) + explicit operator validation.
+
+Scope:
+
+- Validate the #2340 246-row sample against the landed `keep_multiple_rows`
+  resolver.
+- Confirm saved `table_scope` or selected `run_only` policies become active
+  only through fresh dry-run evidence.
+- Confirm resolved duplicate groups require explicit
+  `acceptDuplicateResolution` acknowledgement before apply.
+- Confirm post-apply re-pull is idempotent: resolved duplicate rows become
+  `skip` or `update`, not another `add`.
+- Keep evidence values-free and never paste payload preview JSON or business
+  values.
+
+Acceptance locks:
+
+- A package containing #2372 or later is deployed before validation.
+- Pre-policy dry-run confirms already-written clean rows do not become new
+  `add` decisions.
+- Post-policy dry-run reports `resolvedGroupCount`, `resolvedRowCount`,
+  `heldGroupCount`, `heldReasonCounts`, and scope split
+  (`tableScopeResolvedGroupCount` / `runOnlyResolvedGroupCount`) before apply.
+- Apply without duplicate-resolution acknowledgement is blocked.
+- Apply after owner approval writes only resolved duplicate rows; unresolved
+  groups remain held.
+- Re-pull after apply reports `add=0` for the resolved set and no
+  `clean_to_collision_requires_review` for the resolved-key rows.
+- Any remaining held groups drive the next duplicate strategy decision; no
+  speculative runtime strategy starts from this validation PR.
 
 ## Deferred tracks
 
