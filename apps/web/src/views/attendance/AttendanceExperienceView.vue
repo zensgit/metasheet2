@@ -126,6 +126,11 @@ const overviewInitialSectionId = computed(() => {
   return section === 'attendance-overview-requests' ? section : ''
 })
 
+const overviewInitialRequestId = computed(() => {
+  const requestId = Array.isArray(route.query.requestId) ? route.query.requestId[0] : route.query.requestId
+  return typeof requestId === 'string' ? requestId.trim() : ''
+})
+
 const adminInitialSectionId = computed(() => {
   const section = Array.isArray(route.query.section) ? route.query.section[0] : route.query.section
   return typeof section === 'string' && section.startsWith('attendance-admin-') ? section : ''
@@ -159,7 +164,10 @@ const activeView = computed(() => {
       return {
         component: AttendanceOverview,
         key: 'attendance-overview',
-        props: { initialSectionId: overviewInitialSectionId.value },
+        props: {
+          initialSectionId: overviewInitialSectionId.value,
+          initialRequestId: overviewInitialRequestId.value,
+        },
       }
     case 'reports':
       return {
@@ -189,6 +197,7 @@ const activeView = computed(() => {
         props: { canDesign: canAccessWorkflow.value },
       }
   }
+  return null
 })
 
 function updateMobileState(): void {

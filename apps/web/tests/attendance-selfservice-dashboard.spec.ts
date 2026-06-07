@@ -106,6 +106,29 @@ function installOverviewMock(): void {
         },
       })
     }
+    if (url.endsWith('/api/attendance/requests/request-focused')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          request: {
+            id: 'request-focused',
+            work_date: '2026-04-16',
+            request_type: 'time_correction',
+            requested_in_at: '2026-04-16T09:05:00+08:00',
+            requested_out_at: '2026-04-16T18:02:00+08:00',
+            reason: 'Approval-center pending item',
+            status: 'pending',
+            metadata: {},
+          },
+        },
+      })
+    }
+    if (url.endsWith('/api/attendance/requests/request-missing')) {
+      return jsonResponse(404, {
+        ok: false,
+        error: { message: 'Focused request is no longer available.' },
+      })
+    }
     if (url.includes('/api/attendance/requests?')) {
       return jsonResponse(200, {
         ok: true,
@@ -223,6 +246,12 @@ function installOverviewMock(): void {
     }
     if (url.includes('/api/attendance/overtime-rules')) {
       return jsonResponse(200, { ok: true, data: { items: [{ id: 'ot-default', name: 'Standard Overtime' }] } })
+    }
+    if (
+      url.includes('/api/attendance/requests/request-focused/approve')
+      || url.includes('/api/attendance/requests/request-focused/reject')
+    ) {
+      return jsonResponse(200, { ok: true, data: { requestId: 'request-focused', status: 'approved' } })
     }
 
     return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
@@ -435,6 +464,84 @@ describe('Attendance self-service dashboard', () => {
     expect(vi.mocked(apiFetch).mock.calls.some(call =>
       /\/api\/attendance\/requests\/request-pending\/(?:approve|reject)/.test(String(call[0]))
     )).toBe(false)
+  })
+
+  it('opens a focused attendance approval request from approval center and exposes review actions', async () => {
+    app = createApp(AttendanceView, {
+      mode: 'overview',
+      initialSectionId: 'attendance-overview-requests',
+      initialRequestId: 'request-focused',
+    })
+    app.mount(container!)
+    await flushUi(12)
+
+    expect(vi.mocked(apiFetch).mock.calls.some(call =>
+      String(call[0]).endsWith('/api/attendance/requests/request-focused'),
+    )).toBe(true)
+
+    const focusedItem = container!.querySelector<HTMLElement>('[data-attendance-request-id="request-focused"]')
+    expect(focusedItem).toBeTruthy()
+    expect(focusedItem?.dataset.attendanceRequestFocused).toBe('true')
+    expect(focusedItem?.textContent).toContain('Opened from Approval Center')
+    expect(focusedItem?.textContent).toContain('Time correction')
+    expect(focusedItem?.textContent).toContain('Approval-center pending item')
+    expect(focusedItem?.textContent).toContain('Approve')
+    expect(focusedItem?.textContent).toContain('Reject')
+
+    findButton(container!, 'Approve').click()
+    await flushUi(12)
+
+    expect(vi.mocked(apiFetch).mock.calls.some(call =>
+      String(call[0]).includes('/api/attendance/requests/request-focused/approve'),
+    )).toBe(true)
+  })
+
+  it('keeps the request list available when the focused approval request cannot be loaded', async () => {
+    app = createApp(AttendanceView, {
+      mode: 'overview',
+      initialSectionId: 'attendance-overview-requests',
+      initialRequestId: 'request-missing',
+    })
+    app.mount(container!)
+    await flushUi(12)
+
+    expect(vi.mocked(apiFetch).mock.calls.some(call =>
+      String(call[0]).endsWith('/api/attendance/requests/request-missing'),
+    )).toBe(true)
+
+    expect(container!.textContent).toContain('Focused request is no longer available.')
+    expect(container!.textContent).toContain('Family medical appointment')
+    expect(container!.querySelector('[data-attendance-request-focused="true"]')).toBeNull()
+  })
+
+  it('keeps focused attendance rejection comment required before calling the API', async () => {
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValueOnce('').mockReturnValueOnce('Need evidence')
+
+    app = createApp(AttendanceView, {
+      mode: 'overview',
+      initialSectionId: 'attendance-overview-requests',
+      initialRequestId: 'request-focused',
+    })
+    app.mount(container!)
+    await flushUi(12)
+
+    findButton(container!, 'Reject').click()
+    await flushUi(4)
+
+    expect(vi.mocked(apiFetch).mock.calls.some(call =>
+      String(call[0]).includes('/api/attendance/requests/request-focused/reject'),
+    )).toBe(false)
+    expect(container!.textContent).toContain('Rejection reason is required.')
+
+    findButton(container!, 'Reject').click()
+    await flushUi(12)
+
+    const rejectCall = vi.mocked(apiFetch).mock.calls.find(call =>
+      String(call[0]).includes('/api/attendance/requests/request-focused/reject'),
+    )
+    expect(rejectCall).toBeTruthy()
+    expect(JSON.parse(String(rejectCall?.[1]?.body ?? '{}'))).toEqual({ comment: 'Need evidence' })
+    promptSpy.mockRestore()
   })
 
   it('prefills the request form from quick actions without leaving overview', async () => {

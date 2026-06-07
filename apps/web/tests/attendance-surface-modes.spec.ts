@@ -14,8 +14,12 @@ vi.mock('../src/views/AttendanceView.vue', () => ({
         type: String,
         default: '',
       },
+      initialRequestId: {
+        type: String,
+        default: '',
+      },
     },
-    template: '<div :data-mode="mode" :data-section="initialSectionId"></div>',
+    template: '<div :data-mode="mode" :data-section="initialSectionId" :data-request-id="initialRequestId"></div>',
   }),
 }))
 
@@ -47,6 +51,7 @@ describe('Attendance surface wrappers', () => {
     const surface = container.querySelector<HTMLElement>('[data-mode="overview"]')
     expect(surface).toBeTruthy()
     expect(surface?.dataset.section).toBe('attendance-overview-requests')
+    expect(surface?.dataset.requestId).toBe('')
   })
 
   it('keeps reports routed through the dedicated reports shell mode', async () => {

@@ -44,8 +44,12 @@ vi.mock('../src/views/attendance/AttendanceOverview.vue', () => ({
         type: String,
         default: '',
       },
+      initialRequestId: {
+        type: String,
+        default: '',
+      },
     },
-    template: '<div data-view="overview" :data-section="initialSectionId"></div>',
+    template: '<div data-view="overview" :data-section="initialSectionId" :data-request-id="initialRequestId"></div>',
   }),
 }))
 
@@ -146,7 +150,7 @@ describe('Attendance experience entrypoints', () => {
   })
 
   it('routes the attendance approval queue shortcut into the overview requests section', async () => {
-    routeState.query = { section: 'attendance-overview-requests' }
+    routeState.query = { section: 'attendance-overview-requests', requestId: 'request-123' }
 
     app = createApp(AttendanceExperienceView)
     app.mount(container!)
@@ -155,6 +159,7 @@ describe('Attendance experience entrypoints', () => {
     const overviewView = container!.querySelector<HTMLElement>('[data-view="overview"]')
     expect(overviewView).toBeTruthy()
     expect(overviewView?.dataset.section).toBe('attendance-overview-requests')
+    expect(overviewView?.dataset.requestId).toBe('request-123')
   })
 
   it('routes the reports entrypoint into a dedicated reports view', async () => {

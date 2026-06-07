@@ -804,11 +804,21 @@
             </div>
             <div v-if="requests.length === 0" class="attendance__empty">{{ tr('No requests.', '暂无申请。') }}</div>
             <ul v-else class="attendance__request-list">
-              <li v-for="item in requests" :key="item.id" class="attendance__request-item">
+              <li
+                v-for="item in requests"
+                :key="item.id"
+                class="attendance__request-item"
+                :class="{ 'attendance__request-item--focused': isFocusedAttendanceRequest(item) }"
+                :data-attendance-request-id="item.id"
+                :data-attendance-request-focused="isFocusedAttendanceRequest(item) ? 'true' : undefined"
+              >
                 <div>
                   <strong>{{ item.work_date }}</strong> · {{ formatRequestType(item.request_type) }}
                   <span class="attendance__status-chip" :class="`attendance__status-chip--${item.status}`">
                     {{ formatStatus(item.status) }}
+                  </span>
+                  <span v-if="isFocusedAttendanceRequest(item)" class="attendance__status-chip attendance__status-chip--focus">
+                    {{ tr('Opened from Approval Center', '来自审批中心') }}
                   </span>
                 </div>
                 <div class="attendance__request-meta" v-if="item.metadata">
@@ -827,7 +837,13 @@
                   <span>{{ tr('Out', '出') }}: {{ formatDateTime(item.requested_out_at) }}</span>
                 </div>
                 <div class="attendance__request-actions" v-if="item.status === 'pending'">
-                  <button class="attendance__btn" @click="cancelRequest(item.id)">{{ tr('Cancel', '取消') }}</button>
+                  <button v-if="!isFocusedAttendanceRequest(item)" class="attendance__btn" @click="cancelRequest(item.id)">{{ tr('Cancel', '取消') }}</button>
+                  <template v-if="canReviewFocusedAttendanceRequest(item)">
+                    <button class="attendance__btn" @click="resolveRequest(item.id, 'approve')">{{ tr('Approve', '批准') }}</button>
+                    <button class="attendance__btn attendance__btn--danger" @click="resolveRequest(item.id, 'reject')">
+                      {{ tr('Reject', '驳回') }}
+                    </button>
+                  </template>
                 </div>
               </li>
             </ul>
@@ -6976,10 +6992,12 @@ const props = withDefaults(
   defineProps<{
     mode?: AttendancePageMode
     initialSectionId?: string
+    initialRequestId?: string
   }>(),
   {
     mode: 'overview',
     initialSectionId: '',
+    initialRequestId: '',
   }
 )
 
@@ -8105,6 +8123,7 @@ const recordTimelineById = ref<Record<string, AttendancePunchEvent[]>>({})
 const recordTimelineErrorById = ref<Record<string, string>>({})
 const recordTimelineSupported = ref<boolean | null>(null)
 const requests = ref<AttendanceRequest[]>([])
+const focusedAttendanceRequestId = computed(() => props.initialRequestId.trim())
 const anomalies = ref<AttendanceAnomaly[]>([])
 const anomaliesLoading = ref(false)
 const statusMessage = ref('')
@@ -11778,6 +11797,14 @@ function requestDecisionCommentLabel(item: AttendanceRequest): string {
   return String(item.status || '').toLowerCase() === 'rejected'
     ? tr('Rejection note', '驳回说明')
     : tr('Decision note', '审批说明')
+}
+
+function isFocusedAttendanceRequest(item: AttendanceRequest): boolean {
+  return Boolean(focusedAttendanceRequestId.value && item.id === focusedAttendanceRequestId.value)
+}
+
+function canReviewFocusedAttendanceRequest(item: AttendanceRequest): boolean {
+  return isFocusedAttendanceRequest(item) && String(item.status || '').toLowerCase() === 'pending'
 }
 
 function requestTypeCtaLabel(value: string): string {
@@ -15811,7 +15838,35 @@ async function loadRequests() {
   if (!response.ok || !data.ok) {
     throw new Error(readErrorMessage(data, tr('Failed to load requests', '加载申请失败')))
   }
-  requests.value = data.data.items
+  const loadedRequests = Array.isArray(data.data.items) ? data.data.items as AttendanceRequest[] : []
+  const focusedRequest = await loadFocusedAttendanceRequestBestEffort()
+  requests.value = focusedRequest
+    ? [focusedRequest, ...loadedRequests.filter(item => item.id !== focusedRequest.id)]
+    : loadedRequests
+}
+
+async function loadFocusedAttendanceRequestBestEffort(): Promise<AttendanceRequest | null> {
+  try {
+    return await loadFocusedAttendanceRequest()
+  } catch (error) {
+    setStatus(
+      readErrorMessage(error, tr('Focused attendance request is unavailable.', '待处理考勤申请不可用。')),
+      'error',
+    )
+    return null
+  }
+}
+
+async function loadFocusedAttendanceRequest(): Promise<AttendanceRequest | null> {
+  const requestId = focusedAttendanceRequestId.value
+  if (!requestId) return null
+
+  const response = await apiFetch(`/api/attendance/requests/${encodeURIComponent(requestId)}`)
+  const data = await response.json()
+  if (!response.ok || !data.ok) {
+    throw new Error(readErrorMessage(data, tr('Failed to load focused request', '加载待处理申请失败')))
+  }
+  return data.data?.request ?? null
 }
 
 async function loadAnomalies() {
@@ -19825,11 +19880,26 @@ watch(recordStatusBreakdown, (items) => {
 }, { immediate: true })
 
 watch(
-  () => [props.initialSectionId, showAdmin.value, showOverview.value, showReports.value, adminForbidden.value, attendancePluginActive.value] as const,
+  () => [props.initialSectionId, props.initialRequestId, showAdmin.value, showOverview.value, showReports.value, adminForbidden.value, attendancePluginActive.value] as const,
   () => {
     void focusInitialAttendanceSection()
   },
   { immediate: true },
+)
+
+watch(
+  () => props.initialRequestId,
+  () => {
+    if (!attendancePluginActive.value || !showOverview.value) return
+    void loadRequests().catch((error) => {
+      setStatusFromErrorWithContext(
+        error,
+        tr('Failed to load focused request', '加载待处理申请失败'),
+        requestTimezoneContextHint.value,
+        'refresh',
+      )
+    })
+  },
 )
 
 watch(attendanceGroupMemberGroupId, () => {
@@ -20634,6 +20704,11 @@ const holidaySectionBindings = {
   gap: 6px;
 }
 
+.attendance__request-item--focused {
+  border-color: #1976d2;
+  background: #f5f9ff;
+}
+
 .attendance__request-meta {
   display: flex;
   gap: 12px;
@@ -20674,6 +20749,11 @@ const holidaySectionBindings = {
 .attendance__status-chip--pending {
   background: #fff3e0;
   color: #ef6c00;
+}
+
+.attendance__status-chip--focus {
+  background: #e3f2fd;
+  color: #1565c0;
 }
 
 .attendance__status-chip--approved {
