@@ -74,6 +74,18 @@ function basePlmData(overrides = {}) {
   }
 }
 
+function childBomPlmData(overrides = {}) {
+  return basePlmData({
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [{ part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true }],
+    DN_PDM_BomDetailsInfo: [{ bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3' }],
+    ...overrides,
+  })
+}
+
 function createSourceAdapter(data = basePlmData()) {
   const calls = []
   return {
@@ -385,6 +397,80 @@ async function testApplyRequiresTokenRecomputesAndScopesTarget() {
   )
 }
 
+async function testLargeBomBoundedDryRunBlocksApplyToken() {
+  const source = createSourceAdapter(childBomPlmData())
+  const records = createRecordsApi()
+  const storage = createMemoryStorage()
+
+  const dryRun = await dryRunStockPreparationAction({
+    action: baseAction({ maxRows: 1 }),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+
+  assert.equal(dryRun.status, 'large_bom_bounded')
+  assert.equal(dryRun.largeBom, true)
+  assert.equal(dryRun.canApply, false)
+  assert.equal(dryRun.dryRunToken, null, 'bounded large-BOM dry-run must not issue an apply token')
+  assert.deepEqual([...storage.map.keys()], [], 'bounded large-BOM dry-run stores no token')
+  assert.deepEqual(dryRun.boundedPreview.errorTypes, ['max_rows_exceeded'])
+  assert.equal(dryRun.boundedPreview.complete, false)
+  assert.equal(dryRun.boundedPreview.authoritative, false)
+  assert.equal(dryRun.evidence.expansion.largeBom, true)
+  assert.deepEqual(dryRun.evidence.expansion.boundedPreview.errorTypes, ['max_rows_exceeded'])
+  assert.equal(JSON.stringify(dryRun.evidence).includes('P-001'), false, 'bounded evidence hides project value')
+  assert.equal(JSON.stringify(dryRun.evidence).includes('PART-B'), false, 'bounded evidence hides component source id')
+}
+
+async function testReadPageLimitBoundedDryRunAndDepthHardFailureStayDistinct() {
+  const records = createRecordsApi()
+
+  {
+    const source = createSourceAdapter(basePlmData({
+      DN_PDM_PathExAttrInfo: [
+        { FileCode: 'P-001', Parent_OBJ_ID: 'PATH-1' },
+        { FileCode: 'P-001', Parent_OBJ_ID: 'PATH-2' },
+      ],
+    }))
+    const dryRun = await dryRunStockPreparationAction({
+      action: baseAction({ pageLimit: 1, maxPages: 1 }),
+      parameters: { projectNo: 'P-001' },
+      sourceAdapter: source.adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: createMemoryStorage(),
+      plannedAt: '2026-06-04T09:00:00.000Z',
+    })
+
+    assert.equal(dryRun.status, 'large_bom_bounded')
+    assert.equal(dryRun.largeBom, true)
+    assert.equal(dryRun.canApply, false)
+    assert.equal(dryRun.dryRunToken, null)
+    assert.deepEqual(dryRun.boundedPreview.errorTypes, ['read_page_limit_exceeded'])
+    assert.equal(dryRun.boundedPreview.maxPages, 1)
+  }
+
+  {
+    const source = createSourceAdapter(childBomPlmData())
+    const dryRun = await dryRunStockPreparationAction({
+      action: baseAction({ maxDepth: 0 }),
+      parameters: { projectNo: 'P-001' },
+      sourceAdapter: source.adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: createMemoryStorage(),
+      plannedAt: '2026-06-04T09:00:00.000Z',
+    })
+
+    assert.equal(dryRun.status, 'failed')
+    assert.equal(dryRun.largeBom, false)
+    assert.equal(dryRun.canApply, false)
+    assert.equal(dryRun.dryRunToken, null)
+    assert.equal(dryRun.evidence.expansion.errorTypes.includes('max_depth_exceeded'), true)
+  }
+}
+
 async function testApplyNormalizesNumericPlmDisplayFieldsBeforeCreate() {
   const storage = createMemoryStorage()
   const source = createSourceAdapter(basePlmData({
@@ -556,6 +642,8 @@ async function main() {
   await testBridgeSourceKindRequiresExplicitMatchingReadPlanAndCanDryRun()
   await testTargetFieldMapIncompleteFailsBeforeReads()
   await testApplyRequiresTokenRecomputesAndScopesTarget()
+  await testLargeBomBoundedDryRunBlocksApplyToken()
+  await testReadPageLimitBoundedDryRunAndDepthHardFailureStayDistinct()
   await testApplyNormalizesNumericPlmDisplayFieldsBeforeCreate()
   await testApplySurfacesTypedValuesFreeRowFailureDiagnostics()
   await testApplyDetectsDataShiftAndManualConfirmHold()

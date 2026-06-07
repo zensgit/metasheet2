@@ -571,7 +571,7 @@ Acceptance locks:
   unknown action ids fail closed.
 - Admin-only route/UI. Read/write non-admin users cannot sync options.
 
-### 🟡 Large-BOM C0 - strategy design for #2342 (ACTIVE - this PR)
+### ✅ Large-BOM C0 - strategy design for #2342 (DONE - PR #2351, `b7998d73d`)
 
 Gated on: #2340 large-sample dry-run evidence + explicit opt-in.
 
@@ -602,14 +602,41 @@ Acceptance locks:
 - #2343 D1 remains ready but should run after #2342 C0 for large samples,
   because complete expansion is upstream of authoritative duplicate analysis.
 
-Planned follow-up slices after C0 review:
+### 🟡 Large-BOM C1 - bounded dry-run readiness shape (ACTIVE - this PR)
 
-1. C1 bounded dry-run readiness shape (`largeBom=true`, no token, Apply
-   disabled).
-2. C2 operator UI affordance for summary-first bounded review.
-3. C3 background full-expansion design.
-4. C4 checkpointed apply writer design.
-5. C5 entity-machine validation with values-free evidence.
+Gated on: Large-BOM C0 accepted + explicit opt-in.
+
+Scope:
+
+- Preserve sync dry-run as bounded and read-only.
+- Surface scale-class caps as a values-free bounded state:
+  `status='large_bom_bounded'`, `largeBom=true`, `boundedPreview.complete=false`.
+- Keep Apply blocked: `canApply=false`, no dry-run token, no MetaSheet row
+  write.
+- Treat only scale caps as large-BOM bounded:
+  `max_rows_exceeded`, `read_page_limit_exceeded`, `read_count_exceeded`, and
+  `read_time_limit_exceeded`.
+- Preserve hard failures as hard failures: `max_depth_exceeded`, cycles, source
+  read failures, invalid rows, and other correctness errors must not be
+  relabeled as large BOM.
+- Keep issue/customer evidence values-free: counts, cap fields, read diagnostics,
+  and error types only.
+
+Acceptance locks:
+
+- `largeBom=true` always blocks Apply.
+- No dry-run token is issued for bounded large-BOM states.
+- C3 counts over bounded rows are subset/non-authoritative.
+- Browser input cannot raise caps or choose Apply mode.
+- No UI, route shape redesign, background job, checkpoint writer, package,
+  PLM write, external database write, K3, or production rollout.
+
+Planned follow-up slices after C1 review:
+
+1. C2 operator UI affordance for summary-first bounded review.
+2. C3 background full-expansion design.
+3. C4 checkpointed apply writer design.
+4. C5 entity-machine validation with values-free evidence.
 
 ## Deferred tracks
 
@@ -618,8 +645,8 @@ Planned follow-up slices after C0 review:
 - PLM adapter/API source instead of readonly SQL.
 - Fuzzy/prefix/multi-project matching.
 - Procurement/warehouse child-table generation.
-- Large-BOM runtime beyond C0: bounded-readiness implementation, UI affordance,
-  background full expansion, and checkpointed apply remain separate opt-ins.
+- Large-BOM runtime beyond C1: UI affordance, background full expansion, and
+  checkpointed apply remain separate opt-ins.
 - SQL bridge C3 watermark/incremental implementation.
 - External DB write.
 - K3 Save / Submit / Audit / BOM.

@@ -10,6 +10,7 @@ const {
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
   expandPlmProjectBom,
+  isLargeBomBoundedExpansion,
   summarizeBomExpansionForEvidence,
 } = require('./stock-preparation-bom-expansion.cjs')
 const {
@@ -162,6 +163,8 @@ function normalizeStockPreparationActionConfig(input = {}) {
     conflictStrategy: isPlainObject(input.conflictStrategy) ? cloneJson(input.conflictStrategy) : {},
     pageLimit: positiveInteger(input.pageLimit, 'pageLimit', undefined),
     maxPages: positiveInteger(input.maxPages, 'maxPages', undefined),
+    maxReadCount: positiveInteger(input.maxReadCount, 'maxReadCount', undefined),
+    maxElapsedMs: positiveInteger(input.maxElapsedMs, 'maxElapsedMs', undefined),
     maxDepth: input.maxDepth,
     maxRows: input.maxRows,
   }
@@ -459,6 +462,8 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     readPlan: action.source.readPlan,
     pageLimit: action.pageLimit,
     maxPages: action.maxPages,
+    maxReadCount: action.maxReadCount,
+    maxElapsedMs: action.maxElapsedMs,
     maxDepth: action.maxDepth,
     maxRows: action.maxRows,
   })
@@ -499,6 +504,19 @@ function evidenceForDryRun({ action, parameters, expansion, plan, revision, canA
   }
 }
 
+function largeBomBoundedPreview(expansion) {
+  if (!isLargeBomBoundedExpansion(expansion)) return undefined
+  const evidence = summarizeBomExpansionForEvidence(expansion)
+  return evidence.boundedPreview
+}
+
+function dryRunStatus(dryRun) {
+  if (dryRun.expansion.status === 'not_found') return 'not_found'
+  if (isLargeBomBoundedExpansion(dryRun.expansion)) return 'large_bom_bounded'
+  if (dryRun.canApply) return dryRun.plan.valid ? 'ready' : 'manual_confirm_required'
+  return 'failed'
+}
+
 async function dryRunStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
@@ -520,11 +538,9 @@ async function dryRunStockPreparationAction(input = {}) {
   }
   return {
     action: publicActionMetadata(action),
-    status: dryRun.expansion.status === 'not_found'
-      ? 'not_found'
-      : dryRun.canApply
-        ? (dryRun.plan.valid ? 'ready' : 'manual_confirm_required')
-        : 'failed',
+    status: dryRunStatus(dryRun),
+    largeBom: isLargeBomBoundedExpansion(dryRun.expansion),
+    boundedPreview: largeBomBoundedPreview(dryRun.expansion),
     dryRunToken,
     revision: dryRun.revision,
     canApply: dryRun.canApply,
