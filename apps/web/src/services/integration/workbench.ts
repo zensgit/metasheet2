@@ -1016,7 +1016,12 @@ export interface IntegrationTableActionDryRunResult {
   revision?: string
   canApply?: boolean
   counts?: Record<string, number>
-  evidence?: Record<string, unknown>
+  evidence?: Record<string, unknown> & {
+    plan?: {
+      duplicateExpandedKeyDiagnostics?: Record<string, unknown>
+      [key: string]: unknown
+    }
+  }
 }
 
 export interface IntegrationTableActionApplyResult {

@@ -327,6 +327,99 @@ function testValuesFreeEvidence() {
   assert.ok(evidence.humanPreservedFields.includes('notes'), 'evidence may include field names')
 }
 
+function testDuplicateExpandedKeyDiagnosticsValuesFree() {
+  const sameParentA = row({
+    idempotencyKey: 'DUP-SAME-PARENT',
+    componentSourceId: 'PART-DUP-SAME-A',
+    parentSourceId: 'PARENT-SAME',
+    path: 'ROOT/PARENT-SAME/PART-DUP',
+    pathTokens: ['ROOT', 'PARENT-SAME', 'PART-DUP'],
+    componentCode: 'DUP-CODE',
+    componentName: 'Duplicate Widget',
+    material: 'Secret Alloy',
+    totalQuantity: 2,
+    sortLine: '10',
+  })
+  const sameParentB = {
+    ...sameParentA,
+    componentSourceId: 'PART-DUP-SAME-B',
+    totalQuantity: 3,
+    sortLine: '20',
+  }
+  const crossParentA = row({
+    idempotencyKey: 'DUP-CROSS-PARENT',
+    componentSourceId: 'PART-DUP-CROSS-A',
+    parentSourceId: 'PARENT-A',
+    path: 'ROOT/PARENT-A/PART-DUP',
+    pathTokens: ['ROOT', 'PARENT-A', 'PART-DUP'],
+    componentCode: 'CROSS-CODE',
+    componentName: 'Cross Parent Widget',
+    material: 'Cross Alloy',
+    totalQuantity: 5,
+    sourceDetailId: 'DETAIL-A',
+  })
+  const crossParentB = {
+    ...crossParentA,
+    componentSourceId: 'PART-DUP-CROSS-B',
+    parentSourceId: 'PARENT-B',
+    path: 'ROOT/PARENT-B/PART-DUP',
+    pathTokens: ['ROOT', 'PARENT-B', 'PART-DUP'],
+    sourceDetailId: 'DETAIL-B',
+  }
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [sameParentA, sameParentB, crossParentA, crossParentB],
+    existingRows: [],
+    runId: 'run-duplicate-diagnostics',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  const evidence = summarizeConflictPlanForEvidence(plan)
+  const diagnostics = evidence.duplicateExpandedKeyDiagnostics
+
+  assert.equal(plan.valid, false)
+  assert.equal(evidence.counts.manual_confirm, 2)
+  assert.equal(diagnostics.conflictType, 'duplicate_expanded_key')
+  assert.equal(diagnostics.groupCount, 2)
+  assert.equal(diagnostics.rowCount, 4)
+  assert.deepEqual(diagnostics.rowsPerGroup, [{ rowCount: 2, groups: 2 }])
+  assert.equal(diagnostics.parentShapeCounts.same_parent, 1)
+  assert.equal(diagnostics.parentShapeCounts.cross_parent, 1)
+  assert.equal(diagnostics.quantityShapeCounts.varied, 1)
+  assert.equal(diagnostics.quantityShapeCounts.all_equal, 1)
+  assert.equal(diagnostics.attributeShapeCounts.all_equal, 2)
+  assert.equal(diagnostics.stableDiscriminatorCounts.any, 2)
+  assert.equal(diagnostics.stableDiscriminatorCounts.pathParent, 1)
+  assert.equal(diagnostics.stableDiscriminatorCounts.sourceDetail, 1)
+  assert.equal(diagnostics.stableDiscriminatorCounts.sortLine, 1)
+  assert.deepEqual(diagnostics.allowedPolicies, [
+    'hold',
+    'keep_multiple_rows',
+    'merge_quantity',
+    'select_representative',
+    'skip_selected',
+    'source_correction_required',
+  ])
+  assert.equal(diagnostics.defaultPolicy, 'hold')
+  assert.equal(diagnostics.groups.length, 2)
+  assert.match(diagnostics.groups[0].fingerprint, /^sha16:[a-f0-9]{16}$/)
+  assert.equal(
+    __internals.stableFingerprint('DUP-SAME-PARENT'),
+    __internals.stableFingerprint('DUP-SAME-PARENT'),
+    'collision fingerprints are deterministic',
+  )
+
+  const text = JSON.stringify(evidence)
+  assert.ok(!text.includes('P-001'), 'evidence must not include project value')
+  assert.ok(!text.includes('DUP-SAME-PARENT'), 'evidence must not include raw collision key')
+  assert.ok(!text.includes('DUP-CROSS-PARENT'), 'evidence must not include raw collision key')
+  assert.ok(!text.includes('PART-DUP'), 'evidence must not include component source ids')
+  assert.ok(!text.includes('Duplicate Widget'), 'evidence must not include component names')
+  assert.ok(!text.includes('Secret Alloy'), 'evidence must not include material')
+  assert.ok(!text.includes('DETAIL-A'), 'evidence must not include source detail ids')
+  assert.ok(!text.includes('PARENT-A'), 'evidence must not include parent ids')
+  assert.ok(!text.includes('ROOT/PARENT'), 'evidence must not include paths')
+}
+
 function main() {
   testAddUpdateSkipInactive()
   testRowErrorsDoNotAbortGoodRows()
@@ -337,6 +430,7 @@ function main() {
   testTemplateTypeEquivalentValuesSkipAfterCreate()
   testTemplateNormalizationDoesNotHideRealIdentityOrLineageConflicts()
   testValuesFreeEvidence()
+  testDuplicateExpandedKeyDiagnosticsValuesFree()
 
   console.log('stock-preparation-conflict-planner.test.cjs OK')
 }

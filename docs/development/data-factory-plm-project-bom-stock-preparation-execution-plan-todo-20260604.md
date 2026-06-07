@@ -719,6 +719,53 @@ Acceptance locks:
 - Human-preserved fields are never written.
 - Row-level failures are values-free and do not erase clean-row progress.
 
+### ✅ Duplicate-expanded-key D0 - conflict strategy design (DONE - PR #2346, `14d6c2ca1`)
+
+Gated on: #2340 onsite held-duplicate evidence + explicit opt-in.
+
+Scope:
+
+- Design the generic conflict-strategy frame with `duplicate_expanded_key` as
+  the first supported conflict type.
+- Lock values-free duplicate-cause diagnostics before any policy choice.
+- Lock policy candidates: `hold`, `keep_multiple_rows`, `merge_quantity`,
+  `select_representative`, `skip_selected`, `source_correction_required`.
+- Lock policy scopes: `run_only` and `table_scope`; global/template defaults
+  remain deferred.
+- Lock no silent pick, no silent drop, no material-code-only identity, and
+  fresh dry-run/token before any future duplicate apply.
+- Lock #2342 dependency: duplicate evidence on large samples is authoritative
+  only after complete expansion.
+
+### 🟡 Duplicate-expanded-key D1 - grouped dry-run evidence/UI (ACTIVE - this PR)
+
+Gated on: Duplicate D0 + Large-BOM C1-C4 chain + explicit opt-in.
+
+Scope:
+
+- Extend C3 conflict-plan evidence with values-free
+  `duplicateExpandedKeyDiagnostics`.
+- Diagnose duplicate groups without exposing row values:
+  group count, rows-per-group distribution, same-parent vs cross-parent counts,
+  quantity-shape counts, attribute-shape counts, stable-discriminator counts,
+  deterministic collision fingerprints, and allowed policy names.
+- Render a grouped review block in the workbench dry-run panel.
+- Keep duplicate rows held as `manual_confirm`; no policy persistence and no
+  duplicate apply in D1.
+
+Acceptance locks:
+
+- No MetaSheet write, PLM write, external database write, K3, route change,
+  package, migration, policy persistence, or Apply unlock.
+- Public evidence never exposes project number, raw idempotency key, component
+  source id/code/name/material, parent id/path, source detail id, target values,
+  sheet id, field id, raw SQL, credentials, or tokens.
+- Collision fingerprints are deterministic and do not expose raw keys.
+- Default recommendation is `hold`.
+- `keep_multiple_rows`, `merge_quantity`, `select_representative`,
+  `skip_selected`, and `source_correction_required` are displayed as candidates
+  only; no writer infers or applies them.
+
 ## Deferred tracks
 
 - New project/sample C4 apply validation after separate explicit approval.

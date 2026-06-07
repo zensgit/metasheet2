@@ -780,6 +780,24 @@
                 errorTypes: {{ tableActionBoundedErrorTypes.join(', ') }}
               </p>
             </div>
+            <div v-if="tableActionDuplicateDiagnostics" class="integration-workbench__bounded-preview" data-testid="table-action-duplicate-diagnostics">
+              <div>
+                <strong>重复行分组待处理</strong>
+                <span class="integration-workbench__badge" data-status="warning">manual_confirm</span>
+              </div>
+              <p>重复行不会被自动挑选、合并或写入；下方仅展示 values-free 分组诊断，策略应用仍需后续显式确认。</p>
+              <div class="integration-workbench__metric-row">
+                <span v-for="metric in tableActionDuplicateMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
+              </div>
+              <p v-if="tableActionDuplicatePolicies.length" class="integration-workbench__hint">
+                policies: {{ tableActionDuplicatePolicies.join(', ') }}
+              </p>
+              <ul v-if="tableActionDuplicateGroups.length" class="integration-workbench__mini-list">
+                <li v-for="group in tableActionDuplicateGroups" :key="group.fingerprint">
+                  #{{ group.ordinal }} {{ group.fingerprint }} · rows {{ group.rowCount }} · {{ group.parentShape }} · quantity {{ group.quantityShape }} · attrs {{ group.attributeShape }} · stable {{ group.stableDiscriminator }}
+                </li>
+              </ul>
+            </div>
             <p class="integration-workbench__hint" data-testid="table-action-token-state">
               {{ tableActionDryRunToken ? 'dry-run token 已签发；token 仅保存在当前页面内存，不展示、不复制到 evidence。' : '本次 dry-run 不可 apply；请处理失败项后重跑。' }}
             </p>
@@ -1204,6 +1222,16 @@ interface StagingObjectConfig {
 
 type ConnectionDraftRole = WorkbenchExternalSystem['role']
 type ConnectionDraftStatus = WorkbenchExternalSystem['status']
+
+interface DuplicateExpandedGroupView {
+  ordinal: string
+  fingerprint: string
+  rowCount: string
+  parentShape: string
+  quantityShape: string
+  attributeShape: string
+  stableDiscriminator: string
+}
 
 interface ConnectionDraft {
   id: string
@@ -1903,6 +1931,59 @@ const tableActionBoundedPreviewMetrics = computed(() => {
     { id: 'max-read-count', label: 'maxReadCount', value: numberMetric(preview.maxReadCount) },
     { id: 'max-elapsed-ms', label: 'maxElapsedMs', value: numberMetric(preview.maxElapsedMs) },
   ].filter((metric) => metric.value !== '')
+})
+const tableActionPlanEvidence = computed(() => {
+  const evidence = isRecord(tableActionDryRunResult.value?.evidence) ? tableActionDryRunResult.value?.evidence : null
+  return evidence && isRecord(evidence.plan) ? evidence.plan : null
+})
+const tableActionDuplicateDiagnostics = computed(() => {
+  const diagnostics = tableActionPlanEvidence.value && isRecord(tableActionPlanEvidence.value.duplicateExpandedKeyDiagnostics)
+    ? tableActionPlanEvidence.value.duplicateExpandedKeyDiagnostics
+    : null
+  if (!diagnostics || diagnostics.conflictType !== 'duplicate_expanded_key') return null
+  return diagnostics
+})
+const tableActionDuplicateMetrics = computed(() => {
+  const diagnostics = tableActionDuplicateDiagnostics.value
+  if (!diagnostics) return []
+  const parentCounts = isRecord(diagnostics.parentShapeCounts) ? diagnostics.parentShapeCounts : {}
+  const quantityCounts = isRecord(diagnostics.quantityShapeCounts) ? diagnostics.quantityShapeCounts : {}
+  const stableCounts = isRecord(diagnostics.stableDiscriminatorCounts) ? diagnostics.stableDiscriminatorCounts : {}
+  return [
+    { id: 'groups', label: 'groups', value: numberMetric(diagnostics.groupCount) },
+    { id: 'rows', label: 'rows', value: numberMetric(diagnostics.rowCount) },
+    { id: 'same-parent', label: 'sameParent', value: numberMetric(parentCounts.same_parent) },
+    { id: 'cross-parent', label: 'crossParent', value: numberMetric(parentCounts.cross_parent) },
+    { id: 'quantity-varied', label: 'quantityVaried', value: numberMetric(quantityCounts.varied) },
+    { id: 'stable', label: 'stableDiscriminator', value: numberMetric(stableCounts.any) },
+  ].filter((metric) => metric.value !== '')
+})
+const tableActionDuplicatePolicies = computed(() => {
+  const diagnostics = tableActionDuplicateDiagnostics.value
+  return Array.isArray(diagnostics?.allowedPolicies)
+    ? diagnostics.allowedPolicies.filter((policy): policy is string => typeof policy === 'string')
+    : []
+})
+const tableActionDuplicateGroups = computed<DuplicateExpandedGroupView[]>(() => {
+  const diagnostics = tableActionDuplicateDiagnostics.value
+  const groups = Array.isArray(diagnostics?.groups) ? diagnostics.groups.filter(isRecord) : []
+  return groups.slice(0, 8).map((group, index) => {
+    const stable = isRecord(group.stableDiscriminators) ? group.stableDiscriminators : {}
+    const stableLabels = [
+      stable.sourceDetail === true ? 'sourceDetail' : '',
+      stable.pathParent === true ? 'pathParent' : '',
+      stable.sortLine === true ? 'sortLine' : '',
+    ].filter(Boolean)
+    return {
+      ordinal: numberMetric(group.ordinal) || String(index + 1),
+      fingerprint: typeof group.fingerprint === 'string' ? group.fingerprint : `group-${index + 1}`,
+      rowCount: numberMetric(group.rowCount) || '0',
+      parentShape: typeof group.parentShape === 'string' ? group.parentShape : 'unknown',
+      quantityShape: typeof group.quantityShape === 'string' ? group.quantityShape : 'unknown',
+      attributeShape: typeof group.attributeShape === 'string' ? group.attributeShape : 'unknown',
+      stableDiscriminator: stableLabels.length ? stableLabels.join('+') : 'none',
+    }
+  })
 })
 const tableActionEvidenceText = computed(() => {
   const evidence = tableActionApplyResult.value?.evidence || tableActionDryRunResult.value?.evidence
@@ -3326,8 +3407,15 @@ async function dryRunTableAction(): Promise<void> {
     })
     tableActionDryRunResult.value = result
     const manualCount = Number(result.counts?.manual_confirm || 0)
+    const planEvidence = isRecord(result.evidence?.plan) ? result.evidence.plan : null
+    const duplicateDiagnostics = planEvidence && isRecord(planEvidence.duplicateExpandedKeyDiagnostics)
+      ? planEvidence.duplicateExpandedKeyDiagnostics
+      : null
+    const duplicateGroupCount = duplicateDiagnostics ? Number(duplicateDiagnostics.groupCount || 0) : 0
     const message = isLargeBomBoundedTableActionResult(result)
       ? '表动作 dry-run 返回大 BOM 有界预览；Apply 已阻塞，请走完整展开/后台通道。'
+      : duplicateGroupCount > 0
+      ? `表动作 dry-run 完成：${duplicateGroupCount} 个重复分组需要 review；重复行保持不写。`
       : manualCount > 0
       ? `表动作 dry-run 完成：${manualCount} 行需要人工确认，apply 会保持这些行不写。`
       : '表动作 dry-run 完成，可进入 apply 确认。'
@@ -3612,6 +3700,25 @@ watch([selectedTableActionId, tableActionProjectNo], () => {
 
 .integration-workbench__bounded-preview strong {
   color: #7c2d12;
+}
+
+.integration-workbench__mini-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.integration-workbench__mini-list li {
+  padding: 8px;
+  border: 1px solid #f3d8bd;
+  border-radius: 6px;
+  background: #fffaf5;
+  color: #5b3417;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .integration-workbench {
@@ -3975,6 +4082,11 @@ watch([selectedTableActionId, tableActionProjectNo], () => {
 .integration-workbench__badge[data-status="error"] {
   background: #fff0f0;
   color: #9b1c1c;
+}
+
+.integration-workbench__badge[data-status="warning"] {
+  background: #fff8e8;
+  color: #744600;
 }
 
 .integration-workbench__badge[data-status="enabled"] {
