@@ -14,6 +14,7 @@ const {
   createStockPreparationTableActionRegistry,
   dryRunStockPreparationAction,
   normalizeStockPreparationActionConfig,
+  __internals: tableActionInternals,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
@@ -597,6 +598,56 @@ async function testLargeBomBoundedDryRunBlocksApplyToken() {
   assert.equal(JSON.stringify(dryRun.evidence).includes('PART-B'), false, 'bounded evidence hides component source id')
 }
 
+async function testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites() {
+  const records = createRecordsApi()
+  const storage = createMemoryStorage()
+  const action = baseAction({ maxRows: 1 })
+  const parameters = { projectNo: 'P-001' }
+  const plannedAt = '2026-06-04T09:00:00.000Z'
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters,
+    sourceAdapter: createSourceAdapter(childBomPlmData()).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt,
+  })
+
+  assert.equal(dryRun.status, 'large_bom_bounded')
+  assert.equal(dryRun.canApply, false)
+  assert.equal(dryRun.dryRunToken, null)
+
+  const forgedMatchingToken = await tableActionInternals.createDryRunToken(storage, {
+    actionId: action.actionId,
+    parametersHash: tableActionInternals.hashJson(parameters),
+    revision: dryRun.revision,
+    conflictPolicyReview: null,
+  })
+
+  await assert.rejects(
+    () => applyStockPreparationAction({
+      action,
+      parameters,
+      dryRunToken: forgedMatchingToken,
+      sourceAdapter: createSourceAdapter(childBomPlmData()).adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: storage,
+      permission: 'write',
+      plannedAt,
+    }),
+    (error) => {
+      assert.equal(error.code, 'TABLE_ACTION_DRY_RUN_NOT_APPLYABLE')
+      return true
+    },
+    'bounded large-BOM recompute remains non-applyable even with a matching token',
+  )
+
+  const writeCalls = records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord')
+  assert.equal(writeCalls.length, 0, 'bounded large-BOM apply rejection must happen before any target write')
+  assert.deepEqual([...storage.map.keys()], [], 'token is consumed once even when the recomputed dry-run is not applyable')
+}
+
 async function testReadPageLimitBoundedDryRunAndDepthHardFailureStayDistinct() {
   const records = createRecordsApi()
 
@@ -816,6 +867,7 @@ async function main() {
   await testApplyRequiresTokenRecomputesAndScopesTarget()
   await testSavedKeepMultipleRowsPolicyRequiresFreshReviewAndAppliesResolvedRows()
   await testLargeBomBoundedDryRunBlocksApplyToken()
+  await testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites()
   await testReadPageLimitBoundedDryRunAndDepthHardFailureStayDistinct()
   await testApplyNormalizesNumericPlmDisplayFieldsBeforeCreate()
   await testApplySurfacesTypedValuesFreeRowFailureDiagnostics()
