@@ -286,12 +286,46 @@ describe('ApprovalCenterView', () => {
     expect(container!.querySelector('[data-el-select]')).toBeTruthy()
   })
 
-  it('shows the attendance approval queue entry and routes to the attendance requests section', async () => {
+  it('routes the attendance approval queue entry to the first pending attendance request', async () => {
+    mockPendingApprovals.value = [
+      {
+        id: 'apv_attendance_1',
+        requestNo: 'ATT-100001',
+        title: '补卡申请',
+        status: 'pending',
+        requester: { name: '王五' },
+        createdAt: '2026-06-08T08:00:00Z',
+        workflowKey: 'attendance.request',
+        formSnapshot: { attendanceRequestId: 'request-att-1' },
+        assignments: [],
+      },
+    ]
+
     await mountView()
 
     const entry = container!.querySelector('[data-testid="attendance-approval-queue-entry"]')
     expect(entry?.textContent).toContain('考勤审批')
     expect(entry?.textContent).toContain('待处理考勤审批')
+
+    const button = Array.from(container!.querySelectorAll('button')).find(candidate =>
+      candidate.textContent?.includes('待处理考勤审批'),
+    )
+    expect(button).toBeTruthy()
+
+    button!.click()
+    await flushUi()
+
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'attendance',
+      query: {
+        section: 'attendance-overview-requests',
+        requestId: 'request-att-1',
+      },
+    })
+  })
+
+  it('keeps the attendance approval queue entry fallback when no request id is available', async () => {
+    await mountView()
 
     const button = Array.from(container!.querySelectorAll('button')).find(candidate =>
       candidate.textContent?.includes('待处理考勤审批'),
