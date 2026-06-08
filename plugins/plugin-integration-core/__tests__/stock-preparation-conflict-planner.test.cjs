@@ -478,6 +478,99 @@ function testKeepMultipleRowsResolvesSurgically() {
   assert.ok(!text.includes('ROOT/PARENT'), 'resolution evidence hides paths')
 }
 
+function testDuplicateResolutionEvidenceValuesFree() {
+  const resolvedKey = 'DUP-RESOLVED-SECRET-KEY'
+  const heldKey = 'DUP-HELD-SECRET-KEY'
+  const resolvedA = row({
+    idempotencyKey: resolvedKey,
+    projectNo: 'PROJECT-LEAK',
+    componentSourceId: 'COMP-RESOLVED-A',
+    parentSourceId: 'PARENT-RESOLVED-A',
+    path: 'ROOT/PARENT-RESOLVED-A/COMP-RESOLVED',
+    pathTokens: ['ROOT', 'PARENT-RESOLVED-A', 'COMP-RESOLVED'],
+    componentCode: 'RESOLVED-CODE',
+    componentName: 'Resolved Secret Widget',
+    material: 'Resolved Secret Alloy',
+    sourceDetailId: 'DETAIL-RESOLVED-A',
+    sortLine: 'SORT-RESOLVED-A',
+  })
+  const resolvedB = {
+    ...resolvedA,
+    componentSourceId: 'COMP-RESOLVED-B',
+    parentSourceId: 'PARENT-RESOLVED-B',
+    path: 'ROOT/PARENT-RESOLVED-B/COMP-RESOLVED',
+    pathTokens: ['ROOT', 'PARENT-RESOLVED-B', 'COMP-RESOLVED'],
+    sourceDetailId: 'DETAIL-RESOLVED-B',
+    sortLine: 'SORT-RESOLVED-B',
+  }
+  const heldA = row({
+    idempotencyKey: heldKey,
+    projectNo: 'PROJECT-LEAK',
+    componentSourceId: 'COMP-HELD-A',
+    parentSourceId: 'PARENT-HELD',
+    path: 'ROOT/PARENT-HELD/COMP-HELD',
+    pathTokens: ['ROOT', 'PARENT-HELD', 'COMP-HELD'],
+    componentCode: 'HELD-CODE',
+    componentName: 'Held Secret Widget',
+    material: 'Held Secret Alloy',
+    sourceDetailId: '',
+    sortLine: '',
+  })
+  const heldB = {
+    ...heldA,
+    componentSourceId: 'COMP-HELD-B',
+  }
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [resolvedA, resolvedB, heldA, heldB],
+    existingRows: [],
+    duplicatePolicyReview: {
+      conflictType: 'duplicate_expanded_key',
+      selectedPolicies: [
+        { fingerprint: __internals.stableFingerprint(resolvedKey), policy: 'keep_multiple_rows', scope: 'table_scope' },
+        { fingerprint: __internals.stableFingerprint(heldKey), policy: 'keep_multiple_rows', scope: 'run_only' },
+      ],
+    },
+    runId: 'run-d3-resolution-evidence',
+    plannedAt: '2026-06-07T09:00:00.000Z',
+  })
+  const evidence = summarizeConflictPlanForEvidence(plan)
+  const resolution = evidence.duplicateExpandedKeyResolution
+  const text = JSON.stringify(resolution)
+
+  assert.equal(evidence.valid, false, 'held group keeps the overall plan fail-closed')
+  assert.equal(resolution.resolvedGroupCount, 1)
+  assert.equal(resolution.resolvedRowCount, 2)
+  assert.equal(resolution.heldGroupCount, 1)
+  assert.equal(resolution.heldRowCount, 2)
+  assert.equal(resolution.tableScopeResolvedGroupCount, 1)
+  assert.equal(resolution.runOnlyResolvedGroupCount, 0)
+  assert.equal(resolution.heldReasonCounts.missing_stable_discriminator, 1)
+  assert.equal(resolution.resolvedPolicies[0].discriminator, 'sourceDetail')
+  assert.equal(resolution.heldPolicies[0].reason, 'missing_stable_discriminator')
+
+  for (const sensitive of [
+    'PROJECT-LEAK',
+    'DUP-RESOLVED-SECRET-KEY',
+    'DUP-HELD-SECRET-KEY',
+    'COMP-RESOLVED',
+    'COMP-HELD',
+    'PARENT-RESOLVED',
+    'PARENT-HELD',
+    'ROOT/',
+    'RESOLVED-CODE',
+    'HELD-CODE',
+    'Resolved Secret Widget',
+    'Held Secret Widget',
+    'Resolved Secret Alloy',
+    'Held Secret Alloy',
+    'DETAIL-RESOLVED',
+    'SORT-RESOLVED',
+  ]) {
+    assert.ok(!text.includes(sensitive), `duplicate resolution evidence must not include ${sensitive}`)
+  }
+}
+
 function testKeepMultipleRowsCleanToCollisionHolds() {
   const duplicateKey = 'DUP-CLEAN-TO-COLLISION'
   const duplicateA = row({ idempotencyKey: duplicateKey, componentSourceId: 'PART-DUP-A', parentSourceId: 'PARENT-A', pathTokens: ['ROOT', 'PARENT-A', 'PART-DUP'] })
@@ -533,6 +626,7 @@ function main() {
   testValuesFreeEvidence()
   testDuplicateExpandedKeyDiagnosticsValuesFree()
   testKeepMultipleRowsResolvesSurgically()
+  testDuplicateResolutionEvidenceValuesFree()
   testKeepMultipleRowsCleanToCollisionHolds()
   testKeepMultipleRowsWithoutStableDiscriminatorHolds()
 
