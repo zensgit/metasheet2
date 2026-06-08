@@ -845,38 +845,87 @@ Acceptance locks:
 - No PLM write, external database write, K3 path, migration, package, or new
   policy execution beyond `keep_multiple_rows`.
 
-### 🟡 Duplicate-expanded-key D3 validation - #2340 sample keep-multiple closeout (PENDING - validation runbook)
+### ✅ Duplicate-expanded-key D3 validation - #2340 sample keep-multiple closeout (PARTIAL PASS - runbook #2373, package `929f133bd`)
 
 Gated on: D3 runtime (#2372) + explicit operator validation.
 
 Scope:
 
-- Validate the #2340 246-row sample against the landed `keep_multiple_rows`
-  resolver.
-- Confirm saved `table_scope` or selected `run_only` policies become active
-  only through fresh dry-run evidence.
-- Confirm resolved duplicate groups require explicit
+- Validated the #2340 246-row sample against the landed `keep_multiple_rows`
+  resolver using the D3 validation package
+  `metasheet-multitable-onprem-v2.5.0-d3-duplicate-validation-929f133bd`.
+- Confirmed a selected `run_only` policy became active only through fresh
+  post-policy dry-run evidence.
+- Confirmed resolved duplicate groups required explicit
   `acceptDuplicateResolution` acknowledgement before apply.
-- Confirm post-apply re-pull is idempotent: resolved duplicate rows become
-  `skip` or `update`, not another `add`.
-- Keep evidence values-free and never paste payload preview JSON or business
-  values.
+- Confirmed post-apply re-pull was idempotent: resolved duplicate rows became
+  existing rows, not another `add`.
+- Evidence remained values-free; no payload preview JSON or business values were
+  required.
 
 Acceptance locks:
 
-- A package containing #2372 or later is deployed before validation.
-- Pre-policy dry-run confirms already-written clean rows do not become new
-  `add` decisions.
-- Post-policy dry-run reports `resolvedGroupCount`, `resolvedRowCount`,
-  `heldGroupCount`, `heldReasonCounts`, and scope split
-  (`tableScopeResolvedGroupCount` / `runOnlyResolvedGroupCount`) before apply.
-- Apply without duplicate-resolution acknowledgement is blocked.
-- Apply after owner approval writes only resolved duplicate rows; unresolved
-  groups remain held.
-- Re-pull after apply reports `add=0` for the resolved set and no
-  `clean_to_collision_requires_review` for the resolved-key rows.
-- Any remaining held groups drive the next duplicate strategy decision; no
-  speculative runtime strategy starts from this validation PR.
+- The package containing #2372 was deployed on the entity machine before
+  validation.
+- Pre-policy dry-run confirmed already-written clean rows did not become new
+  `add` decisions:
+  `rowsExpanded=246`, `existingRows=190`,
+  `add/update/skip/inactive/manual_confirm=0/0/190/0/56`.
+- Post-policy dry-run reported the reviewed activation before apply:
+  `resolvedGroupCount=1`, `resolvedRowCount=2`, `heldGroupCount=27`,
+  `heldRowCount=54`, `heldReasonCounts=missing_stable_discriminator`,
+  `runOnlyResolvedGroupCount=1`, `tableScopeResolvedGroupCount=0`.
+- Apply without duplicate-resolution acknowledgement was blocked.
+- Apply after owner approval wrote only resolved duplicate rows:
+  `created/patched/failed/held=2/0/0/27`, `skipped=190`.
+- Re-pull after apply reported idempotence:
+  `existingRows=192`, `add/update/skip/manual_confirm=0/0/192/54`,
+  `rowErrors=0`.
+- The remaining 27 held groups drive the next duplicate strategy decision; no
+  speculative runtime strategy starts from the D3 validation closeout.
+- D3 is closed as a clean partial pass: resolvable groups passed; clean and
+  resolved rows are idempotent on re-pull; the remaining groups stay held
+  fail-closed.
+
+### 🟡 Duplicate-expanded-key D4 - held-group decision design (ACTIVE - #2343 follow-up)
+
+Gated on: D3 partial-pass evidence + #2343 explicit direction.
+
+Design doc:
+`docs/development/data-factory-plm-stock-preparation-duplicate-expanded-key-d4-held-group-decision-design-20260607.md`.
+
+Scope:
+
+- Decide the next strategy for the 27 remaining held groups from values-free
+  evidence, not speculation.
+- Anchor the decision in the legacy stock-preparation system behavior because
+  this track replaces that system.
+- Use D1/D3 diagnostics as decision inputs:
+  `heldReasonCounts`, rows-per-group distribution, same-parent vs cross-parent
+  shape when present, `quantityShapeCounts`, `stableDiscriminatorCounts`,
+  attribute-shape counts, and deterministic collision fingerprints.
+- Keep the remaining groups held fail-closed until a future implementation
+  slice is explicitly approved.
+
+Acceptance locks:
+
+- D4 is design-only. It must not change C2 expansion, C3 planner output, C4
+  apply behavior, idempotency-key generation, target writes, routes, UI,
+  migrations, package contents, or runtime policy execution.
+- The observed D3 held reason `missing_stable_discriminator` must not be forced
+  through `keep_multiple_rows`.
+- `merge_quantity` is not the default next policy. It is allowed only if legacy
+  behavior confirms that the same duplicate shape is additive demand and owner
+  review accepts the quantity semantics.
+- Unknown legacy behavior defaults to `source_correction_required` and no
+  Apply.
+- `select_representative` and `skip_selected` require explicit owner selection
+  and values-free evidence of skipped demand. No silent auto-pick or silent
+  drop.
+- Complete expansion is required before duplicate decisions are authoritative;
+  large-BOM bounded runs route back to #2342.
+- Any future executable policy requires a fresh dry-run, fresh token, reviewed
+  policy evidence, and explicit owner acknowledgement.
 
 ## Deferred tracks
 
