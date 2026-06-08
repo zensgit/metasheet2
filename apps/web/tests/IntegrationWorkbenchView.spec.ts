@@ -2710,6 +2710,38 @@ describe('IntegrationWorkbenchView', () => {
               counts: { add: 190, update: 0, skip: 190, inactive: 0, manual_confirm: 2 },
               conflictTypes: ['duplicate_expanded_key'],
               duplicateExpandedKeyDiagnostics: duplicateDiagnostics,
+              duplicateExpandedKeyResolution: {
+                conflictType: 'duplicate_expanded_key',
+                resolvedPolicy: 'keep_multiple_rows',
+                resolvedGroupCount: 0,
+                resolvedRowCount: 0,
+                heldGroupCount: 2,
+                heldRowCount: 4,
+                heldReasonCounts: {
+                  default_hold: 1,
+                  missing_stable_discriminator: 1,
+                  'unsafe-reason': 1,
+                },
+                resolvedPolicies: [],
+                heldPolicies: [
+                  {
+                    fingerprint: 'sha16:1111222233334444',
+                    policy: 'hold',
+                    scope: 'default',
+                    reason: 'missing_stable_discriminator',
+                    rowCount: 2,
+                    writeEffect: 'manual_confirm_held',
+                  },
+                  {
+                    fingerprint: 'sha16:aaaabbbbccccdddd',
+                    policy: 'hold',
+                    scope: 'default',
+                    reason: 'default_hold',
+                    rowCount: 2,
+                    writeEffect: 'manual_confirm_held',
+                  },
+                ],
+              },
             },
           },
         })
@@ -2752,6 +2784,9 @@ describe('IntegrationWorkbenchView', () => {
     expect(block).toContain('crossParent 1')
     expect(block).toContain('quantityVaried 1')
     expect(block).toContain('stableDiscriminator 2')
+    expect(block).toContain('heldReason default_hold 1')
+    expect(block).toContain('heldReason missing_stable_discriminator 1')
+    expect(block).not.toContain('heldReason unsafe-reason 1')
     expect(block).toContain('keep_multiple_rows')
     expect(block).toContain('merge_quantity')
     expect(block).toContain('skip_selected')

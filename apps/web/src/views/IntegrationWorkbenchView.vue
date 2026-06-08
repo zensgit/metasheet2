@@ -795,6 +795,9 @@
               <p class="integration-workbench__hint" data-testid="table-action-duplicate-policy-scope">
                 本表已保存策略 {{ tableActionStoredConflictPolicyCount }} 条；本次 dry-run 已解决 {{ tableActionResolvedDuplicateGroupCount }} 组，仍 hold {{ tableActionHeldDuplicateGroupCount }} 组；未选择时默认 hold。
               </p>
+              <div v-if="tableActionHeldReasonMetrics.length" class="integration-workbench__metric-row" data-testid="table-action-held-reason-summary">
+                <span v-for="metric in tableActionHeldReasonMetrics" :key="metric.id">heldReason {{ metric.label }} {{ metric.value }}</span>
+              </div>
               <ul v-if="tableActionDuplicateGroups.length" class="integration-workbench__mini-list">
                 <li v-for="group in tableActionDuplicateGroups" :key="group.fingerprint">
                   <div>
@@ -2074,6 +2077,14 @@ const tableActionDuplicateResolutionSelections = computed(() => {
 })
 const tableActionResolvedDuplicateGroupCount = computed(() => Number(tableActionDuplicateResolution.value?.resolvedGroupCount || 0))
 const tableActionHeldDuplicateGroupCount = computed(() => Number(tableActionDuplicateResolution.value?.heldGroupCount || 0))
+const tableActionHeldReasonMetrics = computed(() => {
+  const counts = tableActionDuplicateResolution.value?.heldReasonCounts
+  if (!isRecord(counts)) return []
+  return Object.entries(counts)
+    .filter(([reason, count]) => safeEvidenceToken(reason) && typeof count === 'number' && Number.isFinite(count) && count > 0)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([reason, count]) => ({ id: reason, label: reason, value: String(count) }))
+})
 const tableActionStoredConflictPolicyCount = computed(() => Number(tableActionTableScopePolicies.value?.policyCount || 0))
 const tableActionDuplicateGroups = computed<DuplicateExpandedGroupView[]>(() => {
   const diagnostics = tableActionDuplicateDiagnostics.value
@@ -2616,6 +2627,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function numberMetric(value: unknown): string {
   return typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+}
+
+function safeEvidenceToken(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-z][a-z0-9_]{0,80}$/i.test(value)
 }
 
 function isLargeBomBoundedTableActionResult(result: IntegrationTableActionDryRunResult | null): boolean {
