@@ -4815,6 +4815,12 @@ attendanceIntegrationDescribe(
             monthlyMaxMinutes: 9600,
           },
           compTimeFromOvertime: { enabled: true, expiresInDays: 45 },
+          autoShiftMatching: {
+            enabled: true,
+            mode: 'preview',
+            maxToleranceMinutes: 90,
+            minConfidenceToApply: 'medium',
+          },
         }),
       })
       expect(saveSettingsRes.status).toBe(200)
@@ -4832,6 +4838,7 @@ attendanceIntegrationDescribe(
           comprehensiveHours?: { capDefaults?: Record<string, number | null> }
           shiftCompliance?: Record<string, unknown>
           compTimeFromOvertime?: Record<string, unknown>
+          autoShiftMatching?: Record<string, unknown>
         }
       } | undefined)?.data
       expect(reloaded?.comprehensiveHours?.capDefaults).toEqual({ month: 10560, quarter: 31680, year: 126720 })
@@ -4842,6 +4849,12 @@ attendanceIntegrationDescribe(
         monthlyMaxMinutes: 9600,
       })
       expect(reloaded?.compTimeFromOvertime).toEqual({ enabled: true, expiresInDays: 45 })
+      expect(reloaded?.autoShiftMatching).toEqual({
+        enabled: true,
+        mode: 'preview',
+        maxToleranceMinutes: 90,
+        minConfidenceToApply: 'medium',
+      })
 
       const futurePunchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
         method: 'POST',
@@ -4894,6 +4907,287 @@ attendanceIntegrationDescribe(
         body: JSON.stringify(originalSettings),
       }).catch(() => undefined)
     }
+  })
+
+  describe('auto shift matching preview', () => {
+    const orgId = 'default'
+
+    async function getAdminToken(userId: string): Promise<string | undefined> {
+      if (!baseUrl) return undefined
+      const tokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      )
+      return (tokenRes.body as { token?: string } | undefined)?.token
+    }
+
+    async function saveAutoShiftSettings(token: string, payload: Record<string, unknown>): Promise<void> {
+      if (!baseUrl) return
+      const res = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      expect(res.status).toBe(200)
+    }
+
+    async function loadSettingsForTest(token: string): Promise<Record<string, unknown>> {
+      if (!baseUrl) return {}
+      const res = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expect(res.status).toBe(200)
+      return ((res.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+    }
+
+    async function createShiftForAutoShift(token: string, name: string, start: string, end: string): Promise<string> {
+      if (!baseUrl) throw new Error('baseUrl missing')
+      const res = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          timezone: 'UTC',
+          workStartTime: start,
+          workEndTime: end,
+          workingDays: [0, 1, 2, 3, 4, 5, 6],
+        }),
+      })
+      expect(res.status).toBe(201)
+      const shiftId = (res.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(shiftId).toBeTruthy()
+      if (!shiftId) throw new Error('shift id missing')
+      return shiftId
+    }
+
+    async function createGroupForAutoShift(token: string, name: string, attendanceType: string, userId: string): Promise<string> {
+      if (!baseUrl) throw new Error('baseUrl missing')
+      const groupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, timezone: 'UTC', attendanceType, description: 'auto-shift-preview-test' }),
+      })
+      expect(groupRes.status).toBe(200)
+      const groupId = (groupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(groupId).toBeTruthy()
+      if (!groupId) throw new Error('group id missing')
+
+      const memberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userIds: [userId] }),
+      })
+      expect(memberRes.status).toBe(200)
+      return groupId
+    }
+
+    async function insertPunchEvent(pool: Pool, userId: string, workDate: string, eventType: 'check_in' | 'check_out', occurredAt: string): Promise<string> {
+      const eventId = randomUuidV4()
+      await pool.query(
+        `INSERT INTO attendance_events
+         (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
+         VALUES ($1, $2, $3, $4, $5, $6, 'integration-test', 'UTC', '{}'::jsonb, '{}'::jsonb)`,
+        [eventId, userId, orgId, workDate, occurredAt, eventType],
+      )
+      return eventId
+    }
+
+    it('returns disabled when either preview gate is off and writes no assignments', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-autoshift-disabled-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const previousFlag = process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+      const originalSettings = await loadSettingsForTest(adminToken)
+      const pool = new Pool({ connectionString: dbUrl })
+      const userId = `attendance-autoshift-disabled-user-${runSuffix}`
+      try {
+        process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = 'true'
+        await saveAutoShiftSettings(adminToken, { autoShiftMatching: { enabled: false, mode: 'preview' } })
+        const res = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/preview`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from: '2026-06-10', userIds: [userId] }),
+        })
+        expect(res.status).toBe(403)
+        expect((res.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('AUTO_SHIFT_MATCHING_DISABLED')
+        const writes = await pool.query(
+          `SELECT
+             (SELECT COUNT(*)::int FROM attendance_shift_assignments WHERE org_id = $1 AND user_id = $2) AS shift_count,
+             (SELECT COUNT(*)::int FROM attendance_rotation_assignments WHERE org_id = $1 AND user_id = $2) AS rotation_count`,
+          [orgId, userId],
+        )
+        expect(writes.rows[0]).toMatchObject({ shift_count: 0, rotation_count: 0 })
+      } finally {
+        await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
+        if (previousFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+        else process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = previousFlag
+        await pool.end()
+      }
+    })
+
+    it('suggests a deterministic shift for an unscheduled scheduled-shift member without writing assignments', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-autoshift-happy-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const previousFlag = process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+      const originalSettings = await loadSettingsForTest(adminToken)
+      const pool = new Pool({ connectionString: dbUrl })
+      const userId = `attendance-autoshift-happy-user-${runSuffix}`
+      const workDate = '2026-06-11'
+      const minuteOffset = Number.parseInt(runSuffix.slice(-2), 36) % 40
+      const startMinute = String(10 + minuteOffset).padStart(2, '0')
+      const endMinute = String(49 - minuteOffset).padStart(2, '0')
+      const shiftStart = `10:${startMinute}`
+      const shiftEnd = `17:${endMinute}`
+      const inAt = `10:${String(11 + minuteOffset).padStart(2, '0')}:00`
+      const outAt = `17:${String(48 - minuteOffset).padStart(2, '0')}:00`
+      try {
+        process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = 'true'
+        await pool.query(
+          `DELETE FROM attendance_shifts
+           WHERE org_id = $1
+             AND (
+               name LIKE 'Auto Shift Match %'
+               OR name LIKE '000 Auto Shift Match %'
+               OR name LIKE 'Auto Shift Non Match %'
+             )`,
+          [orgId],
+        )
+        await saveAutoShiftSettings(adminToken, {
+          autoShiftMatching: {
+            enabled: true,
+            mode: 'preview',
+            maxToleranceMinutes: 20,
+            minConfidenceToApply: 'high',
+          },
+        })
+        await createGroupForAutoShift(adminToken, `autoshift-happy-${runSuffix}`, 'scheduled_shift', userId)
+        const matchingShiftId = await createShiftForAutoShift(adminToken, `000 Auto Shift Match ${runSuffix}`, shiftStart, shiftEnd)
+        await createShiftForAutoShift(adminToken, `Auto Shift Non Match ${runSuffix}`, '12:00', '20:00')
+        const inId = await insertPunchEvent(pool, userId, workDate, 'check_in', `${workDate}T${inAt}.000Z`)
+        const outId = await insertPunchEvent(pool, userId, workDate, 'check_out', `${workDate}T${outAt}.000Z`)
+
+        const res = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/preview`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from: workDate, to: workDate, userIds: [userId] }),
+        })
+        expect(res.status).toBe(200)
+        const data = (res.body as { data?: { items?: any[]; skipped?: any[] } } | undefined)?.data
+        expect(data?.items).toHaveLength(1)
+        expect(data?.items?.[0]).toMatchObject({
+          userId,
+          workDate,
+          candidateShiftId: matchingShiftId,
+          candidateShiftName: `000 Auto Shift Match ${runSuffix}`,
+          score: 2,
+          confidence: 'high',
+        })
+        expect(data?.items?.[0]?.evidence?.eventIds).toEqual([inId, outId])
+        expect(data?.skipped ?? []).toHaveLength(0)
+
+        const writes = await pool.query(
+          `SELECT
+             (SELECT COUNT(*)::int FROM attendance_shift_assignments WHERE org_id = $1 AND user_id = $2) AS shift_count,
+             (SELECT COUNT(*)::int FROM attendance_rotation_assignments WHERE org_id = $1 AND user_id = $2) AS rotation_count`,
+          [orgId, userId],
+        )
+        expect(writes.rows[0]).toMatchObject({ shift_count: 0, rotation_count: 0 })
+      } finally {
+        await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
+        if (previousFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+        else process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = previousFlag
+        await pool.end()
+      }
+    })
+
+    it('skips already-scheduled users, fixed/free groups, pending outdoor approvals, and out-of-tolerance punches', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-autoshift-skip-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const previousFlag = process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+      const originalSettings = await loadSettingsForTest(adminToken)
+      const pool = new Pool({ connectionString: dbUrl })
+      const workDate = '2026-06-12'
+      const scheduledUserId = `attendance-autoshift-scheduled-${runSuffix}`
+      const fixedUserId = `attendance-autoshift-fixed-${runSuffix}`
+      const pendingOutdoorUserId = `attendance-autoshift-pending-outdoor-${runSuffix}`
+      const toleranceUserId = `attendance-autoshift-tolerance-${runSuffix}`
+      try {
+        process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = 'true'
+        await saveAutoShiftSettings(adminToken, {
+          autoShiftMatching: {
+            enabled: true,
+            mode: 'preview',
+            maxToleranceMinutes: 30,
+            minConfidenceToApply: 'low',
+          },
+        })
+        const shiftId = await createShiftForAutoShift(adminToken, `Auto Shift Skip ${runSuffix}`, '09:00', '18:00')
+        await createGroupForAutoShift(adminToken, `autoshift-scheduled-${runSuffix}`, 'scheduled_shift', scheduledUserId)
+        await createGroupForAutoShift(adminToken, `autoshift-fixed-${runSuffix}`, 'fixed_shift', fixedUserId)
+        await createGroupForAutoShift(adminToken, `autoshift-pending-${runSuffix}`, 'scheduled_shift', pendingOutdoorUserId)
+        await createGroupForAutoShift(adminToken, `autoshift-tolerance-${runSuffix}`, 'scheduled_shift', toleranceUserId)
+
+        await pool.query(
+          `INSERT INTO attendance_shift_assignments
+           (id, org_id, user_id, shift_id, start_date, end_date, is_active)
+           VALUES ($1, $2, $3, $4, $5, $5, true)`,
+          [randomUuidV4(), orgId, scheduledUserId, shiftId, workDate],
+        )
+        await insertPunchEvent(pool, scheduledUserId, workDate, 'check_in', `${workDate}T09:02:00.000Z`)
+        await insertPunchEvent(pool, scheduledUserId, workDate, 'check_out', `${workDate}T18:01:00.000Z`)
+        await insertPunchEvent(pool, fixedUserId, workDate, 'check_in', `${workDate}T09:01:00.000Z`)
+        await pool.query(
+          `INSERT INTO attendance_requests
+           (id, user_id, org_id, work_date, request_type, requested_in_at, status, metadata)
+           VALUES ($1, $2, $3, $4, 'outdoor_punch', $5, 'pending', $6::jsonb)`,
+          [
+            randomUuidV4(),
+            pendingOutdoorUserId,
+            orgId,
+            workDate,
+            `${workDate}T09:00:00.000Z`,
+            JSON.stringify({ outdoorPunch: { eventType: 'check_in', occurredAt: `${workDate}T09:00:00.000Z`, workDate } }),
+          ],
+        )
+        await insertPunchEvent(pool, toleranceUserId, workDate, 'check_in', `${workDate}T03:00:00.000Z`)
+        await insertPunchEvent(pool, toleranceUserId, workDate, 'check_out', `${workDate}T04:00:00.000Z`)
+
+        const res = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/preview`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            from: workDate,
+            userIds: [scheduledUserId, fixedUserId, pendingOutdoorUserId, toleranceUserId],
+          }),
+        })
+        expect(res.status).toBe(200)
+        const data = (res.body as { data?: { items?: any[]; skipped?: Array<{ userId: string; reason: string }> } } | undefined)?.data
+        expect(data?.items ?? []).toHaveLength(0)
+        const reasonsByUser = new Map((data?.skipped ?? []).map((item) => [item.userId, item.reason]))
+        expect(reasonsByUser.get(scheduledUserId)).toBe('already_scheduled')
+        expect(reasonsByUser.get(fixedUserId)).toBe('not_scheduled_shift_group')
+        expect(reasonsByUser.get(pendingOutdoorUserId)).toBe('no_punch')
+        expect(reasonsByUser.get(toleranceUserId)).toBe('no_candidate_within_tolerance')
+      } finally {
+        await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
+        if (previousFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+        else process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = previousFlag
+        await pool.end()
+      }
+    })
   })
 
   it('supports request item lookup, update, and delete aliases for self-service follow-up', async () => {
