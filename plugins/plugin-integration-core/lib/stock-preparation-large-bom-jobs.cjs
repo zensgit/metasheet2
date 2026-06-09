@@ -191,9 +191,23 @@ function ensureDurableJobStorage(storage) {
   return storage
 }
 
-function backgroundJobKey(actionId, jobId) {
-  const safeActionId = safeEvidenceToken(actionId, 'actionId')
-  const safeJobId = safeEvidenceToken(jobId, 'jobId')
+function requiredJobScope(input = {}) {
+  const tenantId = safeEvidenceToken(input.tenantId, 'tenantId')
+  const workspaceId = safeEvidenceToken(input.workspaceId, 'workspaceId')
+  if (!tenantId || !workspaceId) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_JOB_SCOPE_REQUIRED',
+      'large-BOM job scope is required',
+      { tenantIdPresent: Boolean(tenantId), workspaceIdPresent: Boolean(workspaceId) },
+    )
+  }
+  return { tenantId, workspaceId }
+}
+
+function backgroundJobKey(input = {}) {
+  const { tenantId, workspaceId } = requiredJobScope(input)
+  const safeActionId = safeEvidenceToken(input.actionId, 'actionId')
+  const safeJobId = safeEvidenceToken(input.jobId, 'jobId')
   if (!safeActionId || !safeJobId) {
     throw new StockPreparationLargeBomJobError(
       'LARGE_BOM_JOB_ID_INVALID',
@@ -201,7 +215,7 @@ function backgroundJobKey(actionId, jobId) {
       { actionIdPresent: Boolean(safeActionId), jobIdPresent: Boolean(safeJobId) },
     )
   }
-  return `stock-preparation:large-bom:background:${safeActionId}:${safeJobId}`
+  return `stock-preparation:large-bom:background:${tenantId}:${workspaceId}:${safeActionId}:${safeJobId}`
 }
 
 function requiredPrincipal(value) {
@@ -225,6 +239,7 @@ function publicBackgroundExpansionJob(job) {
 
 async function createLargeBomBackgroundExpansionJob(input = {}) {
   const storage = ensureDurableJobStorage(input.storage)
+  const scope = requiredJobScope(input)
   const principal = requiredPrincipal(input.principal)
   const action = isPlainObject(input.action) ? input.action : {}
   const actionId = safeEvidenceToken(action.actionId || input.actionId, 'actionId')
@@ -240,6 +255,7 @@ async function createLargeBomBackgroundExpansionJob(input = {}) {
   const now = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   const job = {
     jobId,
+    ...scope,
     actionId,
     status: 'queued',
     authoritative: false,
@@ -264,13 +280,13 @@ async function createLargeBomBackgroundExpansionJob(input = {}) {
     createdAt: now,
     updatedAt: now,
   }
-  await storage.set(backgroundJobKey(actionId, jobId), job)
+  await storage.set(backgroundJobKey({ ...scope, actionId, jobId }), job)
   return cloneJson(job)
 }
 
 async function loadLargeBomBackgroundExpansionJob(input = {}) {
   const storage = ensureDurableJobStorage(input.storage)
-  const key = backgroundJobKey(input.actionId, input.jobId)
+  const key = backgroundJobKey(input)
   const job = await storage.get(key)
   if (!job) {
     throw new StockPreparationLargeBomJobError(
@@ -286,7 +302,7 @@ async function loadLargeBomBackgroundExpansionJob(input = {}) {
 async function cancelLargeBomBackgroundExpansionJob(input = {}) {
   const storage = ensureDurableJobStorage(input.storage)
   requiredPrincipal(input.principal)
-  const key = backgroundJobKey(input.actionId, input.jobId)
+  const key = backgroundJobKey(input)
   const job = await storage.get(key)
   if (!job) {
     throw new StockPreparationLargeBomJobError(
