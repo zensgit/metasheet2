@@ -18,6 +18,10 @@ const {
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
 } = require('./stock-preparation-conflict-planner.cjs')
+const {
+  applyStockPreparationPlan,
+  summarizeApplyResultForEvidence,
+} = require('./stock-preparation-apply-writer.cjs')
 
 const LARGE_BOM_BACKGROUND_EXPANSION_STATUSES = Object.freeze([
   'queued',
@@ -64,6 +68,10 @@ const APPLY_COUNT_FIELDS = Object.freeze([
   'held',
   'failed',
 ])
+
+const LARGE_BOM_APPLY_PERMISSIONS = Object.freeze(['write', 'admin'])
+const LARGE_BOM_APPLY_DEFAULT_CHUNK_SIZE = 100
+const LARGE_BOM_APPLY_MAX_CHUNK_SIZE = 1000
 
 class StockPreparationLargeBomJobError extends Error {
   constructor(code, message, details = {}, status = 422) {
@@ -187,6 +195,10 @@ function defaultJobId() {
   return `large-bom-expansion-${crypto.randomUUID()}`
 }
 
+function defaultApplyJobId() {
+  return `large-bom-apply-${crypto.randomUUID()}`
+}
+
 function ensureDurableJobStorage(storage) {
   if (!storage || storage.durable !== true) {
     throw new StockPreparationLargeBomJobError(
@@ -236,6 +248,19 @@ function backgroundJobKey(input = {}) {
   return `stock-preparation:large-bom:background:${tenantId}:${workspaceId}:${safeActionId}:${safeJobId}`
 }
 
+function checkpointApplyJobKey(actionId, applyJobId) {
+  const safeActionId = safeEvidenceToken(actionId, 'actionId')
+  const safeApplyJobId = safeEvidenceToken(applyJobId, 'applyJobId')
+  if (!safeActionId || !safeApplyJobId) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_JOB_ID_INVALID',
+      'large-BOM checkpoint apply job id is required',
+      { actionIdPresent: Boolean(safeActionId), applyJobIdPresent: Boolean(safeApplyJobId) },
+    )
+  }
+  return `stock-preparation:large-bom:apply:${safeActionId}:${safeApplyJobId}`
+}
+
 function requiredPrincipal(value) {
   const principal = optionalString(value)
   if (!principal) {
@@ -252,6 +277,13 @@ function publicBackgroundExpansionJob(job) {
   return {
     jobId: safeEvidenceToken(job && job.jobId, 'jobId'),
     ...summarizeLargeBomBackgroundExpansionJobForEvidence(job),
+  }
+}
+
+function publicCheckpointApplyJob(job) {
+  return {
+    jobId: safeEvidenceToken(job && job.jobId, 'jobId'),
+    ...summarizeLargeBomCheckpointApplyJobForEvidence(job),
   }
 }
 
@@ -526,6 +558,290 @@ function largeBomPlanRevision({ job, plan, existingRows, conflictPolicyReview })
   })
 }
 
+function isAuthoritativeLargeBomPlan(job = {}) {
+  if (!isAuthoritativeLargeBomExpansion(job)) return false
+  const planArtifact = isPlainObject(job.planArtifact) ? job.planArtifact : {}
+  const plan = isPlainObject(planArtifact.plan) ? planArtifact.plan : {}
+  return Boolean(optionalString(job.planRevision || planArtifact.revision)) &&
+    Array.isArray(plan.decisions)
+}
+
+function assertAuthoritativeLargeBomPlan(job = {}) {
+  if (!isAuthoritativeLargeBomPlan(job)) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_PLAN_ARTIFACT_NOT_AUTHORITATIVE',
+      'large-BOM apply requires a completed authoritative conflict plan artifact',
+      {
+        status: isPlainObject(job) ? optionalString(job.status) || undefined : undefined,
+        authoritative: isPlainObject(job) ? job.authoritative === true : false,
+        artifactRevisionPresent: isPlainObject(job)
+          ? Boolean(optionalString(job.artifactRevision || (job.artifact && job.artifact.revision)))
+          : false,
+        planRevisionPresent: isPlainObject(job)
+          ? Boolean(optionalString(job.planRevision || (job.planArtifact && job.planArtifact.revision)))
+          : false,
+      },
+    )
+  }
+  return job
+}
+
+function requireApplyPermission(value) {
+  const permission = optionalString(value)
+  if (!LARGE_BOM_APPLY_PERMISSIONS.includes(permission)) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_PERMISSION_REQUIRED',
+      'large-BOM checkpoint apply requires Data Factory write/admin permission',
+      { permission: permission || undefined },
+      403,
+    )
+  }
+  return permission
+}
+
+function normalizeChunkSize(value) {
+  if (value === undefined || value === null || value === '') return LARGE_BOM_APPLY_DEFAULT_CHUNK_SIZE
+  const parsed = nonNegativeInteger(value, 'maxDecisionsPerChunk')
+  if (parsed < 1 || parsed > LARGE_BOM_APPLY_MAX_CHUNK_SIZE) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_CHUNK_SIZE_INVALID',
+      'large-BOM checkpoint apply chunk size is out of range',
+      { min: 1, max: LARGE_BOM_APPLY_MAX_CHUNK_SIZE },
+    )
+  }
+  return parsed
+}
+
+function emptyApplyCounts() {
+  return Object.fromEntries(APPLY_COUNT_FIELDS.map((field) => [field, 0]))
+}
+
+function mergeCounts(left = {}, right = {}) {
+  const out = emptyApplyCounts()
+  for (const field of APPLY_COUNT_FIELDS) {
+    out[field] = nonNegativeInteger(left[field], field) + nonNegativeInteger(right[field], field)
+  }
+  return out
+}
+
+function mergeTokenList(left = [], right = []) {
+  const out = []
+  for (const token of [...left, ...right]) {
+    if (typeof token === 'string' && token && !out.includes(token)) out.push(token)
+  }
+  return out.sort()
+}
+
+function countManualConfirmDecisions(plan = {}) {
+  return Array.isArray(plan.decisions)
+    ? plan.decisions.filter((decision) => decision && decision.decision === 'manual_confirm').length
+    : 0
+}
+
+function requireTargetSnapshot(job = {}) {
+  const target = job.actionSnapshot && job.actionSnapshot.target
+  if (!isPlainObject(target)) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_TARGET_REQUIRED',
+      'large-BOM checkpoint apply requires a server-configured target binding',
+      { targetPresent: false },
+    )
+  }
+  return cloneJson(target)
+}
+
+function requireCheckpointRecordsApi(recordsApi) {
+  if (
+    !recordsApi ||
+    typeof recordsApi.queryRecords !== 'function' ||
+    typeof recordsApi.createRecord !== 'function' ||
+    typeof recordsApi.patchRecord !== 'function'
+  ) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_RECORDS_API_UNAVAILABLE',
+      'large-BOM checkpoint apply requires queryRecords/createRecord/patchRecord records API',
+      { field: 'recordsApi' },
+      501,
+    )
+  }
+  return recordsApi
+}
+
+async function createLargeBomCheckpointApplyJob(input = {}) {
+  const storage = ensureDurableJobStorage(input.storage)
+  const principal = requiredPrincipal(input.principal)
+  const permission = requireApplyPermission(input.permission)
+  const sourceJob = await loadLargeBomBackgroundExpansionJob({
+    storage,
+    actionId: input.actionId,
+    jobId: input.jobId,
+  })
+  assertAuthoritativeLargeBomPlan(sourceJob)
+  const planArtifact = sourceJob.planArtifact
+  const plan = cloneJson(planArtifact.plan)
+  const manualConfirmCount = countManualConfirmDecisions(plan)
+  if (manualConfirmCount > 0 && input.acceptManualConfirmHold !== true) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_MANUAL_CONFIRM_ACK_REQUIRED',
+      'large-BOM checkpoint apply requires explicit acknowledgement for held manual-confirm rows',
+      { manualConfirmCount },
+      409,
+    )
+  }
+  const target = requireTargetSnapshot(sourceJob)
+  const applyJobId = safeEvidenceToken(
+    (typeof input.createApplyJobId === 'function' ? input.createApplyJobId() : '') ||
+      optionalString(input.applyJobId) ||
+      defaultApplyJobId(),
+    'applyJobId',
+  )
+  const now = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+  const job = {
+    jobId: applyJobId,
+    actionId: sourceJob.actionId,
+    sourceJobId: sourceJob.jobId,
+    status: 'queued',
+    planRevision: sourceJob.planRevision || planArtifact.revision,
+    targetRevision: hashJson(target),
+    approvalPresent: true,
+    approval: {
+      principal,
+      permission,
+      acceptManualConfirmHold: input.acceptManualConfirmHold === true,
+      approvedAt: now,
+    },
+    permission,
+    target,
+    template: sourceJob.actionSnapshot && sourceJob.actionSnapshot.template
+      ? cloneJson(sourceJob.actionSnapshot.template)
+      : undefined,
+    plan,
+    totalDecisions: Array.isArray(plan.decisions) ? plan.decisions.length : 0,
+    checkpoint: {
+      nextDecisionIndex: 0,
+      completedChunks: 0,
+    },
+    counts: emptyApplyCounts(),
+    evidence: {
+      resultStatuses: [],
+      errorCodes: [],
+      fieldCategories: ['plm_system'],
+    },
+    createdAt: now,
+    updatedAt: now,
+  }
+  await storage.set(checkpointApplyJobKey(sourceJob.actionId, applyJobId), job)
+  return cloneJson(job)
+}
+
+async function loadLargeBomCheckpointApplyJob(input = {}) {
+  const storage = ensureDurableJobStorage(input.storage)
+  const key = checkpointApplyJobKey(input.actionId, input.applyJobId || input.jobId)
+  const job = await storage.get(key)
+  if (!job) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_JOB_NOT_FOUND',
+      'large-BOM checkpoint apply job was not found',
+      { applyJobIdPresent: Boolean(optionalString(input.applyJobId || input.jobId)) },
+      404,
+    )
+  }
+  return cloneJson(job)
+}
+
+function nextDecisionIndex(job = {}) {
+  return nonNegativeInteger(job.checkpoint && job.checkpoint.nextDecisionIndex, 'checkpoint.nextDecisionIndex')
+}
+
+function completedChunks(job = {}) {
+  return nonNegativeInteger(job.checkpoint && job.checkpoint.completedChunks, 'checkpoint.completedChunks')
+}
+
+function mergeApplyEvidence(job, applyResult) {
+  const publicResult = summarizeApplyResultForEvidence(applyResult)
+  const evidence = isPlainObject(job.evidence) ? job.evidence : {}
+  job.evidence = {
+    resultStatuses: mergeTokenList(evidence.resultStatuses, publicResult.resultStatuses),
+    errorCodes: mergeTokenList(evidence.errorCodes, publicResult.errorCodes),
+    fieldCategories: mergeTokenList(evidence.fieldCategories, ['plm_system']),
+  }
+}
+
+function terminalApplyStatus(counts = {}) {
+  if (nonNegativeInteger(counts.failed, 'failed') > 0 || nonNegativeInteger(counts.held, 'held') > 0) return 'partial'
+  return 'succeeded'
+}
+
+async function runLargeBomCheckpointApplyJobChunk(input = {}) {
+  const storage = ensureDurableJobStorage(input.storage)
+  const key = checkpointApplyJobKey(input.actionId, input.applyJobId || input.jobId)
+  const job = await storage.get(key)
+  if (!job) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_JOB_NOT_FOUND',
+      'large-BOM checkpoint apply job was not found',
+      { applyJobIdPresent: Boolean(optionalString(input.applyJobId || input.jobId)) },
+      404,
+    )
+  }
+  if (['succeeded', 'partial'].includes(job.status)) return cloneJson(job)
+  if (!['queued', 'running', 'paused', 'failed'].includes(job.status)) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_RUN_REJECTED',
+      'large-BOM checkpoint apply job cannot be run from this status',
+      { status: safeEvidenceToken(job.status, 'status') || undefined },
+      409,
+    )
+  }
+  const plan = isPlainObject(job.plan) && Array.isArray(job.plan.decisions) ? job.plan : null
+  if (!plan) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_PLAN_INVALID',
+      'large-BOM checkpoint apply job is missing a private conflict plan',
+      { planPresent: false },
+    )
+  }
+  const chunkSize = normalizeChunkSize(input.maxDecisionsPerChunk)
+  const recordsApi = requireCheckpointRecordsApi(input.recordsApi)
+  const start = nextDecisionIndex(job)
+  const decisions = plan.decisions
+  if (start >= decisions.length) {
+    job.status = terminalApplyStatus(job.counts)
+    job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+    await storage.set(key, job)
+    return cloneJson(job)
+  }
+
+  const runningAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+  job.status = 'running'
+  job.updatedAt = runningAt
+  await storage.set(key, job)
+
+  const end = Math.min(start + chunkSize, decisions.length)
+  const chunkPlan = {
+    ...plan,
+    decisions: decisions.slice(start, end).map(cloneJson),
+  }
+  const applyResult = await applyStockPreparationPlan({
+    permission: job.permission,
+    plan: chunkPlan,
+    target: job.target,
+    template: job.template,
+    recordsApi,
+  })
+
+  job.counts = mergeCounts(job.counts, applyResult.counts)
+  mergeApplyEvidence(job, applyResult)
+  job.checkpoint = {
+    nextDecisionIndex: end,
+    completedChunks: completedChunks(job) + 1,
+  }
+  job.status = end >= decisions.length ? terminalApplyStatus(job.counts) : 'running'
+  job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+  await storage.set(key, job)
+  return cloneJson(job)
+}
+
 async function planLargeBomBackgroundExpansionJob(input = {}) {
   const storage = ensureDurableJobStorage(input.storage)
   const key = backgroundJobKey(input)
@@ -656,20 +972,29 @@ module.exports = {
   StockPreparationLargeBomJobError,
   cancelLargeBomBackgroundExpansionJob,
   createLargeBomBackgroundExpansionJob,
+  createLargeBomCheckpointApplyJob,
   loadLargeBomBackgroundExpansionJob,
+  loadLargeBomCheckpointApplyJob,
   planLargeBomBackgroundExpansionJob,
   publicBackgroundExpansionJob,
+  publicCheckpointApplyJob,
   runLargeBomBackgroundExpansionJob,
+  runLargeBomCheckpointApplyJobChunk,
   summarizeLargeBomBackgroundExpansionJobForEvidence,
   summarizeLargeBomCheckpointApplyJobForEvidence,
   isAuthoritativeLargeBomExpansion,
   assertAuthoritativeLargeBomExpansion,
+  isAuthoritativeLargeBomPlan,
+  assertAuthoritativeLargeBomPlan,
   __internals: {
     backgroundJobKey,
+    checkpointApplyJobKey,
     ensureDurableJobStorage,
     hashJson,
     safeEvidenceToken,
     safeTokenList,
     nonNegativeInteger,
+    normalizeChunkSize,
+    requireCheckpointRecordsApi,
   },
 }
