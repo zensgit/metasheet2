@@ -75,6 +75,7 @@ const {
   normalizeActionParameters,
 } = require('./stock-preparation-table-actions.cjs')
 const {
+  assertAuthoritativeLargeBomExpansion,
   cancelLargeBomBackgroundExpansionJob,
   createLargeBomBackgroundExpansionJob,
   loadLargeBomBackgroundExpansionJob,
@@ -257,6 +258,14 @@ function scopedInput(req, input = {}) {
     ...input,
     tenantId: resolveTenantId(req, input),
     workspaceId: resolveWorkspaceId(req, input),
+  }
+}
+
+function largeBomJobScope(req, input = {}) {
+  const scope = scopedInput(req, input)
+  return {
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId || 'workspace-default',
   }
 }
 
@@ -1422,10 +1431,12 @@ function createHandlers(services, options = {}) {
       requireAccess(req, 'read')
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const routeScope = largeBomJobScope(req, { actionId })
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const parameters = normalizeActionParameters(body.parameters)
       const job = await createLargeBomBackgroundExpansionJob({
         storage: context.storage,
+        ...routeScope,
         action,
         parameters,
         principal: requestPrincipal(req),
@@ -1437,8 +1448,10 @@ function createHandlers(services, options = {}) {
       requireAccess(req, 'read')
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const routeScope = largeBomJobScope(req, { actionId })
       const job = await loadLargeBomBackgroundExpansionJob({
         storage: context.storage,
+        ...routeScope,
         actionId,
         jobId: firstString(requestParams(req).jobId),
       })
@@ -1450,8 +1463,10 @@ function createHandlers(services, options = {}) {
       normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const jobId = firstString(requestParams(req).jobId)
+      const routeScope = largeBomJobScope(req, { actionId })
       const queuedJob = await loadLargeBomBackgroundExpansionJob({
         storage: context.storage,
+        ...routeScope,
         actionId,
         jobId,
       })
@@ -1459,6 +1474,7 @@ function createHandlers(services, options = {}) {
       const sourceAdapter = await loadTableActionSourceAdapter(req, action, { principal: queuedJob.principal })
       const job = await runLargeBomBackgroundExpansionJob({
         storage: context.storage,
+        ...routeScope,
         actionId,
         jobId,
         sourceAdapter,
@@ -1472,11 +1488,14 @@ function createHandlers(services, options = {}) {
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const jobId = firstString(requestParams(req).jobId)
+      const routeScope = largeBomJobScope(req, { actionId })
       const job = await loadLargeBomBackgroundExpansionJob({
         storage: context.storage,
+        ...routeScope,
         actionId,
         jobId,
       })
+      assertAuthoritativeLargeBomExpansion(job)
       const action = assertStockPreparationTargetReady(job.actionSnapshot)
       const projectNo = job.parameters && job.parameters.projectNo
       const existingRows = await tableActionInternals.readExistingStockPreparationRows(
@@ -1497,6 +1516,7 @@ function createHandlers(services, options = {}) {
       })
       const planned = await planLargeBomBackgroundExpansionJob({
         storage: context.storage,
+        ...routeScope,
         actionId,
         jobId,
         existingRows,
@@ -1510,8 +1530,10 @@ function createHandlers(services, options = {}) {
       normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const routeScope = largeBomJobScope(req, { actionId })
       const job = await cancelLargeBomBackgroundExpansionJob({
         storage: context.storage,
+        ...routeScope,
         actionId,
         jobId: firstString(requestParams(req).jobId),
         principal: requestPrincipal(req),

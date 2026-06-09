@@ -2895,12 +2895,29 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   const jobId = res.body.data.jobId
 
   res = await invoke(mount.routes, 'GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId', {
+    user: { id: 'user_cross_tenant', tenantId: 'tenant_2', permissions: ['integration:read'] },
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assert.equal(res.statusCode, 404)
+  assert.equal(res.body.error.code, 'LARGE_BOM_JOB_NOT_FOUND', 'known jobId is tenant-scoped')
+
+  res = await invoke(mount.routes, 'GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId', {
     user: READ_USER,
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
   })
   assertOkResponse(res, 200)
   assert.equal(res.body.data.jobId, jobId)
   assert.equal(res.body.data.status, 'queued')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE')
+  assert.equal(records.calls.length, 0, 'non-authoritative job plan fails before target rows are read')
+  assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, 0, 'non-authoritative job plan fails before source load')
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'non-authoritative job plan fails before adapter creation')
 
   res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
     user: READ_USER,
