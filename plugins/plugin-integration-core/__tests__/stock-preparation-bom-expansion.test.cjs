@@ -186,6 +186,27 @@ async function testFailClosedGuards() {
   }
 
   {
+    const { adapter } = createAdapter(baseData({
+      DN_PDM_BomDetailsInfo: [],
+    }))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    const evidence = summarizeBomExpansionForEvidence(result)
+    const text = JSON.stringify(evidence)
+
+    assert.equal(result.valid, false)
+    assert.equal(result.status, 'failed')
+    assert.ok(
+      result.rowErrors.some((error) => error.type === 'missing_child_bom' && error.field === 'bom_pid'),
+      'active BOM head with no details is held as missing_child_bom, not guessed as a complete leaf',
+    )
+    assert.deepEqual(evidence.errorTypes, ['missing_child_bom'])
+    assert.equal(evidence.largeBom, false, 'source-incomplete child BOM is not relabeled as a scale-bounded large BOM')
+    assert.equal(text.includes('P-001'), false, 'missing child BOM evidence hides project value')
+    assert.equal(text.includes('PART-A'), false, 'missing child BOM evidence hides component source id')
+    assert.equal(text.includes('BOM-A'), false, 'missing child BOM evidence hides BOM id')
+  }
+
+  {
     const { adapter } = createAdapter(baseData())
     const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', maxRows: 1 })
     assert.equal(result.valid, false)

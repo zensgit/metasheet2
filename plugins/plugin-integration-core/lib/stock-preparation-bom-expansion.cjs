@@ -710,6 +710,14 @@ async function expandPlmProjectBom(input = {}) {
         addReadError(err, plan.bomDetail.object)
         return
       }
+      if (details.length === 0) {
+        addRowError({
+          type: 'missing_child_bom',
+          field: plan.bomDetail.bomParentField,
+          depth: nextDepth,
+        })
+        continue
+      }
       for (const detail of details) {
         if (errors.length > 0) return
         const childSourceId = toKey(readField(detail, plan.bomDetail.componentIdField))
