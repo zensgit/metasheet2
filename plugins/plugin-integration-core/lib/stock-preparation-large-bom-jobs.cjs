@@ -72,6 +72,7 @@ const APPLY_COUNT_FIELDS = Object.freeze([
 const LARGE_BOM_APPLY_PERMISSIONS = Object.freeze(['write', 'admin'])
 const LARGE_BOM_APPLY_DEFAULT_CHUNK_SIZE = 100
 const LARGE_BOM_APPLY_MAX_CHUNK_SIZE = 1000
+const activeCheckpointApplyRuns = new Set()
 
 class StockPreparationLargeBomJobError extends Error {
   constructor(code, message, details = {}, status = 422) {
@@ -776,20 +777,8 @@ function terminalApplyStatus(counts = {}) {
   return 'succeeded'
 }
 
-async function runLargeBomCheckpointApplyJobChunk(input = {}) {
-  const storage = ensureDurableJobStorage(input.storage)
-  const key = checkpointApplyJobKey({ ...input, applyJobId: input.applyJobId || input.jobId })
-  const job = await storage.get(key)
-  if (!job) {
-    throw new StockPreparationLargeBomJobError(
-      'LARGE_BOM_APPLY_JOB_NOT_FOUND',
-      'large-BOM checkpoint apply job was not found',
-      { applyJobIdPresent: Boolean(optionalString(input.applyJobId || input.jobId)) },
-      404,
-    )
-  }
-  if (['succeeded', 'partial'].includes(job.status)) return cloneJson(job)
-  if (job.status === 'running') {
+function acquireCheckpointApplyRun(key) {
+  if (activeCheckpointApplyRuns.has(key)) {
     throw new StockPreparationLargeBomJobError(
       'LARGE_BOM_APPLY_RUN_IN_PROGRESS',
       'large-BOM checkpoint apply job already has a running chunk',
@@ -797,61 +786,96 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
       409,
     )
   }
-  if (!['queued', 'paused', 'failed'].includes(job.status)) {
-    throw new StockPreparationLargeBomJobError(
-      'LARGE_BOM_APPLY_RUN_REJECTED',
-      'large-BOM checkpoint apply job cannot be run from this status',
-      { status: safeEvidenceToken(job.status, 'status') || undefined },
-      409,
-    )
+  activeCheckpointApplyRuns.add(key)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    activeCheckpointApplyRuns.delete(key)
   }
-  const plan = isPlainObject(job.plan) && Array.isArray(job.plan.decisions) ? job.plan : null
-  if (!plan) {
-    throw new StockPreparationLargeBomJobError(
-      'LARGE_BOM_APPLY_PLAN_INVALID',
-      'large-BOM checkpoint apply job is missing a private conflict plan',
-      { planPresent: false },
-    )
-  }
-  const chunkSize = normalizeChunkSize(input.maxDecisionsPerChunk)
-  const recordsApi = requireCheckpointRecordsApi(input.recordsApi)
-  const start = nextDecisionIndex(job)
-  const decisions = plan.decisions
-  if (start >= decisions.length) {
-    job.status = terminalApplyStatus(job.counts)
+}
+
+async function runLargeBomCheckpointApplyJobChunk(input = {}) {
+  const storage = ensureDurableJobStorage(input.storage)
+  const key = checkpointApplyJobKey({ ...input, applyJobId: input.applyJobId || input.jobId })
+  const release = acquireCheckpointApplyRun(key)
+  try {
+    const job = await storage.get(key)
+    if (!job) {
+      throw new StockPreparationLargeBomJobError(
+        'LARGE_BOM_APPLY_JOB_NOT_FOUND',
+        'large-BOM checkpoint apply job was not found',
+        { applyJobIdPresent: Boolean(optionalString(input.applyJobId || input.jobId)) },
+        404,
+      )
+    }
+    if (['succeeded', 'partial'].includes(job.status)) return cloneJson(job)
+    if (job.status === 'running') {
+      throw new StockPreparationLargeBomJobError(
+        'LARGE_BOM_APPLY_RUN_IN_PROGRESS',
+        'large-BOM checkpoint apply job already has a running chunk',
+        { status: 'running' },
+        409,
+      )
+    }
+    if (!['queued', 'paused', 'failed'].includes(job.status)) {
+      throw new StockPreparationLargeBomJobError(
+        'LARGE_BOM_APPLY_RUN_REJECTED',
+        'large-BOM checkpoint apply job cannot be run from this status',
+        { status: safeEvidenceToken(job.status, 'status') || undefined },
+        409,
+      )
+    }
+    const plan = isPlainObject(job.plan) && Array.isArray(job.plan.decisions) ? job.plan : null
+    if (!plan) {
+      throw new StockPreparationLargeBomJobError(
+        'LARGE_BOM_APPLY_PLAN_INVALID',
+        'large-BOM checkpoint apply job is missing a private conflict plan',
+        { planPresent: false },
+      )
+    }
+    const chunkSize = normalizeChunkSize(input.maxDecisionsPerChunk)
+    const recordsApi = requireCheckpointRecordsApi(input.recordsApi)
+    const start = nextDecisionIndex(job)
+    const decisions = plan.decisions
+    if (start >= decisions.length) {
+      job.status = terminalApplyStatus(job.counts)
+      job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+      await storage.set(key, job)
+      return cloneJson(job)
+    }
+
+    const runningAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+    job.status = 'running'
+    job.updatedAt = runningAt
+    await storage.set(key, job)
+
+    const end = Math.min(start + chunkSize, decisions.length)
+    const chunkPlan = {
+      ...plan,
+      decisions: decisions.slice(start, end).map(cloneJson),
+    }
+    const applyResult = await applyStockPreparationPlan({
+      permission: job.permission,
+      plan: chunkPlan,
+      target: job.target,
+      template: job.template,
+      recordsApi,
+    })
+
+    job.counts = mergeCounts(job.counts, applyResult.counts)
+    mergeApplyEvidence(job, applyResult)
+    job.checkpoint = {
+      nextDecisionIndex: end,
+      completedChunks: completedChunks(job) + 1,
+    }
+    job.status = end >= decisions.length ? terminalApplyStatus(job.counts) : 'paused'
     job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
     await storage.set(key, job)
     return cloneJson(job)
+  } finally {
+    release()
   }
-
-  const runningAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
-  job.status = 'running'
-  job.updatedAt = runningAt
-  await storage.set(key, job)
-
-  const end = Math.min(start + chunkSize, decisions.length)
-  const chunkPlan = {
-    ...plan,
-    decisions: decisions.slice(start, end).map(cloneJson),
-  }
-  const applyResult = await applyStockPreparationPlan({
-    permission: job.permission,
-    plan: chunkPlan,
-    target: job.target,
-    template: job.template,
-    recordsApi,
-  })
-
-  job.counts = mergeCounts(job.counts, applyResult.counts)
-  mergeApplyEvidence(job, applyResult)
-  job.checkpoint = {
-    nextDecisionIndex: end,
-    completedChunks: completedChunks(job) + 1,
-  }
-  job.status = end >= decisions.length ? terminalApplyStatus(job.counts) : 'paused'
-  job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
-  await storage.set(key, job)
-  return cloneJson(job)
 }
 
 async function planLargeBomBackgroundExpansionJob(input = {}) {

@@ -156,6 +156,36 @@ function createTargetRecordsApi({ existing = [] } = {}) {
   }
 }
 
+function createBlockingTargetRecordsApi({ existing = [] } = {}) {
+  const api = createTargetRecordsApi({ existing })
+  let enteredFirstCreate
+  let releaseFirstCreate
+  let firstCreateBlocked = false
+  const firstCreateEntered = new Promise((resolve) => {
+    enteredFirstCreate = resolve
+  })
+  const firstCreateReleased = new Promise((resolve) => {
+    releaseFirstCreate = resolve
+  })
+  return {
+    rows: api.rows,
+    calls: api.calls,
+    firstCreateEntered,
+    releaseFirstCreate,
+    recordsApi: {
+      ...api.recordsApi,
+      async createRecord(input = {}) {
+        if (!firstCreateBlocked) {
+          firstCreateBlocked = true
+          enteredFirstCreate()
+          await firstCreateReleased
+        }
+        return api.recordsApi.createRecord(input)
+      },
+    },
+  }
+}
+
 function targetBinding(overrides = {}) {
   return {
     sheetId: 'sheet_stock_preparation',
@@ -1120,6 +1150,53 @@ async function testCheckpointApplyMissingRecordsApiFailsBeforeRunning() {
   assert.equal(loaded.checkpoint.nextDecisionIndex, 0, 'missing recordsApi does not advance the checkpoint')
 }
 
+async function testCheckpointApplySingleFlightRejectsConcurrentQueuedRun() {
+  const plan = planWithDecisions([addDecision('PROJECT_VALUE_SHOULD_NOT_APPEAR::CONCURRENT-KEY')])
+  const { storage, actionId, jobId } = await seedPlannedLargeBomJob({ plan, jobId: 'job-single-flight-apply' })
+  const api = createBlockingTargetRecordsApi()
+  await createLargeBomCheckpointApplyJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    jobId,
+    principal: 'user-1',
+    permission: 'admin',
+    createApplyJobId: () => 'apply-job-single-flight',
+  })
+
+  const firstRun = runLargeBomCheckpointApplyJobChunk({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-single-flight',
+    recordsApi: api.recordsApi,
+    maxDecisionsPerChunk: 1,
+  })
+  await api.firstCreateEntered
+
+  await assert.rejects(
+    () => runLargeBomCheckpointApplyJobChunk({
+      storage,
+      ...TEST_SCOPE,
+      actionId,
+      applyJobId: 'apply-job-single-flight',
+      recordsApi: api.recordsApi,
+      maxDecisionsPerChunk: 1,
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_APPLY_RUN_IN_PROGRESS' &&
+      error.status === 409,
+  )
+  assert.equal(api.rows.length, 0, 'second concurrent run is rejected while the first chunk is in flight')
+
+  api.releaseFirstCreate()
+  const completed = await firstRun
+  assert.equal(completed.status, 'succeeded')
+  assert.equal(completed.counts.created, 1)
+  assert.equal(api.rows.length, 1)
+  assert.equal(api.calls.filter((call) => call[0] === 'createRecord').length, 1)
+}
+
 async function testCheckpointApplyRejectsConcurrentRunningChunk() {
   const key = 'PROJECT_VALUE_SHOULD_NOT_APPEAR::IDEMPOTENT-KEY'
   const plan = planWithDecisions([addDecision(key)])
@@ -1211,6 +1288,7 @@ async function main() {
   await testCheckpointApplyRequiresDurablePlanPermissionAndManualAck()
   await testCheckpointApplyChunksPlanAndKeepsPublicEvidenceValuesFree()
   await testCheckpointApplyMissingRecordsApiFailsBeforeRunning()
+  await testCheckpointApplySingleFlightRejectsConcurrentQueuedRun()
   await testCheckpointApplyRejectsConcurrentRunningChunk()
 }
 
