@@ -2,7 +2,7 @@
 
 Date: 2026-06-09
 Baseline: `origin/main` @ `c667ba137`
-Status: design-lock only; no runtime, schema, UI, scheduler, or staging change in this PR.
+Status: A0/A1 shipped and staging-proven; A2 auto-write remains locked behind a separate design.
 
 ## 0. Why This Exists
 
@@ -257,17 +257,18 @@ A2:
 
 | Slice | Scope | Status |
 | --- | --- | --- |
-| D0 | This design-lock + tracker backfill | ✅ in this PR |
+| D0 | This design-lock + tracker backfill | ✅ design-lock landed |
 | A0 | Backend preview endpoint + unit/real-DB tests; no writes | ✅ #2403 |
 | A0-UI | Admin review table for suggestions | ✅ #2405 |
-| A1 | Admin selected apply, provenance, guard reuse | 🟡 built in this PR; pending merge + staging |
-| A1-UI | Apply selected suggestions | 🟡 built in this PR; pending merge + staging |
+| A1 | Admin selected apply, provenance, guard reuse | ✅ #2406 + staging PASS `A1_AUTO_SHIFT_STAGING_SMOKE_PASS` |
+| A1-UI | Apply selected suggestions | ✅ #2406 + staging PASS `A1_AUTO_SHIFT_STAGING_SMOKE_PASS` |
 | A2 | Automatic write, feature-flag default off, staging smoke | 🔒 separate design-lock |
 
 ## 10. Completion Bar
 
-自动对班 remains 🟡 until A0 preview and A1 admin apply are both merged and
-staging-proven. It becomes ✅ only when:
+自动对班 A0/A1 is ✅ as of 2026-06-09: A0 preview and A1 admin apply are both
+merged and staging-proven. The staging smoke ran on deploy
+`b4a1ca69323d767e7d838882751b365f18b4116f` and proved:
 
 - feature is admin-configurable;
 - no default behavior changes;
@@ -275,6 +276,9 @@ staging-proven. It becomes ✅ only when:
 - apply is explicit and guarded;
 - reverse tests prove no overwrite of existing assignments;
 - one staging smoke proves preview/apply with real records.
+
+Smoke stamp:
+`A1_AUTO_SHIFT_STAGING_SMOKE_PASS deploy=b4a1ca69323d767e7d838882751b365f18b4116f prefix=autoshift-a1-smoke-mq64a66m residue={"users":0,"events":0,"records":0,"assignments":0,"groups":0,"shifts":0}`.
 
 A2 auto-write is optional and does not block the SHOULD ✅ unless product later
 raises the bar.
