@@ -2,7 +2,7 @@
 
 Date: 2026-06-09
 
-Grounded on: `origin/main@db6b128eeb35`
+Grounded on: `origin/main@59c883c0e1e3`
 
 Scope: MetaSheet2 workflow, approval, and multitable automation as one product
 target. This is a completion definition and execution ledger, not a sprint
@@ -51,7 +51,8 @@ Current main already contains substantial approval product runtime:
 | Dynamic assignee resolver | `ApprovalAssigneeResolver` supports `static_user`, `static_role`, `requester`, and `form_field_user`. |
 | Template authoring UI | Landed: `/approval-templates/new` and `/approval-templates/:id/edit`, fail-closed on unsupported rich graphs, preserves unsupported field metadata. |
 | Real DB authoring UAT guard | Landed integration test for create -> publish -> start -> resolve on real DB. |
-| Still missing | Deployed-browser smoke final verdict, field-visibility authoring UI, richer template constructs, trigger bindings, result backwrite, automation `start_approval`. |
+| Deployed/browser UAT | Passed: #2318 and #2371 accepted UI-created template -> publish -> `/approvals/new/:templateId` -> `form_field_user` resolution, plus unsupported-template read-only/save-disabled safety. |
+| Still missing | Field-visibility authoring UI, richer template constructs, trigger bindings, result backwrite, automation `start_approval`. |
 
 ### 1.3 Workflow Designer / BPMN
 
@@ -111,8 +112,8 @@ operate a practical business workflow using existing product surfaces:
 | ID | Work | Status | Completion acceptance |
 |---|---|---|---|
 | W0 | Re-ground status docs against current main | This PR | Existing TODOs no longer say A6-3-2 is not started after #2339/#2348. |
-| W1 | Approval authoring deployed-browser smoke | Remaining UAT | Operator creates template -> publishes -> starts `/approvals/new/:templateId` -> confirms form-field approver resolution; unsupported rich template is read-only/save-disabled. |
-| W2 | Automation A6-3-3 branch-local wait/nesting | Not started; demand-gated | `wait_for_callback` can live inside selected branch with stable nested step cursor, rule-drift guard, resume tests, and no silent flattening in editor. |
+| W1 | Approval authoring deployed-browser smoke | Done | #2318 PASS accepted: UI-created template published, `/approvals/new/:templateId` started, submitted user field resolved to expected assignee, unsupported rich template was read-only/save-disabled. #2375/#2371 reconfirmed current deployment. |
+| W2 | Automation A6-3-3 branch-local wait/nesting | Not started; demand-gated; no current unlock | `wait_for_callback` can live inside selected branch with stable nested step cursor, rule-drift guard, resume tests, and no silent flattening in editor. #2367 trial found A6-3 v1 sufficient for the tested flow, so do not start W2 without a new named scenario. |
 | W3 | Automation parallel fan-out + join-all | Not started; demand-gated | Parallel branches persist independent job lineage; join-all waits for all branches; failures and skipped branches are audited. |
 | W4 | Automation join-any / cancellation semantics | Not started; demand-gated after W3 | First completed branch continues; ignored/cancelled siblings are explicit in C1 jobs and audit. |
 | W5 | Approval completion event contract | Not started | `approval.approved/rejected/returned/cancelled` event payload is versioned, redacted, and tested without adding automation action yet. |
@@ -124,16 +125,21 @@ operate a practical business workflow using existing product surfaces:
 
 ## 4. Recommended Next Slice
 
-The next implementation should be **W1 + W2 in that order**:
+The next implementation should be **W5: approval completion event contract
+scope-gate**.
 
-1. **W1 approval authoring operator smoke** is the smallest remaining proof
-   gap. It does not add code unless smoke discovers a real issue.
-2. **W2 A6-3-3 branch-local wait/nesting** is the next meaningful automation
-   capability. It extends already-landed A6-2 and A6-3 without pulling in
-   approval coupling or BPMN.
+Why:
 
-Do not jump straight to `start_approval` or BPMN before W2 and W5. Approval-as-
-job needs stable suspend/resume plus an approval completion event contract; BPMN
+1. **W1 is closed by issue evidence** (#2318 + #2371 + #2375).
+2. **W2 is intentionally held** because #2367 found no concrete
+   branch-internal wait/nesting demand for the current trial flow.
+3. The v1 completion gap is now cross-surface closure: automation cannot yet
+   start an approval, and approval completion cannot yet resume/update
+   automation. W5 is the smallest safe first step because it defines the event
+   contract without adding `start_approval` behavior yet.
+
+Do not jump straight to `start_approval` or BPMN before W5. Approval-as-job
+needs stable suspend/resume plus an approval completion event contract; BPMN
 gateway preview needs branch/parallel semantics to map to.
 
 ## 5. Non-goals for v1

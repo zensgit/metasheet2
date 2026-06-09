@@ -1,6 +1,6 @@
 # Approval Template Authoring Frontend MVP TODO - 2026-06-04
 
-Status: **Frontend MVP implemented in this branch; real-stack UAT pending**.
+Status: **Frontend MVP landed; deployed authoring -> publish -> start smoke passed (#2318/#2371/#2375)**.
 
 Canonical design: `docs/development/approval-template-authoring-frontend-mvp-design-20260604.md`.
 
@@ -23,7 +23,7 @@ This TODO covers only the frontend authoring MVP. It does not authorize approval
 | Linear approval graph builder | [x] implemented |
 | Publish UI | [x] implemented |
 | Frontend tests/typecheck | [x] passed |
-| Real-stack UAT | [ ] not started |
+| Real-stack UAT | [x] authoring -> publish -> start smoke passed (#2318/#2371/#2375); full approve-to-terminal smoke remains outside the authoring MVP gate |
 
 ## Implementation Tasks
 
@@ -118,18 +118,20 @@ This TODO covers only the frontend authoring MVP. It does not authorize approval
 - [x] Unsupported graph edit-safety spec: existing parallel/condition/add-sign/unknown graph cannot be saved through the linear builder.
 - [x] `form_field_user` guard spec.
 - [x] Attachment not-authorable spec.
-- [x] Existing `ApprovalNewView` compatibility path remains covered by approval permission/lifecycle specs; real-stack UAT remains pending.
+- [x] Existing `ApprovalNewView` compatibility path remains covered by approval permission/lifecycle specs; deployed-browser authoring -> start smoke passed (#2318/#2371).
 - [x] Typecheck.
 
 ### A9. UAT
 
-- [ ] Manager creates a simple two-field template.
-- [ ] Manager configures one approval step with static user or requester source.
-- [ ] Manager publishes template.
-- [ ] Writer starts approval from `/approval-templates`.
+- [x] Manager creates a simple template with a user field (#2318/#2371/#2375).
+- [x] Manager configures one approval step with `form_field_user` source (#2318/#2371/#2375).
+- [x] Manager publishes template (#2318/#2371/#2375).
+- [x] Writer starts approval from `/approvals/new/:templateId` (#2318/#2371/#2375).
+- [x] Submitted user field resolves to the expected active assignee (#2318/#2371/#2375).
+- [x] Unsupported complex template opens read-only / save-disabled with no silent flattening (#2318).
 - [ ] Actor approves.
 - [ ] Requester sees terminal state under `我发起的`.
-- [ ] Non-manager cannot enter authoring view.
+- [ ] Non-manager cannot enter authoring view in deployed UI.
 
 ## Explicitly Deferred
 
