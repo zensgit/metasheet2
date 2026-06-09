@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3-1 `condition_branch` exclusive-branch runtime LANDED #2321 `127b29dd9` (2026-06-05; design-lock `multitable-automation-a6-3-branch-parallel-design-20260605.md`) — A6-3-2 frontend builder / A6-3-3 (wait/nesting in branches) / parallel fan-out·join still gated; A6-4..A6-5 remain frozen / demand-gated
+Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3-1 `condition_branch` exclusive-branch runtime LANDED #2321 `127b29dd9` (2026-06-05; design-lock `multitable-automation-a6-3-branch-parallel-design-20260605.md`) + A6-3-2a editor LANDED #2339 `960ea9315` + A6-3-2b admin-runs readability LANDED #2348 `4b44f25c6`; A6-3-3 (wait/nesting in branches) / parallel fan-out·join still gated; A6-4..A6-5 remain frozen / demand-gated
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, read-boundary wired only); RFC #1885
 
@@ -27,8 +27,8 @@ The governance half and named A5 retry runtime are complete on `origin/main`:
 
 This closeout did NOT mark the convergence engine complete at the time. Current status:
 A6-1 and A6-2 are complete end-to-end; A6-3-1 `condition_branch` exclusive-branch runtime
-landed (#2321), with A6-3-2 frontend / A6-3-3 / parallel-join still gated; A6-4/A6-5 remain
-separate future unlocks.
+landed (#2321), and A6-3-2 frontend/runs readability landed (#2339 + #2348). A6-3-3 /
+parallel-join remain gated; A6-4/A6-5 remain separate future unlocks.
 
 ## Doctrine — Two Gates (definition of "not lopsided")
 
@@ -69,7 +69,8 @@ The K3 Stage-1 blanket lock is retired (#1993; #1792 = M1 one-record Material Sa
 - A4 / A5: completed by explicit opt-in (#2039 + #2047); retry UI,
   idempotency keys, and re-fetch-current-record context remain future opt-ins.
 - A6: A6-0/A6-3 design-locks are docs-only; A6-1/A6-2 + A6-3-1 `condition_branch` runtime
-  landed by explicit opt-in; A6-3-2/A6-3-3 + parallel-join and A6-4/A6-5 remain frozen / demand-gated.
+  + A6-3-2 frontend/readability landed by explicit opt-in; A6-3-3 + parallel-join and
+  A6-4/A6-5 remain frozen / demand-gated.
 
 ## Current Baseline
 
@@ -279,7 +280,14 @@ complete.
       executor) rejecting `wait_for_callback` / nested `condition_branch` in branches; exclusive
       first-match-or-`defaultBranch`; C1 parent/selected-child/downstream lineage (no 2nd status vocab).
       Real-DB lineage seam gates via the blocking `plugin-tests.yml` targeted step.
-- [ ] A6-3-2 `condition_branch` frontend builder + admin-runs readability — not started.
+- [x] A6-3-2a `condition_branch` frontend builder — LANDED #2339 `960ea9315`
+      (2026-06-06): form-based branch builder, flat per-branch conditions, `update_record` /
+      `send_notification` branch action subset, read-only never-flatten guard for richer loaded
+      shapes, branch-key validation, and `workflow_job_v1` auto-lock.
+- [x] A6-3-2b `condition_branch` admin-runs readability — LANDED #2348 `4b44f25c6`
+      (2026-06-06): selected branch shows `label (key)` when present, branch child jobs are
+      grouped via nested step keys, and raw branch-selection output is suppressed in favour of the
+      readable line.
 - [ ] A6-3-3 `wait_for_callback` / nested `condition_branch` inside branches — gated (forbidden in A6-3-1).
 - [ ] A6-3 parallel fan-out / join-all / join-any — gated (separate follow rungs after the exclusive slice).
 - [ ] A6-4 BPMN compile/preview adapter — not started.

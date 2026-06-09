@@ -1,8 +1,8 @@
 # Multitable Automation A6-3 Branch / Parallel DAG Design-Lock (2026-06-05)
 
-Status: **A6-3-0 design-lock / scope gate**
+Status: **A6-3 design-lock / scope gate; A6-3-1 + A6-3-2 landed**
 
-Runtime: **not started**
+Runtime: **A6-3-1 `condition_branch` exclusive runtime landed; A6-3-2 frontend/readability landed; A6-3-3 and parallel/join still gated**
 
 Grounded on: `origin/main@83801c668`
 Companions:
@@ -15,8 +15,15 @@ Companions:
 
 ## 0. Verdict
 
-A6-3 can be opened as the next automation-only capability rung, but **only as
-this docs-only design-lock first**. Runtime remains a separate explicit opt-in.
+> **2026-06-09 status refresh**: this design-lock originally froze the shape
+> before runtime. Since then, A6-3-1 landed via #2321, A6-3-2a editor landed
+> via #2339, and A6-3-2b runs readability landed via #2348. The remaining
+> design-lock boundaries still apply to A6-3-3 and parallel/join.
+
+A6-3 was opened as the next automation-only capability rung, but **only through
+this docs-only design-lock first**. A6-3-1 and A6-3-2 later landed by explicit
+opt-in; the remaining A6-3-3 and parallel/join work still requires a separate
+explicit opt-in.
 
 The first runtime slice must be **A6-3-1 `condition_branch` / exclusive branch
 v1**, not full parallel DAG. Parallel fan-out and join semantics are important,

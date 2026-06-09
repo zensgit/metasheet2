@@ -29,7 +29,8 @@ treatment **on purpose**:
 - **A6-3 … A6-5 ADD capability** (branch/parallel graph execution, modeling import,
   approval coupling). Their *shape* is undefined until a concrete use-case names it.
   A6-3's first runtime slice (A6-3-1 `condition_branch` / exclusive branch v1) **landed via #2321**;
-  parallel/join + A6-3-2 frontend + A6-3-3 stay deferred. A6-4/A6-5 remain plan-level only:
+  the A6-3-2 frontend/readability slice **landed via #2339 + #2348**; parallel/join +
+  A6-3-3 stay deferred. A6-4/A6-5 remain plan-level only:
   scope boundary, dependency order, gate posture, and a pointer to the test surface the
   A6-0 scout already enumerated.
 
@@ -154,7 +155,7 @@ only missing link.
   duplicate-resume idempotent/rejected, resume-after-completion rejected, invalid/expired
   token rejected without leak, later: survives process restart).
 
-## 3. A6-3 branch/parallel DAG — A6-3-1 condition_branch runtime ✅ LANDED (#2321); rest deferred
+## 3. A6-3 branch/parallel DAG — A6-3-1 runtime + A6-3-2 frontend/readability ✅ LANDED (#2321/#2339/#2348); rest deferred
 
 Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
 
@@ -165,9 +166,15 @@ Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
 > inside branches; **exclusive** first-match-or-`defaultBranch` selection; **C1 parent/selected-child/
 > downstream lineage** reusing the existing job plane (no 2nd status vocab). The real-DB lineage seam gates
 > in CI via the blocking `plugin-tests.yml` targeted step (`multitable-automation-jobs.test.ts`, alongside
-> automation-retry/suspend-resume). **Still deferred, each its own opt-in:** A6-3-2 `condition_branch`
-> frontend builder + admin-runs readability; A6-3-3 `wait_for_callback` / nested-`condition_branch` inside
-> branches; A6-3 parallel fan-out / join-all / join-any. Design-lock detail below retained for the record.
+> automation-retry/suspend-resume).
+>
+> **✅ A6-3-2 frontend/readability LANDED 2026-06-06 — #2339 (squash `960ea9315`) + #2348 (squash
+> `4b44f25c6`)**: the rule editor can author a minimal `condition_branch` config (flat branch
+> conditions, `update_record` / `send_notification` branch action subset, default branch, read-only
+> never-flatten guard for richer loaded shapes, `workflow_job_v1` auto-lock), and the admin runs detail
+> shows selected branch `label (key)` plus branch child jobs. **Still deferred, each its own opt-in:**
+> A6-3-3 `wait_for_callback` / nested-`condition_branch` inside branches; A6-3 parallel fan-out /
+> join-all / join-any. Design-lock detail below retained for the record.
 
 The design-lock pins the first runtime slice as **A6-3-1 `condition_branch` /
 exclusive branch v1**, not full parallel DAG. Parallel fan-out, join-all, and
