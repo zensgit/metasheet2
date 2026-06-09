@@ -25,6 +25,7 @@ export class EmbedJtiStoreUnavailableError extends Error {
 /**
  * Hash the SCOPED key so a bare jti never lands in Redis, and a jti can only be consumed within the
  * exact (aud, feature_key, tenant_id, part_id) scope it was minted for (no cross-scope collision).
+ * The JSON array avoids delimiter ambiguity between adjacent scope fields.
  */
 export function embedJtiKey(scope: {
   aud: string
@@ -33,7 +34,7 @@ export function embedJtiKey(scope: {
   part_id: string
   jti: string
 }): string {
-  const material = [scope.aud, scope.feature_key, scope.tenant_id, scope.part_id, scope.jti].join('|')
+  const material = JSON.stringify([scope.aud, scope.feature_key, scope.tenant_id, scope.part_id, scope.jti])
   const digest = crypto.createHash('sha256').update(material).digest('hex')
   return `plm-embed:jti:${digest}`
 }

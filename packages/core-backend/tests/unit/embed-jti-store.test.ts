@@ -34,6 +34,25 @@ describe('embedJtiKey', () => {
     expect(embedJtiKey({ ...scope, feature_key: 'approval_automation' })).not.toBe(key)
     expect(embedJtiKey({ ...scope, aud: 'other.embed' })).not.toBe(key)
   })
+
+  it('does not collapse scopes that would collide under delimiter-joined material', () => {
+    const left = embedJtiKey({
+      aud: 'metasheet2.embed|bom_multitable',
+      feature_key: 'tenant-a',
+      tenant_id: 'part-1',
+      part_id: 'scope',
+      jti: 'jti-1',
+    })
+    const right = embedJtiKey({
+      aud: 'metasheet2.embed',
+      feature_key: 'bom_multitable|tenant-a',
+      tenant_id: 'part-1',
+      part_id: 'scope',
+      jti: 'jti-1',
+    })
+
+    expect(left).not.toBe(right)
+  })
 })
 
 describe('consumeEmbedJti', () => {
