@@ -39,6 +39,7 @@ const DRY_RUN_TOKEN_PREFIX = 'integration:table-action:dry-run-token:'
 const DEFAULT_DRY_RUN_TOKEN_TTL_MS = 30 * 60 * 1000
 const DEFAULT_EXISTING_ROWS_PAGE_LIMIT = 1000
 const DEFAULT_EXISTING_ROWS_MAX_PAGES = 100
+const HARD_APPLY_BLOCKING_ROW_ERROR_TYPES = new Set(['missing_child_bom'])
 
 class StockPreparationTableActionError extends Error {
   constructor(status, code, message, details = {}) {
@@ -530,6 +531,7 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     maxRows: action.maxRows,
   })
   const hasGlobalErrors = Array.isArray(expansion.errors) && expansion.errors.length > 0
+  const hasHardRowErrors = hasHardApplyBlockingRowErrors(expansion)
   if (expansion.status === 'not_found') {
     const revision = buildRevision({ action, parameters, expansion, existingRows: [] })
     return { expansion, existingRows: [], plan: emptyPlan(), revision, canApply: false, hasGlobalErrors }
@@ -557,7 +559,7 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     existingRows,
     plan,
     revision,
-    canApply: !hasGlobalErrors,
+    canApply: !hasGlobalErrors && !hasHardRowErrors,
     hasGlobalErrors,
     conflictPolicyReview,
   }
@@ -587,6 +589,11 @@ function dryRunStatus(dryRun) {
   if (isLargeBomBoundedExpansion(dryRun.expansion)) return 'large_bom_bounded'
   if (dryRun.canApply) return dryRun.plan.valid ? 'ready' : 'manual_confirm_required'
   return 'failed'
+}
+
+function hasHardApplyBlockingRowErrors(expansion) {
+  const rowErrors = Array.isArray(expansion && expansion.rowErrors) ? expansion.rowErrors : []
+  return rowErrors.some((entry) => isPlainObject(entry) && HARD_APPLY_BLOCKING_ROW_ERROR_TYPES.has(entry.type))
 }
 
 async function dryRunStockPreparationAction(input = {}) {
