@@ -614,6 +614,93 @@ function testKeepMultipleRowsWithoutStableDiscriminatorHolds() {
   assert.equal(resolution.heldReasonCounts.missing_stable_discriminator, 1)
 }
 
+function testSourceCorrectionRequiredHoldsWithExplicitReason() {
+  const duplicateKey = 'DUP-SOURCE-CORRECTION'
+  const duplicateA = row({
+    idempotencyKey: duplicateKey,
+    projectNo: 'PROJECT-LEAK',
+    componentSourceId: 'COMP-SOURCE-CORRECTION-A',
+    parentSourceId: 'PARENT-SOURCE-CORRECTION',
+    path: 'ROOT/PARENT-SOURCE-CORRECTION/COMP-SOURCE-CORRECTION',
+    pathTokens: ['ROOT', 'PARENT-SOURCE-CORRECTION', 'COMP-SOURCE-CORRECTION'],
+    componentCode: 'SOURCE-CORRECTION-CODE',
+    componentName: 'Source Correction Widget',
+    material: 'Source Correction Alloy',
+  })
+  const duplicateB = {
+    ...duplicateA,
+    componentSourceId: 'COMP-SOURCE-CORRECTION-B',
+  }
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [duplicateA, duplicateB],
+    existingRows: [],
+    duplicatePolicyReview: duplicatePolicyReviewFor(duplicateKey, 'source_correction_required', 'table_scope'),
+    runId: 'run-d4-source-correction',
+    plannedAt: '2026-06-08T09:00:00.000Z',
+  })
+
+  assert.equal(plan.valid, false, 'source correction keeps the plan fail-closed')
+  assert.equal(plan.counts.add, 0, 'source correction must not produce add decisions')
+  assert.equal(plan.counts.update, 0, 'source correction must not produce update decisions')
+  assert.equal(plan.counts.skip, 0, 'source correction must not produce skip decisions')
+  assert.equal(plan.counts.inactive, 0, 'source correction must not produce inactive decisions')
+  assert.equal(plan.counts.manual_confirm, 1)
+
+  const evidence = summarizeConflictPlanForEvidence(plan)
+  const resolution = evidence.duplicateExpandedKeyResolution
+  const held = resolution.heldPolicies[0]
+  assert.equal(resolution.heldGroupCount, 1)
+  assert.equal(resolution.heldRowCount, 2)
+  assert.equal(resolution.heldReasonCounts.source_correction_required, 1)
+  assert.equal(resolution.heldReasonCounts.unsupported_policy || 0, 0)
+  assert.equal(held.policy, 'source_correction_required')
+  assert.equal(held.reason, 'source_correction_required')
+  assert.equal(held.scope, 'table_scope')
+  assert.equal(held.rowCount, 2)
+
+  const text = JSON.stringify(resolution)
+  for (const sensitive of [
+    'PROJECT-LEAK',
+    duplicateKey,
+    'COMP-SOURCE-CORRECTION',
+    'PARENT-SOURCE-CORRECTION',
+    'ROOT/',
+    'SOURCE-CORRECTION-CODE',
+    'Source Correction Widget',
+    'Source Correction Alloy',
+  ]) {
+    assert.ok(!text.includes(sensitive), `source-correction evidence must not include ${sensitive}`)
+  }
+}
+
+function testUnimplementedDuplicatePoliciesRemainHeldAsUnsupported() {
+  for (const policy of ['merge_quantity', 'select_representative', 'skip_selected']) {
+    const duplicateKey = `DUP-${policy}`
+    const duplicateA = row({ idempotencyKey: duplicateKey, componentSourceId: `PART-${policy}` })
+    const duplicateB = { ...duplicateA }
+
+    const plan = planStockPreparationConflicts({
+      expandedRows: [duplicateA, duplicateB],
+      existingRows: [],
+      duplicatePolicyReview: duplicatePolicyReviewFor(duplicateKey, policy, 'run_only'),
+      runId: `run-${policy}`,
+      plannedAt: '2026-06-08T09:00:00.000Z',
+    })
+
+    assert.equal(plan.valid, false, `${policy} must remain fail-closed`)
+    assert.equal(plan.counts.add, 0, `${policy} must not produce add decisions`)
+    assert.equal(plan.counts.update, 0, `${policy} must not produce update decisions`)
+    assert.equal(plan.counts.skip, 0, `${policy} must not produce skip decisions`)
+    assert.equal(plan.counts.inactive, 0, `${policy} must not produce inactive decisions`)
+    assert.equal(plan.counts.manual_confirm, 1)
+    const resolution = summarizeConflictPlanForEvidence(plan).duplicateExpandedKeyResolution
+    assert.equal(resolution.heldReasonCounts.unsupported_policy, 1)
+    assert.equal(resolution.heldPolicies[0].policy, policy)
+    assert.equal(resolution.heldPolicies[0].reason, 'unsupported_policy')
+  }
+}
+
 function main() {
   testAddUpdateSkipInactive()
   testRowErrorsDoNotAbortGoodRows()
@@ -629,6 +716,8 @@ function main() {
   testDuplicateResolutionEvidenceValuesFree()
   testKeepMultipleRowsCleanToCollisionHolds()
   testKeepMultipleRowsWithoutStableDiscriminatorHolds()
+  testSourceCorrectionRequiredHoldsWithExplicitReason()
+  testUnimplementedDuplicatePoliciesRemainHeldAsUnsupported()
 
   console.log('stock-preparation-conflict-planner.test.cjs OK')
 }

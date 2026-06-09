@@ -398,6 +398,12 @@ function duplicatePolicySelections(review) {
   return selections
 }
 
+function heldReasonForDuplicatePolicy(policy) {
+  if (policy === 'hold') return 'default_hold'
+  if (policy === 'source_correction_required') return 'source_correction_required'
+  return 'unsupported_policy'
+}
+
 function duplicateGroupDiscriminator(rows) {
   if (hasDistinctStableDiscriminator(rows, DUPLICATE_SOURCE_DETAIL_FIELDS)) {
     return {
@@ -508,7 +514,7 @@ function resolveDuplicateExpandedRows({ expandedKeyed, existingKeyed, duplicateP
         rows,
         policy: selected.policy,
         scope: selected.scope,
-        reason: selected.policy === 'hold' ? 'default_hold' : 'unsupported_policy',
+        reason: heldReasonForDuplicatePolicy(selected.policy),
       })
       continue
     }
