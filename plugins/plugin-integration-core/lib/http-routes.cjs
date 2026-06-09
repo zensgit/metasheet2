@@ -1547,10 +1547,12 @@ function createHandlers(services, options = {}) {
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const jobId = firstString(requestParams(req).jobId)
+      const routeScope = largeBomJobScope(req, { actionId })
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const confirm = isPlainObject(body.confirm) ? body.confirm : {}
       const job = await createLargeBomCheckpointApplyJob({
         storage: context.storage,
+        ...routeScope,
         actionId,
         jobId,
         principal: requestPrincipal(req),
@@ -1564,9 +1566,11 @@ function createHandlers(services, options = {}) {
       requireAccess(req, 'read')
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const jobId = firstString(requestParams(req).jobId)
+      const routeScope = largeBomJobScope(req, { actionId })
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const job = await loadLargeBomCheckpointApplyJob({
         storage: context.storage,
+        ...routeScope,
         actionId,
         applyJobId: firstString(requestParams(req).applyJobId),
       })
@@ -1579,9 +1583,11 @@ function createHandlers(services, options = {}) {
       normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const jobId = firstString(requestParams(req).jobId)
+      const routeScope = largeBomJobScope(req, { actionId })
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const pendingJob = await loadLargeBomCheckpointApplyJob({
         storage: context.storage,
+        ...routeScope,
         actionId,
         applyJobId: firstString(requestParams(req).applyJobId),
       })
@@ -1589,6 +1595,7 @@ function createHandlers(services, options = {}) {
       const scopedRecordsApi = createTargetScopedRecordsApi(getMultitableRecordsApi(), pendingJob.target)
       const job = await runLargeBomCheckpointApplyJobChunk({
         storage: context.storage,
+        ...routeScope,
         actionId,
         applyJobId: pendingJob.jobId,
         recordsApi: scopedRecordsApi,

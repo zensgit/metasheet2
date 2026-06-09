@@ -3025,6 +3025,13 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   const applyJobId = res.body.data.jobId
 
   res = await invoke(mount.routes, 'GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId', {
+    user: { id: 'user_cross_tenant', tenantId: 'tenant_2', permissions: ['integration:read'] },
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assert.equal(res.statusCode, 404)
+  assert.equal(res.body.error.code, 'LARGE_BOM_APPLY_JOB_NOT_FOUND', 'known applyJobId is tenant-scoped')
+
+  res = await invoke(mount.routes, 'GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId', {
     user: READ_USER,
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
   })
