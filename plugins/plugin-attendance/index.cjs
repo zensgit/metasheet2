@@ -10889,8 +10889,8 @@ function normalizeAutoShiftMatchingSetting(raw) {
   const tolerance = Number(config.maxToleranceMinutes)
   return {
     enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_SETTINGS.autoShiftMatching.enabled,
-    // A0 is preview-only. apply / auto modes are future slices and must not silently become accepted.
-    mode: modeRaw === 'preview' ? 'preview' : DEFAULT_SETTINGS.autoShiftMatching.mode,
+    // A1 exposes admin-selected apply. `auto` remains a future A2 slice and must not be accepted.
+    mode: modeRaw === 'preview' || modeRaw === 'apply' ? modeRaw : DEFAULT_SETTINGS.autoShiftMatching.mode,
     maxToleranceMinutes: Number.isFinite(tolerance) && tolerance > 0
       ? Math.min(720, Math.floor(tolerance))
       : DEFAULT_SETTINGS.autoShiftMatching.maxToleranceMinutes,
@@ -12265,6 +12265,33 @@ async function buildAutoShiftMatchingPreview(db, input) {
     items,
     skipped,
     total: items.length,
+  }
+}
+
+const AUTO_SHIFT_MATCH_PRODUCER_TYPE = 'auto_shift_match'
+
+function buildAutoShiftMatchProducerKey(userId, workDate) {
+  return `${String(userId || '').trim()}:${String(workDate || '').trim()}`
+}
+
+function normalizeAutoShiftApplyEvidenceEventIds(item) {
+  return normalizeStringArray(item?.evidence?.eventIds).sort()
+}
+
+function autoShiftEvidenceEventIdsMatch(left, right) {
+  const a = normalizeStringArray(left).sort()
+  const b = normalizeStringArray(right).sort()
+  if (a.length !== b.length) return false
+  return a.every((value, index) => value === b[index])
+}
+
+function mapAutoShiftApplySkipped(item, reason, extra = {}) {
+  return {
+    userId: item.userId,
+    workDate: item.workDate,
+    candidateShiftId: item.candidateShiftId,
+    reason,
+    ...extra,
   }
 }
 
@@ -16861,11 +16888,11 @@ module.exports = {
         enabled: z.boolean().optional(),
         expiresInDays: z.number().int().positive().nullable().optional(),
       }).optional(),
-      // 自动对班 A0 preview config. Runtime remains double-gated by
-      // ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED; apply/auto modes are future slices.
+      // 自动对班 config. Runtime remains double-gated by ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED.
+      // `apply` is A1 selected-admin apply; `auto` is still reserved for a separate A2 design-lock.
       autoShiftMatching: z.object({
         enabled: z.boolean().optional(),
-        mode: z.enum(['preview']).optional(),
+        mode: z.enum(['preview', 'apply']).optional(),
         maxToleranceMinutes: z.number().int().positive().max(720).optional(),
         minConfidenceToApply: z.enum(['high', 'medium', 'low']).optional(),
       }).optional(),
@@ -16876,6 +16903,20 @@ module.exports = {
       to: z.string().optional(),
       userIds: z.array(z.string().min(1)).optional(),
       attendanceGroupIds: z.array(z.string().uuid()).optional(),
+      maxToleranceMinutes: z.number().int().positive().max(720).optional(),
+      minConfidenceToApply: z.enum(['high', 'medium', 'low']).optional(),
+      orgId: z.string().optional(),
+    }).strict()
+
+    const autoShiftMatchingApplySchema = z.object({
+      items: z.array(z.object({
+        userId: z.string().min(1),
+        workDate: z.string().min(1),
+        candidateShiftId: z.string().uuid(),
+        evidence: z.object({
+          eventIds: z.array(z.string().min(1)).min(1),
+        }).strict(),
+      }).strict()).min(1).max(100),
       maxToleranceMinutes: z.number().int().positive().max(720).optional(),
       minConfidenceToApply: z.enum(['high', 'medium', 'low']).optional(),
       orgId: z.string().optional(),
@@ -30397,7 +30438,7 @@ module.exports = {
           if (
             !isAutoShiftMatchingRuntimeEnabled()
             || autoShiftSettings.enabled !== true
-            || autoShiftSettings.mode !== 'preview'
+            || !['preview', 'apply'].includes(autoShiftSettings.mode)
           ) {
             res.status(403).json({
               ok: false,
@@ -30426,6 +30467,191 @@ module.exports = {
           }
           logger.error('Attendance auto-shift matching preview failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview auto shift matching' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/auto-shift-matching/apply',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = autoShiftMatchingApplySchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const items = parsed.data.items.map((item) => ({
+          userId: item.userId,
+          workDate: normalizeDateOnlyStrict(item.workDate),
+          candidateShiftId: item.candidateShiftId,
+          evidenceEventIds: normalizeAutoShiftApplyEvidenceEventIds(item),
+        }))
+        if (items.some((item) => !item.workDate)) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'workDate must use YYYY-MM-DD' } })
+          return
+        }
+
+        try {
+          const settings = await getSettings(db)
+          const autoShiftSettings = normalizeAutoShiftMatchingSetting(settings.autoShiftMatching)
+          if (
+            !isAutoShiftMatchingRuntimeEnabled()
+            || autoShiftSettings.enabled !== true
+            || autoShiftSettings.mode !== 'apply'
+          ) {
+            res.status(403).json({
+              ok: false,
+              error: {
+                code: 'AUTO_SHIFT_MATCHING_APPLY_DISABLED',
+                message: 'Auto shift matching apply is disabled',
+              },
+            })
+            return
+          }
+
+          const windowAccess = await enforceShiftEditWindow(res, items.map((item) => item.workDate))
+          if (!windowAccess) return
+
+          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+          if (!actorAccess) return
+          for (const item of items) {
+            const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+              orgId,
+              payload: {
+                userId: item.userId,
+                shiftId: item.candidateShiftId,
+                startDate: item.workDate,
+                endDate: item.workDate,
+                isActive: true,
+              },
+              actorAccess,
+            })
+            if (!access) return
+          }
+
+          const runId = randomUUID()
+          const result = await db.transaction(async (trx) => {
+            const applied = []
+            const skipped = []
+            for (const item of items) {
+              await acquireAttendanceScheduleAssignmentLock(trx, orgId, item.userId)
+              const producerKey = buildAutoShiftMatchProducerKey(item.userId, item.workDate)
+              const alreadyRows = await trx.query(
+                `SELECT *
+                   FROM attendance_shift_assignments
+                  WHERE org_id = $1
+                    AND user_id = $2
+                    AND COALESCE(is_active, true) = true
+                    AND producer_type = $3
+                    AND producer_key = $4
+                  ORDER BY created_at ASC
+                  LIMIT 1`,
+                [orgId, item.userId, AUTO_SHIFT_MATCH_PRODUCER_TYPE, producerKey],
+              )
+              if (alreadyRows.length) {
+                skipped.push(mapAutoShiftApplySkipped(item, 'already_applied', { assignmentId: alreadyRows[0].id }))
+                continue
+              }
+
+              const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
+                kind: 'shift',
+                orgId,
+                userId: item.userId,
+                startDate: item.workDate,
+                endDate: item.workDate,
+                isActive: true,
+              })
+              if (conflict) {
+                skipped.push(mapAutoShiftApplySkipped(item, 'already_scheduled', { conflict }))
+                continue
+              }
+
+              const preview = await buildAutoShiftMatchingPreview(trx, {
+                orgId,
+                from: item.workDate,
+                to: item.workDate,
+                userIds: [item.userId],
+                maxToleranceMinutes: parsed.data.maxToleranceMinutes ?? autoShiftSettings.maxToleranceMinutes,
+                minConfidenceToApply: parsed.data.minConfidenceToApply ?? autoShiftSettings.minConfidenceToApply,
+              })
+              const match = (preview.items || []).find((candidate) => candidate.candidateShiftId === item.candidateShiftId)
+              if (!match) {
+                const skipReason = (preview.skipped || []).find((entry) =>
+                  entry.userId === item.userId && entry.workDate === item.workDate
+                )?.reason
+                skipped.push(mapAutoShiftApplySkipped(item, skipReason || 'stale_or_ineligible'))
+                continue
+              }
+              if (!autoShiftEvidenceEventIdsMatch(item.evidenceEventIds, match.evidence?.eventIds)) {
+                skipped.push(mapAutoShiftApplySkipped(item, 'stale_punch_evidence'))
+                continue
+              }
+
+              const shiftRows = await trx.query(
+                'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
+                [item.candidateShiftId, orgId],
+              )
+              if (!shiftRows.length) {
+                skipped.push(mapAutoShiftApplySkipped(item, 'shift_not_found'))
+                continue
+              }
+
+              const assignmentRows = await trx.query(
+                `INSERT INTO attendance_shift_assignments
+                 (id, org_id, user_id, shift_id, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id)
+                 VALUES ($1, $2, $3, $4, $5, $5, true, $6, $7, $8, $7)
+                 RETURNING *`,
+                [
+                  randomUUID(),
+                  orgId,
+                  item.userId,
+                  item.candidateShiftId,
+                  item.workDate,
+                  AUTO_SHIFT_MATCH_PRODUCER_TYPE,
+                  runId,
+                  producerKey,
+                ],
+              )
+              await enforceShiftComplianceCap(trx, {
+                orgId,
+                userId: item.userId,
+                fromDate: item.workDate,
+                toDate: item.workDate,
+              })
+              applied.push({
+                userId: item.userId,
+                workDate: item.workDate,
+                candidateShiftId: item.candidateShiftId,
+                assignment: mapAssignmentRow(assignmentRows[0]),
+                shift: mapShiftRow(shiftRows[0]),
+              })
+            }
+            return { applied, skipped }
+          })
+
+          for (const item of result.applied) {
+            emitEvent('attendance.assignment.created', { orgId, assignmentId: item.assignment.id })
+          }
+          res.json({
+            ok: true,
+            data: {
+              runId,
+              applied: result.applied,
+              skipped: result.skipped,
+              totalApplied: result.applied.length,
+              totalSkipped: result.skipped.length,
+            },
+          })
+        } catch (error) {
+          if (respondShiftComplianceCapExceeded(res, error)) return
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance auto-shift apply tables missing' } })
+            return
+          }
+          logger.error('Attendance auto-shift matching apply failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to apply auto shift matching' } })
         }
       })
     )

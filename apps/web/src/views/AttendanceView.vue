@@ -2156,6 +2156,17 @@
                       data-auto-shift="enabled"
                     />
                   </label>
+                  <label class="attendance__field" for="attendance-auto-shift-mode">
+                    <span>{{ tr('Mode', '模式') }}</span>
+                    <select
+                      id="attendance-auto-shift-mode"
+                      v-model="autoShiftMatchingForm.mode"
+                      data-auto-shift="mode"
+                    >
+                      <option value="preview">{{ tr('Preview only', '仅预览') }}</option>
+                      <option value="apply">{{ tr('Preview + selected apply', '预览 + 手动应用所选') }}</option>
+                    </select>
+                  </label>
                   <label class="attendance__field" for="attendance-auto-shift-tolerance">
                     <span>{{ tr('Max tolerance (minutes)', '最大容差（分钟）') }}</span>
                     <input
@@ -2186,7 +2197,7 @@
                   data-auto-shift="save-settings"
                   @click="saveAutoShiftMatchingSettings"
                 >
-                  {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save preview settings', '保存预览设置') }}
+                  {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save auto-match settings', '保存自动对班设置') }}
                 </button>
 
                 <div class="attendance__admin-grid">
@@ -2254,6 +2265,7 @@
                   <table class="attendance__table" data-auto-shift="suggestions">
                     <thead>
                       <tr>
+                        <th v-if="autoShiftMatchingForm.mode === 'apply'">{{ tr('Apply', '应用') }}</th>
                         <th>{{ tr('User', '用户') }}</th>
                         <th>{{ tr('Date', '日期') }}</th>
                         <th>{{ tr('Suggested shift', '建议班次') }}</th>
@@ -2264,6 +2276,15 @@
                     </thead>
                     <tbody>
                       <tr v-for="item in autoShiftPreviewItems" :key="`${item.userId}-${item.workDate}-${item.candidateShiftId}`" data-auto-shift="suggestion-row">
+                        <td v-if="autoShiftMatchingForm.mode === 'apply'">
+                          <input
+                            v-model="autoShiftSelectedKeys"
+                            type="checkbox"
+                            :value="autoShiftPreviewItemKey(item)"
+                            :aria-label="tr('Select suggestion', '选择建议')"
+                            data-auto-shift="select-suggestion"
+                          />
+                        </td>
                         <td>{{ item.userId }}</td>
                         <td>{{ item.workDate }}</td>
                         <td>{{ item.candidateShiftName || item.candidateShiftId }}</td>
@@ -2276,6 +2297,30 @@
                       </tr>
                     </tbody>
                   </table>
+                </div>
+                <div v-if="autoShiftPreviewItems.length > 0 && autoShiftMatchingForm.mode === 'apply'" class="attendance__actions">
+                  <button
+                    class="attendance__btn attendance__btn--primary"
+                    :disabled="autoShiftApplyLoading || selectedAutoShiftPreviewItems.length === 0"
+                    data-auto-shift="apply"
+                    @click="runAutoShiftMatchingApply"
+                  >
+                    {{ autoShiftApplyLoading ? tr('Applying...', '应用中...') : tr('Apply selected suggestions', '应用所选建议') }}
+                  </button>
+                  <span class="attendance__field-hint" data-auto-shift="selection-count">
+                    {{ tr(`${selectedAutoShiftPreviewItems.length} selected`, `已选择 ${selectedAutoShiftPreviewItems.length} 条`) }}
+                  </span>
+                </div>
+                <p v-if="autoShiftApplyError" class="attendance__field-hint attendance__field-hint--error" data-auto-shift="apply-error">
+                  {{ autoShiftApplyError }}
+                </p>
+                <div v-if="autoShiftApplyRan" class="attendance__field-hint" data-auto-shift="apply-result">
+                  {{
+                    tr(
+                      `Applied ${autoShiftApplyApplied.length}; skipped ${autoShiftApplySkipped.length}.`,
+                      `已应用 ${autoShiftApplyApplied.length} 条；跳过 ${autoShiftApplySkipped.length} 条。`,
+                    )
+                  }}
                 </div>
                 <div v-if="autoShiftPreviewSkipped.length > 0" class="attendance__table-wrapper">
                   <table class="attendance__table" data-auto-shift="skipped">
@@ -7506,7 +7551,7 @@ interface AttendanceSettings {
   }
   autoShiftMatching?: {
     enabled?: boolean
-    mode?: 'preview'
+    mode?: 'preview' | 'apply'
     maxToleranceMinutes?: number
     minConfidenceToApply?: 'high' | 'medium' | 'low'
   }
@@ -7529,6 +7574,7 @@ interface AttendanceSettings {
 }
 
 type AutoShiftConfidence = 'high' | 'medium' | 'low'
+type AutoShiftMode = 'preview' | 'apply'
 
 interface AutoShiftPreviewItem {
   userId: string
@@ -7551,6 +7597,13 @@ interface AutoShiftPreviewSkippedItem {
   reason: string
   candidateShiftId?: string
   confidence?: AutoShiftConfidence
+}
+
+interface AutoShiftApplyResultItem {
+  userId: string
+  workDate: string
+  candidateShiftId?: string
+  reason?: string
 }
 
 interface HolidayPolicyOverride {
@@ -11329,10 +11382,11 @@ const mergeForm = reactive({
   internalWinsOnIn: false,
   externalWinsOnOut: false,
 })
-// 自动对班 A0: admin preview only. Settings save sends only { autoShiftMatching }; preview POST
-// returns suggestions but never writes assignments. A1 owns apply/write paths.
+// 自动对班 A1: admin previews suggestions, explicitly selects rows, then applies through the
+// dedicated apply endpoint. There is no automatic write path here (A2 owns that design separately).
 const autoShiftMatchingForm = reactive({
   enabled: false,
+  mode: 'preview' as AutoShiftMode,
   maxToleranceMinutes: '120',
   minConfidenceToApply: 'high' as AutoShiftConfidence,
 })
@@ -11347,6 +11401,16 @@ const autoShiftPreviewRan = ref(false)
 const autoShiftPreviewError = ref('')
 const autoShiftPreviewItems = ref<AutoShiftPreviewItem[]>([])
 const autoShiftPreviewSkipped = ref<AutoShiftPreviewSkippedItem[]>([])
+const autoShiftSelectedKeys = ref<string[]>([])
+const autoShiftApplyLoading = ref(false)
+const autoShiftApplyRan = ref(false)
+const autoShiftApplyError = ref('')
+const autoShiftApplyApplied = ref<AutoShiftApplyResultItem[]>([])
+const autoShiftApplySkipped = ref<AutoShiftApplyResultItem[]>([])
+const selectedAutoShiftPreviewItems = computed(() => {
+  const selected = new Set(autoShiftSelectedKeys.value)
+  return autoShiftPreviewItems.value.filter(item => selected.has(autoShiftPreviewItemKey(item)))
+})
 // Real data source for the flow picker: the org's ACTIVE outdoor_punch approval flows (no fake picker).
 const outdoorApprovalFlowOptions = computed(() =>
   approvalFlows.value.filter((flow) => flow.requestType === 'outdoor_punch' && flow.isActive),
@@ -16741,15 +16805,38 @@ function normalizeAutoShiftConfidence(value: unknown): AutoShiftConfidence {
   return value === 'medium' || value === 'low' ? value : 'high'
 }
 
+function normalizeAutoShiftMode(value: unknown): AutoShiftMode {
+  return value === 'apply' ? 'apply' : 'preview'
+}
+
 function normalizeAutoShiftTolerance(value: string | number | null | undefined, fallback = 120): number {
   const raw = String(value ?? '').trim()
   const parsed = raw ? Number(raw) : fallback
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback
 }
 
+function autoShiftPreviewItemKey(item: AutoShiftPreviewItem): string {
+  return `${item.userId}:${item.workDate}:${item.candidateShiftId}`
+}
+
+function autoShiftPreviewEvidenceEventIds(item: AutoShiftPreviewItem): string[] {
+  return Array.isArray(item.evidence?.eventIds)
+    ? item.evidence.eventIds.map(id => String(id || '').trim()).filter(Boolean)
+    : []
+}
+
+function resetAutoShiftApplyState() {
+  autoShiftSelectedKeys.value = []
+  autoShiftApplyRan.value = false
+  autoShiftApplyError.value = ''
+  autoShiftApplyApplied.value = []
+  autoShiftApplySkipped.value = []
+}
+
 function applyAutoShiftMatchingToForm(settings: AttendanceSettings) {
   const autoShift = settings.autoShiftMatching || {}
   autoShiftMatchingForm.enabled = autoShift.enabled === true
+  autoShiftMatchingForm.mode = normalizeAutoShiftMode(autoShift.mode)
   autoShiftMatchingForm.maxToleranceMinutes = String(
     normalizeAutoShiftTolerance(autoShift.maxToleranceMinutes, 120),
   )
@@ -16873,11 +16960,11 @@ async function saveInOutMerge() {
 async function saveAutoShiftMatchingSettings() {
   settingsLoading.value = true
   try {
-    // PUT ONLY autoShiftMatching. mode remains preview in A0; A1/A2 own apply/write behaviour.
+    // PUT ONLY autoShiftMatching. mode=apply enables manual selected-row apply; no automatic write path.
     const payload = {
       autoShiftMatching: {
         enabled: autoShiftMatchingForm.enabled === true,
-        mode: 'preview' as const,
+        mode: normalizeAutoShiftMode(autoShiftMatchingForm.mode),
         maxToleranceMinutes: normalizeAutoShiftTolerance(autoShiftMatchingForm.maxToleranceMinutes, 120),
         minConfidenceToApply: normalizeAutoShiftConfidence(autoShiftMatchingForm.minConfidenceToApply),
       },
@@ -16896,7 +16983,7 @@ async function saveAutoShiftMatchingSettings() {
     }
     adminForbidden.value = false
     applyAutoShiftMatchingToForm((data.data || payload) as AttendanceSettings)
-    setStatus(tr('Auto shift matching preview settings updated.', '自动对班预览设置已更新。'))
+    setStatus(tr('Auto shift matching settings updated.', '自动对班设置已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save auto shift matching', '保存自动对班失败'), 'save-settings')
   } finally {
@@ -16940,6 +17027,7 @@ async function runAutoShiftMatchingPreview() {
     }
     autoShiftPreviewItems.value = Array.isArray(data.data?.items) ? data.data.items : []
     autoShiftPreviewSkipped.value = Array.isArray(data.data?.skipped) ? data.data.skipped : []
+    resetAutoShiftApplyState()
     autoShiftPreviewRan.value = true
     setStatus(
       tr(
@@ -16955,6 +17043,58 @@ async function runAutoShiftMatchingPreview() {
     setStatusFromError(error, tr('Failed to preview auto shift matching', '自动对班预览失败'), 'admin')
   } finally {
     autoShiftPreviewLoading.value = false
+  }
+}
+
+async function runAutoShiftMatchingApply() {
+  if (autoShiftMatchingForm.mode !== 'apply') return
+  const selectedItems = selectedAutoShiftPreviewItems.value
+  if (selectedItems.length === 0) {
+    autoShiftApplyError.value = tr('Select at least one suggestion before applying.', '请至少选择一条建议后再应用。')
+    setStatus(autoShiftApplyError.value, 'error')
+    return
+  }
+  autoShiftApplyLoading.value = true
+  autoShiftApplyError.value = ''
+  try {
+    const payload = {
+      items: selectedItems.map(item => ({
+        userId: item.userId,
+        workDate: item.workDate,
+        candidateShiftId: item.candidateShiftId,
+        evidence: {
+          eventIds: autoShiftPreviewEvidenceEventIds(item),
+        },
+      })),
+      maxToleranceMinutes: normalizeAutoShiftTolerance(autoShiftMatchingForm.maxToleranceMinutes, 120),
+      minConfidenceToApply: normalizeAutoShiftConfidence(autoShiftMatchingForm.minConfidenceToApply),
+    }
+    const response = await apiFetchWithTimeout('/api/attendance/auto-shift-matching/apply', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to apply auto shift matching', '应用自动对班失败'))
+    }
+    autoShiftApplyApplied.value = Array.isArray(data.data?.applied) ? data.data.applied : []
+    autoShiftApplySkipped.value = Array.isArray(data.data?.skipped) ? data.data.skipped : []
+    autoShiftApplyRan.value = true
+    autoShiftSelectedKeys.value = []
+    setStatus(
+      tr(
+        `Auto shift matching applied (${autoShiftApplyApplied.value.length} applied, ${autoShiftApplySkipped.value.length} skipped).`,
+        `自动对班已应用（${autoShiftApplyApplied.value.length} 条应用，${autoShiftApplySkipped.value.length} 条跳过）。`,
+      ),
+    )
+  } catch (error: any) {
+    autoShiftApplyApplied.value = []
+    autoShiftApplySkipped.value = []
+    autoShiftApplyRan.value = true
+    autoShiftApplyError.value = readErrorMessage(error, tr('Failed to apply auto shift matching', '应用自动对班失败'))
+    setStatusFromError(error, tr('Failed to apply auto shift matching', '应用自动对班失败'), 'admin')
+  } finally {
+    autoShiftApplyLoading.value = false
   }
 }
 

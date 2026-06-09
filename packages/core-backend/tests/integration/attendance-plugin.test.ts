@@ -94,6 +94,11 @@ function localDateKeyOffset(days: number): string {
   return `${year}-${month}-${day}`
 }
 
+function dateOnlyForTest(value: unknown): string {
+  if (value instanceof Date) return value.toISOString().slice(0, 10)
+  return String(value ?? '').slice(0, 10)
+}
+
 function resolvePositiveIntEnvForTest(name: string, fallback: number, min: number, max?: number): number {
   const raw = process.env[name]
   if (raw == null || raw === '') return fallback
@@ -4817,13 +4822,13 @@ attendanceIntegrationDescribe(
           compTimeFromOvertime: { enabled: true, expiresInDays: 45 },
           autoShiftMatching: {
             enabled: true,
-            mode: 'preview',
+            mode: 'apply',
             maxToleranceMinutes: 90,
             minConfidenceToApply: 'medium',
           },
         }),
       })
-      expect(saveSettingsRes.status).toBe(200)
+      expect(saveSettingsRes.status, JSON.stringify(saveSettingsRes.body)).toBe(200)
 
       // Real-wire round-trip: config sub-shapes must survive the PUT zod
       // schema + persistence and come back on GET — not be silently stripped. Guards the
@@ -4851,7 +4856,7 @@ attendanceIntegrationDescribe(
       expect(reloaded?.compTimeFromOvertime).toEqual({ enabled: true, expiresInDays: 45 })
       expect(reloaded?.autoShiftMatching).toEqual({
         enabled: true,
-        mode: 'preview',
+        mode: 'apply',
         maxToleranceMinutes: 90,
         minConfidenceToApply: 'medium',
       })
@@ -5181,6 +5186,268 @@ attendanceIntegrationDescribe(
         expect(reasonsByUser.get(fixedUserId)).toBe('not_scheduled_shift_group')
         expect(reasonsByUser.get(pendingOutdoorUserId)).toBe('no_punch')
         expect(reasonsByUser.get(toleranceUserId)).toBe('no_candidate_within_tolerance')
+      } finally {
+        await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
+        if (previousFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+        else process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = previousFlag
+        await pool.end()
+      }
+    })
+
+    it('applies a selected preview suggestion once with auto-shift provenance and skips replay', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-autoshift-apply-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const previousFlag = process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+      const originalSettings = await loadSettingsForTest(adminToken)
+      const pool = new Pool({ connectionString: dbUrl })
+      const userId = `attendance-autoshift-apply-user-${runSuffix}`
+      const workDate = '2026-06-13'
+      try {
+        process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = 'true'
+        await saveAutoShiftSettings(adminToken, {
+          autoShiftMatching: {
+            enabled: true,
+            mode: 'apply',
+            maxToleranceMinutes: 30,
+            minConfidenceToApply: 'high',
+          },
+        })
+        await createGroupForAutoShift(adminToken, `autoshift-apply-${runSuffix}`, 'scheduled_shift', userId)
+        await createShiftForAutoShift(adminToken, `Auto Shift Apply ${runSuffix}`, '05:17', '06:23')
+        const inId = await insertPunchEvent(pool, userId, workDate, 'check_in', `${workDate}T05:17:00.000Z`)
+        const outId = await insertPunchEvent(pool, userId, workDate, 'check_out', `${workDate}T06:23:00.000Z`)
+
+        const previewRes = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/preview`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from: workDate, userIds: [userId] }),
+        })
+        expect(previewRes.status).toBe(200)
+        const previewItem = (previewRes.body as { data?: { items?: any[] } } | undefined)?.data?.items?.[0]
+        expect(previewItem).toMatchObject({ userId, workDate, confidence: 'high' })
+        expect(previewItem?.candidateShiftId).toBeTruthy()
+        expect(previewItem?.evidence?.eventIds).toEqual([inId, outId])
+        const candidateShiftId = String(previewItem.candidateShiftId)
+
+        const applyPayload = {
+          items: [
+            {
+              userId,
+              workDate,
+              candidateShiftId,
+              evidence: { eventIds: previewItem.evidence.eventIds },
+            },
+          ],
+        }
+        const applyRes = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/apply`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(applyPayload),
+        })
+        expect(applyRes.status).toBe(200)
+        const applyData = (applyRes.body as { data?: { runId?: string; applied?: any[]; skipped?: any[] } } | undefined)?.data
+        expect(applyData?.runId).toBeTruthy()
+        expect(applyData?.applied).toHaveLength(1)
+        expect(applyData?.skipped).toHaveLength(0)
+
+        const rows = await pool.query(
+          `SELECT shift_id, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id
+             FROM attendance_shift_assignments
+            WHERE org_id = $1 AND user_id = $2`,
+          [orgId, userId],
+        )
+        expect(rows.rows).toHaveLength(1)
+        expect(rows.rows[0]).toMatchObject({
+          shift_id: candidateShiftId,
+          is_active: true,
+          producer_type: 'auto_shift_match',
+          producer_ref_id: applyData?.runId,
+          producer_key: `${userId}:${workDate}`,
+          producer_run_id: applyData?.runId,
+        })
+        expect(dateOnlyForTest(rows.rows[0].start_date)).toBe(workDate)
+        expect(dateOnlyForTest(rows.rows[0].end_date)).toBe(workDate)
+
+        const replayRes = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/apply`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(applyPayload),
+        })
+        expect(replayRes.status).toBe(200)
+        const replayData = (replayRes.body as { data?: { applied?: any[]; skipped?: any[] } } | undefined)?.data
+        expect(replayData?.applied).toHaveLength(0)
+        expect(replayData?.skipped?.[0]).toMatchObject({ userId, workDate, candidateShiftId, reason: 'already_applied' })
+        const countRows = await pool.query(
+          'SELECT COUNT(*)::int AS count FROM attendance_shift_assignments WHERE org_id = $1 AND user_id = $2',
+          [orgId, userId],
+        )
+        expect(Number(countRows.rows[0]?.count ?? 0)).toBe(1)
+      } finally {
+        await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
+        if (previousFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+        else process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = previousFlag
+        await pool.end()
+      }
+    })
+
+    it('skips stale preview evidence and does not overwrite an existing manual assignment', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-autoshift-stale-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const previousFlag = process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+      const originalSettings = await loadSettingsForTest(adminToken)
+      const pool = new Pool({ connectionString: dbUrl })
+      const staleUserId = `attendance-autoshift-stale-user-${runSuffix}`
+      const manualUserId = `attendance-autoshift-manual-user-${runSuffix}`
+      const workDate = '2026-06-14'
+      try {
+        process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = 'true'
+        await saveAutoShiftSettings(adminToken, {
+          autoShiftMatching: {
+            enabled: true,
+            mode: 'apply',
+            maxToleranceMinutes: 120,
+            minConfidenceToApply: 'low',
+          },
+        })
+        await createGroupForAutoShift(adminToken, `autoshift-stale-${runSuffix}`, 'scheduled_shift', staleUserId)
+        await createGroupForAutoShift(adminToken, `autoshift-manual-${runSuffix}`, 'scheduled_shift', manualUserId)
+        const shiftId = await createShiftForAutoShift(adminToken, `Auto Shift Stale ${runSuffix}`, '05:31', '06:29')
+        const manualShiftId = await createShiftForAutoShift(adminToken, `Auto Shift Manual ${runSuffix}`, '07:10', '08:10')
+        const staleInId = await insertPunchEvent(pool, staleUserId, workDate, 'check_in', `${workDate}T05:31:00.000Z`)
+        const staleOutId = await insertPunchEvent(pool, staleUserId, workDate, 'check_out', `${workDate}T06:29:00.000Z`)
+        const manualInId = await insertPunchEvent(pool, manualUserId, workDate, 'check_in', `${workDate}T05:31:00.000Z`)
+        const manualOutId = await insertPunchEvent(pool, manualUserId, workDate, 'check_out', `${workDate}T06:29:00.000Z`)
+
+        const previewRes = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/preview`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from: workDate, userIds: [staleUserId, manualUserId] }),
+        })
+        expect(previewRes.status).toBe(200)
+        const previewItems = (previewRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+        const staleItem = previewItems.find((item) => item.userId === staleUserId)
+        const manualItem = previewItems.find((item) => item.userId === manualUserId)
+        expect(staleItem?.evidence?.eventIds).toEqual([staleInId, staleOutId])
+        expect(manualItem?.evidence?.eventIds).toEqual([manualInId, manualOutId])
+
+        await insertPunchEvent(pool, staleUserId, workDate, 'check_in', `${workDate}T05:45:00.000Z`)
+        const manualAssignmentId = randomUuidV4()
+        await pool.query(
+          `INSERT INTO attendance_shift_assignments
+           (id, org_id, user_id, shift_id, start_date, end_date, is_active)
+           VALUES ($1, $2, $3, $4, $5, $5, true)`,
+          [manualAssignmentId, orgId, manualUserId, manualShiftId, workDate],
+        )
+
+        const applyRes = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/apply`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            items: [
+              { userId: staleUserId, workDate, candidateShiftId: staleItem.candidateShiftId, evidence: { eventIds: staleItem.evidence.eventIds } },
+              { userId: manualUserId, workDate, candidateShiftId: manualItem.candidateShiftId, evidence: { eventIds: manualItem.evidence.eventIds } },
+            ],
+          }),
+        })
+        expect(applyRes.status).toBe(200)
+        const applyData = (applyRes.body as { data?: { applied?: any[]; skipped?: any[] } } | undefined)?.data
+        expect(applyData?.applied).toHaveLength(0)
+        expect(applyData?.skipped).toEqual(expect.arrayContaining([
+          expect.objectContaining({ userId: staleUserId, workDate, candidateShiftId: staleItem.candidateShiftId, reason: 'stale_punch_evidence' }),
+          expect.objectContaining({ userId: manualUserId, workDate, candidateShiftId: manualItem.candidateShiftId, reason: 'already_scheduled' }),
+        ]))
+        const rows = await pool.query(
+          'SELECT id, shift_id, producer_type FROM attendance_shift_assignments WHERE org_id = $1 AND user_id = ANY($2::text[]) ORDER BY user_id ASC, created_at ASC',
+          [orgId, [staleUserId, manualUserId]],
+        )
+        expect(rows.rows).toHaveLength(1)
+        expect(rows.rows[0]).toMatchObject({ id: manualAssignmentId, shift_id: manualShiftId, producer_type: null })
+      } finally {
+        await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
+        if (previousFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+        else process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = previousFlag
+        await pool.end()
+      }
+    })
+
+    it('keeps edit-window and shift-compliance guards on the apply write path', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-autoshift-guard-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const previousFlag = process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+      const originalSettings = await loadSettingsForTest(adminToken)
+      const pool = new Pool({ connectionString: dbUrl })
+      const oldUserId = `attendance-autoshift-window-user-${runSuffix}`
+      const capUserId = `attendance-autoshift-cap-user-${runSuffix}`
+      const oldDate = '2020-01-15'
+      const capDate = '2026-06-15'
+      try {
+        process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = 'true'
+        await saveAutoShiftSettings(adminToken, {
+          autoShiftMatching: { enabled: true, mode: 'apply', maxToleranceMinutes: 30, minConfidenceToApply: 'high' },
+          shiftEditPolicy: { mode: 'past_locked' },
+          shiftCompliance: { enforcement: 'block', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+        })
+        await createGroupForAutoShift(adminToken, `autoshift-window-${runSuffix}`, 'scheduled_shift', oldUserId)
+        const oldShiftId = await createShiftForAutoShift(adminToken, `Auto Shift Window ${runSuffix}`, '05:51', '06:51')
+        const oldInId = await insertPunchEvent(pool, oldUserId, oldDate, 'check_in', `${oldDate}T05:51:00.000Z`)
+        const oldOutId = await insertPunchEvent(pool, oldUserId, oldDate, 'check_out', `${oldDate}T06:51:00.000Z`)
+        const windowRes = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/apply`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            items: [{ userId: oldUserId, workDate: oldDate, candidateShiftId: oldShiftId, evidence: { eventIds: [oldInId, oldOutId] } }],
+          }),
+        })
+        expect(windowRes.status).toBe(422)
+        expect((windowRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_EDIT_WINDOW_EXCEEDED')
+
+        await saveAutoShiftSettings(adminToken, {
+          autoShiftMatching: { enabled: true, mode: 'apply', maxToleranceMinutes: 30, minConfidenceToApply: 'high' },
+          shiftEditPolicy: { mode: 'unrestricted' },
+          shiftCompliance: { enforcement: 'block', dailyMaxMinutes: 1, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+        })
+        await createGroupForAutoShift(adminToken, `autoshift-cap-${runSuffix}`, 'scheduled_shift', capUserId)
+        await createShiftForAutoShift(adminToken, `Auto Shift Cap ${runSuffix}`, '05:41', '06:41')
+        const capInId = await insertPunchEvent(pool, capUserId, capDate, 'check_in', `${capDate}T05:41:00.000Z`)
+        const capOutId = await insertPunchEvent(pool, capUserId, capDate, 'check_out', `${capDate}T06:41:00.000Z`)
+        const capPreviewRes = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/preview`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from: capDate, userIds: [capUserId] }),
+        })
+        expect(capPreviewRes.status).toBe(200)
+        const capPreviewItem = (capPreviewRes.body as { data?: { items?: any[] } } | undefined)?.data?.items?.[0]
+        expect(capPreviewItem).toMatchObject({ userId: capUserId, workDate: capDate })
+        expect(capPreviewItem?.evidence?.eventIds).toEqual([capInId, capOutId])
+        const capRes = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/apply`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            items: [{ userId: capUserId, workDate: capDate, candidateShiftId: capPreviewItem.candidateShiftId, evidence: { eventIds: capPreviewItem.evidence.eventIds } }],
+          }),
+        })
+        expect(capRes.status).toBe(422)
+        expect((capRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_COMPLIANCE_CAP_EXCEEDED')
+        const rows = await pool.query(
+          'SELECT COUNT(*)::int AS count FROM attendance_shift_assignments WHERE org_id = $1 AND user_id = ANY($2::text[])',
+          [orgId, [oldUserId, capUserId]],
+        )
+        expect(Number(rows.rows[0]?.count ?? 0)).toBe(0)
       } finally {
         await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
         if (previousFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
