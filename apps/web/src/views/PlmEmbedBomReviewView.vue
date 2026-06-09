@@ -20,7 +20,7 @@
         当前租户尚未开通 BOM review；真实授权由 PLM license 判定。
       </p>
       <p v-else-if="reviewState === 'error'" class="plm-embed-bom__hint plm-embed-bom__hint--strong" data-testid="plm-embed-bom-error">
-        加载 BOM review 失败（PLM 暂时不可用），请稍后重试。
+        加载 BOM review 失败（PLM 暂时不可用）。请从 PLM 重新打开此嵌入视图以重新授权。
       </p>
       <p v-else-if="reviewState === 'empty'" class="plm-embed-bom__hint">
         未找到该 Part 的 BOM 数据。
@@ -78,8 +78,9 @@ type EmbedReviewState =
 
 // not-configured (allowlist empty -> can never accept a token) -> awaiting-token -> loading ->
 // one of: unavailable (no support / degraded), upgrade (supported but not entitled), error
-// (entitled but the provider fetch failed transiently), empty (entitled, no context, no reason =
-// part not found), table (entitled + context).
+// (entitled but the provider fetch failed after the single-use token was spent; parent must re-mint
+// by reopening/reloading the embed), empty (entitled, no context, no reason = part not found), table
+// (entitled + context).
 const reviewState = computed<EmbedReviewState>(() => {
   if (!tokenReceived.value) {
     if (configReady.value && allowedOrigins.value.length === 0) return 'not-configured'

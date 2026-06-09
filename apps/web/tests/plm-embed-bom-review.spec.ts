@@ -204,6 +204,9 @@ describe('PlmEmbedBomReviewView — P3-D2 token-bound embed handshake', () => {
     postMessageFromParent(PLM_ORIGIN, tokenMessage())
     await flush()
     expect(state(root)).toBe('error')
+    const error = root.querySelector('[data-testid="plm-embed-bom-error"]')
+    expect(error?.textContent).toContain('重新打开此嵌入视图以重新授权')
+    expect(error?.textContent).not.toContain('重试')
   })
 
   it('shows the unavailable state when the relay reports the surface is unavailable', async () => {
