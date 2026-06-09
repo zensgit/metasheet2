@@ -927,6 +927,46 @@ Acceptance locks:
 - Any future executable policy requires a fresh dry-run, fresh token, reviewed
   policy evidence, and explicit owner acknowledgement.
 
+### 🟡 #2388 C0 - PLM BOM source snapshot + diff gate design (ACTIVE)
+
+Gated on: #2388 explicit direction. Docs-only.
+
+Design doc:
+`docs/development/data-factory-plm-stock-preparation-source-snapshot-diff-c0-design-20260608.md`.
+
+Scope:
+
+- Lock the Source Snapshot Diff Gate as a generic seam with a PLM-BOM pilot:
+  source read -> private source snapshot -> latest-vs-last-applied snapshot
+  diff -> category policy/review -> fresh dry-run/apply gate.
+- Treat shipped behavior as invariants to verify, not rebuild:
+  `missingFromPlmPolicy=mark_inactive`, human-field protection, and fresh
+  dry-run token/revision binding.
+- Define the new scope: private in-tenant `SourceSnapshot`, values-free
+  `SourceDiffResult`, `missing_child_bom` held behavior, and PLM-BOM
+  domain categories.
+- Adopt `ComponentNode` + `BomEdge` internally for snapshot/diff while keeping
+  the current flat target-table idempotency key out of this pilot.
+- Keep snapshot diff (source pull vs last applied source snapshot) distinct
+  from the existing C3 target-table plan (current source vs target rows).
+- Pin the #2342 dependency: large background expansion must not treat an
+  incomplete assembly as a complete leaf; `missing_child_bom` needs an explicit
+  PLM signal or a fail-closed held reason.
+
+Acceptance locks:
+
+- C0 is docs-only. No runtime, route, UI, migration, package, snapshot storage,
+  PLM write, external DB write, raw SQL, K3, or production rollout.
+- Public evidence remains values-free: counts, category/policy names, reason
+  tokens, safe fingerprints, and error codes only.
+- Private snapshots may store source structure needed for diffing, but issue
+  evidence must not expose project number, component values, parent/path,
+  idempotency keys, PLM rows, target ids, credentials, tokens, or raw SQL.
+- Node/edge identity is internal to snapshot/diff. Do not migrate the
+  existing flat target idempotency key in #2388 C0.
+- Full generic Source Snapshot Diff Gate runtime waits until a second real
+  source validates the abstraction.
+
 ## Deferred tracks
 
 - New project/sample C4 apply validation after separate explicit approval.
