@@ -887,7 +887,7 @@ Acceptance locks:
   resolved rows are idempotent on re-pull; the remaining groups stay held
   fail-closed.
 
-### 🟡 Duplicate-expanded-key D4 - held-group decision design (ACTIVE - #2343 follow-up)
+### ✅ Duplicate-expanded-key D4 - held-group decision design (DONE - #2343 follow-up)
 
 Gated on: D3 partial-pass evidence + #2343 explicit direction.
 
@@ -926,6 +926,37 @@ Acceptance locks:
   large-BOM bounded runs route back to #2342.
 - Any future executable policy requires a fresh dry-run, fresh token, reviewed
   policy evidence, and explicit owner acknowledgement.
+
+### 🟡 Duplicate-expanded-key D4-1 - source-correction held-only runtime (ACTIVE)
+
+Gated on: Duplicate D4 design + explicit opt-in.
+
+Scope:
+
+- Implement the conservative `source_correction_required` policy as a held-only
+  runtime reason for reviewed duplicate-expanded-key groups.
+- Keep affected duplicate groups as `manual_confirm` / held. They must not
+  produce `add`, `update`, `skip`, or `inactive` decisions.
+- Preserve D4's source-boundary posture: Data Factory reports that source
+  correction is required; it does not repair PLM/source data and does not make
+  held demand disappear.
+- Keep unimplemented strategies (`merge_quantity`, `select_representative`,
+  `skip_selected`) held as `unsupported_policy`.
+
+Acceptance locks:
+
+- No C2 expansion change, idempotency-key change, route, UI, migration,
+  package, PLM write, external database write, K3 path, or production rollout.
+- `source_correction_required` must distinguish itself from generic
+  `default_hold` / `unsupported_policy` in values-free evidence.
+- `source_correction_required` must never create, patch, skip, inactivate, or
+  delete target rows.
+- Applying a reviewed run that contains only source-correction duplicate groups
+  must report those groups as held and make zero records API write calls.
+- Public evidence must not expose project number, component code/name/source
+  id, parent/path/idempotency key, raw PLM rows, target sheet id, field id,
+  payload JSON, raw SQL, credentials, tokens, or stack traces with business
+  values.
 
 ### 🟡 Source snapshot diff gate C0 - PLM-BOM lifecycle design (ACTIVE - #2388)
 

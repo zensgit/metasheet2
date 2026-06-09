@@ -570,6 +570,78 @@ async function testSavedKeepMultipleRowsPolicyRequiresFreshReviewAndAppliesResol
   assert.equal(repullResolution.heldReasonCounts.clean_to_collision_requires_review || 0, 0)
 }
 
+async function testSavedSourceCorrectionPolicyKeepsDuplicateHeldAndWritesNothing() {
+  const storage = createMemoryStorage()
+  const source = createSourceAdapter(duplicateRootPlmData())
+  const records = createRecordsApi()
+  const action = normalizeStockPreparationActionConfig(baseAction())
+  const fingerprint = rootPartFingerprint()
+
+  await saveTableScopeConflictPolicies({
+    action,
+    policyStore: storage,
+    approver: 'admin-user',
+    request: {
+      conflictType: 'duplicate_expanded_key',
+      policies: [{ fingerprint, policy: 'source_correction_required' }],
+    },
+  })
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    policyStore: storage,
+    plannedAt: '2026-06-08T09:00:00.000Z',
+  })
+
+  assert.equal(dryRun.status, 'manual_confirm_required')
+  assert.equal(dryRun.counts.add, 0)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.skip, 0)
+  assert.equal(dryRun.counts.inactive, 0)
+  assert.equal(dryRun.counts.manual_confirm, 1)
+  assert.equal(typeof dryRun.dryRunToken, 'string')
+
+  const resolution = dryRun.evidence.plan.duplicateExpandedKeyResolution
+  assert.equal(resolution.resolvedGroupCount, 0)
+  assert.equal(resolution.heldGroupCount, 1)
+  assert.equal(resolution.heldRowCount, 2)
+  assert.equal(resolution.heldReasonCounts.source_correction_required, 1)
+  assert.equal(resolution.heldReasonCounts.unsupported_policy || 0, 0)
+  assert.equal(resolution.heldPolicies[0].policy, 'source_correction_required')
+  assert.equal(resolution.heldPolicies[0].reason, 'source_correction_required')
+  assert.equal(dryRun.evidence.plan.conflictPolicyReview.writeEffect, 'manual_confirm_held')
+  assert.equal(dryRun.evidence.plan.conflictPolicyReview.selectedPolicies[0].writeEffect, 'manual_confirm_held')
+
+  const result = await applyStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    policyStore: storage,
+    permission: 'write',
+    acceptManualConfirmHold: true,
+  })
+
+  assert.equal(result.status, 'held')
+  assert.equal(result.apply.counts.created, 0)
+  assert.equal(result.apply.counts.updated, 0)
+  assert.equal(result.apply.counts.inactive, 0)
+  assert.equal(result.apply.counts.held, 1)
+  assert.equal(records.calls.some((call) => call[0] === 'createRecord'), false, 'source correction never creates target rows')
+  assert.equal(records.calls.some((call) => call[0] === 'patchRecord'), false, 'source correction never patches target rows')
+
+  const text = JSON.stringify({ dryRun: dryRun.evidence, apply: result.evidence })
+  for (const sensitive of ['P-001', 'PART-A', 'A-001', 'Assembly', 'sort_id', 'ORDER-1']) {
+    assert.equal(text.includes(sensitive), false, `source-correction evidence hides ${sensitive}`)
+  }
+}
+
 async function testLargeBomBoundedDryRunBlocksApplyToken() {
   const source = createSourceAdapter(childBomPlmData())
   const records = createRecordsApi()
@@ -866,6 +938,7 @@ async function main() {
   await testTargetFieldMapIncompleteFailsBeforeReads()
   await testApplyRequiresTokenRecomputesAndScopesTarget()
   await testSavedKeepMultipleRowsPolicyRequiresFreshReviewAndAppliesResolvedRows()
+  await testSavedSourceCorrectionPolicyKeepsDuplicateHeldAndWritesNothing()
   await testLargeBomBoundedDryRunBlocksApplyToken()
   await testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites()
   await testReadPageLimitBoundedDryRunAndDepthHardFailureStayDistinct()

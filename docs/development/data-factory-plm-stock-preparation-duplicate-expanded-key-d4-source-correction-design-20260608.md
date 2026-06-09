@@ -6,9 +6,11 @@ Define the design contract for `source_correction_required`, the conservative
 D4 policy candidate for duplicate-expanded-key groups that remain held with
 `missing_stable_discriminator`.
 
-This is design-only. It does not authorize runtime changes, another Apply,
-production rollout, checkpoint writer work, K3 write, PLM write, external
-database write, raw SQL, migration, route, UI, or package change.
+The D4-1 runtime slice implements only the held-only part of this contract:
+`source_correction_required` can be selected and reported as its own held
+reason. It still does not authorize another Apply, production rollout,
+checkpoint writer work, K3 write, PLM write, external database write, raw SQL,
+migration, route, UI, package change, or any source repair.
 
 ## Baseline
 
@@ -94,20 +96,20 @@ Forbidden evidence:
 - credentials, tokens, connection strings, raw SQL, or stack traces containing
   business values.
 
-## Future Runtime Contract
+## D4-1 Runtime Contract
 
-If this policy is implemented later, it must be held-only:
+This policy is held-only:
 
 - affected duplicate groups remain `manual_confirm` / held;
 - no `add`, `update`, `skip`, or `inactive` decision is produced for affected
   rows;
 - no target write is attempted for affected rows;
-- apply result, if other clean rows are allowed by existing gates, must report
+- apply result, if other clean rows are allowed by existing gates, reports
   the source-correction groups as held;
 - evidence must distinguish `source_correction_required` from generic
   `default_hold` so the operator understands the required next action.
 
-This future runtime contract must not weaken existing gates:
+This runtime contract must not weaken existing gates:
 
 - fresh dry-run required;
 - fresh token required;
@@ -129,21 +131,22 @@ Avoid wording that implies Data Factory can repair PLM/source data.
 
 ## Acceptance Locks
 
-- Design-only: no runtime, route, UI, migration, package, C2 expansion, C3
-  planner, C4 apply, idempotency-key, K3, PLM write, or external DB write
-  change.
+- D4-1 only adds held-only evidence/runtime handling for
+  `source_correction_required`; it does not change routes, UI, migration,
+  package, C2 expansion, idempotency-key generation, K3, PLM write, or external
+  DB write behavior.
 - Unknown legacy behavior defaults to `source_correction_required`.
 - `source_correction_required` must keep demand visible as held evidence; it
   must never silently drop demand.
 - It must never create target rows.
 - It must never write PLM/source data.
 - It must never be treated as successful resolution of a duplicate group.
-- Future implementation must be a separate opt-in with tests proving held-only
-  behavior and values-free evidence.
+- Any further strategy implementation must be a separate opt-in with tests
+  proving its held/write behavior and values-free evidence.
 
-## Future Test Plan
+## Verification
 
-When implementation is explicitly approved, add tests for:
+Implementation is pinned by tests for:
 
 1. `missing_stable_discriminator` + unknown legacy behavior produces
    `source_correction_required` held evidence.
@@ -156,5 +159,12 @@ When implementation is explicitly approved, add tests for:
 6. Large-BOM bounded runs cannot use this policy to make duplicate evidence
    authoritative.
 
-None of these tests are added by this design slice because no runtime behavior
-is introduced here.
+Runtime coverage added in D4-1:
+
+- planner-level test: a selected `source_correction_required` policy remains
+  fail-closed and reports `heldReasonCounts.source_correction_required`;
+- planner-level test: `merge_quantity`, `select_representative`, and
+  `skip_selected` still remain held as `unsupported_policy`;
+- table-action test: a saved table-scope `source_correction_required` policy
+  dry-runs as held, applies with zero create/patch calls, and emits values-free
+  evidence.
