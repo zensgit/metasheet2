@@ -258,10 +258,10 @@ A2:
 | Slice | Scope | Status |
 | --- | --- | --- |
 | D0 | This design-lock + tracker backfill | ✅ in this PR |
-| A0 | Backend preview endpoint + unit/real-DB tests; no writes | 🔒 gated |
-| A0-UI | Admin review table for suggestions | 🔒 gated |
-| A1 | Admin selected apply, provenance, guard reuse | 🔒 gated |
-| A1-UI | Apply selected suggestions | 🔒 gated |
+| A0 | Backend preview endpoint + unit/real-DB tests; no writes | ✅ #2403 |
+| A0-UI | Admin review table for suggestions | ✅ #2405 |
+| A1 | Admin selected apply, provenance, guard reuse | 🟡 built in this PR; pending merge + staging |
+| A1-UI | Apply selected suggestions | 🟡 built in this PR; pending merge + staging |
 | A2 | Automatic write, feature-flag default off, staging smoke | 🔒 separate design-lock |
 
 ## 10. Completion Bar
