@@ -123,6 +123,12 @@ const DEFAULT_SETTINGS = {
     merge: { internalWinsOnIn: false, externalWinsOnOut: false },
     outdoor: { requireApproval: false, requireNote: false, requirePhoto: false, approvalFlowId: '' },
   },
+  // 一天多班次 (multi-shift day) — latent M0 foundation. Default off preserves the
+  // current single-effective-assignment behaviour; M1 wires the slot conflict guard.
+  multiShiftDay: {
+    enabled: false,
+    maxSlots: 3,
+  },
   formula: {
     allowRawAliases: true,
   },
@@ -8181,6 +8187,8 @@ function mapAssignmentRow(row) {
     user_id: row.user_id,
     shiftId: row.shift_id,
     shift_id: row.shift_id,
+    slotIndex: Number.isFinite(Number(row.slot_index)) ? Number(row.slot_index) : 0,
+    slot_index: Number.isFinite(Number(row.slot_index)) ? Number(row.slot_index) : 0,
     startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
     start_date: normalizeDateOnly(row.start_date) ?? row.start_date,
     endDate: normalizeDateOnly(row.end_date) ?? row.end_date ?? null,
@@ -10871,6 +10879,7 @@ function normalizeSettings(raw) {
     shiftEditPolicy: normalizeShiftEditPolicySetting(raw.shiftEditPolicy),
     shiftCompliance: normalizeShiftComplianceSetting(raw.shiftCompliance),
     punchPolicy: normalizePunchPolicySetting(raw.punchPolicy),
+    multiShiftDay: normalizeMultiShiftDaySetting(raw.multiShiftDay),
     formula: {
       allowRawAliases: parseBoolean(formula.allowRawAliases, DEFAULT_SETTINGS.formula.allowRawAliases),
     },
@@ -10897,6 +10906,17 @@ function normalizeAutoShiftMatchingSetting(raw) {
     minConfidenceToApply: ['high', 'medium', 'low'].includes(minConfidenceRaw)
       ? minConfidenceRaw
       : DEFAULT_SETTINGS.autoShiftMatching.minConfidenceToApply,
+  }
+}
+
+function normalizeMultiShiftDaySetting(raw) {
+  const config = raw && typeof raw === 'object' ? raw : {}
+  const maxSlotsRaw = Number(config.maxSlots)
+  return {
+    enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_SETTINGS.multiShiftDay.enabled,
+    maxSlots: Number.isInteger(maxSlotsRaw) && maxSlotsRaw >= 1 && maxSlotsRaw <= 3
+      ? maxSlotsRaw
+      : DEFAULT_SETTINGS.multiShiftDay.maxSlots,
   }
 }
 
@@ -11033,6 +11053,10 @@ function mergeSettings(base, update) {
       unscheduled: { ...(base?.punchPolicy?.unscheduled || {}), ...(update?.punchPolicy?.unscheduled || {}) },
       merge: { ...(base?.punchPolicy?.merge || {}), ...(update?.punchPolicy?.merge || {}) },
       outdoor: { ...(base?.punchPolicy?.outdoor || {}), ...(update?.punchPolicy?.outdoor || {}) },
+    },
+    multiShiftDay: {
+      ...(base?.multiShiftDay || {}),
+      ...(update?.multiShiftDay || {}),
     },
     comprehensiveHours: {
       ...(base?.comprehensiveHours || {}),
@@ -11386,7 +11410,7 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   try {
     const rows = await db.query(
-      `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
+      `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
               s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
               s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
               s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
@@ -11753,7 +11777,7 @@ async function loadShiftAssignmentMapForUsersRange(db, orgId, userIds, fromDate,
   if (!fromDate || !toDate) return new Map()
   try {
     const rows = await db.query(
-      `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
+      `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
               s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
               s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
               s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
@@ -16871,6 +16895,12 @@ module.exports = {
           requireNote: z.boolean().optional(),
           approvalFlowId: z.string().optional(),
         }).optional(),
+      }).optional(),
+      // Multi-shift day M0: latent org setting only. M1 wires assignment slot writes
+      // and conflict semantics; default false means no behaviour change.
+      multiShiftDay: z.object({
+        enabled: z.boolean().optional(),
+        maxSlots: z.number().int().min(1).max(3).optional(),
       }).optional(),
       formula: z.object({
         allowRawAliases: z.boolean().optional(),
@@ -29888,7 +29918,7 @@ module.exports = {
               [orgId]
             ),
             db.query(
-              `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
+              `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
                       s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
                       s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight,
                       s.late_grace_minutes AS shift_late_grace_minutes,
@@ -30712,7 +30742,7 @@ module.exports = {
             : buildAttendanceAssignmentViewSql(viewAccess.scopes, rowParams, 'a')
           rowParams.push(pageSize, offset)
           const rows = await db.query(
-            `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
+            `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
                     s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
                     s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
                     s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
