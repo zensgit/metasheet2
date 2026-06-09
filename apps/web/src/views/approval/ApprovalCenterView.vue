@@ -381,6 +381,7 @@ const statusFilter = ref<ApprovalStatus | ''>('')
 const sourceSystemFilter = ref<'all' | 'platform' | 'plm'>('all')
 const currentPage = ref(1)
 const pageSize = ref(10)
+const attendanceRequestsSection = 'attendance-overview-requests'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -460,14 +461,26 @@ function isAttendanceApproval(row: UnifiedApprovalDTO): boolean {
     || row.formSnapshot?.attendanceRequestId !== undefined
 }
 
+function attendanceRequestIdOf(row: UnifiedApprovalDTO): string | null {
+  const rawRequestId = row.formSnapshot?.attendanceRequestId
+  if (rawRequestId === undefined || rawRequestId === null) return null
+  const requestId = String(rawRequestId).trim()
+  return requestId ? requestId : null
+}
+
+function attendanceRequestQuery(row?: UnifiedApprovalDTO): Record<string, string> {
+  const query: Record<string, string> = { section: attendanceRequestsSection }
+  if (!row) return query
+  const requestId = attendanceRequestIdOf(row)
+  if (requestId) query.requestId = requestId
+  return query
+}
+
 function handleRowClick(row: UnifiedApprovalDTO) {
   if (isAttendanceApproval(row)) {
     router.push({
       name: 'attendance',
-      query: {
-        section: 'attendance-overview-requests',
-        requestId: String(row.formSnapshot?.attendanceRequestId ?? ''),
-      },
+      query: attendanceRequestQuery(row),
     })
     return
   }
@@ -475,9 +488,12 @@ function handleRowClick(row: UnifiedApprovalDTO) {
 }
 
 function openAttendanceApprovalQueue() {
+  const firstPendingAttendanceRequest = store.pendingApprovals.find(row =>
+    isAttendanceApproval(row) && attendanceRequestIdOf(row) !== null,
+  )
   router.push({
     name: 'attendance',
-    query: { section: 'attendance-overview-requests' },
+    query: attendanceRequestQuery(firstPendingAttendanceRequest),
   })
 }
 
