@@ -13,6 +13,7 @@ const {
   isAuthoritativeLargeBomExpansion,
   loadLargeBomBackgroundExpansionJob,
   publicBackgroundExpansionJob,
+  runLargeBomBackgroundExpansionJob,
   summarizeLargeBomBackgroundExpansionJobForEvidence,
   summarizeLargeBomCheckpointApplyJobForEvidence,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-large-bom-jobs.cjs'))
@@ -24,6 +25,14 @@ const RAW_MARKERS = Object.freeze([
   'PATH_VALUE_SHOULD_NOT_APPEAR',
   'TARGET_RECORD_VALUE_SHOULD_NOT_APPEAR',
   'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+  'SOURCE_BINDING_SHOULD_NOT_APPEAR',
+  'CODE_VALUE_SHOULD_NOT_APPEAR',
+  'NAME_VALUE_SHOULD_NOT_APPEAR',
+  'MATERIAL_VALUE_SHOULD_NOT_APPEAR',
+  'CHILD_VALUE_SHOULD_NOT_APPEAR',
+  'CHILD_CODE_SHOULD_NOT_APPEAR',
+  'CHILD_NAME_SHOULD_NOT_APPEAR',
+  'CHILD_MATERIAL_SHOULD_NOT_APPEAR',
 ])
 
 function assertValuesFree(value) {
@@ -63,6 +72,67 @@ const TEST_SCOPE = Object.freeze({
   tenantId: 'tenant-1',
   workspaceId: 'workspace-1',
 })
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value))
+}
+
+function createSourceAdapter(data) {
+  const calls = []
+  return {
+    calls,
+    adapter: {
+      async read(input = {}) {
+        calls.push(clone(input))
+        const rows = Array.isArray(data[input.object]) ? data[input.object] : []
+        const matches = rows.filter((row) =>
+          Object.entries(input.filters || {}).every(([field, expected]) => row[field] === expected),
+        )
+        const offset = input.cursor ? Number(input.cursor) : 0
+        const limit = input.limit || 1000
+        const records = matches.slice(offset, offset + limit).map(clone)
+        return {
+          records,
+          done: offset + records.length >= matches.length,
+          nextCursor: offset + records.length < matches.length ? String(offset + records.length) : null,
+          metadata: {
+            source: 'data-source:sql-readonly',
+            filtersApplied: true,
+            filterFields: Object.keys(input.filters || {}).sort(),
+          },
+        }
+      },
+    },
+  }
+}
+
+function plmData(overrides = {}) {
+  return {
+    DN_PDM_PathExAttrInfo: [{ FileCode: 'PROJECT_VALUE_SHOULD_NOT_APPEAR', Parent_OBJ_ID: 'PATH-1' }],
+    DN_PDM_PathInfo: [{ OBJ_ID: 'PATH-1' }],
+    DN_PDM_OrderHeadInfo: [{ OBJ_ID: 'ORDER-1', path_id: 'PATH-1' }],
+    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'COMPONENT_VALUE_SHOULD_NOT_APPEAR', quantity: '2', sort_id: 1 }],
+    DN_PDM_PartLibraryInfo: [
+      {
+        OBJ_ID: 'COMPONENT_VALUE_SHOULD_NOT_APPEAR',
+        IdentityNo: 'CODE_VALUE_SHOULD_NOT_APPEAR',
+        IdentityName: 'NAME_VALUE_SHOULD_NOT_APPEAR',
+        Material: 'MATERIAL_VALUE_SHOULD_NOT_APPEAR',
+        SysVer: 'V1',
+      },
+      {
+        OBJ_ID: 'CHILD_VALUE_SHOULD_NOT_APPEAR',
+        IdentityNo: 'CHILD_CODE_SHOULD_NOT_APPEAR',
+        IdentityName: 'CHILD_NAME_SHOULD_NOT_APPEAR',
+        Material: 'CHILD_MATERIAL_SHOULD_NOT_APPEAR',
+        SysVer: 'V1',
+      },
+    ],
+    DN_PDM_BomHeadInfo: [{ part_id: 'COMPONENT_VALUE_SHOULD_NOT_APPEAR', bom_id: 'BOM-1', SysVer: 'V1', bom_able: true }],
+    DN_PDM_BomDetailsInfo: [{ bom_pid: 'BOM-1', part_id: 'CHILD_VALUE_SHOULD_NOT_APPEAR', Bom_ExAttr1: '3', sort_id: 2 }],
+    ...overrides,
+  }
+}
 
 function testStatusEnumsArePinned() {
   assert.deepEqual(LARGE_BOM_BACKGROUND_EXPANSION_STATUSES, [
@@ -134,6 +204,7 @@ function testBackgroundEvidenceIsValuesFreeProjection() {
     status: 'running',
     largeBom: true,
     authoritative: false,
+    artifactRevisionPresent: false,
     projectNoPresent: true,
     progress: {
       rowsExpanded: 1200,
@@ -190,10 +261,15 @@ function testAuthoritativeExpansionGate() {
     () => assertAuthoritativeLargeBomExpansion({ status: 'running', authoritative: false }),
     'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE',
   )
-  assert.deepEqual(running.details, { status: 'running', authoritative: false })
+  assert.deepEqual(running.details, { status: 'running', authoritative: false, artifactRevisionPresent: false })
 
   assertLargeBomJobError(
     () => assertAuthoritativeLargeBomExpansion({ status: 'completed', authoritative: false }),
+    'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE',
+  )
+  assert.equal(isAuthoritativeLargeBomExpansion({ status: 'completed', authoritative: true }), false)
+  assertLargeBomJobError(
+    () => assertAuthoritativeLargeBomExpansion({ status: 'completed', authoritative: true }),
     'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE',
   )
 }
@@ -352,6 +428,7 @@ async function testBackgroundJobLifecycleIsValuesFree() {
 
   const publicJob = publicBackgroundExpansionJob(job)
   assert.equal(publicJob.jobId, 'job-values-free-1')
+  assert.equal(publicJob.artifactRevisionPresent, false)
   assert.deepEqual(publicJob.progress, {
     rowsExpanded: 0,
     readCount: 0,
@@ -421,6 +498,147 @@ async function testBackgroundJobLifecycleIsValuesFree() {
   )
 }
 
+async function testBackgroundWorkerCompletesAuthoritativeArtifactWithoutPublicValues() {
+  const storage = createStorage()
+  const source = createSourceAdapter(plmData())
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly', externalSystemId: 'SOURCE_BINDING_SHOULD_NOT_APPEAR' },
+      target: { sheetId: 'TARGET_RECORD_VALUE_SHOULD_NOT_APPEAR' },
+    },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-complete-1',
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+
+  const completed = await runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-complete-1',
+    sourceAdapter: source.adapter,
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+
+  assert.equal(completed.status, 'completed')
+  assert.equal(completed.authoritative, true)
+  assert.equal(typeof completed.artifactRevision, 'string')
+  assert.equal(completed.artifact.rows.length, 2, 'private artifact keeps full expanded rows for future planning')
+  assert.equal(completed.artifact.rows[1].totalQuantity, 6)
+  assert.equal(source.calls.length > 0, true, 'worker reads through the source adapter')
+  assert.equal(source.calls.every((call) => call.filters && Object.keys(call.filters).length > 0), true, 'worker uses equality-filtered flat reads')
+  assert.equal(source.calls.every((call) => !('sql' in call) && !('rawSql' in call) && !('query' in call)), true, 'worker never sends raw SQL')
+
+  const publicJob = publicBackgroundExpansionJob(completed)
+  assert.equal(publicJob.status, 'completed')
+  assert.equal(publicJob.authoritative, true)
+  assert.equal(publicJob.artifactRevisionPresent, true)
+  assert.equal(publicJob.progress.rowsExpanded, 2)
+  assert.equal(publicJob.progress.completedChunks, 1)
+  assert.equal(publicJob.evidence.sourceKind, 'data-source:sql-readonly')
+  assert.ok(publicJob.evidence.readObjects.includes('DN_PDM_PathExAttrInfo'))
+  assertValuesFree(publicJob)
+
+  const callCountAfterCompletion = source.calls.length
+  const rerun = await runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-complete-1',
+    sourceAdapter: source.adapter,
+    now: () => '2026-06-08T00:02:00.000Z',
+  })
+  assert.equal(rerun.status, 'completed')
+  assert.equal(rerun.artifactRevision, completed.artifactRevision, 'completed job retry keeps the same artifact revision')
+  assert.equal(rerun.artifact.rows.length, 2, 'completed job retry does not append duplicate artifact rows')
+  assert.equal(source.calls.length, callCountAfterCompletion, 'completed job retry does not re-read source')
+}
+
+async function testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget() {
+  const storage = createStorage()
+  const source = createSourceAdapter(plmData())
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+    },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-failed-1',
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+
+  const failed = await runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-failed-1',
+    sourceAdapter: source.adapter,
+    expansionOptions: { maxRows: 1 },
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.authoritative, false)
+  assert.equal(failed.artifact, undefined)
+  const publicJob = publicBackgroundExpansionJob(failed)
+  assert.equal(publicJob.authoritative, false)
+  assert.equal(publicJob.artifactRevisionPresent, false)
+  assert.ok(publicJob.evidence.errorTypes.includes('max_rows_exceeded'))
+  assert.ok(publicJob.evidence.scaleErrorTypes.includes('max_rows_exceeded'))
+  assertValuesFree(publicJob)
+}
+
+async function testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe() {
+  const storage = createStorage()
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+    },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-unsafe-error-1',
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+
+  const failed = await runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-unsafe-error-1',
+    sourceAdapter: {
+      async read() {
+        const error = new Error('PROJECT_VALUE_SHOULD_NOT_APPEAR and COMPONENT_VALUE_SHOULD_NOT_APPEAR')
+        error.code = 'unsafe token with PROJECT_VALUE_SHOULD_NOT_APPEAR'
+        throw error
+      },
+    },
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+
+  assert.equal(failed.status, 'failed')
+  assert.deepEqual(failed.evidence.errorTypes, ['read_failed'])
+  assertValuesFree(publicBackgroundExpansionJob(failed))
+
+  const loaded = await loadLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-unsafe-error-1',
+  })
+  assert.equal(loaded.status, 'failed')
+  assert.deepEqual(loaded.evidence.errorTypes, ['read_failed'])
+}
+
 async function main() {
   testStatusEnumsArePinned()
   testBackgroundEvidenceIsValuesFreeProjection()
@@ -430,6 +648,9 @@ async function main() {
   testInvalidStatusAndCountsFailClosed()
   await testBackgroundJobStoreRequiresDurableStorageAndPrincipal()
   await testBackgroundJobLifecycleIsValuesFree()
+  await testBackgroundWorkerCompletesAuthoritativeArtifactWithoutPublicValues()
+  await testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget()
+  await testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe()
 }
 
 main().catch((err) => {
