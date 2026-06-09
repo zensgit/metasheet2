@@ -248,9 +248,10 @@ function backgroundJobKey(input = {}) {
   return `stock-preparation:large-bom:background:${tenantId}:${workspaceId}:${safeActionId}:${safeJobId}`
 }
 
-function checkpointApplyJobKey(actionId, applyJobId) {
-  const safeActionId = safeEvidenceToken(actionId, 'actionId')
-  const safeApplyJobId = safeEvidenceToken(applyJobId, 'applyJobId')
+function checkpointApplyJobKey(input = {}) {
+  const { tenantId, workspaceId } = requiredJobScope(input)
+  const safeActionId = safeEvidenceToken(input.actionId, 'actionId')
+  const safeApplyJobId = safeEvidenceToken(input.applyJobId, 'applyJobId')
   if (!safeActionId || !safeApplyJobId) {
     throw new StockPreparationLargeBomJobError(
       'LARGE_BOM_APPLY_JOB_ID_INVALID',
@@ -258,7 +259,7 @@ function checkpointApplyJobKey(actionId, applyJobId) {
       { actionIdPresent: Boolean(safeActionId), applyJobIdPresent: Boolean(safeApplyJobId) },
     )
   }
-  return `stock-preparation:large-bom:apply:${safeActionId}:${safeApplyJobId}`
+  return `stock-preparation:large-bom:apply:${tenantId}:${workspaceId}:${safeActionId}:${safeApplyJobId}`
 }
 
 function requiredPrincipal(value) {
@@ -669,10 +670,12 @@ function requireCheckpointRecordsApi(recordsApi) {
 
 async function createLargeBomCheckpointApplyJob(input = {}) {
   const storage = ensureDurableJobStorage(input.storage)
+  const scope = requiredJobScope(input)
   const principal = requiredPrincipal(input.principal)
   const permission = requireApplyPermission(input.permission)
   const sourceJob = await loadLargeBomBackgroundExpansionJob({
     storage,
+    ...scope,
     actionId: input.actionId,
     jobId: input.jobId,
   })
@@ -698,6 +701,7 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
   const now = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   const job = {
     jobId: applyJobId,
+    ...scope,
     actionId: sourceJob.actionId,
     sourceJobId: sourceJob.jobId,
     status: 'queued',
@@ -730,13 +734,13 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
     createdAt: now,
     updatedAt: now,
   }
-  await storage.set(checkpointApplyJobKey(sourceJob.actionId, applyJobId), job)
+  await storage.set(checkpointApplyJobKey({ ...scope, actionId: sourceJob.actionId, applyJobId }), job)
   return cloneJson(job)
 }
 
 async function loadLargeBomCheckpointApplyJob(input = {}) {
   const storage = ensureDurableJobStorage(input.storage)
-  const key = checkpointApplyJobKey(input.actionId, input.applyJobId || input.jobId)
+  const key = checkpointApplyJobKey({ ...input, applyJobId: input.applyJobId || input.jobId })
   const job = await storage.get(key)
   if (!job) {
     throw new StockPreparationLargeBomJobError(
@@ -774,7 +778,7 @@ function terminalApplyStatus(counts = {}) {
 
 async function runLargeBomCheckpointApplyJobChunk(input = {}) {
   const storage = ensureDurableJobStorage(input.storage)
-  const key = checkpointApplyJobKey(input.actionId, input.applyJobId || input.jobId)
+  const key = checkpointApplyJobKey({ ...input, applyJobId: input.applyJobId || input.jobId })
   const job = await storage.get(key)
   if (!job) {
     throw new StockPreparationLargeBomJobError(
@@ -785,7 +789,15 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
     )
   }
   if (['succeeded', 'partial'].includes(job.status)) return cloneJson(job)
-  if (!['queued', 'running', 'paused', 'failed'].includes(job.status)) {
+  if (job.status === 'running') {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_RUN_IN_PROGRESS',
+      'large-BOM checkpoint apply job already has a running chunk',
+      { status: 'running' },
+      409,
+    )
+  }
+  if (!['queued', 'paused', 'failed'].includes(job.status)) {
     throw new StockPreparationLargeBomJobError(
       'LARGE_BOM_APPLY_RUN_REJECTED',
       'large-BOM checkpoint apply job cannot be run from this status',
@@ -836,7 +848,7 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
     nextDecisionIndex: end,
     completedChunks: completedChunks(job) + 1,
   }
-  job.status = end >= decisions.length ? terminalApplyStatus(job.counts) : 'running'
+  job.status = end >= decisions.length ? terminalApplyStatus(job.counts) : 'paused'
   job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   await storage.set(key, job)
   return cloneJson(job)

@@ -224,6 +224,7 @@ async function seedPlannedLargeBomJob({
   const actionId = 'plm.stock-preparation.pull-bom.v1'
   const job = {
     jobId,
+    ...TEST_SCOPE,
     actionId,
     status: 'completed',
     authoritative: true,
@@ -268,8 +269,8 @@ async function seedPlannedLargeBomJob({
     createdAt: '2026-06-08T00:00:00.000Z',
     updatedAt: '2026-06-08T00:00:00.000Z',
   }
-  await storage.set(__internals.backgroundJobKey(actionId, jobId), job)
-  return { storage, actionId, jobId, job }
+  await storage.set(__internals.backgroundJobKey({ ...TEST_SCOPE, actionId, jobId }), job)
+  return { storage, ...TEST_SCOPE, actionId, jobId, job }
 }
 
 function plmData(overrides = {}) {
@@ -943,6 +944,7 @@ async function testCheckpointApplyRequiresDurablePlanPermissionAndManualAck() {
   const storageWithoutPlan = createStorage()
   await createLargeBomBackgroundExpansionJob({
     storage: storageWithoutPlan,
+    ...TEST_SCOPE,
     action: { actionId: 'plm.stock-preparation.pull-bom.v1', target: targetBinding() },
     parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
     principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
@@ -951,6 +953,7 @@ async function testCheckpointApplyRequiresDurablePlanPermissionAndManualAck() {
   await assert.rejects(
     () => createLargeBomCheckpointApplyJob({
       storage: storageWithoutPlan,
+      ...TEST_SCOPE,
       actionId: 'plm.stock-preparation.pull-bom.v1',
       jobId: 'job-no-plan',
       principal: 'user-1',
@@ -965,6 +968,7 @@ async function testCheckpointApplyRequiresDurablePlanPermissionAndManualAck() {
   await assert.rejects(
     () => createLargeBomCheckpointApplyJob({
       storage,
+      ...TEST_SCOPE,
       actionId,
       jobId,
       principal: 'user-1',
@@ -984,6 +988,7 @@ async function testCheckpointApplyRequiresDurablePlanPermissionAndManualAck() {
   await assert.rejects(
     () => createLargeBomCheckpointApplyJob({
       storage: seeded.storage,
+      ...TEST_SCOPE,
       actionId: seeded.actionId,
       jobId: seeded.jobId,
       principal: 'user-1',
@@ -1006,6 +1011,7 @@ async function testCheckpointApplyChunksPlanAndKeepsPublicEvidenceValuesFree() {
   const api = createTargetRecordsApi()
   const created = await createLargeBomCheckpointApplyJob({
     storage,
+    ...TEST_SCOPE,
     actionId,
     jobId,
     principal: 'user-1',
@@ -1021,19 +1027,21 @@ async function testCheckpointApplyChunksPlanAndKeepsPublicEvidenceValuesFree() {
 
   const first = await runLargeBomCheckpointApplyJobChunk({
     storage,
+    ...TEST_SCOPE,
     actionId,
     applyJobId: 'apply-job-chunks',
     recordsApi: api.recordsApi,
     maxDecisionsPerChunk: 1,
     now: () => '2026-06-08T00:02:00.000Z',
   })
-  assert.equal(first.status, 'running')
+  assert.equal(first.status, 'paused', 'completed non-terminal chunks are ready for the next explicit run')
   assert.equal(first.checkpoint.nextDecisionIndex, 1)
   assert.equal(first.counts.created, 1)
   assert.equal(api.rows.length, 1)
 
   const second = await runLargeBomCheckpointApplyJobChunk({
     storage,
+    ...TEST_SCOPE,
     actionId,
     applyJobId: 'apply-job-chunks',
     recordsApi: api.recordsApi,
@@ -1069,6 +1077,7 @@ async function testCheckpointApplyChunksPlanAndKeepsPublicEvidenceValuesFree() {
 
   const loaded = await loadLargeBomCheckpointApplyJob({
     storage,
+    ...TEST_SCOPE,
     actionId,
     applyJobId: 'apply-job-chunks',
   })
@@ -1079,6 +1088,7 @@ async function testCheckpointApplyMissingRecordsApiFailsBeforeRunning() {
   const { storage, actionId, jobId } = await seedPlannedLargeBomJob({ jobId: 'job-missing-records-api' })
   await createLargeBomCheckpointApplyJob({
     storage,
+    ...TEST_SCOPE,
     actionId,
     jobId,
     principal: 'user-1',
@@ -1089,6 +1099,7 @@ async function testCheckpointApplyMissingRecordsApiFailsBeforeRunning() {
   await assert.rejects(
     () => runLargeBomCheckpointApplyJobChunk({
       storage,
+      ...TEST_SCOPE,
       actionId,
       applyJobId: 'apply-job-missing-records-api',
       recordsApi: {},
@@ -1101,6 +1112,7 @@ async function testCheckpointApplyMissingRecordsApiFailsBeforeRunning() {
 
   const loaded = await loadLargeBomCheckpointApplyJob({
     storage,
+    ...TEST_SCOPE,
     actionId,
     applyJobId: 'apply-job-missing-records-api',
   })
@@ -1108,24 +1120,26 @@ async function testCheckpointApplyMissingRecordsApiFailsBeforeRunning() {
   assert.equal(loaded.checkpoint.nextDecisionIndex, 0, 'missing recordsApi does not advance the checkpoint')
 }
 
-async function testCheckpointApplyRetryDoesNotDuplicateAddAfterCheckpointLoss() {
+async function testCheckpointApplyRejectsConcurrentRunningChunk() {
   const key = 'PROJECT_VALUE_SHOULD_NOT_APPEAR::IDEMPOTENT-KEY'
   const plan = planWithDecisions([addDecision(key)])
-  const { storage, actionId, jobId } = await seedPlannedLargeBomJob({ plan, jobId: 'job-idempotent-apply' })
+  const { storage, actionId, jobId } = await seedPlannedLargeBomJob({ plan, jobId: 'job-concurrent-apply' })
   const api = createTargetRecordsApi()
   await createLargeBomCheckpointApplyJob({
     storage,
+    ...TEST_SCOPE,
     actionId,
     jobId,
     principal: 'user-1',
     permission: 'admin',
-    createApplyJobId: () => 'apply-job-idempotent',
+    createApplyJobId: () => 'apply-job-concurrent',
   })
 
   const first = await runLargeBomCheckpointApplyJobChunk({
     storage,
+    ...TEST_SCOPE,
     actionId,
-    applyJobId: 'apply-job-idempotent',
+    applyJobId: 'apply-job-concurrent',
     recordsApi: api.recordsApi,
     maxDecisionsPerChunk: 1,
   })
@@ -1133,7 +1147,7 @@ async function testCheckpointApplyRetryDoesNotDuplicateAddAfterCheckpointLoss() 
   assert.equal(first.counts.created, 1)
   assert.equal(api.rows.length, 1)
 
-  const applyKey = __internals.checkpointApplyJobKey(actionId, 'apply-job-idempotent')
+  const applyKey = __internals.checkpointApplyJobKey({ ...TEST_SCOPE, actionId, applyJobId: 'apply-job-concurrent' })
   const persisted = await storage.get(applyKey)
   persisted.status = 'running'
   persisted.checkpoint.nextDecisionIndex = 0
@@ -1152,20 +1166,31 @@ async function testCheckpointApplyRetryDoesNotDuplicateAddAfterCheckpointLoss() 
   }
   await storage.set(applyKey, persisted)
 
-  const retry = await runLargeBomCheckpointApplyJobChunk({
-    storage,
-    actionId,
-    applyJobId: 'apply-job-idempotent',
-    recordsApi: api.recordsApi,
-    maxDecisionsPerChunk: 1,
-  })
-  assert.equal(retry.status, 'succeeded')
-  assert.equal(retry.counts.created, 0, 'retry after checkpoint loss does not create another row')
-  assert.equal(retry.counts.updated, 1, 'idempotent add patches the already-created row')
-  assert.equal(api.rows.length, 1, 'checkpoint retry keeps a single target row')
+  await assert.rejects(
+    () => runLargeBomCheckpointApplyJobChunk({
+      storage,
+      ...TEST_SCOPE,
+      actionId,
+      applyJobId: 'apply-job-concurrent',
+      recordsApi: api.recordsApi,
+      maxDecisionsPerChunk: 1,
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_APPLY_RUN_IN_PROGRESS' &&
+      error.status === 409,
+  )
+  assert.equal(api.rows.length, 1, 'concurrent run rejection keeps a single target row')
   assert.equal(api.calls.filter((call) => call[0] === 'createRecord').length, 1)
-  assert.equal(api.calls.filter((call) => call[0] === 'patchRecord').length, 1)
-  assertValuesFree(publicCheckpointApplyJob(retry))
+  assert.equal(api.calls.filter((call) => call[0] === 'patchRecord').length, 0)
+
+  const loaded = await loadLargeBomCheckpointApplyJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-concurrent',
+  })
+  assert.equal(loaded.status, 'running', 'concurrent rejection does not mutate the in-flight job')
+  assertValuesFree(publicCheckpointApplyJob(loaded))
 }
 
 async function main() {
@@ -1186,7 +1211,7 @@ async function main() {
   await testCheckpointApplyRequiresDurablePlanPermissionAndManualAck()
   await testCheckpointApplyChunksPlanAndKeepsPublicEvidenceValuesFree()
   await testCheckpointApplyMissingRecordsApiFailsBeforeRunning()
-  await testCheckpointApplyRetryDoesNotDuplicateAddAfterCheckpointLoss()
+  await testCheckpointApplyRejectsConcurrentRunningChunk()
 }
 
 main().catch((err) => {
