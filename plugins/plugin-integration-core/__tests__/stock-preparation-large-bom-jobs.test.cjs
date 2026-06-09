@@ -8,7 +8,11 @@ const {
   LARGE_BOM_CHECKPOINT_APPLY_STATUSES,
   StockPreparationLargeBomJobError,
   assertAuthoritativeLargeBomExpansion,
+  cancelLargeBomBackgroundExpansionJob,
+  createLargeBomBackgroundExpansionJob,
   isAuthoritativeLargeBomExpansion,
+  loadLargeBomBackgroundExpansionJob,
+  publicBackgroundExpansionJob,
   summarizeLargeBomBackgroundExpansionJobForEvidence,
   summarizeLargeBomCheckpointApplyJobForEvidence,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-large-bom-jobs.cjs'))
@@ -39,6 +43,20 @@ function assertLargeBomJobError(fn, code) {
   assert.ok(err instanceof StockPreparationLargeBomJobError, `expected ${code}`)
   assert.equal(err.code, code)
   return err
+}
+
+function createStorage({ durable = true } = {}) {
+  const map = new Map()
+  return {
+    durable,
+    map,
+    async get(key) {
+      return map.get(key) || null
+    },
+    async set(key, value) {
+      map.set(key, JSON.parse(JSON.stringify(value)))
+    },
+  }
 }
 
 function testStatusEnumsArePinned() {
@@ -262,13 +280,109 @@ function testInvalidStatusAndCountsFailClosed() {
   assert.equal(numericString.counts.created, 5)
 }
 
-function main() {
+async function testBackgroundJobStoreRequiresDurableStorageAndPrincipal() {
+  await assert.rejects(
+    () => createLargeBomBackgroundExpansionJob({
+      storage: createStorage({ durable: false }),
+      action: { actionId: 'plm.stock-preparation.pull-bom.v1' },
+      parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+      principal: 'user-1',
+      createJobId: () => 'job-1',
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_JOB_STORE_UNAVAILABLE' &&
+      error.status === 501,
+  )
+
+  await assert.rejects(
+    () => createLargeBomBackgroundExpansionJob({
+      storage: createStorage(),
+      action: { actionId: 'plm.stock-preparation.pull-bom.v1' },
+      parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+      principal: '',
+      createJobId: () => 'job-1',
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_JOB_PRINCIPAL_REQUIRED',
+  )
+}
+
+async function testBackgroundJobLifecycleIsValuesFree() {
+  const storage = createStorage()
+  const job = await createLargeBomBackgroundExpansionJob({
+    storage,
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+      target: { sheetId: 'TARGET_RECORD_VALUE_SHOULD_NOT_APPEAR' },
+    },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-values-free-1',
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+
+  assert.equal(job.status, 'queued')
+  assert.equal(job.authoritative, false)
+  assert.equal(job.parameters.projectNo, 'PROJECT_VALUE_SHOULD_NOT_APPEAR', 'private job keeps operator parameter for future worker resume')
+  assert.equal(job.principal, 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR', 'private job captures request principal for future source reads')
+  assert.equal(job.actionSnapshot.target.sheetId, 'TARGET_RECORD_VALUE_SHOULD_NOT_APPEAR', 'private job captures the server-side action config for future worker resume')
+
+  const publicJob = publicBackgroundExpansionJob(job)
+  assert.equal(publicJob.jobId, 'job-values-free-1')
+  assert.deepEqual(publicJob.progress, {
+    rowsExpanded: 0,
+    readCount: 0,
+    frontierRemaining: 0,
+    completedChunks: 0,
+  })
+  assert.equal(publicJob.projectNoPresent, true)
+  assert.equal(publicJob.evidence.sourceKind, 'data-source:sql-readonly')
+  assertValuesFree(publicJob)
+
+  const loaded = await loadLargeBomBackgroundExpansionJob({
+    storage,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-values-free-1',
+  })
+  assert.deepEqual(loaded, job)
+
+  const cancelled = await cancelLargeBomBackgroundExpansionJob({
+    storage,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-values-free-1',
+    principal: 'user-1',
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+  assert.equal(cancelled.status, 'cancelled')
+  assert.equal(cancelled.authoritative, false)
+  assertValuesFree(publicBackgroundExpansionJob(cancelled))
+
+  await assert.rejects(
+    () => loadLargeBomBackgroundExpansionJob({
+      storage,
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      jobId: 'missing-job',
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_JOB_NOT_FOUND' &&
+      error.status === 404,
+  )
+}
+
+async function main() {
   testStatusEnumsArePinned()
   testBackgroundEvidenceIsValuesFreeProjection()
   testBackgroundEvidenceRejectsUnsafeTokens()
   testAuthoritativeExpansionGate()
   testCheckpointApplyEvidenceIsValuesFreeProjection()
   testInvalidStatusAndCountsFailClosed()
+  await testBackgroundJobStoreRequiresDurableStorageAndPrincipal()
+  await testBackgroundJobLifecycleIsValuesFree()
 }
 
-main()
+main().catch((err) => {
+  console.error('stock-preparation-large-bom-jobs FAILED')
+  console.error(err)
+  process.exit(1)
+})
