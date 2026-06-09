@@ -26,7 +26,7 @@
 | 顺序 | 项 | 当前状态 | 完成口径 |
 |---|---|---|---|
 | 1 | **一天多班次** | 🟡 design-lock 已落（`attendance-multi-shift-day-design-lock-20260609.md`） | M0–M5 全部完成：schema replay、slot conflict guard、effective-calendar slots、planned-minutes/shift-compliance 汇总、fixed-apply/auto-shift 兼容、admin UI、staging smoke residue=0 |
-| 2 | **排班发布/草稿** | ⬜ 未开始 | backend runtime + admin UI + 反向测试 + staging smoke；若触碰 `attendance_shift_assignments` 热表 schema，先与多班次 `slot_index` / `status` / `locked_at` / constraints 做 migration batching 决策 |
+| 2 | **排班发布/草稿** | 🟡 design-lock 已落（`attendance-schedule-publishing-design-lock-20260609.md`） | backend runtime + admin UI + 反向测试 + staging smoke；若触碰 `attendance_shift_assignments` 热表 schema，先与多班次 `slot_index` / `publish_status` / `locked_at` / constraints 做 migration batching 决策 |
 | 3 | **临时班次** | ⬜ 未开始 | backend runtime + admin UI + 反向测试 + staging smoke；不伪装成完整调度/换班系统 |
 | 4 | **加班三段引擎** | ⬜ 未开始 | 工作日/休息日/节假日三段口径进入规则引擎并有反向测试；不把公式派生当 runtime engine |
 
@@ -86,7 +86,7 @@
 | 假期过期管理 | MUST | ✅ | C4 子链已 staging-validated：`expires_at` 写入 + 过期 state-flow + env-gated `AttendanceScheduler` 调度基座均已证实；C5 通知/提醒仍按 #2230 作为后续扩展，不影响 C4 完成口径 |
 | 自动对班 | SHOULD | ✅ | **A0/A1 preview→admin-apply 已 staging-proven**：design-lock `attendance-auto-shift-matching-preview-design-lock-20260609.md` → A0 backend preview #2403 + A0 admin review UI #2405 → A1 admin selected apply #2406（squash `b4a1ca693`）→ staging smoke **PASS** `A1_AUTO_SHIFT_STAGING_SMOKE_PASS deploy=b4a1ca69323d767e7d838882751b365f18b4116f prefix=autoshift-a1-smoke-mq64a66m residue={"users":0,"events":0,"records":0,"assignments":0,"groups":0,"shifts":0}`。owner 口径不变：feature-flag 默认关；A0 只读 preview/建议态，不写 `attendance_shift_assignments`；A1 仅 admin 选择后应用且复用排班写入锁、排班修改窗、排班合规引擎与 provenance；A2 自动写入另起 design-lock。只匹配 scheduled_shift 组内“未排班但有打卡”的 user/day，不覆盖人工/导入/固定/轮班排班 |
 | 一天多班次 | SHOULD | 🟡 | design-lock `attendance-multi-shift-day-design-lock-20260609.md` 已锁：v1 默认关闭，`slot_index` schema-first，最多 3 个 direct shift slots；完成口径要求 schema replay、slot conflict guard、effective-calendar slots、planned-minutes/shift-compliance 汇总、fixed-apply/auto-shift 兼容、admin UI 与 staging smoke 全满足后才 ✅ |
-| 排班发布/草稿 | SHOULD | ⬜ | 0 |
+| 排班发布/草稿 | SHOULD | 🟡 | design-lock `attendance-schedule-publishing-design-lock-20260609.md` 已锁：v1 使用 `draft` / `pending` / `published` 生命周期（推荐 DB `publish_status`，legacy/current writes 默认 published 零回归）；draft/pending 不进入 effective-calendar、`isUserScheduledForDate`、shiftCompliance planned-load、提醒或报表；publish 事务内复用 per-user lock、scope permission、`shiftEditPolicy`、published-conflict guard 与 `shiftCompliance`，成功后写 `published_at/published_by/locked_at`；fixed-apply 与 auto-shift A1 默认保持 immediate published 并保留 provenance；完成口径要求 schema replay、状态过滤、draft CRUD、publish preflight/transition、fixed/auto 兼容、admin UI 与 staging smoke 全满足后才 ✅ |
 | 临时班次 | SHOULD | ⬜ | 0 |
 | 加班三段引擎 | SHOULD | ⬜ | 公式派生，引擎不区分日型 |
 | 调度 / 换班 / 小组织 | OPTIONAL | ⬜ | 0 |
@@ -136,7 +136,9 @@
 
 > **回填（2026-06-09 一天多班次 design-lock）**：下一条 SHOULD 「一天多班次」先落设计锁 `attendance-multi-shift-day-design-lock-20260609.md`，不直接写 runtime。pre-flight 发现当前表没有 user/day DB unique，单班限制主要来自 `findAttendanceScheduleAssignmentConflict`、`loadShiftAssignment LIMIT 1`、effective-calendar/planned-minutes 等 single-effective 口径；因此不能只允许多行写入。v1 锁定：默认关闭；新增 `attendance_shift_assignments.slot_index`（API `slotIndex`，0-2，legacy 默认 0）；同 slot date-range overlap 禁止，不同 slot 仅在 shift 时间窗不重叠时可共存；rotation 与 direct multi-slot v1 互斥；planned minutes / shift-compliance cap 必须汇总 slots；`attendance_records` 仍一日一行，实际出勤 first/last 与 payroll-grade multi-segment 计算不在本线；fixed-schedule apply 与 auto-shift A1 保持 slot 0 兼容。完成口径：schema replay + conflict/effective-calendar/planned-minutes + admin UI + staging smoke 全满足才从 🟡 翻 ✅。
 
-> **⚠️ schema 成组迁移，别一刀一迁。** 首刀"排班修改窗"已按 #2197 路线**无 DDL 落地**：policy 先进 org-level attendance settings JSON（`shiftEditPolicy`），write-time 按受影响日期判窗。后续若要把排班合规（`shift_constraints`）、发布（`status`）、多班次（`slot`）、或持久锁窗（`locked_at`）落到 `attendance_shift_assignments`/`rule_sets`，这些 schema 变更再打一个协调 migration，再分层叠 service/UI（v1 阶段2 已是此意）。
+> **回填（2026-06-09 排班发布/草稿 design-lock）**：下一条 SHOULD 「排班发布/草稿」落设计锁 `attendance-schedule-publishing-design-lock-20260609.md`，不直接写 runtime/schema/UI/OpenAPI。v1 锁定：API 生命周期 `draft` / `pending` / `published`，DB 建议用显式 `publish_status`（不是泛化 `status`）；legacy/current assignment writes 默认 `published`，确保零回归；draft/pending 对 effective-calendar、planned-minutes/shiftCompliance、`isUserScheduledForDate`、未排班提醒、报表均不可见；publish 才是生效写入点，事务内按稳定 user 顺序拿 per-user lock，复用 scheduler-scope permission、`shiftEditPolicy`、published conflict guard 与 `shiftCompliance`，成功后写 `published_at/published_by/locked_at`；published rows v1 不允许普通 PUT 静默改写，修正/重开另起设计；fixed-apply 与 auto-shift A1 默认仍 immediate published，并保留 `producer_type` / `producer_key` / `producer_run_id` provenance。状态从 ⬜ → 🟡，完成口径需 schema replay、状态过滤、draft CRUD、publish preflight/transition、fixed/auto 兼容、admin UI、staging smoke 全满足才 ✅。
+
+> **⚠️ schema 成组迁移，别一刀一迁。** 首刀"排班修改窗"已按 #2197 路线**无 DDL 落地**：policy 先进 org-level attendance settings JSON（`shiftEditPolicy`），write-time 按受影响日期判窗。后续若要把排班合规（`shift_constraints`）、发布（`publish_status`）、多班次（`slot_index`）、或持久锁窗（`locked_at`）落到 `attendance_shift_assignments`/`rule_sets`，这些 schema 变更再打一个协调 migration，再分层叠 service/UI（v1 阶段2 已是此意）。
 
 ---
 
