@@ -115,6 +115,9 @@ describe('Attendance admin regressions', () => {
   let attendanceSettingsFail = false
   let attendanceSettingsSaveData: Record<string, unknown> | null = null
   let attendanceApprovalFlowsData: unknown[] | null = null
+  let attendanceGroupsData: unknown[] | null = null
+  let autoShiftPreviewStatus = 200
+  let autoShiftPreviewData: Record<string, unknown> | null = null
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -122,6 +125,9 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsFail = false
     attendanceSettingsSaveData = null
     attendanceApprovalFlowsData = null
+    attendanceGroupsData = null
+    autoShiftPreviewStatus = 200
+    autoShiftPreviewData = null
     exportReportFieldFingerprint = 'records-unit-test-fingerprint'
     exportReportFieldCodes = 'work_date,employee_name'
     exportReportFieldCount = '2'
@@ -231,7 +237,7 @@ describe('Attendance admin regressions', () => {
                 isDefault: true,
               },
             ],
-            total: 1,
+            total: (attendanceGroupsData ?? [null]).length,
           },
         })
       }
@@ -281,7 +287,7 @@ describe('Attendance admin regressions', () => {
         return jsonResponse(200, {
           ok: true,
           data: {
-            items: [
+            items: attendanceGroupsData ?? [
               {
                 id: 'group-a',
                 name: 'Ops Team',
@@ -595,6 +601,18 @@ describe('Attendance admin regressions', () => {
           return jsonResponse(500, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'settings unavailable' } })
         }
         return jsonResponse(200, { ok: true, data: attendanceSettingsData ?? {} })
+      }
+      if (url.includes('/api/attendance/auto-shift-matching/preview')) {
+        if (autoShiftPreviewStatus >= 400) {
+          return jsonResponse(autoShiftPreviewStatus, {
+            ok: false,
+            error: { code: 'AUTO_SHIFT_MATCHING_DISABLED', message: 'Auto shift matching preview is disabled' },
+          })
+        }
+        return jsonResponse(200, {
+          ok: true,
+          data: autoShiftPreviewData ?? { items: [], skipped: [] },
+        })
       }
       if (url.includes('/api/attendance/approval-flows')
         && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'GET') {
@@ -2084,6 +2102,185 @@ describe('Attendance admin regressions', () => {
     expect(puts).toHaveLength(1)
     return JSON.parse(String((puts[0][1] as { body?: string } | undefined)?.body || '{}'))
   }
+
+  const lastAutoShiftPreviewBody = (): unknown => {
+    const posts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/auto-shift-matching/preview')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'POST')
+    expect(posts).toHaveLength(1)
+    return JSON.parse(String((posts[0][1] as { body?: string } | undefined)?.body || '{}'))
+  }
+
+  it('loads autoShiftMatching into the preview card and PUTs ONLY { autoShiftMatching }', async () => {
+    attendanceSettingsData = {
+      autoShiftMatching: {
+        enabled: true,
+        mode: 'preview',
+        maxToleranceMinutes: 90,
+        minConfidenceToApply: 'medium',
+      },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const enabled = container!.querySelector<HTMLInputElement>('[data-auto-shift="enabled"]')
+    const tolerance = container!.querySelector<HTMLInputElement>('[data-auto-shift="tolerance"]')
+    const confidence = container!.querySelector<HTMLSelectElement>('[data-auto-shift="confidence"]')
+    expect(Boolean(enabled && tolerance && confidence)).toBe(true)
+    expect(enabled!.checked).toBe(true)
+    expect(tolerance!.value).toBe('90')
+    expect(confidence!.value).toBe('medium')
+
+    enabled!.checked = false
+    enabled!.dispatchEvent(new Event('change'))
+    tolerance!.value = '75'
+    tolerance!.dispatchEvent(new Event('input'))
+    confidence!.value = 'low'
+    confidence!.dispatchEvent(new Event('change'))
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-auto-shift="save-settings"]')!.click()
+    await flushUi(6)
+
+    expect(lastSettingsPutBody()).toEqual({
+      autoShiftMatching: {
+        enabled: false,
+        mode: 'preview',
+        maxToleranceMinutes: 75,
+        minConfidenceToApply: 'low',
+      },
+    })
+  })
+
+  it('posts auto shift preview filters, renders suggestions/skips, and exposes no apply action in A0', async () => {
+    attendanceSettingsData = {
+      autoShiftMatching: {
+        enabled: true,
+        mode: 'preview',
+        maxToleranceMinutes: 120,
+        minConfidenceToApply: 'high',
+      },
+    }
+    attendanceGroupsData = [
+      {
+        id: 'group-scheduled',
+        name: 'Scheduled Ops',
+        code: 'scheduled-ops',
+        timezone: 'Asia/Shanghai',
+        attendanceType: 'scheduled_shift',
+        memberCount: 2,
+      },
+      {
+        id: 'group-fixed',
+        name: 'Fixed Team',
+        code: 'fixed-team',
+        timezone: 'Asia/Shanghai',
+        attendanceType: 'fixed_shift',
+        memberCount: 1,
+      },
+    ]
+    autoShiftPreviewData = {
+      items: [
+        {
+          userId: 'user-1',
+          workDate: '2026-06-03',
+          candidateShiftId: 'shift-1',
+          candidateShiftName: 'Morning Shift',
+          confidence: 'high',
+          score: 12,
+          reasons: ['check_in_delta:5', 'check_out_delta:7'],
+          evidence: {
+            firstInAt: '2026-06-03T01:05:00.000Z',
+            lastOutAt: '2026-06-03T10:07:00.000Z',
+            eventIds: ['evt-in', 'evt-out'],
+          },
+        },
+      ],
+      skipped: [
+        { userId: 'user-2', workDate: '2026-06-03', reason: 'already_scheduled' },
+      ],
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const from = container!.querySelector<HTMLInputElement>('[data-auto-shift="from"]')!
+    const to = container!.querySelector<HTMLInputElement>('[data-auto-shift="to"]')!
+    const groups = container!.querySelector<HTMLSelectElement>('[data-auto-shift="groups"]')!
+    const tolerance = container!.querySelector<HTMLInputElement>('[data-auto-shift="tolerance"]')!
+    const confidence = container!.querySelector<HTMLSelectElement>('[data-auto-shift="confidence"]')!
+    expect(Array.from(groups.options).map(option => option.value)).toEqual(['group-scheduled'])
+    from.value = '2026-06-03'
+    from.dispatchEvent(new Event('input'))
+    to.value = '2026-06-03'
+    to.dispatchEvent(new Event('input'))
+    Array.from(groups.options).forEach((option) => {
+      option.selected = option.value === 'group-scheduled'
+    })
+    groups.dispatchEvent(new Event('change'))
+    tolerance.value = '45'
+    tolerance.dispatchEvent(new Event('input'))
+    confidence.value = 'medium'
+    confidence.dispatchEvent(new Event('change'))
+    await flushUi(2)
+
+    container!.querySelector<HTMLButtonElement>('[data-auto-shift="preview"]')!.click()
+    await flushUi(8)
+
+    expect(lastAutoShiftPreviewBody()).toEqual({
+      from: '2026-06-03',
+      to: '2026-06-03',
+      attendanceGroupIds: ['group-scheduled'],
+      userIds: [],
+      maxToleranceMinutes: 45,
+      minConfidenceToApply: 'medium',
+    })
+    const suggestions = container!.querySelector<HTMLElement>('[data-auto-shift="suggestions"]')
+    const skipped = container!.querySelector<HTMLElement>('[data-auto-shift="skipped"]')
+    expect(suggestions?.textContent || '').toContain('Morning Shift')
+    expect(suggestions?.textContent || '').toContain('high · 12')
+    expect(skipped?.textContent || '').toContain('already_scheduled')
+    expect(container!.querySelector('[data-auto-shift="apply"]')).toBeNull()
+    expect(
+      vi.mocked(apiFetch).mock.calls.some(([url, init]) =>
+        String(url).includes('/api/attendance/assignments')
+        && ['POST', 'PUT', 'DELETE'].includes(String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()),
+      ),
+    ).toBe(false)
+  })
+
+  it('shows disabled feedback when the auto shift preview endpoint rejects the A0 gate', async () => {
+    autoShiftPreviewStatus = 403
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const from = container!.querySelector<HTMLInputElement>('[data-auto-shift="from"]')!
+    const to = container!.querySelector<HTMLInputElement>('[data-auto-shift="to"]')!
+    const userIds = container!.querySelector<HTMLTextAreaElement>('[data-auto-shift="user-ids"]')!
+    from.value = '2026-06-03'
+    from.dispatchEvent(new Event('input'))
+    to.value = '2026-06-03'
+    to.dispatchEvent(new Event('input'))
+    userIds.value = 'user-1'
+    userIds.dispatchEvent(new Event('input'))
+    await flushUi(2)
+
+    container!.querySelector<HTMLButtonElement>('[data-auto-shift="preview"]')!.click()
+    await flushUi(8)
+
+    expect(lastAutoShiftPreviewBody()).toEqual({
+      from: '2026-06-03',
+      to: '2026-06-03',
+      attendanceGroupIds: [],
+      userIds: ['user-1'],
+      maxToleranceMinutes: 120,
+      minConfidenceToApply: 'high',
+    })
+    expect(container!.querySelector('[data-auto-shift="error"]')?.textContent || '').toContain('Auto shift matching preview is disabled')
+    expect(container!.querySelector('[data-auto-shift="suggestion-row"]')).toBeNull()
+    expect(container!.querySelector('[data-auto-shift="apply"]')).toBeNull()
+  })
 
   it('loads punchPolicy.outdoor into the card and PUTs ONLY { punchPolicy: { outdoor } } (flow id round-trips)', async () => {
     attendanceSettingsData = {
