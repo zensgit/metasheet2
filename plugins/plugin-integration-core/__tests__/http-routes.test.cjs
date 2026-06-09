@@ -48,6 +48,13 @@ function createMemoryStorage() {
   }
 }
 
+function createDurableMemoryStorage() {
+  return {
+    ...createMemoryStorage(),
+    durable: true,
+  }
+}
+
 function createMockContext(options = {}) {
   const routes = new Map()
   const records = options.recordsApi || {
@@ -2765,6 +2772,122 @@ async function testTableActionRoutes() {
   assert.equal(JSON.stringify(res.body.data.evidence).includes('A-001'), false, 'apply evidence hides component code')
 }
 
+async function testLargeBomBackgroundExpansionJobRoutes() {
+  const records = createTableActionRecordsApi()
+  const { calls, services } = createMockServices()
+  const config = {
+    stockPreparationTableActions: [tableActionConfig()],
+  }
+  let mount = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage: createMemoryStorage(),
+    config,
+  })
+
+  assert.ok(
+    mount.registered.includes('POST /api/integration/table-actions/:actionId/large-bom/expansion-jobs'),
+    'large-BOM expansion job start route registered',
+  )
+  assert.ok(
+    mount.registered.includes('GET /api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId'),
+    'large-BOM expansion job inspect route registered',
+  )
+  assert.ok(
+    mount.registered.includes('POST /api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel'),
+    'large-BOM expansion job cancel route registered',
+  )
+
+  let res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 501)
+  assert.equal(res.body.error.code, 'LARGE_BOM_JOB_STORE_UNAVAILABLE', 'memory-only storage is rejected for background expansion')
+  assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, 0, 'missing durable store fails before source load')
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'missing durable store fails before adapter creation')
+  assert.equal(records.calls.length, 0, 'missing durable store fails before target reads/writes')
+
+  const storage = createDurableMemoryStorage()
+  mount = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage,
+    config,
+  })
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: {
+      parameters: { projectNo: 'P-001' },
+      source: { externalSystemId: 'evil' },
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'browser-supplied source is rejected')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', {
+    user: { tenantId: 'tenant_1', permissions: ['integration:read'] },
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'LARGE_BOM_JOB_PRINCIPAL_REQUIRED', 'missing principal fails closed without fallback')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 202)
+  assert.equal(res.body.data.status, 'queued')
+  assert.equal(res.body.data.largeBom, true)
+  assert.equal(res.body.data.authoritative, false)
+  assert.equal(res.body.data.projectNoPresent, true)
+  assert.equal(res.body.data.jobIdPresent, true)
+  assert.equal(typeof res.body.data.jobId, 'string')
+  assert.equal(res.body.data.evidence.sourceKind, 'data-source:sql-readonly')
+  const responseText = JSON.stringify(res.body.data)
+  assert.equal(responseText.includes('P-001'), false, 'job start response is values-free')
+  assert.equal(responseText.includes('user_read'), false, 'job start response hides principal')
+  assert.equal(responseText.includes('sheet_stock_configured'), false, 'job start response hides target sheet')
+  assert.equal(responseText.includes('plm_sql_source'), false, 'job start response hides source binding')
+  assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, 0, 'job start does not load source system')
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'job start does not create source adapter')
+  assert.equal(records.calls.length, 0, 'job start does not read or write target rows')
+  const jobId = res.body.data.jobId
+
+  res = await invoke(mount.routes, 'GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.jobId, jobId)
+  assert.equal(res.body.data.status, 'queued')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assert.equal(res.statusCode, 403, 'read-only user cannot cancel a background job')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+    body: { sheetId: 'evil_sheet' },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'cancel rejects browser-supplied scope')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'cancelled')
+  assert.equal(res.body.data.authoritative, false)
+}
+
 async function testTableActionConflictPolicyRoutes() {
   const calls = []
   const adapterCalls = []
@@ -3095,6 +3218,7 @@ async function main() {
   await testStockPreparationTargetProvisioningRoutes()
   await testStockPreparationOptionSyncRoute()
   await testTableActionRoutes()
+  await testLargeBomBackgroundExpansionJobRoutes()
   await testTableActionConflictPolicyRoutes()
   await testTableActionRoutesSupportExplicitBridgeSource()
   await testTableActionTargetPreflightBeforeSourceAdapter()

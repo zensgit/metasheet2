@@ -26,6 +26,9 @@ const ROUTES = [
   ['GET', '/api/integration/table-actions', 'tableActionsList'],
   ['POST', '/api/integration/table-actions/:actionId/dry-run', 'tableActionDryRun'],
   ['POST', '/api/integration/table-actions/:actionId/apply', 'tableActionApply'],
+  ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', 'tableActionLargeBomExpansionJobStart'],
+  ['GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId', 'tableActionLargeBomExpansionJobGet'],
+  ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel', 'tableActionLargeBomExpansionJobCancel'],
   ['GET', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesList'],
   ['PUT', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesSave'],
   ['DELETE', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesDelete'],
@@ -66,7 +69,14 @@ const {
   assertStockPreparationTargetReady,
   createStockPreparationTableActionRegistry,
   dryRunStockPreparationAction,
+  normalizeActionParameters,
 } = require('./stock-preparation-table-actions.cjs')
+const {
+  cancelLargeBomBackgroundExpansionJob,
+  createLargeBomBackgroundExpansionJob,
+  loadLargeBomBackgroundExpansionJob,
+  publicBackgroundExpansionJob,
+} = require('./stock-preparation-large-bom-jobs.cjs')
 const {
   deleteTableScopeConflictPolicies,
   loadTableScopeConflictPolicies,
@@ -327,6 +337,8 @@ function publicRunInput(body = {}) {
 
 const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
 const VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])
+const VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS = new Set(['parameters'])
+const VALID_EMPTY_REQUEST_KEYS = new Set()
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
 const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
   'tenantId',
@@ -1373,6 +1385,47 @@ function createHandlers(services, options = {}) {
         tokenStore: context.storage,
         policyStore: context.storage,
       }))
+    },
+
+    async tableActionLargeBomExpansionJobStart(req, res) {
+      requireAccess(req, 'read')
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS)
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const parameters = normalizeActionParameters(body.parameters)
+      const job = await createLargeBomBackgroundExpansionJob({
+        storage: context.storage,
+        action,
+        parameters,
+        principal: requestPrincipal(req),
+      })
+      return sendOk(res, publicBackgroundExpansionJob(job), 202)
+    },
+
+    async tableActionLargeBomExpansionJobGet(req, res) {
+      requireAccess(req, 'read')
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const job = await loadLargeBomBackgroundExpansionJob({
+        storage: context.storage,
+        actionId,
+        jobId: firstString(requestParams(req).jobId),
+      })
+      return sendOk(res, publicBackgroundExpansionJob(job))
+    },
+
+    async tableActionLargeBomExpansionJobCancel(req, res) {
+      requireAccess(req, 'write')
+      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const job = await cancelLargeBomBackgroundExpansionJob({
+        storage: context.storage,
+        actionId,
+        jobId: firstString(requestParams(req).jobId),
+        principal: requestPrincipal(req),
+      })
+      return sendOk(res, publicBackgroundExpansionJob(job))
     },
 
     async tableActionConflictPoliciesList(req, res) {
