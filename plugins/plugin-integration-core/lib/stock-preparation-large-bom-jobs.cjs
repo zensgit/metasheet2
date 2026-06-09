@@ -4,13 +4,15 @@ const crypto = require('node:crypto')
 
 // #2342 C3/C4 large-BOM job contract.
 // This module owns the route-facing job store/projection helpers while
-// intentionally leaving worker execution, dry-run composition, and apply to
-// later slices. It defines values-free status/evidence helpers so future
-// background expansion and checkpointed apply slices have a narrow contract.
+// intentionally leaving dry-run composition and apply to later slices. The
+// worker seam below produces the sealed expansion artifact used by those
+// later slices while keeping public evidence values-free.
 
 const { scrubSecretStringValue } = require('./payload-redaction.cjs')
 const {
+  expandPlmProjectBom,
   LARGE_BOM_BOUNDED_ERROR_TYPES,
+  summarizeBomExpansionForEvidence,
 } = require('./stock-preparation-bom-expansion.cjs')
 
 const LARGE_BOM_BACKGROUND_EXPANSION_STATUSES = Object.freeze([
@@ -151,6 +153,18 @@ function normalizeStatus(value, allowed, field) {
 
 function cloneJson(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value))
+}
+
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function hashJson(value) {
+  return crypto.createHash('sha256').update(stableStringify(value)).digest('hex')
 }
 
 function isoNow(now = new Date()) {
@@ -329,6 +343,149 @@ async function cancelLargeBomBackgroundExpansionJob(input = {}) {
   return cloneJson(job)
 }
 
+function requireSourceAdapter(adapter) {
+  if (!adapter || typeof adapter.read !== 'function') {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_JOB_SOURCE_ADAPTER_UNAVAILABLE',
+      'large-BOM background expansion requires a source adapter with read()',
+      {},
+      501,
+    )
+  }
+  return adapter
+}
+
+function expansionArtifactRevision({ job, expansion }) {
+  return hashJson({
+    action: job.actionSnapshot || { actionId: job.actionId },
+    parameters: job.parameters || {},
+    principal: job.principal,
+    expansion: {
+      rows: Array.isArray(expansion.rows) ? expansion.rows : [],
+      summary: expansion.summary || {},
+    },
+  })
+}
+
+function updateJobFromExpansion(job, expansion, now) {
+  const evidence = summarizeBomExpansionForEvidence(expansion)
+  const progress = {
+    rowsExpanded: Number(evidence.rowsExpanded || 0),
+    readCount: Number(evidence.readCount || 0),
+    frontierRemaining: 0,
+    completedChunks: expansion.valid === true ? 1 : 0,
+  }
+  const budgets = {
+    maxRows: evidence.maxRows,
+    maxPages: evidence.maxPages,
+    maxReadCount: evidence.maxReadCount,
+    maxElapsedMs: evidence.maxElapsedMs,
+    maxDepth: evidence.maxDepth,
+    maxArtifactChunks: 1,
+  }
+  for (const key of Object.keys(budgets)) {
+    if (budgets[key] === undefined || budgets[key] === null || budgets[key] === '') delete budgets[key]
+  }
+  job.progress = progress
+  job.budgets = budgets
+  job.evidence = {
+    sourceKind: job.sourceKind,
+    readObjects: evidence.readObjects || [],
+    errorTypes: evidence.errorTypes || [],
+    readDiagnosticShapePresent: Array.isArray(evidence.readDiagnostics) && evidence.readDiagnostics.length > 0,
+  }
+  job.updatedAt = now
+  if (expansion.valid === true) {
+    const revision = expansionArtifactRevision({ job, expansion })
+    job.status = 'completed'
+    job.authoritative = true
+    job.artifactRevision = revision
+    job.artifact = {
+      revision,
+      status: expansion.status,
+      rows: cloneJson(expansion.rows || []),
+      summary: cloneJson(expansion.summary || {}),
+      sealedAt: now,
+    }
+    return
+  }
+  job.status = 'failed'
+  job.authoritative = false
+  delete job.artifactRevision
+  delete job.artifact
+}
+
+function safeErrorType(error) {
+  try {
+    return safeEvidenceToken(error && (error.code || error.name), 'errorType') || 'read_failed'
+  } catch {
+    return 'read_failed'
+  }
+}
+
+async function runLargeBomBackgroundExpansionJob(input = {}) {
+  const storage = ensureDurableJobStorage(input.storage)
+  const sourceAdapter = requireSourceAdapter(input.sourceAdapter)
+  const key = backgroundJobKey(input)
+  const job = await storage.get(key)
+  if (!job) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_JOB_NOT_FOUND',
+      'large-BOM background expansion job was not found',
+      { jobIdPresent: Boolean(optionalString(input.jobId)) },
+      404,
+    )
+  }
+  if (job.status === 'completed') return cloneJson(job)
+  if (!['queued', 'running', 'paused', 'failed'].includes(job.status)) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_JOB_RUN_REJECTED',
+      'large-BOM background expansion job cannot be run from this status',
+      { status: safeEvidenceToken(job.status, 'status') || undefined },
+      409,
+    )
+  }
+  requiredPrincipal(job.principal)
+  const runningAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+  job.status = 'running'
+  job.authoritative = false
+  job.updatedAt = runningAt
+  await storage.set(key, job)
+
+  let expansion
+  try {
+    expansion = await expandPlmProjectBom({
+      sourceAdapter,
+      projectNo: job.parameters && job.parameters.projectNo,
+      ...(isPlainObject(input.expansionOptions) ? input.expansionOptions : {}),
+    })
+  } catch (error) {
+    const failedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+    job.status = 'failed'
+    job.authoritative = false
+    job.progress = {
+      rowsExpanded: 0,
+      readCount: 0,
+      frontierRemaining: 0,
+      completedChunks: 0,
+    }
+    job.evidence = {
+      sourceKind: job.sourceKind,
+      readObjects: [],
+      errorTypes: [safeErrorType(error)],
+      readDiagnosticShapePresent: false,
+    }
+    job.updatedAt = failedAt
+    await storage.set(key, job)
+    return cloneJson(job)
+  }
+
+  const completedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+  updateJobFromExpansion(job, expansion, completedAt)
+  await storage.set(key, job)
+  return cloneJson(job)
+}
+
 function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
   if (!isPlainObject(job)) {
     throw new StockPreparationLargeBomJobError(
@@ -346,6 +503,7 @@ function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
     status,
     largeBom: true,
     authoritative: status === 'completed' && job.authoritative === true,
+    artifactRevisionPresent: Boolean(optionalString(job.artifactRevision || (job.artifact && job.artifact.revision))),
     projectNoPresent: job.projectNoPresent === true,
     progress: nonNegativeProjection(job.progress, BACKGROUND_PROGRESS_FIELDS),
     budgets: nonNegativeProjection(job.budgets, BACKGROUND_BUDGET_FIELDS),
@@ -361,7 +519,9 @@ function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
 
 function isAuthoritativeLargeBomExpansion(job = {}) {
   if (!isPlainObject(job)) return false
-  return job.status === 'completed' && job.authoritative === true
+  return job.status === 'completed' &&
+    job.authoritative === true &&
+    Boolean(optionalString(job.artifactRevision || (job.artifact && job.artifact.revision)))
 }
 
 function assertAuthoritativeLargeBomExpansion(job = {}) {
@@ -372,6 +532,9 @@ function assertAuthoritativeLargeBomExpansion(job = {}) {
       {
         status: isPlainObject(job) ? optionalString(job.status) || undefined : undefined,
         authoritative: isPlainObject(job) ? job.authoritative === true : false,
+        artifactRevisionPresent: isPlainObject(job)
+          ? Boolean(optionalString(job.artifactRevision || (job.artifact && job.artifact.revision)))
+          : false,
       },
     )
   }
@@ -410,6 +573,7 @@ module.exports = {
   createLargeBomBackgroundExpansionJob,
   loadLargeBomBackgroundExpansionJob,
   publicBackgroundExpansionJob,
+  runLargeBomBackgroundExpansionJob,
   summarizeLargeBomBackgroundExpansionJobForEvidence,
   summarizeLargeBomCheckpointApplyJobForEvidence,
   isAuthoritativeLargeBomExpansion,
@@ -417,6 +581,7 @@ module.exports = {
   __internals: {
     backgroundJobKey,
     ensureDurableJobStorage,
+    hashJson,
     safeEvidenceToken,
     safeTokenList,
     nonNegativeInteger,
