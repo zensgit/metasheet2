@@ -145,6 +145,14 @@ const DEFAULT_SETTINGS = {
     enabled: false,
     expiresInDays: null,
   },
+  // 自动对班 (auto shift matching) — preview-only A0 foundation. Requires BOTH the
+  // runtime env flag and this org setting before the read-only preview endpoint can run.
+  autoShiftMatching: {
+    enabled: false,
+    mode: 'preview',
+    maxToleranceMinutes: 120,
+    minConfidenceToApply: 'high',
+  },
 }
 
 const allowRbacDegradation = process.env.RBAC_OPTIONAL === '1'
@@ -10868,6 +10876,27 @@ function normalizeSettings(raw) {
     },
     comprehensiveHours: normalizeAttendanceComprehensiveHoursSettings(raw.comprehensiveHours),
     compTimeFromOvertime: normalizeCompTimeFromOvertimeSetting(raw.compTimeFromOvertime),
+    autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
+  }
+}
+
+function normalizeAutoShiftMatchingSetting(raw) {
+  const config = raw && typeof raw === 'object' ? raw : {}
+  const modeRaw = typeof config.mode === 'string' ? config.mode.trim() : ''
+  const minConfidenceRaw = typeof config.minConfidenceToApply === 'string'
+    ? config.minConfidenceToApply.trim()
+    : ''
+  const tolerance = Number(config.maxToleranceMinutes)
+  return {
+    enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_SETTINGS.autoShiftMatching.enabled,
+    // A0 is preview-only. apply / auto modes are future slices and must not silently become accepted.
+    mode: modeRaw === 'preview' ? 'preview' : DEFAULT_SETTINGS.autoShiftMatching.mode,
+    maxToleranceMinutes: Number.isFinite(tolerance) && tolerance > 0
+      ? Math.min(720, Math.floor(tolerance))
+      : DEFAULT_SETTINGS.autoShiftMatching.maxToleranceMinutes,
+    minConfidenceToApply: ['high', 'medium', 'low'].includes(minConfidenceRaw)
+      ? minConfidenceRaw
+      : DEFAULT_SETTINGS.autoShiftMatching.minConfidenceToApply,
   }
 }
 
@@ -11018,6 +11047,10 @@ function mergeSettings(base, update) {
     compTimeFromOvertime: {
       ...(base?.compTimeFromOvertime || {}),
       ...(update?.compTimeFromOvertime || {}),
+    },
+    autoShiftMatching: {
+      ...(base?.autoShiftMatching || {}),
+      ...(update?.autoShiftMatching || {}),
     },
   })
 }
@@ -12008,6 +12041,230 @@ async function isUserScheduledForDate(db, orgId, userId, date) {
   } catch (error) {
     if (isDatabaseSchemaError(error)) return true
     throw error
+  }
+}
+
+function isAutoShiftMatchingRuntimeEnabled() {
+  return parseBoolean(process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED, false)
+}
+
+function confidenceRank(value) {
+  if (value === 'high') return 3
+  if (value === 'medium') return 2
+  if (value === 'low') return 1
+  return 0
+}
+
+function enumerateAttendanceDateKeys(from, to) {
+  const start = normalizeDateOnly(from)
+  const end = normalizeDateOnly(to)
+  if (!start || !end || start > end) return []
+  const keys = []
+  const cursor = new Date(`${start}T00:00:00.000Z`)
+  const endTime = new Date(`${end}T00:00:00.000Z`).getTime()
+  while (cursor.getTime() <= endTime) {
+    keys.push(cursor.toISOString().slice(0, 10))
+    cursor.setUTCDate(cursor.getUTCDate() + 1)
+  }
+  return keys
+}
+
+async function loadAutoShiftTargetUserIds(db, orgId, input) {
+  const users = new Set()
+  for (const userId of normalizeStringArray(input.userIds)) {
+    users.add(userId)
+  }
+  const groupIds = normalizeStringArray(input.attendanceGroupIds)
+  if (groupIds.length > 0) {
+    const rows = await db.query(
+      `SELECT DISTINCT user_id
+       FROM attendance_group_members
+       WHERE org_id = $1
+         AND group_id = ANY($2::uuid[])
+       ORDER BY user_id ASC`,
+      [orgId, groupIds],
+    )
+    for (const row of rows) {
+      const userId = String(row.user_id ?? '').trim()
+      if (userId) users.add(userId)
+    }
+  }
+  return [...users].sort()
+}
+
+async function loadAutoShiftUserGroupTypes(db, orgId, userId) {
+  const rows = await db.query(
+    `SELECT g.attendance_type
+     FROM attendance_group_members m
+     JOIN attendance_groups g ON g.id = m.group_id AND g.org_id = m.org_id
+     WHERE m.org_id = $1 AND m.user_id = $2`,
+    [orgId, userId],
+  )
+  return rows.map((row) => normalizeAttendanceGroupType(row.attendance_type))
+}
+
+async function hasAutoShiftRotationAssignmentForDate(db, orgId, userId, workDate) {
+  const rows = await db.query(
+    `SELECT 1
+     FROM attendance_rotation_assignments
+     WHERE org_id = $1
+       AND user_id = $2
+       AND COALESCE(is_active, true) = true
+       AND start_date <= $3::date
+       AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+     LIMIT 1`,
+    [orgId, userId, workDate],
+  )
+  return rows.length > 0
+}
+
+async function loadAutoShiftPunchEvents(db, orgId, userId, workDate) {
+  const rows = await db.query(
+    `SELECT id, event_type, occurred_at
+     FROM attendance_events
+     WHERE org_id = $1
+       AND user_id = $2
+       AND work_date = $3::date
+       AND event_type IN ('check_in', 'check_out')
+     ORDER BY occurred_at ASC, id ASC`,
+    [orgId, userId, workDate],
+  )
+  return rows
+    .map((row) => ({
+      id: row.id,
+      eventType: row.event_type,
+      occurredAt: row.occurred_at instanceof Date ? row.occurred_at : parseDateInput(row.occurred_at),
+    }))
+    .filter((row) => row.occurredAt instanceof Date && !Number.isNaN(row.occurredAt.getTime()))
+}
+
+async function loadAutoShiftCandidateShifts(db, orgId) {
+  const rows = await db.query(
+    `SELECT *
+     FROM attendance_shifts
+     WHERE org_id = $1
+     ORDER BY name ASC, created_at ASC, id ASC`,
+    [orgId],
+  )
+  return rows.map(mapShiftRow)
+}
+
+function scoreAutoShiftCandidate(shift, events, options) {
+  const maxToleranceMinutes = options?.maxToleranceMinutes ?? DEFAULT_SETTINGS.autoShiftMatching.maxToleranceMinutes
+  const startMinutes = parseTimeToMinutes(shift.workStartTime, null)
+  const endMinutes = parseTimeToMinutes(shift.workEndTime, null)
+  if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes)) return null
+  if (shift.isOvernight || endMinutes <= startMinutes) return null
+
+  const checkIns = events.filter((event) => event.eventType === 'check_in')
+  const checkOuts = events.filter((event) => event.eventType === 'check_out')
+  const firstIn = checkIns[0] ?? null
+  const lastOut = checkOuts[checkOuts.length - 1] ?? null
+  const reasons = []
+  let score = 0
+  let compared = 0
+
+  if (firstIn) {
+    const delta = Math.abs(getZonedMinutes(firstIn.occurredAt, shift.timezone) - startMinutes)
+    score += delta
+    compared += 1
+    reasons.push(`check_in_delta:${delta}`)
+  } else {
+    score += 60
+    reasons.push('missing_check_in')
+  }
+
+  if (lastOut) {
+    const delta = Math.abs(getZonedMinutes(lastOut.occurredAt, shift.timezone) - endMinutes)
+    score += delta
+    compared += 1
+    reasons.push(`check_out_delta:${delta}`)
+  } else {
+    score += 60
+    reasons.push('missing_check_out')
+  }
+
+  if (compared === 0) return null
+  if (compared === 1) {
+    reasons.push('single_punch')
+  }
+  if (score > maxToleranceMinutes) return null
+
+  const confidence = compared === 2 && score <= 30
+    ? 'high'
+    : (score <= 90 ? 'medium' : 'low')
+  return {
+    candidateShiftId: shift.id,
+    candidateShiftName: shift.name,
+    score,
+    confidence,
+    reasons,
+    evidence: {
+      firstInAt: firstIn?.occurredAt?.toISOString() ?? null,
+      lastOutAt: lastOut?.occurredAt?.toISOString() ?? null,
+      eventIds: events.map((event) => event.id),
+    },
+  }
+}
+
+async function buildAutoShiftMatchingPreview(db, input) {
+  const orgId = input.orgId || DEFAULT_ORG_ID
+  const dates = enumerateAttendanceDateKeys(input.from, input.to)
+  const userIds = await loadAutoShiftTargetUserIds(db, orgId, input)
+  const maxToleranceMinutes = input.maxToleranceMinutes ?? DEFAULT_SETTINGS.autoShiftMatching.maxToleranceMinutes
+  const minConfidence = input.minConfidenceToApply ?? DEFAULT_SETTINGS.autoShiftMatching.minConfidenceToApply
+  const candidateShifts = await loadAutoShiftCandidateShifts(db, orgId)
+  const items = []
+  const skipped = []
+
+  for (const userId of userIds) {
+    const groupTypes = await loadAutoShiftUserGroupTypes(db, orgId, userId)
+    const allScheduledShift = groupTypes.length > 0 && groupTypes.every((type) => type === 'scheduled_shift')
+    for (const workDate of dates) {
+      if (!allScheduledShift) {
+        skipped.push({ userId, workDate, reason: 'not_scheduled_shift_group' })
+        continue
+      }
+
+      const hasExistingSchedule = await isUserScheduledForDate(db, orgId, userId, workDate)
+      if (hasExistingSchedule || await hasAutoShiftRotationAssignmentForDate(db, orgId, userId, workDate)) {
+        skipped.push({ userId, workDate, reason: 'already_scheduled' })
+        continue
+      }
+
+      const events = await loadAutoShiftPunchEvents(db, orgId, userId, workDate)
+      if (!events.length) {
+        skipped.push({ userId, workDate, reason: 'no_punch' })
+        continue
+      }
+
+      const scored = candidateShifts
+        .map((shift) => scoreAutoShiftCandidate(shift, events, { maxToleranceMinutes }))
+        .filter(Boolean)
+        .sort((a, b) => {
+          if (b.confidence !== a.confidence) return confidenceRank(b.confidence) - confidenceRank(a.confidence)
+          if (a.score !== b.score) return a.score - b.score
+          return String(a.candidateShiftName).localeCompare(String(b.candidateShiftName))
+        })
+      const winner = scored[0]
+      if (!winner) {
+        skipped.push({ userId, workDate, reason: 'no_candidate_within_tolerance' })
+        continue
+      }
+      if (confidenceRank(winner.confidence) < confidenceRank(minConfidence)) {
+        skipped.push({ userId, workDate, reason: 'candidate_below_confidence', candidateShiftId: winner.candidateShiftId, confidence: winner.confidence })
+        continue
+      }
+      items.push({ userId, workDate, ...winner })
+    }
+  }
+
+  return {
+    from: input.from,
+    to: input.to,
+    items,
+    skipped,
+    total: items.length,
   }
 }
 
@@ -16604,7 +16861,25 @@ module.exports = {
         enabled: z.boolean().optional(),
         expiresInDays: z.number().int().positive().nullable().optional(),
       }).optional(),
+      // 自动对班 A0 preview config. Runtime remains double-gated by
+      // ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED; apply/auto modes are future slices.
+      autoShiftMatching: z.object({
+        enabled: z.boolean().optional(),
+        mode: z.enum(['preview']).optional(),
+        maxToleranceMinutes: z.number().int().positive().max(720).optional(),
+        minConfidenceToApply: z.enum(['high', 'medium', 'low']).optional(),
+      }).optional(),
     })
+
+    const autoShiftMatchingPreviewSchema = z.object({
+      from: z.string().min(1),
+      to: z.string().optional(),
+      userIds: z.array(z.string().min(1)).optional(),
+      attendanceGroupIds: z.array(z.string().uuid()).optional(),
+      maxToleranceMinutes: z.number().int().positive().max(720).optional(),
+      minConfidenceToApply: z.enum(['high', 'medium', 'low']).optional(),
+      orgId: z.string().optional(),
+    }).strict()
 
     const punchSchema = z.object({
       eventType: z.enum(['check_in', 'check_out']),
@@ -30084,6 +30359,73 @@ module.exports = {
           }
           logger.error('Attendance shift delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete shift' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/auto-shift-matching/preview',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = autoShiftMatchingPreviewSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to ?? parsed.data.from, 0)
+        if (!dateRange.ok) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+          return
+        }
+        const dates = enumerateAttendanceDateKeys(dateRange.from, dateRange.to)
+        if (dates.length === 0 || dates.length > 31) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Preview range must be 1-31 days' } })
+          return
+        }
+        const hasUserTargets = normalizeStringArray(parsed.data.userIds).length > 0
+        const hasGroupTargets = normalizeStringArray(parsed.data.attendanceGroupIds).length > 0
+        if (!hasUserTargets && !hasGroupTargets) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Preview requires userIds or attendanceGroupIds' } })
+          return
+        }
+
+        try {
+          const settings = await getSettings(db)
+          const autoShiftSettings = normalizeAutoShiftMatchingSetting(settings.autoShiftMatching)
+          if (
+            !isAutoShiftMatchingRuntimeEnabled()
+            || autoShiftSettings.enabled !== true
+            || autoShiftSettings.mode !== 'preview'
+          ) {
+            res.status(403).json({
+              ok: false,
+              error: {
+                code: 'AUTO_SHIFT_MATCHING_DISABLED',
+                message: 'Auto shift matching preview is disabled',
+              },
+            })
+            return
+          }
+
+          const preview = await buildAutoShiftMatchingPreview(db, {
+            orgId,
+            from: dateRange.from,
+            to: dateRange.to,
+            userIds: parsed.data.userIds,
+            attendanceGroupIds: parsed.data.attendanceGroupIds,
+            maxToleranceMinutes: parsed.data.maxToleranceMinutes ?? autoShiftSettings.maxToleranceMinutes,
+            minConfidenceToApply: parsed.data.minConfidenceToApply ?? autoShiftSettings.minConfidenceToApply,
+          })
+          res.json({ ok: true, data: preview })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance auto-shift preview tables missing' } })
+            return
+          }
+          logger.error('Attendance auto-shift matching preview failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview auto shift matching' } })
         }
       })
     )
