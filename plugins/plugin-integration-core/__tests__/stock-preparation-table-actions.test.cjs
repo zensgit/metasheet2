@@ -720,6 +720,63 @@ async function testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites() {
   assert.deepEqual([...storage.map.keys()], [], 'token is consumed once even when the recomputed dry-run is not applyable')
 }
 
+async function testMissingChildBomDryRunBlocksApplyTokenAndWrites() {
+  const records = createRecordsApi()
+  const storage = createMemoryStorage()
+  const action = baseAction()
+  const parameters = { projectNo: 'P-001' }
+  const plannedAt = '2026-06-04T09:00:00.000Z'
+  const missingChildData = childBomPlmData({ DN_PDM_BomDetailsInfo: [] })
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters,
+    sourceAdapter: createSourceAdapter(missingChildData).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt,
+  })
+
+  assert.equal(dryRun.status, 'failed')
+  assert.equal(dryRun.largeBom, false)
+  assert.equal(dryRun.canApply, false)
+  assert.equal(dryRun.dryRunToken, null, 'incomplete assembly must not issue an apply token')
+  assert.equal(dryRun.counts.manual_confirm > 0, true, 'row is still visible as a held planning issue')
+  assert.equal(dryRun.evidence.expansion.errorTypes.includes('missing_child_bom'), true)
+  assert.deepEqual([...storage.map.keys()], [], 'incomplete assembly dry-run stores no token')
+  assert.equal(JSON.stringify(dryRun.evidence).includes('P-001'), false, 'incomplete assembly evidence hides project value')
+  assert.equal(JSON.stringify(dryRun.evidence).includes('BOM-A'), false, 'incomplete assembly evidence hides BOM ids')
+
+  const forgedMatchingToken = await tableActionInternals.createDryRunToken(storage, {
+    actionId: action.actionId,
+    parametersHash: tableActionInternals.hashJson(parameters),
+    revision: dryRun.revision,
+    conflictPolicyReview: null,
+  })
+
+  await assert.rejects(
+    () => applyStockPreparationAction({
+      action,
+      parameters,
+      dryRunToken: forgedMatchingToken,
+      sourceAdapter: createSourceAdapter(missingChildData).adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: storage,
+      permission: 'write',
+      plannedAt,
+      acceptManualConfirmHold: true,
+    }),
+    (error) => {
+      assert.equal(error.code, 'TABLE_ACTION_DRY_RUN_NOT_APPLYABLE')
+      return true
+    },
+    'incomplete assembly remains non-applyable even when manual-confirm hold is accepted',
+  )
+
+  const writeCalls = records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord')
+  assert.equal(writeCalls.length, 0, 'incomplete assembly apply rejection must happen before any target write')
+}
+
 async function testReadPageLimitBoundedDryRunAndDepthHardFailureStayDistinct() {
   const records = createRecordsApi()
 
@@ -941,6 +998,7 @@ async function main() {
   await testSavedSourceCorrectionPolicyKeepsDuplicateHeldAndWritesNothing()
   await testLargeBomBoundedDryRunBlocksApplyToken()
   await testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites()
+  await testMissingChildBomDryRunBlocksApplyTokenAndWrites()
   await testReadPageLimitBoundedDryRunAndDepthHardFailureStayDistinct()
   await testApplyNormalizesNumericPlmDisplayFieldsBeforeCreate()
   await testApplySurfacesTypedValuesFreeRowFailureDiagnostics()

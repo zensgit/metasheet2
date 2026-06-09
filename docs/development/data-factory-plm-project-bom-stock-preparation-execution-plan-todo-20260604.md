@@ -927,7 +927,7 @@ Acceptance locks:
 - Any future executable policy requires a fresh dry-run, fresh token, reviewed
   policy evidence, and explicit owner acknowledgement.
 
-### 🟡 Duplicate-expanded-key D4-1 - source-correction held-only runtime (ACTIVE)
+### ✅ Duplicate-expanded-key D4-1 - source-correction held-only runtime (DONE - PR #2391, `366985cdc`)
 
 Gated on: Duplicate D4 design + explicit opt-in.
 
@@ -958,7 +958,7 @@ Acceptance locks:
   payload JSON, raw SQL, credentials, tokens, or stack traces with business
   values.
 
-### 🟡 Source snapshot diff gate C0 - PLM-BOM lifecycle design (ACTIVE - #2388)
+### ✅ Source snapshot diff gate C0 - PLM-BOM lifecycle design (DONE - PR #2402, `fc6d462f3`)
 
 Gated on: #2388 explicit direction + no runtime opt-in.
 
@@ -999,6 +999,30 @@ Acceptance locks:
   implementation slices.
 - Public evidence remains values-free.
 - Full cross-source generalization waits for a second real source.
+
+### 🟡 Source snapshot diff gate C0a - minimal missing-child BOM guard (ACTIVE)
+
+Gated on: #2402 C0 accepted semantics + #2342 runtime stack re-review.
+
+Scope:
+
+- Add the minimal fail-closed guard required before large-BOM background
+  expansion can become authoritative: an active BOM head with no BOM details is
+  source-incomplete and emits `missing_child_bom`.
+- Preserve normal explicit-leaf behavior where no active BOM head exists.
+- Keep the guard in existing app-side flat-read expansion; do not add raw SQL,
+  stored procedures, PLM writes, MetaSheet writes, routes, UI, migrations, K3,
+  or production rollout.
+
+Acceptance locks:
+
+- `missing_child_bom` makes the expansion invalid / not applyable.
+- `missing_child_bom` is not relabeled as a scale-bounded large-BOM condition.
+- Public evidence exposes only the held reason token and counts; it must not
+  include project number, component id/code/name, BOM id, raw PLM rows, target
+  sheet id, field id, raw SQL, credentials, tokens, or value-bearing stack
+  traces.
+- #2393-#2401 large-BOM runtime must rebase onto this guard before merge.
 
 ## Deferred tracks
 
