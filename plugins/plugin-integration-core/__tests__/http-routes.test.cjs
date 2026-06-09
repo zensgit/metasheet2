@@ -18,6 +18,12 @@ const READ_USER = {
   permissions: ['integration:read'],
 }
 
+const OTHER_READ_USER = {
+  id: 'user_other_read',
+  tenantId: 'tenant_1',
+  permissions: ['integration:read'],
+}
+
 const WRITE_USER = {
   id: 'user_write',
   email: 'writer@example.test',
@@ -2774,7 +2780,30 @@ async function testTableActionRoutes() {
 
 async function testLargeBomBackgroundExpansionJobRoutes() {
   const records = createTableActionRecordsApi()
-  const { calls, services } = createMockServices()
+  const calls = []
+  const { services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          status: 'active',
+          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['createAdapter', system, deps])
+        return createTableActionSourceAdapter(tableActionPlmData(), calls)
+      },
+    },
+  })
   const config = {
     stockPreparationTableActions: [tableActionConfig()],
   }
@@ -2791,6 +2820,14 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.ok(
     mount.registered.includes('GET /api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId'),
     'large-BOM expansion job inspect route registered',
+  )
+  assert.ok(
+    mount.registered.includes('POST /api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run'),
+    'large-BOM expansion job run route registered',
+  )
+  assert.ok(
+    mount.registered.includes('POST /api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan'),
+    'large-BOM expansion job plan route registered',
   )
   assert.ok(
     mount.registered.includes('POST /api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel'),
@@ -2858,6 +2895,13 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   const jobId = res.body.data.jobId
 
   res = await invoke(mount.routes, 'GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId', {
+    user: { id: 'user_cross_tenant', tenantId: 'tenant_2', permissions: ['integration:read'] },
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assert.equal(res.statusCode, 404)
+  assert.equal(res.body.error.code, 'LARGE_BOM_JOB_NOT_FOUND', 'known jobId is tenant-scoped')
+
+  res = await invoke(mount.routes, 'GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId', {
     user: READ_USER,
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
   })
@@ -2865,15 +2909,94 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.equal(res.body.data.jobId, jobId)
   assert.equal(res.body.data.status, 'queued')
 
-  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel', {
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan', {
     user: READ_USER,
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE')
+  assert.equal(records.calls.length, 0, 'non-authoritative job plan fails before target rows are read')
+  assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, 0, 'non-authoritative job plan fails before source load')
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'non-authoritative job plan fails before adapter creation')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+    body: { source: { externalSystemId: 'evil' } },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'run rejects browser-supplied source scope')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
+    user: OTHER_READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'completed')
+  assert.equal(res.body.data.authoritative, true)
+  assert.equal(res.body.data.artifactRevisionPresent, true)
+  assert.equal(res.body.data.progress.rowsExpanded, 1)
+  assert.equal(JSON.stringify(res.body.data).includes('P-001'), false, 'run response is values-free')
+  assert.equal(JSON.stringify(res.body.data).includes('A-001'), false, 'run response hides component code')
+  const adapterCall = findCalls(calls, 'createAdapter').at(-1)
+  assert.equal(adapterCall[2].principal, 'user_read', 'large-BOM run source read uses the job creator principal')
+  assert.notEqual(adapterCall[2].principal, 'user_other_read', 'large-BOM run must not switch owner-scope to the triggering request user')
+  assert.ok(findCalls(calls, 'sourceRead').length > 0, 'large-BOM run reads through the source adapter')
+  assert.equal(records.calls.length, 0, 'large-BOM run still does not touch target rows')
+
+  records.rows.push({
+    id: 'existing_1',
+    sheetId: 'sheet_stock_configured',
+    version: 1,
+    data: {
+      projectNo: 'P-001',
+      idempotencyKey: 'EXISTING_TARGET_VALUE_SHOULD_NOT_APPEAR',
+      componentSourceId: 'EXISTING_TARGET_VALUE_SHOULD_NOT_APPEAR',
+      active: true,
+    },
+  })
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+    body: { target: { sheetId: 'evil' } },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'plan rejects browser-supplied target scope')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'completed')
+  assert.equal(res.body.data.planRevisionPresent, true)
+  assert.equal(res.body.data.evidence.plan.expandedRows, 1)
+  assert.equal(res.body.data.evidence.plan.existingRows, 1)
+  const targetRead = records.calls.find((call) => call[0] === 'queryRecords')
+  assert.equal(targetRead[1].sheetId, 'sheet_stock_configured', 'plan reads only the configured target sheet')
+  assert.deepEqual(targetRead[1].filters, { projectNo: 'P-001' }, 'plan target read is project-scoped')
+  assert.equal(records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length, 0, 'plan never writes target rows')
+  assert.equal(JSON.stringify(res.body.data).includes('P-001'), false, 'plan response is values-free')
+  assert.equal(JSON.stringify(res.body.data).includes('A-001'), false, 'plan response hides component code')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 202)
+  const cancelJobId = res.body.data.jobId
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId: cancelJobId },
   })
   assert.equal(res.statusCode, 403, 'read-only user cannot cancel a background job')
 
   res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel', {
     user: WRITE_USER,
-    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId: cancelJobId },
     body: { sheetId: 'evil_sheet' },
   })
   assert.equal(res.statusCode, 400)
@@ -2881,7 +3004,7 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
 
   res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel', {
     user: WRITE_USER,
-    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId: cancelJobId },
   })
   assertOkResponse(res, 200)
   assert.equal(res.body.data.status, 'cancelled')
