@@ -1864,8 +1864,29 @@ attendanceIntegrationDescribe(
     expect(assignmentRow?.assignment?.user_id).toBe(testUserId)
     expect(assignmentRow?.assignment?.shiftId).toBe(shiftId)
     expect(assignmentRow?.assignment?.shift_id).toBe(shiftId)
+    expect(assignmentRow?.assignment?.slotIndex).toBe(0)
+    expect(assignmentRow?.assignment?.slot_index).toBe(0)
     expect(assignmentRow?.shift?.workStartTime).toBe('08:30:00')
     expect(assignmentRow?.shift?.work_start_time).toBe('08:30:00')
+
+    const pool = new Pool({ connectionString: attendanceIntegrationDbUrl })
+    try {
+      const columnRes = await pool.query(
+        `SELECT column_name
+           FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'attendance_shift_assignments'
+            AND column_name = 'slot_index'`
+      )
+      expect(columnRes.rowCount).toBe(1)
+      const persistedRes = await pool.query(
+        'SELECT slot_index FROM attendance_shift_assignments WHERE id = $1',
+        [assignmentId]
+      )
+      expect(Number(persistedRes.rows[0]?.slot_index)).toBe(0)
+    } finally {
+      await pool.end()
+    }
   })
 
   it('rejects unknown shift fields and overly long shift names on create and update', async () => {
@@ -4819,6 +4840,7 @@ attendanceIntegrationDescribe(
             weeklyMaxMinutes: 2400,
             monthlyMaxMinutes: 9600,
           },
+          multiShiftDay: { enabled: true, maxSlots: 3 },
           compTimeFromOvertime: { enabled: true, expiresInDays: 45 },
           autoShiftMatching: {
             enabled: true,
@@ -4842,6 +4864,7 @@ attendanceIntegrationDescribe(
         data?: {
           comprehensiveHours?: { capDefaults?: Record<string, number | null> }
           shiftCompliance?: Record<string, unknown>
+          multiShiftDay?: Record<string, unknown>
           compTimeFromOvertime?: Record<string, unknown>
           autoShiftMatching?: Record<string, unknown>
         }
@@ -4853,6 +4876,7 @@ attendanceIntegrationDescribe(
         weeklyMaxMinutes: 2400,
         monthlyMaxMinutes: 9600,
       })
+      expect(reloaded?.multiShiftDay).toEqual({ enabled: true, maxSlots: 3 })
       expect(reloaded?.compTimeFromOvertime).toEqual({ enabled: true, expiresInDays: 45 })
       expect(reloaded?.autoShiftMatching).toEqual({
         enabled: true,
