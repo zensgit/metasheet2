@@ -2,7 +2,7 @@
 
 Date: 2026-06-09
 
-Grounded on: `origin/main@59c883c0e1e3`
+Grounded on: `origin/main@f43cfe44a`
 
 Scope: MetaSheet2 workflow, approval, and multitable automation as one product
 target. This is a completion definition and execution ledger, not a sprint
@@ -116,17 +116,18 @@ operate a practical business workflow using existing product surfaces:
 | W2 | Automation A6-3-3 branch-local wait/nesting | Not started; demand-gated; no current unlock | `wait_for_callback` can live inside selected branch with stable nested step cursor, rule-drift guard, resume tests, and no silent flattening in editor. #2367 trial found A6-3 v1 sufficient for the tested flow, so do not start W2 without a new named scenario. |
 | W3 | Automation parallel fan-out + join-all | Not started; demand-gated | Parallel branches persist independent job lineage; join-all waits for all branches; failures and skipped branches are audited. |
 | W4 | Automation join-any / cancellation semantics | Not started; demand-gated after W3 | First completed branch continues; ignored/cancelled siblings are explicit in C1 jobs and audit. |
-| W5 | Approval completion event contract | Not started | `approval.approved/rejected/returned/cancelled` event payload is versioned, redacted, and tested without adding automation action yet. |
-| W6 | Automation `start_approval` action | Not started; after W5 design | Starts one approval instance from a published template, creates a waiting job, and resumes from W5 completion event. |
-| W7 | Approval result backwrite | Not started; after W5/W6 | Explicit mapping writes approved/rejected/returned result to multitable record fields with audit and permission checks. |
+| W5-0 | Approval completion event contract scope-gate | This PR | Defines terminal approval event taxonomy, redacted payload, idempotency key, post-commit emission boundary, and test matrix without adding automation behavior. |
+| W5-1 | Approval completion event contract implementation | Not started | `approval.approved/rejected/revoked/cancelled` payload is versioned, redacted, idempotent, emitted post-commit, and tested without adding automation action yet. `return` remains a non-terminal rework transition. |
+| W6 | Automation `start_approval` action | Not started; after W5-1 | Starts one approval instance from a published template, creates a waiting job, and resumes from W5 completion event. |
+| W7 | Approval result backwrite | Not started; after W5/W6 | Explicit mapping writes approved/rejected/revoked/cancelled outcomes to multitable record fields with audit and permission checks; `return` transition backwrite needs a separate named scope if required. |
 | W8 | BPMN compile/preview adapter | Not started; after W3 minimum | Constrained BPMN subset compiles into automation/approval preview plus gap report; no live execution route. |
 | W9 | Public webhook resume token emitter | Not started; use-case gated | External consumer can receive a token/callback URL safely; auth, expiry, replay, and redaction are locked before public route. |
 | W10 | Field-visibility / richer approval authoring | Optional follow-up | Existing `visibilityRule` data can be authored, not only preserved; unsupported graph constructs remain fail-closed. |
 
 ## 4. Recommended Next Slice
 
-The next implementation should be **W5: approval completion event contract
-scope-gate**.
+The next implementation after this scope-gate should be **W5-1: approval
+completion event contract implementation**.
 
 Why:
 
@@ -135,11 +136,11 @@ Why:
    branch-internal wait/nesting demand for the current trial flow.
 3. The v1 completion gap is now cross-surface closure: automation cannot yet
    start an approval, and approval completion cannot yet resume/update
-   automation. W5 is the smallest safe first step because it defines the event
-   contract without adding `start_approval` behavior yet.
+   automation. W5-1 is the smallest safe runtime step because it implements the
+   event contract without adding `start_approval` behavior yet.
 
-Do not jump straight to `start_approval` or BPMN before W5. Approval-as-job
-needs stable suspend/resume plus an approval completion event contract; BPMN
+Do not jump straight to `start_approval` or BPMN before W5-1 lands.
+Approval-as-job needs stable suspend/resume plus an approval completion event contract; BPMN
 gateway preview needs branch/parallel semantics to map to.
 
 ## 5. Non-goals for v1
