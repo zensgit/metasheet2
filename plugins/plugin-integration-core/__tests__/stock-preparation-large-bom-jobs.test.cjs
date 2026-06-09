@@ -12,6 +12,7 @@ const {
   createLargeBomBackgroundExpansionJob,
   isAuthoritativeLargeBomExpansion,
   loadLargeBomBackgroundExpansionJob,
+  planLargeBomBackgroundExpansionJob,
   publicBackgroundExpansionJob,
   runLargeBomBackgroundExpansionJob,
   summarizeLargeBomBackgroundExpansionJobForEvidence,
@@ -33,6 +34,7 @@ const RAW_MARKERS = Object.freeze([
   'CHILD_CODE_SHOULD_NOT_APPEAR',
   'CHILD_NAME_SHOULD_NOT_APPEAR',
   'CHILD_MATERIAL_SHOULD_NOT_APPEAR',
+  'EXISTING_TARGET_VALUE_SHOULD_NOT_APPEAR',
 ])
 
 function assertValuesFree(value) {
@@ -205,6 +207,7 @@ function testBackgroundEvidenceIsValuesFreeProjection() {
     largeBom: true,
     authoritative: false,
     artifactRevisionPresent: false,
+    planRevisionPresent: false,
     projectNoPresent: true,
     progress: {
       rowsExpanded: 1200,
@@ -429,6 +432,7 @@ async function testBackgroundJobLifecycleIsValuesFree() {
   const publicJob = publicBackgroundExpansionJob(job)
   assert.equal(publicJob.jobId, 'job-values-free-1')
   assert.equal(publicJob.artifactRevisionPresent, false)
+  assert.equal(publicJob.planRevisionPresent, false)
   assert.deepEqual(publicJob.progress, {
     rowsExpanded: 0,
     readCount: 0,
@@ -639,6 +643,125 @@ async function testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe() {
   assert.deepEqual(loaded.evidence.errorTypes, ['read_failed'])
 }
 
+async function completedJobWithArtifact({ storage = createStorage(), jobId = 'job-plan-1' } = {}) {
+  const source = createSourceAdapter(plmData())
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly', externalSystemId: 'SOURCE_BINDING_SHOULD_NOT_APPEAR' },
+      target: { sheetId: 'TARGET_RECORD_VALUE_SHOULD_NOT_APPEAR' },
+    },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => jobId,
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+  await runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId,
+    sourceAdapter: source.adapter,
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+  return { storage, jobId }
+}
+
+async function testPlannerHandoffRequiresAuthoritativeArtifact() {
+  const storage = createStorage()
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+    },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-not-authoritative',
+  })
+
+  await assert.rejects(
+    () => planLargeBomBackgroundExpansionJob({
+      storage,
+      ...TEST_SCOPE,
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      jobId: 'job-not-authoritative',
+      existingRows: [],
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE',
+  )
+}
+
+async function testPlannerHandoffRejectsMalformedExistingRows() {
+  const { storage, jobId } = await completedJobWithArtifact({ jobId: 'job-bad-existing-row' })
+
+  await assert.rejects(
+    () => planLargeBomBackgroundExpansionJob({
+      storage,
+      ...TEST_SCOPE,
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      jobId,
+      existingRows: [null],
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_PLAN_EXISTING_ROWS_INVALID' &&
+      error.details.index === 0,
+  )
+
+  const loaded = await loadLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId,
+  })
+  assert.equal(loaded.planRevision, undefined, 'malformed existingRows must not persist a plan')
+}
+
+async function testPlannerHandoffStoresValuesFreePlanEvidence() {
+  const { storage, jobId } = await completedJobWithArtifact()
+  const planned = await planLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId,
+    existingRows: [{
+      idempotencyKey: 'EXISTING_TARGET_VALUE_SHOULD_NOT_APPEAR',
+      projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR',
+      componentSourceId: 'EXISTING_TARGET_VALUE_SHOULD_NOT_APPEAR',
+      componentName: 'EXISTING_TARGET_VALUE_SHOULD_NOT_APPEAR',
+      active: true,
+    }],
+    runId: 'large-bom-plan-run',
+    plannedAt: '2026-06-08T00:02:00.000Z',
+    now: () => '2026-06-08T00:03:00.000Z',
+  })
+
+  assert.equal(planned.status, 'completed')
+  assert.equal(planned.authoritative, true)
+  assert.equal(typeof planned.planRevision, 'string')
+  assert.equal(planned.planArtifact.plan.counts.add, 2, 'private plan keeps decisions for future C4')
+  assert.equal(planned.planArtifact.plan.counts.manual_confirm, 0)
+  assert.equal(planned.planArtifact.existingRowCount, 1)
+  const publicJob = publicBackgroundExpansionJob(planned)
+  assert.equal(publicJob.planRevisionPresent, true)
+  assert.equal(publicJob.evidence.plan.counts.add, 2)
+  assert.equal(publicJob.evidence.plan.expandedRows, 2)
+  assert.equal(publicJob.evidence.plan.existingRows, 1)
+  assertValuesFree(publicJob)
+
+  const loaded = await loadLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId,
+  })
+  assert.equal(loaded.planRevision, planned.planRevision, 'plan artifact is persisted on the job')
+}
+
 async function main() {
   testStatusEnumsArePinned()
   testBackgroundEvidenceIsValuesFreeProjection()
@@ -651,6 +774,9 @@ async function main() {
   await testBackgroundWorkerCompletesAuthoritativeArtifactWithoutPublicValues()
   await testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget()
   await testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe()
+  await testPlannerHandoffRequiresAuthoritativeArtifact()
+  await testPlannerHandoffRejectsMalformedExistingRows()
+  await testPlannerHandoffStoresValuesFreePlanEvidence()
 }
 
 main().catch((err) => {
