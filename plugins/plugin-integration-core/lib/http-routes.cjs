@@ -28,6 +28,8 @@ const ROUTES = [
   ['POST', '/api/integration/table-actions/:actionId/apply', 'tableActionApply'],
   ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', 'tableActionLargeBomExpansionJobStart'],
   ['GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId', 'tableActionLargeBomExpansionJobGet'],
+  ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', 'tableActionLargeBomExpansionJobRun'],
+  ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan', 'tableActionLargeBomExpansionJobPlan'],
   ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel', 'tableActionLargeBomExpansionJobCancel'],
   ['GET', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesList'],
   ['PUT', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesSave'],
@@ -65,6 +67,7 @@ const { validateRecord } = require('./validator.cjs')
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
+  __internals: tableActionInternals,
   applyStockPreparationAction,
   assertStockPreparationTargetReady,
   createStockPreparationTableActionRegistry,
@@ -75,13 +78,20 @@ const {
   cancelLargeBomBackgroundExpansionJob,
   createLargeBomBackgroundExpansionJob,
   loadLargeBomBackgroundExpansionJob,
+  planLargeBomBackgroundExpansionJob,
   publicBackgroundExpansionJob,
+  runLargeBomBackgroundExpansionJob,
 } = require('./stock-preparation-large-bom-jobs.cjs')
 const {
+  buildConflictPolicyReview,
   deleteTableScopeConflictPolicies,
   loadTableScopeConflictPolicies,
+  normalizeRunOnlyConflictPolicyReview,
   saveTableScopeConflictPolicies,
 } = require('./stock-preparation-conflict-policies.cjs')
+const {
+  duplicateExpandedKeyDiagnosticsForRows,
+} = require('./stock-preparation-conflict-planner.cjs')
 const {
   inspectStockPreparationCanonicalTarget,
   ensureStockPreparationCanonicalTarget,
@@ -338,6 +348,7 @@ function publicRunInput(body = {}) {
 const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
 const VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])
 const VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS = new Set(['parameters'])
+const VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS = new Set(['conflictPolicyReview'])
 const VALID_EMPTY_REQUEST_KEYS = new Set()
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
 const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
@@ -426,6 +437,23 @@ function publicStockPreparationTargetResult(result) {
     targetBinding: result.target ? cloneJson(result.target) : null,
     evidence: result.evidence,
   }
+}
+
+function largeBomExpansionOptionsForAction(action = {}) {
+  const source = isPlainObject(action.source) ? action.source : {}
+  const options = {
+    readPlan: source.readPlan,
+    pageLimit: action.pageLimit,
+    maxPages: action.maxPages,
+    maxReadCount: action.maxReadCount,
+    maxElapsedMs: action.maxElapsedMs,
+    maxDepth: action.maxDepth,
+    maxRows: action.maxRows,
+  }
+  for (const key of Object.keys(options)) {
+    if (options[key] === undefined || options[key] === null || options[key] === '') delete options[key]
+  }
+  return options
 }
 
 function redactDeadLetter(deadLetter, fullPayload = false) {
@@ -1164,7 +1192,7 @@ function createHandlers(services, options = {}) {
     return records
   }
 
-  async function loadTableActionSourceAdapter(req, action) {
+  async function loadTableActionSourceAdapter(req, action, options = {}) {
     const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
       ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       : externalSystems.getExternalSystem.bind(externalSystems)
@@ -1176,7 +1204,10 @@ function createHandlers(services, options = {}) {
         actualKind: system && system.kind,
       })
     }
-    return adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
+    const principal = Object.prototype.hasOwnProperty.call(options, 'principal')
+      ? options.principal
+      : requestPrincipal(req)
+    return adapterRegistry.createAdapter(system, { principal })
   }
 
   function applyPermissionForUser(user) {
@@ -1412,6 +1443,66 @@ function createHandlers(services, options = {}) {
         jobId: firstString(requestParams(req).jobId),
       })
       return sendOk(res, publicBackgroundExpansionJob(job))
+    },
+
+    async tableActionLargeBomExpansionJobRun(req, res) {
+      requireAccess(req, 'read')
+      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const jobId = firstString(requestParams(req).jobId)
+      const queuedJob = await loadLargeBomBackgroundExpansionJob({
+        storage: context.storage,
+        actionId,
+        jobId,
+      })
+      const action = assertStockPreparationTargetReady(queuedJob.actionSnapshot)
+      const sourceAdapter = await loadTableActionSourceAdapter(req, action, { principal: queuedJob.principal })
+      const job = await runLargeBomBackgroundExpansionJob({
+        storage: context.storage,
+        actionId,
+        jobId,
+        sourceAdapter,
+        expansionOptions: largeBomExpansionOptionsForAction(action),
+      })
+      return sendOk(res, publicBackgroundExpansionJob(job))
+    },
+
+    async tableActionLargeBomExpansionJobPlan(req, res) {
+      requireAccess(req, 'read')
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS)
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const jobId = firstString(requestParams(req).jobId)
+      const job = await loadLargeBomBackgroundExpansionJob({
+        storage: context.storage,
+        actionId,
+        jobId,
+      })
+      const action = assertStockPreparationTargetReady(job.actionSnapshot)
+      const projectNo = job.parameters && job.parameters.projectNo
+      const existingRows = await tableActionInternals.readExistingStockPreparationRows(
+        getMultitableRecordsApi(),
+        action.target,
+        projectNo,
+      )
+      const diagnostics = duplicateExpandedKeyDiagnosticsForRows(
+        job.artifact && Array.isArray(job.artifact.rows) ? job.artifact.rows : [],
+      )
+      const conflictPolicyReview = buildConflictPolicyReview({
+        diagnostics,
+        runOnlyReview: normalizeRunOnlyConflictPolicyReview(body.conflictPolicyReview),
+        tableScopeReview: await loadTableScopeConflictPolicies({
+          action,
+          policyStore: context.storage,
+        }),
+      })
+      const planned = await planLargeBomBackgroundExpansionJob({
+        storage: context.storage,
+        actionId,
+        jobId,
+        existingRows,
+        conflictPolicyReview,
+      })
+      return sendOk(res, publicBackgroundExpansionJob(planned))
     },
 
     async tableActionLargeBomExpansionJobCancel(req, res) {
