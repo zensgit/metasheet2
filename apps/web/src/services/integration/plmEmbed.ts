@@ -71,8 +71,10 @@ export async function getPlmEmbedBomContext(token: string): Promise<PlmEmbedBomR
     const entitled = data.entitled === true
     // context is trusted only when entitled AND it validates as a part+lines object
     const context = entitled && isPlmBomMultitableContext(data.context) ? data.context : null
-    // a relayed reason on an entitled+null-context result means a TRANSIENT provider failure
-    // (retry), NOT "this part has no BOM" -- a reason-less null context is the empty/not-found case
+    // a relayed reason on an entitled+null-context result means a TRANSIENT provider failure after
+    // the single-use embed token may already be spent. The parent must re-mint/re-post (reopen or
+    // reload the embed), NOT re-call with the same token. A reason-less null context is the
+    // empty/not-found case.
     const reason = typeof data.reason === 'string' && data.reason.trim() ? data.reason.trim() : undefined
     return { available: true, entitled, context, ...(reason ? { reason } : {}) }
   } catch {
