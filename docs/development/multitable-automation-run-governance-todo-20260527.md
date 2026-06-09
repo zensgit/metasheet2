@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3-1 `condition_branch` exclusive-branch runtime LANDED #2321 `127b29dd9` (2026-06-05; design-lock `multitable-automation-a6-3-branch-parallel-design-20260605.md`) + A6-3-2a editor LANDED #2339 `960ea9315` + A6-3-2b admin-runs readability LANDED #2348 `4b44f25c6`; A6-3-3 (wait/nesting in branches) / parallel fan-out·join still gated; A6-4..A6-5 remain frozen / demand-gated
+Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3-1 `condition_branch` exclusive-branch runtime LANDED #2321 `127b29dd9` (2026-06-05; design-lock `multitable-automation-a6-3-branch-parallel-design-20260605.md`) + A6-3-2a editor LANDED #2339 `960ea9315` + A6-3-2b admin-runs readability LANDED #2348 `4b44f25c6`; A6-3 v1 operator/API/UI trial PASS (#2367/#2371), with no current A6-3-3 unlock signal; A6-3-3 (wait/nesting in branches) / parallel fan-out·join still gated; A6-4..A6-5 remain frozen / demand-gated
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, read-boundary wired only); RFC #1885
 
@@ -28,7 +28,9 @@ The governance half and named A5 retry runtime are complete on `origin/main`:
 This closeout did NOT mark the convergence engine complete at the time. Current status:
 A6-1 and A6-2 are complete end-to-end; A6-3-1 `condition_branch` exclusive-branch runtime
 landed (#2321), and A6-3-2 frontend/runs readability landed (#2339 + #2348). A6-3-3 /
-parallel-join remain gated; A6-4/A6-5 remain separate future unlocks.
+parallel-join remain gated; A6-4/A6-5 remain separate future unlocks. Later trial
+evidence (#2367/#2371) confirmed the A6-3 v1 surface is enough for the tested
+condition-branch flow and did not produce a branch-local wait/nesting demand.
 
 ## Doctrine — Two Gates (definition of "not lopsided")
 
@@ -288,7 +290,8 @@ complete.
       (2026-06-06): selected branch shows `label (key)` when present, branch child jobs are
       grouped via nested step keys, and raw branch-selection output is suppressed in favour of the
       readable line.
-- [ ] A6-3-3 `wait_for_callback` / nested `condition_branch` inside branches — gated (forbidden in A6-3-1).
+- [x] A6-3 v1 operator/API/UI trial — PASS #2367/#2371; no A6-3-3 demand surfaced.
+- [ ] A6-3-3 `wait_for_callback` / nested `condition_branch` inside branches — gated (forbidden in A6-3-1); open only for a named branch-local wait/nesting scenario.
 - [ ] A6-3 parallel fan-out / join-all / join-any — gated (separate follow rungs after the exclusive slice).
 - [ ] A6-4 BPMN compile/preview adapter — not started.
 - [ ] A6-5 approval-as-job bridge — not started.
