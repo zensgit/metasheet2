@@ -17,6 +17,34 @@
 
 ---
 
+## 0.1 近期开发目标（2026-06-09 锁定）
+
+> 目标名：**考勤 H2 SHOULD 收口**。不是"追平钉钉考勤全量"，而是在 MUST 已闭环后，补齐成熟排班系统最容易被真实客户感知的 SHOULD 能力。继续遵守 §6：每项独立 opt-in，落地后回填本账本；未写入本节的能力不自动开工。
+
+### In scope
+
+| 顺序 | 项 | 当前状态 | 完成口径 |
+|---|---|---|---|
+| 1 | **一天多班次** | 🟡 design-lock 已落（`attendance-multi-shift-day-design-lock-20260609.md`） | M0–M5 全部完成：schema replay、slot conflict guard、effective-calendar slots、planned-minutes/shift-compliance 汇总、fixed-apply/auto-shift 兼容、admin UI、staging smoke residue=0 |
+| 2 | **排班发布/草稿** | ⬜ 未开始 | backend runtime + admin UI + 反向测试 + staging smoke；若触碰 `attendance_shift_assignments` 热表 schema，先与多班次 `slot_index` / `status` / `locked_at` / constraints 做 migration batching 决策 |
+| 3 | **临时班次** | ⬜ 未开始 | backend runtime + admin UI + 反向测试 + staging smoke；不伪装成完整调度/换班系统 |
+| 4 | **加班三段引擎** | ⬜ 未开始 | 工作日/休息日/节假日三段口径进入规则引擎并有反向测试；不把公式派生当 runtime engine |
+
+### Out of this target
+
+- **自动对班 A2 自动写入**：仍需另起 design-lock + feature flag + staging smoke；不并入本目标主线。
+- **C5 外发通知渠道 / 负责人 fan-out**：通知增强，不阻断当前 H2 SHOULD 收口。
+- **调度 / 换班 / 小组织 / 多门店**：客户拉动型 OPTIONAL，各自单点开，不纳入本轮目标。
+- **算薪、防作弊、AI、人脸/拍照、原生 app、插件市场**：继续按 §1 OUT 红线处理。
+
+### Development budget
+
+- 本目标全量约 **20–30 人天**。
+- 只做前三个排班能力约 **15–22 人天**。
+- 第一刀从 **一天多班次 M0** 起，但 M0 开工前必须先做 `origin/main` 查重和热表 migration batching 复核。
+
+---
+
 ## 1. H2 目标档位（产品负责人 2026-06-01 最终版）
 
 > 验收口径：MUST 项 = **后端运行时强制 + 前端可配 + 反向（权限/校验）测试 + 1 条 staging 联调** 才算 ✅；不是"能展示"算完。
@@ -63,7 +91,7 @@
 | 加班三段引擎 | SHOULD | ⬜ | 公式派生，引擎不区分日型 |
 | 调度 / 换班 / 小组织 | OPTIONAL | ⬜ | 0 |
 
-**余下量**：H2 全量（MUST+SHOULD）≈ 3–5 周；**只做 MUST ≈ 2.5–3.5 周**。
+**余下量（2026-06-09 复核）**：MUST 已闭环；近期目标改为 **H2 SHOULD 收口 ≈ 20–30 人天**（只做前三个排班能力约 **15–22 人天**）。详见 §0.1。
 
 ---
 
@@ -76,6 +104,7 @@
 ⑤ **未排班提醒**（✅ #2294 + staging 2026-06-05；复用 ④ C4 已建成的 scheduler 基座；C5 外发渠道/负责人 fan-out 后续扩展）
 ⑥ **自动对班**（✅ A0/A1 staging-proven 2026-06-09；灰度门，feature-flag 默认关 → A0 只读 preview → A1 admin apply；A2 自动写另起锁）
 ⑦ **一天多班次**（🟡 design-lock 2026-06-09；schema-first，默认关闭 → slot_index migration → conflict/effective-calendar/planned-minutes → UI → staging）
+⑧ **H2 SHOULD 收口目标**（2026-06-09 owner 锁定；见 §0.1）：一天多班次 → 排班发布/草稿 → 临时班次 → 加班三段引擎；不纳入 A2/C5/OPTIONAL/OUT
 
 > **回填（2026-06-01 pre-flight 发现）**：原排序把"未排班提醒"列首，依据"渠道已有/最便宜"——**verify 证伪**（attendance 无调度器、无事件→通知消费者）。故改：**排班修改窗为首刀**（真·最便宜 + 治理高）；未排班提醒降级为后续"scheduler+notifier 基座"基础设施刀（2–3pd，与假期过期提醒共建）；未排班处理策略归 ③ 打卡策略组。
 
