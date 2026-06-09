@@ -1105,7 +1105,7 @@ export interface AttendanceShiftAssignmentsTable {
   org_id: string
   user_id: string
   shift_id: string
-  slot_index: number
+  slot_index: Generated<number>
   start_date: ColumnType<string, string | undefined, string>
   end_date: ColumnType<string | null, string | undefined, string | null>
   is_active: boolean
