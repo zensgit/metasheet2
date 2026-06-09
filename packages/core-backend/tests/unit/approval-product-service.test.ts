@@ -12,9 +12,24 @@ const pgState = vi.hoisted(() => ({
   },
 }))
 
+const completionEventState = vi.hoisted(() => ({
+  emitApprovalCompletionEvent: vi.fn(),
+}))
+
 vi.mock('../../src/db/pg', () => ({
   pool: pgState.pool,
 }))
+
+vi.mock('../../src/services/ApprovalCompletionEvent', async () => {
+  const actual = await vi.importActual<typeof import('../../src/services/ApprovalCompletionEvent')>(
+    '../../src/services/ApprovalCompletionEvent',
+  )
+
+  return {
+    ...actual,
+    emitApprovalCompletionEvent: completionEventState.emitApprovalCompletionEvent,
+  }
+})
 
 function normalize(sql: string): string {
   return sql.replace(/\s+/g, ' ').trim()
@@ -197,6 +212,7 @@ describe('ApprovalProductService', () => {
     pgState.client.query.mockReset()
     pgState.client.release.mockReset()
     pgState.pool.connect.mockResolvedValue(pgState.client)
+    completionEventState.emitApprovalCompletionEvent.mockReset()
   })
 
   it('blocks revoke when the published runtime policy disables it', async () => {
@@ -345,6 +361,163 @@ describe('ApprovalProductService', () => {
       })
 
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('emits a completion event when the requester revokes an approval', async () => {
+    const runtimeGraph = buildRuntimeGraph()
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return { rows: [buildInstanceRow()], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date('2026-04-11T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT COUNT(*)::text AS count')) {
+        return { rows: [{ count: '0' }], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith("UPDATE approval_instances SET status = 'revoked'")) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      status: 'revoked',
+      currentNodeKey: null,
+      assignments: [],
+    }))
+
+    const result = await service.dispatchAction(
+      'apr-1',
+      { action: 'revoke', comment: 'cancel request' },
+      { userId: 'user-1' },
+    )
+
+    expect(result.status).toBe('revoked')
+    expect(completionEventState.emitApprovalCompletionEvent).toHaveBeenCalledTimes(1)
+    expect(completionEventState.emitApprovalCompletionEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'approval.revoked',
+      transition: expect.objectContaining({
+        action: 'revoke',
+        fromStatus: 'pending',
+        toStatus: 'revoked',
+        fromVersion: 2,
+        toVersion: 3,
+        nodeKey: 'approval_1',
+      }),
+      actor: { id: 'user-1', name: 'user-1' },
+      requester: { id: 'user-1' },
+    }))
+  })
+
+  it('emits a completion event when an approver rejects an approval', async () => {
+    const runtimeGraph = buildRuntimeGraph()
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return { rows: [buildInstanceRow()], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date('2026-04-11T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return {
+          rows: [{
+            id: 'asg-manager-1',
+            instance_id: 'apr-1',
+            assignment_type: 'user',
+            assignee_id: 'manager-1',
+            source_step: 1,
+            node_key: 'approval_1',
+            is_active: true,
+            metadata: {},
+            created_at: new Date('2026-04-11T00:00:00.000Z'),
+            updated_at: new Date('2026-04-11T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith("UPDATE approval_instances SET status = 'rejected'")) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      status: 'rejected',
+      currentNodeKey: null,
+      assignments: [],
+    }))
+
+    const result = await service.dispatchAction(
+      'apr-1',
+      { action: 'reject', comment: 'insufficient evidence' },
+      { userId: 'manager-1', userName: 'Manager One' },
+    )
+
+    expect(result.status).toBe('rejected')
+    expect(completionEventState.emitApprovalCompletionEvent).toHaveBeenCalledTimes(1)
+    expect(completionEventState.emitApprovalCompletionEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'approval.rejected',
+      transition: expect.objectContaining({
+        action: 'reject',
+        fromStatus: 'pending',
+        toStatus: 'rejected',
+        fromVersion: 2,
+        toVersion: 3,
+        nodeKey: 'approval_1',
+      }),
+      actor: { id: 'manager-1', name: 'Manager One' },
+      requester: { id: 'user-1' },
+    }))
   })
 
   it('rejects return targets that are not previously visited approval nodes', async () => {
@@ -554,6 +727,7 @@ describe('ApprovalProductService', () => {
       targetNodeKey: 'approval_1',
       nextNodeKey: 'approval_1',
     })
+    expect(completionEventState.emitApprovalCompletionEvent).not.toHaveBeenCalled()
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
   })
 
@@ -690,6 +864,7 @@ describe('ApprovalProductService', () => {
       aggregateComplete: false,
       remainingAssignments: 1,
     })
+    expect(completionEventState.emitApprovalCompletionEvent).not.toHaveBeenCalled()
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
   })
 
@@ -1268,6 +1443,28 @@ describe('ApprovalProductService', () => {
         terminalState: 'approved',
       }))
     })
+
+    expect(completionEventState.emitApprovalCompletionEvent).toHaveBeenCalledTimes(1)
+    expect(completionEventState.emitApprovalCompletionEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'approval.approved',
+      approval: expect.objectContaining({
+        templateId: 'tpl-1',
+        templateVersionId: 'ver-1',
+        publishedDefinitionId: 'pub-1',
+        businessKey: 'auto',
+        workflowKey: 'approval-product-template',
+      }),
+      transition: expect.objectContaining({
+        action: 'auto_approve',
+        fromStatus: null,
+        toStatus: 'approved',
+        fromVersion: null,
+        toVersion: 0,
+        nodeKey: null,
+      }),
+      actor: null,
+      requester: { id: 'user-1' },
+    }))
   })
 
   it('creates new approvals from the currently active published definition', async () => {
@@ -2349,6 +2546,27 @@ describe('ApprovalProductService', () => {
     const updateCall = pgState.client.query.mock.calls.find(([sql]) =>
       normalize(sql as string).startsWith('UPDATE approval_instances SET status = $2'))
     expect(updateCall?.[1]).toEqual(['apr-1', 'approved', 3, null, 3, 3])
+    expect(completionEventState.emitApprovalCompletionEvent).toHaveBeenCalledTimes(1)
+    expect(completionEventState.emitApprovalCompletionEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'approval.approved',
+      approval: expect.objectContaining({
+        instanceId: 'apr-1',
+        requestNo: 'AP-100001',
+        templateId: 'tpl-1',
+        templateVersionId: 'ver-1',
+        publishedDefinitionId: 'pub-1',
+      }),
+      transition: expect.objectContaining({
+        action: 'approve',
+        fromStatus: 'pending',
+        toStatus: 'approved',
+        fromVersion: 2,
+        toVersion: 3,
+        nodeKey: 'approval_a',
+      }),
+      actor: { id: 'manager-1', name: 'manager-1' },
+      requester: { id: 'user-1' },
+    }))
 
     const autoRecordCalls = pgState.client.query.mock.calls
       .filter(([sql, params]) =>
