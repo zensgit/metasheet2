@@ -14,6 +14,10 @@ const {
   LARGE_BOM_BOUNDED_ERROR_TYPES,
   summarizeBomExpansionForEvidence,
 } = require('./stock-preparation-bom-expansion.cjs')
+const {
+  planStockPreparationConflicts,
+  summarizeConflictPlanForEvidence,
+} = require('./stock-preparation-conflict-planner.cjs')
 
 const LARGE_BOM_BACKGROUND_EXPANSION_STATUSES = Object.freeze([
   'queued',
@@ -486,6 +490,84 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
   return cloneJson(job)
 }
 
+function normalizeExistingRows(rows) {
+  if (rows === undefined || rows === null) return []
+  if (!Array.isArray(rows)) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_PLAN_EXISTING_ROWS_INVALID',
+      'existingRows must be an array',
+      { field: 'existingRows' },
+    )
+  }
+  for (let index = 0; index < rows.length; index += 1) {
+    if (!isPlainObject(rows[index])) {
+      throw new StockPreparationLargeBomJobError(
+        'LARGE_BOM_PLAN_EXISTING_ROWS_INVALID',
+        'existingRows entries must be objects',
+        { field: 'existingRows', index },
+      )
+    }
+  }
+  return rows.map(cloneJson)
+}
+
+function largeBomPlanRevision({ job, plan, existingRows, conflictPolicyReview }) {
+  return hashJson({
+    artifactRevision: job.artifactRevision || (job.artifact && job.artifact.revision),
+    existingRows,
+    conflictPolicyReview: conflictPolicyReview || null,
+    plan: {
+      valid: plan.valid === true,
+      counts: plan.counts || {},
+      conflictTypes: plan.summary && plan.summary.conflictTypes,
+      duplicateExpandedKeyDiagnostics: plan.summary && plan.summary.duplicateExpandedKeyDiagnostics,
+      duplicateExpandedKeyResolution: plan.summary && plan.summary.duplicateExpandedKeyResolution,
+    },
+  })
+}
+
+async function planLargeBomBackgroundExpansionJob(input = {}) {
+  const storage = ensureDurableJobStorage(input.storage)
+  const key = backgroundJobKey(input)
+  const job = await storage.get(key)
+  if (!job) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_JOB_NOT_FOUND',
+      'large-BOM background expansion job was not found',
+      { jobIdPresent: Boolean(optionalString(input.jobId)) },
+      404,
+    )
+  }
+  assertAuthoritativeLargeBomExpansion(job)
+  const artifact = isPlainObject(job.artifact) ? job.artifact : {}
+  const expandedRows = Array.isArray(artifact.rows) ? artifact.rows.map(cloneJson) : []
+  const existingRows = normalizeExistingRows(input.existingRows)
+  const conflictPolicyReview = isPlainObject(input.conflictPolicyReview) ? cloneJson(input.conflictPolicyReview) : undefined
+  const plan = planStockPreparationConflicts({
+    template: job.actionSnapshot && job.actionSnapshot.template,
+    conflictStrategy: job.actionSnapshot && job.actionSnapshot.conflictStrategy,
+    expandedRows,
+    existingRows,
+    rowErrors: [],
+    runId: input.runId || `large-bom:${job.jobId}`,
+    plannedAt: input.plannedAt,
+    duplicatePolicyReview: conflictPolicyReview,
+  })
+  const revision = largeBomPlanRevision({ job, plan, existingRows, conflictPolicyReview })
+  job.planRevision = revision
+  job.planArtifact = {
+    revision,
+    artifactRevision: job.artifactRevision || artifact.revision,
+    plan: cloneJson(plan),
+    existingRowCount: existingRows.length,
+    plannedAt: plan.plannedAt,
+  }
+  job.planEvidence = summarizeConflictPlanForEvidence(plan)
+  job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+  await storage.set(key, job)
+  return cloneJson(job)
+}
+
 function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
   if (!isPlainObject(job)) {
     throw new StockPreparationLargeBomJobError(
@@ -497,6 +579,14 @@ function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
   const evidence = isPlainObject(job.evidence) ? job.evidence : {}
   const status = normalizeStatus(job.status, LARGE_BOM_BACKGROUND_EXPANSION_STATUSES, 'status')
   const errorTypes = safeTokenList(evidence.errorTypes || job.errorTypes, 'errorTypes')
+  const publicEvidence = {
+    sourceKind: safeEvidenceToken(evidence.sourceKind || job.sourceKind, 'sourceKind') || undefined,
+    readObjects: safeTokenList(evidence.readObjects || job.readObjects, 'readObjects'),
+    errorTypes,
+    scaleErrorTypes: errorTypes.filter((errorType) => LARGE_BOM_BOUNDED_ERROR_TYPES.includes(errorType)),
+    readDiagnosticShapePresent: evidence.readDiagnosticShapePresent === true || job.readDiagnosticShapePresent === true,
+  }
+  if (isPlainObject(job.planEvidence)) publicEvidence.plan = cloneJson(job.planEvidence)
   return {
     jobIdPresent: Boolean(optionalString(job.jobId)),
     actionId: safeEvidenceToken(job.actionId, 'actionId') || undefined,
@@ -504,16 +594,11 @@ function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
     largeBom: true,
     authoritative: status === 'completed' && job.authoritative === true,
     artifactRevisionPresent: Boolean(optionalString(job.artifactRevision || (job.artifact && job.artifact.revision))),
+    planRevisionPresent: Boolean(optionalString(job.planRevision || (job.planArtifact && job.planArtifact.revision))),
     projectNoPresent: job.projectNoPresent === true,
     progress: nonNegativeProjection(job.progress, BACKGROUND_PROGRESS_FIELDS),
     budgets: nonNegativeProjection(job.budgets, BACKGROUND_BUDGET_FIELDS),
-    evidence: {
-      sourceKind: safeEvidenceToken(evidence.sourceKind || job.sourceKind, 'sourceKind') || undefined,
-      readObjects: safeTokenList(evidence.readObjects || job.readObjects, 'readObjects'),
-      errorTypes,
-      scaleErrorTypes: errorTypes.filter((errorType) => LARGE_BOM_BOUNDED_ERROR_TYPES.includes(errorType)),
-      readDiagnosticShapePresent: evidence.readDiagnosticShapePresent === true || job.readDiagnosticShapePresent === true,
-    },
+    evidence: publicEvidence,
   }
 }
 
@@ -572,6 +657,7 @@ module.exports = {
   cancelLargeBomBackgroundExpansionJob,
   createLargeBomBackgroundExpansionJob,
   loadLargeBomBackgroundExpansionJob,
+  planLargeBomBackgroundExpansionJob,
   publicBackgroundExpansionJob,
   runLargeBomBackgroundExpansionJob,
   summarizeLargeBomBackgroundExpansionJobForEvidence,
