@@ -2140,6 +2140,162 @@
                   {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save in/out merge', '保存内外勤合并') }}
                 </button>
               </div>
+
+              <div class="attendance__admin-subsection" data-admin-card="auto-shift-matching">
+                <h4>{{ tr('Auto shift matching preview', '自动对班预览') }}</h4>
+                <p class="attendance__field-hint">
+                  {{ tr('Review candidate shift assignments from punch evidence.', '根据打卡证据查看可匹配的班次建议。') }}
+                </p>
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field attendance__field--checkbox" for="attendance-auto-shift-enabled">
+                    <span>{{ tr('Enable preview for this org', '启用本组织预览') }}</span>
+                    <input
+                      id="attendance-auto-shift-enabled"
+                      v-model="autoShiftMatchingForm.enabled"
+                      type="checkbox"
+                      data-auto-shift="enabled"
+                    />
+                  </label>
+                  <label class="attendance__field" for="attendance-auto-shift-tolerance">
+                    <span>{{ tr('Max tolerance (minutes)', '最大容差（分钟）') }}</span>
+                    <input
+                      id="attendance-auto-shift-tolerance"
+                      v-model="autoShiftMatchingForm.maxToleranceMinutes"
+                      type="number"
+                      min="1"
+                      inputmode="numeric"
+                      data-auto-shift="tolerance"
+                    />
+                  </label>
+                  <label class="attendance__field" for="attendance-auto-shift-confidence">
+                    <span>{{ tr('Minimum confidence', '最低置信度') }}</span>
+                    <select
+                      id="attendance-auto-shift-confidence"
+                      v-model="autoShiftMatchingForm.minConfidenceToApply"
+                      data-auto-shift="confidence"
+                    >
+                      <option value="high">{{ tr('High', '高') }}</option>
+                      <option value="medium">{{ tr('Medium', '中') }}</option>
+                      <option value="low">{{ tr('Low', '低') }}</option>
+                    </select>
+                  </label>
+                </div>
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="settingsLoading"
+                  data-auto-shift="save-settings"
+                  @click="saveAutoShiftMatchingSettings"
+                >
+                  {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save preview settings', '保存预览设置') }}
+                </button>
+
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field" for="attendance-auto-shift-from">
+                    <span>{{ tr('From', '开始日期') }}</span>
+                    <input
+                      id="attendance-auto-shift-from"
+                      v-model="autoShiftPreviewForm.from"
+                      type="date"
+                      data-auto-shift="from"
+                    />
+                  </label>
+                  <label class="attendance__field" for="attendance-auto-shift-to">
+                    <span>{{ tr('To', '结束日期') }}</span>
+                    <input
+                      id="attendance-auto-shift-to"
+                      v-model="autoShiftPreviewForm.to"
+                      type="date"
+                      data-auto-shift="to"
+                    />
+                  </label>
+                  <label class="attendance__field" for="attendance-auto-shift-groups">
+                    <span>{{ tr('Scheduled attendance groups', '排班制考勤组') }}</span>
+                    <select
+                      id="attendance-auto-shift-groups"
+                      v-model="autoShiftPreviewForm.attendanceGroupIds"
+                      multiple
+                      size="4"
+                      data-auto-shift="groups"
+                    >
+                      <option v-for="group in scheduledAttendanceGroupOptions" :key="group.id" :value="group.id">
+                        {{ group.name }}
+                      </option>
+                    </select>
+                    <small class="attendance__field-hint">
+                      {{ tr('Fixed-shift and free-time groups are intentionally excluded from auto matching.', '固定班制和自由工时组不会进入自动对班。') }}
+                    </small>
+                  </label>
+                  <label class="attendance__field" for="attendance-auto-shift-users">
+                    <span>{{ tr('User IDs (optional)', '用户 ID（可选）') }}</span>
+                    <textarea
+                      id="attendance-auto-shift-users"
+                      v-model="autoShiftPreviewForm.userIds"
+                      rows="4"
+                      data-auto-shift="user-ids"
+                      :placeholder="tr('Comma or newline separated', '用逗号或换行分隔')"
+                    />
+                  </label>
+                </div>
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="autoShiftPreviewLoading"
+                  data-auto-shift="preview"
+                  @click="runAutoShiftMatchingPreview"
+                >
+                  {{ autoShiftPreviewLoading ? tr('Previewing...', '预览中...') : tr('Preview suggestions', '预览建议') }}
+                </button>
+                <p v-if="autoShiftPreviewError" class="attendance__field-hint attendance__field-hint--error" data-auto-shift="error">
+                  {{ autoShiftPreviewError }}
+                </p>
+                <div v-if="autoShiftPreviewRan && autoShiftPreviewItems.length === 0 && autoShiftPreviewSkipped.length === 0" class="attendance__empty" data-auto-shift="empty">
+                  {{ tr('No suggestions or skipped rows returned.', '没有返回建议或跳过项。') }}
+                </div>
+                <div v-if="autoShiftPreviewItems.length > 0" class="attendance__table-wrapper">
+                  <table class="attendance__table" data-auto-shift="suggestions">
+                    <thead>
+                      <tr>
+                        <th>{{ tr('User', '用户') }}</th>
+                        <th>{{ tr('Date', '日期') }}</th>
+                        <th>{{ tr('Suggested shift', '建议班次') }}</th>
+                        <th>{{ tr('Confidence', '置信度') }}</th>
+                        <th>{{ tr('Punch evidence', '打卡证据') }}</th>
+                        <th>{{ tr('Reason', '原因') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="item in autoShiftPreviewItems" :key="`${item.userId}-${item.workDate}-${item.candidateShiftId}`" data-auto-shift="suggestion-row">
+                        <td>{{ item.userId }}</td>
+                        <td>{{ item.workDate }}</td>
+                        <td>{{ item.candidateShiftName || item.candidateShiftId }}</td>
+                        <td>{{ item.confidence }} · {{ item.score }}</td>
+                        <td>
+                          <span>{{ tr('In', '入') }}: {{ formatDateTime(item.evidence?.firstInAt ?? null) }}</span>
+                          <span> / {{ tr('Out', '出') }}: {{ formatDateTime(item.evidence?.lastOutAt ?? null) }}</span>
+                        </td>
+                        <td>{{ item.reasons?.join(', ') || '--' }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div v-if="autoShiftPreviewSkipped.length > 0" class="attendance__table-wrapper">
+                  <table class="attendance__table" data-auto-shift="skipped">
+                    <thead>
+                      <tr>
+                        <th>{{ tr('User', '用户') }}</th>
+                        <th>{{ tr('Date', '日期') }}</th>
+                        <th>{{ tr('Skip reason', '跳过原因') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="item in autoShiftPreviewSkipped" :key="`${item.userId}-${item.workDate}-${item.reason}`" data-auto-shift="skipped-row">
+                        <td>{{ item.userId }}</td>
+                        <td>{{ item.workDate }}</td>
+                        <td>{{ item.reason }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
 
             <div
@@ -7348,6 +7504,12 @@ interface AttendanceSettings {
     weeklyMaxMinutes?: number | null
     monthlyMaxMinutes?: number | null
   }
+  autoShiftMatching?: {
+    enabled?: boolean
+    mode?: 'preview'
+    maxToleranceMinutes?: number
+    minConfidenceToApply?: 'high' | 'medium' | 'low'
+  }
   // ② S3 punch-policy outdoor approval (backend #2308). Frontend type only — the admin card reads/writes
   // these via PUT { punchPolicy: { outdoor: ... } }. requirePhoto stays latent (no UI in S3-2).
   punchPolicy?: {
@@ -7364,6 +7526,31 @@ interface AttendanceSettings {
       externalWinsOnOut?: boolean
     }
   }
+}
+
+type AutoShiftConfidence = 'high' | 'medium' | 'low'
+
+interface AutoShiftPreviewItem {
+  userId: string
+  workDate: string
+  candidateShiftId: string
+  candidateShiftName?: string
+  confidence: AutoShiftConfidence
+  score: number
+  reasons?: string[]
+  evidence?: {
+    firstInAt?: string | null
+    lastOutAt?: string | null
+    eventIds?: string[]
+  }
+}
+
+interface AutoShiftPreviewSkippedItem {
+  userId: string
+  workDate: string
+  reason: string
+  candidateShiftId?: string
+  confidence?: AutoShiftConfidence
 }
 
 interface HolidayPolicyOverride {
@@ -9505,6 +9692,9 @@ const selectedImportProfileGuide = computed(() => buildImportProfileGuide(select
 const attendanceGroupOptions = computed(() =>
   attendanceGroups.value.map(group => group.name).filter(name => Boolean(name))
 )
+const scheduledAttendanceGroupOptions = computed(() =>
+  attendanceGroups.value.filter(group => readAttendanceGroupType(group) === 'scheduled_shift')
+)
 const selectedAttendanceGroup = computed(() =>
   attendanceGroups.value.find(group => group.id === attendanceGroupEditingId.value) ?? null
 )
@@ -11139,6 +11329,24 @@ const mergeForm = reactive({
   internalWinsOnIn: false,
   externalWinsOnOut: false,
 })
+// 自动对班 A0: admin preview only. Settings save sends only { autoShiftMatching }; preview POST
+// returns suggestions but never writes assignments. A1 owns apply/write paths.
+const autoShiftMatchingForm = reactive({
+  enabled: false,
+  maxToleranceMinutes: '120',
+  minConfidenceToApply: 'high' as AutoShiftConfidence,
+})
+const autoShiftPreviewForm = reactive({
+  from: toDateInput(new Date()),
+  to: toDateInput(new Date()),
+  attendanceGroupIds: [] as string[],
+  userIds: '',
+})
+const autoShiftPreviewLoading = ref(false)
+const autoShiftPreviewRan = ref(false)
+const autoShiftPreviewError = ref('')
+const autoShiftPreviewItems = ref<AutoShiftPreviewItem[]>([])
+const autoShiftPreviewSkipped = ref<AutoShiftPreviewSkippedItem[]>([])
 // Real data source for the flow picker: the org's ACTIVE outdoor_punch approval flows (no fake picker).
 const outdoorApprovalFlowOptions = computed(() =>
   approvalFlows.value.filter((flow) => flow.requestType === 'outdoor_punch' && flow.isActive),
@@ -16497,6 +16705,7 @@ async function loadSettings() {
     applyShiftComplianceToForm(data.data || {})
     applyOutdoorToForm(data.data || {})
     applyInOutMergeToForm(data.data || {})
+    applyAutoShiftMatchingToForm(data.data || {})
   } catch (error: any) {
     attendanceSettings.value = null
     setStatusFromError(error, tr('Failed to load settings', '加载设置失败'), 'admin')
@@ -16526,6 +16735,25 @@ function applyInOutMergeToForm(settings: AttendanceSettings) {
   const merge = settings.punchPolicy?.merge || {}
   mergeForm.internalWinsOnIn = merge.internalWinsOnIn === true
   mergeForm.externalWinsOnOut = merge.externalWinsOnOut === true
+}
+
+function normalizeAutoShiftConfidence(value: unknown): AutoShiftConfidence {
+  return value === 'medium' || value === 'low' ? value : 'high'
+}
+
+function normalizeAutoShiftTolerance(value: string | number | null | undefined, fallback = 120): number {
+  const raw = String(value ?? '').trim()
+  const parsed = raw ? Number(raw) : fallback
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback
+}
+
+function applyAutoShiftMatchingToForm(settings: AttendanceSettings) {
+  const autoShift = settings.autoShiftMatching || {}
+  autoShiftMatchingForm.enabled = autoShift.enabled === true
+  autoShiftMatchingForm.maxToleranceMinutes = String(
+    normalizeAutoShiftTolerance(autoShift.maxToleranceMinutes, 120),
+  )
+  autoShiftMatchingForm.minConfidenceToApply = normalizeAutoShiftConfidence(autoShift.minConfidenceToApply)
 }
 
 async function saveShiftCompliance() {
@@ -16639,6 +16867,94 @@ async function saveInOutMerge() {
     setStatusFromError(error, tr('Failed to save in/out merge', '保存内外勤合并失败'), 'save-settings')
   } finally {
     settingsLoading.value = false
+  }
+}
+
+async function saveAutoShiftMatchingSettings() {
+  settingsLoading.value = true
+  try {
+    // PUT ONLY autoShiftMatching. mode remains preview in A0; A1/A2 own apply/write behaviour.
+    const payload = {
+      autoShiftMatching: {
+        enabled: autoShiftMatchingForm.enabled === true,
+        mode: 'preview' as const,
+        maxToleranceMinutes: normalizeAutoShiftTolerance(autoShiftMatchingForm.maxToleranceMinutes, 120),
+        minConfidenceToApply: normalizeAutoShiftConfidence(autoShiftMatchingForm.minConfidenceToApply),
+      },
+    }
+    const response = await apiFetchWithTimeout('/api/attendance/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw createForbiddenError()
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to save auto shift matching', '保存自动对班失败'))
+    }
+    adminForbidden.value = false
+    applyAutoShiftMatchingToForm((data.data || payload) as AttendanceSettings)
+    setStatus(tr('Auto shift matching preview settings updated.', '自动对班预览设置已更新。'))
+  } catch (error: any) {
+    setStatusFromError(error, tr('Failed to save auto shift matching', '保存自动对班失败'), 'save-settings')
+  } finally {
+    settingsLoading.value = false
+  }
+}
+
+async function runAutoShiftMatchingPreview() {
+  const from = String(autoShiftPreviewForm.from || '').trim()
+  const to = String(autoShiftPreviewForm.to || autoShiftPreviewForm.from || '').trim()
+  const userIds = splitListText(autoShiftPreviewForm.userIds)
+  const attendanceGroupIds = [...autoShiftPreviewForm.attendanceGroupIds].filter(Boolean)
+  if (!from || !to) {
+    autoShiftPreviewError.value = tr('Select a date range before previewing.', '请先选择预览日期范围。')
+    setStatus(autoShiftPreviewError.value, 'error')
+    return
+  }
+  if (userIds.length === 0 && attendanceGroupIds.length === 0) {
+    autoShiftPreviewError.value = tr('Select a scheduled attendance group or enter user IDs before previewing.', '请选择排班制考勤组或输入用户 ID 后再预览。')
+    setStatus(autoShiftPreviewError.value, 'error')
+    return
+  }
+  autoShiftPreviewLoading.value = true
+  autoShiftPreviewError.value = ''
+  try {
+    const payload = {
+      from,
+      to,
+      attendanceGroupIds,
+      userIds,
+      maxToleranceMinutes: normalizeAutoShiftTolerance(autoShiftMatchingForm.maxToleranceMinutes, 120),
+      minConfidenceToApply: normalizeAutoShiftConfidence(autoShiftMatchingForm.minConfidenceToApply),
+    }
+    const response = await apiFetchWithTimeout('/api/attendance/auto-shift-matching/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to preview auto shift matching', '自动对班预览失败'))
+    }
+    autoShiftPreviewItems.value = Array.isArray(data.data?.items) ? data.data.items : []
+    autoShiftPreviewSkipped.value = Array.isArray(data.data?.skipped) ? data.data.skipped : []
+    autoShiftPreviewRan.value = true
+    setStatus(
+      tr(
+        `Auto shift matching preview ready (${autoShiftPreviewItems.value.length} suggestion(s)). No assignments were written.`,
+        `自动对班预览已生成（${autoShiftPreviewItems.value.length} 条建议），未写入任何排班。`,
+      ),
+    )
+  } catch (error: any) {
+    autoShiftPreviewItems.value = []
+    autoShiftPreviewSkipped.value = []
+    autoShiftPreviewRan.value = true
+    autoShiftPreviewError.value = readErrorMessage(error, tr('Failed to preview auto shift matching', '自动对班预览失败'))
+    setStatusFromError(error, tr('Failed to preview auto shift matching', '自动对班预览失败'), 'admin')
+  } finally {
+    autoShiftPreviewLoading.value = false
   }
 }
 
