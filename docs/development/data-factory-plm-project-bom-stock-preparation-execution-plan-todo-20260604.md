@@ -927,10 +927,53 @@ Acceptance locks:
 - Any future executable policy requires a fresh dry-run, fresh token, reviewed
   policy evidence, and explicit owner acknowledgement.
 
+### 🟡 Source snapshot diff gate C0 - PLM-BOM lifecycle design (ACTIVE - #2388)
+
+Gated on: #2388 explicit direction + no runtime opt-in.
+
+Design doc:
+`docs/development/data-factory-plm-stock-preparation-source-snapshot-diff-c0-design-20260608.md`.
+
+Scope:
+
+- Design the Data Factory `SourceSnapshot` / `SourceDiffResult` seam while
+  implementing only the PLM-BOM pilot in later slices.
+- Separate already-shipped invariants from new work:
+  `mark_inactive` for PLM-missing rows, human-field preservation, and fresh
+  dry-run token are invariants to verify, not rebuild.
+- Define private in-tenant source snapshots and values-free public evidence.
+- Define PLM `ComponentNode` + `BomEdge` snapshot internals for lifecycle/diff
+  review.
+- Define snapshot-to-snapshot diff categories:
+  `added_rows`, `removed_from_latest_snapshot`, `quantity_changed`,
+  `hierarchy_changed`, `source_fields_completed`,
+  `source_fields_changed`, `missing_child_bom`,
+  `manual_fields_protected`, and `held_conflicts`.
+- Lock `missing_child_bom` semantics before large-BOM production/batch rollout:
+  childless components require an explicit leaf/assembly signal; missing or
+  ambiguous signal fails closed and must not be treated as a complete leaf.
+
+Acceptance locks:
+
+- C0 is docs-only. It must not change C2 expansion, C3 planner output, C4
+  apply behavior, routes, UI, migrations, package contents, PLM reads/writes,
+  target writes, K3, production rollout, or runtime policy execution.
+- Snapshot diff baseline is latest source pull vs last applied source snapshot,
+  distinct from the existing pull-vs-target-table planner.
+- Node/edge identity is internal to snapshot/diff. It must not silently migrate
+  the flat target `idempotencyKey` scheme.
+- `missing_child_bom` branches stay held and do not generate downstream demand
+  Apply.
+- Apply must be bound to a fresh snapshot/diff-aware dry-run token in later
+  implementation slices.
+- Public evidence remains values-free.
+- Full cross-source generalization waits for a second real source.
+
 ## Deferred tracks
 
 - New project/sample C4 apply validation after separate explicit approval.
 - Production rollout for PLM stock-preparation apply.
+- #2388 source snapshot/diff runtime beyond C0.
 - PLM adapter/API source instead of readonly SQL.
 - Fuzzy/prefix/multi-project matching.
 - Procurement/warehouse child-table generation.
