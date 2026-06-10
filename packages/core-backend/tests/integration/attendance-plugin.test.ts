@@ -2594,7 +2594,7 @@ attendanceIntegrationDescribe(
       expect(fixedCreated[0]?.shiftId ?? fixedCreated[0]?.shift_id).toBe(morningShiftId)
 
       const fixedRowsAfterApply = await pool.query(
-        `SELECT shift_id, slot_index
+        `SELECT shift_id, slot_index, publish_status, published_at, locked_at, producer_type
            FROM attendance_shift_assignments
           WHERE user_id = $1
             AND start_date = $2::date
@@ -2606,6 +2606,9 @@ attendanceIntegrationDescribe(
         { shiftId: morningShiftId, slotIndex: 0 },
         { shiftId: eveningShiftId, slotIndex: 1 },
       ])
+      const fixedApplyManagedRow = fixedRowsAfterApply.rows.find(row => row.shift_id === morningShiftId)
+      expect(fixedApplyManagedRow?.publish_status).toBe('published')
+      expect(fixedApplyManagedRow?.producer_type).toBe('attendance_group_fixed_schedule')
 
       const fixedRebuildRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/rebuild`, {
         method: 'POST',
@@ -2614,7 +2617,7 @@ attendanceIntegrationDescribe(
       })
       expect(fixedRebuildRes.status, JSON.stringify(fixedRebuildRes.body)).toBe(200)
       const fixedRowsAfterRebuild = await pool.query(
-        `SELECT shift_id, slot_index
+        `SELECT shift_id, slot_index, publish_status, published_at, locked_at, producer_type
            FROM attendance_shift_assignments
           WHERE user_id = $1
             AND start_date = $2::date
@@ -2626,6 +2629,9 @@ attendanceIntegrationDescribe(
         { shiftId: morningShiftId, slotIndex: 0 },
         { shiftId: eveningShiftId, slotIndex: 1 },
       ])
+      const fixedRebuildManagedRow = fixedRowsAfterRebuild.rows.find(row => row.shift_id === morningShiftId)
+      expect(fixedRebuildManagedRow?.publish_status).toBe('published')
+      expect(fixedRebuildManagedRow?.producer_type).toBe('attendance_group_fixed_schedule')
 
       await saveSettings({
         multiShiftDay: { enabled: true, maxSlots: 3 },
@@ -6521,7 +6527,9 @@ attendanceIntegrationDescribe(
         expect(applyData?.skipped).toHaveLength(0)
 
         const rows = await pool.query(
-          `SELECT shift_id, slot_index, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id
+          `SELECT shift_id, slot_index, start_date, end_date, is_active,
+                  publish_status, published_at, locked_at,
+                  producer_type, producer_ref_id, producer_key, producer_run_id
              FROM attendance_shift_assignments
             WHERE org_id = $1 AND user_id = $2`,
           [orgId, userId],
@@ -6536,6 +6544,7 @@ attendanceIntegrationDescribe(
           producer_key: `${userId}:${workDate}`,
           producer_run_id: applyData?.runId,
         })
+        expect(rows.rows[0]?.publish_status).toBe('published')
         expect(dateOnlyForTest(rows.rows[0].start_date)).toBe(workDate)
         expect(dateOnlyForTest(rows.rows[0].end_date)).toBe(workDate)
 
