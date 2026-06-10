@@ -269,8 +269,8 @@ async function cleanup() {
   await q(
     `DELETE FROM attendance_shift_assignments
       WHERE org_id = $1
-        AND (user_id LIKE $2 OR producer_key LIKE $3 OR producer_run_id LIKE $3)`,
-    [ORG_ID, `${USER_PREFIX}%`, `${STAMP}%`],
+        AND user_id LIKE $2`,
+    [ORG_ID, `${USER_PREFIX}%`],
   )
   await q(
     `DELETE FROM attendance_group_members

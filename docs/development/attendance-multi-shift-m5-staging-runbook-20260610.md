@@ -25,9 +25,11 @@ It proves that the M1-M4 chain is live on staging:
    - #2427 M2 effective-calendar/planned-minute projection;
    - #2428 M3 fixed/auto producer compatibility;
    - #2429 M4 admin card.
-2. Backend env still has `ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED=true`; the
-   smoke checks the auto-shift compatibility branch and fails if the endpoint is
-   disabled.
+2. Backend env has `ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED=true`; the smoke
+   checks the auto-shift compatibility branch and fails if the endpoint is
+   disabled. Enabling the org setting is not enough: if the env key is missing or
+   false, update the staging env file and re-deploy/restart the backend before
+   running this smoke.
 3. Migrations are current through the `slot_index` migration.
 4. You have a staging admin token. If `/api/auth/dev-token` is disabled, mint a
    staging token using the host helper and pass `SMOKE_TOKEN`.
@@ -75,9 +77,10 @@ Template:
 
 ## Failure Signals
 
-- `AUTO_SHIFT_MATCHING_DISABLED`: staging backend env does not enable the A1
-  compatibility branch. Re-deploy staging with the env flag before treating the
-  smoke as meaningful.
+- `AUTO_SHIFT_MATCHING_APPLY_DISABLED` / `AUTO_SHIFT_MATCHING_DISABLED`:
+  staging backend env does not enable the A1 compatibility branch, or the org
+  setting did not persist in `mode='apply'`. Re-deploy/restart staging with the
+  env flag before treating the smoke as meaningful.
 - effective-calendar has no `slots[]`: deployed backend predates M2 or
   `multiShiftDay.enabled` did not persist.
 - planned minutes are 240 instead of 480: slot summing regressed.
