@@ -4106,6 +4106,244 @@ describe('Attendance admin regressions', () => {
     expect(container!.textContent).toContain('Assignment draft saved.')
   })
 
+  it('saves a temporary shift replacement draft from a published regular assignment', async () => {
+    const draftBodies: unknown[] = []
+    const baseShift = {
+      id: 'shift-base',
+      name: 'Base shift',
+      timezone: 'UTC',
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+      isOvernight: false,
+      lateGraceMinutes: 10,
+      earlyGraceMinutes: 10,
+      roundingMinutes: 5,
+      workingDays: [1, 2, 3, 4, 5],
+    }
+    const temporaryShift = {
+      ...baseShift,
+      id: 'shift-temp',
+      name: 'Temporary shift',
+      workStartTime: '10:00',
+      workEndTime: '19:00',
+    }
+    const assignmentItems = [
+      {
+        assignment: {
+          id: 'assignment-base',
+          userId: 'user-temp',
+          shiftId: 'shift-base',
+          startDate: '2026-06-15',
+          endDate: '2026-06-20',
+          isActive: true,
+          slotIndex: 0,
+          publishStatus: 'published',
+          assignmentKind: 'regular',
+        },
+        shift: baseShift,
+      },
+      {
+        assignment: {
+          id: 'assignment-draft',
+          userId: 'user-draft',
+          shiftId: 'shift-base',
+          startDate: '2026-06-15',
+          endDate: null,
+          isActive: true,
+          slotIndex: 0,
+          publishStatus: 'draft',
+          assignmentKind: 'regular',
+        },
+        shift: baseShift,
+      },
+      {
+        assignment: {
+          id: 'assignment-existing-temp',
+          userId: 'user-temp',
+          shiftId: 'shift-temp',
+          startDate: '2026-06-16',
+          endDate: '2026-06-16',
+          isActive: true,
+          slotIndex: 0,
+          publishStatus: 'published',
+          assignmentKind: 'temporary',
+          temporaryMode: 'replace',
+          temporaryReplacesKind: 'shift',
+          temporaryReplacesAssignmentId: 'assignment-base',
+          temporaryReason: 'existing coverage',
+        },
+        shift: temporaryShift,
+      },
+    ]
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, { ok: true, data: { items: [baseShift, temporaryShift] } })
+      }
+      if (url === '/api/attendance/schedule-drafts/assignments' && method === 'POST') {
+        draftBodies.push(JSON.parse(String(init?.body || '{}')))
+        return jsonResponse(201, {
+          ok: true,
+          data: {
+            assignment: {
+              id: 'assignment-temp-draft',
+              userId: 'user-temp',
+              shiftId: 'shift-temp',
+              startDate: '2026-06-16',
+              endDate: '2026-06-16',
+              isActive: true,
+              slotIndex: 0,
+              publishStatus: 'draft',
+              assignmentKind: 'temporary',
+              temporaryMode: 'replace',
+              temporaryReplacesKind: 'shift',
+              temporaryReplacesAssignmentId: 'assignment-base',
+              temporaryReason: 'one-day coverage',
+            },
+          },
+        })
+      }
+      if (url === '/api/attendance/assignments' && method === 'POST') {
+        return jsonResponse(500, { ok: false, error: { code: 'UNEXPECTED_IMMEDIATE_SAVE', message: 'temporary draft should not call immediate save' } })
+      }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(500, { ok: false, error: { code: 'UNEXPECTED_PREVIEW', message: 'temporary draft should not preview' } })
+      }
+      if (url.includes('/api/attendance/assignments')) {
+        return jsonResponse(200, { ok: true, data: { items: assignmentItems } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')!.click()
+    await flushUi(2)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')!
+    const replacementSelect = section.querySelector<HTMLSelectElement>('#attendance-temporary-shift-replacement-assignment')!
+    expect(replacementSelect).toBeTruthy()
+    expect(Array.from(replacementSelect.options).map(option => option.value)).toEqual(['', 'assignment-base'])
+    expect(section.querySelector('[data-attendance-assignment-temporary-marker]')?.textContent).toContain('Temporary')
+
+    replacementSelect.value = 'assignment-base'
+    replacementSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const shiftSelect = section.querySelector<HTMLSelectElement>('#attendance-temporary-shift-replacement-shift')!
+    shiftSelect.value = 'shift-temp'
+    shiftSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section, '#attendance-temporary-shift-work-date', '2026-06-16')
+    setInput(section, '#attendance-temporary-shift-reason', 'one-day coverage')
+    await flushUi(2)
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-temporary-shift-save-draft]')!.click()
+    await flushUi(8)
+
+    expect(draftBodies).toEqual([
+      {
+        userId: 'user-temp',
+        shiftId: 'shift-temp',
+        startDate: '2026-06-16',
+        endDate: '2026-06-16',
+        isActive: true,
+        slotIndex: 0,
+        assignmentKind: 'temporary',
+        temporaryMode: 'replace',
+        temporaryReplacesKind: 'shift',
+        temporaryReplacesAssignmentId: 'assignment-base',
+        temporaryReason: 'one-day coverage',
+      },
+    ])
+    expect(vi.mocked(apiFetch).mock.calls.some(([input]) =>
+      String(input).includes('/api/attendance/comprehensive-hours/preview')
+    )).toBe(false)
+    expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+    )).toBe(false)
+    expect(container!.textContent).toContain('Temporary shift draft saved.')
+  })
+
+  it('does not post a temporary shift draft outside the replaced assignment date range', async () => {
+    const draftBodies: unknown[] = []
+    const baseShift = {
+      id: 'shift-base',
+      name: 'Base shift',
+      timezone: 'UTC',
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+      isOvernight: false,
+      lateGraceMinutes: 10,
+      earlyGraceMinutes: 10,
+      roundingMinutes: 5,
+      workingDays: [1, 2, 3, 4, 5],
+    }
+    const temporaryShift = {
+      ...baseShift,
+      id: 'shift-temp',
+      name: 'Temporary shift',
+      workStartTime: '10:00',
+      workEndTime: '19:00',
+    }
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, { ok: true, data: { items: [baseShift, temporaryShift] } })
+      }
+      if (url === '/api/attendance/schedule-drafts/assignments' && method === 'POST') {
+        draftBodies.push(JSON.parse(String(init?.body || '{}')))
+        return jsonResponse(500, { ok: false, error: { code: 'UNEXPECTED_POST', message: 'out-of-range work date should not post' } })
+      }
+      if (url.includes('/api/attendance/assignments')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                assignment: {
+                  id: 'assignment-base',
+                  userId: 'user-temp',
+                  shiftId: 'shift-base',
+                  startDate: '2026-06-15',
+                  endDate: '2026-06-20',
+                  isActive: true,
+                  slotIndex: 0,
+                  publishStatus: 'published',
+                  assignmentKind: 'regular',
+                },
+                shift: baseShift,
+              },
+            ],
+          },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')!.click()
+    await flushUi(2)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')!
+    const workDateInput = section.querySelector<HTMLInputElement>('#attendance-temporary-shift-work-date')!
+    expect(workDateInput.min).toBe('2026-06-15')
+    expect(workDateInput.max).toBe('2026-06-20')
+    const shiftSelect = section.querySelector<HTMLSelectElement>('#attendance-temporary-shift-replacement-shift')!
+    shiftSelect.value = 'shift-temp'
+    shiftSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section, '#attendance-temporary-shift-work-date', '2026-06-21')
+    await flushUi(2)
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-temporary-shift-save-draft]')!.click()
+    await flushUi(4)
+
+    expect(draftBodies).toEqual([])
+    expect(container!.textContent).toContain('Work date must fall within the selected assignment range')
+  })
+
   it('publishes selected direct and rotation schedule drafts with an exact request body', async () => {
     const publicationBodies: unknown[] = []
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {

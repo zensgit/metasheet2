@@ -7122,6 +7122,77 @@
                   {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
+              <div class="attendance__admin-subsection" data-attendance-temporary-shift-card>
+                <h4>{{ tr('Temporary shift replacement', '临时替班') }}</h4>
+                <p class="attendance__field-hint">
+                  {{ tr('Create a one-day replacement draft for a published shift assignment. Publish the draft when it is ready to take effect.', '为已发布的班次分配创建单日替班草稿；确认后再发布生效。') }}
+                </p>
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field" for="attendance-temporary-shift-replacement-assignment">
+                    <span>{{ tr('Published assignment to replace', '要替换的已发布分配') }}</span>
+                    <select
+                      id="attendance-temporary-shift-replacement-assignment"
+                      v-model="temporaryAssignmentForm.replacementAssignmentId"
+                      :disabled="temporaryReplacementAssignmentOptions.length === 0"
+                      @change="onTemporaryReplacementAssignmentChange"
+                    >
+                      <option value="" disabled>{{ tr('Select published assignment', '选择已发布分配') }}</option>
+                      <option
+                        v-for="item in temporaryReplacementAssignmentOptions"
+                        :key="item.assignment.id"
+                        :value="item.assignment.id"
+                      >
+                        {{ formatTemporaryReplacementAssignmentOption(item) }}
+                      </option>
+                    </select>
+                    <small v-if="temporaryReplacementAssignmentOptions.length === 0" class="attendance__field-hint">
+                      {{ tr('No published regular assignment is available to replace.', '暂无可替换的已发布常规分配。') }}
+                    </small>
+                  </label>
+                  <label class="attendance__field" for="attendance-temporary-shift-replacement-shift">
+                    <span>{{ tr('Replacement shift', '替换班次') }}</span>
+                    <select
+                      id="attendance-temporary-shift-replacement-shift"
+                      v-model="temporaryAssignmentForm.shiftId"
+                      :disabled="shifts.length === 0"
+                    >
+                      <option value="" disabled>{{ tr('Select shift', '选择班次') }}</option>
+                      <option v-for="shift in shifts" :key="shift.id" :value="shift.id">
+                        {{ shift.name }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="attendance__field" for="attendance-temporary-shift-work-date">
+                    <span>{{ tr('Work date', '工作日期') }}</span>
+                    <input
+                      id="attendance-temporary-shift-work-date"
+                      v-model="temporaryAssignmentForm.workDate"
+                      type="date"
+                      :min="selectedTemporaryReplacementAssignment?.assignment.startDate"
+                      :max="selectedTemporaryReplacementAssignment?.assignment.endDate || undefined"
+                    />
+                  </label>
+                  <label class="attendance__field" for="attendance-temporary-shift-reason">
+                    <span>{{ tr('Reason', '原因') }}</span>
+                    <textarea
+                      id="attendance-temporary-shift-reason"
+                      v-model="temporaryAssignmentForm.reason"
+                      rows="2"
+                      :placeholder="tr('Optional reason shown on the draft', '可选，显示在草稿中的原因')"
+                    ></textarea>
+                  </label>
+                </div>
+                <div class="attendance__admin-actions">
+                  <button
+                    class="attendance__btn attendance__btn--primary"
+                    :disabled="temporaryAssignmentSaving || temporaryReplacementAssignmentOptions.length === 0"
+                    data-attendance-temporary-shift-save-draft
+                    @click="saveTemporaryAssignmentDraft"
+                  >
+                    {{ temporaryAssignmentSaving ? tr('Saving...', '保存中...') : tr('Save temporary draft', '保存临时班次草稿') }}
+                  </button>
+                </div>
+              </div>
               <div class="attendance__admin-actions attendance__admin-actions--wrap" data-attendance-schedule-publication-controls>
                 <span class="attendance__field-hint">
                   {{ tr(`Selected drafts: ${selectedScheduleDraftCount}`, `已选草稿：${selectedScheduleDraftCount}`) }}
@@ -7186,6 +7257,20 @@
                         >
                           {{ assignmentSlotLabel(item.assignment) }}
                         </span>
+                        <span
+                          v-if="isTemporaryAssignment(item.assignment)"
+                          class="attendance__scheduler-scope-chip"
+                          data-attendance-assignment-temporary-marker
+                          :title="temporaryAssignmentReplacementId(item.assignment)"
+                        >
+                          {{ tr('Temporary', '临时') }}
+                        </span>
+                        <small
+                          v-if="temporaryAssignmentReason(item.assignment)"
+                          class="attendance__field-hint"
+                        >
+                          {{ temporaryAssignmentReason(item.assignment) }}
+                        </small>
                       </td>
                       <td>{{ item.assignment.startDate }}</td>
                       <td>{{ item.assignment.endDate || '--' }}</td>
@@ -8681,6 +8766,7 @@ const shiftLoading = ref(false)
 const shiftSaving = ref(false)
 const assignmentLoading = ref(false)
 const assignmentSaving = ref(false)
+const temporaryAssignmentSaving = ref(false)
 const holidayLoading = ref(false)
 const holidaySaving = ref(false)
 const reportLoading = ref(false)
@@ -11736,6 +11822,13 @@ const assignmentForm = reactive({
   endDate: '',
   isActive: true,
   slotIndex: 0,
+})
+
+const temporaryAssignmentForm = reactive({
+  replacementAssignmentId: '',
+  shiftId: '',
+  workDate: toDateInput(today),
+  reason: '',
 })
 
 const shiftAssignmentEffectiveCalendarChips = ref<CalendarEffectiveChip[]>([])
@@ -17072,6 +17165,69 @@ function assignmentSlotLabel(assignment: AttendanceAssignment): string {
   return tr(`Slot ${index}`, `槽位 ${index}`)
 }
 
+function assignmentKind(assignment: AttendanceAssignment): 'regular' | 'temporary' {
+  return (assignment.assignmentKind ?? assignment.assignment_kind) === 'temporary' ? 'temporary' : 'regular'
+}
+
+function isTemporaryAssignment(assignment: AttendanceAssignment): boolean {
+  return assignmentKind(assignment) === 'temporary'
+}
+
+function temporaryAssignmentReason(assignment: AttendanceAssignment): string {
+  return String(assignment.temporaryReason ?? assignment.temporary_reason ?? '').trim()
+}
+
+function temporaryAssignmentReplacementId(assignment: AttendanceAssignment): string {
+  return String(assignment.temporaryReplacesAssignmentId ?? assignment.temporary_replaces_assignment_id ?? '').trim()
+}
+
+function assignmentDateRangeLabel(assignment: Pick<AttendanceAssignment, 'startDate' | 'endDate'>): string {
+  return assignment.endDate ? `${assignment.startDate} - ${assignment.endDate}` : assignment.startDate
+}
+
+function formatTemporaryReplacementAssignmentOption(item: AttendanceAssignmentItem): string {
+  const userLabel = attendanceAssignmentUserPrimaryLabel(item.assignment.userId) || item.assignment.userId
+  return `${userLabel} · ${item.shift.name} · ${assignmentDateRangeLabel(item.assignment)} · ${assignmentSlotLabel(item.assignment)}`
+}
+
+const temporaryReplacementAssignmentOptions = computed(() =>
+  assignments.value.filter((item) =>
+    assignmentPublishStatus(item.assignment) === 'published'
+    && item.assignment.isActive !== false
+    && assignmentKind(item.assignment) === 'regular',
+  ),
+)
+
+const selectedTemporaryReplacementAssignment = computed(() =>
+  temporaryReplacementAssignmentOptions.value.find((item) => item.assignment.id === temporaryAssignmentForm.replacementAssignmentId) ?? null,
+)
+
+function applyTemporaryReplacementDefaults(item: AttendanceAssignmentItem | null): void {
+  if (!item) return
+  temporaryAssignmentForm.workDate = item.assignment.startDate
+  if (!temporaryAssignmentForm.shiftId && shifts.value.length > 0) {
+    temporaryAssignmentForm.shiftId = shifts.value[0]?.id ?? ''
+  }
+}
+
+function onTemporaryReplacementAssignmentChange(): void {
+  applyTemporaryReplacementDefaults(selectedTemporaryReplacementAssignment.value)
+}
+
+function isTemporaryAssignmentWorkDateInRange(assignment: AttendanceAssignment, workDate: string): boolean {
+  if (workDate < assignment.startDate) return false
+  if (assignment.endDate && workDate > assignment.endDate) return false
+  return true
+}
+
+watch(temporaryReplacementAssignmentOptions, (options) => {
+  if (temporaryAssignmentForm.replacementAssignmentId && options.some((item) => item.assignment.id === temporaryAssignmentForm.replacementAssignmentId)) {
+    return
+  }
+  temporaryAssignmentForm.replacementAssignmentId = options[0]?.assignment.id ?? ''
+  applyTemporaryReplacementDefaults(options[0] ?? null)
+}, { immediate: true })
+
 function normalizeAssignmentPublishStatus(value: unknown): AttendanceSchedulePublishStatus {
   if (value === 'draft' || value === 'pending' || value === 'published') return value
   return 'published'
@@ -18536,6 +18692,9 @@ async function loadShifts() {
     if (!assignmentForm.shiftId && shifts.value.length > 0) {
       assignmentForm.shiftId = shifts.value[0].id
     }
+    if (!temporaryAssignmentForm.shiftId && shifts.value.length > 0) {
+      temporaryAssignmentForm.shiftId = shifts.value[0].id
+    }
     if (!attendanceGroupFixedSchedulePreviewForm.shiftId && shifts.value.length > 0) {
       attendanceGroupFixedSchedulePreviewForm.shiftId = shifts.value[0].id
     }
@@ -18617,6 +18776,14 @@ function resetAssignmentForm() {
   assignmentForm.endDate = ''
   assignmentForm.isActive = true
   assignmentForm.slotIndex = 0
+}
+
+function resetTemporaryAssignmentForm() {
+  const firstReplacement = temporaryReplacementAssignmentOptions.value[0] ?? null
+  temporaryAssignmentForm.replacementAssignmentId = firstReplacement?.assignment.id ?? ''
+  temporaryAssignmentForm.shiftId = shifts.value[0]?.id ?? ''
+  temporaryAssignmentForm.workDate = firstReplacement?.assignment.startDate ?? toDateInput(today)
+  temporaryAssignmentForm.reason = ''
 }
 
 function editAssignment(item: AttendanceAssignmentItem) {
@@ -18721,6 +18888,61 @@ async function saveAssignment(options: { asDraft?: boolean } = {}) {
     setStatus(readErrorMessage(error, tr('Failed to save assignment', '保存分配失败')), 'error')
   } finally {
     assignmentSaving.value = false
+  }
+}
+
+async function saveTemporaryAssignmentDraft() {
+  temporaryAssignmentSaving.value = true
+  try {
+    const replacement = selectedTemporaryReplacementAssignment.value
+    if (!replacement) {
+      throw new Error(tr('Select a published assignment to replace', '请选择一个已发布的排班分配作为替换目标'))
+    }
+    if (!temporaryAssignmentForm.shiftId) {
+      throw new Error(tr('Replacement shift is required', '替换班次为必选项'))
+    }
+    const workDate = temporaryAssignmentForm.workDate.trim()
+    if (!workDate) {
+      throw new Error(tr('Work date is required', '工作日期为必填项'))
+    }
+    if (!isTemporaryAssignmentWorkDateInRange(replacement.assignment, workDate)) {
+      throw new Error(tr('Work date must fall within the selected assignment range', '工作日期必须在所选分配的日期范围内'))
+    }
+    const reason = temporaryAssignmentForm.reason.trim()
+    const payload = {
+      userId: replacement.assignment.userId,
+      shiftId: temporaryAssignmentForm.shiftId,
+      startDate: workDate,
+      endDate: workDate,
+      isActive: true,
+      slotIndex: assignmentSlotIndex(replacement.assignment),
+      assignmentKind: 'temporary',
+      temporaryMode: 'replace',
+      temporaryReplacesKind: 'shift',
+      temporaryReplacesAssignmentId: replacement.assignment.id,
+      temporaryReason: reason.length > 0 ? reason : null,
+      orgId: normalizedOrgId(),
+    }
+    const response = await apiFetch('/api/attendance/schedule-drafts/assignments', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to save temporary shift draft', '保存临时班次草稿失败')))
+    }
+    adminForbidden.value = false
+    await loadAssignments()
+    resetTemporaryAssignmentForm()
+    setStatus(tr('Temporary shift draft saved.', '临时班次草稿已保存。'))
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to save temporary shift draft', '保存临时班次草稿失败')), 'error')
+  } finally {
+    temporaryAssignmentSaving.value = false
   }
 }
 
