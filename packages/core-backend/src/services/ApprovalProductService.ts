@@ -46,6 +46,12 @@ import type {
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 import { ServiceError } from './ApprovalBridgeService'
 import { getApprovalMetricsService, type ApprovalMetricsService, type ApprovalTerminalState } from './ApprovalMetricsService'
+import {
+  buildApprovalCompletionEvent,
+  emitApprovalCompletionEvent,
+  type ApprovalCompletionEventV1,
+  type ApprovalCompletionTransitionSnapshot,
+} from './ApprovalCompletionEvent'
 import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
 
@@ -2513,6 +2519,7 @@ export class ApprovalProductService {
       instanceMetadata.parallelBranchStates = buildPersistableParallelState(initial.parallelState)
     }
 
+    let completionEvent: ApprovalCompletionEventV1 | null = null
     let client: ApprovalDbClient | null = null
     try {
       client = await pool.connect()
@@ -2569,6 +2576,30 @@ export class ApprovalProductService {
         },
       })
 
+      if (initial.status === 'approved') {
+        completionEvent = buildApprovalCompletionEvent({
+          instance: {
+            id: instanceId,
+            request_no: requestNo,
+            template_id: bundle.template.id,
+            template_version_id: bundle.version.id,
+            published_definition_id: bundle.publishedDefinition.id,
+            business_key: bundle.template.key,
+            workflow_key: 'approval-product-template',
+            requester_snapshot: requesterSnapshot,
+          },
+          transition: {
+            action: 'auto_approve',
+            fromStatus: null,
+            toStatus: 'approved',
+            fromVersion: null,
+            toVersion: 0,
+            nodeKey: null,
+          },
+          actor: null,
+        })
+      }
+
       await client.query('COMMIT')
     } catch (error) {
       await rollbackQuietly(client)
@@ -2596,6 +2627,9 @@ export class ApprovalProductService {
         })
       }
     })
+    if (completionEvent) {
+      emitApprovalCompletionEvent(completionEvent)
+    }
 
     const approval = await this.getApproval(instanceId)
     if (!approval) {
@@ -2612,6 +2646,7 @@ export class ApprovalProductService {
     if (!pool) throw new Error('Database not available')
 
     let jumpEvent: AdminJumpEventPayload | null = null
+    let completionEvent: ApprovalCompletionEventV1 | null = null
     let client: ApprovalDbClient | null = null
     try {
       client = await pool.connect()
@@ -2773,6 +2808,20 @@ export class ApprovalProductService {
       }, actor)
       await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents)
       await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
+      if (resolution.status === 'approved') {
+        completionEvent = this.buildCompletionEvent(
+          instance,
+          {
+            action: 'jump',
+            fromStatus: instance.status,
+            toStatus: 'approved',
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            nodeKey: instance.current_node_key,
+          },
+          { id: actor.userId, name: actor.userName || actor.userId },
+        )
+      }
       await client.query('COMMIT')
 
       jumpEvent = {
@@ -2799,6 +2848,9 @@ export class ApprovalProductService {
       client?.release()
     }
 
+    if (completionEvent) {
+      emitApprovalCompletionEvent(completionEvent)
+    }
     if (jumpEvent) {
       eventBus.emit('approval.admin_jumped', jumpEvent)
     }
@@ -2993,7 +3045,20 @@ export class ApprovalProductService {
           toVersion: nextVersion,
           metadata: { nodeKey: currentNodeKey },
         }, actor)
+        const completionEvent = this.buildCompletionEvent(
+          instance,
+          {
+            action: 'revoke',
+            fromStatus: instance.status,
+            toStatus: 'revoked',
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            nodeKey: currentNodeKey,
+          },
+          { id: actor.userId, name: actorName },
+        )
         await client.query('COMMIT')
+        emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'revoked')
         return (await this.getApproval(id))!
       }
@@ -3119,8 +3184,21 @@ export class ApprovalProductService {
           toVersion: nextVersion,
           metadata: { nodeKey: currentNodeKey },
         }, actor)
+        const completionEvent = this.buildCompletionEvent(
+          instance,
+          {
+            action: 'reject',
+            fromStatus: instance.status,
+            toStatus: 'rejected',
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            nodeKey: currentNodeKey,
+          },
+          { id: actor.userId, name: actorName },
+        )
         await client.query('COMMIT')
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+        emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'rejected')
         return (await this.getApproval(id))!
       }
@@ -3383,13 +3461,28 @@ export class ApprovalProductService {
       }
       await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents)
       await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
+      const completionEvent = resolution.status === 'approved'
+        ? this.buildCompletionEvent(
+            instance,
+            {
+              action: 'approve',
+              fromStatus: instance.status,
+              toStatus: 'approved',
+              fromVersion: instance.version,
+              toVersion: nextVersion,
+              nodeKey: currentNodeKey,
+            },
+            { id: actor.userId, name: actorName },
+          )
+        : null
 
       await client.query('COMMIT')
 
       // Wave 2 WP5 slice 1 — emit metrics after commit so rollback failures
       // never leave dangling breakdown entries. All hooks are guarded.
       this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
-      if (resolution.status === 'approved') {
+      if (completionEvent) {
+        emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'approved')
       } else if (resolution.currentNodeKey && resolution.currentNodeKey !== currentNodeKey) {
         this.emitNodeActivationMetric(id, resolution.currentNodeKey)
@@ -3441,6 +3534,18 @@ export class ApprovalProductService {
         terminalAt: new Date(),
       }),
     )
+  }
+
+  private buildCompletionEvent(
+    instance: ApprovalInstanceRow,
+    transition: ApprovalCompletionTransitionSnapshot,
+    actor: { id: string; name?: string | null } | null,
+  ): ApprovalCompletionEventV1 {
+    return buildApprovalCompletionEvent({
+      instance,
+      transition,
+      actor,
+    })
   }
 
   async getApproval(id: string): Promise<UnifiedApprovalDTO | null> {
