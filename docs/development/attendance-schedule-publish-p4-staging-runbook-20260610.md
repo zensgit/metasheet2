@@ -29,6 +29,7 @@ It does **not** deploy, restart staging, exercise the frontend browser, or mark 
    - P3 fixed-apply/auto-shift compatibility tests;
    - P4 admin UI.
 2. `DATABASE_URL` points at the staging Postgres. SQL is used for exact status assertions and cleanup.
+   `ORG_ID` is sent to the HTTP API as `orgId` and `x-org-id`, and is also used by the SQL oracle/cleanup.
 3. `SMOKE_TOKEN` is an admin token for staging, or staging allows `/api/auth/dev-token`.
 4. Run from the repo root so `pg` resolves.
 
@@ -45,9 +46,7 @@ Optional:
 
 ```bash
 ORG_ID=default
-WORK_DATE=2026-06-30
-CAP_DATE=2026-07-01
-PAST_DATE=2026-06-01
+# WORK_DATE / CAP_DATE / PAST_DATE are optional; omit them for dynamic defaults.
 SMOKE_USER_ID=publishp4-custom
 ```
 
@@ -88,8 +87,8 @@ Add a tracker closeout entry for `排班发布/草稿` and include:
 - smoke stamp;
 - `preflightOnly=true` left draft unmutated;
 - publish made effective-calendar include the shift;
-- compliance cap rollback stayed draft;
-- edit-window rollback stayed draft;
+- compliance cap rollback stayed draft with no publish metadata residue;
+- edit-window rollback stayed draft with no publish metadata residue;
 - cleanup residue `assignments=0, shifts=0`.
 
 Only then can the schedule publish/draft item move to ✅.

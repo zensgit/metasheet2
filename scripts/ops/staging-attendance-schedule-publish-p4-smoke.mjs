@@ -56,9 +56,12 @@ function ok(condition, label, detail) {
 }
 
 async function api(path, { method = 'GET', body } = {}) {
-  const headers = { 'Content-Type': 'application/json' }
+  const scopedPath = /(?:^|[?&])orgId=/.test(path)
+    ? path
+    : `${path}${path.includes('?') ? '&' : '?'}orgId=${encodeURIComponent(ORG_ID)}`
+  const headers = { 'Content-Type': 'application/json', 'x-org-id': ORG_ID }
   if (token) headers.Authorization = `Bearer ${token}`
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await fetch(`${BASE_URL}${scopedPath}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -129,11 +132,21 @@ async function effectiveSlots(userId, date) {
 
 async function assignmentRow(id) {
   return (await q(
-    `SELECT id, publish_status, publish_batch_id, publish_requested_at, published_at, published_by, locked_at
+    `SELECT id, publish_status, publish_batch_id, publish_requested_at, publish_requested_by, published_at, published_by, locked_at
      FROM attendance_shift_assignments
      WHERE id = $1 AND org_id = $2`,
     [id, ORG_ID],
   ))[0] || null
+}
+
+function isCleanDraftRow(row) {
+  return row?.publish_status === 'draft'
+    && !row?.publish_batch_id
+    && !row?.publish_requested_at
+    && !row?.publish_requested_by
+    && !row?.published_at
+    && !row?.published_by
+    && !row?.locked_at
 }
 
 async function main() {
@@ -174,7 +187,7 @@ async function main() {
   ok(preflight.status === 200 && preflight.body?.data?.preflightOnly === true,
     `preflight succeeds and reports preflightOnly (status ${preflight.status})`, preflight.body)
   let row = await assignmentRow(draftId)
-  ok(row?.publish_status === 'draft' && !row?.published_at && !row?.locked_at,
+  ok(isCleanDraftRow(row),
     'preflight leaves the draft row unmutated', row)
 
   const publish = await api('/api/attendance/schedule-publications', {
@@ -184,7 +197,7 @@ async function main() {
   ok(publish.status === 200 && Number(publish.body?.data?.totalPublished) === 1,
     `publish succeeds with totalPublished=1 (status ${publish.status})`, publish.body)
   row = await assignmentRow(draftId)
-  ok(row?.publish_status === 'published' && !!row?.published_at && !!row?.locked_at,
+  ok(row?.publish_status === 'published' && !!row?.publish_batch_id && !!row?.publish_requested_at && !!row?.published_at && !!row?.locked_at,
     'publish flips draft to a locked published schedule fact', row)
   slots = await effectiveSlots(USER, FUTURE_DATE)
   ok(slots.some(slot => slot.shiftId === normalShiftId),
@@ -204,7 +217,7 @@ async function main() {
   ok(capPublish.status === 422 && capPublish.body?.error?.code === 'SHIFT_COMPLIANCE_CAP_EXCEEDED',
     'publish over shiftCompliance cap returns 422 and the compliance error code', capPublish.body)
   const capRow = await assignmentRow(capDraftId)
-  ok(capRow?.publish_status === 'draft' && !capRow?.published_at && !capRow?.locked_at,
+  ok(isCleanDraftRow(capRow),
     'compliance-blocked publish rolls back without published residue', capRow)
 
   const editWindowShiftId = await createShift('edit-window', '11:00', '12:00')
@@ -224,7 +237,7 @@ async function main() {
   ok(editWindowPublish.status === 422 && editWindowPublish.body?.error?.code === 'SHIFT_EDIT_WINDOW_EXCEEDED',
     'publish outside shiftEditPolicy window returns 422 and the edit-window error code', editWindowPublish.body)
   const editWindowRow = await assignmentRow(editWindowDraftId)
-  ok(editWindowRow?.publish_status === 'draft' && !editWindowRow?.published_at && !editWindowRow?.locked_at,
+  ok(isCleanDraftRow(editWindowRow),
     'edit-window-blocked publish leaves the row as draft', editWindowRow)
 }
 
