@@ -2355,6 +2355,243 @@ attendanceIntegrationDescribe(
     expect(invalidRangeError?.code).toBe('VALIDATION_ERROR')
   })
 
+  it('enforces multi-shift slot conflicts on manual assignment create and update', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const adminUserId = `attendance-multishift-admin-${runSuffix}`
+    const workDate = '2026-07-08'
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    }
+    const pool = new Pool({ connectionString: dbUrl })
+    let originalSettings: Record<string, unknown> = {}
+
+    async function saveSettings(patch: Record<string, unknown>) {
+      const res = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(patch),
+      })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      return res
+    }
+
+    async function createShift(name: string, workStartTime: string, workEndTime: string): Promise<string> {
+      const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name,
+          timezone: 'Asia/Shanghai',
+          workStartTime,
+          workEndTime,
+          workingDays: [1, 2, 3, 4, 5],
+        }),
+      })
+      expect(shiftRes.status, JSON.stringify(shiftRes.body)).toBe(201)
+      const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(shiftId).toBeTruthy()
+      if (!shiftId) throw new Error('missing shift id')
+      return shiftId
+    }
+
+    async function createAssignment(userId: string, shiftId: string, slotIndex?: number) {
+      const body: Record<string, unknown> = {
+        userId,
+        shiftId,
+        startDate: workDate,
+        endDate: workDate,
+        isActive: true,
+      }
+      if (slotIndex !== undefined) body.slotIndex = slotIndex
+      return requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      })
+    }
+
+    function expectShiftAssignmentConflict(res: HttpResponse) {
+      expect(res.status).toBe(409)
+      const error = (res.body as { error?: { code?: string; details?: { conflictType?: string } } } | undefined)?.error
+      expect(error?.code).toBe('ATTENDANCE_SCHEDULE_ASSIGNMENT_CONFLICT')
+      expect(error?.details?.conflictType).toBe('shift_assignment_overlap')
+    }
+
+    try {
+      const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expect(settingsRes.status).toBe(200)
+      originalSettings = ((settingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+
+      const morningShiftId = await createShift(`Multi Shift Morning ${runSuffix}`, '08:00', '12:00')
+      const eveningShiftId = await createShift(`Multi Shift Evening ${runSuffix}`, '13:00', '17:00')
+      const overlapShiftId = await createShift(`Multi Shift Overlap ${runSuffix}`, '11:00', '15:00')
+
+      await saveSettings({
+        shiftEditPolicy: { mode: 'unrestricted', windowDays: 0 },
+        shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+        multiShiftDay: { enabled: false, maxSlots: 3 },
+      })
+
+      const defaultOffUserId = `${adminUserId}-default-off`
+      const defaultOffBaseRes = await createAssignment(defaultOffUserId, morningShiftId, 0)
+      expect(defaultOffBaseRes.status).toBe(201)
+      const defaultOffSecondRes = await createAssignment(defaultOffUserId, eveningShiftId, 1)
+      expectShiftAssignmentConflict(defaultOffSecondRes)
+
+      await saveSettings({
+        multiShiftDay: { enabled: true, maxSlots: 3 },
+        shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+      })
+
+      const multiSlotUserId = `${adminUserId}-enabled`
+      const morningAssignmentRes = await createAssignment(multiSlotUserId, morningShiftId, 0)
+      expect(morningAssignmentRes.status, JSON.stringify(morningAssignmentRes.body)).toBe(201)
+      const morningAssignment = (morningAssignmentRes.body as { data?: { assignment?: { id?: string; slotIndex?: number; slot_index?: number } } } | undefined)?.data?.assignment
+      expect(morningAssignment?.slotIndex).toBe(0)
+      expect(morningAssignment?.slot_index).toBe(0)
+      expect(morningAssignment?.id).toBeTruthy()
+
+      const eveningAssignmentRes = await createAssignment(multiSlotUserId, eveningShiftId, 1)
+      expect(eveningAssignmentRes.status, JSON.stringify(eveningAssignmentRes.body)).toBe(201)
+      const eveningAssignment = (eveningAssignmentRes.body as { data?: { assignment?: { id?: string; slotIndex?: number; slot_index?: number } } } | undefined)?.data?.assignment
+      expect(eveningAssignment?.slotIndex).toBe(1)
+      expect(eveningAssignment?.slot_index).toBe(1)
+      expect(eveningAssignment?.id).toBeTruthy()
+      if (!eveningAssignment?.id) return
+
+      const slotRows = await pool.query(
+        `SELECT slot_index
+           FROM attendance_shift_assignments
+          WHERE user_id = $1
+            AND start_date = $2::date
+            AND COALESCE(is_active, true) = true
+          ORDER BY slot_index ASC`,
+        [multiSlotUserId, workDate]
+      )
+      expect(slotRows.rows.map(row => Number(row.slot_index))).toEqual([0, 1])
+
+      expectShiftAssignmentConflict(await createAssignment(multiSlotUserId, eveningShiftId, 1))
+      expectShiftAssignmentConflict(await createAssignment(multiSlotUserId, overlapShiftId, 2))
+
+      const updateSlotRes = await requestJson(`${baseUrl}/api/attendance/assignments/${eveningAssignment.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ slotIndex: 2 }),
+      })
+      expect(updateSlotRes.status, JSON.stringify(updateSlotRes.body)).toBe(200)
+      const updatedAssignment = (updateSlotRes.body as { data?: { assignment?: { slotIndex?: number; slot_index?: number } } } | undefined)?.data?.assignment
+      expect(updatedAssignment?.slotIndex).toBe(2)
+      expect(updatedAssignment?.slot_index).toBe(2)
+
+      const listRes = await requestJson(`${baseUrl}/api/attendance/assignments?userId=${encodeURIComponent(multiSlotUserId)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expect(listRes.status).toBe(200)
+      const listItems = (listRes.body as { data?: { items?: Array<{ assignment?: { id?: string; slotIndex?: number; slot_index?: number } }> } } | undefined)?.data?.items ?? []
+      const listedEveningAssignment = listItems.find(item => item.assignment?.id === eveningAssignment.id)?.assignment
+      expect(listedEveningAssignment?.slotIndex).toBe(2)
+      expect(listedEveningAssignment?.slot_index).toBe(2)
+
+      const updateToSameSlotRes = await requestJson(`${baseUrl}/api/attendance/assignments/${eveningAssignment.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ slotIndex: 0 }),
+      })
+      expectShiftAssignmentConflict(updateToSameSlotRes)
+
+      const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `Multi Shift Rotation ${runSuffix}`,
+          timezone: 'Asia/Shanghai',
+          shiftSequence: [morningShiftId],
+          isActive: true,
+        }),
+      })
+      expect(rotationRuleRes.status).toBe(201)
+      const rotationRuleId = (rotationRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(rotationRuleId).toBeTruthy()
+      if (!rotationRuleId) return
+
+      const rotationConflictRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: multiSlotUserId,
+          rotationRuleId,
+          startDate: workDate,
+          endDate: workDate,
+          isActive: true,
+        }),
+      })
+      expect(rotationConflictRes.status).toBe(409)
+      const rotationError = (rotationConflictRes.body as { error?: { details?: { conflictType?: string; draftKind?: string; existingKind?: string } } } | undefined)?.error
+      expect(rotationError?.details?.conflictType).toBe('rotation_overrides_shift')
+      expect(rotationError?.details?.draftKind).toBe('rotation')
+      expect(rotationError?.details?.existingKind).toBe('shift')
+
+      const rotationFirstUserId = `${adminUserId}-rotation-first`
+      const rotationFirstRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: rotationFirstUserId,
+          rotationRuleId,
+          startDate: workDate,
+          endDate: workDate,
+          isActive: true,
+        }),
+      })
+      expect(rotationFirstRes.status).toBe(201)
+      const directAfterRotationRes = await createAssignment(rotationFirstUserId, morningShiftId, 1)
+      expect(directAfterRotationRes.status).toBe(409)
+      const directAfterRotationError = (directAfterRotationRes.body as { error?: { details?: { conflictType?: string; draftKind?: string; existingKind?: string } } } | undefined)?.error
+      expect(directAfterRotationError?.details?.conflictType).toBe('rotation_overrides_shift')
+      expect(directAfterRotationError?.details?.draftKind).toBe('shift')
+      expect(directAfterRotationError?.details?.existingKind).toBe('rotation')
+
+      await saveSettings({ multiShiftDay: { enabled: true, maxSlots: 2 } })
+      const tooHighSlotRes = await createAssignment(`${adminUserId}-slot-too-high`, eveningShiftId, 2)
+      expect(tooHighSlotRes.status).toBe(400)
+      const tooHighError = (tooHighSlotRes.body as { error?: { code?: string; message?: string } } | undefined)?.error
+      expect(tooHighError?.code).toBe('VALIDATION_ERROR')
+      expect(String(tooHighError?.message || '')).toContain('slotIndex')
+    } finally {
+      if (Object.keys(originalSettings).length > 0) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({
+            shiftEditPolicy: originalSettings.shiftEditPolicy ?? { mode: 'unrestricted', windowDays: 0 },
+            shiftCompliance: originalSettings.shiftCompliance ?? {
+              enforcement: 'block',
+              dailyMaxMinutes: null,
+              weeklyMaxMinutes: null,
+              monthlyMaxMinutes: null,
+            },
+            multiShiftDay: originalSettings.multiShiftDay ?? { enabled: false, maxSlots: 3 },
+          }),
+        }).catch(() => undefined)
+      }
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('enforces schedule-edit windows on shift and rotation assignment writes', async () => {
     if (!baseUrl) return
 
