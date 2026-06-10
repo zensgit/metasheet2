@@ -2831,7 +2831,7 @@ attendanceIntegrationDescribe(
         body: JSON.stringify({
           shiftEditPolicy: { mode: 'unrestricted', windowDays: 0 },
           shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
-          multiShiftDay: { enabled: false, maxSlots: 3 },
+          multiShiftDay: { enabled: true, maxSlots: 3 },
           punchPolicy: { unscheduled: { mode: 'block' } },
         }),
       })
