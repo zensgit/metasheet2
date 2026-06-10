@@ -945,6 +945,9 @@ export interface PluginServices {
   queue: QueueService        // Queue service instance
   storage: StorageService      // Storage service instance
   scheduler: SchedulerService    // Scheduler service instance
+  attendanceScheduler?: {
+    registerJob(job: { name?: string; run(): Promise<unknown> }): (() => void) | null
+  }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService
   rbacProvisioning: PluginRbacProvisioningService

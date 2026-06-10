@@ -94,6 +94,7 @@ import {
   resolveAttendanceSchedulerIntervalMs,
   resolveAttendanceSchedulerLeaderOptions,
   resolveUnscheduledReminderJob,
+  registerAttendanceSchedulerJob,
   startAttendanceScheduler,
   stopAttendanceScheduler,
 } from './services/AttendanceScheduler'
@@ -199,6 +200,7 @@ export class MetaSheetServer {
   private pluginRouteRegistrationIdsByPlugin = new Map<string, Set<string>>()
   private pluginCommunicationNamespacesByPlugin = new Map<string, Set<string>>()
   private pluginCommunicationNamespaceOwners = new Map<string, string>()
+  private pluginAttendanceSchedulerUnregistersByPlugin = new Map<string, Set<() => void>>()
   private port: number
   private host?: string
   private portLocked: boolean
@@ -848,13 +850,39 @@ export class MetaSheetServer {
     return true
   }
 
+  private registerPluginAttendanceSchedulerJob(pluginName: string, job: { name?: string; run(): Promise<unknown> }): (() => void) | null {
+    const unregister = registerAttendanceSchedulerJob(job)
+    if (!unregister) return null
+
+    const unregisters = this.pluginAttendanceSchedulerUnregistersByPlugin.get(pluginName) ?? new Set<() => void>()
+    const wrappedUnregister = () => {
+      unregister()
+      unregisters.delete(wrappedUnregister)
+      if (unregisters.size === 0) {
+        this.pluginAttendanceSchedulerUnregistersByPlugin.delete(pluginName)
+      }
+    }
+    unregisters.add(wrappedUnregister)
+    this.pluginAttendanceSchedulerUnregistersByPlugin.set(pluginName, unregisters)
+    return wrappedUnregister
+  }
+
   private cleanupPluginRuntimeRegistrations(pluginName: string): void {
     this.removePluginRoutes(pluginName)
 
     const namespaces = this.pluginCommunicationNamespacesByPlugin.get(pluginName)
-    if (!namespaces) return
-    for (const namespace of Array.from(namespaces)) {
-      this.unregisterPluginCommunicationNamespace(pluginName, namespace)
+    if (namespaces) {
+      for (const namespace of Array.from(namespaces)) {
+        this.unregisterPluginCommunicationNamespace(pluginName, namespace)
+      }
+    }
+
+    const unregisters = this.pluginAttendanceSchedulerUnregistersByPlugin.get(pluginName)
+    if (unregisters) {
+      for (const unregister of Array.from(unregisters)) {
+        unregister()
+      }
+      this.pluginAttendanceSchedulerUnregistersByPlugin.delete(pluginName)
     }
   }
 
@@ -1578,6 +1606,9 @@ export class MetaSheetServer {
       core: pluginApiSurface,
       services: {
         notification: notificationService,
+        attendanceScheduler: {
+          registerJob: (job: { name?: string; run(): Promise<unknown> }) => this.registerPluginAttendanceSchedulerJob(pluginName, job),
+        },
         automationRegistry,
         rbacProvisioning,
         platformAppInstances,
@@ -2007,10 +2038,12 @@ export class MetaSheetServer {
     // OFF → null → expiry only).
     try {
       const attendanceLeaderOptions = await resolveAttendanceSchedulerLeaderOptions()
+      const unscheduledReminderJob = resolveUnscheduledReminderJob()
+      const attendanceSchedulerJobs = unscheduledReminderJob ? [unscheduledReminderJob] : []
       const scheduler = startAttendanceScheduler({
         leaderOptions: attendanceLeaderOptions,
         intervalMs: resolveAttendanceSchedulerIntervalMs(),
-        reminderJob: resolveUnscheduledReminderJob(),
+        jobs: attendanceSchedulerJobs,
       })
       this.logger.info(scheduler ? 'Attendance scheduler initialized' : 'Attendance scheduler disabled (ATTENDANCE_SCHEDULER_ENABLED!=true)')
     } catch (e) {
