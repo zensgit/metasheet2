@@ -747,7 +747,7 @@ describe('comprehensive-hours period value-plumbing (PR6)', () => {
     expect(pluginSource).not.toMatch(/async function sync[A-Za-z]*Comprehensive[A-Za-z]*\b/)
     expect(pluginSource).toMatch(/buildAttendanceComprehensiveHoursPeriodSummaryValues\(/)
     expect(pluginSource).toMatch(
-      /for \(const column of valueColumns\)[\s\S]*?Object\.assign\(logical, comprehensiveHoursValues\)[\s\S]*?buildAttendanceReportPeriodSummarySourceFingerprint\(logical\)/,
+      /for \(const column of valueColumns\)[\s\S]*?Object\.assign\(logical, comprehensiveHoursValues\)[\s\S]*?buildAttendanceReportPeriodSummarySourceFingerprint\(logical(?:,|\))/,
     )
   })
 })

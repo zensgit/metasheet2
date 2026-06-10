@@ -320,8 +320,8 @@ One staging smoke is required before tracker ✅:
 | O0 | This design-lock + tracker backfill | ✅ this PR |
 | O1 | Pure day-type resolver + overtime segmentation helper, tests only | ✅ implemented |
 | O2 | Request create/update + final approval metadata snapshot, default off | ✅ implemented |
-| O3 | Record / summary loaders consume segment buckets | 🔒 |
-| O4 | Built-in report fields + report sync fingerprint use engine output | 🔒 |
+| O3 | Record / summary loaders consume segment buckets | ✅ implemented |
+| O4 | Built-in report fields + report sync fingerprint use engine output | ✅ implemented |
 | O5 | Comp-time consumes `compTimeGrantMinutes` + idempotence tests | 🔒 |
 | O6 | Staging smoke + tracker ✅ closeout | 🔒 |
 
