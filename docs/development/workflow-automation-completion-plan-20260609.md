@@ -2,7 +2,7 @@
 
 Date: 2026-06-09
 
-Grounded on: `origin/main@184f2293c`
+Grounded on: `origin/main@6690bade5`
 
 Scope: MetaSheet2 workflow, approval, and multitable automation as one product
 target. This is a completion definition and execution ledger, not a sprint
@@ -119,7 +119,8 @@ operate a practical business workflow using existing product surfaces:
 | W4 | Automation join-any / cancellation semantics | Not started; demand-gated after W3 | First completed branch continues; ignored/cancelled siblings are explicit in C1 jobs and audit. |
 | W5-0 | Approval completion event contract scope-gate | Landed #2413 | Defines terminal approval event taxonomy, redacted payload, idempotency key, post-commit emission boundary, and test matrix without adding automation behavior. |
 | W5-1 | Approval completion event contract implementation | Landed #2414 (`184f2293c`) | `approval.approved/rejected/revoked/cancelled` payload is versioned, redacted, idempotent, emitted post-commit, and tested without adding automation action yet. `return` remains a non-terminal rework transition. |
-| W6 | Automation `start_approval` action | Not started; after W5-1 | Starts one approval instance from a published template, creates a waiting job, and resumes from W5 completion event. |
+| W6-0 | Automation `start_approval` scope-gate | Scope-gate document added; runtime not started | `automation-start-approval-scope-gate-20260610.md` locks action config, idempotency, bridge persistence, waiting/resume semantics, redaction, and tests. |
+| W6-1 | Automation `start_approval` runtime | Not started; after W6-0 | Starts one approval instance from a published template, creates a waiting job, and resumes from W5 completion event. |
 | W7 | Approval result backwrite | Not started; after W5/W6 | Explicit mapping writes approved/rejected/revoked/cancelled outcomes to multitable record fields with audit and permission checks; `return` transition backwrite needs a separate named scope if required. |
 | W8 | BPMN compile/preview adapter | Not started; after W3 minimum | Constrained BPMN subset compiles into automation/approval preview plus gap report; no live execution route. |
 | W9 | Public webhook resume token emitter | Not started; use-case gated | External consumer can receive a token/callback URL safely; auth, expiry, replay, and redaction are locked before public route. |
@@ -127,8 +128,9 @@ operate a practical business workflow using existing product surfaces:
 
 ## 4. Recommended Next Slice
 
-The next implementation after W5 should be **W6: automation `start_approval`
-scope-gate**.
+The next implementation after W5 should be **W6: automation `start_approval`**,
+starting with the dedicated W6-0 scope-gate:
+`docs/development/automation-start-approval-scope-gate-20260610.md`.
 
 Why:
 
@@ -141,9 +143,9 @@ Why:
 
 Do not jump straight to result backwrite or BPMN before W6 lands.
 Approval-as-job now has stable suspend/resume plus an approval completion event contract; it
-still needs a separate `start_approval` scope-gate proving idempotency,
-waiting/resume semantics, and side-effect boundaries. BPMN gateway preview
-needs branch/parallel semantics to map to.
+now also has a W6 scope-gate. The runtime still needs a separate W6-1 PR
+proving idempotency, waiting/resume semantics, and side-effect boundaries.
+BPMN gateway preview needs branch/parallel semantics to map to.
 
 ## 5. Non-goals for v1
 
@@ -166,6 +168,8 @@ needed, one verification/runbook:
 - Approval authoring status source:
   `approval-template-authoring-frontend-mvp-todo-20260604.md`.
 - Cross-surface completion source: this document.
+- W6 `start_approval` bridge scope:
+  `automation-start-approval-scope-gate-20260610.md`.
 
 If code lands but the tracker still says "not started", the tracker is wrong
 and should be corrected before starting a new rung.
