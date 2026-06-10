@@ -2558,6 +2558,75 @@ attendanceIntegrationDescribe(
       expect(mixedComprehensiveRows[0]?.minutes).toBe(240)
       expect(mixedComprehensiveRows[0]?.plannedMinutes).toBe(240)
 
+      const fixedApplyUserId = `${adminUserId}-fixed-apply`
+      expect((await createAssignment(fixedApplyUserId, eveningShiftId, 1)).status).toBe(201)
+      const fixedGroupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `multi-shift-fixed-${runSuffix}`,
+          timezone: 'Asia/Shanghai',
+          attendanceType: 'fixed_shift',
+          description: 'multi-shift fixed apply compatibility',
+        }),
+      })
+      expect(fixedGroupRes.status, JSON.stringify(fixedGroupRes.body)).toBe(200)
+      const fixedGroupId = (fixedGroupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(fixedGroupId).toBeTruthy()
+      if (!fixedGroupId) return
+      const fixedMemberRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/members`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ userIds: [fixedApplyUserId] }),
+      })
+      expect(fixedMemberRes.status, JSON.stringify(fixedMemberRes.body)).toBe(200)
+
+      const fixedApplyRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/apply`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ shiftId: morningShiftId, startDate: workDate, endDate: workDate }),
+      })
+      expect(fixedApplyRes.status, JSON.stringify(fixedApplyRes.body)).toBe(201)
+      const fixedCreated = (fixedApplyRes.body as { data?: { created?: Array<{ slotIndex?: number; slot_index?: number; shiftId?: string; shift_id?: string }> } } | undefined)?.data?.created ?? []
+      expect(fixedCreated).toHaveLength(1)
+      expect(fixedCreated[0]?.slotIndex).toBe(0)
+      expect(fixedCreated[0]?.slot_index).toBe(0)
+      expect(fixedCreated[0]?.shiftId ?? fixedCreated[0]?.shift_id).toBe(morningShiftId)
+
+      const fixedRowsAfterApply = await pool.query(
+        `SELECT shift_id, slot_index
+           FROM attendance_shift_assignments
+          WHERE user_id = $1
+            AND start_date = $2::date
+            AND COALESCE(is_active, true) = true
+          ORDER BY slot_index ASC`,
+        [fixedApplyUserId, workDate],
+      )
+      expect(fixedRowsAfterApply.rows.map(row => ({ shiftId: row.shift_id, slotIndex: Number(row.slot_index) }))).toEqual([
+        { shiftId: morningShiftId, slotIndex: 0 },
+        { shiftId: eveningShiftId, slotIndex: 1 },
+      ])
+
+      const fixedRebuildRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/rebuild`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ shiftId: morningShiftId, startDate: workDate, endDate: workDate }),
+      })
+      expect(fixedRebuildRes.status, JSON.stringify(fixedRebuildRes.body)).toBe(200)
+      const fixedRowsAfterRebuild = await pool.query(
+        `SELECT shift_id, slot_index
+           FROM attendance_shift_assignments
+          WHERE user_id = $1
+            AND start_date = $2::date
+            AND COALESCE(is_active, true) = true
+          ORDER BY slot_index ASC`,
+        [fixedApplyUserId, workDate],
+      )
+      expect(fixedRowsAfterRebuild.rows.map(row => ({ shiftId: row.shift_id, slotIndex: Number(row.slot_index) }))).toEqual([
+        { shiftId: morningShiftId, slotIndex: 0 },
+        { shiftId: eveningShiftId, slotIndex: 1 },
+      ])
+
       await saveSettings({
         multiShiftDay: { enabled: true, maxSlots: 3 },
         shiftCompliance: { enforcement: 'block', dailyMaxMinutes: 300, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
@@ -5611,7 +5680,7 @@ attendanceIntegrationDescribe(
         expect(applyData?.skipped).toHaveLength(0)
 
         const rows = await pool.query(
-          `SELECT shift_id, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id
+          `SELECT shift_id, slot_index, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id
              FROM attendance_shift_assignments
             WHERE org_id = $1 AND user_id = $2`,
           [orgId, userId],
@@ -5619,6 +5688,7 @@ attendanceIntegrationDescribe(
         expect(rows.rows).toHaveLength(1)
         expect(rows.rows[0]).toMatchObject({
           shift_id: candidateShiftId,
+          slot_index: 0,
           is_active: true,
           producer_type: 'auto_shift_match',
           producer_ref_id: applyData?.runId,
@@ -5642,6 +5712,52 @@ attendanceIntegrationDescribe(
           [orgId, userId],
         )
         expect(Number(countRows.rows[0]?.count ?? 0)).toBe(1)
+
+        await saveAutoShiftSettings(adminToken, {
+          multiShiftDay: { enabled: true, maxSlots: 3 },
+          autoShiftMatching: {
+            enabled: true,
+            mode: 'apply',
+            maxToleranceMinutes: 30,
+            minConfidenceToApply: 'high',
+          },
+        })
+        const blockedUserId = `attendance-autoshift-slot1-user-${runSuffix}`
+        await createGroupForAutoShift(adminToken, `autoshift-slot1-${runSuffix}`, 'scheduled_shift', blockedUserId)
+        await pool.query(
+          `INSERT INTO attendance_shift_assignments
+           (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active)
+           VALUES ($1, $2, $3, $4, 1, $5, $5, true)`,
+          [randomUuidV4(), orgId, blockedUserId, candidateShiftId, workDate],
+        )
+        const blockedApplyRes = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/apply`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            items: [
+              {
+                userId: blockedUserId,
+                workDate,
+                candidateShiftId,
+                evidence: { eventIds: [`blocked-evidence-${runSuffix}`] },
+              },
+            ],
+          }),
+        })
+        expect(blockedApplyRes.status).toBe(200)
+        const blockedApplyData = (blockedApplyRes.body as { data?: { applied?: any[]; skipped?: any[] } } | undefined)?.data
+        expect(blockedApplyData?.applied).toHaveLength(0)
+        expect(blockedApplyData?.skipped?.[0]).toMatchObject({ userId: blockedUserId, workDate, candidateShiftId, reason: 'already_scheduled' })
+        const blockedRows = await pool.query(
+          `SELECT slot_index, producer_type
+             FROM attendance_shift_assignments
+            WHERE org_id = $1 AND user_id = $2 AND start_date = $3::date
+            ORDER BY slot_index ASC`,
+          [orgId, blockedUserId, workDate],
+        )
+        expect(blockedRows.rows.map(row => ({ slotIndex: Number(row.slot_index), producerType: row.producer_type ?? null }))).toEqual([
+          { slotIndex: 1, producerType: null },
+        ])
       } finally {
         await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
         if (previousFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
