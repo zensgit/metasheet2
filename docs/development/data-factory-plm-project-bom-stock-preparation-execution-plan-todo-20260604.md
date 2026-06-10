@@ -719,6 +719,181 @@ Acceptance locks:
 - Human-preserved fields are never written.
 - Row-level failures are values-free and do not erase clean-row progress.
 
+### ✅ Source snapshot diff gate C0a - minimal missing-child BOM guard (DONE - PR #2415, `a040f6651`)
+
+Gated on: #2402 C0 accepted semantics + #2342 runtime stack re-review.
+
+Scope:
+
+- Add the minimal fail-closed guard required before large-BOM background
+  expansion can become authoritative: an active BOM head with no BOM details is
+  source-incomplete and emits `missing_child_bom`.
+- Preserve normal explicit-leaf behavior where no active BOM head exists.
+- Keep the guard in existing app-side flat-read expansion; no raw SQL, stored
+  procedures, PLM writes, MetaSheet writes, routes, UI, migrations, K3, or
+  production rollout.
+
+Acceptance locks:
+
+- `missing_child_bom` makes the expansion invalid / not applyable.
+- `missing_child_bom` is not relabeled as a scale-bounded large-BOM condition.
+- Public evidence exposes only the held reason token and counts; it must not
+  include project number, component id/code/name, BOM id, raw PLM rows, target
+  sheet id, field id, raw SQL, credentials, tokens, or value-bearing stack
+  traces.
+- The #2393-#2401 large-BOM runtime stack was merged only after this guard.
+
+### ✅ Large-BOM C3a - background expansion job skeleton (DONE - PR #2393, `8f9fff192`)
+
+Gated on: Large-BOM C3/C4 designs + #2415 missing-child guard + explicit
+opt-in.
+
+Scope:
+
+- Add the latent large-BOM expansion job skeleton and status/evidence contract.
+- Keep job evidence values-free and require durable job state for authoritative
+  artifacts.
+- Add route/test coverage for the job contract without authorizing production
+  rollout.
+
+Acceptance locks:
+
+- No production/batch rollout.
+- No K3, PLM write, external database write, raw SQL, or browser-supplied plan
+  / source / target / caps.
+- Memory-only job state is not acceptable for production validation.
+
+### ✅ Large-BOM C3b - background worker seam (DONE - PR #2394, `b6c27e8d`)
+
+Gated on: C3a + explicit opt-in.
+
+Scope:
+
+- Add the background expansion worker seam that can resume from durable job
+  state.
+- Preserve app-side flat-read expansion and authenticated source-read
+  principal.
+- Keep progress evidence values-free.
+
+Acceptance locks:
+
+- Resume must not duplicate expanded rows.
+- Hard failures remain hard; scale failures do not produce authoritative
+  artifacts.
+- No target writes or production rollout.
+
+### ✅ Large-BOM C3c - planner handoff (DONE - PR #2396, `508dc52b`)
+
+Gated on: C3b + explicit opt-in.
+
+Scope:
+
+- Convert a completed authoritative expansion artifact into the C3 planning
+  input.
+- Preserve the existing C3 conflict planner semantics, including held
+  duplicates and human-field preservation.
+
+Acceptance locks:
+
+- Bounded or non-authoritative artifacts cannot become plans.
+- Manual-confirm rows remain held.
+- Planner evidence stays values-free.
+
+### ✅ Large-BOM C3d - expansion routes (DONE - PR #2398, `4fe850f1c`)
+
+Gated on: C3c + explicit opt-in.
+
+Scope:
+
+- Wire read-side large-BOM expansion routes for job creation, execution, and
+  plan creation.
+- Keep route inputs narrow: action id and allowlisted parameters only.
+
+Acceptance locks:
+
+- Browser input cannot supply source, target, caps, raw SQL, plan payload,
+  sheet id, or field id.
+- Read permissions are enforced; missing principal fails closed.
+- Route responses remain values-free.
+
+### ✅ Large-BOM C4a - checkpoint apply writer runtime (DONE - PR #2397, `6260d75b0`)
+
+Gated on: C3 authoritative plan artifact + explicit opt-in.
+
+Scope:
+
+- Add checkpointed apply writer runtime for completed authoritative large-BOM
+  plans.
+- Preserve C4 find-then-create/patch idempotency, human-field preservation,
+  manual-confirm holds, and row-level failure isolation.
+
+Acceptance locks:
+
+- Large Apply cannot start from bounded preview or memory-only artifacts.
+- Resume after interruption must not duplicate target rows.
+- `update` / `inactive` never create on miss.
+- `manual_confirm` writes nothing.
+- No production/batch rollout.
+
+### ✅ Large-BOM C4b - checkpoint apply routes (DONE - PR #2399, `901954873`)
+
+Gated on: C4a + explicit opt-in.
+
+Scope:
+
+- Wire apply-job creation and checkpoint-run routes for completed
+  authoritative plans.
+- Require explicit owner approval and authenticated write/admin permission.
+
+Acceptance locks:
+
+- Browser input cannot supply plan, payload, source, target, caps, sheet id, or
+  field id.
+- Apply routes use the server-configured target scope only.
+- Public progress/evidence is values-free.
+
+### ✅ Large-BOM C3/C4 entity-machine validation runbook (DONE - PR #2400, `5f08a3e01`)
+
+Gated on: C3/C4 route stack + explicit validation opt-in.
+
+Runbook:
+`docs/operations/data-factory-large-bom-c3c4-entity-machine-validation-runbook-20260608.md`.
+
+Scope:
+
+- Define the values-free entity-machine validation sequence for expansion,
+  planning, checkpoint apply, and idempotence re-check.
+- Keep production/batch rollout closed until the runbook passes.
+
+Acceptance locks:
+
+- Validation must be run from a package built from merged `origin/main`.
+- Evidence must include counts/status/error tokens only.
+- `secondPlan.add=0` is the idempotence signal.
+
+### ✅ Large-BOM production / batch rollout gate (DONE - PR #2401, `fd22d1e96`)
+
+Gated on: C3/C4 validation runbook + explicit production/batch opt-in.
+
+Gate doc:
+`docs/operations/data-factory-large-bom-production-batch-rollout-gate-20260608.md`.
+
+Scope:
+
+- Define the decision checklist for moving from entity-machine validation into
+  canary, limited pilot, and batch rollout.
+- Keep production/batch closed until validation, package fingerprint, D4
+  duplicate posture, #2388 missing-child/lifecycle posture, rollback ownership,
+  and values-free evidence all pass.
+
+Acceptance locks:
+
+- A stacked branch or open PR is not enough; package must be built from merged
+  `origin/main`.
+- Production/batch stays closed on bounded/incomplete expansion, unresolved
+  duplicate held groups, unresolved missing-child/lifecycle semantics, values
+  leaks, permission failures, target-scope failures, or unclear rollback.
+
 ### ✅ Duplicate-expanded-key D0 - conflict strategy design (DONE - PR #2346, `14d6c2ca1`)
 
 Gated on: #2340 onsite held-duplicate evidence + explicit opt-in.
@@ -1000,30 +1175,6 @@ Acceptance locks:
 - Public evidence remains values-free.
 - Full cross-source generalization waits for a second real source.
 
-### 🟡 Source snapshot diff gate C0a - minimal missing-child BOM guard (ACTIVE)
-
-Gated on: #2402 C0 accepted semantics + #2342 runtime stack re-review.
-
-Scope:
-
-- Add the minimal fail-closed guard required before large-BOM background
-  expansion can become authoritative: an active BOM head with no BOM details is
-  source-incomplete and emits `missing_child_bom`.
-- Preserve normal explicit-leaf behavior where no active BOM head exists.
-- Keep the guard in existing app-side flat-read expansion; do not add raw SQL,
-  stored procedures, PLM writes, MetaSheet writes, routes, UI, migrations, K3,
-  or production rollout.
-
-Acceptance locks:
-
-- `missing_child_bom` makes the expansion invalid / not applyable.
-- `missing_child_bom` is not relabeled as a scale-bounded large-BOM condition.
-- Public evidence exposes only the held reason token and counts; it must not
-  include project number, component id/code/name, BOM id, raw PLM rows, target
-  sheet id, field id, raw SQL, credentials, tokens, or value-bearing stack
-  traces.
-- #2393-#2401 large-BOM runtime must rebase onto this guard before merge.
-
 ## Deferred tracks
 
 - New project/sample C4 apply validation after separate explicit approval.
@@ -1032,8 +1183,10 @@ Acceptance locks:
 - PLM adapter/API source instead of readonly SQL.
 - Fuzzy/prefix/multi-project matching.
 - Procurement/warehouse child-table generation.
-- Large-BOM runtime beyond C1: UI affordance, background full expansion, and
-  checkpointed apply remain separate opt-ins.
+- Large-BOM production/batch rollout: the C3/C4 runtime stack is merged, but
+  rollout remains gated on package-from-main, entity-machine validation,
+  values-free evidence, duplicate/lifecycle posture, rollback ownership, and
+  explicit owner approval.
 - SQL bridge C3 watermark/incremental implementation.
 - External DB write.
 - K3 Save / Submit / Audit / BOM.
