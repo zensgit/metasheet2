@@ -2,7 +2,9 @@
 
 Type: **W5-0 docs-only scope-gate**.
 
-Grounded on: `origin/main@f43cfe44a`.
+Grounded on: `origin/main@184f2293c`.
+
+Implementation status: **W5-1 landed in #2414 / `184f2293c`**.
 
 Companion:
 
@@ -22,8 +24,9 @@ backwrite, trigger bindings, BPMN mapping, or a new approval UI. Its only job is
 to make approval completion observable through a typed, redacted, idempotent
 contract that later automation slices can consume.
 
-This document authorizes W5-1 implementation of the contract builder and
-approval-side emission tests. It does **not** authorize W6 `start_approval`.
+This document authorized the W5-1 implementation of the contract builder and
+approval-side emission tests, which landed in #2414. It does **not** authorize
+W6 `start_approval`.
 
 ## 1. Current Code Facts
 
@@ -224,13 +227,17 @@ W5-1 must not:
 
 ## 8. Completion Criteria
 
-W5 is complete only when:
+W5 is complete as of #2414 / `184f2293c`:
 
 1. The event payload type/builder exists.
 2. Approval terminal paths emit guarded, post-commit events.
 3. Tests prove event emission and non-emission across the matrix above.
-4. The workflow completion plan is updated from "W5 not started" to "W5
-   landed".
+4. The workflow completion plan is updated to show W5 landed.
+
+Review note: the #2414 sub-agent re-review found no blockers. It noted two
+non-blocking hardening candidates: explicit `comment` / `transfer`
+non-emission tests, and a future decision on whether `occurredAt` should remain
+builder-time or become emit-time. These are not W5 completion blockers.
 
 After W5 lands, W6 `start_approval` may be scoped. W6 still needs its own gate:
 starting an approval from automation creates side effects, waits on W5 events,
