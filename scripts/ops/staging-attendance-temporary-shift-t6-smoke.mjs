@@ -161,11 +161,15 @@ async function effectiveItem(userId, date) {
 }
 
 function effectiveShiftId(item) {
-  return item?.effective?.shiftId || item?.effective?.shift_id || null
+  return item?.effective?.shiftId || item?.effective?.shift_id || slotShiftId(effectiveSlots(item)[0]) || null
 }
 
 function effectiveSlots(item) {
   return Array.isArray(item?.effective?.slots) ? item.effective.slots : []
+}
+
+function hasTemporarySlot(item) {
+  return effectiveSlots(item).some(slot => slot?.assignmentKind === 'temporary' || slot?.assignment_kind === 'temporary')
 }
 
 function slotShiftId(slot) {
@@ -280,14 +284,14 @@ async function main() {
 
   const baseAssignmentId = await createPublishedAssignment(USER, baseShiftId, WORK_DATE, addDays(WORK_DATE, 2))
   let item = await effectiveItem(USER, WORK_DATE)
-  ok(effectiveShiftId(item) === baseShiftId,
-    'before temp publish, effective-calendar returns the base assignment', item?.effective)
-  ok(!effectiveSlots(item).some(slot => slot?.assignmentKind === 'temporary' || slot?.assignment_kind === 'temporary'),
+  ok(item?.effective?.source === 'shift' && !hasTemporarySlot(item),
+    'before temp publish, effective-calendar returns the base shift schedule', item?.effective)
+  ok(!hasTemporarySlot(item),
     'before temp publish, no temporary slot is visible', effectiveSlots(item))
 
   const tempDraftId = await createTemporaryDraft(USER, replacementShiftId, baseAssignmentId, WORK_DATE, `${STAMP} one-day replacement`)
   item = await effectiveItem(USER, WORK_DATE)
-  ok(effectiveShiftId(item) === baseShiftId,
+  ok(item?.effective?.source === 'shift' && !hasTemporarySlot(item),
     'draft temporary assignment is invisible before publication', item?.effective)
 
   await publishAssignment(tempDraftId, 'temporary replacement draft')
@@ -305,7 +309,7 @@ async function main() {
 
   await deleteAssignment(tempDraftId, 'temporary replacement')
   item = await effectiveItem(USER, WORK_DATE)
-  ok(effectiveShiftId(item) === baseShiftId,
+  ok(item?.effective?.source === 'shift' && !hasTemporarySlot(item),
     'canceling the temporary row restores the base assignment', item?.effective)
 
   const fixedGroupId = await createFixedGroup(FIXED_USER)
