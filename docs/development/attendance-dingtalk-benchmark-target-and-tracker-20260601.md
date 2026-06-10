@@ -28,7 +28,7 @@
 | 1 | **一天多班次** | 🟡 design-lock 已落（`attendance-multi-shift-day-design-lock-20260609.md`） | M0–M5 全部完成：schema replay、slot conflict guard、effective-calendar slots、planned-minutes/shift-compliance 汇总、fixed-apply/auto-shift 兼容、admin UI、staging smoke residue=0 |
 | 2 | **排班发布/草稿** | 🟡 design-lock 已落（`attendance-schedule-publishing-design-lock-20260609.md`） | backend runtime + admin UI + 反向测试 + staging smoke；若触碰 `attendance_shift_assignments` 热表 schema，先与多班次 `slot_index` / `publish_status` / `locked_at` / constraints 做 migration batching 决策 |
 | 3 | **临时班次** | ⬜ 未开始 | backend runtime + admin UI + 反向测试 + staging smoke；不伪装成完整调度/换班系统 |
-| 4 | **加班三段引擎** | ⬜ 未开始 | 工作日/休息日/节假日三段口径进入规则引擎并有反向测试；不把公式派生当 runtime engine |
+| 4 | **加班三段引擎** | 🟡 design-lock 已落（`attendance-overtime-segmentation-engine-design-lock-20260609.md`） | 工作日/休息日/节假日三段口径进入规则引擎并有反向测试；不把公式派生当 runtime engine |
 
 ### Out of this target
 
@@ -88,7 +88,7 @@
 | 一天多班次 | SHOULD | 🟡 | design-lock `attendance-multi-shift-day-design-lock-20260609.md` 已锁：v1 默认关闭，`slot_index` schema-first，最多 3 个 direct shift slots；完成口径要求 schema replay、slot conflict guard、effective-calendar slots、planned-minutes/shift-compliance 汇总、fixed-apply/auto-shift 兼容、admin UI 与 staging smoke 全满足后才 ✅ |
 | 排班发布/草稿 | SHOULD | 🟡 | design-lock `attendance-schedule-publishing-design-lock-20260609.md` 已锁：v1 使用 `draft` / `pending` / `published` 生命周期（推荐 DB `publish_status`，legacy/current writes 默认 published 零回归）；draft/pending 不进入 effective-calendar、`isUserScheduledForDate`、shiftCompliance planned-load、提醒或报表；publish 事务内复用 per-user lock、scope permission、`shiftEditPolicy`、published-conflict guard 与 `shiftCompliance`，成功后写 `published_at/published_by/locked_at`；fixed-apply 与 auto-shift A1 默认保持 immediate published 并保留 provenance；完成口径要求 schema replay、状态过滤、draft CRUD、publish preflight/transition、fixed/auto 兼容、admin UI 与 staging smoke 全满足后才 ✅ |
 | 临时班次 | SHOULD | ⬜ | 0 |
-| 加班三段引擎 | SHOULD | ⬜ | 公式派生，引擎不区分日型 |
+| 加班三段引擎 | SHOULD | 🟡 | design-lock `attendance-overtime-segmentation-engine-design-lock-20260609.md` 已锁：day-type 以 effective-calendar 为真源，request approval / records / summary / report / comp-time 必须消费同一 segmentation snapshot；本 PR 仅设计，不含 runtime/schema/frontend/OpenAPI |
 | 调度 / 换班 / 小组织 | OPTIONAL | ⬜ | 0 |
 
 **余下量（2026-06-09 复核）**：MUST 已闭环；近期目标改为 **H2 SHOULD 收口 ≈ 20–30 人天**（只做前三个排班能力约 **15–22 人天**）。详见 §0.1。
@@ -137,6 +137,8 @@
 > **回填（2026-06-09 一天多班次 design-lock）**：下一条 SHOULD 「一天多班次」先落设计锁 `attendance-multi-shift-day-design-lock-20260609.md`，不直接写 runtime。pre-flight 发现当前表没有 user/day DB unique，单班限制主要来自 `findAttendanceScheduleAssignmentConflict`、`loadShiftAssignment LIMIT 1`、effective-calendar/planned-minutes 等 single-effective 口径；因此不能只允许多行写入。v1 锁定：默认关闭；新增 `attendance_shift_assignments.slot_index`（API `slotIndex`，0-2，legacy 默认 0）；同 slot date-range overlap 禁止，不同 slot 仅在 shift 时间窗不重叠时可共存；rotation 与 direct multi-slot v1 互斥；planned minutes / shift-compliance cap 必须汇总 slots；`attendance_records` 仍一日一行，实际出勤 first/last 与 payroll-grade multi-segment 计算不在本线；fixed-schedule apply 与 auto-shift A1 保持 slot 0 兼容。完成口径：schema replay + conflict/effective-calendar/planned-minutes + admin UI + staging smoke 全满足才从 🟡 翻 ✅。
 
 > **回填（2026-06-09 排班发布/草稿 design-lock）**：下一条 SHOULD 「排班发布/草稿」落设计锁 `attendance-schedule-publishing-design-lock-20260609.md`，不直接写 runtime/schema/UI/OpenAPI。v1 锁定：API 生命周期 `draft` / `pending` / `published`，DB 建议用显式 `publish_status`（不是泛化 `status`）；legacy/current assignment writes 默认 `published`，确保零回归；draft/pending 对 effective-calendar、planned-minutes/shiftCompliance、`isUserScheduledForDate`、未排班提醒、报表均不可见；publish 才是生效写入点，事务内按稳定 user 顺序拿 per-user lock，复用 scheduler-scope permission、`shiftEditPolicy`、published conflict guard 与 `shiftCompliance`，成功后写 `published_at/published_by/locked_at`；published rows v1 不允许普通 PUT 静默改写，修正/重开另起设计；fixed-apply 与 auto-shift A1 默认仍 immediate published，并保留 `producer_type` / `producer_key` / `producer_run_id` provenance。状态从 ⬜ → 🟡，完成口径需 schema replay、状态过滤、draft CRUD、publish preflight/transition、fixed/auto 兼容、admin UI、staging smoke 全满足才 ✅。
+
+> **回填（2026-06-09 加班三段引擎 design-lock）**：下一条 SHOULD 「加班三段引擎」先落设计锁 `attendance-overtime-segmentation-engine-design-lock-20260609.md`，不直接写 runtime。pre-flight 确认当前 `workday_overtime_duration` / `restday_overtime_duration` 主要从 `attendance_records.is_workday` + total overtime 派生，`holiday_overtime_duration` 依赖未被 runtime approval engine 统一产出的 metadata；`attendance_overtime_rules` 也只有通用 min/rounding/max。v1 锁定：O1/O2 只用 org settings JSON、不做 schema/table；day type 只从 effective-calendar 真源解析（makeup workday=workday；非工作日且有 holiday layer=holiday；无 holiday row 的公司/组额外休息日=restday）；跨日加班 v1 稳定拒绝 `OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED`，不 warning 接受；per-day-type comp-time rate 保持 latent，v1 仍按 total 1:1 入账；overtime request metadata 必须保存 versioned segmentation snapshot；request approval、records、summary、report fields、period/report sync、comp-time grant 都消费同一 engine output；公式字段只能作为 projection，不能作为 runtime truth。完成口径：helper/request/record/summary/report/comp-time 反向测试 + staging smoke residue=0 全满足才从 🟡 翻 ✅。
 
 > **⚠️ schema 成组迁移，别一刀一迁。** 首刀"排班修改窗"已按 #2197 路线**无 DDL 落地**：policy 先进 org-level attendance settings JSON（`shiftEditPolicy`），write-time 按受影响日期判窗。后续若要把排班合规（`shift_constraints`）、发布（`publish_status`）、多班次（`slot_index`）、或持久锁窗（`locked_at`）落到 `attendance_shift_assignments`/`rule_sets`，这些 schema 变更再打一个协调 migration，再分层叠 service/UI（v1 阶段2 已是此意）。
 
