@@ -12871,7 +12871,7 @@ async function resolveEffectiveCalendar(db, args) {
     }
     if (effective.label) effectiveOut.label = effective.label
     if (effective.policyId) effectiveOut.policyId = effective.policyId
-    if (mode === 'userId') {
+    if (mode === 'userId' && multiShiftDay.enabled) {
       const dayWorkingOverride = holiday || policyWinner ? effective.isWorkingDay : null
       const slots = profileSource === 'shift'
         ? buildEffectiveCalendarShiftSlots(directShiftSlots, { workDate: date, dayWorkingOverride })

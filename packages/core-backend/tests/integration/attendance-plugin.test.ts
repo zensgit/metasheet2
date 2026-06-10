@@ -2452,6 +2452,15 @@ attendanceIntegrationDescribe(
       const defaultOffSecondRes = await createAssignment(defaultOffUserId, eveningShiftId, 1)
       expectShiftAssignmentConflict(defaultOffSecondRes)
 
+      const defaultOffEffectiveCalendarRes = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${workDate}&to=${workDate}&userId=${encodeURIComponent(defaultOffUserId)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      )
+      expect(defaultOffEffectiveCalendarRes.status, JSON.stringify(defaultOffEffectiveCalendarRes.body)).toBe(200)
+      const defaultOffItem = ((defaultOffEffectiveCalendarRes.body as { data?: { items?: Array<{ effective?: { plannedMinutes?: number; slots?: unknown[] } }> } } | undefined)?.data?.items ?? [])[0]
+      expect(defaultOffItem?.effective?.plannedMinutes).toBeUndefined()
+      expect(defaultOffItem?.effective?.slots).toBeUndefined()
+
       await saveSettings({
         multiShiftDay: { enabled: true, maxSlots: 3 },
         shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
