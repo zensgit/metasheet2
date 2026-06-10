@@ -2595,6 +2595,7 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
           ...normalizeMetadata(row.meta),
           leave_minutes: approved.leaveMinutes,
           overtime_minutes: approved.overtimeMinutes,
+          ...buildApprovedOvertimeSegmentationMeta(approved),
           reportSubtypeMinutes: approved.reportSubtypeMinutes ?? {},
         },
       }
@@ -4745,6 +4746,9 @@ function buildAttendanceSummaryFormulaValueMap(summary) {
     absenteeism_days: absentDays,
     leave_duration: attendanceSummaryNumber(summary, 'leave_minutes'),
     overtime_approval_duration: attendanceSummaryNumber(summary, 'overtime_minutes'),
+    workday_overtime_duration: attendanceSummaryNumber(summary, 'workday_overtime_minutes'),
+    restday_overtime_duration: attendanceSummaryNumber(summary, 'restday_overtime_minutes'),
+    holiday_overtime_duration: attendanceSummaryNumber(summary, 'holiday_overtime_minutes'),
   }
 }
 
@@ -9843,6 +9847,66 @@ function buildOvertimeSegmentationSnapshot(input = {}) {
   }
 }
 
+function createApprovedMinutesEntry() {
+  return {
+    leaveMinutes: 0,
+    overtimeMinutes: 0,
+    reportSubtypeMinutes: {},
+    workdayOvertimeMinutes: 0,
+    restdayOvertimeMinutes: 0,
+    holidayOvertimeMinutes: 0,
+    compTimeGrantMinutes: 0,
+    hasOvertimeSegmentation: false,
+    overtimeSegmentationVersion: null,
+  }
+}
+
+function getApprovedMinutesEntry(map, workDate) {
+  const key = normalizeDateOnlyValue(workDate) ?? String(workDate ?? '').slice(0, 10)
+  if (!map.has(key)) map.set(key, createApprovedMinutesEntry())
+  return map.get(key)
+}
+
+function readOvertimeSegmentationSnapshot(metadata) {
+  const meta = normalizeMetadata(metadata)
+  const snapshot = normalizeMetadata(meta.overtimeSegmentation)
+  if (snapshot.version !== OVERTIME_SEGMENTATION_VERSION) return null
+  if (snapshot.engine !== OVERTIME_SEGMENTATION_ENGINE) return null
+  const segments = normalizeMetadata(snapshot.segments)
+  return {
+    workdayOvertimeMinutes: normalizeOvertimeSegmentationMinutes(segments.workdayMinutes),
+    restdayOvertimeMinutes: normalizeOvertimeSegmentationMinutes(segments.restdayMinutes),
+    holidayOvertimeMinutes: normalizeOvertimeSegmentationMinutes(segments.holidayMinutes),
+    compTimeGrantMinutes: normalizeOvertimeSegmentationMinutes(snapshot.compTimeGrantMinutes),
+    version: snapshot.version,
+  }
+}
+
+function applyOvertimeSegmentationSnapshotToApprovedEntry(entry, snapshot) {
+  if (!entry || !snapshot) return
+  entry.workdayOvertimeMinutes += snapshot.workdayOvertimeMinutes
+  entry.restdayOvertimeMinutes += snapshot.restdayOvertimeMinutes
+  entry.holidayOvertimeMinutes += snapshot.holidayOvertimeMinutes
+  entry.compTimeGrantMinutes += snapshot.compTimeGrantMinutes
+  entry.hasOvertimeSegmentation = true
+  entry.overtimeSegmentationVersion = snapshot.version
+}
+
+function buildApprovedOvertimeSegmentationMeta(approved) {
+  if (!approved?.hasOvertimeSegmentation) return {}
+  const projection = {
+    version: approved.overtimeSegmentationVersion,
+    workdayOvertimeMinutes: approved.workdayOvertimeMinutes,
+    restdayOvertimeMinutes: approved.restdayOvertimeMinutes,
+    holidayOvertimeMinutes: approved.holidayOvertimeMinutes,
+    compTimeGrantMinutes: approved.compTimeGrantMinutes,
+  }
+  return {
+    approvedOvertimeSegmentation: projection,
+    approved_overtime_segmentation: projection,
+  }
+}
+
 function normalizeOvertimeSegmentationDateTime(value) {
   if (!value) return null
   const date = value instanceof Date ? value : new Date(value)
@@ -11088,6 +11152,26 @@ async function loadAttendanceSummary(db, orgId, userId, from, to) {
 
   const leaveMinutes = Number(requestRows.find(row => row.request_type === 'leave')?.total_minutes ?? 0)
   const overtimeMinutes = Number(requestRows.find(row => row.request_type === 'overtime')?.total_minutes ?? 0)
+  const overtimeSegmentation = createApprovedMinutesEntry()
+  if (requestRows.some(row => row.request_type === 'overtime')) {
+    const overtimeSegmentationRows = await db.query(
+      `SELECT metadata
+       FROM attendance_requests
+       WHERE user_id = $1
+         AND org_id = $2
+         AND work_date BETWEEN $3 AND $4
+         AND status = 'approved'
+         AND request_type = 'overtime'
+         AND metadata ? 'overtimeSegmentation'`,
+      [userId, orgId, from, to]
+    )
+    for (const row of overtimeSegmentationRows) {
+      applyOvertimeSegmentationSnapshotToApprovedEntry(
+        overtimeSegmentation,
+        readOvertimeSegmentationSnapshot(row.metadata),
+      )
+    }
+  }
 
   const row = rows[0] ?? {}
   return {
@@ -11105,6 +11189,11 @@ async function loadAttendanceSummary(db, orgId, userId, from, to) {
     off_days: Number(row.off_days ?? 0),
     leave_minutes: leaveMinutes,
     overtime_minutes: overtimeMinutes,
+    workday_overtime_minutes: overtimeSegmentation.workdayOvertimeMinutes,
+    restday_overtime_minutes: overtimeSegmentation.restdayOvertimeMinutes,
+    holiday_overtime_minutes: overtimeSegmentation.holidayOvertimeMinutes,
+    comp_time_grant_minutes: overtimeSegmentation.compTimeGrantMinutes,
+    overtime_segmentation_version: overtimeSegmentation.overtimeSegmentationVersion,
   }
 }
 
@@ -14635,15 +14724,32 @@ async function loadApprovedMinutesRange(db, orgId, userId, fromDate, toDate) {
 
   const map = new Map()
   for (const row of rows) {
-    const workDate = row.work_date
-    if (!map.has(workDate)) {
-      map.set(workDate, { leaveMinutes: 0, overtimeMinutes: 0, reportSubtypeMinutes: {} })
-    }
-    const entry = map.get(workDate)
+    const entry = getApprovedMinutesEntry(map, row.work_date)
     if (row.request_type === 'leave') {
       entry.leaveMinutes = Number(row.total_minutes ?? 0)
     } else if (row.request_type === 'overtime') {
       entry.overtimeMinutes = Number(row.total_minutes ?? 0)
+    }
+  }
+
+  if (rows.some(row => row.request_type === 'overtime')) {
+    const segmentationRows = await db.query(
+      `SELECT work_date, metadata
+       FROM attendance_requests
+       WHERE user_id = $1
+         AND org_id = $2
+         AND work_date BETWEEN $3 AND $4
+         AND status = 'approved'
+         AND request_type = 'overtime'
+         AND metadata ? 'overtimeSegmentation'
+       ORDER BY work_date`,
+      [userId, orgId, fromDate, toDate],
+    )
+    for (const row of segmentationRows) {
+      applyOvertimeSegmentationSnapshotToApprovedEntry(
+        getApprovedMinutesEntry(map, row.work_date),
+        readOvertimeSegmentationSnapshot(row.metadata),
+      )
     }
   }
 
@@ -14675,11 +14781,7 @@ async function loadApprovedMinutesRange(db, orgId, userId, fromDate, toDate) {
         ? leaveMap[subtypeKey]
         : overtimeMap[subtypeKey]
       if (!fieldCode) continue
-      const workDate = row.work_date
-      if (!map.has(workDate)) {
-        map.set(workDate, { leaveMinutes: 0, overtimeMinutes: 0, reportSubtypeMinutes: {} })
-      }
-      const entry = map.get(workDate)
+      const entry = getApprovedMinutesEntry(map, row.work_date)
       if (!entry.reportSubtypeMinutes) entry.reportSubtypeMinutes = {}
       entry.reportSubtypeMinutes[fieldCode] = (entry.reportSubtypeMinutes[fieldCode] ?? 0) + Number(row.total_minutes ?? 0)
     }
@@ -20661,6 +20763,7 @@ module.exports = {
                 ...meta,
                 leave_minutes: approved.leaveMinutes,
                 overtime_minutes: approved.overtimeMinutes,
+                ...buildApprovedOvertimeSegmentationMeta(approved),
                 reportSubtypeMinutes: approved.reportSubtypeMinutes ?? {},
               },
             }
@@ -34391,6 +34494,7 @@ module.exports = {
                 ...normalizeMetadata(row.meta),
                 leave_minutes: approved.leaveMinutes,
                 overtime_minutes: approved.overtimeMinutes,
+                ...buildApprovedOvertimeSegmentationMeta(approved),
                 reportSubtypeMinutes: approved.reportSubtypeMinutes ?? {},
               },
             }
