@@ -3038,6 +3038,307 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('supports draft schedule CRUD through draft-aware routes without changing immediate published writes', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const adminUserId = `attendance-draft-crud-admin-${runSuffix}`
+    const shiftUserId = `attendance-draft-crud-shift-${runSuffix}`
+    const rotationUserId = `attendance-draft-crud-rotation-${runSuffix}`
+    const deleteUserId = `attendance-draft-crud-delete-${runSuffix}`
+    const workDate = '2026-07-23'
+    const rotationDate = '2026-07-24'
+    const pool = new Pool({ connectionString: dbUrl })
+    let originalSettings: Record<string, unknown> = {}
+    const shiftIds: string[] = []
+    const rotationRuleIds: string[] = []
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) {
+      await pool.end().catch(() => undefined)
+      return
+    }
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    }
+
+    async function createShift(name: string, workStartTime: string, workEndTime: string): Promise<string> {
+      const res = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name,
+          timezone: 'UTC',
+          workStartTime,
+          workEndTime,
+          workingDays: [0, 1, 2, 3, 4, 5, 6],
+        }),
+      })
+      expect(res.status, JSON.stringify(res.body)).toBe(201)
+      const id = (res.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(id).toBeTruthy()
+      if (!id) throw new Error('missing shift id')
+      shiftIds.push(id)
+      return id
+    }
+
+    async function createRotationRule(name: string, shiftId: string): Promise<string> {
+      const res = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name,
+          timezone: 'UTC',
+          shiftSequence: [shiftId],
+          isActive: true,
+        }),
+      })
+      expect(res.status, JSON.stringify(res.body)).toBe(201)
+      const id = (res.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(id).toBeTruthy()
+      if (!id) throw new Error('missing rotation rule id')
+      rotationRuleIds.push(id)
+      return id
+    }
+
+    function expectPublishLocked(res: HttpResponse, status: string) {
+      expect(res.status, JSON.stringify(res.body)).toBe(422)
+      const error = (res.body as { error?: { code?: string; details?: { publishStatus?: string } } } | undefined)?.error
+      expect(error?.code).toBe('SCHEDULE_PUBLISH_LOCKED')
+      expect(error?.details?.publishStatus).toBe(status)
+    }
+
+    try {
+      const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expect(settingsRes.status).toBe(200)
+      originalSettings = ((settingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+      const settingsUpdateRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          shiftEditPolicy: { mode: 'unrestricted', windowDays: 0 },
+          shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+          multiShiftDay: { enabled: false, maxSlots: 3 },
+        }),
+      })
+      expect(settingsUpdateRes.status, JSON.stringify(settingsUpdateRes.body)).toBe(200)
+
+      const publishedShiftId = await createShift(`Draft CRUD Published ${runSuffix}`, '08:00', '09:00')
+      const draftShiftId = await createShift(`Draft CRUD Draft ${runSuffix}`, '10:00', '11:00')
+      const updatedDraftShiftId = await createShift(`Draft CRUD Updated ${runSuffix}`, '12:00', '13:00')
+
+      const publishedRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: shiftUserId,
+          shiftId: publishedShiftId,
+          startDate: workDate,
+          endDate: workDate,
+          isActive: true,
+        }),
+      })
+      expect(publishedRes.status, JSON.stringify(publishedRes.body)).toBe(201)
+      const publishedAssignment = (publishedRes.body as { data?: { assignment?: { id?: string; publishStatus?: string } } } | undefined)?.data?.assignment
+      expect(publishedAssignment?.publishStatus).toBe('published')
+      expect(publishedAssignment?.id).toBeTruthy()
+      if (!publishedAssignment?.id) return
+
+      const draftRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: shiftUserId,
+          shiftId: draftShiftId,
+          startDate: workDate,
+          endDate: workDate,
+          isActive: true,
+        }),
+      })
+      expect(draftRes.status, JSON.stringify(draftRes.body)).toBe(201)
+      const draftAssignment = (draftRes.body as { data?: { assignment?: { id?: string; publishStatus?: string; publish_status?: string } } } | undefined)?.data?.assignment
+      expect(draftAssignment?.publishStatus).toBe('draft')
+      expect(draftAssignment?.publish_status).toBe('draft')
+      expect(draftAssignment?.id).toBeTruthy()
+      if (!draftAssignment?.id) return
+
+      const duplicateDraftRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: shiftUserId,
+          shiftId: draftShiftId,
+          startDate: workDate,
+          endDate: workDate,
+          isActive: true,
+        }),
+      })
+      expect(duplicateDraftRes.status, JSON.stringify(duplicateDraftRes.body)).toBe(409)
+      expect((duplicateDraftRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ATTENDANCE_SCHEDULE_ASSIGNMENT_CONFLICT')
+
+      const draftListRes = await requestJson(
+        `${baseUrl}/api/attendance/assignments?userId=${encodeURIComponent(shiftUserId)}&publishStatus=draft`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      expect(draftListRes.status, JSON.stringify(draftListRes.body)).toBe(200)
+      const draftListItems = (draftListRes.body as { data?: { items?: Array<{ assignment?: { id?: string; publishStatus?: string } }> } } | undefined)?.data?.items ?? []
+      expect(draftListItems.map(item => item.assignment?.id)).toContain(draftAssignment.id)
+      expect(draftListItems.every(item => item.assignment?.publishStatus === 'draft')).toBe(true)
+
+      const publishedListRes = await requestJson(
+        `${baseUrl}/api/attendance/assignments?userId=${encodeURIComponent(shiftUserId)}&publishStatus=published`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      expect(publishedListRes.status, JSON.stringify(publishedListRes.body)).toBe(200)
+      const publishedListItems = (publishedListRes.body as { data?: { items?: Array<{ assignment?: { id?: string; publishStatus?: string } }> } } | undefined)?.data?.items ?? []
+      expect(publishedListItems.map(item => item.assignment?.id)).toContain(publishedAssignment?.id)
+      expect(publishedListItems.map(item => item.assignment?.id)).not.toContain(draftAssignment.id)
+
+      const ordinaryDraftUpdateRes = await requestJson(`${baseUrl}/api/attendance/assignments/${draftAssignment.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ shiftId: updatedDraftShiftId }),
+      })
+      expectPublishLocked(ordinaryDraftUpdateRes, 'draft')
+
+      const ordinaryPublishedUpdateRes = await requestJson(`${baseUrl}/api/attendance/assignments/${publishedAssignment.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ shiftId: publishedShiftId }),
+      })
+      expect(ordinaryPublishedUpdateRes.status, JSON.stringify(ordinaryPublishedUpdateRes.body)).toBe(200)
+      expect((ordinaryPublishedUpdateRes.body as { data?: { assignment?: { publishStatus?: string } } } | undefined)?.data?.assignment?.publishStatus).toBe('published')
+
+      const draftUpdateRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments/${draftAssignment.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ shiftId: updatedDraftShiftId }),
+      })
+      expect(draftUpdateRes.status, JSON.stringify(draftUpdateRes.body)).toBe(200)
+      const updatedDraftAssignment = (draftUpdateRes.body as { data?: { assignment?: { shiftId?: string; publishStatus?: string } } } | undefined)?.data?.assignment
+      expect(updatedDraftAssignment?.shiftId).toBe(updatedDraftShiftId)
+      expect(updatedDraftAssignment?.publishStatus).toBe('draft')
+
+      await pool.query('UPDATE attendance_shift_assignments SET publish_status = $2 WHERE id = $1', [draftAssignment.id, 'pending'])
+      const pendingDraftUpdateRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments/${draftAssignment.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ shiftId: draftShiftId }),
+      })
+      expectPublishLocked(pendingDraftUpdateRes, 'pending')
+      const ordinaryPendingDeleteRes = await requestJson(`${baseUrl}/api/attendance/assignments/${draftAssignment.id}`, {
+        method: 'DELETE',
+        headers,
+      })
+      expectPublishLocked(ordinaryPendingDeleteRes, 'pending')
+
+      const deleteDraftRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: deleteUserId,
+          shiftId: draftShiftId,
+          startDate: workDate,
+          endDate: workDate,
+          isActive: true,
+        }),
+      })
+      expect(deleteDraftRes.status, JSON.stringify(deleteDraftRes.body)).toBe(201)
+      const deleteDraftId = (deleteDraftRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+      expect(deleteDraftId).toBeTruthy()
+      if (!deleteDraftId) return
+      const ordinaryDraftDeleteRes = await requestJson(`${baseUrl}/api/attendance/assignments/${deleteDraftId}`, {
+        method: 'DELETE',
+        headers,
+      })
+      expectPublishLocked(ordinaryDraftDeleteRes, 'draft')
+      const draftDeleteRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments/${deleteDraftId}`, {
+        method: 'DELETE',
+        headers,
+      })
+      expect(draftDeleteRes.status, JSON.stringify(draftDeleteRes.body)).toBe(200)
+      const deletedRows = await pool.query('SELECT 1 FROM attendance_shift_assignments WHERE id = $1', [deleteDraftId])
+      expect(deletedRows.rows.length).toBe(0)
+
+      const rotationRuleId = await createRotationRule(`Draft CRUD Rotation ${runSuffix}`, publishedShiftId)
+      const updatedRotationRuleId = await createRotationRule(`Draft CRUD Rotation Updated ${runSuffix}`, updatedDraftShiftId)
+      const rotationDraftRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/rotation-assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: rotationUserId,
+          rotationRuleId,
+          startDate: rotationDate,
+          endDate: rotationDate,
+          isActive: true,
+        }),
+      })
+      expect(rotationDraftRes.status, JSON.stringify(rotationDraftRes.body)).toBe(201)
+      const rotationDraft = (rotationDraftRes.body as { data?: { assignment?: { id?: string; publishStatus?: string } } } | undefined)?.data?.assignment
+      expect(rotationDraft?.publishStatus).toBe('draft')
+      expect(rotationDraft?.id).toBeTruthy()
+      if (!rotationDraft?.id) return
+
+      const ordinaryRotationUpdateRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments/${rotationDraft.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ rotationRuleId: updatedRotationRuleId }),
+      })
+      expectPublishLocked(ordinaryRotationUpdateRes, 'draft')
+      const rotationDraftUpdateRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/rotation-assignments/${rotationDraft.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ rotationRuleId: updatedRotationRuleId }),
+      })
+      expect(rotationDraftUpdateRes.status, JSON.stringify(rotationDraftUpdateRes.body)).toBe(200)
+      expect((rotationDraftUpdateRes.body as { data?: { assignment?: { rotationRuleId?: string; publishStatus?: string } } } | undefined)?.data?.assignment?.rotationRuleId).toBe(updatedRotationRuleId)
+
+      const rotationDraftListRes = await requestJson(
+        `${baseUrl}/api/attendance/rotation-assignments?publishStatus=draft`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      expect(rotationDraftListRes.status, JSON.stringify(rotationDraftListRes.body)).toBe(200)
+      const rotationDraftListItems = (rotationDraftListRes.body as { data?: { items?: Array<{ assignment?: { id?: string; publishStatus?: string } }> } } | undefined)?.data?.items ?? []
+      expect(rotationDraftListItems.map(item => item.assignment?.id)).toContain(rotationDraft.id)
+      expect(rotationDraftListItems.every(item => item.assignment?.publishStatus === 'draft')).toBe(true)
+
+      const rotationDraftDeleteRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/rotation-assignments/${rotationDraft.id}`, {
+        method: 'DELETE',
+        headers,
+      })
+      expect(rotationDraftDeleteRes.status, JSON.stringify(rotationDraftDeleteRes.body)).toBe(200)
+      const deletedRotationRows = await pool.query('SELECT 1 FROM attendance_rotation_assignments WHERE id = $1', [rotationDraft.id])
+      expect(deletedRotationRows.rows.length).toBe(0)
+    } finally {
+      if (Object.keys(originalSettings).length > 0) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify(originalSettings),
+        }).catch(() => undefined)
+      }
+      const users = [shiftUserId, rotationUserId, deleteUserId]
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = ANY($1::text[])', [users]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_rotation_assignments WHERE user_id = ANY($1::text[])', [users]).catch(() => undefined)
+      if (rotationRuleIds.length > 0) {
+        await pool.query('DELETE FROM attendance_rotation_rules WHERE id = ANY($1::uuid[])', [rotationRuleIds]).catch(() => undefined)
+      }
+      if (shiftIds.length > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [shiftIds]).catch(() => undefined)
+      }
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('enforces schedule-edit windows on shift and rotation assignment writes', async () => {
     if (!baseUrl) return
 

@@ -65,7 +65,8 @@ describe('attendance scheduling assignment conflict guard', () => {
     expect(crossKindConflict?.draftKind).toBe('shift')
     expect(crossKindConflict?.existingKind).toBe('rotation')
     expect(crossKindConflict?.existingEndDate).toBeNull()
-    expect(String(crossKindDb.query.mock.calls[0]?.[0] || '')).toContain('id <> $5')
+    expect(String(crossKindDb.query.mock.calls[0]?.[0] || '')).toContain('id <>')
+    expect(crossKindDb.query.mock.calls[0]?.[1]).toContain('shift-current')
     expect(String(crossKindDb.query.mock.calls[1]?.[0] || '')).toContain('attendance_rotation_assignments')
   })
 
