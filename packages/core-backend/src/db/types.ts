@@ -14,6 +14,9 @@ type JsonObjectArrayColumn = JSONColumnType<Record<string, unknown>[] | null, Re
 type JsonStringArrayColumn = JSONColumnType<string[], string[], string[]>
 type JsonValueColumn = ColumnType<unknown | null, unknown | null, unknown | null>
 type AttendanceSchedulePublishStatus = 'draft' | 'pending' | 'published'
+type AttendanceAssignmentKind = 'regular' | 'temporary'
+type AttendanceTemporaryMode = 'replace'
+type AttendanceTemporaryReplacesKind = 'shift' | 'rule'
 
 export interface Database {
   // Core tables
@@ -1118,6 +1121,13 @@ export interface AttendanceShiftAssignmentsTable {
   published_by: string | null
   locked_at: NullableTimestamp
   reopened_from_assignment_id: string | null
+  assignment_kind: Generated<AttendanceAssignmentKind>
+  temporary_mode: AttendanceTemporaryMode | null
+  temporary_replaces_kind: AttendanceTemporaryReplacesKind | null
+  temporary_replaces_assignment_id: string | null
+  temporary_reason: string | null
+  temporary_created_by: string | null
+  temporary_created_at: NullableTimestamp
   created_at: CreatedAt
   updated_at: UpdatedAt
 }

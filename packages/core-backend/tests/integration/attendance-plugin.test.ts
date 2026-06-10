@@ -1866,6 +1866,14 @@ attendanceIntegrationDescribe(
     expect(assignmentRow?.assignment?.shift_id).toBe(shiftId)
     expect(assignmentRow?.assignment?.slotIndex).toBe(0)
     expect(assignmentRow?.assignment?.slot_index).toBe(0)
+    expect(assignmentRow?.assignment?.assignmentKind).toBe('regular')
+    expect(assignmentRow?.assignment?.assignment_kind).toBe('regular')
+    expect(assignmentRow?.assignment?.temporaryMode).toBeNull()
+    expect(assignmentRow?.assignment?.temporary_mode).toBeNull()
+    expect(assignmentRow?.assignment?.temporaryReplacesKind).toBeNull()
+    expect(assignmentRow?.assignment?.temporary_replaces_kind).toBeNull()
+    expect(assignmentRow?.assignment?.temporaryReplacesAssignmentId).toBeNull()
+    expect(assignmentRow?.assignment?.temporary_replaces_assignment_id).toBeNull()
     expect(assignmentRow?.shift?.workStartTime).toBe('08:30:00')
     expect(assignmentRow?.shift?.work_start_time).toBe('08:30:00')
 
@@ -1879,11 +1887,160 @@ attendanceIntegrationDescribe(
             AND column_name = 'slot_index'`
       )
       expect(columnRes.rowCount).toBe(1)
+      const tempColumnNames = [
+        'assignment_kind',
+        'temporary_mode',
+        'temporary_replaces_kind',
+        'temporary_replaces_assignment_id',
+        'temporary_reason',
+        'temporary_created_by',
+        'temporary_created_at',
+      ]
+      const tempColumnRes = await pool.query(
+        `SELECT column_name
+           FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'attendance_shift_assignments'
+            AND column_name = ANY($1::text[])`,
+        [tempColumnNames]
+      )
+      expect(tempColumnRes.rows.map(row => row.column_name).sort()).toEqual([...tempColumnNames].sort())
       const persistedRes = await pool.query(
-        'SELECT slot_index FROM attendance_shift_assignments WHERE id = $1',
+        `SELECT slot_index, assignment_kind, temporary_mode, temporary_replaces_kind,
+                temporary_replaces_assignment_id, temporary_reason, temporary_created_by,
+                temporary_created_at
+           FROM attendance_shift_assignments
+          WHERE id = $1`,
         [assignmentId]
       )
       expect(Number(persistedRes.rows[0]?.slot_index)).toBe(0)
+      expect(persistedRes.rows[0]).toMatchObject({
+        assignment_kind: 'regular',
+        temporary_mode: null,
+        temporary_replaces_kind: null,
+        temporary_replaces_assignment_id: null,
+        temporary_reason: null,
+        temporary_created_by: null,
+        temporary_created_at: null,
+      })
+      await expect(
+        pool.query(
+          `UPDATE attendance_shift_assignments
+              SET temporary_reason = 'should-not-exist-on-regular'
+            WHERE id = $1`,
+          [assignmentId]
+        )
+      ).rejects.toMatchObject({ code: '23514' })
+      await expect(
+        pool.query(
+          `UPDATE attendance_shift_assignments
+              SET assignment_kind = 'temporary',
+                  temporary_mode = 'replace',
+                  temporary_replaces_kind = 'shift',
+                  temporary_replaces_assignment_id = NULL,
+                  temporary_created_by = $2,
+                  temporary_created_at = now(),
+                  end_date = '2026-03-20'
+            WHERE id = $1`,
+          [assignmentId, testUserId]
+        )
+      ).rejects.toMatchObject({ code: '23514' })
+      await expect(
+        pool.query(
+          `UPDATE attendance_shift_assignments
+              SET assignment_kind = 'temporary',
+                  temporary_mode = NULL,
+                  temporary_replaces_kind = 'shift',
+                  temporary_replaces_assignment_id = $1,
+                  temporary_created_by = $2,
+                  temporary_created_at = now(),
+                  end_date = '2026-03-20'
+            WHERE id = $1`,
+          [assignmentId, testUserId]
+        )
+      ).rejects.toMatchObject({ code: '23514' })
+      await expect(
+        pool.query(
+          `UPDATE attendance_shift_assignments
+              SET assignment_kind = 'temporary',
+                  temporary_mode = 'replace',
+                  temporary_replaces_kind = NULL,
+                  temporary_replaces_assignment_id = $1,
+                  temporary_created_by = $2,
+                  temporary_created_at = now(),
+                  end_date = '2026-03-20'
+            WHERE id = $1`,
+          [assignmentId, testUserId]
+        )
+      ).rejects.toMatchObject({ code: '23514' })
+      await expect(
+        pool.query(
+          `UPDATE attendance_shift_assignments
+              SET assignment_kind = 'temporary',
+                  temporary_mode = 'replace',
+                  temporary_replaces_kind = 'shift',
+                  temporary_replaces_assignment_id = $1,
+                  temporary_created_by = $2,
+                  temporary_created_at = now(),
+                  end_date = NULL
+            WHERE id = $1`,
+          [assignmentId, testUserId]
+        )
+      ).rejects.toMatchObject({ code: '23514' })
+      await expect(
+        pool.query(
+          `UPDATE attendance_shift_assignments
+              SET assignment_kind = 'temporary',
+                  temporary_mode = 'replace',
+                  temporary_replaces_kind = 'shift',
+                  temporary_replaces_assignment_id = $1,
+                  temporary_created_by = $2,
+                  temporary_created_at = now(),
+                  end_date = '2026-03-21'
+            WHERE id = $1`,
+          [assignmentId, testUserId]
+        )
+      ).rejects.toMatchObject({ code: '23514' })
+      await pool.query(
+        `UPDATE attendance_shift_assignments
+            SET assignment_kind = 'temporary',
+                temporary_mode = 'replace',
+                temporary_replaces_kind = 'shift',
+                temporary_replaces_assignment_id = $1,
+                temporary_reason = 'temporary coverage',
+                temporary_created_by = $2,
+                temporary_created_at = '2026-03-20T01:02:03Z',
+                end_date = '2026-03-20'
+          WHERE id = $1`,
+        [assignmentId, testUserId]
+      )
+      const tempAssignmentListRes = await requestJson(
+        `${baseUrl}/api/attendance/assignments?userId=${encodeURIComponent(testUserId)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      )
+      expect(tempAssignmentListRes.status).toBe(200)
+      const tempAssignmentItems = (tempAssignmentListRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+      const tempAssignmentRow = tempAssignmentItems.find((item) => item?.assignment?.id === assignmentId)
+      expect(tempAssignmentRow?.assignment).toMatchObject({
+        assignmentKind: 'temporary',
+        assignment_kind: 'temporary',
+        temporaryMode: 'replace',
+        temporary_mode: 'replace',
+        temporaryReplacesKind: 'shift',
+        temporary_replaces_kind: 'shift',
+        temporaryReplacesAssignmentId: assignmentId,
+        temporary_replaces_assignment_id: assignmentId,
+        temporaryReason: 'temporary coverage',
+        temporary_reason: 'temporary coverage',
+        temporaryCreatedBy: testUserId,
+        temporary_created_by: testUserId,
+      })
+      expect(tempAssignmentRow?.assignment?.temporaryCreatedAt).toBeTruthy()
+      expect(tempAssignmentRow?.assignment?.temporary_created_at).toBeTruthy()
     } finally {
       await pool.end()
     }
