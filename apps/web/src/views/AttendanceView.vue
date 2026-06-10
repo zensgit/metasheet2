@@ -2057,6 +2057,42 @@
                 </button>
               </div>
 
+              <div class="attendance__admin-subsection" data-admin-card="multi-shift-day">
+                <h4>{{ tr('Multi-shift day', '一天多班次') }}</h4>
+                <p class="attendance__field-hint">
+                  {{ tr('Use multiple same-day shift slots for schedule planning and compliance caps. Actual attendance still summarizes daily punch records.', '用于排班计划与合规上限；实际出勤仍按当日打卡记录汇总。') }}
+                </p>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-multi-shift-enabled">
+                  <span>{{ tr('Allow multiple shift slots in one day', '允许一天多班次') }}</span>
+                  <input
+                    id="attendance-multi-shift-enabled"
+                    v-model="multiShiftDayForm.enabled"
+                    type="checkbox"
+                    data-multishift="enabled"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-multi-shift-max-slots">
+                  <span>{{ tr('Maximum slots per day', '每日最多槽位') }}</span>
+                  <input
+                    id="attendance-multi-shift-max-slots"
+                    v-model="multiShiftDayForm.maxSlots"
+                    type="number"
+                    min="1"
+                    max="3"
+                    inputmode="numeric"
+                    data-multishift="max-slots"
+                  />
+                </label>
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="settingsLoading"
+                  data-multishift="save"
+                  @click="saveMultiShiftDay"
+                >
+                  {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save multi-shift day', '保存一天多班次') }}
+                </button>
+              </div>
+
               <div class="attendance__admin-subsection" data-admin-card="outdoor-approval">
                 <h4>{{ tr('Outdoor punch approval', '外勤打卡审批') }}</h4>
                 <p class="attendance__field-hint">
@@ -6944,6 +6980,22 @@
                     type="checkbox"
                   />
                 </label>
+                <label v-if="multiShiftDayForm.enabled" class="attendance__field" for="attendance-assignment-slot-index">
+                  <span>{{ tr('Slot index (0-based)', '槽位序号（从 0 开始）') }}</span>
+                  <input
+                    id="attendance-assignment-slot-index"
+                    name="assignmentSlotIndex"
+                    v-model.number="assignmentForm.slotIndex"
+                    type="number"
+                    min="0"
+                    :max="multiShiftSlotMaxIndex"
+                    inputmode="numeric"
+                    data-multishift="assignment-slot"
+                  />
+                  <small class="attendance__field-hint">
+                    {{ tr('Slots separate same-day schedule plans; punch records still summarize by day.', '槽位用于区分同日排班计划；打卡记录仍按日汇总。') }}
+                  </small>
+                </label>
               </div>
               <p
                 v-if="comprehensiveHoursAssignmentAdvisory.shift.message"
@@ -7004,7 +7056,16 @@
                           </small>
                         </span>
                       </td>
-                      <td>{{ item.shift.name }}</td>
+                      <td>
+                        <span>{{ item.shift.name }}</span>
+                        <span
+                          v-if="multiShiftDayForm.enabled"
+                          class="attendance__scheduler-scope-chip"
+                          data-attendance-assignment-slot-chip
+                        >
+                          {{ assignmentSlotLabel(item.assignment) }}
+                        </span>
+                      </td>
                       <td>{{ item.assignment.startDate }}</td>
                       <td>{{ item.assignment.endDate || '--' }}</td>
                       <td>{{ item.assignment.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
@@ -7543,6 +7604,10 @@ interface AttendanceSettings {
     radiusMeters: number
   } | null
   minPunchIntervalMinutes?: number
+  multiShiftDay?: {
+    enabled?: boolean
+    maxSlots?: number
+  }
   shiftCompliance?: {
     enforcement?: 'block' | 'warn'
     dailyMaxMinutes?: number | null
@@ -8079,6 +8144,8 @@ interface AttendanceAssignment {
   startDate: string
   endDate: string | null
   isActive: boolean
+  slotIndex?: number | null
+  slot_index?: number | null
 }
 
 interface AttendanceAssignmentItem {
@@ -11367,6 +11434,13 @@ const shiftComplianceForm = reactive({
   monthlyMaxMinutes: '',
 })
 
+// Multi-shift day M4 admin card. Saved via saveMultiShiftDay, which PUTs ONLY { multiShiftDay }.
+// Default off keeps the assignment editor single-slot and omits slotIndex from assignment writes.
+const multiShiftDayForm = reactive({
+  enabled: false,
+  maxSlots: '3',
+})
+
 // ② S3-2 外勤打卡审批 (outdoor approval) config card. Mirrors shiftComplianceForm: saved via
 // saveOutdoorApproval, which PUTs ONLY { punchPolicy: { outdoor: ... } } so the backend per-key merge
 // leaves unscheduled / merge / the latent requirePhoto untouched. requireApproval=false ⇒ no regression.
@@ -11481,6 +11555,7 @@ const assignmentForm = reactive({
   startDate: toDateInput(today),
   endDate: '',
   isActive: true,
+  slotIndex: 0,
 })
 
 const shiftAssignmentEffectiveCalendarChips = ref<CalendarEffectiveChip[]>([])
@@ -16767,6 +16842,7 @@ async function loadSettings() {
     attendanceSettings.value = (data.data as AttendanceSettings | null) ?? null
     applySettingsToForm(data.data || {})
     applyShiftComplianceToForm(data.data || {})
+    applyMultiShiftDayToForm(data.data || {})
     applyOutdoorToForm(data.data || {})
     applyInOutMergeToForm(data.data || {})
     applyAutoShiftMatchingToForm(data.data || {})
@@ -16786,6 +16862,41 @@ function applyShiftComplianceToForm(settings: AttendanceSettings) {
   shiftComplianceForm.dailyMaxMinutes = capStr(sc.dailyMaxMinutes)
   shiftComplianceForm.weeklyMaxMinutes = capStr(sc.weeklyMaxMinutes)
   shiftComplianceForm.monthlyMaxMinutes = capStr(sc.monthlyMaxMinutes)
+}
+
+function normalizeMultiShiftMaxSlots(value: unknown): number {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 3 ? parsed : 3
+}
+
+const multiShiftSlotMax = computed(() => normalizeMultiShiftMaxSlots(multiShiftDayForm.maxSlots))
+const multiShiftSlotMaxIndex = computed(() => Math.max(0, multiShiftSlotMax.value - 1))
+
+function normalizeAssignmentSlotIndex(value: unknown): number {
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed < 0) return 0
+  return Math.min(parsed, multiShiftSlotMaxIndex.value)
+}
+
+function normalizeStoredAssignmentSlotIndex(value: unknown): number {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0
+}
+
+function assignmentSlotIndex(assignment: AttendanceAssignment): number {
+  return normalizeStoredAssignmentSlotIndex(assignment.slotIndex ?? assignment.slot_index ?? 0)
+}
+
+function assignmentSlotLabel(assignment: AttendanceAssignment): string {
+  const index = assignmentSlotIndex(assignment)
+  return tr(`Slot ${index}`, `槽位 ${index}`)
+}
+
+function applyMultiShiftDayToForm(settings: AttendanceSettings) {
+  const multiShiftDay = settings.multiShiftDay || {}
+  multiShiftDayForm.enabled = multiShiftDay.enabled === true
+  multiShiftDayForm.maxSlots = String(normalizeMultiShiftMaxSlots(multiShiftDay.maxSlots))
+  assignmentForm.slotIndex = normalizeAssignmentSlotIndex(assignmentForm.slotIndex)
 }
 
 function applyOutdoorToForm(settings: AttendanceSettings) {
@@ -16880,6 +16991,39 @@ async function saveShiftCompliance() {
     setStatus(tr('Shift compliance updated.', '排班合规已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save shift compliance', '保存排班合规失败'), 'save-settings')
+  } finally {
+    settingsLoading.value = false
+  }
+}
+
+async function saveMultiShiftDay() {
+  settingsLoading.value = true
+  try {
+    // PUT ONLY multiShiftDay. Keeping it isolated prevents unrelated attendance settings from being
+    // re-saved when admins only enable the slot editor.
+    const payload = {
+      multiShiftDay: {
+        enabled: multiShiftDayForm.enabled === true,
+        maxSlots: normalizeMultiShiftMaxSlots(multiShiftDayForm.maxSlots),
+      },
+    }
+    const response = await apiFetchWithTimeout('/api/attendance/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw createForbiddenError()
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to save multi-shift day', '保存一天多班次失败'))
+    }
+    adminForbidden.value = false
+    applyMultiShiftDayToForm((data.data || payload) as AttendanceSettings)
+    setStatus(tr('Multi-shift day updated.', '一天多班次已更新。'))
+  } catch (error: any) {
+    setStatusFromError(error, tr('Failed to save multi-shift day', '保存一天多班次失败'), 'save-settings')
   } finally {
     settingsLoading.value = false
   }
@@ -18233,6 +18377,7 @@ function resetAssignmentForm() {
   assignmentForm.startDate = toDateInput(today)
   assignmentForm.endDate = ''
   assignmentForm.isActive = true
+  assignmentForm.slotIndex = 0
 }
 
 function editAssignment(item: AttendanceAssignmentItem) {
@@ -18242,6 +18387,7 @@ function editAssignment(item: AttendanceAssignmentItem) {
   assignmentForm.startDate = item.assignment.startDate
   assignmentForm.endDate = item.assignment.endDate ?? ''
   assignmentForm.isActive = item.assignment.isActive
+  assignmentForm.slotIndex = assignmentSlotIndex(item.assignment)
 }
 
 async function loadAssignments() {
@@ -18285,6 +18431,7 @@ async function saveAssignment() {
       endDate: endDate.length > 0 ? endDate : null,
       isActive: assignmentForm.isActive,
       orgId: normalizedOrgId(),
+      ...(multiShiftDayForm.enabled ? { slotIndex: normalizeAssignmentSlotIndex(assignmentForm.slotIndex) } : {}),
     }
     const shiftAdvisory = await previewComprehensiveHoursAssignmentAdvisory('shift', {
       userId: payload.userId,
