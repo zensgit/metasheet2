@@ -19,17 +19,15 @@
 | ✅ A-full 设计 | #2410 | 一跳外表传播 design-lock |
 | ✅ A-full 运行时 | #2450 | `85f4c074b` 2026-06-10。接缝扩展 + AF1-AF8 + AF6b;**含独立 review 全环**:REQUEST-CHANGES(F1 major:全公式重算 × actor 视角 hydration = 低权限 actor 持久 clobber 无关公式 8→1,真线复现)→ 修复 = 依赖门控结果兼任引擎重算白名单(A-full + A-min 双路径;create 保持全算)→ FIX-VERIFIED-APPROVE |
 
-## 1. 进行中(owner 已 opt-in,并行 lane)
+## 1. 已落地(2026-06-10 同日收官,并行 lane)
 
-- [ ] ⬜ **FOL-1 相关记录下游失效(realtime fan-out + Yjs 读侧)** — Lane A
-  - **缺口**:A-full 物化相关记录 formula 后,①相关表 realtime 零信号(Step 6 只 publish 源表);②相关记录的缓存 Y.Doc 无人失效(Step 3 钩子只拿源记录 id)。
-  - **锁定要点**(详见计划 §2):纯失效信号零值上线;**发布门 = 受影响门**(F1 白名单同款,非 echo 即发——防放大);**fieldIds = 未掩码 affected 元数据**(helper 返回形扩展);actorId 跨表 omit / 同表携带;Yjs 读侧失效纳入;partialSuccess N× 成本显式接受;顺手修正 RWS 陈旧推值注释。
-  - **测试**:R1-R7(发布门/未掩码 fieldIds/actorId 分裂/零 recordPatches/主事件回归/Yjs 双向)。
-- [ ] ⬜ **FOL-2 dry-run 预览 hydration** — Lane B
-  - **缺口**:#5c 真记录采样只取 RAW,"与生产一致"理由在 A-min 后倒置。
-  - **锁定要点**(详见计划 §3):route 层 hydrate→mask→手填覆盖;**hydration 按表达式引用裁剪**(成本绑定);actor 视角;**joined-string 代入语义如实钉死**(`[100]`→`"100"`、`[]`→`""`、rollup null→`'0'`);引擎保持 no-DB。
-  - **测试**:D1-D7;**新夹具(foreign sheet + links)是工作量主体**,非简单断言翻转。
-- [ ] ⬜ **验证 MD**(两 lane 落地后):`multitable-formula-over-lookup-followups-verification-20260610.md`,per-slice 证据 + 本 TODO 终态打勾。
+- [x] ✅ **FOL-1 相关记录下游失效(realtime fan-out + Yjs 读侧)** — **#2464 MERGED `d0061a2c4`**
+  - 9 项锁定决策零偏差落地:发布门=受影响门(echo-only 链接记录不入 recordIds);fieldIds=未掩码 affected 元数据(deny actor 钉死),HTTP echo 剥元数据(双层精确键集钉);actorId 跨表 omit / 同表携带;广播 payload 精确键集断言(无值键可能);Yjs invalidator 勘察为 record-id 全局键,相关 id 经既有 post-commit 钩子直传。
+  - R1-R7 fail-first(R1/R2/R3 + 4 单元红→绿);review APPROVE-WITH-NITS,3 发现(时间戳 flake/wire 键集钉/R7 注释)合并前全修。
+- [x] ✅ **FOL-2 dry-run 预览 hydration** — **#2465 MERGED `229a7ec5b`**
+  - 7 项锁定决策零偏差落地:hydrate→mask→手填覆盖;表达式裁剪(D6 用查询捕获 + 未引用诱饵表证明零额外读);joined-string 语义按引擎实测钉死;#5c 注释更新;引擎 no-DB 不变量保持。
+  - D1-D7 fail-first(6 红→绿,dryrun 套件 20→26);review APPROVE-WITH-NITS,F1(注释失实+link 死重)合并前修复,F2(hydration 先于 unknown_field 门)接受为成本注记。
+- [x] ✅ **验证 MD**:`multitable-formula-over-lookup-followups-verification-20260610.md`(per-slice 证据 + 本 TODO 终态)。
 
 ## 2. 门控项(沿用既有 gate,本链不重复拍板)
 
