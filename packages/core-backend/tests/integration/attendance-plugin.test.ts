@@ -2765,9 +2765,17 @@ attendanceIntegrationDescribe(
     const employeeUserId = `attendance-publish-employee-${runSuffix}`
     const rotationUserId = `attendance-publish-rotation-${runSuffix}`
     const conflictUserId = `attendance-publish-conflict-${runSuffix}`
-    const workDate = '2026-07-20'
-    const rotationDate = '2026-07-21'
-    const conflictDate = '2026-07-22'
+    const baseDate = new Date()
+    baseDate.setUTCHours(0, 0, 0, 0)
+    baseDate.setUTCDate(baseDate.getUTCDate() - (((baseDate.getUTCDay() + 6) % 7) + 14))
+    const testDate = (offsetDays: number) => {
+      const date = new Date(baseDate)
+      date.setUTCDate(baseDate.getUTCDate() + offsetDays)
+      return date.toISOString().slice(0, 10)
+    }
+    const workDate = testDate(0)
+    const rotationDate = testDate(1)
+    const conflictDate = testDate(2)
     const occurredAt = `${workDate}T02:30:00.000Z`
     const pool = new Pool({ connectionString: dbUrl })
     let originalSettings: Record<string, unknown> = {}
