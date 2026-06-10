@@ -2387,7 +2387,7 @@ attendanceIntegrationDescribe(
       return res
     }
 
-    async function createShift(name: string, workStartTime: string, workEndTime: string): Promise<string> {
+    async function createShift(name: string, workStartTime: string, workEndTime: string, workingDays: number[] = [1, 2, 3, 4, 5]): Promise<string> {
       const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
         method: 'POST',
         headers,
@@ -2396,7 +2396,7 @@ attendanceIntegrationDescribe(
           timezone: 'Asia/Shanghai',
           workStartTime,
           workEndTime,
-          workingDays: [1, 2, 3, 4, 5],
+          workingDays,
         }),
       })
       expect(shiftRes.status, JSON.stringify(shiftRes.body)).toBe(201)
@@ -2406,12 +2406,12 @@ attendanceIntegrationDescribe(
       return shiftId
     }
 
-    async function createAssignment(userId: string, shiftId: string, slotIndex?: number) {
+    async function createAssignment(userId: string, shiftId: string, slotIndex?: number, date: string = workDate) {
       const body: Record<string, unknown> = {
         userId,
         shiftId,
-        startDate: workDate,
-        endDate: workDate,
+        startDate: date,
+        endDate: date,
         isActive: true,
       }
       if (slotIndex !== undefined) body.slotIndex = slotIndex
@@ -2452,6 +2452,15 @@ attendanceIntegrationDescribe(
       const defaultOffSecondRes = await createAssignment(defaultOffUserId, eveningShiftId, 1)
       expectShiftAssignmentConflict(defaultOffSecondRes)
 
+      const defaultOffEffectiveCalendarRes = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${workDate}&to=${workDate}&userId=${encodeURIComponent(defaultOffUserId)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      )
+      expect(defaultOffEffectiveCalendarRes.status, JSON.stringify(defaultOffEffectiveCalendarRes.body)).toBe(200)
+      const defaultOffItem = ((defaultOffEffectiveCalendarRes.body as { data?: { items?: Array<{ effective?: { plannedMinutes?: number; slots?: unknown[] } }> } } | undefined)?.data?.items ?? [])[0]
+      expect(defaultOffItem?.effective?.plannedMinutes).toBeUndefined()
+      expect(defaultOffItem?.effective?.slots).toBeUndefined()
+
       await saveSettings({
         multiShiftDay: { enabled: true, maxSlots: 3 },
         shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
@@ -2483,6 +2492,91 @@ attendanceIntegrationDescribe(
         [multiSlotUserId, workDate]
       )
       expect(slotRows.rows.map(row => Number(row.slot_index))).toEqual([0, 1])
+
+      const effectiveCalendarRes = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${workDate}&to=${workDate}&userId=${encodeURIComponent(multiSlotUserId)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      )
+      expect(effectiveCalendarRes.status, JSON.stringify(effectiveCalendarRes.body)).toBe(200)
+      const effectiveItems = (effectiveCalendarRes.body as { data?: { items?: Array<{ effective?: { plannedMinutes?: number; slots?: Array<{ slotIndex?: number; shiftId?: string; plannedMinutes?: number }> } }> } } | undefined)?.data?.items ?? []
+      expect(effectiveItems).toHaveLength(1)
+      const effectiveSlots = effectiveItems[0]?.effective?.slots ?? []
+      expect(effectiveSlots.map(slot => slot.slotIndex)).toEqual([0, 1])
+      expect(effectiveSlots.map(slot => slot.shiftId)).toEqual([morningShiftId, eveningShiftId])
+      expect(effectiveSlots.map(slot => slot.plannedMinutes)).toEqual([240, 240])
+      expect(effectiveItems[0]?.effective?.plannedMinutes).toBe(480)
+
+      const comprehensivePreviewRes = await requestJson(`${baseUrl}/api/attendance/comprehensive-hours/preview`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          metric: 'planned',
+          enforcement: 'warn',
+          capMinutes: 1000,
+          userId: multiSlotUserId,
+          period: { type: 'custom_range', from: workDate, to: workDate },
+        }),
+      })
+      expect(comprehensivePreviewRes.status, JSON.stringify(comprehensivePreviewRes.body)).toBe(200)
+      const comprehensiveRows = (comprehensivePreviewRes.body as { data?: { rows?: Array<{ userId?: string; minutes?: number; plannedMinutes?: number }> } } | undefined)?.data?.rows ?? []
+      expect(comprehensiveRows).toHaveLength(1)
+      expect(comprehensiveRows[0]?.userId).toBe(multiSlotUserId)
+      expect(comprehensiveRows[0]?.minutes).toBe(480)
+      expect(comprehensiveRows[0]?.plannedMinutes).toBe(480)
+
+      const saturdayDate = '2026-07-11'
+      const weekdayOnlyShiftId = await createShift(`Multi Shift Weekday Only ${runSuffix}`, '08:00', '12:00', [1, 2, 3, 4, 5])
+      const saturdayOnlyShiftId = await createShift(`Multi Shift Saturday Only ${runSuffix}`, '13:00', '17:00', [6])
+      const mixedWorkingDaysUserId = `${adminUserId}-mixed-days`
+      expect((await createAssignment(mixedWorkingDaysUserId, weekdayOnlyShiftId, 0, saturdayDate)).status).toBe(201)
+      expect((await createAssignment(mixedWorkingDaysUserId, saturdayOnlyShiftId, 1, saturdayDate)).status).toBe(201)
+
+      const mixedEffectiveCalendarRes = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${saturdayDate}&to=${saturdayDate}&userId=${encodeURIComponent(mixedWorkingDaysUserId)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      )
+      expect(mixedEffectiveCalendarRes.status, JSON.stringify(mixedEffectiveCalendarRes.body)).toBe(200)
+      const mixedItem = ((mixedEffectiveCalendarRes.body as { data?: { items?: Array<{ effective?: { isWorkingDay?: boolean; plannedMinutes?: number; slots?: Array<{ slotIndex?: number; plannedMinutes?: number }> } }> } } | undefined)?.data?.items ?? [])[0]
+      expect(mixedItem?.effective?.isWorkingDay).toBe(true)
+      expect(mixedItem?.effective?.slots?.map(slot => slot.slotIndex)).toEqual([0, 1])
+      expect(mixedItem?.effective?.slots?.map(slot => slot.plannedMinutes)).toEqual([0, 240])
+      expect(mixedItem?.effective?.plannedMinutes).toBe(240)
+
+      const mixedComprehensivePreviewRes = await requestJson(`${baseUrl}/api/attendance/comprehensive-hours/preview`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          metric: 'planned',
+          enforcement: 'warn',
+          capMinutes: 1000,
+          userId: mixedWorkingDaysUserId,
+          period: { type: 'custom_range', from: saturdayDate, to: saturdayDate },
+        }),
+      })
+      expect(mixedComprehensivePreviewRes.status, JSON.stringify(mixedComprehensivePreviewRes.body)).toBe(200)
+      const mixedComprehensiveRows = (mixedComprehensivePreviewRes.body as { data?: { rows?: Array<{ minutes?: number; plannedMinutes?: number }> } } | undefined)?.data?.rows ?? []
+      expect(mixedComprehensiveRows[0]?.minutes).toBe(240)
+      expect(mixedComprehensiveRows[0]?.plannedMinutes).toBe(240)
+
+      await saveSettings({
+        multiShiftDay: { enabled: true, maxSlots: 3 },
+        shiftCompliance: { enforcement: 'block', dailyMaxMinutes: 300, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+      })
+      const dailyCapRes = await requestJson(`${baseUrl}/api/attendance/assignments/${eveningAssignment.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ slotIndex: 2 }),
+      })
+      expect(dailyCapRes.status, JSON.stringify(dailyCapRes.body)).toBe(422)
+      const dailyCapError = (dailyCapRes.body as { error?: { code?: string; granularity?: string; projectedMinutes?: number } } | undefined)?.error
+      expect(dailyCapError?.code).toBe('SHIFT_COMPLIANCE_CAP_EXCEEDED')
+      expect(dailyCapError?.granularity).toBe('daily')
+      expect(dailyCapError?.projectedMinutes).toBe(480)
+
+      await saveSettings({
+        multiShiftDay: { enabled: true, maxSlots: 3 },
+        shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+      })
 
       expectShiftAssignmentConflict(await createAssignment(multiSlotUserId, eveningShiftId, 1))
       expectShiftAssignmentConflict(await createAssignment(multiSlotUserId, overlapShiftId, 2))
