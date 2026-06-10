@@ -9253,6 +9253,32 @@ function mapAttendanceGroupFixedScheduleBlockingConflict(row, draft) {
   return mapped
 }
 
+function isTemporaryShiftOverlayRowForFixedScheduleDraft(row, draft, overlaps = []) {
+  if (!row || row.kind === 'rotation') return false
+  if (row.assignment_kind !== 'temporary') return false
+  if (row.temporary_mode !== 'replace') return false
+  if (row.temporary_replaces_kind !== 'shift') return false
+  const replacementAssignmentId = normalizeUuidString(row.temporary_replaces_assignment_id)
+  if (!replacementAssignmentId) return false
+  const rowStartDate = normalizeDateOnly(row.start_date) ?? row.start_date
+  const rowEndDate = normalizeAttendanceScheduleAssignmentEndDate(row.end_date) || rowStartDate
+  const draftStartDate = normalizeDateOnly(draft.startDate) ?? draft.startDate
+  const draftSlotIndex = normalizeAttendanceScheduleSlotIndex(draft.slotIndex, 0)
+  if (
+    String(row.user_id || '') !== String(draft.userId || '')
+    || normalizeAttendanceScheduleSlotIndex(row.slot_index, 0) !== draftSlotIndex
+    || rowStartDate > draftStartDate
+    || rowEndDate < draftStartDate
+  ) {
+    return false
+  }
+  return overlaps.some((candidate) =>
+    String(candidate?.id || '') === replacementAssignmentId
+    && candidate?.assignment_kind !== 'temporary'
+    && isExactAttendanceGroupFixedScheduleAssignment(candidate, draft)
+  )
+}
+
 async function acquireAttendanceScheduleAssignmentLocks(db, orgId, userIds) {
   const lockUserIds = Array.from(new Set(
     (Array.isArray(userIds) ? userIds : [])
@@ -9356,6 +9382,9 @@ async function buildAttendanceGroupFixedSchedulePlan(db, input, options = {}) {
             a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
             a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
             a.producer_type, a.producer_ref_id, a.producer_key, a.producer_run_id,
+            a.assignment_kind, a.temporary_mode, a.temporary_replaces_kind,
+            a.temporary_replaces_assignment_id, a.temporary_reason, a.temporary_created_by,
+            a.temporary_created_at,
             'shift'::text AS kind,
             s.work_start_time, s.work_end_time, s.is_overnight
        FROM attendance_shift_assignments a
@@ -9414,6 +9443,7 @@ async function buildAttendanceGroupFixedSchedulePlan(db, input, options = {}) {
     }
     const overlaps = overlapsByUserId.get(userId) ?? []
     const blockingRow = overlaps.find((row) => {
+      if (isTemporaryShiftOverlayRowForFixedScheduleDraft(row, draft, overlaps)) return false
       if (isExactAttendanceGroupFixedScheduleAssignment(row, draft)) return false
       if (multiShiftDay.enabled && row?.kind !== 'rotation') {
         const existingSlotIndex = normalizeAttendanceScheduleSlotIndex(row?.slot_index, 0)
@@ -32523,21 +32553,50 @@ module.exports = {
             return
           }
 
-          const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existingRows[0].publish_status)
-          if (!isAttendanceSchedulePublishedDirectlyMutable(existingRows[0])) {
+          const existing = existingRows[0]
+          const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existing.publish_status)
+          const isPublishedTemporaryAssignment = existing.assignment_kind === 'temporary' && existingPublishStatus === 'published'
+          if (!isPublishedTemporaryAssignment && !isAttendanceSchedulePublishedDirectlyMutable(existing)) {
             respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
             return
           }
 
-          const windowAccess = await enforceShiftEditWindow(res, [existingRows[0].start_date])
+          const windowAccess = await enforceShiftEditWindow(res, [existing.start_date])
           if (!windowAccess) return
 
           const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
             orgId,
-            payload: existingRows[0],
+            payload: existing,
             actorAccess,
           })
           if (!access) return
+
+          if (isPublishedTemporaryAssignment) {
+            const result = await db.transaction(async (trx) => {
+              await acquireAttendanceScheduleAssignmentLock(trx, orgId, existing.user_id)
+              const rows = await trx.query(
+                `UPDATE attendance_shift_assignments
+                    SET is_active = false,
+                        updated_at = now()
+                  WHERE id = $1
+                    AND org_id = $2
+                    AND assignment_kind = 'temporary'
+                    AND COALESCE(publish_status, 'published') = 'published'
+                    AND COALESCE(is_active, true) = true
+                  RETURNING *`,
+                [assignmentId, orgId]
+              )
+              return rows[0] ? { row: rows[0] } : { missing: true }
+            })
+            if (result.missing) {
+              res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Assignment not found' } })
+              return
+            }
+            const assignment = mapAssignmentRow(result.row)
+            emitEvent('attendance.assignment.deleted', { orgId, assignmentId })
+            res.json({ ok: true, data: { id: assignmentId, assignment } })
+            return
+          }
 
           const rows = await db.query(
             `DELETE FROM attendance_shift_assignments

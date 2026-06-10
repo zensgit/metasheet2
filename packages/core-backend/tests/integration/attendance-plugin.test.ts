@@ -3,6 +3,7 @@ import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
 import fs from 'fs/promises'
+import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
 import http from 'http'
 import { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
@@ -3767,10 +3768,14 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const adminUserId = `attendance-temp-shift-admin-${runSuffix}`
     const userId = `attendance-temp-shift-user-${runSuffix}`
+    const fixedUserId = `attendance-temp-shift-fixed-${runSuffix}`
     const workDate = '2026-08-03'
+    const fixedDate = '2026-08-04'
+    const staleTempDate = '2026-08-05'
     const pool = new Pool({ connectionString: dbUrl })
     let originalSettings: Record<string, unknown> = {}
     const shiftIds: string[] = []
+    let fixedGroupId: string | undefined
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
@@ -3812,6 +3817,16 @@ attendanceIntegrationDescribe(
         headers,
         body: JSON.stringify({ assignmentIds: [assignmentId] }),
       })
+    }
+
+    async function loadEffectiveSlot(targetUserId: string, targetDate: string) {
+      const effectiveCalendarRes = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${targetDate}&to=${targetDate}&userId=${encodeURIComponent(targetUserId)}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      expect(effectiveCalendarRes.status, JSON.stringify(effectiveCalendarRes.body)).toBe(200)
+      const item = ((effectiveCalendarRes.body as { data?: { items?: Array<{ effective?: { slots?: Array<{ shiftId?: string; assignmentKind?: string; replaces?: { assignmentId?: string } }> } }> } } | undefined)?.data?.items ?? [])[0]
+      return item?.effective?.slots?.[0]
     }
 
     function tempDraftBody(replacementShiftId: string, replacementAssignmentId: string, overrides: Record<string, unknown> = {}) {
@@ -4040,6 +4055,115 @@ attendanceIntegrationDescribe(
       })
       expect(secondTempRes.status, JSON.stringify(secondTempRes.body)).toBe(409)
       expect((secondTempRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ATTENDANCE_SCHEDULE_ASSIGNMENT_CONFLICT')
+
+      const fixedGroupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `temp-shift-fixed-${runSuffix}`,
+          timezone: 'UTC',
+          attendanceType: 'fixed_shift',
+          description: 'temporary-shift fixed rebuild compatibility',
+        }),
+      })
+      expect(fixedGroupRes.status, JSON.stringify(fixedGroupRes.body)).toBe(200)
+      fixedGroupId = (fixedGroupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(fixedGroupId).toBeTruthy()
+      if (!fixedGroupId) return
+      const fixedMemberRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/members`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ userIds: [fixedUserId] }),
+      })
+      expect(fixedMemberRes.status, JSON.stringify(fixedMemberRes.body)).toBe(200)
+      const fixedApplyRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/apply`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ shiftId: baseShiftId, startDate: fixedDate, endDate: fixedDate }),
+      })
+      expect(fixedApplyRes.status, JSON.stringify(fixedApplyRes.body)).toBe(201)
+      const fixedBaseRows = await pool.query(
+        `SELECT id
+           FROM attendance_shift_assignments
+          WHERE user_id = $1
+            AND start_date = $2::date
+            AND shift_id = $3
+            AND producer_type = 'attendance_group_fixed_schedule'
+            AND COALESCE(is_active, true) = true`,
+        [fixedUserId, fixedDate, baseShiftId],
+      )
+      const fixedBaseAssignmentId = fixedBaseRows.rows[0]?.id
+      expect(fixedBaseAssignmentId).toBeTruthy()
+      if (!fixedBaseAssignmentId) return
+      const fixedTempDraftRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(tempDraftBody(replacementShiftId, fixedBaseAssignmentId, {
+          userId: fixedUserId,
+          startDate: fixedDate,
+          endDate: fixedDate,
+          temporaryReason: 'fixed rebuild replacement',
+        })),
+      })
+      expect(fixedTempDraftRes.status, JSON.stringify(fixedTempDraftRes.body)).toBe(201)
+      const fixedTempDraftId = (fixedTempDraftRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+      expect(fixedTempDraftId).toBeTruthy()
+      if (!fixedTempDraftId) return
+      const publishFixedTempRes = await publish(fixedTempDraftId)
+      expect(publishFixedTempRes.status, JSON.stringify(publishFixedTempRes.body)).toBe(200)
+      expect(await loadEffectiveSlot(fixedUserId, fixedDate)).toMatchObject({
+        shiftId: replacementShiftId,
+        assignmentKind: 'temporary',
+        replaces: { assignmentId: fixedBaseAssignmentId },
+      })
+      const fixedRebuildRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/rebuild`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ shiftId: baseShiftId, startDate: fixedDate, endDate: fixedDate }),
+      })
+      expect(fixedRebuildRes.status, JSON.stringify(fixedRebuildRes.body)).toBe(200)
+      expect(await loadEffectiveSlot(fixedUserId, fixedDate)).toMatchObject({
+        shiftId: replacementShiftId,
+        assignmentKind: 'temporary',
+        replaces: { assignmentId: fixedBaseAssignmentId },
+      })
+
+      const staleApplyRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/apply`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ shiftId: baseShiftId, startDate: staleTempDate, endDate: staleTempDate }),
+      })
+      expect(staleApplyRes.status, JSON.stringify(staleApplyRes.body)).toBe(201)
+      await pool.query(
+        `INSERT INTO attendance_shift_assignments
+          (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, publish_status,
+           assignment_kind, temporary_mode, temporary_replaces_kind, temporary_replaces_assignment_id,
+           temporary_reason, temporary_created_by, temporary_created_at, locked_at)
+         VALUES ($1, 'default', $2, $3, 0, $4::date, $4::date, true, 'published',
+           'temporary', 'replace', 'shift', $5, 'stale unrelated temp overlay', $6, now(), now())`,
+        [randomUUID(), fixedUserId, replacementShiftId, staleTempDate, baseAssignment.id, adminUserId],
+      )
+      const staleRebuildRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/rebuild`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ shiftId: baseShiftId, startDate: staleTempDate, endDate: staleTempDate }),
+      })
+      expect(staleRebuildRes.status, JSON.stringify(staleRebuildRes.body)).toBe(409)
+      expect((staleRebuildRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT')
+
+      const deleteTempRes = await requestJson(`${baseUrl}/api/attendance/assignments/${tempDraft.id}`, {
+        method: 'DELETE',
+        headers,
+      })
+      expect(deleteTempRes.status, JSON.stringify(deleteTempRes.body)).toBe(200)
+      const inactiveTempRows = await pool.query(
+        'SELECT is_active FROM attendance_shift_assignments WHERE id = $1',
+        [tempDraft.id],
+      )
+      expect(inactiveTempRows.rows[0]?.is_active).toBe(false)
+      expect(await loadEffectiveSlot(userId, workDate)).toMatchObject({
+        shiftId: baseShiftId,
+      })
     } finally {
       if (Object.keys(originalSettings).length > 0) {
         await requestJson(`${baseUrl}/api/attendance/settings`, {
@@ -4048,7 +4172,11 @@ attendanceIntegrationDescribe(
           body: JSON.stringify(originalSettings),
         }).catch(() => undefined)
       }
-      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = ANY($1::text[])', [[userId, fixedUserId]]).catch(() => undefined)
+      if (fixedGroupId) {
+        await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1', [fixedGroupId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_groups WHERE id = $1', [fixedGroupId]).catch(() => undefined)
+      }
       if (shiftIds.length > 0) {
         await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [shiftIds]).catch(() => undefined)
       }
