@@ -16,6 +16,8 @@ This is the final staging gate for the schedule publish/draft SHOULD item:
 - restrictive `shiftEditPolicy` blocks publish with `SHIFT_EDIT_WINDOW_EXCEEDED` and leaves the row draft;
 - settings are restored and synthetic rows are removed with residue 0.
 
+The smoke temporarily enables `multiShiftDay` because the published-visibility assertion reads `effective.slots`, which is only emitted when multi-shift output is enabled. The original settings are restored in cleanup.
+
 It does **not** deploy, restart staging, exercise the frontend browser, or mark the tracker ✅ by itself. The frontend P4 UI has its own web guard; this smoke proves the staged runtime path.
 
 ## Prerequisites

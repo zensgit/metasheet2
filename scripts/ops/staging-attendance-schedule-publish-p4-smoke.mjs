@@ -154,7 +154,7 @@ async function main() {
     body: {
       shiftEditPolicy: { mode: 'unrestricted', windowDays: 0 },
       shiftCompliance: { enforcement: 'block', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
-      multiShiftDay: { enabled: false, maxSlots: 3 },
+      multiShiftDay: { enabled: true, maxSlots: 3 },
       punchPolicy: { unscheduled: { mode: 'allow' } },
     },
   })
