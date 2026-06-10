@@ -2110,6 +2110,155 @@ describe('Attendance admin regressions', () => {
     })
   })
 
+  it('loads multiShiftDay into the config card and PUTs ONLY { multiShiftDay }', async () => {
+    attendanceSettingsData = {
+      multiShiftDay: { enabled: true, maxSlots: 3 },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const enabled = container!.querySelector<HTMLInputElement>('[data-multishift="enabled"]')
+    const maxSlots = container!.querySelector<HTMLInputElement>('[data-multishift="max-slots"]')
+    expect(Boolean(enabled && maxSlots)).toBe(true)
+    expect(enabled!.checked).toBe(true)
+    expect(maxSlots!.value).toBe('3')
+
+    maxSlots!.value = '2'
+    maxSlots!.dispatchEvent(new Event('input'))
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-multishift="save"]')!.click()
+    await flushUi(6)
+
+    expect(lastSettingsPutBody()).toEqual({
+      multiShiftDay: { enabled: true, maxSlots: 2 },
+    })
+  })
+
+  it('shows the slot editor when multiShiftDay is enabled, preserves the assignment payload, and renders slot chips', async () => {
+    const assignmentWrites: unknown[] = []
+    attendanceSettingsData = {
+      multiShiftDay: { enabled: true, maxSlots: 3 },
+    }
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.startsWith('/api/admin/users')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-multi', email: 'multi@example.com', name: 'Multi Slot User', role: 'employee', is_active: true, is_admin: false, last_login_at: null, created_at: '2026-06-10T00:00:00.000Z' },
+            ],
+          },
+        })
+      }
+      if (url === '/api/attendance-admin/users/batch/resolve') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            requested: 1,
+            items: [{ id: 'user-multi', email: 'multi@example.com', name: 'Multi Slot User', is_active: true }],
+            missingUserIds: [],
+            inactiveUserIds: [],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/settings')) {
+        if (method !== 'GET') {
+          return jsonResponse(200, { ok: true, data: attendanceSettingsData ?? {} })
+        }
+        return jsonResponse(200, { ok: true, data: attendanceSettingsData ?? {} })
+      }
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'shift-morning', name: 'Morning slot', timezone: 'UTC', workStartTime: '08:00', workEndTime: '12:00', isOvernight: false, lateGraceMinutes: 10, earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
+              { id: 'shift-evening', name: 'Evening slot', timezone: 'UTC', workStartTime: '13:00', workEndTime: '17:00', isOvernight: false, lateGraceMinutes: 10, earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            status: 'ok',
+            rows: [],
+            totals: { minutes: 0, plannedMinutes: 0 },
+            degraded: false,
+          },
+        })
+      }
+      if (url === '/api/attendance/assignments' && method === 'POST') {
+        assignmentWrites.push(JSON.parse(String(init?.body || '{}')))
+        return jsonResponse(201, { ok: true, data: { id: 'assignment-new' } })
+      }
+      if (url.includes('/api/attendance/assignments')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                assignment: { id: 'assignment-slot-0', userId: 'user-multi', shiftId: 'shift-morning', slotIndex: 0, startDate: '2026-06-10', endDate: null, isActive: true },
+                shift: { id: 'shift-morning', name: 'Morning slot', timezone: 'UTC', workStartTime: '08:00', workEndTime: '12:00', isOvernight: false, lateGraceMinutes: 10, earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
+              },
+              {
+                assignment: { id: 'assignment-slot-1', userId: 'user-multi', shiftId: 'shift-evening', slotIndex: 1, startDate: '2026-06-10', endDate: null, isActive: true },
+                shift: { id: 'shift-evening', name: 'Evening slot', timezone: 'UTC', workStartTime: '13:00', workEndTime: '17:00', isOvernight: false, lateGraceMinutes: 10, earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
+              },
+            ],
+          },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const assignmentsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')
+    expect(assignmentsNav).toBeTruthy()
+    assignmentsNav!.click()
+    await flushUi(4)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')!
+    const slotInput = section.querySelector<HTMLInputElement>('[data-multishift="assignment-slot"]')
+    expect(slotInput).toBeTruthy()
+    selectUserPicker(section, '#attendance-assignment-user-id', 'user-multi')
+    const shiftSelect = section.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')!
+    shiftSelect.value = 'shift-evening'
+    shiftSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section, '#attendance-assignment-start-date', '2026-06-10')
+    setInput(section, '#attendance-assignment-end-date', '2026-06-10')
+    slotInput!.value = '1'
+    slotInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const createButton = Array.from(section.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create assignment'))
+    expect(createButton).toBeTruthy()
+    createButton!.click()
+    await flushUi(8)
+
+    expect(assignmentWrites).toEqual([
+      {
+        userId: 'user-multi',
+        shiftId: 'shift-evening',
+        startDate: '2026-06-10',
+        endDate: '2026-06-10',
+        isActive: true,
+        slotIndex: 1,
+      },
+    ])
+    const slotChips = Array.from(section.querySelectorAll<HTMLElement>('[data-attendance-assignment-slot-chip]'))
+      .map(item => item.textContent?.trim())
+    expect(slotChips).toEqual(['Slot 0', 'Slot 1'])
+  })
+
   // ② S3-2 外勤打卡审批 (outdoor approval) admin config card.
   const lastSettingsPutBody = (): unknown => {
     const puts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
