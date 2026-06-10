@@ -74,7 +74,7 @@ P4 schedule-publish staging smoke @ http://127.0.0.1:8082 (user publishp4-..., s
   PASS  publish outside shiftEditPolicy window returns 422 and the edit-window error code
   PASS  edit-window-blocked publish leaves the row as draft
 --- restore + cleanup ---
-  settings restore status 200
+  PASS  restore original settings
   PASS  cleanup residue = 0 (assignments 0, shifts 0)
 
 === PASS — ... passed, 0 failed ===  stamp publish-p4-...

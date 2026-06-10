@@ -236,7 +236,7 @@ async function cleanup() {
   }
   if (originalSettings) {
     const restored = await api('/api/attendance/settings', { method: 'PUT', body: originalSettings })
-    console.log(`  settings restore status ${restored.status}`)
+    ok(restored.status === 200, `restore original settings (status ${restored.status})`, restored.body)
   }
   await q(
     `DELETE FROM attendance_shift_assignments
