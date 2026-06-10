@@ -31954,6 +31954,129 @@ module.exports = {
       })
     )
 
+    async function applyAutoShiftMatchingItems({
+      orgId,
+      items,
+      runId,
+      maxToleranceMinutes,
+      minConfidenceToApply,
+      enforceEditWindow,
+      resolveActorAccess,
+      assertDispatchAllowed,
+    }) {
+      const windowAccess = await enforceEditWindow(items.map((item) => item.workDate))
+      if (!windowAccess) return null
+
+      const actorAccess = await resolveActorAccess()
+      if (!actorAccess) return null
+      for (const item of items) {
+        const access = await assertDispatchAllowed(item, actorAccess)
+        if (!access) return null
+      }
+
+      return db.transaction(async (trx) => {
+        const applied = []
+        const skipped = []
+        for (const item of items) {
+          await acquireAttendanceScheduleAssignmentLock(trx, orgId, item.userId)
+          const producerKey = buildAutoShiftMatchProducerKey(item.userId, item.workDate)
+          const alreadyRows = await trx.query(
+            `SELECT *
+               FROM attendance_shift_assignments
+              WHERE org_id = $1
+                AND user_id = $2
+                AND COALESCE(is_active, true) = true
+                AND COALESCE(publish_status, 'published') = 'published'
+                AND producer_type = $3
+                AND producer_key = $4
+              ORDER BY created_at ASC
+              LIMIT 1`,
+            [orgId, item.userId, AUTO_SHIFT_MATCH_PRODUCER_TYPE, producerKey],
+          )
+          if (alreadyRows.length) {
+            skipped.push(mapAutoShiftApplySkipped(item, 'already_applied', { assignmentId: alreadyRows[0].id }))
+            continue
+          }
+
+          const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
+            kind: 'shift',
+            orgId,
+            userId: item.userId,
+            startDate: item.workDate,
+            endDate: item.workDate,
+            slotIndex: 0,
+            multiShiftEnabled: false,
+            isActive: true,
+          })
+          if (conflict) {
+            skipped.push(mapAutoShiftApplySkipped(item, 'already_scheduled', { conflict }))
+            continue
+          }
+
+          const preview = await buildAutoShiftMatchingPreview(trx, {
+            orgId,
+            from: item.workDate,
+            to: item.workDate,
+            userIds: [item.userId],
+            maxToleranceMinutes,
+            minConfidenceToApply,
+          })
+          const match = (preview.items || []).find((candidate) => candidate.candidateShiftId === item.candidateShiftId)
+          if (!match) {
+            const skipReason = (preview.skipped || []).find((entry) =>
+              entry.userId === item.userId && entry.workDate === item.workDate
+            )?.reason
+            skipped.push(mapAutoShiftApplySkipped(item, skipReason || 'stale_or_ineligible'))
+            continue
+          }
+          if (!autoShiftEvidenceEventIdsMatch(item.evidenceEventIds, match.evidence?.eventIds)) {
+            skipped.push(mapAutoShiftApplySkipped(item, 'stale_punch_evidence'))
+            continue
+          }
+
+          const shiftRows = await trx.query(
+            'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
+            [item.candidateShiftId, orgId],
+          )
+          if (!shiftRows.length) {
+            skipped.push(mapAutoShiftApplySkipped(item, 'shift_not_found'))
+            continue
+          }
+
+          const assignmentRows = await trx.query(
+            `INSERT INTO attendance_shift_assignments
+             (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id)
+             VALUES ($1, $2, $3, $4, 0, $5, $5, true, $6, $7, $8, $7)
+             RETURNING *`,
+            [
+              randomUUID(),
+              orgId,
+              item.userId,
+              item.candidateShiftId,
+              item.workDate,
+              AUTO_SHIFT_MATCH_PRODUCER_TYPE,
+              runId,
+              producerKey,
+            ],
+          )
+          await enforceShiftComplianceCap(trx, {
+            orgId,
+            userId: item.userId,
+            fromDate: item.workDate,
+            toDate: item.workDate,
+          })
+          applied.push({
+            userId: item.userId,
+            workDate: item.workDate,
+            candidateShiftId: item.candidateShiftId,
+            assignment: mapAssignmentRow(assignmentRows[0]),
+            shift: mapShiftRow(shiftRows[0]),
+          })
+        }
+        return { applied, skipped }
+      })
+    }
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/auto-shift-matching/apply',
@@ -31994,13 +32117,16 @@ module.exports = {
             return
           }
 
-          const windowAccess = await enforceShiftEditWindow(res, items.map((item) => item.workDate))
-          if (!windowAccess) return
-
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
-          for (const item of items) {
-            const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+          const runId = randomUUID()
+          const result = await applyAutoShiftMatchingItems({
+            orgId,
+            items,
+            runId,
+            maxToleranceMinutes: parsed.data.maxToleranceMinutes ?? autoShiftSettings.maxToleranceMinutes,
+            minConfidenceToApply: parsed.data.minConfidenceToApply ?? autoShiftSettings.minConfidenceToApply,
+            enforceEditWindow: (datesToCheck) => enforceShiftEditWindow(res, datesToCheck),
+            resolveActorAccess: () => resolveAttendanceSchedulerScopeActor(req, res),
+            assertDispatchAllowed: (item, access) => assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
               orgId,
               payload: {
                 userId: item.userId,
@@ -32009,113 +32135,10 @@ module.exports = {
                 endDate: item.workDate,
                 isActive: true,
               },
-              actorAccess,
-            })
-            if (!access) return
-          }
-
-          const runId = randomUUID()
-          const result = await db.transaction(async (trx) => {
-            const applied = []
-            const skipped = []
-            for (const item of items) {
-              await acquireAttendanceScheduleAssignmentLock(trx, orgId, item.userId)
-              const producerKey = buildAutoShiftMatchProducerKey(item.userId, item.workDate)
-              const alreadyRows = await trx.query(
-                `SELECT *
-                   FROM attendance_shift_assignments
-                  WHERE org_id = $1
-                    AND user_id = $2
-                    AND COALESCE(is_active, true) = true
-                    AND COALESCE(publish_status, 'published') = 'published'
-                    AND producer_type = $3
-                    AND producer_key = $4
-                  ORDER BY created_at ASC
-                  LIMIT 1`,
-                [orgId, item.userId, AUTO_SHIFT_MATCH_PRODUCER_TYPE, producerKey],
-              )
-              if (alreadyRows.length) {
-                skipped.push(mapAutoShiftApplySkipped(item, 'already_applied', { assignmentId: alreadyRows[0].id }))
-                continue
-              }
-
-              const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
-                kind: 'shift',
-                orgId,
-                userId: item.userId,
-                startDate: item.workDate,
-                endDate: item.workDate,
-                slotIndex: 0,
-                multiShiftEnabled: false,
-                isActive: true,
-              })
-              if (conflict) {
-                skipped.push(mapAutoShiftApplySkipped(item, 'already_scheduled', { conflict }))
-                continue
-              }
-
-              const preview = await buildAutoShiftMatchingPreview(trx, {
-                orgId,
-                from: item.workDate,
-                to: item.workDate,
-                userIds: [item.userId],
-                maxToleranceMinutes: parsed.data.maxToleranceMinutes ?? autoShiftSettings.maxToleranceMinutes,
-                minConfidenceToApply: parsed.data.minConfidenceToApply ?? autoShiftSettings.minConfidenceToApply,
-              })
-              const match = (preview.items || []).find((candidate) => candidate.candidateShiftId === item.candidateShiftId)
-              if (!match) {
-                const skipReason = (preview.skipped || []).find((entry) =>
-                  entry.userId === item.userId && entry.workDate === item.workDate
-                )?.reason
-                skipped.push(mapAutoShiftApplySkipped(item, skipReason || 'stale_or_ineligible'))
-                continue
-              }
-              if (!autoShiftEvidenceEventIdsMatch(item.evidenceEventIds, match.evidence?.eventIds)) {
-                skipped.push(mapAutoShiftApplySkipped(item, 'stale_punch_evidence'))
-                continue
-              }
-
-              const shiftRows = await trx.query(
-                'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
-                [item.candidateShiftId, orgId],
-              )
-              if (!shiftRows.length) {
-                skipped.push(mapAutoShiftApplySkipped(item, 'shift_not_found'))
-                continue
-              }
-
-              const assignmentRows = await trx.query(
-                `INSERT INTO attendance_shift_assignments
-                 (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id)
-                 VALUES ($1, $2, $3, $4, 0, $5, $5, true, $6, $7, $8, $7)
-                 RETURNING *`,
-                [
-                  randomUUID(),
-                  orgId,
-                  item.userId,
-                  item.candidateShiftId,
-                  item.workDate,
-                  AUTO_SHIFT_MATCH_PRODUCER_TYPE,
-                  runId,
-                  producerKey,
-                ],
-              )
-              await enforceShiftComplianceCap(trx, {
-                orgId,
-                userId: item.userId,
-                fromDate: item.workDate,
-                toDate: item.workDate,
-              })
-              applied.push({
-                userId: item.userId,
-                workDate: item.workDate,
-                candidateShiftId: item.candidateShiftId,
-                assignment: mapAssignmentRow(assignmentRows[0]),
-                shift: mapShiftRow(shiftRows[0]),
-              })
-            }
-            return { applied, skipped }
+              actorAccess: access,
+            }),
           })
+          if (!result) return
 
           for (const item of result.applied) {
             emitEvent('attendance.assignment.created', { orgId, assignmentId: item.assignment.id })
