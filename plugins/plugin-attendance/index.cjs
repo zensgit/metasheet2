@@ -8179,6 +8179,7 @@ function normalizeGroupSyncOptions(groupSync, fallbackRuleSetId, fallbackTimezon
 }
 
 function mapAssignmentRow(row) {
+  const publishStatus = normalizeAttendanceSchedulePublishStatus(row.publish_status)
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -8195,6 +8196,22 @@ function mapAssignmentRow(row) {
     end_date: normalizeDateOnly(row.end_date) ?? row.end_date ?? null,
     isActive: row.is_active ?? true,
     is_active: row.is_active ?? true,
+    publishStatus,
+    publish_status: publishStatus,
+    publishBatchId: row.publish_batch_id ?? null,
+    publish_batch_id: row.publish_batch_id ?? null,
+    publishRequestedAt: row.publish_requested_at ?? null,
+    publish_requested_at: row.publish_requested_at ?? null,
+    publishRequestedBy: row.publish_requested_by ?? null,
+    publish_requested_by: row.publish_requested_by ?? null,
+    publishedAt: row.published_at ?? null,
+    published_at: row.published_at ?? null,
+    publishedBy: row.published_by ?? null,
+    published_by: row.published_by ?? null,
+    lockedAt: row.locked_at ?? null,
+    locked_at: row.locked_at ?? null,
+    reopenedFromAssignmentId: row.reopened_from_assignment_id ?? null,
+    reopened_from_assignment_id: row.reopened_from_assignment_id ?? null,
     producerType: row.producer_type ?? null,
     producer_type: row.producer_type ?? null,
     producerRefId: row.producer_ref_id ?? null,
@@ -8790,6 +8807,7 @@ function mapRotationRuleRow(row) {
 }
 
 function mapRotationAssignmentRow(row) {
+  const publishStatus = normalizeAttendanceSchedulePublishStatus(row.publish_status)
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -8798,10 +8816,31 @@ function mapRotationAssignmentRow(row) {
     startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
     endDate: normalizeDateOnly(row.end_date) ?? row.end_date ?? null,
     isActive: row.is_active ?? true,
+    publishStatus,
+    publish_status: publishStatus,
+    publishBatchId: row.publish_batch_id ?? null,
+    publish_batch_id: row.publish_batch_id ?? null,
+    publishRequestedAt: row.publish_requested_at ?? null,
+    publish_requested_at: row.publish_requested_at ?? null,
+    publishRequestedBy: row.publish_requested_by ?? null,
+    publish_requested_by: row.publish_requested_by ?? null,
+    publishedAt: row.published_at ?? null,
+    published_at: row.published_at ?? null,
+    publishedBy: row.published_by ?? null,
+    published_by: row.published_by ?? null,
+    lockedAt: row.locked_at ?? null,
+    locked_at: row.locked_at ?? null,
+    reopenedFromAssignmentId: row.reopened_from_assignment_id ?? null,
+    reopened_from_assignment_id: row.reopened_from_assignment_id ?? null,
   }
 }
 
 const ATTENDANCE_SCHEDULE_OPEN_END_DATE = '9999-12-31'
+const ATTENDANCE_SCHEDULE_PUBLISH_STATUSES = new Set(['draft', 'pending', 'published'])
+
+function normalizeAttendanceSchedulePublishStatus(value) {
+  return ATTENDANCE_SCHEDULE_PUBLISH_STATUSES.has(value) ? value : 'published'
+}
 
 function normalizeAttendanceScheduleAssignmentEndDate(value) {
   const normalized = normalizeDateOnly(value)
@@ -8933,6 +8972,7 @@ async function findAttendanceScheduleAssignmentConflict(db, draft) {
         WHERE a.org_id = $1
           AND a.user_id = $2
           AND COALESCE(a.is_active, true) = true
+          AND COALESCE(a.publish_status, 'published') = 'published'
           AND a.start_date <= $4::date
           AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
           ${draft.excludeId ? 'AND a.id <> $5' : ''}
@@ -8953,6 +8993,7 @@ async function findAttendanceScheduleAssignmentConflict(db, draft) {
         WHERE org_id = $1
           AND user_id = $2
           AND COALESCE(is_active, true) = true
+          AND COALESCE(publish_status, 'published') = 'published'
           AND start_date <= $4::date
           AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
           ${excludeClause}
@@ -8969,6 +9010,7 @@ async function findAttendanceScheduleAssignmentConflict(db, draft) {
       WHERE org_id = $1
         AND user_id = $2
         AND COALESCE(is_active, true) = true
+        AND COALESCE(publish_status, 'published') = 'published'
         AND start_date <= $4::date
         AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
       ORDER BY start_date DESC, created_at DESC
@@ -9074,13 +9116,17 @@ async function acquireAttendanceScheduleAssignmentLocks(db, orgId, userIds) {
 async function loadAttendanceGroupFixedScheduleManagedRows(db, input) {
   const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, '00000000-0000-4000-8000-000000000000')
   return db.query(
-    `SELECT id, user_id, shift_id, slot_index, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id, 'shift'::text AS kind
+    `SELECT id, user_id, shift_id, slot_index, start_date, end_date, is_active,
+            publish_status, publish_batch_id, publish_requested_at, publish_requested_by,
+            published_at, published_by, locked_at, reopened_from_assignment_id,
+            producer_type, producer_ref_id, producer_key, producer_run_id, 'shift'::text AS kind
        FROM attendance_shift_assignments
       WHERE org_id = $1
         AND producer_type = $2
         AND producer_ref_id = $3
         AND producer_key = $4
         AND COALESCE(is_active, true) = true
+        AND COALESCE(publish_status, 'published') = 'published'
       ORDER BY user_id ASC, start_date ASC, created_at ASC`,
     [input.orgId, producerMetadata.producerType, producerMetadata.producerRefId, producerMetadata.producerKey]
   )
@@ -9155,6 +9201,8 @@ async function buildAttendanceGroupFixedSchedulePlan(db, input, options = {}) {
   const shift = mapShiftRow(shiftRows[0])
   const shiftOverlapRows = await db.query(
     `SELECT a.id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date,
+            a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
+            a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
             a.producer_type, a.producer_ref_id, a.producer_key, a.producer_run_id,
             'shift'::text AS kind,
             s.work_start_time, s.work_end_time, s.is_overnight
@@ -9163,17 +9211,19 @@ async function buildAttendanceGroupFixedSchedulePlan(db, input, options = {}) {
       WHERE a.org_id = $1
         AND a.user_id = ANY($2::text[])
         AND COALESCE(a.is_active, true) = true
+        AND COALESCE(a.publish_status, 'published') = 'published'
         AND a.start_date <= $4::date
         AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
       ORDER BY a.user_id ASC, a.start_date DESC, a.created_at DESC`,
     [input.orgId, userIds, input.startDate, overlapEndDate]
   )
   const rotationOverlapRows = await db.query(
-    `SELECT id, user_id, rotation_rule_id, start_date, end_date, 'rotation'::text AS kind
+    `SELECT id, user_id, rotation_rule_id, start_date, end_date, publish_status, 'rotation'::text AS kind
        FROM attendance_rotation_assignments
       WHERE org_id = $1
         AND user_id = ANY($2::text[])
         AND COALESCE(is_active, true) = true
+        AND COALESCE(publish_status, 'published') = 'published'
         AND start_date <= $4::date
         AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
       ORDER BY user_id ASC, start_date DESC, created_at DESC`,
@@ -11501,6 +11551,8 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
   try {
     const rows = await db.query(
       `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
+              a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
+              a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
               a.created_at AS assignment_created_at,
               s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
               s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
@@ -11511,6 +11563,7 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
        WHERE a.org_id = $1
          AND a.user_id = $2
          AND a.is_active = true
+         AND COALESCE(a.publish_status, 'published') = 'published'
          AND a.start_date <= $3
          AND (a.end_date IS NULL OR a.end_date >= $3)
        ORDER BY a.start_date DESC, a.created_at DESC
@@ -11755,6 +11808,8 @@ async function loadRotationAssignment(db, orgId, userId, workDate) {
   try {
     const rows = await db.query(
       `SELECT a.id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date, a.is_active,
+              a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
+              a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
               r.name AS rotation_name, r.timezone AS rotation_timezone, r.shift_sequence AS rotation_shift_sequence,
               r.is_active AS rotation_is_active
        FROM attendance_rotation_assignments a
@@ -11762,6 +11817,7 @@ async function loadRotationAssignment(db, orgId, userId, workDate) {
        WHERE a.org_id = $1
          AND a.user_id = $2
          AND a.is_active = true
+         AND COALESCE(a.publish_status, 'published') = 'published'
          AND r.is_active = true
          AND a.start_date <= $3
          AND (a.end_date IS NULL OR a.end_date >= $3)
@@ -11866,40 +11922,38 @@ async function loadShiftAssignmentMapForUsersRange(db, orgId, userIds, fromDate,
   const targetOrg = orgId || DEFAULT_ORG_ID
   if (!Array.isArray(userIds) || userIds.length === 0) return new Map()
   if (!fromDate || !toDate) return new Map()
-  try {
-    const rows = await db.query(
-      `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
-              a.created_at AS assignment_created_at,
-              s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
-              s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
-              s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
-              s.working_days AS shift_working_days
-       FROM attendance_shift_assignments a
-       JOIN attendance_shifts s ON s.id = a.shift_id
-       WHERE a.org_id = $1
-         AND a.user_id = ANY($2::text[])
-         AND a.is_active = true
-         AND a.start_date <= $3
-         AND (a.end_date IS NULL OR a.end_date >= $4)
-       ORDER BY a.user_id, a.start_date DESC, a.created_at DESC`,
-      [targetOrg, userIds, toDate, fromDate]
-    )
-    const byUser = new Map()
-    for (const row of rows) {
-      const userId = row.user_id
-      if (!userId) continue
-      if (!byUser.has(userId)) byUser.set(userId, [])
-      byUser.get(userId).push({
-        assignment: mapAssignmentRow(row),
-        shift: mapShiftFromAssignmentRow(row),
-        createdAt: row.assignment_created_at ?? null,
-      })
-    }
-    return byUser
-  } catch (error) {
-    if (isDatabaseSchemaError(error)) return new Map()
-    throw error
+  const rows = await db.query(
+    `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
+            a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
+            a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
+            a.created_at AS assignment_created_at,
+            s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
+            s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
+            s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
+            s.working_days AS shift_working_days
+     FROM attendance_shift_assignments a
+     JOIN attendance_shifts s ON s.id = a.shift_id
+     WHERE a.org_id = $1
+       AND a.user_id = ANY($2::text[])
+       AND a.is_active = true
+       AND COALESCE(a.publish_status, 'published') = 'published'
+       AND a.start_date <= $3
+       AND (a.end_date IS NULL OR a.end_date >= $4)
+     ORDER BY a.user_id, a.start_date DESC, a.created_at DESC`,
+    [targetOrg, userIds, toDate, fromDate]
+  )
+  const byUser = new Map()
+  for (const row of rows) {
+    const userId = row.user_id
+    if (!userId) continue
+    if (!byUser.has(userId)) byUser.set(userId, [])
+    byUser.get(userId).push({
+      assignment: mapAssignmentRow(row),
+      shift: mapShiftFromAssignmentRow(row),
+      createdAt: row.assignment_created_at ?? null,
+    })
   }
+  return byUser
 }
 
 async function loadRotationAssignmentMapForUsersRange(db, orgId, userIds, fromDate, toDate) {
@@ -11908,64 +11962,60 @@ async function loadRotationAssignmentMapForUsersRange(db, orgId, userIds, fromDa
     return { assignmentsByUser: new Map(), shiftsById: new Map() }
   }
   if (!fromDate || !toDate) return { assignmentsByUser: new Map(), shiftsById: new Map() }
-  try {
-    const rows = await db.query(
-      `SELECT a.id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date, a.is_active,
-              r.name AS rotation_name, r.timezone AS rotation_timezone, r.shift_sequence AS rotation_shift_sequence,
-              r.is_active AS rotation_is_active
-       FROM attendance_rotation_assignments a
-       JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
-       WHERE a.org_id = $1
-         AND a.user_id = ANY($2::text[])
-         AND a.is_active = true
-         AND r.is_active = true
-         AND a.start_date <= $3
-         AND (a.end_date IS NULL OR a.end_date >= $4)
-       ORDER BY a.user_id, a.start_date DESC, a.created_at DESC`,
-      [targetOrg, userIds, toDate, fromDate]
-    )
-    const assignmentsByUser = new Map()
-    const shiftIdSet = new Set()
-    for (const row of rows) {
-      const userId = row.user_id
-      if (!userId) continue
-      const rotation = mapRotationRuleFromAssignmentRow(row)
-      const assignment = mapRotationAssignmentRow(row)
-      if (!assignmentsByUser.has(userId)) assignmentsByUser.set(userId, [])
-      assignmentsByUser.get(userId).push({ assignment, rotation })
-      for (const shiftId of rotation.shiftSequence) {
-        if (shiftId) shiftIdSet.add(shiftId)
-      }
+  const rows = await db.query(
+    `SELECT a.id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date, a.is_active,
+            a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
+            a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
+            r.name AS rotation_name, r.timezone AS rotation_timezone, r.shift_sequence AS rotation_shift_sequence,
+            r.is_active AS rotation_is_active
+     FROM attendance_rotation_assignments a
+     JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
+     WHERE a.org_id = $1
+       AND a.user_id = ANY($2::text[])
+       AND a.is_active = true
+       AND COALESCE(a.publish_status, 'published') = 'published'
+       AND r.is_active = true
+       AND a.start_date <= $3
+       AND (a.end_date IS NULL OR a.end_date >= $4)
+     ORDER BY a.user_id, a.start_date DESC, a.created_at DESC`,
+    [targetOrg, userIds, toDate, fromDate]
+  )
+  const assignmentsByUser = new Map()
+  const shiftIdSet = new Set()
+  for (const row of rows) {
+    const userId = row.user_id
+    if (!userId) continue
+    const rotation = mapRotationRuleFromAssignmentRow(row)
+    const assignment = mapRotationAssignmentRow(row)
+    if (!assignmentsByUser.has(userId)) assignmentsByUser.set(userId, [])
+    assignmentsByUser.get(userId).push({ assignment, rotation })
+    for (const shiftId of rotation.shiftSequence) {
+      if (shiftId) shiftIdSet.add(shiftId)
     }
-
-    const shiftsById = new Map()
-    if (shiftIdSet.size > 0) {
-      const ids = []
-      const names = []
-      for (const shiftRef of shiftIdSet) {
-        const uuid = normalizeUuidString(shiftRef)
-        if (uuid) {
-          ids.push(uuid)
-        } else if (typeof shiftRef === 'string' && shiftRef.trim()) {
-          names.push(shiftRef.trim())
-        }
-      }
-      const lookup = await loadShiftReferenceLookup(db, targetOrg, { ids, names })
-      for (const shiftRef of shiftIdSet) {
-        const resolution = resolveShiftReference(shiftRef, lookup)
-        if (resolution.status !== 'resolved' || !resolution.shift?.id) continue
-        shiftsById.set(shiftRef, resolution.shift)
-        shiftsById.set(resolution.shift.id, resolution.shift)
-      }
-    }
-
-    return { assignmentsByUser, shiftsById }
-  } catch (error) {
-    if (isDatabaseSchemaError(error)) {
-      return { assignmentsByUser: new Map(), shiftsById: new Map() }
-    }
-    throw error
   }
+
+  const shiftsById = new Map()
+  if (shiftIdSet.size > 0) {
+    const ids = []
+    const names = []
+    for (const shiftRef of shiftIdSet) {
+      const uuid = normalizeUuidString(shiftRef)
+      if (uuid) {
+        ids.push(uuid)
+      } else if (typeof shiftRef === 'string' && shiftRef.trim()) {
+        names.push(shiftRef.trim())
+      }
+    }
+    const lookup = await loadShiftReferenceLookup(db, targetOrg, { ids, names })
+    for (const shiftRef of shiftIdSet) {
+      const resolution = resolveShiftReference(shiftRef, lookup)
+      if (resolution.status !== 'resolved' || !resolution.shift?.id) continue
+      shiftsById.set(shiftRef, resolution.shift)
+      shiftsById.set(resolution.shift.id, resolution.shift)
+    }
+  }
+
+  return { assignmentsByUser, shiftsById }
 }
 
 // ===== EffectiveCalendarResolver (RFC §4) =====
@@ -12149,6 +12199,7 @@ async function isUserScheduledForDate(db, orgId, userId, date) {
          OR EXISTS (
            SELECT 1 FROM attendance_shift_assignments sa
            WHERE sa.org_id = $1 AND sa.user_id = $2 AND COALESCE(sa.is_active, true) = true
+             AND COALESCE(sa.publish_status, 'published') = 'published'
              AND sa.start_date <= $3::date
              AND COALESCE(sa.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
          )`,
@@ -12227,6 +12278,7 @@ async function hasAutoShiftRotationAssignmentForDate(db, orgId, userId, workDate
      WHERE org_id = $1
        AND user_id = $2
        AND COALESCE(is_active, true) = true
+       AND COALESCE(publish_status, 'published') = 'published'
        AND start_date <= $3::date
        AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
      LIMIT 1`,
@@ -22790,6 +22842,8 @@ module.exports = {
           rowParams.push(pageSize, offset)
           const rows = await db.query(
             `SELECT a.id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date, a.is_active,
+                    a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
+                    a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
                     r.name AS rotation_name, r.timezone AS rotation_timezone, r.shift_sequence AS rotation_shift_sequence,
                     r.is_active AS rotation_is_active
              FROM attendance_rotation_assignments a
@@ -30150,6 +30204,8 @@ module.exports = {
             ),
             db.query(
               `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
+                      a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
+                      a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
                       s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
                       s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight,
                       s.late_grace_minutes AS shift_late_grace_minutes,
@@ -30160,6 +30216,7 @@ module.exports = {
                JOIN attendance_shifts s ON s.id = a.shift_id
                WHERE a.org_id = $1
                  AND COALESCE(a.is_active, true) = true
+                 AND COALESCE(a.publish_status, 'published') = 'published'
                  AND a.start_date <= $3::date
                  AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
                ORDER BY a.start_date DESC, a.created_at DESC
@@ -30168,6 +30225,8 @@ module.exports = {
             ),
             db.query(
               `SELECT a.id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date, a.is_active,
+                      a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
+                      a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
                       r.name AS rotation_name, r.timezone AS rotation_timezone,
                       r.shift_sequence AS rotation_shift_sequence,
                       r.is_active AS rotation_is_active
@@ -30175,6 +30234,7 @@ module.exports = {
                JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
                WHERE a.org_id = $1
                  AND COALESCE(a.is_active, true) = true
+                 AND COALESCE(a.publish_status, 'published') = 'published'
                  AND a.start_date <= $3::date
                  AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
                ORDER BY a.start_date DESC, a.created_at DESC
@@ -30188,6 +30248,7 @@ module.exports = {
                  JOIN attendance_shifts s ON s.id = a.shift_id
                  WHERE a.org_id = $1
                    AND COALESCE(a.is_active, true) = true
+                   AND COALESCE(a.publish_status, 'published') = 'published'
                    AND a.start_date <= $3::date
                    AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
                ),
@@ -30197,6 +30258,7 @@ module.exports = {
                  JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
                  WHERE a.org_id = $1
                    AND COALESCE(a.is_active, true) = true
+                   AND COALESCE(a.publish_status, 'published') = 'published'
                    AND a.start_date <= $3::date
                    AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
                ),
@@ -30246,6 +30308,7 @@ module.exports = {
                  JOIN attendance_shifts s ON s.id = a.shift_id
                  WHERE a.org_id = $1
                    AND COALESCE(a.is_active, true) = true
+                   AND COALESCE(a.publish_status, 'published') = 'published'
                    AND a.start_date <= $3::date
                    AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
                  GROUP BY a.user_id
@@ -30256,6 +30319,7 @@ module.exports = {
                  JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
                  WHERE a.org_id = $1
                    AND COALESCE(a.is_active, true) = true
+                   AND COALESCE(a.publish_status, 'published') = 'published'
                    AND a.start_date <= $3::date
                    AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
                  GROUP BY a.user_id
@@ -30805,6 +30869,7 @@ module.exports = {
                   WHERE org_id = $1
                     AND user_id = $2
                     AND COALESCE(is_active, true) = true
+                    AND COALESCE(publish_status, 'published') = 'published'
                     AND producer_type = $3
                     AND producer_key = $4
                   ORDER BY created_at ASC
@@ -30976,6 +31041,8 @@ module.exports = {
           rowParams.push(pageSize, offset)
           const rows = await db.query(
             `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
+                    a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
+                    a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
                     s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
                     s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
                     s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
@@ -31456,6 +31523,10 @@ module.exports = {
           if (message.startsWith('VALIDATION:')) {
             // resolver-level validation; route validation should normally catch first
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance schedule publish columns missing. Run migrations before serving effective calendar.' } })
             return
           }
           logger.error('Attendance effective-calendar resolve failed', error)
