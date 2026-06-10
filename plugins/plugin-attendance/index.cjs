@@ -11480,7 +11480,8 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   try {
     const rows = await db.query(
-      `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
+      `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
+              a.created_at AS assignment_created_at,
               s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
               s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
               s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
@@ -11847,7 +11848,8 @@ async function loadShiftAssignmentMapForUsersRange(db, orgId, userIds, fromDate,
   if (!fromDate || !toDate) return new Map()
   try {
     const rows = await db.query(
-      `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
+      `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
+              a.created_at AS assignment_created_at,
               s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
               s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
               s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
@@ -11870,6 +11872,7 @@ async function loadShiftAssignmentMapForUsersRange(db, orgId, userIds, fromDate,
       byUser.get(userId).push({
         assignment: mapAssignmentRow(row),
         shift: mapShiftFromAssignmentRow(row),
+        createdAt: row.assignment_created_at ?? null,
       })
     }
     return byUser
@@ -12678,15 +12681,16 @@ async function resolveEffectiveCalendar(db, args) {
   else if (args.groupId) mode = 'groupId'
   else mode = 'orgOnly'
 
+  const settings = await getSettings(db)
   let calendarPolicyOverrides
   if (Array.isArray(args.calendarPolicyOverrides)) {
     calendarPolicyOverrides = normalizeCalendarPolicyOverrides(args.calendarPolicyOverrides)
   } else {
-    const settings = await getSettings(db)
     calendarPolicyOverrides = Array.isArray(settings?.calendarPolicy?.overrides)
       ? settings.calendarPolicy.overrides
       : []
   }
+  const multiShiftDay = normalizeMultiShiftDaySetting(settings?.multiShiftDay)
   const defaultRule = await loadDefaultRule(db, orgId)
   const dates = enumerateAttendanceCalendarDateRange(from, to)
   const holidaysByDate = await loadHolidayMapByDates(db, orgId, dates)
@@ -12736,7 +12740,7 @@ async function resolveEffectiveCalendar(db, args) {
   if (mode === 'userId') {
     const firstDate = dates[0] ?? from
     const rotationInfo = resolveRotationInfoFromPrefetch(rotationByUser.get(args.userId), firstDate, rotationShiftsById)
-    const shiftInfo = resolveShiftAssignmentFromPrefetch(shiftAssignmentsByUser.get(args.userId), firstDate)
+    const shiftInfo = resolveShiftAssignmentFromPrefetch(shiftAssignmentsByUser.get(args.userId), firstDate, { multiShiftDay })
     firstDateRotation = rotationInfo?.rotation ?? null
     firstDateShift = rotationInfo?.shift ?? shiftInfo?.shift ?? null
   }
@@ -12772,16 +12776,21 @@ async function resolveEffectiveCalendar(db, args) {
     const weekday = getWeekdayFromDateKey(date)
     let profileSource = 'rule'
     let profile = groupRule ?? defaultRule
+    let directShiftSlots = []
 
     if (mode === 'userId') {
       const rotationInfo = resolveRotationInfoFromPrefetch(rotationByUser.get(args.userId), date, rotationShiftsById)
-      const shiftInfo = resolveShiftAssignmentFromPrefetch(shiftAssignmentsByUser.get(args.userId), date)
+      const shiftSlots = !rotationInfo?.shift
+        ? resolveShiftAssignmentsFromPrefetch(shiftAssignmentsByUser.get(args.userId), date, { multiShiftDay })
+        : []
+      const shiftInfo = shiftSlots.length > 0 ? shiftSlots[0] : null
       if (rotationInfo?.shift) {
         profile = rotationInfo.shift
         profileSource = 'rotation'
       } else if (shiftInfo?.shift) {
         profile = shiftInfo.shift
         profileSource = 'shift'
+        directShiftSlots = shiftSlots
       }
     }
 
@@ -12799,6 +12808,9 @@ async function resolveEffectiveCalendar(db, args) {
       })
     } else {
       base = buildCalendarBaseFromProfile(profile, weekday, profileSource)
+      if (profileSource === 'shift' && directShiftSlots.length > 0) {
+        base.isWorkingDay = directShiftSlots.some((entry) => isShiftAssignmentEntryWorkingOnDate(entry, date))
+      }
       layers.push({
         kind: 'base_rule',
         source: profileSource,
@@ -12859,6 +12871,16 @@ async function resolveEffectiveCalendar(db, args) {
     }
     if (effective.label) effectiveOut.label = effective.label
     if (effective.policyId) effectiveOut.policyId = effective.policyId
+    if (mode === 'userId') {
+      const dayWorkingOverride = holiday || policyWinner ? effective.isWorkingDay : null
+      const slots = profileSource === 'shift'
+        ? buildEffectiveCalendarShiftSlots(directShiftSlots, { workDate: date, dayWorkingOverride })
+        : []
+      effectiveOut.plannedMinutes = slots.length > 0
+        ? sumEffectiveCalendarShiftSlotMinutes(slots)
+        : (effective.isWorkingDay ? calculateAttendanceComprehensiveShiftPlannedMinutes(profile) : 0)
+      if (slots.length > 0) effectiveOut.slots = slots
+    }
 
     return {
       date,
@@ -12878,15 +12900,96 @@ async function resolveEffectiveCalendar(db, args) {
   }
 }
 
-function resolveShiftAssignmentFromPrefetch(entries, workDate) {
-  if (!Array.isArray(entries) || entries.length === 0) return null
+function getShiftAssignmentEntrySlotIndex(entry) {
+  return normalizeAttendanceScheduleSlotIndex(entry?.assignment?.slotIndex ?? entry?.assignment?.slot_index, 0)
+}
+
+function getShiftAssignmentEntryStartMinutes(entry) {
+  const startTime = normalizeTimeString(entry?.shift?.workStartTime ?? entry?.shift?.work_start_time)
+  const minutes = parseTimeToMinutes(startTime, null)
+  return Number.isFinite(minutes) ? minutes : Number.MAX_SAFE_INTEGER
+}
+
+function getShiftAssignmentEntryCreatedAtMs(entry) {
+  const value = entry?.createdAt ?? entry?.assignment?.createdAt ?? entry?.assignment?.created_at
+  if (!value) return Number.MAX_SAFE_INTEGER
+  const ms = new Date(value).getTime()
+  return Number.isFinite(ms) ? ms : Number.MAX_SAFE_INTEGER
+}
+
+function compareShiftAssignmentSlotEntries(left, right) {
+  const slotDiff = getShiftAssignmentEntrySlotIndex(left) - getShiftAssignmentEntrySlotIndex(right)
+  if (slotDiff !== 0) return slotDiff
+  const startDiff = getShiftAssignmentEntryStartMinutes(left) - getShiftAssignmentEntryStartMinutes(right)
+  if (startDiff !== 0) return startDiff
+  const createdDiff = getShiftAssignmentEntryCreatedAtMs(left) - getShiftAssignmentEntryCreatedAtMs(right)
+  if (createdDiff !== 0) return createdDiff
+  return String(left?.assignment?.id ?? '').localeCompare(String(right?.assignment?.id ?? ''))
+}
+
+function resolveShiftAssignmentsFromPrefetch(entries, workDate, options = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) return []
+  const matches = []
   for (const entry of entries) {
     const startDate = entry?.assignment?.startDate
     const endDate = entry?.assignment?.endDate
     if (!startDate) continue
-    if (startDate <= workDate && (!endDate || endDate >= workDate)) return entry
+    if (startDate <= workDate && (!endDate || endDate >= workDate)) matches.push(entry)
   }
-  return null
+  if (matches.length === 0) return []
+  const multiShiftDay = normalizeMultiShiftDaySetting(options.multiShiftDay)
+  if (!multiShiftDay.enabled) return [matches[0]]
+  return matches.sort(compareShiftAssignmentSlotEntries)
+}
+
+function resolveShiftAssignmentFromPrefetch(entries, workDate, options = {}) {
+  const slots = resolveShiftAssignmentsFromPrefetch(entries, workDate, options)
+  return Array.isArray(slots) && slots.length > 0 ? slots[0] : null
+}
+
+function isAttendanceProfileWorkingOnDate(profile, workDate) {
+  const date = normalizeDateOnly(workDate)
+  const weekday = date ? getWeekdayFromDateKey(date) : null
+  return weekday != null && Array.isArray(profile?.workingDays) && profile.workingDays.includes(weekday)
+}
+
+function isShiftAssignmentEntryWorkingOnDate(entry, workDate) {
+  return isAttendanceProfileWorkingOnDate(entry?.shift, workDate)
+}
+
+function buildEffectiveCalendarShiftSlots(entries, options = {}) {
+  const slots = []
+  const dayWorkingOverride = typeof options.dayWorkingOverride === 'boolean'
+    ? options.dayWorkingOverride
+    : null
+  const workDate = normalizeDateOnly(options.workDate)
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const assignment = entry?.assignment
+    const shift = entry?.shift
+    if (!assignment || !shift) continue
+    const isWorkingDay = dayWorkingOverride !== null
+      ? dayWorkingOverride
+      : isShiftAssignmentEntryWorkingOnDate(entry, workDate)
+    const plannedMinutes = isWorkingDay ? calculateAttendanceComprehensiveShiftPlannedMinutes(shift) : 0
+    slots.push({
+      assignmentId: assignment.id,
+      slotIndex: getShiftAssignmentEntrySlotIndex(entry),
+      shiftId: shift.id ?? assignment.shiftId ?? assignment.shift_id ?? null,
+      shiftName: shift.name ?? null,
+      workStartTime: shift.workStartTime ?? shift.work_start_time ?? null,
+      workEndTime: shift.workEndTime ?? shift.work_end_time ?? null,
+      timezone: shift.timezone ?? null,
+      plannedMinutes,
+    })
+  }
+  return slots
+}
+
+function sumEffectiveCalendarShiftSlotMinutes(slots) {
+  return (Array.isArray(slots) ? slots : []).reduce((total, slot) => {
+    const minutes = Number(slot?.plannedMinutes ?? slot?.planned_minutes ?? 0)
+    return total + (Number.isFinite(minutes) ? Math.max(0, Math.floor(minutes)) : 0)
+  }, 0)
 }
 
 function resolveRotationInfoFromPrefetch(entries, workDate, shiftsById) {
@@ -12919,12 +13022,18 @@ function resolveWorkContextFromPrefetch(options) {
   const rotationInfo = userId
     ? resolveRotationInfoFromPrefetch(prefetched.rotationAssignmentsByUser?.get(userId), workDate, prefetched.rotationShiftsById)
     : null
-  const assignmentInfo = userId
-    ? resolveShiftAssignmentFromPrefetch(prefetched.shiftAssignmentsByUser?.get(userId), workDate)
+  const multiShiftDay = normalizeMultiShiftDaySetting(prefetched.multiShiftDay)
+  const assignmentSlots = userId && !rotationInfo
+    ? resolveShiftAssignmentsFromPrefetch(prefetched.shiftAssignmentsByUser?.get(userId), workDate, { multiShiftDay })
+    : []
+  const assignmentInfo = assignmentSlots.length > 0
+    ? assignmentSlots[0]
     : null
   const profile = rotationInfo?.shift ?? assignmentInfo?.shift ?? defaultRule
   const weekday = getWeekdayFromDateKey(workDate)
-  let isWorkingDay = profile.workingDays.includes(weekday)
+  let isWorkingDay = assignmentSlots.length > 0
+    ? assignmentSlots.some((entry) => isShiftAssignmentEntryWorkingOnDate(entry, workDate))
+    : profile.workingDays.includes(weekday)
   if (holiday) {
     isWorkingDay = holiday.isWorkingDay === true
   }
@@ -12952,6 +13061,14 @@ function resolveWorkContextFromPrefetch(options) {
       dateKey: workDate,
       mode: 'userId',
     })
+  }
+  if (!rotationInfo && assignmentSlots.length > 0) {
+    const dayWorkingOverride = holiday || context.policySource ? context.isWorkingDay : null
+    const slots = buildEffectiveCalendarShiftSlots(assignmentSlots, { workDate, dayWorkingOverride })
+    context.slots = slots
+    context.plannedMinutes = sumEffectiveCalendarShiftSlotMinutes(slots)
+  } else {
+    context.plannedMinutes = context.isWorkingDay ? calculateAttendanceComprehensiveShiftPlannedMinutes(context.rule) : 0
   }
   return context
 }
@@ -12982,6 +13099,7 @@ async function buildWorkContextPrefetch(db, options) {
         // policy applies) rather than triggering the "old fixture"
         // no-op branch unexpectedly.
         calendarPolicy: { overrides: [] },
+        multiShiftDay: normalizeMultiShiftDaySetting(),
         scopeContextByUser: new Map(),
       },
     }
@@ -13012,6 +13130,7 @@ async function buildWorkContextPrefetch(db, options) {
       rotationAssignmentsByUser: rotationPrefetch.assignmentsByUser,
       rotationShiftsById: rotationPrefetch.shiftsById,
       calendarPolicy: { overrides: calendarOverrides },
+      multiShiftDay: normalizeMultiShiftDaySetting(settings?.multiShiftDay),
       scopeContextByUser,
     },
   }
@@ -13204,6 +13323,20 @@ function isAttendanceComprehensiveDayWorking(day, profile) {
   return weekday != null && Array.isArray(profile?.workingDays) && profile.workingDays.includes(weekday)
 }
 
+function calculateAttendancePlannedMinutesFromWorkContext(context, fallbackProfile) {
+  if (!context) return 0
+  const explicitMinutes = normalizeAttendanceComprehensiveOptionalMinutes(
+    context.plannedMinutes,
+    context.planned_minutes,
+  )
+  if (explicitMinutes !== null) return explicitMinutes
+  if (Array.isArray(context.slots) && context.slots.length > 0) {
+    return sumEffectiveCalendarShiftSlotMinutes(context.slots)
+  }
+  const profile = context.rule && typeof context.rule === 'object' ? context.rule : fallbackProfile ?? DEFAULT_RULE
+  return context.isWorkingDay ? calculateAttendanceComprehensiveShiftPlannedMinutes(profile) : 0
+}
+
 function buildAttendanceComprehensivePlannedMinutesFromDays(days, options = {}) {
   const fallbackProfile = options.defaultRule ?? options.fallbackProfile ?? DEFAULT_RULE
   const items = []
@@ -13212,7 +13345,14 @@ function buildAttendanceComprehensivePlannedMinutesFromDays(days, options = {}) 
     const date = normalizeDateOnly(day?.date ?? day?.workDate ?? day?.work_date)
     const profile = resolveAttendanceComprehensiveDayProfile(day, fallbackProfile)
     const isWorkingDay = isAttendanceComprehensiveDayWorking(day, profile)
-    const explicitMinutes = normalizeAttendanceComprehensiveOptionalMinutes(day?.plannedMinutes, day?.planned_minutes)
+    const explicitMinutes = normalizeAttendanceComprehensiveOptionalMinutes(
+      day?.plannedMinutes,
+      day?.planned_minutes,
+      day?.effective?.plannedMinutes,
+      day?.effective?.planned_minutes,
+      day?.resolvedContext?.plannedMinutes,
+      day?.resolvedContext?.planned_minutes,
+    )
     const minutes = isWorkingDay
       ? explicitMinutes !== null
         ? explicitMinutes
@@ -13740,7 +13880,7 @@ async function projectExplicitScheduledMinutesByUser(db, orgId, userId, from, to
     // shift assignments too). Use the raw assignment refs — not `context.source` — so the calendarPolicy
     // override layer (which runs after `source` is set) can't flip the classification.
     if (!context || (!context.assignment && !context.rotationAssignment)) continue
-    const minutes = context.isWorkingDay ? calculateAttendanceComprehensiveShiftPlannedMinutes(context.rule) : 0
+    const minutes = calculateAttendancePlannedMinutesFromWorkContext(context, defaultRule)
     items.push({ date, plannedMinutes: minutes })
     total += minutes
   }
