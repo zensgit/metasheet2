@@ -4808,7 +4808,8 @@ attendanceIntegrationDescribe(
       }
       expect(overtimeRuleId).toBeTruthy()
 
-      const setFlag = (enabled: boolean) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ compTimeFromOvertime: { enabled } }) })
+      const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
+      const setFlag = (enabled: boolean) => putSettings({ compTimeFromOvertime: { enabled } })
       const createOvertime = async (workDate: string, minutes: number) => {
         const res = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers, body: JSON.stringify({ workDate, requestType: 'overtime', overtimeRuleId, minutes }) })
         expect(res.status).toBe(201)
@@ -4851,6 +4852,40 @@ attendanceIntegrationDescribe(
       const events = await eventsFor(lots[0].id)
       expect(events).toHaveLength(1)
       expect(events[0]).toMatchObject({ event_type: 'grant', delta_minutes: 90, source_type: 'overtime_conversion', source_id: onId })
+
+      // (2b) O5: if a versioned overtime segmentation snapshot exists, comp-time
+      // credits its compTimeGrantMinutes rather than blindly using metadata.minutes.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true }, overtimeSegmentation: { enabled: false } })).status).toBe(200)
+      const segmentedId = await createOvertime('2026-09-09', 90)
+      const manualSnapshot = {
+        version: 1,
+        engine: 'attendance_overtime_segmentation_v1',
+        workDate: '2026-09-09',
+        dayType: 'workday',
+        segments: { workdayMinutes: 90, restdayMinutes: 0, holidayMinutes: 0 },
+        totalMinutes: 90,
+        compTimeGrantMinutes: 45,
+      }
+      await pool.query(
+        `UPDATE attendance_requests
+            SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb)
+          WHERE id = $1`,
+        [segmentedId, JSON.stringify(manualSnapshot)],
+      )
+      expect((await approve(segmentedId)).status).toBe(200)
+      const segmentedLots = await lotsFor(segmentedId)
+      expect(segmentedLots).toHaveLength(1)
+      expect(segmentedLots[0]).toMatchObject({
+        amount_minutes: 45,
+        remaining_minutes: 45,
+        source_type: 'overtime_conversion',
+        source_id: segmentedId,
+        status: 'active',
+      })
+      const segmentedEvents = await eventsFor(segmentedLots[0].id)
+      expect(segmentedEvents).toEqual([
+        expect.objectContaining({ event_type: 'grant', delta_minutes: 45, source_type: 'overtime_conversion', source_id: segmentedId }),
+      ])
 
       // (3a) replay via route: re-approving an already-resolved request is rejected and never re-credits.
       const reapprove = await approve(onId)
