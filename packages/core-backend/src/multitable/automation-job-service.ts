@@ -150,6 +150,38 @@ export class AutomationJobService {
       .execute()
   }
 
+  /** Write a terminal job row directly for bridge actions that complete synchronously. */
+  async writeSettledJob(
+    executionId: string,
+    rule: { id: string; sheetId?: string },
+    stepIndex: number,
+    action: AutomationAction,
+    result: { status: 'success' | 'failed' | 'skipped'; output?: unknown; error?: string; durationMs?: number },
+    executor: typeof db = db,
+  ): Promise<void> {
+    const now = new Date().toISOString()
+    await executor
+      .insertInto('multitable_automation_jobs')
+      .values({
+        id: `${executionId}:job:${stepIndex}`,
+        execution_id: executionId,
+        rule_id: rule.id,
+        sheet_id: rule.sheetId ?? null,
+        step_index: stepIndex,
+        step_key: String(stepIndex),
+        action_type: action.type,
+        status: legacyAutomationStatusToJobStatus(result.status),
+        upstream_job_id: stepIndex > 0 ? `${executionId}:job:${stepIndex - 1}` : null,
+        result: result.output == null ? null : (toJsonValue(redactValue(result.output)) as never),
+        error: result.error != null ? redactString(result.error) : null,
+        started_at: now,
+        finished_at: now,
+        duration_ms: result.durationMs ?? null,
+        schema_version: JOB_SCHEMA_VERSION,
+      })
+      .execute()
+  }
+
   /**
    * Read persisted jobs for an execution as C1 WorkflowJob views, ordered by step.
    * Returns [] when the execution has no jobs (legacy execution → caller falls back
@@ -197,6 +229,19 @@ export class AutomationJobService {
         suspendByStep.set(Number(s.step_index), {
           reason: s.reason as WorkflowJobSuspendReason,
           resumeToken: s.resume_token as string,
+        })
+      }
+      const approvalBridges = await db
+        .selectFrom('multitable_automation_approval_bridges')
+        .select(['step_index', 'approval_instance_id'])
+        .where('execution_id', '=', executionId)
+        .where('status', '=', 'pending')
+        .orderBy('created_at', 'asc')
+        .execute()
+      for (const bridge of approvalBridges) {
+        suspendByStep.set(Number(bridge.step_index), {
+          reason: 'manual_task',
+          resumeToken: bridge.approval_instance_id as string,
         })
       }
     }
