@@ -895,6 +895,7 @@ export interface PluginCommunication {
  * 插件存储接口
  */
 export interface PluginStorage {
+  durable?: boolean
   get<T = unknown>(key: string): Promise<T | null>
   set<T = unknown>(key: string, value: T): Promise<void>
   delete(key: string): Promise<void>

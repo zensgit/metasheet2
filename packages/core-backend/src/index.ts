@@ -132,6 +132,7 @@ import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
 import plmEmbedRouter from './routes/plm-embed'
+import { createHostPluginStorage } from './plugins/plugin-durable-storage'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
 import { dashboardRouter } from './routes/dashboard'
@@ -1427,22 +1428,10 @@ export class MetaSheetServer {
           }),
         }
       : pluginBaseCoreApi
-    const storageCache = new Map<string, unknown>()
-    const storage: PluginStorage = {
-      async get<T = unknown>(key: string): Promise<T | null> {
-        if (!storageCache.has(key)) return null
-        return storageCache.get(key) as T
-      },
-      async set<T = unknown>(key: string, value: T): Promise<void> {
-        storageCache.set(key, value)
-      },
-      async delete(key: string): Promise<void> {
-        storageCache.delete(key)
-      },
-      async list(): Promise<string[]> {
-        return Array.from(storageCache.keys())
-      },
-    }
+    const storage: PluginStorage = createHostPluginStorage({
+      pluginName,
+      query: (sql, params) => poolManager.get().query(sql, params),
+    })
     const pluginApis = this.pluginApis
     const eventBus = this.eventBus
     const automationRegistry = {
