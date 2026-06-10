@@ -4015,6 +4015,206 @@ describe('Attendance admin regressions', () => {
     expect(container!.textContent).toContain('Assignment created.')
   })
 
+  it('saves a shift assignment draft through the draft route without the immediate-save preview', async () => {
+    const draftBodies: unknown[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-draft',
+                name: 'Draft shift',
+                timezone: 'UTC',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                isOvernight: false,
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 10,
+                roundingMinutes: 5,
+                workingDays: [1, 2, 3, 4, 5],
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(500, { ok: false, error: { code: 'UNEXPECTED_PREVIEW', message: 'draft save should not preview' } })
+      }
+      if (url === '/api/attendance/schedule-drafts/assignments' && method === 'POST') {
+        draftBodies.push(JSON.parse(String(init?.body || '{}')))
+        return jsonResponse(201, {
+          ok: true,
+          data: {
+            assignment: {
+              id: 'assignment-draft',
+              userId: 'user-draft',
+              shiftId: 'shift-draft',
+              startDate: '2026-06-12',
+              endDate: null,
+              isActive: true,
+              publishStatus: 'draft',
+            },
+          },
+        })
+      }
+      if (url === '/api/attendance/assignments' && method === 'POST') {
+        return jsonResponse(500, { ok: false, error: { code: 'UNEXPECTED_IMMEDIATE_SAVE', message: 'draft save should not call immediate save' } })
+      }
+      if (url.includes('/api/attendance/assignments')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')!.click()
+    await flushUi(2)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')!
+    selectUserPicker(section, '#attendance-assignment-user-id', 'user-draft')
+    const shiftSelect = section.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')!
+    shiftSelect.value = 'shift-draft'
+    shiftSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section, '#attendance-assignment-start-date', '2026-06-12')
+    setInput(section, '#attendance-assignment-end-date', '')
+    await flushUi(2)
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-assignment-save-draft]')!.click()
+    await flushUi(8)
+
+    expect(draftBodies).toEqual([
+      {
+        userId: 'user-draft',
+        shiftId: 'shift-draft',
+        startDate: '2026-06-12',
+        endDate: null,
+        isActive: true,
+      },
+    ])
+    expect(vi.mocked(apiFetch).mock.calls.some(([input]) =>
+      String(input).includes('/api/attendance/comprehensive-hours/preview')
+    )).toBe(false)
+    expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+    )).toBe(false)
+    expect(container!.textContent).toContain('Assignment draft saved.')
+  })
+
+  it('publishes selected direct and rotation schedule drafts with an exact request body', async () => {
+    const publicationBodies: unknown[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'shift-pub', name: 'Publish shift', timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', isOvernight: false, lateGraceMinutes: 10, earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/rotation-rules')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'rotation-pub', name: 'Publish rotation', timezone: 'UTC', shiftSequence: ['shift-pub'], isActive: true },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/rotation-assignments')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                assignment: {
+                  id: 'rotation-draft',
+                  userId: 'rotation-user',
+                  rotationRuleId: 'rotation-pub',
+                  startDate: '2026-06-12',
+                  endDate: null,
+                  isActive: true,
+                  publishStatus: 'draft',
+                },
+                rotation: { id: 'rotation-pub', name: 'Publish rotation', timezone: 'UTC', shiftSequence: ['shift-pub'], isActive: true },
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/assignments')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                assignment: {
+                  id: 'assignment-draft',
+                  userId: 'shift-user',
+                  shiftId: 'shift-pub',
+                  startDate: '2026-06-12',
+                  endDate: null,
+                  isActive: true,
+                  publishStatus: 'draft',
+                },
+                shift: { id: 'shift-pub', name: 'Publish shift', timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', isOvernight: false, lateGraceMinutes: 10, earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
+              },
+            ],
+          },
+        })
+      }
+      if (url === '/api/attendance/schedule-publications' && method === 'POST') {
+        publicationBodies.push(JSON.parse(String(init?.body || '{}')))
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            publishBatchId: 'batch-1',
+            totalPublished: 2,
+            assignments: [],
+            rotationAssignments: [],
+          },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(10)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')!.click()
+    await flushUi(2)
+    const assignmentSection = container!.querySelector<HTMLElement>('#attendance-admin-assignments')!
+    assignmentSection.querySelector<HTMLInputElement>('[data-attendance-assignment-draft-select]')!.click()
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-rotation-assignments"]')!.click()
+    await flushUi(2)
+    const rotationSection = container!.querySelector<HTMLElement>('#attendance-admin-rotation-assignments')!
+    rotationSection.querySelector<HTMLInputElement>('[data-attendance-rotation-assignment-draft-select]')!.click()
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')!.click()
+    await flushUi(2)
+    assignmentSection.querySelector<HTMLButtonElement>('[data-attendance-schedule-publication-publish]')!.click()
+    await flushUi(8)
+
+    expect(publicationBodies).toEqual([
+      {
+        preflightOnly: false,
+        assignmentIds: ['assignment-draft'],
+        rotationAssignmentIds: ['rotation-draft'],
+      },
+    ])
+    expect(container!.textContent).toContain('Published 2 schedule drafts.')
+  })
+
   it('runs a weak comprehensive-hours advisory before saving rotation assignments without blocking save', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url

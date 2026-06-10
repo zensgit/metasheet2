@@ -6514,9 +6514,25 @@
             >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rotation Assignments', '轮班分配') }}</h4>
-                <button class="attendance__btn" :disabled="rotationAssignmentLoading" @click="loadRotationAssignments">
-                  {{ rotationAssignmentLoading ? tr('Loading...', '加载中...') : tr('Reload rotations', '重载轮班分配') }}
-                </button>
+                <div class="attendance__admin-actions">
+                  <label class="attendance__field attendance__field--inline" for="attendance-rotation-publish-status-filter">
+                    <span>{{ tr('Status', '状态') }}</span>
+                    <select
+                      id="attendance-rotation-publish-status-filter"
+                      name="rotationPublishStatusFilter"
+                      v-model="rotationAssignmentPublishStatusFilter"
+                      @change="loadRotationAssignments"
+                    >
+                      <option value="all">{{ tr('All', '全部') }}</option>
+                      <option value="draft">{{ tr('Draft', '草稿') }}</option>
+                      <option value="pending">{{ tr('Pending', '待发布') }}</option>
+                      <option value="published">{{ tr('Published', '已发布') }}</option>
+                    </select>
+                  </label>
+                  <button class="attendance__btn" :disabled="rotationAssignmentLoading" @click="loadRotationAssignments">
+                    {{ rotationAssignmentLoading ? tr('Loading...', '加载中...') : tr('Reload rotations', '重载轮班分配') }}
+                  </button>
+                </div>
               </div>
               <div
                 v-if="scheduleConflictDiagnostics.length"
@@ -6656,9 +6672,18 @@
                 <button
                   class="attendance__btn attendance__btn--primary"
                   :disabled="rotationAssignmentSaving"
-                  @click="saveRotationAssignment"
+                  @click="() => saveRotationAssignment()"
                 >
-                  {{ rotationAssignmentSaving ? tr('Saving...', '保存中...') : rotationAssignmentEditingId ? tr('Update assignment', '更新分配') : tr('Create assignment', '创建分配') }}
+                  {{ rotationAssignmentSaving ? tr('Saving...', '保存中...') : rotationAssignmentEditingId ? rotationAssignmentEditingPublishStatus === 'draft' ? tr('Update draft', '更新草稿') : tr('Update assignment', '更新分配') : tr('Create assignment', '创建分配') }}
+                </button>
+                <button
+                  v-if="!rotationAssignmentEditingId"
+                  class="attendance__btn"
+                  :disabled="rotationAssignmentSaving"
+                  data-attendance-rotation-assignment-save-draft
+                  @click="saveRotationAssignment({ asDraft: true })"
+                >
+                  {{ rotationAssignmentSaving ? tr('Saving...', '保存中...') : rotationAssignmentEditingId ? tr('Update draft', '更新草稿') : tr('Save draft', '保存草稿') }}
                 </button>
                 <button
                   v-if="rotationAssignmentEditingId"
@@ -6667,6 +6692,27 @@
                   @click="resetRotationAssignmentForm"
                 >
                   {{ tr('Cancel edit', '取消编辑') }}
+                </button>
+              </div>
+              <div class="attendance__admin-actions attendance__admin-actions--wrap" data-attendance-schedule-publication-controls>
+                <span class="attendance__field-hint">
+                  {{ tr(`Selected drafts: ${selectedScheduleDraftCount}`, `已选草稿：${selectedScheduleDraftCount}`) }}
+                </span>
+                <button
+                  class="attendance__btn"
+                  :disabled="schedulePublicationSaving || selectedScheduleDraftCount === 0"
+                  data-attendance-schedule-publication-preflight
+                  @click="publishSelectedScheduleDrafts(true)"
+                >
+                  {{ schedulePublicationSaving ? tr('Checking...', '检查中...') : tr('Preflight selected drafts', '预检选中草稿') }}
+                </button>
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="schedulePublicationSaving || selectedScheduleDraftCount === 0"
+                  data-attendance-schedule-publication-publish
+                  @click="publishSelectedScheduleDrafts(false)"
+                >
+                  {{ schedulePublicationSaving ? tr('Publishing...', '发布中...') : tr('Publish selected drafts', '发布选中草稿') }}
                 </button>
               </div>
               <div v-if="rotationAssignments.length === 0" class="attendance__empty">{{ tr('No rotation assignments yet.', '暂无轮班分配。') }}</div>
@@ -6679,6 +6725,7 @@
                       <th>{{ tr('Start', '开始') }}</th>
                       <th>{{ tr('End', '结束') }}</th>
                       <th>{{ tr('Active', '启用') }}</th>
+                      <th>{{ tr('Status', '状态') }}</th>
                       <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
@@ -6706,10 +6753,37 @@
                       <td>{{ item.assignment.startDate }}</td>
                       <td>{{ item.assignment.endDate || '--' }}</td>
                       <td>{{ item.assignment.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
+                      <td>
+                        <span
+                          class="attendance__scheduler-scope-chip"
+                          :data-attendance-rotation-assignment-publish-status="assignmentPublishStatus(item.assignment)"
+                        >
+                          {{ formatAssignmentPublishStatus(item.assignment) }}
+                        </span>
+                      </td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editRotationAssignment(item)">{{ tr('Edit', '编辑') }}</button>
+                        <label
+                          v-if="assignmentPublishStatus(item.assignment) === 'draft'"
+                          class="attendance__field attendance__field--checkbox attendance__field--inline"
+                        >
+                          <span>{{ tr('Select', '选择') }}</span>
+                          <input
+                            v-model="selectedDraftRotationAssignmentIds"
+                            type="checkbox"
+                            :value="item.assignment.id"
+                            data-attendance-rotation-assignment-draft-select
+                          />
+                        </label>
+                        <button
+                          class="attendance__btn"
+                          :disabled="assignmentPublishStatus(item.assignment) === 'pending'"
+                          @click="editRotationAssignment(item)"
+                        >
+                          {{ tr('Edit', '编辑') }}
+                        </button>
                         <button
                           class="attendance__btn attendance__btn--danger"
+                          :disabled="assignmentPublishStatus(item.assignment) === 'pending'"
                           @click="deleteRotationAssignment(item.assignment.id)"
                         >
                           {{ tr('Delete', '删除') }}
@@ -6856,9 +6930,25 @@
             >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Assignments', '排班分配') }}</h4>
-                <button class="attendance__btn" :disabled="assignmentLoading" @click="loadAssignments">
-                  {{ assignmentLoading ? tr('Loading...', '加载中...') : tr('Reload assignments', '重载分配') }}
-                </button>
+                <div class="attendance__admin-actions">
+                  <label class="attendance__field attendance__field--inline" for="attendance-assignment-publish-status-filter">
+                    <span>{{ tr('Status', '状态') }}</span>
+                    <select
+                      id="attendance-assignment-publish-status-filter"
+                      name="assignmentPublishStatusFilter"
+                      v-model="assignmentPublishStatusFilter"
+                      @change="loadAssignments"
+                    >
+                      <option value="all">{{ tr('All', '全部') }}</option>
+                      <option value="draft">{{ tr('Draft', '草稿') }}</option>
+                      <option value="pending">{{ tr('Pending', '待发布') }}</option>
+                      <option value="published">{{ tr('Published', '已发布') }}</option>
+                    </select>
+                  </label>
+                  <button class="attendance__btn" :disabled="assignmentLoading" @click="loadAssignments">
+                    {{ assignmentLoading ? tr('Loading...', '加载中...') : tr('Reload assignments', '重载分配') }}
+                  </button>
+                </div>
               </div>
               <div
                 v-if="scheduleConflictDiagnostics.length"
@@ -7011,8 +7101,17 @@
                 {{ comprehensiveHoursAssignmentAdvisory.shift.message }}
               </p>
               <div class="attendance__admin-actions">
-                <button class="attendance__btn attendance__btn--primary" :disabled="assignmentSaving" @click="saveAssignment">
-                  {{ assignmentSaving ? tr('Saving...', '保存中...') : assignmentEditingId ? tr('Update assignment', '更新分配') : tr('Create assignment', '创建分配') }}
+                <button class="attendance__btn attendance__btn--primary" :disabled="assignmentSaving" @click="() => saveAssignment()">
+                  {{ assignmentSaving ? tr('Saving...', '保存中...') : assignmentEditingId ? assignmentEditingPublishStatus === 'draft' ? tr('Update draft', '更新草稿') : tr('Update assignment', '更新分配') : tr('Create assignment', '创建分配') }}
+                </button>
+                <button
+                  v-if="!assignmentEditingId"
+                  class="attendance__btn"
+                  :disabled="assignmentSaving"
+                  data-attendance-assignment-save-draft
+                  @click="saveAssignment({ asDraft: true })"
+                >
+                  {{ assignmentSaving ? tr('Saving...', '保存中...') : assignmentEditingId ? tr('Update draft', '更新草稿') : tr('Save draft', '保存草稿') }}
                 </button>
                 <button
                   v-if="assignmentEditingId"
@@ -7021,6 +7120,27 @@
                   @click="resetAssignmentForm"
                 >
                   {{ tr('Cancel edit', '取消编辑') }}
+                </button>
+              </div>
+              <div class="attendance__admin-actions attendance__admin-actions--wrap" data-attendance-schedule-publication-controls>
+                <span class="attendance__field-hint">
+                  {{ tr(`Selected drafts: ${selectedScheduleDraftCount}`, `已选草稿：${selectedScheduleDraftCount}`) }}
+                </span>
+                <button
+                  class="attendance__btn"
+                  :disabled="schedulePublicationSaving || selectedScheduleDraftCount === 0"
+                  data-attendance-schedule-publication-preflight
+                  @click="publishSelectedScheduleDrafts(true)"
+                >
+                  {{ schedulePublicationSaving ? tr('Checking...', '检查中...') : tr('Preflight selected drafts', '预检选中草稿') }}
+                </button>
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="schedulePublicationSaving || selectedScheduleDraftCount === 0"
+                  data-attendance-schedule-publication-publish
+                  @click="publishSelectedScheduleDrafts(false)"
+                >
+                  {{ schedulePublicationSaving ? tr('Publishing...', '发布中...') : tr('Publish selected drafts', '发布选中草稿') }}
                 </button>
               </div>
               <div v-if="assignments.length === 0" class="attendance__empty">{{ tr('No assignments yet.', '暂无排班分配。') }}</div>
@@ -7033,6 +7153,7 @@
                       <th>{{ tr('Start', '开始') }}</th>
                       <th>{{ tr('End', '结束') }}</th>
                       <th>{{ tr('Active', '启用') }}</th>
+                      <th>{{ tr('Status', '状态') }}</th>
                       <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
@@ -7069,10 +7190,37 @@
                       <td>{{ item.assignment.startDate }}</td>
                       <td>{{ item.assignment.endDate || '--' }}</td>
                       <td>{{ item.assignment.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
+                      <td>
+                        <span
+                          class="attendance__scheduler-scope-chip"
+                          :data-attendance-assignment-publish-status="assignmentPublishStatus(item.assignment)"
+                        >
+                          {{ formatAssignmentPublishStatus(item.assignment) }}
+                        </span>
+                      </td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editAssignment(item)">{{ tr('Edit', '编辑') }}</button>
+                        <label
+                          v-if="assignmentPublishStatus(item.assignment) === 'draft'"
+                          class="attendance__field attendance__field--checkbox attendance__field--inline"
+                        >
+                          <span>{{ tr('Select', '选择') }}</span>
+                          <input
+                            v-model="selectedDraftAssignmentIds"
+                            type="checkbox"
+                            :value="item.assignment.id"
+                            data-attendance-assignment-draft-select
+                          />
+                        </label>
+                        <button
+                          class="attendance__btn"
+                          :disabled="assignmentPublishStatus(item.assignment) === 'pending'"
+                          @click="editAssignment(item)"
+                        >
+                          {{ tr('Edit', '编辑') }}
+                        </button>
                         <button
                           class="attendance__btn attendance__btn--danger"
+                          :disabled="assignmentPublishStatus(item.assignment) === 'pending'"
                           @click="deleteAssignment(item.assignment.id)"
                         >
                           {{ tr('Delete', '删除') }}
@@ -8146,6 +8294,10 @@ interface AttendanceAssignment {
   isActive: boolean
   slotIndex?: number | null
   slot_index?: number | null
+  publishStatus?: AttendanceSchedulePublishStatus | null
+  publish_status?: AttendanceSchedulePublishStatus | null
+  lockedAt?: string | null
+  locked_at?: string | null
 }
 
 interface AttendanceAssignmentItem {
@@ -8215,12 +8367,19 @@ interface AttendanceRotationAssignment {
   startDate: string
   endDate: string | null
   isActive: boolean
+  publishStatus?: AttendanceSchedulePublishStatus | null
+  publish_status?: AttendanceSchedulePublishStatus | null
+  lockedAt?: string | null
+  locked_at?: string | null
 }
 
 interface AttendanceRotationAssignmentItem {
   assignment: AttendanceRotationAssignment
   rotation: AttendanceRotationRule
 }
+
+type AttendanceSchedulePublishStatus = 'draft' | 'pending' | 'published'
+type AttendanceSchedulePublishStatusFilter = AttendanceSchedulePublishStatus | 'all'
 
 interface AttendanceAdvancedSchedulingDiagnostic {
   code: string
@@ -9760,6 +9919,9 @@ const importAsyncJobTelemetryText = computed(() => {
 
 const shiftEditingId = ref<string | null>(null)
 const assignmentEditingId = ref<string | null>(null)
+const assignmentEditingPublishStatus = ref<AttendanceSchedulePublishStatus | null>(null)
+const assignmentPublishStatusFilter = ref<AttendanceSchedulePublishStatusFilter>('all')
+const selectedDraftAssignmentIds = ref<string[]>([])
 const advancedSchedulingWorkbenchLoading = ref(false)
 const comprehensiveHoursPreviewLoading = ref(false)
 const comprehensiveHoursPreviewStatus = ref<{ kind: 'info' | 'warn' | 'error'; message: string }>({
@@ -9777,6 +9939,10 @@ const overtimeRuleEditingId = ref<string | null>(null)
 const approvalFlowEditingId = ref<string | null>(null)
 const rotationRuleEditingId = ref<string | null>(null)
 const rotationAssignmentEditingId = ref<string | null>(null)
+const rotationAssignmentEditingPublishStatus = ref<AttendanceSchedulePublishStatus | null>(null)
+const rotationAssignmentPublishStatusFilter = ref<AttendanceSchedulePublishStatusFilter>('all')
+const selectedDraftRotationAssignmentIds = ref<string[]>([])
+const schedulePublicationSaving = ref(false)
 const ruleSetEditingId = ref<string | null>(null)
 const attendanceGroupEditingId = ref<string | null>(null)
 const attendanceGroupMemberGroupId = ref('')
@@ -16892,6 +17058,44 @@ function assignmentSlotLabel(assignment: AttendanceAssignment): string {
   return tr(`Slot ${index}`, `槽位 ${index}`)
 }
 
+function normalizeAssignmentPublishStatus(value: unknown): AttendanceSchedulePublishStatus {
+  if (value === 'draft' || value === 'pending' || value === 'published') return value
+  return 'published'
+}
+
+function assignmentPublishStatus(
+  assignment: Pick<AttendanceAssignment, 'publishStatus' | 'publish_status'> | Pick<AttendanceRotationAssignment, 'publishStatus' | 'publish_status'> | null | undefined,
+): AttendanceSchedulePublishStatus {
+  return normalizeAssignmentPublishStatus(assignment?.publishStatus ?? assignment?.publish_status)
+}
+
+function formatAssignmentPublishStatus(
+  assignment: Pick<AttendanceAssignment, 'publishStatus' | 'publish_status'> | Pick<AttendanceRotationAssignment, 'publishStatus' | 'publish_status'> | null | undefined,
+): string {
+  const status = assignmentPublishStatus(assignment)
+  if (status === 'draft') return tr('Draft', '草稿')
+  if (status === 'pending') return tr('Pending', '待发布')
+  return tr('Published', '已发布')
+}
+
+const selectedScheduleDraftCount = computed(() =>
+  selectedDraftAssignmentIds.value.length + selectedDraftRotationAssignmentIds.value.length,
+)
+
+function reconcileSelectedDraftAssignmentIds() {
+  const draftIds = new Set(assignments.value
+    .filter(item => assignmentPublishStatus(item.assignment) === 'draft')
+    .map(item => item.assignment.id))
+  selectedDraftAssignmentIds.value = selectedDraftAssignmentIds.value.filter(id => draftIds.has(id))
+}
+
+function reconcileSelectedDraftRotationAssignmentIds() {
+  const draftIds = new Set(rotationAssignments.value
+    .filter(item => assignmentPublishStatus(item.assignment) === 'draft')
+    .map(item => item.assignment.id))
+  selectedDraftRotationAssignmentIds.value = selectedDraftRotationAssignmentIds.value.filter(id => draftIds.has(id))
+}
+
 function applyMultiShiftDayToForm(settings: AttendanceSettings) {
   const multiShiftDay = settings.multiShiftDay || {}
   multiShiftDayForm.enabled = multiShiftDay.enabled === true
@@ -18138,6 +18342,7 @@ async function deleteRotationRule(id: string) {
 
 function resetRotationAssignmentForm() {
   rotationAssignmentEditingId.value = null
+  rotationAssignmentEditingPublishStatus.value = null
   rotationAssignmentForm.userId = ''
   rotationAssignmentForm.rotationRuleId = rotationRules.value[0]?.id ?? ''
   rotationAssignmentForm.startDate = toDateInput(today)
@@ -18147,6 +18352,7 @@ function resetRotationAssignmentForm() {
 
 function editRotationAssignment(item: AttendanceRotationAssignmentItem) {
   rotationAssignmentEditingId.value = item.assignment.id
+  rotationAssignmentEditingPublishStatus.value = assignmentPublishStatus(item.assignment)
   rotationAssignmentForm.userId = item.assignment.userId
   rotationAssignmentForm.rotationRuleId = item.assignment.rotationRuleId
   rotationAssignmentForm.startDate = item.assignment.startDate
@@ -18158,6 +18364,9 @@ async function loadRotationAssignments() {
   rotationAssignmentLoading.value = true
   try {
     const query = buildQuery({ orgId: normalizedOrgId() })
+    if (rotationAssignmentPublishStatusFilter.value !== 'all') {
+      query.set('publishStatus', rotationAssignmentPublishStatusFilter.value)
+    }
     const response = await apiFetch(`/api/attendance/rotation-assignments?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -18169,6 +18378,7 @@ async function loadRotationAssignments() {
     }
     adminForbidden.value = false
     rotationAssignments.value = data.data.items || []
+    reconcileSelectedDraftRotationAssignmentIds()
     void resolveAttendanceAssignmentUserLabels()
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load rotation assignments', '加载轮班分配失败')), 'error')
@@ -18177,9 +18387,10 @@ async function loadRotationAssignments() {
   }
 }
 
-async function saveRotationAssignment() {
+async function saveRotationAssignment(options: { asDraft?: boolean } = {}) {
   rotationAssignmentSaving.value = true
   const isEditing = Boolean(rotationAssignmentEditingId.value)
+  const saveAsDraft = options.asDraft === true || rotationAssignmentEditingPublishStatus.value === 'draft'
   try {
     if (!rotationAssignmentForm.userId.trim()) {
       throw new Error(tr('User ID is required', '用户 ID 为必填项'))
@@ -18196,19 +18407,25 @@ async function saveRotationAssignment() {
       isActive: rotationAssignmentForm.isActive,
       orgId: normalizedOrgId(),
     }
-    const rotationAdvisory = await previewComprehensiveHoursAssignmentAdvisory('rotation', {
-      userId: payload.userId,
-      startDate: payload.startDate,
-      endDate: payload.endDate,
-      isActive: payload.isActive,
-    })
-    if (rotationAdvisory.blocked) {
-      setStatus(comprehensiveHoursAssignmentAdvisory.rotation.message, 'error')
-      return
+    if (!saveAsDraft) {
+      const rotationAdvisory = await previewComprehensiveHoursAssignmentAdvisory('rotation', {
+        userId: payload.userId,
+        startDate: payload.startDate,
+        endDate: payload.endDate,
+        isActive: payload.isActive,
+      })
+      if (rotationAdvisory.blocked) {
+        setStatus(comprehensiveHoursAssignmentAdvisory.rotation.message, 'error')
+        return
+      }
     }
-    const endpoint = isEditing
-      ? `/api/attendance/rotation-assignments/${rotationAssignmentEditingId.value}`
-      : '/api/attendance/rotation-assignments'
+    const endpoint = saveAsDraft
+      ? (isEditing
+          ? `/api/attendance/schedule-drafts/rotation-assignments/${rotationAssignmentEditingId.value}`
+          : '/api/attendance/schedule-drafts/rotation-assignments')
+      : (isEditing
+          ? `/api/attendance/rotation-assignments/${rotationAssignmentEditingId.value}`
+          : '/api/attendance/rotation-assignments')
     const response = await apiFetch(endpoint, {
       method: isEditing ? 'PUT' : 'POST',
       body: JSON.stringify(payload),
@@ -18225,9 +18442,11 @@ async function saveRotationAssignment() {
     await loadRotationAssignments()
     resetRotationAssignmentForm()
     setStatus(
-      isEditing
-        ? tr('Rotation assignment updated.', '轮班分配已更新。')
-        : tr('Rotation assignment created.', '轮班分配已创建。')
+      saveAsDraft
+        ? (isEditing ? tr('Rotation draft updated.', '轮班草稿已更新。') : tr('Rotation draft saved.', '轮班草稿已保存。'))
+        : (isEditing
+            ? tr('Rotation assignment updated.', '轮班分配已更新。')
+            : tr('Rotation assignment created.', '轮班分配已创建。'))
     )
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save rotation assignment', '保存轮班分配失败')), 'error')
@@ -18239,7 +18458,12 @@ async function saveRotationAssignment() {
 async function deleteRotationAssignment(id: string) {
   if (!window.confirm(tr('Delete this rotation assignment?', '确认删除该轮班分配吗？'))) return
   try {
-    const response = await apiFetch(`/api/attendance/rotation-assignments/${id}`, { method: 'DELETE' })
+    const item = rotationAssignments.value.find(candidate => candidate.assignment.id === id)
+    const useDraftRoute = assignmentPublishStatus(item?.assignment) === 'draft'
+    const endpoint = useDraftRoute
+      ? `/api/attendance/schedule-drafts/rotation-assignments/${id}`
+      : `/api/attendance/rotation-assignments/${id}`
+    const response = await apiFetch(endpoint, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
       throw new Error(tr('Admin permissions required', '需要管理员权限'))
@@ -18372,6 +18596,7 @@ async function deleteShift(id: string) {
 
 function resetAssignmentForm() {
   assignmentEditingId.value = null
+  assignmentEditingPublishStatus.value = null
   assignmentForm.userId = ''
   assignmentForm.shiftId = shifts.value[0]?.id ?? ''
   assignmentForm.startDate = toDateInput(today)
@@ -18382,6 +18607,7 @@ function resetAssignmentForm() {
 
 function editAssignment(item: AttendanceAssignmentItem) {
   assignmentEditingId.value = item.assignment.id
+  assignmentEditingPublishStatus.value = assignmentPublishStatus(item.assignment)
   assignmentForm.userId = item.assignment.userId
   assignmentForm.shiftId = item.assignment.shiftId
   assignmentForm.startDate = item.assignment.startDate
@@ -18394,6 +18620,9 @@ async function loadAssignments() {
   assignmentLoading.value = true
   try {
     const query = buildQuery({ orgId: normalizedOrgId() })
+    if (assignmentPublishStatusFilter.value !== 'all') {
+      query.set('publishStatus', assignmentPublishStatusFilter.value)
+    }
     const response = await apiFetch(`/api/attendance/assignments?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -18405,6 +18634,7 @@ async function loadAssignments() {
     }
     adminForbidden.value = false
     assignments.value = data.data.items || []
+    reconcileSelectedDraftAssignmentIds()
     void resolveAttendanceAssignmentUserLabels()
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load assignments', '加载分配失败')), 'error')
@@ -18413,9 +18643,10 @@ async function loadAssignments() {
   }
 }
 
-async function saveAssignment() {
+async function saveAssignment(options: { asDraft?: boolean } = {}) {
   assignmentSaving.value = true
   const isEditing = Boolean(assignmentEditingId.value)
+  const saveAsDraft = options.asDraft === true || assignmentEditingPublishStatus.value === 'draft'
   try {
     if (!assignmentForm.userId.trim()) {
       throw new Error(tr('User ID is required', '用户 ID 为必填项'))
@@ -18433,19 +18664,25 @@ async function saveAssignment() {
       orgId: normalizedOrgId(),
       ...(multiShiftDayForm.enabled ? { slotIndex: normalizeAssignmentSlotIndex(assignmentForm.slotIndex) } : {}),
     }
-    const shiftAdvisory = await previewComprehensiveHoursAssignmentAdvisory('shift', {
-      userId: payload.userId,
-      startDate: payload.startDate,
-      endDate: payload.endDate,
-      isActive: payload.isActive,
-    })
-    if (shiftAdvisory.blocked) {
-      setStatus(comprehensiveHoursAssignmentAdvisory.shift.message, 'error')
-      return
+    if (!saveAsDraft) {
+      const shiftAdvisory = await previewComprehensiveHoursAssignmentAdvisory('shift', {
+        userId: payload.userId,
+        startDate: payload.startDate,
+        endDate: payload.endDate,
+        isActive: payload.isActive,
+      })
+      if (shiftAdvisory.blocked) {
+        setStatus(comprehensiveHoursAssignmentAdvisory.shift.message, 'error')
+        return
+      }
     }
-    const endpoint = isEditing
-      ? `/api/attendance/assignments/${assignmentEditingId.value}`
-      : '/api/attendance/assignments'
+    const endpoint = saveAsDraft
+      ? (isEditing
+          ? `/api/attendance/schedule-drafts/assignments/${assignmentEditingId.value}`
+          : '/api/attendance/schedule-drafts/assignments')
+      : (isEditing
+          ? `/api/attendance/assignments/${assignmentEditingId.value}`
+          : '/api/attendance/assignments')
     const response = await apiFetch(endpoint, {
       method: isEditing ? 'PUT' : 'POST',
       body: JSON.stringify(payload),
@@ -18461,7 +18698,11 @@ async function saveAssignment() {
     adminForbidden.value = false
     await loadAssignments()
     resetAssignmentForm()
-    setStatus(isEditing ? tr('Assignment updated.', '分配已更新。') : tr('Assignment created.', '分配已创建。'))
+    setStatus(
+      saveAsDraft
+        ? (isEditing ? tr('Assignment draft updated.', '分配草稿已更新。') : tr('Assignment draft saved.', '分配草稿已保存。'))
+        : (isEditing ? tr('Assignment updated.', '分配已更新。') : tr('Assignment created.', '分配已创建。'))
+    )
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save assignment', '保存分配失败')), 'error')
   } finally {
@@ -18472,7 +18713,12 @@ async function saveAssignment() {
 async function deleteAssignment(id: string) {
   if (!window.confirm(tr('Delete this assignment?', '确认删除该分配吗？'))) return
   try {
-    const response = await apiFetch(`/api/attendance/assignments/${id}`, { method: 'DELETE' })
+    const item = assignments.value.find(candidate => candidate.assignment.id === id)
+    const useDraftRoute = assignmentPublishStatus(item?.assignment) === 'draft'
+    const endpoint = useDraftRoute
+      ? `/api/attendance/schedule-drafts/assignments/${id}`
+      : `/api/attendance/assignments/${id}`
+    const response = await apiFetch(endpoint, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
       throw new Error(tr('Admin permissions required', '需要管理员权限'))
@@ -18486,6 +18732,56 @@ async function deleteAssignment(id: string) {
     setStatus(tr('Assignment deleted.', '分配已删除。'))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to delete assignment', '删除分配失败')), 'error')
+  }
+}
+
+async function publishSelectedScheduleDrafts(preflightOnly: boolean) {
+  const assignmentIds = [...selectedDraftAssignmentIds.value]
+  const rotationAssignmentIds = [...selectedDraftRotationAssignmentIds.value]
+  if (assignmentIds.length === 0 && rotationAssignmentIds.length === 0) {
+    setStatus(tr('Select at least one draft schedule assignment first.', '请先选择至少一个排班草稿。'), 'error')
+    return
+  }
+  schedulePublicationSaving.value = true
+  try {
+    const payload: {
+      preflightOnly: boolean
+      assignmentIds?: string[]
+      rotationAssignmentIds?: string[]
+    } = { preflightOnly }
+    if (assignmentIds.length > 0) payload.assignmentIds = assignmentIds
+    if (rotationAssignmentIds.length > 0) payload.rotationAssignmentIds = rotationAssignmentIds
+    const response = await apiFetch('/api/attendance/schedule-publications', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to publish schedule drafts', '发布排班草稿失败')))
+    }
+    adminForbidden.value = false
+    if (!preflightOnly) {
+      selectedDraftAssignmentIds.value = []
+      selectedDraftRotationAssignmentIds.value = []
+    }
+    await Promise.all([
+      loadAssignments(),
+      loadRotationAssignments(),
+    ])
+    const total = Number(data.data?.totalPublished ?? assignmentIds.length + rotationAssignmentIds.length)
+    setStatus(
+      preflightOnly
+        ? tr('Schedule draft preflight passed.', '排班草稿预检通过。')
+        : tr(`Published ${total} schedule drafts.`, `已发布 ${total} 个排班草稿。`)
+    )
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to publish schedule drafts', '发布排班草稿失败')), 'error')
+  } finally {
+    schedulePublicationSaving.value = false
   }
 }
 
