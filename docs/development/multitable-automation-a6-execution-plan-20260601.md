@@ -206,7 +206,10 @@ join-any stay separate follow rungs.
 ## 5. A6-5 approval-as-job — PLAN-LEVEL (double-gated; last; design deferred)
 
 - **Adds:** an automation job that starts an approval instance and resumes after the
-  approval completes; approve/reject/return/cancel map to C1 statuses explicitly.
+  approval completes; approved/rejected/revoked/cancelled terminal outcomes map to
+  C1 outcomes explicitly. `return` is a rework transition, not completion, and
+  must not resume the approval-as-job bridge unless a future non-completion
+  transition scope says otherwise.
 - **Must not:** fold approval state into automation tables; pull in approval trigger
   bindings or result backwrite implicitly. Approval remains source-of-truth for graphs,
   assignments, permissions, and version freezing; automation stores only the waiting job
