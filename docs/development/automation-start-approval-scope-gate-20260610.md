@@ -107,7 +107,11 @@ Rules:
    fall back to `rule_creator` for schedule/system triggers. The implementation
    must load a real approval actor snapshot for the chosen user id; it must not
    fabricate permissions, roles, email, or department data.
-4. The implementation must not include a `resultMapping` field in W6-1. Result
+4. The chosen actor must be authorized to start approvals. The HTTP
+   `/api/approvals` route enforces `approvals:write`, but W6-1 will call the
+   service directly; therefore the bridge must enforce the equivalent
+   permission boundary itself before `createApproval()`.
+5. The implementation must not include a `resultMapping` field in W6-1. Result
    backwrite belongs to W7.
 
 If the runtime needs a smaller v1, it may omit `requester`, `titleTemplate`, and
@@ -165,11 +169,22 @@ suspended job that missed its completion.
 Duplicate approval creation is the sharpest W6 risk.
 
 W6-1 must define and test a deterministic idempotency key before runtime ships.
-The recommended key is:
+Within one execution, the recommended action-run key is:
 
 ```text
 start_approval:<executionId>:<stepIndex>:<templateId>
 ```
+
+That key is not sufficient for A5 retry, because retry creates a new execution
+id. W6-1 must also persist enough lineage to detect a retry of a step that
+already created an approval. Acceptable designs include:
+
+- store and query an `original_execution_id` / `root_execution_id` plus
+  `step_index` and `template_id`; or
+- fail closed when retrying an execution that contains a completed or pending
+  W6 bridge; or
+- reuse the existing bridge only if the implementation can prove exactly-once
+  resume and no duplicate approval instance.
 
 Minimum requirements:
 
@@ -217,7 +232,7 @@ diagnosis.
 |---|---|
 | Template missing / unpublished | `start_approval` step fails before suspension; downstream actions are skipped. |
 | Form data mapping invalid | Step fails before approval creation. |
-| Approval permission denied for chosen requester | Step fails before suspension; no bridge row. |
+| Approval permission denied for chosen requester | Step fails before approval creation/suspension; no bridge row. |
 | Chosen requester snapshot cannot be loaded | Step fails before approval creation; no fake actor snapshot. |
 | Approval created + bridge persisted | Step becomes suspended; execution remains running. |
 | Approval auto-approves during creation | Bridge completion path consumes the terminal result exactly once; execution must not get stuck waiting for a missed event. |
@@ -263,19 +278,20 @@ C1 status vocabulary. W6 must not add a second job/read model.
 |---|---|---|
 | T1 | Service validation rejects `start_approval` unless `execution_mode = 'workflow_job_v1'`. | Legacy path cannot half-run approval-as-job. |
 | T2 | Service validation rejects missing `templateId` and invalid `formDataMapping`. | Invalid config fails before runtime. |
-| T3 | `executeRule()` with `start_approval` creates one approval instance, bridge row, and suspended C1 job. | Core happy path. |
-| T4 | The persisted suspended job passes `normalizeWorkflowJob`. | C1 contract. |
-| T5 | Auto-approved-on-create approval does not miss the completion and does not leave the job stuck suspended. | Create-time terminal race. |
-| T6 | W5 `approval.approved` event resumes exactly one waiting job and continues the tail. | Event bridge happy path. |
-| T7 | Duplicate W5 event does not resume twice and does not duplicate tail side effects. | Idempotency. |
-| T8 | `approval.rejected`, `approval.revoked`, and `approval.cancelled` settle the waiting job with explicit outcome. | Outcome taxonomy. |
-| T9 | `return` / pending approval state does not resume the job. | Rework is not completion. |
-| T10 | Listener errors are swallowed/logged and do not roll back approval completion. | Event isolation. |
-| T11 | Approval creation failure does not create bridge rows or suspended jobs. | Partial-write guard. |
-| T12 | Approval-created-but-bridge-failed path is tested and operator-visible. | Orphan approval risk. |
-| T13 | Redaction test proves job/bridge/run response excludes form values, comments, requester email, graph, and credentials. | Privacy. |
-| T14 | A5 retry of an execution that already created a W6 approval does not create a duplicate approval. | Retry duplicate-start guard. |
-| T15 | Real-DB integration traverses automation trigger -> `start_approval` -> approval completion event -> automation tail. | Wire-vs-fixture seam. |
+| T3 | Chosen requester without `approvals:write` fails closed even when the template is visible. | Route-bypass permission guard. |
+| T4 | `executeRule()` with `start_approval` creates one approval instance, bridge row, and suspended C1 job. | Core happy path. |
+| T5 | The persisted suspended job passes `normalizeWorkflowJob`. | C1 contract. |
+| T6 | Auto-approved-on-create approval does not miss the completion and does not leave the job stuck suspended. | Create-time terminal race. |
+| T7 | W5 `approval.approved` event resumes exactly one waiting job and continues the tail. | Event bridge happy path. |
+| T8 | Duplicate W5 event does not resume twice and does not duplicate tail side effects. | Idempotency. |
+| T9 | `approval.rejected`, `approval.revoked`, and `approval.cancelled` settle the waiting job with explicit outcome. | Outcome taxonomy. |
+| T10 | `return` / pending approval state does not resume the job. | Rework is not completion. |
+| T11 | Listener errors are swallowed/logged and do not roll back approval completion. | Event isolation. |
+| T12 | Approval creation failure does not create bridge rows or suspended jobs. | Partial-write guard. |
+| T13 | Approval-created-but-bridge-failed path is tested and operator-visible. | Orphan approval risk. |
+| T14 | Redaction test proves job/bridge/run response excludes form values, comments, requester email, graph, and credentials. | Privacy. |
+| T15 | A5 retry of an execution that already created a W6 approval does not create a duplicate approval. | Retry duplicate-start guard. |
+| T16 | Real-DB integration traverses automation trigger -> `start_approval` -> approval completion event -> automation tail. | Wire-vs-fixture seam. |
 
 At least one test must hit the actual `AutomationService.executeRule()` path and
 the actual `ApprovalProductService.createApproval()` path. Hand-built fixtures
