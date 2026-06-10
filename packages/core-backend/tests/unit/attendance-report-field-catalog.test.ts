@@ -756,6 +756,38 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(helpers.getAttendanceRecordReportFieldValue({ work_date: '2026-05-13', meta: {} }, 'leave_type_annual_duration')).toBe(0)
   })
 
+  it('加班三段 O4 — report fields prefer engine buckets and keep historical fallback', () => {
+    const projectedRow = {
+      work_date: '2026-05-13',
+      status: 'normal',
+      is_workday: true,
+      meta: {
+        overtime_minutes: 90,
+        approvedOvertimeSegmentation: {
+          version: 1,
+          workdayOvertimeMinutes: 0,
+          restdayOvertimeMinutes: 30,
+          holidayOvertimeMinutes: 60,
+          compTimeGrantMinutes: 90,
+        },
+      },
+    }
+    expect(helpers.getAttendanceRecordReportFieldValue(projectedRow, 'overtime_approval_duration')).toBe(90)
+    expect(helpers.getAttendanceRecordReportFieldValue(projectedRow, 'workday_overtime_duration')).toBe(0)
+    expect(helpers.getAttendanceRecordReportFieldValue(projectedRow, 'restday_overtime_duration')).toBe(30)
+    expect(helpers.getAttendanceRecordReportFieldValue(projectedRow, 'holiday_overtime_duration')).toBe(60)
+
+    const legacyWorkday = { work_date: '2026-05-14', status: 'normal', is_workday: true, meta: { overtime_minutes: 45 } }
+    expect(helpers.getAttendanceRecordReportFieldValue(legacyWorkday, 'workday_overtime_duration')).toBe(45)
+    expect(helpers.getAttendanceRecordReportFieldValue(legacyWorkday, 'restday_overtime_duration')).toBe(0)
+    expect(helpers.getAttendanceRecordReportFieldValue(legacyWorkday, 'holiday_overtime_duration')).toBe(0)
+
+    const legacyRestday = { work_date: '2026-05-15', status: 'off', is_workday: false, meta: { overtime_minutes: 75 } }
+    expect(helpers.getAttendanceRecordReportFieldValue(legacyRestday, 'workday_overtime_duration')).toBe(0)
+    expect(helpers.getAttendanceRecordReportFieldValue(legacyRestday, 'restday_overtime_duration')).toBe(75)
+    expect(helpers.getAttendanceRecordReportFieldValue(legacyRestday, 'holiday_overtime_duration')).toBe(0)
+  })
+
   it('loadApprovedMinutesRange aggregates subtypes while keeping aggregate totals unchanged', async () => {
     const calls: string[] = []
     const db = {
@@ -1039,6 +1071,14 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(a).toBe(b) // synced_at + fingerprints excluded, key order irrelevant
     const c = helpers.buildAttendanceReportRecordSourceFingerprint({ a: 1, b: 3 })
     expect(c).not.toBe(a) // payload value change → different fingerprint
+    const d = helpers.buildAttendanceReportRecordSourceFingerprint({ a: 1, b: 2 }, {
+      overtimeSegmentation: { version: 1, workdayOvertimeMinutes: 45, restdayOvertimeMinutes: 0, holidayOvertimeMinutes: 0, compTimeGrantMinutes: 45 },
+    })
+    const e = helpers.buildAttendanceReportRecordSourceFingerprint({ a: 1, b: 2 }, {
+      overtimeSegmentation: { version: 1, workdayOvertimeMinutes: 0, restdayOvertimeMinutes: 45, holidayOvertimeMinutes: 0, compTimeGrantMinutes: 45 },
+    })
+    expect(d).not.toBe(a)
+    expect(e).not.toBe(d)
   })
 
   it('report-records sync: upsert / skip / duplicate / degraded / export decoupling', async () => {
@@ -1126,6 +1166,7 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(store[0].data.fld_hire_date).toBe('2026-05-29')
     expect(typeof store[0].data['fld_field_fingerprint']).toBe('string')
     expect(typeof store[0].data['fld_source_fingerprint']).toBe('string')
+    expect(Object.keys(store[0].data).some(key => key.includes('__source'))).toBe(false)
 
     // sync #2 same data → all skipped (source+field fingerprint 双等)
     const r2 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
@@ -1457,6 +1498,9 @@ describe('attendance report field catalog multitable foundation', () => {
     })
     expect(fpA).toBe(fpB)
     expect(helpers.buildAttendanceReportPeriodSummarySourceFingerprint({ a: 1, b: 3 })).not.toBe(fpA)
+    expect(helpers.buildAttendanceReportPeriodSummarySourceFingerprint({ a: 1, b: 2 }, {
+      overtimeSegmentation: { version: 1, workdayOvertimeMinutes: 45, restdayOvertimeMinutes: 75, holidayOvertimeMinutes: 105, compTimeGrantMinutes: 225 },
+    })).not.toBe(fpA)
 
     const subtypeTotals = helpers.buildAttendancePeriodSummarySubtypeTotals(new Map([
       ['2026-05-01', { reportSubtypeMinutes: { leave_type_annual_duration: 60 } }],

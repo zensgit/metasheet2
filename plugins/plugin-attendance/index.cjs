@@ -2492,17 +2492,29 @@ async function loadAttendanceReportRecordsSyncUserPage(db, orgId, from, to, opti
   }
 }
 
-function buildAttendanceReportRecordSourceFingerprint(logicalPayload) {
+function buildAttendanceReportSourceFingerprint(logicalPayload, excluded, extraPayload = {}) {
+  const extras = extraPayload && typeof extraPayload === 'object' && !Array.isArray(extraPayload)
+    ? Object.keys(extraPayload)
+        .sort()
+        .map(key => [`__source:${key}`, extraPayload[key]])
+    : []
+  const canonical = [
+    ...Object.keys(logicalPayload)
+      .filter(key => !excluded.has(key))
+      .sort()
+      .map(key => [key, logicalPayload[key]]),
+    ...extras,
+  ]
+  return crypto.createHash('sha1').update(JSON.stringify(canonical)).digest('hex')
+}
+
+function buildAttendanceReportRecordSourceFingerprint(logicalPayload, extraPayload = {}) {
   const excluded = new Set([
     ATTENDANCE_REPORT_RECORDS_FIELDS.syncedAt,
     ATTENDANCE_REPORT_RECORDS_FIELDS.fieldFingerprint,
     ATTENDANCE_REPORT_RECORDS_FIELDS.sourceFingerprint,
   ])
-  const canonical = Object.keys(logicalPayload)
-    .filter(key => !excluded.has(key))
-    .sort()
-    .map(key => [key, logicalPayload[key]])
-  return crypto.createHash('sha1').update(JSON.stringify(canonical)).digest('hex')
+  return buildAttendanceReportSourceFingerprint(logicalPayload, excluded, extraPayload)
 }
 
 function createAttendanceReportRecordsSyncEmptyResult(extra = {}) {
@@ -2622,7 +2634,9 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
           ? exportItem[column.id]
           : null
       }
-      const sourceFingerprint = buildAttendanceReportRecordSourceFingerprint(logical)
+      const sourceFingerprint = buildAttendanceReportRecordSourceFingerprint(logical, {
+        overtimeSegmentation: buildAttendanceRecordOvertimeSegmentationFingerprintInput(enrichedRow),
+      })
 
       const data = {}
       for (const [logicalId, value] of Object.entries(logical)) {
@@ -3462,17 +3476,13 @@ function attendanceReportPeriodSummaryRowKey(orgId, userId, period) {
   return `${orgId}:${userId}:range:${period?.from}:${period?.to}`
 }
 
-function buildAttendanceReportPeriodSummarySourceFingerprint(logicalPayload) {
+function buildAttendanceReportPeriodSummarySourceFingerprint(logicalPayload, extraPayload = {}) {
   const excluded = new Set([
     ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.syncedAt,
     ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.fieldFingerprint,
     ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.sourceFingerprint,
   ])
-  const canonical = Object.keys(logicalPayload)
-    .filter(key => !excluded.has(key))
-    .sort()
-    .map(key => [key, logicalPayload[key]])
-  return crypto.createHash('sha1').update(JSON.stringify(canonical)).digest('hex')
+  return buildAttendanceReportSourceFingerprint(logicalPayload, excluded, extraPayload)
 }
 
 function buildAttendancePeriodSummarySubtypeTotals(approvedMap) {
@@ -3725,7 +3735,9 @@ async function syncAttendanceReportPeriodSummary(context, db, orgId, logger, par
       actualMinutes,
     )
     Object.assign(logical, comprehensiveHoursValues)
-    const sourceFingerprint = buildAttendanceReportPeriodSummarySourceFingerprint(logical)
+    const sourceFingerprint = buildAttendanceReportPeriodSummarySourceFingerprint(logical, {
+      overtimeSegmentation: buildAttendanceSummaryOvertimeSegmentationFingerprintInput(summaryWithFormulas),
+    })
 
     const data = {}
     for (const [logicalId, value] of Object.entries(logical)) {
@@ -4360,6 +4372,56 @@ function readAttendanceRecordMinutes(row, keys, fallback = 0) {
   return fallback
 }
 
+function normalizeApprovedOvertimeSegmentationProjection(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const version = Number(value.version ?? value.overtimeSegmentationVersion ?? value.overtime_segmentation_version)
+  if (!Number.isFinite(version)) return null
+  return {
+    version,
+    workdayOvertimeMinutes: normalizeOvertimeSegmentationMinutes(value.workdayOvertimeMinutes ?? value.workday_overtime_minutes),
+    restdayOvertimeMinutes: normalizeOvertimeSegmentationMinutes(value.restdayOvertimeMinutes ?? value.restday_overtime_minutes),
+    holidayOvertimeMinutes: normalizeOvertimeSegmentationMinutes(value.holidayOvertimeMinutes ?? value.holiday_overtime_minutes),
+    compTimeGrantMinutes: normalizeOvertimeSegmentationMinutes(value.compTimeGrantMinutes ?? value.comp_time_grant_minutes),
+  }
+}
+
+function readApprovedOvertimeSegmentationProjection(row) {
+  return normalizeApprovedOvertimeSegmentationProjection(
+    readAttendanceRecordMeta(row, ['approvedOvertimeSegmentation', 'approved_overtime_segmentation']),
+  )
+}
+
+function readAttendanceRecordOvertimeSegments(row) {
+  const projection = readApprovedOvertimeSegmentationProjection(row)
+  if (projection) return { ...projection, projected: true }
+  const isWorkday = row?.is_workday !== false
+  const overtimeMinutes = readAttendanceRecordMinutes(row, ['overtime_minutes', 'overtimeMinutes'], 0)
+  return {
+    version: null,
+    projected: false,
+    workdayOvertimeMinutes: isWorkday ? overtimeMinutes : 0,
+    restdayOvertimeMinutes: !isWorkday ? overtimeMinutes : 0,
+    holidayOvertimeMinutes: readAttendanceRecordMinutes(row, ['holiday_overtime_minutes', 'holidayOvertimeMinutes'], 0),
+    compTimeGrantMinutes: readAttendanceRecordMinutes(row, ['comp_time_grant_minutes', 'compTimeGrantMinutes'], 0),
+  }
+}
+
+function buildAttendanceRecordOvertimeSegmentationFingerprintInput(row) {
+  const projection = readApprovedOvertimeSegmentationProjection(row)
+  if (!projection) return null
+  return projection
+}
+
+function buildAttendanceSummaryOvertimeSegmentationFingerprintInput(summary) {
+  return {
+    version: attendanceSummaryNumber(summary, 'overtime_segmentation_version') || null,
+    workdayOvertimeMinutes: attendanceSummaryNumber(summary, 'workday_overtime_minutes'),
+    restdayOvertimeMinutes: attendanceSummaryNumber(summary, 'restday_overtime_minutes'),
+    holidayOvertimeMinutes: attendanceSummaryNumber(summary, 'holiday_overtime_minutes'),
+    compTimeGrantMinutes: attendanceSummaryNumber(summary, 'comp_time_grant_minutes'),
+  }
+}
+
 function formatAttendanceRecordReportDateTime(value, timezone) {
   return value ? formatDateTimeForCsv(value, timezone) : ''
 }
@@ -4374,6 +4436,7 @@ function getAttendanceRecordReportFieldValue(row, fieldCode) {
   const earlyLeaveMinutes = Number(row?.early_leave_minutes ?? 0)
   const leaveMinutes = readAttendanceRecordMinutes(row, ['leave_minutes', 'leaveMinutes'], 0)
   const overtimeMinutes = readAttendanceRecordMinutes(row, ['overtime_minutes', 'overtimeMinutes'], 0)
+  const overtimeSegments = readAttendanceRecordOvertimeSegments(row)
 
   if (isAttendanceDynamicSubtypeCode(fieldCode)) {
     const subtypeMap = readAttendanceRecordMeta(row, ['reportSubtypeMinutes', 'report_subtype_minutes'])
@@ -4497,11 +4560,11 @@ function getAttendanceRecordReportFieldValue(row, fieldCode) {
     case 'overtime_approval_duration':
       return overtimeMinutes
     case 'workday_overtime_duration':
-      return isWorkday ? overtimeMinutes : 0
+      return overtimeSegments.workdayOvertimeMinutes
     case 'restday_overtime_duration':
-      return !isWorkday ? overtimeMinutes : 0
+      return overtimeSegments.restdayOvertimeMinutes
     case 'holiday_overtime_duration':
-      return Number(readAttendanceRecordMeta(row, ['holiday_overtime_minutes', 'holidayOvertimeMinutes']) ?? 0)
+      return overtimeSegments.holidayOvertimeMinutes
     default:
       return ''
   }
@@ -4528,11 +4591,16 @@ function buildAttendanceReportFormulaValueMap(row, formulaSourceFields, options 
     values[field.code] = getAttendanceRecordReportFieldValue(row, field.code)
   }
   if (options.rawAliasesAllowed !== false) {
+    const overtimeSegments = readAttendanceRecordOvertimeSegments(row)
     values.work_minutes = Number(row?.work_minutes ?? 0)
     values.late_minutes = Number(row?.late_minutes ?? 0)
     values.early_leave_minutes = Number(row?.early_leave_minutes ?? 0)
     values.leave_minutes = readAttendanceRecordMinutes(row, ['leave_minutes', 'leaveMinutes'], 0)
     values.overtime_minutes = readAttendanceRecordMinutes(row, ['overtime_minutes', 'overtimeMinutes'], 0)
+    values.workday_overtime_minutes = overtimeSegments.workdayOvertimeMinutes
+    values.restday_overtime_minutes = overtimeSegments.restdayOvertimeMinutes
+    values.holiday_overtime_minutes = overtimeSegments.holidayOvertimeMinutes
+    values.comp_time_grant_minutes = overtimeSegments.compTimeGrantMinutes
   }
   return values
 }

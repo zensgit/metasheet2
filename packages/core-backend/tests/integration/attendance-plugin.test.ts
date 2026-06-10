@@ -5050,7 +5050,7 @@ attendanceIntegrationDescribe(
     }
   })
 
-  it('加班三段 O3 — records and summary expose approved overtime segment buckets from request snapshots', async () => {
+  it('加班三段 O3/O4 — records, report fields, and summary expose approved overtime segment buckets from request snapshots', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
     if (!dbUrl) return
@@ -5153,6 +5153,7 @@ attendanceIntegrationDescribe(
         expect(record, `missing record for ${date}`).toBeTruthy()
         const meta = (record?.meta ?? {}) as Record<string, unknown>
         const projection = (meta.approvedOvertimeSegmentation ?? meta.approved_overtime_segmentation ?? {}) as Record<string, unknown>
+        const reportValues = (record?.report_values ?? record?.reportValues ?? {}) as Record<string, unknown>
         expect(Number(meta.overtime_minutes ?? meta.overtimeMinutes ?? 0)).toBe(buckets.total)
         expect(projection).toMatchObject({
           version: 1,
@@ -5161,6 +5162,10 @@ attendanceIntegrationDescribe(
           holidayOvertimeMinutes: buckets.holiday,
           compTimeGrantMinutes: buckets.total,
         })
+        expect(Number(reportValues.overtime_approval_duration ?? 0)).toBe(buckets.total)
+        expect(Number(reportValues.workday_overtime_duration ?? 0)).toBe(buckets.workday)
+        expect(Number(reportValues.restday_overtime_duration ?? 0)).toBe(buckets.restday)
+        expect(Number(reportValues.holiday_overtime_duration ?? 0)).toBe(buckets.holiday)
       }
       expectRecordBuckets(workDate, { total: 45, workday: 45, restday: 0, holiday: 0 })
       expectRecordBuckets(restDate, { total: 75, workday: 0, restday: 75, holiday: 0 })
