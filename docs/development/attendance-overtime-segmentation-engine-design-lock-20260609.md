@@ -318,7 +318,7 @@ One staging smoke is required before tracker ✅:
 | Slice | Scope | Status |
 | --- | --- | --- |
 | O0 | This design-lock + tracker backfill | ✅ this PR |
-| O1 | Pure day-type resolver + overtime segmentation helper, tests only | 🔒 |
+| O1 | Pure day-type resolver + overtime segmentation helper, tests only | ✅ implemented |
 | O2 | Request create/update + final approval metadata snapshot, default off | 🔒 |
 | O3 | Record / summary loaders consume segment buckets | 🔒 |
 | O4 | Built-in report fields + report sync fingerprint use engine output | 🔒 |

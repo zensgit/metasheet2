@@ -9773,6 +9773,103 @@ function applyOvertimeRule(minutes, rule) {
   return adjusted
 }
 
+const OVERTIME_SEGMENTATION_ENGINE = 'attendance_overtime_segmentation_v1'
+const OVERTIME_SEGMENTATION_VERSION = 1
+const OVERTIME_DAY_TYPES = new Set(['workday', 'restday', 'holiday'])
+
+function normalizeOvertimeSegmentationMinutes(value) {
+  const minutes = Number(value)
+  if (!Number.isFinite(minutes) || minutes <= 0) return 0
+  return Math.floor(minutes)
+}
+
+function extractEffectiveCalendarHolidayLayer(item) {
+  const layers = Array.isArray(item?.layers) ? item.layers : []
+  return layers.find((layer) => layer?.kind === 'holiday' && layer.isWorkingDay === false) ?? null
+}
+
+function resolveOvertimeDayTypeFromEffectiveCalendarItem(item) {
+  const effective = item?.effective ?? {}
+  const effectiveIsWorkingDay = effective.isWorkingDay === true
+  const holidayLayer = extractEffectiveCalendarHolidayLayer(item)
+  let dayType = 'restday'
+  if (effectiveIsWorkingDay) {
+    dayType = 'workday'
+  } else if (holidayLayer) {
+    dayType = 'holiday'
+  }
+  return {
+    dayType,
+    decision: {
+      effectiveIsWorkingDay,
+      effectiveSource: effective.source ?? null,
+      effectiveLabel: effective.label ?? null,
+      policyId: effective.policyId ?? null,
+      holidayName: holidayLayer?.label ?? item?.base?.name ?? null,
+      holidayDayIndex: item?.base?.dayIndex ?? null,
+      holidaySource: holidayLayer?.source ?? null,
+      holidayRefId: holidayLayer?.refId ?? item?.base?.holidayId ?? null,
+    },
+  }
+}
+
+function buildOvertimeSegmentationSnapshot(input = {}) {
+  const workDate = normalizeDateOnlyStrict(input.workDate)
+  const normalizedMinutes = applyOvertimeRule(
+    normalizeOvertimeSegmentationMinutes(input.minutes),
+    input.overtimeRule ?? null,
+  )
+  const dayTypeResult = resolveOvertimeDayTypeFromEffectiveCalendarItem(input.effectiveCalendarItem)
+  const dayType = OVERTIME_DAY_TYPES.has(dayTypeResult.dayType) ? dayTypeResult.dayType : 'restday'
+  const segments = {
+    workdayMinutes: dayType === 'workday' ? normalizedMinutes : 0,
+    restdayMinutes: dayType === 'restday' ? normalizedMinutes : 0,
+    holidayMinutes: dayType === 'holiday' ? normalizedMinutes : 0,
+  }
+  return {
+    version: OVERTIME_SEGMENTATION_VERSION,
+    engine: OVERTIME_SEGMENTATION_ENGINE,
+    workDate,
+    dayType,
+    calendar: dayTypeResult.decision,
+    segments,
+    totalMinutes: normalizedMinutes,
+    compTimeGrantMinutes: normalizedMinutes,
+  }
+}
+
+function normalizeOvertimeSegmentationDateTime(value) {
+  if (!value) return null
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return date
+}
+
+function extractOvertimeSegmentationDateOnly(value) {
+  if (typeof value === 'string') {
+    const literalDate = normalizeDateOnlyStrict(value.trim().slice(0, 10))
+    if (literalDate) return literalDate
+  }
+  const date = normalizeOvertimeSegmentationDateTime(value)
+  return date ? date.toISOString().slice(0, 10) : null
+}
+
+function validateOvertimeSegmentationWindow(input = {}) {
+  const workDate = normalizeDateOnlyStrict(input.workDate)
+  const startAt = normalizeOvertimeSegmentationDateTime(input.requestedInAt ?? input.startAt)
+  const endAt = normalizeOvertimeSegmentationDateTime(input.requestedOutAt ?? input.endAt)
+  if (!workDate || !startAt || !endAt) return { ok: true }
+  if (endAt.getTime() <= startAt.getTime()) {
+    return { ok: false, code: 'OVERTIME_INVALID_TIME_WINDOW' }
+  }
+  const startDate = extractOvertimeSegmentationDateOnly(input.requestedInAt ?? input.startAt)
+  const endDate = extractOvertimeSegmentationDateOnly(input.requestedOutAt ?? input.endAt)
+  if (startDate !== workDate || endDate !== workDate) {
+    return { ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' }
+  }
+  return { ok: true }
+}
+
 function diffDays(fromDate, toDate) {
   const from = new Date(`${fromDate}T00:00:00Z`)
   const to = new Date(`${toDate}T00:00:00Z`)
@@ -16412,6 +16509,13 @@ module.exports = {
     buildUnresolvedRowUserWarning,
     collectRowUserIdentityValues,
     resolveRowUserId,
+  },
+  __attendanceOvertimeSegmentationForTests: {
+    OVERTIME_SEGMENTATION_ENGINE,
+    OVERTIME_SEGMENTATION_VERSION,
+    buildOvertimeSegmentationSnapshot,
+    resolveOvertimeDayTypeFromEffectiveCalendarItem,
+    validateOvertimeSegmentationWindow,
   },
   __attendanceReportFieldCatalogForTests: {
     ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS,
