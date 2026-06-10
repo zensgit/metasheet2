@@ -1616,7 +1616,10 @@ async function loadLinkValuesByRecord(
  * (which sources the expression from `field.property.expression`) and returns the
  * recomputed formula-field values per record so the write path can surface them
  * in the response + realtime patch. Returns `[]` when no formula depends on the
- * change. Intra-sheet / intra-record only — no cross-sheet read, no perm gate.
+ * change. Only the DEPENDENT formulas are re-evaluated/persisted (the dep-gate
+ * result doubles as the engine allowlist) — formulas with unchanged inputs keep
+ * their stored value, since actor-scoped hydration could otherwise clobber them.
+ * Intra-sheet / intra-record only — no cross-sheet read, no perm gate.
  */
 async function recalculateFormulaFields(
   query: QueryFn,
@@ -1651,6 +1654,9 @@ async function recalculateFormulaFields(
   }
 
   // Gate: only recompute when a changed (or dependent-lookup) field actually feeds a formula here.
+  // The returned field ids are ALSO the recompute allowlist (F1, review of #2450): hydration is
+  // actor-scoped, so a formula whose inputs did not change must not be re-evaluated — it could
+  // be clobbered with a permission-degraded value (unreadable foreign sheet → lookup []).
   const depRes = await query(
     `SELECT DISTINCT field_id FROM formula_dependencies
      WHERE depends_on_field_id = ANY($1::text[])
@@ -1659,16 +1665,21 @@ async function recalculateFormulaFields(
     [effectiveChangedFieldIds, sheetId],
   )
   if (depRes.rows.length === 0) return []
+  const formulaFieldIdSet = new Set(formulaFieldIds)
+  const dependentFormulaFieldIds = new Set(
+    (depRes.rows as any[]).map((row) => String(row.field_id)).filter((id) => formulaFieldIdSet.has(id)),
+  )
+  if (dependentFormulaFieldIds.size === 0) return []
 
   const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
   for (const recordId of updatedRecordIds) {
     const hydrated = hydratedDataByRecord?.get(recordId)
     const nextData = hydrated
-      ? await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, recordId, hydrated, fields)
-      : await multitableFormulaEngine.recalculateRecord(query, sheetId, recordId, fields)
+      ? await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, recordId, hydrated, fields, dependentFormulaFieldIds)
+      : await multitableFormulaEngine.recalculateRecord(query, sheetId, recordId, fields, dependentFormulaFieldIds)
     if (!nextData) continue
     const formulaData: Record<string, unknown> = {}
-    for (const fieldId of formulaFieldIds) {
+    for (const fieldId of dependentFormulaFieldIds) {
       if (fieldId in nextData) formulaData[fieldId] = nextData[fieldId]
     }
     results.push({ recordId, data: formulaData })
@@ -1907,7 +1918,11 @@ function mergeComputedRecords(
 async function computeDependentLookupRollupRecords(
   req: Request,
   query: QueryFn,
+  // A-full (design #2410): the edited (source) sheet + its changed field ids gate which related
+  // lookup/rollup fields count as "affected" for the one-hop formula recompute below.
+  sourceSheetId: string,
   updatedRecordIds: string[],
+  changedFieldIds: string[],
 ): Promise<RelatedComputedRecord[]> {
   if (updatedRecordIds.length === 0) return []
 
@@ -1989,11 +2004,62 @@ async function computeDependentLookupRollupRecords(
 
     await applyLookupRollup(req, query, fields, rows, relationalLinkFields, linkValuesByRecord)
 
+    // A-full (design #2410): one-hop formula recompute on the related records. A related
+    // lookup/rollup is "affected" only when it resolves to the edited source sheet, its
+    // targetFieldId is one of the changed source fields, AND the record actually links to one
+    // of the edited source records via that field's linkFieldId — an unrelated edit on the
+    // foreign record must not rewrite formulas just because the record is linked (§3.3).
+    const changedSourceFieldIds = new Set(changedFieldIds)
+    const updatedSourceRecordIds = new Set(updatedRecordIds)
+    const linkConfigById = new Map(relationalLinkFields.map(({ fieldId, cfg }) => [fieldId, cfg]))
+    const affectedFieldIdsByRecord = new Map<string, Set<string>>()
+    for (const field of fields) {
+      if (field.type !== 'lookup' && field.type !== 'rollup') continue
+      const cfg = field.type === 'lookup' ? parseLookupFieldConfig(field.property) : parseRollupFieldConfig(field.property)
+      if (!cfg) continue
+      const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
+      if (foreignSheetId !== sourceSheetId) continue
+      if (!changedSourceFieldIds.has(cfg.targetFieldId)) continue
+      for (const row of rows) {
+        const linkedIds =
+          linkValuesByRecord.get(row.id)?.get(cfg.linkFieldId) ?? normalizeLinkIds(row.data[cfg.linkFieldId])
+        if (!linkedIds.some((id) => updatedSourceRecordIds.has(id))) continue
+        const set = affectedFieldIdsByRecord.get(row.id) ?? new Set<string>()
+        set.add(field.id)
+        affectedFieldIdsByRecord.set(row.id, set)
+      }
+    }
+
+    let formulaDataByRecord = new Map<string, Record<string, unknown>>()
+    if (affectedFieldIdsByRecord.size > 0) {
+      const affectedComputedFieldIds = new Set<string>()
+      for (const set of affectedFieldIdsByRecord.values()) {
+        for (const id of set) affectedComputedFieldIds.add(id)
+      }
+      // Formula eval consumes the FULL hydrated row (row.data after applyLookupRollup), never
+      // the permission-masked echo patch built below — recompute stays reader-agnostic (§3.2).
+      // recalculateRecordFromData materializes ONLY formula keys; lookup/rollup remain
+      // computed-on-read. One hop only: results never re-enter this propagation.
+      const hydratedDataByRecord = new Map(rows.map((row) => [row.id, row.data]))
+      const formulaRecords = await recalculateFormulaFields(
+        query,
+        sheetId,
+        fields,
+        Array.from(affectedFieldIdsByRecord.keys()),
+        Array.from(affectedComputedFieldIds),
+        hydratedDataByRecord,
+      )
+      formulaDataByRecord = new Map(formulaRecords.map((record) => [record.recordId, record.data]))
+    }
+
     for (const row of rows) {
       results.push({
         sheetId,
         recordId: row.id,
-        data: filterRecordDataByFieldIds(extractLookupRollupData(fields, row.data), allowedFieldIds),
+        data: filterRecordDataByFieldIds(
+          { ...extractLookupRollupData(fields, row.data), ...(formulaDataByRecord.get(row.id) ?? {}) },
+          allowedFieldIds,
+        ),
       })
     }
   }
@@ -8465,11 +8531,12 @@ export function univerMetaRouter(): Router {
 
       const fields = (fieldRes.rows as any[]).map(serializeFieldRow)
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
-      // F3 (#2106 §3 F3): RecordWriteService uses these ONLY for the read-back echo (it masks record / related /
-      // formula data + summaries at record-write-service.ts:828/854/882/914/929), so narrow them to the
-      // layer-2 ∧ layer-3 readable set — a field_permissions-denied value must not be echoed. fieldById (the
-      // write gate, below) stays from ALL fields, so a write-only-no-read field remains writable. (crossSheetRelated
-      // @record-write-service.ts:985 is returned UNMASKED — a separate finding, see the verification doc.)
+      // F3 (#2106 §3 F3): RecordWriteService uses these ONLY for the read-back echo (it masks record /
+      // related / formula data + summaries inside patchRecords), so narrow them to the layer-2 ∧ layer-3
+      // readable set — a field_permissions-denied value must not be echoed. fieldById (the write gate,
+      // below) stays from ALL fields, so a write-only-no-read field remains writable. crossSheetRelated
+      // is masked per related sheet inside computeDependentLookupRollupRecords (locked by the
+      // multitable-cross-sheet-related-echo-mask suite).
       const echoFieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
       const echoFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap: echoFieldScopeMap })
       const readableEchoFields = visiblePropertyFields.filter((field) => echoFieldPermissions[field.id]?.visible !== false)
@@ -8499,7 +8566,8 @@ export function univerMetaRouter(): Router {
         serializeLinkSummaryMap,
         serializeAttachmentSummaryMap,
         applyLookupRollup: (q, f, rows, rl, lv) => applyLookupRollup(req, q, f, rows, rl, lv),
-        computeDependentLookupRollupRecords: (q, ids) => computeDependentLookupRollupRecords(req, q, ids),
+        computeDependentLookupRollupRecords: (q, sourceSheetId, ids, changed) =>
+          computeDependentLookupRollupRecords(req, q, sourceSheetId, ids, changed),
         recalculateFormulaFields,
         loadLinkValuesByRecord,
         buildLinkSummaries: (q, rows, rl, lv) => buildLinkSummaries(req, q, rows, rl, lv),

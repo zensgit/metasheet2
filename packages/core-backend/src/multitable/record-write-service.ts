@@ -283,9 +283,18 @@ export interface RecordWriteHelpers {
     relationalLinkFields: RelationalLinkField[],
     linkValuesByRecord: Map<string, Map<string, string[]>>,
   ) => Promise<void>
+  /**
+   * Recompute related (linked) records' lookup/rollup echoes — and, A-full (design #2410),
+   * one-hop formula propagation: related records whose lookup/rollup resolve to the edited
+   * source sheet AND whose targetFieldId is in `changedFieldIds` get their formulas
+   * recomputed + materialized. Returned `data` is masked per the related sheet's field-read
+   * gate (echo only — the recompute itself runs on the full hydrated row).
+   */
   computeDependentLookupRollupRecords: (
     query: QueryFn,
+    sourceSheetId: string,
     updatedRecordIds: string[],
+    changedFieldIds: string[],
   ) => Promise<Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>>
   /**
    * Recalculate `formula` fields for the given just-updated records when a
@@ -852,13 +861,22 @@ export class RecordWriteService {
     }
 
     // -----------------------------------------------------------------------
-    // Step 4: Related record recomputation (cross-sheet)
+    // Step 4: Related record recomputation (cross-sheet). A-full (design #2410):
+    // the helper also propagates this PATCH one hop into the related records'
+    // formulas, gated by the source sheet + changed field ids below.
     // -----------------------------------------------------------------------
+    const changedFieldIds = [
+      ...new Set(
+        Array.from(changesByRecord.values()).flatMap((changes) => changes.map((change) => change.fieldId)),
+      ),
+    ]
     const relatedRecords =
       updates.length > 0
         ? await h.computeDependentLookupRollupRecords(
             this.pool.query.bind(this.pool),
+            sheetId,
             updates.map((u) => u.recordId),
+            changedFieldIds,
           )
         : []
 
@@ -877,11 +895,6 @@ export class RecordWriteService {
     // surface in the response + realtime patch so the editing client AND other
     // clients refresh after a source field changes via this write path.
     // -----------------------------------------------------------------------
-    const changedFieldIds = [
-      ...new Set(
-        Array.from(changesByRecord.values()).flatMap((changes) => changes.map((change) => change.fieldId)),
-      ),
-    ]
     const formulaRecords =
       updates.length > 0
         ? (
