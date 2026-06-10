@@ -103,6 +103,29 @@ describe('attendance overtime segmentation O1 helper', () => {
     })
   })
 
+  it('resolves comp-time grant minutes from the versioned snapshot before falling back to total minutes', () => {
+    const snapshot = helpers.buildOvertimeSegmentationSnapshot({
+      workDate: '2026-10-02',
+      minutes: 90,
+      overtimeRule: { minMinutes: 0, roundingMinutes: 1, maxMinutesPerDay: 0 },
+      effectiveCalendarItem: item({}),
+    })
+    const futurePolicySnapshot = {
+      ...snapshot,
+      compTimeGrantMinutes: 45,
+    }
+
+    expect(helpers.resolveCompTimeGrantMinutesFromOvertimeMetadata({
+      minutes: 90,
+      overtimeSegmentation: futurePolicySnapshot,
+    })).toBe(45)
+    expect(helpers.resolveCompTimeGrantMinutesFromOvertimeMetadata({ minutes: 90 })).toBe(90)
+    expect(helpers.resolveCompTimeGrantMinutesFromOvertimeMetadata({
+      minutes: 90,
+      overtimeSegmentation: { ...futurePolicySnapshot, version: 999 },
+    })).toBe(90)
+  })
+
   it('rejects cross-midnight overtime windows with the stable v1 code', () => {
     expect(helpers.validateOvertimeSegmentationWindow({
       workDate: '2026-10-01',

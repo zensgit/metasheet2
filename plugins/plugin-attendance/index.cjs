@@ -9950,6 +9950,13 @@ function readOvertimeSegmentationSnapshot(metadata) {
   }
 }
 
+function resolveCompTimeGrantMinutesFromOvertimeMetadata(metadata) {
+  const snapshot = readOvertimeSegmentationSnapshot(metadata)
+  if (snapshot) return Math.floor(snapshot.compTimeGrantMinutes)
+  const meta = normalizeMetadata(metadata)
+  return Math.floor(Number(meta.minutes) || 0)
+}
+
 function applyOvertimeSegmentationSnapshotToApprovedEntry(entry, snapshot) {
   if (!entry || !snapshot) return
   entry.workdayOvertimeMinutes += snapshot.workdayOvertimeMinutes
@@ -16751,6 +16758,7 @@ module.exports = {
     OVERTIME_SEGMENTATION_ENGINE,
     OVERTIME_SEGMENTATION_VERSION,
     buildOvertimeSegmentationSnapshot,
+    resolveCompTimeGrantMinutesFromOvertimeMetadata,
     resolveOvertimeDayTypeFromEffectiveCalendarItem,
     validateOvertimeSegmentationWindow,
   },
@@ -22084,8 +22092,10 @@ module.exports = {
 
           let record = null
           if (action === 'approve' && isFinalApproval) {
-            // ④ C2 (#2230 design-lock): overtime approval → comp-time (调休) grant.
-            // Opt-in (compTimeFromOvertime.enabled, default OFF); v1 = 1:1 minutes, no expiry.
+            // ④ C2/O5 (#2230/#2453 design-lock): overtime approval → comp-time (调休)
+            // grant. O5 consumes the overtime segmentation snapshot's compTimeGrantMinutes
+            // when present; legacy rows without a snapshot keep the metadata.minutes fallback.
+            // Audit back-link is source_id/source_key → attendance_requests.metadata.
             // Idempotent by (org_id, source_key): ON CONFLICT DO NOTHING means a replay / repeated
             // final-approve never double-credits, and the grant event is written ONLY when a NEW lot
             // was inserted. Same txn as the status flip → the grant is atomic with the approval.
@@ -22093,7 +22103,7 @@ module.exports = {
             if (requestType === 'overtime') {
               const compTimeSettings = await getSettings(trx)
               if (compTimeSettings?.compTimeFromOvertime?.enabled === true) {
-                const amountMinutes = Math.floor(Number(requestMetadata.minutes) || 0)
+                const amountMinutes = resolveCompTimeGrantMinutesFromOvertimeMetadata(nextMetadata)
                 if (amountMinutes > 0) {
                   const compTimeSourceKey = `overtime_conversion:${requestId}`
                   // ④ C4 (#2267): when expiresInDays is configured (positive int), stamp the grant with

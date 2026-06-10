@@ -322,7 +322,7 @@ One staging smoke is required before tracker ✅:
 | O2 | Request create/update + final approval metadata snapshot, default off | ✅ implemented |
 | O3 | Record / summary loaders consume segment buckets | ✅ implemented |
 | O4 | Built-in report fields + report sync fingerprint use engine output | ✅ implemented |
-| O5 | Comp-time consumes `compTimeGrantMinutes` + idempotence tests | 🔒 |
+| O5 | Comp-time consumes `compTimeGrantMinutes` + idempotence tests | ✅ implemented |
 | O6 | Staging smoke + tracker ✅ closeout | 🔒 |
 
 ## 11. Locked V1 Decisions
