@@ -7029,6 +7029,12 @@ attendanceIntegrationDescribe(
             mode: 'apply',
             maxToleranceMinutes: 90,
             minConfidenceToApply: 'medium',
+            autoWrite: {
+              enabled: true,
+              lookaheadDays: 3,
+              maxAssignmentsPerRun: 40,
+              minConfidence: 'high',
+            },
           },
         }),
       })
@@ -7067,6 +7073,12 @@ attendanceIntegrationDescribe(
         mode: 'apply',
         maxToleranceMinutes: 90,
         minConfidenceToApply: 'medium',
+        autoWrite: {
+          enabled: true,
+          lookaheadDays: 3,
+          maxAssignmentsPerRun: 40,
+          minConfidence: 'high',
+        },
       })
 
       const futurePunchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
@@ -7151,6 +7163,73 @@ attendanceIntegrationDescribe(
       expect(res.status).toBe(200)
       return ((res.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
     }
+
+    it('round-trips dormant auto-write settings while keeping auto mode rejected', async () => {
+      if (!baseUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-autoshift-autowrite-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const originalSettings = await loadSettingsForTest(adminToken)
+      try {
+        await saveAutoShiftSettings(adminToken, {
+          autoShiftMatching: {
+            enabled: true,
+            mode: 'apply',
+            maxToleranceMinutes: 30,
+            minConfidenceToApply: 'high',
+            autoWrite: {
+              enabled: true,
+              lookaheadDays: 3,
+              maxAssignmentsPerRun: 40,
+              minConfidence: 'high',
+            },
+          },
+        })
+
+        await saveAutoShiftSettings(adminToken, {
+          autoShiftMatching: {
+            autoWrite: {
+              lookaheadDays: 2,
+            },
+          },
+        })
+
+        const reloaded = await loadSettingsForTest(adminToken)
+        expect(reloaded.autoShiftMatching).toEqual({
+          enabled: true,
+          mode: 'apply',
+          maxToleranceMinutes: 30,
+          minConfidenceToApply: 'high',
+          autoWrite: {
+            enabled: true,
+            lookaheadDays: 2,
+            maxAssignmentsPerRun: 40,
+            minConfidence: 'high',
+          },
+        })
+
+        const invalidPayloads: Array<Record<string, unknown>> = [
+          { autoShiftMatching: { mode: 'auto' } },
+          { autoShiftMatching: { autoWrite: { lookaheadDays: 0 } } },
+          { autoShiftMatching: { autoWrite: { lookaheadDays: 4 } } },
+          { autoShiftMatching: { autoWrite: { maxAssignmentsPerRun: 101 } } },
+          { autoShiftMatching: { autoWrite: { minConfidence: 'medium' } } },
+        ]
+
+        for (const payload of invalidPayloads) {
+          const res = await requestJson(`${baseUrl}/api/attendance/settings`, {
+            method: 'PUT',
+            headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          })
+          expect(res.status, JSON.stringify({ payload, body: res.body })).toBe(400)
+          expect((res.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
+        }
+      } finally {
+        await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
+      }
+    })
 
     async function createShiftForAutoShift(token: string, name: string, start: string, end: string): Promise<string> {
       if (!baseUrl) throw new Error('baseUrl missing')

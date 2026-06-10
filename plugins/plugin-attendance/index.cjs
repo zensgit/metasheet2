@@ -163,6 +163,14 @@ const DEFAULT_SETTINGS = {
     mode: 'preview',
     maxToleranceMinutes: 120,
     minConfidenceToApply: 'high',
+    // A2-0 dormant shape only. The background writer stays unavailable until
+    // mode='auto' + the scheduler slice are wired.
+    autoWrite: {
+      enabled: false,
+      lookaheadDays: 1,
+      maxAssignmentsPerRun: 25,
+      minConfidence: 'high',
+    },
   },
 }
 
@@ -11530,11 +11538,17 @@ function normalizeSettings(raw) {
 
 function normalizeAutoShiftMatchingSetting(raw) {
   const config = raw && typeof raw === 'object' ? raw : {}
+  const autoWrite = config.autoWrite && typeof config.autoWrite === 'object' ? config.autoWrite : {}
   const modeRaw = typeof config.mode === 'string' ? config.mode.trim() : ''
   const minConfidenceRaw = typeof config.minConfidenceToApply === 'string'
     ? config.minConfidenceToApply.trim()
     : ''
+  const autoWriteMinConfidenceRaw = typeof autoWrite.minConfidence === 'string'
+    ? autoWrite.minConfidence.trim()
+    : ''
   const tolerance = Number(config.maxToleranceMinutes)
+  const lookaheadDays = Number(autoWrite.lookaheadDays)
+  const maxAssignmentsPerRun = Number(autoWrite.maxAssignmentsPerRun)
   return {
     enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_SETTINGS.autoShiftMatching.enabled,
     // A1 exposes admin-selected apply. `auto` remains a future A2 slice and must not be accepted.
@@ -11545,6 +11559,20 @@ function normalizeAutoShiftMatchingSetting(raw) {
     minConfidenceToApply: ['high', 'medium', 'low'].includes(minConfidenceRaw)
       ? minConfidenceRaw
       : DEFAULT_SETTINGS.autoShiftMatching.minConfidenceToApply,
+    autoWrite: {
+      enabled: typeof autoWrite.enabled === 'boolean'
+        ? autoWrite.enabled
+        : DEFAULT_SETTINGS.autoShiftMatching.autoWrite.enabled,
+      lookaheadDays: Number.isInteger(lookaheadDays) && lookaheadDays >= 1 && lookaheadDays <= 3
+        ? lookaheadDays
+        : DEFAULT_SETTINGS.autoShiftMatching.autoWrite.lookaheadDays,
+      maxAssignmentsPerRun: Number.isInteger(maxAssignmentsPerRun) && maxAssignmentsPerRun >= 1 && maxAssignmentsPerRun <= 100
+        ? maxAssignmentsPerRun
+        : DEFAULT_SETTINGS.autoShiftMatching.autoWrite.maxAssignmentsPerRun,
+      minConfidence: autoWriteMinConfidenceRaw === 'high'
+        ? autoWriteMinConfidenceRaw
+        : DEFAULT_SETTINGS.autoShiftMatching.autoWrite.minConfidence,
+    },
   }
 }
 
@@ -11725,6 +11753,10 @@ function mergeSettings(base, update) {
     autoShiftMatching: {
       ...(base?.autoShiftMatching || {}),
       ...(update?.autoShiftMatching || {}),
+      autoWrite: {
+        ...(base?.autoShiftMatching?.autoWrite || {}),
+        ...(update?.autoShiftMatching?.autoWrite || {}),
+      },
     },
   })
 }
@@ -17784,6 +17816,12 @@ module.exports = {
         mode: z.enum(['preview', 'apply']).optional(),
         maxToleranceMinutes: z.number().int().positive().max(720).optional(),
         minConfidenceToApply: z.enum(['high', 'medium', 'low']).optional(),
+        autoWrite: z.object({
+          enabled: z.boolean().optional(),
+          lookaheadDays: z.number().int().min(1).max(3).optional(),
+          maxAssignmentsPerRun: z.number().int().positive().max(100).optional(),
+          minConfidence: z.literal('high').optional(),
+        }).optional(),
       }).optional(),
     })
 
