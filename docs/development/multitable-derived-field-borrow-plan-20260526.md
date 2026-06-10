@@ -55,12 +55,9 @@
   - **门**：需显式 opt-in（先回答"链式 formula 是否成为产品特性"），且与 B/C 的引擎/依赖图工作面协同最佳。
   - **K3**: 允许（但默认 defer）
 
-- [ ] ⬜ **A2b 宏展开转义/注入加固**
-  - **现状缺陷**：`evaluateField` 把字段值字面替换进表达式字符串；值含引号 / `{fld_` / 运算符时会污染表达式。
-  - **做什么**：对替换值做安全编码。B1 RFC 已拍板先做 A2b、推迟解析器，因此这是耐久修复，不是短寿命补丁。
-  - **验收**：对抗性单测（值含 `"`、`{fld_x}`、`1+1`、超长串）。
-  - **工作量**: S · **风险**: 低 · **依赖**: 无（下一条独立 opt-in）
-  - **K3**: 允许
+- [x] ✅ **A2b (SHIPPED — PR #1958 MERGED `d9b5b031a` 2026-05-28) 宏展开转义/注入加固**
+  - **如建（as-built）**：`formula-engine.ts evaluateField` 的 `String(value)` 兜底收口——标量不变；scalar array → 引号 joined literal（值保留、修注入）；array-with-object + 裸 object → `#VALUE!`。13 对抗性单测。详见 open-items tracker Slice 3。
+  - **后注（reconcile 2026-06-10）**：A2b 验收时发现的 backlog（formula 引用 lookup → recalc 按 `'0'` 算）长成了独立修复链 **formula-over-lookup**，已全链落地：#1971 特征化 → #2246/#2247 A-min → #2255/#2259 create → #2410/#2450 **A-full（一跳外表传播，2026-06-10 MERGED `85f4c074b`，含 review F1 白名单加固）**。后续两刀（相关表 realtime 失效 fan-out + dry-run hydration）见 `multitable-formula-over-lookup-followups-development-plan-20260610.md`。
 
 ---
 
@@ -157,7 +154,8 @@
 ```
 
 - **重要**：箭头是优先级顺序，**不代表做完一条自动开下一条**。每条各需独立 opt-in；我一条一条来。
-- **A1**（#1883）、**A1.1**（#1890）、**A2-defense**、**F1**（删网格死代码）均已落；**B1/C1 RFC 已拍板**。下一条可启动项 = **A2b**，但仍需独立 opt-in。
+- **A1**（#1883）、**A1.1**（#1890）、**A2-defense**、**F1**（删网格死代码）、**A2b**（#1958）均已落；**B1/C1 RFC 已拍板**。
+- **（reconcile 2026-06-10）formula-over-lookup 链已全链落地**（A-min #2247 · create #2259 · A-full #2450）；当前可启动项收敛到该链的两个后续：**FOL-1 相关表 realtime 失效 fan-out、FOL-2 dry-run hydration** —— 见 `multitable-formula-over-lookup-followups-development-plan-20260610.md` + 同名 TODO。
 - **A2-full（链式 topo）** 已降级 gated/future（产品不暴露链式 formula，先答"是否做成特性"）。
 - **B2 解析器**、**C1/C2a/C3 多跳派生** 均推迟；出现 RFC 写明的翻盘条件才重启。
 - **C2b（物化）** 是最重、最靠近存储模型的独立 gate，单独拍板。

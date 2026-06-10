@@ -39,6 +39,7 @@
 - ⛔ **A2b-4 → NOT-APPLICABLE**（原 V-A2b-3 real-DB lookup→formula）：hydrated lookup 数据当前不流入 formula recalc（`recalculateRecord` 走 DB reload；lookup computed-on-read 不 materialize）→ A2b 是 **defensive**，该 e2e 断言与架构不符。
 - 🔒 **A2b-5** Track B（Teable `packages/formula` MIT 真解析器取代宏展开）——**单独 RFC**，若上马则 A2b 可作废，故 A2b 保持最小。
 - 🆕 **Backlog（独立、out-of-scope，本 reconcile 不写 note 本身）**：formula 引用 lookup → recalc 缺席 lookup 值 → `undefined→'0'`（`formula-engine.ts:109`，"按 0 算"）；characterization/design note only，单独决策。
+  - **（resolved 2026-06-10）** 该 backlog 长成 **formula-over-lookup 修复链**并已全链落地：#1971 → A-min #2246/#2247 → create #2255/#2259 → A-full #2410/**#2450（MERGED `85f4c074b`）**；后续两刀（FOL-1/FOL-2）见 `multitable-formula-over-lookup-followups-development-plan-20260610.md` + 同名 TODO。
 
 ---
 
