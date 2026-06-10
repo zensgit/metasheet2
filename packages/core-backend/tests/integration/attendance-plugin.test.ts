@@ -2755,6 +2755,283 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('keeps draft and pending schedule assignments out of runtime schedule consumers until published', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const adminUserId = `attendance-publish-admin-${runSuffix}`
+    const employeeUserId = `attendance-publish-employee-${runSuffix}`
+    const rotationUserId = `attendance-publish-rotation-${runSuffix}`
+    const conflictUserId = `attendance-publish-conflict-${runSuffix}`
+    const workDate = '2026-07-20'
+    const rotationDate = '2026-07-21'
+    const conflictDate = '2026-07-22'
+    const occurredAt = `${workDate}T02:30:00.000Z`
+    const pool = new Pool({ connectionString: dbUrl })
+    let originalSettings: Record<string, unknown> = {}
+    let shiftId: string | undefined
+    let groupId: string | undefined
+    let rotationRuleId: string | undefined
+
+    const adminTokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const employeeTokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&roles=user&perms=attendance:read,attendance:write`
+    )
+    const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+    const employeeToken = (employeeTokenRes.body as { token?: string } | undefined)?.token
+    expect(adminToken).toBeTruthy()
+    expect(employeeToken).toBeTruthy()
+    if (!adminToken || !employeeToken) {
+      await pool.end().catch(() => undefined)
+      return
+    }
+    const adminHeaders = {
+      Authorization: `Bearer ${adminToken}`,
+      'Content-Type': 'application/json',
+    }
+    const employeeHeaders = {
+      Authorization: `Bearer ${employeeToken}`,
+      'Content-Type': 'application/json',
+    }
+
+    const fetchEffectiveSlots = async (userId: string, date: string) => {
+      const res = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${date}&to=${date}&userId=${encodeURIComponent(userId)}`,
+        { headers: { Authorization: `Bearer ${adminToken}` } }
+      )
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      const item = ((res.body as { data?: { items?: Array<{ effective?: { plannedMinutes?: number; slots?: Array<{ shiftId?: string; plannedMinutes?: number }> } }> } } | undefined)?.data?.items ?? [])[0]
+      return {
+        plannedMinutes: item?.effective?.plannedMinutes ?? 0,
+        slots: item?.effective?.slots ?? [],
+      }
+    }
+
+    try {
+      const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+      expect(settingsRes.status).toBe(200)
+      originalSettings = ((settingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+      const settingsUpdateRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: adminHeaders,
+        body: JSON.stringify({
+          shiftEditPolicy: { mode: 'unrestricted', windowDays: 0 },
+          shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+          multiShiftDay: { enabled: false, maxSlots: 3 },
+          punchPolicy: { unscheduled: { mode: 'block' } },
+        }),
+      })
+      expect(settingsUpdateRes.status, JSON.stringify(settingsUpdateRes.body)).toBe(200)
+
+      const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({
+          name: `Publish Lifecycle Shift ${runSuffix}`,
+          timezone: 'UTC',
+          workStartTime: '09:10',
+          workEndTime: '10:40',
+          workingDays: [1, 2, 3, 4, 5, 6, 7],
+        }),
+      })
+      expect(shiftRes.status, JSON.stringify(shiftRes.body)).toBe(201)
+      shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(shiftId).toBeTruthy()
+      if (!shiftId) return
+
+      const groupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({
+          name: `publish-lifecycle-${runSuffix}`,
+          timezone: 'UTC',
+          attendanceType: 'scheduled_shift',
+          description: 'publish lifecycle integration test',
+        }),
+      })
+      expect(groupRes.status, JSON.stringify(groupRes.body)).toBe(200)
+      groupId = (groupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(groupId).toBeTruthy()
+      if (!groupId) return
+      const memberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({ userIds: [employeeUserId] }),
+      })
+      expect(memberRes.status, JSON.stringify(memberRes.body)).toBe(200)
+
+      const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({
+          userId: employeeUserId,
+          shiftId,
+          startDate: workDate,
+          endDate: workDate,
+          isActive: true,
+        }),
+      })
+      expect(assignmentRes.status, JSON.stringify(assignmentRes.body)).toBe(201)
+      const assignment = (assignmentRes.body as { data?: { assignment?: { id?: string; publishStatus?: string; publish_status?: string } } } | undefined)?.data?.assignment
+      expect(assignment?.publishStatus).toBe('published')
+      expect(assignment?.publish_status).toBe('published')
+      expect(assignment?.id).toBeTruthy()
+      if (!assignment?.id) return
+
+      const defaultStatusRows = await pool.query(
+        'SELECT publish_status FROM attendance_shift_assignments WHERE id = $1',
+        [assignment.id],
+      )
+      expect(defaultStatusRows.rows[0]?.publish_status).toBe('published')
+      await expect(
+        pool.query('UPDATE attendance_shift_assignments SET publish_status = $2 WHERE id = $1', [assignment.id, 'archived']),
+      ).rejects.toMatchObject({ code: '23514' })
+
+      await pool.query('UPDATE attendance_shift_assignments SET publish_status = $2 WHERE id = $1', [assignment.id, 'draft'])
+      const draftEffective = await fetchEffectiveSlots(employeeUserId, workDate)
+      expect(draftEffective.slots.some(slot => slot.shiftId === shiftId)).toBe(false)
+      expect(draftEffective.plannedMinutes).not.toBe(90)
+      const blockedPunchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers: employeeHeaders,
+        body: JSON.stringify({ eventType: 'check_in', occurredAt }),
+      })
+      expect(blockedPunchRes.status, JSON.stringify(blockedPunchRes.body)).toBe(422)
+      expect((blockedPunchRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('PUNCH_UNSCHEDULED_BLOCKED')
+      const afterBlockedPunch = await pool.query(
+        'SELECT 1 FROM attendance_events WHERE user_id = $1 AND work_date = $2',
+        [employeeUserId, workDate],
+      )
+      expect(afterBlockedPunch.rows.length).toBe(0)
+
+      await pool.query('UPDATE attendance_shift_assignments SET publish_status = $2 WHERE id = $1', [assignment.id, 'pending'])
+      const pendingEffective = await fetchEffectiveSlots(employeeUserId, workDate)
+      expect(pendingEffective.slots.some(slot => slot.shiftId === shiftId)).toBe(false)
+      const listRes = await requestJson(`${baseUrl}/api/attendance/assignments?userId=${encodeURIComponent(employeeUserId)}`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+      expect(listRes.status, JSON.stringify(listRes.body)).toBe(200)
+      const listed = ((listRes.body as { data?: { items?: Array<{ assignment?: { id?: string; publishStatus?: string; publish_status?: string } }> } } | undefined)?.data?.items ?? [])
+        .find(item => item.assignment?.id === assignment.id)?.assignment
+      expect(listed?.publishStatus).toBe('pending')
+      expect(listed?.publish_status).toBe('pending')
+
+      await pool.query('UPDATE attendance_shift_assignments SET publish_status = $2 WHERE id = $1', [assignment.id, 'published'])
+      const publishedEffective = await fetchEffectiveSlots(employeeUserId, workDate)
+      expect(publishedEffective.slots.some(slot => slot.shiftId === shiftId)).toBe(true)
+      expect(publishedEffective.plannedMinutes).toBe(90)
+      const allowedPunchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers: employeeHeaders,
+        body: JSON.stringify({ eventType: 'check_in', occurredAt }),
+      })
+      expect(allowedPunchRes.status, JSON.stringify(allowedPunchRes.body)).toBe(200)
+      const afterAllowedPunch = await pool.query(
+        'SELECT 1 FROM attendance_events WHERE user_id = $1 AND work_date = $2',
+        [employeeUserId, workDate],
+      )
+      expect(afterAllowedPunch.rows.length).toBe(1)
+
+      const draftConflictRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({
+          userId: conflictUserId,
+          shiftId,
+          startDate: conflictDate,
+          endDate: conflictDate,
+          isActive: true,
+        }),
+      })
+      expect(draftConflictRes.status, JSON.stringify(draftConflictRes.body)).toBe(201)
+      const draftConflictAssignmentId = (draftConflictRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+      expect(draftConflictAssignmentId).toBeTruthy()
+      await pool.query('UPDATE attendance_shift_assignments SET publish_status = $2 WHERE id = $1', [draftConflictAssignmentId, 'draft'])
+      const publishedOverDraftRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({
+          userId: conflictUserId,
+          shiftId,
+          startDate: conflictDate,
+          endDate: conflictDate,
+          isActive: true,
+        }),
+      })
+      expect(publishedOverDraftRes.status, JSON.stringify(publishedOverDraftRes.body)).toBe(201)
+
+      const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({
+          name: `Publish Lifecycle Rotation ${runSuffix}`,
+          timezone: 'UTC',
+          shiftSequence: [shiftId],
+          isActive: true,
+        }),
+      })
+      expect(rotationRuleRes.status, JSON.stringify(rotationRuleRes.body)).toBe(201)
+      rotationRuleId = (rotationRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(rotationRuleId).toBeTruthy()
+      if (!rotationRuleId) return
+
+      const rotationAssignmentRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({
+          userId: rotationUserId,
+          rotationRuleId,
+          startDate: rotationDate,
+          endDate: rotationDate,
+          isActive: true,
+        }),
+      })
+      expect(rotationAssignmentRes.status, JSON.stringify(rotationAssignmentRes.body)).toBe(201)
+      const rotationAssignment = (rotationAssignmentRes.body as { data?: { assignment?: { id?: string; publishStatus?: string; publish_status?: string } } } | undefined)?.data?.assignment
+      expect(rotationAssignment?.publishStatus).toBe('published')
+      expect(rotationAssignment?.publish_status).toBe('published')
+      expect(rotationAssignment?.id).toBeTruthy()
+      if (!rotationAssignment?.id) return
+      await pool.query('UPDATE attendance_rotation_assignments SET publish_status = $2 WHERE id = $1', [rotationAssignment.id, 'draft'])
+      const draftRotationEffective = await fetchEffectiveSlots(rotationUserId, rotationDate)
+      expect(draftRotationEffective.slots.some(slot => slot.shiftId === shiftId)).toBe(false)
+      expect(draftRotationEffective.plannedMinutes).not.toBe(90)
+      await pool.query('UPDATE attendance_rotation_assignments SET publish_status = $2 WHERE id = $1', [rotationAssignment.id, 'pending'])
+      const pendingRotationEffective = await fetchEffectiveSlots(rotationUserId, rotationDate)
+      expect(pendingRotationEffective.slots.some(slot => slot.shiftId === shiftId)).toBe(false)
+      await pool.query('UPDATE attendance_rotation_assignments SET publish_status = $2 WHERE id = $1', [rotationAssignment.id, 'published'])
+      const publishedRotationEffective = await fetchEffectiveSlots(rotationUserId, rotationDate)
+      expect(publishedRotationEffective.slots.some(slot => slot.shiftId === shiftId)).toBe(true)
+      expect(publishedRotationEffective.plannedMinutes).toBe(90)
+    } finally {
+      if (Object.keys(originalSettings).length > 0) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers: adminHeaders,
+          body: JSON.stringify(originalSettings),
+        }).catch(() => undefined)
+      }
+      const users = [employeeUserId, rotationUserId, conflictUserId]
+      await pool.query('DELETE FROM attendance_events WHERE user_id = ANY($1::text[])', [users]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_records WHERE user_id = ANY($1::text[])', [users]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = ANY($1::text[])', [users]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_rotation_assignments WHERE user_id = ANY($1::text[])', [users]).catch(() => undefined)
+      if (groupId) {
+        await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1 OR user_id = ANY($2::text[])', [groupId, users]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_groups WHERE id = $1', [groupId]).catch(() => undefined)
+      }
+      if (rotationRuleId) await pool.query('DELETE FROM attendance_rotation_rules WHERE id = $1', [rotationRuleId]).catch(() => undefined)
+      if (shiftId) await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [shiftId]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('enforces schedule-edit windows on shift and rotation assignment writes', async () => {
     if (!baseUrl) return
 
