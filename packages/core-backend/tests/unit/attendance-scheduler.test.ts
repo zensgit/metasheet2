@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   AttendanceScheduler,
+  registerAttendanceSchedulerJob,
+  resolveUnscheduledReminderJob,
   startAttendanceScheduler,
   stopAttendanceScheduler,
 } from '../../src/services/AttendanceScheduler'
@@ -10,6 +12,7 @@ import {
   AttendanceNotifier,
   createAttendanceNotifierChannelsFromEnv,
 } from '../../src/services/AttendanceNotifier'
+import { UnscheduledReminderService } from '../../src/services/UnscheduledReminderService'
 
 function fakeExpiryService(rows: ExpiredCompTimeBalance[], spy?: () => void): AttendanceExpiryService {
   return {
@@ -24,6 +27,8 @@ describe('AttendanceScheduler (④ C4)', () => {
   afterEach(() => {
     stopAttendanceScheduler()
     delete process.env.ATTENDANCE_SCHEDULER_ENABLED
+    delete process.env.ATTENDANCE_UNSCHEDULED_REMINDER_ENABLED
+    vi.restoreAllMocks()
   })
 
   it('tick (single-process leader) runs the expiry service and returns its result', async () => {
@@ -55,6 +60,77 @@ describe('AttendanceScheduler (④ C4)', () => {
     expect(scheduler).not.toBeNull()
     // Idempotent: the shared instance is returned, not a second scheduler.
     expect(startAttendanceScheduler({ expiryService: fakeExpiryService([]) })).toBe(scheduler)
+  })
+
+  it('runCycle runs registered jobs after expiry and isolates a failing job', async () => {
+    const calls: string[] = []
+    const scheduler = new AttendanceScheduler({
+      expiryService: fakeExpiryService([], () => { calls.push('expiry') }),
+      jobs: [
+        { name: 'first', async run() { calls.push('first') } },
+        { name: 'bad', async run() { calls.push('bad'); throw new Error('down') } },
+        { name: 'second', async run() { calls.push('second') } },
+      ],
+    })
+
+    await scheduler.runCycle()
+
+    expect(calls).toEqual(['expiry', 'first', 'bad', 'second'])
+  })
+
+  it('supports dynamic shared-scheduler job registration and unregistering', async () => {
+    process.env.ATTENDANCE_SCHEDULER_ENABLED = 'true'
+    const calls: string[] = []
+    const scheduler = startAttendanceScheduler({ expiryService: fakeExpiryService([]), intervalMs: 999_999 })
+    expect(scheduler).not.toBeNull()
+
+    const unregister = registerAttendanceSchedulerJob({
+      name: 'dynamic',
+      async run() { calls.push('dynamic') },
+    })
+    expect(typeof unregister).toBe('function')
+
+    await scheduler!.runCycle()
+    expect(calls).toEqual(['dynamic'])
+
+    unregister?.()
+    await scheduler!.runCycle()
+    expect(calls).toEqual(['dynamic'])
+  })
+
+  it('replaces named jobs without letting stale unregister handles remove the replacement', async () => {
+    const calls: string[] = []
+    const scheduler = new AttendanceScheduler({ expiryService: fakeExpiryService([]) })
+    const unregisterOld = scheduler.registerJob({
+      name: 'replaceable',
+      async run() { calls.push('old') },
+    })
+    scheduler.registerJob({
+      name: 'replaceable',
+      async run() { calls.push('new') },
+    })
+    unregisterOld()
+
+    await scheduler.runCycle()
+
+    expect(calls).toEqual(['new'])
+  })
+
+  it('resolves the unscheduled reminder job with one stable service instance', async () => {
+    process.env.ATTENDANCE_UNSCHEDULED_REMINDER_ENABLED = 'true'
+    const instances = new Set<unknown>()
+    vi.spyOn(UnscheduledReminderService.prototype, 'run').mockImplementation(function (this: UnscheduledReminderService) {
+      instances.add(this)
+      return Promise.resolve({ targetDate: '2026-06-11', claimed: 0, dispatched: 0 })
+    })
+
+    const job = resolveUnscheduledReminderJob()
+    expect(job?.name).toBe('unscheduled-reminder')
+
+    await job?.run()
+    await job?.run()
+
+    expect(instances.size).toBe(1)
   })
 })
 

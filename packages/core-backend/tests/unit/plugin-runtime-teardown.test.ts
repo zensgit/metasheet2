@@ -1,6 +1,19 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
 import { MetaSheetServer } from '../../src/index'
+import {
+  startAttendanceScheduler,
+  stopAttendanceScheduler,
+} from '../../src/services/AttendanceScheduler'
+import type { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
+
+function fakeExpiryService(): AttendanceExpiryService {
+  return {
+    async expireCompTimeBalances() {
+      return []
+    },
+  } as unknown as AttendanceExpiryService
+}
 
 function installLoadedPlugin(server: MetaSheetServer, name: string, plugin: Record<string, unknown>) {
   const loader = (server as unknown as { pluginLoader: { loadedPlugins: Map<string, unknown> } }).pluginLoader
@@ -18,6 +31,11 @@ function installLoadedPlugin(server: MetaSheetServer, name: string, plugin: Reco
 }
 
 describe('MetaSheetServer plugin runtime teardown', () => {
+  afterEach(() => {
+    stopAttendanceScheduler()
+    delete process.env.ATTENDANCE_SCHEDULER_ENABLED
+  })
+
   it('disables plugin-owned routes and communication namespaces on deactivate, then allows clean reactivation', async () => {
     const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     const pluginName = 'plugin-runtime-teardown-probe'
@@ -98,6 +116,50 @@ describe('MetaSheetServer plugin runtime teardown', () => {
     await expect(request((server as any).app).get(routePath)).resolves.toMatchObject({
       status: 404,
     })
+  })
+
+  it('cleans plugin-owned attendance scheduler jobs on deactivate and failed activation', async () => {
+    process.env.ATTENDANCE_SCHEDULER_ENABLED = 'true'
+    const scheduler = startAttendanceScheduler({ expiryService: fakeExpiryService(), intervalMs: 999_999 })
+    expect(scheduler).not.toBeNull()
+
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const pluginName = 'plugin-runtime-scheduler-probe'
+    let calls = 0
+
+    installLoadedPlugin(server, pluginName, {
+      async activate(context: any) {
+        context.services.attendanceScheduler.registerJob({
+          name: `${pluginName}:job`,
+          async run() { calls += 1 },
+        })
+      },
+      deactivate: vi.fn(),
+    })
+
+    await (server as any).activatePluginByName(pluginName)
+    await scheduler!.runCycle()
+    expect(calls).toBe(1)
+
+    await (server as any).deactivatePluginByName(pluginName)
+    await scheduler!.runCycle()
+    expect(calls).toBe(1)
+
+    installLoadedPlugin(server, pluginName, {
+      async activate(context: any) {
+        context.services.attendanceScheduler.registerJob({
+          name: `${pluginName}:job`,
+          async run() { calls += 1 },
+        })
+        throw new Error('boom')
+      },
+      deactivate: vi.fn(),
+    })
+
+    const state = await (server as any).activatePluginByName(pluginName)
+    expect(state).toMatchObject({ status: 'failed', error: 'boom' })
+    await scheduler!.runCycle()
+    expect(calls).toBe(1)
   })
 
   it('rejects communication namespace collisions without deleting the original owner', async () => {
