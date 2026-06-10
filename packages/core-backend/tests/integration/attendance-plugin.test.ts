@@ -2837,7 +2837,7 @@ attendanceIntegrationDescribe(
           timezone: 'UTC',
           workStartTime: '09:10',
           workEndTime: '10:40',
-          workingDays: [1, 2, 3, 4, 5, 6, 7],
+          workingDays: [1, 2, 3, 4, 5, 6],
         }),
       })
       expect(shiftRes.status, JSON.stringify(shiftRes.body)).toBe(201)

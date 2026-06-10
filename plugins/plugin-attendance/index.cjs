@@ -11922,43 +11922,38 @@ async function loadShiftAssignmentMapForUsersRange(db, orgId, userIds, fromDate,
   const targetOrg = orgId || DEFAULT_ORG_ID
   if (!Array.isArray(userIds) || userIds.length === 0) return new Map()
   if (!fromDate || !toDate) return new Map()
-  try {
-    const rows = await db.query(
-      `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
-              a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
-              a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
-              a.created_at AS assignment_created_at,
-              s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
-              s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
-              s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
-              s.working_days AS shift_working_days
-       FROM attendance_shift_assignments a
-       JOIN attendance_shifts s ON s.id = a.shift_id
-       WHERE a.org_id = $1
-         AND a.user_id = ANY($2::text[])
-         AND a.is_active = true
-         AND COALESCE(a.publish_status, 'published') = 'published'
-         AND a.start_date <= $3
-         AND (a.end_date IS NULL OR a.end_date >= $4)
-       ORDER BY a.user_id, a.start_date DESC, a.created_at DESC`,
-      [targetOrg, userIds, toDate, fromDate]
-    )
-    const byUser = new Map()
-    for (const row of rows) {
-      const userId = row.user_id
-      if (!userId) continue
-      if (!byUser.has(userId)) byUser.set(userId, [])
-      byUser.get(userId).push({
-        assignment: mapAssignmentRow(row),
-        shift: mapShiftFromAssignmentRow(row),
-        createdAt: row.assignment_created_at ?? null,
-      })
-    }
-    return byUser
-  } catch (error) {
-    if (isDatabaseSchemaError(error)) return new Map()
-    throw error
+  const rows = await db.query(
+    `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
+            a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
+            a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
+            a.created_at AS assignment_created_at,
+            s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
+            s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
+            s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
+            s.working_days AS shift_working_days
+     FROM attendance_shift_assignments a
+     JOIN attendance_shifts s ON s.id = a.shift_id
+     WHERE a.org_id = $1
+       AND a.user_id = ANY($2::text[])
+       AND a.is_active = true
+       AND COALESCE(a.publish_status, 'published') = 'published'
+       AND a.start_date <= $3
+       AND (a.end_date IS NULL OR a.end_date >= $4)
+     ORDER BY a.user_id, a.start_date DESC, a.created_at DESC`,
+    [targetOrg, userIds, toDate, fromDate]
+  )
+  const byUser = new Map()
+  for (const row of rows) {
+    const userId = row.user_id
+    if (!userId) continue
+    if (!byUser.has(userId)) byUser.set(userId, [])
+    byUser.get(userId).push({
+      assignment: mapAssignmentRow(row),
+      shift: mapShiftFromAssignmentRow(row),
+      createdAt: row.assignment_created_at ?? null,
+    })
   }
+  return byUser
 }
 
 async function loadRotationAssignmentMapForUsersRange(db, orgId, userIds, fromDate, toDate) {
@@ -11967,67 +11962,60 @@ async function loadRotationAssignmentMapForUsersRange(db, orgId, userIds, fromDa
     return { assignmentsByUser: new Map(), shiftsById: new Map() }
   }
   if (!fromDate || !toDate) return { assignmentsByUser: new Map(), shiftsById: new Map() }
-  try {
-    const rows = await db.query(
-      `SELECT a.id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date, a.is_active,
-              a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
-              a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
-              r.name AS rotation_name, r.timezone AS rotation_timezone, r.shift_sequence AS rotation_shift_sequence,
-              r.is_active AS rotation_is_active
-       FROM attendance_rotation_assignments a
-       JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
-       WHERE a.org_id = $1
-         AND a.user_id = ANY($2::text[])
-         AND a.is_active = true
-         AND COALESCE(a.publish_status, 'published') = 'published'
-         AND r.is_active = true
-         AND a.start_date <= $3
-         AND (a.end_date IS NULL OR a.end_date >= $4)
-       ORDER BY a.user_id, a.start_date DESC, a.created_at DESC`,
-      [targetOrg, userIds, toDate, fromDate]
-    )
-    const assignmentsByUser = new Map()
-    const shiftIdSet = new Set()
-    for (const row of rows) {
-      const userId = row.user_id
-      if (!userId) continue
-      const rotation = mapRotationRuleFromAssignmentRow(row)
-      const assignment = mapRotationAssignmentRow(row)
-      if (!assignmentsByUser.has(userId)) assignmentsByUser.set(userId, [])
-      assignmentsByUser.get(userId).push({ assignment, rotation })
-      for (const shiftId of rotation.shiftSequence) {
-        if (shiftId) shiftIdSet.add(shiftId)
-      }
+  const rows = await db.query(
+    `SELECT a.id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date, a.is_active,
+            a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
+            a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
+            r.name AS rotation_name, r.timezone AS rotation_timezone, r.shift_sequence AS rotation_shift_sequence,
+            r.is_active AS rotation_is_active
+     FROM attendance_rotation_assignments a
+     JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
+     WHERE a.org_id = $1
+       AND a.user_id = ANY($2::text[])
+       AND a.is_active = true
+       AND COALESCE(a.publish_status, 'published') = 'published'
+       AND r.is_active = true
+       AND a.start_date <= $3
+       AND (a.end_date IS NULL OR a.end_date >= $4)
+     ORDER BY a.user_id, a.start_date DESC, a.created_at DESC`,
+    [targetOrg, userIds, toDate, fromDate]
+  )
+  const assignmentsByUser = new Map()
+  const shiftIdSet = new Set()
+  for (const row of rows) {
+    const userId = row.user_id
+    if (!userId) continue
+    const rotation = mapRotationRuleFromAssignmentRow(row)
+    const assignment = mapRotationAssignmentRow(row)
+    if (!assignmentsByUser.has(userId)) assignmentsByUser.set(userId, [])
+    assignmentsByUser.get(userId).push({ assignment, rotation })
+    for (const shiftId of rotation.shiftSequence) {
+      if (shiftId) shiftIdSet.add(shiftId)
     }
-
-    const shiftsById = new Map()
-    if (shiftIdSet.size > 0) {
-      const ids = []
-      const names = []
-      for (const shiftRef of shiftIdSet) {
-        const uuid = normalizeUuidString(shiftRef)
-        if (uuid) {
-          ids.push(uuid)
-        } else if (typeof shiftRef === 'string' && shiftRef.trim()) {
-          names.push(shiftRef.trim())
-        }
-      }
-      const lookup = await loadShiftReferenceLookup(db, targetOrg, { ids, names })
-      for (const shiftRef of shiftIdSet) {
-        const resolution = resolveShiftReference(shiftRef, lookup)
-        if (resolution.status !== 'resolved' || !resolution.shift?.id) continue
-        shiftsById.set(shiftRef, resolution.shift)
-        shiftsById.set(resolution.shift.id, resolution.shift)
-      }
-    }
-
-    return { assignmentsByUser, shiftsById }
-  } catch (error) {
-    if (isDatabaseSchemaError(error)) {
-      return { assignmentsByUser: new Map(), shiftsById: new Map() }
-    }
-    throw error
   }
+
+  const shiftsById = new Map()
+  if (shiftIdSet.size > 0) {
+    const ids = []
+    const names = []
+    for (const shiftRef of shiftIdSet) {
+      const uuid = normalizeUuidString(shiftRef)
+      if (uuid) {
+        ids.push(uuid)
+      } else if (typeof shiftRef === 'string' && shiftRef.trim()) {
+        names.push(shiftRef.trim())
+      }
+    }
+    const lookup = await loadShiftReferenceLookup(db, targetOrg, { ids, names })
+    for (const shiftRef of shiftIdSet) {
+      const resolution = resolveShiftReference(shiftRef, lookup)
+      if (resolution.status !== 'resolved' || !resolution.shift?.id) continue
+      shiftsById.set(shiftRef, resolution.shift)
+      shiftsById.set(resolution.shift.id, resolution.shift)
+    }
+  }
+
+  return { assignmentsByUser, shiftsById }
 }
 
 // ===== EffectiveCalendarResolver (RFC §4) =====
@@ -31535,6 +31523,10 @@ module.exports = {
           if (message.startsWith('VALIDATION:')) {
             // resolver-level validation; route validation should normally catch first
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance schedule publish columns missing. Run migrations before serving effective calendar.' } })
             return
           }
           logger.error('Attendance effective-calendar resolve failed', error)
