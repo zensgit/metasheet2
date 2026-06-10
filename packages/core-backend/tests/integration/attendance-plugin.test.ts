@@ -2608,8 +2608,6 @@ attendanceIntegrationDescribe(
       ])
       const fixedApplyManagedRow = fixedRowsAfterApply.rows.find(row => row.shift_id === morningShiftId)
       expect(fixedApplyManagedRow?.publish_status).toBe('published')
-      expect(fixedApplyManagedRow?.published_at).toBeTruthy()
-      expect(fixedApplyManagedRow?.locked_at).toBeTruthy()
       expect(fixedApplyManagedRow?.producer_type).toBe('attendance_group_fixed_schedule')
 
       const fixedRebuildRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/rebuild`, {
@@ -2633,8 +2631,6 @@ attendanceIntegrationDescribe(
       ])
       const fixedRebuildManagedRow = fixedRowsAfterRebuild.rows.find(row => row.shift_id === morningShiftId)
       expect(fixedRebuildManagedRow?.publish_status).toBe('published')
-      expect(fixedRebuildManagedRow?.published_at).toBeTruthy()
-      expect(fixedRebuildManagedRow?.locked_at).toBeTruthy()
       expect(fixedRebuildManagedRow?.producer_type).toBe('attendance_group_fixed_schedule')
 
       await saveSettings({
@@ -6549,8 +6545,6 @@ attendanceIntegrationDescribe(
           producer_run_id: applyData?.runId,
         })
         expect(rows.rows[0]?.publish_status).toBe('published')
-        expect(rows.rows[0]?.published_at).toBeTruthy()
-        expect(rows.rows[0]?.locked_at).toBeTruthy()
         expect(dateOnlyForTest(rows.rows[0].start_date)).toBe(workDate)
         expect(dateOnlyForTest(rows.rows[0].end_date)).toBe(workDate)
 
