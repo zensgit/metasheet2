@@ -7213,6 +7213,7 @@ attendanceIntegrationDescribe(
           { autoShiftMatching: { mode: 'auto' } },
           { autoShiftMatching: { autoWrite: { lookaheadDays: 0 } } },
           { autoShiftMatching: { autoWrite: { lookaheadDays: 4 } } },
+          { autoShiftMatching: { autoWrite: { maxAssignmentsPerRun: 0 } } },
           { autoShiftMatching: { autoWrite: { maxAssignmentsPerRun: 101 } } },
           { autoShiftMatching: { autoWrite: { minConfidence: 'medium' } } },
         ]
