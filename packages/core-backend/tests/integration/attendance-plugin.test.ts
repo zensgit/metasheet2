@@ -4777,6 +4777,95 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('A2 auto-shift auto-write ledger — active-run claim and item invariants are DB-enforced (latent schema)', async () => {
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = `a2-ledger-${runSuffix}`
+    const userId = `a2-user-${runSuffix}`
+    const targetFrom = '2026-06-15'
+    const targetTo = '2026-06-16'
+    let runId: string | undefined
+    const rejects = async (text: string, params: unknown[], code: string, label: string) => {
+      let err: { code?: string } | null = null
+      try { await pool.query(text, params) } catch (e) { err = e as { code?: string } }
+      expect({ label, code: err?.code }).toEqual({ label, code })
+    }
+    try {
+      await requireAttendanceTable(pool, 'attendance_auto_shift_auto_write_runs')
+      await requireAttendanceTable(pool, 'attendance_auto_shift_auto_write_run_items')
+
+      const runInsert = `INSERT INTO attendance_auto_shift_auto_write_runs
+        (org_id, source, status, target_from, target_to, config_snapshot)
+        VALUES ($1, 'scheduler', 'running', $2, $3, '{"autoWrite":{"enabled":true}}'::jsonb)
+        RETURNING id`
+      const insertedRun = await pool.query(runInsert, [orgId, targetFrom, targetTo])
+      runId = insertedRun.rows[0]?.id as string | undefined
+      expect(runId).toBeTruthy()
+
+      // The partial UNIQUE claim prevents a second in-flight scheduler run for the same org/source/window.
+      await rejects(runInsert, [orgId, targetFrom, targetTo], '23505', 'duplicate running window must be rejected')
+
+      // The same window can be represented after the prior run is terminal; the active claim is running-only.
+      const finishedRun = await pool.query(
+        `INSERT INTO attendance_auto_shift_auto_write_runs
+           (org_id, source, status, target_from, target_to, config_snapshot, finished_at)
+         VALUES ($1, 'scheduler', 'succeeded', $2, $3, '{}'::jsonb, now())
+         RETURNING id`,
+        [orgId, targetFrom, targetTo],
+      )
+      expect(finishedRun.rows[0]?.id).toBeTruthy()
+
+      const itemInsert = `INSERT INTO attendance_auto_shift_auto_write_run_items
+        (run_id, org_id, user_id, work_date, candidate_shift_id, confidence, status, assignment_id, evidence_event_ids)
+        VALUES ($1, $2, $3, $4, '00000000-0000-4000-8000-000000000111', 'high', 'applied',
+                '00000000-0000-4000-8000-000000000222', '[]'::jsonb)
+        RETURNING id`
+      const item = await pool.query(itemInsert, [runId, orgId, userId, targetFrom])
+      expect(item.rows[0]?.id).toBeTruthy()
+      await rejects(itemInsert, [runId, orgId, userId, targetFrom], '23505', 'duplicate item user/day must be rejected')
+
+      await rejects(
+        `INSERT INTO attendance_auto_shift_auto_write_run_items
+           (run_id, org_id, user_id, work_date, status, reason)
+         VALUES ('00000000-0000-4000-8000-000000000333', $1, $2, $3, 'skipped', 'no candidate')`,
+        [orgId, `${userId}-fk`, targetFrom],
+        '23503',
+        'run_id must reference a real run',
+      )
+      await rejects(
+        `INSERT INTO attendance_auto_shift_auto_write_run_items
+           (run_id, org_id, user_id, work_date, status, reason)
+         VALUES ($1, $2, $3, $4, 'skipped', 'wrong tenant')`,
+        [runId, `${orgId}-other`, `${userId}-tenant`, targetFrom],
+        '23503',
+        'item org_id must match parent run org_id',
+      )
+
+      const badRunInsert = `INSERT INTO attendance_auto_shift_auto_write_runs
+        (org_id, source, status, target_from, target_to, config_snapshot, scanned_count, finished_at)
+        VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, $6, $7)`
+      await rejects(badRunInsert, [orgId, 'scheduler-bad-status', 'bogus', targetFrom, targetTo, 0, new Date()], '23514', 'run status enum must be valid')
+      await rejects(badRunInsert, [orgId, 'scheduler-bad-window', 'running', targetTo, targetFrom, 0, null], '23514', 'target window must be ordered')
+      await rejects(badRunInsert, [orgId, 'scheduler-bad-count', 'running', targetFrom, targetTo, -1, null], '23514', 'run counts must be nonnegative')
+      await rejects(badRunInsert, [orgId, 'scheduler-bad-finished', 'succeeded', targetFrom, targetTo, 0, null], '23514', 'terminal run must have finished_at')
+
+      const badItemInsert = `INSERT INTO attendance_auto_shift_auto_write_run_items
+        (run_id, org_id, user_id, work_date, confidence, status, assignment_id, evidence_event_ids, reason, error_message)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)`
+      await rejects(badItemInsert, [runId, orgId, `${userId}-a`, targetTo, 'none', 'skipped', null, '[]', 'low confidence', null], '23514', 'confidence enum must be valid')
+      await rejects(badItemInsert, [runId, orgId, `${userId}-b`, targetTo, 'high', 'bogus', null, '[]', 'low confidence', null], '23514', 'item status enum must be valid')
+      await rejects(badItemInsert, [runId, orgId, `${userId}-c`, targetTo, 'high', 'applied', null, '[]', null, null], '23514', 'applied item must carry assignment_id')
+      await rejects(badItemInsert, [runId, orgId, `${userId}-d`, targetTo, 'high', 'skipped', null, '{}', 'low confidence', null], '23514', 'evidence_event_ids must be an array')
+      await rejects(badItemInsert, [runId, orgId, `${userId}-e`, targetTo, 'high', 'skipped', null, '[]', null, null], '23514', 'skipped/error item must explain the outcome')
+      await rejects(badItemInsert, [runId, orgId, `${userId}-f`, targetTo, 'high', 'skipped', '00000000-0000-4000-8000-000000000444', '[]', 'no write', null], '23514', 'skipped item must not carry assignment_id')
+    } finally {
+      await pool.query('DELETE FROM attendance_auto_shift_auto_write_runs WHERE org_id = $1', [orgId]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('④ C2 — overtime approval credits a comp-time grant lot (opt-in OFF=no credit; ON=lot+event; replay no double-credit)', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
