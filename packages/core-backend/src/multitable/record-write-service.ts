@@ -288,14 +288,17 @@ export interface RecordWriteHelpers {
    * one-hop formula propagation: related records whose lookup/rollup resolve to the edited
    * source sheet AND whose targetFieldId is in `changedFieldIds` get their formulas
    * recomputed + materialized. Returned `data` is masked per the related sheet's field-read
-   * gate (echo only — the recompute itself runs on the full hydrated row).
+   * gate (echo only — the recompute itself runs on the full hydrated row). FOL-1 (followups
+   * design 2026-06-10 §2.1): `affectedFieldIds` is per-record UNMASKED metadata (affected
+   * lookup/rollup + actually-recomputed formula ids) gating the related-sheet realtime
+   * fan-out + Yjs invalidation in Steps 4/6 below; it never reaches the HTTP echo.
    */
   computeDependentLookupRollupRecords: (
     query: QueryFn,
     sourceSheetId: string,
     updatedRecordIds: string[],
     changedFieldIds: string[],
-  ) => Promise<Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>>
+  ) => Promise<Array<{ sheetId: string; recordId: string; data: Record<string, unknown>; affectedFieldIds: string[] }>>
   /**
    * Recalculate `formula` fields for the given just-updated records when a
    * changed field has a dependent formula (per `formula_dependencies`). Returns
@@ -886,7 +889,53 @@ export class RecordWriteService {
         recordId: record.recordId,
         data: h.filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds),
       }))
-    const crossSheetRelated = relatedRecords.filter((record) => record.sheetId !== sheetId)
+    const crossSheetRelated = relatedRecords
+      .filter((record) => record.sheetId !== sheetId)
+      // The HTTP echo keeps its exact pre-FOL-1 shape — `affectedFieldIds` is unmasked
+      // fan-out metadata, never part of the response contract.
+      .map((record) => ({ sheetId: record.sheetId, recordId: record.recordId, data: record.data }))
+
+    // FOL-1 (followups design 2026-06-10 §2.1): group the related records whose computed
+    // values this PATCH actually invalidated (non-empty UNMASKED affected metadata — the
+    // publish gate is the AFFECTED gate, NOT echo presence: the helper echoes every readable
+    // linked sheet, and broadcasting on echo would fan any edit out to all of them).
+    const affectedRelatedBySheet = new Map<string, { recordIds: string[]; fieldIds: Set<string> }>()
+    for (const record of relatedRecords) {
+      if (record.affectedFieldIds.length === 0) continue
+      let group = affectedRelatedBySheet.get(record.sheetId)
+      if (!group) {
+        group = { recordIds: [], fieldIds: new Set<string>() }
+        affectedRelatedBySheet.set(record.sheetId, group)
+      }
+      group.recordIds.push(record.recordId)
+      for (const fieldId of record.affectedFieldIds) group.fieldIds.add(fieldId)
+    }
+
+    // FOL-1 (§2.1 decision 5): the helper just materialized fresh formula values onto the
+    // affected related records, so any cached Y.Doc for them is now stale. Send their ids
+    // through the same post-commit seam as the source records (Step 3) — the Yjs hook is
+    // record-id keyed and itself skips `source === 'yjs-bridge'`, mirroring source-record
+    // behavior (the bridge additionally stubs the helper to [], a natural no-op).
+    if (this.postCommitHooks.length > 0 && affectedRelatedBySheet.size > 0) {
+      for (const [relatedSheetId, group] of affectedRelatedBySheet.entries()) {
+        const relatedContext: RecordPostCommitContext = {
+          recordIds: group.recordIds,
+          sheetId: relatedSheetId,
+          actorId,
+          source: input.source,
+        }
+        for (const hook of this.postCommitHooks) {
+          try {
+            await hook(relatedContext)
+          } catch (err) {
+            console.error(
+              `[record-write] Post-commit hook failed for related records ${relatedContext.recordIds.join(',')} — downstream state may be stale until the next successful sync:`,
+              err,
+            )
+          }
+        }
+      }
+    }
 
     // -----------------------------------------------------------------------
     // Step 4c: Formula field recalculation (field.property.expression-based).
@@ -982,13 +1031,33 @@ export class RecordWriteService {
             ...Object.fromEntries(
               (changesByRecord.get(update.recordId) ?? []).map((change) => [change.fieldId, change.value]),
             ),
-            // Materialized formula values so other clients merge the fresh value
-            // (applyRemoteRecordPatch does `{ ...data, ...patch }`) rather than
-            // keeping a stale formula after only the source field is patched.
+            // Recomputed formula values ride along for call-payload parity with fieldIds,
+            // but recordPatches NEVER reaches other clients: the shared publisher strips it
+            // before broadcast and the frontend deliberately consumes no values from
+            // realtime events — receivers refetch affected records under their own mask.
             ...(formulaByRecord.get(update.recordId) ?? {}),
           },
         })),
       })
+
+      // FOL-1 (§2.1): related-record invalidation fan-out — one event per AFFECTED related
+      // sheet, pure invalidation signal: fieldIds carry the UNMASKED affected ids (metadata,
+      // never values — an actor-masked echo key set would hide invalidations from readers who
+      // CAN see the field) and the call MUST NOT construct recordPatches. Cross-sheet events
+      // omit actorId (the editor made no local edit there, so their own other tabs must
+      // refetch too); the same-sheet self-link event carries it (the editor's tab already
+      // merged the response echo — actorId prevents a redundant self-GET). No cycle: these
+      // events only ever trigger reads on receivers, never a write path.
+      for (const [relatedSheetId, group] of affectedRelatedBySheet.entries()) {
+        publishMultitableSheetRealtime({
+          spreadsheetId: relatedSheetId,
+          ...(relatedSheetId === sheetId ? { actorId } : {}),
+          source: 'multitable',
+          kind: 'record-updated',
+          recordIds: group.recordIds,
+          fieldIds: [...group.fieldIds],
+        })
+      }
 
       // -------------------------------------------------------------------
       // Step 7: EventBus emit

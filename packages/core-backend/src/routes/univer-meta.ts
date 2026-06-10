@@ -1888,6 +1888,14 @@ type RelatedComputedRecord = {
   sheetId: string
   recordId: string
   data: Record<string, unknown>
+  /**
+   * FOL-1 (followups design 2026-06-10 §2.1): UNMASKED affected-field metadata — the
+   * lookup/rollup ids the edited source fields actually feed for THIS record, plus the
+   * formula ids actually recomputed. Drives the related-sheet realtime fan-out + Yjs
+   * invalidation gates in RecordWriteService; ids are metadata, never values. The masked
+   * `data` above stays the only thing surfaced in the HTTP echo.
+   */
+  affectedFieldIds: string[]
 }
 
 function mergeComputedRecords(
@@ -2053,13 +2061,18 @@ async function computeDependentLookupRollupRecords(
     }
 
     for (const row of rows) {
+      const recomputedFormulaData = formulaDataByRecord.get(row.id)
       results.push({
         sheetId,
         recordId: row.id,
         data: filterRecordDataByFieldIds(
-          { ...extractLookupRollupData(fields, row.data), ...(formulaDataByRecord.get(row.id) ?? {}) },
+          { ...extractLookupRollupData(fields, row.data), ...(recomputedFormulaData ?? {}) },
           allowedFieldIds,
         ),
+        affectedFieldIds: [
+          ...(affectedFieldIdsByRecord.get(row.id) ?? []),
+          ...Object.keys(recomputedFormulaData ?? {}),
+        ],
       })
     }
   }

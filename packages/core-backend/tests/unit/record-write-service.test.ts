@@ -260,8 +260,9 @@ describe('RecordWriteService', () => {
         expect.objectContaining({ recordId: 'rec1', data: expect.objectContaining({ fld_total: 42 }) }),
       ]),
     )
-    // Other clients: the formula field id is in fieldIds AND its value is in the
-    // realtime record patch, so applyRemoteRecordPatch merges fresh (no stale formula).
+    // Other clients: the formula field id is in fieldIds so receivers refetch the record
+    // under their own mask. recordPatches is pinned at the CALL payload level only — the
+    // publisher strips it before broadcast; no value ever reaches the wire.
     const realtimePayload = mockPublish.mock.calls[0][0] as {
       fieldIds: string[]
       recordPatches: Array<{ recordId: string; patch: Record<string, unknown> }>
@@ -953,6 +954,151 @@ describe('RecordWriteService', () => {
       expect(result.updated).toHaveLength(1)
       expect(failing).toHaveBeenCalledOnce()
       expect(succeeding).toHaveBeenCalledOnce()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // FOL-1 — related-record downstream invalidation
+  // (followups design 2026-06-10 §2: realtime fan-out + Yjs read-side)
+  // -------------------------------------------------------------------------
+  describe('FOL-1 related-record downstream invalidation', () => {
+    // Helper return shape per FOL-1: per-record UNMASKED `affectedFieldIds` metadata
+    // (affected lookup/rollup + actually-recomputed formula ids). Records with an empty
+    // affected set are echo-only — linked but untouched by this edit.
+    const relatedHelperResult = [
+      { sheetId: 'sheet2', recordId: 'rel_a', data: { fld_lu: [7] }, affectedFieldIds: ['fld_lu', 'fld_f'] },
+      { sheetId: 'sheet2', recordId: 'rel_b', data: { fld_lu: [] }, affectedFieldIds: [] },
+      { sheetId: 'sheet1', recordId: 'rel_self', data: { fld_self_lu: [7] }, affectedFieldIds: ['fld_self_lu'] },
+      { sheetId: 'sheet3', recordId: 'rel_echo_only', data: { fld_other: null }, affectedFieldIds: [] },
+    ]
+
+    it('publishes one invalidation event per AFFECTED related sheet — affected gate, not echo presence', async () => {
+      helpers = createMockHelpers({
+        computeDependentLookupRollupRecords: vi.fn().mockResolvedValue(relatedHelperResult),
+      })
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+
+      await service.patchRecords(buildTestInput())
+
+      const payloads = mockPublish.mock.calls.map((call) => call[0] as Record<string, unknown>)
+      // Main + sheet2 fan-out + same-sheet (self-link) fan-out; sheet3 has no affected
+      // record → ZERO events for it despite its echo entry.
+      expect(payloads).toHaveLength(3)
+      expect(payloads.filter((p) => p.spreadsheetId === 'sheet3')).toHaveLength(0)
+
+      // Main publish unchanged (R5 pin): still carries actorId + the recordPatches arg
+      // (stripped by the publisher before broadcast).
+      expect(payloads[0]).toMatchObject({
+        spreadsheetId: 'sheet1',
+        actorId: 'user1',
+        kind: 'record-updated',
+        recordIds: ['rec1'],
+      })
+      expect(payloads[0]).toHaveProperty('recordPatches')
+
+      // Cross-sheet fan-out: affected record only (rel_b excluded), UNMASKED affected ids,
+      // NO actorId key, NO recordPatches key — exact equality locks the whole call shape.
+      const sheet2Payload = payloads.find((p) => p.spreadsheetId === 'sheet2')
+      expect(sheet2Payload).toEqual({
+        spreadsheetId: 'sheet2',
+        source: 'multitable',
+        kind: 'record-updated',
+        recordIds: ['rel_a'],
+        fieldIds: ['fld_lu', 'fld_f'],
+      })
+
+      // Same-sheet self-link fan-out: a SECOND sheet1 event, WITH actorId (the editor's
+      // tab already merged the response echo — actorId prevents a redundant self-GET).
+      const selfPayload = payloads.find((p) => p.spreadsheetId === 'sheet1' && p !== payloads[0])
+      expect(selfPayload).toEqual({
+        spreadsheetId: 'sheet1',
+        actorId: 'user1',
+        source: 'multitable',
+        kind: 'record-updated',
+        recordIds: ['rel_self'],
+        fieldIds: ['fld_self_lu'],
+      })
+    })
+
+    it('R7: rest-source patch sends AFFECTED related record ids to the Yjs invalidator', async () => {
+      const invalidator = vi.fn().mockResolvedValue(undefined)
+      // buildTestInput() deliberately leaves `source` undefined — production-faithful: the REST
+      // PATCH route passes no source, and the hook gate skips only on source === 'yjs-bridge'.
+      helpers = createMockHelpers({
+        computeDependentLookupRollupRecords: vi.fn().mockResolvedValue(relatedHelperResult),
+      })
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [
+        createYjsInvalidationPostCommitHook(invalidator),
+      ])
+
+      await service.patchRecords(buildTestInput())
+
+      const invalidated = invalidator.mock.calls.map((call) => call[0] as string[])
+      // First call = source records (Step 3, unchanged); the related ids follow per sheet.
+      expect(invalidated[0]).toEqual(['rec1'])
+      const relatedInvalidated = invalidated.slice(1).flat()
+      expect(relatedInvalidated.sort()).toEqual(['rel_a', 'rel_self'])
+      // Echo-only records (empty affected set) never reach the invalidator.
+      expect(relatedInvalidated).not.toContain('rel_b')
+      expect(relatedInvalidated).not.toContain('rel_echo_only')
+    })
+
+    it('R7: yjs-bridge source never reaches the invalidator — neither source nor related ids', async () => {
+      const invalidator = vi.fn().mockResolvedValue(undefined)
+      helpers = createMockHelpers({
+        computeDependentLookupRollupRecords: vi.fn().mockResolvedValue(relatedHelperResult),
+      })
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [
+        createYjsInvalidationPostCommitHook(invalidator),
+      ])
+
+      await service.patchRecords(buildTestInput({ source: 'yjs-bridge' }))
+
+      expect(invalidator).not.toHaveBeenCalled()
+    })
+
+    it('R6: yjs-bridge stub path (helper → []) — zero fan-out, zero related Yjs invalidation', async () => {
+      const invalidator = vi.fn().mockResolvedValue(undefined)
+      // Default mock helper mirrors the index.ts bridge stub: async () => [].
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [
+        createYjsInvalidationPostCommitHook(invalidator),
+      ])
+
+      await service.patchRecords(buildTestInput({ source: 'yjs-bridge' }))
+
+      expect(mockPublish).toHaveBeenCalledTimes(1) // main publish only
+      expect(invalidator).not.toHaveBeenCalled()
+    })
+
+    it('keeps the patch + fan-out resilient when a related post-commit hook throws', async () => {
+      const invalidator = vi.fn().mockRejectedValue(new Error('purge failed'))
+      helpers = createMockHelpers({
+        computeDependentLookupRollupRecords: vi.fn().mockResolvedValue(relatedHelperResult),
+      })
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [
+        createYjsInvalidationPostCommitHook(invalidator),
+      ])
+
+      const result = await service.patchRecords(buildTestInput())
+
+      expect(result.updated).toHaveLength(1)
+      expect(mockPublish.mock.calls.length).toBe(3) // main + 2 fan-out events still publish
+    })
+
+    it('strips the fan-out metadata from the HTTP relatedRecords echo', async () => {
+      helpers = createMockHelpers({
+        computeDependentLookupRollupRecords: vi.fn().mockResolvedValue(relatedHelperResult),
+      })
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+
+      const result = await service.patchRecords(buildTestInput())
+
+      // Cross-sheet echo keeps its exact pre-FOL-1 shape: `affectedFieldIds` is internal
+      // fan-out metadata (unmasked ids), never part of the response contract.
+      expect(result.relatedRecords).toBeDefined()
+      for (const record of result.relatedRecords!) {
+        expect(Object.keys(record).sort()).toEqual(['data', 'recordId', 'sheetId'])
+      }
     })
   })
 })
