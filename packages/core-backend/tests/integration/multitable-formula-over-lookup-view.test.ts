@@ -1,12 +1,13 @@
 /**
  * A-min (formula-over-lookup, design #2246) — real-DB wire proof.
  *
- * Proves the headline fix through the actual PATCH write path, and proves A-min did NOT silently
- * grow into A-full (foreign-record propagation):
+ * Proves the headline fix through the actual PATCH write path:
  *  - T1/T2 (positive, same-record): editing a record's LINK field re-runs that record's formula
  *    AND it computes against the ACTUAL hydrated lookup value (not stale, not absent→0).
- *  - T4a (negative, foreign record in a SEPARATE sheet): editing the foreign record's target does
- *    NOT re-run the related record's formula — the same-record boundary is enforced, not assumed.
+ *  - T4a (positive since A-full, design #2410): editing the foreign record's target DOES
+ *    recompute the related record's formula — the one-hop propagation that was the A-min-era
+ *    negative boundary. The full A-full matrix lives in
+ *    multitable-formula-over-lookup-afull-view.test.ts.
  *
  * Runs only with DATABASE_URL (describeIfDatabase) via the plugin-tests.yml real-DB runner list.
  * Numeric semantics observed in tests/unit/multitable-formula-over-lookup.test.ts: a single-value
@@ -99,16 +100,17 @@ describeIfDatabase('multitable formula-over-lookup A-min (real DB)', () => {
     expect(await readFormula(REC_M, MS)).toBe(10) // DB-materialized, authoritative
   })
 
-  test('T4a (negative): editing the FOREIGN record does NOT re-run the related formula (A-min ≠ A-full)', async () => {
+  test('T4a (flipped by A-full #2410): editing the FOREIGN record DOES recompute the related formula', async () => {
     // After T1, REC_M.formula = 10 (lookup = REC_FY.FTarget = 9). Now edit the FOREIGN record
-    // REC_FY.FTarget 9 → 100 on the SEPARATE foreign sheet. Under A-min, REC_M's formula must
-    // stay 10 (foreign-record propagation is A-full, deliberately NOT implemented). If it became
-    // 101 the slice silently grew into A-full.
+    // REC_FY.FTarget 9 → 100 on the SEPARATE foreign sheet. Under A-full's bounded one-hop
+    // propagation the related record's lookup-backed formula recomputes: [100] + 1 → 101.
+    // (Until #2410's implementation this was the locked NEGATIVE asserting 10 — A-min's
+    // deliberate same-record boundary. The flip is the A-full headline.)
     const res = await request(app).post('/api/multitable/patch').send({
       sheetId: FS,
       changes: [{ recordId: REC_FY, fieldId: FLD_FTARGET, value: 100, expectedVersion: 1 }],
     })
     expect(res.status).toBe(200)
-    expect(await readFormula(REC_M, MS)).toBe(10) // unchanged — same-record boundary enforced
+    expect(await readFormula(REC_M, MS)).toBe(101) // one-hop foreign propagation materialized
   })
 })

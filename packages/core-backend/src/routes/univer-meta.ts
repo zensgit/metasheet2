@@ -1907,7 +1907,11 @@ function mergeComputedRecords(
 async function computeDependentLookupRollupRecords(
   req: Request,
   query: QueryFn,
+  // A-full (design #2410): the edited (source) sheet + its changed field ids gate which related
+  // lookup/rollup fields count as "affected" for the one-hop formula recompute below.
+  sourceSheetId: string,
   updatedRecordIds: string[],
+  changedFieldIds: string[],
 ): Promise<RelatedComputedRecord[]> {
   if (updatedRecordIds.length === 0) return []
 
@@ -1989,11 +1993,62 @@ async function computeDependentLookupRollupRecords(
 
     await applyLookupRollup(req, query, fields, rows, relationalLinkFields, linkValuesByRecord)
 
+    // A-full (design #2410): one-hop formula recompute on the related records. A related
+    // lookup/rollup is "affected" only when it resolves to the edited source sheet, its
+    // targetFieldId is one of the changed source fields, AND the record actually links to one
+    // of the edited source records via that field's linkFieldId — an unrelated edit on the
+    // foreign record must not rewrite formulas just because the record is linked (§3.3).
+    const changedSourceFieldIds = new Set(changedFieldIds)
+    const updatedSourceRecordIds = new Set(updatedRecordIds)
+    const linkConfigById = new Map(relationalLinkFields.map(({ fieldId, cfg }) => [fieldId, cfg]))
+    const affectedFieldIdsByRecord = new Map<string, Set<string>>()
+    for (const field of fields) {
+      if (field.type !== 'lookup' && field.type !== 'rollup') continue
+      const cfg = field.type === 'lookup' ? parseLookupFieldConfig(field.property) : parseRollupFieldConfig(field.property)
+      if (!cfg) continue
+      const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
+      if (foreignSheetId !== sourceSheetId) continue
+      if (!changedSourceFieldIds.has(cfg.targetFieldId)) continue
+      for (const row of rows) {
+        const linkedIds =
+          linkValuesByRecord.get(row.id)?.get(cfg.linkFieldId) ?? normalizeLinkIds(row.data[cfg.linkFieldId])
+        if (!linkedIds.some((id) => updatedSourceRecordIds.has(id))) continue
+        const set = affectedFieldIdsByRecord.get(row.id) ?? new Set<string>()
+        set.add(field.id)
+        affectedFieldIdsByRecord.set(row.id, set)
+      }
+    }
+
+    let formulaDataByRecord = new Map<string, Record<string, unknown>>()
+    if (affectedFieldIdsByRecord.size > 0) {
+      const affectedComputedFieldIds = new Set<string>()
+      for (const set of affectedFieldIdsByRecord.values()) {
+        for (const id of set) affectedComputedFieldIds.add(id)
+      }
+      // Formula eval consumes the FULL hydrated row (row.data after applyLookupRollup), never
+      // the permission-masked echo patch built below — recompute stays reader-agnostic (§3.2).
+      // recalculateRecordFromData materializes ONLY formula keys; lookup/rollup remain
+      // computed-on-read. One hop only: results never re-enter this propagation.
+      const hydratedDataByRecord = new Map(rows.map((row) => [row.id, row.data]))
+      const formulaRecords = await recalculateFormulaFields(
+        query,
+        sheetId,
+        fields,
+        Array.from(affectedFieldIdsByRecord.keys()),
+        Array.from(affectedComputedFieldIds),
+        hydratedDataByRecord,
+      )
+      formulaDataByRecord = new Map(formulaRecords.map((record) => [record.recordId, record.data]))
+    }
+
     for (const row of rows) {
       results.push({
         sheetId,
         recordId: row.id,
-        data: filterRecordDataByFieldIds(extractLookupRollupData(fields, row.data), allowedFieldIds),
+        data: filterRecordDataByFieldIds(
+          { ...extractLookupRollupData(fields, row.data), ...(formulaDataByRecord.get(row.id) ?? {}) },
+          allowedFieldIds,
+        ),
       })
     }
   }
@@ -8499,7 +8554,8 @@ export function univerMetaRouter(): Router {
         serializeLinkSummaryMap,
         serializeAttachmentSummaryMap,
         applyLookupRollup: (q, f, rows, rl, lv) => applyLookupRollup(req, q, f, rows, rl, lv),
-        computeDependentLookupRollupRecords: (q, ids) => computeDependentLookupRollupRecords(req, q, ids),
+        computeDependentLookupRollupRecords: (q, sourceSheetId, ids, changed) =>
+          computeDependentLookupRollupRecords(req, q, sourceSheetId, ids, changed),
         recalculateFormulaFields,
         loadLinkValuesByRecord,
         buildLinkSummaries: (q, rows, rl, lv) => buildLinkSummaries(req, q, rows, rl, lv),
