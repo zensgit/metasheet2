@@ -3759,6 +3759,303 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('creates replace-only temporary draft assignments and publishes them over an existing shift', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const adminUserId = `attendance-temp-shift-admin-${runSuffix}`
+    const userId = `attendance-temp-shift-user-${runSuffix}`
+    const workDate = '2026-08-03'
+    const pool = new Pool({ connectionString: dbUrl })
+    let originalSettings: Record<string, unknown> = {}
+    const shiftIds: string[] = []
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) {
+      await pool.end().catch(() => undefined)
+      return
+    }
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    }
+
+    async function createShift(name: string, workStartTime: string, workEndTime: string): Promise<string> {
+      const res = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name,
+          timezone: 'UTC',
+          workStartTime,
+          workEndTime,
+          workingDays: [0, 1, 2, 3, 4, 5, 6],
+        }),
+      })
+      expect(res.status, JSON.stringify(res.body)).toBe(201)
+      const id = (res.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(id).toBeTruthy()
+      if (!id) throw new Error('missing shift id')
+      shiftIds.push(id)
+      return id
+    }
+
+    async function publish(assignmentId: string): Promise<HttpResponse> {
+      return requestJson(`${baseUrl}/api/attendance/schedule-publications`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ assignmentIds: [assignmentId] }),
+      })
+    }
+
+    function tempDraftBody(replacementShiftId: string, replacementAssignmentId: string, overrides: Record<string, unknown> = {}) {
+      return {
+        userId,
+        shiftId: replacementShiftId,
+        startDate: workDate,
+        endDate: workDate,
+        isActive: true,
+        assignmentKind: 'temporary',
+        temporaryMode: 'replace',
+        temporaryReplacesKind: 'shift',
+        temporaryReplacesAssignmentId: replacementAssignmentId,
+        temporaryReason: 'one-off onsite coverage',
+        ...overrides,
+      }
+    }
+
+    try {
+      const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expect(settingsRes.status).toBe(200)
+      originalSettings = ((settingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+      const settingsUpdateRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          shiftEditPolicy: { mode: 'unrestricted', windowDays: 0 },
+          shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+          multiShiftDay: { enabled: false, maxSlots: 3 },
+        }),
+      })
+      expect(settingsUpdateRes.status, JSON.stringify(settingsUpdateRes.body)).toBe(200)
+
+      const baseShiftId = await createShift(`Temp Base ${runSuffix}`, '08:00', '16:00')
+      const replacementShiftId = await createShift(`Temp Replacement ${runSuffix}`, '10:00', '18:00')
+
+      const baseAssignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId,
+          shiftId: baseShiftId,
+          startDate: workDate,
+          endDate: workDate,
+          isActive: true,
+        }),
+      })
+      expect(baseAssignmentRes.status, JSON.stringify(baseAssignmentRes.body)).toBe(201)
+      const baseAssignment = (baseAssignmentRes.body as { data?: { assignment?: { id?: string; publishStatus?: string } } } | undefined)?.data?.assignment
+      expect(baseAssignment?.publishStatus).toBe('published')
+      expect(baseAssignment?.id).toBeTruthy()
+      if (!baseAssignment?.id) return
+
+      const directTempRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(tempDraftBody(replacementShiftId, baseAssignment.id)),
+      })
+      expect(directTempRes.status, JSON.stringify(directTempRes.body)).toBe(422)
+      expect((directTempRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('TEMP_SHIFT_IMMEDIATE_ACTIVE_UNSUPPORTED')
+
+      const openEndedTempRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(tempDraftBody(replacementShiftId, baseAssignment.id, { endDate: null })),
+      })
+      expect(openEndedTempRes.status, JSON.stringify(openEndedTempRes.body)).toBe(422)
+      expect((openEndedTempRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('TEMP_SHIFT_RANGE_UNSUPPORTED')
+
+      const addModeTempRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(tempDraftBody(replacementShiftId, baseAssignment.id, { temporaryMode: 'add' })),
+      })
+      expect(addModeTempRes.status, JSON.stringify(addModeTempRes.body)).toBe(422)
+      expect((addModeTempRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('TEMP_SHIFT_ADD_MODE_DEFERRED')
+
+      const rotationReplaceRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(tempDraftBody(replacementShiftId, baseAssignment.id, { temporaryReplacesKind: 'rotation' })),
+      })
+      expect(rotationReplaceRes.status, JSON.stringify(rotationReplaceRes.body)).toBe(422)
+      expect((rotationReplaceRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('TEMP_SHIFT_ROTATION_REPLACEMENT_UNSUPPORTED')
+
+      const tempDraftRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(tempDraftBody(replacementShiftId, baseAssignment.id)),
+      })
+      expect(tempDraftRes.status, JSON.stringify(tempDraftRes.body)).toBe(201)
+      const tempDraft = (tempDraftRes.body as { data?: { assignment?: {
+        id?: string
+        assignmentKind?: string
+        temporaryMode?: string
+        temporaryReplacesAssignmentId?: string
+        publishStatus?: string
+      } } } | undefined)?.data?.assignment
+      expect(tempDraft?.publishStatus).toBe('draft')
+      expect(tempDraft?.assignmentKind).toBe('temporary')
+      expect(tempDraft?.temporaryMode).toBe('replace')
+      expect(tempDraft?.temporaryReplacesAssignmentId).toBe(baseAssignment.id)
+      expect(tempDraft?.id).toBeTruthy()
+      if (!tempDraft?.id) return
+
+      const tempEditRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments/${tempDraft.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ shiftId: baseShiftId }),
+      })
+      expect(tempEditRes.status, JSON.stringify(tempEditRes.body)).toBe(422)
+      expect((tempEditRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('TEMP_SHIFT_EDIT_DEFERRED')
+
+      const publishTempRes = await publish(tempDraft.id)
+      expect(publishTempRes.status, JSON.stringify(publishTempRes.body)).toBe(200)
+      const publishedTemp = (publishTempRes.body as { data?: { assignments?: Array<{ id?: string; assignmentKind?: string; publishStatus?: string; temporaryReplacesAssignmentId?: string }> } } | undefined)?.data?.assignments?.[0]
+      expect(publishedTemp?.id).toBe(tempDraft.id)
+      expect(publishedTemp?.publishStatus).toBe('published')
+      expect(publishedTemp?.assignmentKind).toBe('temporary')
+      expect(publishedTemp?.temporaryReplacesAssignmentId).toBe(baseAssignment.id)
+
+      const persistedRows = await pool.query(
+        `SELECT id, assignment_kind, temporary_mode, temporary_replaces_kind,
+                temporary_replaces_assignment_id, temporary_reason, temporary_created_by,
+                publish_status, locked_at
+           FROM attendance_shift_assignments
+          WHERE id = ANY($1::uuid[])
+          ORDER BY assignment_kind ASC`,
+        [[baseAssignment.id, tempDraft.id]]
+      )
+      expect(persistedRows.rows).toHaveLength(2)
+      const persistedBase = persistedRows.rows.find(row => row.id === baseAssignment.id)
+      const persistedTemp = persistedRows.rows.find(row => row.id === tempDraft.id)
+      expect(persistedBase?.assignment_kind).toBe('regular')
+      expect(persistedTemp).toMatchObject({
+        assignment_kind: 'temporary',
+        temporary_mode: 'replace',
+        temporary_replaces_kind: 'shift',
+        temporary_replaces_assignment_id: baseAssignment.id,
+        temporary_reason: 'one-off onsite coverage',
+        temporary_created_by: adminUserId,
+        publish_status: 'published',
+      })
+      expect(persistedTemp?.locked_at).toBeTruthy()
+
+      const defaultPlannedPreviewRes = await requestJson(`${baseUrl}/api/attendance/comprehensive-hours/preview`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          metric: 'planned',
+          enforcement: 'warn',
+          capMinutes: 1000,
+          userId,
+          period: { type: 'custom_range', from: workDate, to: workDate },
+        }),
+      })
+      expect(defaultPlannedPreviewRes.status, JSON.stringify(defaultPlannedPreviewRes.body)).toBe(200)
+      const defaultPlannedRows = (defaultPlannedPreviewRes.body as { data?: { rows?: Array<{ userId?: string; minutes?: number; plannedMinutes?: number }> } } | undefined)?.data?.rows ?? []
+      expect(defaultPlannedRows).toHaveLength(1)
+      expect(defaultPlannedRows[0]?.userId).toBe(userId)
+      expect(defaultPlannedRows[0]?.minutes).toBe(480)
+      expect(defaultPlannedRows[0]?.plannedMinutes).toBe(480)
+
+      const singleShiftEffectiveCalendarRes = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${workDate}&to=${workDate}&userId=${encodeURIComponent(userId)}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      expect(singleShiftEffectiveCalendarRes.status, JSON.stringify(singleShiftEffectiveCalendarRes.body)).toBe(200)
+      const singleShiftEffectiveItem = ((singleShiftEffectiveCalendarRes.body as { data?: { items?: Array<{ effective?: { plannedMinutes?: number; slots?: Array<{ shiftId?: string; assignmentKind?: string; replaces?: { assignmentId?: string } }> } }> } } | undefined)?.data?.items ?? [])[0]
+      expect(singleShiftEffectiveItem?.effective?.plannedMinutes).toBe(480)
+      expect(singleShiftEffectiveItem?.effective?.slots).toHaveLength(1)
+      expect(singleShiftEffectiveItem?.effective?.slots?.[0]).toMatchObject({
+        shiftId: replacementShiftId,
+        assignmentKind: 'temporary',
+        replaces: { assignmentId: baseAssignment.id },
+      })
+
+      const multiShiftSettingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          multiShiftDay: { enabled: true, maxSlots: 3 },
+          shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+        }),
+      })
+      expect(multiShiftSettingsRes.status, JSON.stringify(multiShiftSettingsRes.body)).toBe(200)
+
+      const effectiveCalendarRes = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${workDate}&to=${workDate}&userId=${encodeURIComponent(userId)}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      expect(effectiveCalendarRes.status, JSON.stringify(effectiveCalendarRes.body)).toBe(200)
+      const effectiveItem = ((effectiveCalendarRes.body as { data?: { items?: Array<{ effective?: { plannedMinutes?: number; slots?: Array<{ shiftId?: string; assignmentKind?: string; replaces?: { assignmentId?: string } }> } }> } } | undefined)?.data?.items ?? [])[0]
+      expect(effectiveItem?.effective?.plannedMinutes).toBe(480)
+      expect(effectiveItem?.effective?.slots).toHaveLength(1)
+      expect(effectiveItem?.effective?.slots?.[0]).toMatchObject({
+        shiftId: replacementShiftId,
+        assignmentKind: 'temporary',
+        replaces: { assignmentId: baseAssignment.id },
+      })
+
+      const plannedPreviewRes = await requestJson(`${baseUrl}/api/attendance/comprehensive-hours/preview`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          metric: 'planned',
+          enforcement: 'warn',
+          capMinutes: 1000,
+          userId,
+          period: { type: 'custom_range', from: workDate, to: workDate },
+        }),
+      })
+      expect(plannedPreviewRes.status, JSON.stringify(plannedPreviewRes.body)).toBe(200)
+      const plannedRows = (plannedPreviewRes.body as { data?: { rows?: Array<{ userId?: string; minutes?: number; plannedMinutes?: number }> } } | undefined)?.data?.rows ?? []
+      expect(plannedRows).toHaveLength(1)
+      expect(plannedRows[0]?.userId).toBe(userId)
+      expect(plannedRows[0]?.minutes).toBe(480)
+      expect(plannedRows[0]?.plannedMinutes).toBe(480)
+
+      const secondTempRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(tempDraftBody(replacementShiftId, baseAssignment.id, { temporaryReason: 'second temp' })),
+      })
+      expect(secondTempRes.status, JSON.stringify(secondTempRes.body)).toBe(409)
+      expect((secondTempRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ATTENDANCE_SCHEDULE_ASSIGNMENT_CONFLICT')
+    } finally {
+      if (Object.keys(originalSettings).length > 0) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify(originalSettings),
+        }).catch(() => undefined)
+      }
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (shiftIds.length > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [shiftIds]).catch(() => undefined)
+      }
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('enforces schedule-edit windows on shift and rotation assignment writes', async () => {
     if (!baseUrl) return
 

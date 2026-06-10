@@ -2519,8 +2519,8 @@ describe('attendance UUID route validation', () => {
       if (rbac !== undefined) return rbac
       if (sql.includes('SELECT * FROM attendance_shifts')) return [shiftRow()]
       if (sql.includes('pg_advisory_xact_lock')) return []
-      if (sql.includes('FROM attendance_shift_assignments') && sql.includes('LIMIT 1')) return []
-      if (sql.includes('FROM attendance_rotation_assignments') && sql.includes('LIMIT 1')) return []
+      if (sql.includes('FROM attendance_shift_assignments')) return []
+      if (sql.includes('FROM attendance_rotation_assignments')) return []
       if (sql.includes('INSERT INTO attendance_shift_assignments')) return [shiftAssignmentRow()]
       throw new Error(`unexpected query: ${sql}`)
     })
@@ -2548,8 +2548,8 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRow()]
       if (sql.includes('SELECT * FROM attendance_shifts')) return [shiftRow()]
       if (sql.includes('pg_advisory_xact_lock')) return []
-      if (sql.includes('FROM attendance_shift_assignments') && sql.includes('LIMIT 1')) return []
-      if (sql.includes('FROM attendance_rotation_assignments') && sql.includes('LIMIT 1')) return []
+      if (sql.includes('FROM attendance_shift_assignments')) return []
+      if (sql.includes('FROM attendance_rotation_assignments')) return []
       if (sql.includes('INSERT INTO attendance_shift_assignments')) return [shiftAssignmentRow()]
       throw new Error(`unexpected query: ${sql}`)
     })

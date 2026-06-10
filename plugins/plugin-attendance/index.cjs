@@ -8669,6 +8669,11 @@ function normalizeAssignmentPayload(value) {
     endDate: firstDefinedValue(payload.endDate, payload.end_date),
     isActive: firstDefinedValue(payload.isActive, payload.is_active),
     publishStatus: firstDefinedValue(payload.publishStatus, payload.publish_status),
+    assignmentKind: firstDefinedValue(payload.assignmentKind, payload.assignment_kind),
+    temporaryMode: firstDefinedValue(payload.temporaryMode, payload.temporary_mode),
+    temporaryReplacesKind: firstDefinedValue(payload.temporaryReplacesKind, payload.temporary_replaces_kind),
+    temporaryReplacesAssignmentId: firstDefinedValue(payload.temporaryReplacesAssignmentId, payload.temporary_replaces_assignment_id),
+    temporaryReason: firstDefinedValue(payload.temporaryReason, payload.temporary_reason),
   }
 }
 
@@ -8972,6 +8977,10 @@ function buildAttendanceSchedulePublishDraft(row, settings) {
     draft.slotIndex = normalizeAttendanceScheduleSlotIndex(row.slot_index, 0)
     draft.multiShiftEnabled = settings?.multiShiftDay?.enabled === true
     draft.shift = row
+    if (row.assignment_kind === 'temporary') {
+      draft.assignmentKind = 'temporary'
+      draft.temporaryReplacesAssignmentId = normalizeUuidString(row.temporary_replaces_assignment_id)
+    }
   }
   return draft
 }
@@ -9086,6 +9095,9 @@ async function findAttendanceScheduleAssignmentConflict(db, draft, options = {})
   const draftStartDate = normalizeDateOnly(draft.startDate) ?? draft.startDate
   const draftEndDate = normalizeAttendanceScheduleAssignmentEndDate(draft.endDate)
   const overlapEndDate = draftEndDate || ATTENDANCE_SCHEDULE_OPEN_END_DATE
+  const allowedOverlapAssignmentId = draft.assignmentKind === 'temporary'
+    ? normalizeUuidString(draft.temporaryReplacesAssignmentId)
+    : null
   const sameKindTable = draft.kind === 'rotation'
     ? 'attendance_rotation_assignments'
     : 'attendance_shift_assignments'
@@ -9120,6 +9132,7 @@ async function findAttendanceScheduleAssignmentConflict(db, draft, options = {})
     )
     const draftSlotIndex = normalizeAttendanceScheduleSlotIndex(draft.slotIndex, 0)
     const conflictingSameKindRow = sameKindRows.find((row) => {
+      if (allowedOverlapAssignmentId && row.id === allowedOverlapAssignmentId) return false
       const existingSlotIndex = normalizeAttendanceScheduleSlotIndex(row.slot_index, 0)
       if (existingSlotIndex === draftSlotIndex) return true
       return attendanceShiftWindowsOverlapForSlotConflict(row, draft.shift)
@@ -9136,11 +9149,11 @@ async function findAttendanceScheduleAssignmentConflict(db, draft, options = {})
           AND start_date <= $4::date
           AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
           ${excludeClause}
-        ORDER BY start_date DESC, created_at DESC
-        LIMIT 1`,
+        ORDER BY start_date DESC, created_at DESC`,
       draft.excludeId ? [...baseParams, draft.excludeId, sameKindLabel] : [...baseParams, sameKindLabel]
     )
-    if (sameKindRows.length) return mapAttendanceScheduleAssignmentConflict(sameKindRows[0], draft)
+    const conflictingSameKindRow = sameKindRows.find(row => !(allowedOverlapAssignmentId && row.id === allowedOverlapAssignmentId))
+    if (conflictingSameKindRow) return mapAttendanceScheduleAssignmentConflict(conflictingSameKindRow, draft)
   }
 
   const otherKindRows = await db.query(
@@ -11692,6 +11705,9 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
       `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
               a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
               a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
+              a.assignment_kind, a.temporary_mode, a.temporary_replaces_kind,
+              a.temporary_replaces_assignment_id, a.temporary_reason, a.temporary_created_by,
+              a.temporary_created_at,
               a.created_at AS assignment_created_at,
               s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
               s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
@@ -11705,7 +11721,8 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
          AND COALESCE(a.publish_status, 'published') = 'published'
          AND a.start_date <= $3
          AND (a.end_date IS NULL OR a.end_date >= $3)
-       ORDER BY a.start_date DESC, a.created_at DESC
+       ORDER BY CASE WHEN a.assignment_kind = 'temporary' AND a.start_date = $3 THEN 0 ELSE 1 END,
+                a.start_date DESC, a.created_at DESC
        LIMIT 1`,
       [targetOrg, userId, workDate]
     )
@@ -12065,6 +12082,9 @@ async function loadShiftAssignmentMapForUsersRange(db, orgId, userIds, fromDate,
     `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
             a.publish_status, a.publish_batch_id, a.publish_requested_at, a.publish_requested_by,
             a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
+            a.assignment_kind, a.temporary_mode, a.temporary_replaces_kind,
+            a.temporary_replaces_assignment_id, a.temporary_reason, a.temporary_created_by,
+            a.temporary_created_at,
             a.created_at AS assignment_created_at,
             s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
             s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
@@ -13082,7 +13102,8 @@ async function resolveEffectiveCalendar(db, args) {
     }
     if (effective.label) effectiveOut.label = effective.label
     if (effective.policyId) effectiveOut.policyId = effective.policyId
-    if (mode === 'userId' && multiShiftDay.enabled) {
+    const exposesTemporaryShiftSlot = directShiftSlots.some(entry => isTemporaryShiftAssignmentEntryForDate(entry, date))
+    if (mode === 'userId' && (multiShiftDay.enabled || exposesTemporaryShiftSlot)) {
       const dayWorkingOverride = holiday || policyWinner ? effective.isWorkingDay : null
       const slots = profileSource === 'shift'
         ? buildEffectiveCalendarShiftSlots(directShiftSlots, { workDate: date, dayWorkingOverride })
@@ -13138,6 +13159,28 @@ function compareShiftAssignmentSlotEntries(left, right) {
   return String(left?.assignment?.id ?? '').localeCompare(String(right?.assignment?.id ?? ''))
 }
 
+function isTemporaryShiftAssignmentEntryForDate(entry, workDate) {
+  const assignment = entry?.assignment
+  if (!assignment || assignment.assignmentKind !== 'temporary') return false
+  const startDate = assignment.startDate ?? assignment.start_date
+  return startDate === workDate
+}
+
+function applyTemporaryShiftOverlayToAssignmentEntries(entries, workDate) {
+  const temporarySlots = new Set()
+  for (const entry of entries) {
+    if (isTemporaryShiftAssignmentEntryForDate(entry, workDate)) {
+      temporarySlots.add(getShiftAssignmentEntrySlotIndex(entry))
+    }
+  }
+  if (temporarySlots.size === 0) return entries
+  return entries.filter((entry) => {
+    const slotIndex = getShiftAssignmentEntrySlotIndex(entry)
+    if (!temporarySlots.has(slotIndex)) return true
+    return isTemporaryShiftAssignmentEntryForDate(entry, workDate)
+  })
+}
+
 function resolveShiftAssignmentsFromPrefetch(entries, workDate, options = {}) {
   if (!Array.isArray(entries) || entries.length === 0) return []
   const matches = []
@@ -13148,9 +13191,10 @@ function resolveShiftAssignmentsFromPrefetch(entries, workDate, options = {}) {
     if (startDate <= workDate && (!endDate || endDate >= workDate)) matches.push(entry)
   }
   if (matches.length === 0) return []
+  const overlayMatches = applyTemporaryShiftOverlayToAssignmentEntries(matches, workDate)
   const multiShiftDay = normalizeMultiShiftDaySetting(options.multiShiftDay)
-  if (!multiShiftDay.enabled) return [matches[0]]
-  return matches.sort(compareShiftAssignmentSlotEntries)
+  if (!multiShiftDay.enabled) return [overlayMatches[0]]
+  return overlayMatches.sort(compareShiftAssignmentSlotEntries)
 }
 
 function resolveShiftAssignmentFromPrefetch(entries, workDate, options = {}) {
@@ -13182,7 +13226,7 @@ function buildEffectiveCalendarShiftSlots(entries, options = {}) {
       ? dayWorkingOverride
       : isShiftAssignmentEntryWorkingOnDate(entry, workDate)
     const plannedMinutes = isWorkingDay ? calculateAttendanceComprehensiveShiftPlannedMinutes(shift) : 0
-    slots.push({
+    const slot = {
       assignmentId: assignment.id,
       slotIndex: getShiftAssignmentEntrySlotIndex(entry),
       shiftId: shift.id ?? assignment.shiftId ?? assignment.shift_id ?? null,
@@ -13191,7 +13235,17 @@ function buildEffectiveCalendarShiftSlots(entries, options = {}) {
       workEndTime: shift.workEndTime ?? shift.work_end_time ?? null,
       timezone: shift.timezone ?? null,
       plannedMinutes,
-    })
+    }
+    if (assignment.assignmentKind === 'temporary') {
+      slot.assignmentKind = 'temporary'
+      slot.temporaryMode = assignment.temporaryMode ?? null
+      slot.temporaryReason = assignment.temporaryReason ?? null
+      slot.replaces = {
+        kind: assignment.temporaryReplacesKind ?? null,
+        assignmentId: assignment.temporaryReplacesAssignmentId ?? null,
+      }
+    }
+    slots.push(slot)
   }
   return slots
 }
@@ -17405,9 +17459,159 @@ module.exports = {
       startDate: z.string().min(1),
       endDate: z.string().nullable().optional(),
       isActive: z.boolean().optional(),
+      assignmentKind: z.string().optional(),
+      temporaryMode: z.string().optional(),
+      temporaryReplacesKind: z.string().optional(),
+      temporaryReplacesAssignmentId: z.string().nullable().optional(),
+      temporaryReason: z.string().trim().max(500).nullable().optional(),
       orgId: z.string().optional(),
     })
     const assignmentUpdateSchema = assignmentCreateSchema.partial()
+
+    function hasTemporaryAssignmentPayload(data = {}) {
+      return data.assignmentKind !== undefined ||
+        data.temporaryMode !== undefined ||
+        data.temporaryReplacesKind !== undefined ||
+        data.temporaryReplacesAssignmentId !== undefined ||
+        data.temporaryReason !== undefined
+    }
+
+    function buildTemporaryShiftRouteError(code, message, details = {}) {
+      return { code, message, details }
+    }
+
+    function respondTemporaryShiftRouteError(res, error) {
+      res.status(422).json({
+        ok: false,
+        error: {
+          code: error.code,
+          message: error.message,
+          details: error.details ?? {},
+        },
+      })
+    }
+
+    function normalizeTemporaryShiftCreatePayload(data, payload) {
+      if (!hasTemporaryAssignmentPayload(data)) return { ok: true, temporary: null }
+      if (data.assignmentKind !== 'temporary') {
+        return {
+          ok: false,
+          error: buildTemporaryShiftRouteError(
+            'TEMP_SHIFT_METADATA_REQUIRES_TEMPORARY',
+            'Temporary shift metadata requires assignmentKind=temporary.'
+          ),
+        }
+      }
+      if (data.temporaryMode === 'add') {
+        return {
+          ok: false,
+          error: buildTemporaryShiftRouteError(
+            'TEMP_SHIFT_ADD_MODE_DEFERRED',
+            'Adding a temporary extra shift is deferred until multi-shift add-mode is enabled.'
+          ),
+        }
+      }
+      if (data.temporaryMode !== 'replace') {
+        return {
+          ok: false,
+          error: buildTemporaryShiftRouteError(
+            'TEMP_SHIFT_REPLACE_MODE_REQUIRED',
+            'Temporary shift v1 only supports replace mode.'
+          ),
+        }
+      }
+      if (!payload.endDate || payload.endDate !== payload.startDate) {
+        return {
+          ok: false,
+          error: buildTemporaryShiftRouteError(
+            'TEMP_SHIFT_RANGE_UNSUPPORTED',
+            'Temporary shift v1 must target exactly one work date.'
+          ),
+        }
+      }
+      if (data.temporaryReplacesKind === 'rotation') {
+        return {
+          ok: false,
+          error: buildTemporaryShiftRouteError(
+            'TEMP_SHIFT_ROTATION_REPLACEMENT_UNSUPPORTED',
+            'Temporary shift replacement for rotation assignments is not supported in v1.'
+          ),
+        }
+      }
+      if (data.temporaryReplacesKind !== 'shift') {
+        return {
+          ok: false,
+          error: buildTemporaryShiftRouteError(
+            'TEMP_SHIFT_REPLACEMENT_REQUIRED',
+            'Temporary shift v1 requires temporaryReplacesKind=shift.'
+          ),
+        }
+      }
+      const replacementId = normalizeUuidString(data.temporaryReplacesAssignmentId)
+      if (!replacementId) {
+        return {
+          ok: false,
+          error: buildTemporaryShiftRouteError(
+            'TEMP_SHIFT_REPLACEMENT_REQUIRED',
+            'Temporary shift v1 requires a valid temporaryReplacesAssignmentId.'
+          ),
+        }
+      }
+      return {
+        ok: true,
+        temporary: {
+          assignmentKind: 'temporary',
+          temporaryMode: 'replace',
+          temporaryReplacesKind: 'shift',
+          temporaryReplacesAssignmentId: replacementId,
+          temporaryReason: data.temporaryReason ?? null,
+        },
+      }
+    }
+
+    async function validateTemporaryShiftReplacement(client, { orgId, payload, temporary }) {
+      if (!temporary) return { ok: true }
+      const rows = await client.query(
+        `SELECT *
+           FROM attendance_shift_assignments
+          WHERE id = $1
+            AND org_id = $2
+          FOR UPDATE`,
+        [temporary.temporaryReplacesAssignmentId, orgId]
+      )
+      const replacement = rows[0]
+      if (!replacement) {
+        return {
+          ok: false,
+          error: buildTemporaryShiftRouteError(
+            'TEMP_SHIFT_REPLACEMENT_NOT_FOUND',
+            'The assignment being replaced was not found.'
+          ),
+        }
+      }
+      const replacementPublishStatus = normalizeAttendanceSchedulePublishStatus(replacement.publish_status)
+      const replacementSlotIndex = normalizeAttendanceScheduleSlotIndex(replacement.slot_index, 0)
+      const replacementStartDate = normalizeDateOnly(replacement.start_date) ?? replacement.start_date
+      const replacementEndDate = normalizeAttendanceScheduleAssignmentEndDate(replacement.end_date) || ATTENDANCE_SCHEDULE_OPEN_END_DATE
+      if (
+        replacement.user_id !== payload.userId ||
+        replacementSlotIndex !== normalizeAttendanceScheduleSlotIndex(payload.slotIndex, 0) ||
+        replacementStartDate > payload.startDate ||
+        replacementEndDate < payload.startDate ||
+        replacement.is_active === false ||
+        replacementPublishStatus !== 'published' ||
+        replacement.assignment_kind === 'temporary'
+      ) {
+        return {
+          ok: false,
+          error: buildTemporaryShiftRouteError(
+            'TEMP_SHIFT_REPLACEMENT_MISMATCH',
+            'The assignment being replaced does not match the temporary shift target.'
+          ),
+        }
+      }
+      return { ok: true, replacement }
+    }
 
     const holidayCreateSchema = z.object({
       date: z.string().min(1),
@@ -31627,6 +31831,13 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'End date must be after start date' } })
           return
         }
+        const temporaryResolution = normalizeTemporaryShiftCreatePayload(parsed.data, payload)
+        if (!temporaryResolution.ok) {
+          respondTemporaryShiftRouteError(res, temporaryResolution.error)
+          return
+        }
+        const temporary = temporaryResolution.temporary
+        const actorUserId = getUserId(req) || null
 
         try {
           const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
@@ -31653,6 +31864,8 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            const replacementValidation = await validateTemporaryShiftReplacement(trx, { orgId, payload, temporary })
+            if (!replacementValidation.ok) return { temporaryError: replacementValidation.error }
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'shift',
               orgId,
@@ -31663,13 +31876,17 @@ module.exports = {
               slotIndex: payload.slotIndex,
               multiShiftEnabled: slotResolution.multiShiftDay.enabled,
               shift: shiftRows[0],
-            }, { publishStatuses: ['draft', 'pending'] })
+              assignmentKind: temporary?.assignmentKind,
+              temporaryReplacesAssignmentId: temporary?.temporaryReplacesAssignmentId,
+            }, { publishStatuses: temporary ? ['draft', 'pending', 'published'] : ['draft', 'pending'] })
             if (conflict) return { conflict }
 
             const rows = await trx.query(
               `INSERT INTO attendance_shift_assignments
-               (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, publish_status)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft')
+               (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, publish_status,
+                assignment_kind, temporary_mode, temporary_replaces_kind, temporary_replaces_assignment_id,
+                temporary_reason, temporary_created_by, temporary_created_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, $10, $11, $12, $13, $14, $15)
                RETURNING *`,
               [
                 randomUUID(),
@@ -31680,11 +31897,22 @@ module.exports = {
                 payload.startDate,
                 payload.endDate,
                 payload.isActive,
+                temporary?.assignmentKind ?? 'regular',
+                temporary?.temporaryMode ?? null,
+                temporary?.temporaryReplacesKind ?? null,
+                temporary?.temporaryReplacesAssignmentId ?? null,
+                temporary?.temporaryReason ?? null,
+                temporary ? actorUserId : null,
+                temporary ? new Date().toISOString() : null,
               ]
             )
             return { row: rows[0] }
           })
 
+          if (result.temporaryError) {
+            respondTemporaryShiftRouteError(res, result.temporaryError)
+            return
+          }
           if (result.conflict) {
             respondAttendanceScheduleAssignmentConflict(res, result.conflict)
             return
@@ -31713,6 +31941,13 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
+        if (hasTemporaryAssignmentPayload(parsed.data)) {
+          respondTemporaryShiftRouteError(res, buildTemporaryShiftRouteError(
+            'TEMP_SHIFT_EDIT_DEFERRED',
+            'Editing temporary shift metadata is deferred to a follow-up slice.'
+          ))
+          return
+        }
 
         const orgId = getOrgId(req)
         const assignmentId = normalizeUuidString(req.params.id)
@@ -31739,6 +31974,13 @@ module.exports = {
           }
 
           const existing = existingRows[0]
+          if (existing.assignment_kind === 'temporary') {
+            respondTemporaryShiftRouteError(res, buildTemporaryShiftRouteError(
+              'TEMP_SHIFT_EDIT_DEFERRED',
+              'Editing temporary shift rows is deferred to a follow-up slice.'
+            ))
+            return
+          }
           const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existing.publish_status)
           if (!isAttendanceScheduleDraftEditable(existing)) {
             respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
@@ -31950,6 +32192,13 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
+        if (hasTemporaryAssignmentPayload(parsed.data)) {
+          respondTemporaryShiftRouteError(res, buildTemporaryShiftRouteError(
+            'TEMP_SHIFT_IMMEDIATE_ACTIVE_UNSUPPORTED',
+            'Temporary shifts must be created through the draft schedule workflow.'
+          ))
+          return
+        }
 
         const orgId = getOrgId(req)
         const shiftId = normalizeUuidString(parsed.data.shiftId)
@@ -32063,6 +32312,13 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
+        if (hasTemporaryAssignmentPayload(parsed.data)) {
+          respondTemporaryShiftRouteError(res, buildTemporaryShiftRouteError(
+            'TEMP_SHIFT_EDIT_DEFERRED',
+            'Editing temporary shift metadata is deferred to a follow-up slice.'
+          ))
+          return
+        }
 
         const orgId = getOrgId(req)
         const assignmentId = normalizeUuidString(req.params.id)
@@ -32089,6 +32345,13 @@ module.exports = {
           }
 
           const existing = existingRows[0]
+          if (existing.assignment_kind === 'temporary') {
+            respondTemporaryShiftRouteError(res, buildTemporaryShiftRouteError(
+              'TEMP_SHIFT_EDIT_DEFERRED',
+              'Editing temporary shift rows is deferred to a follow-up slice.'
+            ))
+            return
+          }
           const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existing.publish_status)
           if (!isAttendanceSchedulePublishedDirectlyMutable(existing)) {
             respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
@@ -32379,6 +32642,28 @@ module.exports = {
 
     async function enforceAttendanceSchedulePublicationConflicts(client, row, settings) {
       const draft = buildAttendanceSchedulePublishDraft(row, settings)
+      if (draft.assignmentKind === 'temporary') {
+        const replacementValidation = await validateTemporaryShiftReplacement(client, {
+          orgId: row.org_id,
+          payload: {
+            userId: row.user_id,
+            startDate: draft.startDate,
+            endDate: draft.endDate,
+            slotIndex: draft.slotIndex,
+          },
+          temporary: {
+            temporaryReplacesAssignmentId: draft.temporaryReplacesAssignmentId,
+          },
+        })
+        if (!replacementValidation.ok) {
+          throwAttendanceSchedulePublishRouteError(
+            422,
+            replacementValidation.error.code,
+            replacementValidation.error.message,
+            replacementValidation.error.details
+          )
+        }
+      }
       const publishedConflict = await findAttendanceScheduleAssignmentConflict(client, draft, { publishStatuses: ['published'] })
       if (publishedConflict) {
         throwAttendanceSchedulePublishRouteError(
