@@ -3339,6 +3339,263 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('publishes draft schedule assignments transactionally with preflight, conflict, and compliance rollback', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const adminUserId = `attendance-publish-admin-${runSuffix}`
+    const publishUserId = `attendance-publish-user-${runSuffix}`
+    const rotationUserId = `attendance-publish-rotation-${runSuffix}`
+    const conflictUserId = `attendance-publish-conflict-${runSuffix}`
+    const complianceUserId = `attendance-publish-cap-${runSuffix}`
+    const workDate = '2026-07-27'
+    const rotationDate = '2026-07-28'
+    const conflictDate = '2026-07-29'
+    const complianceDate = '2026-07-30'
+    const pool = new Pool({ connectionString: dbUrl })
+    let originalSettings: Record<string, unknown> = {}
+    const shiftIds: string[] = []
+    const rotationRuleIds: string[] = []
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) {
+      await pool.end().catch(() => undefined)
+      return
+    }
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    }
+
+    async function createShift(name: string, workStartTime: string, workEndTime: string): Promise<string> {
+      const res = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name,
+          timezone: 'UTC',
+          workStartTime,
+          workEndTime,
+          workingDays: [0, 1, 2, 3, 4, 5, 6],
+        }),
+      })
+      expect(res.status, JSON.stringify(res.body)).toBe(201)
+      const id = (res.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(id).toBeTruthy()
+      if (!id) throw new Error('missing shift id')
+      shiftIds.push(id)
+      return id
+    }
+
+    async function createRotationRule(name: string, shiftId: string): Promise<string> {
+      const res = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name,
+          timezone: 'UTC',
+          shiftSequence: [shiftId],
+          isActive: true,
+        }),
+      })
+      expect(res.status, JSON.stringify(res.body)).toBe(201)
+      const id = (res.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(id).toBeTruthy()
+      if (!id) throw new Error('missing rotation rule id')
+      rotationRuleIds.push(id)
+      return id
+    }
+
+    async function createDraftAssignment(userId: string, shiftId: string, date: string): Promise<string> {
+      const res = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ userId, shiftId, startDate: date, endDate: date, isActive: true }),
+      })
+      expect(res.status, JSON.stringify(res.body)).toBe(201)
+      const id = (res.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+      expect(id).toBeTruthy()
+      if (!id) throw new Error('missing draft assignment id')
+      return id
+    }
+
+    async function publish(body: Record<string, unknown>): Promise<HttpResponse> {
+      return requestJson(`${baseUrl}/api/attendance/schedule-publications`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      })
+    }
+
+    try {
+      const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expect(settingsRes.status).toBe(200)
+      originalSettings = ((settingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+      const settingsUpdateRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          shiftEditPolicy: { mode: 'unrestricted', windowDays: 0 },
+          shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+          multiShiftDay: { enabled: false, maxSlots: 3 },
+        }),
+      })
+      expect(settingsUpdateRes.status, JSON.stringify(settingsUpdateRes.body)).toBe(200)
+
+      const oneHourShiftId = await createShift(`Publish One Hour ${runSuffix}`, '08:00', '09:00')
+      const twoHourShiftId = await createShift(`Publish Two Hour ${runSuffix}`, '10:00', '12:00')
+      const capShiftId = await createShift(`Publish Cap ${runSuffix}`, '13:00', '15:00')
+      const publishDraftId = await createDraftAssignment(publishUserId, oneHourShiftId, workDate)
+
+      const preflightRes = await publish({ assignmentIds: [publishDraftId], preflightOnly: true })
+      expect(preflightRes.status, JSON.stringify(preflightRes.body)).toBe(200)
+      const preflightData = (preflightRes.body as { data?: { preflightOnly?: boolean; totalPublished?: number; assignments?: Array<{ id?: string; publishStatus?: string }> } } | undefined)?.data
+      expect(preflightData?.preflightOnly).toBe(true)
+      expect(preflightData?.totalPublished).toBe(1)
+      expect(preflightData?.assignments?.[0]?.publishStatus).toBe('published')
+      const preflightPersisted = await pool.query(
+        `SELECT publish_status, publish_batch_id, publish_requested_at, publish_requested_by,
+                published_at, published_by, locked_at
+           FROM attendance_shift_assignments
+          WHERE id = $1`,
+        [publishDraftId],
+      )
+      expect(preflightPersisted.rows[0]?.publish_status).toBe('draft')
+      expect(preflightPersisted.rows[0]?.publish_batch_id).toBeNull()
+      expect(preflightPersisted.rows[0]?.publish_requested_at).toBeNull()
+      expect(preflightPersisted.rows[0]?.publish_requested_by).toBeNull()
+      expect(preflightPersisted.rows[0]?.published_at).toBeNull()
+      expect(preflightPersisted.rows[0]?.published_by).toBeNull()
+      expect(preflightPersisted.rows[0]?.locked_at).toBeNull()
+
+      const rotationRuleId = await createRotationRule(`Publish Rotation ${runSuffix}`, oneHourShiftId)
+      const rotationDraftRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/rotation-assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: rotationUserId,
+          rotationRuleId,
+          startDate: rotationDate,
+          endDate: rotationDate,
+          isActive: true,
+        }),
+      })
+      expect(rotationDraftRes.status, JSON.stringify(rotationDraftRes.body)).toBe(201)
+      const rotationDraftId = (rotationDraftRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+      expect(rotationDraftId).toBeTruthy()
+      if (!rotationDraftId) return
+
+      const publishRes = await publish({ assignmentIds: [publishDraftId], rotationAssignmentIds: [rotationDraftId] })
+      expect(publishRes.status, JSON.stringify(publishRes.body)).toBe(200)
+      const publishData = (publishRes.body as { data?: { publishBatchId?: string; preflightOnly?: boolean; totalPublished?: number; assignments?: Array<{ id?: string; publishStatus?: string }>; rotationAssignments?: Array<{ id?: string; publishStatus?: string }> } } | undefined)?.data
+      expect(publishData?.preflightOnly).toBe(false)
+      expect(publishData?.publishBatchId).toBeTruthy()
+      expect(publishData?.totalPublished).toBe(2)
+      expect(publishData?.assignments?.[0]?.publishStatus).toBe('published')
+      expect(publishData?.rotationAssignments?.[0]?.publishStatus).toBe('published')
+      const publishedRows = await pool.query(
+        `SELECT id, publish_status, publish_batch_id, publish_requested_at, publish_requested_by,
+                published_at, published_by, locked_at
+           FROM attendance_shift_assignments
+          WHERE id = $1
+         UNION ALL
+         SELECT id, publish_status, publish_batch_id, publish_requested_at, publish_requested_by,
+                published_at, published_by, locked_at
+           FROM attendance_rotation_assignments
+          WHERE id = $2`,
+        [publishDraftId, rotationDraftId],
+      )
+      expect(publishedRows.rows).toHaveLength(2)
+      for (const row of publishedRows.rows) {
+        expect(row.publish_status).toBe('published')
+        expect(row.publish_batch_id).toBe(publishData?.publishBatchId)
+        expect(row.publish_requested_at).toBeTruthy()
+        expect(row.publish_requested_by).toBe(adminUserId)
+        expect(row.published_at).toBeTruthy()
+        expect(row.published_by).toBe(adminUserId)
+        expect(row.locked_at).toBeTruthy()
+      }
+      const lockedPublishedUpdateRes = await requestJson(`${baseUrl}/api/attendance/assignments/${publishDraftId}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ shiftId: twoHourShiftId }),
+      })
+      expect(lockedPublishedUpdateRes.status, JSON.stringify(lockedPublishedUpdateRes.body)).toBe(422)
+      expect((lockedPublishedUpdateRes.body as { error?: { code?: string; details?: { publishStatus?: string } } } | undefined)?.error?.code).toBe('SCHEDULE_PUBLISH_LOCKED')
+      expect((lockedPublishedUpdateRes.body as { error?: { code?: string; details?: { publishStatus?: string } } } | undefined)?.error?.details?.publishStatus).toBe('published')
+
+      const conflictPublishedRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: conflictUserId,
+          shiftId: oneHourShiftId,
+          startDate: conflictDate,
+          endDate: conflictDate,
+          isActive: true,
+        }),
+      })
+      expect(conflictPublishedRes.status, JSON.stringify(conflictPublishedRes.body)).toBe(201)
+      const conflictDraftId = await createDraftAssignment(conflictUserId, twoHourShiftId, conflictDate)
+      const conflictPublishRes = await publish({ assignmentIds: [conflictDraftId] })
+      expect(conflictPublishRes.status, JSON.stringify(conflictPublishRes.body)).toBe(409)
+      expect((conflictPublishRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULE_PUBLISH_CONFLICT')
+      const conflictDraftRow = await pool.query(
+        'SELECT publish_status, publish_batch_id, published_at FROM attendance_shift_assignments WHERE id = $1',
+        [conflictDraftId],
+      )
+      expect(conflictDraftRow.rows[0]?.publish_status).toBe('draft')
+      expect(conflictDraftRow.rows[0]?.publish_batch_id).toBeNull()
+      expect(conflictDraftRow.rows[0]?.published_at).toBeNull()
+
+      const capSettingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          shiftCompliance: { enforcement: 'block', dailyMaxMinutes: 30, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+        }),
+      })
+      expect(capSettingsRes.status, JSON.stringify(capSettingsRes.body)).toBe(200)
+      const capDraftId = await createDraftAssignment(complianceUserId, capShiftId, complianceDate)
+      const capPublishRes = await publish({ assignmentIds: [capDraftId] })
+      expect(capPublishRes.status, JSON.stringify(capPublishRes.body)).toBe(422)
+      expect((capPublishRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_COMPLIANCE_CAP_EXCEEDED')
+      const capDraftRow = await pool.query(
+        'SELECT publish_status, publish_batch_id, published_at FROM attendance_shift_assignments WHERE id = $1',
+        [capDraftId],
+      )
+      expect(capDraftRow.rows[0]?.publish_status).toBe('draft')
+      expect(capDraftRow.rows[0]?.publish_batch_id).toBeNull()
+      expect(capDraftRow.rows[0]?.published_at).toBeNull()
+    } finally {
+      if (Object.keys(originalSettings).length > 0) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify(originalSettings),
+        }).catch(() => undefined)
+      }
+      const users = [publishUserId, rotationUserId, conflictUserId, complianceUserId]
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = ANY($1::text[])', [users]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_rotation_assignments WHERE user_id = ANY($1::text[])', [users]).catch(() => undefined)
+      if (rotationRuleIds.length > 0) {
+        await pool.query('DELETE FROM attendance_rotation_rules WHERE id = ANY($1::uuid[])', [rotationRuleIds]).catch(() => undefined)
+      }
+      if (shiftIds.length > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [shiftIds]).catch(() => undefined)
+      }
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('enforces schedule-edit windows on shift and rotation assignment writes', async () => {
     if (!baseUrl) return
 

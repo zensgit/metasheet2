@@ -8853,6 +8853,10 @@ function isAttendanceScheduleDraftEditable(row) {
   return normalizeAttendanceSchedulePublishStatus(row?.publish_status) === 'draft'
 }
 
+function isAttendanceSchedulePublishedDirectlyMutable(row) {
+  return normalizeAttendanceSchedulePublishStatus(row?.publish_status) === 'published' && row?.locked_at == null
+}
+
 function respondAttendanceSchedulePublishLocked(res, status) {
   res.status(422).json({
     ok: false,
@@ -8874,6 +8878,88 @@ async function loadAttendanceScheduleAssignmentPublishStatus(db, tableName, assi
   )
   if (!rows.length) return null
   return normalizeAttendanceSchedulePublishStatus(rows[0].publish_status)
+}
+
+class AttendanceSchedulePublishRouteError extends Error {
+  constructor(status, code, message, details = {}) {
+    super(message)
+    this.name = 'AttendanceSchedulePublishRouteError'
+    this.status = status
+    this.code = code
+    this.details = details
+  }
+}
+
+class AttendanceSchedulePublishPreflightComplete extends Error {
+  constructor(result) {
+    super('Attendance schedule publish preflight complete')
+    this.name = 'AttendanceSchedulePublishPreflightComplete'
+    this.result = result
+  }
+}
+
+function respondAttendanceSchedulePublishRouteError(res, error) {
+  if (!(error instanceof AttendanceSchedulePublishRouteError)) return false
+  res.status(error.status).json({
+    ok: false,
+    error: {
+      code: error.code,
+      message: error.message,
+      details: error.details,
+    },
+  })
+  return true
+}
+
+function throwAttendanceSchedulePublishRouteError(status, code, message, details = {}) {
+  throw new AttendanceSchedulePublishRouteError(status, code, message, details)
+}
+
+function normalizeAttendanceSchedulePublicationIds(value) {
+  const ids = []
+  const invalid = []
+  for (const raw of Array.isArray(value) ? value : []) {
+    const id = normalizeUuidString(raw)
+    if (id) {
+      ids.push(id)
+    } else {
+      invalid.push(raw)
+    }
+  }
+  return { ids: Array.from(new Set(ids)).sort(), invalid }
+}
+
+function attendanceSchedulePublishSnapshot(row) {
+  return [
+    row.kind,
+    row.id,
+    row.user_id,
+    row.shift_id ?? row.rotation_rule_id ?? '',
+    normalizeAttendanceScheduleSlotIndex(row.slot_index, 0),
+    normalizeDateOnly(row.start_date) ?? row.start_date ?? '',
+    normalizeAttendanceScheduleAssignmentEndDate(row.end_date) ?? '',
+    row.is_active === false ? 'false' : 'true',
+    row.updated_at ? new Date(row.updated_at).toISOString() : '',
+  ].join('|')
+}
+
+function buildAttendanceSchedulePublishDraft(row, settings) {
+  const kind = row.kind === 'rotation' ? 'rotation' : 'shift'
+  const draft = {
+    kind,
+    orgId: row.org_id,
+    userId: row.user_id,
+    startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
+    endDate: normalizeAttendanceScheduleAssignmentEndDate(row.end_date),
+    isActive: row.is_active,
+    excludeId: row.id,
+  }
+  if (kind === 'shift') {
+    draft.slotIndex = normalizeAttendanceScheduleSlotIndex(row.slot_index, 0)
+    draft.multiShiftEnabled = settings?.multiShiftDay?.enabled === true
+    draft.shift = row
+  }
+  return draft
 }
 
 function normalizeAttendanceScheduleAssignmentEndDate(value) {
@@ -23386,7 +23472,7 @@ module.exports = {
 
           const existing = existingRows[0]
           const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existing.publish_status)
-          if (existingPublishStatus !== 'published') {
+          if (!isAttendanceSchedulePublishedDirectlyMutable(existing)) {
             respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
             return
           }
@@ -23456,7 +23542,9 @@ module.exports = {
                    end_date = $6,
                    is_active = $7,
                    updated_at = now()
-               WHERE id = $1 AND org_id = $2 AND COALESCE(publish_status, 'published') = 'published'
+               WHERE id = $1 AND org_id = $2
+                 AND COALESCE(publish_status, 'published') = 'published'
+                 AND locked_at IS NULL
                RETURNING *`,
               [
                 assignmentId,
@@ -23539,7 +23627,7 @@ module.exports = {
           }
 
           const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existingRows[0].publish_status)
-          if (existingPublishStatus !== 'published') {
+          if (!isAttendanceSchedulePublishedDirectlyMutable(existingRows[0])) {
             respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
             return
           }
@@ -23556,7 +23644,9 @@ module.exports = {
 
           const rows = await db.query(
             `DELETE FROM attendance_rotation_assignments
-             WHERE id = $1 AND org_id = $2 AND COALESCE(publish_status, 'published') = 'published'
+             WHERE id = $1 AND org_id = $2
+               AND COALESCE(publish_status, 'published') = 'published'
+               AND locked_at IS NULL
              RETURNING id`,
             [assignmentId, orgId]
           )
@@ -31983,7 +32073,7 @@ module.exports = {
 
           const existing = existingRows[0]
           const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existing.publish_status)
-          if (existingPublishStatus !== 'published') {
+          if (!isAttendanceSchedulePublishedDirectlyMutable(existing)) {
             respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
             return
           }
@@ -32068,7 +32158,9 @@ module.exports = {
                    end_date = $7,
                    is_active = $8,
                    updated_at = now()
-               WHERE id = $1 AND org_id = $2 AND COALESCE(publish_status, 'published') = 'published'
+               WHERE id = $1 AND org_id = $2
+                 AND COALESCE(publish_status, 'published') = 'published'
+                 AND locked_at IS NULL
                RETURNING *`,
               [
                 assignmentId,
@@ -32152,7 +32244,7 @@ module.exports = {
           }
 
           const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existingRows[0].publish_status)
-          if (existingPublishStatus !== 'published') {
+          if (!isAttendanceSchedulePublishedDirectlyMutable(existingRows[0])) {
             respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
             return
           }
@@ -32169,7 +32261,9 @@ module.exports = {
 
           const rows = await db.query(
             `DELETE FROM attendance_shift_assignments
-             WHERE id = $1 AND org_id = $2 AND COALESCE(publish_status, 'published') = 'published'
+             WHERE id = $1 AND org_id = $2
+               AND COALESCE(publish_status, 'published') = 'published'
+               AND locked_at IS NULL
              RETURNING id`,
             [assignmentId, orgId]
           )
@@ -32191,6 +32285,313 @@ module.exports = {
           }
           logger.error('Attendance assignment delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete assignment' } })
+        }
+      }
+    )
+
+    const schedulePublicationSchema = z.object({
+      assignmentIds: z.array(z.string().min(1)).optional(),
+      rotationAssignmentIds: z.array(z.string().min(1)).optional(),
+      preflightOnly: z.boolean().optional(),
+    }).strict()
+
+    async function loadAttendanceSchedulePublicationRows(client, orgId, assignmentIds, rotationAssignmentIds, options = {}) {
+      const forUpdate = options.forUpdate === true
+      const rows = []
+      if (assignmentIds.length) {
+        const shiftRows = await client.query(
+          `SELECT a.*, 'shift'::text AS kind,
+                  s.work_start_time, s.work_end_time, s.is_overnight
+             FROM attendance_shift_assignments a
+             LEFT JOIN attendance_shifts s ON s.id = a.shift_id AND s.org_id = a.org_id
+            WHERE a.org_id = $1
+              AND a.id = ANY($2::uuid[])
+            ${forUpdate ? 'FOR UPDATE OF a' : ''}`,
+          [orgId, assignmentIds]
+        )
+        rows.push(...shiftRows)
+      }
+      if (rotationAssignmentIds.length) {
+        const rotationRows = await client.query(
+          `SELECT a.*, 'rotation'::text AS kind
+             FROM attendance_rotation_assignments a
+            WHERE a.org_id = $1
+              AND a.id = ANY($2::uuid[])
+            ${forUpdate ? 'FOR UPDATE OF a' : ''}`,
+          [orgId, rotationAssignmentIds]
+        )
+        rows.push(...rotationRows)
+      }
+      return rows
+    }
+
+    function assertAttendanceSchedulePublicationTargets(res, rows, requestedKeys) {
+      const foundKeys = new Set(rows.map(row => `${row.kind}:${row.id}`))
+      const missingKeys = requestedKeys.filter(key => !foundKeys.has(key))
+      if (missingKeys.length) {
+        res.status(404).json({
+          ok: false,
+          error: {
+            code: 'NOT_FOUND',
+            message: 'One or more draft assignments were not found',
+            details: { missing: missingKeys },
+          },
+        })
+        return false
+      }
+      for (const row of rows) {
+        const publishStatus = normalizeAttendanceSchedulePublishStatus(row.publish_status)
+        if (publishStatus === 'published') {
+          res.status(409).json({
+            ok: false,
+            error: {
+              code: 'SCHEDULE_PUBLISH_ALREADY_PUBLISHED',
+              message: 'One or more target assignments are already published',
+              details: { id: row.id, kind: row.kind, publishStatus },
+            },
+          })
+          return false
+        }
+        if (publishStatus !== 'draft') {
+          respondAttendanceSchedulePublishLocked(res, publishStatus)
+          return false
+        }
+      }
+      return true
+    }
+
+    async function enforceAttendanceSchedulePublicationConflicts(client, row, settings) {
+      const draft = buildAttendanceSchedulePublishDraft(row, settings)
+      const publishedConflict = await findAttendanceScheduleAssignmentConflict(client, draft, { publishStatuses: ['published'] })
+      if (publishedConflict) {
+        throwAttendanceSchedulePublishRouteError(
+          409,
+          'SCHEDULE_PUBLISH_CONFLICT',
+          getAttendanceScheduleAssignmentConflictMessage(publishedConflict),
+          { conflict: publishedConflict }
+        )
+      }
+      const pendingConflict = await findAttendanceScheduleAssignmentConflict(client, draft, { publishStatuses: ['pending'] })
+      if (pendingConflict) {
+        throwAttendanceSchedulePublishRouteError(
+          409,
+          'SCHEDULE_PUBLISH_PENDING_CONFLICT',
+          getAttendanceScheduleAssignmentConflictMessage(pendingConflict),
+          { conflict: pendingConflict }
+        )
+      }
+    }
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/schedule-publications',
+      async (req, res) => {
+        const parsed = schedulePublicationSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const assignmentIdResult = normalizeAttendanceSchedulePublicationIds(parsed.data.assignmentIds)
+        const rotationAssignmentIdResult = normalizeAttendanceSchedulePublicationIds(parsed.data.rotationAssignmentIds)
+        if (assignmentIdResult.invalid.length || rotationAssignmentIdResult.invalid.length) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'Invalid schedule assignment id',
+              details: {
+                assignmentIds: assignmentIdResult.invalid,
+                rotationAssignmentIds: rotationAssignmentIdResult.invalid,
+              },
+            },
+          })
+          return
+        }
+
+        const assignmentIds = assignmentIdResult.ids
+        const rotationAssignmentIds = rotationAssignmentIdResult.ids
+        if (!assignmentIds.length && !rotationAssignmentIds.length) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'At least one assignment id is required' } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const actorUserId = getUserId(req) || null
+        const preflightOnly = parsed.data.preflightOnly === true
+        const requestedKeys = [
+          ...assignmentIds.map(id => `shift:${id}`),
+          ...rotationAssignmentIds.map(id => `rotation:${id}`),
+        ].sort()
+
+        try {
+          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+          if (!actorAccess) return
+
+          const initialRows = await loadAttendanceSchedulePublicationRows(db, orgId, assignmentIds, rotationAssignmentIds)
+          if (!assertAttendanceSchedulePublicationTargets(res, initialRows, requestedKeys)) return
+
+          const affectedDates = []
+          for (const row of initialRows) {
+            affectedDates.push(row.start_date)
+            if (row.end_date) affectedDates.push(row.end_date)
+            const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+              orgId,
+              payload: row,
+              actorAccess,
+            })
+            if (!access) return
+          }
+
+          const windowAccess = await enforceShiftEditWindow(res, affectedDates)
+          if (!windowAccess) return
+
+          const initialSnapshots = new Map(initialRows.map(row => [`${row.kind}:${row.id}`, attendanceSchedulePublishSnapshot(row)]))
+          const result = await db.transaction(async (trx) => {
+            await acquireAttendanceScheduleAssignmentLocks(trx, orgId, initialRows.map(row => row.user_id))
+            const settings = await getSettings(trx)
+            const lockedRows = await loadAttendanceSchedulePublicationRows(trx, orgId, assignmentIds, rotationAssignmentIds, { forUpdate: true })
+            const lockedKeys = new Set(lockedRows.map(row => `${row.kind}:${row.id}`))
+            const missingKeys = requestedKeys.filter(key => !lockedKeys.has(key))
+            if (missingKeys.length) {
+              throwAttendanceSchedulePublishRouteError(404, 'NOT_FOUND', 'One or more draft assignments were not found', { missing: missingKeys })
+            }
+
+            for (const row of lockedRows) {
+              const key = `${row.kind}:${row.id}`
+              const publishStatus = normalizeAttendanceSchedulePublishStatus(row.publish_status)
+              if (publishStatus !== 'draft' || initialSnapshots.get(key) !== attendanceSchedulePublishSnapshot(row)) {
+                throwAttendanceSchedulePublishRouteError(
+                  409,
+                  'SCHEDULE_PUBLISH_STALE_DRAFT',
+                  'One or more draft assignments changed before publication',
+                  { id: row.id, kind: row.kind, publishStatus }
+                )
+              }
+            }
+
+            for (const row of lockedRows) {
+              await enforceAttendanceSchedulePublicationConflicts(trx, row, settings)
+            }
+
+            const publishBatchId = randomUUID()
+            if (assignmentIds.length) {
+              await trx.query(
+                `UPDATE attendance_shift_assignments
+                    SET publish_status = 'pending',
+                        publish_batch_id = $3,
+                        publish_requested_at = now(),
+                        publish_requested_by = $4,
+                        updated_at = now()
+                  WHERE org_id = $1
+                    AND id = ANY($2::uuid[])
+                    AND publish_status = 'draft'`,
+                [orgId, assignmentIds, publishBatchId, actorUserId]
+              )
+            }
+            if (rotationAssignmentIds.length) {
+              await trx.query(
+                `UPDATE attendance_rotation_assignments
+                    SET publish_status = 'pending',
+                        publish_batch_id = $3,
+                        publish_requested_at = now(),
+                        publish_requested_by = $4,
+                        updated_at = now()
+                  WHERE org_id = $1
+                    AND id = ANY($2::uuid[])
+                    AND publish_status = 'draft'`,
+                [orgId, rotationAssignmentIds, publishBatchId, actorUserId]
+              )
+            }
+
+            const publishedShiftRows = assignmentIds.length
+              ? await trx.query(
+                `UPDATE attendance_shift_assignments
+                    SET publish_status = 'published',
+                        published_at = now(),
+                        published_by = $4,
+                        locked_at = now(),
+                        updated_at = now()
+                  WHERE org_id = $1
+                    AND id = ANY($2::uuid[])
+                    AND publish_status = 'pending'
+                    AND publish_batch_id = $3
+                  RETURNING *`,
+                [orgId, assignmentIds, publishBatchId, actorUserId]
+              )
+              : []
+            const publishedRotationRows = rotationAssignmentIds.length
+              ? await trx.query(
+                `UPDATE attendance_rotation_assignments
+                    SET publish_status = 'published',
+                        published_at = now(),
+                        published_by = $4,
+                        locked_at = now(),
+                        updated_at = now()
+                  WHERE org_id = $1
+                    AND id = ANY($2::uuid[])
+                    AND publish_status = 'pending'
+                    AND publish_batch_id = $3
+                  RETURNING *`,
+                [orgId, rotationAssignmentIds, publishBatchId, actorUserId]
+              )
+              : []
+
+            if (publishedShiftRows.length !== assignmentIds.length || publishedRotationRows.length !== rotationAssignmentIds.length) {
+              throwAttendanceSchedulePublishRouteError(
+                409,
+                'SCHEDULE_PUBLISH_STALE_DRAFT',
+                'One or more draft assignments changed before publication',
+                {
+                  expectedAssignments: assignmentIds.length,
+                  publishedAssignments: publishedShiftRows.length,
+                  expectedRotationAssignments: rotationAssignmentIds.length,
+                  publishedRotationAssignments: publishedRotationRows.length,
+                }
+              )
+            }
+
+            for (const row of [...publishedShiftRows, ...publishedRotationRows]) {
+              await enforceShiftComplianceCap(trx, {
+                orgId,
+                userId: row.user_id,
+                fromDate: row.start_date,
+                toDate: row.end_date,
+              })
+            }
+
+            const data = {
+              publishBatchId,
+              preflightOnly,
+              assignments: publishedShiftRows.map(mapAssignmentRow),
+              rotationAssignments: publishedRotationRows.map(mapRotationAssignmentRow),
+              totalPublished: publishedShiftRows.length + publishedRotationRows.length,
+            }
+            if (preflightOnly) throw new AttendanceSchedulePublishPreflightComplete(data)
+            return data
+          })
+
+          emitEvent('attendance.schedulePublication.published', {
+            orgId,
+            publishBatchId: result.publishBatchId,
+            assignmentIds,
+            rotationAssignmentIds,
+            totalPublished: result.totalPublished,
+          })
+          res.json({ ok: true, data: result })
+        } catch (error) {
+          if (error instanceof AttendanceSchedulePublishPreflightComplete) {
+            res.json({ ok: true, data: error.result })
+            return
+          }
+          if (respondAttendanceSchedulePublishRouteError(res, error)) return
+          if (respondShiftComplianceCapExceeded(res, error)) return
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule publication failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to publish schedule assignments' } })
         }
       }
     )
