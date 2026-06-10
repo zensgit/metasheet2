@@ -8298,6 +8298,20 @@ interface AttendanceAssignment {
   publish_status?: AttendanceSchedulePublishStatus | null
   lockedAt?: string | null
   locked_at?: string | null
+  assignmentKind?: 'regular' | 'temporary' | null
+  assignment_kind?: 'regular' | 'temporary' | null
+  temporaryMode?: 'replace' | null
+  temporary_mode?: 'replace' | null
+  temporaryReplacesKind?: 'shift' | 'rule' | null
+  temporary_replaces_kind?: 'shift' | 'rule' | null
+  temporaryReplacesAssignmentId?: string | null
+  temporary_replaces_assignment_id?: string | null
+  temporaryReason?: string | null
+  temporary_reason?: string | null
+  temporaryCreatedBy?: string | null
+  temporary_created_by?: string | null
+  temporaryCreatedAt?: string | null
+  temporary_created_at?: string | null
 }
 
 interface AttendanceAssignmentItem {

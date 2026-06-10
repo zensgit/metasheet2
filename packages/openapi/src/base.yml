@@ -1530,6 +1530,63 @@ components:
         is_active:
           type: boolean
           deprecated: true
+        assignmentKind:
+          type: string
+          enum: [regular, temporary]
+        assignment_kind:
+          type: string
+          enum: [regular, temporary]
+          deprecated: true
+        temporaryMode:
+          type: string
+          enum: [replace]
+          nullable: true
+        temporary_mode:
+          type: string
+          enum: [replace]
+          nullable: true
+          deprecated: true
+        temporaryReplacesKind:
+          type: string
+          enum: [shift, rule]
+          nullable: true
+        temporary_replaces_kind:
+          type: string
+          enum: [shift, rule]
+          nullable: true
+          deprecated: true
+        temporaryReplacesAssignmentId:
+          type: string
+          format: uuid
+          nullable: true
+        temporary_replaces_assignment_id:
+          type: string
+          format: uuid
+          nullable: true
+          deprecated: true
+        temporaryReason:
+          type: string
+          nullable: true
+        temporary_reason:
+          type: string
+          nullable: true
+          deprecated: true
+        temporaryCreatedBy:
+          type: string
+          nullable: true
+        temporary_created_by:
+          type: string
+          nullable: true
+          deprecated: true
+        temporaryCreatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        temporary_created_at:
+          type: string
+          format: date-time
+          nullable: true
+          deprecated: true
     AttendanceHoliday:
       type: object
       properties:
