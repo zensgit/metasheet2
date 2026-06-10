@@ -286,4 +286,21 @@ describeIfDatabase('multitable formula-over-lookup A-full (real DB)', () => {
     // F1 guard on the A-min path too: the link edit affects only lu1's chain; f2 stays put.
     expect(await readField(REC_M1, MS, FLD_M_F2)).toBe(8)
   })
+
+  test('AF6b: A-min F1 guard is DISCRIMINATING — limited actor link edit cannot clobber the G-chain', async () => {
+    // AF6 used USER_FULL, for whom a pre-fix all-formula recompute was value-idempotent (G readable
+    // → f2 re-evaluates to the same 8). This variant is the airtight pin: USER_LIMITED (write on M,
+    // NOTHING on G) edits M's link directly. Pre-fix, the A-min recompute would hydrate lu2 to []
+    // for this actor and clobber f2 to 1; with the dependency allowlist f2 is not re-evaluated.
+    currentUser = { id: USER_LIMITED, roles: ['member'], perms: ['comments:write'] }
+    const res = await request(app).post('/api/multitable/patch').send({
+      sheetId: MS,
+      changes: [{ recordId: REC_M1, fieldId: FLD_M_LINK, value: [REC_F1] }],
+    })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    // Re-linked back to F1 (target = 100 since AF1) → f1 recomputes through A-min: [100] → 101.
+    expect(await readField(REC_M1, MS, FLD_M_F)).toBe(101)
+    // The independent G-chain survives a limited-actor same-record edit untouched.
+    expect(await readField(REC_M1, MS, FLD_M_F2)).toBe(8)
+  })
 })
