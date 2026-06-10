@@ -334,6 +334,7 @@ describe('attendance scheduling assignment conflict guard', () => {
           { user_id: 'user-shift-conflict' },
           { user_id: 'user-rotation-conflict' },
         ])
+        .mockResolvedValueOnce([])
         .mockResolvedValueOnce([
           {
             id: 'assignment-skip',

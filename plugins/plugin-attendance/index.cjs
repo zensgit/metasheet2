@@ -9037,6 +9037,7 @@ function mapAttendanceGroupFixedScheduleSkipped(row, draft, producerKey) {
 function isExactAttendanceGroupFixedScheduleAssignment(row, draft) {
   return row?.kind !== 'rotation'
     && String(row?.shift_id || '') === String(draft.shiftId || '')
+    && normalizeAttendanceScheduleSlotIndex(row?.slot_index, 0) === normalizeAttendanceScheduleSlotIndex(draft.slotIndex, 0)
     && (normalizeDateOnly(row?.start_date) ?? row?.start_date) === draft.startDate
     && normalizeAttendanceScheduleAssignmentEndDate(row?.end_date) === normalizeAttendanceScheduleAssignmentEndDate(draft.endDate)
 }
@@ -9073,7 +9074,7 @@ async function acquireAttendanceScheduleAssignmentLocks(db, orgId, userIds) {
 async function loadAttendanceGroupFixedScheduleManagedRows(db, input) {
   const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, '00000000-0000-4000-8000-000000000000')
   return db.query(
-    `SELECT id, user_id, shift_id, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id, 'shift'::text AS kind
+    `SELECT id, user_id, shift_id, slot_index, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id, 'shift'::text AS kind
        FROM attendance_shift_assignments
       WHERE org_id = $1
         AND producer_type = $2
@@ -9149,15 +9150,22 @@ async function buildAttendanceGroupFixedSchedulePlan(db, input, options = {}) {
 
   const producerKey = buildAttendanceGroupFixedScheduleProducerKey(input)
   const overlapEndDate = normalizeAttendanceScheduleAssignmentEndDate(input.endDate) || ATTENDANCE_SCHEDULE_OPEN_END_DATE
+  const settings = await getSettings(db).catch(() => null)
+  const multiShiftDay = normalizeMultiShiftDaySetting(settings?.multiShiftDay)
+  const shift = mapShiftRow(shiftRows[0])
   const shiftOverlapRows = await db.query(
-    `SELECT id, user_id, shift_id, start_date, end_date, producer_type, producer_ref_id, producer_key, producer_run_id, 'shift'::text AS kind
-       FROM attendance_shift_assignments
-      WHERE org_id = $1
-        AND user_id = ANY($2::text[])
-        AND COALESCE(is_active, true) = true
-        AND start_date <= $4::date
-        AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
-      ORDER BY user_id ASC, start_date DESC, created_at DESC`,
+    `SELECT a.id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date,
+            a.producer_type, a.producer_ref_id, a.producer_key, a.producer_run_id,
+            'shift'::text AS kind,
+            s.work_start_time, s.work_end_time, s.is_overnight
+       FROM attendance_shift_assignments a
+       LEFT JOIN attendance_shifts s ON s.id = a.shift_id AND s.org_id = a.org_id
+      WHERE a.org_id = $1
+        AND a.user_id = ANY($2::text[])
+        AND COALESCE(a.is_active, true) = true
+        AND a.start_date <= $4::date
+        AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+      ORDER BY a.user_id ASC, a.start_date DESC, a.created_at DESC`,
     [input.orgId, userIds, input.startDate, overlapEndDate]
   )
   const rotationOverlapRows = await db.query(
@@ -9197,10 +9205,22 @@ async function buildAttendanceGroupFixedSchedulePlan(db, input, options = {}) {
       shiftId: input.shiftId,
       startDate: input.startDate,
       endDate: input.endDate ?? null,
+      slotIndex: 0,
+      multiShiftEnabled: multiShiftDay.enabled,
+      shift,
       isActive: true,
     }
     const overlaps = overlapsByUserId.get(userId) ?? []
-    const blockingRow = overlaps.find(row => !isExactAttendanceGroupFixedScheduleAssignment(row, draft))
+    const blockingRow = overlaps.find((row) => {
+      if (isExactAttendanceGroupFixedScheduleAssignment(row, draft)) return false
+      if (multiShiftDay.enabled && row?.kind !== 'rotation') {
+        const existingSlotIndex = normalizeAttendanceScheduleSlotIndex(row?.slot_index, 0)
+        if (existingSlotIndex !== 0 && !attendanceShiftWindowsOverlapForSlotConflict(row, shift)) {
+          return false
+        }
+      }
+      return true
+    })
     if (blockingRow) {
       const conflict = mapAttendanceGroupFixedScheduleBlockingConflict(blockingRow, draft)
       if (conflict) blockingConflicts.push(conflict)
@@ -9250,8 +9270,8 @@ async function insertAttendanceGroupFixedScheduleAssignments(db, input, items, p
   for (const item of items) {
     const rows = await db.query(
       `INSERT INTO attendance_shift_assignments
-       (id, org_id, user_id, shift_id, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id)
-       VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8, $9, $10)
+       (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id)
+       VALUES ($1, $2, $3, $4, 0, $5, $6, true, $7, $8, $9, $10)
        RETURNING *`,
       [
         randomUUID(),
@@ -30802,6 +30822,8 @@ module.exports = {
                 userId: item.userId,
                 startDate: item.workDate,
                 endDate: item.workDate,
+                slotIndex: 0,
+                multiShiftEnabled: false,
                 isActive: true,
               })
               if (conflict) {
@@ -30841,8 +30863,8 @@ module.exports = {
 
               const assignmentRows = await trx.query(
                 `INSERT INTO attendance_shift_assignments
-                 (id, org_id, user_id, shift_id, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id)
-                 VALUES ($1, $2, $3, $4, $5, $5, true, $6, $7, $8, $7)
+                 (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id)
+                 VALUES ($1, $2, $3, $4, 0, $5, $5, true, $6, $7, $8, $7)
                  RETURNING *`,
                 [
                   randomUUID(),
