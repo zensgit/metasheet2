@@ -8633,6 +8633,7 @@ function normalizeAssignmentPayload(value) {
     ...payload,
     userId: firstDefinedValue(payload.userId, payload.user_id),
     shiftId: firstDefinedValue(payload.shiftId, payload.shift_id),
+    slotIndex: firstDefinedValue(payload.slotIndex, payload.slot_index),
     startDate: firstDefinedValue(payload.startDate, payload.start_date),
     endDate: firstDefinedValue(payload.endDate, payload.end_date),
     isActive: firstDefinedValue(payload.isActive, payload.is_active),
@@ -8812,6 +8813,50 @@ function resolveAttendanceScheduleAssignmentUpdateEndDate(payload, existingEndDa
   return normalizeAttendanceScheduleAssignmentEndDate(payload.endDate)
 }
 
+function normalizeAttendanceScheduleSlotIndex(value, fallback = 0) {
+  if (value === null || value === undefined || value === '') return fallback
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed)) return fallback
+  return parsed
+}
+
+function resolveAttendanceScheduleAssignmentSlotIndex(settings, value, fallback = 0) {
+  const multiShiftDay = normalizeMultiShiftDaySetting(settings?.multiShiftDay)
+  const slotIndex = multiShiftDay.enabled
+    ? normalizeAttendanceScheduleSlotIndex(value, fallback)
+    : 0
+  if (multiShiftDay.enabled && (slotIndex < 0 || slotIndex >= multiShiftDay.maxSlots)) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: `slotIndex must be between 0 and ${multiShiftDay.maxSlots - 1}`,
+    }
+  }
+  return { ok: true, slotIndex, multiShiftDay }
+}
+
+function resolveAttendanceShiftWindowForSlotConflict(shift) {
+  if (!shift || typeof shift !== 'object') return null
+  const start = normalizeTimeString(shift.workStartTime ?? shift.work_start_time)
+  const end = normalizeTimeString(shift.workEndTime ?? shift.work_end_time)
+  if (!start || !end) return null
+  const isOvernight = resolveOvernightFlag(shift.isOvernight ?? shift.is_overnight, start, end)
+  if (isOvernight || start === end) return null
+  const startMinutes = parseTimeToMinutes(start, null)
+  const endMinutes = parseTimeToMinutes(end, null)
+  if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes) || startMinutes >= endMinutes) return null
+  return { startMinutes, endMinutes }
+}
+
+function attendanceShiftWindowsOverlapForSlotConflict(leftShift, rightShift) {
+  const left = resolveAttendanceShiftWindowForSlotConflict(leftShift)
+  const right = resolveAttendanceShiftWindowForSlotConflict(rightShift)
+  // Overnight/invalid multi-slot comparisons are intentionally conservative for v1.
+  if (!left || !right) return true
+  return left.startMinutes < right.endMinutes && right.startMinutes < left.endMinutes
+}
+
 async function acquireAttendanceScheduleAssignmentLock(client, orgId, userId) {
   try {
     await client.query(
@@ -8878,20 +8923,45 @@ async function findAttendanceScheduleAssignmentConflict(db, draft) {
   const otherKindLabel = draft.kind === 'rotation' ? 'shift' : 'rotation'
   const baseParams = [draft.orgId, draft.userId, draftStartDate, overlapEndDate]
   const excludeClause = draft.excludeId ? 'AND id <> $5' : ''
-  const sameKindRows = await db.query(
-    `SELECT id, start_date, end_date, $${draft.excludeId ? 6 : 5}::text AS kind
-       FROM ${sameKindTable}
-      WHERE org_id = $1
-        AND user_id = $2
-        AND COALESCE(is_active, true) = true
-        AND start_date <= $4::date
-        AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
-        ${excludeClause}
-      ORDER BY start_date DESC, created_at DESC
-      LIMIT 1`,
-    draft.excludeId ? [...baseParams, draft.excludeId, sameKindLabel] : [...baseParams, sameKindLabel]
-  )
-  if (sameKindRows.length) return mapAttendanceScheduleAssignmentConflict(sameKindRows[0], draft)
+  const multiShiftConflictEnabled = draft.kind === 'shift' && draft.multiShiftEnabled === true
+  if (multiShiftConflictEnabled) {
+    const sameKindRows = await db.query(
+      `SELECT a.id, a.start_date, a.end_date, a.slot_index, $${draft.excludeId ? 6 : 5}::text AS kind,
+              s.work_start_time, s.work_end_time, s.is_overnight
+         FROM attendance_shift_assignments a
+         LEFT JOIN attendance_shifts s ON s.id = a.shift_id AND s.org_id = a.org_id
+        WHERE a.org_id = $1
+          AND a.user_id = $2
+          AND COALESCE(a.is_active, true) = true
+          AND a.start_date <= $4::date
+          AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+          ${draft.excludeId ? 'AND a.id <> $5' : ''}
+        ORDER BY a.start_date DESC, a.created_at DESC`,
+      draft.excludeId ? [...baseParams, draft.excludeId, sameKindLabel] : [...baseParams, sameKindLabel]
+    )
+    const draftSlotIndex = normalizeAttendanceScheduleSlotIndex(draft.slotIndex, 0)
+    const conflictingSameKindRow = sameKindRows.find((row) => {
+      const existingSlotIndex = normalizeAttendanceScheduleSlotIndex(row.slot_index, 0)
+      if (existingSlotIndex === draftSlotIndex) return true
+      return attendanceShiftWindowsOverlapForSlotConflict(row, draft.shift)
+    })
+    if (conflictingSameKindRow) return mapAttendanceScheduleAssignmentConflict(conflictingSameKindRow, draft)
+  } else {
+    const sameKindRows = await db.query(
+      `SELECT id, start_date, end_date, $${draft.excludeId ? 6 : 5}::text AS kind
+         FROM ${sameKindTable}
+        WHERE org_id = $1
+          AND user_id = $2
+          AND COALESCE(is_active, true) = true
+          AND start_date <= $4::date
+          AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+          ${excludeClause}
+        ORDER BY start_date DESC, created_at DESC
+        LIMIT 1`,
+      draft.excludeId ? [...baseParams, draft.excludeId, sameKindLabel] : [...baseParams, sameKindLabel]
+    )
+    if (sameKindRows.length) return mapAttendanceScheduleAssignmentConflict(sameKindRows[0], draft)
+  }
 
   const otherKindRows = await db.query(
     `SELECT id, start_date, end_date, $5::text AS kind
@@ -16980,6 +17050,7 @@ module.exports = {
     const assignmentCreateSchema = z.object({
       userId: z.string().min(1),
       shiftId: z.string().min(1),
+      slotIndex: z.number().int().min(0).max(2).optional(),
       startDate: z.string().min(1),
       endDate: z.string().nullable().optional(),
       isActive: z.boolean().optional(),
@@ -30742,7 +30813,7 @@ module.exports = {
             : buildAttendanceAssignmentViewSql(viewAccess.scopes, rowParams, 'a')
           rowParams.push(pageSize, offset)
           const rows = await db.query(
-            `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
+            `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.slot_index, a.start_date, a.end_date, a.is_active,
                     s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
                     s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
                     s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
@@ -30822,6 +30893,13 @@ module.exports = {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
             return
           }
+          const settings = await getSettings(db)
+          const slotResolution = resolveAttendanceScheduleAssignmentSlotIndex(settings, parsed.data.slotIndex, 0)
+          if (!slotResolution.ok) {
+            res.status(slotResolution.status).json({ ok: false, error: { code: slotResolution.code, message: slotResolution.message } })
+            return
+          }
+          payload.slotIndex = slotResolution.slotIndex
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
@@ -30832,19 +30910,23 @@ module.exports = {
               startDate: payload.startDate,
               endDate: payload.endDate,
               isActive: payload.isActive,
+              slotIndex: payload.slotIndex,
+              multiShiftEnabled: slotResolution.multiShiftDay.enabled,
+              shift: shiftRows[0],
             })
             if (conflict) return { conflict }
 
             const rows = await trx.query(
               `INSERT INTO attendance_shift_assignments
-               (id, org_id, user_id, shift_id, start_date, end_date, is_active)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                RETURNING *`,
               [
                 randomUUID(),
                 orgId,
                 payload.userId,
                 payload.shiftId,
+                payload.slotIndex,
                 payload.startDate,
                 payload.endDate,
                 payload.isActive,
@@ -30959,6 +31041,17 @@ module.exports = {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
             return
           }
+          const settings = await getSettings(db)
+          const slotResolution = resolveAttendanceScheduleAssignmentSlotIndex(
+            settings,
+            parsed.data.slotIndex,
+            normalizeAttendanceScheduleSlotIndex(existing.slot_index, 0)
+          )
+          if (!slotResolution.ok) {
+            res.status(slotResolution.status).json({ ok: false, error: { code: slotResolution.code, message: slotResolution.message } })
+            return
+          }
+          payload.slotIndex = slotResolution.slotIndex
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
@@ -30969,6 +31062,9 @@ module.exports = {
               startDate: payload.startDate,
               endDate: payload.endDate,
               isActive: payload.isActive,
+              slotIndex: payload.slotIndex,
+              multiShiftEnabled: slotResolution.multiShiftDay.enabled,
+              shift: shiftRows[0],
               excludeId: assignmentId,
             })
             if (conflict) return { conflict }
@@ -30977,9 +31073,10 @@ module.exports = {
               `UPDATE attendance_shift_assignments
                SET user_id = $3,
                    shift_id = $4,
-                   start_date = $5,
-                   end_date = $6,
-                   is_active = $7,
+                   slot_index = $5,
+                   start_date = $6,
+                   end_date = $7,
+                   is_active = $8,
                    updated_at = now()
                WHERE id = $1 AND org_id = $2
                RETURNING *`,
@@ -30988,6 +31085,7 @@ module.exports = {
                 orgId,
                 payload.userId,
                 payload.shiftId,
+                payload.slotIndex,
                 payload.startDate,
                 payload.endDate,
                 payload.isActive,
