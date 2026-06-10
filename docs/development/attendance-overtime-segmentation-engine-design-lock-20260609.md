@@ -2,13 +2,13 @@
 
 Date: 2026-06-09
 Baseline: `origin/main` @ `c74cdc6f3`
-Status: design-lock only; no runtime, schema, UI, OpenAPI, scheduler, or staging change in this PR.
+Status: closed by O1-O6, with staging smoke PASS on 2026-06-10 (`overtime-o6-mq89b8gp`).
 
 ## 0. Why This Exists
 
-The H2 tracker still lists **加班三段引擎** as unfinished: current overtime reporting
-can show workday / rest-day / holiday labels, but the classification is not a
-runtime overtime rule engine.
+At design-lock time, the H2 tracker still listed **加班三段引擎** as unfinished:
+overtime reporting could show workday / rest-day / holiday labels, but the
+classification was not a runtime overtime rule engine.
 
 Today:
 
@@ -323,7 +323,7 @@ One staging smoke is required before tracker ✅:
 | O3 | Record / summary loaders consume segment buckets | ✅ implemented |
 | O4 | Built-in report fields + report sync fingerprint use engine output | ✅ implemented |
 | O5 | Comp-time consumes `compTimeGrantMinutes` + idempotence tests | ✅ implemented |
-| O6 | Staging smoke + tracker ✅ closeout | 🟡 harness prepared; staging run pending |
+| O6 | Staging smoke + tracker ✅ closeout | ✅ staging smoke PASS 2026-06-10 (`overtime-o6-mq89b8gp`) |
 
 ## 11. Locked V1 Decisions
 
@@ -344,7 +344,7 @@ runtime PR:
 
 ## 12. Completion Bar
 
-加班三段引擎 remains 🟡 until all of these are true:
+加班三段引擎 was closed ✅ on 2026-06-10 after all of these became true:
 
 - day type is resolved through effective-calendar truth;
 - request metadata has a versioned segmentation snapshot;
@@ -355,3 +355,13 @@ runtime PR:
 - staging smoke passes with residue 0.
 
 Only then may the tracker row flip to ✅.
+
+O6 closeout evidence: staging deployed `a55576fa66683719a643d4e7c480da068a214e20`
+and ran `scripts/ops/staging-attendance-overtime-segmentation-o6-smoke.mjs`
+successfully (`47 passed, 0 failed`, stamp `overtime-o6-mq89b8gp`, log
+`/tmp/staging-overtime-o6-smoke-20260610T160158Z.log`). The smoke proved
+workday/restday/holiday effective-calendar parity; versioned request metadata
+snapshots; records/report_values/summary bucket consumption; comp-time
+lots/events from `compTimeGrantMinutes` (`45,75,105`); settings restore; and
+residue 0 for requests, records, events, lots, lot events, holidays, overtime
+rules, and the synthetic identity.

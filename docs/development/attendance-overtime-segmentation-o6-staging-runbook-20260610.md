@@ -2,7 +2,27 @@
 
 **Date:** 2026-06-10
 **Script:** `scripts/ops/staging-attendance-overtime-segmentation-o6-smoke.mjs`
-**Scope:** prep-only smoke harness + runbook. Running staging and flipping the tracker are separate owner-gated actions.
+**Scope:** staging smoke harness + runbook. The harness was initially prepared
+as owner-gated prep, then executed successfully on staging later the same day.
+
+## Actual Closeout
+
+**Status:** PASS, 2026-06-10.
+
+- Deploy SHA: `a55576fa66683719a643d4e7c480da068a214e20`.
+- Smoke stamp: `overtime-o6-mq89b8gp`.
+- Log: `/tmp/staging-overtime-o6-smoke-20260610T160158Z.log`.
+- Result: `47 passed, 0 failed`.
+- Final line:
+  `OVERTIME_SEGMENTATION_O6_STAGING_SMOKE_PASS deploy=a55576fa66683719a643d4e7c480da068a214e20 stamp=overtime-o6-mq89b8gp residue=0`.
+
+The first attempt correctly failed before execution because staging was still
+running an older runtime image (`46b218503c965370fc58db02141220787cb1cf79`)
+that did not persist `overtimeSegmentation`. Staging was then redeployed to the
+O1-O5 runtime build above and the smoke passed. Cleanup residue was 0 for
+requests, records, events, comp-time lots, comp-time lot events, holidays, and
+overtime rules; the temporary synthetic identity also cleaned to
+`users=0 user_roles=0`.
 
 ## What It Proves
 
@@ -126,6 +146,9 @@ OVERTIME_SEGMENTATION_O6_STAGING_SMOKE_PASS deploy=<sha> stamp=overtime-o6-... r
 ```
 
 ## On PASS
+
+This happened on 2026-06-10; the concrete evidence is recorded in
+**Actual Closeout** above. For future re-runs, use the same evidence shape:
 
 Flip the tracker row `加班三段引擎` from **🟡** to **✅** and include:
 
