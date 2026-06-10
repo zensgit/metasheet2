@@ -1,7 +1,7 @@
 # P4 staging smoke runbook — 排班发布/草稿
 
-**Date:** 2026-06-10  
-**Script:** `scripts/ops/staging-attendance-schedule-publish-p4-smoke.mjs`  
+**Date:** 2026-06-10
+**Script:** `scripts/ops/staging-attendance-schedule-publish-p4-smoke.mjs`
 **Scope:** prep-only runbook + smoke harness. Running staging and flipping the tracker are separate owner-gated actions.
 
 ## What It Proves
