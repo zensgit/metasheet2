@@ -13,6 +13,7 @@ type JsonObjectColumn = JSONColumnType<Record<string, unknown> | null, Record<st
 type JsonObjectArrayColumn = JSONColumnType<Record<string, unknown>[] | null, Record<string, unknown>[] | null, Record<string, unknown>[] | null>
 type JsonStringArrayColumn = JSONColumnType<string[], string[], string[]>
 type JsonValueColumn = ColumnType<unknown | null, unknown | null, unknown | null>
+type AttendanceSchedulePublishStatus = 'draft' | 'pending' | 'published'
 
 export interface Database {
   // Core tables
@@ -1109,6 +1110,14 @@ export interface AttendanceShiftAssignmentsTable {
   start_date: ColumnType<string, string | undefined, string>
   end_date: ColumnType<string | null, string | undefined, string | null>
   is_active: boolean
+  publish_status: Generated<AttendanceSchedulePublishStatus>
+  publish_batch_id: string | null
+  publish_requested_at: NullableTimestamp
+  publish_requested_by: string | null
+  published_at: NullableTimestamp
+  published_by: string | null
+  locked_at: NullableTimestamp
+  reopened_from_assignment_id: string | null
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
@@ -1181,6 +1190,14 @@ export interface AttendanceRotationAssignmentsTable {
   start_date: ColumnType<string, string | undefined, string>
   end_date: ColumnType<string | null, string | undefined, string | null>
   is_active: boolean
+  publish_status: Generated<AttendanceSchedulePublishStatus>
+  publish_batch_id: string | null
+  publish_requested_at: NullableTimestamp
+  publish_requested_by: string | null
+  published_at: NullableTimestamp
+  published_by: string | null
+  locked_at: NullableTimestamp
+  reopened_from_assignment_id: string | null
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
