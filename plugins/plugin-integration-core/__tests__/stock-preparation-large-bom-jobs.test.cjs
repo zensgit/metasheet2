@@ -7,13 +7,18 @@ const {
   LARGE_BOM_BACKGROUND_EXPANSION_STATUSES,
   LARGE_BOM_CHECKPOINT_APPLY_STATUSES,
   StockPreparationLargeBomJobError,
+  __internals,
   assertAuthoritativeLargeBomExpansion,
   cancelLargeBomBackgroundExpansionJob,
   createLargeBomBackgroundExpansionJob,
+  createLargeBomCheckpointApplyJob,
   isAuthoritativeLargeBomExpansion,
   loadLargeBomBackgroundExpansionJob,
+  loadLargeBomCheckpointApplyJob,
   planLargeBomBackgroundExpansionJob,
   publicBackgroundExpansionJob,
+  publicCheckpointApplyJob,
+  runLargeBomCheckpointApplyJobChunk,
   runLargeBomBackgroundExpansionJob,
   summarizeLargeBomBackgroundExpansionJobForEvidence,
   summarizeLargeBomCheckpointApplyJobForEvidence,
@@ -106,6 +111,196 @@ function createSourceAdapter(data) {
       },
     },
   }
+}
+
+function createTargetRecordsApi({ existing = [] } = {}) {
+  const rows = existing.map((entry, index) => ({
+    id: entry.id || `target_${index + 1}`,
+    sheetId: entry.sheetId || 'sheet_stock_preparation',
+    version: entry.version || 1,
+    data: { ...(entry.data || entry) },
+  }))
+  const calls = []
+  return {
+    rows,
+    calls,
+    recordsApi: {
+      async queryRecords(input = {}) {
+        calls.push(['queryRecords', clone(input)])
+        return rows
+          .filter((row) => row.sheetId === input.sheetId)
+          .filter((row) => Object.entries(input.filters || {}).every(([field, expected]) => row.data[field] === expected))
+          .slice(input.offset || 0, (input.offset || 0) + (input.limit || 1000))
+          .map(clone)
+      },
+      async createRecord(input = {}) {
+        calls.push(['createRecord', clone(input)])
+        const record = {
+          id: `target_${rows.length + 1}`,
+          sheetId: input.sheetId,
+          version: 1,
+          data: { ...(input.data || {}) },
+        }
+        rows.push(record)
+        return clone(record)
+      },
+      async patchRecord(input = {}) {
+        calls.push(['patchRecord', clone(input)])
+        const row = rows.find((entry) => entry.sheetId === input.sheetId && entry.id === input.recordId)
+        if (!row) throw new Error(`record not found: ${input.recordId}`)
+        row.version += 1
+        row.data = { ...row.data, ...(input.changes || {}) }
+        return clone(row)
+      },
+    },
+  }
+}
+
+function createBlockingTargetRecordsApi({ existing = [] } = {}) {
+  const api = createTargetRecordsApi({ existing })
+  let enteredFirstCreate
+  let releaseFirstCreate
+  let firstCreateBlocked = false
+  const firstCreateEntered = new Promise((resolve) => {
+    enteredFirstCreate = resolve
+  })
+  const firstCreateReleased = new Promise((resolve) => {
+    releaseFirstCreate = resolve
+  })
+  return {
+    rows: api.rows,
+    calls: api.calls,
+    firstCreateEntered,
+    releaseFirstCreate,
+    recordsApi: {
+      ...api.recordsApi,
+      async createRecord(input = {}) {
+        if (!firstCreateBlocked) {
+          firstCreateBlocked = true
+          enteredFirstCreate()
+          await firstCreateReleased
+        }
+        return api.recordsApi.createRecord(input)
+      },
+    },
+  }
+}
+
+function targetBinding(overrides = {}) {
+  return {
+    sheetId: 'sheet_stock_preparation',
+    ...overrides,
+  }
+}
+
+function addDecision(key, overrides = {}) {
+  return {
+    decision: 'add',
+    idempotencyKey: key,
+    record: {
+      idempotencyKey: key,
+      projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR',
+      componentSourceId: overrides.componentSourceId || 'COMPONENT_VALUE_SHOULD_NOT_APPEAR',
+      parentSourceId: overrides.parentSourceId === undefined ? null : overrides.parentSourceId,
+      path: overrides.path || 'PATH_VALUE_SHOULD_NOT_APPEAR',
+      depth: overrides.depth || 0,
+      componentCode: overrides.componentCode || 'CODE_VALUE_SHOULD_NOT_APPEAR',
+      componentName: overrides.componentName || 'NAME_VALUE_SHOULD_NOT_APPEAR',
+      material: overrides.material || 'MATERIAL_VALUE_SHOULD_NOT_APPEAR',
+      sourceVersion: overrides.sourceVersion || 'V1',
+      rawQuantity: overrides.rawQuantity || 1,
+      totalQuantity: overrides.totalQuantity || 1,
+      active: true,
+      lastPlmRefreshRunId: 'run-large-bom-apply',
+      lastPlmRefreshAt: '2026-06-08T00:00:00.000Z',
+      lastPlmRefreshDecision: 'add',
+      lastPlmConflictSummary: '',
+    },
+    conflictSummary: { type: 'add_missing' },
+  }
+}
+
+function manualConfirmDecision(key) {
+  return {
+    decision: 'manual_confirm',
+    idempotencyKey: key,
+    conflictSummary: { type: 'source_correction_required' },
+    source: 'planner',
+  }
+}
+
+function planWithDecisions(decisions) {
+  return {
+    valid: true,
+    ok: decisions.every((decision) => decision.decision !== 'manual_confirm'),
+    counts: {
+      add: decisions.filter((decision) => decision.decision === 'add').length,
+      update: 0,
+      skip: 0,
+      inactive: 0,
+      manual_confirm: decisions.filter((decision) => decision.decision === 'manual_confirm').length,
+    },
+    decisions: decisions.map(clone),
+    plannedAt: '2026-06-08T00:00:00.000Z',
+  }
+}
+
+async function seedPlannedLargeBomJob({
+  storage = createStorage(),
+  jobId = 'job-apply-source-1',
+  plan = planWithDecisions([addDecision('PROJECT_VALUE_SHOULD_NOT_APPEAR::KEY-1')]),
+  target = targetBinding(),
+} = {}) {
+  const actionId = 'plm.stock-preparation.pull-bom.v1'
+  const job = {
+    jobId,
+    ...TEST_SCOPE,
+    actionId,
+    status: 'completed',
+    authoritative: true,
+    projectNoPresent: true,
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    actionSnapshot: {
+      actionId,
+      source: { kind: 'data-source:sql-readonly', externalSystemId: 'SOURCE_BINDING_SHOULD_NOT_APPEAR' },
+      target,
+    },
+    sourceKind: 'data-source:sql-readonly',
+    artifactRevision: 'artifact-revision-1',
+    artifact: {
+      revision: 'artifact-revision-1',
+      status: 'expanded',
+      rows: [],
+      summary: {},
+      sealedAt: '2026-06-08T00:00:00.000Z',
+    },
+    planRevision: 'plan-revision-1',
+    planArtifact: {
+      revision: 'plan-revision-1',
+      artifactRevision: 'artifact-revision-1',
+      plan: clone(plan),
+      existingRowCount: 0,
+      plannedAt: plan.plannedAt,
+    },
+    progress: {
+      rowsExpanded: 0,
+      readCount: 0,
+      frontierRemaining: 0,
+      completedChunks: 1,
+    },
+    budgets: {},
+    evidence: {
+      sourceKind: 'data-source:sql-readonly',
+      readObjects: [],
+      errorTypes: [],
+      readDiagnosticShapePresent: false,
+    },
+    createdAt: '2026-06-08T00:00:00.000Z',
+    updatedAt: '2026-06-08T00:00:00.000Z',
+  }
+  await storage.set(__internals.backgroundJobKey({ ...TEST_SCOPE, actionId, jobId }), job)
+  return { storage, ...TEST_SCOPE, actionId, jobId, job }
 }
 
 function plmData(overrides = {}) {
@@ -762,6 +957,319 @@ async function testPlannerHandoffStoresValuesFreePlanEvidence() {
   assert.equal(loaded.planRevision, planned.planRevision, 'plan artifact is persisted on the job')
 }
 
+async function testCheckpointApplyRequiresDurablePlanPermissionAndManualAck() {
+  await assert.rejects(
+    () => createLargeBomCheckpointApplyJob({
+      storage: createStorage({ durable: false }),
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      jobId: 'missing',
+      principal: 'user-1',
+      permission: 'write',
+      createApplyJobId: () => 'apply-job-1',
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_JOB_STORE_UNAVAILABLE',
+  )
+
+  const storageWithoutPlan = createStorage()
+  await createLargeBomBackgroundExpansionJob({
+    storage: storageWithoutPlan,
+    ...TEST_SCOPE,
+    action: { actionId: 'plm.stock-preparation.pull-bom.v1', target: targetBinding() },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-no-plan',
+  })
+  await assert.rejects(
+    () => createLargeBomCheckpointApplyJob({
+      storage: storageWithoutPlan,
+      ...TEST_SCOPE,
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      jobId: 'job-no-plan',
+      principal: 'user-1',
+      permission: 'write',
+      createApplyJobId: () => 'apply-job-no-plan',
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_PLAN_ARTIFACT_NOT_AUTHORITATIVE',
+  )
+
+  const { storage, actionId, jobId } = await seedPlannedLargeBomJob()
+  await assert.rejects(
+    () => createLargeBomCheckpointApplyJob({
+      storage,
+      ...TEST_SCOPE,
+      actionId,
+      jobId,
+      principal: 'user-1',
+      permission: 'read',
+      createApplyJobId: () => 'apply-job-read',
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_APPLY_PERMISSION_REQUIRED' &&
+      error.status === 403,
+  )
+
+  const manualPlan = planWithDecisions([
+    addDecision('PROJECT_VALUE_SHOULD_NOT_APPEAR::KEY-1'),
+    manualConfirmDecision('PROJECT_VALUE_SHOULD_NOT_APPEAR::HELD-1'),
+  ])
+  const seeded = await seedPlannedLargeBomJob({ plan: manualPlan, jobId: 'job-manual-ack' })
+  await assert.rejects(
+    () => createLargeBomCheckpointApplyJob({
+      storage: seeded.storage,
+      ...TEST_SCOPE,
+      actionId: seeded.actionId,
+      jobId: seeded.jobId,
+      principal: 'user-1',
+      permission: 'write',
+      createApplyJobId: () => 'apply-job-needs-ack',
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_APPLY_MANUAL_CONFIRM_ACK_REQUIRED' &&
+      error.status === 409,
+  )
+}
+
+async function testCheckpointApplyChunksPlanAndKeepsPublicEvidenceValuesFree() {
+  const plan = planWithDecisions([
+    addDecision('PROJECT_VALUE_SHOULD_NOT_APPEAR::KEY-1', { componentSourceId: 'COMPONENT_VALUE_SHOULD_NOT_APPEAR' }),
+    manualConfirmDecision('PROJECT_VALUE_SHOULD_NOT_APPEAR::HELD-1'),
+    addDecision('PROJECT_VALUE_SHOULD_NOT_APPEAR::KEY-2', { componentSourceId: 'CHILD_VALUE_SHOULD_NOT_APPEAR' }),
+  ])
+  const { storage, actionId, jobId } = await seedPlannedLargeBomJob({ plan })
+  const api = createTargetRecordsApi()
+  const created = await createLargeBomCheckpointApplyJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    jobId,
+    principal: 'user-1',
+    permission: 'write',
+    acceptManualConfirmHold: true,
+    createApplyJobId: () => 'apply-job-chunks',
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+  assert.equal(created.status, 'queued')
+  assert.equal(created.totalDecisions, 3)
+  assert.equal(created.approval.principal, 'user-1', 'private apply job records the authenticated approver')
+  assert.equal(created.target.sheetId, 'sheet_stock_preparation', 'private apply job records server-configured target')
+
+  const first = await runLargeBomCheckpointApplyJobChunk({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-chunks',
+    recordsApi: api.recordsApi,
+    maxDecisionsPerChunk: 1,
+    now: () => '2026-06-08T00:02:00.000Z',
+  })
+  assert.equal(first.status, 'paused', 'completed non-terminal chunks are ready for the next explicit run')
+  assert.equal(first.checkpoint.nextDecisionIndex, 1)
+  assert.equal(first.counts.created, 1)
+  assert.equal(api.rows.length, 1)
+
+  const second = await runLargeBomCheckpointApplyJobChunk({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-chunks',
+    recordsApi: api.recordsApi,
+    maxDecisionsPerChunk: 2,
+    now: () => '2026-06-08T00:03:00.000Z',
+  })
+  assert.equal(second.status, 'partial', 'manual_confirm remains held while clean rows write')
+  assert.equal(second.checkpoint.nextDecisionIndex, 3)
+  assert.equal(second.counts.created, 2)
+  assert.equal(second.counts.held, 1)
+  assert.equal(second.counts.failed, 0)
+  assert.equal(api.rows.length, 2)
+  assert.equal(api.calls.filter((call) => call[0] === 'createRecord').length, 2)
+
+  const publicJob = publicCheckpointApplyJob(second)
+  assert.equal(publicJob.jobId, 'apply-job-chunks')
+  assert.equal(publicJob.status, 'partial')
+  assert.equal(publicJob.planRevisionPresent, true)
+  assert.equal(publicJob.targetRevisionPresent, true)
+  assert.equal(publicJob.approvalPresent, true)
+  assert.deepEqual(publicJob.counts, {
+    created: 2,
+    updated: 0,
+    inactive: 0,
+    skipped: 0,
+    held: 1,
+    failed: 0,
+  })
+  assert.ok(publicJob.evidence.resultStatuses.includes('created'))
+  assert.ok(publicJob.evidence.resultStatuses.includes('held'))
+  assert.ok(publicJob.evidence.fieldCategories.includes('plm_system'))
+  assertValuesFree(publicJob)
+
+  const loaded = await loadLargeBomCheckpointApplyJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-chunks',
+  })
+  assert.equal(loaded.status, 'partial')
+}
+
+async function testCheckpointApplyMissingRecordsApiFailsBeforeRunning() {
+  const { storage, actionId, jobId } = await seedPlannedLargeBomJob({ jobId: 'job-missing-records-api' })
+  await createLargeBomCheckpointApplyJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    jobId,
+    principal: 'user-1',
+    permission: 'write',
+    createApplyJobId: () => 'apply-job-missing-records-api',
+  })
+
+  await assert.rejects(
+    () => runLargeBomCheckpointApplyJobChunk({
+      storage,
+      ...TEST_SCOPE,
+      actionId,
+      applyJobId: 'apply-job-missing-records-api',
+      recordsApi: {},
+      maxDecisionsPerChunk: 1,
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_APPLY_RECORDS_API_UNAVAILABLE' &&
+      error.status === 501,
+  )
+
+  const loaded = await loadLargeBomCheckpointApplyJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-missing-records-api',
+  })
+  assert.equal(loaded.status, 'queued', 'missing recordsApi fails before marking the job running')
+  assert.equal(loaded.checkpoint.nextDecisionIndex, 0, 'missing recordsApi does not advance the checkpoint')
+}
+
+async function testCheckpointApplySingleFlightRejectsConcurrentQueuedRun() {
+  const plan = planWithDecisions([addDecision('PROJECT_VALUE_SHOULD_NOT_APPEAR::CONCURRENT-KEY')])
+  const { storage, actionId, jobId } = await seedPlannedLargeBomJob({ plan, jobId: 'job-single-flight-apply' })
+  const api = createBlockingTargetRecordsApi()
+  await createLargeBomCheckpointApplyJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    jobId,
+    principal: 'user-1',
+    permission: 'admin',
+    createApplyJobId: () => 'apply-job-single-flight',
+  })
+
+  const firstRun = runLargeBomCheckpointApplyJobChunk({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-single-flight',
+    recordsApi: api.recordsApi,
+    maxDecisionsPerChunk: 1,
+  })
+  await api.firstCreateEntered
+
+  await assert.rejects(
+    () => runLargeBomCheckpointApplyJobChunk({
+      storage,
+      ...TEST_SCOPE,
+      actionId,
+      applyJobId: 'apply-job-single-flight',
+      recordsApi: api.recordsApi,
+      maxDecisionsPerChunk: 1,
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_APPLY_RUN_IN_PROGRESS' &&
+      error.status === 409,
+  )
+  assert.equal(api.rows.length, 0, 'second concurrent run is rejected while the first chunk is in flight')
+
+  api.releaseFirstCreate()
+  const completed = await firstRun
+  assert.equal(completed.status, 'succeeded')
+  assert.equal(completed.counts.created, 1)
+  assert.equal(api.rows.length, 1)
+  assert.equal(api.calls.filter((call) => call[0] === 'createRecord').length, 1)
+}
+
+async function testCheckpointApplyRejectsConcurrentRunningChunk() {
+  const key = 'PROJECT_VALUE_SHOULD_NOT_APPEAR::IDEMPOTENT-KEY'
+  const plan = planWithDecisions([addDecision(key)])
+  const { storage, actionId, jobId } = await seedPlannedLargeBomJob({ plan, jobId: 'job-concurrent-apply' })
+  const api = createTargetRecordsApi()
+  await createLargeBomCheckpointApplyJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    jobId,
+    principal: 'user-1',
+    permission: 'admin',
+    createApplyJobId: () => 'apply-job-concurrent',
+  })
+
+  const first = await runLargeBomCheckpointApplyJobChunk({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-concurrent',
+    recordsApi: api.recordsApi,
+    maxDecisionsPerChunk: 1,
+  })
+  assert.equal(first.status, 'succeeded')
+  assert.equal(first.counts.created, 1)
+  assert.equal(api.rows.length, 1)
+
+  const applyKey = __internals.checkpointApplyJobKey({ ...TEST_SCOPE, actionId, applyJobId: 'apply-job-concurrent' })
+  const persisted = await storage.get(applyKey)
+  persisted.status = 'running'
+  persisted.checkpoint.nextDecisionIndex = 0
+  persisted.counts = {
+    created: 0,
+    updated: 0,
+    inactive: 0,
+    skipped: 0,
+    held: 0,
+    failed: 0,
+  }
+  persisted.evidence = {
+    resultStatuses: [],
+    errorCodes: [],
+    fieldCategories: ['plm_system'],
+  }
+  await storage.set(applyKey, persisted)
+
+  await assert.rejects(
+    () => runLargeBomCheckpointApplyJobChunk({
+      storage,
+      ...TEST_SCOPE,
+      actionId,
+      applyJobId: 'apply-job-concurrent',
+      recordsApi: api.recordsApi,
+      maxDecisionsPerChunk: 1,
+    }),
+    (error) => error instanceof StockPreparationLargeBomJobError &&
+      error.code === 'LARGE_BOM_APPLY_RUN_IN_PROGRESS' &&
+      error.status === 409,
+  )
+  assert.equal(api.rows.length, 1, 'concurrent run rejection keeps a single target row')
+  assert.equal(api.calls.filter((call) => call[0] === 'createRecord').length, 1)
+  assert.equal(api.calls.filter((call) => call[0] === 'patchRecord').length, 0)
+
+  const loaded = await loadLargeBomCheckpointApplyJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-concurrent',
+  })
+  assert.equal(loaded.status, 'running', 'concurrent rejection does not mutate the in-flight job')
+  assertValuesFree(publicCheckpointApplyJob(loaded))
+}
+
 async function main() {
   testStatusEnumsArePinned()
   testBackgroundEvidenceIsValuesFreeProjection()
@@ -777,6 +1285,11 @@ async function main() {
   await testPlannerHandoffRequiresAuthoritativeArtifact()
   await testPlannerHandoffRejectsMalformedExistingRows()
   await testPlannerHandoffStoresValuesFreePlanEvidence()
+  await testCheckpointApplyRequiresDurablePlanPermissionAndManualAck()
+  await testCheckpointApplyChunksPlanAndKeepsPublicEvidenceValuesFree()
+  await testCheckpointApplyMissingRecordsApiFailsBeforeRunning()
+  await testCheckpointApplySingleFlightRejectsConcurrentQueuedRun()
+  await testCheckpointApplyRejectsConcurrentRunningChunk()
 }
 
 main().catch((err) => {
