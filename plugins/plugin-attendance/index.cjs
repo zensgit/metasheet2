@@ -8654,6 +8654,7 @@ function normalizeAssignmentPayload(value) {
     startDate: firstDefinedValue(payload.startDate, payload.start_date),
     endDate: firstDefinedValue(payload.endDate, payload.end_date),
     isActive: firstDefinedValue(payload.isActive, payload.is_active),
+    publishStatus: firstDefinedValue(payload.publishStatus, payload.publish_status),
   }
 }
 
@@ -8743,6 +8744,7 @@ function normalizeRotationAssignmentPayload(value) {
     startDate: firstDefinedValue(payload.startDate, payload.start_date),
     endDate: firstDefinedValue(payload.endDate, payload.end_date),
     isActive: firstDefinedValue(payload.isActive, payload.is_active),
+    publishStatus: firstDefinedValue(payload.publishStatus, payload.publish_status),
   }
 }
 
@@ -8840,6 +8842,38 @@ const ATTENDANCE_SCHEDULE_PUBLISH_STATUSES = new Set(['draft', 'pending', 'publi
 
 function normalizeAttendanceSchedulePublishStatus(value) {
   return ATTENDANCE_SCHEDULE_PUBLISH_STATUSES.has(value) ? value : 'published'
+}
+
+function normalizeAttendanceSchedulePublishStatusFilter(value) {
+  if (value == null || value === '' || value === 'all') return null
+  return ATTENDANCE_SCHEDULE_PUBLISH_STATUSES.has(value) ? value : undefined
+}
+
+function isAttendanceScheduleDraftEditable(row) {
+  return normalizeAttendanceSchedulePublishStatus(row?.publish_status) === 'draft'
+}
+
+function respondAttendanceSchedulePublishLocked(res, status) {
+  res.status(422).json({
+    ok: false,
+    error: {
+      code: 'SCHEDULE_PUBLISH_LOCKED',
+      message: `Schedule assignment is ${status}; use the draft workflow for draft rows and publish/cancel workflow for pending or published rows.`,
+      details: { publishStatus: status },
+    },
+  })
+}
+
+async function loadAttendanceScheduleAssignmentPublishStatus(db, tableName, assignmentId, orgId) {
+  if (!['attendance_shift_assignments', 'attendance_rotation_assignments'].includes(tableName)) {
+    throw new Error(`Unsupported attendance schedule assignment table: ${tableName}`)
+  }
+  const rows = await db.query(
+    `SELECT publish_status FROM ${tableName} WHERE id = $1 AND org_id = $2`,
+    [assignmentId, orgId]
+  )
+  if (!rows.length) return null
+  return normalizeAttendanceSchedulePublishStatus(rows[0].publish_status)
 }
 
 function normalizeAttendanceScheduleAssignmentEndDate(value) {
@@ -8947,7 +8981,7 @@ function mapAttendanceScheduleAssignmentConflict(row, draft) {
   }
 }
 
-async function findAttendanceScheduleAssignmentConflict(db, draft) {
+async function findAttendanceScheduleAssignmentConflict(db, draft, options = {}) {
   if (draft.isActive === false) return null
   const draftStartDate = normalizeDateOnly(draft.startDate) ?? draft.startDate
   const draftEndDate = normalizeAttendanceScheduleAssignmentEndDate(draft.endDate)
@@ -8960,22 +8994,27 @@ async function findAttendanceScheduleAssignmentConflict(db, draft) {
     : 'attendance_rotation_assignments'
   const sameKindLabel = draft.kind
   const otherKindLabel = draft.kind === 'rotation' ? 'shift' : 'rotation'
-  const baseParams = [draft.orgId, draft.userId, draftStartDate, overlapEndDate]
-  const excludeClause = draft.excludeId ? 'AND id <> $5' : ''
+  const conflictPublishStatuses = normalizeStringArray(options.publishStatuses)
+    .map(status => normalizeAttendanceSchedulePublishStatusFilter(status))
+    .filter(Boolean)
+  const publishStatuses = conflictPublishStatuses.length > 0 ? conflictPublishStatuses : ['published']
+  const baseParams = [draft.orgId, draft.userId, draftStartDate, overlapEndDate, publishStatuses]
+  const labelParamIndex = draft.excludeId ? 7 : 6
+  const excludeClause = draft.excludeId ? 'AND id <> $6' : ''
   const multiShiftConflictEnabled = draft.kind === 'shift' && draft.multiShiftEnabled === true
   if (multiShiftConflictEnabled) {
     const sameKindRows = await db.query(
-      `SELECT a.id, a.start_date, a.end_date, a.slot_index, $${draft.excludeId ? 6 : 5}::text AS kind,
+      `SELECT a.id, a.start_date, a.end_date, a.slot_index, $${labelParamIndex}::text AS kind,
               s.work_start_time, s.work_end_time, s.is_overnight
          FROM attendance_shift_assignments a
          LEFT JOIN attendance_shifts s ON s.id = a.shift_id AND s.org_id = a.org_id
         WHERE a.org_id = $1
           AND a.user_id = $2
           AND COALESCE(a.is_active, true) = true
-          AND COALESCE(a.publish_status, 'published') = 'published'
+          AND COALESCE(a.publish_status, 'published') = ANY($5::text[])
           AND a.start_date <= $4::date
           AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
-          ${draft.excludeId ? 'AND a.id <> $5' : ''}
+          ${draft.excludeId ? 'AND a.id <> $6' : ''}
         ORDER BY a.start_date DESC, a.created_at DESC`,
       draft.excludeId ? [...baseParams, draft.excludeId, sameKindLabel] : [...baseParams, sameKindLabel]
     )
@@ -8988,12 +9027,12 @@ async function findAttendanceScheduleAssignmentConflict(db, draft) {
     if (conflictingSameKindRow) return mapAttendanceScheduleAssignmentConflict(conflictingSameKindRow, draft)
   } else {
     const sameKindRows = await db.query(
-      `SELECT id, start_date, end_date, $${draft.excludeId ? 6 : 5}::text AS kind
+      `SELECT id, start_date, end_date, $${labelParamIndex}::text AS kind
          FROM ${sameKindTable}
         WHERE org_id = $1
           AND user_id = $2
           AND COALESCE(is_active, true) = true
-          AND COALESCE(publish_status, 'published') = 'published'
+          AND COALESCE(publish_status, 'published') = ANY($5::text[])
           AND start_date <= $4::date
           AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
           ${excludeClause}
@@ -9005,12 +9044,12 @@ async function findAttendanceScheduleAssignmentConflict(db, draft) {
   }
 
   const otherKindRows = await db.query(
-    `SELECT id, start_date, end_date, $5::text AS kind
+    `SELECT id, start_date, end_date, $6::text AS kind
        FROM ${otherKindTable}
       WHERE org_id = $1
         AND user_id = $2
         AND COALESCE(is_active, true) = true
-        AND COALESCE(publish_status, 'published') = 'published'
+        AND COALESCE(publish_status, 'published') = ANY($5::text[])
         AND start_date <= $4::date
         AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
       ORDER BY start_date DESC, created_at DESC
@@ -22806,10 +22845,14 @@ module.exports = {
       async (req, res) => {
         const schema = z.object({
           orgId: z.string().optional(),
+          publishStatus: z.enum(['draft', 'pending', 'published', 'all']).optional(),
         })
 
         const parsed = schema.safeParse({
           orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+          publishStatus: typeof req.query.publishStatus === 'string'
+            ? req.query.publishStatus
+            : (typeof req.query.publish_status === 'string' ? req.query.publish_status : undefined),
         })
 
         if (!parsed.success) {
@@ -22819,23 +22862,34 @@ module.exports = {
 
         const { page, pageSize, offset } = parsePagination(req.query)
         const orgId = getOrgId(req)
+        const publishStatusFilter = normalizeAttendanceSchedulePublishStatusFilter(parsed.data.publishStatus)
         const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
         if (!viewAccess) return
 
         try {
           const countParams = [orgId]
+          let countPublishStatusFilter = ''
+          if (publishStatusFilter) {
+            countParams.push(publishStatusFilter)
+            countPublishStatusFilter = `AND COALESCE(a.publish_status, 'published') = $${countParams.length}`
+          }
           const countScopeClause = viewAccess.access.fullAdmin
             ? ''
             : buildAttendanceAssignmentViewSql(viewAccess.scopes, countParams, 'a')
           const countRows = await db.query(
             `SELECT COUNT(*)::int AS total
              FROM attendance_rotation_assignments a
-             WHERE a.org_id = $1 ${countScopeClause}`,
+             WHERE a.org_id = $1 ${countPublishStatusFilter} ${countScopeClause}`,
             countParams
           )
           const total = Number(countRows[0]?.total ?? 0)
 
           const rowParams = [orgId]
+          let rowPublishStatusFilter = ''
+          if (publishStatusFilter) {
+            rowParams.push(publishStatusFilter)
+            rowPublishStatusFilter = `AND COALESCE(a.publish_status, 'published') = $${rowParams.length}`
+          }
           const rowScopeClause = viewAccess.access.fullAdmin
             ? ''
             : buildAttendanceAssignmentViewSql(viewAccess.scopes, rowParams, 'a')
@@ -22848,7 +22902,7 @@ module.exports = {
                     r.is_active AS rotation_is_active
              FROM attendance_rotation_assignments a
              JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
-             WHERE a.org_id = $1 ${rowScopeClause}
+             WHERE a.org_id = $1 ${rowPublishStatusFilter} ${rowScopeClause}
              ORDER BY a.start_date DESC, a.created_at DESC
              LIMIT $${rowParams.length - 1} OFFSET $${rowParams.length}`,
             rowParams
@@ -22875,6 +22929,321 @@ module.exports = {
           }
           logger.error('Attendance rotation assignments query failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rotation assignments' } })
+        }
+      }
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/schedule-drafts/rotation-assignments',
+      async (req, res) => {
+        const parsed = rotationAssignmentCreateSchema.safeParse(normalizeRotationAssignmentPayload(req.body))
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const rotationRuleId = normalizeUuidString(parsed.data.rotationRuleId)
+        if (!rotationRuleId) {
+          respondInvalidUuid(res, 'rotationRuleId')
+          return
+        }
+        const payload = {
+          userId: parsed.data.userId,
+          rotationRuleId,
+          startDate: parsed.data.startDate,
+          endDate: normalizeAttendanceScheduleAssignmentEndDate(parsed.data.endDate),
+          isActive: parsed.data.isActive ?? true,
+        }
+
+        if (payload.endDate && payload.endDate < payload.startDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'End date must be after start date' } })
+          return
+        }
+
+        try {
+          const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
+          if (!windowAccess) return
+
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
+          if (!access) return
+
+          const ruleRows = await db.query(
+            'SELECT * FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2',
+            [payload.rotationRuleId, orgId]
+          )
+          if (!ruleRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation rule not found' } })
+            return
+          }
+
+          const result = await db.transaction(async (trx) => {
+            await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
+              kind: 'rotation',
+              orgId,
+              userId: payload.userId,
+              startDate: payload.startDate,
+              endDate: payload.endDate,
+              isActive: payload.isActive,
+            }, { publishStatuses: ['draft', 'pending'] })
+            if (conflict) return { conflict }
+
+            const rows = await trx.query(
+              `INSERT INTO attendance_rotation_assignments
+               (id, org_id, user_id, rotation_rule_id, start_date, end_date, is_active, publish_status)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft')
+               RETURNING *`,
+              [
+                randomUUID(),
+                orgId,
+                payload.userId,
+                payload.rotationRuleId,
+                payload.startDate,
+                payload.endDate,
+                payload.isActive,
+              ]
+            )
+            return { row: rows[0] }
+          })
+
+          if (result.conflict) {
+            respondAttendanceScheduleAssignmentConflict(res, result.conflict)
+            return
+          }
+
+          const assignment = mapRotationAssignmentRow(result.row)
+          const rotation = mapRotationRuleRow(ruleRows[0])
+          res.status(201).json({ ok: true, data: { assignment, rotation } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance draft rotation assignment creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create draft rotation assignment' } })
+        }
+      }
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/schedule-drafts/rotation-assignments/:id',
+      async (req, res) => {
+        const parsed = rotationAssignmentUpdateSchema.safeParse(normalizeRotationAssignmentPayload(req.body ?? {}))
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const assignmentId = normalizeUuidString(req.params.id)
+        if (!assignmentId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+          if (!actorAccess) return
+
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
+            [assignmentId, orgId]
+          )
+          if (!existingRows.length) {
+            if (!actorAccess.fullAdmin) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation assignment not found' } })
+            return
+          }
+
+          const existing = existingRows[0]
+          const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existing.publish_status)
+          if (!isAttendanceScheduleDraftEditable(existing)) {
+            respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
+            return
+          }
+          const nextRotationRuleId = parsed.data.rotationRuleId !== undefined
+            ? normalizeUuidString(parsed.data.rotationRuleId)
+            : existing.rotation_rule_id
+          if (!nextRotationRuleId) {
+            respondInvalidUuid(res, 'rotationRuleId')
+            return
+          }
+          const payload = {
+            userId: parsed.data.userId ?? existing.user_id,
+            rotationRuleId: nextRotationRuleId,
+            startDate: parsed.data.startDate ?? existing.start_date,
+            endDate: resolveAttendanceScheduleAssignmentUpdateEndDate(parsed.data, existing.end_date),
+            isActive: parsed.data.isActive ?? existing.is_active,
+          }
+
+          if (payload.endDate && payload.endDate < payload.startDate) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'End date must be after start date' } })
+            return
+          }
+
+          const windowAccess = await enforceShiftEditWindow(res, [existing.start_date, payload.startDate])
+          if (!windowAccess) return
+
+          const existingAccess = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload: existing,
+            actorAccess,
+          })
+          if (!existingAccess) return
+          const nextAccess = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload,
+            actorAccess,
+          })
+          if (!nextAccess) return
+
+          const ruleRows = await db.query(
+            'SELECT * FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2',
+            [payload.rotationRuleId, orgId]
+          )
+          if (!ruleRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation rule not found' } })
+            return
+          }
+
+          const result = await db.transaction(async (trx) => {
+            await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
+              kind: 'rotation',
+              orgId,
+              userId: payload.userId,
+              startDate: payload.startDate,
+              endDate: payload.endDate,
+              isActive: payload.isActive,
+              excludeId: assignmentId,
+            }, { publishStatuses: ['draft', 'pending'] })
+            if (conflict) return { conflict }
+
+            const rows = await trx.query(
+              `UPDATE attendance_rotation_assignments
+               SET user_id = $3,
+                   rotation_rule_id = $4,
+                   start_date = $5,
+                   end_date = $6,
+                   is_active = $7,
+                   updated_at = now()
+               WHERE id = $1 AND org_id = $2 AND publish_status = 'draft'
+               RETURNING *`,
+              [
+                assignmentId,
+                orgId,
+                payload.userId,
+                payload.rotationRuleId,
+                payload.startDate,
+                payload.endDate,
+                payload.isActive,
+              ]
+            )
+            if (!rows.length) {
+              const publishStatus = await loadAttendanceScheduleAssignmentPublishStatus(trx, 'attendance_rotation_assignments', assignmentId, orgId)
+              return publishStatus ? { lockedPublishStatus: publishStatus } : { missing: true }
+            }
+            return { row: rows[0] }
+          })
+
+          if (result.lockedPublishStatus) {
+            respondAttendanceSchedulePublishLocked(res, result.lockedPublishStatus)
+            return
+          }
+          if (result.missing) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation assignment not found' } })
+            return
+          }
+          if (result.conflict) {
+            respondAttendanceScheduleAssignmentConflict(res, result.conflict)
+            return
+          }
+
+          const assignment = mapRotationAssignmentRow(result.row)
+          const rotation = mapRotationRuleRow(ruleRows[0])
+          res.json({ ok: true, data: { assignment, rotation } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance draft rotation assignment update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update draft rotation assignment' } })
+        }
+      }
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/schedule-drafts/rotation-assignments/:id',
+      async (req, res) => {
+        const orgId = getOrgId(req)
+        const assignmentId = normalizeUuidString(req.params.id)
+        if (!assignmentId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+          if (!actorAccess) return
+
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
+            [assignmentId, orgId]
+          )
+          if (!existingRows.length) {
+            if (!actorAccess.fullAdmin) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation assignment not found' } })
+            return
+          }
+
+          const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existingRows[0].publish_status)
+          if (!isAttendanceScheduleDraftEditable(existingRows[0])) {
+            respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
+            return
+          }
+
+          const windowAccess = await enforceShiftEditWindow(res, [existingRows[0].start_date])
+          if (!windowAccess) return
+
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload: existingRows[0],
+            actorAccess,
+          })
+          if (!access) return
+
+          const rows = await db.query(
+            'DELETE FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2 AND publish_status = $3 RETURNING id',
+            [assignmentId, orgId, 'draft']
+          )
+          if (!rows.length) {
+            const publishStatus = await loadAttendanceScheduleAssignmentPublishStatus(db, 'attendance_rotation_assignments', assignmentId, orgId)
+            if (publishStatus) {
+              respondAttendanceSchedulePublishLocked(res, publishStatus)
+              return
+            }
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Draft rotation assignment not found' } })
+            return
+          }
+          res.json({ ok: true, data: { id: assignmentId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance draft rotation assignment delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete draft rotation assignment' } })
         }
       }
     )
@@ -23016,6 +23385,11 @@ module.exports = {
           }
 
           const existing = existingRows[0]
+          const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existing.publish_status)
+          if (existingPublishStatus !== 'published') {
+            respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
+            return
+          }
           const nextRotationRuleId = parsed.data.rotationRuleId !== undefined
             ? normalizeUuidString(parsed.data.rotationRuleId)
             : existing.rotation_rule_id
@@ -23082,7 +23456,7 @@ module.exports = {
                    end_date = $6,
                    is_active = $7,
                    updated_at = now()
-               WHERE id = $1 AND org_id = $2
+               WHERE id = $1 AND org_id = $2 AND COALESCE(publish_status, 'published') = 'published'
                RETURNING *`,
               [
                 assignmentId,
@@ -23094,6 +23468,10 @@ module.exports = {
                 payload.isActive,
               ]
             )
+            if (!rows.length) {
+              const publishStatus = await loadAttendanceScheduleAssignmentPublishStatus(trx, 'attendance_rotation_assignments', assignmentId, orgId)
+              return publishStatus ? { lockedPublishStatus: publishStatus } : { missing: true }
+            }
             await enforceShiftComplianceCap(trx, {
               orgId,
               userId: payload.userId,
@@ -23103,6 +23481,14 @@ module.exports = {
             return { row: rows[0] }
           })
 
+          if (result.lockedPublishStatus) {
+            respondAttendanceSchedulePublishLocked(res, result.lockedPublishStatus)
+            return
+          }
+          if (result.missing) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation assignment not found' } })
+            return
+          }
           if (result.conflict) {
             respondAttendanceScheduleAssignmentConflict(res, result.conflict)
             return
@@ -23152,6 +23538,12 @@ module.exports = {
             return
           }
 
+          const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existingRows[0].publish_status)
+          if (existingPublishStatus !== 'published') {
+            respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
+            return
+          }
+
           const windowAccess = await enforceShiftEditWindow(res, [existingRows[0].start_date])
           if (!windowAccess) return
 
@@ -23163,10 +23555,17 @@ module.exports = {
           if (!access) return
 
           const rows = await db.query(
-            'DELETE FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2 RETURNING id',
+            `DELETE FROM attendance_rotation_assignments
+             WHERE id = $1 AND org_id = $2 AND COALESCE(publish_status, 'published') = 'published'
+             RETURNING id`,
             [assignmentId, orgId]
           )
           if (!rows.length) {
+            const publishStatus = await loadAttendanceScheduleAssignmentPublishStatus(db, 'attendance_rotation_assignments', assignmentId, orgId)
+            if (publishStatus) {
+              respondAttendanceSchedulePublishLocked(res, publishStatus)
+              return
+            }
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation assignment not found' } })
             return
           }
@@ -30991,6 +31390,7 @@ module.exports = {
         const schema = z.object({
           orgId: z.string().optional(),
           userId: z.string().optional(),
+          publishStatus: z.enum(['draft', 'pending', 'published', 'all']).optional(),
         })
 
         const parsed = schema.safeParse({
@@ -30998,6 +31398,9 @@ module.exports = {
           userId: typeof req.query.userId === 'string'
             ? req.query.userId
             : (typeof req.query.user_id === 'string' ? req.query.user_id : undefined),
+          publishStatus: typeof req.query.publishStatus === 'string'
+            ? req.query.publishStatus
+            : (typeof req.query.publish_status === 'string' ? req.query.publish_status : undefined),
         })
 
         if (!parsed.success) {
@@ -31007,6 +31410,7 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const { page, pageSize, offset } = parsePagination(req.query)
+        const publishStatusFilter = normalizeAttendanceSchedulePublishStatusFilter(parsed.data.publishStatus)
         const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
         if (!viewAccess) return
 
@@ -31017,6 +31421,11 @@ module.exports = {
             countParams.push(parsed.data.userId)
             userFilter = `AND a.user_id = $${countParams.length}`
           }
+          let countPublishStatusFilter = ''
+          if (publishStatusFilter) {
+            countParams.push(publishStatusFilter)
+            countPublishStatusFilter = `AND COALESCE(a.publish_status, 'published') = $${countParams.length}`
+          }
           const countScopeClause = viewAccess.access.fullAdmin
             ? ''
             : buildAttendanceAssignmentViewSql(viewAccess.scopes, countParams, 'a')
@@ -31024,7 +31433,7 @@ module.exports = {
           const countRows = await db.query(
             `SELECT COUNT(*)::int AS total
              FROM attendance_shift_assignments a
-             WHERE a.org_id = $1 ${userFilter} ${countScopeClause}`,
+             WHERE a.org_id = $1 ${userFilter} ${countPublishStatusFilter} ${countScopeClause}`,
             countParams
           )
           const total = Number(countRows[0]?.total ?? 0)
@@ -31034,6 +31443,11 @@ module.exports = {
           if (parsed.data.userId) {
             rowParams.push(parsed.data.userId)
             rowUserFilter = `AND a.user_id = $${rowParams.length}`
+          }
+          let rowPublishStatusFilter = ''
+          if (publishStatusFilter) {
+            rowParams.push(publishStatusFilter)
+            rowPublishStatusFilter = `AND COALESCE(a.publish_status, 'published') = $${rowParams.length}`
           }
           const rowScopeClause = viewAccess.access.fullAdmin
             ? ''
@@ -31049,7 +31463,7 @@ module.exports = {
                     s.working_days AS shift_working_days
              FROM attendance_shift_assignments a
              JOIN attendance_shifts s ON s.id = a.shift_id
-             WHERE a.org_id = $1 ${rowUserFilter} ${rowScopeClause}
+             WHERE a.org_id = $1 ${rowUserFilter} ${rowPublishStatusFilter} ${rowScopeClause}
              ORDER BY a.start_date DESC, a.created_at DESC
              LIMIT $${rowParams.length - 1} OFFSET $${rowParams.length}`,
             rowParams
@@ -31074,6 +31488,348 @@ module.exports = {
           }
           logger.error('Attendance assignments query failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load assignments' } })
+        }
+      }
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/schedule-drafts/assignments',
+      async (req, res) => {
+        const parsed = assignmentCreateSchema.safeParse(normalizeAssignmentPayload(req.body))
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const shiftId = normalizeUuidString(parsed.data.shiftId)
+        if (!shiftId) {
+          respondInvalidUuid(res, 'shiftId')
+          return
+        }
+        const payload = {
+          userId: parsed.data.userId,
+          shiftId,
+          startDate: parsed.data.startDate,
+          endDate: normalizeAttendanceScheduleAssignmentEndDate(parsed.data.endDate),
+          isActive: parsed.data.isActive ?? true,
+        }
+
+        if (payload.endDate && payload.endDate < payload.startDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'End date must be after start date' } })
+          return
+        }
+
+        try {
+          const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
+          if (!windowAccess) return
+
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
+          if (!access) return
+
+          const shiftRows = await db.query(
+            'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
+            [payload.shiftId, orgId]
+          )
+          if (!shiftRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
+            return
+          }
+          const settings = await getSettings(db)
+          const slotResolution = resolveAttendanceScheduleAssignmentSlotIndex(settings, parsed.data.slotIndex, 0)
+          if (!slotResolution.ok) {
+            res.status(slotResolution.status).json({ ok: false, error: { code: slotResolution.code, message: slotResolution.message } })
+            return
+          }
+          payload.slotIndex = slotResolution.slotIndex
+
+          const result = await db.transaction(async (trx) => {
+            await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
+              kind: 'shift',
+              orgId,
+              userId: payload.userId,
+              startDate: payload.startDate,
+              endDate: payload.endDate,
+              isActive: payload.isActive,
+              slotIndex: payload.slotIndex,
+              multiShiftEnabled: slotResolution.multiShiftDay.enabled,
+              shift: shiftRows[0],
+            }, { publishStatuses: ['draft', 'pending'] })
+            if (conflict) return { conflict }
+
+            const rows = await trx.query(
+              `INSERT INTO attendance_shift_assignments
+               (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, publish_status)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft')
+               RETURNING *`,
+              [
+                randomUUID(),
+                orgId,
+                payload.userId,
+                payload.shiftId,
+                payload.slotIndex,
+                payload.startDate,
+                payload.endDate,
+                payload.isActive,
+              ]
+            )
+            return { row: rows[0] }
+          })
+
+          if (result.conflict) {
+            respondAttendanceScheduleAssignmentConflict(res, result.conflict)
+            return
+          }
+
+          const assignment = mapAssignmentRow(result.row)
+          const shift = mapShiftRow(shiftRows[0])
+          res.status(201).json({ ok: true, data: { assignment, shift } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance draft assignment creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create draft assignment' } })
+        }
+      }
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/schedule-drafts/assignments/:id',
+      async (req, res) => {
+        const parsed = assignmentUpdateSchema.safeParse(normalizeAssignmentPayload(req.body ?? {}))
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const assignmentId = normalizeUuidString(req.params.id)
+        if (!assignmentId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+          if (!actorAccess) return
+
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
+            [assignmentId, orgId]
+          )
+          if (!existingRows.length) {
+            if (!actorAccess.fullAdmin) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Assignment not found' } })
+            return
+          }
+
+          const existing = existingRows[0]
+          const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existing.publish_status)
+          if (!isAttendanceScheduleDraftEditable(existing)) {
+            respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
+            return
+          }
+          const nextShiftId = parsed.data.shiftId !== undefined
+            ? normalizeUuidString(parsed.data.shiftId)
+            : existing.shift_id
+          if (!nextShiftId) {
+            respondInvalidUuid(res, 'shiftId')
+            return
+          }
+          const payload = {
+            userId: parsed.data.userId ?? existing.user_id,
+            shiftId: nextShiftId,
+            startDate: parsed.data.startDate ?? existing.start_date,
+            endDate: resolveAttendanceScheduleAssignmentUpdateEndDate(parsed.data, existing.end_date),
+            isActive: parsed.data.isActive ?? existing.is_active,
+          }
+
+          if (payload.endDate && payload.endDate < payload.startDate) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'End date must be after start date' } })
+            return
+          }
+
+          const windowAccess = await enforceShiftEditWindow(res, [existing.start_date, payload.startDate])
+          if (!windowAccess) return
+
+          const existingAccess = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload: existing,
+            actorAccess,
+          })
+          if (!existingAccess) return
+          const nextAccess = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload,
+            actorAccess,
+          })
+          if (!nextAccess) return
+
+          const shiftRows = await db.query(
+            'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
+            [payload.shiftId, orgId]
+          )
+          if (!shiftRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
+            return
+          }
+          const settings = await getSettings(db)
+          const slotResolution = resolveAttendanceScheduleAssignmentSlotIndex(
+            settings,
+            parsed.data.slotIndex,
+            normalizeAttendanceScheduleSlotIndex(existing.slot_index, 0)
+          )
+          if (!slotResolution.ok) {
+            res.status(slotResolution.status).json({ ok: false, error: { code: slotResolution.code, message: slotResolution.message } })
+            return
+          }
+          payload.slotIndex = slotResolution.slotIndex
+
+          const result = await db.transaction(async (trx) => {
+            await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
+              kind: 'shift',
+              orgId,
+              userId: payload.userId,
+              startDate: payload.startDate,
+              endDate: payload.endDate,
+              isActive: payload.isActive,
+              slotIndex: payload.slotIndex,
+              multiShiftEnabled: slotResolution.multiShiftDay.enabled,
+              shift: shiftRows[0],
+              excludeId: assignmentId,
+            }, { publishStatuses: ['draft', 'pending'] })
+            if (conflict) return { conflict }
+
+            const rows = await trx.query(
+              `UPDATE attendance_shift_assignments
+               SET user_id = $3,
+                   shift_id = $4,
+                   slot_index = $5,
+                   start_date = $6,
+                   end_date = $7,
+                   is_active = $8,
+                   updated_at = now()
+               WHERE id = $1 AND org_id = $2 AND publish_status = 'draft'
+               RETURNING *`,
+              [
+                assignmentId,
+                orgId,
+                payload.userId,
+                payload.shiftId,
+                payload.slotIndex,
+                payload.startDate,
+                payload.endDate,
+                payload.isActive,
+              ]
+            )
+            if (!rows.length) {
+              const publishStatus = await loadAttendanceScheduleAssignmentPublishStatus(trx, 'attendance_shift_assignments', assignmentId, orgId)
+              return publishStatus ? { lockedPublishStatus: publishStatus } : { missing: true }
+            }
+            return { row: rows[0] }
+          })
+
+          if (result.lockedPublishStatus) {
+            respondAttendanceSchedulePublishLocked(res, result.lockedPublishStatus)
+            return
+          }
+          if (result.missing) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Assignment not found' } })
+            return
+          }
+          if (result.conflict) {
+            respondAttendanceScheduleAssignmentConflict(res, result.conflict)
+            return
+          }
+
+          const assignment = mapAssignmentRow(result.row)
+          const shift = mapShiftRow(shiftRows[0])
+          res.json({ ok: true, data: { assignment, shift } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance draft assignment update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update draft assignment' } })
+        }
+      }
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/schedule-drafts/assignments/:id',
+      async (req, res) => {
+        const orgId = getOrgId(req)
+        const assignmentId = normalizeUuidString(req.params.id)
+        if (!assignmentId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+          if (!actorAccess) return
+
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
+            [assignmentId, orgId]
+          )
+          if (!existingRows.length) {
+            if (!actorAccess.fullAdmin) {
+              respondAttendanceSchedulerScopeForbidden(res)
+              return
+            }
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Assignment not found' } })
+            return
+          }
+
+          const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existingRows[0].publish_status)
+          if (!isAttendanceScheduleDraftEditable(existingRows[0])) {
+            respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
+            return
+          }
+
+          const windowAccess = await enforceShiftEditWindow(res, [existingRows[0].start_date])
+          if (!windowAccess) return
+
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload: existingRows[0],
+            actorAccess,
+          })
+          if (!access) return
+
+          const rows = await db.query(
+            'DELETE FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2 AND publish_status = $3 RETURNING id',
+            [assignmentId, orgId, 'draft']
+          )
+          if (!rows.length) {
+            const publishStatus = await loadAttendanceScheduleAssignmentPublishStatus(db, 'attendance_shift_assignments', assignmentId, orgId)
+            if (publishStatus) {
+              respondAttendanceSchedulePublishLocked(res, publishStatus)
+              return
+            }
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Draft assignment not found' } })
+            return
+          }
+          res.json({ ok: true, data: { id: assignmentId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance draft assignment delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete draft assignment' } })
         }
       }
     )
@@ -31226,6 +31982,11 @@ module.exports = {
           }
 
           const existing = existingRows[0]
+          const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existing.publish_status)
+          if (existingPublishStatus !== 'published') {
+            respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
+            return
+          }
           const nextShiftId = parsed.data.shiftId !== undefined
             ? normalizeUuidString(parsed.data.shiftId)
             : existing.shift_id
@@ -31307,7 +32068,7 @@ module.exports = {
                    end_date = $7,
                    is_active = $8,
                    updated_at = now()
-               WHERE id = $1 AND org_id = $2
+               WHERE id = $1 AND org_id = $2 AND COALESCE(publish_status, 'published') = 'published'
                RETURNING *`,
               [
                 assignmentId,
@@ -31320,6 +32081,10 @@ module.exports = {
                 payload.isActive,
               ]
             )
+            if (!rows.length) {
+              const publishStatus = await loadAttendanceScheduleAssignmentPublishStatus(trx, 'attendance_shift_assignments', assignmentId, orgId)
+              return publishStatus ? { lockedPublishStatus: publishStatus } : { missing: true }
+            }
             await enforceShiftComplianceCap(trx, {
               orgId,
               userId: payload.userId,
@@ -31329,6 +32094,14 @@ module.exports = {
             return { row: rows[0] }
           })
 
+          if (result.lockedPublishStatus) {
+            respondAttendanceSchedulePublishLocked(res, result.lockedPublishStatus)
+            return
+          }
+          if (result.missing) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Assignment not found' } })
+            return
+          }
           if (result.conflict) {
             respondAttendanceScheduleAssignmentConflict(res, result.conflict)
             return
@@ -31378,6 +32151,12 @@ module.exports = {
             return
           }
 
+          const existingPublishStatus = normalizeAttendanceSchedulePublishStatus(existingRows[0].publish_status)
+          if (existingPublishStatus !== 'published') {
+            respondAttendanceSchedulePublishLocked(res, existingPublishStatus)
+            return
+          }
+
           const windowAccess = await enforceShiftEditWindow(res, [existingRows[0].start_date])
           if (!windowAccess) return
 
@@ -31389,10 +32168,17 @@ module.exports = {
           if (!access) return
 
           const rows = await db.query(
-            'DELETE FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2 RETURNING id',
+            `DELETE FROM attendance_shift_assignments
+             WHERE id = $1 AND org_id = $2 AND COALESCE(publish_status, 'published') = 'published'
+             RETURNING id`,
             [assignmentId, orgId]
           )
           if (!rows.length) {
+            const publishStatus = await loadAttendanceScheduleAssignmentPublishStatus(db, 'attendance_shift_assignments', assignmentId, orgId)
+            if (publishStatus) {
+              respondAttendanceSchedulePublishLocked(res, publishStatus)
+              return
+            }
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Assignment not found' } })
             return
           }
