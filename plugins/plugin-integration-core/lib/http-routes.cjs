@@ -30,6 +30,9 @@ const ROUTES = [
   ['GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId', 'tableActionLargeBomExpansionJobGet'],
   ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', 'tableActionLargeBomExpansionJobRun'],
   ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan', 'tableActionLargeBomExpansionJobPlan'],
+  ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs', 'tableActionLargeBomApplyJobStart'],
+  ['GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId', 'tableActionLargeBomApplyJobGet'],
+  ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', 'tableActionLargeBomApplyJobRun'],
   ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel', 'tableActionLargeBomExpansionJobCancel'],
   ['GET', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesList'],
   ['PUT', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesSave'],
@@ -71,6 +74,7 @@ const {
   applyStockPreparationAction,
   assertStockPreparationTargetReady,
   createStockPreparationTableActionRegistry,
+  createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
   normalizeActionParameters,
 } = require('./stock-preparation-table-actions.cjs')
@@ -78,9 +82,13 @@ const {
   assertAuthoritativeLargeBomExpansion,
   cancelLargeBomBackgroundExpansionJob,
   createLargeBomBackgroundExpansionJob,
+  createLargeBomCheckpointApplyJob,
   loadLargeBomBackgroundExpansionJob,
+  loadLargeBomCheckpointApplyJob,
   planLargeBomBackgroundExpansionJob,
   publicBackgroundExpansionJob,
+  publicCheckpointApplyJob,
+  runLargeBomCheckpointApplyJobChunk,
   runLargeBomBackgroundExpansionJob,
 } = require('./stock-preparation-large-bom-jobs.cjs')
 const {
@@ -358,6 +366,7 @@ const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPol
 const VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])
 const VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS = new Set(['conflictPolicyReview'])
+const VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS = new Set(['confirm'])
 const VALID_EMPTY_REQUEST_KEYS = new Set()
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
 const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
@@ -463,6 +472,14 @@ function largeBomExpansionOptionsForAction(action = {}) {
     if (options[key] === undefined || options[key] === null || options[key] === '') delete options[key]
   }
   return options
+}
+
+function assertApplyJobMatchesExpansion(applyJob, jobId) {
+  if (firstString(applyJob && applyJob.sourceJobId) === firstString(jobId)) return applyJob
+  throw new HttpRouteError(404, 'LARGE_BOM_APPLY_JOB_NOT_FOUND', 'large-BOM checkpoint apply job was not found', {
+    applyJobIdPresent: Boolean(firstString(applyJob && applyJob.jobId)),
+    sourceJobIdPresent: Boolean(firstString(jobId)),
+  })
 }
 
 function redactDeadLetter(deadLetter, fullPayload = false) {
@@ -1523,6 +1540,67 @@ function createHandlers(services, options = {}) {
         conflictPolicyReview,
       })
       return sendOk(res, publicBackgroundExpansionJob(planned))
+    },
+
+    async tableActionLargeBomApplyJobStart(req, res) {
+      const user = requireAccess(req, 'write')
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS)
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const jobId = firstString(requestParams(req).jobId)
+      const routeScope = largeBomJobScope(req, { actionId })
+      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const confirm = isPlainObject(body.confirm) ? body.confirm : {}
+      const job = await createLargeBomCheckpointApplyJob({
+        storage: context.storage,
+        ...routeScope,
+        actionId,
+        jobId,
+        principal: requestPrincipal(req),
+        permission: applyPermissionForUser(user),
+        acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
+      })
+      return sendOk(res, publicCheckpointApplyJob(job), 202)
+    },
+
+    async tableActionLargeBomApplyJobGet(req, res) {
+      requireAccess(req, 'read')
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const jobId = firstString(requestParams(req).jobId)
+      const routeScope = largeBomJobScope(req, { actionId })
+      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const job = await loadLargeBomCheckpointApplyJob({
+        storage: context.storage,
+        ...routeScope,
+        actionId,
+        applyJobId: firstString(requestParams(req).applyJobId),
+      })
+      assertApplyJobMatchesExpansion(job, jobId)
+      return sendOk(res, publicCheckpointApplyJob(job))
+    },
+
+    async tableActionLargeBomApplyJobRun(req, res) {
+      requireAccess(req, 'write')
+      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const jobId = firstString(requestParams(req).jobId)
+      const routeScope = largeBomJobScope(req, { actionId })
+      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const pendingJob = await loadLargeBomCheckpointApplyJob({
+        storage: context.storage,
+        ...routeScope,
+        actionId,
+        applyJobId: firstString(requestParams(req).applyJobId),
+      })
+      assertApplyJobMatchesExpansion(pendingJob, jobId)
+      const scopedRecordsApi = createTargetScopedRecordsApi(getMultitableRecordsApi(), pendingJob.target)
+      const job = await runLargeBomCheckpointApplyJobChunk({
+        storage: context.storage,
+        ...routeScope,
+        actionId,
+        applyJobId: pendingJob.jobId,
+        recordsApi: scopedRecordsApi,
+      })
+      return sendOk(res, publicCheckpointApplyJob(job))
     },
 
     async tableActionLargeBomExpansionJobCancel(req, res) {

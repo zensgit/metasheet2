@@ -2830,6 +2830,18 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
     'large-BOM expansion job plan route registered',
   )
   assert.ok(
+    mount.registered.includes('POST /api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs'),
+    'large-BOM checkpoint apply job start route registered',
+  )
+  assert.ok(
+    mount.registered.includes('GET /api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId'),
+    'large-BOM checkpoint apply job inspect route registered',
+  )
+  assert.ok(
+    mount.registered.includes('POST /api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run'),
+    'large-BOM checkpoint apply job run route registered',
+  )
+  assert.ok(
     mount.registered.includes('POST /api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel'),
     'large-BOM expansion job cancel route registered',
   )
@@ -2979,6 +2991,83 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.equal(records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length, 0, 'plan never writes target rows')
   assert.equal(JSON.stringify(res.body.data).includes('P-001'), false, 'plan response is values-free')
   assert.equal(JSON.stringify(res.body.data).includes('A-001'), false, 'plan response hides component code')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+    body: { confirm: {} },
+  })
+  assert.equal(res.statusCode, 403, 'read-only user cannot create a checkpoint apply job')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+    body: { target: { sheetId: 'evil_sheet' } },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'apply-job start rejects browser-supplied target')
+
+  const writesBeforeApplyJobStart = records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+    body: { confirm: {} },
+  })
+  assertOkResponse(res, 202)
+  assert.equal(res.body.data.status, 'queued')
+  assert.equal(res.body.data.planRevisionPresent, true)
+  assert.equal(res.body.data.targetRevisionPresent, true)
+  assert.equal(res.body.data.approvalPresent, true)
+  assert.equal(typeof res.body.data.jobId, 'string')
+  assert.equal(records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length, writesBeforeApplyJobStart, 'apply-job start does not write target rows')
+  assert.equal(JSON.stringify(res.body.data).includes('P-001'), false, 'apply-job start response is values-free')
+  assert.equal(JSON.stringify(res.body.data).includes('sheet_stock_configured'), false, 'apply-job start hides target sheet')
+  const applyJobId = res.body.data.jobId
+
+  res = await invoke(mount.routes, 'GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId', {
+    user: { id: 'user_cross_tenant', tenantId: 'tenant_2', permissions: ['integration:read'] },
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assert.equal(res.statusCode, 404)
+  assert.equal(res.body.error.code, 'LARGE_BOM_APPLY_JOB_NOT_FOUND', 'known applyJobId is tenant-scoped')
+
+  res = await invoke(mount.routes, 'GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.jobId, applyJobId)
+  assert.equal(res.body.data.status, 'queued')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assert.equal(res.statusCode, 403, 'read-only user cannot run checkpoint apply')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+    body: { sheetId: 'evil_sheet' },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'apply-job run rejects browser-supplied sheet scope')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'succeeded')
+  assert.equal(res.body.data.counts.created, 1)
+  assert.equal(res.body.data.counts.inactive, 1)
+  assert.equal(res.body.data.counts.failed, 0)
+  const applyCreate = records.calls.find((call) => call[0] === 'createRecord')
+  const applyPatch = records.calls.find((call) => call[0] === 'patchRecord')
+  assert.equal(applyCreate[1].sheetId, 'sheet_stock_configured', 'checkpoint apply creates only on the configured target sheet')
+  assert.equal(applyPatch[1].sheetId, 'sheet_stock_configured', 'checkpoint apply patches only on the configured target sheet')
+  assert.equal(JSON.stringify(res.body.data).includes('P-001'), false, 'checkpoint apply response is values-free')
+  assert.equal(JSON.stringify(res.body.data).includes('A-001'), false, 'checkpoint apply response hides component code')
 
   res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', {
     user: READ_USER,
