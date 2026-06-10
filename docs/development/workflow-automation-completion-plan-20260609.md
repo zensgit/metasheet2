@@ -2,7 +2,7 @@
 
 Date: 2026-06-09
 
-Grounded on: `origin/main@f43cfe44a`
+Grounded on: `origin/main@184f2293c`
 
 Scope: MetaSheet2 workflow, approval, and multitable automation as one product
 target. This is a completion definition and execution ledger, not a sprint
@@ -52,6 +52,7 @@ Current main already contains substantial approval product runtime:
 | Template authoring UI | Landed: `/approval-templates/new` and `/approval-templates/:id/edit`, fail-closed on unsupported rich graphs, preserves unsupported field metadata. |
 | Real DB authoring UAT guard | Landed integration test for create -> publish -> start -> resolve on real DB. |
 | Deployed/browser UAT | Passed: #2318 and #2371 accepted UI-created template -> publish -> `/approvals/new/:templateId` -> `form_field_user` resolution, plus unsupported-template read-only/save-disabled safety. |
+| Completion event contract | Landed: #2413 locked the W5 scope; #2414 emits typed, redacted, idempotent approval terminal completion events after commit. |
 | Still missing | Field-visibility authoring UI, richer template constructs, trigger bindings, result backwrite, automation `start_approval`. |
 
 ### 1.3 Workflow Designer / BPMN
@@ -111,13 +112,13 @@ operate a practical business workflow using existing product surfaces:
 
 | ID | Work | Status | Completion acceptance |
 |---|---|---|---|
-| W0 | Re-ground status docs against current main | This PR | Existing TODOs no longer say A6-3-2 is not started after #2339/#2348. |
+| W0 | Re-ground status docs against current main | Landed #2411/#2412 | Existing TODOs no longer say A6-3-2 is not started after #2339/#2348. |
 | W1 | Approval authoring deployed-browser smoke | Done | #2318 PASS accepted: UI-created template published, `/approvals/new/:templateId` started, submitted user field resolved to expected assignee, unsupported rich template was read-only/save-disabled. #2375/#2371 reconfirmed current deployment. |
 | W2 | Automation A6-3-3 branch-local wait/nesting | Not started; demand-gated; no current unlock | `wait_for_callback` can live inside selected branch with stable nested step cursor, rule-drift guard, resume tests, and no silent flattening in editor. #2367 trial found A6-3 v1 sufficient for the tested flow, so do not start W2 without a new named scenario. |
 | W3 | Automation parallel fan-out + join-all | Not started; demand-gated | Parallel branches persist independent job lineage; join-all waits for all branches; failures and skipped branches are audited. |
 | W4 | Automation join-any / cancellation semantics | Not started; demand-gated after W3 | First completed branch continues; ignored/cancelled siblings are explicit in C1 jobs and audit. |
-| W5-0 | Approval completion event contract scope-gate | This PR | Defines terminal approval event taxonomy, redacted payload, idempotency key, post-commit emission boundary, and test matrix without adding automation behavior. |
-| W5-1 | Approval completion event contract implementation | Not started | `approval.approved/rejected/revoked/cancelled` payload is versioned, redacted, idempotent, emitted post-commit, and tested without adding automation action yet. `return` remains a non-terminal rework transition. |
+| W5-0 | Approval completion event contract scope-gate | Landed #2413 | Defines terminal approval event taxonomy, redacted payload, idempotency key, post-commit emission boundary, and test matrix without adding automation behavior. |
+| W5-1 | Approval completion event contract implementation | Landed #2414 (`184f2293c`) | `approval.approved/rejected/revoked/cancelled` payload is versioned, redacted, idempotent, emitted post-commit, and tested without adding automation action yet. `return` remains a non-terminal rework transition. |
 | W6 | Automation `start_approval` action | Not started; after W5-1 | Starts one approval instance from a published template, creates a waiting job, and resumes from W5 completion event. |
 | W7 | Approval result backwrite | Not started; after W5/W6 | Explicit mapping writes approved/rejected/revoked/cancelled outcomes to multitable record fields with audit and permission checks; `return` transition backwrite needs a separate named scope if required. |
 | W8 | BPMN compile/preview adapter | Not started; after W3 minimum | Constrained BPMN subset compiles into automation/approval preview plus gap report; no live execution route. |
@@ -126,22 +127,23 @@ operate a practical business workflow using existing product surfaces:
 
 ## 4. Recommended Next Slice
 
-The next implementation after this scope-gate should be **W5-1: approval
-completion event contract implementation**.
+The next implementation after W5 should be **W6: automation `start_approval`
+scope-gate**.
 
 Why:
 
 1. **W1 is closed by issue evidence** (#2318 + #2371 + #2375).
 2. **W2 is intentionally held** because #2367 found no concrete
    branch-internal wait/nesting demand for the current trial flow.
-3. The v1 completion gap is now cross-surface closure: automation cannot yet
-   start an approval, and approval completion cannot yet resume/update
-   automation. W5-1 is the smallest safe runtime step because it implements the
-   event contract without adding `start_approval` behavior yet.
+3. The v1 completion gap is now cross-surface closure: automation still cannot
+   start an approval. W5-1 gives W6 a stable approval completion signal, but it
+   intentionally does not add automation behavior.
 
-Do not jump straight to `start_approval` or BPMN before W5-1 lands.
-Approval-as-job needs stable suspend/resume plus an approval completion event contract; BPMN
-gateway preview needs branch/parallel semantics to map to.
+Do not jump straight to result backwrite or BPMN before W6 lands.
+Approval-as-job now has stable suspend/resume plus an approval completion event contract; it
+still needs a separate `start_approval` scope-gate proving idempotency,
+waiting/resume semantics, and side-effect boundaries. BPMN gateway preview
+needs branch/parallel semantics to map to.
 
 ## 5. Non-goals for v1
 
