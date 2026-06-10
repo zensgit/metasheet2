@@ -6404,13 +6404,17 @@ export function univerMetaRouter(): Router {
       }
       if (!capabilities.canManageFields) return sendForbidden(res)
 
-      if (dryRunFormulaEngine.extractFieldReferences(expression).length > DRY_RUN_MAX_REFERENCED_FIELDS) {
+      const referencedFieldIds = dryRunFormulaEngine.extractFieldReferences(expression)
+      if (referencedFieldIds.length > DRY_RUN_MAX_REFERENCED_FIELDS) {
         return res.status(422).json({ ok: false, error: { code: 'DRYRUN_TOO_MANY_REFS', message: `Expression references more than ${DRY_RUN_MAX_REFERENCED_FIELDS} fields` } })
       }
       const fields = await loadFieldsForSheetShared(pool.query.bind(pool), sheetId)
 
-      // #5c: optional real-record sampling. RAW persisted data only (no applyLookupRollup) so the preview
-      // matches production recalc; lookup/rollup keys are absent in raw → existing missing_sample diagnostic.
+      // #5c + FOL-2: optional real-record sampling. Production recalc evaluates HYDRATED rows since
+      // A-min (#2247), so the sampled record hydrates its referenced lookup/rollup the same way —
+      // at the ROUTE layer only (the dry-run engine keeps its no-DB invariant). Order is
+      // hydrate → mask → manual override: a denied/hidden lookup key is dropped by the mask and
+      // still surfaces as missing_sample.
       let effectiveSampleValues: Record<string, unknown> = sampleValues
       if (recordId && recordReadAccess) {
         const userId = recordReadAccess.userId
@@ -6420,6 +6424,24 @@ export function univerMetaRouter(): Router {
             [recordId, sheetId],
           )
           const rawData = recordRes.rows.length > 0 ? normalizeJson(recordRes.rows[0].data) : {}
+          // FOL-2 hydration is EXPRESSION-SCOPED (design 2026-06-10 §3.1): only the lookup/rollup
+          // fields the expression references are passed to applyLookupRollup (its `fields` param
+          // consumes lookup/rollup entries only; link configs flow via `relationalLinkFields`),
+          // binding the per-preview cost to the expression — no computed ref → zero
+          // link/foreign-sheet reads. Requester-perspective (`req`): an unreadable foreign sheet
+          // hydrates a lookup to [] and a rollup to null, same as every read path.
+          const referencedIdSet = new Set(referencedFieldIds)
+          const referencedComputedFields = fields.filter(
+            (field) => (field.type === 'lookup' || field.type === 'rollup') && referencedIdSet.has(field.id),
+          )
+          if (referencedComputedFields.length > 0) {
+            const relationalLinkFields = fields
+              .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
+              .filter((v): v is RelationalLinkField => !!v && !!v.cfg)
+            const row: UniverMetaRecord = { id: recordId, version: 0, data: rawData }
+            const linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), [recordId], relationalLinkFields)
+            await applyLookupRollup(req, pool.query.bind(pool), referencedComputedFields, [row], relationalLinkFields, linkValuesByRecord)
+          }
           // D3c field mask, sheet-scope (hiddenFieldIds: [] — display-consistency defer, see #5c design-lock §4).
           // scope.visible is the real field-read gate; a denied field is omitted → becomes missing_sample.
           const visibleFields = filterVisiblePropertyFields(fields)
