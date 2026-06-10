@@ -847,6 +847,14 @@ describe('RecordWriteService', () => {
 
       expect(invalidator).toHaveBeenCalledOnce()
       expect(helpers.computeDependentLookupRollupRecords).toHaveBeenCalledOnce()
+      // A-full plumbing (design #2410): the helper receives the edited (source) sheet and the
+      // PATCH-level changed field ids so it can gate related-formula recompute.
+      expect(helpers.computeDependentLookupRollupRecords).toHaveBeenCalledWith(
+        expect.any(Function),
+        'sheet1',
+        ['rec1'],
+        ['fld_name'],
+      )
       expect(invalidator.mock.invocationCallOrder[0]).toBeLessThan(
         vi.mocked(helpers.computeDependentLookupRollupRecords).mock.invocationCallOrder[0],
       )

@@ -254,6 +254,7 @@ export class MultitableFormulaEngine {
     sheetId: string,
     recordId: string,
     fields: MultitableField[],
+    onlyFormulaFieldIds?: ReadonlySet<string>,
   ): Promise<Record<string, unknown> | null> {
     try {
       const recordRes = await query(
@@ -266,7 +267,7 @@ export class MultitableFormulaEngine {
       const data: Record<string, unknown> =
         typeof row.data === 'string' ? JSON.parse(row.data) : (row.data ?? {})
 
-      return await this.recalculateRecordFromData(query, sheetId, recordId, data, fields)
+      return await this.recalculateRecordFromData(query, sheetId, recordId, data, fields, onlyFormulaFieldIds)
     } catch (error) {
       logger.error('recalculateRecord failed:', error as Error)
       return null
@@ -281,6 +282,12 @@ export class MultitableFormulaEngine {
    * back (`data || $keys`) — lookup/rollup values are NOT materialized. Note: a scalar-array
    * lookup reaches `evaluateField` as a joined string literal per the existing A2b contract;
    * exact numeric arithmetic over lookups is Option D (parser), out of A-min scope.
+   *
+   * `onlyFormulaFieldIds` restricts evaluation + materialization to those formula fields.
+   * The dependency-gated write paths (A-min/A-full) MUST pass it: hydration is actor-scoped
+   * (an unreadable foreign sheet hydrates a lookup to []), so re-evaluating a formula whose
+   * inputs did NOT change can clobber a correct stored value with a permission-degraded one.
+   * Absent → all formula fields (first computation on create/submit/import, design #2255).
    */
   async recalculateRecordFromData(
     query: MultitableRecordsQueryFn,
@@ -288,6 +295,7 @@ export class MultitableFormulaEngine {
     recordId: string,
     data: Record<string, unknown>,
     fields: MultitableField[],
+    onlyFormulaFieldIds?: ReadonlySet<string>,
   ): Promise<Record<string, unknown> | null> {
     try {
       // Resolve each formula field's expression. Field-defined formulas store the
@@ -297,6 +305,7 @@ export class MultitableFormulaEngine {
       // writes still compute.
       const formulaTargets = fields.flatMap((field) => {
         if (field.type !== 'formula') return []
+        if (onlyFormulaFieldIds && !onlyFormulaFieldIds.has(field.id)) return []
         const property = field.property as Record<string, unknown> | undefined
         // The legacy data-string fallback applies ONLY when the field has no
         // `expression` property key at all (older records). If the key is present

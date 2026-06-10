@@ -1616,7 +1616,10 @@ async function loadLinkValuesByRecord(
  * (which sources the expression from `field.property.expression`) and returns the
  * recomputed formula-field values per record so the write path can surface them
  * in the response + realtime patch. Returns `[]` when no formula depends on the
- * change. Intra-sheet / intra-record only — no cross-sheet read, no perm gate.
+ * change. Only the DEPENDENT formulas are re-evaluated/persisted (the dep-gate
+ * result doubles as the engine allowlist) — formulas with unchanged inputs keep
+ * their stored value, since actor-scoped hydration could otherwise clobber them.
+ * Intra-sheet / intra-record only — no cross-sheet read, no perm gate.
  */
 async function recalculateFormulaFields(
   query: QueryFn,
@@ -1651,6 +1654,9 @@ async function recalculateFormulaFields(
   }
 
   // Gate: only recompute when a changed (or dependent-lookup) field actually feeds a formula here.
+  // The returned field ids are ALSO the recompute allowlist (F1, review of #2450): hydration is
+  // actor-scoped, so a formula whose inputs did not change must not be re-evaluated — it could
+  // be clobbered with a permission-degraded value (unreadable foreign sheet → lookup []).
   const depRes = await query(
     `SELECT DISTINCT field_id FROM formula_dependencies
      WHERE depends_on_field_id = ANY($1::text[])
@@ -1659,16 +1665,21 @@ async function recalculateFormulaFields(
     [effectiveChangedFieldIds, sheetId],
   )
   if (depRes.rows.length === 0) return []
+  const formulaFieldIdSet = new Set(formulaFieldIds)
+  const dependentFormulaFieldIds = new Set(
+    (depRes.rows as any[]).map((row) => String(row.field_id)).filter((id) => formulaFieldIdSet.has(id)),
+  )
+  if (dependentFormulaFieldIds.size === 0) return []
 
   const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
   for (const recordId of updatedRecordIds) {
     const hydrated = hydratedDataByRecord?.get(recordId)
     const nextData = hydrated
-      ? await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, recordId, hydrated, fields)
-      : await multitableFormulaEngine.recalculateRecord(query, sheetId, recordId, fields)
+      ? await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, recordId, hydrated, fields, dependentFormulaFieldIds)
+      : await multitableFormulaEngine.recalculateRecord(query, sheetId, recordId, fields, dependentFormulaFieldIds)
     if (!nextData) continue
     const formulaData: Record<string, unknown> = {}
-    for (const fieldId of formulaFieldIds) {
+    for (const fieldId of dependentFormulaFieldIds) {
       if (fieldId in nextData) formulaData[fieldId] = nextData[fieldId]
     }
     results.push({ recordId, data: formulaData })
@@ -8520,11 +8531,12 @@ export function univerMetaRouter(): Router {
 
       const fields = (fieldRes.rows as any[]).map(serializeFieldRow)
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
-      // F3 (#2106 §3 F3): RecordWriteService uses these ONLY for the read-back echo (it masks record / related /
-      // formula data + summaries at record-write-service.ts:828/854/882/914/929), so narrow them to the
-      // layer-2 ∧ layer-3 readable set — a field_permissions-denied value must not be echoed. fieldById (the
-      // write gate, below) stays from ALL fields, so a write-only-no-read field remains writable. (crossSheetRelated
-      // @record-write-service.ts:985 is returned UNMASKED — a separate finding, see the verification doc.)
+      // F3 (#2106 §3 F3): RecordWriteService uses these ONLY for the read-back echo (it masks record /
+      // related / formula data + summaries inside patchRecords), so narrow them to the layer-2 ∧ layer-3
+      // readable set — a field_permissions-denied value must not be echoed. fieldById (the write gate,
+      // below) stays from ALL fields, so a write-only-no-read field remains writable. crossSheetRelated
+      // is masked per related sheet inside computeDependentLookupRollupRecords (locked by the
+      // multitable-cross-sheet-related-echo-mask suite).
       const echoFieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
       const echoFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap: echoFieldScopeMap })
       const readableEchoFields = visiblePropertyFields.filter((field) => echoFieldPermissions[field.id]?.visible !== false)

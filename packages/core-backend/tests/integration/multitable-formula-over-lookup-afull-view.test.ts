@@ -19,6 +19,13 @@
  * .test.ts; AF8 (no diff to src/formula/engine.ts / no migrations / no RBAC) is a static PR
  * boundary, not a runtime assertion.
  *
+ * F1 guard (independent review of #2450): recompute must be restricted to the formulas the
+ * dependency gate actually returns. M carries a SECOND, independent chain
+ * (lu2 -> sheet G, f2 = {lu2}+1, seeded CORRECT at 8). A foreign edit on F must never rewrite
+ * f2 — neither for an actor who cannot read G (pre-fix: actor-scoped hydration emptied lu2 and
+ * persistently clobbered f2 to 1) nor for a full-perm actor (f2 simply does not depend on the
+ * affected lookup).
+ *
  * Stale seeding: related formulas are seeded as 6 (≠ current-value recompute results) so a
  * blind recompute (AF3) and a skipped recompute (AF4) are both distinguishable from a correct
  * one. Numeric semantics per A-min: lookup [9] + `={lu}+1` → 10; sum-rollup 9 + 1 → 10.
@@ -41,11 +48,17 @@ const MS = `sheet_afull_main_${TS}` // related: link + lookup + formula (readabl
 const RS = `sheet_afull_rollup_${TS}` // related: link + rollup + formula (AF5)
 const NS = `sheet_afull_noread_${TS}` // related: link + lookup + formula (unreadable in AF4)
 
+const GS = `sheet_afull_other_${TS}` // second foreign sheet feeding M's INDEPENDENT chain (F1 guard)
+
 const FLD_FTARGET = `fld_afull_ftarget_${TS}`
 const FLD_FNOISE = `fld_afull_fnoise_${TS}`
+const FLD_GVAL = `fld_afull_gval_${TS}`
 const FLD_M_LINK = `fld_afull_m_link_${TS}`
 const FLD_M_LU = `fld_afull_m_lu_${TS}`
 const FLD_M_F = `fld_afull_m_f_${TS}`
+const FLD_M_LINK2 = `fld_afull_m_link2_${TS}` // link -> GS (independent chain)
+const FLD_M_LU2 = `fld_afull_m_lu2_${TS}` // lookup(GVal)
+const FLD_M_F2 = `fld_afull_m_f2_${TS}` // formula = {lu2}+1, seeded CORRECT — must never be rewritten here
 const FLD_R_LINK = `fld_afull_r_link_${TS}`
 const FLD_R_RU = `fld_afull_r_ru_${TS}`
 const FLD_R_F = `fld_afull_r_f_${TS}`
@@ -55,6 +68,7 @@ const FLD_N_F = `fld_afull_n_f_${TS}`
 
 const REC_F1 = `rec_afull_f1_${TS}` // target = 9, the record edited throughout
 const REC_F2 = `rec_afull_f2_${TS}` // target = 200, AF6 same-record re-link target
+const REC_G1 = `rec_afull_g1_${TS}` // gval = 7 — never edited in this file
 const REC_M1 = `rec_afull_m1_${TS}`
 const REC_R1 = `rec_afull_r1_${TS}`
 const REC_N1 = `rec_afull_n1_${TS}`
@@ -100,6 +114,7 @@ describeIfDatabase('multitable formula-over-lookup A-full (real DB)', () => {
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [MS, BASE_ID, 'Main Lookup'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [RS, BASE_ID, 'Rollup'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [NS, BASE_ID, 'No Read'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [GS, BASE_ID, 'Other Foreign'])
 
     // foreign sheet: numeric target + an unrelated noise field
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
@@ -111,18 +126,35 @@ describeIfDatabase('multitable formula-over-lookup A-full (real DB)', () => {
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
       [REC_F2, FS, JSON.stringify({ [FLD_FTARGET]: 200 })])
 
+    // second foreign sheet G: numeric value — feeds M's independent chain, never edited here
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_GVAL, GS, 'GVal', 'number', '{}', 1])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
+      [REC_G1, GS, JSON.stringify({ [FLD_GVAL]: 7 })])
+
     // M: link -> FS, lookup(FTarget), formula = {lookup}+1 — seeded STALE (6)
+    // PLUS an INDEPENDENT chain (F1 guard): link2 -> GS, lu2 = lookup(GVal), f2 = {lu2}+1 —
+    // seeded CORRECT (7+1 = 8). Nothing in this file edits G, so f2 must remain 8 throughout.
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_M_LINK, MS, 'Link', 'link', JSON.stringify({ foreignSheetId: FS }), 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_M_LU, MS, 'Lookup', 'lookup', JSON.stringify({ linkFieldId: FLD_M_LINK, targetFieldId: FLD_FTARGET, foreignSheetId: FS }), 2])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_M_F, MS, 'Formula', 'formula', JSON.stringify({ expression: `={${FLD_M_LU}}+1` }), 3])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_M_LINK2, MS, 'Link G', 'link', JSON.stringify({ foreignSheetId: GS }), 4])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_M_LU2, MS, 'Lookup G', 'lookup', JSON.stringify({ linkFieldId: FLD_M_LINK2, targetFieldId: FLD_GVAL, foreignSheetId: GS }), 5])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_M_F2, MS, 'Formula G', 'formula', JSON.stringify({ expression: `={${FLD_M_LU2}}+1` }), 6])
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
-      [REC_M1, MS, JSON.stringify({ [FLD_M_F]: 6 })])
+      [REC_M1, MS, JSON.stringify({ [FLD_M_F]: 6, [FLD_M_F2]: 8 })])
     await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [FLD_M_LINK, REC_M1, REC_F1])
+    await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [FLD_M_LINK2, REC_M1, REC_G1])
     await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,$4)',
       [MS, FLD_M_F, FLD_M_LU, MS])
+    await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,$4)',
+      [MS, FLD_M_F2, FLD_M_LU2, MS])
 
     // R: link -> FS, rollup sum(FTarget), formula = {rollup}+1 — seeded STALE (6)
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
@@ -164,12 +196,12 @@ describeIfDatabase('multitable formula-over-lookup A-full (real DB)', () => {
 
   afterAll(async () => {
     await q('DELETE FROM formula_dependencies WHERE sheet_id = ANY($1::text[])', [[MS, RS, NS]]).catch(() => {})
-    await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[FLD_M_LINK, FLD_R_LINK, FLD_N_LINK]]).catch(() => {})
-    await q('DELETE FROM field_permissions WHERE sheet_id = ANY($1::text[])', [[FS, MS, RS, NS]]).catch(() => {})
-    await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = ANY($1::text[])', [[FS, MS, RS, NS]]).catch(() => {})
-    await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[FS, MS, RS, NS]]).catch(() => {})
-    await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[FS, MS, RS, NS]]).catch(() => {})
-    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[FS, MS, RS, NS]]).catch(() => {})
+    await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[FLD_M_LINK, FLD_M_LINK2, FLD_R_LINK, FLD_N_LINK]]).catch(() => {})
+    await q('DELETE FROM field_permissions WHERE sheet_id = ANY($1::text[])', [[FS, MS, RS, NS, GS]]).catch(() => {})
+    await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = ANY($1::text[])', [[FS, MS, RS, NS, GS]]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[FS, MS, RS, NS, GS]]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[FS, MS, RS, NS, GS]]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[FS, MS, RS, NS, GS]]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
   })
 
@@ -183,17 +215,22 @@ describeIfDatabase('multitable formula-over-lookup A-full (real DB)', () => {
     expect(await readField(REC_M1, MS, FLD_M_F)).toBe(6)
     expect(await readField(REC_R1, RS, FLD_R_F)).toBe(6)
     expect(await readField(REC_N1, NS, FLD_N_F)).toBe(6)
-    // The related echo (if present) must not carry a formula key either.
+    // The related echo always carries M for a full-perm actor; it must not carry a formula key.
     const m = related(res.body, MS, REC_M1)
-    if (m) expect(m.data[FLD_M_F]).toBeUndefined()
+    expect(m).toBeDefined()
+    expect(m.data[FLD_M_F]).toBeUndefined()
   })
 
-  test('AF4: readable related sheet recomputes, unreadable related sheets are skipped', async () => {
+  test('AF4: readable related sheet recomputes, unreadable related sheets are skipped + unrelated formula untouched (F1 guard)', async () => {
     currentUser = { id: USER_LIMITED, roles: ['member'], perms: ['comments:write'] }
     const res = await patchForeign(FLD_FTARGET, 50)
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     // M is readable to USER_LIMITED → its formula recomputes: lookup [50] → 51.
     expect(await readField(REC_M1, MS, FLD_M_F)).toBe(51)
+    // F1 guard (the exact review repro): USER_LIMITED cannot read G, so lu2 hydrates to [] for
+    // this actor — but f2 does not depend on the affected lookup, so it must NOT be re-evaluated.
+    // Pre-fix this clobbered the correct 8 to 1 (empty lookup → 0 → +1).
+    expect(await readField(REC_M1, MS, FLD_M_F2)).toBe(8)
     // N and R are unreadable to USER_LIMITED → skipped under the related-recompute boundary:
     // formulas stay stale (6) and the sheets do not appear in the response at all.
     expect(await readField(REC_N1, NS, FLD_N_F)).toBe(6)
@@ -217,11 +254,18 @@ describeIfDatabase('multitable formula-over-lookup A-full (real DB)', () => {
     // N readable for this actor → catches up too.
     expect(await readField(REC_N1, NS, FLD_N_F)).toBe(101)
 
+    // F1 guard (allowlist, not permission luck): USER_MASKED CAN read G, yet f2 still must not
+    // be rewritten — it does not depend on the affected lookup, so the dependency gate excludes
+    // it from recompute entirely.
+    expect(await readField(REC_M1, MS, FLD_M_F2)).toBe(8)
+
     // AF2: the related echo for M carries the visible lookup but NOT the denied formula field.
     const m = related(res.body, MS, REC_M1)
     expect(m).toBeDefined()
     expect(m.data[FLD_M_LU]).toEqual([100])
     expect(m.data[FLD_M_F]).toBeUndefined()
+    // The unrecomputed f2 must not ride along in the formula echo either.
+    expect(m.data[FLD_M_F2]).toBeUndefined()
 
     // Positive echo control: R's formula field has no deny row → fresh value present in echo.
     const r = related(res.body, RS, REC_R1)
@@ -239,5 +283,7 @@ describeIfDatabase('multitable formula-over-lookup A-full (real DB)', () => {
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     // Same-record A-min path: lookup now [200] → formula 201, exactly as before A-full.
     expect(await readField(REC_M1, MS, FLD_M_F)).toBe(201)
+    // F1 guard on the A-min path too: the link edit affects only lu1's chain; f2 stays put.
+    expect(await readField(REC_M1, MS, FLD_M_F2)).toBe(8)
   })
 })
