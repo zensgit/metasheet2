@@ -4886,6 +4886,170 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('加班三段 O2 — opt-in request metadata snapshot is written and refreshed on final approval', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-o2-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    let token: string | undefined
+    let originalSettings: Record<string, unknown> = {}
+    const createdRequestIds: string[] = []
+    const holidayDate = '2036-10-01'
+    const offDate = '2036-10-02'
+    const crossDate = '2036-10-03'
+    const holidayId = randomUUID()
+    let overtimeRuleId: string | undefined
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
+      token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+
+      const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
+      expect(settingsRes.status).toBe(200)
+      originalSettings = ((settingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+
+      const ruleRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ name: `o2-ot-${runSuffix}`, minMinutes: 30, roundingMinutes: 15, maxMinutesPerDay: 120 }),
+      })
+      expect([201, 409]).toContain(ruleRes.status)
+      overtimeRuleId = (ruleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!overtimeRuleId) {
+        const listRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, { headers: { Authorization: `Bearer ${token}` } })
+        const items = (listRes.body as { data?: { items?: { id?: string; name?: string }[] } } | undefined)?.data?.items ?? []
+        overtimeRuleId = items.find(item => item.name === `o2-ot-${runSuffix}`)?.id
+      }
+      expect(overtimeRuleId).toBeTruthy()
+      if (!overtimeRuleId) return
+
+      await pool.query(
+        `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
+         VALUES ($1, 'default', $2, $3, false, 'national')`,
+        [holidayId, holidayDate, `O2 Holiday ${runSuffix}`],
+      )
+
+      const saveSettings = (enabled: boolean) => requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ overtimeSegmentation: { enabled } }),
+      })
+      const createOvertime = async (workDate: string, body: Record<string, unknown> = {}) => {
+        const res = await requestJson(`${baseUrl}/api/attendance/requests`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ workDate, requestType: 'overtime', overtimeRuleId, ...body }),
+        })
+        if (res.status === 201) {
+          const id = (res.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+          if (id) createdRequestIds.push(id)
+        }
+        return res
+      }
+      const loadRequestMetadata = async (requestId: string) => {
+        const rows = await pool.query('SELECT metadata FROM attendance_requests WHERE id = $1', [requestId])
+        return (rows.rows[0]?.metadata ?? {}) as Record<string, unknown>
+      }
+
+      expect((await saveSettings(false)).status).toBe(200)
+      const offRes = await createOvertime(offDate, { minutes: 47 })
+      expect(offRes.status).toBe(201)
+      const offId = (offRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+      expect(offId).toBeTruthy()
+      if (!offId) return
+      expect((await loadRequestMetadata(offId)).overtimeSegmentation).toBeUndefined()
+
+      expect((await saveSettings(true)).status).toBe(200)
+      const holidayRes = await createOvertime(holidayDate, { minutes: 47 })
+      expect(holidayRes.status).toBe(201)
+      const holidayRequestId = (holidayRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+      expect(holidayRequestId).toBeTruthy()
+      if (!holidayRequestId) return
+      let metadata = await loadRequestMetadata(holidayRequestId)
+      expect(metadata.overtimeSegmentation).toMatchObject({
+        version: 1,
+        engine: 'attendance_overtime_segmentation_v1',
+        workDate: holidayDate,
+        dayType: 'holiday',
+        totalMinutes: 60,
+        compTimeGrantMinutes: 60,
+        segments: { workdayMinutes: 0, restdayMinutes: 0, holidayMinutes: 60 },
+      })
+
+      const updateRes = await requestJson(`${baseUrl}/api/attendance/requests/${holidayRequestId}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ minutes: 90 }),
+      })
+      expect(updateRes.status, updateRes.raw).toBe(200)
+      metadata = await loadRequestMetadata(holidayRequestId)
+      expect(metadata.overtimeSegmentation).toMatchObject({
+        dayType: 'holiday',
+        totalMinutes: 90,
+        segments: { workdayMinutes: 0, restdayMinutes: 0, holidayMinutes: 90 },
+      })
+
+      // Corrupt the draft snapshot to prove final approval recomputes it inside the approval txn.
+      await pool.query(
+        `UPDATE attendance_requests
+         SET metadata = jsonb_set(metadata, '{overtimeSegmentation,dayType}', '"workday"'::jsonb, true)
+         WHERE id = $1`,
+        [holidayRequestId],
+      )
+      const approveRes = await requestJson(`${baseUrl}/api/attendance/requests/${holidayRequestId}/approve`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ comment: 'approve o2' }),
+      })
+      expect(approveRes.status, approveRes.raw).toBe(200)
+      metadata = await loadRequestMetadata(holidayRequestId)
+      expect(metadata.overtimeSegmentation).toMatchObject({
+        dayType: 'holiday',
+        totalMinutes: 90,
+        segments: { workdayMinutes: 0, restdayMinutes: 0, holidayMinutes: 90 },
+      })
+      expect(metadata.resolution).toMatchObject({ action: 'approve', status: 'approved' })
+
+      const crossRes = await createOvertime(crossDate, {
+        requestedInAt: `${crossDate}T23:00:00.000Z`,
+        requestedOutAt: '2036-10-04T01:00:00.000Z',
+      })
+      expect(crossRes.status, crossRes.raw).toBe(422)
+      expect((crossRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED')
+      const crossRows = await pool.query(
+        `SELECT COUNT(*)::int AS count
+         FROM attendance_requests
+         WHERE org_id = 'default' AND user_id = $1 AND work_date = $2 AND request_type = 'overtime'`,
+        [userId, crossDate],
+      )
+      expect(Number(crossRows.rows[0]?.count ?? 0)).toBe(0)
+    } finally {
+      if (token && Object.keys(originalSettings).length > 0) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(originalSettings),
+        }).catch(() => undefined)
+      }
+      if (createdRequestIds.length > 0) {
+        await pool.query('DELETE FROM attendance_events WHERE meta->>\'requestId\' = ANY($1::text[])', [createdRequestIds]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_records WHERE user_id = $1 AND work_date::text = ANY($2::text[])', [userId, [holidayDate, offDate, crossDate]]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      }
+      await pool.query('DELETE FROM attendance_holidays WHERE id = $1', [holidayId]).catch(() => undefined)
+      if (overtimeRuleId) await pool.query('DELETE FROM attendance_overtime_rules WHERE id = $1', [overtimeRuleId]).catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('④ C3 — comp_time leave approval deducts balance FIFO; insufficient blocks (422) with no deduction; replay no double-deduct', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -6671,6 +6835,7 @@ attendanceIntegrationDescribe(
           },
           multiShiftDay: { enabled: true, maxSlots: 3 },
           compTimeFromOvertime: { enabled: true, expiresInDays: 45 },
+          overtimeSegmentation: { enabled: true },
           autoShiftMatching: {
             enabled: true,
             mode: 'apply',
@@ -6695,6 +6860,7 @@ attendanceIntegrationDescribe(
           shiftCompliance?: Record<string, unknown>
           multiShiftDay?: Record<string, unknown>
           compTimeFromOvertime?: Record<string, unknown>
+          overtimeSegmentation?: Record<string, unknown>
           autoShiftMatching?: Record<string, unknown>
         }
       } | undefined)?.data
@@ -6707,6 +6873,7 @@ attendanceIntegrationDescribe(
       })
       expect(reloaded?.multiShiftDay).toEqual({ enabled: true, maxSlots: 3 })
       expect(reloaded?.compTimeFromOvertime).toEqual({ enabled: true, expiresInDays: 45 })
+      expect(reloaded?.overtimeSegmentation).toEqual({ enabled: true })
       expect(reloaded?.autoShiftMatching).toEqual({
         enabled: true,
         mode: 'apply',

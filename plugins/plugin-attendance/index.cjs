@@ -151,6 +151,11 @@ const DEFAULT_SETTINGS = {
     enabled: false,
     expiresInDays: null,
   },
+  // 加班三段引擎 (overtime segmentation) — O2 runtime switch. Default OFF means
+  // overtime requests keep today's single total-minute metadata until an org opts in.
+  overtimeSegmentation: {
+    enabled: false,
+  },
   // 自动对班 (auto shift matching) — preview-only A0 foundation. Requires BOTH the
   // runtime env flag and this org setting before the read-only preview endpoint can run.
   autoShiftMatching: {
@@ -9814,7 +9819,7 @@ function resolveOvertimeDayTypeFromEffectiveCalendarItem(item) {
 }
 
 function buildOvertimeSegmentationSnapshot(input = {}) {
-  const workDate = normalizeDateOnlyStrict(input.workDate)
+  const workDate = normalizeDateOnlyValue(input.workDate)
   const normalizedMinutes = applyOvertimeRule(
     normalizeOvertimeSegmentationMinutes(input.minutes),
     input.overtimeRule ?? null,
@@ -9868,6 +9873,56 @@ function validateOvertimeSegmentationWindow(input = {}) {
     return { ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' }
   }
   return { ok: true }
+}
+
+async function maybeBuildOvertimeSegmentationSnapshot(db, input = {}) {
+  const settings = input.settings ?? await getSettings(db)
+  const config = normalizeOvertimeSegmentationSetting(settings?.overtimeSegmentation)
+  if (config.enabled !== true) return null
+
+  const workDate = normalizeDateOnlyValue(input.workDate)
+  if (!workDate || !input.userId) return null
+
+  const windowValidation = validateOvertimeSegmentationWindow({
+    workDate,
+    requestedInAt: input.requestedInAt,
+    requestedOutAt: input.requestedOutAt,
+  })
+  if (!windowValidation.ok) {
+    throw new HttpError(
+      422,
+      windowValidation.code,
+      windowValidation.code === 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED'
+        ? 'Cross-midnight overtime is not supported in v1'
+        : 'Invalid overtime time window',
+    )
+  }
+
+  let calendar
+  try {
+    calendar = await resolveEffectiveCalendar(db, {
+      orgId: input.orgId,
+      userId: input.userId,
+      from: workDate,
+      to: workDate,
+    })
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) {
+      throw new HttpError(503, 'DB_NOT_READY', 'Attendance effective calendar tables missing')
+    }
+    throw error
+  }
+  const effectiveCalendarItem = Array.isArray(calendar?.items) ? calendar.items[0] : null
+  if (!effectiveCalendarItem) {
+    throw new HttpError(422, 'OVERTIME_SEGMENTATION_UNRESOLVED', 'Unable to resolve overtime day type')
+  }
+
+  return buildOvertimeSegmentationSnapshot({
+    workDate,
+    minutes: input.minutes,
+    overtimeRule: input.overtimeRule ?? null,
+    effectiveCalendarItem,
+  })
 }
 
 function diffDays(fromDate, toDate) {
@@ -11304,6 +11359,7 @@ function normalizeSettings(raw) {
     },
     comprehensiveHours: normalizeAttendanceComprehensiveHoursSettings(raw.comprehensiveHours),
     compTimeFromOvertime: normalizeCompTimeFromOvertimeSetting(raw.compTimeFromOvertime),
+    overtimeSegmentation: normalizeOvertimeSegmentationSetting(raw.overtimeSegmentation),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
   }
 }
@@ -11350,6 +11406,13 @@ function normalizeCompTimeFromOvertimeSetting(raw) {
   return {
     enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_SETTINGS.compTimeFromOvertime.enabled,
     expiresInDays,
+  }
+}
+
+function normalizeOvertimeSegmentationSetting(raw) {
+  const config = raw && typeof raw === 'object' ? raw : {}
+  return {
+    enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_SETTINGS.overtimeSegmentation.enabled,
   }
 }
 
@@ -11490,6 +11553,10 @@ function mergeSettings(base, update) {
     compTimeFromOvertime: {
       ...(base?.compTimeFromOvertime || {}),
       ...(update?.compTimeFromOvertime || {}),
+    },
+    overtimeSegmentation: {
+      ...(base?.overtimeSegmentation || {}),
+      ...(update?.overtimeSegmentation || {}),
     },
     autoShiftMatching: {
       ...(base?.autoShiftMatching || {}),
@@ -17527,6 +17594,11 @@ module.exports = {
         enabled: z.boolean().optional(),
         expiresInDays: z.number().int().positive().nullable().optional(),
       }).optional(),
+      // 加班三段引擎 O2: request metadata snapshot switch. Default false preserves
+      // today's total-only overtime metadata; later slices consume the snapshot.
+      overtimeSegmentation: z.object({
+        enabled: z.boolean().optional(),
+      }).optional(),
       // 自动对班 config. Runtime remains double-gated by ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED.
       // `apply` is A1 selected-admin apply; `auto` is still reserved for a separate A2 design-lock.
       autoShiftMatching: z.object({
@@ -21141,6 +21213,7 @@ module.exports = {
       if (!durationMinutes) {
         durationMinutes = calculateDurationMinutes(requestedInAt, requestedOutAt)
       }
+      let overtimeSegmentationInputMinutes = null
 
       let leaveType = null
       let overtimeRule = null
@@ -21195,6 +21268,7 @@ module.exports = {
             singleValidationDetail('minutes', 'Provide minutes or requestedInAt/requestedOutAt for overtime')
           )
         }
+        overtimeSegmentationInputMinutes = durationMinutes
         durationMinutes = applyOvertimeRule(durationMinutes, overtimeRule)
       }
 
@@ -21255,6 +21329,18 @@ module.exports = {
           currentStep: 0,
         }
       }
+      if (requestType === 'overtime') {
+        const overtimeSegmentation = await maybeBuildOvertimeSegmentationSnapshot(db, {
+          orgId,
+          userId: existingRequest?.user_id,
+          workDate,
+          minutes: overtimeSegmentationInputMinutes ?? durationMinutes,
+          overtimeRule,
+          requestedInAt: requestedInSource,
+          requestedOutAt: requestedOutSource,
+        })
+        if (overtimeSegmentation) metadata.overtimeSegmentation = overtimeSegmentation
+      }
 
       return {
         orgId,
@@ -21291,7 +21377,7 @@ module.exports = {
         const orgId = getOrgId(req)
         let draft
         try {
-          draft = await resolveAttendanceRequestDraft(parsed.data, { org_id: orgId })
+          draft = await resolveAttendanceRequestDraft(parsed.data, { org_id: orgId, user_id: userId })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({
@@ -21702,6 +21788,8 @@ module.exports = {
 
           const approval = approvalRows[0]
           const requestMetadata = normalizeMetadata(requestRow.metadata)
+          const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+          const requestType = requestRow.request_type
           const flowMeta = normalizeMetadata(requestMetadata.approvalFlow)
           const flowSteps = normalizeApprovalSteps(flowMeta.steps)
           const rawStepIndex = Number(flowMeta.currentStep ?? 0)
@@ -21776,6 +21864,18 @@ module.exports = {
           )
 
           const nextMetadata = { ...requestMetadata }
+          if (action === 'approve' && isFinalApproval && requestType === 'overtime') {
+            const overtimeSegmentation = await maybeBuildOvertimeSegmentationSnapshot(trx, {
+              orgId,
+              userId: requestRow.user_id,
+              workDate: requestRow.work_date,
+              minutes: requestMetadata.minutes,
+              overtimeRule: requestMetadata.overtimeRule,
+              requestedInAt: requestRow.requested_in_at,
+              requestedOutAt: requestRow.requested_out_at,
+            })
+            if (overtimeSegmentation) nextMetadata.overtimeSegmentation = overtimeSegmentation
+          }
           if (flowMeta.id || flowMeta.name || flowSteps.length > 0) {
             nextMetadata.approvalFlow = {
               id: flowMeta.id,
@@ -21812,8 +21912,6 @@ module.exports = {
           }
 
           let record = null
-          const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
-          const requestType = requestRow.request_type
           if (action === 'approve' && isFinalApproval) {
             // ④ C2 (#2230 design-lock): overtime approval → comp-time (调休) grant.
             // Opt-in (compTimeFromOvertime.enabled, default OFF); v1 = 1:1 minutes, no expiry.
