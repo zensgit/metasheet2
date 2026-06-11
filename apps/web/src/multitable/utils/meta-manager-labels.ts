@@ -31,6 +31,12 @@ export type MetaManagerLabelKey =
   | 'field.formulaDryRun.test' | 'field.formulaDryRun.testWithRecord' | 'field.formulaDryRun.recordHint' | 'field.formulaDryRun.sampleHeading' | 'field.formulaDryRun.evaluating'
   | 'field.formulaDryRun.resultHeading' | 'field.formulaDryRun.errorHeading' | 'field.formulaDryRun.invalidNumber'
   | 'field.formulaDryRun.forbidden' | 'field.formulaDryRun.tooLarge' | 'field.formulaDryRun.requestFailed'
+  // --- M4 / Lane B2: NL→formula AI suggest ---
+  | 'field.formulaSuggest.heading' | 'field.formulaSuggest.hint'
+  | 'field.formulaSuggest.placeholder' | 'field.formulaSuggest.generate'
+  | 'field.formulaSuggest.generating' | 'field.formulaSuggest.candidateHeading'
+  | 'field.formulaSuggest.accept' | 'field.formulaSuggest.reject'
+  | 'field.formulaSuggest.regenerate' | 'field.formulaSuggest.acceptedHint'
   | 'field.allCategories' | 'field.noMatchingFunctions'
   | 'field.maxFiles' | 'field.acceptedMimeTypes'
   | 'field.decimals' | 'field.preserve' | 'field.unit'
@@ -184,6 +190,18 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.formulaDryRun.forbidden': { en: 'You cannot manage fields on this sheet', zh: '你没有管理该表字段的权限' },
   'field.formulaDryRun.tooLarge': { en: 'Expression is too large or complex to test', zh: '表达式过大或过于复杂，无法试算' },
   'field.formulaDryRun.requestFailed': { en: 'Dry-run request failed', zh: '试算请求失败' },
+  // M4 / Lane B2: describe a formula in words → AI proposes ONE candidate you
+  // accept manually (then Test/dry-run validates it). No auto-persist.
+  'field.formulaSuggest.heading': { en: 'Describe the formula (AI)', zh: '用自然语言描述公式（AI）' },
+  'field.formulaSuggest.hint': { en: 'A real AI request consuming quota; the proposal is validated with Test before you keep it.', zh: '这是会消耗配额的真实 AI 请求；接受后请用“试算”校验再保存。' },
+  'field.formulaSuggest.placeholder': { en: 'e.g. unit price times one plus tax rate', zh: '例如：单价乘以（1 加税率）' },
+  'field.formulaSuggest.generate': { en: 'Generate formula', zh: '生成公式' },
+  'field.formulaSuggest.generating': { en: 'Generating…', zh: '生成中…' },
+  'field.formulaSuggest.candidateHeading': { en: 'Suggested expression', zh: '建议表达式' },
+  'field.formulaSuggest.accept': { en: 'Accept', zh: '接受' },
+  'field.formulaSuggest.reject': { en: 'Reject', zh: '拒绝' },
+  'field.formulaSuggest.regenerate': { en: 'Regenerate', zh: '重新生成' },
+  'field.formulaSuggest.acceptedHint': { en: 'Copied to the expression above — run Test to validate it.', zh: '已填入上方表达式——请运行“试算”校验。' },
   'field.formulaSearchPlaceholder': { en: 'Search SUM, IF, %, ^, &...', zh: '搜索 SUM、IF、%、^、&...' },
   'field.allCategories': { en: 'All categories', zh: '全部分类' },
   'field.noMatchingFunctions': { en: 'No matching functions.', zh: '没有匹配的函数。' },

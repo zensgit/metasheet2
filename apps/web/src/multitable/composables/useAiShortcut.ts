@@ -40,6 +40,7 @@ import type {
   AiShortcutPreviewData,
   AiShortcutRunData,
   AiShortcutUsage,
+  AiSuggestFormulaData,
   AiUsageSummary,
 } from '../api/client'
 import type { PatchResult } from '../types'
@@ -105,12 +106,18 @@ export type AiShortcutPreviewOutcome =
   | { data: AiShortcutPreviewData }
   | { error: AiShortcutUiError }
 
+/** M4 / Lane B2: NL→formula suggest outcome (mirrors the preview outcome shape). */
+export type AiFormulaSuggestOutcome =
+  | { data: AiSuggestFormulaData }
+  | { error: AiShortcutUiError }
+
 interface AiShortcutClientLike {
   aiShortcutPreview(
     sheetId: string,
     input: { recordId: string; fieldId?: string; config?: AiShortcutConfigInput },
   ): Promise<AiShortcutPreviewData>
   aiShortcutRun(sheetId: string, input: { recordId: string; fieldId: string }): Promise<AiShortcutRunData>
+  aiSuggestFormula(sheetId: string, input: { instruction: string }): Promise<AiSuggestFormulaData>
 }
 
 export interface UseAiShortcutOptions {
@@ -284,6 +291,33 @@ export function useAiShortcut(opts: UseAiShortcutOptions) {
     }
   }
 
+  /**
+   * Field-manager path (M4 / Lane B2): NL→formula suggest over the inline
+   * instruction (real call, consumes quota — sheet-scoped, no record). Outcome
+   * is returned inline so the manager renders the candidate/errors next to the
+   * description; the shared pending guard + countdown still apply. null =
+   * guarded no-op. Reuses the 'preview' kind for the unified in-flight guard
+   * (suggest has no record/field of its own).
+   */
+  async function suggestFormula(
+    sheetId: string,
+    instruction: string,
+  ): Promise<AiFormulaSuggestOutcome | null> {
+    if (!begin('preview', '', null)) return null
+    try {
+      const data = await opts.client.aiSuggestFormula(sheetId, { instruction })
+      return { data }
+    } catch (err) {
+      const mapped = mapAiShortcutError(err)
+      if (mapped.code === 'RATE_LIMITED' && typeof mapped.retryAfterMs === 'number' && mapped.retryAfterMs > 0) {
+        startCountdown(mapped.retryAfterMs)
+      }
+      return { error: mapped }
+    } finally {
+      state.pending = null
+    }
+  }
+
   /** Run the persisted config and merge the echo through applyPatchResult. */
   async function run(recordId: string, fieldId: string): Promise<void> {
     if (!begin('run', recordId, fieldId)) return
@@ -339,5 +373,5 @@ export function useAiShortcut(opts: UseAiShortcutOptions) {
     })
   }
 
-  return { state, busy, preview, previewWithConfig, run, clear }
+  return { state, busy, preview, previewWithConfig, suggestFormula, run, clear }
 }
