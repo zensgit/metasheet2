@@ -325,5 +325,29 @@ W6 is complete only when:
 5. `docs/development/workflow-automation-completion-plan-20260609.md` is updated
    to mark W6 landed.
 
-After W6 lands, W7 result backwrite may be scoped. W7 still needs a separate
+After W6 landed, W7 result backwrite may be scoped. W7 still needs a separate
 gate because it writes business data and changes record state.
+
+## 12. Closeout — PR #2469
+
+W6-1 landed in #2469 under this scope gate:
+
+- canonical `start_approval` automation action;
+- `workflow_job_v1`-only execution;
+- durable automation/approval bridge row;
+- exactly one approval instance per successful bridge start;
+- suspended C1 job while waiting for approval terminal completion;
+- W5 `approval.approved/rejected/revoked/cancelled` completion events resume or
+  fail the automation tail;
+- auto-approval-on-create is handled without leaving the automation stuck;
+- A5 retry guard blocks duplicate approvals after an approval instance exists,
+  while allowing retry after a pre-instance start failure;
+- asynchronous rejected/revoked/cancelled outcomes mark the `start_approval`
+  step failed and downstream actions skipped, matching executor fail-stop/C1
+  semantics;
+- real-DB tests cover the bridge and resume seam.
+
+The Runtime Red Lines above remain active. #2469 did **not** add result
+backwrite, generic approval triggers, public webhook endpoints, BPMN runtime,
+approval publish/assignment semantic changes, full approval form snapshots in
+automation tables, `return`-as-completion, or legacy/non-job execution.

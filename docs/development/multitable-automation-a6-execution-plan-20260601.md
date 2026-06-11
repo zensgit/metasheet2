@@ -30,13 +30,16 @@ treatment **on purpose**:
   approval coupling). Their *shape* is undefined until a concrete use-case names it.
   A6-3's first runtime slice (A6-3-1 `condition_branch` / exclusive branch v1) **landed via #2321**;
   the A6-3-2 frontend/readability slice **landed via #2339 + #2348**; parallel/join +
-  A6-3-3 stay deferred. A6-4/A6-5 remain plan-level only:
-  scope boundary, dependency order, gate posture, and a pointer to the test surface the
-  A6-0 scout already enumerated.
+  A6-3-3 stay deferred. A6-5's first `start_approval` bridge slice **landed via #2469**
+  as a named cross-surface carve-out on top of A6-2 + W5 completion events. A6-4 remains
+  plan-level only.
 
-Dependency order is fixed (each rung is the next one's floor):
+The original ladder was:
 **A6-1 enable-writer → A6-2 suspend/resume → A6-3 branch/parallel DAG → A6-4 BPMN
-compile/preview adapter → A6-5 approval-as-job.**
+compile/preview adapter → A6-5 approval-as-job.** #2469 intentionally lands only the
+minimal W6-1 `start_approval` bridge slice of A6-5 before A6-4, without unlocking BPMN
+compile/preview, public webhook/token emitters, branch-local wait/nesting, or parallel/join.
+W7 result backwrite remains a separate rung.
 
 ---
 
@@ -203,23 +206,24 @@ join-any stay separate follow rungs.
 - **Test surface:** see A6-0 scout "→ A6-4" (preview side-effect-free, deterministic gap
   report, gateway mappings backed by A6-3 tests, no live BPMN route).
 
-## 5. A6-5 approval-as-job — PLAN-LEVEL (double-gated; last; design deferred)
+## 5. A6-5 approval-as-job — LANDED first slice (#2469); W7 backwrite still separate
 
-- **Adds:** an automation job that starts an approval instance and resumes after the
-  approval completes; approved/rejected/revoked/cancelled terminal outcomes map to
-  C1 outcomes explicitly. `return` is a rework transition, not completion, and
-  must not resume the approval-as-job bridge unless a future non-completion
-  transition scope says otherwise.
-- **Must not:** fold approval state into automation tables; pull in approval trigger
-  bindings or result backwrite implicitly. Approval remains source-of-truth for graphs,
-  assignments, permissions, and version freezing; automation stores only the waiting job
-  and resume linkage. The **approval-completion event contract lands first**, before any
-  bridge.
-- **Depends on:** A6-2 (suspend/resume) and the completion-event contract.
-- **Gate:** **double-gated** — highest value + highest risk; explicitly last.
-- **Test surface:** see A6-0 scout "→ A6-5" (start_approval creates suspended job + one
-  instance, status mapping unambiguous, version-freezing stays with approval, completion
-  resumes exactly one job, missing/deleted instance fails closed).
+- **Adds:** an automation `start_approval` action that starts exactly one approval
+  instance, persists a durable automation/approval bridge row, writes a suspended C1
+  job, and resumes or fails the automation tail from the W5 terminal completion event.
+  Approved / rejected / revoked / cancelled terminal outcomes are mapped explicitly.
+  `return` remains a rework transition, not completion, and does not resume the bridge.
+- **As-built guardrails:** the bridge has deterministic idempotency, exactly-once
+  claim/resume semantics, auto-approval-on-create handling, and an A5 retry guard that
+  blocks duplicate approvals once an approval instance was created while allowing retry
+  after a pre-instance start failure.
+- **Still must not:** fold approval state into automation tables; pull in approval
+  trigger bindings or result backwrite implicitly. Approval remains source-of-truth for
+  graphs, assignments, permissions, and version freezing; automation stores only the
+  waiting job, bridge lineage, and terminal outcome needed to continue the job plane.
+- **Still separate:** W7 approval result backwrite, approval trigger bindings, public
+  webhook/token emitters, branch-local wait/nesting, parallel/join, and BPMN
+  compile/preview all require separate named gates.
 
 ---
 
@@ -243,5 +247,7 @@ join-any stay separate follow rungs.
 - References the TODO checklist for status (does not re-derive or duplicate it) and the
   A6-0/A6-1 scouts for test surface and runtime rationale.
 - A6-1 enable-writer **landed** (#2130/#2191/#2193) and A6-2 suspend/resume **landed**
-  2026-06-03 (#2236 design-lock + #2237 impl, admin-gated v1); A6-3 … A6-5 remain
-  design-deferred and demand-gated, with no schema/mechanics designed here.
+  2026-06-03 (#2236 design-lock + #2237 impl, admin-gated v1); A6-3 exclusive branch
+  v1 **landed** (#2321/#2339/#2348); A6-5 `start_approval` bridge **landed** (#2469).
+  A6-3-3, A6-3 parallel/join, A6-4 BPMN compile/preview, public webhook/token emitter,
+  and W7 result backwrite remain demand-gated.
