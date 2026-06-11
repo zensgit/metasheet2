@@ -5,7 +5,6 @@ import {
   resolveUnscheduledReminderJob,
 } from '../../src/services/AttendanceScheduler'
 import type { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
-import { AttendanceNotifier, type AttendanceNotificationMessage } from '../../src/services/AttendanceNotifier'
 import {
   UnscheduledReminderService,
   clampLookaheadDays,
@@ -37,31 +36,44 @@ describe('UnscheduledReminderService.computeTargetDate', () => {
   })
 })
 
-describe('UnscheduledReminderService.run (claim + dispatch)', () => {
-  it('claims candidates and dispatches the claimed set through the notifier', async () => {
-    const captured: AttendanceNotificationMessage[] = []
-    const notifier = new AttendanceNotifier({
-      channels: [{ name: 'cap', async send(m) { captured.push(m); return { ok: true } } }],
-    })
+describe('UnscheduledReminderService.run (claim + C5 outbox production)', () => {
+  it('claims candidates and produces delivery rows for claimed dispatches', async () => {
     let insertCalls = 0
+    let deliveryCalls = 0
     const query: UnscheduledReminderQuery = async (sql) => {
       if (sql.includes('INSERT INTO attendance_unscheduled_reminder_dispatch')) {
         insertCalls += 1
-        return { rows: [{ org_id: 'default', user_id: 'u1' }, { org_id: 'default', user_id: 'u2' }] as never }
+        return {
+          rows: [
+            { id: '00000000-0000-0000-0000-000000000001', org_id: 'default', user_id: 'u1', target_date: '2026-06-05', reminder_type: 'unscheduled' },
+            { id: '00000000-0000-0000-0000-000000000002', org_id: 'default', user_id: 'u2', target_date: '2026-06-05', reminder_type: 'unscheduled' },
+          ] as never,
+        }
+      }
+      if (sql.includes('FROM attendance_unscheduled_reminder_dispatch d') && sql.includes('NOT EXISTS')) {
+        return {
+          rows: [
+            { id: '00000000-0000-0000-0000-000000000001', org_id: 'default', user_id: 'u1', target_date: '2026-06-05', reminder_type: 'unscheduled' },
+            { id: '00000000-0000-0000-0000-000000000002', org_id: 'default', user_id: 'u2', target_date: '2026-06-05', reminder_type: 'unscheduled' },
+          ] as never,
+        }
+      }
+      if (sql.includes('INSERT INTO attendance_notification_deliveries')) {
+        deliveryCalls += 1
+        return { rows: [{ id: `delivery-${deliveryCalls}-1` }, { id: `delivery-${deliveryCalls}-2` }] as never }
       }
       return { rows: [] }
     }
-    const svc = new UnscheduledReminderService({ query, notifier, now: fixedNow, lookaheadDays: 1 })
+    const svc = new UnscheduledReminderService({ query, now: fixedNow, lookaheadDays: 1 })
     const result = await svc.run()
-    expect(result).toEqual({ targetDate: '2026-06-05', claimed: 2, dispatched: 2 })
-    expect(captured.map((m) => m.userId)).toEqual(['u1', 'u2'])
-    expect(captured[0].kind).toBe('unscheduled_shift_reminder')
+    expect(result).toEqual({ targetDate: '2026-06-05', claimed: 2, deliveries: 2 })
     expect(insertCalls).toBe(1)
+    expect(deliveryCalls).toBe(1)
   })
 
-  it('claims nothing → no dispatch, dispatched=0 (and never throws with 0 channels)', async () => {
-    const svc = new UnscheduledReminderService({ query: emptyQuery, notifier: new AttendanceNotifier(), now: fixedNow })
-    expect(await svc.run()).toEqual({ targetDate: '2026-06-05', claimed: 0, dispatched: 0 })
+  it('claims/reconciles nothing → produces no deliveries', async () => {
+    const svc = new UnscheduledReminderService({ query: emptyQuery, now: fixedNow })
+    expect(await svc.run()).toEqual({ targetDate: '2026-06-05', claimed: 0, deliveries: 0 })
   })
 
   it('re-entrancy guard: a second run while the first is in-flight is an immediate no-op', async () => {
@@ -71,10 +83,10 @@ describe('UnscheduledReminderService.run (claim + dispatch)', () => {
       if (sql.includes('INSERT')) { await gate; return { rows: [{ org_id: 'default', user_id: 'u1' }] as never } }
       return { rows: [] }
     }
-    const svc = new UnscheduledReminderService({ query, notifier: new AttendanceNotifier(), now: fixedNow })
+    const svc = new UnscheduledReminderService({ query, now: fixedNow })
     const first = svc.run()
     const second = await svc.run() // running guard → returns before touching the DB
-    expect(second).toEqual({ targetDate: '2026-06-05', claimed: 0, dispatched: 0 })
+    expect(second).toEqual({ targetDate: '2026-06-05', claimed: 0, deliveries: 0 })
     release()
     expect((await first).claimed).toBe(1)
   })

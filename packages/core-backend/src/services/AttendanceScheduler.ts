@@ -15,8 +15,8 @@
  * Jobs per cycle (each independently guarded, one failing never affects the others):
  *   - the comp-time EXPIRY job (④ C4, always present);
  *   - registered secondary jobs such as the ⑤ UNSCHEDULED-REMINDER job and future A2 auto-shift jobs.
- * Reuses THIS scheduler base — never a second scheduler. The notification path lives in AttendanceNotifier
- * (no channels by default ⇒ the scheduler sends nothing externally; ⑤'s reminder record is internal).
+ * Reuses THIS scheduler base — never a second scheduler. Notification delivery is a separate C5 worker
+ * path; scheduler jobs may produce outbox rows but must not call external channels directly.
  */
 
 import { randomBytes } from 'crypto'
@@ -28,7 +28,6 @@ import {
   type AttendanceExpiryService,
   type ExpiredCompTimeBalance,
 } from './AttendanceExpiryService'
-import { AttendanceNotifier, createAttendanceNotifierChannelsFromEnv } from './AttendanceNotifier'
 import { UnscheduledReminderService } from './UnscheduledReminderService'
 
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000
@@ -350,16 +349,13 @@ export function resolveAttendanceSchedulerIntervalMs(): number | undefined {
 
 /**
  * ⑤ Opt-in: the unscheduled-reminder job, only when ATTENDANCE_UNSCHEDULED_REMINDER_ENABLED=true
- * (default OFF → null → the scheduler runs expiry only, ④ unchanged). The notifier is built from env
- * channels (createAttendanceNotifierChannelsFromEnv → [] today), so the job's only effect is the internal
- * dispatch record — no external send until a channel is configured (C5). Lookahead defaults to 1 day and
- * is clamped inside the service.
+ * (default OFF → null → the scheduler runs expiry only, ④ unchanged). The job produces C5 outbox rows
+ * only; the delivery worker is the only path that may call a real notification channel. Lookahead defaults
+ * to 1 day and is clamped inside the service.
  */
 export function resolveUnscheduledReminderJob(): AttendanceSchedulerJob | null {
   if (process.env.ATTENDANCE_UNSCHEDULED_REMINDER_ENABLED !== 'true') return null
-  const notifier = new AttendanceNotifier({ channels: createAttendanceNotifierChannelsFromEnv() })
   const service = new UnscheduledReminderService({
-    notifier,
     lookaheadDays: Number(process.env.ATTENDANCE_UNSCHEDULED_REMINDER_LOOKAHEAD_DAYS),
   })
   return {
