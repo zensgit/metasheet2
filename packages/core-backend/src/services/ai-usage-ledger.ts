@@ -315,6 +315,93 @@ export async function reserveAiUsage(
   })
 }
 
+/**
+ * Retention sweep (ladder #9): DELETE ledger rows older than the retention
+ * window. The M2 ledger inserts a row for EVERY attempt (incl. zero-token
+ * blocked/quota_exhausted rows) so a rate-limit storm is a DB-write
+ * amplification vector and the table grows unbounded — this is the GAP the
+ * migration header flagged (NiFi benchmark #1880).
+ *
+ * QUOTA NON-INTERFERENCE (the keystone): `sumAiUsageWindows` aggregates only
+ * rows with `occurred_at >= date_trunc('week', now())` — at most ~7 days old.
+ * The retention floor (DEFAULT 90, env floor 7 days) is always ≥ the quota
+ * window, so a sweep can only delete rows that are ALREADY quota-inert. Quota
+ * SUMs (daily/weekly tokens, instance daily USD) are untouched by any sweep.
+ *
+ * PLAIN DELETE, no aggregate-then-delete: quota SUMs are daily/weekly per the
+ * reserve-then-settle design, so rows older than ~2 days are already
+ * quota-inert; 90 days gives audit/cost-history headroom. The DELETE is
+ * bounded per pass (ctid sub-select) so a backlog drains over several ticks
+ * instead of one long-running statement under a rate-limit-storm table.
+ */
+
+/** Operational default retention window (env-overridable). */
+export const AI_USAGE_LEDGER_RETENTION_DEFAULT_DAYS = 90
+
+/**
+ * Hard floor so an env mis-set (e.g. `0` / `1`) can never collapse the
+ * retention window below the widest quota window (the weekly token cap), which
+ * would let a sweep delete rows the quota SUMs still count.
+ */
+export const AI_USAGE_LEDGER_RETENTION_MIN_DAYS = 7
+
+/** Per-pass DELETE bound — drains a backlog over ticks, never one huge statement. */
+export const AI_USAGE_LEDGER_RETENTION_DEFAULT_BATCH = 5000
+
+export interface AiUsageRetentionConfig {
+  /** Resolved retention window in days (already floored). */
+  retentionDays: number
+  /** Opt-out: when true the sweep is a no-op (deletes 0). */
+  disabled: boolean
+  /** Per-pass row cap (defaults to AI_USAGE_LEDGER_RETENTION_DEFAULT_BATCH). */
+  batchSize?: number
+}
+
+/**
+ * Resolve the retention config from the environment. Defaults preserve today's
+ * behavior except the new sweep (90-day window; on an empty/young table it
+ * deletes 0). The retention window is floored at AI_USAGE_LEDGER_RETENTION_MIN_DAYS
+ * to keep the foot-gun shut.
+ */
+export function resolveAiUsageRetentionConfig(env: NodeJS.ProcessEnv = process.env): AiUsageRetentionConfig {
+  const disabled = env.MULTITABLE_AI_LEDGER_RETENTION_DISABLED === '1'
+  const rawDays = Number(env.MULTITABLE_AI_LEDGER_RETENTION_DAYS)
+  const requestedDays =
+    Number.isFinite(rawDays) && rawDays > 0 ? rawDays : AI_USAGE_LEDGER_RETENTION_DEFAULT_DAYS
+  const retentionDays = Math.max(AI_USAGE_LEDGER_RETENTION_MIN_DAYS, Math.floor(requestedDays))
+  return { retentionDays, disabled }
+}
+
+/**
+ * Delete ledger rows older than the retention window. Returns the number of
+ * rows deleted (0 when disabled, or when nothing is past the window — the
+ * empty/young-table case). The DELETE is bounded by `batchSize` via a ctid
+ * sub-select so one pass never blocks the table during a backlog drain.
+ *
+ * CRITICAL: the cutoff is `now() - interval '<retentionDays> days'`. Because
+ * `retentionDays >= AI_USAGE_LEDGER_RETENTION_MIN_DAYS (7) >=` the widest quota
+ * window (`date_trunc('week', now())`), this can only delete quota-inert rows;
+ * the live quota SUMs are never affected.
+ */
+export async function sweepAiUsageLedgerRetention(
+  query: AiUsageQueryFn,
+  config: AiUsageRetentionConfig,
+): Promise<number> {
+  if (config.disabled) return 0
+  const retentionDays = Math.max(AI_USAGE_LEDGER_RETENTION_MIN_DAYS, Math.floor(config.retentionDays))
+  const batchSize = Math.max(1, Math.floor(config.batchSize ?? AI_USAGE_LEDGER_RETENTION_DEFAULT_BATCH))
+  const result = await query(
+    `DELETE FROM ${AI_USAGE_LEDGER_TABLE}
+      WHERE ctid IN (
+        SELECT ctid FROM ${AI_USAGE_LEDGER_TABLE}
+         WHERE occurred_at < now() - ($1::int * interval '1 day')
+         LIMIT $2
+      )`,
+    [retentionDays, batchSize],
+  )
+  return result.rowCount ?? 0
+}
+
 export interface AiUsageSettlement {
   promptTokens: number
   completionTokens: number

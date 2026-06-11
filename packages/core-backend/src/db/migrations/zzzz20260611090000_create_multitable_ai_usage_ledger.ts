@@ -7,9 +7,11 @@
  * (zzzz20260414100001_create_automation_executions_and_dashboard_charts.ts).
  *
  * Never stores prompt or completion text; `error` is redacted before insert
- * (services/ai-usage-ledger.ts). No TTL/aging automation exists yet — the
- * (occurred_at DESC) index keeps manual archiving cheap (known follow-up, NiFi
- * benchmark #1880 GAP).
+ * (services/ai-usage-ledger.ts). Retention/aging is a DELETE policy (NOT a
+ * schema change) shipped in ladder #9: sweepAiUsageLedgerRetention +
+ * LedgerRetentionScheduler delete rows past the retention window (default 90d,
+ * env-overridable, floored at 7d so a sweep never crosses a quota window). The
+ * (occurred_at DESC) index keeps that sweep cheap (NiFi benchmark #1880 GAP).
  *
  * Tables: multitable_ai_usage_ledger
  * Breaking: No
