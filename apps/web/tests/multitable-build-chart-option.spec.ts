@@ -244,4 +244,86 @@ describe('buildChartOption', () => {
     }, { variant: 'area' }))
     expect(o.series.every((s: any) => s.areaStyle !== undefined && s.stack === undefined)).toBe(true)
   })
+
+  // --- S3: first-class area / funnel / gauge chart types ---
+
+  it('S3 area: renders as a line series with areaStyle forced (no variant needed)', () => {
+    const o = opt(buildChartOption(chart('area', [{ label: 'A', value: 1 }, { label: 'B', value: 2 }])))
+    expect(o.series[0].type).toBe('line')
+    expect(o.series[0].areaStyle).toBeDefined()
+    expect(o.xAxis.type).toBe('category')
+    expect(o.xAxis.data).toEqual(['A', 'B'])
+    expect(o.series[0].data.map((d: any) => d.value)).toEqual([1, 2])
+  })
+
+  it('S3 area: keeps line conventions — no value labels, no ECharts legend/title', () => {
+    const o = opt(buildChartOption(chart('area', [{ label: 'A', value: 1 }]), { title: 'T' }))
+    expect(o.series[0].label.show).toBe(false)
+    expect(o.legend).toBeUndefined()
+    expect(o.title).toBeUndefined()
+  })
+
+  it('S3 area: a (defensive) series split renders overlaid area lines, never stacked', () => {
+    const o = opt(buildChartOption({
+      chartType: 'area',
+      dataPoints: [{ label: 'Jan', value: 3 }, { label: 'Feb', value: 5 }],
+      series: [{ name: 'A', data: [2, 4] }, { name: 'B', data: [1, 1] }],
+    }))
+    expect(o.series).toHaveLength(2)
+    expect(o.series.every((s: any) => s.type === 'line' && s.areaStyle !== undefined && s.stack === undefined)).toBe(true)
+  })
+
+  it('S3 area: regression — a plain line stays areaStyle-free (area type does not leak into line)', () => {
+    const o = opt(buildChartOption(chart('line', [{ label: 'A', value: 1 }])))
+    expect(o.series[0].areaStyle).toBeUndefined()
+  })
+
+  it('S3 funnel: maps dataPoints to label-less {name,value} stages (HTML legend carries values)', () => {
+    const o = opt(buildChartOption(chart('funnel', [{ label: 'Visit', value: 100 }, { label: 'Buy', value: 30 }])))
+    expect(o.series[0].type).toBe('funnel')
+    expect(o.series[0].data).toEqual([{ name: 'Visit', value: 100 }, { name: 'Buy', value: 30 }])
+    expect(o.series[0].label.show).toBe(false)
+    expect(o.legend).toBeUndefined()
+    expect(o.tooltip.trigger).toBe('item')
+  })
+
+  it('S3 funnel: preserves backend ordering (sort "none" — dataSource.sortBy stays authoritative)', () => {
+    const o = opt(buildChartOption(chart('funnel', [{ label: 'small', value: 1 }, { label: 'big', value: 9 }])))
+    expect(o.series[0].sort).toBe('none')
+    expect(o.series[0].data.map((d: any) => d.name)).toEqual(['small', 'big'])
+  })
+
+  it('S3 funnel: honors per-point colors via itemStyle, palette otherwise', () => {
+    const o = opt(buildChartOption(chart('funnel', [{ label: 'A', value: 1, color: '#123456' }])))
+    expect(o.series[0].data[0].itemStyle.color).toBe('#123456')
+    expect(o.color).toEqual(CHART_COLORS)
+  })
+
+  it('S3 gauge: dials the FIRST data point against the dataPoints total (share-of-total)', () => {
+    const o = opt(buildChartOption({
+      chartType: 'gauge',
+      dataPoints: [{ label: 'open', value: 30 }, { label: 'closed', value: 70 }],
+      total: 100,
+    }))
+    expect(o.series[0].type).toBe('gauge')
+    expect(o.series[0].data).toEqual([{ name: 'open', value: 30 }])
+    expect(o.series[0].min).toBe(0)
+    expect(o.series[0].max).toBe(100)
+  })
+
+  it('S3 gauge: empty dataPoints → value 0 with max clamped to ≥ 1 (never a degenerate dial)', () => {
+    const o = opt(buildChartOption({ chartType: 'gauge', dataPoints: [], total: 0 }))
+    expect(o.series[0].data).toEqual([{ name: '', value: 0 }])
+    expect(o.series[0].max).toBe(1)
+  })
+
+  it('S3 gauge: without a total the value itself is the max (full dial)', () => {
+    const o = opt(buildChartOption(chart('gauge', [{ label: 'A', value: 42 }])))
+    expect(o.series[0].max).toBe(42)
+  })
+
+  it('S3: number/table still render as HTML (null option) after the type additions', () => {
+    expect(buildChartOption(chart('number', [{ label: 'x', value: 1 }]))).toBeNull()
+    expect(buildChartOption(chart('table', [{ label: 'x', value: 1 }]))).toBeNull()
+  })
 })

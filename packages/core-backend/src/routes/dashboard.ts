@@ -45,7 +45,7 @@ import {
 } from '../multitable/permission-service'
 
 const dashboardService = new DashboardService()
-const CHART_TYPES = new Set<ChartType>(['bar', 'line', 'pie', 'number', 'table'])
+const CHART_TYPES = new Set<ChartType>(['bar', 'line', 'pie', 'number', 'table', 'area', 'funnel', 'gauge'])
 const AGGREGATION_FUNCTIONS = new Set<AggregationFunction>(['count', 'sum', 'avg', 'min', 'max', 'count_distinct'])
 const AGGREGATIONS_REQUIRING_FIELD = new Set<AggregationFunction>(['sum', 'avg', 'min', 'max', 'count_distinct'])
 const DATE_GROUPINGS = new Set(['day', 'week', 'month', 'quarter', 'year'])

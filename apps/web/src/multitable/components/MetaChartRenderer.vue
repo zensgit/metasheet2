@@ -7,12 +7,13 @@
       <span>{{ viewRenderLabel('chart.restrictedHint', isZh) }}</span>
     </div>
 
-    <!-- bar / line / pie → ECharts canvas. Title + (pie) legend stay as HTML chrome. -->
+    <!-- bar / line / pie / area / funnel / gauge → ECharts canvas. Title + (pie/funnel) legend stay as HTML chrome. -->
     <template v-else-if="isEChartsType">
-      <div class="meta-chart__plot" :class="{ 'meta-chart__plot--pie': chartData.chartType === 'pie' }">
+      <div class="meta-chart__plot" :class="{ 'meta-chart__plot--pie': hasPointLegend }">
         <div ref="chartEl" class="meta-chart__echarts" data-chart-canvas="true"></div>
+        <!-- S3: funnel shares the pie-style point legend (stages are label-less on the canvas). -->
         <div
-          v-if="chartData.chartType === 'pie' && displayConfig?.showLegend !== false"
+          v-if="hasPointLegend && displayConfig?.showLegend !== false"
           class="meta-chart__legend"
           data-legend="true"
         >
@@ -69,17 +70,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts/core'
-import { BarChart, LineChart, PieChart } from 'echarts/charts'
+import { BarChart, LineChart, PieChart, FunnelChart, GaugeChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { ChartData, ChartDisplayConfig } from '../types'
-import { buildChartOption, CHART_COLORS } from '../utils/buildChartOption'
+import { buildChartOption, CHART_COLORS, ECHARTS_CHART_TYPES } from '../utils/buildChartOption'
 import { useLocale } from '../../composables/useLocale'
 import { viewRenderLabel } from '../utils/meta-view-render-labels'
 
-// Tree-shakeable: only the chart types + components actually used. Legend/title are HTML
-// chrome (not ECharts components), so LegendComponent/TitleComponent are deliberately absent.
-echarts.use([BarChart, LineChart, PieChart, GridComponent, TooltipComponent, CanvasRenderer])
+// Tree-shakeable: only the chart types + components actually used (S3 adds funnel/gauge; the
+// 'area' type reuses LineChart). Legend/title are HTML chrome (not ECharts components), so
+// LegendComponent/TitleComponent are deliberately absent.
+echarts.use([BarChart, LineChart, PieChart, FunnelChart, GaugeChart, GridComponent, TooltipComponent, CanvasRenderer])
 
 const props = defineProps<{
   chartData: ChartData
@@ -87,10 +89,10 @@ const props = defineProps<{
 }>()
 const { isZh } = useLocale()
 
-const isEChartsType = computed(() =>
-  props.chartData.chartType === 'bar'
-  || props.chartData.chartType === 'line'
-  || props.chartData.chartType === 'pie',
+const isEChartsType = computed(() => ECHARTS_CHART_TYPES.has(props.chartData.chartType))
+// pie + funnel share the HTML "swatch + label + value" point legend (their canvas marks are label-less).
+const hasPointLegend = computed(() =>
+  props.chartData.chartType === 'pie' || props.chartData.chartType === 'funnel',
 )
 const isRestricted = computed(() => props.chartData.metadata?.restricted === true)
 const hasSeriesLegend = computed(() =>
