@@ -121,7 +121,8 @@ operate a practical business workflow using existing product surfaces:
 | W5-1 | Approval completion event contract implementation | Landed #2414 (`184f2293c`) | `approval.approved/rejected/revoked/cancelled` payload is versioned, redacted, idempotent, emitted post-commit, and tested without adding automation action yet. `return` remains a non-terminal rework transition. |
 | W6-0 | Automation `start_approval` scope-gate | Scope-gate document added; runtime not started | `automation-start-approval-scope-gate-20260610.md` locks action config, idempotency, bridge persistence, waiting/resume semantics, redaction, and tests. |
 | W6-1 | Automation `start_approval` runtime | Landed #2469 | Starts one approval instance from a published template, persists the approval bridge, creates a suspended C1 job, resumes/fails from W5 terminal completion events, and guards retry duplicates. |
-| W7 | Approval result backwrite | Not started; after W5/W6 | Explicit mapping writes approved/rejected/revoked/cancelled outcomes to multitable record fields with audit and permission checks; `return` transition backwrite needs a separate named scope if required. |
+| W7-0 | Approval result backwrite scope-gate | Scope-gate document added; runtime not started | `automation-approval-result-backwrite-scope-gate-20260611.md` locks explicit mapping, idempotency, permission/field guards, redaction, and tests. |
+| W7-1 | Approval result backwrite runtime | Not started; after W6 operator smoke or named runtime unlock | Explicit mapping writes approved/rejected/revoked/cancelled outcomes to multitable record fields with audit and permission checks; `return` transition backwrite needs a separate named scope if required. |
 | W8 | BPMN compile/preview adapter | Not started; after W3 minimum | Constrained BPMN subset compiles into automation/approval preview plus gap report; no live execution route. |
 | W9 | Public webhook resume token emitter | Not started; use-case gated | External consumer can receive a token/callback URL safely; auth, expiry, replay, and redaction are locked before public route. |
 | W10 | Field-visibility / richer approval authoring | Optional follow-up | Existing `visibilityRule` data can be authored, not only preserved; unsupported graph constructs remain fail-closed. |
@@ -140,11 +141,11 @@ Why:
    start an approval through `start_approval`, and W5-1 gives it a stable
    terminal completion signal.
 
-The next cross-surface candidate is **W7 approval result backwrite**, but it
-must still start from a separate scope gate because it writes business data and
-changes record state. Do not jump straight to BPMN before the remaining graph
-prerequisites are named. BPMN gateway preview still needs branch/parallel
-semantics to map to.
+The next cross-surface candidate is **W7 approval result backwrite**. W7-0 now
+has a scope-gate document, but W7-1 runtime remains gated because it writes
+business data and changes record state. Do not jump straight to BPMN before the
+remaining graph prerequisites are named. BPMN gateway preview still needs
+branch/parallel semantics to map to.
 
 ## 5. Non-goals for v1
 
@@ -169,6 +170,8 @@ needed, one verification/runbook:
 - Cross-surface completion source: this document.
 - W6 `start_approval` bridge scope:
   `automation-start-approval-scope-gate-20260610.md`.
+- W7 approval result backwrite scope:
+  `automation-approval-result-backwrite-scope-gate-20260611.md`.
 
 If code lands but the tracker still says "not started", the tracker is wrong
 and should be corrected before starting a new rung.

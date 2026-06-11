@@ -221,9 +221,11 @@ join-any stay separate follow rungs.
   trigger bindings or result backwrite implicitly. Approval remains source-of-truth for
   graphs, assignments, permissions, and version freezing; automation stores only the
   waiting job, bridge lineage, and terminal outcome needed to continue the job plane.
-- **Still separate:** W7 approval result backwrite, approval trigger bindings, public
-  webhook/token emitters, branch-local wait/nesting, parallel/join, and BPMN
-  compile/preview all require separate named gates.
+- **Still separate:** W7 approval result backwrite runtime, approval trigger bindings,
+  public webhook/token emitters, branch-local wait/nesting, parallel/join, and BPMN
+  compile/preview all require separate named gates. W7-0 now has a docs-only scope
+  gate (`automation-approval-result-backwrite-scope-gate-20260611.md`); W7-1 runtime
+  remains gated.
 
 ---
 
@@ -250,4 +252,4 @@ join-any stay separate follow rungs.
   2026-06-03 (#2236 design-lock + #2237 impl, admin-gated v1); A6-3 exclusive branch
   v1 **landed** (#2321/#2339/#2348); A6-5 `start_approval` bridge **landed** (#2469).
   A6-3-3, A6-3 parallel/join, A6-4 BPMN compile/preview, public webhook/token emitter,
-  and W7 result backwrite remain demand-gated.
+  and W7 result backwrite runtime remain demand-gated.
