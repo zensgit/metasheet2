@@ -235,7 +235,7 @@ export class AutomationJobService {
         .selectFrom('multitable_automation_approval_bridges')
         .select(['step_index', 'approval_instance_id'])
         .where('execution_id', '=', executionId)
-        .where('status', '=', 'pending')
+        .where('approval_instance_id', 'is not', null)
         .orderBy('created_at', 'asc')
         .execute()
       for (const bridge of approvalBridges) {

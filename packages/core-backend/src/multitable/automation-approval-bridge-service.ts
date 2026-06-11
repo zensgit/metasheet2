@@ -14,7 +14,8 @@ import { ServiceError } from '../services/ApprovalBridgeService'
 import { ApprovalProductService } from '../services/ApprovalProductService'
 import type { ApprovalCompletionEventV1, ApprovalCompletionOutcome } from '../services/ApprovalCompletionEvent'
 import type { UnifiedApprovalDTO } from '../services/approval-bridge-types'
-import { isAdmin, listUserPermissions, userHasPermission } from '../rbac/service'
+import { isAdmin } from '../rbac/service'
+import { filterPermissionCodesByNamespaceAdmission } from '../rbac/namespace-admission'
 import { redactValue } from './automation-log-redact'
 import { AutomationJobService } from './automation-job-service'
 import { computeActionFingerprint, type ActionFingerprint } from './automation-suspension-service'
@@ -93,6 +94,26 @@ function hasPermissionCode(permissionCodes: string[], permissionCode: string): b
   if (permissionCodes.includes(permissionCode) || permissionCodes.includes('*:*')) return true
   const resource = permissionCode.split(':')[0]
   return resource ? permissionCodes.includes(`${resource}:*`) : false
+}
+
+async function listRbacPermissionCodes(userId: string): Promise<string[]> {
+  const result = await query<{ code: string }>(
+    `SELECT DISTINCT permission_code AS code FROM (
+       SELECT up.permission_code
+         FROM user_permissions up
+        WHERE up.user_id = $1
+       UNION ALL
+       SELECT rp.permission_code
+         FROM user_roles ur
+         JOIN role_permissions rp ON rp.role_id = ur.role_id
+        WHERE ur.user_id = $1
+     ) t`,
+    [userId],
+  )
+  return filterPermissionCodesByNamespaceAdmission(
+    userId,
+    result.rows.map((row) => row.code),
+  )
 }
 
 function rootIdFor(execution: Pick<AutomationExecution, 'id' | 'rerunOfExecutionId'> & { rootExecutionId?: string }): string {
@@ -353,11 +374,10 @@ export class AutomationApprovalBridgeService {
       throw new ServiceError('start_approval requester user not found or inactive', 404, 'START_APPROVAL_REQUESTER_NOT_FOUND')
     }
 
-    const permissions = await listUserPermissions(userId)
+    const permissions = await listRbacPermissionCodes(userId)
     const roles = await this.loadUserRoles(userId, user.role)
     const allowed = await isAdmin(userId)
       || hasPermissionCode(permissions, 'approvals:write')
-      || await userHasPermission(userId, 'approvals:write')
     if (!allowed) {
       throw new ServiceError('start_approval requester lacks approvals:write', 403, 'START_APPROVAL_PERMISSION_DENIED')
     }

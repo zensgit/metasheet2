@@ -570,6 +570,12 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       return new Response('OK', { status: 200 })
     }) as never)
     try {
+      await q(
+        `UPDATE users
+            SET permissions = $2::jsonb
+          WHERE id = $1`,
+        [NO_APPROVAL_PERMISSION, JSON.stringify(['approvals:write'])],
+      )
       const templateId = await createPublishedTemplate()
       const ruleId = await createStartApprovalRule(svc, templateId)
       await seedSheetRecord('No approval permission')
@@ -618,6 +624,73 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
         [templateId],
       )
       expect(approvals.rows).toHaveLength(0)
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('resumed bridge still hydrates manual_task descriptor while job row remains suspended', async () => {
+    const svc = makeAutomationService()
+    try {
+      const templateId = await createPublishedTemplate()
+      const ruleId = await createStartApprovalRule(svc, templateId)
+      await seedSheetRecord('Post-claim settle window')
+      const execRule = {
+        id: ruleId,
+        name: 'W6 post-claim settle window',
+        sheetId: SHEET,
+        trigger: { type: 'record.created', config: {} },
+        actions: [
+          {
+            type: 'start_approval',
+            config: {
+              templateId,
+              formDataMapping: { summary: 'Record {{record.title}} needs approval' },
+              requester: { mode: 'trigger_actor' },
+            },
+          },
+          { type: 'send_webhook', config: { url: 'https://example.test/w6-post-claim-tail' } },
+        ],
+        enabled: true,
+        createdBy: REQUESTER,
+        createdAt: new Date(TS).toISOString(),
+        executionMode: 'workflow_job_v1',
+      }
+
+      const execution = await svc.executeRule(execRule as never, {
+        sheetId: SHEET,
+        recordId: RECORD,
+        data: { title: 'Post-claim settle window' },
+        actorId: REQUESTER,
+      })
+      executionIds.push(execution.id)
+
+      const bridge = await q(
+        `SELECT approval_instance_id
+           FROM multitable_automation_approval_bridges
+          WHERE execution_id = $1`,
+        [execution.id],
+      )
+      expect(bridge.rows).toHaveLength(1)
+      approvalIds.push(bridge.rows[0].approval_instance_id)
+
+      await q(
+        `UPDATE multitable_automation_approval_bridges
+            SET status = 'resumed',
+                outcome = 'approved',
+                completed_at = NOW(),
+                resumed_at = NOW()
+          WHERE execution_id = $1`,
+        [execution.id],
+      )
+
+      const jobs = await svc.jobs.listByExecution(execution.id)
+      expect(jobs).toHaveLength(1)
+      expect(jobs[0]).toMatchObject({
+        status: 'suspended',
+        suspend: { reason: 'manual_task', resumeToken: bridge.rows[0].approval_instance_id },
+      })
+      expect(() => normalizeWorkflowJob(jobs[0])).not.toThrow()
     } finally {
       svc.shutdown()
     }
