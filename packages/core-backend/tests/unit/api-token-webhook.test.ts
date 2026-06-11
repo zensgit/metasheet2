@@ -28,7 +28,7 @@ function makeChain(): Record<string, unknown> {
     'limit', 'offset', 'groupBy', 'insertInto', 'values',
     'onConflict', 'columns', 'doUpdateSet',
     'updateTable', 'set', 'deleteFrom', 'returningAll',
-    'leftJoin',
+    'leftJoin', 'forUpdate', 'skipLocked',
   ]
   for (const m of methods) {
     self[m] = vi.fn(chainFn)

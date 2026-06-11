@@ -23,6 +23,10 @@ const logger = new Logger('WebhookService')
 const DELIVERY_TIMEOUT_MS = 5_000
 const MAX_CONSECUTIVE_FAILURES = 10
 const BASE_RETRY_DELAY_MS = 1_000
+// Lease window a retry tick holds a claimed delivery for (review MINOR-1):
+// long enough to out-live the HTTP attempt + backoff recompute so a concurrent
+// replica's tick skips it; short enough that a crashed tick's row is retried soon.
+const RETRY_CLAIM_LEASE_MS = DELIVERY_TIMEOUT_MS * 4
 
 function generateId(): string {
   return randomBytes(16).toString('hex')
@@ -404,20 +408,42 @@ export class WebhookService {
    * Retry all failed deliveries that are due for retry.
    */
   async retryFailedDeliveries(): Promise<number> {
-    const rows = await this.db
-      .selectFrom('multitable_webhook_deliveries')
-      .selectAll()
-      .where('status', '=', 'pending')
-      .execute()
-
+    // Cross-replica safety (review MINOR-1): claim due rows under
+    // FOR UPDATE SKIP LOCKED in a short transaction and lease them forward by
+    // bumping next_retry_at, so a concurrent tick on another replica skips
+    // them — then deliver OUTSIDE the transaction (no DB lock held across the
+    // HTTP attempt, mirroring the M2 reserve-then-settle posture). If this
+    // tick crashes mid-delivery the lease expires and the row is retried.
     const now = Date.now()
+    const leaseUntil = new Date(now + RETRY_CLAIM_LEASE_MS)
+    const claimed = await this.db.transaction().execute(async (trx) => {
+      const due = await trx
+        .selectFrom('multitable_webhook_deliveries')
+        .selectAll()
+        .where('status', '=', 'pending')
+        .where('next_retry_at', 'is not', null)
+        .where('next_retry_at', '<=', new Date(now))
+        .forUpdate()
+        .skipLocked()
+        .execute()
+      if (due.length > 0) {
+        await trx
+          .updateTable('multitable_webhook_deliveries')
+          .set({ next_retry_at: leaseUntil })
+          .where(
+            'id',
+            'in',
+            due.map((r) => String((r as { id: string }).id)),
+          )
+          .execute()
+      }
+      return due
+    })
+
     let retried = 0
 
-    for (const row of rows) {
+    for (const row of claimed) {
       const delivery = rowToDelivery(row as Parameters<typeof rowToDelivery>[0])
-
-      if (!delivery.nextRetryAt) continue
-      if (new Date(delivery.nextRetryAt).getTime() > now) continue
 
       const wh = await this.getWebhookById(delivery.webhookId)
       if (!wh || !wh.active) {

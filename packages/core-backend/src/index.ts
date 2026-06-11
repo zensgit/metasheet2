@@ -100,6 +100,13 @@ import {
   startAttendanceScheduler,
   stopAttendanceScheduler,
 } from './services/AttendanceScheduler'
+import {
+  resolveWebhookRetrySchedulerIntervalMs,
+  resolveWebhookRetrySchedulerLeaderOptions,
+  startWebhookRetryScheduler,
+  stopWebhookRetryScheduler,
+} from './services/WebhookRetryScheduler'
+import { initWebhookEventBridge } from './multitable/webhook-event-bridge'
 import { ApprovalBreachNotifier } from './services/ApprovalBreachNotifier'
 import {
   createApprovalBreachChannelsFromEnv,
@@ -1861,6 +1868,14 @@ export class MetaSheetServer {
       }
     })())
 
+    shutdownTasks.push((async () => {
+      try {
+        stopWebhookRetryScheduler()
+      } catch (err) {
+        this.logger.warn(`Webhook retry scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 4. Destroy API Gateway resources (only if one was constructed during start()).
     shutdownTasks.push((async () => {
       try {
@@ -2051,6 +2066,38 @@ export class MetaSheetServer {
       this.logger.info(scheduler ? 'Attendance scheduler initialized' : 'Attendance scheduler disabled (ATTENDANCE_SCHEDULER_ENABLED!=true)')
     } catch (e) {
       this.logger.error('Attendance scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // Webhook outbound pipeline. Two independent halves wired here:
+    //   (1) the event bridge — subscribes the multitable record/comment topics on the
+    //       module-singleton integration eventBus (the SAME bus the record-write path
+    //       emits on; independent of core/EventBusService.initialize() above) and
+    //       forwards them to WebhookService.deliverEvent. Webhooks are DB-row-driven,
+    //       not env-gated, so this is wired unconditionally; the bridge keeps its own
+    //       initialized idempotency guard, so a duplicate call is a no-op.
+    //   (2) the retry tick — a periodic scan that re-attempts `pending` deliveries past
+    //       their next_retry_at, mirroring the SLA scheduler's leader-elected interval.
+    //       Enabled by default (opt out via WEBHOOK_RETRY_SCHEDULER_DISABLED=1).
+    try {
+      initWebhookEventBridge()
+      this.logger.info('Webhook event bridge initialized')
+    } catch (e) {
+      this.logger.error('Webhook event bridge initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    try {
+      const webhookRetryLeaderOptions = await resolveWebhookRetrySchedulerLeaderOptions()
+      const webhookRetryScheduler = startWebhookRetryScheduler({
+        leaderOptions: webhookRetryLeaderOptions,
+        intervalMs: resolveWebhookRetrySchedulerIntervalMs(),
+      })
+      this.logger.info(
+        webhookRetryScheduler
+          ? 'Webhook retry scheduler initialized'
+          : 'Webhook retry scheduler disabled (WEBHOOK_RETRY_SCHEDULER_DISABLED=1)',
+      )
+    } catch (e) {
+      this.logger.error('Webhook retry scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
     // 加载插件并启动 HTTP 服务
