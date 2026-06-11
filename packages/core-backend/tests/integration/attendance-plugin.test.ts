@@ -13416,6 +13416,7 @@ attendanceIntegrationDescribe(
     const orgId = `c5-observe-${runSuffix}`
     const adminId = `c5-observe-admin-${runSuffix}`
     const readOnlyId = `c5-observe-reader-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
     const pool = new Pool({ connectionString: dbUrl })
 
     async function tokenFor(uid: string, role: string, perms: string): Promise<string | null> {
@@ -13452,6 +13453,23 @@ attendanceIntegrationDescribe(
     }
 
     try {
+      process.env.RBAC_BYPASS = 'false'
+      await pool.query(
+        `INSERT INTO permissions (code, name, description)
+         VALUES
+           ('attendance:read', 'Attendance Read', 'Read attendance data'),
+           ('attendance:admin', 'Attendance Admin', 'Administer attendance')
+         ON CONFLICT (code) DO NOTHING`,
+      )
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES
+           ($1, 'attendance:read'),
+           ($1, 'attendance:admin'),
+           ($2, 'attendance:read')
+         ON CONFLICT DO NOTHING`,
+        [adminId, readOnlyId],
+      )
       await requireAttendanceTable(pool, 'attendance_notification_deliveries')
       await insertDelivery('pending', 'pending')
       await insertDelivery('owner', 'failed', { attemptCount: 2, lastError: 'recipient_not_bound' })
@@ -13507,6 +13525,8 @@ attendanceIntegrationDescribe(
       )
       expect(forbiddenRes.status).toBe(403)
     } finally {
+      process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[adminId, readOnlyId]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_notification_deliveries WHERE org_id = $1`, [orgId]).catch(() => undefined)
       await pool.end()
     }
