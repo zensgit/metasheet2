@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   AttendanceScheduler,
   registerAttendanceSchedulerJob,
+  resolveCompTimeExpiryReminderJob,
   resolveUnscheduledReminderJob,
   startAttendanceScheduler,
   stopAttendanceScheduler,
@@ -12,6 +13,7 @@ import {
   AttendanceNotifier,
   createAttendanceNotifierChannelsFromEnv,
 } from '../../src/services/AttendanceNotifier'
+import { CompTimeExpiryReminderService } from '../../src/services/CompTimeExpiryReminderService'
 import { UnscheduledReminderService } from '../../src/services/UnscheduledReminderService'
 
 function fakeExpiryService(rows: ExpiredCompTimeBalance[], spy?: () => void): AttendanceExpiryService {
@@ -28,6 +30,7 @@ describe('AttendanceScheduler (④ C4)', () => {
     stopAttendanceScheduler()
     delete process.env.ATTENDANCE_SCHEDULER_ENABLED
     delete process.env.ATTENDANCE_UNSCHEDULED_REMINDER_ENABLED
+    delete process.env.ATTENDANCE_COMP_TIME_EXPIRY_REMINDER_ENABLED
     vi.restoreAllMocks()
   })
 
@@ -126,6 +129,25 @@ describe('AttendanceScheduler (④ C4)', () => {
 
     const job = resolveUnscheduledReminderJob()
     expect(job?.name).toBe('unscheduled-reminder')
+
+    await job?.run()
+    await job?.run()
+
+    expect(instances.size).toBe(1)
+  })
+
+  it('resolves the comp-time expiry reminder job with one stable service instance', async () => {
+    expect(resolveCompTimeExpiryReminderJob()).toBeNull()
+
+    process.env.ATTENDANCE_COMP_TIME_EXPIRY_REMINDER_ENABLED = 'true'
+    const instances = new Set<unknown>()
+    vi.spyOn(CompTimeExpiryReminderService.prototype, 'run').mockImplementation(function (this: CompTimeExpiryReminderService) {
+      instances.add(this)
+      return Promise.resolve({ candidates: 0, deliveries: 0 })
+    })
+
+    const job = resolveCompTimeExpiryReminderJob()
+    expect(job?.name).toBe('comp-time-expiry-reminder')
 
     await job?.run()
     await job?.run()
