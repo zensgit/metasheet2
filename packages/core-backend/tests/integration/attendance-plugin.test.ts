@@ -13407,4 +13407,109 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('C5-4: lists notification deliveries with counters, pagination, filtering, and admin-only access', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const orgId = `c5-observe-${runSuffix}`
+    const adminId = `c5-observe-admin-${runSuffix}`
+    const readOnlyId = `c5-observe-reader-${runSuffix}`
+    const pool = new Pool({ connectionString: dbUrl })
+
+    async function tokenFor(uid: string, role: string, perms: string): Promise<string | null> {
+      const res = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=${role}&perms=${perms}`,
+      )
+      return (res.body as { token?: string } | undefined)?.token ?? null
+    }
+
+    const insertDelivery = async (
+      label: string,
+      status: 'pending' | 'sent' | 'failed',
+      overrides: { attemptCount?: number; lastError?: string | null; deliveredAt?: string | null } = {},
+    ) => {
+      await pool.query(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, status,
+            attempt_count, last_error, delivered_at, payload)
+         VALUES ($1, $2, $3, $4, $5, $6, 'dingtalk_work_notification', $7, $8, $9, $10::timestamptz, $11::jsonb)`,
+        [
+          orgId,
+          label === 'expiry' ? 'comp_time_expiry_reminder' : 'unscheduled_reminder',
+          randomUUID(),
+          `c5-observe:${runSuffix}:${label}`,
+          `recipient-${label}-${runSuffix}`,
+          label === 'owner' ? 'owner' : 'subject',
+          status,
+          overrides.attemptCount ?? 0,
+          overrides.lastError ?? null,
+          overrides.deliveredAt ?? null,
+          JSON.stringify({ title: `Delivery ${label}`, body: 'C5 observe test' }),
+        ],
+      )
+    }
+
+    try {
+      await requireAttendanceTable(pool, 'attendance_notification_deliveries')
+      await insertDelivery('pending', 'pending')
+      await insertDelivery('owner', 'failed', { attemptCount: 2, lastError: 'recipient_not_bound' })
+      await insertDelivery('expiry', 'sent', { attemptCount: 1, deliveredAt: new Date().toISOString() })
+
+      const adminToken = await tokenFor(adminId, 'admin', 'attendance:read,attendance:admin')
+      const readOnlyToken = await tokenFor(readOnlyId, 'user', 'attendance:read')
+      expect(adminToken).toBeTruthy()
+      expect(readOnlyToken).toBeTruthy()
+      if (!adminToken || !readOnlyToken) return
+
+      const listRes = await requestJson(
+        `${baseUrl}/api/attendance/notification-deliveries?orgId=${encodeURIComponent(orgId)}&page=1&pageSize=2`,
+        { headers: { Authorization: `Bearer ${adminToken}` } },
+      )
+      expect(listRes.status).toBe(200)
+      const listBody = listRes.body as { data?: { items?: any[]; total?: number; counters?: Record<string, number>; pageSize?: number } }
+      expect(listBody.data?.items?.length).toBe(2)
+      expect(listBody.data?.total).toBe(3)
+      expect(listBody.data?.pageSize).toBe(2)
+      expect(listBody.data?.counters).toMatchObject({ pending: 1, failed: 1, sent: 1 })
+      expect(listBody.data?.items?.[0]).toMatchObject({
+        orgId,
+        channel: 'dingtalk_work_notification',
+      })
+
+      const failedRes = await requestJson(
+        `${baseUrl}/api/attendance/notification-deliveries?orgId=${encodeURIComponent(orgId)}&status=failed&pageSize=50`,
+        { headers: { Authorization: `Bearer ${adminToken}` } },
+      )
+      expect(failedRes.status).toBe(200)
+      const failedBody = failedRes.body as { data?: { items?: any[]; total?: number; counters?: Record<string, number> } }
+      expect(failedBody.data?.total).toBe(1)
+      expect(failedBody.data?.items).toHaveLength(1)
+      expect(failedBody.data?.items?.[0]).toMatchObject({
+        status: 'failed',
+        recipientRole: 'owner',
+        attemptCount: 2,
+        lastError: 'recipient_not_bound',
+      })
+      // Counters remain global for the org, not scoped to the current filter.
+      expect(failedBody.data?.counters).toMatchObject({ pending: 1, failed: 1, sent: 1 })
+
+      const invalidRes = await requestJson(
+        `${baseUrl}/api/attendance/notification-deliveries?orgId=${encodeURIComponent(orgId)}&status=bogus`,
+        { headers: { Authorization: `Bearer ${adminToken}` } },
+      )
+      expect(invalidRes.status).toBe(400)
+
+      const forbiddenRes = await requestJson(
+        `${baseUrl}/api/attendance/notification-deliveries?orgId=${encodeURIComponent(orgId)}`,
+        { headers: { Authorization: `Bearer ${readOnlyToken}` } },
+      )
+      expect(forbiddenRes.status).toBe(403)
+    } finally {
+      await pool.query(`DELETE FROM attendance_notification_deliveries WHERE org_id = $1`, [orgId]).catch(() => undefined)
+      await pool.end()
+    }
+  })
+
 })

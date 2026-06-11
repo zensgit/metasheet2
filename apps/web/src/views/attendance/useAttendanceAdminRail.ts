@@ -14,6 +14,7 @@ export const ATTENDANCE_ADMIN_SECTION_IDS = {
   userAccess: 'attendance-admin-user-access',
   batchProvisioning: 'attendance-admin-batch-provisioning',
   auditLogs: 'attendance-admin-audit-logs',
+  notificationDeliveries: 'attendance-admin-notification-deliveries',
   holidaySync: 'attendance-admin-holiday-sync',
   defaultRule: 'attendance-admin-default-rule',
   ruleSets: 'attendance-admin-rule-sets',
@@ -163,6 +164,7 @@ export function useAttendanceAdminRail({
     { id: ATTENDANCE_ADMIN_SECTION_IDS.userAccess, label: tr('User Access', '用户权限') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning, label: tr('Batch Provisioning', '批量授权') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.auditLogs, label: tr('Audit Logs', '审计日志') },
+    { id: ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries, label: tr('Notification deliveries', '通知投递') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.holidaySync, label: tr('Holiday Sync', '节假日同步') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.defaultRule, label: tr('Default Rule', '默认规则') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.ruleSets, label: tr('Rule Sets', '规则集') },
@@ -196,6 +198,7 @@ export function useAttendanceAdminRail({
         ATTENDANCE_ADMIN_SECTION_IDS.userAccess,
         ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning,
         ATTENDANCE_ADMIN_SECTION_IDS.auditLogs,
+        ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries,
       ],
     },
     {

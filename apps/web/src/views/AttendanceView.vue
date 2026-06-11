@@ -1593,6 +1593,103 @@
               </p>
             </div>
             <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries)"
+              data-attendance-notification-deliveries
+            >
+              <div class="attendance__admin-section-header">
+                <h4>{{ tr('Notification delivery status', '通知投递状态') }}</h4>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn" :disabled="notificationDeliveriesLoading" data-attendance-notification-deliveries-reload @click="loadAttendanceNotificationDeliveries">
+                    {{ notificationDeliveriesLoading ? tr('Loading...', '加载中...') : tr('Reload deliveries', '刷新投递') }}
+                  </button>
+                </div>
+              </div>
+              <p class="attendance__field-hint" data-attendance-notification-deliveries-readonly>
+                {{ tr('Read-only delivery truth for C5 outbox rows. Manual retry and bulk replay are separate follow-ups.', '这里仅读取 C5 outbox 的投递真实状态；手动重试和批量重放属于后续独立能力。') }}
+              </p>
+              <div class="attendance__group-summary-grid" data-attendance-notification-deliveries-counters>
+                <section
+                  v-for="item in notificationDeliveryCounterItems"
+                  :key="item.status"
+                  class="attendance__group-summary-card"
+                  :data-attendance-notification-deliveries-counter="item.status"
+                >
+                  <span>{{ item.label }}</span>
+                  <strong>{{ item.value }}</strong>
+                </section>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-notification-delivery-status-filter">
+                  <span>{{ tr('Status filter', '状态筛选') }}</span>
+                  <select
+                    id="attendance-notification-delivery-status-filter"
+                    v-model="notificationDeliveryStatusFilter"
+                    data-attendance-notification-deliveries-status-filter
+                  >
+                    <option value="all">{{ attendanceNotificationDeliveryStatusLabel('all') }}</option>
+                    <option v-for="status in ATTENDANCE_NOTIFICATION_DELIVERY_STATUSES" :key="status" :value="status">
+                      {{ attendanceNotificationDeliveryStatusLabel(status) }}
+                    </option>
+                  </select>
+                </label>
+              </div>
+              <p v-if="notificationDeliveriesError" class="attendance__field-hint attendance__field-hint--error" data-attendance-notification-deliveries-error>
+                {{ notificationDeliveriesError }}
+              </p>
+              <div v-if="!notificationDeliveriesLoading && notificationDeliveries.length === 0" class="attendance__empty" data-attendance-notification-deliveries-empty>
+                {{ tr('No delivery rows match this filter.', '当前筛选下没有通知投递记录。') }}
+              </div>
+              <div v-if="notificationDeliveries.length > 0" class="attendance__table-wrapper">
+                <table class="attendance__table" data-attendance-notification-deliveries-table>
+                  <thead>
+                    <tr>
+                      <th>{{ tr('Status', '状态') }}</th>
+                      <th>{{ tr('Source', '来源') }}</th>
+                      <th>{{ tr('Recipient', '接收人') }}</th>
+                      <th>{{ tr('Channel', '通道') }}</th>
+                      <th>{{ tr('Attempts', '尝试') }}</th>
+                      <th>{{ tr('Last error', '最近错误') }}</th>
+                      <th>{{ tr('Updated', '更新时间') }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="delivery in notificationDeliveries" :key="delivery.id" data-attendance-notification-delivery-row>
+                      <td>
+                        <span
+                          class="attendance__status-chip"
+                          :class="`attendance__status-chip--${delivery.status}`"
+                          :data-attendance-notification-delivery-status="delivery.status"
+                        >
+                          {{ attendanceNotificationDeliveryStatusLabel(delivery.status) }}
+                        </span>
+                      </td>
+                      <td>
+                        <strong>{{ attendanceNotificationDeliverySourceLabel(delivery.sourceType) }}</strong>
+                        <small>{{ delivery.sourceId || delivery.sourceKey }}</small>
+                      </td>
+                      <td>
+                        <strong>{{ delivery.recipientUserId }}</strong>
+                        <small>{{ delivery.recipientRole }}</small>
+                      </td>
+                      <td>{{ attendanceNotificationDeliveryChannelLabel(delivery.channel) }}</td>
+                      <td>{{ delivery.attemptCount }}</td>
+                      <td>{{ delivery.lastError || '--' }}</td>
+                      <td>{{ attendanceNotificationDeliveryTimeLabel(delivery.updatedAt || delivery.createdAt) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p
+                v-if="notificationDeliveriesTotal > notificationDeliveries.length"
+                class="attendance__field-hint"
+                data-attendance-notification-deliveries-cap
+              >
+                {{ tr(`Showing first ${notificationDeliveries.length} of ${notificationDeliveriesTotal}`, `仅显示前 ${notificationDeliveries.length}/${notificationDeliveriesTotal} 条`) }}
+              </p>
+            </div>
+            <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
               class="attendance__admin-section"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
@@ -8015,6 +8112,29 @@ interface AutoShiftAutoWriteRun {
   skipReasons: Array<{ reason: string; count: number }>
 }
 
+type AttendanceNotificationDeliveryStatus = 'pending' | 'sending' | 'sent' | 'retrying' | 'failed' | 'skipped'
+type AttendanceNotificationDeliveryStatusFilter = AttendanceNotificationDeliveryStatus | 'all'
+
+interface AttendanceNotificationDeliveryItem {
+  id: string
+  sourceType: string
+  sourceId: string | null
+  sourceKey: string
+  recipientUserId: string
+  recipientRole: string
+  channel: string
+  status: AttendanceNotificationDeliveryStatus
+  attemptCount: number
+  nextAttemptAt: string | null
+  lastAttemptAt: string | null
+  deliveredAt: string | null
+  lastError: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+type AttendanceNotificationDeliveryCounters = Record<AttendanceNotificationDeliveryStatus, number>
+
 interface AutoShiftPreviewItem {
   userId: string
   workDate: string
@@ -11884,6 +12004,20 @@ const autoShiftAutoWriteRuns = ref<AutoShiftAutoWriteRun[]>([])
 const autoShiftAutoWriteRunsTotal = ref(0)
 const autoShiftAutoWriteRunsLoading = ref(false)
 const autoShiftAutoWriteRunsError = ref('')
+const ATTENDANCE_NOTIFICATION_DELIVERY_STATUSES: AttendanceNotificationDeliveryStatus[] = ['pending', 'sending', 'sent', 'retrying', 'failed', 'skipped']
+const notificationDeliveryStatusFilter = ref<AttendanceNotificationDeliveryStatusFilter>('all')
+const notificationDeliveries = ref<AttendanceNotificationDeliveryItem[]>([])
+const notificationDeliveriesTotal = ref(0)
+const notificationDeliveriesLoading = ref(false)
+const notificationDeliveriesError = ref('')
+const notificationDeliveryCounters = reactive<AttendanceNotificationDeliveryCounters>({
+  pending: 0,
+  sending: 0,
+  sent: 0,
+  retrying: 0,
+  failed: 0,
+  skipped: 0,
+})
 const autoShiftPreviewForm = reactive({
   from: toDateInput(new Date()),
   to: toDateInput(new Date()),
@@ -17534,6 +17668,81 @@ function normalizeAutoShiftAutoWriteRun(value: any): AutoShiftAutoWriteRun | nul
   }
 }
 
+function normalizeAttendanceNotificationDeliveryStatus(value: unknown): AttendanceNotificationDeliveryStatus {
+  const status = String(value || '').trim().toLowerCase()
+  return ATTENDANCE_NOTIFICATION_DELIVERY_STATUSES.includes(status as AttendanceNotificationDeliveryStatus)
+    ? status as AttendanceNotificationDeliveryStatus
+    : 'pending'
+}
+
+function normalizeAttendanceNotificationDelivery(value: any): AttendanceNotificationDeliveryItem | null {
+  if (!value || typeof value !== 'object') return null
+  const id = String(value.id || '').trim()
+  if (!id) return null
+  return {
+    id,
+    sourceType: String(value.sourceType || value.source_type || ''),
+    sourceId: value.sourceId == null && value.source_id == null ? null : String(value.sourceId ?? value.source_id),
+    sourceKey: String(value.sourceKey || value.source_key || ''),
+    recipientUserId: String(value.recipientUserId || value.recipient_user_id || ''),
+    recipientRole: String(value.recipientRole || value.recipient_role || ''),
+    channel: String(value.channel || ''),
+    status: normalizeAttendanceNotificationDeliveryStatus(value.status),
+    attemptCount: Number(value.attemptCount ?? value.attempt_count ?? 0) || 0,
+    nextAttemptAt: value.nextAttemptAt == null && value.next_attempt_at == null ? null : String(value.nextAttemptAt ?? value.next_attempt_at),
+    lastAttemptAt: value.lastAttemptAt == null && value.last_attempt_at == null ? null : String(value.lastAttemptAt ?? value.last_attempt_at),
+    deliveredAt: value.deliveredAt == null && value.delivered_at == null ? null : String(value.deliveredAt ?? value.delivered_at),
+    lastError: value.lastError == null && value.last_error == null ? null : String(value.lastError ?? value.last_error),
+    createdAt: value.createdAt == null && value.created_at == null ? null : String(value.createdAt ?? value.created_at),
+    updatedAt: value.updatedAt == null && value.updated_at == null ? null : String(value.updatedAt ?? value.updated_at),
+  }
+}
+
+function applyAttendanceNotificationDeliveryCounters(value: any): void {
+  for (const status of ATTENDANCE_NOTIFICATION_DELIVERY_STATUSES) {
+    const count = Number(value?.[status] ?? 0)
+    notificationDeliveryCounters[status] = Number.isFinite(count) && count >= 0 ? count : 0
+  }
+}
+
+function attendanceNotificationDeliveryStatusLabel(status: AttendanceNotificationDeliveryStatus | 'all'): string {
+  if (status === 'all') return tr('All statuses', '全部状态')
+  if (status === 'pending') return tr('Pending', '待发送')
+  if (status === 'sending') return tr('Sending', '发送中')
+  if (status === 'sent') return tr('Sent', '已送达')
+  if (status === 'retrying') return tr('Retrying', '待重试')
+  if (status === 'failed') return tr('Failed', '失败')
+  if (status === 'skipped') return tr('Skipped', '已跳过')
+  return status
+}
+
+function attendanceNotificationDeliverySourceLabel(sourceType: string): string {
+  if (sourceType === 'unscheduled_reminder') return tr('Unscheduled reminder', '未排班提醒')
+  if (sourceType === 'comp_time_expiry_reminder') return tr('Comp-time expiry', '调休到期提醒')
+  return sourceType || '--'
+}
+
+function attendanceNotificationDeliveryChannelLabel(channel: string): string {
+  if (channel === 'dingtalk_work_notification') return tr('DingTalk work notification', '钉钉工作通知')
+  if (channel === 'fake') return tr('Fake channel', '模拟通道')
+  return channel || '--'
+}
+
+function attendanceNotificationDeliveryTimeLabel(value: string | null): string {
+  if (!value) return '--'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+const notificationDeliveryCounterItems = computed(() =>
+  ATTENDANCE_NOTIFICATION_DELIVERY_STATUSES.map(status => ({
+    status,
+    label: attendanceNotificationDeliveryStatusLabel(status),
+    value: notificationDeliveryCounters[status],
+  })),
+)
+
 function formatAutoShiftAutoWriteSkipReasons(run: AutoShiftAutoWriteRun): string {
   if (!run.skipReasons.length) return run.errorMessage || '--'
   return run.skipReasons.map(item => `${item.reason} × ${item.count}`).join(' · ')
@@ -21166,6 +21375,43 @@ async function loadAutoShiftAutoWriteRuns() {
   }
 }
 
+async function loadAttendanceNotificationDeliveries() {
+  notificationDeliveriesLoading.value = true
+  notificationDeliveriesError.value = ''
+  try {
+    const query: Record<string, string> = { orgId: normalizedOrgId() || '', page: '1', pageSize: '50' }
+    if (notificationDeliveryStatusFilter.value !== 'all') query.status = notificationDeliveryStatusFilter.value
+    const params = buildQuery(query)
+    const response = await apiFetch(`/api/attendance/notification-deliveries?${params.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load notification deliveries', '加载通知投递失败')))
+    }
+    adminForbidden.value = false
+    const items = Array.isArray(data.data?.items) ? data.data.items : []
+    notificationDeliveries.value = items
+      .map(normalizeAttendanceNotificationDelivery)
+      .filter((item: AttendanceNotificationDeliveryItem | null): item is AttendanceNotificationDeliveryItem => item !== null)
+    const total = Number(data.data?.total)
+    notificationDeliveriesTotal.value = Number.isFinite(total) && total >= 0 ? total : notificationDeliveries.value.length
+    applyAttendanceNotificationDeliveryCounters(data.data?.counters)
+  } catch (error: unknown) {
+    notificationDeliveriesError.value = readErrorMessage(error, tr('Failed to load notification deliveries', '加载通知投递失败'))
+    setStatus(notificationDeliveriesError.value, 'error')
+  } finally {
+    notificationDeliveriesLoading.value = false
+  }
+}
+
+watch(notificationDeliveryStatusFilter, () => {
+  if (!showAdmin.value) return
+  void loadAttendanceNotificationDeliveries()
+})
+
 function schedulerScopeSubjectLabel(subjectType: string): string {
   if (subjectType === 'user') return tr('Employee', '员工')
   if (subjectType === 'role') return tr('Role', '角色')
@@ -21227,6 +21473,7 @@ async function loadAdminData() {
       loadRotationAssignments(),
       loadSchedulerScopes(),
       loadAutoShiftAutoWriteRuns(),
+      loadAttendanceNotificationDeliveries(),
       loadHolidays(),
     ])
   } catch (error) {

@@ -82,10 +82,10 @@
 | 4 | **C5-1b comp-time expiry reminder producer** | ✅ #2502 | 即将到期 active `comp_time` lot → 本人 + 负责人 delivery rows，不改余额；重复不建 dup；CI real-DB gate 实跑 comp-time expiry reminder producer spec |
 | 5 | **C5-2 delivery worker + fake channel** | ✅ #2504 | pending/retrying claim → sent/retrying/failed/skipped 状态流 + retry/backoff；无真实外网依赖；CI real-DB gate 实跑 outbox spec + stale-lease race |
 | 6 | **C5-3 DingTalk work-notification channel** | ✅ #2507 | env/store-gated，复用现有 DingTalk work-notification runtime；缺配置/缺绑定 fail-visible；CI real-DB gate 实跑绑定解析 + worker sent 状态流 |
-| 7 | **C5-4 admin observability** | 🔒 | read-only delivery status view/counters；不默认加手动 retry |
+| 7 | **C5-4 admin observability** | 🟡 本 PR | read-only delivery status view/counters；不默认加手动 retry；待合后进入 C5-5 staging closeout |
 | 8 | **C5-5 staging closeout** | 🔒 | C5-5a fake-channel 只证明 delivery-state（仍 🟡）；C5-5b 真实 DingTalk work-notification smoke 证明未排班 + 调休到期两 source、fan-out、delivery 状态流、retry/idempotency、scheduler 共存、cleanup residue=0 后才 ✅ |
 
-> 2026-06-11 回填：C5 design-lock #2483 与 C5-0 outbox DDL #2487 已落 main；C5-1a #2498 已接入未排班提醒 producer（仅写 outbox，不直发真实 channel）；C5-1b #2502 已接入调休到期提醒 producer；C5-2 #2504 已接入 delivery worker + fake channel（含 stale-lease 防覆盖反向测试）。C5-3 #2507 接入真实 DingTalk work-notification channel，复用现有 `readDingTalkMessageConfigFromRuntime` / `fetchDingTalkAppAccessToken` / `sendDingTalkWorkNotification`，缺配置/缺绑定 fail-visible，真实外发仍由 env/store 配置 gate 控制。C5 整体仍保持 🟡，直到 C5-5b 真实 DingTalk staging smoke 完整闭环。
+> 2026-06-11 回填：C5 design-lock #2483 与 C5-0 outbox DDL #2487 已落 main；C5-1a #2498 已接入未排班提醒 producer（仅写 outbox，不直发真实 channel）；C5-1b #2502 已接入调休到期提醒 producer；C5-2 #2504 已接入 delivery worker + fake channel（含 stale-lease 防覆盖反向测试）。C5-3 #2507 接入真实 DingTalk work-notification channel，复用现有 `readDingTalkMessageConfigFromRuntime` / `fetchDingTalkAppAccessToken` / `sendDingTalkWorkNotification`，缺配置/缺绑定 fail-visible，真实外发仍由 env/store 配置 gate 控制。本 PR 推进 C5-4 admin observability：新增只读 delivery status/counters API 与 admin UI，不提供手动 retry。C5 整体仍保持 🟡，直到 C5-5b 真实 DingTalk staging smoke 完整闭环。
 
 ### Out of this target
 

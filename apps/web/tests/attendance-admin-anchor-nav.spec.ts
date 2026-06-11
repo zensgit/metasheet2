@@ -124,11 +124,12 @@ describe('Attendance admin anchor navigation', () => {
     )
 
     expect(groupLabels).toEqual(['Workspace', 'Scheduling', 'Organization', 'Policies', 'Data & Payroll'])
-    expect(labels).toHaveLength(26)
+    expect(labels).toHaveLength(27)
     expect(labels).toEqual(
       expect.arrayContaining([
         'Settings',
         'User Access',
+        'Notification deliveries',
         'Advanced scheduling',
         'Comprehensive hours',
         'Import',
@@ -826,7 +827,7 @@ describe('Attendance admin anchor navigation', () => {
 
     const jumpSelect = container!.querySelector<HTMLSelectElement>('[data-admin-quick-jump="true"]')
     expect(jumpSelect).toBeTruthy()
-    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(26)
+    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(27)
 
     jumpSelect!.value = 'attendance-admin-advanced-scheduling-workbench'
     jumpSelect!.dispatchEvent(new Event('change', { bubbles: true }))
