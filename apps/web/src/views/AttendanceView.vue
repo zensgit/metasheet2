@@ -2201,6 +2201,7 @@
                     >
                       <option value="preview">{{ tr('Preview only', '仅预览') }}</option>
                       <option value="apply">{{ tr('Preview + selected apply', '预览 + 手动应用所选') }}</option>
+                      <option value="auto">{{ tr('Background auto-write (configure below)', '后台自动写入（在下方配置）') }}</option>
                     </select>
                   </label>
                   <label class="attendance__field" for="attendance-auto-shift-tolerance">
@@ -2376,6 +2377,124 @@
                     </tbody>
                   </table>
                 </div>
+              </div>
+
+              <div class="attendance__admin-subsection" data-admin-card="auto-shift-auto-write">
+                <div class="attendance__admin-section-header">
+                  <div>
+                    <h4>{{ tr('Auto shift background write', '自动对班后台写入') }}</h4>
+                    <p class="attendance__field-hint">
+                      {{ tr('Runs through the attendance scheduler when the server runtime flag is also enabled. No force-write action is exposed here.', '仅在服务端运行开关同时开启时由考勤调度器执行；本卡片不提供强制写入。') }}
+                    </p>
+                  </div>
+                  <button class="attendance__btn" :disabled="autoShiftAutoWriteRunsLoading" data-auto-shift-auto="reload-runs" @click="loadAutoShiftAutoWriteRuns">
+                    {{ autoShiftAutoWriteRunsLoading ? tr('Loading...', '加载中...') : tr('Reload runs', '刷新运行记录') }}
+                  </button>
+                </div>
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field attendance__field--checkbox" for="attendance-auto-shift-auto-enabled">
+                    <span>{{ tr('Enable auto matching for this org', '启用本组织自动对班') }}</span>
+                    <input
+                      id="attendance-auto-shift-auto-enabled"
+                      v-model="autoShiftAutoWriteForm.enabled"
+                      type="checkbox"
+                      data-auto-shift-auto="enabled"
+                    />
+                  </label>
+                  <label class="attendance__field attendance__field--checkbox" for="attendance-auto-shift-auto-write-enabled">
+                    <span>{{ tr('Enable background writes', '启用后台自动写入') }}</span>
+                    <input
+                      id="attendance-auto-shift-auto-write-enabled"
+                      v-model="autoShiftAutoWriteForm.autoWriteEnabled"
+                      type="checkbox"
+                      data-auto-shift-auto="auto-write-enabled"
+                    />
+                  </label>
+                  <label class="attendance__field" for="attendance-auto-shift-auto-lookahead">
+                    <span>{{ tr('Lookahead days', '向前扫描天数') }}</span>
+                    <input
+                      id="attendance-auto-shift-auto-lookahead"
+                      v-model="autoShiftAutoWriteForm.lookaheadDays"
+                      type="number"
+                      min="1"
+                      max="3"
+                      inputmode="numeric"
+                      data-auto-shift-auto="lookahead-days"
+                    />
+                  </label>
+                  <label class="attendance__field" for="attendance-auto-shift-auto-max">
+                    <span>{{ tr('Max assignments per run', '单次最多写入') }}</span>
+                    <input
+                      id="attendance-auto-shift-auto-max"
+                      v-model="autoShiftAutoWriteForm.maxAssignmentsPerRun"
+                      type="number"
+                      min="1"
+                      max="100"
+                      inputmode="numeric"
+                      data-auto-shift-auto="max-assignments"
+                    />
+                  </label>
+                  <label class="attendance__field" for="attendance-auto-shift-auto-confidence">
+                    <span>{{ tr('Auto-write confidence', '自动写入置信度') }}</span>
+                    <select
+                      id="attendance-auto-shift-auto-confidence"
+                      v-model="autoShiftAutoWriteForm.minConfidence"
+                      disabled
+                      data-auto-shift-auto="min-confidence"
+                    >
+                      <option value="high">{{ tr('High only', '仅高置信度') }}</option>
+                    </select>
+                  </label>
+                </div>
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="settingsLoading"
+                  data-auto-shift-auto="save"
+                  @click="saveAutoShiftAutoWriteSettings"
+                >
+                  {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save auto-write settings', '保存后台写入设置') }}
+                </button>
+                <p class="attendance__field-hint" data-auto-shift-auto="runtime-flag">
+                  {{ tr('Server runtime flag: not exposed in this UI; if it is off, runs stay disabled even when this card is enabled.', '服务端运行开关：此界面不展示；若服务端关闭，即使本卡片开启也不会执行写入。') }}
+                </p>
+                <p v-if="autoShiftAutoWriteRunsError" class="attendance__field-hint attendance__field-hint--error" data-auto-shift-auto="runs-error">
+                  {{ autoShiftAutoWriteRunsError }}
+                </p>
+                <div v-if="!autoShiftAutoWriteRunsLoading && autoShiftAutoWriteRuns.length === 0" class="attendance__empty" data-auto-shift-auto="runs-empty">
+                  {{ tr('No auto-write runs yet.', '暂无后台写入运行记录。') }}
+                </div>
+                <div v-if="autoShiftAutoWriteRuns.length > 0" class="attendance__table-wrapper">
+                  <table class="attendance__table" data-auto-shift-auto="runs">
+                    <thead>
+                      <tr>
+                        <th>{{ tr('Window', '窗口') }}</th>
+                        <th>{{ tr('Status', '状态') }}</th>
+                        <th>{{ tr('Counts', '计数') }}</th>
+                        <th>{{ tr('Skipped reasons', '跳过原因') }}</th>
+                        <th>{{ tr('Started', '开始时间') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="run in autoShiftAutoWriteRuns" :key="run.id" data-auto-shift-auto="run-row">
+                        <td>{{ run.targetFrom }} - {{ run.targetTo }}</td>
+                        <td>{{ formatStatus(run.status) }}</td>
+                        <td>
+                          {{
+                            tr(
+                              `scanned ${run.scannedCount}; candidates ${run.candidateCount}; applied ${run.appliedCount}; skipped ${run.skippedCount}; errors ${run.errorCount}`,
+                              `扫描 ${run.scannedCount}；候选 ${run.candidateCount}；写入 ${run.appliedCount}；跳过 ${run.skippedCount}；错误 ${run.errorCount}`,
+                            )
+                          }}
+                        </td>
+                        <td>{{ formatAutoShiftAutoWriteSkipReasons(run) }}</td>
+                        <td>{{ formatDateTime(run.startedAt ?? null) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p v-if="autoShiftAutoWriteRunsTotal > autoShiftAutoWriteRuns.length" class="attendance__field-hint" data-auto-shift-auto="runs-cap">
+                  {{ tr(`Showing first ${autoShiftAutoWriteRuns.length} of ${autoShiftAutoWriteRunsTotal}`, `仅显示前 ${autoShiftAutoWriteRuns.length}/${autoShiftAutoWriteRunsTotal} 条`) }}
+                </p>
               </div>
             </div>
 
@@ -7849,9 +7968,15 @@ interface AttendanceSettings {
   }
   autoShiftMatching?: {
     enabled?: boolean
-    mode?: 'preview' | 'apply'
+    mode?: 'preview' | 'apply' | 'auto'
     maxToleranceMinutes?: number
     minConfidenceToApply?: 'high' | 'medium' | 'low'
+    autoWrite?: {
+      enabled?: boolean
+      lookaheadDays?: number
+      maxAssignmentsPerRun?: number
+      minConfidence?: 'high'
+    }
   }
   // ② S3 punch-policy outdoor approval (backend #2308). Frontend type only — the admin card reads/writes
   // these via PUT { punchPolicy: { outdoor: ... } }. requirePhoto stays latent (no UI in S3-2).
@@ -7872,7 +7997,23 @@ interface AttendanceSettings {
 }
 
 type AutoShiftConfidence = 'high' | 'medium' | 'low'
-type AutoShiftMode = 'preview' | 'apply'
+type AutoShiftMode = 'preview' | 'apply' | 'auto'
+
+interface AutoShiftAutoWriteRun {
+  id: string
+  status: string
+  targetFrom: string
+  targetTo: string
+  scannedCount: number
+  candidateCount: number
+  appliedCount: number
+  skippedCount: number
+  errorCount: number
+  errorMessage?: string | null
+  startedAt?: string | null
+  finishedAt?: string | null
+  skipReasons: Array<{ reason: string; count: number }>
+}
 
 interface AutoShiftPreviewItem {
   userId: string
@@ -11730,6 +11871,19 @@ const autoShiftMatchingForm = reactive({
   maxToleranceMinutes: '120',
   minConfidenceToApply: 'high' as AutoShiftConfidence,
 })
+// 自动对班 A2: background auto-write operations card. Saving this card explicitly puts the org in
+// mode=auto and writes ONLY the autoWrite sub-config plus the top-level enabled/mode gates.
+const autoShiftAutoWriteForm = reactive({
+  enabled: false,
+  autoWriteEnabled: false,
+  lookaheadDays: '1',
+  maxAssignmentsPerRun: '25',
+  minConfidence: 'high' as 'high',
+})
+const autoShiftAutoWriteRuns = ref<AutoShiftAutoWriteRun[]>([])
+const autoShiftAutoWriteRunsTotal = ref(0)
+const autoShiftAutoWriteRunsLoading = ref(false)
+const autoShiftAutoWriteRunsError = ref('')
 const autoShiftPreviewForm = reactive({
   from: toDateInput(new Date()),
   to: toDateInput(new Date()),
@@ -17119,6 +17273,7 @@ async function loadSettings() {
     applyOutdoorToForm(data.data || {})
     applyInOutMergeToForm(data.data || {})
     applyAutoShiftMatchingToForm(data.data || {})
+    applyAutoShiftAutoWriteToForm(data.data || {})
   } catch (error: any) {
     attendanceSettings.value = null
     setStatusFromError(error, tr('Failed to load settings', '加载设置失败'), 'admin')
@@ -17291,13 +17446,21 @@ function normalizeAutoShiftConfidence(value: unknown): AutoShiftConfidence {
 }
 
 function normalizeAutoShiftMode(value: unknown): AutoShiftMode {
-  return value === 'apply' ? 'apply' : 'preview'
+  if (value === 'apply' || value === 'auto') return value
+  return 'preview'
 }
 
 function normalizeAutoShiftTolerance(value: string | number | null | undefined, fallback = 120): number {
   const raw = String(value ?? '').trim()
   const parsed = raw ? Number(raw) : fallback
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback
+}
+
+function normalizeAutoShiftAutoWriteInt(value: string | number | null | undefined, fallback: number, min: number, max: number): number {
+  const raw = String(value ?? '').trim()
+  const parsed = raw ? Number(raw) : fallback
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.max(min, Math.min(max, Math.floor(parsed)))
 }
 
 function autoShiftPreviewItemKey(item: AutoShiftPreviewItem): string {
@@ -17326,6 +17489,54 @@ function applyAutoShiftMatchingToForm(settings: AttendanceSettings) {
     normalizeAutoShiftTolerance(autoShift.maxToleranceMinutes, 120),
   )
   autoShiftMatchingForm.minConfidenceToApply = normalizeAutoShiftConfidence(autoShift.minConfidenceToApply)
+}
+
+function applyAutoShiftAutoWriteToForm(settings: AttendanceSettings) {
+  const autoShift = settings.autoShiftMatching || {}
+  const autoWrite = autoShift.autoWrite || {}
+  autoShiftAutoWriteForm.enabled = autoShift.enabled === true
+  autoShiftAutoWriteForm.autoWriteEnabled = autoWrite.enabled === true
+  autoShiftAutoWriteForm.lookaheadDays = String(
+    normalizeAutoShiftAutoWriteInt(autoWrite.lookaheadDays, 1, 1, 3),
+  )
+  autoShiftAutoWriteForm.maxAssignmentsPerRun = String(
+    normalizeAutoShiftAutoWriteInt(autoWrite.maxAssignmentsPerRun, 25, 1, 100),
+  )
+  autoShiftAutoWriteForm.minConfidence = 'high'
+}
+
+function normalizeAutoShiftAutoWriteRun(value: any): AutoShiftAutoWriteRun | null {
+  if (!value || typeof value !== 'object') return null
+  const id = String(value.id || '').trim()
+  if (!id) return null
+  const skipReasons = Array.isArray(value.skipReasons)
+    ? value.skipReasons
+        .map((item: any) => ({
+          reason: String(item?.reason || '').trim(),
+          count: Number(item?.count ?? 0),
+        }))
+        .filter((item: { reason: string; count: number }) => item.reason && Number.isFinite(item.count) && item.count > 0)
+    : []
+  return {
+    id,
+    status: String(value.status || ''),
+    targetFrom: String(value.targetFrom || ''),
+    targetTo: String(value.targetTo || ''),
+    scannedCount: Number(value.scannedCount ?? 0) || 0,
+    candidateCount: Number(value.candidateCount ?? 0) || 0,
+    appliedCount: Number(value.appliedCount ?? 0) || 0,
+    skippedCount: Number(value.skippedCount ?? 0) || 0,
+    errorCount: Number(value.errorCount ?? 0) || 0,
+    errorMessage: value.errorMessage == null ? null : String(value.errorMessage),
+    startedAt: value.startedAt == null ? null : String(value.startedAt),
+    finishedAt: value.finishedAt == null ? null : String(value.finishedAt),
+    skipReasons,
+  }
+}
+
+function formatAutoShiftAutoWriteSkipReasons(run: AutoShiftAutoWriteRun): string {
+  if (!run.skipReasons.length) return run.errorMessage || '--'
+  return run.skipReasons.map(item => `${item.reason} × ${item.count}`).join(' · ')
 }
 
 async function saveShiftCompliance() {
@@ -17501,9 +17712,51 @@ async function saveAutoShiftMatchingSettings() {
     }
     adminForbidden.value = false
     applyAutoShiftMatchingToForm((data.data || payload) as AttendanceSettings)
+    applyAutoShiftAutoWriteToForm((data.data || payload) as AttendanceSettings)
     setStatus(tr('Auto shift matching settings updated.', '自动对班设置已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save auto shift matching', '保存自动对班失败'), 'save-settings')
+  } finally {
+    settingsLoading.value = false
+  }
+}
+
+async function saveAutoShiftAutoWriteSettings() {
+  settingsLoading.value = true
+  try {
+    // PUT ONLY the A2 gates and autoWrite sub-config. maxToleranceMinutes/minConfidenceToApply stay owned by
+    // the A1 preview/apply card and are preserved by the backend merge.
+    const payload = {
+      autoShiftMatching: {
+        enabled: autoShiftAutoWriteForm.enabled === true,
+        mode: 'auto' as AutoShiftMode,
+        autoWrite: {
+          enabled: autoShiftAutoWriteForm.autoWriteEnabled === true,
+          lookaheadDays: normalizeAutoShiftAutoWriteInt(autoShiftAutoWriteForm.lookaheadDays, 1, 1, 3),
+          maxAssignmentsPerRun: normalizeAutoShiftAutoWriteInt(autoShiftAutoWriteForm.maxAssignmentsPerRun, 25, 1, 100),
+          minConfidence: 'high' as const,
+        },
+      },
+    }
+    const response = await apiFetchWithTimeout('/api/attendance/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw createForbiddenError()
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to save auto-write settings', '保存后台写入设置失败'))
+    }
+    adminForbidden.value = false
+    applyAutoShiftMatchingToForm((data.data || payload) as AttendanceSettings)
+    applyAutoShiftAutoWriteToForm((data.data || payload) as AttendanceSettings)
+    await loadAutoShiftAutoWriteRuns()
+    setStatus(tr('Auto-write settings updated.', '后台写入设置已更新。'))
+  } catch (error: any) {
+    setStatusFromError(error, tr('Failed to save auto-write settings', '保存后台写入设置失败'), 'save-settings')
   } finally {
     settingsLoading.value = false
   }
@@ -20884,6 +21137,35 @@ async function loadSchedulerScopes() {
   }
 }
 
+async function loadAutoShiftAutoWriteRuns() {
+  autoShiftAutoWriteRunsLoading.value = true
+  autoShiftAutoWriteRunsError.value = ''
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId(), page: '1', pageSize: '5' })
+    const response = await apiFetch(`/api/attendance/auto-shift-matching/auto-write-runs?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load auto-write runs', '加载后台写入运行记录失败')))
+    }
+    adminForbidden.value = false
+    const items = Array.isArray(data.data?.items) ? data.data.items : []
+    autoShiftAutoWriteRuns.value = items
+      .map(normalizeAutoShiftAutoWriteRun)
+      .filter((item: AutoShiftAutoWriteRun | null): item is AutoShiftAutoWriteRun => item !== null)
+    const total = Number(data.data?.total)
+    autoShiftAutoWriteRunsTotal.value = Number.isFinite(total) && total >= 0 ? total : autoShiftAutoWriteRuns.value.length
+  } catch (error: unknown) {
+    autoShiftAutoWriteRunsError.value = readErrorMessage(error, tr('Failed to load auto-write runs', '加载后台写入运行记录失败'))
+    setStatus(autoShiftAutoWriteRunsError.value, 'error')
+  } finally {
+    autoShiftAutoWriteRunsLoading.value = false
+  }
+}
+
 function schedulerScopeSubjectLabel(subjectType: string): string {
   if (subjectType === 'user') return tr('Employee', '员工')
   if (subjectType === 'role') return tr('Role', '角色')
@@ -20944,6 +21226,7 @@ async function loadAdminData() {
       loadAssignments(),
       loadRotationAssignments(),
       loadSchedulerScopes(),
+      loadAutoShiftAutoWriteRuns(),
       loadHolidays(),
     ])
   } catch (error) {

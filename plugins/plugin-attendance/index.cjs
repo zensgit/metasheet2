@@ -158,15 +158,14 @@ const DEFAULT_SETTINGS = {
   overtimeSegmentation: {
     enabled: false,
   },
-  // 自动对班 (auto shift matching) — preview-only A0 foundation. Requires BOTH the
-  // runtime env flag and this org setting before the read-only preview endpoint can run.
+  // 自动对班 (auto shift matching) — A1 preview/manual apply plus A2 scheduler auto-write.
+  // Runtime still requires env flags in addition to these org settings.
   autoShiftMatching: {
     enabled: false,
     mode: 'preview',
     maxToleranceMinutes: 120,
     minConfidenceToApply: 'high',
-    // A2-0 dormant shape only. The background writer stays unavailable until
-    // mode='auto' + the scheduler slice are wired.
+    // A2 background writes require mode='auto', autoWrite.enabled=true, and the server runtime flag.
     autoWrite: {
       enabled: false,
       lookaheadDays: 1,
@@ -13174,6 +13173,34 @@ function resolveAutoShiftAutoWriteWindow(now = new Date(), lookaheadDays = DEFAU
   const from = addDaysToDateKey(today, 1) ?? today
   const to = addDaysToDateKey(from, days - 1) ?? from
   return { from, to, days }
+}
+
+function normalizeAutoShiftAutoWriteRunTimestamp(value) {
+  if (!value) return null
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
+}
+
+function mapAutoShiftAutoWriteRunRow(row, skipReasons = []) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    source: row.source ?? AUTO_SHIFT_AUTO_WRITE_SOURCE,
+    status: row.status,
+    targetFrom: normalizeDateOnly(row.target_from) ?? String(row.target_from ?? '').slice(0, 10),
+    targetTo: normalizeDateOnly(row.target_to) ?? String(row.target_to ?? '').slice(0, 10),
+    configSnapshot: normalizeMetadata(row.config_snapshot),
+    scannedCount: Number(row.scanned_count ?? 0),
+    candidateCount: Number(row.candidate_count ?? 0),
+    appliedCount: Number(row.applied_count ?? 0),
+    skippedCount: Number(row.skipped_count ?? 0),
+    errorCount: Number(row.error_count ?? 0),
+    errorMessage: row.error_message ?? null,
+    startedAt: normalizeAutoShiftAutoWriteRunTimestamp(row.started_at),
+    finishedAt: normalizeAutoShiftAutoWriteRunTimestamp(row.finished_at),
+    createdAt: normalizeAutoShiftAutoWriteRunTimestamp(row.created_at),
+    skipReasons,
+  }
 }
 
 async function loadAutoShiftAutoWriteTargetUserIds(db, orgId) {
@@ -32410,6 +32437,67 @@ module.exports = {
           }
           logger.error('Attendance shift delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete shift' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/auto-shift-matching/auto-write-runs',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query, { defaultPageSize: 5, maxPageSize: 20 })
+
+        try {
+          const countRows = await db.query(
+            'SELECT COUNT(*)::int AS total FROM attendance_auto_shift_auto_write_runs WHERE org_id = $1',
+            [orgId],
+          )
+          const rows = await db.query(
+            `SELECT *
+               FROM attendance_auto_shift_auto_write_runs
+              WHERE org_id = $1
+              ORDER BY started_at DESC, created_at DESC
+              LIMIT $2 OFFSET $3`,
+            [orgId, pageSize, offset],
+          )
+          const runIds = rows.map(row => row.id).filter(Boolean)
+          const reasonRows = runIds.length
+            ? await db.query(
+                `SELECT run_id, reason, COUNT(*)::int AS count
+                   FROM attendance_auto_shift_auto_write_run_items
+                  WHERE org_id = $1
+                    AND run_id = ANY($2::uuid[])
+                    AND status = 'skipped'
+                    AND reason IS NOT NULL
+                  GROUP BY run_id, reason
+                  ORDER BY run_id ASC, count DESC, reason ASC`,
+                [orgId, runIds],
+              )
+            : []
+          const reasonsByRun = new Map()
+          for (const row of reasonRows) {
+            const runId = String(row.run_id)
+            const list = reasonsByRun.get(runId) ?? []
+            list.push({ reason: String(row.reason), count: Number(row.count ?? 0) })
+            reasonsByRun.set(runId, list)
+          }
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(row => mapAutoShiftAutoWriteRunRow(row, reasonsByRun.get(String(row.id)) ?? [])),
+              total: Number(countRows[0]?.total ?? 0),
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance auto-shift auto-write tables missing' } })
+            return
+          }
+          logger.error('Attendance auto-shift auto-write runs query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load auto-shift auto-write runs' } })
         }
       })
     )
