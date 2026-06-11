@@ -647,6 +647,7 @@ unset TOKEN API_BASE BASE_ID ROOT
 | dispatch 立即 fail @ "Validate required env" | secrets/vars 配置缺失 — 回 §1 + §2 + §3 检查 |
 | dispatch 失败 @ "Backend seed + measure" with `[d2-perf] BASE_ID required` | `MULTITABLE_PERF_BASE_ID` 没设 — 回 §2 |
 | dispatch 失败 @ "Backend seed + measure" with `Cannot find module 'xlsx'` | pnpm install 未跑或 xlsx 不在 `packages/core-backend` deps — 检 `pnpm-lock.yaml` |
+| dispatch 失败 @ "Backend seed + measure" with `Cannot resolve undici package` | pnpm install 未跑或 root devDeps 缺 `undici`（S5a 起 seed-upload dispatcher 依赖）— 检 root `package.json` + `pnpm-lock.yaml` |
 | dispatch 失败 @ backend insert with `success ratio X% below MIN_SAMPLE_SUCCESS_RATIO=80%` | staging 后端不稳 / auth token 过期 — 检 logs，单独 curl POST /records 验证 |
 | dispatch 失败 @ backend query with `Unknown fieldId` | 不应再发生（precision pass 2 fix）— 如果发生说明 mjs 代码回归，开 fix PR |
 | dispatch 失败 @ "Frontend measure (Playwright)" with `Perf gate requires reachable API/FE` | API_BASE_URL / FE_BASE_URL 不可达 — 排查 staging 状态 |
@@ -657,6 +658,16 @@ unset TOKEN API_BASE BASE_ID ROOT
 ---
 
 ## 11. Changelog
+
+### v5 (2026-06-11) — S5a harness fix addendum：seed 现可承受 >300s chunk（undici dispatcher + err.cause 日志）
+
+按 verdict（`multitable-perf-gate-d2-baseline-verdict-20260525.md` §6）的两条 harness-side 处方落地，**harness-only，不触 `packages/core-backend/src/**`，不含任何实际 perf run**：
+
+- **Seed-upload-only undici dispatcher**：`scripts/ops/multitable-perf-baseline.mjs` 的 XLSX chunk 上传改走自定义 `undici.Agent`（`headersTimeout`/`bodyTimeout` = 1800s，env `SEED_UPLOAD_TIMEOUT_MS` 只可上调不可低于 1800s）；其余 API 调用保持 Node 默认 dispatcher 不变。此前 50k/100k seed 全部死于客户端 undici 默认 300s `headersTimeout`（~307s 墙），现在 >300s 的同步 import chunk 可存活。`undici@^6` 加为 root devDependency（lockfile 同步更新）。
+- **错误日志补 `err.cause`**：harness 此前只打 `err.message`（"fetch failed"），掩盖了底层 `UND_ERR_HEADERS_TIMEOUT`；现统一经 `formatErrorWithCause()`（含 cause 链 + code）输出。
+- **Chunk 大小指引（belt-and-braces）**：默认 `XLSX_CHUNK_SIZE=50000` 不变；如想让单 chunk 服务端耗时落在 verdict 验证过的安全区（~≤200s；10k chunk 实测 ~100s），设 `XLSX_CHUNK_SIZE=20000`（50k→3 chunks、100k→5 chunks）。
+- 新增单测 `scripts/ops/multitable-perf-baseline-upload.test.mjs`（`pnpm run verify:multitable-perf:baseline-harness:test`，无网络）。
+- **本 runbook 操作流程不变**：staging run 程序照旧；**runs 仍必须串行**（verdict §5 contention 教训：一次只 dispatch 一个）；实际 50k/100k staging run（S5b）仍是 operator-gated 的独立 opt-in，本次未执行。
 
 ### v4 (2026-05-24) — Pre-push precision pass 3 — 2 Medium + 1 Low fixes
 
