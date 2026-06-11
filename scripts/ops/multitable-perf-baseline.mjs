@@ -24,6 +24,13 @@ import path from 'path'
 import { performance } from 'perf_hooks'
 import { createRequire } from 'module'
 
+import {
+  createUploadDispatcher,
+  formatErrorWithCause,
+  resolveSeedUploadTimeoutMs,
+  resolveXlsxChunkSize,
+} from './multitable-perf-baseline-upload.mjs'
+
 // --- env config ---
 // API_BASE normalized: strip trailing slashes AND trailing /api suffix.
 // Both 'http://host:8081' and 'http://host:8081/api' work — we always
@@ -38,7 +45,18 @@ const PERF_PROFILE = String(process.env.PERF_PROFILE || 'multitable-d2-baseline'
 const PHASE = String(process.env.PHASE || 'seed_and_backend')
 const SCENARIO = String(process.env.SCENARIO || 'primary')
 const ROLLBACK = process.env.ROLLBACK !== 'false'
-const XLSX_CHUNK_SIZE = Math.max(1, Math.min(50_000, Number(process.env.XLSX_CHUNK_SIZE || 50_000)))
+// XLSX_CHUNK_SIZE: default stays 50_000 (= server cap XLSX_MAX_ROWS).
+// Chunk guidance (S5a, belt-and-braces with the upload dispatcher below): the
+// server processes each chunk SYNCHRONOUSLY (~10 ms/row → 50k ≈ 500s before
+// any response headers). The dispatcher's 1800s headersTimeout now survives
+// that, but if you want per-chunk server time to stay in verdict-proven safe
+// territory (~≤200s — 10k chunks measured ~100s on staging), set
+// XLSX_CHUNK_SIZE=20000 (50k→3 chunks, 100k→5 chunks). There is no
+// --max-chunk-seconds flag; this env is the knob.
+const XLSX_CHUNK_SIZE = resolveXlsxChunkSize(process.env.XLSX_CHUNK_SIZE)
+// Seed-upload-only headers/body timeout (≥1800s enforced; see verdict §6 —
+// undici's default 300s headersTimeout killed every ≥50k chunk at ~307s).
+const SEED_UPLOAD_TIMEOUT_MS = resolveSeedUploadTimeoutMs(process.env.SEED_UPLOAD_TIMEOUT_MS)
 const BACKEND_INSERT_SAMPLE_SIZE = Math.max(10, Number(process.env.BACKEND_INSERT_SAMPLE_SIZE || 200))
 const BACKEND_QUERY_SAMPLE_SIZE = Math.max(10, Number(process.env.BACKEND_QUERY_SAMPLE_SIZE || 50))
 const OUTPUT_DIR = String(process.env.OUTPUT_DIR || 'output/multitable-perf')
@@ -86,6 +104,9 @@ async function apiFetch(method, pathSuffix, body, opts = {}) {
   if (body && !opts.isMultipart) headers['Content-Type'] = 'application/json'
   const init = { method, headers }
   if (body) init.body = opts.isMultipart ? body : JSON.stringify(body)
+  // Seed-upload calls pass a custom undici dispatcher (raised headers/body
+  // timeouts); every other call keeps Node's default global dispatcher.
+  if (opts.dispatcher) init.dispatcher = opts.dispatcher
   const res = await fetch(url, init)
   const text = await res.text()
   let json
@@ -221,7 +242,23 @@ async function buildXlsxBuffer(xlsx, rowCount) {
   return Buffer.isBuffer(out) ? out : Buffer.from(out)
 }
 
-async function uploadXlsxChunk(xlsx, sheetId, rowsInChunk) {
+// undici is a root devDependency (added with the S5a fix); lazy-loaded so the
+// rollback phase never depends on it. Node's GLOBAL fetch ships a bundled
+// undici whose Agent is not importable — the supported way to override
+// headersTimeout/bodyTimeout per call is `import { Agent } from 'undici'` and
+// pass the instance via the (undici-specific) `dispatcher` fetch init option.
+async function loadUndiciAgent() {
+  try {
+    const mod = await import('undici')
+    return mod.Agent
+  } catch (err) {
+    throw new Error(
+      `Cannot resolve undici package (needed for the seed-upload dispatcher; root devDependency since S5a). Run pnpm install at the repo root. Error: ${err.message}`,
+    )
+  }
+}
+
+async function uploadXlsxChunk(xlsx, sheetId, rowsInChunk, dispatcher) {
   const buf = await buildXlsxBuffer(xlsx, rowsInChunk)
   const fd = new FormData()
   fd.append(
@@ -235,7 +272,7 @@ async function uploadXlsxChunk(xlsx, sheetId, rowsInChunk) {
     'POST',
     `/api/multitable/sheets/${encodeURIComponent(sheetId)}/import-xlsx`,
     fd,
-    { isMultipart: true },
+    { isMultipart: true, dispatcher },
   )
   const elapsed = performance.now() - start
   const data = env.data || env
@@ -250,23 +287,35 @@ async function uploadXlsxChunk(xlsx, sheetId, rowsInChunk) {
 
 async function seedRows(sheetId) {
   const xlsx = await loadXlsx()
-  const chunks = []
-  let remaining = ROWS
-  while (remaining > 0) {
-    const chunkSize = Math.min(XLSX_CHUNK_SIZE, remaining)
-    console.log(
-      `[seed] chunk ${chunks.length + 1}: ${chunkSize} rows (after this, remaining=${remaining - chunkSize})`,
-    )
-    const result = await uploadXlsxChunk(xlsx, sheetId, chunkSize)
-    chunks.push(result)
-    if ((result.imported ?? 0) === 0 && remaining > 0) {
-      throw new Error(
-        `Chunk upload produced 0 imports while ${remaining} rows still remaining (attempted=${result.attempted}, failed=${result.failed})`,
+  const Agent = await loadUndiciAgent()
+  // Upload-only dispatcher (verdict §6 fix #2): raised headersTimeout/
+  // bodyTimeout so a chunk whose synchronous server-side import takes >300s
+  // no longer dies on the client's default undici headersTimeout.
+  const dispatcher = createUploadDispatcher(Agent, SEED_UPLOAD_TIMEOUT_MS)
+  console.log(
+    `[seed] upload dispatcher: headersTimeout=bodyTimeout=${SEED_UPLOAD_TIMEOUT_MS}ms (seed uploads only; other calls use defaults)`,
+  )
+  try {
+    const chunks = []
+    let remaining = ROWS
+    while (remaining > 0) {
+      const chunkSize = Math.min(XLSX_CHUNK_SIZE, remaining)
+      console.log(
+        `[seed] chunk ${chunks.length + 1}: ${chunkSize} rows (after this, remaining=${remaining - chunkSize})`,
       )
+      const result = await uploadXlsxChunk(xlsx, sheetId, chunkSize, dispatcher)
+      chunks.push(result)
+      if ((result.imported ?? 0) === 0 && remaining > 0) {
+        throw new Error(
+          `Chunk upload produced 0 imports while ${remaining} rows still remaining (attempted=${result.attempted}, failed=${result.failed})`,
+        )
+      }
+      remaining -= (result.imported ?? chunkSize)
     }
-    remaining -= (result.imported ?? chunkSize)
+    return chunks
+  } finally {
+    await dispatcher.close().catch(() => {})
   }
-  return chunks
 }
 
 function assertSampleSuccessRate(label, successCount, requested) {
@@ -296,7 +345,7 @@ async function measureBackendInsertDistribution(sheetId, fields) {
       await apiFetch('POST', '/api/multitable/records', { sheetId, data })
       samples.push(performance.now() - start)
     } catch (err) {
-      console.warn(`[measure-insert] sample ${i} failed: ${err.message}`)
+      console.warn(`[measure-insert] sample ${i} failed: ${formatErrorWithCause(err)}`)
     }
   }
   assertSampleSuccessRate('backend-insert', samples.length, BACKEND_INSERT_SAMPLE_SIZE)
@@ -329,7 +378,7 @@ async function measureBackendQueryDistribution(sheetId, fields) {
       await apiFetch('GET', url)
       samples.push(performance.now() - start)
     } catch (err) {
-      console.warn(`[measure-query] sample ${i} failed: ${err.message}`)
+      console.warn(`[measure-query] sample ${i} failed: ${formatErrorWithCause(err)}`)
     }
   }
   assertSampleSuccessRate('backend-query', samples.length, BACKEND_QUERY_SAMPLE_SIZE)
@@ -447,7 +496,7 @@ async function runRollback() {
   try {
     state = await readState()
   } catch (err) {
-    console.warn(`[rollback] state file unavailable (${err.message}); ROLLBACK skipped`)
+    console.warn(`[rollback] state file unavailable (${formatErrorWithCause(err)}); ROLLBACK skipped`)
     return
   }
   console.log(`[d2-perf] PHASE=rollback sheetId=${state.sheetId}`)
@@ -471,7 +520,9 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('[d2-perf] FAILED:', err.message || err)
+  // S5a: include err.cause — the 2026-05-25 verdict's UND_ERR_HEADERS_TIMEOUT
+  // diagnosis was masked because only err.message ("fetch failed") was logged.
+  console.error('[d2-perf] FAILED:', formatErrorWithCause(err))
   if (err.stack) console.error(err.stack)
   process.exit(1)
 })

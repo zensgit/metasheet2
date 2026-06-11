@@ -57,6 +57,9 @@ importers:
       typescript:
         specifier: ^5.3.3
         version: 5.8.3
+      undici:
+        specifier: ^6.21.3
+        version: 6.26.0
       vitest:
         specifier: ^1.1.0
         version: 1.6.1(@types/node@20.19.25)(jsdom@27.2.0)(less@4.4.2)
@@ -4263,6 +4266,10 @@ packages:
 
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
+
+  undici@6.26.0:
+    resolution: {integrity: sha512-4yqz8a3n5HmGTlsbADNtr/dJlhkh/55Rq798G6ibiULcXbDtaLpTl1pvdqcbFfeoj3iSi52lePFM7h9H21cw/A==}
+    engines: {node: '>=18.17'}
 
   universalify@2.0.1:
     resolution: {integrity: sha512-gptHNQghINnc/vTGIk0SOFGFNXw7JVrlRUtConJRlvaw6DuX0wO5Jeko9sWrMBhh+PsYAZ7oXAiOnf/UKogyiw==}
@@ -8788,6 +8795,8 @@ snapshots:
       which-boxed-primitive: 1.1.1
 
   undici-types@6.21.0: {}
+
+  undici@6.26.0: {}
 
   universalify@2.0.1: {}
 
