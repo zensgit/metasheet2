@@ -230,10 +230,17 @@ export class DingTalkAttendanceDeliveryChannel implements AttendanceDeliveryChan
         result: { ok: false, retryable: false, error: 'dingtalk_recipient_ambiguous' },
       }
     }
+    const dingTalkUserId = String(rows[0].external_user_id ?? '').trim()
+    if (!dingTalkUserId) {
+      return {
+        ok: false,
+        result: { ok: false, retryable: false, error: 'dingtalk_recipient_external_user_id_missing' },
+      }
+    }
     return {
       ok: true,
       integrationId: rows[0].integration_id,
-      dingTalkUserId: rows[0].external_user_id,
+      dingTalkUserId,
     }
   }
 }
@@ -470,9 +477,10 @@ function normalizeErrorText(error: unknown, fallback: string): string {
 }
 
 function redactDingTalkErrorText(text: string): string {
-  return text
-    .replace(/([?&](?:access_token|accessToken|appsecret|appSecret|app_secret|client_secret|clientSecret)=)[^&\s'")]+/gi, '$1[redacted]')
-    .replace(/((?:access_token|accessToken|appsecret|appSecret|app_secret|client_secret|clientSecret)\s*[:=]\s*)[^&\s'")]+/gi, '$1[redacted]')
+  const redactedSecrets = text
+    .replace(/([?&](?:access_token|accessToken|appkey|appKey|appsecret|appSecret|app_secret|client_secret|clientSecret)=)[^&\s'")]+/gi, '$1[redacted]')
+    .replace(/((?:access_token|accessToken|appkey|appKey|appsecret|appSecret|app_secret|client_secret|clientSecret)\s*[:=]\s*)[^&\s'")]+/gi, '$1[redacted]')
+  return redactedSecrets.replace(/(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/[^\s'")]*)?/gi, '[redacted-url]')
 }
 
 function classifyConfigError(error: unknown): AttendanceDeliveryChannelResult {
@@ -482,16 +490,34 @@ function classifyConfigError(error: unknown): AttendanceDeliveryChannelResult {
 }
 
 function isRetryableDingTalkBusinessError(error: DingTalkBusinessError): boolean {
+  const code = readDingTalkErrorNumber(error.responseBody, 'errcode', 'code', 'statusCode', 'status')
+  if (code !== null && isRetryableDingTalkErrorCode(code)) return true
   const responseText = typeof error.responseBody?.errmsg === 'string' ? error.responseBody.errmsg : ''
   const message = `${error.message} ${responseText}`.toLowerCase()
   return /rate.?limit|too many|throttl|system busy|server busy|temporar|timeout|timed out|try again|retry|busy|限流|频繁|繁忙|超时|稍后|重试|系统异常|服务异常/i.test(message)
+}
+
+function readDingTalkErrorNumber(body: Record<string, unknown> | null, ...keys: string[]): number | null {
+  if (!body) return null
+  for (const key of keys) {
+    const value = body[key]
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'string' && value.trim().length > 0 && !Number.isNaN(Number(value))) {
+      return Number(value)
+    }
+  }
+  return null
+}
+
+function isRetryableDingTalkErrorCode(code: number): boolean {
+  return code === 408 || code === 429 || (code >= 500 && code < 600) || code === 50001
 }
 
 function classifyDingTalkSendError(error: unknown): AttendanceDeliveryChannelResult {
   if (error instanceof DingTalkRequestError) {
     return {
       ok: false,
-      retryable: error.statusCode === 429 || error.statusCode >= 500,
+      retryable: isRetryableDingTalkErrorCode(error.statusCode),
       error: `dingtalk_request_${error.statusCode}: ${normalizeErrorText(error, 'DingTalk request failed')}`,
     }
   }

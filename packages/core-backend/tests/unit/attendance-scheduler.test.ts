@@ -355,6 +355,18 @@ describe('Attendance C5 delivery worker primitives', () => {
       retryable: false,
       error: 'dingtalk_recipient_ambiguous',
     })
+
+    const blankExternalUser = new DingTalkAttendanceDeliveryChannel({
+      query: async () => ({
+        rows: [{ integration_id: 'dir-1', external_user_id: '   ' }],
+        rowCount: 1,
+      }),
+    })
+    await expect(blankExternalUser.send(base)).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      error: 'dingtalk_recipient_external_user_id_missing',
+    })
   })
 
   it('real DingTalk channel classifies config, network, and DingTalk business failures', async () => {
@@ -397,6 +409,16 @@ describe('Attendance C5 delivery worker primitives', () => {
     await expect(new DingTalkAttendanceDeliveryChannel({
       query,
       readConfig: async () => config,
+      fetchAccessToken: async () => { throw new DingTalkRequestError('request timed out', 408, null) },
+    }).send(base)).resolves.toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('dingtalk_request_408'),
+    })
+
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
       fetchAccessToken: async () => 'access-token',
       sendWorkNotification: async () => { throw new DingTalkBusinessError('invalid userid', { errcode: 40001 }) },
     }).send(base)).resolves.toEqual({
@@ -410,6 +432,17 @@ describe('Attendance C5 delivery worker primitives', () => {
       readConfig: async () => config,
       fetchAccessToken: async () => 'access-token',
       sendWorkNotification: async () => { throw new DingTalkBusinessError('system busy, try again later', { errcode: 50001, errmsg: 'system busy' }) },
+    }).send(base)).resolves.toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('dingtalk_business_error'),
+    })
+
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => 'access-token',
+      sendWorkNotification: async () => { throw new DingTalkBusinessError('upstream rejected request', { errcode: 429 }) },
     }).send(base)).resolves.toEqual({
       ok: false,
       retryable: true,
@@ -455,9 +488,12 @@ describe('Attendance C5 delivery worker primitives', () => {
     expect(result).toEqual({
       ok: false,
       retryable: true,
-      error: expect.stringContaining('appsecret=[redacted]'),
+      error: expect.stringContaining('[redacted-url]'),
     })
     expect(JSON.stringify(result)).not.toContain('super-secret')
+    expect(JSON.stringify(result)).not.toContain('bad.invalid')
+    expect(JSON.stringify(result)).not.toContain('appkey=k')
+    expect(JSON.stringify(result)).not.toContain('/gettoken')
 
     const sendResult = await new DingTalkAttendanceDeliveryChannel({
       query,
@@ -481,8 +517,38 @@ describe('Attendance C5 delivery worker primitives', () => {
     expect(sendResult).toEqual({
       ok: false,
       retryable: true,
-      error: expect.stringContaining('access_token=[redacted]'),
+      error: expect.stringContaining('[redacted-url]'),
     })
     expect(JSON.stringify(sendResult)).not.toContain('token-secret')
+    expect(JSON.stringify(sendResult)).not.toContain('bad.invalid')
+    expect(JSON.stringify(sendResult)).not.toContain('/topapi/message')
+
+    const schemelessResult = await new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => {
+        throw new Error('Failed to parse URL from oapi.dingtalk.com/gettoken?appkey=k&appsecret=super-secret')
+      },
+    }).send({
+      id: 'delivery-3',
+      orgId: 'default',
+      sourceType: 'comp_time_expiry_reminder',
+      sourceId: 'balance-1',
+      sourceKey: 'balance-1:recipient:u1',
+      recipientUserId: 'u1',
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+      payload: {},
+    })
+
+    expect(schemelessResult).toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('[redacted-url]'),
+    })
+    expect(JSON.stringify(schemelessResult)).not.toContain('super-secret')
+    expect(JSON.stringify(schemelessResult)).not.toContain('oapi.dingtalk.com')
+    expect(JSON.stringify(schemelessResult)).not.toContain('appkey=k')
+    expect(JSON.stringify(schemelessResult)).not.toContain('/gettoken')
   })
 })
