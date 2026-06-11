@@ -5,7 +5,10 @@
 // S3: area / funnel / gauge are RENDER-LAYER types — the aggregation service computes them through
 // the same grouped {label,value} pipeline as bar/line/pie (no per-type math; series split stays
 // bar/line-only). The frontend maps area→line+areaStyle, funnel→stages, gauge→first-point/total dial.
-export type ChartType = 'bar' | 'line' | 'pie' | 'number' | 'table' | 'area' | 'funnel' | 'gauge'
+// r12: scatter is the ONE non-grouped type — a PER-RECORD x/y projection (no groupBy / aggregation /
+// seriesBy / dateField). It branches early in the producer and carries xValue/yValue (+ optional size)
+// per dataPoint; `label` is its optional color category. See `ChartDataSource` x/y/color/sizeFieldId.
+export type ChartType = 'bar' | 'line' | 'pie' | 'number' | 'table' | 'area' | 'funnel' | 'gauge' | 'scatter'
 
 export type AggregationFunction = 'count' | 'sum' | 'avg' | 'min' | 'max' | 'count_distinct'
 
@@ -42,6 +45,18 @@ export interface ChartDataSource {
   /** For line charts: time field for X axis */
   dateFieldId?: string
   dateGrouping?: 'day' | 'week' | 'month' | 'quarter' | 'year'
+
+  /**
+   * r12 scatter (a discriminant — meaningful ONLY when `type === 'scatter'`). Scatter is a per-record
+   * x/y projection, so it ignores `groupByFieldId` / `aggregation` / `seriesByFieldId` / `dateFieldId`.
+   * `xFieldId` + `yFieldId` are both required (numeric fields). `colorFieldId` sets the per-point
+   * `label` (color category); `sizeFieldId` sets the per-point `size`. `limit` caps the number of
+   * points (no sort — scatter has no value to sort by).
+   */
+  xFieldId?: string
+  yFieldId?: string
+  colorFieldId?: string
+  sizeFieldId?: string
 
   /** Limit number of groups/slices */
   limit?: number
@@ -129,5 +144,17 @@ export function assertSeriesConstraints(
   // additive aggregation. (v2-d-b1 = grouped relaxation; v2-d-b2 = line; v2-d-b3 = date axis.)
   if (type === 'bar' && barMode !== 'grouped' && !ADDITIVE_AGGREGATIONS.has(dataSource.aggregation?.function)) {
     throw new Error('stacked series require a sum or count aggregation (use barMode "grouped" for others)')
+  }
+}
+
+/**
+ * A scatter chart is a per-record x/y projection — it requires both axis fields (review M3: the
+ * persisted POST/PATCH path must enforce this, not just the preview path + config UI, or a direct
+ * API write of a scatter chart with no x/y would persist and later render an empty plot).
+ */
+export function assertScatterFields(dataSource: ChartDataSource | undefined, type: ChartType): void {
+  if (type !== 'scatter') return
+  if (!dataSource?.xFieldId || !dataSource?.yFieldId) {
+    throw new Error('scatter requires xFieldId and yFieldId')
   }
 }

@@ -952,7 +952,9 @@ export interface AutomationStats {
 // --- Charts ---
 // S3: area / funnel / gauge are render-layer additions — the backend aggregates them through the
 // same grouped {label,value} pipeline as bar/line/pie (no per-type aggregation math).
-export type ChartType = 'bar' | 'line' | 'pie' | 'number' | 'table' | 'area' | 'funnel' | 'gauge'
+// r12: scatter is the one NON-grouped type — a per-record x/y projection (xValue/yValue per dataPoint),
+// not a grouped aggregation. It uses x/y/color/sizeFieldId on the dataSource (ignores groupBy/aggregation).
+export type ChartType = 'bar' | 'line' | 'pie' | 'number' | 'table' | 'area' | 'funnel' | 'gauge' | 'scatter'
 
 export type AggregationFunction = 'count' | 'sum' | 'avg' | 'min' | 'max' | 'count_distinct'
 
@@ -971,6 +973,13 @@ export interface ChartDataSource {
   dateFieldId?: string
   dateGrouping?: 'day' | 'week' | 'month' | 'quarter' | 'year'
   aggregation: ChartAggregation
+  // r12 scatter (discriminant — meaningful only when chartType === 'scatter'). x/y are both required
+  // numeric fields; color sets the per-point category (label); size sets the per-point bubble size.
+  // Scatter ignores groupByFieldId / aggregation / seriesByFieldId / dateFieldId.
+  xFieldId?: string
+  yFieldId?: string
+  colorFieldId?: string
+  sizeFieldId?: string
 }
 
 export interface ChartDisplayConfig {
@@ -1011,6 +1020,11 @@ export interface ChartDataPoint {
   label: string
   value: number
   color?: string
+  // r12 scatter: a per-record point carries its own x/y (+ optional size). Optional so grouped types
+  // stay unchanged; only scatter dataPoints populate them. `label` then holds the optional color category.
+  xValue?: number
+  yValue?: number
+  size?: number
 }
 
 // v2-d: a bar series (grouped or stacked). `data` is dense + aligned positionally to ChartData.dataPoints.

@@ -76,7 +76,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts/core'
-import { BarChart, LineChart, PieChart, FunnelChart, GaugeChart } from 'echarts/charts'
+import { BarChart, LineChart, PieChart, FunnelChart, GaugeChart, ScatterChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { AggregationFunction, ChartData, ChartDisplayConfig } from '../types'
@@ -84,10 +84,10 @@ import { buildChartOption, CHART_COLORS, ECHARTS_CHART_TYPES } from '../utils/bu
 import { useLocale } from '../../composables/useLocale'
 import { viewRenderLabel } from '../utils/meta-view-render-labels'
 
-// Tree-shakeable: only the chart types + components actually used (S3 adds funnel/gauge; the
-// 'area' type reuses LineChart). Legend/title are HTML chrome (not ECharts components), so
-// LegendComponent/TitleComponent are deliberately absent.
-echarts.use([BarChart, LineChart, PieChart, FunnelChart, GaugeChart, GridComponent, TooltipComponent, CanvasRenderer])
+// Tree-shakeable: only the chart types + components actually used (S3 adds funnel/gauge; r12 adds
+// scatter; the 'area' type reuses LineChart). Legend/title are HTML chrome (not ECharts components),
+// so LegendComponent/TitleComponent are deliberately absent.
+echarts.use([BarChart, LineChart, PieChart, FunnelChart, GaugeChart, ScatterChart, GridComponent, TooltipComponent, CanvasRenderer])
 
 const props = defineProps<{
   chartData: ChartData

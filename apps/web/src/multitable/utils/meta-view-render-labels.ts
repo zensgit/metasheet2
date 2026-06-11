@@ -111,6 +111,11 @@ export type MetaViewRenderLabelKey =
   | 'dashboard.barModeGrouped'
   | 'dashboard.barModeAdditiveOnly'
   | 'dashboard.noNumericFields'
+  | 'dashboard.xField'
+  | 'dashboard.yField'
+  | 'dashboard.colorField'
+  | 'dashboard.sizeField'
+  | 'dashboard.scatterFieldHint'
   | 'dashboard.livePreview'
   | 'dashboard.previewFillRequired'
   | 'dashboard.loadingPreview'
@@ -232,6 +237,11 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'dashboard.barModeGrouped',
   'dashboard.barModeAdditiveOnly',
   'dashboard.noNumericFields',
+  'dashboard.xField',
+  'dashboard.yField',
+  'dashboard.colorField',
+  'dashboard.sizeField',
+  'dashboard.scatterFieldHint',
   'dashboard.livePreview',
   'dashboard.previewFillRequired',
   'dashboard.loadingPreview',
@@ -360,6 +370,11 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'dashboard.barModeGrouped': { en: 'Grouped (side by side)', zh: '并排分组' },
   'dashboard.barModeAdditiveOnly': { en: 'Stacked needs a sum or count aggregation; using grouped.', zh: '堆叠需要求和或计数聚合；已改用并排分组。' },
   'dashboard.noNumericFields': { en: 'No readable numeric fields available.', zh: '没有可读取的数值字段。' },
+  'dashboard.xField': { en: 'X axis (numeric)', zh: 'X 轴（数值）' },
+  'dashboard.yField': { en: 'Y axis (numeric)', zh: 'Y 轴（数值）' },
+  'dashboard.colorField': { en: 'Color by (optional)', zh: '颜色分类（可选）' },
+  'dashboard.sizeField': { en: 'Size by (optional, numeric)', zh: '气泡大小（可选，数值）' },
+  'dashboard.scatterFieldHint': { en: 'Each record is one point at (X, Y); no grouping or aggregation.', zh: '每条记录是一个 (X, Y) 坐标点，不分组也不聚合。' },
   'dashboard.livePreview': { en: 'Live preview', zh: '实时预览' },
   'dashboard.previewFillRequired': { en: 'Complete the chart fields to preview.', zh: '填写完整图表字段后可预览。' },
   'dashboard.loadingPreview': { en: 'Loading preview...', zh: '正在加载预览...' },

@@ -17,7 +17,7 @@ vi.mock('echarts/core', () => ({
   init: vi.fn(() => ({ setOption: vi.fn(), resize: vi.fn(), dispose: vi.fn() })),
   use: vi.fn(),
 }))
-vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {}, FunnelChart: {}, GaugeChart: {} }))
+vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {}, FunnelChart: {}, GaugeChart: {}, ScatterChart: {} }))
 vi.mock('echarts/components', () => ({ GridComponent: {}, TooltipComponent: {} }))
 vi.mock('echarts/renderers', () => ({ CanvasRenderer: {} }))
 
@@ -282,6 +282,74 @@ describe('MetaDashboardView', () => {
     ])
     const dataLoads = fetchFn.mock.calls.filter(([url]: [string]) => url.includes('/charts/chart_new/data'))
     expect(dataLoads.length).toBe(1)
+  })
+
+  it('r12 scatter: shows x/y/color/size pickers + hides grouped pickers, and gates save on x && y', async () => {
+    const dashboard = fakeDashboard({ panels: [] })
+    const { client, fetchFn } = mockClient([dashboard], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    // grouped pickers are shown for the default (bar) type
+    expect(container.querySelector('[data-field="chart-group-by"]')).toBeTruthy()
+    expect(container.querySelector('[data-field="chart-aggregation"]')).toBeTruthy()
+    expect(container.querySelector('[data-field="chart-x-field"]')).toBeNull()
+
+    const typeSelect = container.querySelector('[data-field="chart-type"]') as HTMLSelectElement
+    typeSelect.value = 'scatter'
+    typeSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    // scatter HIDES groupBy/aggregation/series/bar-mode and SHOWS x/y/color/size
+    expect(container.querySelector('[data-field="chart-group-by"]')).toBeNull()
+    expect(container.querySelector('[data-field="chart-aggregation"]')).toBeNull()
+    expect(container.querySelector('[data-field="chart-series-by"]')).toBeNull()
+    expect(container.querySelector('[data-field="chart-x-field"]')).toBeTruthy()
+    expect(container.querySelector('[data-field="chart-y-field"]')).toBeTruthy()
+    expect(container.querySelector('[data-field="chart-color-field"]')).toBeTruthy()
+    expect(container.querySelector('[data-field="chart-size-field"]')).toBeTruthy()
+
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Amount vs Amount'
+    nameInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const submit = container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement
+    // x and y both required — disabled with neither, then only x, then enabled with both
+    expect(submit.disabled).toBe(true)
+
+    const xSelect = container.querySelector('[data-field="chart-x-field"]') as HTMLSelectElement
+    xSelect.value = 'fld_amount'
+    xSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    expect(submit.disabled).toBe(true) // still missing y
+
+    const ySelect = container.querySelector('[data-field="chart-y-field"]') as HTMLSelectElement
+    ySelect.value = 'fld_amount'
+    ySelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    expect(submit.disabled).toBe(false)
+
+    submit.click()
+    await flushPromises()
+
+    const chartPosts = fetchFn.mock.calls.filter(
+      ([url, init]: [string, RequestInit?]) => url.includes('/charts') && init?.method === 'POST',
+    )
+    expect(chartPosts.length).toBe(1)
+    const chartBody = JSON.parse(chartPosts[0][1].body as string)
+    // the client maps chartType -> type and dataSource/displayConfig -> dataSource/display on the wire
+    expect(chartBody).toMatchObject({
+      name: 'Amount vs Amount',
+      type: 'scatter',
+      dataSource: { sheetId: 'sheet_1', xFieldId: 'fld_amount', yFieldId: 'fld_amount' },
+    })
+    // scatter payload carries NO grouped fields
+    expect(chartBody.dataSource.groupByFieldId).toBeUndefined()
+    expect(chartBody.dataSource.seriesByFieldId).toBeUndefined()
   })
 
   it('loads a debounced live preview without gating chart save', async () => {
@@ -1052,14 +1120,14 @@ describe('MetaDashboardView', () => {
 
   // ---- S3: chart-type completion (area / funnel / gauge) + S1-9 async renderer ----
 
-  it('S3: the chart-type select offers area / funnel / gauge alongside the original five', async () => {
+  it('S3 + r12: the chart-type select offers area / funnel / gauge / scatter alongside the originals', async () => {
     const { client } = mockClient([fakeDashboard({ panels: [] })], [])
     const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
     await flushPromises()
     await openCreateForm(container)
 
     const options = Array.from(typeSelectOf(container).options).map((o) => o.value)
-    expect(options).toEqual(['bar', 'line', 'area', 'pie', 'funnel', 'gauge', 'number', 'table'])
+    expect(options).toEqual(['bar', 'line', 'area', 'pie', 'funnel', 'gauge', 'scatter', 'number', 'table'])
   })
 
   it('S3: variant + series pickers stay hidden for area/funnel/gauge (no inapplicable controls)', async () => {

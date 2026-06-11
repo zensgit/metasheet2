@@ -194,8 +194,8 @@ describe('dashboardRouter HTTP mounting', () => {
     }
   })
 
-  it('POST /charts/preview-data still rejects unknown chart types (scatter stays out — no numeric x/y in the data contract)', async () => {
-    for (const type of ['scatter', 'radar', 'nope']) {
+  it('POST /charts/preview-data still rejects unknown chart types (radar/nope — scatter is now a real type, see scatter tests below)', async () => {
+    for (const type of ['radar', 'nope']) {
       const res = await request(buildApp())
         .post('/api/multitable/sheets/sheet-a/charts/preview-data')
         .send({ type, dataSource: { groupByFieldId: 'fld_x', aggregation: { function: 'count' } } })
@@ -204,12 +204,36 @@ describe('dashboardRouter HTTP mounting', () => {
     }
   })
 
+  // r12 scatter: a per-record x/y projection — the preview-data type gate must ADMIT it. With the
+  // loaders mocked to zero fields the referenced x/y fields are "not allowed" → the route answers the
+  // restricted ChartData shape (200), which is enough to prove the type passed validation.
+  it('POST /charts/preview-data accepts scatter when xFieldId + yFieldId are present', async () => {
+    const res = await request(buildApp())
+      .post('/api/multitable/sheets/sheet-a/charts/preview-data')
+      .send({ type: 'scatter', dataSource: { xFieldId: 'fld_x', yFieldId: 'fld_y', aggregation: { function: 'count' } } })
+    expect(res.status).toBe(200)
+    expect(res.body.chartType).toBe('scatter')
+  })
+
+  it('POST /charts/preview-data rejects scatter MISSING xFieldId or yFieldId with 400', async () => {
+    for (const dataSource of [
+      { yFieldId: 'fld_y', aggregation: { function: 'count' } }, // no x
+      { xFieldId: 'fld_x', aggregation: { function: 'count' } }, // no y
+    ]) {
+      const res = await request(buildApp())
+        .post('/api/multitable/sheets/sheet-a/charts/preview-data')
+        .send({ type: 'scatter', dataSource })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('scatter requires xFieldId and yFieldId')
+    }
+  })
+
   // F4: the PERSISTED write paths (POST/PATCH /charts) must reject an unknown `type` too —
   // the `type` column is TEXT NOT NULL with no CHECK, and only preview-data validated
   // it before. An unknown type must 400 BEFORE the service is touched.
   it('POST /charts rejects an unknown chart type with 400 (never persists)', async () => {
     const createChart = vi.spyOn(service, 'createChart')
-    for (const type of ['scatter', 'radar', 'nope']) {
+    for (const type of ['radar', 'nope']) {
       const res = await request(buildApp())
         .post('/api/multitable/sheets/sheet-a/charts')
         .send({ name: 'X', type, dataSource: { aggregation: { function: 'count' } } })
@@ -229,6 +253,26 @@ describe('dashboardRouter HTTP mounting', () => {
       .expect(201)
   })
 
+  it('M3: POST /charts rejects a scatter chart missing x/y on the PERSISTED path (never persists)', async () => {
+    const createChart = vi.spyOn(service, 'createChart')
+    const res = await request(buildApp())
+      .post('/api/multitable/sheets/sheet-a/charts')
+      .send({ name: 'S', type: 'scatter', dataSource: { xFieldId: 'fld_x' } }) // y missing
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('scatter requires xFieldId and yFieldId')
+    expect(createChart).not.toHaveBeenCalled()
+  })
+
+  it('M3: POST /charts accepts a scatter chart with x/y', async () => {
+    vi.spyOn(service, 'createChart').mockResolvedValue({
+      id: 'c', sheetId: 'sheet-a', name: 'S', type: 'scatter',
+    } as any)
+    await request(buildApp())
+      .post('/api/multitable/sheets/sheet-a/charts')
+      .send({ name: 'S', type: 'scatter', dataSource: { xFieldId: 'fld_x', yFieldId: 'fld_y' } })
+      .expect(201)
+  })
+
   it('PATCH /charts/:id rejects an unknown chart type with 400 (never updates)', async () => {
     vi.spyOn(service, 'getChart').mockResolvedValue({
       id: 'chart-1', sheetId: 'sheet-a', name: 'c', type: 'bar',
@@ -237,7 +281,7 @@ describe('dashboardRouter HTTP mounting', () => {
     const updateChart = vi.spyOn(service, 'updateChart')
     const res = await request(buildApp())
       .patch('/api/multitable/sheets/sheet-a/charts/chart-1')
-      .send({ type: 'scatter' })
+      .send({ type: 'radar' })
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('Invalid chart type')
     expect(updateChart).not.toHaveBeenCalled()
