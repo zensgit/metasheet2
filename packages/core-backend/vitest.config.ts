@@ -21,6 +21,7 @@ export default defineConfig({
       'tests/integration/after-sales-plugin.install.test.ts',
       'tests/integration/after-sales-registry-backfill.test.ts',
       'tests/integration/approval-pack1a-lifecycle.api.test.ts',
+      'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
       'tests/integration/attendance-outdoor-punch.test.ts',

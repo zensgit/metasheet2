@@ -28,6 +28,7 @@ import {
   type AttendanceExpiryService,
   type ExpiredCompTimeBalance,
 } from './AttendanceExpiryService'
+import { CompTimeExpiryReminderService } from './CompTimeExpiryReminderService'
 import { UnscheduledReminderService } from './UnscheduledReminderService'
 
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000
@@ -360,6 +361,23 @@ export function resolveUnscheduledReminderJob(): AttendanceSchedulerJob | null {
   })
   return {
     name: 'unscheduled-reminder',
+    run: () => service.run(),
+  }
+}
+
+/**
+ * C5-1b opt-in: comp-time expiry reminder producer, only when
+ * ATTENDANCE_COMP_TIME_EXPIRY_REMINDER_ENABLED=true. It produces C5 outbox rows only; the delivery
+ * worker is the only path that may call a real channel. Lookahead defaults to 7 days and is clamped
+ * inside the service.
+ */
+export function resolveCompTimeExpiryReminderJob(): AttendanceSchedulerJob | null {
+  if (process.env.ATTENDANCE_COMP_TIME_EXPIRY_REMINDER_ENABLED !== 'true') return null
+  const service = new CompTimeExpiryReminderService({
+    lookaheadDays: Number(process.env.ATTENDANCE_COMP_TIME_EXPIRY_REMINDER_LOOKAHEAD_DAYS),
+  })
+  return {
+    name: 'comp-time-expiry-reminder',
     run: () => service.run(),
   }
 }
