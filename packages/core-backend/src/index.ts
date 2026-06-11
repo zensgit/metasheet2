@@ -137,6 +137,7 @@ import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
 import { dashboardRouter } from './routes/dashboard'
 import { createAutomationRoutes } from './routes/automation'
+import { createMultitableAiRoutes } from './routes/multitable-ai'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
@@ -1089,6 +1090,10 @@ export class MetaSheetServer {
     // Uses a lazy resolver because AutomationService is initialized later
     // in the startup sequence than route mounting happens.
     this.app.use('/api/multitable', createAutomationRoutes(() => this.automationService))
+    // AI provider readiness (A1, path: /ai/readiness) — internal/not-in-OpenAPI,
+    // admin-only via requireAdminRole(); platform JWT comes from the global
+    // /api/** middleware above. See routes/multitable-ai.ts header.
+    this.app.use('/api/multitable', createMultitableAiRoutes())
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {
