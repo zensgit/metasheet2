@@ -72,6 +72,13 @@ describe('meta-automation-labels', () => {
     expect(automationLabel('editor.executionModeRequiredHint', true)).toContain('等待回调')
   })
 
+  it('localizes branch run-readability labels', () => {
+    expect(automationLabel('runs.parallelBranchStep', false)).toBe('parallel branch')
+    expect(automationLabel('runs.parallelBranchStep', true)).toBe('并行分支')
+    expect(automationLabel('runs.parallelJoinAll', false)).toBe('Parallel join-all:')
+    expect(automationLabel('runs.parallelJoinAll', true)).toBe('并行全部汇合：')
+  })
+
   it('localizes trigger types, trigger conditions, and cron presets with raw fallbacks', () => {
     expect(automationTriggerTypeLabel('record.created', false)).toBe('When record created')
     expect(automationTriggerTypeLabel('record.created', true)).toBe('当记录创建时')
