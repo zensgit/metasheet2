@@ -818,6 +818,59 @@ export interface DryRunResult {
   diagnostics: DryRunDiagnostic[]
 }
 
+// AI field shortcut (A3, design multitable-ai-shortcut-frontend-a3-design-20260611).
+// These types mirror the PINNED A2 wire contract 1:1
+// (packages/core-backend/src/routes/multitable-ai.ts; the run key set is
+// asserted route-level in the backend integration suite). Do not reshape here —
+// the useAiShortcut adapter owns the PatchResult synthesis.
+export type AiShortcutKind = 'summarize' | 'classify' | 'extract' | 'translate'
+
+export interface AiShortcutConfigInput {
+  kind: AiShortcutKind
+  sourceFieldIds: string[]
+  params?: { options?: string[]; targetLang?: string; instruction?: string }
+}
+
+export interface AiShortcutUsage {
+  promptTokens: number
+  completionTokens: number
+}
+
+export interface AiShortcutPreviewData {
+  status: 'succeeded'
+  action: 'preview'
+  output: string
+  usage: AiShortcutUsage | null
+  estimatedCostUsd: number
+  provider: string | null
+  model: string | null
+}
+
+export interface AiShortcutRunData {
+  status: 'succeeded'
+  action: 'run'
+  recordId: string
+  fieldId: string
+  /** null when the write landed without a reported version — the adapter must skip the version merge. */
+  version: number | null
+  output: string
+  usage: AiShortcutUsage | null
+  estimatedCostUsd: number
+  provider: string | null
+  model: string | null
+}
+
+export interface AiUsageSummary {
+  callerDayTokens: number
+  callerWeekTokens: number
+  instanceDayUsd: number
+  caps: {
+    tenantDailyTokenCap: number
+    tenantWeeklyTokenCap: number
+    accountDailyUsdCap: number
+  }
+}
+
 export class MultitableApiClient {
   private fetch: FetchFn
   private readonly isZhOption?: ApiErrorLocaleOption
@@ -1119,6 +1172,46 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ expression, sampleValues, ...(recordId ? { recordId } : {}) }),
     })
+    return this.parseJson(res)
+  }
+
+  // --- AI shortcut (A3) ---
+  // Preview accepts EITHER a persisted fieldId (drawer path) OR an inline
+  // DRAFT config (field-manager config-time preview — a REAL provider call
+  // that consumes quota). A real readable recordId is mandatory (no
+  // hand-typed-sample path on the backend).
+  async aiShortcutPreview(
+    sheetId: string,
+    input: { recordId: string; fieldId?: string; config?: AiShortcutConfigInput },
+  ): Promise<AiShortcutPreviewData> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/ai/shortcut/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        recordId: input.recordId,
+        ...(input.fieldId ? { fieldId: input.fieldId } : {}),
+        ...(input.config ? { config: input.config } : {}),
+      }),
+    })
+    return this.parseJson(res)
+  }
+
+  // Run executes ONLY the persisted field.property.aiShortcut config — the
+  // backend rejects any inline config (400 AI_INLINE_CONFIG_REJECTED), so the
+  // body is deliberately limited to {recordId, fieldId}.
+  async aiShortcutRun(sheetId: string, input: { recordId: string; fieldId: string }): Promise<AiShortcutRunData> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/ai/shortcut/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recordId: input.recordId, fieldId: input.fieldId }),
+    })
+    return this.parseJson(res)
+  }
+
+  // Admin usage summary (flat single-object response, readiness-route
+  // precedent). 403 for non-admins — callers cache the probe per session.
+  async aiUsageSummary(): Promise<AiUsageSummary> {
+    const res = await this.fetch('/api/multitable/ai/usage-summary')
     return this.parseJson(res)
   }
 

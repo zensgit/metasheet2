@@ -55,6 +55,18 @@ export type MetaManagerLabelKey =
   | 'field.error.autoNumberPrefix'
   | 'field.error.autoNumberDigits'
   | 'field.error.autoNumberStart'
+  // --- AI shortcut config section (A3 §2.1) ---
+  | 'field.ai.title' | 'field.ai.enable'
+  | 'field.ai.kind' | 'field.ai.sourceFields' | 'field.ai.sourceHint'
+  | 'field.ai.options' | 'field.ai.optionPlaceholder'
+  | 'field.ai.targetLang' | 'field.ai.instruction'
+  | 'field.ai.previewWithRecord' | 'field.ai.previewNeedsRecord'
+  | 'field.ai.previewRealCallHint' | 'field.ai.previewDraftHint'
+  | 'field.ai.previewing' | 'field.ai.previewResult'
+  | 'field.error.aiSourceRequired' | 'field.error.aiSourceTooMany'
+  | 'field.error.aiOptionsTooMany' | 'field.error.aiOptionTooLong'
+  | 'field.error.aiTargetLangTooLong' | 'field.error.aiInstructionTooLong'
+  | 'field.aiUsage.title' | 'field.aiUsage.today' | 'field.aiUsage.week' | 'field.aiUsage.instance'
   | 'view.title' | 'view.empty' | 'view.saveSettings'
   | 'view.namePlaceholder' | 'view.addButton'
   | 'view.titleField' | 'view.coverField' | 'view.cardFields'
@@ -219,6 +231,38 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.error.autoNumberDigits': { en: 'Auto number digits must be between 0 and 12', zh: '自动编号位数必须在 0 到 12 之间' },
   'field.error.autoNumberStart': { en: 'Auto number start must be at least 1', zh: '自动编号起始值至少为 1' },
 
+  // --- AI shortcut config section (A3 §2.1). zh keeps the product term
+  // "AI shortcut" / "token" raw (same convention as persisted enum values). ---
+  'field.ai.title': { en: 'AI shortcut', zh: 'AI shortcut' },
+  'field.ai.enable': { en: 'Enable AI shortcut', zh: '启用 AI shortcut' },
+  'field.ai.kind': { en: 'Task type', zh: '任务类型' },
+  'field.ai.sourceFields': { en: 'Source fields', zh: '来源字段' },
+  'field.ai.sourceHint': { en: 'Up to 20 source fields. Computed fields (formula/lookup/rollup) and the target field itself are excluded.', zh: '最多 20 个来源字段；公式/查找/汇总等计算字段及目标字段自身不可选。' },
+  'field.ai.options': { en: 'Categories', zh: '分类选项' },
+  'field.ai.optionPlaceholder': { en: 'Category text', zh: '分类文本' },
+  'field.ai.targetLang': { en: 'Target language', zh: '目标语言' },
+  'field.ai.instruction': { en: 'Additional instruction', zh: '附加指令' },
+  // §2.1 LOCKED preview copy: a config-time preview is a REAL provider call
+  // (consumes quota/tokens) and validates the DRAFT, not the saved config.
+  'field.ai.previewWithRecord': { en: 'Preview with current record', zh: '用当前记录预览' },
+  'field.ai.previewNeedsRecord': { en: 'Select a record in the grid to enable preview.', zh: '请先在表格中选择一条记录后再预览。' },
+  'field.ai.previewRealCallHint': { en: 'Preview makes a real AI call and consumes quota and tokens.', zh: '预览为真实 AI 调用，会消耗配额与 token。' },
+  'field.ai.previewDraftHint': { en: 'Preview validates the current draft config, not the saved one.', zh: '预览验证的是当前草稿配置，而非已保存的配置。' },
+  'field.ai.previewing': { en: 'Previewing...', zh: '正在预览...' },
+  'field.ai.previewResult': { en: 'Preview result', zh: '预览结果' },
+  // Client-side constraint mirrors of the A2 config governance caps.
+  'field.error.aiSourceRequired': { en: 'Select at least one source field for the AI shortcut', zh: '请为 AI shortcut 至少选择一个来源字段' },
+  'field.error.aiSourceTooMany': { en: 'AI shortcut allows at most 20 source fields', zh: 'AI shortcut 来源字段最多 20 个' },
+  'field.error.aiOptionsTooMany': { en: 'AI shortcut allows at most 50 categories', zh: 'AI shortcut 分类选项最多 50 个' },
+  'field.error.aiOptionTooLong': { en: 'Each category must be at most 100 characters', zh: '每个分类选项最长 100 字符' },
+  'field.error.aiTargetLangTooLong': { en: 'Target language must be at most 32 characters', zh: '目标语言最长 32 字符' },
+  'field.error.aiInstructionTooLong': { en: 'Instruction must be at most 500 characters', zh: '附加指令最长 500 字符' },
+  // Admin usage card (§2.4): caller's own token windows + instance USD.
+  'field.aiUsage.title': { en: 'AI usage (admin)', zh: 'AI 用量（管理员）' },
+  'field.aiUsage.today': { en: 'My tokens today', zh: '我今日 tokens' },
+  'field.aiUsage.week': { en: 'My tokens this week', zh: '我本周 tokens' },
+  'field.aiUsage.instance': { en: 'Instance USD today', zh: '实例今日 USD' },
+
   'view.title': { en: 'Manage Views', zh: '管理视图' },
   'view.empty': { en: 'No views defined', zh: '暂无视图' },
   'view.saveSettings': { en: 'Save view settings', zh: '保存视图设置' },
@@ -338,6 +382,22 @@ export function fieldOptionRequired(type: string, isZh: boolean): string {
 
 export function configureView(name: string, isZh: boolean): string {
   return isZh ? `配置 ${name}` : `Configure ${name}`
+}
+
+// aiShortcutKindLabel: display labels for the A2-pinned kind enum. The
+// persisted enum VALUES (summarize/classify/extract/translate) stay raw —
+// only the display text localizes (persisted-enum bucketing convention).
+const AI_SHORTCUT_KIND_LABELS: Record<string, { en: string; zh: string }> = {
+  summarize: { en: 'Summarize', zh: '摘要' },
+  classify: { en: 'Classify', zh: '分类' },
+  extract: { en: 'Extract', zh: '提取' },
+  translate: { en: 'Translate', zh: '翻译' },
+}
+
+export function aiShortcutKindLabel(kind: string, isZh: boolean): string {
+  const entry = AI_SHORTCUT_KIND_LABELS[kind]
+  if (!entry) return kind
+  return isZh ? entry.zh : entry.en
 }
 
 const VIEW_TYPE_LABELS: Record<string, { en: string; zh: string }> = {

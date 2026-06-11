@@ -15,6 +15,7 @@ import {
   insertAiUsageLedgerEntry,
   reserveAiUsage,
   settleAiUsageReservation,
+  sumAiUsageWindows,
   type AiUsageAction,
   type AiUsageLedgerEntry,
   type AiUsageLedgerStatus,
@@ -176,6 +177,42 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
   router.get('/ai/readiness', requireAdminRole(), (_req: Request, res: Response) => {
     const report = resolveAiProviderReadiness(process.env)
     res.json(redactValue(report))
+  })
+
+  /**
+   * A3 §2.4 — admin usage summary (INTERNAL, not in OpenAPI). Deliberately
+   * NOT behind the AI burst limiter: a read-only ledger aggregate must never
+   * consume (or be starved by) the preview/run budget. Subject semantics are
+   * LOCKED: token windows are the CALLER's own (authenticated user id), the
+   * USD window is instance-wide. No readiness info here — blocked diagnosis
+   * stays on GET /ai/readiness (A1).
+   */
+  router.get('/ai/usage-summary', requireAdminRole(), async (req: Request, res: Response) => {
+    try {
+      const subjectKey = resolveRequestUserKey(req)
+      if (!subjectKey) {
+        // requireAdminRole already rejected anonymous callers; this guards the
+        // exotic "admin without a usable id" shape instead of summing garbage.
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'No usable caller identity' } })
+      }
+      const pool = poolManager.get() as unknown as PoolLike
+      const query = pool.query.bind(pool) as AiUsageQueryFn
+      const sums = await sumAiUsageWindows(query, subjectKey)
+      const caps = resolveAiProviderReadiness(process.env).caps
+      res.json({
+        callerDayTokens: sums.userDailyTokens,
+        callerWeekTokens: sums.userWeeklyTokens,
+        instanceDayUsd: sums.instanceDailyUsd,
+        caps: {
+          tenantDailyTokenCap: caps.tenantDailyTokenCap,
+          tenantWeeklyTokenCap: caps.tenantWeeklyTokenCap,
+          accountDailyUsdCap: caps.accountDailyUsdCap,
+        },
+      })
+    } catch (err) {
+      console.error('[multitable-ai] usage summary failed:', err)
+      res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load AI usage summary' } })
+    }
   })
 
   /**

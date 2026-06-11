@@ -258,6 +258,9 @@
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           :conditional-formatting="conditionalFormattingByRecord"
+          :ai-run-enabled="effectiveRowActions.canEdit"
+          :ai-run-pending="Boolean(aiShortcut.state.pending)"
+          :ai-run-busy="aiShortcutBusy"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
@@ -266,6 +269,7 @@
           @set-aggregation="onSetAggregation"
           @open-comments="onOpenRecordComments"
           @open-field-comments="onOpenGridFieldComments"
+          @ai-run="onGridAiRun"
         />
       </div>
       <MetaRecordDrawer
@@ -280,9 +284,11 @@
         :record-ids="drawerRecordIds"
         :upload-fn="uploadAttachmentFn"
         :delete-attachment-fn="deleteAttachmentFn"
+        :ai-shortcut="aiShortcut.state"
         @close="onCloseDrawer" @delete="onDeleteRecord" @patch="onDrawerPatch"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker"
         @navigate="onDrawerNavigate"
+        @ai-preview="onAiPreviewField" @ai-run="onAiRunField"
       />
       <MetaCommentsDrawer
         :visible="showComments && !!selectedRecordId" :comments="commentsState.comments.value"
@@ -354,6 +360,9 @@
       :visible="showFieldManager" :fields="propertyVisibleWorkbenchFields" :sheets="workbench.sheets.value" :sheet-id="workbench.activeSheetId.value"
       :dry-run-fn="dryRunFormulaFn"
       :current-record-id="selectedRecordId"
+      :ai-preview-fn="aiPreviewFn"
+      :ai-preview-busy="aiShortcutBusy"
+      :ai-usage-summary-fn="aiUsageSummaryFn"
       @update:dirty="fieldManagerDirty = $event"
       @close="showFieldManager = false" @create-field="onCreateField" @update-field="onUpdateField" @delete-field="onDeleteField"
     />
@@ -514,6 +523,8 @@ import {
 } from '../utils/calendar-holiday-notice'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
 import { parseFrozenIds } from '../utils/frozen-columns'
+import { useAiShortcut } from '../composables/useAiShortcut'
+import type { AiShortcutConfigInput } from '../api/client'
 import { buildRecordFormattingMap, extractRulesFromConfig } from '../utils/conditional-formatting'
 import {
   decorateAndSortBases,
@@ -562,6 +573,43 @@ const sheetPresenceState = useMultitableSheetPresence({
 })
 
 const selectedRecordId = ref<string | null>(null)
+
+// --- A3: AI field shortcut — ONE instance drives all three trigger surfaces
+// (drawer preview/run, cell-editor run, field-manager config-time preview) so
+// the in-flight pending guard is unified (LOCKED §2.2).
+const aiShortcut = useAiShortcut({
+  client: workbench.client,
+  sheetId: () => workbench.activeSheetId.value,
+  getLocalRecordVersion: (recordId) => grid.rows.value.find((row) => row.id === recordId)?.version,
+  applyPatchResult: grid.applyPatchResult,
+})
+// Review F3: the unified busy signal (in-flight OR rate-limit countdown)
+// reaches ALL trigger surfaces — drawer (via aiShortcut.state), cell-editor
+// run button (aiRunBusy) and field-manager config preview (aiPreviewBusy) —
+// so no surface offers a click the composable guard would silently refuse.
+const aiShortcutBusy = aiShortcut.busy
+
+function onAiPreviewField(field: MetaField) {
+  const recordId = selectedRecordId.value
+  if (recordId) void aiShortcut.preview(recordId, field.id)
+}
+
+function onAiRunField(field: MetaField) {
+  const recordId = selectedRecordId.value
+  if (recordId) void aiShortcut.run(recordId, field.id)
+}
+
+function onGridAiRun(recordId: string, field: MetaField) {
+  void aiShortcut.run(recordId, field.id)
+}
+
+// MetaFieldManager is emit/fn-prop based (dryRunFn precedent): config-time
+// preview routes through the SAME composable guard; usage summary is the raw
+// client call (403 probe caching lives in fetchAiUsageSummaryWithProbeCache).
+const aiPreviewFn = (params: { recordId: string; config: AiShortcutConfigInput }) =>
+  aiShortcut.previewWithConfig(params.recordId, params.config)
+const aiUsageSummaryFn = () => workbench.client.aiUsageSummary()
+
 const showComments = ref(false)
 const selectedCommentFieldId = ref<string | null>(null)
 const selectedReplyCommentId = ref<string | null>(null)

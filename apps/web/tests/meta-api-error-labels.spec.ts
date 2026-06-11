@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   META_API_ERROR_LABEL_KEYS,
+  aiRetryCountdown,
+  aiShortcutErrorMessage,
   apiDefaultErrorMessage,
   apiFieldValidationFallback,
   metaApiErrorLabel,
@@ -14,12 +16,37 @@ describe('meta-api-error-labels', () => {
       'error.unauthenticated',
       'error.validation',
       'error.fieldValidation',
+      // A3 AI shortcut state copy (§2.3) — keyed on error.code.
+      'error.aiBlocked',
+      'error.aiRateLimited',
+      'error.aiQuotaExhausted',
+      'error.aiUnsafeInput',
+      'error.aiProviderError',
+      'error.aiVersionConflict',
     ])
 
     for (const key of META_API_ERROR_LABEL_KEYS) {
       expect(metaApiErrorLabel(key, false)).toBeTruthy()
       expect(metaApiErrorLabel(key, true)).toBeTruthy()
     }
+  })
+
+  it('A3-T8: maps every AI shortcut error code to §2.3 copy in both locales; unknown codes → null', () => {
+    const codes = ['AI_BLOCKED', 'RATE_LIMITED', 'AI_QUOTA_EXHAUSTED', 'AI_UNSAFE_INPUT', 'AI_PROVIDER_ERROR', 'VERSION_CONFLICT']
+    for (const code of codes) {
+      expect(aiShortcutErrorMessage(code, false)).toBeTruthy()
+      expect(aiShortcutErrorMessage(code, true)).toBeTruthy()
+    }
+    // AI_BLOCKED has dedicated readiness copy — never a generic 5xx message.
+    expect(aiShortcutErrorMessage('AI_BLOCKED', true)).toContain('管理员')
+    // Unknown codes fall back to the raw backend message at the caller.
+    expect(aiShortcutErrorMessage('SOMETHING_NEW', false)).toBeNull()
+    expect(aiShortcutErrorMessage(undefined, false)).toBeNull()
+  })
+
+  it('A3-T8: rate-limit countdown copy interpolates the seconds in both locales', () => {
+    expect(aiRetryCountdown(5, false)).toBe('Retry in 5s')
+    expect(aiRetryCountdown(5, true)).toBe('5 秒后可重试')
   })
 
   it('localizes static fallback labels', () => {

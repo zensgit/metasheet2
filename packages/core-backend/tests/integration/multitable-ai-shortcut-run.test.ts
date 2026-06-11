@@ -202,6 +202,15 @@ describeIfDatabase('A2 shortcut run (real DB)', () => {
     expect(res.body.data.output).toBe('AI OUT')
     expect(res.body.data.usage).toEqual({ promptTokens: 21, completionTokens: 13 })
     expect(res.body.data.version).toBe(2) // optimistic-lock increment through RWS
+    // A3-T4 route-level wire pin (fixture-drift discipline): the frontend run
+    // adapter (useAiShortcut) synthesizes a PatchResult from EXACTLY this key
+    // set — any key change here must update the composable + its spec fixture.
+    expect(Object.keys(res.body.data).sort()).toEqual([
+      'action', 'estimatedCostUsd', 'fieldId', 'model', 'output', 'provider', 'recordId', 'status', 'usage', 'version',
+    ])
+    expect(res.body.data.action).toBe('run')
+    expect(res.body.data.recordId).toBe(REC_MAIN)
+    expect(res.body.data.fieldId).toBe(FLD_TARGET)
 
     const row = await recordRow(REC_MAIN)
     expect(row.data[FLD_TARGET]).toBe('AI OUT') // value landed via the authoritative write path

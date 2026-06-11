@@ -70,6 +70,8 @@ export type MetaCoreLabelKey =
   | 'cell.yes' | 'cell.no' | 'cell.clear'
   | 'cell.noAttachments' | 'cell.clearAll'
   | 'cell.uploadFailed' | 'cell.removeFailed' | 'cell.clearFailed'
+  // --- MetaCellEditor AI shortcut run button (A3-T6) ---
+  | 'cell.aiRun' | 'cell.aiRunning'
   // --- Auth chrome (file-location closure tightening per #1803) ---
   | 'auth.notAuthenticated'
 
@@ -209,6 +211,9 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'cell.uploadFailed': { en: 'Failed to upload attachment', zh: '附件上传失败' },
   'cell.removeFailed': { en: 'Failed to remove attachment', zh: '附件移除失败' },
   'cell.clearFailed': { en: 'Failed to clear attachments', zh: '附件清空失败' },
+  // A3-T6: in-cell AI run trigger (host opt-in; RBAC rides the editor-open invariant).
+  'cell.aiRun': { en: 'Run AI', zh: '运行 AI' },
+  'cell.aiRunning': { en: 'Running AI...', zh: 'AI 处理中...' },
 }
 
 export function metaCoreLabel(key: MetaCoreLabelKey, isZh: boolean): string {
@@ -339,4 +344,12 @@ export function attachmentActivityLabel(
   if (activity === 'removing') return isZh ? '正在移除...' : 'Removing...'
   if (activity === 'clearing') return isZh ? '正在清空...' : 'Clearing...'
   return isZh ? '正在上传...' : 'Uploading...'
+}
+
+// --- A3: AI shortcut per-run tokens (§2.4 user visibility) ---
+// Shared by MetaRecordDrawer (run/preview result) and MetaFieldManager
+// (config-time preview result). Lives HERE once — never redeclared in
+// meta-record-labels / meta-manager-labels (cross-module reuse, documented).
+export function aiTokensConsumed(tokens: number, isZh: boolean): string {
+  return isZh ? `本次消耗 ~${tokens} tokens` : `~${tokens} tokens used`
 }
