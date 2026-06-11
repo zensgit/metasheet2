@@ -403,3 +403,82 @@ describe('conditionalPublicRateLimiter', () => {
     limiter._cleanup()
   })
 })
+
+// ---------------------------------------------------------------------------
+// A2 (Q-3) backward-compatible extensions: keyFn + onLimited
+// ---------------------------------------------------------------------------
+
+describe('createRateLimiter keyFn / onLimited (A2 Q-3)', () => {
+  it('keyFn overrides the default userId/ip key extraction', async () => {
+    const limiter = createRateLimiter({
+      windowMs: 60_000,
+      maxRequests: 1,
+      keyPrefix: 'ai-test',
+      keyFn: (req) => (req as any).user?.id,
+    })
+
+    const reqA = createMockRequest({ ip: '1.1.1.1' } as any)
+    ;(reqA as any).user = { id: 'subject-1' }
+    await runMiddleware(limiter, reqA, createMockResponse())
+
+    // Same subject from a different IP shares the bucket → blocked
+    const reqB = createMockRequest({ ip: '2.2.2.2' } as any)
+    ;(reqB as any).user = { id: 'subject-1' }
+    const blocked = createMockResponse()
+    await new Promise<void>((resolve) => {
+      limiter(reqB, blocked as any, (() => resolve()) as NextFunction)
+      setTimeout(resolve, 50)
+    })
+    expect(blocked._status).toBe(429)
+
+    // A different subject passes
+    const reqC = createMockRequest({ ip: '1.1.1.1' } as any)
+    ;(reqC as any).user = { id: 'subject-2' }
+    const ok = createMockResponse()
+    await runMiddleware(limiter, reqC, ok)
+    expect(ok._status).toBe(200)
+
+    limiter._cleanup()
+  })
+
+  it('keyFn returning undefined falls back to the legacy userId/ip chain', async () => {
+    const limiter = createRateLimiter({
+      windowMs: 60_000,
+      maxRequests: 1,
+      keyPrefix: 'ai-test-fallback',
+      keyFn: () => undefined,
+    })
+
+    const req = createMockRequest({ ip: '9.9.9.9' } as any)
+    await runMiddleware(limiter, req, createMockResponse())
+    const blocked = createMockResponse()
+    await new Promise<void>((resolve) => {
+      limiter(createMockRequest({ ip: '9.9.9.9' } as any), blocked as any, (() => resolve()) as NextFunction)
+      setTimeout(resolve, 50)
+    })
+    expect(blocked._status).toBe(429)
+    limiter._cleanup()
+  })
+
+  it('onLimited customizes the 429 response (Retry-After still set)', async () => {
+    const limiter = createRateLimiter({
+      windowMs: 60_000,
+      maxRequests: 1,
+      keyPrefix: 'ai-test-onlimited',
+      onLimited: (_req, res, retryAfterSeconds) => {
+        res.status(429).json({ ok: false, status: 'rate_limited', retryAfter: retryAfterSeconds })
+      },
+    })
+
+    await runMiddleware(limiter, createMockRequest({ ip: '8.8.8.8' } as any), createMockResponse())
+    const blocked = createMockResponse()
+    await new Promise<void>((resolve) => {
+      limiter(createMockRequest({ ip: '8.8.8.8' } as any), blocked as any, (() => resolve()) as NextFunction)
+      setTimeout(resolve, 50)
+    })
+    expect(blocked._status).toBe(429)
+    expect((blocked._body as { status?: string }).status).toBe('rate_limited')
+    expect(blocked._headers['Retry-After']).toBeDefined()
+    limiter._cleanup()
+  })
+})

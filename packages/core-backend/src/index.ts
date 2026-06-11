@@ -1090,9 +1090,11 @@ export class MetaSheetServer {
     // Uses a lazy resolver because AutomationService is initialized later
     // in the startup sequence than route mounting happens.
     this.app.use('/api/multitable', createAutomationRoutes(() => this.automationService))
-    // AI provider readiness (A1, path: /ai/readiness) — internal/not-in-OpenAPI,
-    // admin-only via requireAdminRole(); platform JWT comes from the global
-    // /api/** middleware above. See routes/multitable-ai.ts header.
+    // AI routes — internal/not-in-OpenAPI, per-route guards; platform JWT
+    // comes from the global /api/** middleware above:
+    //   A1 readiness (GET /ai/readiness, admin-only) +
+    //   A2 shortcut (POST /sheets/:sheetId/ai/shortcut/{preview,run}, record RBAC).
+    // See routes/multitable-ai.ts header.
     this.app.use('/api/multitable', createMultitableAiRoutes())
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
