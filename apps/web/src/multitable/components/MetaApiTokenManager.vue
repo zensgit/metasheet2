@@ -124,6 +124,57 @@
             </div>
             <label class="meta-api-mgr__label">{{ a('webhook.secretOptional') }}</label>
             <input v-model="webhookDraft.secret" class="meta-api-mgr__input" type="text" :placeholder="a('webhook.secretPlaceholder')" data-webhook-secret="true" />
+
+            <!-- Retry policy (optional; blank = backend default) -->
+            <div class="meta-api-mgr__label" data-webhook-retry-section="true">{{ a('webhook.retry.section') }}</div>
+            <label class="meta-api-mgr__label">{{ a('webhook.retry.maxRetries') }}</label>
+            <input
+              v-model="webhookDraft.maxRetries"
+              class="meta-api-mgr__input"
+              type="number"
+              :min="WEBHOOK_RETRY_BOUNDS.maxRetries.min"
+              :max="WEBHOOK_RETRY_BOUNDS.maxRetries.max"
+              :placeholder="a('webhook.retry.maxRetriesHint')"
+              data-webhook-max-retries="true"
+            />
+            <p
+              v-if="!webhookRetryPolicy.maxRetries.ok"
+              class="meta-api-mgr__error"
+              data-webhook-max-retries-error="true"
+            >{{ a('webhook.retry.rangeError') }}</p>
+
+            <label class="meta-api-mgr__label">{{ a('webhook.retry.baseDelay') }}</label>
+            <input
+              v-model="webhookDraft.retryBaseDelayMs"
+              class="meta-api-mgr__input"
+              type="number"
+              :min="WEBHOOK_RETRY_BOUNDS.baseDelayMs.min"
+              :max="WEBHOOK_RETRY_BOUNDS.baseDelayMs.max"
+              :placeholder="a('webhook.retry.baseDelayHint')"
+              data-webhook-base-delay="true"
+            />
+            <p
+              v-if="!webhookRetryPolicy.retryBaseDelayMs.ok"
+              class="meta-api-mgr__error"
+              data-webhook-base-delay-error="true"
+            >{{ a('webhook.retry.rangeError') }}</p>
+
+            <label class="meta-api-mgr__label">{{ a('webhook.retry.maxDelay') }}</label>
+            <input
+              v-model="webhookDraft.retryMaxDelayMs"
+              class="meta-api-mgr__input"
+              type="number"
+              :min="WEBHOOK_RETRY_BOUNDS.maxDelayMs.min"
+              :max="WEBHOOK_RETRY_BOUNDS.maxDelayMs.max"
+              :placeholder="a('webhook.retry.maxDelayHint')"
+              data-webhook-max-delay="true"
+            />
+            <p
+              v-if="!webhookRetryPolicy.retryMaxDelayMs.ok"
+              class="meta-api-mgr__error"
+              data-webhook-max-delay-error="true"
+            >{{ a('webhook.retry.rangeError') }}</p>
+
             <div class="meta-api-mgr__form-actions">
               <button class="meta-api-mgr__btn meta-api-mgr__btn--primary" type="button" :disabled="!canSaveWebhook || busy" data-webhook-save="true" @click="onSaveWebhook">
                 {{ editingWebhookId ? a('webhook.action.update') : a('webhook.action.create') }}
@@ -440,8 +491,24 @@ const availableScopes = ['read', 'write', 'admin']
 const webhooks = ref<Webhook[]>([])
 const webhooksLoading = ref(false)
 const showWebhookForm = ref(false)
+// Retry-policy bounds — mirror the backend webhook schema (webhooks.ts).
+const WEBHOOK_RETRY_BOUNDS = {
+  maxRetries: { min: 0, max: 10 },
+  baseDelayMs: { min: 100, max: 60_000 },
+  maxDelayMs: { min: 1_000, max: 3_600_000 },
+} as const
+
 const editingWebhookId = ref<string | null>(null)
-const webhookDraft = ref({ name: '', url: '', events: [] as string[], secret: '' })
+// Retry-policy fields are kept as raw strings ('' = unset → backend default).
+const webhookDraft = ref({
+  name: '',
+  url: '',
+  events: [] as string[],
+  secret: '',
+  maxRetries: '',
+  retryBaseDelayMs: '',
+  retryMaxDelayMs: '',
+})
 const availableEvents = ['record.created', 'record.updated', 'record.deleted', 'field.changed']
 const deliveriesWebhookId = ref<string | null>(null)
 const deliveries = ref<WebhookDelivery[]>([])
@@ -467,8 +534,43 @@ const dingTalkGroupDraft = ref({
 const canManageDingTalkGroups = computed(() => props.canManageAutomation !== false)
 const managerTitle = computed(() => apiManagerTitle(canManageDingTalkGroups.value, isZh.value))
 
+/**
+ * Parse an optional bounded integer from a raw input string.
+ * Returns `{ ok: true, value: undefined }` for blank (use backend default),
+ * `{ ok: true, value: n }` when in range, and `{ ok: false }` otherwise.
+ */
+function parseBoundedInt(
+  raw: string | number,
+  bounds: { min: number; max: number },
+): { ok: boolean; value?: number } {
+  // `v-model` on <input type="number"> can hand back a number; normalize to a
+  // trimmed string first so the empty-input case stays detectable.
+  const trimmed = String(raw ?? '').trim()
+  if (trimmed === '') return { ok: true, value: undefined }
+  if (!/^-?\d+$/.test(trimmed)) return { ok: false }
+  const n = Number(trimmed)
+  if (n < bounds.min || n > bounds.max) return { ok: false }
+  return { ok: true, value: n }
+}
+
+const webhookRetryPolicy = computed(() => ({
+  maxRetries: parseBoundedInt(webhookDraft.value.maxRetries, WEBHOOK_RETRY_BOUNDS.maxRetries),
+  retryBaseDelayMs: parseBoundedInt(webhookDraft.value.retryBaseDelayMs, WEBHOOK_RETRY_BOUNDS.baseDelayMs),
+  retryMaxDelayMs: parseBoundedInt(webhookDraft.value.retryMaxDelayMs, WEBHOOK_RETRY_BOUNDS.maxDelayMs),
+}))
+
+const webhookRetryPolicyValid = computed(() => {
+  const p = webhookRetryPolicy.value
+  return p.maxRetries.ok && p.retryBaseDelayMs.ok && p.retryMaxDelayMs.ok
+})
+
 const canSaveWebhook = computed(() => {
-  return webhookDraft.value.name.trim() && webhookDraft.value.url.startsWith('https://') && webhookDraft.value.events.length > 0
+  return (
+    !!webhookDraft.value.name.trim() &&
+    webhookDraft.value.url.startsWith('https://') &&
+    webhookDraft.value.events.length > 0 &&
+    webhookRetryPolicyValid.value
+  )
 })
 
 const dingTalkGroupWebhookChanged = computed(() => {
@@ -665,7 +767,15 @@ async function loadWebhooks() {
 
 function openWebhookForm() {
   editingWebhookId.value = null
-  webhookDraft.value = { name: '', url: '', events: [], secret: '' }
+  webhookDraft.value = {
+    name: '',
+    url: '',
+    events: [],
+    secret: '',
+    maxRetries: '',
+    retryBaseDelayMs: '',
+    retryMaxDelayMs: '',
+  }
   showWebhookForm.value = true
 }
 
@@ -676,6 +786,9 @@ function openEditWebhook(wh: Webhook) {
     url: wh.url,
     events: [...wh.events],
     secret: wh.secret ?? '',
+    maxRetries: wh.maxRetries != null ? String(wh.maxRetries) : '',
+    retryBaseDelayMs: wh.retryBaseDelayMs != null ? String(wh.retryBaseDelayMs) : '',
+    retryMaxDelayMs: wh.retryMaxDelayMs != null ? String(wh.retryMaxDelayMs) : '',
   }
   showWebhookForm.value = true
 }
@@ -699,11 +812,15 @@ async function onSaveWebhook() {
   busy.value = true
   error.value = null
   try {
+    const policy = webhookRetryPolicy.value
     const input = {
       name: webhookDraft.value.name.trim(),
       url: webhookDraft.value.url.trim(),
       events: webhookDraft.value.events,
       secret: webhookDraft.value.secret || undefined,
+      maxRetries: policy.maxRetries.value,
+      retryBaseDelayMs: policy.retryBaseDelayMs.value,
+      retryMaxDelayMs: policy.retryMaxDelayMs.value,
     }
     if (editingWebhookId.value) {
       await props.client.updateWebhook(editingWebhookId.value, input)

@@ -32,11 +32,39 @@ import type { ConditionGroup } from './automation-conditions'
 import { evaluateConditions } from './automation-conditions'
 import type { AutomationTrigger } from './automation-triggers'
 import type { NotificationService } from '../types/plugin'
+import { WebhookService } from './webhook-service'
 
 const logger = new Logger('AutomationExecutor')
 
-const WEBHOOK_TIMEOUT_MS = 5_000
-const MAX_WEBHOOK_RETRIES = 2
+const DEFAULT_WEBHOOK_TIMEOUT_MS = 5_000
+const DEFAULT_MAX_WEBHOOK_RETRIES = 2
+// DingTalk group/person dispatch keeps its fixed timeout (unchanged by rank-6).
+const WEBHOOK_TIMEOUT_MS = DEFAULT_WEBHOOK_TIMEOUT_MS
+
+/**
+ * send_webhook timeout, env-overridable via AUTOMATION_WEBHOOK_TIMEOUT_MS.
+ * Bounded [1s, 30s]; a bad value falls back to the default (mirrors the
+ * webhook-service delivery timeout posture).
+ */
+function webhookTimeoutMs(): number {
+  const raw = process.env.AUTOMATION_WEBHOOK_TIMEOUT_MS
+  if (raw === undefined) return DEFAULT_WEBHOOK_TIMEOUT_MS
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed)) return DEFAULT_WEBHOOK_TIMEOUT_MS
+  return Math.min(Math.max(parsed, 1_000), 30_000)
+}
+
+/**
+ * send_webhook bounded retry count, env-overridable via
+ * AUTOMATION_WEBHOOK_MAX_RETRIES. Bounded [0, 5]; bad value → default.
+ */
+function maxWebhookRetries(): number {
+  const raw = process.env.AUTOMATION_WEBHOOK_MAX_RETRIES
+  if (raw === undefined) return DEFAULT_MAX_WEBHOOK_RETRIES
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_MAX_WEBHOOK_RETRIES
+  return Math.min(parsed, 5)
+}
 const DINGTALK_PERSON_BATCH_SIZE = 100
 const DINGTALK_FAILURE_ALERT_CONTENT_LIMIT = 1_000
 
@@ -1281,7 +1309,7 @@ export class AutomationExecutor {
     }
 
     const method = (config.method as string) ?? 'POST'
-    const headers = (config.headers as Record<string, string>) ?? {}
+    const headers = { ...((config.headers as Record<string, string>) ?? {}) }
     if (!headers['Content-Type']) {
       headers['Content-Type'] = 'application/json'
     }
@@ -1292,19 +1320,34 @@ export class AutomationExecutor {
       data: context.recordData,
       triggeredAt: new Date().toISOString(),
     }
+    // Serialize once so the signature is computed over exactly the bytes sent.
+    const bodyStr = JSON.stringify(body)
+
+    // Share the webhook-service security posture: HMAC-SHA256 sign the body and
+    // stamp a timestamp when a secret is configured, using the same header names
+    // and algorithm so a single receiver verifier works for both dispatch paths.
+    const secret = typeof config.secret === 'string' ? config.secret : undefined
+    if (secret) {
+      headers['X-Webhook-Signature'] = WebhookService.signPayload(bodyStr, secret)
+      if (!headers['X-Webhook-Timestamp']) {
+        headers['X-Webhook-Timestamp'] = new Date().toISOString()
+      }
+    }
 
     const fetchFn = this.deps.fetchFn ?? globalThis.fetch
+    const timeoutMs = webhookTimeoutMs()
+    const retries = maxWebhookRetries()
 
     let lastError: string | undefined
-    for (let attempt = 0; attempt <= MAX_WEBHOOK_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
       try {
         const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS)
+        const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
         const response = await fetchFn(url, {
           method,
           headers,
-          body: JSON.stringify(body),
+          body: bodyStr,
           signal: controller.signal,
         })
         clearTimeout(timeout)
@@ -1323,12 +1366,21 @@ export class AutomationExecutor {
       }
 
       // Wait before retry (simple exponential backoff)
-      if (attempt < MAX_WEBHOOK_RETRIES) {
+      if (attempt < retries) {
         await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)))
       }
     }
 
-    return { actionType: 'send_webhook', status: 'failed', error: `Webhook failed after ${MAX_WEBHOOK_RETRIES + 1} attempts: ${lastError}` }
+    // Surface the failure in the step result (never silent) — the executor lifts
+    // a failed step into the execution log + marks the run failed.
+    logger.warn(
+      `send_webhook to ${redactString(url)} failed after ${retries + 1} attempts: ${lastError}`,
+    )
+    return {
+      actionType: 'send_webhook',
+      status: 'failed',
+      error: `Webhook failed after ${retries + 1} attempts: ${lastError}`,
+    }
   }
 
   private async executeSendNotification(

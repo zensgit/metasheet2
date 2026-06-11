@@ -1413,6 +1413,8 @@ export interface MultitableWebhooksTable {
   last_delivered_at: NullableTimestamp
   failure_count: number
   max_retries: number
+  retry_base_delay_ms: number | null
+  retry_max_delay_ms: number | null
 }
 
 export interface MultitableWebhookDeliveriesTable {

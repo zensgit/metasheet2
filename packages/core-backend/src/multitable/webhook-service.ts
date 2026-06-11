@@ -16,13 +16,17 @@ import type {
   WebhookEventType,
   WebhookUpdateInput,
 } from './webhooks'
-import { ALL_WEBHOOK_EVENT_TYPES } from './webhooks'
+import {
+  ALL_WEBHOOK_EVENT_TYPES,
+  WEBHOOK_DEFAULT_BASE_RETRY_DELAY_MS,
+  WEBHOOK_DEFAULT_MAX_RETRIES,
+} from './webhooks'
 
 const logger = new Logger('WebhookService')
 
 const DELIVERY_TIMEOUT_MS = 5_000
-const MAX_CONSECUTIVE_FAILURES = 10
-const BASE_RETRY_DELAY_MS = 1_000
+const DEFAULT_MAX_CONSECUTIVE_FAILURES = 10
+const BASE_RETRY_DELAY_MS = WEBHOOK_DEFAULT_BASE_RETRY_DELAY_MS
 // Lease window a retry tick holds a claimed delivery for (review MINOR-1):
 // long enough to out-live the HTTP attempt + backoff recompute so a concurrent
 // replica's tick skips it; short enough that a crashed tick's row is retried soon.
@@ -46,6 +50,8 @@ function rowToWebhook(row: {
   last_delivered_at?: string | Date | null
   failure_count: number
   max_retries: number
+  retry_base_delay_ms?: number | null
+  retry_max_delay_ms?: number | null
 }): Webhook {
   const events =
     typeof row.events === 'string'
@@ -75,6 +81,8 @@ function rowToWebhook(row: {
       : undefined,
     failureCount: row.failure_count,
     maxRetries: row.max_retries,
+    retryBaseDelayMs: row.retry_base_delay_ms ?? undefined,
+    retryMaxDelayMs: row.retry_max_delay_ms ?? undefined,
   }
 }
 
@@ -164,6 +172,10 @@ export class WebhookService {
     const id = generateId()
     const now = new Date().toISOString()
 
+    const maxRetries = input.maxRetries ?? WEBHOOK_DEFAULT_MAX_RETRIES
+    const retryBaseDelayMs = input.retryBaseDelayMs ?? null
+    const retryMaxDelayMs = input.retryMaxDelayMs ?? null
+
     await this.db
       .insertInto('multitable_webhooks')
       .values({
@@ -176,7 +188,9 @@ export class WebhookService {
         created_by: userId,
         created_at: now,
         failure_count: 0,
-        max_retries: 3,
+        max_retries: maxRetries,
+        retry_base_delay_ms: retryBaseDelayMs,
+        retry_max_delay_ms: retryMaxDelayMs,
       })
       .execute()
 
@@ -190,7 +204,9 @@ export class WebhookService {
       createdBy: userId,
       createdAt: now,
       failureCount: 0,
-      maxRetries: 3,
+      maxRetries,
+      retryBaseDelayMs: retryBaseDelayMs ?? undefined,
+      retryMaxDelayMs: retryMaxDelayMs ?? undefined,
     }
 
     logger.info(`Webhook created: ${id} by user ${userId}`)
@@ -238,6 +254,11 @@ export class WebhookService {
     if (input.events !== undefined)
       updates.events = toJsonValue([...input.events])
     if (input.active !== undefined) updates.active = input.active
+    if (input.maxRetries !== undefined) updates.max_retries = input.maxRetries
+    if (input.retryBaseDelayMs !== undefined)
+      updates.retry_base_delay_ms = input.retryBaseDelayMs
+    if (input.retryMaxDelayMs !== undefined)
+      updates.retry_max_delay_ms = input.retryMaxDelayMs
 
     await this.db
       .updateTable('multitable_webhooks')
@@ -530,8 +551,9 @@ export class WebhookService {
     wh: Webhook,
   ): Promise<void> {
     const newFailureCount = wh.failureCount + 1
+    const maxConsecutiveFailures = WebhookService.maxConsecutiveFailures()
 
-    if (newFailureCount >= MAX_CONSECUTIVE_FAILURES) {
+    if (newFailureCount >= maxConsecutiveFailures) {
       await this.db
         .updateTable('multitable_webhooks')
         .set({ active: false, failure_count: newFailureCount })
@@ -551,7 +573,7 @@ export class WebhookService {
 
       delivery.status = 'failed'
       logger.warn(
-        `Webhook ${wh.id} auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failures`,
+        `Webhook ${wh.id} auto-disabled after ${maxConsecutiveFailures} consecutive failures`,
       )
       return
     }
@@ -578,8 +600,13 @@ export class WebhookService {
       return
     }
 
-    // Exponential backoff
-    const delay = BASE_RETRY_DELAY_MS * Math.pow(2, delivery.attemptCount - 1)
+    // Exponential backoff, driven by the webhook's stored retry policy (or the
+    // module defaults when the row predates the policy columns / leaves them NULL).
+    const delay = WebhookService.computeBackoffMs(
+      delivery.attemptCount,
+      wh.retryBaseDelayMs,
+      wh.retryMaxDelayMs,
+    )
     const nextRetry = new Date(Date.now() + delay).toISOString()
     delivery.nextRetryAt = nextRetry
     delivery.status = 'pending'
@@ -602,5 +629,39 @@ export class WebhookService {
    */
   static signPayload(body: string, secret: string): string {
     return createHmac('sha256', secret).update(body).digest('hex')
+  }
+
+  /**
+   * Exponential backoff for the Nth attempt (1-based): base * 2^(attempt-1),
+   * optionally capped at maxMs. Absent base/cap fall back to the module
+   * default (1s base, uncapped) so legacy webhooks keep today's behavior.
+   */
+  static computeBackoffMs(
+    attemptCount: number,
+    baseMs?: number,
+    maxMs?: number,
+  ): number {
+    const base = baseMs ?? BASE_RETRY_DELAY_MS
+    const exp = Math.max(0, attemptCount - 1)
+    const delay = base * Math.pow(2, exp)
+    if (maxMs === undefined) return delay
+    // Cross-field guard (review NIT-1): a cap below the base delay would shorten
+    // the very first retry below `base`, which is never intended — floor the cap
+    // at the base so "cap wins" can only ever lengthen the wait, not invert it.
+    return Math.min(delay, Math.max(maxMs, base))
+  }
+
+  /**
+   * Consecutive-failure count that auto-disables a webhook. Env-configurable via
+   * WEBHOOK_MAX_CONSECUTIVE_FAILURES (default 10); a non-positive / non-numeric
+   * value falls back to the default rather than disabling immediately.
+   */
+  static maxConsecutiveFailures(): number {
+    const raw = process.env.WEBHOOK_MAX_CONSECUTIVE_FAILURES
+    if (raw === undefined) return DEFAULT_MAX_CONSECUTIVE_FAILURES
+    const parsed = Number.parseInt(raw, 10)
+    return Number.isFinite(parsed) && parsed > 0
+      ? parsed
+      : DEFAULT_MAX_CONSECUTIVE_FAILURES
   }
 }

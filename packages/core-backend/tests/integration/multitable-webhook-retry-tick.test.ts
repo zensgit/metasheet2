@@ -105,6 +105,43 @@ describeIfDatabase('webhook retry tick (real DB)', () => {
     scheduler.stop()
   })
 
+  test('stored retry policy drives the backoff: a custom base delay reschedules next_retry_at accordingly', async () => {
+    // Seed a webhook with a large custom base delay + a due pending delivery that
+    // will FAIL on retry (loopback 500). After the tick, the row is rescheduled
+    // and its next_retry_at must reflect the stored base delay (computeBackoffMs
+    // with attemptCount=2 → base * 2), not the 1s module default.
+    const POLICY_WH = `whk_policy_${TS}`
+    const POLICY_DEL = `del_policy_${TS}`
+    const BASE_MS = 50_000 // attempt 1→failure already done, this retry is attempt 2 → 100s ahead
+    const now = new Date().toISOString()
+    await q(
+      'INSERT INTO multitable_webhooks (id, name, url, secret, events, active, created_by, created_at, failure_count, max_retries, retry_base_delay_ms) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11)',
+      [POLICY_WH, 'Policy', 'https://sink.test/policy', null, JSON.stringify(['record.updated']), true, USER_ID, now, 0, 5, BASE_MS],
+    )
+    await q(
+      'INSERT INTO multitable_webhook_deliveries (id, webhook_id, event, payload, status, attempt_count, created_at, next_retry_at) VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8)',
+      [POLICY_DEL, POLICY_WH, 'record.updated', JSON.stringify({ recordId: 'rp' }), 'pending', 1, now, new Date(Date.now() - 60_000).toISOString()],
+    )
+
+    const failFetch = (async () => ({ ok: false, status: 500, text: async () => 'boom' }) as Response) as unknown as typeof fetch
+    const svc = new WebhookService(db, failFetch)
+    const before = Date.now()
+    const retried = await svc.retryFailedDeliveries()
+    expect(retried).toBe(1)
+
+    const row = await q('SELECT status, attempt_count, next_retry_at FROM multitable_webhook_deliveries WHERE id = $1', [POLICY_DEL])
+    expect(row.rows[0].status).toBe('pending') // failed but still under max_retries → rescheduled
+    expect(Number(row.rows[0].attempt_count)).toBe(2)
+    // attempt_count is now 2 → computeBackoffMs(2, 50000) = 100000ms ahead.
+    const nextRetry = new Date(row.rows[0].next_retry_at).getTime()
+    const aheadMs = nextRetry - before
+    expect(aheadMs).toBeGreaterThan(90_000) // well above the 2s the default policy would give
+    expect(aheadMs).toBeLessThan(130_000)
+
+    await q('DELETE FROM multitable_webhook_deliveries WHERE webhook_id = $1', [POLICY_WH]).catch(() => {})
+    await q('DELETE FROM multitable_webhooks WHERE id = $1', [POLICY_WH]).catch(() => {})
+  })
+
   test('MINOR-1: two concurrent retry passes claim the due row exactly once (no double-delivery)', async () => {
     // Re-arm the due row to pending+due, then run two retryFailedDeliveries() passes
     // concurrently (simulating two replicas ticking at once). FOR UPDATE SKIP LOCKED +
