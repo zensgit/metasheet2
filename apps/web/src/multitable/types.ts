@@ -552,6 +552,40 @@ export interface InstallTemplateResult {
   views: MetaView[]
 }
 
+// S2 — POST /templates/:id/dry-run (design 20260611 §2.1). Zero-write install
+// simulation: wouldCreate ids derive through the same generator path install
+// uses but are illustrative, NOT a promise of the ids a later install creates.
+export type TemplateDryRunConflictKind =
+  | 'base_exists'
+  | 'sheet_exists'
+  | 'view_exists'
+  // Plan-level self-collision inside a (mis-authored) template (review
+  // 2026-06-11 F1) — derived sheet/field/view ids duplicate each other.
+  | 'template_duplicate_id'
+
+export interface TemplateDryRunConflict {
+  severity: 'error'
+  kind: TemplateDryRunConflictKind
+  id: string
+  name: string
+  /** English + stable kind; localize by kind (formula dry-run convention). */
+  message: string
+}
+
+export interface TemplateDryRunWouldCreate {
+  base: { id: string; name: string }
+  sheets: Array<{ id: string; name: string; fieldCount: number; viewCount: number }>
+  fields: Array<{ id: string; sheetId: string; name: string; type: string }>
+  views: Array<{ id: string; sheetId: string; name: string; type: string }>
+}
+
+export interface TemplateDryRunResult {
+  templateId: string
+  wouldCreate: TemplateDryRunWouldCreate
+  conflicts: TemplateDryRunConflict[]
+  installable: boolean
+}
+
 // --- Input types ---
 export interface CreateBaseInput {
   id?: string

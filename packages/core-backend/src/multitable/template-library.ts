@@ -71,6 +71,35 @@ export type InstallMultitableTemplateResult = {
   views: MultitableProvisioningView[]
 }
 
+export type MultitableTemplateConflictKind =
+  | 'base_exists'
+  | 'sheet_exists'
+  | 'view_exists'
+  // Plan-level self-collision (review 2026-06-11 F1): a mis-authored template
+  // whose sheets/views/fields derive identical ids — invisible to DB-occupancy
+  // probes, but install's per-table ON CONFLICT would 409 on the second write.
+  | 'template_duplicate_id'
+
+export type MultitableTemplateConflict = {
+  severity: 'error'
+  kind: MultitableTemplateConflictKind
+  id: string
+  name: string
+  message: string
+}
+
+export type MultitableTemplateWouldCreate = {
+  base: { id: string; name: string }
+  sheets: Array<{ id: string; name: string; fieldCount: number; viewCount: number }>
+  fields: Array<{ id: string; sheetId: string; name: string; type: string }>
+  views: Array<{ id: string; sheetId: string; name: string; type: string }>
+}
+
+export type TemplateConflictDetectionOptions = {
+  baseId: string
+  baseName: string
+}
+
 export class MultitableTemplateNotFoundError extends Error {
   constructor(templateId: string) {
     super(`Template not found: ${templateId}`)
@@ -383,6 +412,153 @@ export function getMultitableTemplate(templateId: string): MultitableTemplate | 
   return template ? normalizeTemplate(template) : null
 }
 
+/**
+ * S2 — id plan for a template install (design 20260611 §2.1).
+ *
+ * Derives base/sheet/field/view ids through EXACTLY the same path
+ * installMultitableTemplate uses (stableChildId / mapFieldIds keyed off the
+ * provided baseId), so a dry-run shows ids shaped like the ones a real install
+ * would write. The base id itself comes from the caller's idGenerator, which
+ * install draws FRESH per call — plan ids are therefore illustrative, not a
+ * promise of the exact ids a later install will create.
+ * (Derivation parity is locked by multitable-template-dryrun-routes.test.ts.)
+ */
+export function buildTemplateWouldCreate(
+  template: MultitableTemplate,
+  opts: TemplateConflictDetectionOptions,
+): MultitableTemplateWouldCreate {
+  const sheets: MultitableTemplateWouldCreate['sheets'] = []
+  const fields: MultitableTemplateWouldCreate['fields'] = []
+  const views: MultitableTemplateWouldCreate['views'] = []
+
+  for (const templateSheet of template.sheets) {
+    const sheetId = stableChildId('sheet', opts.baseId, template.id, templateSheet.id)
+    sheets.push({
+      id: sheetId,
+      name: templateSheet.name,
+      fieldCount: templateSheet.fields.length,
+      viewCount: templateSheet.views.length,
+    })
+
+    const fieldIds = mapFieldIds(sheetId, template.id, templateSheet)
+    for (const field of templateSheet.fields) {
+      fields.push({ id: fieldIds[field.id], sheetId, name: field.name, type: field.type })
+    }
+
+    for (const templateView of templateSheet.views) {
+      views.push({
+        id: stableChildId('view', sheetId, template.id, templateSheet.id, templateView.id),
+        sheetId,
+        name: templateView.name,
+        type: templateView.type,
+      })
+    }
+  }
+
+  return { base: { id: opts.baseId, name: opts.baseName }, sheets, fields, views }
+}
+
+/**
+ * S2 — shared base/sheet/view id-occupancy detection (design 20260611 §2.1).
+ *
+ * PURE SELECT-only: never opens a transaction, never writes. Single source for
+ * conflict semantics — installMultitableTemplate consumes this as its
+ * pre-check and the dry-run route consumes it directly, so the two paths
+ * cannot drift (wire-vs-fixture discipline).
+ *
+ * Occupancy probes deliberately do NOT filter on deleted_at: install collides
+ * via INSERT ... ON CONFLICT (id), which a soft-deleted row still triggers, and
+ * this function must answer exactly the question install asks.
+ *
+ * Conflicts are collected in install's write order (base, then per sheet: the
+ * sheet, then its views), so conflicts[0].message is verbatim the first error
+ * install would throw in the same scenario.
+ *
+ * Before the occupancy probes, the derived plan itself is checked for
+ * duplicate ids (review 2026-06-11 F1): DB probes only answer occupancy, so a
+ * mis-authored template whose sheets/views derive IDENTICAL ids would
+ * otherwise dry-run clean yet 409 on install's per-table ON CONFLICT
+ * (duplicate field ids would silently upsert-merge — fewer fields than
+ * declared). Pure compute, zero-write invariant untouched.
+ */
+export async function detectTemplateConflicts(
+  query: MultitableProvisioningQueryFn,
+  template: MultitableTemplate,
+  opts: TemplateConflictDetectionOptions,
+): Promise<MultitableTemplateConflict[]> {
+  const plan = buildTemplateWouldCreate(template, opts)
+  const conflicts: MultitableTemplateConflict[] = []
+
+  // Plan-level duplicate-id self-collision check — BEFORE any DB probe.
+  // Per-kind sets: install's collision surface is per table (meta_sheets /
+  // meta_fields / meta_views), and the check order mirrors install's per-sheet
+  // write order (sheet → fields → views).
+  const duplicateProbes: Array<{
+    entity: 'sheet' | 'field' | 'view'
+    items: Array<{ id: string; name: string }>
+  }> = [
+    { entity: 'sheet', items: plan.sheets },
+    { entity: 'field', items: plan.fields },
+    { entity: 'view', items: plan.views },
+  ]
+  for (const { entity, items } of duplicateProbes) {
+    const seen = new Set<string>()
+    for (const item of items) {
+      if (seen.has(item.id)) {
+        conflicts.push({
+          severity: 'error',
+          kind: 'template_duplicate_id',
+          id: item.id,
+          name: item.name,
+          message: `Template derives duplicate ${entity} id: ${item.id}`,
+        })
+        continue
+      }
+      seen.add(item.id)
+    }
+  }
+
+  const baseResult = await query('SELECT id FROM meta_bases WHERE id = $1', [opts.baseId])
+  if (baseResult.rows.length > 0) {
+    conflicts.push({
+      severity: 'error',
+      kind: 'base_exists',
+      id: opts.baseId,
+      name: opts.baseName,
+      message: `Base already exists: ${opts.baseId}`,
+    })
+  }
+
+  for (const sheet of plan.sheets) {
+    const sheetResult = await query('SELECT id FROM meta_sheets WHERE id = $1', [sheet.id])
+    if (sheetResult.rows.length > 0) {
+      conflicts.push({
+        severity: 'error',
+        kind: 'sheet_exists',
+        id: sheet.id,
+        name: sheet.name,
+        message: `Sheet already exists: ${sheet.id}`,
+      })
+    }
+
+    for (const view of plan.views) {
+      if (view.sheetId !== sheet.id) continue
+      const viewResult = await query('SELECT id FROM meta_views WHERE id = $1', [view.id])
+      if (viewResult.rows.length > 0) {
+        conflicts.push({
+          severity: 'error',
+          kind: 'view_exists',
+          id: view.id,
+          name: view.name,
+          message: `View already exists: ${view.id}`,
+        })
+      }
+    }
+  }
+
+  return conflicts
+}
+
 export async function installMultitableTemplate(
   input: InstallMultitableTemplateInput,
 ): Promise<InstallMultitableTemplateResult> {
@@ -394,6 +570,16 @@ export async function installMultitableTemplate(
   const makeId = input.idGenerator ?? generatedId
   const baseId = (input.baseId?.trim() || makeId('base')).slice(0, 50)
   const baseName = (input.baseName?.trim() || template.name).slice(0, 255)
+
+  // S2: single-source conflict pre-check (SELECT-only). The write-time
+  // rowCount checks below stay as a TOCTOU backstop for ids occupied between
+  // this probe and the INSERTs; they throw the same messages this pre-check
+  // derives, so external behavior is unchanged.
+  const conflicts = await detectTemplateConflicts(input.query, template, { baseId, baseName })
+  if (conflicts.length > 0) {
+    throw new MultitableTemplateConflictError(conflicts[0].message)
+  }
+
   const baseInsert = await input.query(
     `INSERT INTO meta_bases (id, name, icon, color, owner_id, workspace_id)
      VALUES ($1, $2, $3, $4, $5, $6)

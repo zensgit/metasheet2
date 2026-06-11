@@ -122,6 +122,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Templates', titleZh: '模板中心', requiresAuth: true },
   },
   {
+    path: ROUTE_PATHS.MULTITABLE_TEMPLATE_DETAIL,
+    name: AppRouteNames.MULTITABLE_TEMPLATE_DETAIL,
+    component: () => import('../views/MultitableTemplateDetailView.vue'),
+    meta: { title: 'Template Details', titleZh: '模板详情', requiresAuth: true },
+  },
+  {
     path: '/data-sources',
     name: 'data-sources',
     component: () => import('../views/DataSourcesView.vue'),

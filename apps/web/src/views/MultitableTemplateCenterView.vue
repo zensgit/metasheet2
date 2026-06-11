@@ -81,7 +81,9 @@
         :key="template.id"
         :template="template"
         :installing="installingTemplateId === template.id"
+        show-detail
         @install="onInstall"
+        @detail="onDetail"
       />
     </div>
   </section>
@@ -89,6 +91,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import MetaTemplateCard from '../multitable/components/MetaTemplateCard.vue'
 import { multitableClient } from '../multitable/api/client'
 import { useTemplateInstall } from '../multitable/composables/useTemplateInstall'
@@ -99,6 +102,7 @@ import { AppRouteNames } from '../router/types'
 const ALL_CATEGORY = '__all__'
 const HomeRouteName = AppRouteNames.MULTITABLE_HOME
 
+const router = useRouter()
 const templates = ref<MetaTemplate[]>([])
 const loading = ref(false)
 const errorMessage = ref('')
@@ -159,6 +163,13 @@ async function loadTemplates(): Promise<void> {
 
 async function onInstall(template: MetaTemplate): Promise<void> {
   await installAndOpen(template)
+}
+
+function onDetail(template: MetaTemplate): void {
+  void router.push({
+    name: AppRouteNames.MULTITABLE_TEMPLATE_DETAIL,
+    params: { templateId: template.id },
+  })
 }
 
 onMounted(() => {

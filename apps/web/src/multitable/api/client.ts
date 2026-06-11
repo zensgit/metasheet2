@@ -58,6 +58,7 @@ import type {
   FormShareConfigUpdate,
   InstallTemplateInput,
   InstallTemplateResult,
+  TemplateDryRunResult,
   ApiToken,
   ApiTokenCreateResult,
   MetaTemplate,
@@ -912,6 +913,17 @@ export class MultitableApiClient {
 
   async installTemplate(templateId: string, input: InstallTemplateInput = {}): Promise<InstallTemplateResult> {
     const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}/install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return this.parseJson(res)
+  }
+
+  // S2 — zero-write install simulation (design 20260611 §2.1). Same body
+  // shape as install; the server only runs SELECT occupancy probes.
+  async dryRunTemplate(templateId: string, input: InstallTemplateInput = {}): Promise<TemplateDryRunResult> {
+    const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}/dry-run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),

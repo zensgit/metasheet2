@@ -56,6 +56,14 @@ export type WorkbenchLabelKey =
   | 'confirm.pageLeaveBusy' | 'confirm.pageLeaveDirty'
   // §3.6 MetaTemplateCard button (counts use the card* helpers below)
   | 'card.install' | 'card.installing'
+  // S2 template detail + dry-run (design 20260611 §2.2)
+  | 'card.viewDetail'
+  | 'detail.back' | 'detail.loading' | 'detail.notFound'
+  | 'detail.fieldsTitle' | 'detail.viewsTitle'
+  | 'detail.colFieldName' | 'detail.colFieldType' | 'detail.groupBy'
+  | 'detail.checkInstallable' | 'detail.checking' | 'detail.dryRunFailed'
+  | 'detail.installableYes' | 'detail.installableNo'
+  | 'detail.wouldCreateTitle' | 'detail.conflictsTitle' | 'detail.conflictHint'
   // final audit closure follow-up: composable fallback messages (backend e.message remains raw)
   | 'error.loadSheets' | 'error.loadSheetMetadata' | 'error.loadBaseMetadata'
 
@@ -200,6 +208,36 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'card.install': { en: 'Use template', zh: '使用模板' },
   'card.installing': { en: 'Installing...', zh: '创建中...' },
 
+  'card.viewDetail': { en: 'View details', zh: '查看详情' },
+  'detail.back': { en: '← Back to template center', zh: '← 返回模板中心' },
+  'detail.loading': { en: 'Loading template...', zh: '正在加载模板...' },
+  'detail.notFound': { en: 'Template not found.', zh: '未找到该模板。' },
+  'detail.fieldsTitle': { en: 'Fields', zh: '字段' },
+  'detail.viewsTitle': { en: 'Views', zh: '视图' },
+  'detail.colFieldName': { en: 'Field', zh: '字段名称' },
+  'detail.colFieldType': { en: 'Type', zh: '类型' },
+  'detail.groupBy': { en: 'Grouped by', zh: '分组字段' },
+  'detail.checkInstallable': { en: 'Check installability', zh: '检查可安装性' },
+  'detail.checking': { en: 'Checking...', zh: '检查中...' },
+  'detail.dryRunFailed': { en: 'Installability check failed', zh: '可安装性检查失败' },
+  'detail.installableYes': {
+    en: 'Ready to install — no conflicts detected.',
+    zh: '可以安装——未检测到冲突。',
+  },
+  'detail.installableNo': {
+    en: 'Conflicts detected — install is blocked.',
+    zh: '检测到冲突——安装已被阻止。',
+  },
+  'detail.wouldCreateTitle': { en: 'Will create', zh: '将创建' },
+  'detail.conflictsTitle': { en: 'Conflicts', zh: '冲突' },
+  // Review 2026-06-11 F4: truthful copy — baseName never enters id
+  // derivation (and the detail page has no baseName input), so the hint must
+  // not suggest renaming; a re-check is what can change the outcome.
+  'detail.conflictHint': {
+    en: 'Existing objects conflict with this template. Re-check before installing.',
+    zh: '存在与模板冲突的对象，安装前请重新检查。',
+  },
+
   'error.loadSheets': { en: 'Failed to load sheets', zh: '加载 Sheet 失败' },
   'error.loadSheetMetadata': { en: 'Failed to load sheet metadata', zh: '加载 Sheet 元数据失败' },
   'error.loadBaseMetadata': { en: 'Failed to load base metadata', zh: '加载 Base 元数据失败' },
@@ -295,6 +333,19 @@ export function recordsDeleted(n: number, isZh: boolean): string {
 
 export function recordNotFound(recordId: string, isZh: boolean): string {
   return isZh ? `未找到记录：${recordId}` : `Record not found: ${recordId}`
+}
+
+// S2 dry-run conflicts: the server emits English messages plus a stable
+// `kind`; the client localizes by kind (formula dry-run convention) and may
+// show the raw message as secondary detail. Unknown kinds pass through raw.
+export function templateConflictKindLabel(kind: string, isZh: boolean): string {
+  switch (kind) {
+    case 'base_exists': return isZh ? 'Base 已存在' : 'Base already exists'
+    case 'sheet_exists': return isZh ? 'Sheet 已存在' : 'Sheet already exists'
+    case 'view_exists': return isZh ? '视图已存在' : 'View already exists'
+    case 'template_duplicate_id': return isZh ? '模板内部 id 重复' : 'Duplicate id inside template'
+    default: return kind
+  }
 }
 
 // MetaTemplateCard counts: zh "{n} 个 Sheet/字段/视图"; en pluralized.
