@@ -3,12 +3,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   AttendanceScheduler,
   registerAttendanceSchedulerJob,
+  resolveAttendanceNotificationDeliveryJob,
   resolveCompTimeExpiryReminderJob,
   resolveUnscheduledReminderJob,
   startAttendanceScheduler,
   stopAttendanceScheduler,
 } from '../../src/services/AttendanceScheduler'
 import type { AttendanceExpiryService, ExpiredCompTimeBalance } from '../../src/services/AttendanceExpiryService'
+import {
+  AttendanceNotificationDeliveryWorker,
+  createAttendanceDeliveryChannelsFromEnv,
+  DeterministicFakeAttendanceDeliveryChannel,
+  computeDeliveryBackoffMs,
+} from '../../src/services/AttendanceNotificationDeliveryWorker'
 import {
   AttendanceNotifier,
   createAttendanceNotifierChannelsFromEnv,
@@ -31,6 +38,8 @@ describe('AttendanceScheduler (④ C4)', () => {
     delete process.env.ATTENDANCE_SCHEDULER_ENABLED
     delete process.env.ATTENDANCE_UNSCHEDULED_REMINDER_ENABLED
     delete process.env.ATTENDANCE_COMP_TIME_EXPIRY_REMINDER_ENABLED
+    delete process.env.ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED
+    delete process.env.ATTENDANCE_NOTIFICATION_FAKE_CHANNEL_ENABLED
     vi.restoreAllMocks()
   })
 
@@ -154,6 +163,26 @@ describe('AttendanceScheduler (④ C4)', () => {
 
     expect(instances.size).toBe(1)
   })
+
+  it('resolves the notification delivery worker job with one stable worker instance', async () => {
+    expect(resolveAttendanceNotificationDeliveryJob()).toBeNull()
+
+    process.env.ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED = 'true'
+    process.env.ATTENDANCE_NOTIFICATION_FAKE_CHANNEL_ENABLED = 'true'
+    const instances = new Set<unknown>()
+    vi.spyOn(AttendanceNotificationDeliveryWorker.prototype, 'runBatch').mockImplementation(function (this: AttendanceNotificationDeliveryWorker) {
+      instances.add(this)
+      return Promise.resolve({ claimed: 0, sent: 0, retrying: 0, failed: 0 })
+    })
+
+    const job = resolveAttendanceNotificationDeliveryJob()
+    expect(job?.name).toBe('attendance-notification-delivery')
+
+    await job?.run()
+    await job?.run()
+
+    expect(instances.size).toBe(1)
+  })
 })
 
 describe('AttendanceNotifier scaffold (④ C4 — no messages)', () => {
@@ -179,5 +208,48 @@ describe('AttendanceNotifier scaffold (④ C4 — no messages)', () => {
     const result = await notifier.notify([{ orgId: 'default', userId: 'u1', kind: 'k', text: 't' }])
     expect(result).toEqual({ requested: 1, sent: 1, failed: 1 })
     expect(calls).toEqual(['ok', 'bad'])
+  })
+})
+
+describe('Attendance C5 delivery worker primitives', () => {
+  it('keeps delivery channels default-off and registers the deterministic fake channel only by env', () => {
+    expect(createAttendanceDeliveryChannelsFromEnv({})).toEqual([])
+    const channels = createAttendanceDeliveryChannelsFromEnv({ ATTENDANCE_NOTIFICATION_FAKE_CHANNEL_ENABLED: 'true' } as NodeJS.ProcessEnv)
+    expect(channels).toHaveLength(1)
+    expect(channels[0].name).toBe('dingtalk_work_notification')
+  })
+
+  it('fake channel deterministically returns ok, retryable, and non-retryable outcomes', async () => {
+    const channel = new DeterministicFakeAttendanceDeliveryChannel()
+    const base = {
+      id: 'delivery-1',
+      orgId: 'default',
+      sourceType: 'unscheduled_reminder',
+      sourceId: 'source-1',
+      sourceKey: 'source-key',
+      recipientUserId: 'u1',
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+    }
+    await expect(channel.send({ ...base, payload: {} })).resolves.toEqual({ ok: true })
+    await expect(channel.send({ ...base, payload: { fakeDelivery: 'retry' } })).resolves.toEqual({
+      ok: false,
+      retryable: true,
+      error: 'fake_retryable_failure',
+    })
+    await expect(channel.send({ ...base, payload: { fakeDelivery: 'fail' } })).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      error: 'fake_non_retryable_failure',
+    })
+  })
+
+  it('uses bounded exponential retry backoff', () => {
+    expect(computeDeliveryBackoffMs(1)).toBe(60_000)
+    expect(computeDeliveryBackoffMs(2)).toBe(5 * 60_000)
+    expect(computeDeliveryBackoffMs(3)).toBe(15 * 60_000)
+    expect(computeDeliveryBackoffMs(4)).toBe(60 * 60_000)
+    expect(computeDeliveryBackoffMs(5)).toBe(6 * 60 * 60_000)
+    expect(computeDeliveryBackoffMs(99)).toBe(6 * 60 * 60_000)
   })
 })

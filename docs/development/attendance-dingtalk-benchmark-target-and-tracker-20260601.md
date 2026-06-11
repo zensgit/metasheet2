@@ -79,13 +79,13 @@
 | 1 | **C5 design-lock** | ✅ #2483 | 锁定 `dispatched_at` 不是 delivery success、outbox/delivery-status/retry、本人 + owner/sub_owner fan-out、channel env-gating、staging smoke 口径 |
 | 2 | **C5-0 outbox DDL** | ✅ #2487 | `attendance_notification_deliveries` 表 + CHECK/unique/index；不发送 |
 | 3 | **C5-1a unscheduled fan-out producer** | ✅ #2498 | 未排班 intent row → 本人 + 负责人 delivery rows，幂等 source_key，重复不建 dup；CI real-DB gate 实跑 `attendance-unscheduled-reminder` + outbox spec |
-| 4 | **C5-1b comp-time expiry reminder producer** | 🟡 本 PR | 即将到期 active `comp_time` lot → 本人 + 负责人 delivery rows，不改余额；重复不建 dup；pending CI/review/merge 后回填 ✅ |
-| 5 | **C5-2 delivery worker + fake channel** | 🔒 | pending/retrying claim → sent/retrying/failed/skipped 状态流 + retry/backoff；无真实外网依赖 |
+| 4 | **C5-1b comp-time expiry reminder producer** | ✅ #2502 | 即将到期 active `comp_time` lot → 本人 + 负责人 delivery rows，不改余额；重复不建 dup；CI real-DB gate 实跑 comp-time expiry reminder producer spec |
+| 5 | **C5-2 delivery worker + fake channel** | 🟡 本 PR | pending/retrying claim → sent/retrying/failed/skipped 状态流 + retry/backoff；无真实外网依赖；pending CI/review/merge 后回填 ✅ |
 | 6 | **C5-3 DingTalk work-notification channel** | 🔒 | env/store-gated，复用现有 DingTalk work-notification runtime；缺配置/缺绑定 fail-visible |
 | 7 | **C5-4 admin observability** | 🔒 | read-only delivery status view/counters；不默认加手动 retry |
 | 8 | **C5-5 staging closeout** | 🔒 | C5-5a fake-channel 只证明 delivery-state（仍 🟡）；C5-5b 真实 DingTalk work-notification smoke 证明未排班 + 调休到期两 source、fan-out、delivery 状态流、retry/idempotency、scheduler 共存、cleanup residue=0 后才 ✅ |
 
-> 2026-06-11 回填：C5 design-lock #2483 与 C5-0 outbox DDL #2487 已落 main；C5-1a #2498 已接入未排班提醒 producer（仅写 outbox，不直发真实 channel），C5-1b 正在本 PR 中接入调休到期提醒 producer。C5 整体仍保持 🟡，直到 C5-1b/C5-2/C5-3/C5-5b 完整闭环。
+> 2026-06-11 回填：C5 design-lock #2483 与 C5-0 outbox DDL #2487 已落 main；C5-1a #2498 已接入未排班提醒 producer（仅写 outbox，不直发真实 channel）；C5-1b #2502 已接入调休到期提醒 producer；C5-2 正在本 PR 中接入 delivery worker + fake channel。C5 整体仍保持 🟡，直到 C5-2/C5-3/C5-5b 完整闭环。
 
 ### Out of this target
 

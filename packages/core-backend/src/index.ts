@@ -93,6 +93,7 @@ import {
 import {
   resolveAttendanceSchedulerIntervalMs,
   resolveAttendanceSchedulerLeaderOptions,
+  resolveAttendanceNotificationDeliveryJob,
   resolveCompTimeExpiryReminderJob,
   resolveUnscheduledReminderJob,
   registerAttendanceSchedulerJob,
@@ -2036,7 +2037,12 @@ export class MetaSheetServer {
       const attendanceLeaderOptions = await resolveAttendanceSchedulerLeaderOptions()
       const unscheduledReminderJob = resolveUnscheduledReminderJob()
       const compTimeExpiryReminderJob = resolveCompTimeExpiryReminderJob()
-      const attendanceSchedulerJobs = [unscheduledReminderJob, compTimeExpiryReminderJob].filter((job): job is NonNullable<typeof job> => Boolean(job))
+      const attendanceNotificationDeliveryJob = resolveAttendanceNotificationDeliveryJob()
+      const attendanceSchedulerJobs = [
+        unscheduledReminderJob,
+        compTimeExpiryReminderJob,
+        attendanceNotificationDeliveryJob,
+      ].filter((job): job is NonNullable<typeof job> => Boolean(job))
       const scheduler = startAttendanceScheduler({
         leaderOptions: attendanceLeaderOptions,
         intervalMs: resolveAttendanceSchedulerIntervalMs(),
