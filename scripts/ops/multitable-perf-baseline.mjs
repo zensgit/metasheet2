@@ -29,6 +29,7 @@ import {
   formatErrorWithCause,
   resolveSeedUploadTimeoutMs,
   resolveXlsxChunkSize,
+  wrapUndiciLoadError,
 } from './multitable-perf-baseline-upload.mjs'
 
 // --- env config ---
@@ -252,9 +253,9 @@ async function loadUndiciAgent() {
     const mod = await import('undici')
     return mod.Agent
   } catch (err) {
-    throw new Error(
-      `Cannot resolve undici package (needed for the seed-upload dispatcher; root devDependency since S5a). Run pnpm install at the repo root. Error: ${err.message}`,
-    )
+    // N4: wrap with { cause } so the underlying ERR_MODULE_NOT_FOUND (code/stack)
+    // survives for formatErrorWithCause + structured logs.
+    throw wrapUndiciLoadError(err)
   }
 }
 

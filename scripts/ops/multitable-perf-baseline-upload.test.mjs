@@ -10,6 +10,7 @@ import {
   formatErrorWithCause,
   resolveSeedUploadTimeoutMs,
   resolveXlsxChunkSize,
+  wrapUndiciLoadError,
 } from './multitable-perf-baseline-upload.mjs'
 
 // ---------------------------------------------------------------------------
@@ -124,4 +125,32 @@ test('formatErrorWithCause terminates on cyclic cause chains', () => {
   b.cause = a
   const out = formatErrorWithCause(a)
   assert.match(out, /cause chain truncated/)
+})
+
+// N1: a non-Error plain-object cause hits JSON.stringify. A CIRCULAR plain object
+// makes JSON.stringify throw — formatErrorWithCause must not itself blow up.
+test('formatErrorWithCause survives a circular plain-object cause (no throw)', () => {
+  const circular = { tag: 'circular-cause' }
+  circular.self = circular
+  const err = new Error('outer', { cause: circular })
+  let out
+  assert.doesNotThrow(() => {
+    out = formatErrorWithCause(err)
+  })
+  assert.match(out, /outer/)
+  // some readable placeholder for the unstringifiable cause (not a crash)
+  assert.match(out, /unserializable|\[object/i)
+})
+
+// N4: the undici-load wrap error must attach the underlying error as `cause`
+// (Error cause option), not just splice its message into the text.
+test('wrapUndiciLoadError attaches the original error as { cause }', () => {
+  const original = new Error('ERR_MODULE_NOT_FOUND: undici')
+  const wrapped = wrapUndiciLoadError(original)
+  assert.ok(wrapped instanceof Error)
+  assert.equal(wrapped.cause, original)
+  assert.match(wrapped.message, /undici/)
+  assert.match(wrapped.message, /pnpm install/)
+  // and it round-trips through the cause formatter
+  assert.match(formatErrorWithCause(wrapped), /ERR_MODULE_NOT_FOUND/)
 })

@@ -203,4 +203,58 @@ describe('dashboardRouter HTTP mounting', () => {
       expect(res.body.error).toBe('Invalid chart type')
     }
   })
+
+  // F4: the PERSISTED write paths (POST/PATCH /charts) must reject an unknown `type` too —
+  // the `type` column is TEXT NOT NULL with no CHECK, and only preview-data validated
+  // it before. An unknown type must 400 BEFORE the service is touched.
+  it('POST /charts rejects an unknown chart type with 400 (never persists)', async () => {
+    const createChart = vi.spyOn(service, 'createChart')
+    for (const type of ['scatter', 'radar', 'nope']) {
+      const res = await request(buildApp())
+        .post('/api/multitable/sheets/sheet-a/charts')
+        .send({ name: 'X', type, dataSource: { aggregation: { function: 'count' } } })
+      expect(res.status, `create must reject chart type "${type}"`).toBe(400)
+      expect(res.body.error).toBe('Invalid chart type')
+    }
+    expect(createChart).not.toHaveBeenCalled()
+  })
+
+  it('POST /charts still accepts a known chart type (does not over-reject)', async () => {
+    vi.spyOn(service, 'createChart').mockResolvedValue({
+      id: 'c', sheetId: 'sheet-a', name: 'X', type: 'gauge',
+    } as any)
+    await request(buildApp())
+      .post('/api/multitable/sheets/sheet-a/charts')
+      .send({ name: 'X', type: 'gauge', dataSource: { aggregation: { function: 'count' } } })
+      .expect(201)
+  })
+
+  it('PATCH /charts/:id rejects an unknown chart type with 400 (never updates)', async () => {
+    vi.spyOn(service, 'getChart').mockResolvedValue({
+      id: 'chart-1', sheetId: 'sheet-a', name: 'c', type: 'bar',
+      dataSource: { aggregation: { function: 'count' } },
+    } as any)
+    const updateChart = vi.spyOn(service, 'updateChart')
+    const res = await request(buildApp())
+      .patch('/api/multitable/sheets/sheet-a/charts/chart-1')
+      .send({ type: 'scatter' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('Invalid chart type')
+    expect(updateChart).not.toHaveBeenCalled()
+  })
+
+  it('PATCH /charts/:id leaves an unchanged type alone (patch without type keeps the stored bar)', async () => {
+    vi.spyOn(service, 'getChart').mockResolvedValue({
+      id: 'chart-1', sheetId: 'sheet-a', name: 'c', type: 'bar',
+      dataSource: { aggregation: { function: 'count' } },
+    } as any)
+    const updateChart = vi.spyOn(service, 'updateChart').mockResolvedValue({
+      id: 'chart-1', sheetId: 'sheet-a', name: 'c2', type: 'bar',
+    } as any)
+    await request(buildApp())
+      .patch('/api/multitable/sheets/sheet-a/charts/chart-1')
+      .send({ name: 'c2' })
+      .expect(200)
+    expect(updateChart).toHaveBeenCalled()
+  })
 })
