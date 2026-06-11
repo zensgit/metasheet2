@@ -120,6 +120,7 @@ describe('Attendance admin regressions', () => {
   let autoShiftPreviewData: Record<string, unknown> | null = null
   let autoShiftApplyStatus = 200
   let autoShiftApplyData: Record<string, unknown> | null = null
+  let autoShiftAutoWriteRunsData: Record<string, unknown> | null = null
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -132,6 +133,7 @@ describe('Attendance admin regressions', () => {
     autoShiftPreviewData = null
     autoShiftApplyStatus = 200
     autoShiftApplyData = null
+    autoShiftAutoWriteRunsData = null
     exportReportFieldFingerprint = 'records-unit-test-fingerprint'
     exportReportFieldCodes = 'work_date,employee_name'
     exportReportFieldCount = '2'
@@ -616,6 +618,12 @@ describe('Attendance admin regressions', () => {
         return jsonResponse(200, {
           ok: true,
           data: autoShiftApplyData ?? { runId: 'apply-run-1', applied: [], skipped: [] },
+        })
+      }
+      if (url.includes('/api/attendance/auto-shift-matching/auto-write-runs')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: autoShiftAutoWriteRunsData ?? { items: [], total: 0, page: 1, pageSize: 5 },
         })
       }
       if (url.includes('/api/attendance/auto-shift-matching/preview')) {
@@ -2563,6 +2571,106 @@ describe('Attendance admin regressions', () => {
     expect(container!.querySelector('[data-auto-shift="error"]')?.textContent || '').toContain('Auto shift matching preview is disabled')
     expect(container!.querySelector('[data-auto-shift="suggestion-row"]')).toBeNull()
     expect(container!.querySelector('[data-auto-shift="apply"]')).toBeNull()
+  })
+
+  it('loads A2 auto-write settings and PUTs ONLY the auto-write gates/sub-config', async () => {
+    attendanceSettingsData = {
+      autoShiftMatching: {
+        enabled: true,
+        mode: 'auto',
+        maxToleranceMinutes: 80,
+        minConfidenceToApply: 'medium',
+        autoWrite: {
+          enabled: true,
+          lookaheadDays: 3,
+          maxAssignmentsPerRun: 40,
+          minConfidence: 'high',
+        },
+      },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const enabled = container!.querySelector<HTMLInputElement>('[data-auto-shift-auto="enabled"]')
+    const autoWriteEnabled = container!.querySelector<HTMLInputElement>('[data-auto-shift-auto="auto-write-enabled"]')
+    const lookahead = container!.querySelector<HTMLInputElement>('[data-auto-shift-auto="lookahead-days"]')
+    const maxAssignments = container!.querySelector<HTMLInputElement>('[data-auto-shift-auto="max-assignments"]')
+    const minConfidence = container!.querySelector<HTMLSelectElement>('[data-auto-shift-auto="min-confidence"]')
+    expect(Boolean(enabled && autoWriteEnabled && lookahead && maxAssignments && minConfidence)).toBe(true)
+    expect(enabled!.checked).toBe(true)
+    expect(autoWriteEnabled!.checked).toBe(true)
+    expect(lookahead!.value).toBe('3')
+    expect(maxAssignments!.value).toBe('40')
+    expect(minConfidence!.value).toBe('high')
+
+    autoWriteEnabled!.checked = false
+    autoWriteEnabled!.dispatchEvent(new Event('change'))
+    lookahead!.value = '2'
+    lookahead!.dispatchEvent(new Event('input'))
+    maxAssignments!.value = '12'
+    maxAssignments!.dispatchEvent(new Event('input'))
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-auto-shift-auto="save"]')!.click()
+    await flushUi(8)
+
+    expect(lastSettingsPutBody()).toEqual({
+      autoShiftMatching: {
+        enabled: true,
+        mode: 'auto',
+        autoWrite: {
+          enabled: false,
+          lookaheadDays: 2,
+          maxAssignmentsPerRun: 12,
+          minConfidence: 'high',
+        },
+      },
+    })
+  })
+
+  it('renders A2 auto-write run summaries and skipped reasons from the operations route', async () => {
+    autoShiftAutoWriteRunsData = {
+      items: [
+        {
+          id: 'run-a2-1',
+          status: 'partial',
+          targetFrom: '2026-06-15',
+          targetTo: '2026-06-16',
+          scannedCount: 8,
+          candidateCount: 4,
+          appliedCount: 2,
+          skippedCount: 2,
+          errorCount: 1,
+          startedAt: '2026-06-14T00:00:00.000Z',
+          skipReasons: [
+            { reason: 'scheduler_scope_forbidden', count: 2 },
+            { reason: 'max_assignments_per_run', count: 1 },
+          ],
+        },
+      ],
+      total: 3,
+      page: 1,
+      pageSize: 5,
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const runsTable = container!.querySelector<HTMLElement>('[data-auto-shift-auto="runs"]')
+    expect(runsTable).toBeTruthy()
+    const text = runsTable!.textContent || ''
+    expect(text).toContain('2026-06-15 - 2026-06-16')
+    expect(text).toContain('scheduler_scope_forbidden × 2')
+    expect(text).toContain('max_assignments_per_run × 1')
+    expect(text).toContain('scanned 8; candidates 4; applied 2; skipped 2; errors 1')
+    expect(container!.querySelector('[data-auto-shift-auto="runs-cap"]')?.textContent || '').toContain('Showing first 1 of 3')
+    expect(
+      vi.mocked(apiFetch).mock.calls.some(([url]) =>
+        String(url).includes('/api/attendance/auto-shift-matching/auto-write-runs')
+        && String(url).includes('page=1')
+        && String(url).includes('pageSize=5'),
+      ),
+    ).toBe(true)
   })
 
   it('loads punchPolicy.outdoor into the card and PUTs ONLY { punchPolicy: { outdoor } } (flow id round-trips)', async () => {

@@ -7379,6 +7379,105 @@ attendanceIntegrationDescribe(
       }
     })
 
+    it('returns auto-write run summaries with skipped reason counts for admin operations UI', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const orgId = `a2-ui-${runSuffix}`
+      const adminToken = await getAdminToken(`attendance-autoshift-ui-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      try {
+        await requireAttendanceTable(pool, 'attendance_auto_shift_auto_write_runs')
+        await requireAttendanceTable(pool, 'attendance_auto_shift_auto_write_run_items')
+        const runRows = await pool.query(
+          `INSERT INTO attendance_auto_shift_auto_write_runs
+             (org_id, source, status, target_from, target_to, config_snapshot,
+              scanned_count, candidate_count, applied_count, skipped_count, error_count, started_at, finished_at, created_at)
+           VALUES ($1, 'scheduler', 'partial', '2026-06-15', '2026-06-16',
+                   '{"autoShiftMatching":{"autoWrite":{"enabled":true,"lookaheadDays":2}}}'::jsonb,
+                   7, 4, 2, 2, 1,
+                   '2026-06-14T00:00:00.000Z'::timestamptz,
+                   '2026-06-14T00:00:02.000Z'::timestamptz,
+                   '2026-06-14T00:00:00.000Z'::timestamptz)
+           RETURNING id`,
+          [orgId],
+        )
+        const runId = runRows.rows[0]?.id as string | undefined
+        expect(runId).toBeTruthy()
+        await pool.query(
+          `INSERT INTO attendance_auto_shift_auto_write_run_items
+             (run_id, org_id, user_id, work_date, candidate_shift_id, confidence, status, reason, evidence_event_ids)
+           VALUES
+             ($1, $2, 'a2-ui-u1', '2026-06-15', $3::uuid, 'high', 'skipped', 'scheduler_scope_forbidden', '[]'::jsonb),
+             ($1, $2, 'a2-ui-u2', '2026-06-15', $4::uuid, 'high', 'skipped', 'max_assignments_per_run', '[]'::jsonb),
+             ($1, $2, 'a2-ui-u3', '2026-06-16', $5::uuid, 'high', 'skipped', 'scheduler_scope_forbidden', '[]'::jsonb)`,
+          [runId, orgId, randomUuidV4(), randomUuidV4(), randomUuidV4()],
+        )
+
+        const res = await requestJson(`${baseUrl}/api/attendance/auto-shift-matching/auto-write-runs?orgId=${encodeURIComponent(orgId)}&page=1&pageSize=5`, {
+          headers: { Authorization: `Bearer ${adminToken}` },
+        })
+        expect(res.status, JSON.stringify(res.body)).toBe(200)
+        const body = res.body as {
+          data?: {
+            items?: Array<{
+              id?: string
+              status?: string
+              targetFrom?: string
+              targetTo?: string
+              scannedCount?: number
+              candidateCount?: number
+              appliedCount?: number
+              skippedCount?: number
+              errorCount?: number
+              errorMessage?: string | null
+              startedAt?: string | null
+              finishedAt?: string | null
+              createdAt?: string | null
+              orgId?: string
+              source?: string
+              configSnapshot?: Record<string, unknown>
+              skipReasons?: Array<{ reason?: string; count?: number }>
+            }>
+            total?: number
+            page?: number
+            pageSize?: number
+          }
+        }
+        expect(body.data?.total).toBe(1)
+        expect(body.data?.page).toBe(1)
+        expect(body.data?.pageSize).toBe(5)
+        expect(body.data?.items).toEqual([{
+          id: runId,
+          orgId,
+          source: 'scheduler',
+          status: 'partial',
+          targetFrom: '2026-06-15',
+          targetTo: '2026-06-16',
+          configSnapshot: { autoShiftMatching: { autoWrite: { enabled: true, lookaheadDays: 2 } } },
+          scannedCount: 7,
+          candidateCount: 4,
+          appliedCount: 2,
+          skippedCount: 2,
+          errorCount: 1,
+          errorMessage: null,
+          startedAt: '2026-06-14T00:00:00.000Z',
+          finishedAt: '2026-06-14T00:00:02.000Z',
+          createdAt: '2026-06-14T00:00:00.000Z',
+          skipReasons: [
+            { reason: 'scheduler_scope_forbidden', count: 2 },
+            { reason: 'max_assignments_per_run', count: 1 },
+          ],
+        }])
+      } finally {
+        await pool.query('DELETE FROM attendance_auto_shift_auto_write_runs WHERE org_id = $1', [orgId]).catch(() => undefined)
+        await pool.end().catch(() => undefined)
+      }
+    })
+
     async function createShiftForAutoShift(token: string, name: string, start: string, end: string): Promise<string> {
       if (!baseUrl) throw new Error('baseUrl missing')
       const res = await requestJson(`${baseUrl}/api/attendance/shifts`, {
