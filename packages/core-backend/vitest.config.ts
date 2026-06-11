@@ -34,7 +34,10 @@ export default defineConfig({
       'tests/integration/multitable-record-form.api.test.ts',
       'tests/integration/multitable-sheet-permissions.api.test.ts',
       'tests/integration/multitable-sheet-realtime.api.test.ts',
-      'tests/integration/multitable-view-config.api.test.ts',
+      // multitable-view-config.api.test.ts uses an in-file MOCK pool (no live DB) and
+      // self-contains its RBAC mocking — it runs under the default config + setup.ts, so
+      // it stays IN the standard `test` job (runs on every PR, Node 18 + 20). Excluding it
+      // here hid a #2052/#2068 redaction-wiring regression (4/7 RED) that no CI job caught.
       'tests/integration/plugin-failures.test.ts',
       'tests/integration/rooms.basic.test.ts',
       'tests/integration/snapshot-protection.test.ts',

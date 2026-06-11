@@ -2,12 +2,83 @@ import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+// ---------------------------------------------------------------------------
+// MOCK-POOL CONTRACT (read before editing — this is a hand-rolled SQL matcher).
+//
+// POST /views and PATCH /views/:viewId each fan out to a fixed set of queries.
+// Every query the handler issues MUST have a matching `if (sql.includes(...))`
+// branch in the test's queryHandler, or the route's try/catch swallows the
+// "Unhandled SQL in test" throw and returns 500 (silent regression — see #2052
+// / #2068 redaction wiring that this net guards). The branches a handler needs:
+//
+//   POST /views (create):
+//     1. SELECT sp.sheet_id, sp.perm_code, sp.subject_type ...   (sheet ACL → capabilities)
+//     2. SELECT id FROM meta_sheets WHERE id = $1 ...            (sheet existence)
+//     3. SELECT id, name, type, property, "order" FROM meta_fields
+//          WHERE sheet_id = $1 AND id = $2                       (gantt/hierarchy dep field, gantt/hierarchy only)
+//     4. SELECT id, name, type, property, "order" FROM meta_fields
+//          WHERE sheet_id = $1 ORDER BY ...                      (loadFieldsForSheet — #2052 allowed-field set)
+//     5. SELECT fp.field_id, fp.visible, fp.read_only FROM field_permissions fp
+//          WHERE fp.sheet_id = $2 ...                            (loadFieldPermissionScopeMap — #2052)
+//     6. INSERT INTO meta_views ...
+//
+//   PATCH /views/:viewId (update):
+//     1. SELECT sp.sheet_id, sp.perm_code, sp.subject_type ...   (sheet ACL → capabilities)
+//     2. SELECT id, sheet_id, name, type, filter_info, ... FROM meta_views WHERE id = $1  (current row)
+//     3. + 4. the same two loadAllowedFieldIds queries as POST (4 & 5 above) — run UP FRONT,
+//             before validateGanttDependencyConfig, so a malformed mock 500s before the 400.
+//     5. SELECT id, name, type, property, "order" FROM meta_fields
+//          WHERE sheet_id = $1 AND id = $2                       (gantt/hierarchy dep field, gantt/hierarchy only)
+//     6. UPDATE meta_views ...
+//
+// `matchAllowedFieldQueries` below satisfies branches (4) & (5); callers supply
+// the sheet's field rows so the redaction path genuinely runs over a real field
+// set. field_permissions returns [] (no per-field denials) → all fields allowed
+// → redactViewConfigFilterLiterals is a no-op (none of these configs carry
+// filterInfo.conditions literals), so assertions stay exact.
+// ---------------------------------------------------------------------------
+
 type QueryResult = {
   rows: any[]
   rowCount?: number
 }
 
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
+
+type FieldRow = {
+  id: string
+  name: string
+  type: string
+  property: Record<string, unknown>
+  order: number
+}
+
+// Satisfies the #2052 loadAllowedFieldIds query pair (loadFieldsForSheet +
+// loadFieldPermissionScopeMap). Returns the matching QueryResult, or null when
+// `sql` is some other query the caller must handle itself.
+function matchAllowedFieldQueries(
+  sql: string,
+  params: unknown[] | undefined,
+  fieldsBySheet: Record<string, FieldRow[]>,
+): QueryResult | null {
+  // loadFieldsForSheet — full field list, ORDER BY (distinct from the gantt
+  // single-field lookup which has `AND id = $2`).
+  if (sql.includes('FROM meta_fields') && sql.includes('ORDER BY') && !sql.includes('AND id = $2')) {
+    const sheetId = String((params ?? [])[0] ?? '')
+    return { rows: fieldsBySheet[sheetId] ?? [] }
+  }
+  // loadFieldPermissionScopeMap — no per-field denials → empty set → all fields allowed.
+  if (sql.includes('FROM field_permissions fp')) {
+    return { rows: [] }
+  }
+  return null
+}
+
+const SHEET_OPS_FIELDS: FieldRow[] = [
+  { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0 },
+  { id: 'fld_owner', name: 'Owner', type: 'string', property: {}, order: 1 },
+  { id: 'fld_status', name: 'Status', type: 'singleSelect', property: {}, order: 2 },
+]
 
 function createMockPool(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => queryHandler(sql, params))
@@ -75,6 +146,8 @@ describe('Multitable view config API', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'sheet_ops' }] }
         }
+        const allowed = matchAllowedFieldQueries(sql, params, { sheet_ops: SHEET_OPS_FIELDS })
+        if (allowed) return allowed
         if (sql.includes('INSERT INTO meta_views')) {
           insertParams = params
           return { rows: [], rowCount: 1 }
@@ -120,10 +193,15 @@ describe('Multitable view config API', () => {
 
   test('updates view config and groupInfo through PATCH /views/:viewId', async () => {
     let updateParams: unknown[] | undefined
+    // NIT-1: positively assert the #2052/#2068 redaction wiring actually runs on
+    // this path — a future refactor that deletes the loadAllowedFieldIds call would
+    // otherwise leave the mock branch unused and these tests silently green.
+    let sawFieldPermissionQuery = false
 
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('FROM field_permissions fp')) sawFieldPermissionQuery = true
         if (sql.includes('SELECT sp.sheet_id, sp.perm_code, sp.subject_type')) {
           expect(params).toEqual(['user_multitable_1', ['sheet_ops']])
           return { rows: [] }
@@ -144,6 +222,8 @@ describe('Multitable view config API', () => {
             }],
           }
         }
+        const allowed = matchAllowedFieldQueries(sql, params, { sheet_ops: SHEET_OPS_FIELDS })
+        if (allowed) return allowed
         if (sql.includes('UPDATE meta_views')) {
           updateParams = params
           return { rows: [], rowCount: 1 }
@@ -176,6 +256,8 @@ describe('Multitable view config API', () => {
     })
     expect(updateParams?.[0]).toBe('view_kanban')
     expect(updateParams?.[5]).toBe(JSON.stringify({ fieldId: 'fld_status' }))
+    // The redaction wiring (loadAllowedFieldIds → loadFieldPermissionScopeMap) ran.
+    expect(sawFieldPermissionQuery).toBe(true)
     expect(updateParams?.[7]).toBe(JSON.stringify({
       groupFieldId: 'fld_status',
       cardFieldIds: ['fld_title', 'fld_owner'],
@@ -206,6 +288,8 @@ describe('Multitable view config API', () => {
             }],
           }
         }
+        const allowed = matchAllowedFieldQueries(sql, params, { sheet_ops: SHEET_OPS_FIELDS })
+        if (allowed) return allowed
         if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = $2')) {
           expect(params).toEqual(['sheet_ops', 'fld_cross_sheet'])
           return {
@@ -270,6 +354,8 @@ describe('Multitable view config API', () => {
             }],
           }
         }
+        const allowed = matchAllowedFieldQueries(sql, params, { sheet_ops: SHEET_OPS_FIELDS })
+        if (allowed) return allowed
         if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = $2')) {
           expect(params).toEqual(['sheet_ops', 'fld_deps'])
           return {
