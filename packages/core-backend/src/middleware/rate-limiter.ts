@@ -138,6 +138,17 @@ export interface RateLimiterOptions {
   /** Optional Redis client — enables distributed rate limiting.
    *  If omitted or if Redis operations fail, falls back to in-memory store. */
   redis?: RedisClient
+  /**
+   * Optional custom key extractor (A2 Q-3, backward compatible). When it
+   * returns a non-empty string that key wins; otherwise the legacy
+   * `(req as any).userId || req.ip` chain applies unchanged.
+   */
+  keyFn?: (req: Request) => string | undefined
+  /**
+   * Optional custom 429 responder (Retry-After is already set when it runs).
+   * Default behavior (generic RATE_LIMITED body) is unchanged when omitted.
+   */
+  onLimited?: (req: Request, res: Response, retryAfterSeconds: number) => void
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +167,7 @@ export interface RateLimiterOptions {
  * transparently falls back to the in-memory store for that request.
  */
 export function createRateLimiter(options: RateLimiterOptions) {
-  const { windowMs, maxRequests, keyPrefix, redis } = options
+  const { windowMs, maxRequests, keyPrefix, redis, keyFn, onLimited } = options
 
   const memoryStore = new MemoryRateLimitStore(windowMs)
   const redisStore = redis ? new RedisRateLimitStore(redis) : null
@@ -164,14 +175,19 @@ export function createRateLimiter(options: RateLimiterOptions) {
   let redisFallbackWarned = false
 
   function middleware(req: Request, res: Response, next: NextFunction): void {
+    const customKey = keyFn ? keyFn(req) : undefined
     const userId = (req as any).userId as string | undefined
-    const rawKey = userId || req.ip || 'unknown'
+    const rawKey = customKey || userId || req.ip || 'unknown'
     const key = `ratelimit:${keyPrefix}:${rawKey}`
 
     const handleResult = (result: { count: number; ttlMs: number }) => {
       if (result.count > maxRequests) {
         const retryAfterSeconds = Math.ceil(result.ttlMs / 1000)
         res.set('Retry-After', String(retryAfterSeconds))
+        if (onLimited) {
+          onLimited(req, res, retryAfterSeconds)
+          return
+        }
         res.status(429).json({
           ok: false,
           error: {

@@ -15,8 +15,8 @@
 - [x] ✅ **M0 决策批准**(2026-06-10):全按推荐 + owner 两修正(①批准≠实现解锁,M1 实现另需显式解除 AI 线旧 defer gate;②R-2/internal-route 仅限 A1,A2/A3 产品路径届时按 sheet/field/record 权限重设计)→ `multitable-ai-field-staged-arc-m0-ratification-result-20260610.md`。
 - [x] ✅ **M1a A1 设计锁定**(本 PR):`multitable-ai-provider-readiness-a1-design-20260610.md` — resolver 镜像 email-transport-readiness / `requireAdminRole()` + internal 路由 / 门脚本 exit-2-blocked / 测试矩阵 A1-T1..T10(含三处泄漏哨兵)/ 零真实调用。
 - [x] ✅ **M1b A1 实现**(#2486 MERGED `6a91b22c4` 2026-06-10):resolver + internal admin 路由 + tsx 门脚本;18 单元/路由 + 5 门测试 fail-first;审查泄漏狩猎 7 对抗场景零泄漏,APPROVE-WITH-NITS 全修后合并。**M1 整环闭合。**
-- [ ] ⬜ **M2 A2 shortcut 后端**(M1 已闭):**design-lock ✅(本 PR,`multitable-ai-shortcut-backend-a2-design-20260611.md`,经 fact-check workflow ready-with-edits 修订:helpers 工厂接缝/subject_key=user_id 防伪造/配额 advisory-lock/usage 归一化/429 不记账等)**;⬜ 实现 PR = 下一项(preview/run + 台账 migration + 配额 + T6 推导,fail-first A2-T1..T13)。
-- [ ] 🔒 **M3 A3 前端**(gated on M2):shortcut 配置 + 单元格 preview/run + blocked 安全态 + 成本可见性(关 T3 展示);design-lock 先行。
+- [x] ✅ **M2 A2 shortcut 后端**(#2490 MERGED `1e677208` 2026-06-11):design #2489 + 实现(preview/run、createRecordWriteHelpers 工厂(/patch 同源)、provider 客户端 fetchFn DI + E-12 双确认、台账 migration、**reserve-then-settle 配额**);审查 F1 major(跨 IO 持锁)→ 重构 → delta 复审 FIX-VERIFIED + NF-1 中文估算修复。**T1 + T6 关闭。**
+- [ ] ⬜ **M3 A3 前端**(M2 已闭):**design-lock ✅(本 PR,`multitable-ai-shortcut-frontend-a3-design-20260611.md`,fact-check ready-with-edits 修订:run 响应适配器/移除=省键/clobber 防护/429 双语义判别/usage-summary 触点)**;⬜ 实现 PR = 下一项(A3-T1..T9 fail-first,关 T3 展示)。
 - [ ] 🔒 **M4 B2 公式 AI 辅助**(gated on M1-M3 验证 + 独立 opt-in)。
 
 ## 2. 副线 — parity 清尾(已获 owner 总 opt-in 2026-06-10,可并行)
