@@ -3687,6 +3687,7 @@ export function univerMetaRouter(): Router {
 
   router.post('/templates/:templateId/install', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
     const schema = z.object({
+      baseId: z.string().min(1).max(50).optional(),
       baseName: z.string().min(1).max(255).optional(),
       workspaceId: z.string().min(1).max(100).optional(),
     })
@@ -3715,6 +3716,7 @@ export function univerMetaRouter(): Router {
       const result = await pool.transaction(async ({ query }) => installMultitableTemplate({
         query: query as unknown as QueryFn,
         templateId,
+        baseId: parsed.data.baseId,
         baseName: parsed.data.baseName,
         ownerId: access.userId,
         workspaceId: parsed.data.workspaceId ?? null,
@@ -3783,6 +3785,7 @@ export function univerMetaRouter(): Router {
     // Request body is install-shaped on purpose (workspaceId accepted for
     // parity; it does not influence id occupancy).
     const schema = z.object({
+      baseId: z.string().min(1).max(50).optional(),
       baseName: z.string().min(1).max(255).optional(),
       workspaceId: z.string().min(1).max(100).optional(),
     })
@@ -3826,11 +3829,10 @@ export function univerMetaRouter(): Router {
     try {
       const pool = poolManager.get()
       // Ids derive through the same generator path install uses (buildId +
-      // the shared stableChildId derivation in template-library). Install
-      // draws a FRESH base id per call, so the ids returned here are
-      // illustrative of shape/derivation — NOT a promise of the exact ids a
-      // subsequent install will create.
-      const baseId = buildId('base').slice(0, 50)
+      // the shared stableChildId derivation in template-library). If a caller
+      // sends this planned base id back to install, the derived child ids stay
+      // aligned; omitting baseId still gives install a fresh id.
+      const baseId = (parsed.data.baseId?.trim() || buildId('base')).slice(0, 50)
       const baseName = (parsed.data.baseName?.trim() || template.name).slice(0, 255)
       const wouldCreate = buildTemplateWouldCreate(template, { baseId, baseName })
       const conflicts = await detectTemplateConflicts(

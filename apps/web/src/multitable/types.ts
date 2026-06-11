@@ -540,6 +540,7 @@ export interface MetaTemplate {
 }
 
 export interface InstallTemplateInput {
+  baseId?: string
   baseName?: string
   workspaceId?: string
 }
@@ -554,7 +555,8 @@ export interface InstallTemplateResult {
 
 // S2 — POST /templates/:id/dry-run (design 20260611 §2.1). Zero-write install
 // simulation: wouldCreate ids derive through the same generator path install
-// uses but are illustrative, NOT a promise of the ids a later install creates.
+// uses. Passing the planned base id back into install preserves the derived
+// child ids; omitting it keeps the legacy fresh-id install behavior.
 export type TemplateDryRunConflictKind =
   | 'base_exists'
   | 'sheet_exists'

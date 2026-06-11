@@ -112,8 +112,14 @@ describe('MultitableTemplateCenterView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(MultitableTemplateCenterView as Component)
-    app.component('router-link', {
-      props: ['to'],
+    app.component('RouterLink', {
+      name: 'RouterLink',
+      props: {
+        to: {
+          type: [String, Object],
+          required: true,
+        },
+      },
       render() {
         const href = typeof this.$props.to === 'string' ? this.$props.to : JSON.stringify(this.$props.to)
         return h('a', { href, 'data-router-link-to': href }, this.$slots.default ? this.$slots.default() : [])
@@ -230,6 +236,25 @@ describe('MultitableTemplateCenterView', () => {
       name: AppRouteNames.MULTITABLE,
       params: { sheetId: 'sheet_new', viewId: 'view_new' },
       query: { baseId: 'base_new' },
+    })
+  })
+
+  it('opens the template detail route from a card', async () => {
+    mocks.listTemplates.mockResolvedValue({
+      templates: [
+        makeTemplate({ id: 'project-tracker', name: 'Project Tracker' }),
+      ],
+    })
+
+    const root = mountView()
+    await flushUi()
+
+    findButton(root, '查看详情').click()
+    await flushUi()
+
+    expect(mocks.push).toHaveBeenCalledWith({
+      name: AppRouteNames.MULTITABLE_TEMPLATE_DETAIL,
+      params: { templateId: 'project-tracker' },
     })
   })
 

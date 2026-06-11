@@ -255,7 +255,10 @@ async function runDryRun(): Promise<void> {
 
 async function onInstall(): Promise<void> {
   if (!template.value) return
-  await installAndOpen(template.value)
+  await installAndOpen(template.value, {
+    ...(dryRun.value?.wouldCreate.base.id ? { baseId: dryRun.value.wouldCreate.base.id } : {}),
+    baseName: defaultBaseName(template.value),
+  })
 }
 
 onMounted(() => {

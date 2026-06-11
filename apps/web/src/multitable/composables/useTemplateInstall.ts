@@ -29,13 +29,14 @@ export function useTemplateInstall() {
 
   async function installAndOpen(
     template: MetaTemplate,
-    opts?: { baseName?: string },
+    opts?: { baseId?: string; baseName?: string },
   ): Promise<TemplateInstallOutcome | null> {
     if (installingTemplateId.value) return null
     installingTemplateId.value = template.id
     errorMessage.value = ''
     try {
       const result = await multitableClient.installTemplate(template.id, {
+        ...(opts?.baseId ? { baseId: opts.baseId } : {}),
         baseName: opts?.baseName ?? `${template.name} Base`,
       })
       const sheet = result.sheets[0]

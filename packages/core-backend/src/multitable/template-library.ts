@@ -95,6 +95,21 @@ export type MultitableTemplateWouldCreate = {
   views: Array<{ id: string; sheetId: string; name: string; type: string }>
 }
 
+export type PreviewMultitableTemplateInstallInput = {
+  query: MultitableProvisioningQueryFn
+  templateId: string
+  baseId?: string
+  baseName?: string
+  idGenerator?: (prefix: string) => string
+}
+
+export type MultitableTemplateInstallPreview = {
+  templateId: string
+  wouldCreate: MultitableTemplateWouldCreate
+  conflicts: MultitableTemplateConflict[]
+  installable: boolean
+}
+
 export type TemplateConflictDetectionOptions = {
   baseId: string
   baseName: string
@@ -418,9 +433,9 @@ export function getMultitableTemplate(templateId: string): MultitableTemplate | 
  * Derives base/sheet/field/view ids through EXACTLY the same path
  * installMultitableTemplate uses (stableChildId / mapFieldIds keyed off the
  * provided baseId), so a dry-run shows ids shaped like the ones a real install
- * would write. The base id itself comes from the caller's idGenerator, which
- * install draws FRESH per call — plan ids are therefore illustrative, not a
- * promise of the exact ids a later install will create.
+ * would write. Callers that pass the dry-run base id back into install get the
+ * same derived child ids; callers without a planned base id still get a fresh
+ * install id.
  * (Derivation parity is locked by multitable-template-dryrun-routes.test.ts.)
  */
 export function buildTemplateWouldCreate(
@@ -557,6 +572,28 @@ export async function detectTemplateConflicts(
   }
 
   return conflicts
+}
+
+export async function previewMultitableTemplateInstall(
+  input: PreviewMultitableTemplateInstallInput,
+): Promise<MultitableTemplateInstallPreview> {
+  const template = getMultitableTemplate(input.templateId)
+  if (!template) {
+    throw new MultitableTemplateNotFoundError(input.templateId)
+  }
+
+  const makeId = input.idGenerator ?? generatedId
+  const baseId = (input.baseId?.trim() || makeId('base')).slice(0, 50)
+  const baseName = (input.baseName?.trim() || template.name).slice(0, 255)
+  const wouldCreate = buildTemplateWouldCreate(template, { baseId, baseName })
+  const conflicts = await detectTemplateConflicts(input.query, template, { baseId, baseName })
+
+  return {
+    templateId: template.id,
+    wouldCreate,
+    conflicts,
+    installable: !conflicts.some((conflict) => conflict.severity === 'error'),
+  }
 }
 
 export async function installMultitableTemplate(

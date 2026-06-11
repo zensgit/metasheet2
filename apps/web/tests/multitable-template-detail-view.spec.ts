@@ -261,6 +261,29 @@ describe('MultitableTemplateDetailView', () => {
     })
   })
 
+  it('install after a clean dry-run reuses the planned base id', async () => {
+    mocks.dryRunTemplate.mockResolvedValue(cleanDryRunResult())
+    mocks.installTemplate.mockResolvedValue({
+      template: { id: 'project-tracker', name: 'Project Tracker' },
+      base: { id: 'base_abc', name: 'Project Tracker Base' },
+      sheets: [{ id: 'sheet_abc', baseId: 'base_abc', name: 'Tasks' }],
+      fields: [],
+      views: [{ id: 'view_abc', sheetId: 'sheet_abc', name: 'Grid', type: 'grid' }],
+    })
+    const root = mountView()
+    await flushUi()
+
+    findButton(root, '检查可安装性').click()
+    await flushUi()
+    findButton(root, '使用模板').click()
+    await flushUi()
+
+    expect(mocks.installTemplate).toHaveBeenCalledWith('project-tracker', {
+      baseId: 'base_abc',
+      baseName: 'Project Tracker Base',
+    })
+  })
+
   it('load failure shows the error message', async () => {
     mocks.listTemplates.mockRejectedValue(new Error('网络断了'))
     const root = mountView()

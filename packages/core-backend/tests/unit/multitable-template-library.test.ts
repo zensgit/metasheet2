@@ -5,6 +5,7 @@ import {
   MultitableTemplateNotFoundError,
   installMultitableTemplate,
   listMultitableTemplates,
+  previewMultitableTemplateInstall,
   type MultitableTemplateBase,
 } from '../../src/multitable/template-library'
 import type { MultitableProvisioningQueryFn } from '../../src/multitable/provisioning'
@@ -43,14 +44,32 @@ function createQuery(seed?: { bases?: MultitableTemplateBase[] }): {
   sheets: FakeSheet[]
   fields: FakeField[]
   views: FakeView[]
+  queries: string[]
 } {
   const bases = [...(seed?.bases ?? [])]
   const sheets: FakeSheet[] = []
   const fields: FakeField[] = []
   const views: FakeView[] = []
+  const queries: string[] = []
 
   const query: MultitableProvisioningQueryFn = async (sql, params = []) => {
     const normalized = sql.replace(/\s+/g, ' ').trim()
+    queries.push(normalized)
+
+    if (normalized.startsWith('SELECT id FROM meta_bases')) {
+      const [baseId] = params as [string]
+      return { rows: bases.filter((base) => base.id === baseId).map((base) => ({ id: base.id })) }
+    }
+
+    if (normalized.startsWith('SELECT id FROM meta_sheets')) {
+      const [sheetId] = params as [string]
+      return { rows: sheets.filter((sheet) => sheet.id === sheetId).map((sheet) => ({ id: sheet.id })) }
+    }
+
+    if (normalized.startsWith('SELECT id FROM meta_views')) {
+      const [viewId] = params as [string]
+      return { rows: views.filter((view) => view.id === viewId).map((view) => ({ id: view.id })) }
+    }
 
     // S2 conflict pre-check probe (detectTemplateConflicts) — SELECT-only
     // base-id occupancy; sheet/view probes reuse the SELECT handlers below.
@@ -170,7 +189,7 @@ function createQuery(seed?: { bases?: MultitableTemplateBase[] }): {
     throw new Error(`Unhandled SQL in test: ${normalized}`)
   }
 
-  return { query, bases, sheets, fields, views }
+  return { query, bases, sheets, fields, views, queries }
 }
 
 describe('multitable template library', () => {
@@ -254,6 +273,68 @@ describe('multitable template library', () => {
       idGenerator: (prefix) => `${prefix}_fixed`,
     })).rejects.toBeInstanceOf(MultitableTemplateConflictError)
     expect(sheets).toHaveLength(0)
+  })
+
+  it('dry-runs a template install without writing rows', async () => {
+    const { query, bases, sheets, fields, views, queries } = createQuery()
+
+    const preview = await previewMultitableTemplateInstall({
+      query,
+      templateId: 'project-tracker',
+      baseName: 'Launch Plan',
+      idGenerator: (prefix) => `${prefix}_fixed`,
+    })
+
+    expect(preview.templateId).toBe('project-tracker')
+    expect(preview.installable).toBe(true)
+    expect(preview.conflicts).toEqual([])
+    expect(preview.wouldCreate.base).toEqual({ id: 'base_fixed', name: 'Launch Plan' })
+    expect(preview.wouldCreate.sheets).toEqual([
+      expect.objectContaining({ name: 'Tasks', fieldCount: 6, viewCount: 3 }),
+    ])
+    expect(preview.wouldCreate.fields).toHaveLength(6)
+    expect(preview.wouldCreate.views.map((view) => view.type)).toEqual(['grid', 'kanban', 'calendar'])
+    expect(bases).toHaveLength(0)
+    expect(sheets).toHaveLength(0)
+    expect(fields).toHaveLength(0)
+    expect(views).toHaveLength(0)
+    expect(queries.every((sql) => sql.startsWith('SELECT '))).toBe(true)
+  })
+
+  it('dry-run reports base, sheet, and view conflicts from the same planned ids', async () => {
+    const store = createQuery()
+    await installMultitableTemplate({
+      query: store.query,
+      templateId: 'project-tracker',
+      baseName: 'Existing Base',
+      idGenerator: (prefix) => `${prefix}_fixed`,
+    })
+
+    const preview = await previewMultitableTemplateInstall({
+      query: store.query,
+      templateId: 'project-tracker',
+      baseName: 'Existing Base',
+      idGenerator: (prefix) => `${prefix}_fixed`,
+    })
+
+    expect(preview.installable).toBe(false)
+    expect(preview.conflicts.map((conflict) => conflict.kind)).toEqual([
+      'base_exists',
+      'sheet_exists',
+      'view_exists',
+      'view_exists',
+      'view_exists',
+    ])
+    expect(preview.conflicts[0].message).toBe('Base already exists: base_fixed')
+  })
+
+  it('dry-run rejects unknown templates', async () => {
+    const { query } = createQuery()
+
+    await expect(previewMultitableTemplateInstall({
+      query,
+      templateId: 'missing',
+    })).rejects.toBeInstanceOf(MultitableTemplateNotFoundError)
   })
 })
 
