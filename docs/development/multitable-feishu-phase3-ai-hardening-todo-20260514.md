@@ -2,6 +2,15 @@
 
 Date: 2026-05-14
 
+> **Reconcile 2026-06-10** (evidence: 2026-06-10 five-agent completion audit; lane-level corrections only — individual checkbox lines below are NOT flipped):
+>
+> - Lane D0/D1/D4: SHIPPED + formally closed — D0 #1541 (`a92189533`) + #1549 (`8025b2499`); D1 #1544 (`1f9061f56`) + #1554 (`7fe0b5ca7` — the "pending until squash merge" note below is stale); D4 #1547 (`855ba871e`); closeout #1565 + 2026-05-15 staging audit PASS.
+> - Lane B1 (formula diagnostics): SHIPPED via the later dry-run track #1860/#1865/#1869/#1873/#1995/#2006/#2021 (+ hydration #2465).
+> - Lane D2 (partial): first 10k baseline SHIPPED via #1807/#1808/#1809/#1815; 50k/100k still blocked (undici harness limitation).
+> - Lane D3: SHIPPED via #1818/#1822/#1827/#1831 (real-DB golden tests), extended by #2028/#2044. T4/T5 closed/overtaken; T1/T2/T3/T6/T7 remain genuinely open.
+> - Lane C1 (partial): template center + 5 industry templates shipped via #1651/#1655; template preview/dry-run and onboarding remain unbuilt.
+> - The AI lanes (A1/A2/A3, B2) are now tracked by `docs/development/multitable-ai-field-staged-arc-todo-20260610.md` (M0–M4); this TODO's lane statuses are historical context.
+
 ## Status
 
 - Baseline: `origin/main` after Phase 2 and RC closeout.

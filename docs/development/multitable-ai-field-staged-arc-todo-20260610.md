@@ -20,7 +20,7 @@
 
 ## 2. 副线 — parity 清尾(已获 owner 总 opt-in 2026-06-10,可并行)
 
-- [ ] ⬜ **S1 stale 文档 reconcile**(docs):phase3 plan/todo 四处 lane 级 stale + open-items S1-10 + research §7-4,按审计证据加 reconcile 注记。
+- [x] ✅ **S1 stale 文档 reconcile**（本 reconcile PR）(docs):phase3 plan/todo 四处 lane 级 stale + open-items S1-10 + research §7-4,按审计证据加 reconcile 注记。
 - [ ] ⬜ **S2 模板 preview/dry-run**(runtime,design-lock 先行):预览(含样例数据)+ install dry-run 零写端点 + 详情 UI。
 - [ ] ⬜ **S3 图表补全**(runtime):scatter/area/funnel/gauge(纯渲染层)+ S1-9 echarts 异步 chunk。
 - [ ] ⬜ **S4 层级父链接 maxValues=1 约束**(runtime,小):消除多值链接静默覆盖风险。

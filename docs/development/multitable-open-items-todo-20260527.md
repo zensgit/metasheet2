@@ -16,6 +16,7 @@
 - ✅ **S1-1..S1-8 done（as-built，#1950）**：tree-shakeable `echarts/core` + `charts`/`components`/`renderers`（不引 Legend/Title）· 纯函数 `buildOption`（scalar / scalar-array / pie 映射；title+legend 留 HTML chrome；pie/line label-less；option 无 legend/title）· renderer bar/line/pie→canvas + number/table HTML（保留 `data-chart-type`）· 生命周期 init/`setOption`/`watch{flush:'post'}`/`ResizeObserver`/`dispose` · 静态 import · renderer+dashboard specs `vi.mock('echarts/core')` · i18n 走既有 `meta-view-render-labels`。
 - ⬜ **S1-9** 🔒 follow-up：`defineAsyncComponent` 让 echarts 落异步 chunk（+ dashboard spec 改 `flushPromises`）。**单独 PR**，不进 S1 本刀。
 - ⬜ **S1-10** 🔒 follow-up：新图表类型（scatter/area/funnel/gauge/堆叠/组合）——需后端 `ChartAggregationService` 补多 series 维度。**单独 opt-in**。
+  - **（resolved 2026-06-10, partial）** 堆叠/组合一半已由 **BI v2-d track** 落地：#2297/#2303（stacked bar）+ #2312/#2315（grouped bar）+ #2316/#2323（multi-series line）+ #2345/#2354（date-axis×series）；剩余 scatter/area/funnel/gauge + S1-9 现以 **S3** 追踪于 `multitable-ai-field-staged-arc-todo-20260610.md`。
 
 ---
 
