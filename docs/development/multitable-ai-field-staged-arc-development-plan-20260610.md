@@ -20,17 +20,19 @@
 
 ### M0 决策批准(零代码)
 Operator 按批准表 §3 模板逐行 markup;结果**新增一份 ratification-result 附录文档**记录(原表保持 as-landed 不改写)。M0 完成判据:全部行有答案。
+**✅ 2026-06-10 RATIFIED**(全按推荐 + owner 两修正)→ `multitable-ai-field-staged-arc-m0-ratification-result-20260610.md`。**修正一**:批准 ≠ 实现解锁——M1 实现 PR 额外需要 owner 显式解除 AI 线旧 defer gate(#1571 自身为 read-only/not-ratified 且 K3 门独立);设计锁定(docs-only)不受阻。
 
 ### M1 — A1 provider readiness(声明层)
-1. **设计锁定 docs PR**(替代已失草稿;锁:resolver 形状、readiness 内部路由、状态机 `disabled/blocked/ready` + 4 个 A2 保留态、redaction 路径、按 M0 批准的 env 契约)。
-2. **实现 PR**:provider resolver + readiness 查询路由(按 M0 的 RBAC/OpenAPI/shape 决议)+ 全套 fail-closed(无 key/无 enable → `disabled`;非白名单 → `blocked`)+ 工件脱敏测试。**不发真实 provider 调用**(`MULTITABLE_AI_CONFIRM_LIVE_REQUESTS` 双确认留给 M2)。
-- 边界:不建新权限原语(R-3);不动 OpenAPI 公开面(若 M0 选 Option B);不写台账(T1 归 M2)。
+1. **设计锁定 docs PR**(批准后即可先行;替代已失草稿;锁:resolver 形状、readiness 内部路由、状态机 `disabled/blocked/ready` + 4 个 A2 保留态、redaction 路径、按 M0 批准的 env 契约)。
+2. **实现 PR**(🔒 另需 owner 显式解除 defer gate,见 ratification-result §3):provider resolver + readiness 查询路由(按 M0 的 RBAC/OpenAPI/shape 决议)+ 全套 fail-closed(无 key/无 enable → `disabled`;非白名单 → `blocked`)+ 工件脱敏测试。**不发真实 provider 调用**(`MULTITABLE_AI_CONFIRM_LIVE_REQUESTS` 双确认留给 M2)。
+- 边界:不建新权限原语(R-3);不动 OpenAPI 公开面(M0 已定 Option B,**仅限 A1**);不写台账(T1 归 M2)。
 
 ### M2 — A2 AI 字段 shortcut 后端(执行层)
 预置 prompt 的字段级 AI shortcut(摘要/分类/抽取/翻译):preview + run 端点、成本台账写入 + 配额执行(关 T1)、4 个保留状态推导(关 T6)、provider 错误→`blocked` 降级、值写入走既有 RecordWriteService 权威写路径。真实调用受双确认门。设计锁定先行;真库测试矩阵含配额触顶/脱敏/降级/权限。
+**M0 修正二(约束)**:A2 是产品路径,**不得继承** A1 的 admin-only / internal-route 心智——preview/run 的 RBAC 必须在 A2 design-lock 按 sheet/field/record 权限与写入边界重新设计;API 面(internal vs OpenAPI)同样重评。
 
 ### M3 — A3 前端(体验层)
-字段管理器 shortcut 配置 UI、单元格 preview/run、provider-blocked 安全态展示、成本/配额可见性(关 T3 展示)。设计锁定先行;遵守既有 i18n 模块扩展点。
+字段管理器 shortcut 配置 UI、单元格 preview/run、provider-blocked 安全态展示、成本/配额可见性(关 T3 展示)。设计锁定先行;遵守既有 i18n 模块扩展点。**M0 修正二同样适用**:display 面权限随 A3 design-lock 重新设计,不继承 A1 姿态。
 
 ### M4 — B2 公式 AI 辅助(后置)
 🔒 M1-M3 验证后评估;依赖 readiness 基建,且需独立 opt-in。
