@@ -28,6 +28,10 @@ import {
   type AttendanceExpiryService,
   type ExpiredCompTimeBalance,
 } from './AttendanceExpiryService'
+import {
+  AttendanceNotificationDeliveryWorker,
+  createAttendanceDeliveryChannelsFromEnv,
+} from './AttendanceNotificationDeliveryWorker'
 import { CompTimeExpiryReminderService } from './CompTimeExpiryReminderService'
 import { UnscheduledReminderService } from './UnscheduledReminderService'
 
@@ -379,5 +383,24 @@ export function resolveCompTimeExpiryReminderJob(): AttendanceSchedulerJob | nul
   return {
     name: 'comp-time-expiry-reminder',
     run: () => service.run(),
+  }
+}
+
+/**
+ * C5-2 opt-in: delivery worker job. It consumes C5 outbox rows and updates per-row delivery state.
+ * Default OFF; C5-2 can use the deterministic fake channel via ATTENDANCE_NOTIFICATION_FAKE_CHANNEL_ENABLED=true.
+ * Real DingTalk channel registration is C5-3.
+ */
+export function resolveAttendanceNotificationDeliveryJob(): AttendanceSchedulerJob | null {
+  if (process.env.ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED !== 'true') return null
+  const worker = new AttendanceNotificationDeliveryWorker({
+    batchSize: Number(process.env.ATTENDANCE_NOTIFICATION_DELIVERY_BATCH_SIZE),
+    leaseMs: Number(process.env.ATTENDANCE_NOTIFICATION_DELIVERY_LEASE_MS),
+    maxAttempts: Number(process.env.ATTENDANCE_NOTIFICATION_DELIVERY_MAX_ATTEMPTS),
+    channels: createAttendanceDeliveryChannelsFromEnv(),
+  })
+  return {
+    name: 'attendance-notification-delivery',
+    run: () => worker.runBatch(),
   }
 }
