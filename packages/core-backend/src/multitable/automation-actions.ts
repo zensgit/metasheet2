@@ -15,6 +15,7 @@ export type AutomationActionType =
   | 'wait_for_callback'
   | 'condition_branch'
   | 'start_approval'
+  | 'parallel_branch'
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'update_record',
@@ -28,6 +29,7 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'wait_for_callback',
   'condition_branch',
   'start_approval',
+  'parallel_branch',
 ]
 
 /** Config shape for update_record */
@@ -121,6 +123,22 @@ export interface StartApprovalConfig {
   requester?: {
     mode?: 'trigger_actor' | 'rule_creator'
   }
+}
+
+/**
+ * Config shape for parallel_branch (A6-3-4 / W3-1 join-all runtime).
+ *
+ * v1 is fan-out + join-all only: all branches run, the parent job settles after
+ * every branch is terminal, and join_any/cancellation/branch-local waits stay
+ * out of scope.
+ */
+export interface ParallelBranchConfig {
+  joinMode: 'all'
+  branches: Array<{
+    key: string
+    label?: string
+    actions: AutomationAction[]
+  }>
 }
 
 export interface AutomationAction {

@@ -2309,7 +2309,7 @@ describe('AutomationService — Rule CRUD', () => {
       actions: [action],
       createdBy: 'user_1',
     })
-    await expect(promise).rejects.toThrow('condition_branch/start_approval requires execution_mode workflow_job_v1')
+    await expect(promise).rejects.toThrow('condition_branch/start_approval/parallel_branch requires execution_mode workflow_job_v1')
   })
 
   it('W6-1: createRule rejects invalid start_approval config before persistence', async () => {
@@ -2400,6 +2400,142 @@ describe('AutomationService — Rule CRUD', () => {
     })
 
     await expect(promise).rejects.toThrow('cannot contain wait_for_callback until A6-3-3')
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
+  it('A6-3-1: createRule rejects parallel_branch inside a condition_branch branch', async () => {
+    const nestedParallel = {
+      type: 'parallel_branch',
+      config: {
+        joinMode: 'all',
+        branches: [{
+          key: 'nested',
+          actions: [{ type: 'update_record', config: { fields: { status: 'nested' } } }],
+        }],
+      },
+    }
+    const promise = service.createRule('sheet_1', {
+      name: 'Nested parallel branch',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'condition_branch',
+      actionConfig: {
+        branches: [{
+          key: 'needs_parallel',
+          conditions: { logic: 'and', conditions: [{ fieldId: 'status', operator: 'equals', value: 'pending' }] },
+          actions: [nestedParallel],
+        }],
+      },
+      actions: [{
+        type: 'condition_branch',
+        config: {
+          branches: [{
+            key: 'needs_parallel',
+            conditions: { logic: 'and', conditions: [{ fieldId: 'status', operator: 'equals', value: 'pending' }] },
+            actions: [nestedParallel],
+          }],
+        },
+      }],
+      executionMode: 'workflow_job_v1',
+      createdBy: 'user_1',
+    })
+
+    await expect(promise).rejects.toThrow('cannot contain parallel_branch until a later nested-DAG slice')
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
+  it('A6-3-4: createRule accepts parallel_branch only with workflow_job_v1', async () => {
+    const action = {
+      type: 'parallel_branch',
+      config: {
+        joinMode: 'all',
+        branches: [
+          {
+            key: 'ops',
+            label: 'Ops',
+            actions: [{ type: 'update_record', config: { fields: { status: 'ops' } } }],
+          },
+          {
+            key: 'notify',
+            actions: [{ type: 'send_notification', config: { userIds: ['u1'], message: 'ready' } }],
+          },
+        ],
+      },
+    } as const
+
+    dbExecuteResults.push([])
+    const rule = await service.createRule('sheet_1', {
+      name: 'Parallel rule',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'parallel_branch',
+      actionConfig: action.config,
+      actions: [action],
+      executionMode: 'workflow_job_v1',
+      createdBy: 'user_1',
+    })
+
+    expect(rule.action_type).toBe('parallel_branch')
+    expect(rule.actions).toEqual([action])
+    expect(rule.execution_mode).toBe('workflow_job_v1')
+
+    const promise = service.createRule('sheet_1', {
+      name: 'Parallel rule legacy',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'parallel_branch',
+      actionConfig: action.config,
+      actions: [action],
+      createdBy: 'user_1',
+    })
+    await expect(promise).rejects.toThrow('requires execution_mode workflow_job_v1')
+  })
+
+  it('A6-3-4: createRule rejects unsupported actions inside parallel_branch branches', async () => {
+    const unsupportedActions = [
+      { type: 'wait_for_callback', config: {}, expected: 'cannot contain wait_for_callback in A6-3-4' },
+      {
+        type: 'parallel_branch',
+        config: {
+          joinMode: 'all',
+          branches: [{
+            key: 'nested',
+            actions: [{ type: 'update_record', config: { fields: { status: 'nested' } } }],
+          }],
+        },
+        expected: 'cannot contain parallel_branch in A6-3-4',
+      },
+    ]
+
+    for (const unsupportedAction of unsupportedActions) {
+      const promise = service.createRule('sheet_1', {
+        name: 'Parallel bad branch',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'parallel_branch',
+        actionConfig: {
+          joinMode: 'all',
+          branches: [{
+            key: 'unsupported',
+            actions: [{ type: unsupportedAction.type, config: unsupportedAction.config }],
+          }],
+        },
+        actions: [{
+          type: 'parallel_branch',
+          config: {
+            joinMode: 'all',
+            branches: [{
+              key: 'unsupported',
+              actions: [{ type: unsupportedAction.type, config: unsupportedAction.config }],
+            }],
+          },
+        }],
+        executionMode: 'workflow_job_v1',
+        createdBy: 'user_1',
+      })
+
+      await expect(promise).rejects.toThrow(unsupportedAction.expected)
+    }
     expect(dbExecuteResults).toHaveLength(0)
   })
 
@@ -2731,7 +2867,65 @@ describe('AutomationService — Rule CRUD', () => {
 
     const promise = service.updateRule('atr_1', 'sheet_1', { executionMode: null })
 
-    await expect(promise).rejects.toThrow('condition_branch/start_approval requires execution_mode workflow_job_v1')
+    await expect(promise).rejects.toThrow('condition_branch/start_approval/parallel_branch requires execution_mode workflow_job_v1')
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
+  it('A6-3-4: updateRule accepts parallel_branch with workflow_job_v1', async () => {
+    const action = {
+      type: 'parallel_branch',
+      config: {
+        joinMode: 'all',
+        branches: [
+          { key: 'ops', actions: [{ type: 'update_record', config: { fields: { status: 'ops' } } }] },
+          { key: 'notify', actions: [{ type: 'send_notification', config: { userIds: ['u1'], message: 'ok' } }] },
+        ],
+      },
+    }
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'update_record',
+      action_config: { fields: { status: 'before' } },
+      actions: [{ type: 'update_record', config: { fields: { status: 'before' } } }],
+    }))
+    dbExecuteResults.push([makeRuleRow({
+      action_type: 'parallel_branch',
+      action_config: action.config,
+      actions: [action],
+      execution_mode: 'workflow_job_v1',
+    })])
+
+    const rule = await service.updateRule('atr_1', 'sheet_1', {
+      actionType: 'parallel_branch',
+      actionConfig: action.config,
+      actions: [action],
+      executionMode: 'workflow_job_v1',
+    })
+
+    expect(rule?.action_type).toBe('parallel_branch')
+    expect(rule?.actions).toEqual([action])
+    expect(rule?.execution_mode).toBe('workflow_job_v1')
+  })
+
+  it('A6-3-4: updateRule rejects turning a parallel_branch rule back to legacy', async () => {
+    const action = {
+      type: 'parallel_branch',
+      config: {
+        joinMode: 'all',
+        branches: [
+          { key: 'ops', actions: [{ type: 'update_record', config: { fields: { status: 'ops' } } }] },
+        ],
+      },
+    }
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'parallel_branch',
+      action_config: action.config,
+      actions: [action],
+      execution_mode: 'workflow_job_v1',
+    }))
+
+    const promise = service.updateRule('atr_1', 'sheet_1', { executionMode: null })
+
+    await expect(promise).rejects.toThrow('requires execution_mode workflow_job_v1')
     expect(dbExecuteResults).toHaveLength(0)
   })
 
@@ -3313,6 +3507,345 @@ describe('AutomationExecutor — A6-1 job lifecycle hooks', () => {
       { actionType: 'send_webhook', status: 'skipped', durationMs: 0 },
     ])
     expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('A6-3-4: parallel_branch runs all branches and upstreams the next top-level job from the parent join', async () => {
+    let executionId = ''
+    const events: Array<{
+      phase: string
+      index: number
+      type: string
+      status?: string
+      stepKey?: string
+      jobId?: string
+      upstreamJobId?: string | null
+    }> = []
+    const lifecycle = {
+      factory: (id: string) => {
+        executionId = id
+        return {
+          onStart: async (index: number, action: { type: string }, meta?: { stepKey?: string; jobId?: string; upstreamJobId?: string | null }) => {
+            events.push({ phase: 'start', index, type: action.type, ...meta })
+          },
+          onSettled: async (index: number, action: { type: string }, result: { status: string }, meta?: { stepKey?: string; jobId?: string; upstreamJobId?: string | null }) => {
+            events.push({ phase: 'settled', index, type: action.type, status: result.status, ...meta })
+          },
+          onSkipped: async (index: number, action: { type: string }, meta?: { stepKey?: string; jobId?: string; upstreamJobId?: string | null }) => {
+            events.push({ phase: 'skipped', index, type: action.type, ...meta })
+          },
+        }
+      },
+    }
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'parallel_branch',
+          config: {
+            joinMode: 'all',
+            branches: [
+              {
+                key: 'ops',
+                label: 'Ops',
+                actions: [{ type: 'update_record', config: { fields: { status: 'ops' } } }],
+              },
+              {
+                key: 'notify',
+                actions: [{ type: 'send_notification', config: { userIds: ['u1'], message: 'done' } }],
+              },
+            ],
+          },
+        },
+        { type: 'send_webhook', config: { url: 'https://example.com/after' } },
+      ],
+    })
+
+    const execution = await executor.execute(rule, {
+      recordId: 'r1',
+      data: {},
+      sheetId: 'sheet_1',
+    }, lifecycle.factory)
+
+    expect(execution.status).toBe('success')
+    expect(execution.steps).toHaveLength(2)
+    expect(execution.steps[0]).toMatchObject({
+      actionType: 'parallel_branch',
+      status: 'success',
+      output: {
+        joinMode: 'all',
+        branchCount: 2,
+        resolvedBranchKeys: ['ops', 'notify'],
+        failedBranchKeys: [],
+        branchStatuses: { ops: 'resolved', notify: 'resolved' },
+      },
+    })
+    expect(events).toEqual([
+      { phase: 'start', index: 0, type: 'parallel_branch' },
+      {
+        phase: 'start',
+        index: 0,
+        type: 'update_record',
+        stepKey: '0.parallel.ops.0',
+        jobId: `${executionId}:job:0:parallel:ops:0`,
+        upstreamJobId: `${executionId}:job:0`,
+      },
+      {
+        phase: 'settled',
+        index: 0,
+        type: 'update_record',
+        status: 'success',
+        stepKey: '0.parallel.ops.0',
+        jobId: `${executionId}:job:0:parallel:ops:0`,
+        upstreamJobId: `${executionId}:job:0`,
+      },
+      {
+        phase: 'start',
+        index: 0,
+        type: 'send_notification',
+        stepKey: '0.parallel.notify.0',
+        jobId: `${executionId}:job:0:parallel:notify:0`,
+        upstreamJobId: `${executionId}:job:0`,
+      },
+      {
+        phase: 'settled',
+        index: 0,
+        type: 'send_notification',
+        status: 'success',
+        stepKey: '0.parallel.notify.0',
+        jobId: `${executionId}:job:0:parallel:notify:0`,
+        upstreamJobId: `${executionId}:job:0`,
+      },
+      { phase: 'settled', index: 0, type: 'parallel_branch', status: 'success' },
+      {
+        phase: 'start',
+        index: 1,
+        type: 'send_webhook',
+        upstreamJobId: `${executionId}:job:0`,
+      },
+      { phase: 'settled', index: 1, type: 'send_webhook', status: 'success' },
+    ])
+    expect(deps.fetchFn).toHaveBeenCalledTimes(1) // only the after action uses fetch
+  })
+
+  it('A6-3-4: branch failure skips only that branch tail, still runs siblings, then fails parent and skips downstream', async () => {
+    let executionId = ''
+    const events: Array<{
+      phase: string
+      index: number
+      type: string
+      status?: string
+      stepKey?: string
+      jobId?: string
+      upstreamJobId?: string | null
+    }> = []
+    const lifecycle = {
+      factory: (id: string) => {
+        executionId = id
+        return {
+          onStart: async (index: number, action: { type: string }, meta?: { stepKey?: string; jobId?: string; upstreamJobId?: string | null }) => {
+            events.push({ phase: 'start', index, type: action.type, ...meta })
+          },
+          onSettled: async (index: number, action: { type: string }, result: { status: string }, meta?: { stepKey?: string; jobId?: string; upstreamJobId?: string | null }) => {
+            events.push({ phase: 'settled', index, type: action.type, status: result.status, ...meta })
+          },
+          onSkipped: async (index: number, action: { type: string }, meta?: { stepKey?: string; jobId?: string; upstreamJobId?: string | null }) => {
+            events.push({ phase: 'skipped', index, type: action.type, ...meta })
+          },
+        }
+      },
+    }
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'parallel_branch',
+          config: {
+            joinMode: 'all',
+            branches: [
+              {
+                key: 'bad',
+                actions: [
+                  { type: 'send_notification', config: { userIds: [], message: 'missing users' } },
+                  { type: 'update_record', config: { fields: { should_not_run: true } } },
+                ],
+              },
+              {
+                key: 'good',
+                actions: [{ type: 'update_record', config: { fields: { status: 'good' } } }],
+              },
+            ],
+          },
+        },
+        { type: 'send_webhook', config: { url: 'https://example.com/after' } },
+      ],
+    })
+
+    const execution = await executor.execute(rule, {
+      recordId: 'r1',
+      data: {},
+      sheetId: 'sheet_1',
+    }, lifecycle.factory)
+
+    expect(execution.status).toBe('failed')
+    expect(execution.steps).toEqual([
+      expect.objectContaining({
+        actionType: 'parallel_branch',
+        status: 'failed',
+        output: expect.objectContaining({
+          resolvedBranchKeys: ['good'],
+          failedBranchKeys: ['bad'],
+          branchStatuses: { bad: 'failed', good: 'resolved' },
+        }),
+      }),
+      { actionType: 'send_webhook', status: 'skipped', durationMs: 0 },
+    ])
+    expect(events).toEqual([
+      { phase: 'start', index: 0, type: 'parallel_branch' },
+      {
+        phase: 'start',
+        index: 0,
+        type: 'send_notification',
+        stepKey: '0.parallel.bad.0',
+        jobId: `${executionId}:job:0:parallel:bad:0`,
+        upstreamJobId: `${executionId}:job:0`,
+      },
+      {
+        phase: 'settled',
+        index: 0,
+        type: 'send_notification',
+        status: 'failed',
+        stepKey: '0.parallel.bad.0',
+        jobId: `${executionId}:job:0:parallel:bad:0`,
+        upstreamJobId: `${executionId}:job:0`,
+      },
+      {
+        phase: 'skipped',
+        index: 0,
+        type: 'update_record',
+        stepKey: '0.parallel.bad.1',
+        jobId: `${executionId}:job:0:parallel:bad:1`,
+        upstreamJobId: `${executionId}:job:0:parallel:bad:0`,
+      },
+      {
+        phase: 'start',
+        index: 0,
+        type: 'update_record',
+        stepKey: '0.parallel.good.0',
+        jobId: `${executionId}:job:0:parallel:good:0`,
+        upstreamJobId: `${executionId}:job:0`,
+      },
+      {
+        phase: 'settled',
+        index: 0,
+        type: 'update_record',
+        status: 'success',
+        stepKey: '0.parallel.good.0',
+        jobId: `${executionId}:job:0:parallel:good:0`,
+        upstreamJobId: `${executionId}:job:0`,
+      },
+      { phase: 'settled', index: 0, type: 'parallel_branch', status: 'failed' },
+      { phase: 'skipped', index: 1, type: 'send_webhook' },
+    ])
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('A6-3-4: parallel_branch runtime rejects unsupported persisted child actions before child jobs or side effects', async () => {
+    const events: Array<{ phase: string; index: number; type: string; status?: string }> = []
+    const lifecycle = {
+      factory: () => ({
+        onStart: async (index: number, action: { type: string }) => {
+          events.push({ phase: 'start', index, type: action.type })
+        },
+        onSettled: async (index: number, action: { type: string }, result: { status: string }) => {
+          events.push({ phase: 'settled', index, type: action.type, status: result.status })
+        },
+        onSkipped: async (index: number, action: { type: string }) => {
+          events.push({ phase: 'skipped', index, type: action.type })
+        },
+      }),
+    }
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'parallel_branch',
+          config: {
+            joinMode: 'all',
+            branches: [{
+              key: 'bad',
+              actions: [{ type: 'send_webhook', config: { url: 'https://example.com/should-not-run' } }],
+            }],
+          },
+        },
+        { type: 'send_webhook', config: { url: 'https://example.com/after' } },
+      ],
+    })
+
+    const execution = await executor.execute(rule, {
+      recordId: 'r1',
+      data: {},
+      sheetId: 'sheet_1',
+    }, lifecycle.factory)
+
+    expect(execution.status).toBe('failed')
+    expect(execution.steps).toEqual([
+      expect.objectContaining({
+        actionType: 'parallel_branch',
+        status: 'failed',
+        error: 'parallel_branch.branches[0].actions cannot contain send_webhook in A6-3-4',
+      }),
+      { actionType: 'send_webhook', status: 'skipped', durationMs: 0 },
+    ])
+    expect(events).toEqual([
+      { phase: 'start', index: 0, type: 'parallel_branch' },
+      { phase: 'settled', index: 0, type: 'parallel_branch', status: 'failed' },
+      { phase: 'skipped', index: 1, type: 'send_webhook' },
+    ])
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('A6-3-4: parallel_branch runtime rejects persisted configs over branch/action bounds before child jobs', async () => {
+    const events: Array<{ phase: string; index: number; type: string; status?: string }> = []
+    const lifecycle = {
+      factory: () => ({
+        onStart: async (index: number, action: { type: string }) => {
+          events.push({ phase: 'start', index, type: action.type })
+        },
+        onSettled: async (index: number, action: { type: string }, result: { status: string }) => {
+          events.push({ phase: 'settled', index, type: action.type, status: result.status })
+        },
+        onSkipped: async (index: number, action: { type: string }) => {
+          events.push({ phase: 'skipped', index, type: action.type })
+        },
+      }),
+    }
+    const branches = Array.from({ length: 11 }, (_unused, index) => ({
+      key: `branch_${index}`,
+      actions: [{ type: 'update_record', config: { fields: { status: `b${index}` } } }],
+    }))
+    const rule = createMockRule({
+      actions: [{
+        type: 'parallel_branch',
+        config: { joinMode: 'all', branches },
+      }],
+    })
+
+    const execution = await executor.execute(rule, {
+      recordId: 'r1',
+      data: {},
+      sheetId: 'sheet_1',
+    }, lifecycle.factory)
+
+    expect(execution.status).toBe('failed')
+    expect(execution.steps).toEqual([
+      expect.objectContaining({
+        actionType: 'parallel_branch',
+        status: 'failed',
+        error: 'parallel_branch.branches exceeds max 10',
+      }),
+    ])
+    expect(events).toEqual([
+      { phase: 'start', index: 0, type: 'parallel_branch' },
+      { phase: 'settled', index: 0, type: 'parallel_branch', status: 'failed' },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
   })
 })
 

@@ -316,4 +316,240 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
       }
     }
   })
+
+  test('A6-3-4 seam: parallel_branch join_all persists parent, all child jobs, and downstream C1 lineage', async () => {
+    const notifications: unknown[] = []
+    const bus = new EventBus()
+    const svc = new AutomationService(
+      bus,
+      db as never,
+      (async () => ({ rows: [], rowCount: 0 })) as never,
+    )
+    const subscription = bus.subscribe('automation.notification', (payload) => {
+      notifications.push(payload)
+    })
+    const sheetId = `sheet_parallel_${TS}`
+    const parallelAction = {
+      type: 'parallel_branch',
+      config: {
+        joinMode: 'all',
+        branches: [
+          {
+            key: 'ops',
+            label: 'Ops',
+            actions: [{ type: 'update_record', config: { fields: { status: 'ops' } } }],
+          },
+          {
+            key: 'notify',
+            label: 'Notify',
+            actions: [{ type: 'send_notification', config: { userIds: ['u1'], message: 'ready' } }],
+          },
+        ],
+      },
+    } as const
+    const execIds: string[] = []
+    const ruleIds: string[] = []
+    try {
+      const persisted = await svc.createRule(sheetId, {
+        name: 'A6-3-4 parallel real DB',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'parallel_branch',
+        actionConfig: parallelAction.config,
+        actions: [parallelAction],
+        executionMode: 'workflow_job_v1',
+        createdBy: 'u1',
+      })
+      ruleIds.push(persisted.id)
+      expect(persisted.action_type).toBe('parallel_branch')
+      expect(persisted.execution_mode).toBe('workflow_job_v1')
+
+      const optIn = await svc.executeRule(
+        {
+          id: `atr_parallel_in_${TS}`,
+          name: 'A6-3-4 parallel opt-in',
+          sheetId,
+          trigger: { type: 'record.created', config: {} },
+          actions: [
+            parallelAction,
+            { type: 'update_record', config: { fields: { after_parallel: true } } },
+          ],
+          enabled: true,
+          createdBy: 'u1',
+          createdAt: new Date(TS).toISOString(),
+          executionMode: 'workflow_job_v1',
+        } as never,
+        { sheetId, recordId: `rec_parallel_${TS}`, data: {} },
+      )
+      execIds.push(optIn.id)
+      expect(optIn.status).toBe('success')
+      expect(optIn.steps[0]).toMatchObject({
+        actionType: 'parallel_branch',
+        status: 'success',
+        output: {
+          joinMode: 'all',
+          resolvedBranchKeys: ['ops', 'notify'],
+          failedBranchKeys: [],
+          branchStatuses: { ops: 'resolved', notify: 'resolved' },
+        },
+      })
+      expect(notifications).toHaveLength(1)
+
+      const raw = await q(
+        `SELECT id, step_index, step_key, action_type, status, upstream_job_id, result
+           FROM multitable_automation_jobs
+          WHERE execution_id = $1
+          ORDER BY step_index ASC, created_at ASC, step_key ASC`,
+        [optIn.id],
+      )
+      expect(raw.rows.map((r) => ({
+        id: r.id,
+        step_index: r.step_index,
+        step_key: r.step_key,
+        action_type: r.action_type,
+        status: r.status,
+        upstream_job_id: r.upstream_job_id,
+      }))).toEqual([
+        {
+          id: `${optIn.id}:job:0`,
+          step_index: 0,
+          step_key: '0',
+          action_type: 'parallel_branch',
+          status: 'resolved',
+          upstream_job_id: null,
+        },
+        {
+          id: `${optIn.id}:job:0:parallel:ops:0`,
+          step_index: 0,
+          step_key: '0.parallel.ops.0',
+          action_type: 'update_record',
+          status: 'resolved',
+          upstream_job_id: `${optIn.id}:job:0`,
+        },
+        {
+          id: `${optIn.id}:job:0:parallel:notify:0`,
+          step_index: 0,
+          step_key: '0.parallel.notify.0',
+          action_type: 'send_notification',
+          status: 'resolved',
+          upstream_job_id: `${optIn.id}:job:0`,
+        },
+        {
+          id: `${optIn.id}:job:1`,
+          step_index: 1,
+          step_key: '1',
+          action_type: 'update_record',
+          status: 'resolved',
+          upstream_job_id: `${optIn.id}:job:0`,
+        },
+      ])
+      expect(JSON.stringify(raw.rows[0].result)).toContain('childJobIds')
+
+      const views = await jobs.listByExecution(optIn.id)
+      expect(views.map((v) => [v.stepKey, v.status, v.upstreamJobId])).toEqual([
+        ['0', 'resolved', null],
+        ['0.parallel.ops.0', 'resolved', `${optIn.id}:job:0`],
+        ['0.parallel.notify.0', 'resolved', `${optIn.id}:job:0`],
+        ['1', 'resolved', `${optIn.id}:job:0`],
+      ])
+    } finally {
+      bus.unsubscribe(subscription)
+      for (const id of execIds) {
+        await q('DELETE FROM multitable_automation_jobs WHERE execution_id = $1', [id])
+        await q('DELETE FROM multitable_automation_executions WHERE id = $1', [id])
+      }
+      for (const id of ruleIds) {
+        await q('DELETE FROM automation_rules WHERE id = $1', [id])
+      }
+    }
+  })
+
+  test('A6-3-4 seam: parallel_branch branch failure still runs siblings, skips branch tail and downstream', async () => {
+    const notifications: unknown[] = []
+    const bus = new EventBus()
+    const svc = new AutomationService(
+      bus,
+      db as never,
+      (async () => ({ rows: [], rowCount: 0 })) as never,
+    )
+    const subscription = bus.subscribe('automation.notification', (payload) => {
+      notifications.push(payload)
+    })
+    const sheetId = `sheet_parallel_fail_${TS}`
+    const parallelAction = {
+      type: 'parallel_branch',
+      config: {
+        joinMode: 'all',
+        branches: [
+          {
+            key: 'bad',
+            actions: [
+              { type: 'send_notification', config: { userIds: [], message: 'missing users' } },
+              { type: 'update_record', config: { fields: { should_not_run: true } } },
+            ],
+          },
+          {
+            key: 'good',
+            actions: [{ type: 'send_notification', config: { userIds: ['u2'], message: 'still runs' } }],
+          },
+        ],
+      },
+    } as const
+    const execIds: string[] = []
+    try {
+      const exec = await svc.executeRule(
+        {
+          id: `atr_parallel_fail_${TS}`,
+          name: 'A6-3-4 parallel failure',
+          sheetId,
+          trigger: { type: 'record.created', config: {} },
+          actions: [
+            parallelAction,
+            { type: 'update_record', config: { fields: { after_parallel: true } } },
+          ],
+          enabled: true,
+          createdBy: 'u1',
+          createdAt: new Date(TS).toISOString(),
+          executionMode: 'workflow_job_v1',
+        } as never,
+        { sheetId, recordId: `rec_parallel_fail_${TS}`, data: {} },
+      )
+      execIds.push(exec.id)
+      expect(exec.status).toBe('failed')
+      expect(exec.steps).toEqual([
+        expect.objectContaining({
+          actionType: 'parallel_branch',
+          status: 'failed',
+          output: expect.objectContaining({
+            resolvedBranchKeys: ['good'],
+            failedBranchKeys: ['bad'],
+            branchStatuses: { bad: 'failed', good: 'resolved' },
+          }),
+        }),
+        { actionType: 'update_record', status: 'skipped', durationMs: 0 },
+      ])
+      expect(notifications).toHaveLength(1) // good sibling still ran
+
+      const raw = await q(
+        `SELECT step_key, action_type, status, upstream_job_id
+           FROM multitable_automation_jobs
+          WHERE execution_id = $1
+          ORDER BY step_index ASC, created_at ASC, step_key ASC`,
+        [exec.id],
+      )
+      expect(raw.rows).toEqual([
+        { step_key: '0', action_type: 'parallel_branch', status: 'failed', upstream_job_id: null },
+        { step_key: '0.parallel.bad.0', action_type: 'send_notification', status: 'failed', upstream_job_id: `${exec.id}:job:0` },
+        { step_key: '0.parallel.bad.1', action_type: 'update_record', status: 'skipped', upstream_job_id: `${exec.id}:job:0:parallel:bad:0` },
+        { step_key: '0.parallel.good.0', action_type: 'send_notification', status: 'resolved', upstream_job_id: `${exec.id}:job:0` },
+        { step_key: '1', action_type: 'update_record', status: 'skipped', upstream_job_id: `${exec.id}:job:0` },
+      ])
+    } finally {
+      bus.unsubscribe(subscription)
+      for (const id of execIds) {
+        await q('DELETE FROM multitable_automation_jobs WHERE execution_id = $1', [id])
+        await q('DELETE FROM multitable_automation_executions WHERE id = $1', [id])
+      }
+    }
+  })
 })

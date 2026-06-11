@@ -67,6 +67,20 @@ function maxWebhookRetries(): number {
 }
 const DINGTALK_PERSON_BATCH_SIZE = 100
 const DINGTALK_FAILURE_ALERT_CONTENT_LIMIT = 1_000
+const SAFE_PARALLEL_BRANCH_KEY = /^[A-Za-z0-9_-]{1,64}$/
+const MAX_PARALLEL_BRANCHES = 10
+const MAX_PARALLEL_BRANCH_ACTIONS = 20
+const PARALLEL_BRANCH_RUNTIME_ACTION_TYPES = new Set<AutomationActionType>(['update_record', 'send_notification'])
+
+type RuntimeParallelBranch = {
+  key: string
+  label?: string
+  actions: AutomationAction[]
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
 
 function readJsonSafely(response: Response): Promise<unknown> {
   return response.json().catch(() => null)
@@ -97,6 +111,72 @@ export function renderAutomationTemplate(template: string, data: Record<string, 
   return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key: string) =>
     renderTemplateValue(lookupTemplateValue(key, data)),
   )
+}
+
+function validateParallelBranchRuntimeConfig(config: unknown): { branches: RuntimeParallelBranch[] } | { error: string } {
+  if (!isPlainRecord(config)) {
+    return { error: 'parallel_branch config must be an object' }
+  }
+  if (config.joinMode !== 'all') {
+    return { error: 'parallel_branch requires joinMode all and non-empty branches' }
+  }
+  if (!Array.isArray(config.branches) || config.branches.length === 0) {
+    return { error: 'parallel_branch requires joinMode all and non-empty branches' }
+  }
+  if (config.branches.length > MAX_PARALLEL_BRANCHES) {
+    return { error: `parallel_branch.branches exceeds max ${MAX_PARALLEL_BRANCHES}` }
+  }
+
+  const seen = new Set<string>()
+  const branches: RuntimeParallelBranch[] = []
+  let totalActions = 0
+  for (const [branchIndex, branch] of config.branches.entries()) {
+    const branchPath = `parallel_branch.branches[${branchIndex}]`
+    if (!isPlainRecord(branch)) {
+      return { error: `${branchPath} must be an object` }
+    }
+    if (typeof branch.key !== 'string' || !SAFE_PARALLEL_BRANCH_KEY.test(branch.key)) {
+      return { error: `${branchPath}.key must be a safe non-empty string` }
+    }
+    if (seen.has(branch.key)) {
+      return { error: `${branchPath}.key must be unique` }
+    }
+    seen.add(branch.key)
+    if (branch.label !== undefined && typeof branch.label !== 'string') {
+      return { error: `${branchPath}.label must be a string` }
+    }
+    const label = typeof branch.label === 'string' ? branch.label : undefined
+    if (!Array.isArray(branch.actions) || branch.actions.length === 0) {
+      return { error: `${branchPath}.actions must be a non-empty array` }
+    }
+    totalActions += branch.actions.length
+    if (totalActions > MAX_PARALLEL_BRANCH_ACTIONS) {
+      return { error: `parallel_branch.branches total actions exceeds max ${MAX_PARALLEL_BRANCH_ACTIONS}` }
+    }
+
+    const actions: AutomationAction[] = []
+    for (const [actionIndex, branchAction] of branch.actions.entries()) {
+      const actionPath = `${branchPath}.actions[${actionIndex}]`
+      if (!isPlainRecord(branchAction) || typeof branchAction.type !== 'string') {
+        return { error: `${actionPath}.type is invalid` }
+      }
+      if (!PARALLEL_BRANCH_RUNTIME_ACTION_TYPES.has(branchAction.type as AutomationActionType)) {
+        return { error: `${branchPath}.actions cannot contain ${branchAction.type} in A6-3-4` }
+      }
+      actions.push({
+        type: branchAction.type as AutomationActionType,
+        config: isPlainRecord(branchAction.config) ? branchAction.config : {},
+      })
+    }
+
+    branches.push({
+      key: branch.key,
+      ...(label ? { label } : {}),
+      actions,
+    })
+  }
+
+  return { branches }
 }
 
 function normalizeUserIds(value: unknown): string[] {
@@ -861,6 +941,41 @@ export class AutomationExecutor {
         continue
       }
 
+      // A6-3-4 / W3-1 parallel branch. V1 is graph-shaped fan-out + join-all:
+      // every branch is attempted, the parent join job settles only after every
+      // branch is terminal, and the next top-level action upstreams from the
+      // parent join job (not an arbitrary child).
+      if (action.type === 'parallel_branch') {
+        if (!jobLifecycle) {
+          results.push({
+            actionType: 'parallel_branch',
+            status: 'failed',
+            error: 'parallel_branch requires execution_mode workflow_job_v1',
+            durationMs: 0,
+          })
+          for (let i = index + 1; i < actions.length; i++) {
+            results.push({ actionType: actions[i].type, status: 'skipped', durationMs: 0 })
+          }
+          return { suspended: false }
+        }
+
+        await jobLifecycle.onStart(index, action, topLevelMeta)
+        const parallelResult = await this.executeParallelBranch(index, action, context, jobLifecycle)
+        results.push(parallelResult.result)
+        await jobLifecycle.onSettled(index, action, parallelResult.result)
+
+        if (parallelResult.result.status === 'failed') {
+          for (let i = index + 1; i < actions.length; i++) {
+            await jobLifecycle.onSkipped(i, actions[i])
+            results.push({ actionType: actions[i].type, status: 'skipped', durationMs: 0 })
+          }
+          break
+        }
+
+        nextTopLevelUpstreamJobId = parallelResult.joinJobId
+        continue
+      }
+
       // A6-1 fail-closed: onStart runs BEFORE the inner try, so a job-create failure propagates
       // to execute()'s outer catch (execution fails) — and the action's side effect never runs.
       if (jobLifecycle) await jobLifecycle.onStart(index, action, topLevelMeta)
@@ -890,6 +1005,106 @@ export class AutomationExecutor {
     }
 
     return { suspended: false }
+  }
+
+  private async executeParallelBranch(
+    stepIndex: number,
+    action: AutomationAction,
+    context: ExecutionContext,
+    jobLifecycle: ActionJobLifecycle,
+  ): Promise<{ result: AutomationStepResult; joinJobId: string }> {
+    const startMs = Date.now()
+    const parentJobId = `${context.executionId}:job:${stepIndex}`
+    const validation = validateParallelBranchRuntimeConfig(action.config)
+    const childJobIds: string[] = []
+    const resolvedBranchKeys: string[] = []
+    const failedBranchKeys: string[] = []
+    const skippedBranchKeys: string[] = []
+    const branchStatuses: Record<string, 'resolved' | 'failed' | 'skipped'> = {}
+    const branchLabels: Record<string, string> = {}
+
+    if ('error' in validation) {
+      return {
+        joinJobId: parentJobId,
+        result: {
+          actionType: 'parallel_branch',
+          status: 'failed',
+          error: validation.error,
+          durationMs: Date.now() - startMs,
+        },
+      }
+    }
+
+    const branches = validation.branches
+    for (const branch of branches) {
+      const branchKey = branch.key
+      const branchLabel = branch.label
+      const branchActions = branch.actions
+
+      if (branchLabel) branchLabels[branchKey] = branchLabel
+
+      let upstreamJobId: string | null = parentJobId
+      let branchFailed = false
+      for (let actionIndex = 0; actionIndex < branchActions.length; actionIndex++) {
+        const branchAction = branchActions[actionIndex]
+        const stepKey = `${stepIndex}.parallel.${branchKey}.${actionIndex}`
+        const jobId = `${context.executionId}:job:${stepIndex}:parallel:${branchKey}:${actionIndex}`
+        const meta = { stepKey, jobId, upstreamJobId }
+        childJobIds.push(jobId)
+
+        await jobLifecycle.onStart(stepIndex, branchAction, meta)
+        const branchActionResult = await this.executeSingleAction(branchAction, context)
+        await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
+
+        upstreamJobId = jobId
+
+        if (branchActionResult.status === 'failed') {
+          branchFailed = true
+          for (let skippedIndex = actionIndex + 1; skippedIndex < branchActions.length; skippedIndex++) {
+            const skippedAction = branchActions[skippedIndex]
+            const skippedStepKey = `${stepIndex}.parallel.${branchKey}.${skippedIndex}`
+            const skippedJobId = `${context.executionId}:job:${stepIndex}:parallel:${branchKey}:${skippedIndex}`
+            await jobLifecycle.onSkipped(stepIndex, skippedAction, {
+              stepKey: skippedStepKey,
+              jobId: skippedJobId,
+              upstreamJobId,
+            })
+            childJobIds.push(skippedJobId)
+            upstreamJobId = skippedJobId
+          }
+          failedBranchKeys.push(branchKey)
+          branchStatuses[branchKey] = 'failed'
+          break
+        }
+      }
+
+      if (!branchFailed) {
+        resolvedBranchKeys.push(branchKey)
+        branchStatuses[branchKey] = 'resolved'
+      }
+    }
+
+    const output: Record<string, unknown> = {
+      joinMode: 'all',
+      branchCount: branches.length,
+      childJobIds,
+      resolvedBranchKeys,
+      failedBranchKeys,
+      skippedBranchKeys,
+      branchStatuses,
+    }
+    if (Object.keys(branchLabels).length > 0) output.branchLabels = branchLabels
+
+    return {
+      joinJobId: parentJobId,
+      result: {
+        actionType: 'parallel_branch',
+        status: failedBranchKeys.length > 0 ? 'failed' : 'success',
+        ...(failedBranchKeys.length > 0 ? { error: `parallel_branch failed branches: ${failedBranchKeys.join(', ')}` } : {}),
+        output,
+        durationMs: Date.now() - startMs,
+      },
+    }
   }
 
   private async executeConditionBranch(
