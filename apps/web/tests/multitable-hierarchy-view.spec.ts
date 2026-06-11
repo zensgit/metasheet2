@@ -11,6 +11,7 @@ const fields: MetaField[] = [
 
 function mountHierarchy(props: {
   rows: MetaRecord[]
+  fields?: MetaField[]
   viewConfig?: Record<string, unknown>
   canCreate?: boolean
   canEdit?: boolean
@@ -124,6 +125,49 @@ describe('MetaHierarchyView', () => {
         orphanMode: 'hidden',
       },
     })
+
+    unmount()
+  })
+
+  it('lists only single-value link fields as parent-field candidates (S4 multi-value silent-overwrite guard)', async () => {
+    const { container, unmount } = mountHierarchy({
+      rows: [],
+      fields: [
+        { id: 'fld_title', name: 'Title', type: 'string' },
+        { id: 'fld_parent_multi', name: 'Parent Multi', type: 'link', property: { limitSingleRecord: false } },
+        { id: 'fld_parent_single', name: 'Parent Single', type: 'link', property: { limitSingleRecord: true } },
+      ],
+      viewConfig: { parentFieldId: 'fld_parent_single', titleFieldId: 'fld_title' },
+    })
+    await nextTick()
+
+    const parentSelect = container.querySelector('.meta-hierarchy__control select') as HTMLSelectElement
+    const optionValues = Array.from(parentSelect.options).map((option) => option.value)
+    expect(optionValues).toContain('fld_parent_single')
+    expect(optionValues).not.toContain('fld_parent_multi')
+
+    unmount()
+  })
+
+  it('renders a legacy multi-value parent as a disabled option instead of a blank select (S4 F4)', async () => {
+    const { container, unmount } = mountHierarchy({
+      rows: [],
+      fields: [
+        { id: 'fld_title', name: 'Title', type: 'string' },
+        { id: 'fld_parent_multi', name: 'Parent Multi', type: 'link', property: { limitSingleRecord: false } },
+        { id: 'fld_parent_single', name: 'Parent Single', type: 'link', property: { limitSingleRecord: true } },
+      ],
+      viewConfig: { parentFieldId: 'fld_parent_multi', titleFieldId: 'fld_title' },
+    })
+    await nextTick()
+
+    const parentSelect = container.querySelector('.meta-hierarchy__control select') as HTMLSelectElement
+    // The legacy field stays visible (the tree still uses it) but cannot be re-selected.
+    expect(parentSelect.value).toBe('fld_parent_multi')
+    const legacyOption = Array.from(parentSelect.options).find((option) => option.value === 'fld_parent_multi')
+    expect(legacyOption?.disabled).toBe(true)
+    const singleOption = Array.from(parentSelect.options).find((option) => option.value === 'fld_parent_single')
+    expect(singleOption?.disabled).toBe(false)
 
     unmount()
   })

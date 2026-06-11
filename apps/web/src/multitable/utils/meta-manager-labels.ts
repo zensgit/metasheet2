@@ -279,7 +279,7 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'view.error.ganttGroupInvalid': { en: 'The selected Gantt group field is no longer groupable. Reload latest before saving.', zh: '已选择的甘特分组字段不再可分组。保存前请重新加载最新设置。' },
   'view.error.dependencyInvalid': { en: 'The selected dependency field is no longer supported. Reload latest before saving.', zh: '已选择的依赖字段不再受支持。保存前请重新加载最新设置。' },
   'view.error.kanbanGroupInvalid': { en: 'The selected group field is no longer a select field. Reload latest before saving.', zh: '已选择的分组字段不再是单选字段。保存前请重新加载最新设置。' },
-  'view.error.parentInvalid': { en: 'The selected parent field is no longer a link field. Reload latest before saving.', zh: '已选择的父级字段不再是关联字段。保存前请重新加载最新设置。' },
+  'view.error.parentInvalid': { en: 'The selected parent field is not a single-value link field. Pick a single-value link field or Auto before saving.', zh: '已选择的父级字段不是单值关联字段。保存前请改选单值关联字段或自动。' },
   'view.error.filterMissing': { en: 'One or more selected filter fields disappeared in the background. Reload latest before saving.', zh: '一个或多个已选择的筛选字段已在后台消失。保存前请重新加载最新设置。' },
   'view.error.sortMissing': { en: 'One or more selected sort fields disappeared in the background. Reload latest before saving.', zh: '一个或多个已选择的排序字段已在后台消失。保存前请重新加载最新设置。' },
   'view.error.groupInvalid': { en: 'The selected group field is no longer groupable. Reload latest before saving.', zh: '已选择的分组字段不再可分组。保存前请重新加载最新设置。' },

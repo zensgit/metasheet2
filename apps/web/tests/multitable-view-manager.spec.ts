@@ -152,8 +152,8 @@ describe('MetaViewManager', () => {
           activeViewId: 'view_hierarchy',
           fields: [
             { id: 'fld_name', name: 'Name', type: 'string' },
-            { id: 'fld_parent', name: 'Parent', type: 'link' },
-            { id: 'fld_alt_parent', name: 'Alt Parent', type: 'link' },
+            { id: 'fld_parent', name: 'Parent', type: 'link', property: { limitSingleRecord: true } },
+            { id: 'fld_alt_parent', name: 'Alt Parent', type: 'link', property: { limitSingleRecord: true } },
           ],
           views: [
             {
@@ -196,6 +196,118 @@ describe('MetaViewManager', () => {
         titleFieldId: 'fld_name',
         defaultExpandDepth: 3,
         orphanMode: 'hidden',
+      },
+    })
+
+    app.unmount()
+  })
+
+  it('excludes multi-value link fields from the hierarchy parent picker (S4 silent-overwrite guard)', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_hierarchy',
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_parent_multi', name: 'Parent Multi', type: 'link', property: { limitSingleRecord: false } },
+            { id: 'fld_parent_single', name: 'Parent Single', type: 'link', property: { limitSingleRecord: true } },
+          ],
+          views: [
+            {
+              id: 'view_hierarchy',
+              sheetId: 'sheet_1',
+              name: 'Hierarchy',
+              type: 'hierarchy',
+              config: { parentFieldId: 'fld_parent_single', titleFieldId: 'fld_name' },
+            },
+          ],
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    const selects = Array.from(container.querySelectorAll('.meta-view-mgr__config select')) as HTMLSelectElement[]
+    const parentOptionValues = Array.from(selects[0].options).map((option) => option.value)
+    expect(parentOptionValues).toContain('fld_parent_single')
+    expect(parentOptionValues).not.toContain('fld_parent_multi')
+
+    app.unmount()
+  })
+
+  it('blocks saving a legacy hierarchy config with a multi-value parent instead of silently nulling it (S4)', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_hierarchy',
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_parent_multi', name: 'Parent Multi', type: 'link', property: { limitSingleRecord: false } },
+            { id: 'fld_parent_single', name: 'Parent Single', type: 'link', property: { limitSingleRecord: true } },
+          ],
+          views: [
+            {
+              id: 'view_hierarchy',
+              sheetId: 'sheet_1',
+              name: 'Hierarchy',
+              type: 'hierarchy',
+              // Legacy config saved before the S4 guard: parent points at a multi-value link.
+              config: { parentFieldId: 'fld_parent_multi', titleFieldId: 'fld_name' },
+            },
+          ],
+          onUpdateView: updateSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    // The parentInvalid validation surfaces and save is blocked — no silent null at save time.
+    const warning = container.querySelector('.meta-view-mgr__warning')
+    expect(warning?.textContent).toContain('The selected parent field is not a single-value link field')
+    const saveButton = (Array.from(container.querySelectorAll('.meta-view-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save view settings')) as HTMLButtonElement
+    expect(saveButton.disabled).toBe(true)
+    saveButton.click()
+    await nextTick()
+    expect(updateSpy).not.toHaveBeenCalled()
+
+    // Unbrick path: picking a single-value link clears the block and saves that field.
+    const selects = Array.from(container.querySelectorAll('.meta-view-mgr__config select')) as HTMLSelectElement[]
+    selects[0].value = 'fld_parent_single'
+    selects[0].dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    expect(container.querySelector('.meta-view-mgr__warning')).toBeNull()
+    expect(saveButton.disabled).toBe(false)
+    saveButton.click()
+    await nextTick()
+
+    expect(updateSpy).toHaveBeenCalledWith('view_hierarchy', {
+      config: {
+        parentFieldId: 'fld_parent_single',
+        titleFieldId: 'fld_name',
+        defaultExpandDepth: 2,
+        orphanMode: 'root',
       },
     })
 
