@@ -22,8 +22,8 @@
 ## 2. 副线 — parity 清尾(已获 owner 总 opt-in 2026-06-10,可并行)
 
 - [x] ✅ **S1 stale 文档 reconcile**（本 reconcile PR）(docs):phase3 plan/todo 四处 lane 级 stale + open-items S1-10 + research §7-4,按审计证据加 reconcile 注记。
-- [ ] ⬜ **S2 模板 preview/dry-run**(runtime,design-lock 先行):预览(含样例数据)+ install dry-run 零写端点 + 详情 UI。
-- [ ] ⬜ **S3 图表补全**(runtime):scatter/area/funnel/gauge(纯渲染层)+ S1-9 echarts 异步 chunk。
+- [ ] ⬜ **S2 模板 dry-run + 详情(工程缩减版)**:design-lock ✅(本 PR,`multitable-template-dryrun-detail-s2-design-20260611.md`);⬜ 实现 = install dry-run 零写端点(与 install 同源冲突检测)+ 详情 UI。**范围修正:样例数据预览/onboarding/回滚策略 = #1571 C1 包 PM/SME 门控(G-4/G-6/T7),明示推迟**——原 S2 行的"含样例数据"在勘察后按既有门重新切分。
+- [x] ✅ **S3 图表补全**(#2492 MERGED `a6b3986e5` 2026-06-11):area/funnel/gauge 端到端 + S1-9 异步 chunk(echarts 独立 chunk,EmbedHost 1.2M→760K 构建实证);**scatter 出局**(数据契约无 x/y 维度,需后端聚合新维度 = follow-up);polish 候选:gauge 非加性聚合文案、异步加载失败兜底、图表持久化 type 校验(F4 既有缺口)。
 - [x] ✅ **S4 层级父链接单值约束**(#2488 MERGED `d928eff23` 2026-06-11):真实概念=`limitSingleRecord`;后端 view-config 校验镜像 gantt + 前端双选择器收窄 + parentInvalid 门控 bug 顺带修复;残留(field-PATCH 翻转/provisioning 旁路)已文档化。
 - [ ] ⬜ **S5 D2 50k/100k 基线**(ops):修 undici harness → 跑全 perf budget;禁 async-import/seed-endpoint。
 
