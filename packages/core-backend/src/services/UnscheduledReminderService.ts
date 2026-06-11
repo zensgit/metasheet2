@@ -1,18 +1,13 @@
 import { query as defaultQuery } from '../db/pg'
 import { Logger } from '../core/logger'
-import {
-  AttendanceNotifier,
-  type AttendanceNotificationMessage,
-} from './AttendanceNotifier'
 
 /**
  * ⑤ Unscheduled-shift reminder job (design-lock attendance-unscheduled-reminder-design-lock-20260604).
  *
  * A SECOND job for the C4 AttendanceScheduler (NOT a second scheduler). Each tick it scans for members of
  * `scheduled_shift` attendance groups who have NO schedule coverage for an upcoming date, CLAIMS each as a
- * dispatch row (UNIQUE index → at-most-once, mirrors ④'s status-claim), and routes the newly-claimed rows
- * through the AttendanceNotifier. Default = no channels ⇒ no external send; the claimed dispatch row is the
- * v1 internal reminder record. Real channels = C5.
+ * dispatch row (UNIQUE index → at-most-once, mirrors ④'s status-claim), and produces per-recipient C5
+ * outbox rows. The delivery worker is the only component that may turn those rows into external sends.
  *
  * Default OFF: only wired when ATTENDANCE_UNSCHEDULED_REMINDER_ENABLED=true (see AttendanceScheduler).
  */
@@ -30,12 +25,11 @@ export interface UnscheduledReminderCandidate {
 export interface UnscheduledReminderResult {
   targetDate: string
   claimed: number
-  dispatched: number
+  deliveries: number
 }
 
 export interface UnscheduledReminderServiceOptions {
   query?: UnscheduledReminderQuery
-  notifier?: AttendanceNotifier
   lookaheadDays?: number
   now?: () => Date
   logger?: Logger
@@ -46,10 +40,21 @@ interface CandidateRow {
   user_id: string
 }
 
+interface DispatchRow {
+  id: string
+  org_id: string
+  user_id: string
+  target_date: string
+  reminder_type: string
+}
+
 const DEFAULT_LOOKAHEAD_DAYS = 1
 const MIN_LOOKAHEAD_DAYS = 1
 const MAX_LOOKAHEAD_DAYS = 14
 const REMINDER_TYPE = 'unscheduled'
+const SOURCE_TYPE = 'unscheduled_reminder'
+const DELIVERY_CHANNEL = 'dingtalk_work_notification'
+const INACTIVE_RECIPIENT_ERROR = 'recipient_inactive_or_missing'
 // Must equal the plugin predicate's ATTENDANCE_SCHEDULE_OPEN_END_DATE (index.cjs) — parity-locked by the
 // integration test that compares scanCandidates() to isUserScheduledForDate().
 const OPEN_END_DATE = '9999-12-31'
@@ -90,6 +95,7 @@ const SCAN_SQL = `
   AND NOT EXISTS (
     SELECT 1 FROM attendance_shift_assignments sa
     WHERE sa.org_id = e.org_id AND sa.user_id = e.user_id AND COALESCE(sa.is_active, true) = true
+      AND COALESCE(sa.publish_status, 'published') = 'published'
       AND sa.start_date <= $1::date
       AND COALESCE(sa.end_date, DATE '${OPEN_END_DATE}') >= $1::date
   )
@@ -97,7 +103,6 @@ const SCAN_SQL = `
 
 export class UnscheduledReminderService {
   private readonly query: UnscheduledReminderQuery
-  private readonly notifier: AttendanceNotifier
   private readonly lookaheadDays: number
   private readonly now: () => Date
   private readonly logger: Logger
@@ -105,7 +110,6 @@ export class UnscheduledReminderService {
 
   constructor(options: UnscheduledReminderServiceOptions = {}) {
     this.query = options.query ?? (defaultQuery as UnscheduledReminderQuery)
-    this.notifier = options.notifier ?? new AttendanceNotifier()
     this.lookaheadDays = clampLookaheadDays(options.lookaheadDays)
     this.now = options.now ?? (() => new Date())
     this.logger = options.logger ?? new Logger('UnscheduledReminderService')
@@ -125,40 +129,130 @@ export class UnscheduledReminderService {
     return rows.map((row) => ({ orgId: row.org_id, userId: row.user_id }))
   }
 
+  async claimDispatches(targetDate: string): Promise<DispatchRow[]> {
+    const { rows } = await this.query<DispatchRow>(
+      `INSERT INTO attendance_unscheduled_reminder_dispatch (org_id, user_id, target_date, reminder_type)
+       SELECT c.org_id, c.user_id, $1::date, '${REMINDER_TYPE}'
+       FROM ( ${SCAN_SQL} ) c
+       ON CONFLICT (org_id, user_id, target_date, reminder_type) DO NOTHING
+       RETURNING id::text AS id, org_id, user_id, target_date::text AS target_date, reminder_type`,
+      [targetDate],
+    )
+    return rows
+  }
+
+  async findDispatchesMissingDeliveries(): Promise<DispatchRow[]> {
+    const { rows } = await this.query<DispatchRow>(
+      `SELECT d.id::text AS id, d.org_id, d.user_id, d.target_date::text AS target_date, d.reminder_type
+       FROM attendance_unscheduled_reminder_dispatch d
+       WHERE NOT EXISTS (
+         SELECT 1
+         FROM attendance_notification_deliveries nd
+         WHERE nd.org_id = d.org_id
+           AND nd.source_type = '${SOURCE_TYPE}'
+           AND nd.source_id = d.id::text
+       )
+       ORDER BY d.created_at ASC, d.id ASC`,
+    )
+    return rows
+  }
+
+  async produceDeliveriesForDispatches(dispatches: DispatchRow[]): Promise<number> {
+    if (dispatches.length === 0) return 0
+    const { rows } = await this.query<{ id: string }>(
+      `WITH dispatches AS (
+         SELECT id, org_id, user_id, target_date, reminder_type
+         FROM attendance_unscheduled_reminder_dispatch
+         WHERE id = ANY($1::uuid[])
+       ),
+       candidate_recipients AS (
+         SELECT d.id::text AS id, d.org_id, d.user_id, d.target_date::text AS target_date, d.reminder_type,
+                d.user_id AS recipient_user_id, 'subject'::text AS recipient_role, NULL::uuid AS group_id
+         FROM dispatches d
+         UNION ALL
+         SELECT d.id::text AS id, d.org_id, d.user_id, d.target_date::text AS target_date, d.reminder_type,
+                gm.user_id AS recipient_user_id, gm.role AS recipient_role, gm.group_id
+         FROM dispatches d
+         JOIN attendance_group_members m
+           ON m.org_id = d.org_id
+          AND m.user_id = d.user_id
+         JOIN attendance_group_managers gm
+           ON gm.org_id = d.org_id
+          AND gm.group_id = m.group_id
+          AND gm.role IN ('owner','sub_owner')
+       ),
+       recipient_rows AS (
+         SELECT c.id, c.org_id, c.user_id, c.target_date::text AS target_date, c.reminder_type,
+                c.recipient_user_id,
+                CASE
+                  WHEN bool_or(c.recipient_role = 'subject') THEN 'subject'
+                  WHEN bool_or(c.recipient_role = 'owner') THEN 'owner'
+                  ELSE 'sub_owner'
+                END AS recipient_role,
+                array_remove(ARRAY[
+                  CASE WHEN bool_or(c.recipient_role = 'subject') THEN 'subject' END,
+                  CASE WHEN bool_or(c.recipient_role = 'owner') THEN 'owner' END,
+                  CASE WHEN bool_or(c.recipient_role = 'sub_owner') THEN 'sub_owner' END
+                ], NULL) AS recipient_roles,
+                COALESCE(
+                  array_agg(DISTINCT c.group_id::text) FILTER (WHERE c.group_id IS NOT NULL),
+                  ARRAY[]::text[]
+                ) AS group_ids,
+                COALESCE(bool_or(u.is_active IS TRUE), false) AS is_active
+         FROM candidate_recipients c
+         LEFT JOIN users u ON u.id = c.recipient_user_id
+         GROUP BY c.id, c.org_id, c.user_id, c.target_date, c.reminder_type, c.recipient_user_id
+       )
+       INSERT INTO attendance_notification_deliveries
+         (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, status, last_error, payload)
+       SELECT r.org_id,
+              '${SOURCE_TYPE}',
+              r.id::text,
+              'unscheduled:' || r.id::text || ':recipient:' || r.recipient_user_id || ':channel:${DELIVERY_CHANNEL}',
+              r.recipient_user_id,
+              r.recipient_role,
+              '${DELIVERY_CHANNEL}',
+              CASE WHEN r.is_active THEN 'pending' ELSE 'skipped' END,
+              CASE WHEN r.is_active THEN NULL ELSE '${INACTIVE_RECIPIENT_ERROR}' END,
+              jsonb_build_object(
+                'kind', 'unscheduled_shift_reminder',
+                'title', 'Unscheduled shift reminder',
+                'body', 'No schedule is assigned for ' || r.target_date || '.',
+                'sourceType', '${SOURCE_TYPE}',
+                'dispatchId', r.id::text,
+                'targetDate', r.target_date,
+                'reminderType', r.reminder_type,
+                'subjectUserId', r.user_id,
+                'recipientUserId', r.recipient_user_id,
+                'recipientRole', r.recipient_role,
+                'recipientRoles', r.recipient_roles,
+                'groupIds', r.group_ids
+              )
+       FROM recipient_rows r
+       ON CONFLICT (org_id, source_key) DO NOTHING
+       RETURNING id::text AS id`,
+      [dispatches.map((dispatch) => dispatch.id)],
+    )
+    return rows.length
+  }
+
   /**
-   * Scan → claim (at-most-once) → dispatch. A re-entrancy guard (mirrors the expiry tick's `running` flag)
-   * keeps a slow scan from overlapping itself; the UNIQUE-constraint claim already makes overlap merely
-   * wasteful, not wrong.
+   * Scan → claim (at-most-once) → produce C5 outbox rows. A re-entrancy guard (mirrors the expiry
+   * tick's `running` flag) keeps a slow scan from overlapping itself; the UNIQUE-constraint claim and
+   * delivery source_key already make overlap merely wasteful, not wrong.
    */
   async run(): Promise<UnscheduledReminderResult> {
     const targetDate = this.computeTargetDate()
-    if (this.running) return { targetDate, claimed: 0, dispatched: 0 }
+    if (this.running) return { targetDate, claimed: 0, deliveries: 0 }
     this.running = true
     try {
-      // Scan + claim atomically. RETURNING yields ONLY the rows this statement inserted (won the claim);
-      // a repeat/concurrent tick conflicts on the unique index and returns nothing → no double reminder.
-      const { rows } = await this.query<CandidateRow>(
-        `INSERT INTO attendance_unscheduled_reminder_dispatch (org_id, user_id, target_date, reminder_type)
-         SELECT c.org_id, c.user_id, $1::date, '${REMINDER_TYPE}'
-         FROM ( ${SCAN_SQL} ) c
-         ON CONFLICT (org_id, user_id, target_date, reminder_type) DO NOTHING
-         RETURNING org_id, user_id`,
-        [targetDate],
-      )
-      const claimed = rows.map((row) => ({ orgId: row.org_id, userId: row.user_id }))
-      if (claimed.length === 0) return { targetDate, claimed: 0, dispatched: 0 }
-
-      const messages: AttendanceNotificationMessage[] = claimed.map((c) => ({
-        orgId: c.orgId,
-        userId: c.userId,
-        kind: 'unscheduled_shift_reminder',
-        text: `No schedule is assigned for ${targetDate}.`,
-      }))
-      const dispatch = await this.notifier.notify(messages)
+      const claimed = await this.claimDispatches(targetDate)
+      const pendingDispatches = await this.findDispatchesMissingDeliveries()
+      const deliveries = await this.produceDeliveriesForDispatches(pendingDispatches)
       this.logger.info(
-        `Unscheduled-shift reminders claimed=${claimed.length} dispatched=${dispatch.sent} target=${targetDate}`,
+        `Unscheduled-shift reminders claimed=${claimed.length} deliveries=${deliveries} target=${targetDate}`,
       )
-      return { targetDate, claimed: claimed.length, dispatched: dispatch.sent }
+      return { targetDate, claimed: claimed.length, deliveries }
     } finally {
       this.running = false
     }

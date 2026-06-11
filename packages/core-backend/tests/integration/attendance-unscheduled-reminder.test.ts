@@ -7,7 +7,6 @@ import {
   UnscheduledReminderService,
   type UnscheduledReminderQuery,
 } from '../../src/services/UnscheduledReminderService'
-import { AttendanceNotifier, type AttendanceNotificationMessage } from '../../src/services/AttendanceNotifier'
 
 // The shared predicate the punch path uses (plugins/plugin-attendance/index.cjs, exported). The §f parity
 // assertion compares our set-based scan to it so a future change to either side that diverges fails CI.
@@ -49,24 +48,38 @@ describeDb('⑤ unscheduled-shift reminder (real DB)', () => {
     await pool?.end().catch(() => undefined)
   })
 
-  it('scan parity with isUserScheduledForDate; claims only unscheduled scheduled_shift members; dedup; no-channel still records', async () => {
+  it('scan parity with isUserScheduledForDate; claims only unscheduled scheduled_shift members; produces C5 outbox fan-out; reconciles pre-existing dispatches', async () => {
     const suffix = `ur${Date.now().toString(36)}`
     const org = `org-${suffix}`
     const at0701 = () => new Date('2026-07-01T00:00:00.000Z')
     const target = '2026-07-02' // = 0701 + lookahead 1
-    const targetE = '2026-07-03' // = 0701 + lookahead 2 (case e, distinct claim)
+    const targetE = '2026-07-03' // pre-existing dispatch reconcile target
 
     const gSched = randomUUID(), gFixed = randomUUID(), gFree = randomUUID()
     const shiftId = randomUUID(), schedGroupId = randomUUID()
     const uNoAssign = `u-noassign-${suffix}`
     const uShift = `u-shift-${suffix}`
+    const uDraft = `u-draft-${suffix}`
     const uSchedGrp = `u-schedgrp-${suffix}`
     const uFixed = `u-fixed-${suffix}`
     const uFree = `u-free-${suffix}`
     const uMixed = `u-mixed-${suffix}`
-    const allUsers = [uNoAssign, uShift, uSchedGrp, uFixed, uFree, uMixed]
+    const ownerActive = `u-owner-${suffix}`
+    const subOwnerInactive = `u-subowner-inactive-${suffix}`
+    const ownerMissing = `u-owner-missing-${suffix}`
+    const allUsers = [uNoAssign, uShift, uDraft, uSchedGrp, uFixed, uFree, uMixed]
 
     try {
+      const seedUser = (uid: string, active = true) =>
+        pool.query(
+          `INSERT INTO users (id, email, password_hash, name, role, is_active)
+           VALUES ($1,$2,'hash',$3,'user',$4)
+           ON CONFLICT (id) DO UPDATE SET is_active = EXCLUDED.is_active`,
+          [uid, `${uid}@example.test`, uid, active],
+        )
+      for (const u of [...allUsers, ownerActive]) await seedUser(u)
+      await seedUser(subOwnerInactive, false)
+
       // --- seed groups (one of each type), a shift, a schedule group ---
       await pool.query(
         `INSERT INTO attendance_groups (id, org_id, name, attendance_type) VALUES
@@ -88,16 +101,29 @@ describeDb('⑤ unscheduled-shift reminder (real DB)', () => {
           [randomUUID(), org, gid, uid])
       await member(uNoAssign, gSched)
       await member(uShift, gSched)
+      await member(uDraft, gSched)
       await member(uSchedGrp, gSched)
       await member(uFixed, gFixed)
       await member(uFree, gFree)
       await member(uMixed, gSched)
       await member(uMixed, gFixed) // mixed → applicability guard excludes (not ALL scheduled_shift)
+      await pool.query(
+        `INSERT INTO attendance_group_managers (id, org_id, group_id, user_id, role) VALUES
+           ($1,$5,$4,$6,'owner'),
+           ($2,$5,$4,$7,'sub_owner'),
+           ($3,$5,$4,$8,'owner')`,
+        [randomUUID(), randomUUID(), randomUUID(), gSched, org, ownerActive, subOwnerInactive, ownerMissing],
+      )
       // --- coverage for the two that SHOULD be covered on the target date ---
       await pool.query(
         `INSERT INTO attendance_shift_assignments (id, org_id, user_id, shift_id, start_date, end_date, is_active)
          VALUES ($1,$2,$3,$4,'2026-07-01','2026-07-31',true)`,
         [randomUUID(), org, uShift, shiftId],
+      )
+      await pool.query(
+        `INSERT INTO attendance_shift_assignments (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status)
+         VALUES ($1,$2,$3,$4,'2026-07-01','2026-07-31',true,'draft')`,
+        [randomUUID(), org, uDraft, shiftId],
       )
       await pool.query(
         `INSERT INTO attendance_schedule_group_members (id, org_id, schedule_group_id, user_id, effective_from, effective_to)
@@ -113,40 +139,98 @@ describeDb('⑤ unscheduled-shift reminder (real DB)', () => {
         const scheduled = await isUserScheduledForDate(pluginDb, org, u, target)
         expect(scannedMine.has(u)).toBe(!scheduled) // candidate ⇔ predicate says "unscheduled"
       }
-      // (a/b/c) only the no-coverage all-scheduled_shift member is a candidate
-      expect(scannedMine).toEqual(new Set([uNoAssign]))
+      // (a/b/c) no-coverage and draft-only all-scheduled_shift members are candidates.
+      expect(scannedMine).toEqual(new Set([uNoAssign, uDraft]))
 
-      // === run with a capture channel: claims + dispatches uNoAssign (scope assertions to our org; scan is global) ===
-      const captured: AttendanceNotificationMessage[] = []
-      const notifier = new AttendanceNotifier({ channels: [{ name: 'cap', async send(m) { captured.push(m); return { ok: true } } }] })
-      const svcCap = new UnscheduledReminderService({ query: serviceQuery, notifier, now: at0701, lookaheadDays: 1 })
-      await svcCap.run()
+      // === run: claims uNoAssign and produces C5 delivery rows (scope assertions to our org; scan is global) ===
+      const svcCap = new UnscheduledReminderService({ query: serviceQuery, now: at0701, lookaheadDays: 1 })
+      const firstRun = await svcCap.run()
+      expect(firstRun.claimed).toBeGreaterThanOrEqual(1)
       const rowCount = async (uid: string, d: string) =>
         Number((await pool.query(
           `SELECT count(*)::int AS n FROM attendance_unscheduled_reminder_dispatch WHERE org_id=$1 AND user_id=$2 AND target_date=$3`,
           [org, uid, d])).rows[0].n)
+      const deliveryRows = async (uid: string, d: string) =>
+        (await pool.query(
+          `SELECT nd.*, disp.user_id AS subject_user_id, disp.target_date::text AS target_date
+           FROM attendance_notification_deliveries nd
+           JOIN attendance_unscheduled_reminder_dispatch disp
+             ON disp.org_id = nd.org_id
+            AND disp.id::text = nd.source_id
+           WHERE nd.org_id=$1
+             AND nd.source_type='unscheduled_reminder'
+             AND disp.user_id=$2
+             AND disp.target_date=$3
+           ORDER BY nd.recipient_user_id`,
+          [org, uid, d],
+        )).rows
       expect(await rowCount(uNoAssign, target)).toBe(1)
+      expect(await rowCount(uDraft, target)).toBe(1)
       for (const u of [uShift, uSchedGrp, uFixed, uFree, uMixed]) expect(await rowCount(u, target)).toBe(0)
-      expect(captured.filter((m) => m.orgId === org).map((m) => m.userId)).toEqual([uNoAssign])
+      const rows = await deliveryRows(uNoAssign, target)
+      expect(rows).toHaveLength(4)
+      const byRecipient = new Map(rows.map((row) => [row.recipient_user_id, row]))
+      expect(byRecipient.get(uNoAssign)).toMatchObject({
+        recipient_role: 'subject',
+        channel: 'dingtalk_work_notification',
+        status: 'pending',
+        last_error: null,
+      })
+      expect(byRecipient.get(ownerActive)).toMatchObject({
+        recipient_role: 'owner',
+        channel: 'dingtalk_work_notification',
+        status: 'pending',
+        last_error: null,
+      })
+      expect(byRecipient.get(subOwnerInactive)).toMatchObject({
+        recipient_role: 'sub_owner',
+        status: 'skipped',
+        last_error: 'recipient_inactive_or_missing',
+      })
+      expect(byRecipient.get(ownerMissing)).toMatchObject({
+        recipient_role: 'owner',
+        status: 'skipped',
+        last_error: 'recipient_inactive_or_missing',
+      })
+      const ownerPayload = parsePayload(byRecipient.get(ownerActive)?.payload)
+      expect(ownerPayload.recipientRoles).toEqual(['owner'])
+      expect(ownerPayload.groupIds).toEqual([gSched])
+      expect(ownerPayload.subjectUserId).toBe(uNoAssign)
+      expect(ownerPayload.targetDate).toBe(target)
 
-      // === (d) repeat tick → no duplicate row, no second dispatch ===
+      // === (d) repeat tick → no duplicate dispatch or delivery rows ===
       await svcCap.run()
       expect(await rowCount(uNoAssign, target)).toBe(1) // unique-constraint claim held
-      expect(captured.filter((m) => m.orgId === org).length).toBe(1) // dispatched once total
+      expect(await deliveryRows(uNoAssign, target)).toHaveLength(4) // delivery source_key held
 
-      // === (e) default notifier (0 channels) → no external send, but the internal row IS recorded ===
-      const svcNoCh = new UnscheduledReminderService({ query: serviceQuery, notifier: new AttendanceNotifier(), now: at0701, lookaheadDays: 2 })
-      const eResult = await svcNoCh.run()
-      expect(eResult.dispatched).toBe(0) // no channel → nothing sent
-      expect(await rowCount(uNoAssign, targetE)).toBe(1) // but the reminder is recorded
+      // === (e) pre-existing dispatch row with no deliveries is reconciled into C5 outbox rows ===
+      const preExistingDispatchId = randomUUID()
+      await pool.query(
+        `INSERT INTO attendance_unscheduled_reminder_dispatch (id, org_id, user_id, target_date, reminder_type)
+         VALUES ($1,$2,$3,$4,'unscheduled')`,
+        [preExistingDispatchId, org, uNoAssign, targetE],
+      )
+      const reconcile = await svcCap.run()
+      expect(reconcile.deliveries).toBeGreaterThanOrEqual(4)
+      expect(await rowCount(uNoAssign, targetE)).toBe(1)
+      const reconciledRows = await deliveryRows(uNoAssign, targetE)
+      expect(reconciledRows).toHaveLength(4)
+      expect(new Set(reconciledRows.map((row) => row.source_id))).toEqual(new Set([preExistingDispatchId]))
     } finally {
+      await pool.query('DELETE FROM attendance_notification_deliveries WHERE org_id = $1', [org]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_unscheduled_reminder_dispatch WHERE org_id = $1', [org]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_schedule_group_members WHERE org_id = $1', [org]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_shift_assignments WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_group_managers WHERE org_id = $1', [org]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_group_members WHERE org_id = $1', [org]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_schedule_groups WHERE org_id = $1', [org]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_shifts WHERE org_id = $1', [org]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_groups WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [[...allUsers, ownerActive, subOwnerInactive]]).catch(() => undefined)
     }
   })
 })
+
+function parsePayload(value: unknown): Record<string, unknown> {
+  return typeof value === 'string' ? JSON.parse(value) as Record<string, unknown> : value as Record<string, unknown>
+}

@@ -121,7 +121,7 @@ describe('AttendanceScheduler (④ C4)', () => {
     const instances = new Set<unknown>()
     vi.spyOn(UnscheduledReminderService.prototype, 'run').mockImplementation(function (this: UnscheduledReminderService) {
       instances.add(this)
-      return Promise.resolve({ targetDate: '2026-06-11', claimed: 0, dispatched: 0 })
+      return Promise.resolve({ targetDate: '2026-06-11', claimed: 0, deliveries: 0 })
     })
 
     const job = resolveUnscheduledReminderJob()
