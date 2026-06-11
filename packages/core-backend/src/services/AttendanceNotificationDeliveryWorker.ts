@@ -465,14 +465,26 @@ function buildDeliveryContent(message: AttendanceDeliveryMessage): string {
 
 function normalizeErrorText(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : String(error ?? '')
-  const text = raw.trim() || fallback
+  const text = redactDingTalkErrorText(raw.trim() || fallback)
   return text.length > 240 ? `${text.slice(0, 237)}...` : text
+}
+
+function redactDingTalkErrorText(text: string): string {
+  return text
+    .replace(/([?&](?:access_token|accessToken|appsecret|appSecret|app_secret|client_secret|clientSecret)=)[^&\s'")]+/gi, '$1[redacted]')
+    .replace(/((?:access_token|accessToken|appsecret|appSecret|app_secret|client_secret|clientSecret)\s*[:=]\s*)[^&\s'")]+/gi, '$1[redacted]')
 }
 
 function classifyConfigError(error: unknown): AttendanceDeliveryChannelResult {
   const message = normalizeErrorText(error, 'DingTalk work-notification config unavailable')
   const retryable = !/not configured|required|not found|Agent ID/i.test(message)
   return { ok: false, retryable, error: `dingtalk_work_notification_config_unavailable: ${message}` }
+}
+
+function isRetryableDingTalkBusinessError(error: DingTalkBusinessError): boolean {
+  const responseText = typeof error.responseBody?.errmsg === 'string' ? error.responseBody.errmsg : ''
+  const message = `${error.message} ${responseText}`.toLowerCase()
+  return /rate.?limit|too many|throttl|system busy|server busy|temporar|timeout|timed out|try again|retry|busy|限流|频繁|繁忙|超时|稍后|重试|系统异常|服务异常/i.test(message)
 }
 
 function classifyDingTalkSendError(error: unknown): AttendanceDeliveryChannelResult {
@@ -486,7 +498,7 @@ function classifyDingTalkSendError(error: unknown): AttendanceDeliveryChannelRes
   if (error instanceof DingTalkBusinessError) {
     return {
       ok: false,
-      retryable: false,
+      retryable: isRetryableDingTalkBusinessError(error),
       error: `dingtalk_business_error: ${normalizeErrorText(error, 'DingTalk business error')}`,
     }
   }

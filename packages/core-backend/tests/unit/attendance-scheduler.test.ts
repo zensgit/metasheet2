@@ -404,5 +404,85 @@ describe('Attendance C5 delivery worker primitives', () => {
       retryable: false,
       error: expect.stringContaining('dingtalk_business_error'),
     })
+
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => 'access-token',
+      sendWorkNotification: async () => { throw new DingTalkBusinessError('system busy, try again later', { errcode: 50001, errmsg: 'system busy' }) },
+    }).send(base)).resolves.toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('dingtalk_business_error'),
+    })
+
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => 'access-token',
+      sendWorkNotification: async () => { throw new DingTalkBusinessError('rate limit exceeded', { errcode: 429, errmsg: 'too many requests' }) },
+    }).send(base)).resolves.toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('dingtalk_business_error'),
+    })
+  })
+
+  it('real DingTalk channel redacts DingTalk URL secrets before returning retryable errors', async () => {
+    const query: AttendanceNotificationDeliveryQuery = async () => ({
+      rows: [{ integration_id: 'dir-1', external_user_id: 'dt-user-1' }],
+      rowCount: 1,
+    })
+    const config: DingTalkMessageConfig = { appKey: 'k', appSecret: 'super-secret', agentId: '1' }
+    const result = await new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => {
+        throw new Error('Failed to parse URL from https://bad.invalid/gettoken?appkey=k&appsecret=super-secret')
+      },
+    }).send({
+      id: 'delivery-1',
+      orgId: 'default',
+      sourceType: 'comp_time_expiry_reminder',
+      sourceId: 'balance-1',
+      sourceKey: 'balance-1:recipient:u1',
+      recipientUserId: 'u1',
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+      payload: {},
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('appsecret=[redacted]'),
+    })
+    expect(JSON.stringify(result)).not.toContain('super-secret')
+
+    const sendResult = await new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => 'token-secret',
+      sendWorkNotification: async () => {
+        throw new Error('Failed to parse URL from https://bad.invalid/topapi/message?access_token=token-secret')
+      },
+    }).send({
+      id: 'delivery-2',
+      orgId: 'default',
+      sourceType: 'unscheduled_reminder',
+      sourceId: 'dispatch-1',
+      sourceKey: 'dispatch-1:recipient:u1',
+      recipientUserId: 'u1',
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+      payload: {},
+    })
+
+    expect(sendResult).toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('access_token=[redacted]'),
+    })
+    expect(JSON.stringify(sendResult)).not.toContain('token-secret')
   })
 })
