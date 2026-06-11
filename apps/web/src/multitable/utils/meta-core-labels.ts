@@ -252,6 +252,19 @@ export function groupNoValue(isZh: boolean): string {
   return isZh ? '(无值)' : '(No value)'
 }
 
+// percentGaugeAria: accessible label for the read-only percent progress bar
+// in MetaCellRenderer (r13 UI parity). `text` is the already-formatted percent
+// string (e.g. "65%") — user-facing data, interpolated raw.
+export function percentGaugeAria(text: string, isZh: boolean): string {
+  return isZh ? `进度 ${text}` : `Progress ${text}`
+}
+
+// ratingGaugeAria: accessible label for the read-only rating segment display
+// in MetaCellRenderer (r13 UI parity). Both numbers are UI-derived counts.
+export function ratingGaugeAria(filled: number, max: number, isZh: boolean): string {
+  return isZh ? `评分 ${filled} / ${max}` : `Rating ${filled} of ${max}`
+}
+
 // fieldTypeLabel: stable field-type display labels. F2 — used by BOTH the
 // filter panel and the group panel so the two stay consistent (before T3A1
 // the group panel showed the raw `f.type`; reusing this helper there also

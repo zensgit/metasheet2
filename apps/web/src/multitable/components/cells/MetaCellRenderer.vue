@@ -51,13 +51,25 @@
       >{{ tag.value }}</span>
     </template>
 
+    <!-- person (dedicated type or user-link field): avatar chip + name -->
+    <template v-else-if="isPersonLink">
+      <span
+        v-for="item in personItems"
+        :key="item.id"
+        class="meta-cell-renderer__person-chip"
+        :title="item.display"
+      >
+        <span class="meta-cell-renderer__person-avatar" aria-hidden="true">{{ item.initial }}</span>
+        <span class="meta-cell-renderer__person-name">{{ item.display }}</span>
+      </span>
+    </template>
+
     <!-- link -->
     <template v-else-if="field.type === 'link'">
       <span
         v-for="item in linkItems"
         :key="item.id"
         class="meta-cell-renderer__link"
-        :class="{ 'meta-cell-renderer__link--person': isPersonLink }"
       >{{ item.display }}</span>
     </template>
 
@@ -66,14 +78,45 @@
       <MetaAttachmentList :attachments="attachmentItems" variant="compact" empty-label="" />
     </template>
 
-    <!-- currency / percent -->
-    <template v-else-if="field.type === 'currency' || field.type === 'percent'">
+    <!-- percent: inline read-only progress gauge + numeric label -->
+    <template v-else-if="field.type === 'percent'">
+      <span
+        v-if="percentGauge !== null"
+        class="meta-cell-renderer__gauge"
+        role="img"
+        :aria-label="percentGaugeAria(displayValue, isZh)"
+      >
+        <span class="meta-cell-renderer__gauge-track" aria-hidden="true">
+          <span class="meta-cell-renderer__gauge-fill" :style="{ width: `${percentGauge}%` }"></span>
+        </span>
+        <span class="meta-cell-renderer__gauge-label">{{ displayValue }}</span>
+      </span>
+      <span v-else class="meta-cell-renderer__numeric">{{ displayValue }}</span>
+    </template>
+
+    <!-- currency -->
+    <template v-else-if="field.type === 'currency'">
       <span class="meta-cell-renderer__numeric">{{ displayValue }}</span>
     </template>
 
-    <!-- rating -->
+    <!-- rating: read-only filled/empty segment display -->
     <template v-else-if="field.type === 'rating'">
-      <span class="meta-cell-renderer__rating" :title="ratingTitle">{{ displayValue }}</span>
+      <span
+        v-if="ratingGauge"
+        class="meta-cell-renderer__rating"
+        role="img"
+        :aria-label="ratingGaugeAria(ratingGauge.filled, ratingGauge.max, isZh)"
+        :title="ratingTitle"
+      >
+        <span
+          v-for="i in ratingGauge.max"
+          :key="i"
+          class="meta-cell-renderer__rating-segment"
+          :class="{ 'meta-cell-renderer__rating-segment--filled': i <= ratingGauge.filled }"
+          aria-hidden="true"
+        >{{ i <= ratingGauge.filled ? '★' : '☆' }}</span>
+      </span>
+      <span v-else class="meta-cell-renderer__rating" :title="ratingTitle">{{ displayValue }}</span>
     </template>
 
     <!-- url -->
@@ -124,6 +167,8 @@ import { useLocale } from '../../../composables/useLocale'
 import { isPersonField } from '../../utils/link-fields'
 import { formatFieldDisplay } from '../../utils/field-display'
 import { isSystemFieldType } from '../../utils/system-fields'
+import { resolveRatingFieldProperty } from '../../utils/field-config'
+import { percentGaugeAria, ratingGaugeAria } from '../../utils/meta-core-labels'
 
 const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[]; attachmentSummaries?: MetaAttachment[] }>()
 const { isZh } = useLocale()
@@ -184,6 +229,47 @@ const linkItems = computed(() => {
   return [{ id: '__link_summary__', display: fallbackLabel }]
 })
 const isPersonLink = computed(() => isPersonField(props.field))
+
+function personInitial(display: string): string {
+  const trimmed = display.trim()
+  if (!trimmed) return '?'
+  return [...trimmed][0]!.toUpperCase()
+}
+
+const personItems = computed(() =>
+  linkItems.value.map((item) => ({
+    id: item.id,
+    display: item.display,
+    initial: personInitial(item.display),
+  })),
+)
+
+// percentGauge: bar fill width 0..100 for the read-only progress gauge.
+// Percent values are stored as the percent number itself (e.g. 65 → "65%"),
+// so the fill clamps the value into [0, 100]. Returns null for non-numeric
+// values so the template falls back to the plain numeric label.
+const percentGauge = computed<number | null>(() => {
+  if (props.field.type !== 'percent') return null
+  const v = props.value
+  if (v === null || v === undefined || v === '') return null
+  const num = typeof v === 'number' ? v : Number(v)
+  if (!Number.isFinite(num)) return null
+  return Math.max(0, Math.min(100, num))
+})
+
+// ratingGauge: filled-segment count and segment max for the read-only rating
+// display. Returns null for non-numeric values so the template falls back to
+// the plain star string.
+const ratingGauge = computed<{ filled: number; max: number } | null>(() => {
+  if (props.field.type !== 'rating') return null
+  const v = props.value
+  if (v === null || v === undefined || v === '') return null
+  const num = typeof v === 'number' ? v : Number(v)
+  if (!Number.isFinite(num)) return null
+  const { max } = resolveRatingFieldProperty(props.field.property)
+  const filled = Math.max(0, Math.min(max, Math.round(num)))
+  return { filled, max }
+})
 
 const attachmentIds = computed(() => {
   const v = props.value
@@ -254,10 +340,6 @@ const conditionalClass = computed(() => {
   display: inline-block; padding: 1px 6px; background: #ecf5ff;
   color: #409eff; border-radius: 3px; font-size: 11px; margin-right: 4px;
 }
-.meta-cell-renderer__link--person {
-  background: #eefbf3;
-  color: #227447;
-}
 .meta-cell-renderer__date { color: #606266; }
 .meta-cell-renderer__date-time {
   color: #475569;
@@ -279,6 +361,72 @@ const conditionalClass = computed(() => {
 .meta-cell-renderer__rating {
   color: #f5a623;
   letter-spacing: 1px;
+}
+.meta-cell-renderer__rating-segment { color: #d8dee9; }
+.meta-cell-renderer__rating-segment--filled { color: #f5a623; }
+.meta-cell-renderer__gauge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.meta-cell-renderer__gauge-track {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 36px;
+  max-width: 96px;
+  height: 6px;
+  border-radius: 999px;
+  background: #eceff4;
+  overflow: hidden;
+}
+.meta-cell-renderer__gauge-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: #409eff;
+  transition: width 0.15s ease;
+}
+.meta-cell-renderer__gauge-label {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #475569;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+.meta-cell-renderer__person-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px 1px 2px;
+  margin-right: 4px;
+  background: #eefbf3;
+  color: #227447;
+  border-radius: 999px;
+  font-size: 11px;
+  max-width: 100%;
+  min-width: 0;
+}
+.meta-cell-renderer__person-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #227447;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.meta-cell-renderer__person-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .meta-cell-renderer__barcode {
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;

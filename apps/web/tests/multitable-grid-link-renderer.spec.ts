@@ -37,7 +37,7 @@ describe('MetaCellRenderer link rendering', () => {
     container.remove()
   })
 
-  it('uses the people style for user link fields', async () => {
+  it('renders a person avatar chip for user link fields', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
 
@@ -64,8 +64,9 @@ describe('MetaCellRenderer link rendering', () => {
     app.mount(container)
     await nextTick()
 
-    const chip = container.querySelector('.meta-cell-renderer__link') as HTMLElement | null
-    expect(chip?.classList.contains('meta-cell-renderer__link--person')).toBe(true)
+    const chip = container.querySelector('.meta-cell-renderer__person-chip') as HTMLElement | null
+    expect(chip).not.toBeNull()
+    expect(container.querySelector('.meta-cell-renderer__person-avatar')?.textContent?.trim()).toBe('J')
     expect(container.textContent).toContain('Jamie')
 
     app.unmount()
