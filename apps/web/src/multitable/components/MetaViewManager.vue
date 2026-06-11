@@ -53,6 +53,9 @@
           <span>{{ viewConfigWarningText }}</span>
           <button class="meta-view-mgr__btn-inline" @click="reloadLatestConfig">{{ ml('action.reloadLatest') }}</button>
         </div>
+        <div v-else-if="viewConfigBlockingReason" class="meta-view-mgr__warning">
+          <span>{{ viewConfigBlockingReason }}</span>
+        </div>
         <div v-else-if="viewConfigLiveRefreshText" class="meta-view-mgr__refresh">
           <span>{{ viewConfigLiveRefreshText }}</span>
           <button class="meta-view-mgr__btn-inline" @click="dismissLiveRefreshNotice">{{ ml('action.dismiss') }}</button>
@@ -454,6 +457,7 @@ import {
 } from '../composables/useMultitableGrid'
 import {
   isSelfTableLinkField,
+  isSingleValueLinkField,
   resolveCalendarViewConfig,
   resolveGanttViewConfig,
   resolveGalleryViewConfig,
@@ -591,7 +595,10 @@ const dateFields = computed(() => props.fields.filter((field) => field.type === 
 const dateLikeFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'dateTime' || field.type === 'string' || field.type === 'number'))
 const numericFields = computed(() => props.fields.filter((field) => ['number', 'currency', 'percent', 'rating'].includes(field.type)))
 const selectFields = computed(() => props.fields.filter((field) => field.type === 'select'))
-const linkFields = computed(() => props.fields.filter((field) => field.type === 'link'))
+// S4 — hierarchy parent candidates only: reparent writes `[parentRecordId]` over this field,
+// so multi-value links are excluded here (and from validLinkFieldIds below, which makes a
+// legacy multi-value parent surface `view.error.parentInvalid` instead of silently nulling).
+const linkFields = computed(() => props.fields.filter((field) => isSingleValueLinkField(field)))
 const dependencyFields = computed(() => props.fields.filter((field) => isSelfTableLinkField(field, props.sheetId)))
 const stringFields = computed(() => props.fields.filter((field) => ['string', 'formula', 'lookup'].includes(field.type)))
 const groupableFields = computed(() => props.fields.filter((field) => ['select', 'string', 'boolean', 'number', 'date', 'dateTime'].includes(field.type)))
@@ -607,7 +614,14 @@ const validGroupableFieldIds = computed(() => new Set(groupableFields.value.map(
 
 const viewConfigBlockingReason = computed(() => {
   const target = configTarget.value
-  if (!target || !viewConfigOutdated.value) return ''
+  if (!target) return ''
+  // S4 — checked even when the draft is not outdated: a LEGACY hierarchy config may point at a
+  // multi-value link (hydrated as-is by resolveHierarchyViewConfig, which stays type-only), and
+  // without this block the saveConfig sanitization would silently null the parent field.
+  if (target.type === 'hierarchy' && hierarchyDraft.parentFieldId && !validLinkFieldIds.value.has(hierarchyDraft.parentFieldId)) {
+    return ml('view.error.parentInvalid')
+  }
+  if (!viewConfigOutdated.value) return ''
 
   if (target.type === 'gallery') {
     if (galleryDraft.titleFieldId && !validStringFieldIds.value.has(galleryDraft.titleFieldId)) {
@@ -676,9 +690,7 @@ const viewConfigBlockingReason = computed(() => {
   }
 
   if (target.type === 'hierarchy') {
-    if (hierarchyDraft.parentFieldId && !validLinkFieldIds.value.has(hierarchyDraft.parentFieldId)) {
-      return ml('view.error.parentInvalid')
-    }
+    // parentFieldId is covered by the unconditional S4 check above.
     if (hierarchyDraft.titleFieldId && !validFieldIds.value.has(hierarchyDraft.titleFieldId)) {
       return ml('view.error.titleMissing')
     }

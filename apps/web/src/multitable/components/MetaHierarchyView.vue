@@ -5,6 +5,7 @@
         <span>{{ managerLabel('view.parentField', isZh) }}</span>
         <select :value="hierarchyDraft.parentFieldId ?? ''" @change="onPickParentField">
           <option value="">{{ viewRenderLabel('hierarchy.autoLinkField', isZh) }}</option>
+          <option v-if="legacyParentFieldOption" :value="legacyParentFieldOption.id" disabled>{{ legacyParentFieldOption.name }}</option>
           <option v-for="field in linkFields" :key="field.id" :value="field.id">{{ field.name }}</option>
         </select>
       </label>
@@ -88,7 +89,7 @@
 import { computed, defineComponent, h, reactive, ref, watch, type PropType, type VNode } from 'vue'
 import type { MetaField, MetaHierarchyViewConfig, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { formatFieldDisplay } from '../utils/field-display'
-import { resolveHierarchyViewConfig } from '../utils/view-config'
+import { isSingleValueLinkField, resolveHierarchyViewConfig } from '../utils/view-config'
 import { useLocale } from '../../composables/useLocale'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import {
@@ -162,10 +163,21 @@ watch(
   { immediate: true },
 )
 
-const linkFields = computed(() => props.fields.filter((field) => field.type === 'link'))
+// S4 — only single-value links may be picked as parent: reparent writes `[parentRecordId]`
+// over this field, so a multi-value link would be silently overwritten on every drag.
+// Existing configs pointing at a multi-value link keep rendering (parentField below stays
+// type-only) but cannot be re-selected, and the backend rejects saving them.
+const linkFields = computed(() => props.fields.filter((field) => isSingleValueLinkField(field)))
 const parentField = computed(() =>
   hierarchyDraft.parentFieldId
     ? props.fields.find((field) => field.id === hierarchyDraft.parentFieldId && field.type === 'link') ?? null
+    : null,
+)
+// A legacy config may point at a link field that is no longer offered (multi-value): render it
+// as a disabled option so the select reflects the field the tree still uses instead of blank.
+const legacyParentFieldOption = computed(() =>
+  parentField.value && !linkFields.value.some((field) => field.id === parentField.value?.id)
+    ? parentField.value
     : null,
 )
 const titleField = computed(() =>

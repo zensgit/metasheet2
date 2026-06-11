@@ -41,6 +41,14 @@ function firstNonMatchingFieldId(fields: MetaField[], excludedIds: Array<string 
   return firstFieldId(candidates, types)
 }
 
+// S4 — hierarchy reparent writes `[parentRecordId]` over the configured parent link field via
+// a generic record patch, so only single-value links are safe parent candidates; a multi-value
+// link would be silently overwritten on every drag-to-reparent. Shared by MetaHierarchyView
+// (toolbar picker) and MetaViewManager (view-config dialog picker + client validation).
+export function isSingleValueLinkField(field: MetaField): boolean {
+  return field.type === 'link' && field.property?.limitSingleRecord === true
+}
+
 export function isSelfTableLinkField(field: MetaField, sheetId?: string | null): boolean {
   if (field.type !== 'link') return false
   const currentSheetId = typeof sheetId === 'string' ? sheetId.trim() : ''

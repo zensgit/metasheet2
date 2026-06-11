@@ -3440,6 +3440,42 @@ async function validateGanttDependencyConfig(
   return null
 }
 
+// S4 — the hierarchy view reparents by writing `[parentRecordId]` over the configured parent
+// link field via a generic record patch (no dedicated reparent endpoint), so a MULTI-value
+// link used as parent gets silently overwritten on every drag-to-reparent. Reject saving a
+// hierarchy view whose explicit parentFieldId is not a single-value (`limitSingleRecord`)
+// link field. An absent parentFieldId is allowed (runtime auto/first-link fallback unchanged).
+// Documented residuals (accepted): (a) PATCH /fields/:fieldId can later flip limitSingleRecord
+// or the field type without view re-validation — same pre-existing class as gantt's dependency
+// field, follow-up candidate; (b) provisioning ensureView/createView bypass route-layer view
+// validation by design (template library ships no hierarchy views today).
+async function validateHierarchyParentLinkConfig(
+  query: QueryFn,
+  sheetId: string,
+  viewType: string,
+  config: Record<string, unknown>,
+): Promise<string | null> {
+  if (viewType !== 'hierarchy') return null
+  const parentFieldId = typeof config.parentFieldId === 'string' ? config.parentFieldId.trim() : ''
+  if (!parentFieldId) return null
+
+  const fieldRes = await query(
+    'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = $2',
+    [sheetId, parentFieldId],
+  )
+  const fieldRow = (fieldRes.rows as any[])[0]
+  if (!fieldRow) {
+    return `Hierarchy parent field must be a single-value link field: ${parentFieldId}`
+  }
+
+  const field = serializeFieldRow(fieldRow)
+  if (field.type !== 'link' || (field.property ?? {}).limitSingleRecord !== true) {
+    return `Hierarchy parent field must be a single-value link field: ${parentFieldId}`
+  }
+
+  return null
+}
+
 class PermissionError extends Error {
   constructor(public message: string) {
     super(message)
@@ -5397,6 +5433,10 @@ export function univerMetaRouter(): Router {
       if (ganttConfigError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: ganttConfigError } })
       }
+      const hierarchyConfigError = await validateHierarchyParentLinkConfig(pool.query.bind(pool), sheetId, type, incomingConfig)
+      if (hierarchyConfigError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: hierarchyConfigError } })
+      }
 
       await pool.query(
         `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
@@ -5512,6 +5552,15 @@ export function univerMetaRouter(): Router {
         )
         if (ganttConfigError) {
           return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: ganttConfigError } })
+        }
+        const hierarchyConfigError = await validateHierarchyParentLinkConfig(
+          pool.query.bind(pool),
+          String(row.sheet_id),
+          nextType,
+          nextConfig as Record<string, unknown>,
+        )
+        if (hierarchyConfigError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: hierarchyConfigError } })
         }
       }
 
