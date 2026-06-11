@@ -76,6 +76,7 @@ export const AppRouteNames = {
   ATTENDANCE: 'attendance',
   MULTITABLE_HOME: 'multitable-home',
   MULTITABLE_TEMPLATES: 'multitable-templates',
+  MULTITABLE_TEMPLATE_DETAIL: 'multitable-template-detail',
   MULTITABLE: 'multitable',
   MULTITABLE_PUBLIC_FORM: 'multitable-public-form',
   MULTITABLE_COMMENT_INBOX: 'multitable-comment-inbox',
@@ -156,6 +157,7 @@ export interface AppRouteParams {
   'attendance': Record<string, never>
   'multitable-home': Record<string, never>
   'multitable-templates': Record<string, never>
+  'multitable-template-detail': { templateId: string }
   'multitable': { sheetId: string; viewId: string }
   'multitable-public-form': { sheetId: string; viewId: string }
   'multitable-comment-inbox': Record<string, never>
@@ -451,6 +453,9 @@ export const ROUTE_PATHS = {
   ATTENDANCE: '/attendance',
   MULTITABLE_HOME: '/multitable',
   MULTITABLE_TEMPLATES: '/multitable/templates',
+  // Static 'templates' segment outranks MULTITABLE's ':sheetId' param in
+  // vue-router scoring, so this never shadows /multitable/:sheetId/:viewId.
+  MULTITABLE_TEMPLATE_DETAIL: '/multitable/templates/:templateId',
   MULTITABLE: '/multitable/:sheetId/:viewId',
   MULTITABLE_PUBLIC_FORM: '/multitable/public-form/:sheetId/:viewId',
   MULTITABLE_COMMENT_INBOX: '/multitable/comments/inbox',

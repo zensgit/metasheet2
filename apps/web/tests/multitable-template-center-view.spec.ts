@@ -295,6 +295,25 @@ describe('MultitableTemplateCenterView', () => {
     expect(root.textContent).toContain('没有匹配的模板')
   })
 
+  // S2: the card's detail entry navigates to the template detail route.
+  it('查看详情 navigates to the template detail view', async () => {
+    mocks.listTemplates.mockResolvedValue({
+      templates: [makeTemplate({ id: 'project-tracker', name: 'Project Tracker' })],
+    })
+
+    const root = mountView()
+    await flushUi()
+
+    findButton(root, '查看详情').click()
+    await flushUi()
+
+    expect(mocks.push).toHaveBeenCalledWith({
+      name: AppRouteNames.MULTITABLE_TEMPLATE_DETAIL,
+      params: { templateId: 'project-tracker' },
+    })
+    expect(mocks.installTemplate).not.toHaveBeenCalled()
+  })
+
   it('hero shows a link back to multitable home', async () => {
     mocks.listTemplates.mockResolvedValue({ templates: [] })
 

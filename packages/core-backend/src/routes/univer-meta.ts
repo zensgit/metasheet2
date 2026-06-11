@@ -71,6 +71,9 @@ import { ensureLegacyBase as ensureLegacyBaseShared } from '../multitable/provis
 import {
   MultitableTemplateConflictError,
   MultitableTemplateNotFoundError,
+  buildTemplateWouldCreate,
+  detectTemplateConflicts,
+  getMultitableTemplate,
   installMultitableTemplate,
   listMultitableTemplates,
 } from '../multitable/template-library'
@@ -187,7 +190,9 @@ const DRY_RUN_MAX_PAREN_DEPTH = 32
 
 // Observation-readiness logger for the multitable H-series. Emits the stable
 // `[multitable.template.install]` event consumed by the H-series observation
-// SOP (docs/operations/multitable-h-series-observation-sop-20260519.md).
+// SOP (docs/operations/multitable-h-series-observation-sop-20260519.md), plus
+// the symmetric `[multitable.template.dry-run]` event (S2 review 2026-06-11
+// F5; distinct token, so the SOP's install grep stays single-counted).
 // Structured fields only — never logs baseName / request body / token / email
 // / template content / arbitrary user text.
 const templateInstallLogger = new Logger('MultitableTemplates')
@@ -3758,6 +3763,113 @@ export function univerMetaRouter(): Router {
         }
       }
       templateInstallLogger.info('[multitable.template.install]', {
+        templateId,
+        ok: false,
+        userId,
+        statusCode,
+        errorCode,
+      })
+      return res.status(statusCode).json({ ok: false, error: { code: errorCode, message } })
+    }
+  })
+
+  // S2 (design 20260611 §2.1): ZERO-WRITE install simulation — no transaction,
+  // no INSERT; pure SELECT id-occupancy probes via the shared
+  // detectTemplateConflicts (same source install consumes). Guarded with the
+  // same gate as install: dry-run answers "can I install", which is
+  // meaningless for read-only users. Conflict messages are English + a stable
+  // kind; clients localize by kind (formula dry-run convention).
+  router.post('/templates/:templateId/dry-run', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+    // Request body is install-shaped on purpose (workspaceId accepted for
+    // parity; it does not influence id occupancy).
+    const schema = z.object({
+      baseName: z.string().min(1).max(255).optional(),
+      workspaceId: z.string().min(1).max(100).optional(),
+    })
+
+    const parsed = schema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    const templateId = typeof req.params.templateId === 'string' ? req.params.templateId.trim() : ''
+    if (!templateId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'templateId is required' } })
+    }
+
+    // Observability userId (review 2026-06-11 F5): token-derived only — same
+    // claim fallbacks resolveRequestAccess reads, WITHOUT its DB-backed
+    // permission lookups, so the route's query surface stays exactly the
+    // SELECT-only occupancy probes (zero-write proof unchanged).
+    const userId =
+      req.user?.id?.toString() ??
+      req.user?.sub?.toString() ??
+      req.user?.userId?.toString() ??
+      null
+
+    const template = getMultitableTemplate(templateId)
+    if (!template) {
+      templateInstallLogger.info('[multitable.template.dry-run]', {
+        templateId,
+        ok: false,
+        userId,
+        statusCode: 404,
+        errorCode: 'NOT_FOUND',
+      })
+      // 404 semantics shared with install — same error type supplies the message.
+      return res.status(404).json({
+        ok: false,
+        error: { code: 'NOT_FOUND', message: new MultitableTemplateNotFoundError(templateId).message },
+      })
+    }
+
+    try {
+      const pool = poolManager.get()
+      // Ids derive through the same generator path install uses (buildId +
+      // the shared stableChildId derivation in template-library). Install
+      // draws a FRESH base id per call, so the ids returned here are
+      // illustrative of shape/derivation — NOT a promise of the exact ids a
+      // subsequent install will create.
+      const baseId = buildId('base').slice(0, 50)
+      const baseName = (parsed.data.baseName?.trim() || template.name).slice(0, 255)
+      const wouldCreate = buildTemplateWouldCreate(template, { baseId, baseName })
+      const conflicts = await detectTemplateConflicts(
+        (sql, params) => pool.query(sql, params),
+        template,
+        { baseId, baseName },
+      )
+      const installable = !conflicts.some((conflict) => conflict.severity === 'error')
+      templateInstallLogger.info('[multitable.template.dry-run]', {
+        templateId,
+        ok: true,
+        userId,
+        installable,
+        conflictCount: conflicts.length,
+      })
+      return res.json({ ok: true, data: { templateId, wouldCreate, conflicts, installable } })
+    } catch (err) {
+      let statusCode: number
+      let errorCode: string
+      let message: string
+      const hint = getDbNotReadyMessage(err)
+      if (hint) {
+        statusCode = 503
+        errorCode = 'DB_NOT_READY'
+        message = hint
+      } else {
+        statusCode = 500
+        errorCode = 'INTERNAL_ERROR'
+        message = 'Failed to dry-run template'
+        // Raw exception/stack kept separate from the structured event, and the
+        // message omits the stable `[multitable.template.dry-run]` token so an
+        // event-name grep is not double-counted on the 500 path (install-route
+        // convention).
+        templateInstallLogger.error(
+          'Dry-run multitable template failed',
+          err instanceof Error ? err : new Error(String(err)),
+        )
+      }
+      templateInstallLogger.info('[multitable.template.dry-run]', {
         templateId,
         ok: false,
         userId,

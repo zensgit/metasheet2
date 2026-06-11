@@ -52,6 +52,13 @@ function createQuery(seed?: { bases?: MultitableTemplateBase[] }): {
   const query: MultitableProvisioningQueryFn = async (sql, params = []) => {
     const normalized = sql.replace(/\s+/g, ' ').trim()
 
+    // S2 conflict pre-check probe (detectTemplateConflicts) — SELECT-only
+    // base-id occupancy; sheet/view probes reuse the SELECT handlers below.
+    if (normalized.startsWith('SELECT') && normalized.includes('FROM meta_bases') && normalized.includes('WHERE id = $1')) {
+      const [baseId] = params as [string]
+      return { rows: bases.filter((base) => base.id === baseId).map((base) => ({ id: base.id })) }
+    }
+
     if (normalized.startsWith('INSERT INTO meta_bases')) {
       const [id, name, icon, color, ownerId, workspaceId] = params as [string, string, string, string, string | null, string | null]
       if (bases.some((base) => base.id === id)) {

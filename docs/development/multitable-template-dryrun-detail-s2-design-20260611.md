@@ -49,6 +49,8 @@ S2(工程版)= ①`POST /templates/:id/dry-run`:**零写**模拟 install,返回 
 
 不动 install 语义/事务;无迁移;无 OpenAPI(两路由维持 internal 姿态——GET /templates 本就不在 spec,核实后保持一致);无 onboarding;无回滚语义变更(T7);不为 8 个模板authoring 任何内容。
 
+> **勘误(2026-06-11,S2 评审 F2)**:上行"GET /templates 本就不在 spec"与事实不符——GET /templates 与 POST install 均已在 `packages/openapi`(`scripts/ops/multitable-openapi-parity.test.mjs` 断言其存在);操作性锁定不变(dry-run 维持 spec 外),补录 dry-run 进 spec 为可选的后续 docs PR。
+
 ## 3. 测试矩阵(fail-first)
 
 | # | 场景 | 断言 |
