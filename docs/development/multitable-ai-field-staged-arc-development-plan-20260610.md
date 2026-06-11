@@ -24,7 +24,7 @@ Operator 按批准表 §3 模板逐行 markup;结果**新增一份 ratification-
 
 ### M1 — A1 provider readiness(声明层)
 1. **设计锁定 docs PR**(批准后即可先行;替代已失草稿;锁:resolver 形状、readiness 内部路由、状态机 `disabled/blocked/ready` + 4 个 A2 保留态、redaction 路径、按 M0 批准的 env 契约)。
-2. **实现 PR**(🔒 另需 owner 显式解除 defer gate,见 ratification-result §3):provider resolver + readiness 查询路由(按 M0 的 RBAC/OpenAPI/shape 决议)+ 全套 fail-closed(无 key/无 enable → `disabled`;非白名单 → `blocked`)+ 工件脱敏测试。**不发真实 provider 调用**(`MULTITABLE_AI_CONFIRM_LIVE_REQUESTS` 双确认留给 M2)。
+2. **实现 PR**(⬜ owner 已于 2026-06-10 显式解除 defer gate,见 ratification-result §3;前置仅剩 M1a 设计锁定合并):provider resolver + readiness 查询路由(按 M0 的 RBAC/OpenAPI/shape 决议)+ 全套 fail-closed(无 key/无 enable → `disabled`;非白名单 → `blocked`)+ 工件脱敏测试。**不发真实 provider 调用**(`MULTITABLE_AI_CONFIRM_LIVE_REQUESTS` 双确认留给 M2)。
 - 边界:不建新权限原语(R-3);不动 OpenAPI 公开面(M0 已定 Option B,**仅限 A1**);不写台账(T1 归 M2)。
 
 ### M2 — A2 AI 字段 shortcut 后端(执行层)
