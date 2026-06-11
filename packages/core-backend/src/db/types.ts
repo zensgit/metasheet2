@@ -112,6 +112,7 @@ export interface Database {
   automation_rules: AutomationRulesTable
   multitable_automation_jobs: MultitableAutomationJobsTable
   multitable_automation_suspensions: MultitableAutomationSuspensionsTable
+  multitable_automation_approval_bridges: MultitableAutomationApprovalBridgesTable
   multitable_automation_executions: MultitableAutomationExecutionsTable
   multitable_charts: MultitableChartsTable
   multitable_dashboards: MultitableDashboardsTable
@@ -1311,6 +1312,29 @@ export interface MultitableAutomationSuspensionsTable {
   trigger_event: JsonValueColumn
   status: string
   created_at: CreatedAt
+  resumed_at: Date | string | null
+}
+
+/** W6-1 start_approval bridge — approval completion resumes an automation job. */
+export interface MultitableAutomationApprovalBridgesTable {
+  id: string
+  execution_id: string
+  root_execution_id: string
+  rule_id: string
+  sheet_id: string | null
+  record_id: string | null
+  step_index: number
+  approval_instance_id: string | null
+  approval_request_no: string | null
+  approval_template_id: string
+  approval_published_definition_id: string | null
+  idempotency_key: string
+  status: string
+  outcome: string | null
+  action_fingerprint: JsonValueColumn
+  trigger_event: JsonValueColumn
+  created_at: CreatedAt
+  completed_at: Date | string | null
   resumed_at: Date | string | null
 }
 

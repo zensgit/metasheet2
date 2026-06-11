@@ -2275,6 +2275,59 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rule.execution_mode).toBe('workflow_job_v1')
   })
 
+  it('W6-1: createRule accepts start_approval only with workflow_job_v1', async () => {
+    const action = {
+      type: 'start_approval',
+      config: {
+        templateId: 'tpl_1',
+        formDataMapping: { amount: '{{record.amount}}', reviewer: '{{record.reviewer}}' },
+      },
+    } as const
+
+    dbExecuteResults.push([])
+    const rule = await service.createRule('sheet_1', {
+      name: 'Approval rule',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'start_approval',
+      actionConfig: action.config,
+      actions: [action],
+      executionMode: 'workflow_job_v1',
+      createdBy: 'user_1',
+    })
+
+    expect(rule.action_type).toBe('start_approval')
+    expect(rule.actions).toEqual([action])
+    expect(rule.execution_mode).toBe('workflow_job_v1')
+
+    const promise = service.createRule('sheet_1', {
+      name: 'Approval rule legacy',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'start_approval',
+      actionConfig: action.config,
+      actions: [action],
+      createdBy: 'user_1',
+    })
+    await expect(promise).rejects.toThrow('condition_branch/start_approval requires execution_mode workflow_job_v1')
+  })
+
+  it('W6-1: createRule rejects invalid start_approval config before persistence', async () => {
+    const promise = service.createRule('sheet_1', {
+      name: 'Broken approval rule',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'start_approval',
+      actionConfig: { templateId: '', formDataMapping: {} },
+      actions: [{ type: 'start_approval', config: { templateId: '', formDataMapping: {} } }],
+      executionMode: 'workflow_job_v1',
+      createdBy: 'user_1',
+    })
+
+    await expect(promise).rejects.toThrow('actionConfig.templateId is required')
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
   it('A6-3-1: createRule accepts condition_branch only with workflow_job_v1', async () => {
     const action = {
       type: 'condition_branch',
@@ -2316,7 +2369,7 @@ describe('AutomationService — Rule CRUD', () => {
       actions: [action],
       createdBy: 'user_1',
     })
-    await expect(promise).rejects.toThrow('condition_branch requires execution_mode workflow_job_v1')
+    await expect(promise).rejects.toThrow('requires execution_mode workflow_job_v1')
   })
 
   it('A6-3-1: createRule rejects wait_for_callback inside a condition_branch branch', async () => {
@@ -2629,6 +2682,59 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rule?.execution_mode).toBe('workflow_job_v1')
   })
 
+  it('W6-1: updateRule accepts start_approval with workflow_job_v1', async () => {
+    const action = {
+      type: 'start_approval',
+      config: {
+        templateId: 'tpl_1',
+        formDataMapping: { amount: '{{record.amount}}' },
+      },
+    }
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'update_record',
+      action_config: { fields: { status: 'before' } },
+      actions: [{ type: 'update_record', config: { fields: { status: 'before' } } }],
+    }))
+    dbExecuteResults.push([makeRuleRow({
+      action_type: 'start_approval',
+      action_config: action.config,
+      actions: [action],
+      execution_mode: 'workflow_job_v1',
+    })])
+
+    const rule = await service.updateRule('atr_1', 'sheet_1', {
+      actionType: 'start_approval',
+      actionConfig: action.config,
+      actions: [action],
+      executionMode: 'workflow_job_v1',
+    })
+
+    expect(rule?.action_type).toBe('start_approval')
+    expect(rule?.actions).toEqual([action])
+    expect(rule?.execution_mode).toBe('workflow_job_v1')
+  })
+
+  it('W6-1: updateRule rejects turning a start_approval rule back to legacy', async () => {
+    const action = {
+      type: 'start_approval',
+      config: {
+        templateId: 'tpl_1',
+        formDataMapping: { amount: '{{record.amount}}' },
+      },
+    }
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'start_approval',
+      action_config: action.config,
+      actions: [action],
+      execution_mode: 'workflow_job_v1',
+    }))
+
+    const promise = service.updateRule('atr_1', 'sheet_1', { executionMode: null })
+
+    await expect(promise).rejects.toThrow('condition_branch/start_approval requires execution_mode workflow_job_v1')
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
   it('A6-3-1: updateRule rejects turning a condition_branch rule back to legacy', async () => {
     const branchAction = {
       type: 'condition_branch',
@@ -2649,7 +2755,7 @@ describe('AutomationService — Rule CRUD', () => {
 
     const promise = service.updateRule('atr_1', 'sheet_1', { executionMode: null })
 
-    await expect(promise).rejects.toThrow('condition_branch requires execution_mode workflow_job_v1')
+    await expect(promise).rejects.toThrow('requires execution_mode workflow_job_v1')
     expect(dbExecuteResults).toHaveLength(0)
   })
 
@@ -2961,7 +3067,7 @@ describe('AutomationService — retryExecution (A5)', () => {
     expect(r).toEqual({ execution: newExec })
     const [, triggerEvent, retryMeta] = execSpy.mock.calls[0]
     expect(triggerEvent).toEqual({ recordId: 'rec1', data: { name: 'Bolt' } }) // original stored trigger event reused
-    expect(retryMeta).toEqual({ rerunOfExecutionId: 'axe_orig', initiatedBy: 'admin1' })
+    expect(retryMeta).toEqual({ rerunOfExecutionId: 'axe_orig', initiatedBy: 'admin1', rootExecutionId: 'axe_orig' })
   })
 
   it('D1 — retry uses the CURRENT rule (live token), never the redacted rule_snapshot', async () => {

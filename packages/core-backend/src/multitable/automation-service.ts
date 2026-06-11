@@ -10,7 +10,7 @@ import {
   type AutomationConditionField,
   type ConditionGroup,
 } from './automation-conditions'
-import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext } from './automation-executor'
+import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult } from './automation-executor'
 import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
 import {
@@ -24,6 +24,8 @@ import { randomBytes } from 'crypto'
 import { AutomationLogService } from './automation-log-service'
 import { AutomationJobService } from './automation-job-service'
 import { AutomationSuspensionService, computeActionFingerprint } from './automation-suspension-service'
+import { AutomationApprovalBridgeService, type AutomationApprovalBridgeRow } from './automation-approval-bridge-service'
+import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEvent'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -120,6 +122,43 @@ function validateSendEmailActionConfigs(
   return null
 }
 
+function validateStartApprovalConfig(config: Record<string, unknown>, path: string): string | null {
+  const templateId = typeof config.templateId === 'string' ? config.templateId.trim() : ''
+  if (!templateId) return `${path}.templateId is required`
+  const mapping = isRecord(config.formDataMapping) ? config.formDataMapping : null
+  if (!mapping || Object.keys(mapping).length === 0) return `${path}.formDataMapping is required`
+  for (const [key, value] of Object.entries(mapping)) {
+    if (!key.trim() || typeof value !== 'string' || value.trim().length === 0) {
+      return `${path}.formDataMapping entries must be non-empty strings`
+    }
+  }
+  if (config.requester !== undefined) {
+    if (!isRecord(config.requester)) return `${path}.requester must be an object`
+    const mode = config.requester.mode
+    if (mode !== undefined && mode !== 'trigger_actor' && mode !== 'rule_creator') {
+      return `${path}.requester.mode must be trigger_actor or rule_creator`
+    }
+  }
+  return null
+}
+
+function validateStartApprovalActionConfigs(
+  actionType: string,
+  actionConfig: Record<string, unknown>,
+  actions: AutomationAction[] | null | undefined,
+): string | null {
+  if (actionType === 'start_approval') {
+    const error = validateStartApprovalConfig(actionConfig, 'actionConfig')
+    if (error) return error
+  }
+  for (const [index, action] of (actions ?? []).entries()) {
+    if (action.type !== 'start_approval') continue
+    const error = validateStartApprovalConfig(action.config, `actions[${index}].config`)
+    if (error) return error
+  }
+  return null
+}
+
 function parseConditionGroupInput(value: unknown): ConditionGroup {
   try {
     return normalizeConditionGroupInput(value)
@@ -185,6 +224,9 @@ function validateConditionBranchConfig(config: unknown, path: string): Automatio
       if (nested.type === 'wait_for_callback') {
         throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain wait_for_callback until A6-3-3`)
       }
+      if (nested.type === 'start_approval') {
+        throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain start_approval until A6-3-3`)
+      }
     }
     nestedActions.push(...actions)
   }
@@ -208,6 +250,9 @@ function validateConditionBranchConfig(config: unknown, path: string): Automatio
       if (nested.type === 'wait_for_callback') {
         throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain wait_for_callback until A6-3-3`)
       }
+      if (nested.type === 'start_approval') {
+        throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain start_approval until A6-3-3`)
+      }
     }
     nestedActions.push(...actions)
   }
@@ -222,7 +267,7 @@ function collectNestedAutomationActions(
   executionMode: string | null,
 ): AutomationAction[] {
   const collected: AutomationAction[] = []
-  const requiresWorkflowJobMode = actionType === 'condition_branch'
+  const requiresWorkflowJobMode = actionType === 'condition_branch' || actionType === 'start_approval'
 
   if (actionType === 'condition_branch') {
     collected.push(...validateConditionBranchConfig(actionConfig, 'actionConfig'))
@@ -236,9 +281,10 @@ function collectNestedAutomationActions(
     collected.push(current)
   }
 
-  const hasBranch = requiresWorkflowJobMode || collected.some((action) => action.type === 'condition_branch')
-  if (hasBranch && executionMode !== 'workflow_job_v1') {
-    throw new AutomationRuleValidationError('condition_branch requires execution_mode workflow_job_v1')
+  const hasWorkflowAction = requiresWorkflowJobMode
+    || collected.some((action) => action.type === 'condition_branch' || action.type === 'start_approval')
+  if (hasWorkflowAction && executionMode !== 'workflow_job_v1') {
+    throw new AutomationRuleValidationError('condition_branch/start_approval requires execution_mode workflow_job_v1')
   }
 
   return collected
@@ -409,6 +455,7 @@ export class AutomationService {
   private logService: AutomationLogService
   private jobService: AutomationJobService
   private suspensionService: AutomationSuspensionService
+  private approvalBridgeService: AutomationApprovalBridgeService
   /** Kept for backward-compat with raw SQL in executor actions */
   private queryFn: AutomationQueryFn
 
@@ -435,6 +482,7 @@ export class AutomationService {
     this.logService = new AutomationLogService()
     this.jobService = new AutomationJobService()
     this.suspensionService = new AutomationSuspensionService(this.jobService)
+    this.approvalBridgeService = new AutomationApprovalBridgeService(this.jobService)
     this.scheduler = new AutomationScheduler(
       async (rule) => {
         await this.executeRule(rule, { _triggeredBy: 'schedule' })
@@ -477,6 +525,18 @@ export class AutomationService {
       this.subscriptionIds.push(id)
     }
 
+    for (const eventType of ['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled']) {
+      const id = this.eventBus.subscribe<ApprovalCompletionEventV1>(
+        eventType,
+        (payload) => {
+          this.handleApprovalCompletionEvent(payload).catch((err) => {
+            logger.error(`Automation approval bridge handler error for ${eventType}`, err instanceof Error ? err : undefined)
+          })
+        },
+      )
+      this.subscriptionIds.push(id)
+    }
+
     logger.info('AutomationService initialized (V1)')
   }
 
@@ -511,6 +571,8 @@ export class AutomationService {
     if (actionConfigValidationError) throw new AutomationRuleValidationError(actionConfigValidationError)
     const sendEmailValidationError = validateSendEmailActionConfigs(input.actionType, actionConfig, actionsForValidation)
     if (sendEmailValidationError) throw new AutomationRuleValidationError(sendEmailValidationError)
+    const startApprovalValidationError = validateStartApprovalActionConfigs(input.actionType, actionConfig, actionsForValidation)
+    if (startApprovalValidationError) throw new AutomationRuleValidationError(startApprovalValidationError)
     const linkValidationError = await validateDingTalkAutomationLinks(
       this.queryFn,
       sheetId,
@@ -644,6 +706,12 @@ export class AutomationService {
         actionsForValidation,
       )
       if (sendEmailValidationError) throw new AutomationRuleValidationError(sendEmailValidationError)
+      const startApprovalValidationError = validateStartApprovalActionConfigs(
+        nextActionType,
+        normalizedNextActionConfig,
+        actionsForValidation,
+      )
+      if (startApprovalValidationError) throw new AutomationRuleValidationError(startApprovalValidationError)
       const linkValidationError = await validateDingTalkAutomationLinks(
         this.queryFn,
         sheetId,
@@ -839,29 +907,14 @@ export class AutomationService {
   async executeRule(
     rule: ExecutorRule,
     triggerEvent: unknown,
-    retryMeta?: { rerunOfExecutionId: string; initiatedBy: string },
+    retryMeta?: { rerunOfExecutionId: string; initiatedBy: string; rootExecutionId?: string },
   ): Promise<AutomationExecution> {
     const persistJobs = rule.executionMode === 'workflow_job_v1'
     // A6-1: ONLY opted-in rules ('workflow_job_v1') get a per-action job lifecycle. Legacy rules
     // pass no factory → executor writes zero job rows (opt-out path is byte-identical to today).
     // This is the single place the path is chosen, so a retry of an opt-in rule also writes jobs.
     const jobLifecycleFactory = persistJobs
-      ? (executionId: string) => ({
-          onExecutionStarted: (execution: AutomationExecution) => this.logService.record(execution),
-          ...this.jobService.lifecycleFor(executionId, { id: rule.id, sheetId: rule.sheetId }),
-          // A6-2: a wait_for_callback step persists the suspension + suspended job, then the executor stops.
-          onSuspend: (stepIndex: number, action: AutomationAction): Promise<void> =>
-            this.suspensionService
-              .create({
-                executionId,
-                rule: { id: rule.id, sheetId: rule.sheetId, actions: rule.actions },
-                recordId: ((triggerEvent as Record<string, unknown>)?.recordId as string) ?? '',
-                triggerEvent,
-                stepIndex,
-                action,
-              })
-              .then(() => undefined),
-        })
+      ? (executionId: string) => this.buildJobLifecycle(executionId, rule, triggerEvent, retryMeta?.rootExecutionId)
       : undefined
     const execution = await this.executor.execute(rule, triggerEvent, jobLifecycleFactory)
     if (retryMeta) {
@@ -879,6 +932,43 @@ export class AutomationService {
       logger.error('Automation execution log persistence failed', err instanceof Error ? err : undefined)
     }
     return execution
+  }
+
+  private buildJobLifecycle(
+    executionId: string,
+    rule: ExecutorRule,
+    triggerEvent: unknown,
+    rootExecutionId?: string,
+  ): ActionJobLifecycle {
+    return {
+      onExecutionStarted: (execution: AutomationExecution) => this.logService.record(execution),
+      ...this.jobService.lifecycleFor(executionId, { id: rule.id, sheetId: rule.sheetId }),
+      // A6-2: a wait_for_callback step persists the suspension + suspended job, then the executor stops.
+      onSuspend: (stepIndex: number, action: AutomationAction): Promise<void> =>
+        this.suspensionService
+          .create({
+            executionId,
+            rule: { id: rule.id, sheetId: rule.sheetId, actions: rule.actions },
+            recordId: ((triggerEvent as Record<string, unknown>)?.recordId as string) ?? '',
+            triggerEvent,
+            stepIndex,
+            action,
+          })
+          .then(() => undefined),
+      // W6-1: create one approval, then either suspend pending completion or continue immediately
+      // if the approval auto-completed during createApproval().
+      onStartApproval: async (stepIndex: number, action: AutomationAction, context: ExecutionContext) => {
+        const result = await this.approvalBridgeService.startApproval({
+          execution: { id: executionId, rootExecutionId },
+          rule: { id: rule.id, sheetId: rule.sheetId, actions: rule.actions, createdBy: rule.createdBy },
+          context,
+          stepIndex,
+          action,
+        })
+        if (result.suspended) return { suspended: true }
+        return { suspended: false, result: result.result }
+      },
+    }
   }
 
   /**
@@ -914,6 +1004,15 @@ export class AutomationService {
       // Fail closed (A4-D7): null/undefined, array, or empty `{}` cannot rebuild context.
       return { status: 409, code: 'MISSING_TRIGGER_EVENT', message: 'Original execution has no usable stored trigger event to retry' }
     }
+    const lineageIds = await this.collectExecutionLineageIds(original)
+    const rootExecutionId = lineageIds.at(-1) ?? original.id
+    if (await this.approvalBridgeService.hasCreatedApprovalForAnyExecution(lineageIds)) {
+      return {
+        status: 409,
+        code: 'START_APPROVAL_ALREADY_CREATED',
+        message: 'Executions that already created an approval cannot be whole-execution retried in W6-1',
+      }
+    }
     const rule = await this.getRule(original.ruleId)
     if (!rule || !rule.enabled) {
       return { status: 409, code: 'RULE_MISSING_OR_DISABLED', message: `Rule ${original.ruleId} is missing or disabled; cannot retry` }
@@ -922,8 +1021,24 @@ export class AutomationService {
     const execution = await this.executeRule(execRule, original.triggerEvent, {
       rerunOfExecutionId: original.id,
       initiatedBy,
+      rootExecutionId,
     })
     return { execution }
+  }
+
+  private async collectExecutionLineageIds(execution: AutomationExecution): Promise<string[]> {
+    const ids: string[] = []
+    const seen = new Set<string>()
+    let current: AutomationExecution | null = execution
+    for (let depth = 0; current && depth < 16; depth++) {
+      if (seen.has(current.id)) break
+      seen.add(current.id)
+      ids.push(current.id)
+      const parentId = current.rerunOfExecutionId
+      if (!parentId || seen.has(parentId)) break
+      current = await this.logService.getById(parentId)
+    }
+    return ids
   }
 
   /**
@@ -995,21 +1110,9 @@ export class AutomationService {
       actorId: ((triggerEvent as Record<string, unknown>)?.actorId as string) ?? null,
       triggerEvent,
     }
-    const jobLifecycle = {
-      ...this.jobService.lifecycleFor(execution.id, { id: execRule.id, sheetId: execRule.sheetId }),
-      // A sequential second wait in the tail suspends again (new suspension row).
-      onSuspend: (stepIndex: number, action: AutomationAction): Promise<void> =>
-        this.suspensionService
-          .create({
-            executionId: execution.id,
-            rule: { id: execRule.id, sheetId: execRule.sheetId, actions: execRule.actions },
-            recordId: suspension.recordId ?? '',
-            triggerEvent,
-            stepIndex,
-            action,
-          })
-          .then(() => undefined),
-    }
+    const lineageIds = await this.collectExecutionLineageIds(execution)
+    const rootExecutionId = lineageIds.at(-1) ?? execution.id
+    const jobLifecycle = this.buildJobLifecycle(execution.id, execRule, triggerEvent, rootExecutionId)
     const continued = await this.executor.continueExecution(execution, execRule, context, suspension.stepIndex, jobLifecycle)
     try {
       await this.logService.updateRecordedExecution(continued)
@@ -1017,6 +1120,137 @@ export class AutomationService {
       logger.error('Resume execution log persistence failed', err instanceof Error ? err : undefined)
     }
     return { execution: continued }
+  }
+
+  async handleApprovalCompletionEvent(event: ApprovalCompletionEventV1): Promise<void> {
+    if (event.version !== 1 || event.source !== 'approval-product') return
+    if (!['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled'].includes(event.eventType)) return
+
+    const bridge = await this.approvalBridgeService.claimCompletion(event)
+    if (!bridge) return
+
+    const execution = await this.logService.getById(bridge.executionId)
+    if (!execution) {
+      logger.error(`start_approval bridge ${bridge.id} references missing execution ${bridge.executionId}`)
+      return
+    }
+
+    const rule = await this.getRule(bridge.ruleId)
+    if (!rule || !rule.enabled) {
+      await this.failApprovalBridgeExecution(execution, bridge, `Rule ${bridge.ruleId} is missing or disabled; cannot resume approval bridge`)
+      return
+    }
+    const execRule = toExecutorRule(rule)
+    const currentFp = computeActionFingerprint(execRule.actions)
+    if (currentFp.count !== bridge.actionFingerprint.count || currentFp.hash !== bridge.actionFingerprint.hash) {
+      await this.failApprovalBridgeExecution(execution, bridge, 'Rule actions changed since start_approval suspended; cannot resume safely')
+      return
+    }
+
+    const result = this.approvalCompletionStepResult(event)
+    if (event.transition.toStatus !== 'approved') {
+      await this.failApprovalBridgeExecution(execution, bridge, result.error ?? `Approval completed with ${event.transition.toStatus}`, result)
+      return
+    }
+
+    let recordData: Record<string, unknown> = {}
+    if (bridge.recordId) {
+      const rec = await this.queryFn(
+        `SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2`,
+        [bridge.recordId, bridge.sheetId ?? execRule.sheetId],
+      )
+      const row = (rec.rows[0] ?? null) as { data?: Record<string, unknown> } | null
+      if (!row) {
+        await this.failApprovalBridgeExecution(execution, bridge, 'Record no longer exists; cannot resume approval bridge')
+        return
+      }
+      recordData = (row.data as Record<string, unknown>) ?? {}
+    }
+
+    const triggerEvent = bridge.triggerEvent ?? {}
+    const context: ExecutionContext = {
+      executionId: execution.id,
+      ruleId: execRule.id,
+      sheetId: execRule.sheetId,
+      recordId: bridge.recordId ?? '',
+      recordData,
+      ruleCreatedBy: execRule.createdBy,
+      actorId: event.actor?.id ?? event.requester.id ?? null,
+      triggerEvent,
+    }
+    const continued = await this.executor.continueExecution(
+      execution,
+      execRule,
+      context,
+      bridge.stepIndex,
+      this.buildJobLifecycle(execution.id, execRule, triggerEvent, bridge.rootExecutionId),
+      result,
+    )
+    try {
+      await this.logService.updateRecordedExecution(continued)
+    } catch (err) {
+      logger.error('Approval bridge execution log persistence failed', err instanceof Error ? err : undefined)
+    }
+  }
+
+  private approvalCompletionStepResult(event: ApprovalCompletionEventV1): AutomationStepResult {
+    const output = {
+      approvalInstanceId: event.approval.instanceId,
+      requestNo: event.approval.requestNo,
+      templateId: event.approval.templateId,
+      publishedDefinitionId: event.approval.publishedDefinitionId,
+      outcome: event.transition.toStatus,
+      eventId: event.eventId,
+    }
+    if (event.transition.toStatus === 'approved') {
+      return { actionType: 'start_approval', status: 'success', output, durationMs: 0 }
+    }
+    return {
+      actionType: 'start_approval',
+      status: 'failed',
+      output,
+      error: `Approval completed with ${event.transition.toStatus}`,
+      durationMs: 0,
+    }
+  }
+
+  private async failApprovalBridgeExecution(
+    execution: AutomationExecution,
+    bridge: AutomationApprovalBridgeRow,
+    message: string,
+    result?: AutomationStepResult,
+  ): Promise<void> {
+    const rule = await this.getRule(bridge.ruleId)
+    const execRule = rule ? toExecutorRule(rule) : null
+    const action = execRule?.actions[bridge.stepIndex] ?? { type: 'start_approval', config: {} } as AutomationAction
+    const failedResult = result ?? {
+      actionType: 'start_approval',
+      status: 'failed',
+      error: message,
+      durationMs: 0,
+    }
+    execution.status = 'failed'
+    execution.error = failedResult.error ?? message
+    execution.steps.push(failedResult)
+    const skippedTail = execRule?.actions.slice(bridge.stepIndex + 1) ?? []
+    for (const action of skippedTail) {
+      execution.steps.push({ actionType: action.type, status: 'skipped', durationMs: 0 })
+    }
+    execution.finishedAt = new Date().toISOString()
+    const lifecycle = this.jobService.lifecycleFor(execution.id, { id: bridge.ruleId, sheetId: bridge.sheetId ?? undefined })
+    try {
+      await lifecycle.onSettled(bridge.stepIndex, action, failedResult)
+      for (let offset = 0; offset < skippedTail.length; offset++) {
+        await lifecycle.onSkipped(bridge.stepIndex + 1 + offset, skippedTail[offset])
+      }
+    } catch (err) {
+      logger.error('Approval bridge job settle failed', err instanceof Error ? err : undefined)
+    }
+    try {
+      await this.logService.updateRecordedExecution(execution)
+    } catch (err) {
+      logger.error('Approval bridge failed-execution persistence failed', err instanceof Error ? err : undefined)
+    }
   }
 
   /**
