@@ -106,6 +106,12 @@ import {
   startWebhookRetryScheduler,
   stopWebhookRetryScheduler,
 } from './services/WebhookRetryScheduler'
+import {
+  resolveLedgerRetentionSchedulerIntervalMs,
+  resolveLedgerRetentionSchedulerLeaderOptions,
+  startLedgerRetentionScheduler,
+  stopLedgerRetentionScheduler,
+} from './services/LedgerRetentionScheduler'
 import { initWebhookEventBridge } from './multitable/webhook-event-bridge'
 import { ApprovalBreachNotifier } from './services/ApprovalBreachNotifier'
 import {
@@ -1876,6 +1882,14 @@ export class MetaSheetServer {
       }
     })())
 
+    shutdownTasks.push((async () => {
+      try {
+        stopLedgerRetentionScheduler()
+      } catch (err) {
+        this.logger.warn(`Ledger retention scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 4. Destroy API Gateway resources (only if one was constructed during start()).
     shutdownTasks.push((async () => {
       try {
@@ -2098,6 +2112,28 @@ export class MetaSheetServer {
       )
     } catch (e) {
       this.logger.error('Webhook retry scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // AI usage ledger retention sweep (ladder #9): a periodic bounded DELETE of
+    // multitable_ai_usage_ledger rows past the retention window (default 90d,
+    // env-overridable, floored at 7d so it can never cross a quota window). The
+    // M2 ledger inserts a row per attempt, so without this the table grows
+    // unbounded under a rate-limit storm. Mirrors the webhook retry scheduler's
+    // leader-elected interval; enabled by default (opt out via
+    // MULTITABLE_AI_LEDGER_RETENTION_DISABLED=1).
+    try {
+      const ledgerRetentionLeaderOptions = await resolveLedgerRetentionSchedulerLeaderOptions()
+      const ledgerRetentionScheduler = startLedgerRetentionScheduler({
+        leaderOptions: ledgerRetentionLeaderOptions,
+        intervalMs: resolveLedgerRetentionSchedulerIntervalMs(),
+      })
+      this.logger.info(
+        ledgerRetentionScheduler
+          ? 'AI usage ledger retention scheduler initialized'
+          : 'AI usage ledger retention scheduler disabled (MULTITABLE_AI_LEDGER_RETENTION_DISABLED=1)',
+      )
+    } catch (e) {
+      this.logger.error('AI usage ledger retention scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
     // 加载插件并启动 HTTP 服务
