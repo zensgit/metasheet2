@@ -61,6 +61,56 @@ function createDurableMemoryStorage() {
   }
 }
 
+function createSharedDurableStorage(backing = new Map()) {
+  return {
+    durable: true,
+    backing,
+    async get(key) {
+      if (!backing.has(key)) return null
+      return clone(backing.get(key))
+    },
+    async set(key, value) {
+      backing.set(key, clone(value))
+    },
+    async delete(key) {
+      backing.delete(key)
+    },
+    async list() {
+      return Array.from(backing.keys()).sort()
+    },
+  }
+}
+
+function createFailingDurableStorage(operation = 'set') {
+  return {
+    durable: true,
+    async get() {
+      if (operation === 'get') throw createDurableStorageFailure('get')
+      return null
+    },
+    async set() {
+      if (operation === 'set') throw createDurableStorageFailure('set')
+    },
+    async delete() {},
+    async list() {
+      return []
+    },
+  }
+}
+
+function createDurableStorageFailure(operation) {
+  const error = new Error('plugin durable storage is unavailable')
+  error.name = 'PluginDurableStorageError'
+  error.code = 'PLUGIN_DURABLE_STORAGE_UNAVAILABLE'
+  error.status = 501
+  error.details = {
+    pluginName: 'plugin-integration-core',
+    operation,
+  }
+  error.cause = new Error('INSERT failed for key P-001/PART-A')
+  return error
+}
+
 function createMockContext(options = {}) {
   const routes = new Map()
   const records = options.recordsApi || {
@@ -3100,6 +3150,104 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.equal(res.body.data.authoritative, false)
 }
 
+async function testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount() {
+  const calls = []
+  const records = createTableActionRecordsApi()
+  const { services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          status: 'active',
+          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['createAdapter', system, deps])
+        return createTableActionSourceAdapter(tableActionPlmData(), calls)
+      },
+    },
+  })
+  const backing = new Map()
+  const config = {
+    stockPreparationTableActions: [tableActionConfig()],
+  }
+
+  const firstMount = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage: createSharedDurableStorage(backing),
+    config,
+  })
+  let res = await invoke(firstMount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 202)
+  const jobId = res.body.data.jobId
+
+  const secondMount = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage: createSharedDurableStorage(backing),
+    config,
+  })
+  res = await invoke(secondMount.routes, 'GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'queued', 'second route mount reads the job from durable backing storage')
+
+  res = await invoke(secondMount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'completed')
+  assert.equal(res.body.data.progress.rowsExpanded, 1)
+  assert.ok(findCalls(calls, 'sourceRead').length > 0, 'remounted route runs the real source read path')
+  assert.equal(records.calls.length, 0, 'background expansion still does not touch target rows')
+}
+
+async function testLargeBomDurableStorageFailureIsValuesFree() {
+  const records = createTableActionRecordsApi()
+  const { calls, services } = createMockServices()
+  const { routes } = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage: createFailingDurableStorage('set'),
+    config: {
+      stockPreparationTableActions: [tableActionConfig()],
+    },
+  })
+
+  const res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+
+  assert.equal(res.statusCode, 501)
+  assert.equal(res.body.error.code, 'PLUGIN_DURABLE_STORAGE_UNAVAILABLE')
+  assert.equal(res.body.error.details.pluginName, 'plugin-integration-core')
+  assert.equal(res.body.error.details.operation, 'set')
+  assert.deepEqual(Object.keys(res.body.error.details).sort(), ['operation', 'pluginName'])
+  const responseText = JSON.stringify(res.body.error)
+  assert.equal(responseText.includes('P-001'), false, 'durable storage failure hides project values')
+  assert.equal(responseText.includes('PART-A'), false, 'durable storage failure hides component values')
+  assert.equal(responseText.includes('INSERT'), false, 'durable storage failure hides backing SQL')
+  assert.equal(responseText.includes('stock-preparation:large-bom'), false, 'durable storage failure hides storage keys')
+  assert.equal(calls.length, 0, 'durable storage failure fails before source adapter work')
+  assert.equal(records.calls.length, 0, 'durable storage failure fails before target reads/writes')
+}
+
 async function testTableActionConflictPolicyRoutes() {
   const calls = []
   const adapterCalls = []
@@ -3431,6 +3579,8 @@ async function main() {
   await testStockPreparationOptionSyncRoute()
   await testTableActionRoutes()
   await testLargeBomBackgroundExpansionJobRoutes()
+  await testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount()
+  await testLargeBomDurableStorageFailureIsValuesFree()
   await testTableActionConflictPolicyRoutes()
   await testTableActionRoutesSupportExplicitBridgeSource()
   await testTableActionTargetPreflightBeforeSourceAdapter()
