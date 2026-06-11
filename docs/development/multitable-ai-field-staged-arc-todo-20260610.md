@@ -12,8 +12,9 @@
 
 ## 1. 主线 — AI 字段 staged
 
-- [ ] ⬜ **M0 决策批准**:operator 对 `multitable-phase3-lane-a1-ratification-table-20260515.md` 逐行 markup(R-1..3 / OpenAPI A-B / shape / E-1..12 / P-1 / Q-1..4 / T-framing);结果落 ratification-result 附录文档。**当前等待 operator。**
-- [ ] 🔒 **M1 A1 provider readiness**(gated on M0):①新设计锁定 docs PR(替代已失 `/tmp` 草稿,按 M0 决议);②实现 PR(resolver + readiness 内部路由 + `disabled/blocked/ready` 状态机 + 脱敏 + fail-closed;**零真实 provider 调用**)。
+- [x] ✅ **M0 决策批准**(2026-06-10):全按推荐 + owner 两修正(①批准≠实现解锁,M1 实现另需显式解除 AI 线旧 defer gate;②R-2/internal-route 仅限 A1,A2/A3 产品路径届时按 sheet/field/record 权限重设计)→ `multitable-ai-field-staged-arc-m0-ratification-result-20260610.md`。
+- [ ] ⬜ **M1a A1 设计锁定 docs PR**(M0 已批,可先行):替代已失 `/tmp` 草稿,按 M0 决议(R-1..3 A1 限定 / Option B / shape defer / E-1..12 / P-1 / Q-1..4)。
+- [ ] 🔒 **M1b A1 实现 PR**(gated on **owner 显式解除 AI 线 defer gate**,见 ratification-result §3):resolver + readiness 内部路由 + `disabled/blocked/ready` 状态机 + 脱敏 + fail-closed;**零真实 provider 调用**。
 - [ ] 🔒 **M2 A2 shortcut 后端**(gated on M1):preview/run 端点 + 成本台账 + 配额执行(关 T1)+ 4 保留态推导(关 T6)+ 双确认真实调用门;design-lock 先行。
 - [ ] 🔒 **M3 A3 前端**(gated on M2):shortcut 配置 + 单元格 preview/run + blocked 安全态 + 成本可见性(关 T3 展示);design-lock 先行。
 - [ ] 🔒 **M4 B2 公式 AI 辅助**(gated on M1-M3 验证 + 独立 opt-in)。
