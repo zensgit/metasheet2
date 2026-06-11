@@ -54,6 +54,7 @@
     "verify:multitable-rc:staging": "node scripts/verify-multitable-rc-staging-smoke.mjs",
     "verify:multitable-rc:ui": "bash scripts/verify-multitable-rc-ui-smoke.sh",
     "verify:multitable-views:ui": "bash scripts/verify-multitable-views-ui-smoke.sh",
+    "verify:multitable-ai:readiness": "tsx scripts/ops/multitable-ai-readiness-gate.ts",
     "verify:multitable-email:readiness": "tsx scripts/ops/multitable-email-transport-readiness.ts",
     "verify:multitable-email:real-send": "tsx scripts/ops/multitable-email-real-send-smoke.ts",
     "verify:multitable-pilot:staging:test": "node --test scripts/ops/multitable-pilot-staging.test.mjs",
