@@ -7773,6 +7773,43 @@ function mapAttendanceSchedulerScopeRow(row) {
   }
 }
 
+const ATTENDANCE_NOTIFICATION_DELIVERY_STATUSES = ['pending', 'sending', 'sent', 'retrying', 'failed', 'skipped']
+
+function normalizeAttendanceNotificationDeliveryStatus(value) {
+  const status = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return ATTENDANCE_NOTIFICATION_DELIVERY_STATUSES.includes(status) ? status : null
+}
+
+function mapAttendanceNotificationDeliveryRow(row) {
+  const timestamp = (value) => {
+    if (!value) return null
+    const date = value instanceof Date ? value : new Date(value)
+    return Number.isNaN(date.getTime()) ? null : date.toISOString()
+  }
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    sourceType: row.source_type,
+    sourceId: row.source_id ?? null,
+    sourceKey: row.source_key,
+    recipientUserId: row.recipient_user_id,
+    recipientRole: row.recipient_role,
+    channel: row.channel,
+    status: row.status,
+    attemptCount: Number(row.attempt_count ?? 0),
+    nextAttemptAt: timestamp(row.next_attempt_at),
+    lastAttemptAt: timestamp(row.last_attempt_at),
+    claimedAt: timestamp(row.claimed_at),
+    claimExpiresAt: timestamp(row.claim_expires_at),
+    claimWorkerId: row.claim_worker_id ?? null,
+    deliveredAt: timestamp(row.delivered_at),
+    lastError: row.last_error ?? null,
+    payload: normalizeMetadata(row.payload),
+    createdAt: timestamp(row.created_at),
+    updatedAt: timestamp(row.updated_at),
+  }
+}
+
 function scopeListCoversTarget(scopeList, targetList) {
   const allowed = new Set(normalizeStringArray(scopeList))
   const targets = normalizeStringArray(targetList)
@@ -31653,6 +31690,68 @@ module.exports = {
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to remove schedule group member' } })
         }
       }
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/notification-deliveries',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query, { defaultPageSize: 50, maxPageSize: 200 })
+        const rawStatus = typeof req.query.status === 'string' ? req.query.status.trim() : ''
+        const status = rawStatus && rawStatus !== 'all' ? normalizeAttendanceNotificationDeliveryStatus(rawStatus) : null
+        if (rawStatus && rawStatus !== 'all' && !status) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid delivery status filter' } })
+          return
+        }
+        const filterParams = status ? [orgId, status] : [orgId]
+        const statusClause = status ? 'AND status = $2' : ''
+        try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+               FROM attendance_notification_deliveries
+              WHERE org_id = $1 ${statusClause}`,
+            filterParams,
+          )
+          const rows = await db.query(
+            `SELECT *
+               FROM attendance_notification_deliveries
+              WHERE org_id = $1 ${statusClause}
+              ORDER BY updated_at DESC, created_at DESC
+              LIMIT $${filterParams.length + 1} OFFSET $${filterParams.length + 2}`,
+            [...filterParams, pageSize, offset],
+          )
+          const counterRows = await db.query(
+            `SELECT status, COUNT(*)::int AS count
+               FROM attendance_notification_deliveries
+              WHERE org_id = $1
+              GROUP BY status`,
+            [orgId],
+          )
+          const counters = Object.fromEntries(ATTENDANCE_NOTIFICATION_DELIVERY_STATUSES.map(item => [item, 0]))
+          for (const row of counterRows) {
+            const normalized = normalizeAttendanceNotificationDeliveryStatus(row.status)
+            if (normalized) counters[normalized] = Number(row.count ?? 0)
+          }
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapAttendanceNotificationDeliveryRow),
+              total: Number(countRows[0]?.total ?? 0),
+              page,
+              pageSize,
+              counters,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance notification delivery table missing' } })
+            return
+          }
+          logger.error('Attendance notification deliveries fetch failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load attendance notification deliveries' } })
+        }
+      })
     )
 
     context.api.http.addRoute(

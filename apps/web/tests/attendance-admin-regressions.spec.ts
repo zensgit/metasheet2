@@ -121,6 +121,7 @@ describe('Attendance admin regressions', () => {
   let autoShiftApplyStatus = 200
   let autoShiftApplyData: Record<string, unknown> | null = null
   let autoShiftAutoWriteRunsData: Record<string, unknown> | null = null
+  let attendanceNotificationDeliveriesData: Record<string, unknown> | null = null
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -134,6 +135,7 @@ describe('Attendance admin regressions', () => {
     autoShiftApplyStatus = 200
     autoShiftApplyData = null
     autoShiftAutoWriteRunsData = null
+    attendanceNotificationDeliveriesData = null
     exportReportFieldFingerprint = 'records-unit-test-fingerprint'
     exportReportFieldCodes = 'work_date,employee_name'
     exportReportFieldCount = '2'
@@ -625,6 +627,22 @@ describe('Attendance admin regressions', () => {
           ok: true,
           data: autoShiftAutoWriteRunsData ?? { items: [], total: 0, page: 1, pageSize: 5 },
         })
+      }
+      if (url.includes('/api/attendance/notification-deliveries')) {
+        const parsedUrl = new URL(url, 'http://localhost')
+        const status = parsedUrl.searchParams.get('status')
+        const data = attendanceNotificationDeliveriesData ?? {
+          items: [],
+          total: 0,
+          page: 1,
+          pageSize: 50,
+          counters: { pending: 0, sending: 0, sent: 0, retrying: 0, failed: 0, skipped: 0 },
+        }
+        if (status && status !== 'all' && attendanceNotificationDeliveriesData) {
+          const items = Array.isArray(data.items) ? data.items.filter((item: any) => item.status === status) : []
+          return jsonResponse(200, { ok: true, data: { ...data, items, total: items.length } })
+        }
+        return jsonResponse(200, { ok: true, data })
       }
       if (url.includes('/api/attendance/auto-shift-matching/preview')) {
         if (autoShiftPreviewStatus >= 400) {
@@ -2671,6 +2689,87 @@ describe('Attendance admin regressions', () => {
         && String(url).includes('pageSize=5'),
       ),
     ).toBe(true)
+  })
+
+  it('renders C5 notification delivery counters and read-only delivery rows without retry controls', async () => {
+    attendanceNotificationDeliveriesData = {
+      items: [
+        {
+          id: 'delivery-failed-1',
+          sourceType: 'unscheduled_reminder',
+          sourceId: 'dispatch-1',
+          sourceKey: 'unscheduled:dispatch-1:recipient:owner-1:channel:dingtalk_work_notification',
+          recipientUserId: 'owner-1',
+          recipientRole: 'owner',
+          channel: 'dingtalk_work_notification',
+          status: 'failed',
+          attemptCount: 5,
+          lastError: 'dingtalk_recipient_not_bound',
+          updatedAt: '2026-06-11T09:00:00.000Z',
+        },
+        {
+          id: 'delivery-sent-1',
+          sourceType: 'comp_time_expiry_reminder',
+          sourceId: 'balance-1',
+          sourceKey: 'comp_time_expiry_reminder:balance-1:2026-06-20:recipient:user-1:channel:dingtalk_work_notification',
+          recipientUserId: 'user-1',
+          recipientRole: 'subject',
+          channel: 'dingtalk_work_notification',
+          status: 'sent',
+          attemptCount: 1,
+          deliveredAt: '2026-06-11T09:01:00.000Z',
+          updatedAt: '2026-06-11T09:01:00.000Z',
+        },
+      ],
+      total: 5,
+      page: 1,
+      pageSize: 50,
+      counters: { pending: 1, sending: 0, sent: 1, retrying: 2, failed: 1, skipped: 0 },
+    }
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const nav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-notification-deliveries"]')
+    expect(nav).toBeTruthy()
+    nav!.click()
+    await flushUi(4)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-notification-deliveries')
+    expect(section).toBeTruthy()
+    expect(window.getComputedStyle(section!).display).not.toBe('none')
+    const text = section!.textContent || ''
+    expect(text).toContain('Read-only delivery truth')
+    expect(text).toContain('Unscheduled reminder')
+    expect(text).toContain('Comp-time expiry')
+    expect(text).toContain('owner-1')
+    expect(text).toContain('dingtalk_recipient_not_bound')
+    expect(text).toContain('Showing first 2 of 5')
+    expect(section!.querySelector('[data-attendance-notification-deliveries-counter="failed"]')?.textContent).toContain('1')
+    expect(section!.querySelector('[data-attendance-notification-deliveries-counter="retrying"]')?.textContent).toContain('2')
+    expect(
+      Array.from(section!.querySelectorAll('button')).map(button => button.textContent || '').filter(label => /retry/i.test(label)),
+    ).toEqual([])
+    expect(
+      vi.mocked(apiFetch).mock.calls.some(([url]) =>
+        String(url).includes('/api/attendance/notification-deliveries')
+        && String(url).includes('page=1')
+        && String(url).includes('pageSize=50'),
+      ),
+    ).toBe(true)
+
+    const filter = section!.querySelector<HTMLSelectElement>('[data-attendance-notification-deliveries-status-filter]')
+    expect(filter).toBeTruthy()
+    filter!.value = 'failed'
+    filter!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+
+    const calls = vi.mocked(apiFetch).mock.calls.map(([url]) => String(url))
+    expect(calls.some(url => url.includes('/api/attendance/notification-deliveries') && url.includes('status=failed'))).toBe(true)
+    const rows = section!.querySelectorAll('[data-attendance-notification-delivery-row]')
+    expect(rows.length).toBe(1)
+    expect(rows[0]?.textContent || '').toContain('dingtalk_recipient_not_bound')
   })
 
   it('loads punchPolicy.outdoor into the card and PUTs ONLY { punchPolicy: { outdoor } } (flow id round-trips)', async () => {
