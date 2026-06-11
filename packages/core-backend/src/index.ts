@@ -93,6 +93,7 @@ import {
 import {
   resolveAttendanceSchedulerIntervalMs,
   resolveAttendanceSchedulerLeaderOptions,
+  resolveCompTimeExpiryReminderJob,
   resolveUnscheduledReminderJob,
   registerAttendanceSchedulerJob,
   startAttendanceScheduler,
@@ -2029,13 +2030,13 @@ export class MetaSheetServer {
 
     // ④ C4 — attendance comp-time expiry scheduler. Opt-in (ATTENDANCE_SCHEDULER_ENABLED=true, default
     // OFF); returns null and no-ops when disabled. The expiry claim is idempotent + concurrency-safe on
-    // its own, so the optional Redis leader lock only sheds load. ⑤ adds the unscheduled-reminder job as a
-    // SECOND job on the same scheduler, itself opt-in (ATTENDANCE_UNSCHEDULED_REMINDER_ENABLED=true, default
-    // OFF → null → expiry only).
+    // its own, so the optional Redis leader lock only sheds load. ⑤/C5 source producers are SECONDARY jobs
+    // on the same scheduler, each opt-in (default OFF → null → expiry only).
     try {
       const attendanceLeaderOptions = await resolveAttendanceSchedulerLeaderOptions()
       const unscheduledReminderJob = resolveUnscheduledReminderJob()
-      const attendanceSchedulerJobs = unscheduledReminderJob ? [unscheduledReminderJob] : []
+      const compTimeExpiryReminderJob = resolveCompTimeExpiryReminderJob()
+      const attendanceSchedulerJobs = [unscheduledReminderJob, compTimeExpiryReminderJob].filter((job): job is NonNullable<typeof job> => Boolean(job))
       const scheduler = startAttendanceScheduler({
         leaderOptions: attendanceLeaderOptions,
         intervalMs: resolveAttendanceSchedulerIntervalMs(),

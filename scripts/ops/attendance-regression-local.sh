@@ -53,7 +53,7 @@ fi
 
 run_check \
   "backend-attendance-integration" \
-  "cd packages/core-backend && pnpm exec vitest --config ${backend_vitest_config} run tests/integration/attendance-plugin.test.ts tests/integration/attendance-expiry-service.test.ts tests/integration/attendance-unscheduled-reminder.test.ts tests/integration/attendance-outdoor-punch.test.ts tests/integration/attendance-notification-deliveries.test.ts"
+  "cd packages/core-backend && pnpm exec vitest --config ${backend_vitest_config} run tests/integration/attendance-plugin.test.ts tests/integration/attendance-expiry-service.test.ts tests/integration/attendance-unscheduled-reminder.test.ts tests/integration/attendance-outdoor-punch.test.ts tests/integration/attendance-notification-deliveries.test.ts tests/integration/attendance-comp-time-expiry-reminder.test.ts"
 
 run_check \
   "web-unit-tests" \
