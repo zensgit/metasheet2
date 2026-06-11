@@ -59,6 +59,32 @@
       <div v-for="field in visibleFields" :key="field.id" class="meta-record-drawer__field">
         <div class="meta-record-drawer__field-header">
           <label class="meta-record-drawer__label" :for="`drawer_field_${field.id}`">{{ field.name }}</label>
+          <!--
+            A3-T3 AI shortcut actions: a field rendered here IS readable
+            (visibleFields filters visible===false), so preview mirrors the
+            backend's record-read gate; run additionally requires
+            canEditField — the same layer the backend's run pre-check
+            enforces (#2106 F3).
+          -->
+          <div v-if="fieldHasAiShortcut(field)" class="meta-record-drawer__ai-actions">
+            <button
+              type="button"
+              class="meta-record-drawer__ai-btn"
+              :disabled="aiBusy"
+              :title="l('record.aiPreviewTitle')"
+              :data-ai-preview="field.id"
+              @click="emit('ai-preview', field)"
+            >{{ l('record.aiPreview') }}</button>
+            <button
+              v-if="canEditField(field.id)"
+              type="button"
+              class="meta-record-drawer__ai-btn meta-record-drawer__ai-btn--run"
+              :disabled="aiBusy"
+              :title="l('record.aiRunTitle')"
+              :data-ai-run="field.id"
+              @click="emit('ai-run', field)"
+            >{{ l('record.aiRun') }}</button>
+          </div>
           <button
             v-if="resolvedCanComment"
             type="button"
@@ -193,6 +219,18 @@
           <span v-else class="meta-record-drawer__text">{{ formatValue(field, record.data[field.id]) }}</span>
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-record-drawer__link-summary">{{ linkPreview(field.id) }}</div>
         </div>
+        <!-- A3 §2.3/§2.4: per-field AI state — pending / error copy (by code) / per-run tokens. -->
+        <div
+          v-if="aiStatusTextFor(field.id)"
+          class="meta-record-drawer__ai-status"
+          :class="{ 'meta-record-drawer__ai-status--error': aiStatusIsError(field.id) }"
+          :data-ai-status="field.id"
+        >{{ aiStatusTextFor(field.id) }}</div>
+        <div
+          v-if="aiPreviewOutputFor(field.id)"
+          class="meta-record-drawer__ai-output"
+          :data-ai-output="field.id"
+        >{{ aiPreviewOutputFor(field.id) }}</div>
       </div>
       </div>
       <div v-else class="meta-record-drawer__history">
@@ -267,10 +305,13 @@ import {
 } from '../utils/meta-record-labels'
 import {
   metaCoreLabel,
+  aiTokensConsumed,
   attachmentActionHint as attachmentActionHintFn,
   attachmentActivityLabel,
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
+import { aiRetryCountdown, aiShortcutErrorMessage } from '../utils/meta-api-error-labels'
+import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
   dateTimeInputValue,
   dateTimeValueFromLocalInput,
@@ -299,6 +340,8 @@ const props = withDefaults(defineProps<{
   canManageRecordPermissions?: boolean
   sheetId?: string
   apiClient?: MultitableApiClient
+  /** A3: shared AI shortcut UI state from the workbench useAiShortcut instance. */
+  aiShortcut?: AiShortcutState | null
 }>(), {
   recordIds: () => [],
 })
@@ -312,6 +355,9 @@ const emit = defineEmits<{
   (e: 'open-automation'): void
   (e: 'open-link-picker', field: MetaField): void
   (e: 'navigate', recordId: string): void
+  /** A3: AI shortcut triggers (workbench resolves them through useAiShortcut). */
+  (e: 'ai-preview', field: MetaField): void
+  (e: 'ai-run', field: MetaField): void
 }>()
 
 const { isZh } = useLocale()
@@ -381,6 +427,68 @@ function canEditField(fieldId: string): boolean {
     && props.rowActions?.canEdit !== false
     && props.fieldPermissions?.[fieldId]?.readOnly !== true
     && !isSystemField(field)
+}
+
+// --- A3 AI shortcut (drawer = primary trigger surface) ---
+
+function fieldHasAiShortcut(field: MetaField): boolean {
+  if (field.type !== 'string' && field.type !== 'longText') return false
+  const raw = (field.property ?? {}).aiShortcut
+  return Boolean(raw) && typeof raw === 'object' && !Array.isArray(raw)
+}
+
+// Unified in-flight + rate-limit countdown disable across ALL fields (§2.2).
+const aiBusy = computed(() =>
+  Boolean(props.aiShortcut?.pending) || (props.aiShortcut?.retryRemainingMs ?? 0) > 0,
+)
+
+function aiStateTargets(fieldId: string): {
+  pending: boolean
+  error: AiShortcutState['error']
+  result: AiShortcutState['result']
+} {
+  const ai = props.aiShortcut
+  const recordId = props.record?.id
+  if (!ai || !recordId) return { pending: false, error: null, result: null }
+  return {
+    pending: Boolean(ai.pending && ai.pending.recordId === recordId && ai.pending.fieldId === fieldId),
+    error: ai.error && ai.error.recordId === recordId && ai.error.fieldId === fieldId ? ai.error : null,
+    result: ai.result && ai.result.recordId === recordId && ai.result.fieldId === fieldId ? ai.result : null,
+  }
+}
+
+function aiStatusIsError(fieldId: string): boolean {
+  const { error, result } = aiStateTargets(fieldId)
+  return Boolean(error) || Boolean(result?.refreshHint)
+}
+
+/** §2.3 state copy by error.code; per-run tokens; drift shares the 409 refresh copy. */
+function aiStatusTextFor(fieldId: string): string {
+  const { pending, error, result } = aiStateTargets(fieldId)
+  if (pending) return l('record.aiPending')
+  if (error) {
+    const mapped = aiShortcutErrorMessage(error.code, isZh.value) ?? error.message
+    const remaining = props.aiShortcut?.retryRemainingMs
+    if (error.code === 'RATE_LIMITED' && typeof remaining === 'number' && remaining > 0) {
+      return `${mapped} ${aiRetryCountdown(Math.ceil(remaining / 1000), isZh.value)}`
+    }
+    return mapped
+  }
+  if (result) {
+    const tokens = aiTokensConsumed(result.totalTokens, isZh.value)
+    if (result.refreshHint) {
+      // Drift-skipped merge: SAME recovery copy as 409 (LOCKED §2.2).
+      return `${aiShortcutErrorMessage('VERSION_CONFLICT', isZh.value)} · ${tokens}`
+    }
+    return tokens
+  }
+  return ''
+}
+
+/** Preview output is shown inline (a preview never writes the record). */
+function aiPreviewOutputFor(fieldId: string): string {
+  const { result } = aiStateTargets(fieldId)
+  return result && result.kind === 'preview' ? result.output : ''
 }
 
 function recordFieldAffordance(fieldId: string) {
@@ -750,6 +858,13 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__field { margin-bottom: 14px; }
 .meta-record-drawer__field-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
 .meta-record-drawer__label { display: block; font-size: 12px; color: #999; }
+.meta-record-drawer__ai-actions { display: inline-flex; gap: 4px; margin-left: auto; }
+.meta-record-drawer__ai-btn { padding: 1px 8px; border: 1px solid #c7d2fe; border-radius: 999px; background: #eef2ff; color: #4338ca; cursor: pointer; font-size: 11px; }
+.meta-record-drawer__ai-btn--run { border-color: #a7f3d0; background: #ecfdf5; color: #047857; }
+.meta-record-drawer__ai-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.meta-record-drawer__ai-status { margin-top: 4px; font-size: 11px; color: #4338ca; }
+.meta-record-drawer__ai-status--error { color: #b91c1c; }
+.meta-record-drawer__ai-output { margin-top: 4px; padding: 6px 8px; border: 1px dashed #c7d2fe; border-radius: 6px; background: #f8faff; font-size: 12px; color: #334155; white-space: pre-wrap; word-break: break-word; }
 .meta-record-drawer__comment-anchor { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 24px; padding: 0 6px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; }
 .meta-record-drawer__comment-anchor:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
 .meta-record-drawer__comment-anchor--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }

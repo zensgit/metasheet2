@@ -131,16 +131,23 @@ export async function insertAiUsageLedgerEntry(query: AiUsageQueryFn, entry: AiU
   )
 }
 
+/** Numeric window sums shared by the quota decision and the A3 usage summary. */
+export interface AiUsageWindowSums {
+  userDailyTokens: number
+  userWeeklyTokens: number
+  instanceDailyUsd: number
+}
+
 /**
- * Aggregate consumed tokens/USD for the quota windows. SUMs are NOT filtered
- * by status (§2.5: usage counts whatever the downstream outcome). Caller runs
- * this under `withAiUsageQuotaLock` and FAILS CLOSED (blocked) when it throws.
+ * Aggregate consumed tokens/USD for the quota windows — the SINGLE SUM source
+ * (A3 §2.4): `checkAiUsageQuota` derives its decision from these numbers and
+ * the admin usage-summary route reports them directly. SUMs are NOT filtered
+ * by status (§2.5: usage counts whatever the downstream outcome).
  */
-export async function checkAiUsageQuota(
+export async function sumAiUsageWindows(
   query: AiUsageQueryFn,
   subjectKey: string,
-  caps: AiUsageQuotaCaps,
-): Promise<AiUsageQuotaDecision> {
+): Promise<AiUsageWindowSums> {
   const result = await query(
     `SELECT
        COALESCE(SUM(prompt_tokens + completion_tokens) FILTER (
@@ -157,17 +164,31 @@ export async function checkAiUsageQuota(
     [subjectKey],
   )
   const row = (result.rows[0] ?? {}) as Record<string, unknown>
-  const userDailyTokens = Number(row.user_daily_tokens ?? 0)
-  const userWeeklyTokens = Number(row.user_weekly_tokens ?? 0)
-  const instanceDailyUsd = Number(row.instance_daily_usd ?? 0)
+  return {
+    userDailyTokens: Number(row.user_daily_tokens ?? 0),
+    userWeeklyTokens: Number(row.user_weekly_tokens ?? 0),
+    instanceDailyUsd: Number(row.instance_daily_usd ?? 0),
+  }
+}
 
-  if (userDailyTokens >= caps.tenantDailyTokenCap) {
+/**
+ * Quota decision over the shared window sums. Caller runs this under
+ * `withAiUsageQuotaLock` and FAILS CLOSED (blocked) when it throws.
+ */
+export async function checkAiUsageQuota(
+  query: AiUsageQueryFn,
+  subjectKey: string,
+  caps: AiUsageQuotaCaps,
+): Promise<AiUsageQuotaDecision> {
+  const sums = await sumAiUsageWindows(query, subjectKey)
+
+  if (sums.userDailyTokens >= caps.tenantDailyTokenCap) {
     return { allowed: false, reason: 'user_daily_tokens' }
   }
-  if (userWeeklyTokens >= caps.tenantWeeklyTokenCap) {
+  if (sums.userWeeklyTokens >= caps.tenantWeeklyTokenCap) {
     return { allowed: false, reason: 'user_weekly_tokens' }
   }
-  if (instanceDailyUsd >= caps.accountDailyUsdCap) {
+  if (sums.instanceDailyUsd >= caps.accountDailyUsdCap) {
     return { allowed: false, reason: 'instance_daily_usd' }
   }
   return { allowed: true }

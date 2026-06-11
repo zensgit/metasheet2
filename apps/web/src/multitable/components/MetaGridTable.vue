@@ -85,10 +85,12 @@
                     :delete-attachment-fn="props.deleteAttachmentFn"
                     :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                     :upload-context="{ recordId: row.id, fieldId: field.id }"
+                    :ai-run-state="aiRunState"
                     @update:model-value="editCell!.value = $event"
                     @confirm="confirmEdit(row)"
                     @cancel="cancelEdit"
                     @open-link-picker="openLinkPickerFromCell(row.id, field)"
+                    @ai-run="onAiRunFromCell(row.id, field)"
                   />
                   <MetaCellRenderer
                     v-else
@@ -187,11 +189,13 @@
                   :delete-attachment-fn="props.deleteAttachmentFn"
                   :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                   :upload-context="{ recordId: row.id, fieldId: field.id }"
+                  :ai-run-state="aiRunState"
                   @update:model-value="editCell!.value = $event"
                   @confirm="confirmEdit(row)"
                   @yjs-commit="markYjsHandled(row.id, field.id)"
                   @cancel="cancelEdit"
                   @open-link-picker="openLinkPickerFromCell(row.id, field)"
+                  @ai-run="onAiRunFromCell(row.id, field)"
                 />
                 <MetaCellRenderer
                   v-else
@@ -374,6 +378,13 @@ const props = defineProps<{
   // #4-3b-2a: server-computed per-group subtotals (full filtered set, NOT page). Matched to the
   // client's rendered groups by key. Value rendered from this prop only — no local group aggregation.
   aggregateGroups?: Array<{ key: string | number | boolean | null; count: number; aggregates: Record<string, { fn: string; value: number }> }>
+  // A3: AI shortcut run opt-in for the cell editor. `aiRunEnabled` gates the
+  // button; `aiRunPending` is the UNIFIED in-flight state from useAiShortcut;
+  // `aiRunBusy` (review F3) additionally covers the RATE_LIMITED countdown —
+  // the button disables on it so a click can never be silently refused.
+  aiRunEnabled?: boolean
+  aiRunPending?: boolean
+  aiRunBusy?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -392,6 +403,8 @@ const emit = defineEmits<{
   (e: 'create-record'): void
   (e: 'set-frozen', frozenLeftColumnIds: string[]): void
   (e: 'set-aggregation', payload: { fieldId: string; fn: string | null }): void
+  // A3: AI shortcut run requested from a cell editor.
+  (e: 'ai-run', recordId: string, field: MetaField): void
 }>()
 
 const { isZh } = useLocale()
@@ -674,6 +687,25 @@ function cancelEdit() { editCell.value = null; yjsHandledCellKey.value = null }
 function openLinkPickerFromCell(recordId: string, field: MetaField) {
   cancelEdit()
   emit('open-link-picker', { recordId, field })
+}
+
+// A3: cell-editor opt-in payload (null = host did not enable → no button).
+// `busy` (review F3) folds in the rate-limit countdown so the run button
+// disables exactly like the drawer's aiBusy — never an enabled click that
+// would only be refused by the composable guard.
+const aiRunState = computed(() => (props.aiRunEnabled
+  ? { pending: Boolean(props.aiRunPending), busy: Boolean(props.aiRunPending) || Boolean(props.aiRunBusy) }
+  : null))
+
+// A3: an AI run replaces the cell value server-side — close the edit session
+// first so a stale editor draft can never overwrite the AI output on confirm.
+// Review F3 guard: while the unified AI state is busy (in-flight elsewhere or
+// rate-limit countdown) the composable would refuse the run anyway, so do NOT
+// destroy the user's edit session — keep the editor open and no-op here.
+function onAiRunFromCell(recordId: string, field: MetaField) {
+  if (props.aiRunPending || props.aiRunBusy) return
+  cancelEdit()
+  emit('ai-run', recordId, field)
 }
 
 function copyFocusedCell() {

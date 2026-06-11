@@ -39,6 +39,10 @@ export type MetaRecordLabelKey =
   // pattern from T3A2). Backend error.message remains raw when present.
   | 'record.errorHistoryLoad' | 'record.errorWatchLoad' | 'record.errorWatchUpdate'
   | 'record.noRecord'
+  // --- AI shortcut field-header actions (A3-T3) ---
+  | 'record.aiPreview' | 'record.aiRun'
+  | 'record.aiPreviewTitle' | 'record.aiRunTitle'
+  | 'record.aiPending'
   // --- MetaFormView static ---
   | 'form.loading' | 'form.readOnly'
   | 'form.discardConfirm'
@@ -72,6 +76,14 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.errorWatchLoad': { en: 'Failed to load watch status', zh: '加载关注状态失败' },
   'record.errorWatchUpdate': { en: 'Failed to update watch status', zh: '更新关注状态失败' },
   'record.noRecord': { en: 'No record selected', zh: '未选择记录' },
+  // A3: AI shortcut actions. Preview is gated on field readability (a visible
+  // drawer field IS readable); run is additionally gated on canEditField —
+  // mirroring the backend preview/run gates.
+  'record.aiPreview': { en: 'AI preview', zh: 'AI 预览' },
+  'record.aiRun': { en: 'AI run', zh: 'AI 运行' },
+  'record.aiPreviewTitle': { en: 'Preview the AI output (real call, consumes quota)', zh: '预览 AI 输出（真实调用，消耗配额）' },
+  'record.aiRunTitle': { en: 'Run AI and write the output into this field', zh: '运行 AI 并将结果写入此字段' },
+  'record.aiPending': { en: 'AI request in progress...', zh: 'AI 请求处理中...' },
 
   'form.loading': { en: 'Loading...', zh: '正在加载...' },
   'form.readOnly': { en: 'This form is read-only', zh: '此表单为只读' },

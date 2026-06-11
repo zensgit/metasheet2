@@ -1008,6 +1008,9 @@ export function useMultitableGrid(opts: {
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
     applySortFilter,
     createRecord, deleteRecord, patchCell, bulkPatch,
+    // A3: exposed as the single echo-application seam for the AI shortcut
+    // run adapter (useAiShortcut synthesizes a PatchResult and feeds it here).
+    applyPatchResult,
     mergeRemoteRecord, applyRemoteRecordPatch, removeRemoteRecord,
     undo, redo, clearEditHistory, dismissConflict, retryConflict,
     setColumnWidth, setGroupField,

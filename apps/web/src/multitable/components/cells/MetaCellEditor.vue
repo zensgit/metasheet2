@@ -263,6 +263,24 @@
 
     <!-- readonly fallback -->
     <span v-else class="meta-cell-editor__readonly">{{ readonlyDisplayValue }}</span>
+
+    <!--
+      A3-T6: edit-mode AI run trigger (link-btn precedent).
+      RBAC INVARIANT (LOCKED A3 §2.2): this button's safety relies on the
+      upstream invariant that the cell editor only opens for cells the actor
+      can edit — MetaCellEditor has NO fieldPermissions of its own. Any
+      follow-up that moves this button OUTSIDE the edit mode MUST wire
+      explicit fieldPermissions gating. Hosts opt in via `aiRunState`
+      (only MetaGridTable does; MetaBulkEditDialog stays untouched).
+    -->
+    <button
+      v-if="aiRunVisible"
+      type="button"
+      class="meta-cell-editor__link-btn meta-cell-editor__ai-run"
+      :disabled="aiRunState?.pending || aiRunState?.busy"
+      data-test="cell-ai-run"
+      @click="emit('ai-run')"
+    >{{ aiRunState?.pending ? l('cell.aiRunning') : l('cell.aiRun') }}</button>
   </div>
 </template>
 
@@ -311,6 +329,14 @@ const props = defineProps<{
    * existing REST path regardless of the build-time flag.
    */
   recordId?: string | null
+  /**
+   * A3 AI shortcut run opt-in. Present (non-null) only when the HOST wires
+   * an `ai-run` listener (MetaGridTable). `pending` is the unified in-flight
+   * state (drives the "running" label); `busy` (review F3) additionally
+   * covers the RATE_LIMITED countdown — the button disables on either, same
+   * as the drawer's aiBusy. See the RBAC invariant note in the template.
+   */
+  aiRunState?: { pending: boolean; busy: boolean } | null
 }>()
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}/
@@ -334,10 +360,20 @@ const emit = defineEmits<{
    * change via `meta_records`. Pass-through REST is safe but redundant.
    */
   (e: 'yjs-commit'): void
+  /** A3: AI shortcut run requested for this cell (host resolves record/field). */
+  (e: 'ai-run'): void
 }>()
 
 const { isZh } = useLocale()
 const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, isZh.value)
+
+// A3-T6: host opt-in (aiRunState) ∧ text target type ∧ persisted aiShortcut config.
+const aiRunVisible = computed(() => {
+  if (!props.aiRunState) return false
+  if (props.field.type !== 'string' && props.field.type !== 'longText') return false
+  const raw = (props.field.property ?? {}).aiShortcut
+  return Boolean(raw) && typeof raw === 'object' && !Array.isArray(raw)
+})
 
 const readonlyDisplayValue = computed(() =>
   formatFieldDisplay({

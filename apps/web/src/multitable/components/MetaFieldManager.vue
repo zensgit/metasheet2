@@ -368,6 +368,115 @@
           </div>
         </template>
 
+        <!-- A3 §2.1: AI shortcut config section (string/longText targets only) -->
+        <div v-if="aiShortcutSectionVisible" class="meta-field-mgr__ai" data-test="ai-shortcut-section">
+          <div class="meta-field-mgr__ai-header">
+            <strong>{{ ml('field.ai.title') }}</strong>
+          </div>
+          <label class="meta-field-mgr__toggle">
+            <input v-model="aiDraft.enabled" type="checkbox" data-test="ai-shortcut-enable" />
+            <span>{{ ml('field.ai.enable') }}</span>
+          </label>
+          <template v-if="aiDraft.enabled">
+            <label class="meta-field-mgr__field">
+              <span>{{ ml('field.ai.kind') }}</span>
+              <select v-model="aiDraft.kind" class="meta-field-mgr__select" data-test="ai-shortcut-kind">
+                <option v-for="kind in AI_SHORTCUT_KINDS" :key="kind" :value="kind">{{ aiShortcutKindLabel(kind, isZh) }}</option>
+              </select>
+            </label>
+            <div class="meta-field-mgr__field">
+              <span>{{ ml('field.ai.sourceFields') }}</span>
+              <div class="meta-field-mgr__ai-sources">
+                <label v-for="sourceField in aiSourceFieldCandidates" :key="sourceField.id" class="meta-field-mgr__ai-source">
+                  <input
+                    type="checkbox"
+                    :checked="aiDraft.sourceFieldIds.includes(sourceField.id)"
+                    :disabled="!aiDraft.sourceFieldIds.includes(sourceField.id) && aiDraft.sourceFieldIds.length >= AI_SHORTCUT_MAX_SOURCE_FIELDS"
+                    :data-test="`ai-shortcut-source-${sourceField.id}`"
+                    @change="toggleAiSourceField(sourceField.id, $event)"
+                  />
+                  <span>{{ sourceField.name }}</span>
+                </label>
+              </div>
+              <span class="meta-field-mgr__hint">{{ ml('field.ai.sourceHint') }}</span>
+            </div>
+            <div v-if="aiDraft.kind === 'classify'" class="meta-field-mgr__field">
+              <span>{{ ml('field.ai.options') }}</span>
+              <div class="meta-field-mgr__stack">
+                <div v-for="(option, idx) in aiDraft.options" :key="idx" class="meta-field-mgr__option-row">
+                  <input
+                    class="meta-field-mgr__input"
+                    :maxlength="AI_SHORTCUT_MAX_OPTION_LENGTH"
+                    :placeholder="ml('field.ai.optionPlaceholder')"
+                    :value="option"
+                    data-test="ai-shortcut-option-input"
+                    @input="onAiOptionInput(idx, $event)"
+                  />
+                  <button class="meta-field-mgr__action meta-field-mgr__action--danger" type="button" @click="removeAiOption(idx)">&times;</button>
+                </div>
+                <button
+                  class="meta-field-mgr__btn-inline"
+                  type="button"
+                  :disabled="aiDraft.options.length >= AI_SHORTCUT_MAX_OPTIONS"
+                  data-test="ai-shortcut-add-option"
+                  @click="addAiOption"
+                >{{ ml('action.addOption') }}</button>
+              </div>
+            </div>
+            <label v-if="aiDraft.kind === 'translate'" class="meta-field-mgr__field">
+              <span>{{ ml('field.ai.targetLang') }}</span>
+              <input
+                v-model="aiDraft.targetLang"
+                class="meta-field-mgr__input"
+                :maxlength="AI_SHORTCUT_MAX_TARGET_LANG_LENGTH"
+                data-test="ai-shortcut-target-lang"
+              />
+            </label>
+            <label class="meta-field-mgr__field">
+              <span>{{ ml('field.ai.instruction') }} ({{ aiDraft.instruction.length }}/{{ AI_SHORTCUT_MAX_INSTRUCTION_LENGTH }})</span>
+              <textarea
+                v-model="aiDraft.instruction"
+                class="meta-field-mgr__textarea"
+                :maxlength="AI_SHORTCUT_MAX_INSTRUCTION_LENGTH"
+                data-test="ai-shortcut-instruction"
+              ></textarea>
+            </label>
+            <!-- §2.1 LOCKED copy: REAL call consuming quota; validates the DRAFT. -->
+            <div class="meta-field-mgr__ai-preview">
+              <div class="meta-field-mgr__hint">
+                {{ ml('field.ai.previewRealCallHint') }} {{ ml('field.ai.previewDraftHint') }}
+              </div>
+              <button
+                type="button"
+                class="meta-field-mgr__dryrun-btn"
+                :disabled="!aiPreviewCanRun"
+                data-test="ai-shortcut-preview-btn"
+                @click="runAiPreview"
+              >
+                {{ aiPreviewRunning ? ml('field.ai.previewing') : ml('field.ai.previewWithRecord') }}
+              </button>
+              <div v-if="!currentRecordId" class="meta-field-mgr__hint">{{ ml('field.ai.previewNeedsRecord') }}</div>
+              <div v-if="aiPreviewError" class="meta-field-mgr__formula-diagnostic meta-field-mgr__formula-diagnostic--error" data-test="ai-shortcut-preview-error">{{ aiPreviewError }}</div>
+              <div v-else-if="aiPreviewData" class="meta-field-mgr__dryrun-result" data-test="ai-shortcut-preview-result">
+                <div class="meta-field-mgr__dryrun-result-head">
+                  <strong>{{ ml('field.ai.previewResult') }}</strong>
+                </div>
+                <div class="meta-field-mgr__ai-preview-output">{{ aiPreviewData.output }}</div>
+                <div v-if="aiPreviewTokensText" class="meta-field-mgr__hint">{{ aiPreviewTokensText }}</div>
+              </div>
+            </div>
+          </template>
+          <!-- §2.4 admin usage card (automation stats-card styling family; hidden after a cached 403 probe) -->
+          <div v-if="aiUsageSummary" class="meta-field-mgr__ai-usage" data-test="ai-usage-card">
+            <strong>{{ ml('field.aiUsage.title') }}</strong>
+            <div class="meta-field-mgr__ai-usage-stats">
+              <span class="meta-field-mgr__ai-stat meta-field-mgr__ai-stat--day">{{ ml('field.aiUsage.today') }}: {{ aiUsageSummary.callerDayTokens }} / {{ aiUsageSummary.caps.tenantDailyTokenCap }}</span>
+              <span class="meta-field-mgr__ai-stat meta-field-mgr__ai-stat--week">{{ ml('field.aiUsage.week') }}: {{ aiUsageSummary.callerWeekTokens }} / {{ aiUsageSummary.caps.tenantWeeklyTokenCap }}</span>
+              <span class="meta-field-mgr__ai-stat meta-field-mgr__ai-stat--usd">{{ ml('field.aiUsage.instance') }}: {{ aiUsageSummary.instanceDayUsd }} / {{ aiUsageSummary.caps.accountDailyUsdCap }}</span>
+            </div>
+          </div>
+        </div>
+
         <MetaFieldValidationPanel
           v-if="configTarget && validationPanelVisible"
           class="meta-field-mgr__validation"
@@ -464,6 +573,7 @@ import {
   systemFieldHint,
 } from '../utils/system-fields'
 import {
+  aiShortcutKindLabel,
   configureField,
   configureNewField,
   deleteFieldConfirm,
@@ -473,7 +583,20 @@ import {
   insertFieldTokenTitle,
   managerLabel,
 } from '../utils/meta-manager-labels'
-import { fieldTypeLabel } from '../utils/meta-core-labels'
+import { aiTokensConsumed, fieldTypeLabel } from '../utils/meta-core-labels'
+import { aiShortcutErrorMessage } from '../utils/meta-api-error-labels'
+import {
+  AI_SHORTCUT_COMPUTED_SOURCE_TYPES,
+  AI_SHORTCUT_KINDS,
+  AI_SHORTCUT_MAX_INSTRUCTION_LENGTH,
+  AI_SHORTCUT_MAX_OPTIONS,
+  AI_SHORTCUT_MAX_OPTION_LENGTH,
+  AI_SHORTCUT_MAX_SOURCE_FIELDS,
+  AI_SHORTCUT_MAX_TARGET_LANG_LENGTH,
+  fetchAiUsageSummaryWithProbeCache,
+  type AiShortcutPreviewOutcome,
+} from '../composables/useAiShortcut'
+import type { AiShortcutConfigInput, AiShortcutKind, AiShortcutPreviewData, AiUsageSummary } from '../api/client'
 import MetaFieldValidationPanel from './MetaFieldValidationPanel.vue'
 
 /** Field types where the validation panel is configurable. */
@@ -588,6 +711,17 @@ const props = defineProps<{
   // #5c: the currently-selected record, if any. When present, a "preview with current record" button
   // appears that samples this record's real values server-side (manual samples still override).
   currentRecordId?: string | null
+  // A3 §2.1: config-time AI shortcut preview over the inline DRAFT config.
+  // The workbench wires this to useAiShortcut.previewWithConfig so the
+  // unified in-flight guard covers this entry point too. null outcome =
+  // guarded no-op (another AI request is in flight / countdown active).
+  aiPreviewFn?: (params: { recordId: string; config: AiShortcutConfigInput }) => Promise<AiShortcutPreviewOutcome | null>
+  // Review F3: unified AI busy state (request in flight on ANY surface, or a
+  // RATE_LIMITED countdown). The preview button disables on it — same as the
+  // drawer's aiBusy — instead of offering a click the guard silently refuses.
+  aiPreviewBusy?: boolean
+  // A3 §2.4: admin usage summary (403 probe is session-cached by the helper).
+  aiUsageSummaryFn?: () => Promise<AiUsageSummary>
 }>()
 
 const emit = defineEmits<{
@@ -662,6 +796,22 @@ const autoNumberDraft = reactive<{ prefix: string; digits: number; start: number
   prefix: '',
   digits: 0,
   start: 1,
+})
+// --- A3 §2.1: aiShortcut config draft (string/longText targets) ---
+const aiDraft = reactive<{
+  enabled: boolean
+  kind: AiShortcutKind
+  sourceFieldIds: string[]
+  options: string[]
+  targetLang: string
+  instruction: string
+}>({
+  enabled: false,
+  kind: 'summarize',
+  sourceFieldIds: [],
+  options: [],
+  targetLang: '',
+  instruction: '',
 })
 const validationDraft = ref<FieldValidationRule[]>([])
 // True when the field had explicit validation rules stored OR the user
@@ -883,7 +1033,21 @@ function fieldTypeName(field: MetaField): string {
   return fieldTypeLabel(displayFieldType(field), isZh.value)
 }
 
+function resetAiDraft() {
+  aiDraft.enabled = false
+  aiDraft.kind = 'summarize'
+  aiDraft.sourceFieldIds = []
+  aiDraft.options = []
+  aiDraft.targetLang = ''
+  aiDraft.instruction = ''
+  aiPreviewSeq++
+  aiPreviewRunning.value = false
+  aiPreviewData.value = null
+  aiPreviewError.value = ''
+}
+
 function resetDrafts() {
+  resetAiDraft()
   selectDraft.options = [{ value: '', color: '' }]
   linkDraft.foreignSheetId = ''
   linkDraft.limitSingleRecord = false
@@ -989,10 +1153,27 @@ function serializeFieldDraft(type: string | null): string {
       startAt: autoNumberDraft.start,
     })
   }
-  if (type === 'string' || type === 'longText' || type === 'number') {
+  if (type === 'string' || type === 'longText') {
+    // A3: the ai draft participates in dirty/outdated detection so an
+    // aiShortcut-only edit marks the config dirty (and a background field
+    // change while editing flips the outdated banner, same as validation).
+    return JSON.stringify({ validation, aiShortcut: serializeAiDraft() })
+  }
+  if (type === 'number') {
     return JSON.stringify({ validation })
   }
   return ''
+}
+
+function serializeAiDraft(): Record<string, unknown> | null {
+  if (!aiDraft.enabled) return null
+  return {
+    kind: aiDraft.kind,
+    sourceFieldIds: [...aiDraft.sourceFieldIds],
+    options: [...aiDraft.options],
+    targetLang: aiDraft.targetLang,
+    instruction: aiDraft.instruction,
+  }
 }
 
 function serializeFieldSourceSignature(field: MetaField | null): string {
@@ -1072,6 +1253,12 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
     autoNumberDraft.prefix = property.prefix
     autoNumberDraft.digits = property.digits
     autoNumberDraft.start = property.start
+  } else if (fieldType === 'string' || fieldType === 'longText') {
+    // A3 CLOBBER GUARD leg 1 (LOCKED §2.1): hydrate the persisted aiShortcut
+    // into the draft so EVERY subsequent save re-emits it (see
+    // currentDraftProperty). Without this, any validation-only save would
+    // silently delete the configured shortcut (property is replaced wholesale).
+    hydrateAiShortcutDraft(field.property)
   }
   if (VALIDATION_PANEL_TYPES.has(fieldType)) {
     const loaded = rulesFromProperty(field.property ?? null)
@@ -1138,6 +1325,210 @@ function openNewFieldConfigIfNeeded() {
   fieldConfigLiveRefreshText.value = ''
   fieldConfigSourceSignature.value = ''
 }
+
+// --- A3: aiShortcut config section logic (string/longText targets) ---
+
+const aiShortcutSectionVisible = computed(() =>
+  configTargetType.value === 'string' || configTargetType.value === 'longText',
+)
+
+// Constraint mirror (A2): existing, non-computed, not the target field itself.
+const aiSourceFieldCandidates = computed(() =>
+  props.fields.filter((field) =>
+    field.id !== configTarget.value?.id && !AI_SHORTCUT_COMPUTED_SOURCE_TYPES.has(field.type),
+  ),
+)
+
+function hydrateAiShortcutDraft(property: Record<string, unknown> | null | undefined) {
+  const raw = property?.aiShortcut
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    aiDraft.enabled = false
+    return
+  }
+  const obj = raw as Record<string, unknown>
+  const params = obj.params && typeof obj.params === 'object' && !Array.isArray(obj.params)
+    ? (obj.params as Record<string, unknown>)
+    : {}
+  aiDraft.enabled = true
+  aiDraft.kind = (AI_SHORTCUT_KINDS as readonly string[]).includes(String(obj.kind))
+    ? (obj.kind as AiShortcutKind)
+    : 'summarize'
+  aiDraft.sourceFieldIds = Array.isArray(obj.sourceFieldIds)
+    ? obj.sourceFieldIds.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  aiDraft.options = Array.isArray(params.options)
+    ? params.options.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  aiDraft.targetLang = typeof params.targetLang === 'string' ? params.targetLang : ''
+  aiDraft.instruction = typeof params.instruction === 'string' ? params.instruction : ''
+}
+
+function toggleAiSourceField(fieldId: string, event: Event) {
+  const checked = (event.target as HTMLInputElement).checked
+  if (checked) {
+    if (aiDraft.sourceFieldIds.includes(fieldId)) return
+    aiDraft.sourceFieldIds = [...aiDraft.sourceFieldIds, fieldId]
+  } else {
+    aiDraft.sourceFieldIds = aiDraft.sourceFieldIds.filter((id) => id !== fieldId)
+  }
+}
+
+function addAiOption() {
+  if (aiDraft.options.length >= AI_SHORTCUT_MAX_OPTIONS) return
+  aiDraft.options = [...aiDraft.options, '']
+}
+
+function removeAiOption(index: number) {
+  aiDraft.options = aiDraft.options.filter((_, i) => i !== index)
+}
+
+function onAiOptionInput(index: number, event: Event) {
+  const next = [...aiDraft.options]
+  next[index] = (event.target as HTMLInputElement).value
+  aiDraft.options = next
+}
+
+/**
+ * Resolve the draft into the canonical wire config, mirroring the A2 caps
+ * client-side. ok:false → fieldConfigError is already set. ok:true with no
+ * config = the toggle is off (removal-by-key-omission, §2.1 LOCK — never
+ * `aiShortcut: null`, which the backend 400s).
+ */
+function resolveAiShortcutDraft(): { ok: boolean; config?: AiShortcutConfigInput } {
+  if (!aiDraft.enabled) return { ok: true }
+  const candidateIds = new Set(aiSourceFieldCandidates.value.map((field) => field.id))
+  const sourceFieldIds = aiDraft.sourceFieldIds.filter((id) => candidateIds.has(id))
+  if (sourceFieldIds.length === 0) {
+    fieldConfigError.value = ml('field.error.aiSourceRequired')
+    return { ok: false }
+  }
+  if (sourceFieldIds.length > AI_SHORTCUT_MAX_SOURCE_FIELDS) {
+    fieldConfigError.value = ml('field.error.aiSourceTooMany')
+    return { ok: false }
+  }
+  const options = aiDraft.options.map((option) => option.trim()).filter((option) => option.length > 0)
+  if (options.length > AI_SHORTCUT_MAX_OPTIONS) {
+    fieldConfigError.value = ml('field.error.aiOptionsTooMany')
+    return { ok: false }
+  }
+  if (options.some((option) => option.length > AI_SHORTCUT_MAX_OPTION_LENGTH)) {
+    fieldConfigError.value = ml('field.error.aiOptionTooLong')
+    return { ok: false }
+  }
+  const targetLang = aiDraft.targetLang.trim()
+  if (targetLang.length > AI_SHORTCUT_MAX_TARGET_LANG_LENGTH) {
+    fieldConfigError.value = ml('field.error.aiTargetLangTooLong')
+    return { ok: false }
+  }
+  const instruction = aiDraft.instruction.trim()
+  if (instruction.length > AI_SHORTCUT_MAX_INSTRUCTION_LENGTH) {
+    fieldConfigError.value = ml('field.error.aiInstructionTooLong')
+    return { ok: false }
+  }
+  const params: AiShortcutConfigInput['params'] = {
+    ...(aiDraft.kind === 'classify' && options.length > 0 ? { options } : {}),
+    ...(aiDraft.kind === 'translate' && targetLang ? { targetLang } : {}),
+    ...(instruction ? { instruction } : {}),
+  }
+  return {
+    ok: true,
+    config: {
+      kind: aiDraft.kind,
+      sourceFieldIds,
+      ...(Object.keys(params).length > 0 ? { params } : {}),
+    },
+  }
+}
+
+// dirty leg for the save no-op skip (mirrors fieldConfigDirty's serialization).
+const aiShortcutDirty = computed(() => {
+  if (!configTarget.value) return false
+  if (!aiShortcutSectionVisible.value) return false
+  const baseline = safeParseBaseline(fieldConfigBaseline.value)
+  return JSON.stringify(baseline?.aiShortcut ?? null) !== JSON.stringify(serializeAiDraft())
+})
+
+function safeParseBaseline(raw: string): { aiShortcut?: unknown } | null {
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as { aiShortcut?: unknown }
+  } catch {
+    return null
+  }
+}
+
+// --- A3 §2.1: config-time preview ("用当前记录预览", inline DRAFT config) ---
+const aiPreviewRunning = ref(false)
+const aiPreviewData = ref<AiShortcutPreviewData | null>(null)
+const aiPreviewError = ref('')
+let aiPreviewSeq = 0
+
+const aiPreviewCanRun = computed(() =>
+  Boolean(props.aiPreviewFn) &&
+  Boolean(props.currentRecordId) &&
+  aiDraft.enabled &&
+  !aiPreviewRunning.value &&
+  // Review F3: countdown / cross-surface in-flight → disable, like the drawer.
+  !props.aiPreviewBusy,
+)
+
+async function runAiPreview() {
+  if (!props.aiPreviewFn || !props.currentRecordId || !aiPreviewCanRun.value) return
+  fieldConfigError.value = ''
+  const resolved = resolveAiShortcutDraft()
+  if (!resolved.ok || !resolved.config) return // constraint mirror already set fieldConfigError
+  const seq = ++aiPreviewSeq
+  aiPreviewRunning.value = true
+  aiPreviewError.value = ''
+  aiPreviewData.value = null
+  try {
+    const outcome = await props.aiPreviewFn({ recordId: props.currentRecordId, config: resolved.config })
+    if (seq !== aiPreviewSeq) return
+    if (!outcome) return // unified in-flight guard refused (another AI request active)
+    if ('error' in outcome) {
+      if (outcome.error.code === 'VALIDATION_ERROR') {
+        // A2 server-side config rejection → the EXISTING fieldConfigError inline (§2.1).
+        fieldConfigError.value = outcome.error.message || ml('field.error.aiSourceRequired')
+      } else {
+        // AI-state errors use the §2.3 copy (fall back to the raw message for unknown codes).
+        aiPreviewError.value = aiShortcutErrorMessage(outcome.error.code, isZh.value) ?? outcome.error.message
+      }
+      return
+    }
+    aiPreviewData.value = outcome.data
+  } finally {
+    if (seq === aiPreviewSeq) aiPreviewRunning.value = false
+  }
+}
+
+const aiPreviewTokensText = computed(() => {
+  const usage = aiPreviewData.value?.usage
+  if (!usage) return ''
+  return aiTokensConsumed(usage.promptTokens + usage.completionTokens, isZh.value)
+})
+
+// --- A3 §2.4: admin usage card (403 probe session-cached in useAiShortcut) ---
+const aiUsageSummary = ref<AiUsageSummary | null>(null)
+let aiUsageSeq = 0
+
+async function loadAiUsageSummary() {
+  const fn = props.aiUsageSummaryFn
+  if (!fn) return
+  const seq = ++aiUsageSeq
+  try {
+    const summary = await fetchAiUsageSummaryWithProbeCache(fn)
+    if (seq === aiUsageSeq) aiUsageSummary.value = summary
+  } catch {
+    // Non-403 read failure: hide the card quietly — it is admin telemetry,
+    // never a blocker for field configuration.
+    if (seq === aiUsageSeq) aiUsageSummary.value = null
+  }
+}
+
+watch(aiShortcutSectionVisible, (visible) => {
+  if (visible) void loadAiUsageSummary()
+  else aiUsageSummary.value = null
+})
 
 function currentDraftProperty(type: MetaFieldCreateType | string): Record<string, unknown> | undefined {
   const normalizedType = type === 'link' || type === 'select' || type === 'multiSelect' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person' || type === 'number' || type === 'currency' || type === 'percent' || type === 'rating' || type === 'autoNumber'
@@ -1291,7 +1682,14 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     }
   }
   if (type === 'string' || type === 'longText') {
-    return { ...validationProperty }
+    // A3 CLOBBER GUARD leg 2 (LOCKED §2.1, regression-tested A3-T1b): EVERY
+    // string/longText save re-emits the aiShortcut carried by the draft
+    // (hydrated from the persisted field), because update-field replaces the
+    // property wholesale. Removal = key omission via the enable toggle
+    // (A3-T1c) — never `aiShortcut: null` (the backend 400s null).
+    const ai = resolveAiShortcutDraft()
+    if (!ai.ok) return undefined
+    return { ...validationProperty, ...(ai.config ? { aiShortcut: ai.config } : {}) }
   }
   return undefined
 }
@@ -1333,13 +1731,13 @@ function saveConfig() {
   const property = currentDraftProperty(fieldType)
   if (!property && fieldConfigError.value) return
   if (!property) return
-  // Skip no-op saves for types that only expose validation: if the user
-  // never touched the panel there is nothing to persist, and emitting
-  // an empty `property: {}` would otherwise clobber existing values on
-  // the server. Types with mandatory structural config (select/link/
+  // Skip no-op saves for types that only expose validation + aiShortcut: if
+  // the user touched neither surface there is nothing to persist, and
+  // emitting an empty `property: {}` would otherwise clobber existing values
+  // on the server. Types with mandatory structural config (select/link/
   // lookup/rollup/formula/attachment) always have keys to persist.
   const onlyValidationSurface = (fieldType === 'string' || fieldType === 'longText')
-  if (onlyValidationSurface && !validationDraftTouched.value) {
+  if (onlyValidationSurface && !validationDraftTouched.value && !aiShortcutDirty.value) {
     closeConfig()
     return
   }
@@ -1546,6 +1944,21 @@ onBeforeUnmount(() => {
 .meta-field-mgr__btn-delete { padding: 4px 12px; background: #f56c6c; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
 .meta-field-mgr__error { color: #f56c6c; font-size: 12px; }
 .meta-field-mgr__validation { margin-top: 4px; }
+/* A3: AI shortcut config section */
+.meta-field-mgr__ai { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; border: 1px solid #e0e7ff; border-radius: 8px; background: #fafbff; }
+.meta-field-mgr__ai-header { font-size: 12px; color: #4338ca; }
+.meta-field-mgr__ai-sources { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.meta-field-mgr__ai-source { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #444; }
+.meta-field-mgr__ai-preview { display: flex; flex-direction: column; gap: 6px; }
+.meta-field-mgr__ai-preview-output { font-size: 12px; color: #334155; white-space: pre-wrap; word-break: break-word; }
+/* §2.4 admin usage card — automation stats-card styling family
+   (MetaAutomationManager .meta-automation__card-stats / __stat). */
+.meta-field-mgr__ai-usage { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff; font-size: 12px; }
+.meta-field-mgr__ai-usage-stats { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; }
+.meta-field-mgr__ai-stat { font-weight: 600; }
+.meta-field-mgr__ai-stat--day { color: #16a34a; }
+.meta-field-mgr__ai-stat--week { color: #1d4ed8; }
+.meta-field-mgr__ai-stat--usd { color: #b45309; }
 .meta-field-mgr__rename-wrap { flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .meta-field-mgr__rename--invalid { border-color: #f56c6c; }
 .meta-field-mgr__input--invalid { border-color: #f56c6c; }

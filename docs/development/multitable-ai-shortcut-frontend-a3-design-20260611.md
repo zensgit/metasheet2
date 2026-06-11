@@ -39,8 +39,8 @@ M3 = 体验层:①字段管理器 aiShortcut 配置区(含"用当前记录预览
 - **抽屉(主)**:字段头动作区按钮组——`fieldPermissions` 可读→"预览",`canEditField`→"运行"(与后端门一致)。
 - **单元格编辑器(辅)**:编辑态内嵌"运行"按钮(link-btn 先例);**RBAC 不变式入注释**:按钮安全性依赖编辑器仅为可编辑单元格打开;任何把按钮挪出编辑态的 follow-up 必须显式接 fieldPermissions。
 - **run 响应适配器(锁;核验 refuted 修正)**:`useAiShortcut` 从 run 响应**合成** `{updated:[{recordId,version}], records:[{recordId,data:{[fieldId]:output}}]}` 再喂 `applyPatchResult()`;**`version===null` 时跳过 version 写入只合值**;合成逻辑必须有**对真实 wire 形状的路由级断言**(fixture-drift 纪律)。
-- **运行中漂移(锁)**:run 发起时捕获本地 row.version;返回时若本地 version 已变(协作编辑),**跳过合并**并提示刷新(与 409 同一条恢复文案);409 原样走网格既有冲突语义。
-- **重入防护(锁)**:三个入口统一 in-flight pending 态(按钮禁用 + spinner);文案提示预览与运行共享频率额度。
+- **运行中漂移(锁;review-F4 细化)**:run 发起时捕获本地 row.version;返回时若本地 version 已变:**= 响应 version(本人 run 的写入经 Yjs 实时回声先于 HTTP 响应落地)→ 视为已应用,静默跳过(冗余)合并,成功态、不提示刷新(tokens 照常展示)**;**≠ 捕获 version 且 ≠ 响应 version(真协作漂移)→ 跳过合并并提示刷新**(与 409 同一条恢复文案);409 原样走网格既有冲突语义。
+- **重入防护(锁;review-F3 细化)**:三个入口统一 in-flight pending 态(按钮禁用 + spinner);**RATE_LIMITED 倒计时禁用同样覆盖全部三个入口(抽屉 aiBusy / 单元格运行按钮 / 配置区预览按钮)——不允许"可点击但被守卫静默拒绝"的入口,单元格路径在 busy 时也不得关闭编辑会话**;文案提示预览与运行共享频率额度。
 
 ### 2.3 状态 UX(契约已验证钉死;client 按 `error.code` 分支)
 
@@ -75,10 +75,10 @@ A2 后端语义不动(新增:ledger summary 导出 + 一只读路由);无 OpenAP
 | A3-T2 | 配置时 preview:inline 草稿 config + currentRecordId 调用形状;无 currentRecordId → 禁用;真实调用/草稿语义提示文案存在 | 组件 + client spec |
 | A3-T3 | 抽屉按钮 RBAC 三态(可读/可编辑/均无) | 组件 spec |
 | A3-T4 | **适配器**:对真实 wire 形状(路由级响应)合成 PatchResult;version null 跳过;成功落值 + tokens 展示 | composable + 路由级 spec |
-| A3-T4b | 漂移守卫:返回时本地 version 已变 → 跳过合并 + 刷新提示 | composable spec |
+| A3-T4b | 漂移守卫:本地 version ≠ 捕获且 ≠ 响应 version → 跳过合并 + 刷新提示;**= 响应 version(本人 Yjs 回声)→ 视为已应用,静默成功不提示(review F4)** | composable spec |
 | A3-T5 | 状态全集按 error.code 分支:**429 双语义**(RATE_LIMITED 有倒计时/AI_QUOTA_EXHAUSTED 无)、503 AI_BLOCKED 不按通用故障、422/502/409 | client + 组件 spec |
 | A3-T5b | 重入:pending 中再点 → 无第二次请求 | composable spec |
-| A3-T6 | 单元格编辑器按钮(编辑态出现,同 composable) | 组件 spec |
+| A3-T6 | 单元格编辑器按钮(编辑态出现,同 composable);**倒计时/busy → 按钮禁用,点击不关闭编辑会话(review F3)** | 组件 spec |
 | A3-T7 | usage-summary:后端 admin 200 形状/非 admin 403/不挂 burst limiter;FE admin 卡渲染/403 缓存隐藏 | 后端路由 + 组件 spec |
 | A3-T8 | i18n 双语/模块归属/无跨模块重声明 | 静态 |
 | A3-T9 | vue-tsc -b + 后端 tsc + 全套回归 | gates |

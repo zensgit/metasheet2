@@ -16,6 +16,7 @@ import {
   insertAiUsageLedgerEntry,
   reserveAiUsage,
   settleAiUsageReservation,
+  sumAiUsageWindows,
   withAiUsageQuotaLock,
   type AiUsageReservationInput,
 } from '../../src/services/ai-usage-ledger'
@@ -111,6 +112,29 @@ describe('checkAiUsageQuota', () => {
     ])
     const decision = await checkAiUsageQuota(query, 'user-1', caps)
     expect(decision).toEqual({ allowed: false, reason: 'instance_daily_usd' })
+  })
+})
+
+describe('sumAiUsageWindows (A3 §2.4 — shared SUM source for quota + summary)', () => {
+  it('returns the numeric window sums from ONE query (the same SQL the quota check uses)', async () => {
+    const { calls, query } = captureQuery([
+      { user_daily_tokens: '123', user_weekly_tokens: '456', instance_daily_usd: '7.89' },
+    ])
+    const sums = await sumAiUsageWindows(query, 'user-1')
+    expect(sums).toEqual({ userDailyTokens: 123, userWeeklyTokens: 456, instanceDailyUsd: 7.89 })
+    expect(calls).toHaveLength(1)
+    expect(calls[0].sql).toContain(AI_USAGE_LEDGER_TABLE)
+    expect(calls[0].sql.toLowerCase()).not.toContain('status')
+    expect(calls[0].params).toEqual(['user-1'])
+  })
+
+  it('checkAiUsageQuota consumes the SAME shared sums (no duplicated SQL path)', async () => {
+    const { calls, query } = captureQuery([
+      { user_daily_tokens: '0', user_weekly_tokens: '0', instance_daily_usd: '0' },
+    ])
+    await checkAiUsageQuota(query, 'user-1', { tenantDailyTokenCap: 1, tenantWeeklyTokenCap: 1, accountDailyUsdCap: 1 })
+    const sumsCalls = calls.filter((call) => call.sql.includes('user_daily_tokens'))
+    expect(sumsCalls).toHaveLength(1)
   })
 })
 
