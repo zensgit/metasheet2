@@ -68,6 +68,9 @@ const VALID_ACTION_TYPES = new Set<string>([
 ])
 const CANONICAL_ACTION_TYPES = new Set<string>(ALL_ACTION_TYPES)
 const SAFE_BRANCH_KEY = /^[A-Za-z0-9_-]{1,64}$/
+const PARALLEL_BRANCH_ACTION_TYPES = new Set(['update_record', 'send_notification'])
+const MAX_PARALLEL_BRANCHES = 10
+const MAX_PARALLEL_BRANCH_ACTIONS = 20
 
 // A6-1 opt-in (#2130 runtime): a rule may persist one C1 WorkflowJob row per action.
 // `null`/`'legacy'` both mean the legacy fire-and-forget path (no job rows); only
@@ -221,6 +224,9 @@ function validateConditionBranchConfig(config: unknown, path: string): Automatio
       if (nested.type === 'condition_branch') {
         throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain nested condition_branch in A6-3-1`)
       }
+      if (nested.type === 'parallel_branch') {
+        throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain parallel_branch until a later nested-DAG slice`)
+      }
       if (nested.type === 'wait_for_callback') {
         throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain wait_for_callback until A6-3-3`)
       }
@@ -247,11 +253,66 @@ function validateConditionBranchConfig(config: unknown, path: string): Automatio
       if (nested.type === 'condition_branch') {
         throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain nested condition_branch in A6-3-1`)
       }
+      if (nested.type === 'parallel_branch') {
+        throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain parallel_branch until a later nested-DAG slice`)
+      }
       if (nested.type === 'wait_for_callback') {
         throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain wait_for_callback until A6-3-3`)
       }
       if (nested.type === 'start_approval') {
         throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain start_approval until A6-3-3`)
+      }
+    }
+    nestedActions.push(...actions)
+  }
+
+  return nestedActions
+}
+
+function validateParallelBranchConfig(config: unknown, path: string): AutomationAction[] {
+  if (!isRecord(config)) {
+    throw new AutomationRuleValidationError(`${path} must be an object`)
+  }
+  if (config.joinMode !== 'all') {
+    throw new AutomationRuleValidationError(`${path}.joinMode must be all`)
+  }
+  if (!Array.isArray(config.branches) || config.branches.length === 0) {
+    throw new AutomationRuleValidationError(`${path}.branches must be a non-empty array`)
+  }
+  if (config.branches.length > MAX_PARALLEL_BRANCHES) {
+    throw new AutomationRuleValidationError(`${path}.branches exceeds max ${MAX_PARALLEL_BRANCHES}`)
+  }
+
+  const seen = new Set<string>()
+  const nestedActions: AutomationAction[] = []
+  let totalActions = 0
+  for (const [index, branch] of config.branches.entries()) {
+    const branchPath = `${path}.branches[${index}]`
+    if (!isRecord(branch)) {
+      throw new AutomationRuleValidationError(`${branchPath} must be an object`)
+    }
+    if (typeof branch.key !== 'string' || !SAFE_BRANCH_KEY.test(branch.key)) {
+      throw new AutomationRuleValidationError(`${branchPath}.key must be a safe non-empty string`)
+    }
+    if (seen.has(branch.key)) {
+      throw new AutomationRuleValidationError(`${branchPath}.key must be unique`)
+    }
+    seen.add(branch.key)
+    if (branch.label !== undefined && typeof branch.label !== 'string') {
+      throw new AutomationRuleValidationError(`${branchPath}.label must be a string`)
+    }
+
+    const actions = readBranchActions(branch.actions, `${branchPath}.actions`)
+    if (actions.length === 0) {
+      throw new AutomationRuleValidationError(`${branchPath}.actions must be a non-empty array`)
+    }
+    totalActions += actions.length
+    if (totalActions > MAX_PARALLEL_BRANCH_ACTIONS) {
+      throw new AutomationRuleValidationError(`${path}.branches total actions exceeds max ${MAX_PARALLEL_BRANCH_ACTIONS}`)
+    }
+    for (const nested of actions) {
+      if (!PARALLEL_BRANCH_ACTION_TYPES.has(nested.type)) {
+        throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain ${nested.type} in A6-3-4`)
       }
     }
     nestedActions.push(...actions)
@@ -267,10 +328,15 @@ function collectNestedAutomationActions(
   executionMode: string | null,
 ): AutomationAction[] {
   const collected: AutomationAction[] = []
-  const requiresWorkflowJobMode = actionType === 'condition_branch' || actionType === 'start_approval'
+  const requiresWorkflowJobMode = actionType === 'condition_branch'
+    || actionType === 'start_approval'
+    || actionType === 'parallel_branch'
 
   if (actionType === 'condition_branch') {
     collected.push(...validateConditionBranchConfig(actionConfig, 'actionConfig'))
+  }
+  if (actionType === 'parallel_branch') {
+    collected.push(...validateParallelBranchConfig(actionConfig, 'actionConfig'))
   }
 
   for (const [index, action] of (actions ?? []).entries()) {
@@ -278,13 +344,20 @@ function collectNestedAutomationActions(
     if (current.type === 'condition_branch') {
       collected.push(...validateConditionBranchConfig(current.config, `actions[${index}].config`))
     }
+    if (current.type === 'parallel_branch') {
+      collected.push(...validateParallelBranchConfig(current.config, `actions[${index}].config`))
+    }
     collected.push(current)
   }
 
   const hasWorkflowAction = requiresWorkflowJobMode
-    || collected.some((action) => action.type === 'condition_branch' || action.type === 'start_approval')
+    || collected.some((action) => (
+      action.type === 'condition_branch'
+      || action.type === 'start_approval'
+      || action.type === 'parallel_branch'
+    ))
   if (hasWorkflowAction && executionMode !== 'workflow_job_v1') {
-    throw new AutomationRuleValidationError('condition_branch/start_approval requires execution_mode workflow_job_v1')
+    throw new AutomationRuleValidationError('condition_branch/start_approval/parallel_branch requires execution_mode workflow_job_v1')
   }
 
   return collected
