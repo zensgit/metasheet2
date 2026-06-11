@@ -815,6 +815,7 @@ export type AutomationActionType =
   | 'lock_record'
   | 'wait_for_callback'
   | 'condition_branch'
+  | 'parallel_branch'
   // Legacy aliases
   | 'notify'
   | 'update_field'
