@@ -74,7 +74,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         approval_request_no TEXT,
         approval_template_id TEXT NOT NULL,
         approval_published_definition_id TEXT,
-        idempotency_key TEXT NOT NULL UNIQUE,
+        idempotency_key TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
         outcome TEXT,
         action_fingerprint JSONB NOT NULL,
@@ -104,6 +104,16 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         WHERE approval_instance_id IS NOT NULL
     `.execute(db)
   }
+
+  await sql`
+    ALTER TABLE multitable_automation_approval_bridges
+    DROP CONSTRAINT IF EXISTS multitable_automation_approval_bridges_idempotency_key_key
+  `.execute(db)
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_mt_auto_approval_bridges_active_idempotency
+      ON multitable_automation_approval_bridges (idempotency_key)
+      WHERE status <> 'failed' OR approval_instance_id IS NOT NULL
+  `.execute(db)
 
   await sql`
     ALTER TABLE multitable_automation_approval_bridges

@@ -155,7 +155,7 @@ export class AutomationApprovalBridgeService {
     private readonly approvalProductService: ApprovalProductService = new ApprovalProductService(),
   ) {}
 
-  async hasBridgeForAnyExecution(executionIds: string[]): Promise<boolean> {
+  async hasCreatedApprovalForAnyExecution(executionIds: string[]): Promise<boolean> {
     const ids = Array.from(new Set(executionIds.filter(Boolean)))
     if (ids.length === 0) return false
     const row = await db
@@ -165,6 +165,7 @@ export class AutomationApprovalBridgeService {
         eb('execution_id', 'in', ids),
         eb('root_execution_id', 'in', ids),
       ]))
+      .where('approval_instance_id', 'is not', null)
       .executeTakeFirst()
     return row != null
   }
@@ -182,8 +183,12 @@ export class AutomationApprovalBridgeService {
 
     const existing = await db
       .selectFrom('multitable_automation_approval_bridges')
-      .select(['id', 'approval_instance_id'])
+      .select(['id', 'approval_instance_id', 'status'])
       .where('idempotency_key', '=', idempotencyKey)
+      .where((eb) => eb.or([
+        eb('status', '<>', 'failed'),
+        eb('approval_instance_id', 'is not', null),
+      ]))
       .executeTakeFirst()
     if (existing) {
       throw new ServiceError('start_approval already created an approval for this execution step', 409, 'START_APPROVAL_DUPLICATE')

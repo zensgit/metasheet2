@@ -405,11 +405,15 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       expect(approvalAfterAction.status).toBe('rejected')
 
       const failed = await waitForExecutionStatus(svc, execution.id, 'failed')
-      expect(failed.steps).toHaveLength(1)
+      expect(failed.steps).toHaveLength(2)
       expect(failed.steps[0]).toMatchObject({
         actionType: 'start_approval',
         status: 'failed',
         error: 'Approval completed with rejected',
+      })
+      expect(failed.steps[1]).toMatchObject({
+        actionType: 'send_webhook',
+        status: 'skipped',
       })
       expect(calls).toEqual([])
 
@@ -420,9 +424,89 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       expect(finalBridge.rows[0]).toMatchObject({ status: 'resumed', outcome: 'rejected' })
 
       const jobs = await svc.jobs.listByExecution(execution.id)
-      expect(jobs).toHaveLength(1)
+      expect(jobs).toHaveLength(2)
       expect(jobs[0]).toMatchObject({ status: 'failed', error: 'Approval completed with rejected' })
-      expect(() => normalizeWorkflowJob(jobs[0])).not.toThrow()
+      expect(jobs[1]).toMatchObject({ status: 'skipped' })
+      jobs.forEach((job) => expect(() => normalizeWorkflowJob(job)).not.toThrow())
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('retry is allowed after createApproval fails before any approval instance exists', async () => {
+    const svc = makeAutomationService()
+    try {
+      const missingTemplateId = `00000000-0000-4000-8000-${String(TS).slice(-12).padStart(12, '0')}`
+      const created = await svc.createRule(SHEET, {
+        name: 'W6 missing approval template',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'start_approval',
+        actionConfig: {
+          templateId: missingTemplateId,
+          formDataMapping: { summary: 'Record {{record.title}} needs approval' },
+          requester: { mode: 'trigger_actor' },
+        },
+        actions: [
+          {
+            type: 'start_approval',
+            config: {
+              templateId: missingTemplateId,
+              formDataMapping: { summary: 'Record {{record.title}} needs approval' },
+              requester: { mode: 'trigger_actor' },
+            },
+          },
+          { type: 'send_webhook', config: { url: 'https://example.test/w6-missing-template-tail' } },
+        ] as never,
+        executionMode: 'workflow_job_v1',
+        createdBy: REQUESTER,
+      })
+      ruleIds.push(created.id)
+      await seedSheetRecord('Missing template')
+
+      const execution = await svc.executeRule({
+        id: created.id,
+        name: 'W6 missing approval template',
+        sheetId: SHEET,
+        trigger: { type: 'record.created', config: {} },
+        actions: created.actions,
+        enabled: true,
+        createdBy: REQUESTER,
+        createdAt: new Date(TS).toISOString(),
+        executionMode: 'workflow_job_v1',
+      } as never, {
+        sheetId: SHEET,
+        recordId: RECORD,
+        data: { title: 'Missing template' },
+        actorId: REQUESTER,
+      })
+      executionIds.push(execution.id)
+      expect(execution.status).toBe('failed')
+
+      const failedBridge = await q(
+        `SELECT status, approval_instance_id, idempotency_key
+           FROM multitable_automation_approval_bridges
+          WHERE execution_id = $1`,
+        [execution.id],
+      )
+      expect(failedBridge.rows).toHaveLength(1)
+      expect(failedBridge.rows[0]).toMatchObject({ status: 'failed', approval_instance_id: null })
+
+      const retry = await svc.retryExecution(execution.id, REQUESTER)
+      expect('execution' in retry).toBe(true)
+      if (!('execution' in retry)) throw new Error(`retry was rejected: ${JSON.stringify(retry)}`)
+      executionIds.push(retry.execution.id)
+      expect(retry.execution.status).toBe('failed')
+
+      const retryBridge = await q(
+        `SELECT status, approval_instance_id, idempotency_key
+           FROM multitable_automation_approval_bridges
+          WHERE execution_id = $1`,
+        [retry.execution.id],
+      )
+      expect(retryBridge.rows).toHaveLength(1)
+      expect(retryBridge.rows[0]).toMatchObject({ status: 'failed', approval_instance_id: null })
+      expect(retryBridge.rows[0].idempotency_key).toBe(failedBridge.rows[0].idempotency_key)
     } finally {
       svc.shutdown()
     }

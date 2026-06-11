@@ -1006,7 +1006,7 @@ export class AutomationService {
     }
     const lineageIds = await this.collectExecutionLineageIds(original)
     const rootExecutionId = lineageIds.at(-1) ?? original.id
-    if (await this.approvalBridgeService.hasBridgeForAnyExecution(lineageIds)) {
+    if (await this.approvalBridgeService.hasCreatedApprovalForAnyExecution(lineageIds)) {
       return {
         status: 409,
         code: 'START_APPROVAL_ALREADY_CREATED',
@@ -1232,10 +1232,17 @@ export class AutomationService {
     execution.status = 'failed'
     execution.error = failedResult.error ?? message
     execution.steps.push(failedResult)
+    const skippedTail = execRule?.actions.slice(bridge.stepIndex + 1) ?? []
+    for (const action of skippedTail) {
+      execution.steps.push({ actionType: action.type, status: 'skipped', durationMs: 0 })
+    }
     execution.finishedAt = new Date().toISOString()
+    const lifecycle = this.jobService.lifecycleFor(execution.id, { id: bridge.ruleId, sheetId: bridge.sheetId ?? undefined })
     try {
-      await this.jobService.lifecycleFor(execution.id, { id: bridge.ruleId, sheetId: bridge.sheetId ?? undefined })
-        .onSettled(bridge.stepIndex, action, failedResult)
+      await lifecycle.onSettled(bridge.stepIndex, action, failedResult)
+      for (let offset = 0; offset < skippedTail.length; offset++) {
+        await lifecycle.onSkipped(bridge.stepIndex + 1 + offset, skippedTail[offset])
+      }
     } catch (err) {
       logger.error('Approval bridge job settle failed', err instanceof Error ? err : undefined)
     }
