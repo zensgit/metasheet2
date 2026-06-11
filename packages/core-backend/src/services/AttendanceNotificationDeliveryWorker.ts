@@ -1,6 +1,17 @@
 import { randomBytes } from 'crypto'
 import { query as defaultQuery } from '../db/pg'
 import { Logger } from '../core/logger'
+import {
+  DingTalkBusinessError,
+  DingTalkRequestError,
+  fetchDingTalkAppAccessToken,
+  sendDingTalkWorkNotification,
+  type DingTalkMessageConfig,
+  type DingTalkWorkNotificationResult,
+} from '../integrations/dingtalk/client'
+import {
+  readDingTalkMessageConfigFromRuntime,
+} from '../integrations/dingtalk/work-notification-settings'
 
 /**
  * C5-2 delivery worker.
@@ -47,6 +58,17 @@ export interface AttendanceNotificationDeliveryWorkerOptions {
   logger?: Logger
 }
 
+export interface DingTalkAttendanceDeliveryChannelOptions {
+  query?: AttendanceNotificationDeliveryQuery
+  readConfig?: (integrationId?: string) => Promise<DingTalkMessageConfig>
+  fetchAccessToken?: (config: DingTalkMessageConfig) => Promise<string>
+  sendWorkNotification?: (
+    accessToken: string,
+    input: { userIds: string[]; title: string; content: string },
+    config: DingTalkMessageConfig,
+  ) => Promise<DingTalkWorkNotificationResult>
+}
+
 export interface AttendanceNotificationDeliveryResult {
   claimed: number
   sent: number
@@ -75,7 +97,7 @@ const MIN_BATCH_SIZE = 1
 const MAX_BATCH_SIZE = 200
 const MIN_LEASE_MS = 5_000
 const MAX_LEASE_MS = 10 * 60_000
-const FAKE_CHANNEL_NAME = 'dingtalk_work_notification'
+export const DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME = 'dingtalk_work_notification'
 
 export function clampDeliveryBatchSize(value: number | undefined): number {
   const n = Number(value)
@@ -98,7 +120,7 @@ export function computeDeliveryBackoffMs(attemptCount: number): number {
 }
 
 export class DeterministicFakeAttendanceDeliveryChannel implements AttendanceDeliveryChannel {
-  readonly name = FAKE_CHANNEL_NAME
+  readonly name = DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME
 
   async send(message: AttendanceDeliveryMessage): Promise<AttendanceDeliveryChannelResult> {
     const mode = String(message.payload.fakeDelivery ?? message.payload.deliveryMode ?? 'ok')
@@ -113,8 +135,107 @@ export class DeterministicFakeAttendanceDeliveryChannel implements AttendanceDel
 }
 
 export function createAttendanceDeliveryChannelsFromEnv(env: NodeJS.ProcessEnv = process.env): AttendanceDeliveryChannel[] {
-  if (env.ATTENDANCE_NOTIFICATION_FAKE_CHANNEL_ENABLED !== 'true') return []
-  return [new DeterministicFakeAttendanceDeliveryChannel()]
+  if (env.ATTENDANCE_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED === 'true') {
+    return [new DingTalkAttendanceDeliveryChannel()]
+  }
+  if (env.ATTENDANCE_NOTIFICATION_FAKE_CHANNEL_ENABLED === 'true') {
+    return [new DeterministicFakeAttendanceDeliveryChannel()]
+  }
+  return []
+}
+
+interface DingTalkRecipientRow {
+  integration_id: string
+  external_user_id: string
+}
+
+export class DingTalkAttendanceDeliveryChannel implements AttendanceDeliveryChannel {
+  readonly name = DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME
+  private readonly query: AttendanceNotificationDeliveryQuery
+  private readonly readConfig: (integrationId?: string) => Promise<DingTalkMessageConfig>
+  private readonly fetchAccessToken: (config: DingTalkMessageConfig) => Promise<string>
+  private readonly sendWorkNotification: (
+    accessToken: string,
+    input: { userIds: string[]; title: string; content: string },
+    config: DingTalkMessageConfig,
+  ) => Promise<DingTalkWorkNotificationResult>
+
+  constructor(options: DingTalkAttendanceDeliveryChannelOptions = {}) {
+    this.query = options.query ?? (defaultQuery as AttendanceNotificationDeliveryQuery)
+    this.readConfig = options.readConfig ?? readDingTalkMessageConfigFromRuntime
+    this.fetchAccessToken = options.fetchAccessToken ?? fetchDingTalkAppAccessToken
+    this.sendWorkNotification = options.sendWorkNotification ?? sendDingTalkWorkNotification
+  }
+
+  async send(message: AttendanceDeliveryMessage): Promise<AttendanceDeliveryChannelResult> {
+    const recipient = await this.resolveRecipient(message)
+    if (recipient.ok === false) return recipient.result
+
+    let config: DingTalkMessageConfig
+    try {
+      config = await this.readConfig(recipient.integrationId)
+    } catch (error) {
+      return classifyConfigError(error)
+    }
+
+    try {
+      const accessToken = await this.fetchAccessToken(config)
+      await this.sendWorkNotification(
+        accessToken,
+        {
+          userIds: [recipient.dingTalkUserId],
+          title: buildDeliveryTitle(message),
+          content: buildDeliveryContent(message),
+        },
+        config,
+      )
+      return { ok: true }
+    } catch (error) {
+      return classifyDingTalkSendError(error)
+    }
+  }
+
+  private async resolveRecipient(message: AttendanceDeliveryMessage): Promise<
+    | { ok: true; integrationId: string; dingTalkUserId: string }
+    | { ok: false; result: AttendanceDeliveryChannelResult }
+  > {
+    const { rows } = await this.query<DingTalkRecipientRow>(
+      `SELECT i.id::text AS integration_id,
+              a.external_user_id
+         FROM directory_account_links l
+         JOIN directory_accounts a
+           ON a.id = l.directory_account_id
+          AND a.provider = 'dingtalk'
+          AND a.is_active = true
+         JOIN directory_integrations i
+           ON i.id = a.integration_id
+          AND i.provider = 'dingtalk'
+          AND i.status = 'active'
+          AND i.org_id = $2
+        WHERE l.local_user_id = $1
+          AND l.link_status = 'linked'
+        ORDER BY i.updated_at DESC, a.updated_at DESC, a.id ASC
+        LIMIT 2`,
+      [message.recipientUserId, message.orgId],
+    )
+    if (rows.length === 0) {
+      return {
+        ok: false,
+        result: { ok: false, retryable: false, error: 'dingtalk_recipient_not_bound' },
+      }
+    }
+    if (rows.length > 1) {
+      return {
+        ok: false,
+        result: { ok: false, retryable: false, error: 'dingtalk_recipient_ambiguous' },
+      }
+    }
+    return {
+      ok: true,
+      integrationId: rows[0].integration_id,
+      dingTalkUserId: rows[0].external_user_id,
+    }
+  }
 }
 
 export class AttendanceNotificationDeliveryWorker {
@@ -320,4 +441,58 @@ function parsePayload(value: unknown): Record<string, unknown> {
     try { return JSON.parse(value) as Record<string, unknown> } catch { return {} }
   }
   return value as Record<string, unknown>
+}
+
+function normalizePayloadText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function buildDeliveryTitle(message: AttendanceDeliveryMessage): string {
+  const title = normalizePayloadText(message.payload.title)
+  if (title) return title
+  if (message.sourceType === 'comp_time_expiry_reminder') return 'Comp-time expiry reminder'
+  if (message.sourceType === 'unscheduled_reminder') return 'Unscheduled shift reminder'
+  return 'Attendance notification'
+}
+
+function buildDeliveryContent(message: AttendanceDeliveryMessage): string {
+  const body = normalizePayloadText(message.payload.body)
+  if (body) return body
+  const content = normalizePayloadText(message.payload.content)
+  if (content) return content
+  return `Attendance notification source: ${message.sourceType}`
+}
+
+function normalizeErrorText(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : String(error ?? '')
+  const text = raw.trim() || fallback
+  return text.length > 240 ? `${text.slice(0, 237)}...` : text
+}
+
+function classifyConfigError(error: unknown): AttendanceDeliveryChannelResult {
+  const message = normalizeErrorText(error, 'DingTalk work-notification config unavailable')
+  const retryable = !/not configured|required|not found|Agent ID/i.test(message)
+  return { ok: false, retryable, error: `dingtalk_work_notification_config_unavailable: ${message}` }
+}
+
+function classifyDingTalkSendError(error: unknown): AttendanceDeliveryChannelResult {
+  if (error instanceof DingTalkRequestError) {
+    return {
+      ok: false,
+      retryable: error.statusCode === 429 || error.statusCode >= 500,
+      error: `dingtalk_request_${error.statusCode}: ${normalizeErrorText(error, 'DingTalk request failed')}`,
+    }
+  }
+  if (error instanceof DingTalkBusinessError) {
+    return {
+      ok: false,
+      retryable: false,
+      error: `dingtalk_business_error: ${normalizeErrorText(error, 'DingTalk business error')}`,
+    }
+  }
+  return {
+    ok: false,
+    retryable: true,
+    error: `dingtalk_send_failed: ${normalizeErrorText(error, 'DingTalk send failed')}`,
+  }
 }

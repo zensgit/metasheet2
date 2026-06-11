@@ -6,8 +6,10 @@ import { up as createAttendanceNotificationDeliveries } from '../../src/db/migra
 import {
   AttendanceNotificationDeliveryWorker,
   DeterministicFakeAttendanceDeliveryChannel,
+  DingTalkAttendanceDeliveryChannel,
   type AttendanceNotificationDeliveryQuery,
 } from '../../src/services/AttendanceNotificationDeliveryWorker'
+import type { DingTalkMessageConfig } from '../../src/integrations/dingtalk/client'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -421,6 +423,131 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       await workerPool.end().catch(() => undefined)
       await workerDb.destroy().catch(() => undefined)
       await dropSchema(dbUrl, workerSchemaName).catch(() => undefined)
+    }
+  })
+
+  it('C5-3 real DingTalk channel resolves linked directory users and lets the worker mark delivery sent without external network', async () => {
+    if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
+    const publicPool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = `c5-dingtalk-${runSuffix}`
+    const localUserId = `u-c5-dingtalk-${runSuffix}`
+    const integrationId = randomUUID()
+    const directoryAccountId = randomUUID()
+    const sourceId = randomUUID()
+    let deliveryId = ''
+    const config: DingTalkMessageConfig = {
+      appKey: 'dt-app-key',
+      appSecret: 'dt-app-secret',
+      agentId: '123456789',
+      baseUrl: 'https://oapi.dingtalk.com',
+    }
+    const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
+      const r = await publicPool.query(sqlText, params as unknown[])
+      return { rows: r.rows, rowCount: r.rowCount }
+    }
+    const sentMessages: unknown[] = []
+
+    try {
+      await requireTable(publicPool, 'users')
+      await requireTable(publicPool, 'directory_integrations')
+      await requireTable(publicPool, 'directory_accounts')
+      await requireTable(publicPool, 'directory_account_links')
+      await requireTable(publicPool, 'attendance_notification_deliveries')
+
+      await publicPool.query(
+        `INSERT INTO users (id, email, password_hash, name, role, is_active)
+         VALUES ($1,$2,'hash',$3,'user',true)
+         ON CONFLICT (id) DO UPDATE SET is_active = EXCLUDED.is_active`,
+        [localUserId, `${localUserId}@example.test`, localUserId],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_integrations (id, org_id, provider, name, status, corp_id, config)
+         VALUES ($1,$2,'dingtalk',$3,'active','corp-c5',$4::jsonb)`,
+        [integrationId, orgId, `C5 DingTalk ${runSuffix}`, JSON.stringify({})],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_accounts
+           (id, integration_id, provider, corp_id, external_user_id, external_key, name, is_active)
+         VALUES ($1,$2,'dingtalk','corp-c5','dt-user-c5','dt-key-c5',$3,true)`,
+        [directoryAccountId, integrationId, localUserId],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy)
+         VALUES ($1,$2,'linked','manual')`,
+        [directoryAccountId, localUserId],
+      )
+      const delivery = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','dingtalk_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          sourceId,
+          `c5-dingtalk:${sourceId}:recipient:${localUserId}:channel:dingtalk_work_notification`,
+          localUserId,
+          JSON.stringify({ title: 'C5 DingTalk smoke', body: 'Please check the attendance reminder.' }),
+        ],
+      )
+      deliveryId = delivery.rows[0].id
+
+      const channel = new DingTalkAttendanceDeliveryChannel({
+        query,
+        readConfig: async (receivedIntegrationId) => {
+          expect(receivedIntegrationId).toBe(integrationId)
+          return config
+        },
+        fetchAccessToken: async (receivedConfig) => {
+          expect(receivedConfig).toBe(config)
+          return 'access-token'
+        },
+        sendWorkNotification: async (accessToken, input, receivedConfig) => {
+          sentMessages.push({ accessToken, input, receivedConfig })
+          return { taskId: 'task-c5', requestId: 'req-c5', raw: {} }
+        },
+      })
+      const worker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [channel],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-c5-dingtalk',
+      })
+
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+
+      expect(sentMessages).toEqual([{
+        accessToken: 'access-token',
+        input: {
+          userIds: ['dt-user-c5'],
+          title: 'C5 DingTalk smoke',
+          content: 'Please check the attendance reminder.',
+        },
+        receivedConfig: config,
+      }])
+      const row = (await publicPool.query(
+        `SELECT status, delivered_at, last_error, attempt_count, claim_worker_id, claim_expires_at
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [deliveryId],
+      )).rows[0]
+      expect(row).toMatchObject({
+        status: 'sent',
+        last_error: null,
+        attempt_count: 1,
+        claim_worker_id: null,
+        claim_expires_at: null,
+      })
+      expect(row.delivered_at).toBeTruthy()
+    } finally {
+      if (deliveryId) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [deliveryId]).catch(() => undefined)
+      }
+      await publicPool.query('DELETE FROM directory_account_links WHERE directory_account_id = $1', [directoryAccountId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_accounts WHERE id = $1', [directoryAccountId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM users WHERE id = $1', [localUserId]).catch(() => undefined)
+      await publicPool.end().catch(() => undefined)
     }
   })
 })
