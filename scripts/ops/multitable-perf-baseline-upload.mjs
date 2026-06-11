@@ -94,7 +94,7 @@ export function formatErrorWithCause(err) {
       current instanceof Error
         ? current.message || String(current)
         : typeof current === 'object'
-          ? JSON.stringify(current)
+          ? safeStringify(current)
           : String(current)
     parts.push(`${message}${code}`)
     current = typeof current === 'object' ? current.cause : undefined
@@ -103,4 +103,36 @@ export function formatErrorWithCause(err) {
     }
   }
   return parts.join(' ← caused by: ')
+}
+
+/**
+ * N1: JSON.stringify throws on a circular plain-object cause (and on BigInt).
+ * The whole point of formatErrorWithCause is to make a FAILURE legible — it must
+ * never throw on the very error it is formatting. Fall back to a readable
+ * placeholder instead of propagating the stringify error.
+ */
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return '[unserializable cause]'
+  }
+}
+
+/**
+ * N4: wrap a failed `import('undici')` into an actionable error that ALSO carries
+ * the original as `cause`. The previous wrap spliced `err.message` into the text
+ * but dropped the underlying error object, so a downstream `formatErrorWithCause`
+ * (and any structured logger) lost the real `code`/stack. Building the new Error
+ * with the `{ cause }` option keeps both the operator-facing remediation hint and
+ * the machine-readable cause chain. Lives here (the testable module) so the node
+ * test can assert the cause is attached without importing the network harness.
+ */
+export function wrapUndiciLoadError(err) {
+  // The inner error rides on `cause` (printed by formatErrorWithCause with its
+  // [code=…]); don't splice err.message into the text too, or it prints twice (review N2).
+  return new Error(
+    'Cannot resolve undici package (needed for the seed-upload dispatcher; root devDependency since S5a). Run pnpm install at the repo root.',
+    { cause: err },
+  )
 }

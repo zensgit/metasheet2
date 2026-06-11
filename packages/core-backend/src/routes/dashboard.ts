@@ -259,6 +259,12 @@ export function dashboardRouter() {
     try {
       const auth = await requireSheetManageViews(req, res, req.params.sheetId)
       if (!auth) return
+      // F4: validate `type` against CHART_TYPES on the PERSISTED path too — the column is TEXT NOT
+      // NULL with no CHECK, and only preview-data validated it before. Reject an unknown type BEFORE
+      // the service is touched (enum reuse, not a new contract). createChart requires a type.
+      if (!CHART_TYPES.has(req.body?.type as ChartType)) {
+        throw new Error('Invalid chart type')
+      }
       // v2-d: validate series constraints on the persisted path too — the UI is never the sole guard.
       assertSeriesConstraints(req.body?.dataSource as ChartConfig['dataSource'] | undefined, req.body?.type as ChartType, readBarMode(req.body?.display))
       const chart = await dashboardService.createChart(req.params.sheetId, {
@@ -320,11 +326,18 @@ export function dashboardRouter() {
         res.status(404).json({ error: 'Chart not found' })
         return
       }
+      // F4: validate the EFFECTIVE `type` against CHART_TYPES (updateChart shallow-merges
+      // `{...existing,...input}`). A patch that introduces a new type is rejected; a patch with no
+      // `type` re-validates the already-stored (always-valid) type, a harmless no-op.
+      const effectiveType = (req.body?.type ?? chart.type) as ChartType
+      if (!CHART_TYPES.has(effectiveType)) {
+        throw new Error('Invalid chart type')
+      }
       // v2-d: validate the EFFECTIVE config (updateChart shallow-merges `{...existing,...input}`),
       // so a patch that introduces a series field or changes type/aggregation is checked.
       assertSeriesConstraints(
         (req.body?.dataSource ?? chart.dataSource) as ChartConfig['dataSource'],
-        (req.body?.type ?? chart.type) as ChartType,
+        effectiveType,
         readBarMode(req.body?.display ?? chart.display),
       )
       const updated = await dashboardService.updateChart(req.params.id, req.body)

@@ -270,6 +270,47 @@ describe('MetaChartRenderer', () => {
     expect(container.querySelector('[data-legend]')).toBeNull()
   })
 
+  // r2 item 2: gauge dial=first point / max=share-of-total is only meaningful for an ADDITIVE
+  // aggregation (count/sum). For avg/min/max the share-of-total framing misleads → surface an
+  // i18n'd caption. The caption is HTML chrome in the renderer (buildChartOption stays unchanged).
+  it('r2: gauge with a non-additive aggregation (avg) shows the misleading-share caption', async () => {
+    const { container } = mount({ chartData: gaugeData, aggregation: 'avg' })
+    await flushPromises()
+    const note = container.querySelector('[data-gauge-agg-note]')
+    expect(note).toBeTruthy()
+    expect(note?.textContent || '').toMatch(/share of total/i)
+  })
+
+  it('r2: gauge with min / max also shows the caption (all non-additive aggs)', async () => {
+    for (const agg of ['min', 'max'] as const) {
+      const { container } = mount({ chartData: gaugeData, aggregation: agg })
+      await flushPromises()
+      expect(container.querySelector('[data-gauge-agg-note]'), `agg=${agg}`).toBeTruthy()
+    }
+  })
+
+  it('r2: gauge with an additive aggregation (count / sum) shows NO caption', async () => {
+    for (const agg of ['count', 'sum'] as const) {
+      const { container } = mount({ chartData: gaugeData, aggregation: agg })
+      await flushPromises()
+      expect(container.querySelector('[data-gauge-agg-note]'), `agg=${agg}`).toBeNull()
+    }
+  })
+
+  it('r2: a non-gauge chart never shows the gauge caption even with a non-additive agg', async () => {
+    const { container } = mount({ chartData: barData, aggregation: 'avg' })
+    await flushPromises()
+    expect(container.querySelector('[data-gauge-agg-note]')).toBeNull()
+  })
+
+  it('r2: gauge caption localizes to zh', async () => {
+    useLocale().setLocale('zh')
+    const { container } = mount({ chartData: gaugeData, aggregation: 'avg' })
+    await flushPromises()
+    const note = container.querySelector('[data-gauge-agg-note]')
+    expect(note?.textContent || '').toContain('占比')
+  })
+
   it('S3: disposes the canvas when switching funnel → number (new types share the lifecycle)', async () => {
     const { state } = mountReactive({ chartData: funnelData })
     await flushPromises()

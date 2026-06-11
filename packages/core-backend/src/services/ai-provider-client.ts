@@ -39,9 +39,17 @@ import {
  * only for postgres/mysql conn-string schemes, so a credentialed
  * MULTITABLE_AI_BASE_URL (e.g. https basic-auth to a proxy) surfacing in a
  * provider error would otherwise leak into the response + ledger `error`.
+ *
+ * NIT-NEW-1: the userinfo run is `[^/\s]*` (greedy, allows '@'), so a password
+ * with an UNENCODED '@' (e.g. `user:p@ss`) is redacted through the LAST '@'
+ * before the host — RFC 3986 puts the authority's userinfo entirely before the
+ * first '/'. A prior `[^@/\s]+` stopped at the FIRST '@' and leaked the tail
+ * (`<redacted>@ss@host`). Stopping at '/' (and whitespace) keeps a bare '@' that
+ * appears only in a path/query (`host/users@me`) untouched, and a string with no
+ * `scheme://…@` before its first '/' never matches (no userinfo → no change).
  */
 export function stripUrlUserinfo(text: string): string {
-  return text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^@/\s]+@/gi, '$1<redacted>@')
+  return text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s]*@/gi, '$1<redacted>@')
 }
 
 export interface AiUsage {

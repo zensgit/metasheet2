@@ -196,6 +196,40 @@ describe('MetaFieldManager aiShortcut config section (A3)', () => {
     app.unmount()
   })
 
+  it('r2 item 6: ALL persisted sources deleted → blocks save with an actionable, AI-section-specific message + warning state (no auto-disable)', async () => {
+    const updateSpy = vi.fn()
+    // The target keeps its configured aiShortcut (source = fld_src), but fld_src is GONE from fields.
+    const fieldsMissingSource: MetaField[] = [
+      {
+        id: 'fld_target',
+        name: 'Summary',
+        type: 'string',
+        property: { aiShortcut: structuredClone(AI_CONFIG), validation: [{ type: 'required' }] },
+      } as unknown as MetaField,
+      { id: 'fld_plain', name: 'Plain', type: 'string', property: {} } as unknown as MetaField,
+    ]
+    const { container, app } = mountManager({ fields: fieldsMissingSource, onUpdateField: updateSpy })
+    await openConfigFor(container, 'Summary')
+
+    // The shortcut is still ENABLED (no silent auto-disable on open).
+    expect((container.querySelector('[data-test="ai-shortcut-enable"]') as HTMLInputElement).checked).toBe(true)
+
+    saveButton(container).click()
+    await nextTick()
+
+    // Blocked — no field update is emitted.
+    expect(updateSpy).not.toHaveBeenCalled()
+    // Distinct, actionable message (NOT the generic "select at least one source").
+    const warning = container.querySelector('[data-test="ai-source-deleted-warning"]')
+    expect(warning).toBeTruthy()
+    expect(warning?.textContent || '').toContain('deleted')
+    expect(warning?.textContent || '').toMatch(/turn off the AI shortcut/i)
+    // The inline config error also carries the same actionable copy (not aiSourceRequired).
+    expect(container.querySelector('.meta-field-mgr__error')?.textContent || '').toContain('deleted')
+
+    app.unmount()
+  })
+
   it('A3-T1: enabling with zero source fields blocks the save with an inline error (constraint mirror)', async () => {
     const updateSpy = vi.fn()
     const { container, app } = mountManager({ onUpdateField: updateSpy })
