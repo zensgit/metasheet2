@@ -179,4 +179,28 @@ describe('dashboardRouter HTTP mounting', () => {
       .get('/api/multitable/sheet-a/charts')
       .expect(404)
   })
+
+  // S3 chart-type completion: the preview-data type gate (CHART_TYPES) must admit the new
+  // render-layer types. With the loaders mocked to zero fields the referenced groupBy field is
+  // "not allowed" → the route answers with the restricted ChartData shape (200), which is enough
+  // to prove the type passed validation (an unknown type 400s before any field check).
+  it('POST /charts/preview-data accepts the S3 chart types (area / funnel / gauge)', async () => {
+    for (const type of ['area', 'funnel', 'gauge']) {
+      const res = await request(buildApp())
+        .post('/api/multitable/sheets/sheet-a/charts/preview-data')
+        .send({ type, dataSource: { groupByFieldId: 'fld_x', aggregation: { function: 'count' } } })
+      expect(res.status, `preview must accept chart type "${type}"`).toBe(200)
+      expect(res.body.chartType).toBe(type)
+    }
+  })
+
+  it('POST /charts/preview-data still rejects unknown chart types (scatter stays out — no numeric x/y in the data contract)', async () => {
+    for (const type of ['scatter', 'radar', 'nope']) {
+      const res = await request(buildApp())
+        .post('/api/multitable/sheets/sheet-a/charts/preview-data')
+        .send({ type, dataSource: { groupByFieldId: 'fld_x', aggregation: { function: 'count' } } })
+      expect(res.status, `preview must reject chart type "${type}"`).toBe(400)
+      expect(res.body.error).toBe('Invalid chart type')
+    }
+  })
 })

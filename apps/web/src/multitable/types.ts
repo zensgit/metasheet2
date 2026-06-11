@@ -916,7 +916,9 @@ export interface AutomationStats {
 }
 
 // --- Charts ---
-export type ChartType = 'bar' | 'line' | 'pie' | 'number' | 'table'
+// S3: area / funnel / gauge are render-layer additions — the backend aggregates them through the
+// same grouped {label,value} pipeline as bar/line/pie (no per-type aggregation math).
+export type ChartType = 'bar' | 'line' | 'pie' | 'number' | 'table' | 'area' | 'funnel' | 'gauge'
 
 export type AggregationFunction = 'count' | 'sum' | 'avg' | 'min' | 'max' | 'count_distinct'
 

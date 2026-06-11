@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 
 function flushPromises() {
@@ -17,7 +17,7 @@ vi.mock('echarts/core', () => ({
   init: vi.fn(() => ({ setOption: vi.fn(), resize: vi.fn(), dispose: vi.fn() })),
   use: vi.fn(),
 }))
-vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {} }))
+vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {}, FunnelChart: {}, GaugeChart: {} }))
 vi.mock('echarts/components', () => ({ GridComponent: {}, TooltipComponent: {} }))
 vi.mock('echarts/renderers', () => ({ CanvasRenderer: {} }))
 
@@ -125,6 +125,28 @@ function mount(props: Record<string, unknown>) {
 }
 
 describe('MetaDashboardView', () => {
+  // S1-9: MetaChartRenderer is an async chunk (defineAsyncComponent). Resolve its loader ONCE up
+  // front (real timers) so every test — including the fake-timer preview tests — renders the
+  // cached component the same tick its chart data lands, exactly like the old static import.
+  beforeAll(async () => {
+    const { client } = mockClient([fakeDashboard()], [fakeChart()])
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({ render: () => h(MetaDashboardView, { sheetId: 'sheet_1', client }) })
+    app.mount(container)
+    // Wall-clock bound, not an iteration count: under full-suite load the first module
+    // transform of the renderer chunk can outlast many setTimeout(0) round-trips.
+    const deadline = Date.now() + 10_000
+    while (!container.querySelector('[data-chart-canvas]') && Date.now() < deadline) {
+      await flushPromises()
+    }
+    expect(container.querySelector('[data-chart-canvas]')).toBeTruthy()
+    app.unmount()
+    document.body.innerHTML = ''
+    // Explicit hook timeout > the in-loop 10s deadline so a pathological stall fails on the
+    // assertion above (loud), never on vitest's default hook timeout (review N2).
+  }, 15_000)
+
   afterEach(() => {
     vi.useRealTimers()
     useLocale().setLocale('en')
@@ -1026,5 +1048,68 @@ describe('MetaDashboardView', () => {
     expect(body.type).toBe('line')
     expect(body.dataSource.seriesByFieldId).toBe('fld_amount')
     expect(body.display.barMode).toBeUndefined()
+  })
+
+  // ---- S3: chart-type completion (area / funnel / gauge) + S1-9 async renderer ----
+
+  it('S3: the chart-type select offers area / funnel / gauge alongside the original five', async () => {
+    const { client } = mockClient([fakeDashboard({ panels: [] })], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    await openCreateForm(container)
+
+    const options = Array.from(typeSelectOf(container).options).map((o) => o.value)
+    expect(options).toEqual(['bar', 'line', 'area', 'pie', 'funnel', 'gauge', 'number', 'table'])
+  })
+
+  it('S3: variant + series pickers stay hidden for area/funnel/gauge (no inapplicable controls)', async () => {
+    const { client } = mockClient([fakeDashboard({ panels: [] })], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    await openCreateForm(container)
+    const typeSelect = typeSelectOf(container)
+
+    for (const t of ['area', 'funnel', 'gauge']) {
+      await setSelect(typeSelect, t)
+      expect(variantSelectOf(container), `variant select must stay hidden for ${t}`).toBeNull()
+      expect(seriesSelectOf(container), `series select must stay hidden for ${t}`).toBeNull()
+    }
+  })
+
+  it('S3: create carries type funnel (wire maps chartType -> type)', async () => {
+    const { client, fetchFn } = mockClient([fakeDashboard({ panels: [] })], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    await openCreateForm(container)
+    const nameInput = container.querySelector('[data-field="chart-name"]') as HTMLInputElement
+    nameInput.value = 'Pipeline'; nameInput.dispatchEvent(new Event('input')); await nextTick()
+    await setSelect(typeSelectOf(container), 'funnel')
+    ;(container.querySelector('[data-action="submit-create-chart"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const post = fetchFn.mock.calls.find(
+      ([url, init]: [string, RequestInit?]) => init?.method === 'POST' && url.includes('/charts') && !url.includes('preview-data'),
+    )
+    const body = JSON.parse(post![1].body as string)
+    expect(body.type).toBe('funnel')
+    expect(body.display.variant).toBeUndefined() // no render variant applies to funnel
+  })
+
+  it('S1-9: a panel renders the (async-chunked) chart renderer after promises flush', async () => {
+    const funnelChart = fakeChart({ chartType: 'funnel' })
+    const funnelChartData: ChartData = {
+      chartType: 'funnel',
+      dataPoints: [{ label: 'Visit', value: 100 }, { label: 'Buy', value: 30 }],
+      total: 130,
+    }
+    const { client } = mockClient([fakeDashboard()], [funnelChart], funnelChartData)
+    const { container } = mount({ sheetId: 'sheet_1', client })
+    await flushPromises()
+
+    // defineAsyncComponent resolves through the same microtask flushing the data load uses;
+    // after the flush the panel must contain the real renderer (canvas + funnel legend).
+    expect(container.querySelector('[data-chart-type="funnel"]')).toBeTruthy()
+    expect(container.querySelector('[data-chart-canvas]')).toBeTruthy()
+    expect(container.querySelector('[data-legend]')).toBeTruthy()
   })
 })
