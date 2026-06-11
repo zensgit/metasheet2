@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => {
   return { setOption, resize, dispose, init, instance }
 })
 vi.mock('echarts/core', () => ({ init: mocks.init, use: vi.fn() }))
-vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {} }))
+vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {}, FunnelChart: {}, GaugeChart: {} }))
 vi.mock('echarts/components', () => ({ GridComponent: {}, TooltipComponent: {} }))
 vi.mock('echarts/renderers', () => ({ CanvasRenderer: {} }))
 
@@ -80,6 +80,33 @@ const restrictedBarData: ChartData = {
   dataPoints: [],
   total: 0,
   metadata: { restricted: true, recordCount: 0 },
+}
+
+// S3 chart-type completion fixtures
+const areaData: ChartData = {
+  chartType: 'area',
+  dataPoints: [
+    { label: 'Jan', value: 5 },
+    { label: 'Feb', value: 12 },
+  ],
+}
+
+const funnelData: ChartData = {
+  chartType: 'funnel',
+  dataPoints: [
+    { label: 'Visit', value: 100 },
+    { label: 'Signup', value: 40 },
+    { label: 'Buy', value: 10 },
+  ],
+}
+
+const gaugeData: ChartData = {
+  chartType: 'gauge',
+  dataPoints: [
+    { label: 'open', value: 30 },
+    { label: 'closed', value: 70 },
+  ],
+  total: 100,
 }
 
 describe('MetaChartRenderer', () => {
@@ -194,6 +221,63 @@ describe('MetaChartRenderer', () => {
     })
     await flushPromises()
     expect(container.querySelector('[data-legend="series"]')).toBeNull()
+  })
+
+  // --- S3: area / funnel / gauge chart types ---
+
+  it('S3: renders area via ECharts canvas as a line+areaStyle option', async () => {
+    const { container } = mount({ chartData: areaData })
+    await flushPromises()
+
+    expect(container.querySelector('[data-chart-type="area"]')).toBeTruthy()
+    expect(container.querySelector('[data-chart-canvas]')).toBeTruthy()
+    expect(mocks.init).toHaveBeenCalledTimes(1)
+    expect(mocks.setOption.mock.calls[0][0]).toEqual(buildChartOption(areaData))
+    const series = (mocks.setOption.mock.calls[0][0] as { series: { type: string; areaStyle?: unknown }[] }).series
+    expect(series[0].type).toBe('line')
+    expect(series[0].areaStyle).toBeDefined()
+  })
+
+  it('S3: renders funnel via ECharts canvas + shares the pie-style HTML legend (swatch/label/value)', async () => {
+    const { container } = mount({ chartData: funnelData })
+    await flushPromises()
+
+    expect(container.querySelector('[data-chart-type="funnel"]')).toBeTruthy()
+    expect(container.querySelector('[data-chart-canvas]')).toBeTruthy()
+    expect(mocks.init).toHaveBeenCalledTimes(1)
+    expect(mocks.setOption.mock.calls[0][0]).toEqual(buildChartOption(funnelData))
+    const legend = container.querySelector('[data-legend]')
+    expect(legend).toBeTruthy()
+    expect(container.querySelectorAll('.meta-chart__legend-item').length).toBe(3)
+    expect(legend?.textContent).toContain('Visit')
+    expect(legend?.textContent).toContain('100')
+  })
+
+  it('S3: hides the funnel HTML legend when showLegend is false', async () => {
+    const { container } = mount({ chartData: funnelData, displayConfig: { showLegend: false } })
+    await flushPromises()
+    expect(container.querySelector('[data-legend]')).toBeNull()
+  })
+
+  it('S3: renders gauge via ECharts canvas without any HTML legend', async () => {
+    const { container } = mount({ chartData: gaugeData })
+    await flushPromises()
+
+    expect(container.querySelector('[data-chart-type="gauge"]')).toBeTruthy()
+    expect(container.querySelector('[data-chart-canvas]')).toBeTruthy()
+    expect(mocks.init).toHaveBeenCalledTimes(1)
+    expect(mocks.setOption.mock.calls[0][0]).toEqual(buildChartOption(gaugeData))
+    expect(container.querySelector('[data-legend]')).toBeNull()
+  })
+
+  it('S3: disposes the canvas when switching funnel → number (new types share the lifecycle)', async () => {
+    const { state } = mountReactive({ chartData: funnelData })
+    await flushPromises()
+    expect(mocks.init).toHaveBeenCalledTimes(1)
+
+    state.chartData = numberData
+    await flushPromises()
+    expect(mocks.dispose).toHaveBeenCalled()
   })
 
   it('does NOT init ECharts for number/table (HTML-rendered)', async () => {

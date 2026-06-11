@@ -157,7 +157,10 @@
             <select v-model="chartDraft.chartType" class="meta-dashboard__select" data-field="chart-type" @change="chartDraft.variant = ''">
               <option value="bar">bar</option>
               <option value="line">line</option>
+              <option value="area">area</option>
               <option value="pie">pie</option>
+              <option value="funnel">funnel</option>
+              <option value="gauge">gauge</option>
               <option value="number">number</option>
               <option value="table">table</option>
             </select>
@@ -271,11 +274,20 @@
   </div>
 </template>
 
+<script lang="ts">
+import { defineAsyncComponent } from 'vue'
+
+// S1-9: the ECharts renderer is the only echarts importer — loading it async puts echarts in its
+// own lazy chunk (≈150KB+ off the workbench bundle); panels keep their loading state meanwhile.
+// MODULE scope (plain <script>), NOT <script setup>: setup-scope would create a fresh loader
+// closure per component instance, losing Vue's resolved-component cache across remounts.
+const MetaChartRenderer = defineAsyncComponent(() => import('./MetaChartRenderer.vue'))
+</script>
+
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import type { AggregationFunction, ChartType, Dashboard, DashboardPanel, ChartConfig, ChartCreateInput, ChartData, ChartDataSource, MetaField, MetaFieldType } from '../types'
 import type { MultitableApiClient } from '../api/client'
-import MetaChartRenderer from './MetaChartRenderer.vue'
 import { useLocale } from '../../composables/useLocale'
 import { dashboardDefaultName, viewRenderLabel, viewSizeLabel } from '../utils/meta-view-render-labels'
 import { fieldTypeLabel } from '../utils/meta-core-labels'

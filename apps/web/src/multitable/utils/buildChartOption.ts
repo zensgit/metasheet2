@@ -11,9 +11,17 @@ export const CHART_COLORS = [
 ]
 
 /**
+ * Chart types drawn on the ECharts canvas. The rest (`number` / `table`) stay plain HTML in the
+ * renderer — single source so the renderer's canvas gate and this mapper's guard never drift.
+ */
+export const ECHARTS_CHART_TYPES: ReadonlySet<ChartData['chartType']> = new Set<ChartData['chartType']>([
+  'bar', 'line', 'pie', 'area', 'funnel', 'gauge',
+])
+
+/**
  * Map a ChartData (+ optional display config) to an ECharts option for the
- * bar / line / pie chart types. Returns `null` for `number` / `table`, which the
- * renderer keeps as plain HTML (ECharts has no native equivalent).
+ * bar / line / pie / area / funnel / gauge chart types. Returns `null` for `number` / `table`,
+ * which the renderer keeps as plain HTML (ECharts has no native equivalent).
  *
  * Behavior contract — deliberately matches the previous hand-rolled SVG so the
  * swap is visually equivalent (only hover tooltips are added):
@@ -34,7 +42,7 @@ export function buildChartOption(
   displayConfig?: ChartDisplayConfig,
 ): EChartsOption | null {
   const { chartType, dataPoints } = chartData
-  if (chartType !== 'bar' && chartType !== 'line' && chartType !== 'pie') return null
+  if (!ECHARTS_CHART_TYPES.has(chartType)) return null
 
   const showValues = displayConfig?.showValues !== false
   const labels = dataPoints.map((p) => p.label)
@@ -66,7 +74,52 @@ export function buildChartOption(
     }
   }
 
-  // bar | line share value-encoded data; bar additionally supports horizontal orientation.
+  // S3 funnel: dataPoints map to {name,value} stages like pie; stages stay label-less and the
+  // renderer shows the same HTML "swatch + label + value" legend as pie.
+  if (chartType === 'funnel') {
+    return {
+      ...base,
+      tooltip: { trigger: 'item' },
+      series: [
+        {
+          type: 'funnel',
+          // Backend ordering (dataSource.sortBy/sortOrder) stays authoritative — ECharts' default
+          // value-descending re-sort would silently override it (mirrors the date-axis rationale:
+          // the producer owns ordering, the renderer is order-faithful).
+          sort: 'none',
+          label: { show: false },
+          data: dataPoints.map((p) => ({
+            name: p.label,
+            value: p.value,
+            ...(p.color ? { itemStyle: { color: p.color } } : {}),
+          })),
+        },
+      ],
+    }
+  }
+
+  // S3 gauge: dials the FIRST data point against the dataPoints total (share-of-total semantic —
+  // the backend emits grouped {label,value} + total = Σ values; there is no per-type aggregation).
+  // max is clamped to ≥ 1 so an all-zero result still renders a sane (empty) dial.
+  if (chartType === 'gauge') {
+    const point = dataPoints[0]
+    const value = point?.value ?? 0
+    return {
+      ...base,
+      tooltip: { trigger: 'item' },
+      series: [
+        {
+          type: 'gauge',
+          min: 0,
+          max: Math.max(chartData.total ?? 0, value, 1),
+          progress: { show: true },
+          data: [{ name: point?.label ?? '', value }],
+        },
+      ],
+    }
+  }
+
+  // bar | line | area share value-encoded data; bar additionally supports horizontal orientation.
   const seriesData = dataPoints.map((p) => ({
     value: p.value,
     ...(p.color ? { itemStyle: { color: p.color } } : {}),
@@ -116,8 +169,9 @@ export function buildChartOption(
     }
   }
 
-  // line — category labels come from the x-axis; no per-point value labels (matches old SVG)
-  const area = displayConfig?.variant === 'area'
+  // line | area — category labels come from the x-axis; no per-point value labels (matches old SVG).
+  // S3: the first-class 'area' type forces areaStyle; the v2-c line-variant 'area' keeps working.
+  const area = chartType === 'area' || displayConfig?.variant === 'area'
   // v2-d-b2: multi-series line — one overlaid line per seriesByFieldId value (never stacked).
   // Categories (xAxis) come from dataPoints; each series.data is dense + aligned to that order.
   // The area variant is preserved: every line keeps its areaStyle.

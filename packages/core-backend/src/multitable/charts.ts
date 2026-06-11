@@ -2,7 +2,10 @@
  * Chart type definitions for multitable dashboard V1.
  */
 
-export type ChartType = 'bar' | 'line' | 'pie' | 'number' | 'table'
+// S3: area / funnel / gauge are RENDER-LAYER types — the aggregation service computes them through
+// the same grouped {label,value} pipeline as bar/line/pie (no per-type math; series split stays
+// bar/line-only). The frontend maps area→line+areaStyle, funnel→stages, gauge→first-point/total dial.
+export type ChartType = 'bar' | 'line' | 'pie' | 'number' | 'table' | 'area' | 'funnel' | 'gauge'
 
 export type AggregationFunction = 'count' | 'sum' | 'avg' | 'min' | 'max' | 'count_distinct'
 
