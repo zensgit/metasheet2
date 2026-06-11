@@ -264,10 +264,10 @@ Staging:
 
 | Slice | Scope | Status |
 | --- | --- | --- |
-| D0 | This design-lock + tracker backfill | 🟡 this PR |
-| A2-0 | Dormant settings + strict validation, no writer | 🔒 |
-| A2-1 | Shared apply helper extraction; A1 route no behavior change | 🔒 |
-| A2-2 | Accept `mode='auto'` + env-gated scheduler job + high-confidence auto-write | 🔒 |
+| D0 | This design-lock + tracker backfill | ✅ |
+| A2-0 | Dormant settings + strict validation, no writer | ✅ |
+| A2-1 | Shared apply helper extraction; A1 route no behavior change | 🟡 runtime PR |
+| A2-2 | Accept `mode='auto'` + env-gated scheduler job + high-confidence auto-write | 🟡 runtime PR |
 | A2-3 | Admin operations card + run summaries | 🔒 |
 | A2-4 | Staging smoke + tracker closeout | 🔒 |
 

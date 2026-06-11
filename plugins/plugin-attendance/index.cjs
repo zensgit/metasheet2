@@ -57,6 +57,8 @@ const ATTENDANCE_SCHEDULE_GROUP_SOURCES = new Set(['manual', 'import', 'integrat
 const ATTENDANCE_SCHEDULE_GROUP_MEMBER_ROLES = new Set(['member', 'lead', 'backup'])
 const ATTENDANCE_SCHEDULER_SCOPE_SUBJECT_TYPES = new Set(['user', 'role', 'role_tag'])
 const ATTENDANCE_SCHEDULER_SCOPE_ACTIONS = new Set(['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'])
+const AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG = 'system:attendance-auto-shift'
+const AUTO_SHIFT_AUTO_WRITE_SOURCE = 'scheduler'
 const ATTENDANCE_GROUP_TYPES = new Set(['fixed_shift', 'scheduled_shift', 'free_time'])
 const DEFAULT_ATTENDANCE_GROUP_TYPE = 'fixed_shift'
 const ATTENDANCE_GROUP_MANAGER_ROLES = new Set(['owner', 'sub_owner'])
@@ -182,6 +184,7 @@ let lastAutoAbsenceKey = ''
 let autoHolidaySyncTimeout = null
 let autoHolidaySyncInterval = null
 let importUploadCleanupInterval = null
+let autoShiftAutoWriteSchedulerUnregister = null
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -7827,6 +7830,30 @@ function attendanceSchedulerScopeAllowsActorActionTarget(scopeRow, actorContext,
   return attendanceSchedulerScopeMatchesTarget(scopeRow, target)
 }
 
+function buildAttendanceSchedulerScopeTargetFromFacts(scopeRow, facts) {
+  const scope = normalizeAttendanceSchedulerScopeBody(scopeRow?.scope ?? scopeRow)
+  const target = {}
+  let constrained = false
+  for (const key of ['scheduleGroupIds', 'attendanceGroupIds', 'userIds', 'departments', 'roles', 'roleTags']) {
+    const scopeValues = normalizeStringArray(scope[key])
+    if (scopeValues.length === 0) continue
+    constrained = true
+    const factValues = new Set(normalizeStringArray(facts?.[key]))
+    const matches = scopeValues.filter(value => factValues.has(value))
+    if (matches.length === 0) return null
+    target[key] = matches
+  }
+  return constrained ? target : null
+}
+
+function attendanceSchedulerScopeAllowsActorActionFacts(scopeRow, actorContext, action, facts) {
+  if (!scopeRow || scopeRow.isActive === false || scopeRow.is_active === false) return false
+  if (!attendanceSchedulerScopeMatchesActor(scopeRow, actorContext)) return false
+  if (!normalizeStringArray(scopeRow.actions).includes(action)) return false
+  const target = buildAttendanceSchedulerScopeTargetFromFacts(scopeRow, facts)
+  return target ? attendanceSchedulerScopeMatchesTarget(scopeRow, target) : false
+}
+
 function countBy(items, resolveKey) {
   const counts = new Map()
   for (const item of Array.isArray(items) ? items : []) {
@@ -11551,8 +11578,9 @@ function normalizeAutoShiftMatchingSetting(raw) {
   const maxAssignmentsPerRun = Number(autoWrite.maxAssignmentsPerRun)
   return {
     enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_SETTINGS.autoShiftMatching.enabled,
-    // A1 exposes admin-selected apply. `auto` remains a future A2 slice and must not be accepted.
-    mode: modeRaw === 'preview' || modeRaw === 'apply' ? modeRaw : DEFAULT_SETTINGS.autoShiftMatching.mode,
+    mode: modeRaw === 'preview' || modeRaw === 'apply' || modeRaw === 'auto'
+      ? modeRaw
+      : DEFAULT_SETTINGS.autoShiftMatching.mode,
     maxToleranceMinutes: Number.isFinite(tolerance) && tolerance > 0
       ? Math.min(720, Math.floor(tolerance))
       : DEFAULT_SETTINGS.autoShiftMatching.maxToleranceMinutes,
@@ -12765,6 +12793,10 @@ function isAutoShiftMatchingRuntimeEnabled() {
   return parseBoolean(process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED, false)
 }
 
+function isAutoShiftAutoWriteRuntimeEnabled() {
+  return parseBoolean(process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED, false)
+}
+
 function confidenceRank(value) {
   if (value === 'high') return 3
   if (value === 'medium') return 2
@@ -13010,6 +13042,491 @@ function mapAutoShiftApplySkipped(item, reason, extra = {}) {
     candidateShiftId: item.candidateShiftId,
     reason,
     ...extra,
+  }
+}
+
+async function applyAutoShiftMatchingItems(db, {
+  orgId,
+  items,
+  runId,
+  maxToleranceMinutes,
+  minConfidenceToApply,
+  enforceEditWindow,
+  resolveActorAccess,
+  assertDispatchAllowed,
+}) {
+  const windowAccess = await enforceEditWindow(items.map((item) => item.workDate))
+  if (!windowAccess) return null
+
+  const actorAccess = await resolveActorAccess()
+  if (!actorAccess) return null
+  for (const item of items) {
+    const access = await assertDispatchAllowed(item, actorAccess)
+    if (!access) return null
+  }
+
+  return db.transaction(async (trx) => {
+    const applied = []
+    const skipped = []
+    for (const item of items) {
+      await acquireAttendanceScheduleAssignmentLock(trx, orgId, item.userId)
+      const producerKey = buildAutoShiftMatchProducerKey(item.userId, item.workDate)
+      const alreadyRows = await trx.query(
+        `SELECT *
+           FROM attendance_shift_assignments
+          WHERE org_id = $1
+            AND user_id = $2
+            AND COALESCE(is_active, true) = true
+            AND COALESCE(publish_status, 'published') = 'published'
+            AND producer_type = $3
+            AND producer_key = $4
+          ORDER BY created_at ASC
+          LIMIT 1`,
+        [orgId, item.userId, AUTO_SHIFT_MATCH_PRODUCER_TYPE, producerKey],
+      )
+      if (alreadyRows.length) {
+        skipped.push(mapAutoShiftApplySkipped(item, 'already_applied', { assignmentId: alreadyRows[0].id }))
+        continue
+      }
+
+      const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
+        kind: 'shift',
+        orgId,
+        userId: item.userId,
+        startDate: item.workDate,
+        endDate: item.workDate,
+        slotIndex: 0,
+        multiShiftEnabled: false,
+        isActive: true,
+      })
+      if (conflict) {
+        skipped.push(mapAutoShiftApplySkipped(item, 'already_scheduled', { conflict }))
+        continue
+      }
+
+      const preview = await buildAutoShiftMatchingPreview(trx, {
+        orgId,
+        from: item.workDate,
+        to: item.workDate,
+        userIds: [item.userId],
+        maxToleranceMinutes,
+        minConfidenceToApply,
+      })
+      const match = (preview.items || []).find((candidate) => candidate.candidateShiftId === item.candidateShiftId)
+      if (!match) {
+        const skipReason = (preview.skipped || []).find((entry) =>
+          entry.userId === item.userId && entry.workDate === item.workDate
+        )?.reason
+        skipped.push(mapAutoShiftApplySkipped(item, skipReason || 'stale_or_ineligible'))
+        continue
+      }
+      if (!autoShiftEvidenceEventIdsMatch(item.evidenceEventIds, match.evidence?.eventIds)) {
+        skipped.push(mapAutoShiftApplySkipped(item, 'stale_punch_evidence'))
+        continue
+      }
+
+      const shiftRows = await trx.query(
+        'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
+        [item.candidateShiftId, orgId],
+      )
+      if (!shiftRows.length) {
+        skipped.push(mapAutoShiftApplySkipped(item, 'shift_not_found'))
+        continue
+      }
+
+      const assignmentRows = await trx.query(
+        `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id)
+         VALUES ($1, $2, $3, $4, 0, $5, $5, true, $6, $7, $8, $7)
+         RETURNING *`,
+        [
+          randomUUID(),
+          orgId,
+          item.userId,
+          item.candidateShiftId,
+          item.workDate,
+          AUTO_SHIFT_MATCH_PRODUCER_TYPE,
+          runId,
+          producerKey,
+        ],
+      )
+      await enforceShiftComplianceCap(trx, {
+        orgId,
+        userId: item.userId,
+        fromDate: item.workDate,
+        toDate: item.workDate,
+      })
+      applied.push({
+        userId: item.userId,
+        workDate: item.workDate,
+        candidateShiftId: item.candidateShiftId,
+        assignment: mapAssignmentRow(assignmentRows[0]),
+        shift: mapShiftRow(shiftRows[0]),
+      })
+    }
+    return { applied, skipped }
+  })
+}
+
+function resolveAutoShiftAutoWriteWindow(now = new Date(), lookaheadDays = DEFAULT_SETTINGS.autoShiftMatching.autoWrite.lookaheadDays) {
+  const today = normalizeDateOnly(now) ?? new Date().toISOString().slice(0, 10)
+  const days = Math.max(1, Math.min(3, Math.floor(Number(lookaheadDays) || 1)))
+  const from = addDaysToDateKey(today, 1) ?? today
+  const to = addDaysToDateKey(from, days - 1) ?? from
+  return { from, to, days }
+}
+
+async function loadAutoShiftAutoWriteTargetUserIds(db, orgId) {
+  const rows = await db.query(
+    `SELECT DISTINCT m.user_id
+       FROM attendance_group_members m
+       JOIN attendance_groups g
+         ON g.id = m.group_id
+        AND g.org_id = m.org_id
+      WHERE m.org_id = $1
+        AND m.user_id IS NOT NULL
+        AND g.attendance_type = 'scheduled_shift'
+      ORDER BY m.user_id ASC`,
+    [orgId],
+  )
+  return rows.map(row => String(row.user_id ?? '').trim()).filter(Boolean)
+}
+
+async function resolveAutoShiftAutoWriteDispatchFacts(db, orgId, item) {
+  const userId = String(item?.userId ?? '').trim()
+  const workDate = normalizeDateOnly(item?.workDate) ?? item?.workDate
+  const context = await loadAttendanceScopeContextForUser(db, orgId, userId)
+  const actorRefs = attendanceSchedulerScopeActorRefs(context)
+  const facts = {
+    userIds: userId ? [userId] : [],
+    attendanceGroupIds: [],
+    scheduleGroupIds: [],
+    departments: [],
+    roles: actorRefs.roles,
+    roleTags: actorRefs.roleTags,
+  }
+  if (!userId) return facts
+  const attendanceGroupRows = await db.query(
+    `SELECT DISTINCT group_id
+       FROM attendance_group_members
+      WHERE org_id = $1
+        AND user_id = $2
+        AND group_id IS NOT NULL
+      ORDER BY group_id ASC`,
+    [orgId, userId],
+  )
+  facts.attendanceGroupIds = attendanceGroupRows.map(row => row.group_id).filter(Boolean)
+  if (workDate) {
+    const scheduleGroupRows = await db.query(
+      `SELECT DISTINCT m.schedule_group_id, g.department_ref
+         FROM attendance_schedule_group_members m
+         JOIN attendance_schedule_groups g
+           ON g.id = m.schedule_group_id
+          AND g.org_id = m.org_id
+          AND COALESCE(g.is_active, true) = true
+        WHERE m.org_id = $1
+          AND m.user_id = $2
+          AND m.schedule_group_id IS NOT NULL
+          AND COALESCE(m.effective_from, DATE '0001-01-01') <= $3::date
+          AND COALESCE(m.effective_to, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+        ORDER BY m.schedule_group_id ASC`,
+      [orgId, userId, workDate],
+    )
+    facts.scheduleGroupIds = scheduleGroupRows.map(row => row.schedule_group_id).filter(Boolean)
+    facts.departments = sortedUnique(scheduleGroupRows.map(row => row.department_ref).filter(Boolean))
+  }
+  return facts
+}
+
+async function assertAutoShiftAutoWriteSystemDispatchAllowed(db, orgId, item) {
+  const actorContext = {
+    userId: '',
+    roles: [],
+    roleTags: [AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG],
+  }
+  const rows = await db.query(
+    `SELECT *
+       FROM attendance_scheduler_scopes
+      WHERE org_id = $1
+        AND is_active = true
+        AND subject_type = 'role_tag'
+        AND subject_ref = $2
+      ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST`,
+    [orgId, AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG],
+  )
+  if (!rows.length) return false
+  const facts = await resolveAutoShiftAutoWriteDispatchFacts(db, orgId, item)
+  return rows
+    .map(mapAttendanceSchedulerScopeRow)
+    .some(scope => attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'dispatch', facts))
+}
+
+async function insertAutoShiftAutoWriteRun(db, { orgId, from, to, configSnapshot }) {
+  try {
+    const rows = await db.query(
+      `INSERT INTO attendance_auto_shift_auto_write_runs
+       (id, org_id, source, status, target_from, target_to, config_snapshot, started_at, created_at)
+       VALUES ($1, $2, $3, 'running', $4::date, $5::date, $6::jsonb, now(), now())
+       RETURNING *`,
+      [randomUUID(), orgId, AUTO_SHIFT_AUTO_WRITE_SOURCE, from, to, JSON.stringify(configSnapshot ?? {})],
+    )
+    return { run: rows[0], claimed: true }
+  } catch (error) {
+    if (error?.code === '23505') return { run: null, claimed: false }
+    throw error
+  }
+}
+
+async function insertAutoShiftAutoWriteRunItem(db, {
+  runId,
+  orgId,
+  item,
+  status,
+  reason,
+  assignmentId,
+  errorMessage,
+}) {
+  await db.query(
+    `INSERT INTO attendance_auto_shift_auto_write_run_items
+     (id, run_id, org_id, user_id, work_date, candidate_shift_id, confidence, status, reason, assignment_id, evidence_event_ids, error_message, created_at)
+     VALUES ($1, $2, $3, $4, $5::date, $6::uuid, $7, $8, $9, $10::uuid, $11::jsonb, $12, now())
+     ON CONFLICT (run_id, user_id, work_date) DO UPDATE
+       SET status = EXCLUDED.status,
+           reason = EXCLUDED.reason,
+           assignment_id = EXCLUDED.assignment_id,
+           error_message = EXCLUDED.error_message`,
+    [
+      randomUUID(),
+      runId,
+      orgId,
+      item.userId,
+      item.workDate,
+      item.candidateShiftId ?? null,
+      item.confidence ?? null,
+      status,
+      reason ?? null,
+      assignmentId ?? null,
+      JSON.stringify(normalizeStringArray(item.evidenceEventIds ?? item.evidence?.eventIds)),
+      errorMessage ?? null,
+    ],
+  )
+}
+
+async function finalizeAutoShiftAutoWriteRun(db, runId, { status, scannedCount, candidateCount, appliedCount, skippedCount, errorCount, errorMessage }) {
+  await db.query(
+    `UPDATE attendance_auto_shift_auto_write_runs
+        SET status = $2,
+            scanned_count = $3,
+            candidate_count = $4,
+            applied_count = $5,
+            skipped_count = $6,
+            error_count = $7,
+            error_message = $8,
+            finished_at = now()
+      WHERE id = $1`,
+    [runId, status, scannedCount, candidateCount, appliedCount, skippedCount, errorCount, errorMessage ?? null],
+  )
+}
+
+async function runAttendanceAutoShiftAutoWriteOnce(db, { orgId = DEFAULT_ORG_ID, now = new Date(), logger = console, emitEvent = () => {} } = {}) {
+  const settings = await getSettings(db)
+  const autoShiftSettings = normalizeAutoShiftMatchingSetting(settings.autoShiftMatching)
+  const autoWrite = autoShiftSettings.autoWrite
+  if (
+    !isAutoShiftMatchingRuntimeEnabled()
+    || !isAutoShiftAutoWriteRuntimeEnabled()
+    || autoShiftSettings.enabled !== true
+    || autoShiftSettings.mode !== 'auto'
+    || autoWrite.enabled !== true
+  ) {
+    return { ran: false, reason: 'disabled' }
+  }
+
+  const window = resolveAutoShiftAutoWriteWindow(now, autoWrite.lookaheadDays)
+  const configSnapshot = {
+    autoShiftMatching: {
+      enabled: autoShiftSettings.enabled,
+      mode: autoShiftSettings.mode,
+      maxToleranceMinutes: autoShiftSettings.maxToleranceMinutes,
+      minConfidenceToApply: autoShiftSettings.minConfidenceToApply,
+      autoWrite: { ...autoWrite },
+    },
+    systemRoleTag: AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG,
+  }
+  const claim = await insertAutoShiftAutoWriteRun(db, {
+    orgId,
+    from: window.from,
+    to: window.to,
+    configSnapshot,
+  })
+  if (!claim.claimed || !claim.run?.id) {
+    return { ran: false, reason: 'already_running', from: window.from, to: window.to }
+  }
+
+  const runId = claim.run.id
+  let scannedCount = 0
+  let candidateCount = 0
+  let appliedCount = 0
+  let skippedCount = 0
+  let errorCount = 0
+  let fatalMessage = null
+
+  try {
+    const userIds = await loadAutoShiftAutoWriteTargetUserIds(db, orgId)
+    const dates = enumerateAttendanceDateKeys(window.from, window.to)
+    scannedCount = userIds.length * dates.length
+    const preview = await buildAutoShiftMatchingPreview(db, {
+      orgId,
+      from: window.from,
+      to: window.to,
+      userIds,
+      maxToleranceMinutes: autoShiftSettings.maxToleranceMinutes,
+      minConfidenceToApply: autoWrite.minConfidence,
+    })
+    candidateCount = (preview.items ?? []).length
+
+    for (const skipped of preview.skipped ?? []) {
+      await insertAutoShiftAutoWriteRunItem(db, {
+        runId,
+        orgId,
+        item: skipped,
+        status: 'skipped',
+        reason: skipped.reason || 'skipped',
+      })
+      skippedCount += 1
+    }
+
+    const candidates = preview.items ?? []
+    const applyLimit = autoWrite.maxAssignmentsPerRun
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = {
+        ...candidates[index],
+        evidenceEventIds: normalizeStringArray(candidates[index]?.evidence?.eventIds),
+      }
+      if (appliedCount >= applyLimit) {
+        await insertAutoShiftAutoWriteRunItem(db, {
+          runId,
+          orgId,
+          item: candidate,
+          status: 'skipped',
+          reason: 'max_assignments_per_run',
+        })
+        skippedCount += 1
+        continue
+      }
+
+      try {
+        const dispatchAllowed = await assertAutoShiftAutoWriteSystemDispatchAllowed(db, orgId, candidate)
+        if (!dispatchAllowed) {
+          await insertAutoShiftAutoWriteRunItem(db, {
+            runId,
+            orgId,
+            item: candidate,
+            status: 'skipped',
+            reason: 'scheduler_scope_forbidden',
+          })
+          skippedCount += 1
+          continue
+        }
+
+        const result = await applyAutoShiftMatchingItems(db, {
+          orgId,
+          items: [candidate],
+          runId,
+          maxToleranceMinutes: autoShiftSettings.maxToleranceMinutes,
+          minConfidenceToApply: autoWrite.minConfidence,
+          enforceEditWindow: async (datesToCheck) => !evaluateShiftEditWindow(settings?.shiftEditPolicy, datesToCheck, normalizeDateOnly(now)),
+          resolveActorAccess: async () => ({
+            userId: AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG,
+            orgId,
+            fullAdmin: false,
+            roleTags: [AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG],
+          }),
+          assertDispatchAllowed: async (itemToCheck) =>
+            assertAutoShiftAutoWriteSystemDispatchAllowed(db, orgId, itemToCheck),
+        })
+        if (!result) {
+          await insertAutoShiftAutoWriteRunItem(db, {
+            runId,
+            orgId,
+            item: candidate,
+            status: 'skipped',
+            reason: 'shift_edit_window_exceeded',
+          })
+          skippedCount += 1
+          continue
+        }
+        const applied = result.applied?.[0]
+        if (applied?.assignment?.id) {
+          await insertAutoShiftAutoWriteRunItem(db, {
+            runId,
+            orgId,
+            item: candidate,
+            status: 'applied',
+            assignmentId: applied.assignment.id,
+          })
+          appliedCount += 1
+          emitEvent('attendance.assignment.created', { orgId, assignmentId: applied.assignment.id })
+          continue
+        }
+        const skippedItem = result.skipped?.[0]
+        await insertAutoShiftAutoWriteRunItem(db, {
+          runId,
+          orgId,
+          item: candidate,
+          status: 'skipped',
+          reason: skippedItem?.reason || 'stale_or_ineligible',
+        })
+        skippedCount += 1
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        await insertAutoShiftAutoWriteRunItem(db, {
+          runId,
+          orgId,
+          item: candidate,
+          status: 'error',
+          reason: 'apply_error',
+          errorMessage: message,
+        })
+        errorCount += 1
+        if (logger?.warn) logger.warn(`Attendance auto-shift auto-write item failed: ${message}`)
+      }
+    }
+
+    const status = errorCount > 0 ? (appliedCount + skippedCount > 0 ? 'partial' : 'failed') : 'succeeded'
+    await finalizeAutoShiftAutoWriteRun(db, runId, {
+      status,
+      scannedCount,
+      candidateCount,
+      appliedCount,
+      skippedCount,
+      errorCount,
+      errorMessage: fatalMessage,
+    })
+    return {
+      ran: true,
+      runId,
+      status,
+      from: window.from,
+      to: window.to,
+      scannedCount,
+      candidateCount,
+      appliedCount,
+      skippedCount,
+      errorCount,
+    }
+  } catch (error) {
+    fatalMessage = error instanceof Error ? error.message : String(error)
+    await finalizeAutoShiftAutoWriteRun(db, runId, {
+      status: 'failed',
+      scannedCount,
+      candidateCount,
+      appliedCount,
+      skippedCount,
+      errorCount: errorCount + 1,
+      errorMessage: fatalMessage,
+    }).catch(() => undefined)
+    throw error
   }
 }
 
@@ -16786,6 +17303,16 @@ module.exports = {
     collectRowUserIdentityValues,
     resolveRowUserId,
   },
+  __attendanceAutoShiftForTests: {
+    AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG,
+    AUTO_SHIFT_AUTO_WRITE_SOURCE,
+    AUTO_SHIFT_MATCH_PRODUCER_TYPE,
+    applyAutoShiftMatchingItems,
+    buildAutoShiftMatchProducerKey,
+    normalizeAutoShiftMatchingSetting,
+    resolveAutoShiftAutoWriteWindow,
+    runAttendanceAutoShiftAutoWriteOnce,
+  },
   __attendanceOvertimeSegmentationForTests: {
     OVERTIME_SEGMENTATION_ENGINE,
     OVERTIME_SEGMENTATION_VERSION,
@@ -17809,11 +18336,11 @@ module.exports = {
       overtimeSegmentation: z.object({
         enabled: z.boolean().optional(),
       }).optional(),
-      // 自动对班 config. Runtime remains double-gated by ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED.
-      // `apply` is A1 selected-admin apply; `auto` is still reserved for a separate A2 design-lock.
+      // 自动对班 config. Runtime remains env-gated by ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED; A2
+      // background writes add ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED plus autoWrite.enabled.
       autoShiftMatching: z.object({
         enabled: z.boolean().optional(),
-        mode: z.enum(['preview', 'apply']).optional(),
+        mode: z.enum(['preview', 'apply', 'auto']).optional(),
         maxToleranceMinutes: z.number().int().positive().max(720).optional(),
         minConfidenceToApply: z.enum(['high', 'medium', 'low']).optional(),
         autoWrite: z.object({
@@ -31921,7 +32448,7 @@ module.exports = {
           if (
             !isAutoShiftMatchingRuntimeEnabled()
             || autoShiftSettings.enabled !== true
-            || !['preview', 'apply'].includes(autoShiftSettings.mode)
+            || !['preview', 'apply', 'auto'].includes(autoShiftSettings.mode)
           ) {
             res.status(403).json({
               ok: false,
@@ -31953,129 +32480,6 @@ module.exports = {
         }
       })
     )
-
-    async function applyAutoShiftMatchingItems({
-      orgId,
-      items,
-      runId,
-      maxToleranceMinutes,
-      minConfidenceToApply,
-      enforceEditWindow,
-      resolveActorAccess,
-      assertDispatchAllowed,
-    }) {
-      const windowAccess = await enforceEditWindow(items.map((item) => item.workDate))
-      if (!windowAccess) return null
-
-      const actorAccess = await resolveActorAccess()
-      if (!actorAccess) return null
-      for (const item of items) {
-        const access = await assertDispatchAllowed(item, actorAccess)
-        if (!access) return null
-      }
-
-      return db.transaction(async (trx) => {
-        const applied = []
-        const skipped = []
-        for (const item of items) {
-          await acquireAttendanceScheduleAssignmentLock(trx, orgId, item.userId)
-          const producerKey = buildAutoShiftMatchProducerKey(item.userId, item.workDate)
-          const alreadyRows = await trx.query(
-            `SELECT *
-               FROM attendance_shift_assignments
-              WHERE org_id = $1
-                AND user_id = $2
-                AND COALESCE(is_active, true) = true
-                AND COALESCE(publish_status, 'published') = 'published'
-                AND producer_type = $3
-                AND producer_key = $4
-              ORDER BY created_at ASC
-              LIMIT 1`,
-            [orgId, item.userId, AUTO_SHIFT_MATCH_PRODUCER_TYPE, producerKey],
-          )
-          if (alreadyRows.length) {
-            skipped.push(mapAutoShiftApplySkipped(item, 'already_applied', { assignmentId: alreadyRows[0].id }))
-            continue
-          }
-
-          const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
-            kind: 'shift',
-            orgId,
-            userId: item.userId,
-            startDate: item.workDate,
-            endDate: item.workDate,
-            slotIndex: 0,
-            multiShiftEnabled: false,
-            isActive: true,
-          })
-          if (conflict) {
-            skipped.push(mapAutoShiftApplySkipped(item, 'already_scheduled', { conflict }))
-            continue
-          }
-
-          const preview = await buildAutoShiftMatchingPreview(trx, {
-            orgId,
-            from: item.workDate,
-            to: item.workDate,
-            userIds: [item.userId],
-            maxToleranceMinutes,
-            minConfidenceToApply,
-          })
-          const match = (preview.items || []).find((candidate) => candidate.candidateShiftId === item.candidateShiftId)
-          if (!match) {
-            const skipReason = (preview.skipped || []).find((entry) =>
-              entry.userId === item.userId && entry.workDate === item.workDate
-            )?.reason
-            skipped.push(mapAutoShiftApplySkipped(item, skipReason || 'stale_or_ineligible'))
-            continue
-          }
-          if (!autoShiftEvidenceEventIdsMatch(item.evidenceEventIds, match.evidence?.eventIds)) {
-            skipped.push(mapAutoShiftApplySkipped(item, 'stale_punch_evidence'))
-            continue
-          }
-
-          const shiftRows = await trx.query(
-            'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
-            [item.candidateShiftId, orgId],
-          )
-          if (!shiftRows.length) {
-            skipped.push(mapAutoShiftApplySkipped(item, 'shift_not_found'))
-            continue
-          }
-
-          const assignmentRows = await trx.query(
-            `INSERT INTO attendance_shift_assignments
-             (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id)
-             VALUES ($1, $2, $3, $4, 0, $5, $5, true, $6, $7, $8, $7)
-             RETURNING *`,
-            [
-              randomUUID(),
-              orgId,
-              item.userId,
-              item.candidateShiftId,
-              item.workDate,
-              AUTO_SHIFT_MATCH_PRODUCER_TYPE,
-              runId,
-              producerKey,
-            ],
-          )
-          await enforceShiftComplianceCap(trx, {
-            orgId,
-            userId: item.userId,
-            fromDate: item.workDate,
-            toDate: item.workDate,
-          })
-          applied.push({
-            userId: item.userId,
-            workDate: item.workDate,
-            candidateShiftId: item.candidateShiftId,
-            assignment: mapAssignmentRow(assignmentRows[0]),
-            shift: mapShiftRow(shiftRows[0]),
-          })
-        }
-        return { applied, skipped }
-      })
-    }
 
     context.api.http.addRoute(
       'POST',
@@ -32118,7 +32522,7 @@ module.exports = {
           }
 
           const runId = randomUUID()
-          const result = await applyAutoShiftMatchingItems({
+          const result = await applyAutoShiftMatchingItems(db, {
             orgId,
             items,
             runId,
@@ -34704,6 +35108,14 @@ module.exports = {
 	      scheduleAutoAbsence({ db, logger, emit: emitEvent })
 	      scheduleHolidaySync({ db, logger, emit: emitEvent })
 	      scheduleImportUploadCleanup()
+	      if (autoShiftAutoWriteSchedulerUnregister) {
+	        autoShiftAutoWriteSchedulerUnregister()
+	        autoShiftAutoWriteSchedulerUnregister = null
+	      }
+	      autoShiftAutoWriteSchedulerUnregister = context.services?.attendanceScheduler?.registerJob?.({
+	        name: 'attendance-auto-shift-auto-write',
+	        run: () => runAttendanceAutoShiftAutoWriteOnce(db, { logger, emitEvent }),
+	      }) ?? null
 	    } catch (error) {
 	      logger.warn('Attendance settings preload failed', error)
 	    }
@@ -34722,5 +35134,9 @@ module.exports = {
 	    clearHolidaySyncSchedule()
 	    if (importUploadCleanupInterval) clearInterval(importUploadCleanupInterval)
 	    importUploadCleanupInterval = null
+	    if (autoShiftAutoWriteSchedulerUnregister) {
+	      autoShiftAutoWriteSchedulerUnregister()
+	      autoShiftAutoWriteSchedulerUnregister = null
+	    }
 	  }
 }

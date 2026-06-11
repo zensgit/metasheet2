@@ -4,10 +4,23 @@ import * as path from 'path'
 import net from 'net'
 import fs from 'fs/promises'
 import { randomUUID } from 'crypto'
+import { createRequire } from 'module'
 import { Pool } from 'pg'
 import http from 'http'
 import { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
 import { AttendanceScheduler } from '../../src/services/AttendanceScheduler'
+
+const require = createRequire(import.meta.url)
+type AttendancePluginTestModule = {
+  __attendanceAutoShiftForTests?: {
+    AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG: string
+    runAttendanceAutoShiftAutoWriteOnce(db: unknown, options?: Record<string, unknown>): Promise<any>
+  }
+}
+
+function getAttendancePluginForTest(): AttendancePluginTestModule {
+  return require('../../../../plugins/plugin-attendance/index.cjs') as AttendancePluginTestModule
+}
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
 
@@ -98,6 +111,35 @@ function localDateKeyOffset(days: number): string {
 function dateOnlyForTest(value: unknown): string {
   if (value instanceof Date) return value.toISOString().slice(0, 10)
   return String(value ?? '').slice(0, 10)
+}
+
+function createPluginDbForTest(pool: Pool) {
+  return {
+    async query(sql: string, params?: unknown[]) {
+      const result = await pool.query(sql, params as any[])
+      return result.rows
+    },
+    async transaction<T>(handler: (client: { query(sql: string, params?: unknown[]): Promise<any[]> }) => Promise<T>): Promise<T> {
+      const client = await pool.connect()
+      const trx = {
+        async query(sql: string, params?: unknown[]) {
+          const result = await client.query(sql, params as any[])
+          return result.rows
+        },
+      }
+      try {
+        await client.query('BEGIN')
+        const value = await handler(trx)
+        await client.query('COMMIT')
+        return value
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        throw error
+      } finally {
+        client.release()
+      }
+    },
+  }
 }
 
 function resolvePositiveIntEnvForTest(name: string, fallback: number, min: number, max?: number): number {
@@ -7253,7 +7295,7 @@ attendanceIntegrationDescribe(
       return ((res.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
     }
 
-    it('round-trips dormant auto-write settings while keeping auto mode rejected', async () => {
+    it('round-trips auto-write settings including auto mode while rejecting invalid bounds', async () => {
       if (!baseUrl) return
       const runSuffix = Date.now().toString(36)
       const adminToken = await getAdminToken(`attendance-autoshift-autowrite-admin-${runSuffix}`)
@@ -7298,8 +7340,24 @@ attendanceIntegrationDescribe(
           },
         })
 
+        await saveAutoShiftSettings(adminToken, {
+          autoShiftMatching: {
+            mode: 'auto',
+          },
+        })
+        const autoReloaded = await loadSettingsForTest(adminToken)
+        expect(autoReloaded.autoShiftMatching).toMatchObject({
+          enabled: true,
+          mode: 'auto',
+          autoWrite: {
+            enabled: true,
+            lookaheadDays: 2,
+            maxAssignmentsPerRun: 40,
+            minConfidence: 'high',
+          },
+        })
+
         const invalidPayloads: Array<Record<string, unknown>> = [
-          { autoShiftMatching: { mode: 'auto' } },
           { autoShiftMatching: { autoWrite: { lookaheadDays: 0 } } },
           { autoShiftMatching: { autoWrite: { lookaheadDays: 4 } } },
           { autoShiftMatching: { autoWrite: { maxAssignmentsPerRun: 0 } } },
@@ -7371,6 +7429,31 @@ attendanceIntegrationDescribe(
         [eventId, userId, orgId, workDate, occurredAt, eventType],
       )
       return eventId
+    }
+
+    async function createAutoShiftSystemDispatchScope(pool: Pool, scope: Record<string, unknown>): Promise<string> {
+      const scopeId = randomUuidV4()
+      const roleTag = getAttendancePluginForTest().__attendanceAutoShiftForTests?.AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG
+      expect(roleTag).toBeTruthy()
+      await pool.query(
+        `INSERT INTO attendance_scheduler_scopes
+         (id, org_id, subject_type, subject_ref, actions, scope, is_active, created_by, updated_by)
+         VALUES ($1, $2, 'role_tag', $3, ARRAY['dispatch']::text[], $4::jsonb, true, 'integration-test', 'integration-test')`,
+        [scopeId, orgId, roleTag, JSON.stringify(scope)],
+      )
+      return scopeId
+    }
+
+    async function runAutoShiftAutoWriteForTest(pool: Pool, now: string): Promise<any> {
+      const runner = getAttendancePluginForTest().__attendanceAutoShiftForTests?.runAttendanceAutoShiftAutoWriteOnce
+      expect(runner).toBeTruthy()
+      if (!runner) throw new Error('auto-shift test runner missing')
+      return runner(createPluginDbForTest(pool), {
+        orgId,
+        now: new Date(`${now}T12:00:00.000Z`),
+        logger: { warn: () => undefined, error: () => undefined, info: () => undefined },
+        emitEvent: () => undefined,
+      })
     }
 
     it('returns disabled when either preview gate is off and writes no assignments', async () => {
@@ -7879,6 +7962,303 @@ attendanceIntegrationDescribe(
         await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
         if (previousFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
         else process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = previousFlag
+        await pool.end()
+      }
+    })
+
+    it('keeps the auto-write runner inert until all runtime and org gates are enabled', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-autoshift-auto-gate-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const previousPreviewFlag = process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+      const previousAutoWriteFlag = process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED
+      const originalSettings = await loadSettingsForTest(adminToken)
+      const pool = new Pool({ connectionString: dbUrl })
+      const userId = `attendance-autoshift-auto-gate-user-${runSuffix}`
+      const workDate = '2026-06-11'
+      try {
+        process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = 'true'
+        delete process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED
+        await saveAutoShiftSettings(adminToken, {
+          autoShiftMatching: {
+            enabled: true,
+            mode: 'auto',
+            maxToleranceMinutes: 30,
+            minConfidenceToApply: 'high',
+            autoWrite: { enabled: true, lookaheadDays: 1, maxAssignmentsPerRun: 25, minConfidence: 'high' },
+          },
+        })
+        await createGroupForAutoShift(adminToken, `autoshift-auto-gate-${runSuffix}`, 'scheduled_shift', userId)
+        await createShiftForAutoShift(adminToken, `Auto Shift Auto Gate ${runSuffix}`, '05:17', '06:23')
+        await insertPunchEvent(pool, userId, workDate, 'check_in', `${workDate}T05:17:00.000Z`)
+        await insertPunchEvent(pool, userId, workDate, 'check_out', `${workDate}T06:23:00.000Z`)
+
+        const disabledByEnv = await runAutoShiftAutoWriteForTest(pool, '2026-06-10')
+        expect(disabledByEnv).toMatchObject({ ran: false, reason: 'disabled' })
+        process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED = 'true'
+        await saveAutoShiftSettings(adminToken, { autoShiftMatching: { autoWrite: { enabled: false } } })
+        const disabledByOrg = await runAutoShiftAutoWriteForTest(pool, '2026-06-10')
+        expect(disabledByOrg).toMatchObject({ ran: false, reason: 'disabled' })
+
+        const rows = await pool.query(
+          `SELECT
+             (SELECT COUNT(*)::int FROM attendance_shift_assignments WHERE org_id = $1 AND user_id = $2) AS assignment_count,
+             (SELECT COUNT(*)::int FROM attendance_auto_shift_auto_write_runs WHERE org_id = $1 AND source = 'scheduler' AND status = 'running') AS running_count`,
+          [orgId, userId],
+        )
+        expect(rows.rows[0]).toMatchObject({ assignment_count: 0, running_count: 0 })
+      } finally {
+        await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
+        if (previousPreviewFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+        else process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = previousPreviewFlag
+        if (previousAutoWriteFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED
+        else process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED = previousAutoWriteFlag
+        await pool.end()
+      }
+    })
+
+    it('auto-writes one high-confidence suggestion with ledger provenance and skips repeat ticks', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-autoshift-auto-write-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const previousPreviewFlag = process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+      const previousAutoWriteFlag = process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED
+      const originalSettings = await loadSettingsForTest(adminToken)
+      const pool = new Pool({ connectionString: dbUrl })
+      const userId = `attendance-autoshift-auto-write-user-${runSuffix}`
+      const manualUserId = `attendance-autoshift-auto-write-manual-${runSuffix}`
+      const workDate = '2026-06-11'
+      const minuteOffset = Number.parseInt(runSuffix.slice(-2), 36) % 20
+      const shiftStart = `03:${String(10 + minuteOffset).padStart(2, '0')}`
+      const shiftEnd = `04:${String(40 + minuteOffset).padStart(2, '0')}`
+      try {
+        process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = 'true'
+        process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED = 'true'
+        await saveAutoShiftSettings(adminToken, {
+          autoShiftMatching: {
+            enabled: true,
+            mode: 'auto',
+            maxToleranceMinutes: 30,
+            minConfidenceToApply: 'high',
+            autoWrite: { enabled: true, lookaheadDays: 1, maxAssignmentsPerRun: 25, minConfidence: 'high' },
+          },
+        })
+        await createGroupForAutoShift(adminToken, `autoshift-auto-write-${runSuffix}`, 'scheduled_shift', userId)
+        await createGroupForAutoShift(adminToken, `autoshift-auto-write-manual-${runSuffix}`, 'scheduled_shift', manualUserId)
+        const shiftId = await createShiftForAutoShift(adminToken, `Auto Shift Auto Write ${runSuffix}`, shiftStart, shiftEnd)
+        const manualShiftId = await createShiftForAutoShift(adminToken, `Auto Shift Auto Manual ${runSuffix}`, '07:10', '08:10')
+        const inId = await insertPunchEvent(pool, userId, workDate, 'check_in', `${workDate}T${shiftStart}:00.000Z`)
+        const outId = await insertPunchEvent(pool, userId, workDate, 'check_out', `${workDate}T${shiftEnd}:00.000Z`)
+        await insertPunchEvent(pool, manualUserId, workDate, 'check_in', `${workDate}T${shiftStart}:00.000Z`)
+        await insertPunchEvent(pool, manualUserId, workDate, 'check_out', `${workDate}T${shiftEnd}:00.000Z`)
+        const manualAssignmentId = randomUuidV4()
+        await pool.query(
+          `INSERT INTO attendance_shift_assignments
+           (id, org_id, user_id, shift_id, start_date, end_date, is_active)
+           VALUES ($1, $2, $3, $4, $5, $5, true)`,
+          [manualAssignmentId, orgId, manualUserId, manualShiftId, workDate],
+        )
+
+        const forbiddenRun = await runAutoShiftAutoWriteForTest(pool, '2026-06-10')
+        expect(forbiddenRun).toMatchObject({ ran: true, status: 'succeeded', appliedCount: 0, errorCount: 0 })
+        const forbiddenItemRows = await pool.query(
+          `SELECT status, reason
+             FROM attendance_auto_shift_auto_write_run_items
+            WHERE run_id = $1 AND org_id = $2 AND user_id = $3 AND work_date = $4::date`,
+          [forbiddenRun.runId, orgId, userId, workDate],
+        )
+        expect(forbiddenItemRows.rows[0]).toMatchObject({ status: 'skipped', reason: 'scheduler_scope_forbidden' })
+        const forbiddenAssignments = await pool.query(
+          'SELECT COUNT(*)::int AS count FROM attendance_shift_assignments WHERE org_id = $1 AND user_id = $2',
+          [orgId, userId],
+        )
+        expect(Number(forbiddenAssignments.rows[0]?.count ?? 0)).toBe(0)
+
+        await createAutoShiftSystemDispatchScope(pool, { userIds: [userId, manualUserId] })
+        const firstRun = await runAutoShiftAutoWriteForTest(pool, '2026-06-10')
+        expect(firstRun).toMatchObject({ ran: true, status: 'succeeded', appliedCount: 1, errorCount: 0 })
+        const assignmentRows = await pool.query(
+          `SELECT id, shift_id, slot_index, start_date, end_date, is_active, publish_status,
+                  producer_type, producer_key, producer_run_id
+             FROM attendance_shift_assignments
+            WHERE org_id = $1 AND user_id = $2`,
+          [orgId, userId],
+        )
+        expect(assignmentRows.rows).toHaveLength(1)
+        expect(assignmentRows.rows[0]).toMatchObject({
+          shift_id: shiftId,
+          slot_index: 0,
+          is_active: true,
+          publish_status: 'published',
+          producer_type: 'auto_shift_match',
+          producer_key: `${userId}:${workDate}`,
+          producer_run_id: firstRun.runId,
+        })
+        expect(dateOnlyForTest(assignmentRows.rows[0].start_date)).toBe(workDate)
+        expect(dateOnlyForTest(assignmentRows.rows[0].end_date)).toBe(workDate)
+
+        const itemRows = await pool.query(
+          `SELECT status, assignment_id, candidate_shift_id, confidence, evidence_event_ids
+             FROM attendance_auto_shift_auto_write_run_items
+            WHERE run_id = $1 AND org_id = $2 AND user_id = $3 AND work_date = $4::date`,
+          [firstRun.runId, orgId, userId, workDate],
+        )
+        expect(itemRows.rows).toHaveLength(1)
+        expect(itemRows.rows[0]).toMatchObject({
+          status: 'applied',
+          assignment_id: assignmentRows.rows[0].id,
+          candidate_shift_id: shiftId,
+          confidence: 'high',
+        })
+        expect(itemRows.rows[0].evidence_event_ids).toEqual([inId, outId])
+        const manualItemRows = await pool.query(
+          `SELECT status, reason
+             FROM attendance_auto_shift_auto_write_run_items
+            WHERE run_id = $1 AND org_id = $2 AND user_id = $3 AND work_date = $4::date`,
+          [firstRun.runId, orgId, manualUserId, workDate],
+        )
+        expect(manualItemRows.rows[0]).toMatchObject({ status: 'skipped', reason: 'already_scheduled' })
+        const manualAssignmentRows = await pool.query(
+          `SELECT id, shift_id, producer_type
+             FROM attendance_shift_assignments
+            WHERE org_id = $1 AND user_id = $2`,
+          [orgId, manualUserId],
+        )
+        expect(manualAssignmentRows.rows).toHaveLength(1)
+        expect(manualAssignmentRows.rows[0]).toMatchObject({
+          id: manualAssignmentId,
+          shift_id: manualShiftId,
+          producer_type: null,
+        })
+
+        const replayRun = await runAutoShiftAutoWriteForTest(pool, '2026-06-10')
+        expect(replayRun).toMatchObject({ ran: true, status: 'succeeded', appliedCount: 0, errorCount: 0 })
+        const replayAssignments = await pool.query(
+          'SELECT COUNT(*)::int AS count FROM attendance_shift_assignments WHERE org_id = $1 AND user_id = $2',
+          [orgId, userId],
+        )
+        expect(Number(replayAssignments.rows[0]?.count ?? 0)).toBe(1)
+        const replayItems = await pool.query(
+          `SELECT status, reason
+             FROM attendance_auto_shift_auto_write_run_items
+            WHERE run_id = $1 AND org_id = $2 AND user_id = $3 AND work_date = $4::date`,
+          [replayRun.runId, orgId, userId, workDate],
+        )
+        expect(replayItems.rows[0]).toMatchObject({ status: 'skipped', reason: 'already_scheduled' })
+      } finally {
+        await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
+        if (previousPreviewFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+        else process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = previousPreviewFlag
+        if (previousAutoWriteFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED
+        else process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED = previousAutoWriteFlag
+        await pool.end()
+      }
+    })
+
+    it('records max-cap and low-confidence auto-write skips without creating assignments', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-autoshift-auto-skip-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const previousPreviewFlag = process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+      const previousAutoWriteFlag = process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED
+      const originalSettings = await loadSettingsForTest(adminToken)
+      const pool = new Pool({ connectionString: dbUrl })
+      const workDate = '2026-06-11'
+      const minuteOffset = Number.parseInt(runSuffix.slice(-2), 36) % 20
+      const shiftStart = `11:${String(10 + minuteOffset).padStart(2, '0')}`
+      const shiftEnd = `20:${String(40 + minuteOffset).padStart(2, '0')}`
+      const lowInAt = `12:${String(10 + minuteOffset).padStart(2, '0')}`
+      const lowOutAt = `21:${String(40 + minuteOffset).padStart(2, '0')}`
+      const forbiddenUserId = `attendance-autoshift-aa-forbidden-${runSuffix}`
+      const lowUserId = `attendance-autoshift-aa-low-${runSuffix}`
+      const cappedUsers = [0, 1, 2].map(index => `attendance-autoshift-zz-cap-${index}-${runSuffix}`)
+      try {
+        process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = 'true'
+        process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED = 'true'
+        await saveAutoShiftSettings(adminToken, {
+          autoShiftMatching: {
+            enabled: true,
+            mode: 'auto',
+            maxToleranceMinutes: 180,
+            minConfidenceToApply: 'low',
+            autoWrite: { enabled: true, lookaheadDays: 1, maxAssignmentsPerRun: 2, minConfidence: 'high' },
+          },
+        })
+        const shiftId = await createShiftForAutoShift(adminToken, `Auto Shift Auto Skip ${runSuffix}`, shiftStart, shiftEnd)
+        for (const userId of [forbiddenUserId, ...cappedUsers, lowUserId]) {
+          await createGroupForAutoShift(adminToken, `autoshift-auto-skip-${userId}`, 'scheduled_shift', userId)
+        }
+        await createAutoShiftSystemDispatchScope(pool, { userIds: [...cappedUsers, lowUserId] })
+        await insertPunchEvent(pool, forbiddenUserId, workDate, 'check_in', `${workDate}T${shiftStart}:00.000Z`)
+        await insertPunchEvent(pool, forbiddenUserId, workDate, 'check_out', `${workDate}T${shiftEnd}:00.000Z`)
+        for (const userId of cappedUsers) {
+          await insertPunchEvent(pool, userId, workDate, 'check_in', `${workDate}T${shiftStart}:00.000Z`)
+          await insertPunchEvent(pool, userId, workDate, 'check_out', `${workDate}T${shiftEnd}:00.000Z`)
+        }
+        await insertPunchEvent(pool, lowUserId, workDate, 'check_in', `${workDate}T${lowInAt}:00.000Z`)
+        await insertPunchEvent(pool, lowUserId, workDate, 'check_out', `${workDate}T${lowOutAt}:00.000Z`)
+
+        const run = await runAutoShiftAutoWriteForTest(pool, '2026-06-10')
+        expect(run).toMatchObject({ ran: true, status: 'succeeded', appliedCount: 2, errorCount: 0 })
+        const rows = await pool.query(
+          `SELECT user_id, status, reason, candidate_shift_id, confidence, assignment_id
+             FROM attendance_auto_shift_auto_write_run_items
+            WHERE run_id = $1
+              AND org_id = $2
+              AND user_id = ANY($3::text[])
+            ORDER BY user_id ASC`,
+          [run.runId, orgId, [forbiddenUserId, ...cappedUsers, lowUserId]],
+        )
+        const byUser = new Map(rows.rows.map(row => [row.user_id, row]))
+        expect(byUser.get(forbiddenUserId)).toMatchObject({
+          status: 'skipped',
+          reason: 'scheduler_scope_forbidden',
+          candidate_shift_id: shiftId,
+          confidence: 'high',
+          assignment_id: null,
+        })
+        const appliedCappedUsers = cappedUsers.filter(userId => byUser.get(userId)?.status === 'applied')
+        const cappedSkippedUsers = cappedUsers.filter(userId => byUser.get(userId)?.reason === 'max_assignments_per_run')
+        expect(appliedCappedUsers).toHaveLength(2)
+        expect(cappedSkippedUsers).toHaveLength(1)
+        for (const userId of appliedCappedUsers) {
+          expect(byUser.get(userId)).toMatchObject({ candidate_shift_id: shiftId, confidence: 'high' })
+          expect(byUser.get(userId)?.assignment_id).toBeTruthy()
+        }
+        expect(byUser.get(lowUserId)).toMatchObject({
+          status: 'skipped',
+          reason: 'candidate_below_confidence',
+          confidence: 'low',
+          assignment_id: null,
+        })
+        const assignmentCounts = await pool.query(
+          `SELECT user_id, COUNT(*)::int AS count
+             FROM attendance_shift_assignments
+            WHERE org_id = $1 AND user_id = ANY($2::text[])
+            GROUP BY user_id`,
+          [orgId, [...cappedUsers, lowUserId]],
+        )
+        const countByUser = new Map(assignmentCounts.rows.map(row => [row.user_id, Number(row.count)]))
+        expect(cappedUsers.reduce((sum, userId) => sum + (countByUser.get(userId) ?? 0), 0)).toBe(2)
+        expect(countByUser.get(lowUserId) ?? 0).toBe(0)
+      } finally {
+        await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
+        if (previousPreviewFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
+        else process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = previousPreviewFlag
+        if (previousAutoWriteFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED
+        else process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED = previousAutoWriteFlag
         await pool.end()
       }
     })
