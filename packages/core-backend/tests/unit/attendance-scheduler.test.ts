@@ -12,10 +12,13 @@ import {
 import type { AttendanceExpiryService, ExpiredCompTimeBalance } from '../../src/services/AttendanceExpiryService'
 import {
   AttendanceNotificationDeliveryWorker,
+  DingTalkAttendanceDeliveryChannel,
   createAttendanceDeliveryChannelsFromEnv,
   DeterministicFakeAttendanceDeliveryChannel,
   computeDeliveryBackoffMs,
+  type AttendanceNotificationDeliveryQuery,
 } from '../../src/services/AttendanceNotificationDeliveryWorker'
+import { DingTalkBusinessError, DingTalkRequestError, type DingTalkMessageConfig } from '../../src/integrations/dingtalk/client'
 import {
   AttendanceNotifier,
   createAttendanceNotifierChannelsFromEnv,
@@ -40,6 +43,7 @@ describe('AttendanceScheduler (④ C4)', () => {
     delete process.env.ATTENDANCE_COMP_TIME_EXPIRY_REMINDER_ENABLED
     delete process.env.ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED
     delete process.env.ATTENDANCE_NOTIFICATION_FAKE_CHANNEL_ENABLED
+    delete process.env.ATTENDANCE_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED
     vi.restoreAllMocks()
   })
 
@@ -217,6 +221,25 @@ describe('Attendance C5 delivery worker primitives', () => {
     const channels = createAttendanceDeliveryChannelsFromEnv({ ATTENDANCE_NOTIFICATION_FAKE_CHANNEL_ENABLED: 'true' } as NodeJS.ProcessEnv)
     expect(channels).toHaveLength(1)
     expect(channels[0].name).toBe('dingtalk_work_notification')
+    expect(channels[0]).toBeInstanceOf(DeterministicFakeAttendanceDeliveryChannel)
+  })
+
+  it('registers the real DingTalk work-notification channel only by explicit env', () => {
+    const channels = createAttendanceDeliveryChannelsFromEnv({
+      ATTENDANCE_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)
+    expect(channels).toHaveLength(1)
+    expect(channels[0].name).toBe('dingtalk_work_notification')
+    expect(channels[0]).toBeInstanceOf(DingTalkAttendanceDeliveryChannel)
+  })
+
+  it('prefers the real DingTalk channel over fake when both env gates are accidentally enabled', () => {
+    const channels = createAttendanceDeliveryChannelsFromEnv({
+      ATTENDANCE_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED: 'true',
+      ATTENDANCE_NOTIFICATION_FAKE_CHANNEL_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)
+    expect(channels).toHaveLength(1)
+    expect(channels[0]).toBeInstanceOf(DingTalkAttendanceDeliveryChannel)
   })
 
   it('fake channel deterministically returns ok, retryable, and non-retryable outcomes', async () => {
@@ -251,5 +274,281 @@ describe('Attendance C5 delivery worker primitives', () => {
     expect(computeDeliveryBackoffMs(4)).toBe(60 * 60_000)
     expect(computeDeliveryBackoffMs(5)).toBe(6 * 60 * 60_000)
     expect(computeDeliveryBackoffMs(99)).toBe(6 * 60 * 60_000)
+  })
+
+  it('real DingTalk channel resolves a linked recipient and sends through the existing work-notification client seam', async () => {
+    const query: AttendanceNotificationDeliveryQuery = vi.fn(async () => ({
+      rows: [{ integration_id: 'dir-1', external_user_id: 'dt-user-1' }],
+      rowCount: 1,
+    }))
+    const config: DingTalkMessageConfig = {
+      appKey: 'dt-app-key',
+      appSecret: 'dt-app-secret',
+      agentId: '123456789',
+      baseUrl: 'https://oapi.dingtalk.com',
+    }
+    const readConfig = vi.fn(async () => config)
+    const fetchAccessToken = vi.fn(async () => 'access-token')
+    const sendWorkNotification = vi.fn(async () => ({ taskId: 'task-1', raw: {} }))
+    const channel = new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig,
+      fetchAccessToken,
+      sendWorkNotification,
+    })
+
+    await expect(channel.send({
+      id: 'delivery-1',
+      orgId: 'default',
+      sourceType: 'unscheduled_reminder',
+      sourceId: 'dispatch-1',
+      sourceKey: 'dispatch-1:recipient:u1',
+      recipientUserId: 'u1',
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+      payload: { title: '排班提醒', body: '明天还没有排班。' },
+    })).resolves.toEqual({ ok: true })
+
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('directory_account_links'), ['u1', 'default'])
+    expect(readConfig).toHaveBeenCalledWith('dir-1')
+    expect(fetchAccessToken).toHaveBeenCalledWith(config)
+    expect(sendWorkNotification).toHaveBeenCalledWith(
+      'access-token',
+      { userIds: ['dt-user-1'], title: '排班提醒', content: '明天还没有排班。' },
+      config,
+    )
+  })
+
+  it('real DingTalk channel fails visibly without a unique active recipient binding', async () => {
+    const base = {
+      id: 'delivery-1',
+      orgId: 'default',
+      sourceType: 'comp_time_expiry_reminder',
+      sourceId: 'balance-1',
+      sourceKey: 'balance-1:recipient:u1',
+      recipientUserId: 'u1',
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+      payload: {},
+    }
+    const noBinding = new DingTalkAttendanceDeliveryChannel({
+      query: async () => ({ rows: [], rowCount: 0 }),
+      readConfig: async () => { throw new Error('should not read config') },
+    })
+    await expect(noBinding.send(base)).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      error: 'dingtalk_recipient_not_bound',
+    })
+
+    const ambiguous = new DingTalkAttendanceDeliveryChannel({
+      query: async () => ({
+        rows: [
+          { integration_id: 'dir-1', external_user_id: 'dt-user-1' },
+          { integration_id: 'dir-2', external_user_id: 'dt-user-2' },
+        ],
+        rowCount: 2,
+      }),
+    })
+    await expect(ambiguous.send(base)).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      error: 'dingtalk_recipient_ambiguous',
+    })
+
+    const blankExternalUser = new DingTalkAttendanceDeliveryChannel({
+      query: async () => ({
+        rows: [{ integration_id: 'dir-1', external_user_id: '   ' }],
+        rowCount: 1,
+      }),
+    })
+    await expect(blankExternalUser.send(base)).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      error: 'dingtalk_recipient_external_user_id_missing',
+    })
+  })
+
+  it('real DingTalk channel classifies config, network, and DingTalk business failures', async () => {
+    const base = {
+      id: 'delivery-1',
+      orgId: 'default',
+      sourceType: 'comp_time_expiry_reminder',
+      sourceId: 'balance-1',
+      sourceKey: 'balance-1:recipient:u1',
+      recipientUserId: 'u1',
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+      payload: {},
+    }
+    const query: AttendanceNotificationDeliveryQuery = async () => ({
+      rows: [{ integration_id: 'dir-1', external_user_id: 'dt-user-1' }],
+      rowCount: 1,
+    })
+    const config: DingTalkMessageConfig = { appKey: 'k', appSecret: 's', agentId: '1' }
+
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => { throw new Error('DINGTALK_AGENT_ID is not configured') },
+    }).send(base)).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      error: expect.stringContaining('dingtalk_work_notification_config_unavailable'),
+    })
+
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => { throw new DingTalkRequestError('upstream down', 503, null) },
+    }).send(base)).resolves.toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('dingtalk_request_503'),
+    })
+
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => { throw new DingTalkRequestError('request timed out', 408, null) },
+    }).send(base)).resolves.toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('dingtalk_request_408'),
+    })
+
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => 'access-token',
+      sendWorkNotification: async () => { throw new DingTalkBusinessError('invalid userid', { errcode: 40001 }) },
+    }).send(base)).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      error: expect.stringContaining('dingtalk_business_error'),
+    })
+
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => 'access-token',
+      sendWorkNotification: async () => { throw new DingTalkBusinessError('system busy, try again later', { errcode: 50001, errmsg: 'system busy' }) },
+    }).send(base)).resolves.toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('dingtalk_business_error'),
+    })
+
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => 'access-token',
+      sendWorkNotification: async () => { throw new DingTalkBusinessError('upstream rejected request', { errcode: 429 }) },
+    }).send(base)).resolves.toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('dingtalk_business_error'),
+    })
+
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => 'access-token',
+      sendWorkNotification: async () => { throw new DingTalkBusinessError('rate limit exceeded', { errcode: 429, errmsg: 'too many requests' }) },
+    }).send(base)).resolves.toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('dingtalk_business_error'),
+    })
+  })
+
+  it('real DingTalk channel redacts DingTalk URL secrets before returning retryable errors', async () => {
+    const query: AttendanceNotificationDeliveryQuery = async () => ({
+      rows: [{ integration_id: 'dir-1', external_user_id: 'dt-user-1' }],
+      rowCount: 1,
+    })
+    const config: DingTalkMessageConfig = { appKey: 'k', appSecret: 'super-secret', agentId: '1' }
+    const result = await new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => {
+        throw new Error('Failed to parse URL from https://bad.invalid/gettoken?appkey=k&appsecret=super-secret')
+      },
+    }).send({
+      id: 'delivery-1',
+      orgId: 'default',
+      sourceType: 'comp_time_expiry_reminder',
+      sourceId: 'balance-1',
+      sourceKey: 'balance-1:recipient:u1',
+      recipientUserId: 'u1',
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+      payload: {},
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('[redacted-url]'),
+    })
+    expect(JSON.stringify(result)).not.toContain('super-secret')
+    expect(JSON.stringify(result)).not.toContain('bad.invalid')
+    expect(JSON.stringify(result)).not.toContain('appkey=k')
+    expect(JSON.stringify(result)).not.toContain('/gettoken')
+
+    const sendResult = await new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => 'token-secret',
+      sendWorkNotification: async () => {
+        throw new Error('Failed to parse URL from https://bad.invalid/topapi/message?access_token=token-secret')
+      },
+    }).send({
+      id: 'delivery-2',
+      orgId: 'default',
+      sourceType: 'unscheduled_reminder',
+      sourceId: 'dispatch-1',
+      sourceKey: 'dispatch-1:recipient:u1',
+      recipientUserId: 'u1',
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+      payload: {},
+    })
+
+    expect(sendResult).toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('[redacted-url]'),
+    })
+    expect(JSON.stringify(sendResult)).not.toContain('token-secret')
+    expect(JSON.stringify(sendResult)).not.toContain('bad.invalid')
+    expect(JSON.stringify(sendResult)).not.toContain('/topapi/message')
+
+    const schemelessResult = await new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => {
+        throw new Error('Failed to parse URL from oapi.dingtalk.com/gettoken?appkey=k&appsecret=super-secret')
+      },
+    }).send({
+      id: 'delivery-3',
+      orgId: 'default',
+      sourceType: 'comp_time_expiry_reminder',
+      sourceId: 'balance-1',
+      sourceKey: 'balance-1:recipient:u1',
+      recipientUserId: 'u1',
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+      payload: {},
+    })
+
+    expect(schemelessResult).toEqual({
+      ok: false,
+      retryable: true,
+      error: expect.stringContaining('[redacted-url]'),
+    })
+    expect(JSON.stringify(schemelessResult)).not.toContain('super-secret')
+    expect(JSON.stringify(schemelessResult)).not.toContain('oapi.dingtalk.com')
+    expect(JSON.stringify(schemelessResult)).not.toContain('appkey=k')
+    expect(JSON.stringify(schemelessResult)).not.toContain('/gettoken')
   })
 })
