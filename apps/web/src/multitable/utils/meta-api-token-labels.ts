@@ -26,6 +26,10 @@ export type MetaApiTokenLabelKey =
   | 'webhook.action.enable' | 'webhook.action.disable' | 'webhook.action.deliveries'
   | 'webhook.delivery.recent' | 'webhook.delivery.ok' | 'webhook.delivery.fail'
   | 'webhook.delivery.retries'
+  | 'webhook.retry.section' | 'webhook.retry.maxRetries'
+  | 'webhook.retry.maxRetriesHint' | 'webhook.retry.baseDelay'
+  | 'webhook.retry.baseDelayHint' | 'webhook.retry.maxDelay'
+  | 'webhook.retry.maxDelayHint' | 'webhook.retry.rangeError'
   | 'webhook.event.recordCreated' | 'webhook.event.recordUpdated'
   | 'webhook.event.recordDeleted' | 'webhook.event.fieldChanged'
   | 'dingtalk.scopeNote.title' | 'dingtalk.scopeNote.bound'
@@ -123,6 +127,14 @@ const LABELS: Record<MetaApiTokenLabelKey, { en: string; zh: string }> = {
   'webhook.delivery.ok': { en: 'OK', zh: '成功' },
   'webhook.delivery.fail': { en: 'FAIL', zh: '失败' },
   'webhook.delivery.retries': { en: 'Retries', zh: '重试次数' },
+  'webhook.retry.section': { en: 'Retry policy (optional)', zh: '重试策略（可选）' },
+  'webhook.retry.maxRetries': { en: 'Max retries', zh: '最大重试次数' },
+  'webhook.retry.maxRetriesHint': { en: '0–10 (default 3)', zh: '0–10（默认 3）' },
+  'webhook.retry.baseDelay': { en: 'Base delay (ms)', zh: '基础延迟（毫秒）' },
+  'webhook.retry.baseDelayHint': { en: '100–60000 (default 1000)', zh: '100–60000（默认 1000）' },
+  'webhook.retry.maxDelay': { en: 'Max delay (ms)', zh: '最大延迟（毫秒）' },
+  'webhook.retry.maxDelayHint': { en: '1000–3600000 (optional)', zh: '1000–3600000（可选）' },
+  'webhook.retry.rangeError': { en: 'Value is out of the allowed range.', zh: '取值超出允许范围。' },
   'webhook.event.recordCreated': { en: 'record.created', zh: '记录已创建' },
   'webhook.event.recordUpdated': { en: 'record.updated', zh: '记录已更新' },
   'webhook.event.recordDeleted': { en: 'record.deleted', zh: '记录已删除' },

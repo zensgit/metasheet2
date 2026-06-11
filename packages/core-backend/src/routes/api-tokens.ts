@@ -15,7 +15,10 @@ import { DingTalkGroupDestinationService } from '../multitable/dingtalk-group-de
 import { toDingTalkGroupDestinationResponse } from '../multitable/dingtalk-group-destination-response'
 import { resolveSheetCapabilitiesForUser } from '../multitable/sheet-capabilities'
 import { WebhookService } from '../multitable/webhook-service'
-import { ALL_WEBHOOK_EVENT_TYPES } from '../multitable/webhooks'
+import {
+  CreateWebhookSchema,
+  UpdateWebhookSchema,
+} from '../multitable/webhooks'
 
 const logger = new Logger('ApiTokenRoutes')
 
@@ -38,21 +41,6 @@ const CreateTokenSchema = z.object({
   name: z.string().min(1).max(100),
   scopes: z.array(z.enum(ALL_API_TOKEN_SCOPES as [string, ...string[]])).min(1),
   expiresAt: z.string().datetime().optional(),
-})
-
-const CreateWebhookSchema = z.object({
-  name: z.string().min(1).max(100),
-  url: z.string().url(),
-  secret: z.string().optional(),
-  events: z.array(z.enum(ALL_WEBHOOK_EVENT_TYPES as [string, ...string[]])).min(1),
-})
-
-const UpdateWebhookSchema = z.object({
-  name: z.string().min(1).max(100).optional(),
-  url: z.string().url().optional(),
-  secret: z.string().optional(),
-  events: z.array(z.enum(ALL_WEBHOOK_EVENT_TYPES as [string, ...string[]])).min(1).optional(),
-  active: z.boolean().optional(),
 })
 
 const CreateDingTalkGroupSchema = z.object({
@@ -327,6 +315,9 @@ export function apiTokensRouter(): Router {
         url: input.url,
         secret: input.secret,
         events: input.events as import('../multitable/webhooks').WebhookEventType[],
+        maxRetries: input.maxRetries,
+        retryBaseDelayMs: input.retryBaseDelayMs,
+        retryMaxDelayMs: input.retryMaxDelayMs,
       })
       res.status(201).json({ ok: true, data: webhook })
     } catch (err) {
@@ -353,6 +344,9 @@ export function apiTokensRouter(): Router {
         secret: input.secret,
         events: input.events as import('../multitable/webhooks').WebhookEventType[] | undefined,
         active: input.active,
+        maxRetries: input.maxRetries,
+        retryBaseDelayMs: input.retryBaseDelayMs,
+        retryMaxDelayMs: input.retryMaxDelayMs,
       })
       res.json({ ok: true, data: webhook })
     } catch (err) {

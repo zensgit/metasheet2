@@ -372,6 +372,128 @@ describe('MetaApiTokenManager', () => {
     expect(createCalls.length).toBe(1)
   })
 
+  async function openWebhookCreateForm() {
+    const webhookTab = document.querySelectorAll('[role="tab"]')[1] as HTMLButtonElement
+    webhookTab.click()
+    await flushPromises()
+    const newBtn = document.querySelector('[data-webhook-new]') as HTMLButtonElement
+    newBtn.click()
+    await flushPromises()
+
+    const nameInput = document.querySelector('[data-webhook-name]') as HTMLInputElement
+    nameInput.value = 'Policy hook'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    const urlInput = document.querySelector('[data-webhook-url]') as HTMLInputElement
+    urlInput.value = 'https://example.com/hook'
+    urlInput.dispatchEvent(new Event('input', { bubbles: true }))
+    const eventCheckbox = document.querySelector('[data-webhook-event="record.created"]') as HTMLInputElement
+    eventCheckbox.click()
+    await flushPromises()
+  }
+
+  function setNumberField(selector: string, value: string) {
+    const input = document.querySelector(selector) as HTMLInputElement
+    input.value = value
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  it('rejects an out-of-bounds maxRetries (save disabled + error shown)', async () => {
+    const { client, fetchFn } = mockClient()
+    mount({ visible: true, client })
+    await flushPromises()
+    await openWebhookCreateForm()
+
+    setNumberField('[data-webhook-max-retries]', '11') // > 10
+    await flushPromises()
+
+    expect(document.querySelector('[data-webhook-max-retries-error]')).toBeTruthy()
+    const saveBtn = document.querySelector('[data-webhook-save]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+
+    saveBtn.click()
+    await flushPromises()
+    const createCalls = fetchFn.mock.calls.filter(
+      (c: [string, RequestInit?]) => c[1]?.method === 'POST' && c[0].includes('/webhooks'),
+    )
+    expect(createCalls.length).toBe(0)
+  })
+
+  it('rejects a below-min base delay', async () => {
+    const { client } = mockClient()
+    mount({ visible: true, client })
+    await flushPromises()
+    await openWebhookCreateForm()
+
+    setNumberField('[data-webhook-base-delay]', '50') // < 100
+    await flushPromises()
+
+    expect(document.querySelector('[data-webhook-base-delay-error]')).toBeTruthy()
+    expect((document.querySelector('[data-webhook-save]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('sends in-bounds retry policy in the create payload', async () => {
+    const { client, fetchFn } = mockClient()
+    mount({ visible: true, client })
+    await flushPromises()
+    await openWebhookCreateForm()
+
+    setNumberField('[data-webhook-max-retries]', '5')
+    setNumberField('[data-webhook-base-delay]', '2000')
+    setNumberField('[data-webhook-max-delay]', '30000')
+    await flushPromises()
+
+    expect(document.querySelector('[data-webhook-max-retries-error]')).toBeFalsy()
+    const saveBtn = document.querySelector('[data-webhook-save]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    const createCall = fetchFn.mock.calls.find(
+      (c: [string, RequestInit?]) => c[1]?.method === 'POST' && c[0].includes('/webhooks'),
+    )
+    expect(createCall).toBeTruthy()
+    const body = JSON.parse(createCall![1]!.body as string)
+    expect(body.maxRetries).toBe(5)
+    expect(body.retryBaseDelayMs).toBe(2000)
+    expect(body.retryMaxDelayMs).toBe(30000)
+  })
+
+  it('omits retry policy fields when blank (backend default)', async () => {
+    const { client, fetchFn } = mockClient()
+    mount({ visible: true, client })
+    await flushPromises()
+    await openWebhookCreateForm()
+
+    const saveBtn = document.querySelector('[data-webhook-save]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    const createCall = fetchFn.mock.calls.find(
+      (c: [string, RequestInit?]) => c[1]?.method === 'POST' && c[0].includes('/webhooks'),
+    )
+    const body = JSON.parse(createCall![1]!.body as string)
+    expect(body.maxRetries).toBeUndefined()
+    expect(body.retryBaseDelayMs).toBeUndefined()
+    expect(body.retryMaxDelayMs).toBeUndefined()
+  })
+
+  it('prefills retry policy when editing an existing webhook', async () => {
+    const { client } = mockClient([], [fakeWebhook({ maxRetries: 7, retryBaseDelayMs: 3000 })])
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const webhookTab = document.querySelectorAll('[role="tab"]')[1] as HTMLButtonElement
+    webhookTab.click()
+    await flushPromises()
+    const editBtn = document.querySelector('[data-webhook-edit]') as HTMLButtonElement
+    editBtn.click()
+    await flushPromises()
+
+    expect((document.querySelector('[data-webhook-max-retries]') as HTMLInputElement).value).toBe('7')
+    expect((document.querySelector('[data-webhook-base-delay]') as HTMLInputElement).value).toBe('3000')
+  })
+
   it('deletes a webhook', async () => {
     const { client, fetchFn } = mockClient([], [fakeWebhook()])
     mount({ visible: true, client })

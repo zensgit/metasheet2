@@ -47,6 +47,8 @@ export interface SendWebhookConfig {
   method?: string
   headers?: Record<string, string>
   body?: unknown
+  /** Optional HMAC-SHA256 signing secret (X-Webhook-Signature header). */
+  secret?: string
 }
 
 /** Config shape for send_notification */

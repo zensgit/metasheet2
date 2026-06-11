@@ -1097,6 +1097,9 @@ export interface Webhook {
   active: boolean
   secret: string | null
   failureCount: number
+  maxRetries?: number
+  retryBaseDelayMs?: number
+  retryMaxDelayMs?: number
   createdAt: string
   updatedAt: string
 }
@@ -1107,6 +1110,9 @@ export interface WebhookCreateInput {
   events: string[]
   secret?: string
   active?: boolean
+  maxRetries?: number
+  retryBaseDelayMs?: number
+  retryMaxDelayMs?: number
 }
 
 export interface WebhookDelivery {
