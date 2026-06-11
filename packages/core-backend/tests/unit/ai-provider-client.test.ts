@@ -181,6 +181,28 @@ describe('URL userinfo strip (review-fix F2)', () => {
     expect(stripUrlUserinfo('see https://proxy.internal/v1/messages')).toBe('see https://proxy.internal/v1/messages')
   })
 
+  it('redacts through the LAST @ when the password embeds an unencoded @ (multi-@ tail leak)', () => {
+    // NIT-NEW-1: a password with a literal '@' (e.g. user:p@ss) puts a second '@'
+    // BEFORE the host. Stopping at the FIRST '@' leaked the tail ('ss@host').
+    expect(stripUrlUserinfo(`https://user:p${URL_SECRET}@ss@proxy.internal/v1`)).toBe(
+      'https://<redacted>@proxy.internal/v1',
+    )
+    // Three '@' in the userinfo — still redacted through the last one before the host.
+    expect(stripUrlUserinfo(`odbc://sa:a@b@${URL_SECRET}@db.internal;Database=x`)).toBe(
+      'odbc://<redacted>@db.internal;Database=x',
+    )
+    // The secret must not survive anywhere in the output.
+    expect(stripUrlUserinfo(`https://user:p${URL_SECRET}@ss@proxy.internal/v1`)).not.toContain(URL_SECRET)
+  })
+
+  it('does not treat an @ that appears AFTER the path as userinfo', () => {
+    // A bare '@' inside a path/query (no scheme://...@ before the first '/') stays put —
+    // the greedy userinfo run must stop at the first '/'.
+    expect(stripUrlUserinfo('see https://proxy.internal/v1/users@me')).toBe(
+      'see https://proxy.internal/v1/users@me',
+    )
+  })
+
   it('a credentialed MULTITABLE_AI_BASE_URL surfacing in a network error never reaches the provider_error message', async () => {
     const credentialedBase = `https://svc:${URL_SECRET}@proxy.internal`
     const fetchSpy = vi.fn(async (url: unknown) => {

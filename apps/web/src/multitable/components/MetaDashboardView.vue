@@ -90,6 +90,7 @@
             v-if="chartDataMap[panel.chartId]"
             :chart-data="chartDataMap[panel.chartId]"
             :display-config="chartConfigMap[panel.chartId]?.displayConfig"
+            :aggregation="chartConfigMap[panel.chartId]?.dataSource?.aggregation?.function"
           />
           <div v-else class="meta-dashboard__panel-loading">{{ viewRenderLabel('dashboard.loadingChart', isZh) }}</div>
         </div>
@@ -253,6 +254,7 @@
               <MetaChartRenderer
                 :chart-data="previewChartData"
                 :display-config="previewDisplayConfig"
+                :aggregation="chartDraft.aggregation"
               />
             </div>
             <div v-else class="meta-dashboard__preview-empty" data-chart-preview-empty="true">
@@ -276,12 +278,22 @@
 
 <script lang="ts">
 import { defineAsyncComponent } from 'vue'
+import MetaChartLoadError from './MetaChartLoadError.vue'
 
 // S1-9: the ECharts renderer is the only echarts importer — loading it async puts echarts in its
 // own lazy chunk (≈150KB+ off the workbench bundle); panels keep their loading state meanwhile.
 // MODULE scope (plain <script>), NOT <script setup>: setup-scope would create a fresh loader
 // closure per component instance, losing Vue's resolved-component cache across remounts.
-const MetaChartRenderer = defineAsyncComponent(() => import('./MetaChartRenderer.vue'))
+//
+// r2 item 3: a lazy-chunk network failure (or a slow CDN past `timeout`) previously rendered the
+// panel silently empty. `errorComponent` surfaces a 'chart failed to load' + Retry fallback (Vue
+// passes it a `retry` prop that re-attempts the loader); `timeout` bounds the wait so a stalled
+// fetch eventually trips the error path instead of hanging on the loading state forever.
+const MetaChartRenderer = defineAsyncComponent({
+  loader: () => import('./MetaChartRenderer.vue'),
+  errorComponent: MetaChartLoadError,
+  timeout: 30_000,
+})
 </script>
 
 <script setup lang="ts">

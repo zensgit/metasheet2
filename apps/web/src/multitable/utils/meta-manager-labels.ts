@@ -63,7 +63,7 @@ export type MetaManagerLabelKey =
   | 'field.ai.previewWithRecord' | 'field.ai.previewNeedsRecord'
   | 'field.ai.previewRealCallHint' | 'field.ai.previewDraftHint'
   | 'field.ai.previewing' | 'field.ai.previewResult'
-  | 'field.error.aiSourceRequired' | 'field.error.aiSourceTooMany'
+  | 'field.error.aiSourceRequired' | 'field.error.aiSourceAllDeleted' | 'field.error.aiSourceTooMany'
   | 'field.error.aiOptionsTooMany' | 'field.error.aiOptionTooLong'
   | 'field.error.aiTargetLangTooLong' | 'field.error.aiInstructionTooLong'
   | 'field.aiUsage.title' | 'field.aiUsage.today' | 'field.aiUsage.week' | 'field.aiUsage.instance'
@@ -252,6 +252,9 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.ai.previewResult': { en: 'Preview result', zh: '预览结果' },
   // Client-side constraint mirrors of the A2 config governance caps.
   'field.error.aiSourceRequired': { en: 'Select at least one source field for the AI shortcut', zh: '请为 AI shortcut 至少选择一个来源字段' },
+  // r2 item 6: ALL persisted AI source fields were deleted. We block (do NOT silently auto-disable the
+  // shortcut), but the message must be actionable + name the AI section as the blocker.
+  'field.error.aiSourceAllDeleted': { en: 'All AI source fields were deleted — pick new sources or turn off the AI shortcut', zh: 'AI 来源字段均已被删除——请重新选择来源字段，或关闭 AI shortcut' },
   'field.error.aiSourceTooMany': { en: 'AI shortcut allows at most 20 source fields', zh: 'AI shortcut 来源字段最多 20 个' },
   'field.error.aiOptionsTooMany': { en: 'AI shortcut allows at most 50 categories', zh: 'AI shortcut 分类选项最多 50 个' },
   'field.error.aiOptionTooLong': { en: 'Each category must be at most 100 characters', zh: '每个分类选项最长 100 字符' },

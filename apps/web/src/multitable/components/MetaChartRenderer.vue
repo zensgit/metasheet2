@@ -11,6 +11,12 @@
     <template v-else-if="isEChartsType">
       <div class="meta-chart__plot" :class="{ 'meta-chart__plot--pie': hasPointLegend }">
         <div ref="chartEl" class="meta-chart__echarts" data-chart-canvas="true"></div>
+        <!-- r2 item 2: caption a gauge whose share-of-total dial is misleading for a non-additive aggregation. -->
+        <p
+          v-if="showGaugeAggNote"
+          class="meta-chart__gauge-note"
+          data-gauge-agg-note="true"
+        >{{ viewRenderLabel('chart.gaugeNonAdditiveNote', isZh) }}</p>
         <!-- S3: funnel shares the pie-style point legend (stages are label-less on the canvas). -->
         <div
           v-if="hasPointLegend && displayConfig?.showLegend !== false"
@@ -73,7 +79,7 @@ import * as echarts from 'echarts/core'
 import { BarChart, LineChart, PieChart, FunnelChart, GaugeChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import type { ChartData, ChartDisplayConfig } from '../types'
+import type { AggregationFunction, ChartData, ChartDisplayConfig } from '../types'
 import { buildChartOption, CHART_COLORS, ECHARTS_CHART_TYPES } from '../utils/buildChartOption'
 import { useLocale } from '../../composables/useLocale'
 import { viewRenderLabel } from '../utils/meta-view-render-labels'
@@ -86,8 +92,21 @@ echarts.use([BarChart, LineChart, PieChart, FunnelChart, GaugeChart, GridCompone
 const props = defineProps<{
   chartData: ChartData
   displayConfig?: ChartDisplayConfig
+  // r2 item 2: the chart's aggregation function (from dataSource.aggregation.function). Optional —
+  // the renderer is also mounted in places that have only ChartData. Used solely to caption a gauge
+  // whose share-of-total dial is misleading for a non-additive aggregation (avg/min/max).
+  aggregation?: AggregationFunction
 }>()
 const { isZh } = useLocale()
+
+// Additive aggregations are the only ones whose Σ values is a meaningful whole, so the gauge's
+// share-of-total dial is sound. Mirrors charts.ts ADDITIVE_AGGREGATIONS.
+const ADDITIVE_AGGREGATIONS: ReadonlySet<AggregationFunction> = new Set<AggregationFunction>(['count', 'sum'])
+const showGaugeAggNote = computed(() =>
+  props.chartData.chartType === 'gauge'
+  && props.aggregation !== undefined
+  && !ADDITIVE_AGGREGATIONS.has(props.aggregation),
+)
 
 const isEChartsType = computed(() => ECHARTS_CHART_TYPES.has(props.chartData.chartType))
 // pie + funnel share the HTML "swatch + label + value" point legend (their canvas marks are label-less).
@@ -183,6 +202,14 @@ onBeforeUnmount(teardownChart)
 .meta-chart__plot--pie .meta-chart__echarts { flex: 1; min-width: 0; }
 
 .meta-chart__echarts { width: 100%; height: 250px; }
+
+.meta-chart__gauge-note {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #94a3b8;
+  text-align: center;
+}
 
 .meta-chart__legend { display: flex; flex-direction: column; gap: 4px; }
 .meta-chart__legend--inline { flex-direction: row; flex-wrap: wrap; gap: 12px; margin-top: 8px; }

@@ -399,6 +399,15 @@
                 </label>
               </div>
               <span class="meta-field-mgr__hint">{{ ml('field.ai.sourceHint') }}</span>
+              <!-- r2 item 6: distinct AI-section warning when every persisted source field was deleted.
+                   It is rendered ON the source-fields control so the user sees the AI section is the
+                   blocker (not their unrelated edit). The save stays blocked; no silent auto-disable. -->
+              <p
+                v-if="aiSourceAllDeletedBlocked"
+                class="meta-field-mgr__ai-source-deleted-warning"
+                data-test="ai-source-deleted-warning"
+                role="alert"
+              >{{ ml('field.error.aiSourceAllDeleted') }}</p>
             </div>
             <div v-if="aiDraft.kind === 'classify'" class="meta-field-mgr__field">
               <span>{{ ml('field.ai.options') }}</span>
@@ -745,6 +754,10 @@ const deleteTargetId = ref<string | null>(null)
 const configTargetId = ref<string | null>(null)
 const configDraftType = ref<string | null>(null)
 const fieldConfigError = ref('')
+// r2 item 6: distinct field-level state for "every persisted AI source field was deleted" — drives a
+// warning banner ON the AI config section so the user sees the AI section is the blocker (not their
+// unrelated edit). We still BLOCK the save (no silent auto-disable); this only makes it legible.
+const aiSourceAllDeletedBlocked = ref(false)
 
 const selectDraft = reactive<{ options: Array<{ value: string; color: string }> }>({
   options: [{ value: '', color: '' }],
@@ -1078,6 +1091,7 @@ function resetDrafts() {
   validationDraft.value = []
   validationDraftTouched.value = false
   fieldConfigError.value = ''
+  aiSourceAllDeletedBlocked.value = false
 }
 
 function serializeFieldDraft(type: string | null): string {
@@ -1393,12 +1407,43 @@ function onAiOptionInput(index: number, event: Event) {
  * client-side. ok:false → fieldConfigError is already set. ok:true with no
  * config = the toggle is off (removal-by-key-omission, §2.1 LOCK — never
  * `aiShortcut: null`, which the backend 400s).
+ *
+ * r2 item 5 — INTENTIONAL DRAFT CANONICALIZATION (review F1). Because the
+ * §2.1 clobber guard re-emits this resolved config on EVERY save of a
+ * string/longText field (even a validation-only edit), the returned config is a
+ * canonical form of the persisted aiShortcut, not a verbatim copy. The
+ * transforms applied here, all of them deliberate:
+ *   - self-heal deleted sources: `sourceFieldIds` is filtered to ids that still
+ *     exist as candidates, so a since-deleted source field is dropped rather
+ *     than re-persisted as a dangling reference (see item 6 for the all-deleted
+ *     case, which BLOCKS instead of silently emptying);
+ *   - drop inert non-classify options: `params.options` is emitted only when
+ *     `kind === 'classify'` (options on summarize/translate/custom are inert,
+ *     so they are not round-tripped);
+ *   - drop inert non-translate targetLang likewise (emitted only for
+ *     `kind === 'translate'`);
+ *   - trim + drop empties: options are trimmed and blank ones removed;
+ *     `targetLang` and `instruction` are trimmed (an empty instruction is
+ *     omitted entirely).
+ * Net effect: a validation-only save may rewrite the stored aiShortcut into this
+ * canonical shape. That is acceptable and by design (it cannot enable/disable the
+ * shortcut or change its kind/instruction intent) — flagged here so the rewrite
+ * is not mistaken for an accidental clobber.
  */
 function resolveAiShortcutDraft(): { ok: boolean; config?: AiShortcutConfigInput } {
+  aiSourceAllDeletedBlocked.value = false
   if (!aiDraft.enabled) return { ok: true }
   const candidateIds = new Set(aiSourceFieldCandidates.value.map((field) => field.id))
   const sourceFieldIds = aiDraft.sourceFieldIds.filter((id) => candidateIds.has(id))
   if (sourceFieldIds.length === 0) {
+    // r2 item 6: separate "every configured source was DELETED" (the draft had source ids, but none
+    // survive as candidates) from "none picked yet". The former gets an actionable, AI-section-specific
+    // message + a distinct warning state; we still BLOCK (no silent auto-disable of the shortcut).
+    if (aiDraft.sourceFieldIds.length > 0) {
+      aiSourceAllDeletedBlocked.value = true
+      fieldConfigError.value = ml('field.error.aiSourceAllDeleted')
+      return { ok: false }
+    }
     fieldConfigError.value = ml('field.error.aiSourceRequired')
     return { ok: false }
   }
@@ -1949,6 +1994,16 @@ onBeforeUnmount(() => {
 .meta-field-mgr__ai-header { font-size: 12px; color: #4338ca; }
 .meta-field-mgr__ai-sources { display: flex; flex-wrap: wrap; gap: 6px 12px; }
 .meta-field-mgr__ai-source { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #444; }
+/* r2 item 6: all-sources-deleted needs-attention banner ON the AI section. */
+.meta-field-mgr__ai-source-deleted-warning {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border: 1px solid #f0c36d;
+  border-radius: 6px;
+  background: #fdf6ec;
+  color: #b45309;
+  font-size: 12px;
+}
 .meta-field-mgr__ai-preview { display: flex; flex-direction: column; gap: 6px; }
 .meta-field-mgr__ai-preview-output { font-size: 12px; color: #334155; white-space: pre-wrap; word-break: break-word; }
 /* §2.4 admin usage card — automation stats-card styling family

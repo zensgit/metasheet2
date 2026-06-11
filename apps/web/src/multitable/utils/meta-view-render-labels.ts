@@ -84,6 +84,8 @@ export type MetaViewRenderLabelKey =
   | 'dashboard.loadingDashboard'
   | 'dashboard.empty'
   | 'dashboard.loadingChart'
+  | 'dashboard.chartLoadFailed'
+  | 'dashboard.retry'
   | 'dashboard.addChartPanel'
   | 'dashboard.noCharts'
   | 'dashboard.newChart'
@@ -125,6 +127,7 @@ export type MetaViewRenderLabelKey =
   | 'chart.value'
   | 'chart.restrictedTitle'
   | 'chart.restrictedHint'
+  | 'chart.gaugeNonAdditiveNote'
 
 export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'common.loading',
@@ -202,6 +205,8 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'dashboard.loadingDashboard',
   'dashboard.empty',
   'dashboard.loadingChart',
+  'dashboard.chartLoadFailed',
+  'dashboard.retry',
   'dashboard.addChartPanel',
   'dashboard.noCharts',
   'dashboard.newChart',
@@ -243,6 +248,7 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'chart.value',
   'chart.restrictedTitle',
   'chart.restrictedHint',
+  'chart.gaugeNonAdditiveNote',
 ]
 
 const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
@@ -324,6 +330,8 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'dashboard.loadingDashboard': { en: 'Loading dashboard...', zh: '正在加载仪表板...' },
   'dashboard.empty': { en: 'No dashboards yet. Create your first dashboard.', zh: '暂无仪表板。创建你的第一个仪表板。' },
   'dashboard.loadingChart': { en: 'Loading chart...', zh: '正在加载图表...' },
+  'dashboard.chartLoadFailed': { en: 'Chart failed to load.', zh: '图表加载失败。' },
+  'dashboard.retry': { en: 'Retry', zh: '重试' },
   'dashboard.addChartPanel': { en: 'Add Chart Panel', zh: '添加图表面板' },
   'dashboard.noCharts': { en: 'No charts available. Create a chart first.', zh: '暂无可用图表。请先创建一个图表。' },
   'dashboard.newChart': { en: '+ New Chart', zh: '+ 新建图表' },
@@ -370,6 +378,13 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'chart.restrictedHint': {
     en: 'This chart references fields you cannot read.',
     zh: '此图表引用了你无权读取的字段。',
+  },
+  'chart.gaugeNonAdditiveNote': {
+    // r2 item 2: the gauge dials the first value against the sum of all values (share-of-total).
+    // That reading only holds for an additive aggregation (count/sum); for avg/min/max the
+    // sum-of-values denominator is not a meaningful whole, so warn the reader.
+    en: 'Share of total is approximate for this aggregation (avg/min/max do not sum to a whole).',
+    zh: '该聚合方式下的占比仅供参考（平均/最小/最大值之和不构成有意义的总量）。',
   },
 }
 
