@@ -2,7 +2,7 @@
 
 Date: 2026-06-09
 
-Grounded on: `origin/main@6690bade5`
+Grounded on: `origin/main@275644e81`
 
 Scope: MetaSheet2 workflow, approval, and multitable automation as one product
 target. This is a completion definition and execution ledger, not a sprint
@@ -38,7 +38,7 @@ Current main already contains the governance and first convergence slices:
 | A6-2 suspend/resume | Landed end-to-end: `wait_for_callback`, `multitable_automation_suspensions`, admin resume route, editor config, admin runs resume UI, UAT recorded. |
 | A6-3-1 condition branch runtime | Landed: `condition_branch`, exclusive first-match/default branch, C1 parent/child/downstream lineage. |
 | A6-3-2 frontend and runs readability | Landed in code: editor builder in `MetaAutomationRuleEditor.vue` and `conditionBranchAuthoring.ts`; runs readability in `AutomationExecutionsView.vue`. |
-| Still missing | Branch-local wait/nesting, parallel fan-out/join, BPMN compile/preview mapping, approval-as-job bridge, public webhook token emitter. |
+| Still missing | Branch-local wait/nesting, parallel fan-out/join, BPMN compile/preview mapping, public webhook token emitter. |
 
 ### 1.2 Approval
 
@@ -53,7 +53,7 @@ Current main already contains substantial approval product runtime:
 | Real DB authoring UAT guard | Landed integration test for create -> publish -> start -> resolve on real DB. |
 | Deployed/browser UAT | Passed: #2318 and #2371 accepted UI-created template -> publish -> `/approvals/new/:templateId` -> `form_field_user` resolution, plus unsupported-template read-only/save-disabled safety. |
 | Completion event contract | Landed: #2413 locked the W5 scope; #2414 emits typed, redacted, idempotent approval terminal completion events after commit. |
-| Still missing | Field-visibility authoring UI, richer template constructs, trigger bindings, result backwrite, automation `start_approval`. |
+| Still missing | Field-visibility authoring UI, richer template constructs, trigger bindings, result backwrite. |
 
 ### 1.3 Workflow Designer / BPMN
 
@@ -120,7 +120,7 @@ operate a practical business workflow using existing product surfaces:
 | W5-0 | Approval completion event contract scope-gate | Landed #2413 | Defines terminal approval event taxonomy, redacted payload, idempotency key, post-commit emission boundary, and test matrix without adding automation behavior. |
 | W5-1 | Approval completion event contract implementation | Landed #2414 (`184f2293c`) | `approval.approved/rejected/revoked/cancelled` payload is versioned, redacted, idempotent, emitted post-commit, and tested without adding automation action yet. `return` remains a non-terminal rework transition. |
 | W6-0 | Automation `start_approval` scope-gate | Scope-gate document added; runtime not started | `automation-start-approval-scope-gate-20260610.md` locks action config, idempotency, bridge persistence, waiting/resume semantics, redaction, and tests. |
-| W6-1 | Automation `start_approval` runtime | Not started; after W6-0 | Starts one approval instance from a published template, creates a waiting job, and resumes from W5 completion event. |
+| W6-1 | Automation `start_approval` runtime | Landed #2469 | Starts one approval instance from a published template, persists the approval bridge, creates a suspended C1 job, resumes/fails from W5 terminal completion events, and guards retry duplicates. |
 | W7 | Approval result backwrite | Not started; after W5/W6 | Explicit mapping writes approved/rejected/revoked/cancelled outcomes to multitable record fields with audit and permission checks; `return` transition backwrite needs a separate named scope if required. |
 | W8 | BPMN compile/preview adapter | Not started; after W3 minimum | Constrained BPMN subset compiles into automation/approval preview plus gap report; no live execution route. |
 | W9 | Public webhook resume token emitter | Not started; use-case gated | External consumer can receive a token/callback URL safely; auth, expiry, replay, and redaction are locked before public route. |
@@ -128,8 +128,7 @@ operate a practical business workflow using existing product surfaces:
 
 ## 4. Recommended Next Slice
 
-The next implementation after W5 should be **W6: automation `start_approval`**,
-starting with the dedicated W6-0 scope-gate:
+W6 **automation `start_approval`** landed after the dedicated W6-0 scope-gate:
 `docs/development/automation-start-approval-scope-gate-20260610.md`.
 
 Why:
@@ -137,15 +136,15 @@ Why:
 1. **W1 is closed by issue evidence** (#2318 + #2371 + #2375).
 2. **W2 is intentionally held** because #2367 found no concrete
    branch-internal wait/nesting demand for the current trial flow.
-3. The v1 completion gap is now cross-surface closure: automation still cannot
-   start an approval. W5-1 gives W6 a stable approval completion signal, but it
-   intentionally does not add automation behavior.
+3. The v1 cross-surface start gap is now closed: automation can explicitly
+   start an approval through `start_approval`, and W5-1 gives it a stable
+   terminal completion signal.
 
-Do not jump straight to result backwrite or BPMN before W6 lands.
-Approval-as-job now has stable suspend/resume plus an approval completion event contract; it
-now also has a W6 scope-gate. The runtime still needs a separate W6-1 PR
-proving idempotency, waiting/resume semantics, and side-effect boundaries.
-BPMN gateway preview needs branch/parallel semantics to map to.
+The next cross-surface candidate is **W7 approval result backwrite**, but it
+must still start from a separate scope gate because it writes business data and
+changes record state. Do not jump straight to BPMN before the remaining graph
+prerequisites are named. BPMN gateway preview still needs branch/parallel
+semantics to map to.
 
 ## 5. Non-goals for v1
 
