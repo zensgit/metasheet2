@@ -14,6 +14,7 @@ export type AutomationActionType =
   | 'lock_record'
   | 'wait_for_callback'
   | 'condition_branch'
+  | 'start_approval'
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'update_record',
@@ -26,6 +27,7 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'lock_record',
   'wait_for_callback',
   'condition_branch',
+  'start_approval',
 ]
 
 /** Config shape for update_record */
@@ -102,6 +104,21 @@ export interface LockRecordConfig {
  */
 export interface WaitForCallbackConfig {
   reason?: 'external_event'
+}
+
+/**
+ * Config shape for start_approval (W6-1 approval bridge).
+ *
+ * v1 creates one approval instance from a published approval template, suspends
+ * the automation job, and resumes from W5 approval completion events. Form data
+ * is explicit mapping only; result backwrite is intentionally absent.
+ */
+export interface StartApprovalConfig {
+  templateId: string
+  formDataMapping: Record<string, string>
+  requester?: {
+    mode?: 'trigger_actor' | 'rule_creator'
+  }
 }
 
 export interface AutomationAction {

@@ -44,7 +44,7 @@ function readJsonSafely(response: Response): Promise<unknown> {
   return response.json().catch(() => null)
 }
 
-function lookupTemplateValue(path: string, data: Record<string, unknown>): unknown {
+export function lookupTemplateValue(path: string, data: Record<string, unknown>): unknown {
   const segments = path.split('.').filter(Boolean)
   let current: unknown = data
   for (const segment of segments) {
@@ -54,7 +54,7 @@ function lookupTemplateValue(path: string, data: Record<string, unknown>): unkno
   return current
 }
 
-function renderTemplateValue(value: unknown): string {
+export function renderTemplateValue(value: unknown): string {
   if (value === null || value === undefined) return ''
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
@@ -65,7 +65,7 @@ function renderTemplateValue(value: unknown): string {
   }
 }
 
-function renderAutomationTemplate(template: string, data: Record<string, unknown>): string {
+export function renderAutomationTemplate(template: string, data: Record<string, unknown>): string {
   return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key: string) =>
     renderTemplateValue(lookupTemplateValue(key, data)),
   )
@@ -490,6 +490,15 @@ export interface ActionJobLifecycle {
    * Optional: legacy rules supply no lifecycle, so a legacy `wait_for_callback` fails closed (D7).
    */
   onSuspend?(stepIndex: number, action: AutomationAction): Promise<void>
+  /**
+   * W6-1: `start_approval` in an opted-in rule — create one approval, persist the
+   * approval bridge + a `suspended` C1 job, then STOP. Completion resumes from W5.
+   */
+  onStartApproval?(
+    stepIndex: number,
+    action: AutomationAction,
+    context: ExecutionContext,
+  ): Promise<{ suspended: boolean; result?: AutomationStepResult }>
 }
 
 export interface ActionJobLifecycleMeta {
@@ -674,6 +683,7 @@ export class AutomationExecutor {
     context: ExecutionContext,
     suspendIndex: number,
     jobLifecycle?: ActionJobLifecycle,
+    settledStepResult?: AutomationStepResult,
   ): Promise<AutomationExecution> {
     const startTime = Date.now()
     execution.status = 'running'
@@ -684,7 +694,11 @@ export class AutomationExecutor {
       // bridge in onSettled). If this settle throws (e.g. a DB error), it now fails the execution
       // terminally below — NOT a bubbled 500 that leaves the token consumed and the tail unrun.
       const waitAction = rule.actions[suspendIndex]
-      const waitResult: AutomationStepResult = { actionType: 'wait_for_callback', status: 'success', durationMs: 0 }
+      const waitResult: AutomationStepResult = settledStepResult ?? {
+        actionType: waitAction.type,
+        status: 'success',
+        durationMs: 0,
+      }
       execution.steps.push(waitResult)
       if (jobLifecycle) await jobLifecycle.onSettled(suspendIndex, waitAction, waitResult)
 
@@ -746,6 +760,38 @@ export class AutomationExecutor {
           actionType: 'wait_for_callback',
           status: 'failed',
           error: 'wait_for_callback requires execution_mode workflow_job_v1',
+          durationMs: 0,
+        })
+        for (let i = index + 1; i < actions.length; i++) {
+          results.push({ actionType: actions[i].type, status: 'skipped', durationMs: 0 })
+        }
+        return { suspended: false }
+      }
+
+      // W6-1 approval bridge. The completion event, not an admin token, resumes the tail.
+      if (action.type === 'start_approval') {
+        if (jobLifecycle?.onStartApproval) {
+          const approvalResult = await jobLifecycle.onStartApproval(index, action, context)
+          if (approvalResult.suspended) return { suspended: true }
+          const result = approvalResult.result ?? {
+            actionType: 'start_approval',
+            status: 'success',
+            durationMs: 0,
+          }
+          results.push(result)
+          if (result.status === 'failed') {
+            for (let i = index + 1; i < actions.length; i++) {
+              await jobLifecycle.onSkipped(i, actions[i])
+              results.push({ actionType: actions[i].type, status: 'skipped', durationMs: 0 })
+            }
+            break
+          }
+          continue
+        }
+        results.push({
+          actionType: 'start_approval',
+          status: 'failed',
+          error: 'start_approval requires execution_mode workflow_job_v1',
           durationMs: 0,
         })
         for (let i = index + 1; i < actions.length; i++) {
@@ -1006,6 +1052,13 @@ export class AutomationExecutor {
           break
         case 'lock_record':
           result = await this.executeLockRecord(action.config, context)
+          break
+        case 'start_approval':
+          result = {
+            actionType: 'start_approval',
+            status: 'failed',
+            error: 'start_approval requires execution_mode workflow_job_v1',
+          }
           break
         default:
           result = {

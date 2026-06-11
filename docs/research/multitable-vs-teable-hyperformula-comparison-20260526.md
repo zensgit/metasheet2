@@ -187,6 +187,7 @@ Teable 的 `ComputedUpdateOutbox` / `ComputedUpdateOutboxSeed` / `ComputedUpdate
 3. **多维表 formula 跨写路径不一致（已验证，建议建 backlog issue）**：前端 `MetaFieldManager.vue` **有完整 formula 编辑器**（表达式/函数目录/字段引用），用户能建 formula 字段；后端 formula recalc **只在 `/views/:viewId/submit` 触发**，网格 PATCH 编辑不触发。**用户可见后果**：表单填报出来的 formula 值，在网格里改了引用字段后**不刷新、变陈旧**。严重度：中（数据正确性/陈旧，限"表单建值→网格改引用"路径）。**K3 锁下不动手实现**，但应建 issue 记录这个不一致 + 记录内 formula 链的拓扑/转义两个已知弱点，防止"以为统一支持其实只一条路径算"。修复方向（解锁后）：把 `recalculateRecord`（或其重写版）接进 `RecordWriteService.patchRecords` 的 Step 4，与 lookup/rollup 同位。
    - **[UPDATE 2026-05-26 · 已修复 = A1 / PR #1883 MERGED `9e3fcf549`]**：实现按"先修表达式语义（`recalculateRecord` 取 `field.property.expression`，仅 expression 键缺失才回退 data `=…` 串）再接 `patchRecords` Step 4c（必填 `recalculateFormulaFields` helper，按 `formula_dependencies` 门控）"。重算值进响应 `records` + 实时 `recordPatches[].patch`，其它客户端经 `applyRemoteRecordPatch` 合并、**无需前端改动**。**Yjs 边界**：协同桥按既有 lookup/rollup 模式把该 helper 置 no-op stub → formula recalc **不在协同编辑路径触发**。`validateChanges` formula 写入只读 = **A1.1 已合并（PR #1890 `3dae1ed3`）**：formula 并入 lookup/rollup 的只读拒写分支（formula 本就 UI 只读，此为后端 backstop）。
 4. **网格引擎死代码**：`formula/engine.ts` 的 `buildDependencyGraph`/`topologicalSort`/`calculationOrder` 无调用方 —— K3 锁解除后的内核打磨可清理。
+   - **[UPDATE 2026-06-10 · 已完成 = F1 / PR #1897 MERGED `a7c1126d6`（2026-05-26）]**：死依赖图代码已验证不存在于 `formula/engine.ts`。
 
 > 全部受 **K3 PoC Stage-1 锁** 约束：以上是"记录/对照"，非"开工"。涉及 `integration-core`/RBAC/auth 一律不碰。
 
