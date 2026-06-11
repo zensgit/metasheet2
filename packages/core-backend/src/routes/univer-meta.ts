@@ -15,6 +15,7 @@ import {
   isFieldAlwaysReadOnly,
   isFieldPermissionHidden,
 } from '../multitable/permission-derivation'
+import { validateAiShortcutFieldProperty } from '../multitable/ai-shortcut-config'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import {
   deriveCapabilities,
@@ -202,6 +203,17 @@ let yjsInvalidator: YjsInvalidator | null = null
 
 export function setYjsInvalidatorForRoutes(invalidator: YjsInvalidator | null): void {
   yjsInvalidator = invalidator
+}
+
+/**
+ * A2 (design §2.2): the AI shortcut run route (routes/multitable-ai.ts) must
+ * wire the SAME post-commit Yjs invalidation hook as POST /patch. The
+ * invalidator is module-private state set by index.ts via
+ * `setYjsInvalidatorForRoutes`; this getter is the minimal read seam — no
+ * behavior change for /patch.
+ */
+export function getYjsInvalidatorForRoutes(): YjsInvalidator | null {
+  return yjsInvalidator
 }
 
 const MULTITABLE_FIELD_TYPES = [
@@ -2339,7 +2351,7 @@ function sendForbidden(res: Response, message = 'Insufficient permissions') {
   return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message } })
 }
 
-async function requireRecordReadable(
+export async function requireRecordReadable(
   req: Request,
   query: QueryFn,
   sheetId: string,
@@ -2430,6 +2442,95 @@ function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>)
   return Object.fromEntries(
     Object.entries(data as Record<string, unknown>).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
   )
+}
+
+/**
+ * A2 (design §2.2 seam decision): the req-scoped `RecordWriteHelpers` factory.
+ * This COHERES the former inline `writeHelpers` literal from POST /patch into
+ * the single source of truth consumed by BOTH /patch and the AI shortcut run
+ * route (routes/multitable-ai.ts) — the helper bodies stay module-private
+ * here; nothing is moved or copied.
+ *
+ * The `_pool` slot is part of the locked factory signature
+ * (`createRecordWriteHelpers(req, pool)`); every helper receives its query
+ * function per-call from RecordWriteService, so the pool is not consumed here.
+ */
+export function createRecordWriteHelpers(req: Request, _pool?: { query: QueryFn }): RecordWriteHelpers {
+  return {
+    normalizeLinkIds,
+    normalizeAttachmentIds,
+    normalizeJson,
+    parseLinkFieldConfig,
+    buildId,
+    ensureRecordWriteAllowed,
+    filterRecordDataByFieldIds,
+    extractLookupRollupData,
+    mergeComputedRecords,
+    filterRecordFieldSummaryMap,
+    serializeLinkSummaryMap,
+    serializeAttachmentSummaryMap,
+    applyLookupRollup: (q, f, rows, rl, lv) => applyLookupRollup(req, q, f, rows, rl, lv),
+    computeDependentLookupRollupRecords: (q, sourceSheetId, ids, changed) =>
+      computeDependentLookupRollupRecords(req, q, sourceSheetId, ids, changed),
+    recalculateFormulaFields,
+    loadLinkValuesByRecord,
+    buildLinkSummaries: (q, rows, rl, lv) => buildLinkSummaries(req, q, rows, rl, lv),
+    buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),
+    ensureAttachmentIdsExist,
+  }
+}
+
+/**
+ * A2: the field/permission context POST /patch composes before delegating to
+ * `RecordWriteService.patchRecords` — extracted so the AI shortcut run route
+ * consumes the IDENTICAL construction (single source of truth; /patch behavior
+ * unchanged). Returns null when the sheet has no fields (the /patch 404).
+ *
+ * F3 (#2106 §3 F3): `readableEchoFields` is the layer-2 ∧ layer-3 readable
+ * set used ONLY for the read-back echo (RecordWriteService masks record /
+ * related / formula data + summaries with it) — a field_permissions-denied
+ * value must never be echoed. `fieldById` (the write gate) stays built from
+ * ALL fields so a write-only-no-read field remains writable. `fieldPermissions`
+ * exposes the same layer-2 ∧ layer-3 derive for callers that need a layer-3
+ * pre-check (A2 target-editable — patchRecords itself never executes the
+ * layer-3 write gate).
+ */
+export interface RecordPatchRouteContext {
+  fields: UniverMetaField[]
+  readableEchoFields: UniverMetaField[]
+  readableEchoFieldIds: Set<string>
+  attachmentFields: UniverMetaField[]
+  fieldById: Map<string, FieldMutationGuard>
+  fieldPermissions: Record<string, MultitableFieldPermission>
+}
+
+export async function buildRecordPatchContext(
+  query: QueryFn,
+  sheetId: string,
+  access: ResolvedRequestAccess,
+  capabilities: MultitableCapabilities,
+): Promise<RecordPatchRouteContext | null> {
+  const fieldRes = await query(
+    'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
+    [sheetId],
+  )
+  if (fieldRes.rows.length === 0) return null
+
+  const fields = (fieldRes.rows as any[]).map(serializeFieldRow)
+  const visiblePropertyFields = filterVisiblePropertyFields(fields)
+  const echoFieldScopeMap = access.userId
+    ? await loadFieldPermissionScopeMap(query, sheetId, access.userId)
+    : new Map<string, FieldPermissionScope>()
+  const fieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, {
+    hiddenFieldIds: [],
+    fieldScopeMap: echoFieldScopeMap,
+  })
+  const readableEchoFields = visiblePropertyFields.filter((field) => fieldPermissions[field.id]?.visible !== false)
+  const readableEchoFieldIds = new Set(readableEchoFields.map((field) => field.id))
+  const attachmentFields = readableEchoFields.filter((field) => field.type === 'attachment')
+  const fieldById = buildFieldMutationGuardMap(fields)
+
+  return { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions }
 }
 
 function redactRecordRevisionEntry(item: RecordRevisionEntry, allowedFieldIds: Set<string>): RecordRevisionEntry {
@@ -4853,6 +4954,12 @@ export function univerMetaRouter(): Router {
         if (configError) {
           throw new ValidationError(configError)
         }
+        // A2 (§2.1): sanitizeFieldProperty passes unknown keys through, so the
+        // aiShortcut config is validated explicitly at this write chokepoint.
+        const aiShortcutError = await validateAiShortcutFieldProperty(query as unknown as QueryFn, sheetId, property)
+        if (aiShortcutError) {
+          throw new ValidationError(aiShortcutError)
+        }
         if (type === 'formula' && property?.expression) {
           const formulaError = await validateFormulaReferences(query, sheetId, fieldId, String(property.expression))
           if (formulaError) throw new ValidationError(formulaError)
@@ -5138,6 +5245,18 @@ export function univerMetaRouter(): Router {
         const configError = await validateLookupRollupConfig(req, query, sheetId, nextType, nextProperty)
         if (configError) {
           throw new ValidationError(configError)
+        }
+        // A2 (§2.1): validate aiShortcut only when the payload explicitly carries it
+        // (mirrors the lazy expression re-validation below) — a rename-only PATCH on a
+        // field with a pre-existing config must not re-validate and 400.
+        const aiShortcutInPayload =
+          typeof parsed.data.property !== 'undefined'
+          && Object.prototype.hasOwnProperty.call(parsed.data.property ?? {}, 'aiShortcut')
+        if (aiShortcutInPayload) {
+          const aiShortcutError = await validateAiShortcutFieldProperty(query as unknown as QueryFn, sheetId, nextProperty)
+          if (aiShortcutError) {
+            throw new ValidationError(aiShortcutError)
+          }
         }
         // Only re-validate the expression when the caller is actually writing it
         // (lazy/on-edit): `nextProperty` falls back to the stored `row.property`, so a
@@ -8605,28 +8724,16 @@ export function univerMetaRouter(): Router {
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
 
-      const fieldRes = await pool.query(
-        'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
-        [sheetId],
-      )
-      if (fieldRes.rows.length === 0) {
+      // F3 (#2106 §3 F3) echo-mask composition + write-gate guard map — extracted to
+      // `buildRecordPatchContext` (single source of truth shared with the A2 AI shortcut
+      // run route; see the factory's doc comment). crossSheetRelated stays masked per
+      // related sheet inside computeDependentLookupRollupRecords (locked by the
+      // multitable-cross-sheet-related-echo-mask suite).
+      const patchContext = await buildRecordPatchContext(pool.query.bind(pool), sheetId, access, capabilities)
+      if (!patchContext) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-
-      const fields = (fieldRes.rows as any[]).map(serializeFieldRow)
-      const visiblePropertyFields = filterVisiblePropertyFields(fields)
-      // F3 (#2106 §3 F3): RecordWriteService uses these ONLY for the read-back echo (it masks record /
-      // related / formula data + summaries inside patchRecords), so narrow them to the layer-2 ∧ layer-3
-      // readable set — a field_permissions-denied value must not be echoed. fieldById (the write gate,
-      // below) stays from ALL fields, so a write-only-no-read field remains writable. crossSheetRelated
-      // is masked per related sheet inside computeDependentLookupRollupRecords (locked by the
-      // multitable-cross-sheet-related-echo-mask suite).
-      const echoFieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
-      const echoFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap: echoFieldScopeMap })
-      const readableEchoFields = visiblePropertyFields.filter((field) => echoFieldPermissions[field.id]?.visible !== false)
-      const readableEchoFieldIds = new Set(readableEchoFields.map((field) => field.id))
-      const attachmentFields = readableEchoFields.filter((field) => field.type === 'attachment')
-      const fieldById = buildFieldMutationGuardMap(fields)
+      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById } = patchContext
 
       const changesByRecord = new Map<string, typeof parsed.data.changes>()
       for (const change of parsed.data.changes) {
@@ -8636,28 +8743,7 @@ export function univerMetaRouter(): Router {
       }
 
       // --------------- Delegate to RecordWriteService (validation + pipeline) ---------------
-      const writeHelpers: RecordWriteHelpers = {
-        normalizeLinkIds,
-        normalizeAttachmentIds,
-        normalizeJson,
-        parseLinkFieldConfig,
-        buildId,
-        ensureRecordWriteAllowed,
-        filterRecordDataByFieldIds,
-        extractLookupRollupData,
-        mergeComputedRecords,
-        filterRecordFieldSummaryMap,
-        serializeLinkSummaryMap,
-        serializeAttachmentSummaryMap,
-        applyLookupRollup: (q, f, rows, rl, lv) => applyLookupRollup(req, q, f, rows, rl, lv),
-        computeDependentLookupRollupRecords: (q, sourceSheetId, ids, changed) =>
-          computeDependentLookupRollupRecords(req, q, sourceSheetId, ids, changed),
-        recalculateFormulaFields,
-        loadLinkValuesByRecord,
-        buildLinkSummaries: (q, rows, rl, lv) => buildLinkSummaries(req, q, rows, rl, lv),
-        buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),
-        ensureAttachmentIdsExist,
-      }
+      const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
       const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
       if (yjsInvalidator) {
         recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
