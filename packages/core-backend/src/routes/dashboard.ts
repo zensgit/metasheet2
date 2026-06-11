@@ -31,7 +31,7 @@ import { randomUUID } from 'crypto'
 import { poolManager } from '../integration/db/connection-pool'
 import type { MultitableCapabilities } from '../multitable/access'
 import type { AggregationFunction, ChartConfig, ChartCreateInput, ChartType } from '../multitable/charts'
-import { assertSeriesConstraints } from '../multitable/charts'
+import { assertScatterFields, assertSeriesConstraints } from '../multitable/charts'
 import type { ChartData } from '../multitable/chart-aggregation-service'
 import { DashboardService } from '../multitable/dashboard-service'
 import type { MultitableField } from '../multitable/field-codecs'
@@ -45,7 +45,7 @@ import {
 } from '../multitable/permission-service'
 
 const dashboardService = new DashboardService()
-const CHART_TYPES = new Set<ChartType>(['bar', 'line', 'pie', 'number', 'table', 'area', 'funnel', 'gauge'])
+const CHART_TYPES = new Set<ChartType>(['bar', 'line', 'pie', 'number', 'table', 'area', 'funnel', 'gauge', 'scatter'])
 const AGGREGATION_FUNCTIONS = new Set<AggregationFunction>(['count', 'sum', 'avg', 'min', 'max', 'count_distinct'])
 const AGGREGATIONS_REQUIRING_FIELD = new Set<AggregationFunction>(['sum', 'avg', 'min', 'max', 'count_distinct'])
 const DATE_GROUPINGS = new Set(['day', 'week', 'month', 'quarter', 'year'])
@@ -149,11 +149,16 @@ async function loadAllowedFieldIds(
 function chartReferencedFieldIds(chart: ChartConfig): string[] {
   const source = chart.dataSource
   const ids = [
-    source.aggregation.fieldId,
+    source.aggregation?.fieldId,
     source.groupByFieldId,
     source.seriesByFieldId, // v2-d: a denied series field must restrict, not leak its values as series names
     source.dateFieldId,
     source.filterFieldId,
+    // r12 scatter: a denied x/y/color/size field must restrict too (its values feed point coords/category).
+    source.xFieldId,
+    source.yFieldId,
+    source.colorFieldId,
+    source.sizeFieldId,
   ]
   return ids.filter((id): id is string => typeof id === 'string' && id.length > 0)
 }
@@ -199,6 +204,28 @@ function buildPreviewChart(sheetId: string, userId: string, body: unknown): Char
   const source = input.dataSource
   if (!source || typeof source !== 'object') {
     throw new Error('dataSource is required')
+  }
+  // r12 scatter: a per-record x/y projection — NOT a grouped aggregation. It requires xFieldId +
+  // yFieldId and IGNORES aggregation / groupBy / date / series (so the grouped-path requirements below
+  // do not apply). Branch out early once the type+source are valid.
+  if (chartType === 'scatter') {
+    const xFieldId = readString((source as ChartConfig['dataSource']).xFieldId)
+    const yFieldId = readString((source as ChartConfig['dataSource']).yFieldId)
+    if (!xFieldId || !yFieldId) {
+      throw new Error('scatter requires xFieldId and yFieldId')
+    }
+    const now = new Date().toISOString()
+    return {
+      id: `chart_preview_${randomUUID()}`,
+      name: readString(input.name) ?? 'Preview chart',
+      type: chartType as ChartType,
+      sheetId,
+      viewId: readString(input.viewId),
+      dataSource: source as ChartConfig['dataSource'],
+      display: (input.display ?? input.displayConfig ?? {}) as ChartConfig['display'],
+      createdBy: userId,
+      createdAt: now,
+    }
   }
   const aggregation = (source as ChartConfig['dataSource']).aggregation
   if (!aggregation || typeof aggregation !== 'object') {
@@ -267,6 +294,8 @@ export function dashboardRouter() {
       }
       // v2-d: validate series constraints on the persisted path too — the UI is never the sole guard.
       assertSeriesConstraints(req.body?.dataSource as ChartConfig['dataSource'] | undefined, req.body?.type as ChartType, readBarMode(req.body?.display))
+      // r12 M3: scatter requires x/y on the persisted path too (not just preview + config UI).
+      assertScatterFields(req.body?.dataSource as ChartConfig['dataSource'] | undefined, req.body?.type as ChartType)
       const chart = await dashboardService.createChart(req.params.sheetId, {
         ...req.body,
         createdBy: auth.userId,
@@ -340,6 +369,8 @@ export function dashboardRouter() {
         effectiveType,
         readBarMode(req.body?.display ?? chart.display),
       )
+      // r12 M3: scatter requires x/y on the effective (merged) config.
+      assertScatterFields((req.body?.dataSource ?? chart.dataSource) as ChartConfig['dataSource'], effectiveType)
       const updated = await dashboardService.updateChart(req.params.id, req.body)
       res.json(updated)
     } catch (err: unknown) {

@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => {
   return { setOption, resize, dispose, init, instance }
 })
 vi.mock('echarts/core', () => ({ init: mocks.init, use: vi.fn() }))
-vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {}, FunnelChart: {}, GaugeChart: {} }))
+vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {}, FunnelChart: {}, GaugeChart: {}, ScatterChart: {} }))
 vi.mock('echarts/components', () => ({ GridComponent: {}, TooltipComponent: {} }))
 vi.mock('echarts/renderers', () => ({ CanvasRenderer: {} }))
 
@@ -107,6 +107,14 @@ const gaugeData: ChartData = {
     { label: 'closed', value: 70 },
   ],
   total: 100,
+}
+
+const scatterData: ChartData = {
+  chartType: 'scatter',
+  dataPoints: [
+    { label: '', value: 10, xValue: 1, yValue: 10 },
+    { label: '', value: 20, xValue: 2, yValue: 20 },
+  ],
 }
 
 describe('MetaChartRenderer', () => {
@@ -309,6 +317,29 @@ describe('MetaChartRenderer', () => {
     await flushPromises()
     const note = container.querySelector('[data-gauge-agg-note]')
     expect(note?.textContent || '').toContain('占比')
+  })
+
+  it('r12: renders scatter via ECharts canvas (init once + setOption) with NO HTML legend', async () => {
+    const { container } = mount({ chartData: scatterData })
+    await flushPromises()
+
+    expect(container.querySelector('[data-chart-type="scatter"]')).toBeTruthy()
+    expect(container.querySelector('[data-chart-canvas]')).toBeTruthy()
+    expect(mocks.init).toHaveBeenCalledTimes(1)
+    expect(mocks.setOption).toHaveBeenCalledTimes(1)
+    // The scatter option carries function props (symbolSize / tooltip.formatter) so a whole-option
+    // deepEqual is brittle (fresh fn instances) — assert the structural bits the renderer must pass.
+    const passed = mocks.setOption.mock.calls[0][0] as {
+      series: { type: string; data: { value: number[] }[] }[]
+      xAxis: { type: string }
+      yAxis: { type: string }
+    }
+    expect(passed.series[0].type).toBe('scatter')
+    expect(passed.xAxis.type).toBe('value')
+    expect(passed.yAxis.type).toBe('value')
+    expect(passed.series[0].data.map((d) => d.value)).toEqual([[1, 10], [2, 20]])
+    // scatter is neither a point-legend (pie/funnel) nor a series-legend (bar/line) type
+    expect(container.querySelector('[data-legend]')).toBeNull()
   })
 
   it('S3: disposes the canvas when switching funnel → number (new types share the lifecycle)', async () => {

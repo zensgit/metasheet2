@@ -162,6 +162,7 @@
               <option value="pie">pie</option>
               <option value="funnel">funnel</option>
               <option value="gauge">gauge</option>
+              <option value="scatter">scatter</option>
               <option value="number">number</option>
               <option value="table">table</option>
             </select>
@@ -175,7 +176,7 @@
               <option v-if="chartDraft.chartType === 'line'" value="area">{{ viewRenderLabel('dashboard.variantArea', isZh) }}</option>
             </select>
           </label>
-          <label class="meta-dashboard__field">
+          <label v-if="!isScatter" class="meta-dashboard__field">
             <span>{{ viewRenderLabel('dashboard.groupBy', isZh) }}</span>
             <select
               v-model="chartDraft.groupByFieldId"
@@ -193,7 +194,7 @@
             </small>
             <small v-else-if="!groupableFields.length" class="meta-dashboard__hint">{{ viewRenderLabel('dashboard.noGroupableFields', isZh) }}</small>
           </label>
-          <label class="meta-dashboard__field">
+          <label v-if="!isScatter" class="meta-dashboard__field">
             <span>{{ viewRenderLabel('dashboard.aggregation', isZh) }}</span>
             <select v-model="chartDraft.aggregation" class="meta-dashboard__select" data-field="chart-aggregation">
               <option value="count">count</option>
@@ -213,6 +214,48 @@
             </select>
             <small v-if="!numericFields.length" class="meta-dashboard__hint">{{ viewRenderLabel('dashboard.noNumericFields', isZh) }}</small>
           </label>
+          <!-- r12 scatter: per-record x/y projection — x + y are required numeric fields; color/size are
+               optional. Shown ONLY for scatter (groupBy/aggregation/value/series/bar-mode are hidden above). -->
+          <template v-if="isScatter">
+            <label class="meta-dashboard__field">
+              <span>{{ viewRenderLabel('dashboard.xField', isZh) }}</span>
+              <select v-model="chartDraft.xFieldId" class="meta-dashboard__select" data-field="chart-x-field">
+                <option value="">{{ viewRenderLabel('common.chooseField', isZh) }}</option>
+                <option v-for="field in numericFields" :key="field.id" :value="field.id">
+                  {{ field.name }} · {{ fieldTypeLabel(field.type, isZh) }}
+                </option>
+              </select>
+            </label>
+            <label class="meta-dashboard__field">
+              <span>{{ viewRenderLabel('dashboard.yField', isZh) }}</span>
+              <select v-model="chartDraft.yFieldId" class="meta-dashboard__select" data-field="chart-y-field">
+                <option value="">{{ viewRenderLabel('common.chooseField', isZh) }}</option>
+                <option v-for="field in numericFields" :key="field.id" :value="field.id">
+                  {{ field.name }} · {{ fieldTypeLabel(field.type, isZh) }}
+                </option>
+              </select>
+              <small v-if="!numericFields.length" class="meta-dashboard__hint">{{ viewRenderLabel('dashboard.noNumericFields', isZh) }}</small>
+            </label>
+            <label class="meta-dashboard__field">
+              <span>{{ viewRenderLabel('dashboard.colorField', isZh) }}</span>
+              <select v-model="chartDraft.colorFieldId" class="meta-dashboard__select" data-field="chart-color-field">
+                <option value="">{{ viewRenderLabel('common.none', isZh) }}</option>
+                <option v-for="field in groupableFields" :key="field.id" :value="field.id">
+                  {{ field.name }} · {{ fieldTypeLabel(field.type, isZh) }}
+                </option>
+              </select>
+            </label>
+            <label class="meta-dashboard__field">
+              <span>{{ viewRenderLabel('dashboard.sizeField', isZh) }}</span>
+              <select v-model="chartDraft.sizeFieldId" class="meta-dashboard__select" data-field="chart-size-field">
+                <option value="">{{ viewRenderLabel('common.none', isZh) }}</option>
+                <option v-for="field in numericFields" :key="field.id" :value="field.id">
+                  {{ field.name }} · {{ fieldTypeLabel(field.type, isZh) }}
+                </option>
+              </select>
+              <small class="meta-dashboard__hint" data-hint="scatter-fields">{{ viewRenderLabel('dashboard.scatterFieldHint', isZh) }}</small>
+            </label>
+          </template>
           <!-- v2-d: series split — for any bar chart (grouped or stacked); needs a primary groupBy. -->
           <label v-if="seriesByAllowed" class="meta-dashboard__field">
             <span>{{ viewRenderLabel('dashboard.seriesBy', isZh) }}</span>
@@ -362,6 +405,12 @@ const chartDraft = ref({
   seriesByFieldId: '',
   // v2-d-b1: bar series layout — 'stacked' (default) or 'grouped' (side-by-side, allows non-additive).
   barMode: 'stacked' as 'stacked' | 'grouped',
+  // r12 scatter (only meaningful for chartType === 'scatter'): x/y are required numeric fields;
+  // color sets the per-point category, size the per-point bubble size.
+  xFieldId: '',
+  yFieldId: '',
+  colorFieldId: '',
+  sizeFieldId: '',
 })
 
 const activeDashboard = computed(() => dashboards.value.find((d) => d.id === activeDashboardId.value) ?? dashboards.value[0] ?? null)
@@ -371,7 +420,10 @@ const editingDateGrouped = computed(() => Boolean(editingChart.value?.dataSource
 const chartFields = computed(() => filterPropertyVisibleFields(props.fields ?? []))
 const groupableFields = computed(() => chartFields.value.filter((field) => GROUPABLE_FIELD_TYPES.has(field.type)))
 const numericFields = computed(() => chartFields.value.filter((field) => NUMERIC_FIELD_TYPES.has(field.type)))
-const requiresValueField = computed(() => AGGREGATIONS_REQUIRING_VALUE.has(chartDraft.value.aggregation))
+// r12: scatter is the one non-grouped chart type — it hides groupBy/aggregation/value/series/bar-mode
+// and shows x/y/color/size pickers instead.
+const isScatter = computed(() => chartDraft.value.chartType === 'scatter')
+const requiresValueField = computed(() => !isScatter.value && AGGREGATIONS_REQUIRING_VALUE.has(chartDraft.value.aggregation))
 // v2-d / v2-d-b1: the series-split picker is offered for any bar chart with a non-date-grouped
 // primary axis (grouped layout accepts any aggregation). Whether STACKED is a legal layout depends
 // on the aggregation being additive (sum/count) — see `stackedAllowed` + the producer/validator.
@@ -404,6 +456,10 @@ watch(
 const createChartDisabled = computed(() => {
   if (!activeDashboard.value) return true
   if (!chartDraft.value.name.trim()) return true
+  // r12 scatter: requires BOTH x and y fields; it has no groupBy/aggregation to validate.
+  if (isScatter.value) {
+    return !chartDraft.value.xFieldId || !chartDraft.value.yFieldId
+  }
   if (!editingDateGrouped.value && !chartDraft.value.groupByFieldId) return true
   if (requiresValueField.value && !chartDraft.value.valueFieldId) return true
   return false
@@ -429,6 +485,10 @@ function resetChartDraft() {
     variant: '',
     seriesByFieldId: '',
     barMode: 'stacked',
+    xFieldId: '',
+    yFieldId: '',
+    colorFieldId: '',
+    sizeFieldId: '',
   }
   createChartError.value = ''
   resetChartPreview()
@@ -454,6 +514,10 @@ function openEditChart(chartId: string) {
     variant: cfg.displayConfig?.variant ?? '',
     seriesByFieldId: cfg.dataSource.seriesByFieldId ?? '',
     barMode: cfg.displayConfig?.barMode ?? 'stacked',
+    xFieldId: cfg.dataSource.xFieldId ?? '',
+    yFieldId: cfg.dataSource.yFieldId ?? '',
+    colorFieldId: cfg.dataSource.colorFieldId ?? '',
+    sizeFieldId: cfg.dataSource.sizeFieldId ?? '',
   }
   createChartError.value = ''
   resetChartPreview()
@@ -553,6 +617,29 @@ async function addPanelForChart(chartId: string) {
 // chart keeps its date-grouping — full grouping-mode editing is a later slice.)
 function buildChartInput(base?: ChartConfig): ChartCreateInput {
   const name = chartDraft.value.name.trim()
+  // r12 scatter: a per-record x/y projection — emit x/y (+ optional color/size) and DROP the grouped
+  // dataSource fields (groupBy/series/date). `aggregation` stays present (the contract requires it) but
+  // the backend scatter branch ignores it. Built explicitly off `base` so groupBy/series carried by an
+  // edited config are cleared when switching INTO scatter.
+  if (isScatter.value) {
+    const scatterSource: ChartDataSource = {
+      sheetId: props.sheetId,
+      aggregation: { function: chartDraft.value.aggregation },
+      xFieldId: chartDraft.value.xFieldId,
+      yFieldId: chartDraft.value.yFieldId,
+      ...(chartDraft.value.colorFieldId ? { colorFieldId: chartDraft.value.colorFieldId } : {}),
+      ...(chartDraft.value.sizeFieldId ? { sizeFieldId: chartDraft.value.sizeFieldId } : {}),
+    }
+    return {
+      name,
+      chartType: 'scatter',
+      dataSource: scatterSource,
+      displayConfig: {
+        ...(base?.displayConfig ?? {}),
+        title: name,
+      },
+    }
+  }
   const dataSource: ChartDataSource = {
     ...(base?.dataSource ?? {}),
     sheetId: props.sheetId,
@@ -561,6 +648,11 @@ function buildChartInput(base?: ChartConfig): ChartCreateInput {
       ...(requiresValueField.value ? { fieldId: chartDraft.value.valueFieldId } : {}),
     },
   }
+  // r12: a base config switching OUT of scatter must not leak its x/y/color/size fields.
+  delete dataSource.xFieldId
+  delete dataSource.yFieldId
+  delete dataSource.colorFieldId
+  delete dataSource.sizeFieldId
   if (!editingDateGrouped.value) {
     dataSource.groupByFieldId = chartDraft.value.groupByFieldId
   }

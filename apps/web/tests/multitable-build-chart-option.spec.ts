@@ -326,4 +326,66 @@ describe('buildChartOption', () => {
     expect(buildChartOption(chart('number', [{ label: 'x', value: 1 }]))).toBeNull()
     expect(buildChartOption(chart('table', [{ label: 'x', value: 1 }]))).toBeNull()
   })
+
+  // --- r12 scatter: per-record x/y projection ---
+  const scatterData = (
+    points: Array<{ label?: string; xValue: number; yValue: number; size?: number; color?: string }>,
+  ): ChartData => ({
+    chartType: 'scatter',
+    dataPoints: points.map((p) => ({ label: p.label ?? '', value: p.yValue, xValue: p.xValue, yValue: p.yValue, ...(p.size !== undefined ? { size: p.size } : {}), ...(p.color ? { color: p.color } : {}) })),
+  })
+
+  it('r12 scatter: BOTH axes are type "value" (numeric, not category) and series type is scatter', () => {
+    const o = opt(buildChartOption(scatterData([{ xValue: 1, yValue: 10 }, { xValue: 2, yValue: 20 }])))
+    expect(o.xAxis.type).toBe('value')
+    expect(o.yAxis.type).toBe('value')
+    expect(o.xAxis.data).toBeUndefined() // no category labels
+    expect(o.series[0].type).toBe('scatter')
+  })
+
+  it('r12 scatter: maps each dataPoint to an [xValue, yValue] pair', () => {
+    const o = opt(buildChartOption(scatterData([{ xValue: 1, yValue: 10 }, { xValue: 3.5, yValue: 7 }])))
+    expect(o.series[0].data.map((d: any) => d.value)).toEqual([[1, 10], [3.5, 7]])
+  })
+
+  it('r12 scatter: symbolSize uses the point size, falling back to the default', () => {
+    const o = opt(buildChartOption(scatterData([{ xValue: 1, yValue: 1, size: 25 }, { xValue: 2, yValue: 2 }])))
+    const sizeFn = o.series[0].symbolSize
+    expect(typeof sizeFn).toBe('function')
+    expect(sizeFn(undefined, { data: { size: 25 } })).toBe(25)
+    expect(sizeFn(undefined, { data: {} })).toBe(10) // default
+  })
+
+  it('r12 scatter: honors per-point color via itemStyle', () => {
+    const o = opt(buildChartOption(scatterData([{ xValue: 1, yValue: 1, color: '#abcdef' }])))
+    expect(o.series[0].data[0].itemStyle.color).toBe('#abcdef')
+  })
+
+  it('r12 scatter M1: color-by category assigns a stable palette color per distinct label', () => {
+    const o = opt(buildChartOption(scatterData([
+      { label: 'A', xValue: 1, yValue: 1 },
+      { label: 'B', xValue: 2, yValue: 2 },
+      { label: 'A', xValue: 3, yValue: 3 },
+    ])))
+    const colors = o.series[0].data.map((d: any) => d.itemStyle.color)
+    expect(colors[0]).toBe(colors[2]) // same category → same color
+    expect(colors[0]).not.toBe(colors[1]) // distinct categories → distinct colors
+    expect(o.series[0].data[0].category).toBe('A')
+  })
+
+  it('r12 scatter M1: tooltip names the category when present', () => {
+    const o = opt(buildChartOption(scatterData([{ label: 'North', xValue: 4, yValue: 9 }])))
+    expect(o.tooltip.formatter({ data: { value: [4, 9], category: 'North' } })).toBe('North\n(4, 9)')
+  })
+
+  it('r12 scatter: item tooltip formats the (x, y) coordinate (no category)', () => {
+    const o = opt(buildChartOption(scatterData([{ xValue: 4, yValue: 9 }])))
+    expect(o.tooltip.trigger).toBe('item')
+    expect(o.tooltip.formatter({ data: { value: [4, 9] } })).toBe('(4, 9)')
+  })
+
+  it('r12 scatter: does not crash on empty dataPoints', () => {
+    const o = opt(buildChartOption(scatterData([])))
+    expect(o.series[0].data).toEqual([])
+  })
 })

@@ -13,6 +13,12 @@ export interface ChartDataPoint {
   label: string
   value: number
   color?: string
+  // r12 scatter: a per-record point carries its own x/y (and optional size) instead of an aggregated
+  // `value`. These stay OPTIONAL so the grouped {label,value} types are byte-unchanged; only scatter
+  // dataPoints populate them. `label` then holds the optional color category (empty when unset).
+  xValue?: number
+  yValue?: number
+  size?: number
 }
 
 /**
@@ -117,6 +123,12 @@ export class ChartAggregationService {
       }
     }
 
+    // r12 scatter: a PER-RECORD x/y projection — NOT a grouped aggregation. Branch out BEFORE the
+    // grouped pipeline so that path stays byte-identical; scatter has no groupBy/aggregation/series.
+    if (chart.type === 'scatter') {
+      return this.computeScatterData(chart, filtered)
+    }
+
     // Group records
     let groups: Map<string, RecordRow[]>
 
@@ -207,6 +219,46 @@ export class ChartAggregationService {
         ...(series ? { seriesByField: seriesByFieldId } : {}),
         aggregationFunction: aggFn,
         recordCount: filtered.length,
+      },
+    }
+  }
+
+  /**
+   * r12 scatter: one dataPoint PER RECORD (no grouping/aggregation/sort). A record is included only
+   * when BOTH x and y parse to finite numbers (a scatter point with a missing axis is meaningless);
+   * `label` carries the optional color category (`colorFieldId`, stringified — '' when unset), and
+   * `size` the optional bubble size (`sizeFieldId`, finite-numeric or omitted). `limit` caps the point
+   * count (records are taken in encounter order — scatter has no value to sort by). `total` is omitted
+   * (a sum of scattered y-values is meaningless); `metadata.recordCount` reports the matched records.
+   */
+  private computeScatterData(chart: ChartConfig, records: RecordRow[]): ChartData {
+    const { xFieldId, yFieldId, colorFieldId, sizeFieldId, limit } = chart.dataSource
+    const dataPoints: ChartDataPoint[] = []
+    for (const record of records) {
+      const xRaw = record.data[xFieldId ?? '']
+      const yRaw = record.data[yFieldId ?? '']
+      // Review M2: an empty string coerces to a misleading 0 — a phantom point at the axis edge.
+      // For a scatter coordinate, treat '' as absent like null.
+      const x = xRaw === '' ? null : toNumber(xRaw)
+      const y = yRaw === '' ? null : toNumber(yRaw)
+      if (x === null || y === null) continue // skip a record missing/non-numeric on either axis
+      const colorRaw = colorFieldId ? record.data[colorFieldId] : undefined
+      const size = sizeFieldId ? toNumber(record.data[sizeFieldId]) : null
+      dataPoints.push({
+        label: colorRaw != null ? String(colorRaw) : '',
+        value: y, // keep `value` populated (= y) so generic {label,value} consumers degrade gracefully
+        xValue: x,
+        yValue: y,
+        ...(size !== null ? { size } : {}),
+      })
+      if (limit && limit > 0 && dataPoints.length >= limit) break
+    }
+    return {
+      chartId: chart.id,
+      chartType: chart.type,
+      dataPoints,
+      metadata: {
+        recordCount: dataPoints.length,
       },
     }
   }

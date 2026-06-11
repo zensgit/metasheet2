@@ -15,8 +15,11 @@ export const CHART_COLORS = [
  * renderer — single source so the renderer's canvas gate and this mapper's guard never drift.
  */
 export const ECHARTS_CHART_TYPES: ReadonlySet<ChartData['chartType']> = new Set<ChartData['chartType']>([
-  'bar', 'line', 'pie', 'area', 'funnel', 'gauge',
+  'bar', 'line', 'pie', 'area', 'funnel', 'gauge', 'scatter',
 ])
+
+// r12 scatter: default symbol size when no per-point `size` is supplied.
+const SCATTER_DEFAULT_SYMBOL_SIZE = 10
 
 /**
  * Map a ChartData (+ optional display config) to an ECharts option for the
@@ -114,6 +117,51 @@ export function buildChartOption(
           max: Math.max(chartData.total ?? 0, value, 1),
           progress: { show: true },
           data: [{ name: point?.label ?? '', value }],
+        },
+      ],
+    }
+  }
+
+  // r12 scatter: a per-record x/y projection. BOTH axes are type:'value' (numeric, not category) — the
+  // defining difference from bar/line. Each dataPoint maps to an [xValue, yValue] pair; symbolSize comes
+  // from the point's `size` (falling back to a default), and the tooltip shows the (x, y) coordinate.
+  if (chartType === 'scatter') {
+    // Color-by (review M1): `label` carries the optional color-category from colorFieldId.
+    // Assign each distinct category a stable palette color here (the palette lives frontend-side)
+    // so the Color-by picker has a visible effect; the category is also named in the tooltip.
+    const scatterCategories = [...new Set(dataPoints.map((p) => p.label).filter((l) => l !== ''))]
+    const colorForCategory = (label: string): string | undefined =>
+      label === '' ? undefined : CHART_COLORS[scatterCategories.indexOf(label) % CHART_COLORS.length]
+    return {
+      ...base,
+      tooltip: {
+        trigger: 'item',
+        formatter: (params: unknown) => {
+          const data = (params as { data?: { value?: unknown; category?: string } })?.data
+          const value = data?.value
+          const [x, y] = Array.isArray(value) ? value : [undefined, undefined]
+          return data?.category ? `${data.category}\n(${x}, ${y})` : `(${x}, ${y})`
+        },
+      },
+      grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
+      xAxis: { type: 'value' },
+      yAxis: { type: 'value' },
+      series: [
+        {
+          type: 'scatter',
+          symbolSize: (rawValue: unknown, params: unknown) => {
+            const size = (params as { data?: { size?: number } })?.data?.size
+            return typeof size === 'number' && Number.isFinite(size) ? size : SCATTER_DEFAULT_SYMBOL_SIZE
+          },
+          data: dataPoints.map((p) => {
+            const color = p.color ?? colorForCategory(p.label)
+            return {
+              value: [p.xValue ?? 0, p.yValue ?? 0],
+              ...(p.label !== '' ? { category: p.label } : {}),
+              ...(p.size !== undefined ? { size: p.size } : {}),
+              ...(color ? { itemStyle: { color } } : {}),
+            }
+          }),
         },
       ],
     }

@@ -566,6 +566,112 @@ describe('ChartAggregationService', () => {
       expect(result.metadata?.recordCount).toBe(5)
     })
   })
+
+  // -- r12 scatter: PER-RECORD x/y projection (no grouping/aggregation) ------
+  describe('scatter (per-record x/y projection)', () => {
+    function scatterChart(overrides: Partial<ChartConfig['dataSource']> = {}): ChartConfig {
+      return makeChart({
+        type: 'scatter',
+        dataSource: { aggregation: { function: 'count' }, xFieldId: 'x', yFieldId: 'y', ...overrides },
+      })
+    }
+
+    it('emits ONE dataPoint per record (N records → N points, no grouping)', async () => {
+      const records = makeRecords([
+        { x: 1, y: 10 },
+        { x: 2, y: 20 },
+        { x: 1, y: 30 }, // same x as the first record — NOT merged (no grouping)
+      ])
+      const result = await service.computeChartData(scatterChart(), records)
+      expect(result.dataPoints).toHaveLength(3)
+      expect(result.dataPoints.map((p) => [p.xValue, p.yValue])).toEqual([
+        [1, 10],
+        [2, 20],
+        [1, 30],
+      ])
+    })
+
+    it('parses numeric strings for x/y', async () => {
+      const records = makeRecords([{ x: '3.5', y: '7' }])
+      const result = await service.computeChartData(scatterChart(), records)
+      expect(result.dataPoints).toEqual([
+        expect.objectContaining({ xValue: 3.5, yValue: 7, value: 7 }),
+      ])
+    })
+
+    it('SKIPS records missing or non-numeric on either axis', async () => {
+      const records = makeRecords([
+        { x: 1, y: 10 }, // ok
+        { x: null, y: 20 }, // missing x → skip
+        { x: 3 }, // missing y → skip
+        { x: 'abc', y: 40 }, // non-numeric x → skip
+        { x: 5, y: 'xyz' }, // non-numeric y → skip
+        { x: '', y: 50 }, // empty-string x → skip (M2: not a phantom 0 point)
+        { x: 7, y: '' }, // empty-string y → skip
+        { x: 6, y: 60 }, // ok
+      ])
+      const result = await service.computeChartData(scatterChart(), records)
+      expect(result.dataPoints).toHaveLength(2)
+      expect(result.dataPoints.map((p) => p.xValue)).toEqual([1, 6])
+      expect(result.metadata?.recordCount).toBe(2) // matched records, not input length
+    })
+
+    it('sets label from colorFieldId and size from sizeFieldId (both optional)', async () => {
+      const records = makeRecords([{ x: 1, y: 2, cat: 'A', mag: 18 }])
+      const result = await service.computeChartData(
+        scatterChart({ colorFieldId: 'cat', sizeFieldId: 'mag' }),
+        records,
+      )
+      expect(result.dataPoints[0]).toEqual(
+        expect.objectContaining({ label: 'A', xValue: 1, yValue: 2, size: 18 }),
+      )
+    })
+
+    it('leaves label empty and omits size when color/size fields are unset', async () => {
+      const records = makeRecords([{ x: 1, y: 2 }])
+      const result = await service.computeChartData(scatterChart(), records)
+      expect(result.dataPoints[0].label).toBe('')
+      expect(result.dataPoints[0].size).toBeUndefined()
+    })
+
+    it('honors the optional limit (caps points, no value-sort)', async () => {
+      const records = makeRecords([
+        { x: 1, y: 1 },
+        { x: 2, y: 2 },
+        { x: 3, y: 3 },
+      ])
+      const result = await service.computeChartData(scatterChart({ limit: 2 }), records)
+      expect(result.dataPoints).toHaveLength(2)
+      expect(result.dataPoints.map((p) => p.xValue)).toEqual([1, 2]) // encounter order, NOT sorted
+    })
+
+    it('does NOT emit grouped series/total/groupByField metadata', async () => {
+      const records = makeRecords([{ x: 1, y: 1 }])
+      const result = await service.computeChartData(scatterChart(), records)
+      expect(result.series).toBeUndefined()
+      expect(result.total).toBeUndefined()
+      expect(result.metadata?.groupByField).toBeUndefined()
+      expect(result.metadata?.aggregationFunction).toBeUndefined()
+    })
+  })
+
+  // -- r12 NON-REGRESSION: the grouped pipeline is unchanged by the scatter branch --
+  describe('grouped non-regression (scatter branch must not alter grouped charts)', () => {
+    it('a bar chart still groups + aggregates per category (no x/y leak)', async () => {
+      const chart = makeChart({
+        type: 'bar',
+        dataSource: { groupByFieldId: 'status', aggregation: { function: 'sum', fieldId: 'amount' } },
+      })
+      const result = await service.computeChartData(chart, sampleRecords)
+      const open = result.dataPoints.find((dp) => dp.label === 'open')
+      const closed = result.dataPoints.find((dp) => dp.label === 'closed')
+      expect(open?.value).toBe(80) // 10 + 20 + 50
+      expect(closed?.value).toBe(70) // 30 + 40
+      // grouped points carry NO scatter fields
+      expect(result.dataPoints.every((dp) => dp.xValue === undefined && dp.yValue === undefined)).toBe(true)
+      expect(result.metadata?.groupByField).toBe('status')
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
