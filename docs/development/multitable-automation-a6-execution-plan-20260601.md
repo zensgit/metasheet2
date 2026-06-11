@@ -177,18 +177,22 @@ Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
 > never-flatten guard for richer loaded shapes, `workflow_job_v1` auto-lock), and the admin runs detail
 > shows selected branch `label (key)` plus branch child jobs. **Still deferred, each its own opt-in:**
 > A6-3-3 `wait_for_callback` / nested-`condition_branch` inside branches; A6-3 parallel fan-out /
-> join-all / join-any. Design-lock detail below retained for the record.
+> join-all runtime / join-any. A6-3-4/W3-0 now has a docs-only scope gate:
+> `multitable-automation-a6-3-parallel-join-all-scope-gate-20260611.md`.
+> Design-lock detail below retained for the record.
 
 The design-lock pins the first runtime slice as **A6-3-1 `condition_branch` /
 exclusive branch v1**, not full parallel DAG. Parallel fan-out, join-all, and
-join-any stay separate follow rungs.
+join-any stay separate follow rungs. The first parallel follow rung is scoped as
+A6-3-4/W3-0 (`join_all` only); runtime remains gated.
 
 - **Adds:** graph fields (upstream/downstream edges, branch discriminator, join mode,
   branch result aggregation) and generalizes the linear executor into a DAG. This is the
   **largest single engine change** on the ladder.
 - **Must not (this rung):** no BPMN import; no approval coupling.
 - **Depends on:** A6-2 (job persistence + resume stable before fan-out/join).
-- **Gate:** a named per-record branch/parallel demand with audit.
+- **Gate:** A6-3-4/W3-0 docs-only scope gate exists; runtime still needs a named
+  parallel/join-all opt-in.
 - **Test surface:** see A6-0 scout "→ A6-3" (branch picks exactly one, parallel fan-out
   independent, join-all waits, join-any cancels with explicit audit, branch failures
   isolated).
@@ -221,9 +225,11 @@ join-any stay separate follow rungs.
   trigger bindings or result backwrite implicitly. Approval remains source-of-truth for
   graphs, assignments, permissions, and version freezing; automation stores only the
   waiting job, bridge lineage, and terminal outcome needed to continue the job plane.
-- **Still separate:** W7 approval result backwrite, approval trigger bindings, public
-  webhook/token emitters, branch-local wait/nesting, parallel/join, and BPMN
-  compile/preview all require separate named gates.
+- **Still separate:** W7 approval result backwrite runtime, approval trigger bindings,
+  public webhook/token emitters, branch-local wait/nesting, parallel/join, and BPMN
+  compile/preview all require separate named gates. W7-0 now has a docs-only scope
+  gate (`automation-approval-result-backwrite-scope-gate-20260611.md`); W7-1 runtime
+  remains gated.
 
 ---
 
@@ -249,5 +255,6 @@ join-any stay separate follow rungs.
 - A6-1 enable-writer **landed** (#2130/#2191/#2193) and A6-2 suspend/resume **landed**
   2026-06-03 (#2236 design-lock + #2237 impl, admin-gated v1); A6-3 exclusive branch
   v1 **landed** (#2321/#2339/#2348); A6-5 `start_approval` bridge **landed** (#2469).
-  A6-3-3, A6-3 parallel/join, A6-4 BPMN compile/preview, public webhook/token emitter,
-  and W7 result backwrite remain demand-gated.
+  A6-3-3, A6-3-4/W3-1 parallel join-all runtime, A6-3-5 join-any, A6-4 BPMN
+  compile/preview, public webhook/token emitter, and W7 result backwrite
+  runtime remain demand-gated.

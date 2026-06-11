@@ -38,7 +38,7 @@ Current main already contains the governance and first convergence slices:
 | A6-2 suspend/resume | Landed end-to-end: `wait_for_callback`, `multitable_automation_suspensions`, admin resume route, editor config, admin runs resume UI, UAT recorded. |
 | A6-3-1 condition branch runtime | Landed: `condition_branch`, exclusive first-match/default branch, C1 parent/child/downstream lineage. |
 | A6-3-2 frontend and runs readability | Landed in code: editor builder in `MetaAutomationRuleEditor.vue` and `conditionBranchAuthoring.ts`; runs readability in `AutomationExecutionsView.vue`. |
-| Still missing | Branch-local wait/nesting, parallel fan-out/join, BPMN compile/preview mapping, public webhook token emitter. |
+| Still missing | Branch-local wait/nesting, parallel join-all runtime, join-any/cancellation, BPMN compile/preview mapping, public webhook token emitter. |
 
 ### 1.2 Approval
 
@@ -115,13 +115,15 @@ operate a practical business workflow using existing product surfaces:
 | W0 | Re-ground status docs against current main | Landed #2411/#2412 | Existing TODOs no longer say A6-3-2 is not started after #2339/#2348. |
 | W1 | Approval authoring deployed-browser smoke | Done | #2318 PASS accepted: UI-created template published, `/approvals/new/:templateId` started, submitted user field resolved to expected assignee, unsupported rich template was read-only/save-disabled. #2375/#2371 reconfirmed current deployment. |
 | W2 | Automation A6-3-3 branch-local wait/nesting | Not started; demand-gated; no current unlock | `wait_for_callback` can live inside selected branch with stable nested step cursor, rule-drift guard, resume tests, and no silent flattening in editor. #2367 trial found A6-3 v1 sufficient for the tested flow, so do not start W2 without a new named scenario. |
-| W3 | Automation parallel fan-out + join-all | Not started; demand-gated | Parallel branches persist independent job lineage; join-all waits for all branches; failures and skipped branches are audited. |
+| W3-0 | Automation parallel fan-out + join-all scope-gate | Scope-gate document added; runtime not started | `multitable-automation-a6-3-parallel-join-all-scope-gate-20260611.md` locks fan-out/fan-in C1 graph shape, `join_all` only, fail/skip semantics, redaction, and tests. |
+| W3-1 | Automation parallel fan-out + join-all runtime | Not started; named opt-in required | Parallel branches persist independent job lineage; join-all waits for all branches; failures and skipped branches are audited. |
 | W4 | Automation join-any / cancellation semantics | Not started; demand-gated after W3 | First completed branch continues; ignored/cancelled siblings are explicit in C1 jobs and audit. |
 | W5-0 | Approval completion event contract scope-gate | Landed #2413 | Defines terminal approval event taxonomy, redacted payload, idempotency key, post-commit emission boundary, and test matrix without adding automation behavior. |
 | W5-1 | Approval completion event contract implementation | Landed #2414 (`184f2293c`) | `approval.approved/rejected/revoked/cancelled` payload is versioned, redacted, idempotent, emitted post-commit, and tested without adding automation action yet. `return` remains a non-terminal rework transition. |
 | W6-0 | Automation `start_approval` scope-gate | Scope-gate document added; runtime not started | `automation-start-approval-scope-gate-20260610.md` locks action config, idempotency, bridge persistence, waiting/resume semantics, redaction, and tests. |
 | W6-1 | Automation `start_approval` runtime | Landed #2469 | Starts one approval instance from a published template, persists the approval bridge, creates a suspended C1 job, resumes/fails from W5 terminal completion events, and guards retry duplicates. |
-| W7 | Approval result backwrite | Not started; after W5/W6 | Explicit mapping writes approved/rejected/revoked/cancelled outcomes to multitable record fields with audit and permission checks; `return` transition backwrite needs a separate named scope if required. |
+| W7-0 | Approval result backwrite scope-gate | Scope-gate document added; runtime not started | `automation-approval-result-backwrite-scope-gate-20260611.md` locks explicit mapping, idempotency, permission/field guards, redaction, and tests. |
+| W7-1 | Approval result backwrite runtime | Not started; after W6 operator smoke or named runtime unlock | Explicit mapping writes approved/rejected/revoked/cancelled outcomes to multitable record fields with audit and permission checks; `return` transition backwrite needs a separate named scope if required. |
 | W8 | BPMN compile/preview adapter | Not started; after W3 minimum | Constrained BPMN subset compiles into automation/approval preview plus gap report; no live execution route. |
 | W9 | Public webhook resume token emitter | Not started; use-case gated | External consumer can receive a token/callback URL safely; auth, expiry, replay, and redaction are locked before public route. |
 | W10 | Field-visibility / richer approval authoring | Optional follow-up | Existing `visibilityRule` data can be authored, not only preserved; unsupported graph constructs remain fail-closed. |
@@ -140,11 +142,12 @@ Why:
    start an approval through `start_approval`, and W5-1 gives it a stable
    terminal completion signal.
 
-The next cross-surface candidate is **W7 approval result backwrite**, but it
-must still start from a separate scope gate because it writes business data and
-changes record state. Do not jump straight to BPMN before the remaining graph
-prerequisites are named. BPMN gateway preview still needs branch/parallel
-semantics to map to.
+The next cross-surface candidate is **W7 approval result backwrite**. W7-0 now
+has a scope-gate document, but W7-1 runtime remains gated because it writes
+business data and changes record state. Do not jump straight to BPMN before the
+remaining graph prerequisites are named. W3-0 now scopes the `join_all` slice,
+but W3-1 runtime remains gated. BPMN gateway preview still needs
+branch/parallel semantics to map to.
 
 ## 5. Non-goals for v1
 
@@ -169,6 +172,10 @@ needed, one verification/runbook:
 - Cross-surface completion source: this document.
 - W6 `start_approval` bridge scope:
   `automation-start-approval-scope-gate-20260610.md`.
+- W7 approval result backwrite scope:
+  `automation-approval-result-backwrite-scope-gate-20260611.md`.
+- A6-3-4 / W3 parallel join-all scope:
+  `multitable-automation-a6-3-parallel-join-all-scope-gate-20260611.md`.
 
 If code lands but the tracker still says "not started", the tracker is wrong
 and should be corrected before starting a new rung.
