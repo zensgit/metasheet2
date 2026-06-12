@@ -66,7 +66,7 @@ but it is not yet the unified workflow automation authoring layer.
 | BPMN draft API | Existing draft save/load/update/deploy support. |
 | Designer hub/catalog | Existing list/template/team-view/hub improvements. |
 | Runtime positioning | Must stay modeling/preview first. v1 must not route production execution through a separate BPMN runtime. |
-| Still missing | Compile/preview adapter implementation into automation/approval definitions. A6-4/W8 scope is now locked in `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`: deterministic gap report, side-effect-free preview, no-live-runtime guard. |
+| Still missing | Compile/preview adapter implementation into automation/approval definitions. A6-4/W8 scope is now locked in `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`, and the first build slice is narrowed by `multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`: pure compiler module + unit tests first, route deferred, deterministic gap report, side-effect-free preview, no-live-runtime guard. |
 
 ## 2. Definition of Complete v1
 
@@ -143,13 +143,17 @@ Why:
    start an approval through `start_approval`, and W5-1 gives it a stable
    terminal completion signal.
 
-The next cross-surface candidate is **W7 approval result backwrite**. W7-0 now
-has a scope-gate document, but W7-1 runtime remains gated because it writes
-business data and changes record state. W3-1 has now landed the minimum
-parallel `join_all` semantics that BPMN parallel-gateway preview can map to.
-W8/A6-4 now has its own compile/preview scope gate, and remains non-runtime:
-implementation may only produce side-effect-free preview plus gap report unless
-separately unlocked.
+The next lowest-risk technical slice is **W8/A6-4a BPMN compile-preview pure
+compiler**: it advances the Workflow Designer layer without writing business
+data, adding a route, or starting a live BPMN runtime. It is still gated by the
+A6-4 re-entry phrase; when unlocked, the first PR should follow
+`multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`
+and add only `bpmnCompilePreview` + unit tests.
+
+**W7 approval result backwrite** remains the next cross-surface business-write
+candidate. W7-0 has a scope-gate document, but W7-1 runtime remains separately
+gated because it writes business data and changes record state. It should not
+preempt A6-4a unless the owner names a concrete result-backwrite use case.
 
 ## 5. Non-goals for v1
 
@@ -180,6 +184,8 @@ needed, one verification/runbook:
   `multitable-automation-a6-3-parallel-join-all-scope-gate-20260611.md`.
 - A6-4 / W8 BPMN compile-preview scope:
   `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`.
+- A6-4a / W8 pure compiler implementation plan:
+  `multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`.
 
 If code lands but the tracker still says "not started", the tracker is wrong
 and should be corrected before starting a new rung.
