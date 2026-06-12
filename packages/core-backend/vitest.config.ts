@@ -26,6 +26,7 @@ export default defineConfig({
       'tests/integration/attendance-notification-deliveries.test.ts',
       'tests/integration/attendance-outdoor-punch.test.ts',
       'tests/integration/attendance-plugin.test.ts',
+      'tests/integration/attendance-schedule-dispatch.test.ts',
       'tests/integration/attendance-shift-swap.test.ts',
       'tests/integration/attendance-unscheduled-reminder.test.ts',
       'tests/integration/comments.api.test.ts',

@@ -66,11 +66,14 @@
               v-for="step in detail.steps"
               :key="step.id"
               class="automation-runs__step"
-              :class="{ 'automation-runs__step--branch-child': branchChildStep(step.stepKey) }"
+              :class="{ 'automation-runs__step--branch-child': branchChildStep(step.stepKey) || parallelChildStep(step.stepKey) }"
             >
               <span class="automation-runs__step-key">{{ step.stepKey }}</span>
               <span v-if="branchChildStep(step.stepKey)" class="automation-runs__branch-child" data-field="branch-child">
                 ↳ {{ automationLabel('runs.branchStep', isZh) }} {{ branchChildStep(step.stepKey)?.branchKey }} · #{{ branchChildStep(step.stepKey)?.actionIndex }}
+              </span>
+              <span v-else-if="parallelChildStep(step.stepKey)" class="automation-runs__branch-child" data-field="parallel-child">
+                ↳ {{ automationLabel('runs.parallelBranchStep', isZh) }} {{ parallelChildStep(step.stepKey)?.branchKey }} · #{{ parallelChildStep(step.stepKey)?.actionIndex }}
               </span>
               <span class="automation-runs__badge automation-runs__badge--sm" :class="`automation-runs__badge--${step.status}`">
                 {{ automationStatusLabel(step.status, isZh) }}
@@ -91,7 +94,13 @@
                 <template v-if="conditionBranchSelection(step)?.key">{{ automationLabel('runs.selectedBranch', isZh) }} {{ conditionBranchSelection(step)?.label ? `${conditionBranchSelection(step)?.label} (${conditionBranchSelection(step)?.key})` : conditionBranchSelection(step)?.key }}</template>
                 <template v-else>{{ automationLabel('runs.branchNoMatch', isZh) }}</template>
               </div>
-              <div v-if="step.result !== undefined && step.result !== null && !conditionBranchSelection(step)" class="automation-runs__step-output" data-field="step-output">
+              <div v-if="parallelBranchSummary(step)" class="automation-runs__branch-selection" data-field="parallel-summary">
+                {{ automationLabel('runs.parallelJoinAll', isZh) }}
+                <span v-for="branch in parallelBranchSummary(step)?.branches" :key="branch.key" class="automation-runs__parallel-branch" data-field="parallel-branch-status">
+                  {{ branch.label ? `${branch.label} (${branch.key})` : branch.key }}: {{ automationStatusLabel(branch.status, isZh) }}
+                </span>
+              </div>
+              <div v-if="step.result !== undefined && step.result !== null && !conditionBranchSelection(step) && !parallelBranchSummary(step)" class="automation-runs__step-output" data-field="step-output">
                 {{ summarizeStepOutput(step.result) }}
               </div>
             </div>
@@ -142,9 +151,11 @@ const detailLoading = ref(false)
 const resuming = ref<string | null>(null)
 const resumeError = ref<string | null>(null)
 
-// A6-3-2b (read-only): surface condition_branch lineage from the persisted C1 jobs.
+// A6-3-2b/A6-3-4 (read-only): surface branch lineage from the persisted C1 jobs.
 // Parent step's result carries { selectedBranchKey, matched }; nested branch-action jobs use a
-// `${stepIndex}.branch.${key}.${i}` stepKey. Pure readers over the existing run-view shape.
+// `${stepIndex}.branch.${key}.${i}` stepKey. parallel_branch uses the same shape with
+// `${stepIndex}.parallel.${key}.${i}` and a parent result containing branchStatuses.
+// Pure readers over the existing run-view shape.
 function conditionBranchSelection(step: AutomationRunStepView): { key: string; label: string; matched: boolean } | null {
   const r = step.result
   if (r && typeof r === 'object' && !Array.isArray(r) && 'selectedBranchKey' in r) {
@@ -160,6 +171,26 @@ function conditionBranchSelection(step: AutomationRunStepView): { key: string; l
 function branchChildStep(stepKey: string): { branchKey: string; actionIndex: string } | null {
   const m = /\.branch\.([A-Za-z0-9_-]+)\.(\d+)$/.exec(stepKey)
   return m ? { branchKey: m[1], actionIndex: m[2] } : null
+}
+function parallelChildStep(stepKey: string): { branchKey: string; actionIndex: string } | null {
+  const m = /\.parallel\.([A-Za-z0-9_-]+)\.(\d+)$/.exec(stepKey)
+  return m ? { branchKey: m[1], actionIndex: m[2] } : null
+}
+function parallelBranchSummary(step: AutomationRunStepView): { branches: Array<{ key: string; label: string; status: WorkflowJobStatus }> } | null {
+  const r = step.result
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return null
+  const rec = r as Record<string, unknown>
+  if (rec.joinMode !== 'all' || !rec.branchStatuses || typeof rec.branchStatuses !== 'object' || Array.isArray(rec.branchStatuses)) return null
+  const labels = rec.branchLabels && typeof rec.branchLabels === 'object' && !Array.isArray(rec.branchLabels)
+    ? rec.branchLabels as Record<string, unknown>
+    : {}
+  const branches = Object.entries(rec.branchStatuses as Record<string, unknown>)
+    .map(([key, status]) => ({
+      key,
+      label: typeof labels[key] === 'string' ? labels[key] : '',
+      status: (typeof status === 'string' ? status : 'running') as WorkflowJobStatus,
+    }))
+  return { branches }
 }
 
 async function loadData() {
