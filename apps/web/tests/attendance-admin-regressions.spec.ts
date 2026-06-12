@@ -116,6 +116,7 @@ describe('Attendance admin regressions', () => {
   let attendanceSettingsSaveData: Record<string, unknown> | null = null
   let attendanceApprovalFlowsData: unknown[] | null = null
   let attendanceGroupsData: unknown[] | null = null
+  let scheduleGroupsData: unknown[] | null = null
   let autoShiftPreviewStatus = 200
   let autoShiftPreviewData: Record<string, unknown> | null = null
   let autoShiftApplyStatus = 200
@@ -130,6 +131,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsSaveData = null
     attendanceApprovalFlowsData = null
     attendanceGroupsData = null
+    scheduleGroupsData = null
     autoShiftPreviewStatus = 200
     autoShiftPreviewData = null
     autoShiftApplyStatus = 200
@@ -288,6 +290,17 @@ describe('Attendance admin regressions', () => {
               },
             ],
             total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/schedule-groups')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: scheduleGroupsData ?? [],
+            total: scheduleGroupsData?.length ?? 0,
+            page: 1,
+            pageSize: 200,
           },
         })
       }
@@ -4027,7 +4040,19 @@ describe('Attendance admin regressions', () => {
     expect(window.getComputedStyle(actionCell!).display).toBe('table-cell')
   })
 
-  it('renders the read-only advanced scheduling workbench without write controls', async () => {
+  it('renders the advanced scheduling snapshot with the small-organization cockpit', async () => {
+    scheduleGroupsData = [
+      {
+        id: 'sg-1',
+        name: 'Line A',
+        code: 'line-a',
+        parentId: null,
+        departmentRef: 'dept-line-a',
+        attendanceGroupId: 'group-a',
+        source: 'manual',
+        isActive: true,
+      },
+    ]
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
@@ -4047,11 +4072,398 @@ describe('Attendance admin regressions', () => {
     expect(section!.querySelector('[data-attendance-advanced-scheduling-metric="assignments"]')?.textContent).toContain('10')
     expect(section!.querySelector('[data-attendance-advanced-scheduling-diagnostic="assignment_without_schedule_group"]')?.textContent).toContain('1')
     expect(section!.querySelector('[data-attendance-advanced-scheduling-groups]')?.textContent).toContain('Line A')
+    expect(section!.querySelector('[data-attendance-small-org-cockpit]')?.textContent).toContain('Small scheduling organizations')
+    expect(section!.querySelector('[data-attendance-small-org-groups]')?.textContent).toContain('dept-line-a')
+    expect(section!.querySelector('[data-attendance-small-org-groups]')?.textContent).toContain('manual')
     const buttons = Array.from(section!.querySelectorAll<HTMLButtonElement>('button')).map(button => button.textContent || '')
     expect(buttons.join(' ')).toContain('Reload workbench')
-    expect(buttons.join(' ')).not.toContain('Create')
-    expect(buttons.join(' ')).not.toContain('Edit')
-    expect(buttons.join(' ')).not.toContain('Delete')
+    expect(buttons.join(' ')).toContain('Create schedule group')
+    expect(buttons.join(' ')).toContain('Edit')
+    expect(buttons.join(' ')).toContain('Deactivate')
+  })
+
+  it('saves and deactivates schedule groups with exact strict bodies and no silent caps', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const posts: Array<Record<string, unknown>> = []
+    const puts: Array<Record<string, unknown>> = []
+    const deletes: Array<{ url: string; body?: unknown }> = []
+    const groupGets: string[] = []
+    let groups = [
+      {
+        id: 'sg-root',
+        name: 'Line A Root',
+        code: 'line-a-root',
+        parentId: null,
+        attendanceGroupId: null,
+        departmentRef: 'dept-root',
+        description: null,
+        source: 'manual',
+        isActive: true,
+      },
+      {
+        id: 'sg-child',
+        name: 'Line A Child',
+        code: 'line-a-child',
+        parentId: 'sg-root',
+        attendanceGroupId: 'group-a',
+        departmentRef: 'dept-child',
+        description: 'Child team',
+        source: 'manual',
+        isActive: true,
+      },
+    ]
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/groups')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'group-a', name: 'Ops Team', code: 'ops-team', timezone: 'Asia/Shanghai', attendanceType: 'scheduled_shift', memberCount: 1 },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/advanced-scheduling/workbench')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            summary: {
+              scheduleGroups: groups.length,
+              scheduleGroupMembers: 2,
+              schedulerScopes: 0,
+              shifts: 0,
+              rotationRules: 0,
+              shiftAssignments: 1,
+              rotationAssignments: 1,
+              assignedUsers: 1,
+              diagnostics: 0,
+              groupsWithoutMembers: 0,
+              assignmentUsersWithoutScheduleGroup: 0,
+              usersWithMultipleScheduleGroups: 0,
+              usersWithBothAssignmentKinds: 0,
+            },
+            scheduleGroups: {
+              items: groups.map(group => ({
+                ...group,
+                memberCount: group.id === 'sg-child' ? 2 : 0,
+                assignedUserCount: group.id === 'sg-child' ? 1 : 0,
+                shiftAssignmentCount: group.id === 'sg-child' ? 1 : 0,
+                rotationAssignmentCount: group.id === 'sg-child' ? 1 : 0,
+              })),
+              total: groups.length,
+            },
+            diagnostics: [],
+            metadata: { readOnly: true },
+          },
+        })
+      }
+      if (url.includes('/api/attendance/schedule-groups/sg-child') && method === 'PUT') {
+        const body = JSON.parse(String((init as { body?: string } | undefined)?.body || '{}'))
+        puts.push(body)
+        groups = groups.map(group => group.id === 'sg-child' ? { ...group, ...body } : group)
+        return jsonResponse(200, { ok: true, data: groups.find(group => group.id === 'sg-child') })
+      }
+      if (url.includes('/api/attendance/schedule-groups/sg-child') && method === 'DELETE') {
+        deletes.push({ url, body: (init as { body?: unknown } | undefined)?.body })
+        groups = groups.map(group => group.id === 'sg-child' ? { ...group, isActive: false } : group)
+        return jsonResponse(200, { ok: true, data: groups.find(group => group.id === 'sg-child') })
+      }
+      if (url.includes('/api/attendance/schedule-groups') && method === 'POST') {
+        const body = JSON.parse(String((init as { body?: string } | undefined)?.body || '{}'))
+        posts.push(body)
+        const created = { id: 'sg-new', source: 'manual', ...body }
+        groups = [...groups, created]
+        return jsonResponse(200, { ok: true, data: created })
+      }
+      if (url.includes('/api/attendance/schedule-groups') && method === 'GET') {
+        groupGets.push(url)
+        return jsonResponse(200, { ok: true, data: { items: groups, total: 250, page: 1, pageSize: 200 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    try {
+      app = createApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(8)
+      container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')!.click()
+      await flushUi(4)
+
+      const section = container!.querySelector<HTMLElement>('[data-attendance-small-org-cockpit]')!
+      expect(section).toBeTruthy()
+      expect(groupGets.some(url => url.includes('pageSize=200') && url.includes('includeInactive=true'))).toBe(true)
+      expect(section.querySelector('[data-attendance-small-org-groups-cap]')?.textContent).toContain('Showing first 2 of 250')
+
+      const childRow = Array.from(section.querySelectorAll<HTMLElement>('[data-attendance-small-org-row]'))
+        .find(row => row.textContent?.includes('Line A Child'))
+      expect(childRow).toBeTruthy()
+      childRow!.querySelector<HTMLButtonElement>('[data-attendance-small-org-edit]')!.click()
+      await flushUi(2)
+      setInput(section, '#attendance-small-org-name', 'Line A Child Prime')
+      setInput(section, '#attendance-small-org-code', 'line-a-child-prime')
+      setInput(section, '#attendance-small-org-department', 'dept-child-prime')
+      setInput(section, '#attendance-small-org-description', 'Prime child team')
+      section.querySelector<HTMLButtonElement>('[data-attendance-small-org-save]')!.click()
+      await flushUi(12)
+
+      expect(puts).toHaveLength(1)
+      expect(puts[0]).toEqual({
+        name: 'Line A Child Prime',
+        code: 'line-a-child-prime',
+        description: 'Prime child team',
+        attendanceGroupId: 'group-a',
+        parentId: 'sg-root',
+        departmentRef: 'dept-child-prime',
+        isActive: true,
+      })
+
+      section.querySelector<HTMLButtonElement>('[data-attendance-small-org-new]')!.click()
+      await flushUi(2)
+      setInput(section, '#attendance-small-org-name', 'Line B')
+      setInput(section, '#attendance-small-org-code', 'line-b')
+      setInput(section, '#attendance-small-org-department', 'dept-line-b')
+      const parent = section.querySelector<HTMLSelectElement>('#attendance-small-org-parent')!
+      parent.value = 'sg-root'
+      parent.dispatchEvent(new Event('change', { bubbles: true }))
+      const attendanceGroup = section.querySelector<HTMLSelectElement>('#attendance-small-org-attendance-group')!
+      attendanceGroup.value = 'group-a'
+      attendanceGroup.dispatchEvent(new Event('change', { bubbles: true }))
+      section.querySelector<HTMLButtonElement>('[data-attendance-small-org-save]')!.click()
+      await flushUi(12)
+
+      expect(posts).toHaveLength(1)
+      expect(posts[0]).toEqual({
+        name: 'Line B',
+        code: 'line-b',
+        description: null,
+        attendanceGroupId: 'group-a',
+        parentId: 'sg-root',
+        departmentRef: 'dept-line-b',
+        isActive: true,
+      })
+
+      const updatedChildRow = Array.from(section.querySelectorAll<HTMLElement>('[data-attendance-small-org-row]'))
+        .find(row => row.textContent?.includes('Line A Child Prime'))
+      expect(updatedChildRow).toBeTruthy()
+      updatedChildRow!.querySelector<HTMLButtonElement>('[data-attendance-small-org-deactivate]')!.click()
+      await flushUi(12)
+
+      expect(confirmSpy).toHaveBeenCalled()
+      expect(deletes).toHaveLength(1)
+      expect(deletes[0].url).toContain('/api/attendance/schedule-groups/sg-child')
+      expect(deletes[0].body).toBeUndefined()
+    } finally {
+      confirmSpy.mockRestore()
+    }
+  })
+
+  it('manages date-aware schedule group members with exact POST and DELETE requests', async () => {
+    const memberGets: string[] = []
+    const posts: Array<Record<string, unknown>> = []
+    const deletes: Array<{ url: string; body?: unknown }> = []
+    let members = [
+      {
+        id: 'member-1',
+        scheduleGroupId: 'sg-child',
+        userId: 'user-1',
+        role: 'lead',
+        effectiveFrom: '2026-06-01',
+        effectiveTo: null,
+        source: 'manual',
+      },
+    ]
+    const groups = [
+      {
+        id: 'sg-child',
+        name: 'Line A Child',
+        code: 'line-a-child',
+        parentId: null,
+        attendanceGroupId: null,
+        departmentRef: 'dept-child',
+        source: 'manual',
+        isActive: true,
+      },
+    ]
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/advanced-scheduling/workbench')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            summary: {
+              scheduleGroups: 1,
+              scheduleGroupMembers: members.length,
+              schedulerScopes: 0,
+              shifts: 0,
+              rotationRules: 0,
+              shiftAssignments: 0,
+              rotationAssignments: 0,
+              assignedUsers: 0,
+              diagnostics: 0,
+              groupsWithoutMembers: 0,
+              assignmentUsersWithoutScheduleGroup: 0,
+              usersWithMultipleScheduleGroups: 0,
+              usersWithBothAssignmentKinds: 0,
+            },
+            scheduleGroups: {
+              items: groups.map(group => ({ ...group, memberCount: members.length, assignedUserCount: 0, shiftAssignmentCount: 0, rotationAssignmentCount: 0 })),
+              total: groups.length,
+            },
+            diagnostics: [],
+            metadata: { readOnly: true },
+          },
+        })
+      }
+      if (url.includes('/api/attendance/schedule-groups/sg-child/members/member-1') && method === 'DELETE') {
+        deletes.push({ url, body: (init as { body?: unknown } | undefined)?.body })
+        members = members.filter(member => member.id !== 'member-1')
+        return jsonResponse(200, { ok: true, data: { id: 'member-1' } })
+      }
+      if (url.includes('/api/attendance/schedule-groups/sg-child/members') && method === 'POST') {
+        const body = JSON.parse(String((init as { body?: string } | undefined)?.body || '{}'))
+        posts.push(body)
+        members = [
+          ...members,
+          ...((body.userIds as string[]) || []).map((userId, index) => ({
+            id: `created-${index}`,
+            scheduleGroupId: 'sg-child',
+            userId,
+            role: body.role,
+            effectiveFrom: body.effectiveFrom,
+            effectiveTo: body.effectiveTo,
+            source: 'manual',
+          })),
+        ]
+        return jsonResponse(200, { ok: true, data: { items: members.slice(1) } })
+      }
+      if (url.includes('/api/attendance/schedule-groups/sg-child/members') && method === 'GET') {
+        memberGets.push(url)
+        return jsonResponse(200, { ok: true, data: { items: members, total: 250, page: 1, pageSize: 200 } })
+      }
+      if (url.includes('/api/attendance/schedule-groups') && method === 'GET') {
+        return jsonResponse(200, { ok: true, data: { items: groups, total: groups.length, page: 1, pageSize: 200 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')!.click()
+    await flushUi(4)
+
+    const section = container!.querySelector<HTMLElement>('[data-attendance-small-org-cockpit]')!
+    const row = section.querySelector<HTMLElement>('[data-attendance-small-org-row]')!
+    row.querySelector<HTMLButtonElement>('[data-attendance-small-org-members]')!.click()
+    await flushUi(4)
+    const panel = section.querySelector<HTMLElement>('[data-attendance-small-org-members-panel]')!
+    expect(panel).toBeTruthy()
+    expect(memberGets.some(url => url.includes('pageSize=200'))).toBe(true)
+    expect(panel.querySelector('[data-attendance-small-org-members-cap]')?.textContent).toContain('Showing first 1 of 250')
+
+    setInput(panel, '#attendance-small-org-member-user-ids', 'user-2\nuser-3')
+    const role = panel.querySelector<HTMLSelectElement>('#attendance-small-org-member-role')!
+    role.value = 'backup'
+    role.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(panel, '#attendance-small-org-member-from', '2026-06-10')
+    setInput(panel, '#attendance-small-org-member-to', '2026-06-30')
+    panel.querySelector<HTMLButtonElement>('[data-attendance-small-org-member-add]')!.click()
+    await flushUi(6)
+
+    expect(posts).toHaveLength(1)
+    expect(posts[0]).toEqual({
+      userIds: ['user-2', 'user-3'],
+      role: 'backup',
+      effectiveFrom: '2026-06-10',
+      effectiveTo: '2026-06-30',
+      source: 'manual',
+    })
+
+    panel.querySelector<HTMLButtonElement>('[data-attendance-small-org-member-remove]')!.click()
+    await flushUi(6)
+
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0].url).toContain('/api/attendance/schedule-groups/sg-child/members/member-1')
+    expect(deletes[0].body).toBeUndefined()
+  })
+
+  it('does not deactivate a schedule group when confirmation is dismissed', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const deletes: string[] = []
+    const groups = [
+      {
+        id: 'sg-child',
+        name: 'Line A Child',
+        code: 'line-a-child',
+        parentId: null,
+        departmentRef: 'dept-child',
+        source: 'manual',
+        isActive: true,
+      },
+    ]
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/advanced-scheduling/workbench')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            summary: {
+              scheduleGroups: 1,
+              scheduleGroupMembers: 0,
+              schedulerScopes: 0,
+              shifts: 0,
+              rotationRules: 0,
+              shiftAssignments: 0,
+              rotationAssignments: 0,
+              assignedUsers: 0,
+              diagnostics: 0,
+              groupsWithoutMembers: 0,
+              assignmentUsersWithoutScheduleGroup: 0,
+              usersWithMultipleScheduleGroups: 0,
+              usersWithBothAssignmentKinds: 0,
+            },
+            scheduleGroups: {
+              items: groups.map(group => ({ ...group, memberCount: 0, assignedUserCount: 0, shiftAssignmentCount: 0, rotationAssignmentCount: 0 })),
+              total: groups.length,
+            },
+            diagnostics: [],
+            metadata: { readOnly: true },
+          },
+        })
+      }
+      if (url.includes('/api/attendance/schedule-groups/sg-child') && method === 'DELETE') {
+        deletes.push(url)
+        return jsonResponse(200, { ok: true, data: { ...groups[0], isActive: false } })
+      }
+      if (url.includes('/api/attendance/schedule-groups') && method === 'GET') {
+        return jsonResponse(200, { ok: true, data: { items: groups, total: groups.length, page: 1, pageSize: 200 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    try {
+      app = createApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(8)
+      container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')!.click()
+      await flushUi(4)
+
+      const section = container!.querySelector<HTMLElement>('[data-attendance-small-org-cockpit]')!
+      const row = section.querySelector<HTMLElement>('[data-attendance-small-org-row]')!
+      row.querySelector<HTMLButtonElement>('[data-attendance-small-org-deactivate]')!.click()
+      await flushUi(4)
+
+      expect(confirmSpy).toHaveBeenCalled()
+      expect(deletes).toEqual([])
+      expect(row.textContent).toContain('Active')
+    } finally {
+      confirmSpy.mockRestore()
+    }
   })
 
   it('runs the read-only comprehensive hours preview without write controls', async () => {
