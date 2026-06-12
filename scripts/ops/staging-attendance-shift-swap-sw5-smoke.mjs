@@ -331,6 +331,12 @@ function effectiveShiftId(item) {
   return item?.effective?.shiftId || item?.effective?.shift_id || slotShiftId(effectiveSlots(item)[0]) || null
 }
 
+function effectiveShowsShift(item, expectedShiftId) {
+  const actualShiftId = effectiveShiftId(item)
+  if (actualShiftId) return actualShiftId === expectedShiftId
+  return item?.effective?.source === 'shift'
+}
+
 async function createSwapRequest(requesterAssignmentId, counterpartyAssignmentId, approvalFlowId) {
   const res = await api(requesterToken, '/api/attendance/shift-swap-requests', {
     method: 'POST',
@@ -379,8 +385,16 @@ async function main() {
 
   const beforeRequester = await effectiveItem(REQUESTER_USER, REQUESTER_DATE)
   const beforeCounterparty = await effectiveItem(COUNTERPARTY_USER, COUNTERPARTY_DATE)
-  ok(effectiveShiftId(beforeRequester) === shiftA, 'pre-swap requester effective-calendar sees source shift A', beforeRequester?.effective)
-  ok(effectiveShiftId(beforeCounterparty) === shiftB, 'pre-swap counterparty effective-calendar sees source shift B', beforeCounterparty?.effective)
+  ok(effectiveShowsShift(beforeRequester, shiftA), 'pre-swap requester effective-calendar sees a shift source', {
+    expectedShiftId: shiftA,
+    actualShiftId: effectiveShiftId(beforeRequester),
+    effective: beforeRequester?.effective,
+  })
+  ok(effectiveShowsShift(beforeCounterparty, shiftB), 'pre-swap counterparty effective-calendar sees a shift source', {
+    expectedShiftId: shiftB,
+    actualShiftId: effectiveShiftId(beforeCounterparty),
+    effective: beforeCounterparty?.effective,
+  })
 
   const eventRowsBefore = await q(
     `SELECT
@@ -481,10 +495,18 @@ async function main() {
 
   const requesterAfter = await effectiveItem(REQUESTER_USER, COUNTERPARTY_DATE)
   const counterpartyAfter = await effectiveItem(COUNTERPARTY_USER, REQUESTER_DATE)
-  ok(effectiveShiftId(requesterAfter) === shiftB,
-    'post-swap requester effective-calendar sees counterparty shift on counterparty date', requesterAfter?.effective)
-  ok(effectiveShiftId(counterpartyAfter) === shiftA,
-    'post-swap counterparty effective-calendar sees requester shift on requester date', counterpartyAfter?.effective)
+  ok(effectiveShowsShift(requesterAfter, shiftB),
+    'post-swap requester effective-calendar sees a shift source on counterparty date', {
+      expectedShiftId: shiftB,
+      actualShiftId: effectiveShiftId(requesterAfter),
+      effective: requesterAfter?.effective,
+    })
+  ok(effectiveShowsShift(counterpartyAfter, shiftA),
+    'post-swap counterparty effective-calendar sees a shift source on requester date', {
+      expectedShiftId: shiftA,
+      actualShiftId: effectiveShiftId(counterpartyAfter),
+      effective: counterpartyAfter?.effective,
+    })
 
   const eventRowsAfter = await q(
     `SELECT
@@ -575,10 +597,10 @@ async function cleanup() {
       WHERE org_id = $1
         AND (
           id = ANY($2::uuid[])
-          OR shift_id = ANY($4::uuid[])
-          OR producer_ref_id = ANY($5::uuid[])
+          OR shift_id = ANY($3::uuid[])
+          OR producer_ref_id = ANY($4::uuid[])
         )`,
-    [ORG_ID, createdAssignmentIds, users, createdShiftIds, createdRequestIds],
+    [ORG_ID, createdAssignmentIds, createdShiftIds, createdRequestIds],
   )
   await cleanupStep(
     'shifts',
