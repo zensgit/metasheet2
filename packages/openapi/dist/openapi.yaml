@@ -504,6 +504,8 @@ components:
             - time_correction
             - leave
             - overtime
+            - outdoor_punch
+            - shift_swap
         requested_in_at:
           type: string
           format: date-time

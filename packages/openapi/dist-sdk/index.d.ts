@@ -13318,7 +13318,7 @@ export interface components {
             /** Format: date */
             work_date?: string;
             /** @enum {string} */
-            request_type?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime";
+            request_type?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime" | "outdoor_punch" | "shift_swap";
             /** Format: date-time */
             requested_in_at?: string | null;
             /** Format: date-time */

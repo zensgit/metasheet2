@@ -44,6 +44,9 @@ const REQUEST_TYPES = [
   'overtime',
   // ② S3 外勤审批 (#2304): outdoor field-work punch that needs approval before it counts.
   'outdoor_punch',
+  // OPTIONAL shift-swap SW1 (#2538 design-lock): approval envelope type only; generic /requests
+  // must not create it because swap needs structured assignment snapshots + counterparty consent.
+  'shift_swap',
 ]
 const OUTDOOR_APPROVAL_EVENT_SOURCE = 'outdoor_approval'
 // ② S2-0 (#2325 design-lock): event sources that ONLY a trusted internal writer may set — never accepted
@@ -22049,6 +22052,14 @@ module.exports = {
           'OUTDOOR_PUNCH_VIA_PUNCH_ONLY',
           'outdoor_punch requests are created by the attendance punch route, not the requests API',
           singleValidationDetail('requestType', 'outdoor_punch is not creatable via the requests API')
+        )
+      }
+      if (requestType === 'shift_swap') {
+        throw new HttpError(
+          422,
+          'SHIFT_SWAP_DEDICATED_ROUTE_ONLY',
+          'shift_swap requests are created by the attendance shift-swap route, not the requests API',
+          singleValidationDetail('requestType', 'shift_swap is not creatable via the requests API')
         )
       }
 
