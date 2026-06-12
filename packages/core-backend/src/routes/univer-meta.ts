@@ -866,6 +866,9 @@ type LookupFieldConfig = {
   linkFieldId: string
   targetFieldId: string
   foreignSheetId?: string
+  // §2a.3: deliberate same-base projection opt-out. Honored ONLY for same-base lookups; a
+  // cross-base lookup of an unreadable foreign field is ALWAYS masked (flag ignored).
+  skipForeignFieldMasking?: boolean
 }
 
 type RollupAggregation = 'count' | 'sum' | 'avg' | 'min' | 'max'
@@ -875,6 +878,8 @@ type RollupFieldConfig = {
   targetFieldId: string
   aggregation: RollupAggregation
   foreignSheetId?: string
+  // §2a.3: see LookupFieldConfig.skipForeignFieldMasking — same semantics for rollup configs.
+  skipForeignFieldMasking?: boolean
 }
 
 function parseLinkFieldConfig(property: unknown): LinkFieldConfig | null {
@@ -902,6 +907,7 @@ function parseLookupFieldConfig(property: unknown): LookupFieldConfig | null {
     linkFieldId: linkFieldId.trim(),
     targetFieldId: targetFieldId.trim(),
     ...(foreignSheetId ? { foreignSheetId } : {}),
+    ...(obj.skipForeignFieldMasking === true ? { skipForeignFieldMasking: true } : {}),
   }
 }
 
@@ -933,6 +939,7 @@ function parseRollupFieldConfig(property: unknown): RollupFieldConfig | null {
     targetFieldId: targetFieldId.trim(),
     aggregation,
     ...(foreignSheetId ? { foreignSheetId } : {}),
+    ...(obj.skipForeignFieldMasking === true ? { skipForeignFieldMasking: true } : {}),
   }
 }
 
@@ -1639,6 +1646,10 @@ async function loadLinkValuesByRecord(
  * Intra-sheet / intra-record only — no cross-sheet read, no perm gate.
  */
 async function recalculateFormulaFields(
+  // §2a.3 B1: `req` is the WRITING actor — needed to resolve write-side formula taint so a
+  // foreign-field-denied writer never recomputes (and persists) a permission-degraded formula
+  // value into shared meta_records.data. See the taint skip below.
+  req: Request,
   query: QueryFn,
   sheetId: string,
   fields: UniverMetaField[],
@@ -1686,6 +1697,17 @@ async function recalculateFormulaFields(
   const dependentFormulaFieldIds = new Set(
     (depRes.rows as any[]).map((row) => String(row.field_id)).filter((id) => formulaFieldIdSet.has(id)),
   )
+  if (dependentFormulaFieldIds.size === 0) return []
+
+  // §2a.3 B1 (write-side taint skip-recompute): the write path hydrates rows via applyLookupRollup,
+  // which MASKS a lookup/rollup over a foreign field this actor cannot read (→ []). Recomputing a
+  // formula against that masked input would PERSIST a permission-degraded value into shared
+  // meta_records.data (recalculateRecordFromData unconditionally writes back). Drop any formula
+  // whose deps (transitively) reach a lookup/rollup masked for THIS writer, leaving the previously
+  // stored AUTHORIZED value untouched — symmetric to the export/aggregate/read taint sinks. An
+  // authorized writer (nothing masked) gets an empty tainted set → recompute is unchanged.
+  const taintedForWriter = await resolveTaintedFormulaFieldIds(req, query, sheetId, dependentFormulaFieldIds)
+  for (const id of taintedForWriter) dependentFormulaFieldIds.delete(id)
   if (dependentFormulaFieldIds.size === 0) return []
 
   const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
@@ -1743,14 +1765,27 @@ async function recalcNewRecordFormulas(
     .filter((v): v is RelationalLinkField => !!v && !!v.cfg)
   const linkValuesByRecord = await loadLinkValuesByRecord(query, recordIds, relationalLinkFields)
   // Hydrate same-record lookup/rollup into row.data (perm-scoped foreign read inside).
-  await applyLookupRollup(req, query, fields, rows, relationalLinkFields, linkValuesByRecord)
+  await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
+
+  // §2a.3 B1-CREATE (write-side taint skip-recompute on the CREATE/import/form-submit path): the
+  // hydration above MASKS a lookup/rollup over a foreign field this actor (the creator / form
+  // submitter — possibly anonymous on the public form) cannot read (→ []). Recomputing a formula
+  // against that masked input would PERSIST a permission-degraded value into shared
+  // meta_records.data (recalculateRecordFromData unconditionally writes back). Restrict the
+  // recompute to formula fields whose deps do NOT (transitively) reach a lookup/rollup masked for
+  // THIS actor, leaving any tainted formula absent rather than degraded — symmetric to the PATCH
+  // recompute skip and the export/aggregate/read taint sinks. An authorized creator (nothing
+  // masked) gets an empty tainted set → recompute is unchanged.
+  const taintedForCreator = await resolveTaintedFormulaFieldIds(req, query, sheetId, new Set(formulaFieldIds))
+  const recomputeFormulaFieldIds = new Set(formulaFieldIds.filter((id) => !taintedForCreator.has(id)))
+  if (recomputeFormulaFieldIds.size === 0) return []
 
   const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
   for (const row of rows) {
-    const nextData = await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, row.id, row.data, fields)
+    const nextData = await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, row.id, row.data, fields, recomputeFormulaFieldIds)
     if (!nextData) continue
     const formulaData: Record<string, unknown> = {}
-    for (const fieldId of formulaFieldIds) {
+    for (const fieldId of recomputeFormulaFieldIds) {
       if (fieldId in nextData) formulaData[fieldId] = nextData[fieldId]
     }
     results.push({ recordId: row.id, data: formulaData })
@@ -1758,9 +1793,257 @@ async function recalcNewRecordFormulas(
   return results
 }
 
+/**
+ * §2a.3 — per (foreignSheetId) actor-scoped foreign-field readability + cross-base flag.
+ * `readableFieldIds` = the foreign fields the actor may read (visible !== false under the
+ * foreign sheet's subject-scoped field_permissions), mirroring the export/view derivation.
+ * `crossBase` = foreign base_id ≠ source base_id (null vs non-null counts as cross-base;
+ * both null / equal counts as same-base). Decided ONCE per foreign sheet, never per record.
+ */
+type ForeignFieldReadability = { readableFieldIds: Set<string>; crossBase: boolean }
+
+async function resolveForeignFieldReadability(
+  req: Request,
+  query: QueryFn,
+  sourceBaseId: string | null,
+  foreignSheetIds: Iterable<string>,
+): Promise<Map<string, ForeignFieldReadability>> {
+  const out = new Map<string, ForeignFieldReadability>()
+  const unique = Array.from(new Set(Array.from(foreignSheetIds).filter(Boolean)))
+  if (unique.length === 0) return out
+  const access = await resolveRequestAccess(req)
+  for (const foreignSheetId of unique) {
+    const [foreignSheet, foreignFields, capabilities, fieldScopeMap] = await Promise.all([
+      loadSheetRowShared(query, foreignSheetId),
+      loadFieldsForSheetShared(query, foreignSheetId),
+      // Capabilities don't affect field VISIBILITY (only readOnly), but resolve them so the
+      // foreign-sheet derivation matches the export/view path exactly.
+      resolveSheetReadableCapabilities(req, query, foreignSheetId).then((r) => r.capabilities),
+      access.userId ? loadFieldPermissionScopeMap(query, foreignSheetId, access.userId) : Promise.resolve(new Map<string, FieldPermissionScope>()),
+    ])
+    const readableFieldIds = computeAllowedFieldIds(foreignFields as UniverMetaField[], capabilities, fieldScopeMap)
+    // null vs non-null ⇒ cross-base (mask); equal (incl. both null) ⇒ same-base.
+    const foreignBaseId = foreignSheet?.baseId ?? null
+    const crossBase = foreignBaseId !== sourceBaseId
+    out.set(foreignSheetId, { readableFieldIds, crossBase })
+  }
+  return out
+}
+
+/**
+ * §2a.3 — given the per-foreign-sheet readability map + a lookup/rollup config, decide whether
+ * the config's foreign target field must be MASKED for the actor. A field is masked when the
+ * actor cannot read it AND (cross-base OR (same-base AND no opt-out)). Returns false when the
+ * foreign field is readable, when the foreign sheet is unknown, or when same-base opt-out is set.
+ */
+function shouldMaskForeignField(
+  readability: Map<string, ForeignFieldReadability>,
+  foreignSheetId: string | undefined,
+  targetFieldId: string,
+  skipForeignFieldMasking: boolean | undefined,
+): boolean {
+  if (!foreignSheetId) return false
+  const entry = readability.get(foreignSheetId)
+  if (!entry) return false
+  if (entry.readableFieldIds.has(targetFieldId)) return false // actor can read it → flows normally
+  // Unreadable foreign field: cross-base masks unconditionally; same-base masks unless opted out.
+  if (entry.crossBase) return true
+  return skipForeignFieldMasking !== true
+}
+
+/**
+ * §2a.3 formula taint-check (surface-neutral) — returns the subset of `candidateFormulaFieldIds`
+ * whose MATERIALIZED value must be DROPPED because the formula (directly OR transitively via
+ * formula→formula dependency edges within this sheet) reads a lookup/rollup field whose foreign
+ * target field is masked for `req`'s actor (cross-base unconditional / same-base default unless
+ * opt-out). Transitive closure is bounded to same-sheet formula→formula edges, which is the
+ * model `formula_dependencies` records; cross-sheet formula chaining is not part of the model.
+ *
+ * Applied UNIFORMLY across EVERY sink that reads or persists materialized formula values RAW
+ * (without applyLookupRollup re-masking them):
+ *   READ/EMIT sinks (drop tainted ids from the actor's allowed/visible set before emitting data):
+ *     - GET /view, single-record GET /records/:id, cursor GET /records,
+ *     - PATCH /records/:id echo, GET /form-context edit-mode echo,
+ *     - export-xlsx, view-aggregate, dashboard group-by/aggregate, record-history.
+ *   WRITE/RECOMPUTE sinks (drop tainted ids from the recompute set so a denied write never
+ *   materializes a degraded value into shared state):
+ *     - PATCH recompute (recalculateFormulaFields),
+ *     - CREATE / import / public form-submit recompute (recalcNewRecordFormulas).
+ * The POST /records create echo carries only the recompute output, so it inherits the create
+ * recompute skip automatically; the bulk-PATCH related-record echo carries only the (already
+ * taint-skipped) recompute output and never raw stored formula values.
+ */
+async function resolveTaintedFormulaFieldIds(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+  candidateFormulaFieldIds: Set<string>,
+): Promise<Set<string>> {
+  if (candidateFormulaFieldIds.size === 0) return new Set()
+
+  const fields = (await loadFieldsForSheetShared(query, sheetId)) as UniverMetaField[]
+  // Map each lookup/rollup field id → its parsed config (the foreign target it reads).
+  const computedConfigById = new Map<string, LookupFieldConfig | RollupFieldConfig>()
+  const linkConfigById = new Map<string, LinkFieldConfig>()
+  for (const f of fields) {
+    if (f.type === 'link') {
+      const cfg = parseLinkFieldConfig(f.property)
+      if (cfg) linkConfigById.set(f.id, cfg)
+    } else if (f.type === 'lookup') {
+      const cfg = parseLookupFieldConfig(f.property)
+      if (cfg) computedConfigById.set(f.id, cfg)
+    } else if (f.type === 'rollup') {
+      const cfg = parseRollupFieldConfig(f.property)
+      if (cfg) computedConfigById.set(f.id, cfg)
+    }
+  }
+  const formulaFieldIds = new Set(fields.filter((f) => f.type === 'formula').map((f) => f.id))
+  // No computed fields on this sheet → nothing a formula could taint-leak.
+  if (computedConfigById.size === 0) return new Set()
+
+  // All in-sheet dependency edges (field_id depends_on depends_on_field_id, same sheet).
+  const depRes = await query(
+    `SELECT field_id, depends_on_field_id FROM formula_dependencies
+     WHERE sheet_id = $1 AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $1)`,
+    [sheetId],
+  )
+  const dependsOnByField = new Map<string, Set<string>>()
+  for (const raw of depRes.rows as Array<{ field_id?: unknown; depends_on_field_id?: unknown }>) {
+    const fieldId = typeof raw.field_id === 'string' ? raw.field_id : ''
+    const dep = typeof raw.depends_on_field_id === 'string' ? raw.depends_on_field_id : ''
+    if (!fieldId || !dep) continue
+    const set = dependsOnByField.get(fieldId) ?? new Set<string>()
+    set.add(dep)
+    dependsOnByField.set(fieldId, set)
+  }
+
+  // Resolve foreign-field readability ONCE for every foreign sheet any computed field references.
+  const sourceSheet = await loadSheetRowShared(query, sheetId)
+  const sourceBaseId = sourceSheet?.baseId ?? null
+  const foreignSheetIds = new Set<string>()
+  for (const cfg of computedConfigById.values()) {
+    const fs = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
+    if (fs) foreignSheetIds.add(fs)
+  }
+  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, foreignSheetIds)
+
+  // A computed (lookup/rollup) field is "masked" iff its foreign target field is masked.
+  const maskedComputedFieldIds = new Set<string>()
+  for (const [fieldId, cfg] of computedConfigById.entries()) {
+    const fs = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
+    if (shouldMaskForeignField(readability, fs, cfg.targetFieldId, cfg.skipForeignFieldMasking)) {
+      maskedComputedFieldIds.add(fieldId)
+    }
+  }
+  if (maskedComputedFieldIds.size === 0) return new Set()
+
+  // For each candidate FORMULA field, transitively resolve whether it reaches a masked computed
+  // field via same-sheet formula→formula edges (bounded — visited-guarded, no cycles). Non-formula
+  // candidate ids are ignored defensively so a caller may pass a broad allow-set (e.g. history)
+  // without ever dropping a non-formula field.
+  const tainted = new Set<string>()
+  for (const formulaFieldId of candidateFormulaFieldIds) {
+    if (!formulaFieldIds.has(formulaFieldId)) continue
+    const stack = [formulaFieldId]
+    const visited = new Set<string>()
+    let leaks = false
+    while (stack.length > 0) {
+      const current = stack.pop() as string
+      if (visited.has(current)) continue
+      visited.add(current)
+      for (const dep of dependsOnByField.get(current) ?? []) {
+        if (maskedComputedFieldIds.has(dep)) { leaks = true; break }
+        // Only chase further through formula→formula edges (a formula's deps that are themselves
+        // formulas); a dep on a non-formula, non-masked-computed field is a leaf.
+        if (formulaFieldIds.has(dep)) stack.push(dep)
+      }
+      if (leaks) break
+    }
+    if (leaks) tainted.add(formulaFieldId)
+  }
+  return tainted
+}
+
+/**
+ * §2a.3 CHOKEPOINT — the single place that knows the "stored-data read sink" masking rule.
+ *
+ * Every surface that re-reads stored `meta_records.data` and then masks it with a SOURCE-SHEET-ONLY
+ * field set (`filterRecordDataByFieldIds(storedData, allowedFieldIds)`) MUST derive that allowed set
+ * through this helper. A formula field whose value was materialized from a lookup/rollup over a
+ * foreign field that is DENIED to the requesting actor is itself source-visible, so it survives the
+ * layer-2 ∧ layer-3 field mask — but its persisted value still encodes the denied foreign data. This
+ * helper drops those tainted formula ids from the base allowed set so the materialized value can
+ * never reach a non-authorized actor.
+ *
+ * Returns a NEW set (does not mutate `baseAllowedFieldIds`): `baseAllowedFieldIds` MINUS the formula
+ * field ids tainted for this actor. The taint is per-(sheet, actor) — computed once per request, the
+ * same granularity as the existing allowed set — NOT per-record.
+ *
+ * `fields` is optional: when supplied, only formula fields present in both `fields` and
+ * `baseAllowedFieldIds` are offered to the resolver (a clarity/perf narrowing). When omitted, the
+ * full `baseAllowedFieldIds` is passed to the resolver, which defensively ignores non-formula ids
+ * (used by the record-history redaction, whose allow-set is built without a typed field list).
+ *
+ * Adding a NEW stored-data read sink? Route its allowed set through THIS helper. The durable guard
+ * test `multitable-stored-data-taint-chokepoint.guard.test.ts` will FAIL if a
+ * `filterRecordDataByFieldIds` call over stored record data is reachable without it.
+ */
+async function maskStoredRecordFieldIds(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+  fields: Array<{ id: string; type: string }> | undefined,
+  baseAllowedFieldIds: Set<string>,
+): Promise<Set<string>> {
+  const candidateFormulaIds = fields
+    ? new Set(
+        fields
+          .filter((field) => field.type === 'formula' && baseAllowedFieldIds.has(field.id))
+          .map((field) => field.id),
+      )
+    : new Set(baseAllowedFieldIds)
+  const tainted = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateFormulaIds)
+  if (tainted.size === 0) return new Set(baseAllowedFieldIds)
+  const masked = new Set(baseAllowedFieldIds)
+  for (const id of tainted) masked.delete(id)
+  return masked
+}
+
+/**
+ * §2a.3 DISPLAY-PROJECTION chokepoint — the symmetric guard for single-field display projections over
+ * stored data (e.g. `loadRecordSummaries` choosing one `displayFieldId` to string-coerce). A tainted
+ * formula field passed as the display field would leak its materialized foreign-derived value as the
+ * summary string. Resolves whether `displayFieldId` is tainted for the actor, and returns the set of
+ * candidate display field ids with tainted formula fields removed (for auto-pick). Callers that accept
+ * an explicit attacker-controlled `displayFieldId` must reject it when `taintedDisplay` is true (same
+ * 400 posture as the existing `allowedFieldIds.has(...)` validation).
+ */
+async function resolveDisplayFieldTaint(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+  fields: Array<{ id: string; type: string }>,
+  candidateDisplayFieldIds: Set<string>,
+  explicitDisplayFieldId: string | null,
+): Promise<{ taintedExplicit: boolean; allowedDisplayFieldIds: Set<string> }> {
+  const candidateFormulaIds = new Set(
+    fields
+      .filter((field) => field.type === 'formula' && candidateDisplayFieldIds.has(field.id))
+      .map((field) => field.id),
+  )
+  const tainted = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateFormulaIds)
+  const allowedDisplayFieldIds = new Set(candidateDisplayFieldIds)
+  for (const id of tainted) allowedDisplayFieldIds.delete(id)
+  return {
+    taintedExplicit: explicitDisplayFieldId !== null && tainted.has(explicitDisplayFieldId),
+    allowedDisplayFieldIds,
+  }
+}
+
 async function applyLookupRollup(
   req: Request,
   query: QueryFn,
+  sourceSheetId: string,
   fields: UniverMetaField[],
   rows: UniverMetaRecord[],
   relationalLinkFields: RelationalLinkField[],
@@ -1824,6 +2107,18 @@ async function applyLookupRollup(
 
   const readableForeignSheetIds = await resolveReadableSheetIds(req, query, foreignIdsBySheet.keys())
 
+  // §2a.3 — resolve foreign-FIELD-level readability + cross-base for every readable foreign sheet
+  // (one scope-map load per foreign sheet, batched — never per record). Source base_id is needed
+  // for the cross-base decision; load it once.
+  const sourceSheet = await loadSheetRowShared(query, sourceSheetId)
+  const sourceBaseId = sourceSheet?.baseId ?? null
+  const foreignFieldReadability = await resolveForeignFieldReadability(
+    req,
+    query,
+    sourceBaseId,
+    Array.from(foreignIdsBySheet.keys()).filter((id) => readableForeignSheetIds.has(id)),
+  )
+
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [foreignSheetId, ids] of foreignIdsBySheet.entries()) {
     if (!readableForeignSheetIds.has(foreignSheetId)) continue
@@ -1840,10 +2135,16 @@ async function applyLookupRollup(
     foreignRecordsBySheet.set(foreignSheetId, recordMap)
   }
 
-  const resolveLookupValues = (record: UniverMetaRecord, cfg: LookupFieldConfig): unknown[] => {
+  const resolveLookupValues = (record: UniverMetaRecord, cfg: LookupFieldConfig | RollupFieldConfig): unknown[] => {
     const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
     if (!foreignSheetId) return []
     if (!readableForeignSheetIds.has(foreignSheetId)) return []
+    // §2a.3: fail-closed foreign-FIELD mask — if the actor can't read the foreign target field,
+    // mask it (cross-base unconditional / same-base default unless opt-out). Same gate for
+    // lookup AND rollup (both read data[targetFieldId]).
+    if (shouldMaskForeignField(foreignFieldReadability, foreignSheetId, cfg.targetFieldId, cfg.skipForeignFieldMasking)) {
+      return []
+    }
     const linkIds = getLinkIds(record, cfg.linkFieldId)
     if (linkIds.length === 0) return []
     const foreignMap = foreignRecordsBySheet.get(foreignSheetId)
@@ -2027,7 +2328,7 @@ async function computeDependentLookupRollupRecords(
       relationalLinkFields,
     )
 
-    await applyLookupRollup(req, query, fields, rows, relationalLinkFields, linkValuesByRecord)
+    await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
 
     // A-full (design #2410): one-hop formula recompute on the related records. A related
     // lookup/rollup is "affected" only when it resolves to the edited source sheet, its
@@ -2067,6 +2368,7 @@ async function computeDependentLookupRollupRecords(
       // computed-on-read. One hop only: results never re-enter this propagation.
       const hydratedDataByRecord = new Map(rows.map((row) => [row.id, row.data]))
       const formulaRecords = await recalculateFormulaFields(
+        req,
         query,
         sheetId,
         fields,
@@ -2474,10 +2776,11 @@ export function createRecordWriteHelpers(req: Request, _pool?: { query: QueryFn 
     filterRecordFieldSummaryMap,
     serializeLinkSummaryMap,
     serializeAttachmentSummaryMap,
-    applyLookupRollup: (q, f, rows, rl, lv) => applyLookupRollup(req, q, f, rows, rl, lv),
+    applyLookupRollup: (q, sid, f, rows, rl, lv) => applyLookupRollup(req, q, sid, f, rows, rl, lv),
     computeDependentLookupRollupRecords: (q, sourceSheetId, ids, changed) =>
       computeDependentLookupRollupRecords(req, q, sourceSheetId, ids, changed),
-    recalculateFormulaFields,
+    recalculateFormulaFields: (q, sid, f, ids, changed, hydrated) =>
+      recalculateFormulaFields(req, q, sid, f, ids, changed, hydrated),
     loadLinkValuesByRecord,
     buildLinkSummaries: (q, rows, rl, lv) => buildLinkSummaries(req, q, rows, rl, lv),
     buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),
@@ -2510,6 +2813,7 @@ export interface RecordPatchRouteContext {
 }
 
 export async function buildRecordPatchContext(
+  req: Request,
   query: QueryFn,
   sheetId: string,
   access: ResolvedRequestAccess,
@@ -2530,8 +2834,20 @@ export async function buildRecordPatchContext(
     hiddenFieldIds: [],
     fieldScopeMap: echoFieldScopeMap,
   })
-  const readableEchoFields = visiblePropertyFields.filter((field) => fieldPermissions[field.id]?.visible !== false)
-  const readableEchoFieldIds = new Set(readableEchoFields.map((field) => field.id))
+  const echoVisibleFields = visiblePropertyFields.filter((field) => fieldPermissions[field.id]?.visible !== false)
+  // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds): the
+  // RecordWriteService masks the bulk-PATCH echo (record / related / formula data) with this set over
+  // re-read stored meta_records.data, so a formula over a denied foreign lookup must be dropped here so
+  // its materialized value cannot be echoed back to a foreign-field-denied actor. Shared with the AI
+  // shortcut run route, so BOTH echo consumers inherit the taint drop from this single source.
+  const readableEchoFieldIds = await maskStoredRecordFieldIds(
+    req,
+    query,
+    sheetId,
+    echoVisibleFields,
+    new Set(echoVisibleFields.map((field) => field.id)),
+  )
+  const readableEchoFields = echoVisibleFields.filter((field) => readableEchoFieldIds.has(field.id))
   const attachmentFields = readableEchoFields.filter((field) => field.type === 'attachment')
   const fieldById = buildFieldMutationGuardMap(fields)
 
@@ -2663,7 +2979,18 @@ async function loadDashboardSourceRows(args: {
     createdAt: row.created_at as unknown,
   }))
 
-  const visibleFieldIds = new Set(visibleFields.map((field) => field.id))
+  // §2a.3 taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds): dashboard widgets
+  // group/aggregate over row.data raw, so a formula over a denied foreign lookup would leak its
+  // materialized value as a group-by bucket label (and into count-family aggregates). The chokepoint
+  // drops tainted formula fields from the visible set before the per-row data-mask below, so the
+  // value never reaches the widget builder.
+  const visibleFieldIds = await maskStoredRecordFieldIds(
+    req,
+    query,
+    sheetId,
+    visibleFields,
+    new Set(visibleFields.map((field) => field.id)),
+  )
   const fieldTypeById = new Map(visibleFields.map((field) => [field.id, field.type] as const))
   const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
   const filteredConditions = rawFilterInfo
@@ -2694,7 +3021,7 @@ async function loadDashboardSourceRows(args: {
       rows.map((row) => row.id),
       relationalLinkFields,
     )
-    await applyLookupRollup(req, query, fields, rows, relationalLinkFields, linkValuesByRecord)
+    await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
   }
 
   if (filterInfo) {
@@ -3100,7 +3427,20 @@ async function buildLinkSummaries(
     if (!readableSheetIds.has(sheetId)) continue
     const fields = await loadFieldsForSheet(query, sheetId)
     const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
-    const allowedFieldIds = await loadAllowedFieldIds(query, sheetId, access.userId, capabilities)
+    const baseAllowedFieldIds = await loadAllowedFieldIds(query, sheetId, access.userId, capabilities)
+    // §2a.3 DISPLAY-PROJECTION chokepoint (resolveDisplayFieldTaint) — C2 (link-summary auto-pick):
+    // the auto-picked foreign display field is projected over stored data; a foreign formula over a
+    // (further) denied lookup is source-visible and could be auto-picked when there is no string field
+    // ahead of it, leaking its materialized value as the link display. Drop tainted foreign formula
+    // ids from the candidate set so they are never selectable here.
+    const { allowedDisplayFieldIds: allowedFieldIds } = await resolveDisplayFieldTaint(
+      req,
+      query,
+      sheetId,
+      fields,
+      baseAllowedFieldIds,
+      null,
+    )
     const allowedFields = fields.filter((field) => allowedFieldIds.has(field.id))
     const stringField = allowedFields.find((field) => field.type === 'string')
     displayFieldBySheet.set(sheetId, stringField?.id ?? allowedFields[0]?.id ?? null)
@@ -4757,7 +5097,15 @@ export function univerMetaRouter(): Router {
         }
       }
 
-      const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+      const baseAllowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+      // §2a.3 (m1) via the single CHOKEPOINT (maskStoredRecordFieldIds): a record-revision
+      // snapshot/patch can carry a MATERIALIZED formula value whose foreign lookup input is masked for
+      // this actor; the source-sheet allowed-field set above does not catch it (the formula field
+      // itself is source-visible). The chokepoint taint-drops those formula fields from the redaction
+      // allow-set. No typed field list here (the allow-set is built without one), so `fields` is
+      // omitted — the resolver defensively ignores non-formula ids. Cheap (one resolver call per
+      // history request; snapshot capture is often null anyway).
+      const allowedFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowedFieldIds)
       const items = (await listRecordRevisions(pool.query.bind(pool), { sheetId, recordId, limit, offset }))
         .map((item) => redactRecordRevisionEntry(item, allowedFieldIds))
       return res.json({ ok: true, data: { items, limit, offset } })
@@ -5292,7 +5640,19 @@ export function univerMetaRouter(): Router {
       if (!capabilities.canRead) return sendForbidden(res)
 
       // F5 (#2106 §3 F5): gate the people sheet's default display field by its own layer-2 ∧ layer-3 allowed set.
-      const peopleAllowedFieldIds = await loadAllowedFieldIds(query, peopleSheetId, access.userId, capabilities)
+      // §2a.3 DISPLAY-PROJECTION chokepoint (resolveDisplayFieldTaint) — C2 (auto-pick parity): drop any
+      // tainted formula id from the auto-pick candidate set so a formula-over-denied-lookup can never be
+      // selected as the people display (uniform with the link-picker / records-summary display guard).
+      const peopleBaseAllowedFieldIds = await loadAllowedFieldIds(query, peopleSheetId, access.userId, capabilities)
+      const peopleFields = await loadFieldsForSheetShared(query, peopleSheetId)
+      const { allowedDisplayFieldIds: peopleAllowedFieldIds } = await resolveDisplayFieldTaint(
+        req,
+        query,
+        peopleSheetId,
+        peopleFields,
+        peopleBaseAllowedFieldIds,
+        null,
+      )
       const summary = await loadRecordSummaries(query, peopleSheetId, { search: q, limit, offset: 0, allowedFieldIds: peopleAllowedFieldIds })
       return res.json({ ok: true, data: { items: summary.records } })
     } catch (err) {
@@ -6463,8 +6823,19 @@ export function univerMetaRouter(): Router {
         hiddenFieldIds: viewHiddenFieldIds,
         fieldScopeMap,
       })
-      const fields = visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false)
-      const fieldIds = new Set(fields.map((field) => field.id))
+      let fields = visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false)
+      // §2a.3 export taint-check (fail-closed) via the single CHOKEPOINT (maskStoredRecordFieldIds):
+      // formula values are MATERIALIZED into meta_records.data, and this export path reads them RAW
+      // (no applyLookupRollup), so a formula over a lookup/rollup of an UNREADABLE foreign field would
+      // leak the value. The chokepoint yields the taint-dropped allowed set; export additionally drops
+      // the WHOLE formula column from the header `fields` list (consistent with field-level export
+      // masking above), so re-derive `fields` from the masked set rather than mutating in place.
+      let fieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, fields, new Set(fields.map((field) => field.id)))
+      if (fieldIds.size !== fields.length) {
+        fields = fields.filter((field) => fieldIds.has(field.id))
+        fieldIds = new Set(fields.map((field) => field.id))
+      }
+
       const rows: Array<Array<string | number | boolean | null | undefined>> = []
       let cursor: string | undefined
       let truncated = false
@@ -6574,6 +6945,24 @@ export function univerMetaRouter(): Router {
       const aggregateFieldTypeById = new Map(
         visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => [field.id, field.type]),
       )
+
+      // §2a.3 (M1) via the single CHOKEPOINT (maskStoredRecordFieldIds): view-aggregate reads
+      // MATERIALIZED formula values raw (no applyLookupRollup). A formula over a lookup/rollup of an
+      // UNREADABLE foreign field passes the source-sheet gate above (the formula field itself isn't
+      // denied) but its count/countDistinct/countNonEmpty would leak the foreign-derived
+      // cardinality/non-emptiness. The chokepoint yields the taint-dropped allowed set; remove any
+      // aggregate-output key that did not survive it (fail-closed). This shape gates a Map (id→type),
+      // not a per-row data mask, so it derives the masked set then deletes the dropped keys.
+      const maskedAggFieldIds = await maskStoredRecordFieldIds(
+        req,
+        pool.query.bind(pool),
+        sheetId,
+        visibleFields,
+        new Set(aggregateFieldTypeById.keys()),
+      )
+      for (const id of [...aggregateFieldTypeById.keys()]) {
+        if (!maskedAggFieldIds.has(id)) aggregateFieldTypeById.delete(id)
+      }
 
       // full filtered set = all records + persisted filterInfo + search, resolved over the SAME field set
       // as /view (visibleFields) → identical filtered set
@@ -6733,15 +7122,24 @@ export function univerMetaRouter(): Router {
               .filter((v): v is RelationalLinkField => !!v && !!v.cfg)
             const row: UniverMetaRecord = { id: recordId, version: 0, data: rawData }
             const linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), [recordId], relationalLinkFields)
-            await applyLookupRollup(req, pool.query.bind(pool), referencedComputedFields, [row], relationalLinkFields, linkValuesByRecord)
+            await applyLookupRollup(req, pool.query.bind(pool), sheetId, referencedComputedFields, [row], relationalLinkFields, linkValuesByRecord)
           }
           // D3c field mask, sheet-scope (hiddenFieldIds: [] — display-consistency defer, see #5c design-lock §4).
           // scope.visible is the real field-read gate; a denied field is omitted → becomes missing_sample.
           const visibleFields = filterVisiblePropertyFields(fields)
           const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, userId)
           const fieldPermissions = deriveFieldPermissions(visibleFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
-          const allowedIds = new Set(
-            visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => field.id),
+          // §2a.3 read taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds): the sampled
+          // stored data can hold a MATERIALIZED formula-over-denied-lookup value; feeding it as a
+          // dry-run sample would surface/transitively leak it to the actor. The chokepoint drops
+          // tainted formula ids before the data-mask (a dropped key then surfaces as missing_sample,
+          // identical to a masked lookup key).
+          const allowedIds = await maskStoredRecordFieldIds(
+            req,
+            pool.query.bind(pool),
+            sheetId,
+            visibleFields,
+            new Set(visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => field.id)),
           )
           const maskedData = filterRecordDataByFieldIds(rawData, allowedIds)
           // Record values are the base; explicit manual sampleValues override per-field (denied keys stay omitted).
@@ -6809,9 +7207,17 @@ export function univerMetaRouter(): Router {
         ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
         : new Map()
       const securityFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
-      const allowedFieldIds = new Set(
+      let allowedFieldIds = new Set(
         visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id),
       )
+      // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds): the LOOKUP
+      // column is masked by applyLookupRollup below, but the MATERIALIZED FORMULA column is read
+      // straight from meta_records.data and would otherwise leak a formula-over-denied-foreign-lookup
+      // value. The chokepoint drops tainted formula fields from allowedFieldIds (the data-mask gate at
+      // filterRecordDataByFieldIds below) so the value never reaches the wire. The column still
+      // appears in the returned field list (parity with how a masked lookup keeps its column); only
+      // the per-row materialized value is withheld.
+      allowedFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, visiblePropertyFields, allowedFieldIds)
       const fieldTypeById = new Map(visiblePropertyFields.map((f) => [f.id, f.type] as const))
       // #2038 (a): search/sort/filter SELECTION is gated by allowedFieldIds (layer-3, the field-read gate) —
       // a field_permissions-denied field is treated as unavailable (not searchable/filterable/sortable),
@@ -6948,6 +7354,7 @@ export function univerMetaRouter(): Router {
           await applyLookupRollup(
             req,
             pool.query.bind(pool),
+            sheetId,
             fields,
             all,
             relationalLinkFields,
@@ -7057,6 +7464,7 @@ export function univerMetaRouter(): Router {
       await applyLookupRollup(
         req,
         pool.query.bind(pool),
+        sheetId,
         fields,
         rows,
         relationalLinkFields,
@@ -7250,7 +7658,15 @@ export function univerMetaRouter(): Router {
       // layer-2 (property.hidden); fieldPermissions[].visible adds layer-3. For an ANONYMOUS public-form caller
       // effectiveAccess.userId='' → fieldScopeMap is empty → this equals visibleFieldIds (the public path is
       // unchanged; anonymous has no subject to scope to).
-      const readableFieldIds = new Set(visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => field.id))
+      let readableFieldIds = new Set(visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => field.id))
+      // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds): in edit-mode
+      // the form echoes an existing record's stored meta_records.data, so a formula over a denied
+      // foreign lookup would leak its materialized value into the form prefill. The chokepoint drops
+      // tainted formula fields (only matters when a record is loaded — create-mode has no stored value
+      // to leak).
+      if (record) {
+        readableFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, visibleFields, readableFieldIds)
+      }
       const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], effectiveCapabilities, viewScopeMap) : {}
       const rowActions = record
         ? deriveRecordRowActions(effectiveCapabilities, effectiveSheetScope, effectiveAccess, record.createdBy)
@@ -7676,7 +8092,21 @@ export function univerMetaRouter(): Router {
       // scope map → readableEchoFieldIds equals visibleFormFieldIds, so the public-form echo is unchanged.
       const echoFieldScopeMap = effectiveAccess.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), view.sheetId, effectiveAccess.userId) : new Map()
       const echoFieldPermissions = deriveFieldPermissions(fields, effectiveCapabilities, { hiddenFieldIds: view.hiddenFieldIds ?? [], fieldScopeMap: echoFieldScopeMap })
-      const readableEchoFieldIds = new Set(visibleFormFields.filter((field) => echoFieldPermissions[field.id]?.visible !== false).map((field) => field.id))
+      // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds) — C1: in
+      // EDIT mode (`recordId` present) this echo re-reads the existing record's stored
+      // meta_records.data, which holds a previously-materialized AUTHORIZED formula value. The
+      // taint-SKIPPED recalcNewRecordFormulas overlay below only OVERWRITES a formula it recomputes —
+      // a tainted formula is absent from `formulaValues`, so the stored authorized value would survive
+      // into the echo to a foreign-field-denied (often anonymous) submitter. The chokepoint drops
+      // tainted formula fields so that value is withheld. Harmless in create mode (no stored value;
+      // overlay already taint-skips), so applied uniformly.
+      const readableEchoFieldIds = await maskStoredRecordFieldIds(
+        req,
+        pool.query.bind(pool),
+        view.sheetId,
+        visibleFormFields,
+        new Set(visibleFormFields.filter((field) => echoFieldPermissions[field.id]?.visible !== false).map((field) => field.id)),
+      )
 
       const relationalLinkFields = fields
         .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
@@ -7879,7 +8309,18 @@ export function univerMetaRouter(): Router {
       const echoFieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
       const echoFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap: echoFieldScopeMap })
       const readableEchoFields = visiblePropertyFields.filter((field) => echoFieldPermissions[field.id]?.visible !== false)
-      const readableEchoFieldIds = new Set(readableEchoFields.map((field) => field.id))
+      // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds): the echo
+      // re-reads the stored meta_records.data, so a formula over a denied foreign lookup would leak its
+      // materialized value back to the writer. The chokepoint drops tainted formula fields from the
+      // echo's allowed set. The write-side recompute skip leaves the stored formula at the authorized
+      // value; this prevents re-emitting it to a foreign-field-denied actor.
+      const readableEchoFieldIds = await maskStoredRecordFieldIds(
+        req,
+        pool.query.bind(pool),
+        sheetId,
+        readableEchoFields,
+        new Set(readableEchoFields.map((field) => field.id)),
+      )
 
       const relationalLinkFields = fields
         .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
@@ -8019,8 +8460,15 @@ export function univerMetaRouter(): Router {
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
       const securityFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
-      const allowedFieldIds = new Set(
-        visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id),
+      // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds): drop tainted
+      // formula fields whose materialized value derives from a denied foreign lookup, before the
+      // per-row data-mask below (parity with GET /view).
+      const allowedFieldIds = await maskStoredRecordFieldIds(
+        req,
+        pool.query.bind(pool),
+        sheetId,
+        visiblePropertyFields,
+        new Set(visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id)),
       )
 
       // Selection gate (#2044 parity): filter.*/sortField over a field the caller cannot read (denied,
@@ -8143,7 +8591,7 @@ export function univerMetaRouter(): Router {
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
-      await applyLookupRollup(req, pool.query.bind(pool), fields, [record], relationalLinkFields, linkValuesByRecord)
+      await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, [record], relationalLinkFields, linkValuesByRecord)
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
       // #2015 read-path field mask: D3c security composite (layer-2 property.hidden ∧ layer-3
       // field_permissions.visible), mirroring export-xlsx / dry-run #5c-a. hiddenFieldIds:[] keeps layer-1
@@ -8154,8 +8602,16 @@ export function univerMetaRouter(): Router {
         ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
         : new Map()
       const securityFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
-      const allowedFieldIds = new Set(
-        visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id),
+      // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds): the
+      // MATERIALIZED formula column is read straight from meta_records.data, so a formula over a denied
+      // foreign lookup would leak. The chokepoint drops tainted formula fields before the data-mask
+      // below (parity with GET /view).
+      const allowedFieldIds = await maskStoredRecordFieldIds(
+        req,
+        pool.query.bind(pool),
+        sheetId,
+        visiblePropertyFields,
+        new Set(visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id)),
       )
       record.data = filterRecordDataByFieldIds(record.data, allowedFieldIds)
       const linkSummaries = filterSingleRecordFieldSummaryMap(
@@ -8266,7 +8722,23 @@ export function univerMetaRouter(): Router {
       }
       if (!capabilities.canRead) return sendForbidden(res)
 
-      const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+      const baseAllowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+      // §2a.3 DISPLAY-PROJECTION chokepoint (resolveDisplayFieldTaint) — C2: /records-summary projects
+      // ONE caller-chosen `displayFieldId` over stored data and string-coerces it. A formula over a
+      // denied foreign lookup is itself source-visible, so it passes the source-sheet `allowedFieldIds`
+      // gate; an attacker could set `displayFieldId=<that formula>` and read its materialized value as
+      // the summary string. Drop tainted formula ids from the allowed set: an explicit tainted
+      // `displayFieldId` then fails the validation below (same 400), and the auto-pick `selectableFields`
+      // inside loadRecordSummaries excludes it too.
+      const summaryFields = await loadFieldsForSheetShared(pool.query.bind(pool), sheetId)
+      const { allowedDisplayFieldIds: allowedFieldIds } = await resolveDisplayFieldTaint(
+        req,
+        pool.query.bind(pool),
+        sheetId,
+        summaryFields,
+        baseAllowedFieldIds,
+        displayFieldId,
+      )
       if (displayFieldId && !allowedFieldIds.has(displayFieldId)) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid displayFieldId' } })
       }
@@ -8372,7 +8844,21 @@ export function univerMetaRouter(): Router {
       // F5 (#2106 §3 F5): gate the FOREIGN sheet's default display field by ITS OWN layer-2 ∧ layer-3 allowed
       // set (keyed to the foreign sheet, not the caller's) so a field_permissions-denied display value never
       // leaks via the summary `display`.
-      const foreignAllowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), linkConfig.foreignSheetId, foreignAccess.userId, capabilities)
+      // §2a.3 DISPLAY-PROJECTION chokepoint (resolveDisplayFieldTaint) — C2 (auto-pick path): the
+      // link-picker auto-picks the foreign sheet's display field over stored data. A foreign formula
+      // over a (further) denied lookup is source-visible on the foreign sheet, so it could be auto-picked
+      // and leak its materialized value as the picker display. Drop tainted foreign formula ids from the
+      // foreign allowed set so they are never selectable. No explicit displayFieldId here (auto-pick only).
+      const foreignBaseAllowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), linkConfig.foreignSheetId, foreignAccess.userId, capabilities)
+      const foreignFields = await loadFieldsForSheetShared(pool.query.bind(pool), linkConfig.foreignSheetId)
+      const { allowedDisplayFieldIds: foreignAllowedFieldIds } = await resolveDisplayFieldTaint(
+        req,
+        pool.query.bind(pool),
+        linkConfig.foreignSheetId,
+        foreignFields,
+        foreignBaseAllowedFieldIds,
+        null,
+      )
       const summary = await loadRecordSummaries(pool.query.bind(pool), linkConfig.foreignSheetId, {
         search,
         limit,
@@ -8705,8 +9191,17 @@ export function univerMetaRouter(): Router {
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
       const securityFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
-      const allowedFieldIds = new Set(
-        visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id),
+      // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds): the create
+      // recompute (recalcNewRecordFormulas) already taint-skips, so a tainted formula is absent from
+      // result.data and would filter out by absence — but routing the echo's allowed set through the
+      // chokepoint makes that structural (defense-in-depth) rather than safe-by-accident, identical to
+      // every other stored-data read sink.
+      const allowedFieldIds = await maskStoredRecordFieldIds(
+        req,
+        pool.query.bind(pool),
+        sheetId,
+        visiblePropertyFields,
+        new Set(visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id)),
       )
 
       return res.json({
@@ -8841,7 +9336,7 @@ export function univerMetaRouter(): Router {
       // run route; see the factory's doc comment). crossSheetRelated stays masked per
       // related sheet inside computeDependentLookupRollupRecords (locked by the
       // multitable-cross-sheet-related-echo-mask suite).
-      const patchContext = await buildRecordPatchContext(pool.query.bind(pool), sheetId, access, capabilities)
+      const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
       if (!patchContext) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
