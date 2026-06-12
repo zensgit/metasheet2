@@ -269,6 +269,7 @@
           @set-aggregation="onSetAggregation"
           @open-comments="onOpenRecordComments"
           @open-field-comments="onOpenGridFieldComments"
+          @toggle-lock="onToggleRecordLock"
           @ai-run="onGridAiRun"
         />
       </div>
@@ -287,6 +288,7 @@
         :ai-shortcut="aiShortcut.state"
         @close="onCloseDrawer" @delete="onDeleteRecord" @patch="onDrawerPatch"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker"
+        @toggle-lock="onToggleRecordLock"
         @navigate="onDrawerNavigate"
         @ai-preview="onAiPreviewField" @ai-run="onAiRunField"
       />
@@ -1510,6 +1512,19 @@ async function onDeleteRecord() {
     return
   }
   if (grid.error.value) showError(grid.error.value)
+}
+
+async function onToggleRecordLock(payload: { recordId: string; locked: boolean }) {
+  try {
+    await workbench.client.setRecordLock(payload.recordId, payload.locked, {
+      sheetId: workbench.activeSheetId.value || undefined,
+      viewId: workbench.activeViewId.value || undefined,
+    })
+    showSuccess(wb(payload.locked ? 'toast.recordLocked' : 'toast.recordUnlocked', isZh.value))
+    await grid.loadViewData(grid.page.value.offset)
+  } catch (error) {
+    showError((error as Error)?.message ?? wb('toast.recordLockFailed', isZh.value))
+  }
 }
 
 async function onReloadConflict() {

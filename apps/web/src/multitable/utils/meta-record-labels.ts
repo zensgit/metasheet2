@@ -30,6 +30,9 @@ export type MetaRecordLabelKey =
   | 'record.comments'
   | 'record.workflow' | 'record.workflowTitle'
   | 'record.permissions' | 'record.permissionsTitle'
+  // --- Record locking (design #2278 follow-up) ---
+  | 'record.locked' | 'record.lockedBy' | 'record.lockedAt'
+  | 'record.lock' | 'record.unlock'
   | 'record.delete' | 'record.close'
   | 'record.tabsAria'
   | 'record.details' | 'record.history'
@@ -61,6 +64,11 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.workflowTitle': { en: 'Open workflow designer', zh: '打开工作流设计器' },
   'record.permissions': { en: 'Permissions', zh: '权限' },
   'record.permissionsTitle': { en: 'Record Permissions', zh: '记录权限' },
+  'record.locked': { en: 'This record is locked', zh: '该记录已锁定' },
+  'record.lockedBy': { en: 'Locked by', zh: '锁定人' },
+  'record.lockedAt': { en: 'Locked at', zh: '锁定时间' },
+  'record.lock': { en: 'Lock', zh: '锁定' },
+  'record.unlock': { en: 'Unlock', zh: '解锁' },
   'record.delete': { en: 'Delete', zh: '删除' },
   'record.close': { en: 'Close record drawer', zh: '关闭记录抽屉' },
   'record.tabsAria': { en: 'Record drawer sections', zh: '记录抽屉分区' },

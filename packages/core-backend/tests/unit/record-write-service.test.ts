@@ -67,8 +67,8 @@ function createMockPool(queryResponses: Record<string, { rows: unknown[] }> = {}
 
   const queryFn = vi.fn(async (sql: string, _params?: unknown[]) => {
     // Match SQL patterns to return the correct responses
-    if (sql.includes('SELECT id, version, data, created_by FROM meta_records') && sql.includes('FOR UPDATE')) {
-      return queryResponses['SELECT_FOR_UPDATE'] ?? { rows: [{ id: 'rec1', version: 1, data: { fld_name: 'Before' }, created_by: 'user1' }] }
+    if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records') && sql.includes('FOR UPDATE')) {
+      return queryResponses['SELECT_FOR_UPDATE'] ?? { rows: [{ id: 'rec1', version: 1, data: { fld_name: 'Before' }, created_by: 'user1', locked: false, locked_by: null }] }
     }
     if (sql.includes('UPDATE meta_records')) {
       return queryResponses['UPDATE'] ?? { rows: [{ version: 2 }] }

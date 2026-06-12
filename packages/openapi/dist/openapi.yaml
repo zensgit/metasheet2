@@ -2226,6 +2226,24 @@ components:
         data:
           type: object
           additionalProperties: true
+        locked:
+          type: boolean
+          description: >-
+            Whole-record lock flag (record-locking storage contract). Top-level
+            metadata, never a data field.
+        lockedBy:
+          type: string
+          nullable: true
+          description: User id (or 'system') that locked the record.
+        lockedAt:
+          type: string
+          nullable: true
+          description: ISO timestamp when the record was locked.
+        canUnlock:
+          type: boolean
+          description: >-
+            Server-authoritative per-row unlock gate (locker / owner /
+            sheet-admin). Only meaningful when locked.
     MultitableRecordSubscription:
       type: object
       properties:

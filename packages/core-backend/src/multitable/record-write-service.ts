@@ -35,6 +35,7 @@ import {
   notifyRecordSubscribersBestEffort,
   type NotifyRecordSubscribersInput,
 } from './record-subscription-service'
+import { canEditWhileLocked } from './record-lock'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -562,7 +563,7 @@ export class RecordWriteService {
         )[0]
 
         const recordRes = await query(
-          'SELECT id, version, data, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
+          'SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
           [sheetId, recordId],
         )
         if ((recordRes.rows as any[]).length === 0) {
@@ -580,6 +581,18 @@ export class RecordWriteService {
           )
         ) {
           throw new RecordValidationError(`Record editing is not allowed for ${recordId}`)
+        }
+
+        // Record-lock guard (decision d/e): a locked record is read-only unless the actor is the
+        // locker or owner. No silent admin bypass — an admin must explicitly unlock first.
+        if (
+          recordRow?.locked === true &&
+          !canEditWhileLocked(actorId, {
+            lockedBy: typeof recordRow?.locked_by === 'string' ? recordRow.locked_by : null,
+            createdBy: typeof recordRow?.created_by === 'string' ? recordRow.created_by : null,
+          })
+        ) {
+          throw new RecordValidationError(`Record is locked: ${recordId}`, 'FORBIDDEN')
         }
 
         const serverVersion = Number(recordRow?.version ?? 1)

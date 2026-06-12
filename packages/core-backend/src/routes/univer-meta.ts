@@ -141,6 +141,7 @@ import {
   RecordValidationFailedError as RecordCreateValidationFailedError,
   RecordPatchFieldValidationError as RecordServicePatchFieldValidationError,
 } from '../multitable/record-service'
+import { canUnlock, mapRecordLockState } from '../multitable/record-lock'
 import {
   acquireAutoNumberSheetWriteLock,
   allocateAutoNumberValues,
@@ -297,6 +298,14 @@ type UniverMetaRecord = {
   version: number
   data: Record<string, unknown>
   createdBy?: string | null
+  // Record-locking metadata (design #2278 follow-up). TOP-LEVEL on the wire — NOT a `data` field, so it
+  // is never swept by the §2a.3 `filterRecordDataByFieldIds` / `maskStoredRecordFieldIds` masking.
+  locked?: boolean
+  lockedBy?: string | null
+  lockedAt?: string | null
+  // Server-authoritative per-row unlock gate (decision b) so the grid/drawer can show the unlock
+  // action without exposing `created_by` to the client. Only meaningful when `locked` is true.
+  canUnlock?: boolean
 }
 
 type UniverMetaView = {
@@ -7281,7 +7290,7 @@ export function univerMetaRouter(): Router {
             const limitParamIndex = firstFieldParamIndex + searchableFieldIds.length
             const offsetParamIndex = limitParamIndex + 1
             const recordRes = await pool.query(
-              `SELECT id, version, data, COUNT(*) OVER()::int AS total
+              `SELECT id, version, data, locked, locked_by, locked_at, COUNT(*) OVER()::int AS total
                FROM meta_records
                WHERE sheet_id = $1 AND (${predicate})
                ORDER BY created_at ASC, id ASC
@@ -7293,6 +7302,7 @@ export function univerMetaRouter(): Router {
               id: String(r.id),
               version: Number(r.version ?? 1),
               data: normalizeJson(r.data),
+              ...mapRecordLockState(r),
             }))
 
             let total = Number((recordRes.rows[0] as any)?.total ?? 0)
@@ -7308,7 +7318,7 @@ export function univerMetaRouter(): Router {
             page = { offset, limit, total, hasMore: offset + rows.length < total }
           } else {
             const recordRes = await pool.query(
-              `SELECT id, version, data
+              `SELECT id, version, data, locked, locked_by, locked_at
                FROM meta_records
                WHERE sheet_id = $1 AND (${predicate})
                ORDER BY created_at ASC, id ASC`,
@@ -7319,12 +7329,13 @@ export function univerMetaRouter(): Router {
               id: String(r.id),
               version: Number(r.version ?? 1),
               data: normalizeJson(r.data),
+              ...mapRecordLockState(r),
             }))
           }
         }
       } else if (hasInMemoryProcessing) {
         const recordRes = await pool.query(
-          'SELECT id, version, data, created_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
+          'SELECT id, version, data, created_at, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
           [sheetId],
         )
 
@@ -7333,6 +7344,7 @@ export function univerMetaRouter(): Router {
           version: Number(r.version ?? 1),
           data: normalizeJson(r.data),
           createdAt: (r as any).created_at as unknown,
+          lock: mapRecordLockState(r),
         }))
 
         const needsComputedFilterSort =
@@ -7399,12 +7411,12 @@ export function univerMetaRouter(): Router {
 
         const total = sorted.length
         const paged = limit ? sorted.slice(offset, offset + limit) : sorted
-        rows = paged.map((r) => ({ id: r.id, version: r.version, data: r.data }))
+        rows = paged.map((r) => ({ id: r.id, version: r.version, data: r.data, ...r.lock }))
         if (limit) page = { offset, limit, total, hasMore: offset + rows.length < total }
       } else {
         if (limit) {
           const recordRes = await pool.query(
-            `SELECT id, version, data, COUNT(*) OVER()::int AS total
+            `SELECT id, version, data, locked, locked_by, locked_at, COUNT(*) OVER()::int AS total
              FROM meta_records
              WHERE sheet_id = $1
              ORDER BY created_at ASC, id ASC
@@ -7416,6 +7428,7 @@ export function univerMetaRouter(): Router {
             id: String(r.id),
             version: Number(r.version ?? 1),
             data: normalizeJson(r.data),
+            ...mapRecordLockState(r),
           }))
 
           let total = Number((recordRes.rows[0] as any)?.total ?? 0)
@@ -7426,7 +7439,7 @@ export function univerMetaRouter(): Router {
           page = { offset, limit, total, hasMore: offset + rows.length < total }
         } else {
           const recordRes = await pool.query(
-            'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
+            'SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
             [sheetId],
           )
 
@@ -7434,6 +7447,7 @@ export function univerMetaRouter(): Router {
             id: String(r.id),
             version: Number(r.version ?? 1),
             data: normalizeJson(r.data),
+            ...mapRecordLockState(r),
           }))
         }
       }
@@ -7529,6 +7543,25 @@ export function univerMetaRouter(): Router {
         sheetScope,
         access,
       )
+      // Per-row unlock gate (decision b): compute `canUnlock` server-side for the LOCKED rows so the
+      // grid/drawer can show the unlock action without the client ever seeing `created_by`. The owner
+      // layer needs each locked row's creator, so load a creator map scoped to just the locked ids.
+      const lockedRowIds = rows.filter((row) => row.locked).map((row) => row.id)
+      if (lockedRowIds.length > 0) {
+        const lockedCreatorMap = await loadRecordCreatorMap(pool.query.bind(pool), sheetId, lockedRowIds)
+        for (const row of rows) {
+          if (!row.locked) continue
+          row.canUnlock = canUnlock(
+            access.userId ?? null,
+            {
+              lockedBy: row.lockedBy ?? null,
+              createdBy: lockedCreatorMap.get(row.id) ?? null,
+            },
+            capabilities,
+          )
+        }
+      }
+
       const viewScopeMap = (access.userId && viewConfig) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [viewConfig.id], access.userId) : new Map()
       const permissions: MultitableScopedPermissions = {
         fieldPermissions: deriveFieldPermissions(fields, capabilities, {
@@ -8288,7 +8321,7 @@ export function univerMetaRouter(): Router {
       const nextVersion = patchResult.version
 
       const recordRes = await pool.query(
-        'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        'SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE id = $1 AND sheet_id = $2',
         [recordId, sheetId],
       )
       const row: any = recordRes.rows[0]
@@ -8300,6 +8333,7 @@ export function univerMetaRouter(): Router {
         id: String(row.id),
         version: Number(row.version ?? nextVersion),
         data: normalizeJson(row.data),
+        ...mapRecordLockState(row),
       }
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
       // F3 (#2106 §3 F3): the write already happened above; this set gates ONLY the read-back echo, so it must
@@ -8512,7 +8546,15 @@ export function univerMetaRouter(): Router {
       const body = {
         ok: true,
         data: {
-          records: items.map((r) => ({ id: r.id, version: r.version, data: filterRecordDataByFieldIds(r.data, allowedFieldIds) })),
+          records: items.map((r) => ({
+            id: r.id,
+            version: r.version,
+            data: filterRecordDataByFieldIds(r.data, allowedFieldIds),
+            // Lock metadata is TOP-LEVEL (never inside data) — not subject to the §2a.3 data mask.
+            locked: r.locked,
+            lockedBy: r.lockedBy,
+            lockedAt: r.lockedAt,
+          })),
           nextCursor: result.nextCursor,
           hasMore: result.hasMore,
         },
@@ -8555,11 +8597,11 @@ export function univerMetaRouter(): Router {
 
       const recordRes = sheetId
         ? await pool.query(
-          'SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
+          'SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1 AND sheet_id = $2',
           [recordId, sheetId],
         )
         : await pool.query(
-          'SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1',
+          'SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1',
           [recordId],
         )
       const row: any = recordRes.rows[0]
@@ -8582,6 +8624,7 @@ export function univerMetaRouter(): Router {
         version: Number(row.version ?? 1),
         data: normalizeJson(row.data),
         createdBy: typeof row.created_by === 'string' ? row.created_by : null,
+        ...mapRecordLockState(row),
       }
 
       const relationalLinkFields = fields
@@ -8642,6 +8685,15 @@ export function univerMetaRouter(): Router {
       })
       const viewPermissions = viewConfig ? deriveViewPermissions([viewConfig], capabilities, viewScopeMap) : {}
       const rowActions = deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy)
+      // Per-row unlock gate (decision b) for the drawer's lock/unlock action. `created_by` is already
+      // resolved on `record` here, so no extra read is needed. Only meaningful while locked.
+      if (record.locked) {
+        record.canUnlock = canUnlock(
+          access.userId ?? null,
+          { lockedBy: record.lockedBy ?? null, createdBy: record.createdBy ?? null },
+          capabilities,
+        )
+      }
 
       return res.json({
         ok: true,
@@ -9297,6 +9349,95 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete record failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete record' } })
+    }
+  })
+
+  // Manual record lock / unlock (design #2278 follow-up). `{ locked: true }` LOCKS, `{ locked: false }`
+  // UNLOCKS. Locking requires edit rights on the row (you may protect a row you can edit). Unlocking
+  // requires `canUnlock` (decision b: locker ∨ owner ∨ sheet-admin) — decision e's explicit unlock gate.
+  router.post('/records/:recordId/lock', async (req: Request, res: Response) => {
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
+    }
+    const schema = z.object({
+      locked: z.boolean(),
+      sheetId: z.string().min(1).optional(),
+      viewId: z.string().min(1).optional(),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      let sheetId = parsed.data.sheetId
+      if (parsed.data.sheetId || parsed.data.viewId) {
+        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+          sheetId: parsed.data.sheetId,
+          viewId: parsed.data.viewId,
+        })
+        sheetId = resolved.sheetId
+      }
+
+      const lookup = sheetId
+        ? await pool.query('SELECT id, sheet_id, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
+        : await pool.query('SELECT id, sheet_id, created_by, locked, locked_by FROM meta_records WHERE id = $1', [recordId])
+      const recordRow: any = lookup.rows[0]
+      if (!recordRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
+      sheetId = String(recordRow.sheet_id)
+      const createdBy = typeof recordRow.created_by === 'string' ? recordRow.created_by : null
+
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      const actorId = getRequestActorId(req)
+
+      if (parsed.data.locked) {
+        // LOCK: must be allowed to edit this row.
+        if (!capabilities.canEditRecord || !ensureRecordWriteAllowed(capabilities, sheetScope, access, createdBy, 'edit')) {
+          return sendForbidden(res, 'Record editing is not allowed for this row')
+        }
+        const lockedBy = actorId ?? access.userId
+        await pool.query(
+          `UPDATE meta_records SET locked = true, locked_by = $2, locked_at = NOW(), version = version + 1, updated_at = NOW()
+           WHERE id = $1 AND sheet_id = $3`,
+          [recordId, lockedBy, sheetId],
+        )
+      } else {
+        // UNLOCK: must pass canUnlock (locker ∨ owner ∨ sheet-admin).
+        if (!canUnlock(actorId ?? access.userId ?? null, {
+          lockedBy: typeof recordRow.locked_by === 'string' ? recordRow.locked_by : null,
+          createdBy,
+        }, capabilities)) {
+          return sendForbidden(res, 'Not allowed to unlock this record')
+        }
+        await pool.query(
+          `UPDATE meta_records SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
+           WHERE id = $1 AND sheet_id = $2`,
+          [recordId, sheetId],
+        )
+      }
+
+      const after = await pool.query('SELECT locked, locked_by, locked_at FROM meta_records WHERE id = $1', [recordId])
+      publishMultitableSheetRealtime({
+        spreadsheetId: sheetId,
+        actorId,
+        source: 'multitable',
+        kind: 'record-updated',
+        recordIds: [recordId],
+        fieldIds: [],
+      })
+      return res.json({ ok: true, data: { recordId, ...mapRecordLockState(after.rows[0] as any) } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] lock record failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update record lock state' } })
     }
   })
 

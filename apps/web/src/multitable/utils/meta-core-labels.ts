@@ -57,6 +57,9 @@ export type MetaCoreLabelKey =
   | 'grid.aggregateTooLarge'
   | 'grid.noMatchingTitle' | 'grid.noMatchingHint'
   | 'grid.collapseRow' | 'grid.expandRow'
+  // --- Record locking (design #2278 follow-up) ---
+  | 'grid.lockRow' | 'grid.unlockRow' | 'grid.lockedIndicator'
+  | 'grid.errorLockRow' | 'grid.errorUnlockRow'
   | 'grid.prev' | 'grid.next' | 'grid.loading'
   | 'grid.errorLoadViewData'
   | 'grid.errorEditRowBlocked' | 'grid.errorDeleteRowBlocked'
@@ -160,6 +163,11 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'grid.noMatchingHint': { en: 'Try a different search term', zh: '试试其他搜索词' },
   'grid.collapseRow': { en: 'Collapse row', zh: '收起行' },
   'grid.expandRow': { en: 'Expand row', zh: '展开行' },
+  'grid.lockRow': { en: 'Lock row', zh: '锁定此行' },
+  'grid.unlockRow': { en: 'Unlock row', zh: '解锁此行' },
+  'grid.lockedIndicator': { en: 'Row is locked', zh: '该行已锁定' },
+  'grid.errorLockRow': { en: 'Failed to lock row', zh: '锁定行失败' },
+  'grid.errorUnlockRow': { en: 'Failed to unlock row', zh: '解锁行失败' },
   'grid.prev': { en: 'Prev', zh: '上一页' },
   'grid.next': { en: 'Next', zh: '下一页' },
   'grid.loading': { en: 'Loading data', zh: '正在加载数据' },

@@ -7,6 +7,7 @@ import {
 import { fieldTypeRegistry } from './field-type-registry'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
 import { MultitableRecordNotFoundError, MultitableRecordValidationError } from './record-errors'
+import { mapRecordLockState } from './record-lock'
 import {
   listRecords as listRecordsViaQueryService,
   queryRecords as queryRecordsViaQueryService,
@@ -392,7 +393,7 @@ export async function getRecord(
   input: GetMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
   const recordRes = await input.query(
-    'SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+    'SELECT id, sheet_id, version, data, locked, locked_by, locked_at FROM meta_records WHERE id = $1 AND sheet_id = $2',
     [input.recordId, input.sheetId],
   )
   const row = (recordRes.rows as any[])[0]
@@ -404,6 +405,7 @@ export async function getRecord(
     sheetId: String(row.sheet_id),
     version: Number(row.version ?? 1),
     data: normalizeRecordData(row.data),
+    ...mapRecordLockState(row),
   }
 }
 
@@ -460,6 +462,9 @@ export async function patchRecord(
     sheetId: existing.sheetId,
     version: Number.isFinite(version) ? version : existing.version + 1,
     data: nextData,
+    locked: existing.locked,
+    lockedBy: existing.lockedBy,
+    lockedAt: existing.lockedAt,
   }
 }
 

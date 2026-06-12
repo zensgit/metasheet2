@@ -29,6 +29,7 @@ export type WorkbenchLabelKey =
   // §3.5 static (non-interpolated) toast subset
   | 'toast.recordCreateBlocked' | 'toast.recordEditBlocked' | 'toast.recordDeleteBlocked'
   | 'toast.datesUpdated' | 'toast.hierarchyUpdated' | 'toast.recordDeleted'
+  | 'toast.recordLocked' | 'toast.recordUnlocked' | 'toast.recordLockFailed'
   | 'toast.loadedLatest' | 'toast.changeReapplied' | 'toast.recordUpdated'
   | 'toast.commentUpdated' | 'toast.commentAdded'
   | 'toast.commentResolved' | 'toast.commentDeleted' | 'toast.linkedRecordsUpdated'
@@ -122,6 +123,9 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.datesUpdated': { en: 'Dates updated', zh: '日期已更新' },
   'toast.hierarchyUpdated': { en: 'Hierarchy updated', zh: '层级已更新' },
   'toast.recordDeleted': { en: 'Record deleted', zh: '记录已删除' },
+  'toast.recordLocked': { en: 'Record locked', zh: '记录已锁定' },
+  'toast.recordUnlocked': { en: 'Record unlocked', zh: '记录已解锁' },
+  'toast.recordLockFailed': { en: 'Failed to update record lock', zh: '更新锁定状态失败' },
   'toast.loadedLatest': { en: 'Loaded the latest row state', zh: '已加载最新行状态' },
   'toast.changeReapplied': { en: 'Change reapplied', zh: '修改已重新应用' },
   'toast.recordUpdated': { en: 'Record updated', zh: '记录已更新' },

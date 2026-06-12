@@ -107,10 +107,10 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
         }
-        if (sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_1', 'sheet_ops'])
           return {
-            rows: [{ id: 'rec_1', version: 7, data: { fld_title: 'Original title' }, created_by: 'user_patch_1' }],
+            rows: [{ id: 'rec_1', version: 7, data: { fld_title: 'Original title' }, created_by: 'user_patch_1', locked: false, locked_by: null }],
           }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
@@ -272,7 +272,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
         }
-        if (sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           return { rows: [{ id: 'rec_1', version: 11, data: { fld_title: 'Current' }, created_by: 'user_patch_1' }] }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)
@@ -325,7 +325,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
           expect(params).toEqual(['sheet_customer', ['rec_c2', 'rec_c3']])
           return { rows: [{ id: 'rec_c2' }, { id: 'rec_c3' }] }
         }
-        if (sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           return {
             rows: [{ id: 'rec_1', version: 2, data: { fld_customer: ['rec_c1', 'rec_c2'] }, created_by: 'user_patch_1' }],
           }
@@ -438,7 +438,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         if (sql.includes('FROM multitable_attachments') && sql.includes('id = ANY')) {
           return { rows: [{ id: 'att_new_1', field_id: 'fld_files' }] }
         }
-        if (sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           return {
             rows: [{
               id: 'rec_1',

@@ -85,9 +85,9 @@ function createMockPool(
     if (sql.includes('INSERT INTO meta_links')) {
       return responses.INSERT_LINK ?? { rows: [], rowCount: 1 }
     }
-    if (sql.includes('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1')) {
+    if (sql.includes('SELECT id, sheet_id, created_by, locked, locked_by FROM meta_records WHERE id = $1')) {
       return responses.SELECT_DELETE_RECORD ?? {
-        rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops', created_by: 'user_1' }],
+        rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops', created_by: 'user_1', locked: false, locked_by: null }],
       }
     }
     if (sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 FOR UPDATE')) {
@@ -95,9 +95,9 @@ function createMockPool(
         rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops', version: 4, data: { fld_title: 'Before' } }],
       }
     }
-    if (sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+    if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
       return responses.SELECT_PATCH_FOR_UPDATE ?? {
-        rows: [{ id: 'rec_existing', version: 4, data: { fld_title: 'Before' }, created_by: 'user_1' }],
+        rows: [{ id: 'rec_existing', version: 4, data: { fld_title: 'Before' }, created_by: 'user_1', locked: false, locked_by: null }],
       }
     }
     if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {

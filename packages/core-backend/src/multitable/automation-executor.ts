@@ -2043,14 +2043,27 @@ export class AutomationExecutor {
     config: Record<string, unknown>,
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
-    const locked = config.locked !== false // default to true
+    const locked = config.locked !== false // default to true (decision f: config.locked === false → unlock)
 
     try {
-      await this.deps.queryFn(
-        `UPDATE meta_records SET locked = $1, version = version + 1, updated_at = NOW()
-         WHERE id = $2 AND sheet_id = $3`,
-        [locked, context.recordId, context.sheetId],
-      )
+      if (locked) {
+        // LOCK: stamp the locker (rule actor id, or 'system' for an actor-less run) + lock time.
+        const lockedBy = typeof context.actorId === 'string' && context.actorId.trim() ? context.actorId : 'system'
+        await this.deps.queryFn(
+          `UPDATE meta_records
+           SET locked = true, locked_by = $1, locked_at = NOW(), version = version + 1, updated_at = NOW()
+           WHERE id = $2 AND sheet_id = $3`,
+          [lockedBy, context.recordId, context.sheetId],
+        )
+      } else {
+        // UNLOCK: clear lock state.
+        await this.deps.queryFn(
+          `UPDATE meta_records
+           SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
+           WHERE id = $1 AND sheet_id = $2`,
+          [context.recordId, context.sheetId],
+        )
+      }
 
       return {
         actionType: 'lock_record',
@@ -2058,6 +2071,7 @@ export class AutomationExecutor {
         output: { locked, recordId: context.recordId },
       }
     } catch (err) {
+      // Failures surface honestly in the automation execution log instead of crashing the run.
       return { actionType: 'lock_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
     }
   }

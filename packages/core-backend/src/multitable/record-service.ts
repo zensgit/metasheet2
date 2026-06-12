@@ -44,6 +44,7 @@ import {
   type NotifyRecordSubscribersInput,
 } from './record-subscription-service'
 import { ensureRecordWriteAllowed, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
+import { canEditWhileLocked } from './record-lock'
 
 export type QueryFn = (
   sql: string,
@@ -667,7 +668,7 @@ export class RecordService {
     const { recordId, expectedVersion, actorId, access, resolveSheetAccess } = input
 
     const recordRes = await this.pool.query(
-      'SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1',
+      'SELECT id, sheet_id, created_by, locked, locked_by FROM meta_records WHERE id = $1',
       [recordId],
     )
     if (recordRes.rows.length === 0) {
@@ -685,6 +686,15 @@ export class RecordService {
 
     if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, createdBy, 'delete')) {
       throw new RecordPermissionError('Record deletion is not allowed for this row')
+    }
+
+    // Record-lock guard (decision d/e): a locked record cannot be deleted unless the actor is the
+    // locker or owner. No silent admin bypass — an admin must explicitly unlock first.
+    if (recordRow.locked === true && !canEditWhileLocked(actorId, {
+      lockedBy: typeof recordRow.locked_by === 'string' ? recordRow.locked_by : null,
+      createdBy,
+    })) {
+      throw new RecordPermissionError('Record is locked')
     }
 
     await this.pool.transaction(async ({ query }) => {
@@ -908,7 +918,7 @@ export class RecordService {
     let pendingSubscriberNotification: NotifyRecordSubscribersInput | null = null
     await this.pool.transaction(async ({ query }) => {
       const currentRes = await query(
-        'SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+        'SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
         [recordId, sheetId],
       )
       if (currentRes.rows.length === 0) {
@@ -923,6 +933,17 @@ export class RecordService {
         'edit',
       )) {
         throw new RecordPermissionError('Record editing is not allowed for this row')
+      }
+      // Record-lock guard (decision d/e): a locked record is read-only unless the actor is the locker
+      // or owner. No silent admin bypass — an admin must explicitly unlock first.
+      if (currentRow.locked === true && !canEditWhileLocked(
+        patchActorId,
+        {
+          lockedBy: typeof currentRow.locked_by === 'string' ? currentRow.locked_by : null,
+          createdBy: typeof currentRow.created_by === 'string' ? currentRow.created_by : null,
+        },
+      )) {
+        throw new RecordPermissionError('Record is locked')
       }
 
       const serverVersion = Number(currentRow.version ?? 1)
