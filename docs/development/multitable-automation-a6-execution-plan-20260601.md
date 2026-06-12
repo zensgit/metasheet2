@@ -29,16 +29,20 @@ treatment **on purpose**:
 - **A6-3 … A6-5 ADD capability** (branch/parallel graph execution, modeling import,
   approval coupling). Their *shape* is undefined until a concrete use-case names it.
   A6-3's first runtime slice (A6-3-1 `condition_branch` / exclusive branch v1) **landed via #2321**;
-  the A6-3-2 frontend/readability slice **landed via #2339 + #2348**; parallel/join +
-  A6-3-3 stay deferred. A6-5's first `start_approval` bridge slice **landed via #2469**
+  the A6-3-2 frontend/readability slice **landed via #2339 + #2348**; the
+  A6-3-4/W3 parallel fan-out + join-all slice **landed via #2496 + #2500 + #2501**.
+  A6-3-3 branch-local wait/nesting and A6-3-5 join-any stay deferred. A6-5's first `start_approval` bridge slice **landed via #2469**
   as a named cross-surface carve-out on top of A6-2 + W5 completion events. A6-4 remains
   plan-level only.
 
 The original ladder was:
 **A6-1 enable-writer → A6-2 suspend/resume → A6-3 branch/parallel DAG → A6-4 BPMN
-compile/preview adapter → A6-5 approval-as-job.** #2469 intentionally lands only the
+compile/preview adapter → A6-5 approval-as-job.** #2496/#2500/#2501 intentionally land only
+the `join_all` parallel fan-out slice, without `join_any`, branch-local waits, nested branches,
+BPMN, or approval coupling. #2469 intentionally lands only the
 minimal W6-1 `start_approval` bridge slice of A6-5 before A6-4, without unlocking BPMN
-compile/preview, public webhook/token emitters, branch-local wait/nesting, or parallel/join.
+compile/preview, public webhook/token emitters, branch-local wait/nesting, or join-any /
+parallel follow-ups beyond the separately landed `join_all` slice.
 W7 result backwrite remains a separate rung.
 
 ---
@@ -158,7 +162,7 @@ only missing link.
   duplicate-resume idempotent/rejected, resume-after-completion rejected, invalid/expired
   token rejected without leak, later: survives process restart).
 
-## 3. A6-3 branch/parallel DAG — A6-3-1 runtime + A6-3-2 frontend/readability ✅ LANDED (#2321/#2339/#2348); rest deferred
+## 3. A6-3 branch/parallel DAG — condition branches + join-all parallel ✅ LANDED (#2321/#2339/#2348/#2496/#2500/#2501); rest deferred
 
 Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
 
@@ -176,23 +180,32 @@ Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
 > conditions, `update_record` / `send_notification` branch action subset, default branch, read-only
 > never-flatten guard for richer loaded shapes, `workflow_job_v1` auto-lock), and the admin runs detail
 > shows selected branch `label (key)` plus branch child jobs. **Still deferred, each its own opt-in:**
-> A6-3-3 `wait_for_callback` / nested-`condition_branch` inside branches; A6-3 parallel fan-out /
-> join-all runtime / join-any. A6-3-4/W3-0 now has a docs-only scope gate:
+> A6-3-3 `wait_for_callback` / nested-`condition_branch` inside branches; A6-3 join-any / cancellation
+> semantics. A6-3-4/W3-0 has a docs-only scope gate:
 > `multitable-automation-a6-3-parallel-join-all-scope-gate-20260611.md`.
+>
+> **✅ A6-3-4/W3 parallel fan-out + join-all LANDED 2026-06-11/12 — #2496 (squash
+> `b161080b8`) + #2500 (squash `4408239d0`) + #2501 (squash `88f5f538a`)**: the backend
+> can run `parallel_branch` with `joinMode: 'all'`, persist C1 parent/branch-child fan-out/fan-in
+> lineage, and aggregate fail/skip semantics; the editor can author the constrained `parallel_branch`
+> shape with `workflow_job_v1` auto-lock; admin runs detail can explain branch labels and child
+> jobs. **Still deferred:** A6-3-3 branch-local wait/nesting, A6-3-5 join-any/cancellation, A6-4
+> BPMN compile/preview, public webhook/token emitter, and W7 result backwrite runtime.
 > Design-lock detail below retained for the record.
 
-The design-lock pins the first runtime slice as **A6-3-1 `condition_branch` /
-exclusive branch v1**, not full parallel DAG. Parallel fan-out, join-all, and
-join-any stay separate follow rungs. The first parallel follow rung is scoped as
-A6-3-4/W3-0 (`join_all` only); runtime remains gated.
+The design-lock pinned the first runtime slice as **A6-3-1 `condition_branch` /
+exclusive branch v1**, not full parallel DAG. The first parallel follow rung
+A6-3-4/W3 (`join_all` only) has now landed. `join_any` remains a separate follow
+rung.
 
 - **Adds:** graph fields (upstream/downstream edges, branch discriminator, join mode,
   branch result aggregation) and generalizes the linear executor into a DAG. This is the
   **largest single engine change** on the ladder.
 - **Must not (this rung):** no BPMN import; no approval coupling.
 - **Depends on:** A6-2 (job persistence + resume stable before fan-out/join).
-- **Gate:** A6-3-4/W3-0 docs-only scope gate exists; runtime still needs a named
-  parallel/join-all opt-in.
+- **Gate:** A6-3-4/W3 `join_all` landed after named opt-in (#2496/#2500/#2501).
+  `join_any`, branch-local waits/nesting, BPMN, and approval coupling still need
+  separate named opt-ins.
 - **Test surface:** see A6-0 scout "→ A6-3" (branch picks exactly one, parallel fan-out
   independent, join-all waits, join-any cancels with explicit audit, branch failures
   isolated).
@@ -226,7 +239,7 @@ A6-3-4/W3-0 (`join_all` only); runtime remains gated.
   graphs, assignments, permissions, and version freezing; automation stores only the
   waiting job, bridge lineage, and terminal outcome needed to continue the job plane.
 - **Still separate:** W7 approval result backwrite runtime, approval trigger bindings,
-  public webhook/token emitters, branch-local wait/nesting, parallel/join, and BPMN
+  public webhook/token emitters, branch-local wait/nesting, join-any / parallel follow-ups, and BPMN
   compile/preview all require separate named gates. W7-0 now has a docs-only scope
   gate (`automation-approval-result-backwrite-scope-gate-20260611.md`); W7-1 runtime
   remains gated.
@@ -254,7 +267,8 @@ A6-3-4/W3-0 (`join_all` only); runtime remains gated.
   A6-0/A6-1 scouts for test surface and runtime rationale.
 - A6-1 enable-writer **landed** (#2130/#2191/#2193) and A6-2 suspend/resume **landed**
   2026-06-03 (#2236 design-lock + #2237 impl, admin-gated v1); A6-3 exclusive branch
-  v1 **landed** (#2321/#2339/#2348); A6-5 `start_approval` bridge **landed** (#2469).
-  A6-3-3, A6-3-4/W3-1 parallel join-all runtime, A6-3-5 join-any, A6-4 BPMN
+  v1 **landed** (#2321/#2339/#2348); A6-3-4/W3 parallel join-all **landed**
+  (#2496/#2500/#2501); A6-5 `start_approval` bridge **landed** (#2469).
+  A6-3-3, A6-3-5 join-any, A6-4 BPMN
   compile/preview, public webhook/token emitter, and W7 result backwrite
   runtime remain demand-gated.
