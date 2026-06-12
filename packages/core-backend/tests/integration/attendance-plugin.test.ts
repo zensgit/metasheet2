@@ -5741,6 +5741,192 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('lets scoped schedule-group actors view, edit, and dispatch only within their small organization', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    expect(dbUrl).toBeTruthy()
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const orgId = 'default'
+    const scopedUserId = `attendance-small-org-scoped-${runSuffix}`
+    const dispatchUserId = `attendance-small-org-member-${runSuffix}`
+    const otherUserId = `attendance-small-org-other-${runSuffix}`
+    const rootId = randomUuidV4()
+    const childId = randomUuidV4()
+    const siblingId = randomUuidV4()
+    const viewEditScopeId = randomUuidV4()
+    const dispatchScopeId = randomUuidV4()
+    const codePrefix = `so2-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(scopedUserId)}&roles=user&perms=attendance:read,attendance:write`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) {
+      await pool.end().catch(() => undefined)
+      return
+    }
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+
+    const expectRouteError = (response: HttpResponse, status: number, code: string) => {
+      expect(response.status, response.raw).toBe(status)
+      const error = (response.body as { error?: { code?: string } } | undefined)?.error
+      expect(error?.code).toBe(code)
+    }
+
+    try {
+      process.env.RBAC_BYPASS = 'false'
+      await pool.query(
+        `INSERT INTO attendance_schedule_groups (id, org_id, name, code, parent_id, department_ref, is_active)
+         VALUES
+           ($1, $4, $5, $8, NULL, $11, true),
+           ($2, $4, $6, $9, $1, $12, true),
+           ($3, $4, $7, $10, $1, $13, true)`,
+        [
+          rootId,
+          childId,
+          siblingId,
+          orgId,
+          `SO2 Root ${runSuffix}`,
+          `SO2 Child ${runSuffix}`,
+          `SO2 Sibling ${runSuffix}`,
+          `${codePrefix}-root`,
+          `${codePrefix}-child`,
+          `${codePrefix}-sibling`,
+          `dept-root-${runSuffix}`,
+          `dept-child-${runSuffix}`,
+          `dept-sibling-${runSuffix}`,
+        ]
+      )
+      await pool.query(
+        `INSERT INTO attendance_scheduler_scopes
+         (id, org_id, subject_type, subject_ref, actions, scope, is_active, created_by, updated_by)
+         VALUES
+           ($1, $3, 'user', $4, ARRAY['view', 'edit']::text[], $5::jsonb, true, 'integration-test', 'integration-test'),
+           ($2, $3, 'user', $4, ARRAY['dispatch']::text[], $6::jsonb, true, 'integration-test', 'integration-test')`,
+        [
+          viewEditScopeId,
+          dispatchScopeId,
+          orgId,
+          scopedUserId,
+          JSON.stringify({ departments: [`dept-child-${runSuffix}`] }),
+          JSON.stringify({ scheduleGroupIds: [childId], userIds: [dispatchUserId] }),
+        ]
+      )
+
+      const adminCreateAttempt = await requestJson(`${baseUrl}/api/attendance/schedule-groups`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ name: `SO2 Forbidden Create ${runSuffix}`, code: `${codePrefix}-forbidden` }),
+      })
+      expectRouteError(adminCreateAttempt, 403, 'FORBIDDEN')
+
+      const listResponse = await requestJson(`${baseUrl}/api/attendance/schedule-groups?includeInactive=true&pageSize=200`, { headers })
+      expect(listResponse.status, listResponse.raw).toBe(200)
+      const listedItems = ((listResponse.body as { data?: { items?: Array<{ id?: string }> } } | undefined)?.data?.items ?? [])
+        .map(item => item.id)
+      expect(listedItems).toContain(childId)
+      expect(listedItems).not.toContain(rootId)
+      expect(listedItems).not.toContain(siblingId)
+
+      const childLookup = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${childId}`, { headers })
+      expect(childLookup.status, childLookup.raw).toBe(200)
+      expect((childLookup.body as { data?: { departmentRef?: string | null } } | undefined)?.data?.departmentRef).toBe(`dept-child-${runSuffix}`)
+
+      const siblingLookup = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${siblingId}`, { headers })
+      expectRouteError(siblingLookup, 403, 'SCHEDULER_SCOPE_FORBIDDEN')
+
+      const childEdit = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${childId}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ description: `scoped edit ${runSuffix}` }),
+      })
+      expect(childEdit.status, childEdit.raw).toBe(200)
+      expect((childEdit.body as { data?: { description?: string | null } } | undefined)?.data?.description).toBe(`scoped edit ${runSuffix}`)
+
+      const childScopeMove = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${childId}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ departmentRef: `dept-sibling-${runSuffix}` }),
+      })
+      expectRouteError(childScopeMove, 403, 'SCHEDULER_SCOPE_FORBIDDEN')
+      const childRows = await pool.query('SELECT department_ref FROM attendance_schedule_groups WHERE id = $1', [childId])
+      expect(childRows.rows[0]?.department_ref).toBe(`dept-child-${runSuffix}`)
+
+      const siblingEdit = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${siblingId}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ description: `should not edit ${runSuffix}` }),
+      })
+      expectRouteError(siblingEdit, 403, 'SCHEDULER_SCOPE_FORBIDDEN')
+      const siblingRows = await pool.query('SELECT description FROM attendance_schedule_groups WHERE id = $1', [siblingId])
+      expect(siblingRows.rows[0]?.description ?? null).toBeNull()
+
+      const memberAdd = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${childId}/members`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ userIds: [dispatchUserId], role: 'lead', source: 'manual' }),
+      })
+      expect(memberAdd.status, memberAdd.raw).toBe(200)
+      const createdMembers = (memberAdd.body as { data?: { items?: Array<{ id?: string; userId?: string; role?: string }> } } | undefined)?.data?.items ?? []
+      expect(createdMembers.map(item => item.userId)).toEqual([dispatchUserId])
+      expect(createdMembers[0]?.role).toBe('lead')
+      const createdMemberId = createdMembers[0]?.id
+      expect(createdMemberId).toBeTruthy()
+
+      const disallowedUserAdd = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${childId}/members`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ userIds: [otherUserId], role: 'member', source: 'manual' }),
+      })
+      expectRouteError(disallowedUserAdd, 403, 'SCHEDULER_SCOPE_FORBIDDEN')
+
+      const siblingMemberAdd = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${siblingId}/members`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ userIds: [dispatchUserId], role: 'member', source: 'manual' }),
+      })
+      expectRouteError(siblingMemberAdd, 403, 'SCHEDULER_SCOPE_FORBIDDEN')
+
+      if (createdMemberId) {
+        const memberDelete = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${childId}/members/${createdMemberId}`, {
+          method: 'DELETE',
+          headers,
+        })
+        expect(memberDelete.status, memberDelete.raw).toBe(200)
+        expect((memberDelete.body as { data?: { id?: string } } | undefined)?.data?.id).toBe(createdMemberId)
+        const deletedMemberRows = await pool.query('SELECT id FROM attendance_schedule_group_members WHERE id = $1', [createdMemberId])
+        expect(deletedMemberRows.rowCount).toBe(0)
+      }
+
+      const siblingMemberId = randomUuidV4()
+      await pool.query(
+        `INSERT INTO attendance_schedule_group_members (id, org_id, schedule_group_id, user_id, role, source)
+         VALUES ($1, $2, $3, $4, 'member', 'manual')`,
+        [siblingMemberId, orgId, siblingId, dispatchUserId]
+      )
+      const siblingMemberDelete = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${siblingId}/members/${siblingMemberId}`, {
+        method: 'DELETE',
+        headers,
+      })
+      expectRouteError(siblingMemberDelete, 403, 'SCHEDULER_SCOPE_FORBIDDEN')
+      const siblingMemberRows = await pool.query('SELECT id FROM attendance_schedule_group_members WHERE id = $1', [siblingMemberId])
+      expect(siblingMemberRows.rowCount).toBe(1)
+    } finally {
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.query('DELETE FROM attendance_schedule_group_members WHERE org_id = $1 AND schedule_group_id = ANY($2::uuid[])', [orgId, [childId, siblingId, rootId]]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_scheduler_scopes WHERE id = ANY($1::uuid[])', [[viewEditScopeId, dispatchScopeId]]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_schedule_groups WHERE id = ANY($1::uuid[])', [[childId, siblingId, rootId]]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_schedule_groups WHERE code LIKE $1', [`${codePrefix}%`]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('rejects non-UUID shift references for rotation rules, including UUID-like shift names', async () => {
     if (!baseUrl) return
 
