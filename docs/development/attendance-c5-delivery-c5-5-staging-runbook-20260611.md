@@ -60,6 +60,25 @@ C5_FAKE_CHANNEL_STAGING_SMOKE_PASS deploy=<sha> stamp=c5-delivery-... channel=fa
 
 Record the result, but keep the tracker at 🟡.
 
+### 2026-06-12 fake-channel staging evidence
+
+On 2026-06-12, staging was deployed to `a1d8a6c62e5feb526d5d854dbc7805770c904941` (the #2528
+runbook/script commit) and migrated from 185 to 190 applied migrations, including
+`zzzz20260611120000_create_attendance_notification_deliveries`. The first migration attempt failed with
+Postgres `53100 No space left on device` while the root filesystem was at 100%; the operator cleanup removed
+unused Docker images/build cache only (no volumes or DB data) and left the root filesystem at about 52% used
+before retrying the migrations successfully.
+
+The fake-channel smoke then ran from the deployed backend container and passed:
+
+```text
+C5_FAKE_CHANNEL_STAGING_SMOKE_PASS deploy=a1d8a6c62e5feb526d5d854dbc7805770c904941 stamp=c5-delivery-mqajq5o8 channel=fake residue=0
+```
+
+It covered both source producers, subject + owner + sub_owner fan-out, delivery worker sent/retry/failed
+state flow, repeat idempotency, C5-4 admin counters, and cleanup residue 0. This evidence is **C5-5a only**:
+it keeps C5 at 🟡 because no real DingTalk work notification was sent.
+
 ## Run Real DingTalk Smoke
 
 This sends six real DingTalk work notifications: two sources times subject, owner, and sub_owner. Use a test DingTalk user or a staging-only recipient.
@@ -94,6 +113,18 @@ C5_REAL_DINGTALK_STAGING_SMOKE_PASS deploy=<sha> stamp=c5-delivery-... channel=d
 ```
 
 On PASS, close C5 in the tracker with deploy SHA, stamp, channel mode, and residue.
+
+### 2026-06-12 real-mode blocker
+
+The same staging environment could not run the real DingTalk smoke yet: the deployed backend had no
+`DINGTALK_APP_KEY`, `DINGTALK_APP_SECRET`, or `DINGTALK_AGENT_ID` env values, and staging DB had no
+`directory_integrations`, `directory_accounts`, or `directory_account_links` rows to copy from via
+`DINGTALK_SMOKE_CONFIG_INTEGRATION_ID`. To run C5-5b, first provide either:
+
+- backend DingTalk work-notification env config plus `DINGTALK_SMOKE_EXTERNAL_USER_ID`; or
+- a stored active DingTalk integration id plus a test `DINGTALK_SMOKE_EXTERNAL_USER_ID`.
+
+Do not mark C5 ✅ from the fake-channel PASS alone.
 
 ## Expected Output Shape
 
