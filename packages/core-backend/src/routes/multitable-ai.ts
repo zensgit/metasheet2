@@ -397,7 +397,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       }
       const { access, capabilities } = readable
 
-      const patchContext = await buildRecordPatchContext(query, sheetId, access, capabilities)
+      const patchContext = await buildRecordPatchContext(req, query, sheetId, access, capabilities)
       if (!patchContext) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
@@ -511,7 +511,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
       }
 
-      const patchContext = await buildRecordPatchContext(query, sheetId, access, capabilities)
+      const patchContext = await buildRecordPatchContext(req, query, sheetId, access, capabilities)
       if (!patchContext) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
