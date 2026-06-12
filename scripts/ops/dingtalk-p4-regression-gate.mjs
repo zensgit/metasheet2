@@ -70,6 +70,11 @@ const OPS_CHECKS = [
     command: ['node', '--test', 'scripts/ops/attendance-c5-real-dingtalk-preflight.test.mjs'],
   },
   {
+    id: 'ops-backend-docker-image-contract',
+    label: 'Backend Docker image ops-script contract',
+    command: ['node', '--test', 'scripts/ops/backend-docker-image-contract.test.mjs'],
+  },
+  {
     id: 'ops-diff-check',
     label: 'Git whitespace diff check',
     command: ['git', 'diff', '--check'],

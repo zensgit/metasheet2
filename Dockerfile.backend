@@ -42,6 +42,7 @@ COPY --from=builder /app/pnpm-lock.yaml ./pnpm-lock.yaml
 COPY --from=builder /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
 COPY --from=builder /app/packages ./packages
 COPY --from=builder /app/plugins ./plugins
+COPY --from=builder /app/scripts ./scripts
 
 EXPOSE 8900
 CMD ["node", "packages/core-backend/dist/src/index.js"]
