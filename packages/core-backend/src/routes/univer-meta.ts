@@ -1646,6 +1646,10 @@ async function loadLinkValuesByRecord(
  * Intra-sheet / intra-record only — no cross-sheet read, no perm gate.
  */
 async function recalculateFormulaFields(
+  // §2a.3 B1: `req` is the WRITING actor — needed to resolve write-side formula taint so a
+  // foreign-field-denied writer never recomputes (and persists) a permission-degraded formula
+  // value into shared meta_records.data. See the taint skip below.
+  req: Request,
   query: QueryFn,
   sheetId: string,
   fields: UniverMetaField[],
@@ -1693,6 +1697,17 @@ async function recalculateFormulaFields(
   const dependentFormulaFieldIds = new Set(
     (depRes.rows as any[]).map((row) => String(row.field_id)).filter((id) => formulaFieldIdSet.has(id)),
   )
+  if (dependentFormulaFieldIds.size === 0) return []
+
+  // §2a.3 B1 (write-side taint skip-recompute): the write path hydrates rows via applyLookupRollup,
+  // which MASKS a lookup/rollup over a foreign field this actor cannot read (→ []). Recomputing a
+  // formula against that masked input would PERSIST a permission-degraded value into shared
+  // meta_records.data (recalculateRecordFromData unconditionally writes back). Drop any formula
+  // whose deps (transitively) reach a lookup/rollup masked for THIS writer, leaving the previously
+  // stored AUTHORIZED value untouched — symmetric to the export/aggregate/read taint sinks. An
+  // authorized writer (nothing masked) gets an empty tainted set → recompute is unchanged.
+  const taintedForWriter = await resolveTaintedFormulaFieldIds(req, query, sheetId, dependentFormulaFieldIds)
+  for (const id of taintedForWriter) dependentFormulaFieldIds.delete(id)
   if (dependentFormulaFieldIds.size === 0) return []
 
   const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
@@ -1824,20 +1839,25 @@ function shouldMaskForeignField(
 }
 
 /**
- * §2a.3 export taint-check — returns the subset of `exportFormulaFieldIds` whose materialized
- * value must be DROPPED from the export because the formula (directly OR transitively via
+ * §2a.3 formula taint-check (surface-neutral) — returns the subset of `candidateFormulaFieldIds`
+ * whose MATERIALIZED value must be DROPPED because the formula (directly OR transitively via
  * formula→formula dependency edges within this sheet) reads a lookup/rollup field whose foreign
  * target field is masked for `req`'s actor (cross-base unconditional / same-base default unless
  * opt-out). Transitive closure is bounded to same-sheet formula→formula edges, which is the
  * model `formula_dependencies` records; cross-sheet formula chaining is not part of the model.
+ *
+ * Applied UNIFORMLY across every sink that reads materialized formula values RAW (without
+ * applyLookupRollup): export-xlsx, view-aggregate, the /view read/JSON path, record-history, AND
+ * the write-side recompute (drop the tainted ids before recompute so a denied actor's write never
+ * degrades the shared authorized formula value).
  */
-async function resolveTaintedFormulaExportFieldIds(
+async function resolveTaintedFormulaFieldIds(
   req: Request,
   query: QueryFn,
   sheetId: string,
-  exportFormulaFieldIds: Set<string>,
+  candidateFormulaFieldIds: Set<string>,
 ): Promise<Set<string>> {
-  if (exportFormulaFieldIds.size === 0) return new Set()
+  if (candidateFormulaFieldIds.size === 0) return new Set()
 
   const fields = (await loadFieldsForSheetShared(query, sheetId)) as UniverMetaField[]
   // Map each lookup/rollup field id → its parsed config (the foreign target it reads).
@@ -1895,10 +1915,13 @@ async function resolveTaintedFormulaExportFieldIds(
   }
   if (maskedComputedFieldIds.size === 0) return new Set()
 
-  // For each exportable formula field, transitively resolve whether it reaches a masked computed
-  // field via same-sheet formula→formula edges (bounded — visited-guarded, no cycles).
+  // For each candidate FORMULA field, transitively resolve whether it reaches a masked computed
+  // field via same-sheet formula→formula edges (bounded — visited-guarded, no cycles). Non-formula
+  // candidate ids are ignored defensively so a caller may pass a broad allow-set (e.g. history)
+  // without ever dropping a non-formula field.
   const tainted = new Set<string>()
-  for (const formulaFieldId of exportFormulaFieldIds) {
+  for (const formulaFieldId of candidateFormulaFieldIds) {
+    if (!formulaFieldIds.has(formulaFieldId)) continue
     const stack = [formulaFieldId]
     const visited = new Set<string>()
     let leaks = false
@@ -2247,6 +2270,7 @@ async function computeDependentLookupRollupRecords(
       // computed-on-read. One hop only: results never re-enter this propagation.
       const hydratedDataByRecord = new Map(rows.map((row) => [row.id, row.data]))
       const formulaRecords = await recalculateFormulaFields(
+        req,
         query,
         sheetId,
         fields,
@@ -2657,7 +2681,8 @@ export function createRecordWriteHelpers(req: Request, _pool?: { query: QueryFn 
     applyLookupRollup: (q, sid, f, rows, rl, lv) => applyLookupRollup(req, q, sid, f, rows, rl, lv),
     computeDependentLookupRollupRecords: (q, sourceSheetId, ids, changed) =>
       computeDependentLookupRollupRecords(req, q, sourceSheetId, ids, changed),
-    recalculateFormulaFields,
+    recalculateFormulaFields: (q, sid, f, ids, changed, hydrated) =>
+      recalculateFormulaFields(req, q, sid, f, ids, changed, hydrated),
     loadLinkValuesByRecord,
     buildLinkSummaries: (q, rows, rl, lv) => buildLinkSummaries(req, q, rows, rl, lv),
     buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),
@@ -4938,6 +4963,18 @@ export function univerMetaRouter(): Router {
       }
 
       const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+      // §2a.3 (m1): a record-revision snapshot/patch can carry a MATERIALIZED formula value whose
+      // foreign lookup input is masked for this actor; the source-sheet allowed-field set above does
+      // not catch it (the formula field itself is source-visible). Taint-drop those formula fields
+      // from the redaction allow-set — same resolver/posture as export/aggregate/read. Cheap (one
+      // resolver call per history request; snapshot capture is often null anyway).
+      const taintedHistoryFieldIds = await resolveTaintedFormulaFieldIds(
+        req,
+        pool.query.bind(pool),
+        sheetId,
+        new Set([...allowedFieldIds]),
+      )
+      for (const id of taintedHistoryFieldIds) allowedFieldIds.delete(id)
       const items = (await listRecordRevisions(pool.query.bind(pool), { sheetId, recordId, limit, offset }))
         .map((item) => redactRecordRevisionEntry(item, allowedFieldIds))
       return res.json({ ok: true, data: { items, limit, offset } })
@@ -6653,7 +6690,7 @@ export function univerMetaRouter(): Router {
       // formula→formula edges) depends on a lookup/rollup whose foreign target field is masked
       // for THIS actor (cross-base unconditional / same-base default unless opt-out), drop the
       // WHOLE formula column — consistent with the field-level export masking above.
-      const tainted = await resolveTaintedFormulaExportFieldIds(
+      const tainted = await resolveTaintedFormulaFieldIds(
         req,
         pool.query.bind(pool),
         sheetId,
@@ -6773,6 +6810,19 @@ export function univerMetaRouter(): Router {
       const aggregateFieldTypeById = new Map(
         visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => [field.id, field.type]),
       )
+
+      // §2a.3 (M1): view-aggregate reads MATERIALIZED formula values raw (no applyLookupRollup). A
+      // formula over a lookup/rollup of an UNREADABLE foreign field passes the source-sheet gate
+      // above (the formula field itself isn't denied) but its count/countDistinct/countNonEmpty
+      // would leak the foreign-derived cardinality/non-emptiness. Drop tainted formula fields from
+      // the aggregate output set (same taint resolver as export/read), fail-closed.
+      const taintedAggFieldIds = await resolveTaintedFormulaFieldIds(
+        req,
+        pool.query.bind(pool),
+        sheetId,
+        new Set([...aggregateFieldTypeById.entries()].filter(([, type]) => type === 'formula').map(([id]) => id)),
+      )
+      for (const id of taintedAggFieldIds) aggregateFieldTypeById.delete(id)
 
       // full filtered set = all records + persisted filterInfo + search, resolved over the SAME field set
       // as /view (visibleFields) → identical filtered set
@@ -7011,6 +7061,20 @@ export function univerMetaRouter(): Router {
       const allowedFieldIds = new Set(
         visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id),
       )
+      // §2a.3 read/JSON taint mask: the LOOKUP column is masked by applyLookupRollup below, but the
+      // MATERIALIZED FORMULA column is read straight from meta_records.data and would otherwise leak
+      // a formula-over-denied-foreign-lookup value. Drop tainted formula fields from allowedFieldIds
+      // (the data-mask gate at filterRecordDataByFieldIds below) so the value never reaches the wire
+      // — same taint resolver / fail-closed posture as export, aggregate, and the write path. The
+      // column still appears in the returned field list (parity with how a masked lookup keeps its
+      // column); only the per-row materialized value is withheld.
+      const taintedReadFieldIds = await resolveTaintedFormulaFieldIds(
+        req,
+        pool.query.bind(pool),
+        sheetId,
+        new Set(visiblePropertyFields.filter((field) => field.type === 'formula' && allowedFieldIds.has(field.id)).map((field) => field.id)),
+      )
+      for (const id of taintedReadFieldIds) allowedFieldIds.delete(id)
       const fieldTypeById = new Map(visiblePropertyFields.map((f) => [f.id, f.type] as const))
       // #2038 (a): search/sort/filter SELECTION is gated by allowedFieldIds (layer-3, the field-read gate) —
       // a field_permissions-denied field is treated as unavailable (not searchable/filterable/sortable),
