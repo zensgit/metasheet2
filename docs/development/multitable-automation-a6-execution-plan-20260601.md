@@ -32,8 +32,9 @@ treatment **on purpose**:
   the A6-3-2 frontend/readability slice **landed via #2339 + #2348**; the
   A6-3-4/W3 parallel fan-out + join-all slice **landed via #2496 + #2500 + #2501**.
   A6-3-3 branch-local wait/nesting and A6-3-5 join-any stay deferred. A6-5's first `start_approval` bridge slice **landed via #2469**
-  as a named cross-surface carve-out on top of A6-2 + W5 completion events. A6-4 remains
-  plan-level only.
+  as a named cross-surface carve-out on top of A6-2 + W5 completion events. A6-4 now has
+  a docs-only scope gate (`multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`);
+  implementation remains not started.
 
 The original ladder was:
 **A6-1 enable-writer → A6-2 suspend/resume → A6-3 branch/parallel DAG → A6-4 BPMN
@@ -210,18 +211,24 @@ rung.
   independent, join-all waits, join-any cancels with explicit audit, branch failures
   isolated).
 
-## 4. A6-4 BPMN compile/preview adapter — PLAN-LEVEL (design deferred to its scout)
+## 4. A6-4 BPMN compile/preview adapter — SCOPED (implementation not started)
+
+Scope gate:
+`multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`.
 
 - **Adds:** parse a constrained BPMN subset, compile-**preview** into automation/approval
   definitions, and return a gap report for unsupported nodes.
 - **Must not — permanent positioning:** never execute BPMN, never a second status model,
   never a separate audit/log store, no side-effecting preview. BPMN is a modeling/preview
   input, never a fourth runtime.
-- **Depends on:** A6-3 (gateways map onto branch/parallel; without it, gateways can only be
-  reported as unsupported).
-- **Gate:** a named modeling/preview demand.
-- **Test surface:** see A6-0 scout "→ A6-4" (preview side-effect-free, deterministic gap
-  report, gateway mappings backed by A6-3 tests, no live BPMN route).
+- **Depends on:** landed A6-3 `condition_branch` and `parallel_branch` `joinMode: 'all'`
+  mappings. Branch-local waits, join-any, public webhook/token emitters, and result backwrite
+  remain gaps unless their own rungs are explicitly unlocked.
+- **Gate:** a named modeling/preview demand. "Continue automation" is not enough.
+- **Test surface:** preview side-effect-free, deterministic gap report, gateway mappings backed
+  by A6-3 tests, no live BPMN route, no `BPMNWorkflowEngine.deployProcess()` /
+  `startProcess()` call, and no writes to BPMN, workflow, automation, approval, execution, or
+  job tables.
 
 ## 5. A6-5 approval-as-job — LANDED first slice (#2469); W7 backwrite still separate
 

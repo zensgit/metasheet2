@@ -2,7 +2,7 @@
 
 Date: 2026-06-09
 
-Grounded on: `origin/main@88f5f538a`
+Grounded on: `origin/main@52ce8279d`
 
 Scope: MetaSheet2 workflow, approval, and multitable automation as one product
 target. This is a completion definition and execution ledger, not a sprint
@@ -66,7 +66,7 @@ but it is not yet the unified workflow automation authoring layer.
 | BPMN draft API | Existing draft save/load/update/deploy support. |
 | Designer hub/catalog | Existing list/template/team-view/hub improvements. |
 | Runtime positioning | Must stay modeling/preview first. v1 must not route production execution through a separate BPMN runtime. |
-| Still missing | Compile/preview adapter into automation/approval definitions, deterministic gap report, no-live-runtime guard. |
+| Still missing | Compile/preview adapter implementation into automation/approval definitions. A6-4/W8 scope is now locked in `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`: deterministic gap report, side-effect-free preview, no-live-runtime guard. |
 
 ## 2. Definition of Complete v1
 
@@ -125,7 +125,7 @@ operate a practical business workflow using existing product surfaces:
 | W6-1 | Automation `start_approval` runtime | Landed #2469 | Starts one approval instance from a published template, persists the approval bridge, creates a suspended C1 job, resumes/fails from W5 terminal completion events, and guards retry duplicates. |
 | W7-0 | Approval result backwrite scope-gate | Scope-gate document added; runtime not started | `automation-approval-result-backwrite-scope-gate-20260611.md` locks explicit mapping, idempotency, permission/field guards, redaction, and tests. |
 | W7-1 | Approval result backwrite runtime | Not started; after W6 operator smoke or named runtime unlock | Explicit mapping writes approved/rejected/revoked/cancelled outcomes to multitable record fields with audit and permission checks; `return` transition backwrite needs a separate named scope if required. |
-| W8 | BPMN compile/preview adapter | Not started; after W3 minimum | Constrained BPMN subset compiles into automation/approval preview plus gap report; no live execution route. |
+| W8 | BPMN compile/preview adapter | Scope-gate recorded; implementation not started | `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md` locks the constrained subset, side-effect-free preview, gap report, and hard no-live-runtime boundary. Runtime implementation still needs explicit opt-in. |
 | W9 | Public webhook resume token emitter | Not started; use-case gated | External consumer can receive a token/callback URL safely; auth, expiry, replay, and redaction are locked before public route. |
 | W10 | Field-visibility / richer approval authoring | Optional follow-up | Existing `visibilityRule` data can be authored, not only preserved; unsupported graph constructs remain fail-closed. |
 
@@ -146,8 +146,10 @@ Why:
 The next cross-surface candidate is **W7 approval result backwrite**. W7-0 now
 has a scope-gate document, but W7-1 runtime remains gated because it writes
 business data and changes record state. W3-1 has now landed the minimum
-parallel `join_all` semantics that BPMN parallel-gateway preview can map to,
-but BPMN still needs its own compile/preview scout and must remain non-runtime.
+parallel `join_all` semantics that BPMN parallel-gateway preview can map to.
+W8/A6-4 now has its own compile/preview scope gate, and remains non-runtime:
+implementation may only produce side-effect-free preview plus gap report unless
+separately unlocked.
 
 ## 5. Non-goals for v1
 
@@ -176,6 +178,8 @@ needed, one verification/runbook:
   `automation-approval-result-backwrite-scope-gate-20260611.md`.
 - A6-3-4 / W3 parallel join-all scope:
   `multitable-automation-a6-3-parallel-join-all-scope-gate-20260611.md`.
+- A6-4 / W8 BPMN compile-preview scope:
+  `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`.
 
 If code lands but the tracker still says "not started", the tracker is wrong
 and should be corrected before starting a new rung.
