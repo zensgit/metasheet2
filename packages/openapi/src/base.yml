@@ -590,6 +590,72 @@ components:
           type: string
           format: date-time
 
+    AttendanceScheduleDispatchRequest:
+      type: object
+      properties:
+        id: { type: string }
+        requestId: { type: string }
+        orgId: { type: string }
+        dispatchType:
+          type: string
+          enum: [daily]
+        userId: { type: string }
+        targetScheduleGroupId: { type: string }
+        targetAttendanceGroupId:
+          type: string
+          nullable: true
+        targetDepartmentRef:
+          type: string
+          nullable: true
+        targetShiftId: { type: string }
+        slotIndex:
+          type: integer
+          minimum: 0
+          maximum: 2
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        publishStatus:
+          type: string
+          enum: [pending, published, cancelled]
+        sourceKey: { type: string }
+        assignmentIds:
+          type: array
+          items: { type: string }
+        membershipId:
+          type: string
+          nullable: true
+        finalizedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        request:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string }
+            status:
+              type: string
+              enum: [pending, approved, rejected, cancelled]
+            workDate:
+              type: string
+              format: date
+            reason:
+              type: string
+              nullable: true
+            approvalInstanceId:
+              type: string
+              nullable: true
+
     AttendanceAnomaly:
       type: object
       properties:

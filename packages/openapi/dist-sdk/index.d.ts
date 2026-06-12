@@ -1982,6 +1982,237 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/schedule-dispatch-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List schedule-dispatch requests visible to the current actor
+         * @description Central admins see all rows; scoped actors see rows covered by scheduler-scope dispatch on user, target schedule group, and target department.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    status?: "pending" | "approved" | "rejected" | "cancelled";
+                    userId?: string;
+                    targetScheduleGroupId?: string;
+                    /** @description Include dispatch windows ending on or after this date. */
+                    from?: string;
+                    /** @description Include dispatch windows starting on or before this date. */
+                    to?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceScheduleDispatchRequest"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /**
+         * Create a schedule-dispatch request
+         * @description Creates the schedule_dispatch approval envelope and dispatch detail. It does not write schedule assignments or membership rows until final approval.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description Dispatched employee user id. */
+                        userId?: string;
+                        /** @description Compatibility snake_case alias for userId. */
+                        user_id?: string;
+                        /** @description Target schedule group. The server reloads it and derives targetDepartmentRef. */
+                        targetScheduleGroupId?: string;
+                        /** @description Compatibility snake_case alias for targetScheduleGroupId. */
+                        target_schedule_group_id?: string;
+                        targetShiftId?: string;
+                        /** @description Compatibility snake_case alias for targetShiftId. */
+                        target_shift_id?: string;
+                        /** Format: date */
+                        startDate?: string;
+                        /**
+                         * Format: date
+                         * @description Compatibility snake_case alias for startDate.
+                         */
+                        start_date?: string;
+                        /**
+                         * Format: date
+                         * @description Defaults to startDate when omitted.
+                         */
+                        endDate?: string;
+                        /**
+                         * Format: date
+                         * @description Compatibility snake_case alias for endDate.
+                         */
+                        end_date?: string;
+                        /** @default 0 */
+                        slotIndex?: number;
+                        /** @description Compatibility snake_case alias for slotIndex. */
+                        slot_index?: number;
+                        reason?: string;
+                        /** @description Optional active schedule_dispatch approval flow. If omitted, exactly one active schedule_dispatch flow must exist. */
+                        approvalFlowId?: string | null;
+                        /** @description Compatibility snake_case alias for approvalFlowId. */
+                        approval_flow_id?: string | null;
+                    } & ((unknown | unknown) & (unknown | unknown) & (unknown | unknown) & (unknown | unknown));
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                request?: components["schemas"]["AttendanceRequest"];
+                                scheduleDispatch?: components["schemas"]["AttendanceScheduleDispatchRequest"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/schedule-dispatch-requests/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a schedule-dispatch request by id */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                scheduleDispatch?: components["schemas"]["AttendanceScheduleDispatchRequest"];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/schedule-dispatch-requests/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel a pending schedule-dispatch request
+         * @description Cancels the approval envelope and marks the dispatch detail cancelled. Published assignment reversal is out of scope for D2.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                scheduleDispatch?: components["schemas"]["AttendanceScheduleDispatchRequest"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/rules/default": {
         parameters: {
             query?: never;
@@ -14110,6 +14341,43 @@ export interface components {
             updatedAt?: string;
             /** Format: date-time */
             updated_at?: string;
+        };
+        AttendanceScheduleDispatchRequest: {
+            id?: string;
+            requestId?: string;
+            orgId?: string;
+            /** @enum {string} */
+            dispatchType?: "daily";
+            userId?: string;
+            targetScheduleGroupId?: string;
+            targetAttendanceGroupId?: string | null;
+            targetDepartmentRef?: string | null;
+            targetShiftId?: string;
+            slotIndex?: number;
+            /** Format: date */
+            startDate?: string;
+            /** Format: date */
+            endDate?: string;
+            /** @enum {string} */
+            publishStatus?: "pending" | "published" | "cancelled";
+            sourceKey?: string;
+            assignmentIds?: string[];
+            membershipId?: string | null;
+            /** Format: date-time */
+            finalizedAt?: string | null;
+            /** Format: date-time */
+            createdAt?: string;
+            /** Format: date-time */
+            updatedAt?: string;
+            request?: {
+                id?: string;
+                /** @enum {string} */
+                status?: "pending" | "approved" | "rejected" | "cancelled";
+                /** Format: date */
+                workDate?: string;
+                reason?: string | null;
+                approvalInstanceId?: string | null;
+            } | null;
         };
         AttendanceAnomaly: {
             recordId?: string;

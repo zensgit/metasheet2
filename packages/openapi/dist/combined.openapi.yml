@@ -668,6 +668,88 @@ components:
         updated_at:
           type: string
           format: date-time
+    AttendanceScheduleDispatchRequest:
+      type: object
+      properties:
+        id:
+          type: string
+        requestId:
+          type: string
+        orgId:
+          type: string
+        dispatchType:
+          type: string
+          enum:
+            - daily
+        userId:
+          type: string
+        targetScheduleGroupId:
+          type: string
+        targetAttendanceGroupId:
+          type: string
+          nullable: true
+        targetDepartmentRef:
+          type: string
+          nullable: true
+        targetShiftId:
+          type: string
+        slotIndex:
+          type: integer
+          minimum: 0
+          maximum: 2
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        publishStatus:
+          type: string
+          enum:
+            - pending
+            - published
+            - cancelled
+        sourceKey:
+          type: string
+        assignmentIds:
+          type: array
+          items:
+            type: string
+        membershipId:
+          type: string
+          nullable: true
+        finalizedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        request:
+          type: object
+          nullable: true
+          properties:
+            id:
+              type: string
+            status:
+              type: string
+              enum:
+                - pending
+                - approved
+                - rejected
+                - cancelled
+            workDate:
+              type: string
+              format: date
+            reason:
+              type: string
+              nullable: true
+            approvalInstanceId:
+              type: string
+              nullable: true
     AttendanceAnomaly:
       type: object
       properties:
@@ -6763,6 +6845,277 @@ paths:
                     properties:
                       shiftSwap:
                         $ref: '#/components/schemas/AttendanceShiftSwapRequest'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/attendance/schedule-dispatch-requests:
+    x-plugin: plugin-attendance
+    post:
+      summary: Create a schedule-dispatch request
+      description: >-
+        Creates the schedule_dispatch approval envelope and dispatch detail. It
+        does not write schedule assignments or membership rows until final
+        approval.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              allOf:
+                - anyOf:
+                    - required:
+                        - userId
+                    - required:
+                        - user_id
+                - anyOf:
+                    - required:
+                        - targetScheduleGroupId
+                    - required:
+                        - target_schedule_group_id
+                - anyOf:
+                    - required:
+                        - targetShiftId
+                    - required:
+                        - target_shift_id
+                - anyOf:
+                    - required:
+                        - startDate
+                    - required:
+                        - start_date
+              properties:
+                userId:
+                  type: string
+                  description: Dispatched employee user id.
+                user_id:
+                  type: string
+                  description: Compatibility snake_case alias for userId.
+                targetScheduleGroupId:
+                  type: string
+                  description: >-
+                    Target schedule group. The server reloads it and derives
+                    targetDepartmentRef.
+                target_schedule_group_id:
+                  type: string
+                  description: Compatibility snake_case alias for targetScheduleGroupId.
+                targetShiftId:
+                  type: string
+                target_shift_id:
+                  type: string
+                  description: Compatibility snake_case alias for targetShiftId.
+                startDate:
+                  type: string
+                  format: date
+                start_date:
+                  type: string
+                  format: date
+                  description: Compatibility snake_case alias for startDate.
+                endDate:
+                  type: string
+                  format: date
+                  description: Defaults to startDate when omitted.
+                end_date:
+                  type: string
+                  format: date
+                  description: Compatibility snake_case alias for endDate.
+                slotIndex:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                  default: 0
+                slot_index:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                  description: Compatibility snake_case alias for slotIndex.
+                reason:
+                  type: string
+                approvalFlowId:
+                  type: string
+                  nullable: true
+                  description: >-
+                    Optional active schedule_dispatch approval flow. If omitted,
+                    exactly one active schedule_dispatch flow must exist.
+                approval_flow_id:
+                  type: string
+                  nullable: true
+                  description: Compatibility snake_case alias for approvalFlowId.
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      request:
+                        $ref: '#/components/schemas/AttendanceRequest'
+                      scheduleDispatch:
+                        $ref: '#/components/schemas/AttendanceScheduleDispatchRequest'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    get:
+      summary: List schedule-dispatch requests visible to the current actor
+      description: >-
+        Central admins see all rows; scoped actors see rows covered by
+        scheduler-scope dispatch on user, target schedule group, and target
+        department.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum:
+              - pending
+              - approved
+              - rejected
+              - cancelled
+        - in: query
+          name: userId
+          schema:
+            type: string
+        - in: query
+          name: targetScheduleGroupId
+          schema:
+            type: string
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date
+          description: Include dispatch windows ending on or after this date.
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date
+          description: Include dispatch windows starting on or before this date.
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: >-
+                            #/components/schemas/AttendanceScheduleDispatchRequest
+                      total:
+                        type: integer
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/schedule-dispatch-requests/{id}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get a schedule-dispatch request by id
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      scheduleDispatch:
+                        $ref: '#/components/schemas/AttendanceScheduleDispatchRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/attendance/schedule-dispatch-requests/{id}/cancel:
+    x-plugin: plugin-attendance
+    post:
+      summary: Cancel a pending schedule-dispatch request
+      description: >-
+        Cancels the approval envelope and marks the dispatch detail cancelled.
+        Published assignment reversal is out of scope for D2.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      scheduleDispatch:
+                        $ref: '#/components/schemas/AttendanceScheduleDispatchRequest'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':

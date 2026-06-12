@@ -7635,6 +7635,48 @@ function mapAttendanceScheduleGroupMemberRow(row) {
   }
 }
 
+function normalizeScheduleDispatchDetailDate(value) {
+  return normalizeDateOnly(value) ?? (typeof value === 'string' ? value.slice(0, 10) : null)
+}
+
+function mapScheduleDispatchRequestRow(row) {
+  const startDate = normalizeScheduleDispatchDetailDate(row.start_date)
+  const endDate = normalizeScheduleDispatchDetailDate(row.end_date)
+  const requestWorkDate = normalizeScheduleDispatchDetailDate(row.request_work_date)
+  const assignmentIds = Array.isArray(row.assignment_ids)
+    ? row.assignment_ids.map(item => String(item)).filter(Boolean)
+    : normalizeStringArray(row.assignment_ids)
+  return {
+    id: row.request_id,
+    requestId: row.request_id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    dispatchType: row.dispatch_type ?? 'daily',
+    userId: row.user_id,
+    targetScheduleGroupId: row.target_schedule_group_id,
+    targetAttendanceGroupId: row.target_attendance_group_id ?? null,
+    targetDepartmentRef: row.target_department_ref ?? null,
+    targetShiftId: row.target_shift_id,
+    slotIndex: Number(row.slot_index ?? 0),
+    startDate,
+    endDate,
+    publishStatus: row.publish_status ?? 'pending',
+    sourceKey: row.source_key,
+    assignmentIds,
+    membershipId: row.membership_id ?? null,
+    finalizedAt: row.finalized_at ? new Date(row.finalized_at).toISOString() : null,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : undefined,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : undefined,
+    request: row.request_status === undefined ? undefined : {
+      id: row.request_id,
+      status: row.request_status,
+      workDate: requestWorkDate,
+      reason: row.request_reason ?? null,
+      metadata: normalizeMetadata(row.request_metadata),
+      approvalInstanceId: row.approval_instance_id ?? null,
+    },
+  }
+}
+
 function normalizeAttendanceScheduleGroupInput(value, existing = null) {
   const name = value.name !== undefined
     ? normalizeSafeDisplayName('name', value.name)
@@ -22024,6 +22066,24 @@ module.exports = {
       approval_flow_id: z.string().optional(),
     })
 
+    const scheduleDispatchCreateSchema = z.object({
+      userId: z.string().min(1).optional(),
+      user_id: z.string().min(1).optional(),
+      targetScheduleGroupId: z.string().optional(),
+      target_schedule_group_id: z.string().optional(),
+      targetShiftId: z.string().optional(),
+      target_shift_id: z.string().optional(),
+      startDate: z.string().optional(),
+      start_date: z.string().optional(),
+      endDate: z.string().optional(),
+      end_date: z.string().optional(),
+      slotIndex: z.coerce.number().int().min(0).max(2).optional(),
+      slot_index: z.coerce.number().int().min(0).max(2).optional(),
+      reason: z.string().optional(),
+      approvalFlowId: z.string().optional().nullable(),
+      approval_flow_id: z.string().optional().nullable(),
+    }).strict()
+
     function normalizeShiftSwapDetailDate(value) {
       return normalizeDateOnly(value) ?? (typeof value === 'string' ? value.slice(0, 10) : null)
     }
@@ -22477,6 +22537,202 @@ module.exports = {
         return rows.length ? mapApprovalFlowRow(rows[0]) : null
       }
       return loadApprovalFlow(client, orgId, { requestType })
+    }
+
+    function buildScheduleDispatchSourceKey({ userId, targetScheduleGroupId, startDate, endDate, slotIndex }) {
+      return `schedule_dispatch:${userId}:${targetScheduleGroupId}:${startDate}:${endDate}:${Number(slotIndex ?? 0)}`
+    }
+
+    async function acquireScheduleDispatchWindowLock(client, orgId, userId, targetScheduleGroupId, slotIndex) {
+      try {
+        await client.query(
+          'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+          [
+            `attendance-schedule-dispatch:${String(orgId ?? '')}`,
+            `${String(userId ?? '')}:${String(targetScheduleGroupId ?? '')}:${Number(slotIndex ?? 0)}`,
+          ]
+        )
+      } catch (_error) {
+        // Best-effort: if advisory locks are unavailable, the exact source_key unique index still catches exact
+        // duplicates, but overlapping windows rely on the pre-insert SELECT.
+      }
+    }
+
+    function buildScheduleDispatchSchedulerScopeTarget(value) {
+      const target = {
+        userIds: [value.userId ?? value.user_id].filter(Boolean),
+        scheduleGroupIds: [value.targetScheduleGroupId ?? value.target_schedule_group_id].filter(Boolean),
+      }
+      const departmentRef = value.targetDepartmentRef ?? value.target_department_ref
+      if (departmentRef) target.departments = [departmentRef]
+      return target
+    }
+
+    async function assertScheduleDispatchScopeAllowed(client, orgId, actorAccess, target) {
+      if (actorAccess?.fullAdmin) return
+      const actorContext = await loadAttendanceScopeContextForUser(client, orgId, actorAccess?.userId)
+      const scopes = await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext, client)
+      const allowed = scopes.some(scope => attendanceSchedulerScopeAllowsActorActionTarget(
+        scope,
+        actorContext,
+        'dispatch',
+        target
+      ))
+      if (!allowed) {
+        throw new HttpError(403, 'SCHEDULER_SCOPE_FORBIDDEN', 'Scheduler scope does not allow this attendance scheduling action')
+      }
+    }
+
+    async function resolveScheduleDispatchApprovalFlow(client, orgId, approvalFlowId) {
+      const requestedFlowId = approvalFlowId ? String(approvalFlowId).trim() : ''
+      if (requestedFlowId) {
+        const flow = await loadActiveApprovalFlowForRequestType(client, orgId, 'schedule_dispatch', requestedFlowId)
+        if (!flow) {
+          throw new HttpError(
+            422,
+            'SCHEDULE_DISPATCH_APPROVAL_FLOW_REQUIRED',
+            'Schedule-dispatch approval flow does not exist or is inactive',
+            singleValidationDetail('approvalFlowId', 'Provide an active schedule_dispatch approvalFlowId')
+          )
+        }
+        return flow
+      }
+      const activeFlows = await client.query(
+        `SELECT *
+           FROM attendance_approval_flows
+          WHERE org_id = $1 AND request_type = 'schedule_dispatch' AND is_active = true
+          ORDER BY created_at DESC
+          LIMIT 2`,
+        [orgId]
+      )
+      if (activeFlows.length !== 1) {
+        throw new HttpError(
+          422,
+          'SCHEDULE_DISPATCH_APPROVAL_FLOW_REQUIRED',
+          activeFlows.length === 0
+            ? 'Schedule-dispatch approval flow is not configured'
+            : 'Multiple active schedule-dispatch approval flows exist; specify approvalFlowId',
+          singleValidationDetail('approvalFlowId', 'Exactly one active schedule_dispatch flow is required when approvalFlowId is omitted')
+        )
+      }
+      return mapApprovalFlowRow(activeFlows[0])
+    }
+
+    function normalizeScheduleDispatchCreateInput(data) {
+      const userId = normalizeAttendanceSchedulerScopeRef(firstDefinedValue(data.userId, data.user_id))
+      if (!userId) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'userId is required', singleValidationDetail('userId', 'Required'))
+      }
+      const targetScheduleGroupId = normalizeRequestUuidReferenceInput(
+        firstDefinedValue(data.targetScheduleGroupId, data.target_schedule_group_id),
+        null,
+        'targetScheduleGroupId'
+      )
+      const targetShiftId = normalizeRequestUuidReferenceInput(
+        firstDefinedValue(data.targetShiftId, data.target_shift_id),
+        null,
+        'targetShiftId'
+      )
+      if (!targetScheduleGroupId) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'targetScheduleGroupId is required', singleValidationDetail('targetScheduleGroupId', 'Required'))
+      }
+      if (!targetShiftId) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'targetShiftId is required', singleValidationDetail('targetShiftId', 'Required'))
+      }
+      const startDate = normalizeDateOnlyStrict(firstDefinedValue(data.startDate, data.start_date))
+      if (!startDate) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'startDate must use YYYY-MM-DD format', singleValidationDetail('startDate', 'Must use YYYY-MM-DD format'))
+      }
+      const rawEndDate = firstDefinedValue(data.endDate, data.end_date)
+      const endDate = rawEndDate === undefined || rawEndDate === null || rawEndDate === ''
+        ? startDate
+        : normalizeDateOnlyStrict(rawEndDate)
+      if (!endDate) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'endDate must use YYYY-MM-DD format', singleValidationDetail('endDate', 'Must use YYYY-MM-DD format'))
+      }
+      if (startDate > endDate) {
+        throw new HttpError(422, 'SCHEDULE_DISPATCH_DATE_WINDOW_INVALID', 'startDate must be on or before endDate')
+      }
+      const slotIndex = Number(firstDefinedValue(data.slotIndex, data.slot_index, 0))
+      const approvalFlowId = normalizeRequestUuidReferenceInput(
+        firstDefinedValue(data.approvalFlowId, data.approval_flow_id),
+        null,
+        'approvalFlowId'
+      )
+      return {
+        userId,
+        targetScheduleGroupId,
+        targetShiftId,
+        startDate,
+        endDate,
+        slotIndex,
+        reason: normalizeOptionalText(data.reason),
+        approvalFlowId,
+      }
+    }
+
+    async function loadScheduleDispatchDetail(client, orgId, requestId, { forUpdate = false } = {}) {
+      const rows = await client.query(
+        `SELECT d.*, r.status AS request_status, r.work_date AS request_work_date, r.reason AS request_reason,
+                r.metadata AS request_metadata, r.approval_instance_id AS approval_instance_id
+           FROM attendance_schedule_dispatch_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.org_id = $1 AND d.request_id = $2
+          LIMIT 1 ${forUpdate ? 'FOR UPDATE OF d, r' : ''}`,
+        [orgId, requestId]
+      )
+      return rows[0] ?? null
+    }
+
+    async function assertScheduleDispatchRequestScopeAllowed(client, orgId, requestId, actorAccess, { forUpdate = false } = {}) {
+      const detail = await loadScheduleDispatchDetail(client, orgId, requestId, { forUpdate })
+      if (!detail) {
+        throw new HttpError(400, 'SCHEDULE_DISPATCH_DETAIL_MISSING', 'Schedule-dispatch request detail is missing')
+      }
+      await assertScheduleDispatchScopeAllowed(client, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget(detail))
+      return detail
+    }
+
+    async function archiveScheduleDispatchSourceKey(client, orgId, requestId) {
+      await client.query(
+        `UPDATE attendance_schedule_dispatch_requests
+            SET source_key = source_key || ':archived:' || request_id::text,
+                updated_at = now()
+          WHERE org_id = $1
+            AND request_id = $2
+            AND source_key NOT LIKE '%:archived:%'`,
+        [orgId, requestId]
+      )
+    }
+
+    async function closeScheduleDispatchRequest(client, orgId, requestId) {
+      await client.query(
+        `UPDATE attendance_schedule_dispatch_requests
+            SET publish_status = 'cancelled',
+                updated_at = now()
+          WHERE org_id = $1 AND request_id = $2`,
+        [orgId, requestId]
+      )
+      await archiveScheduleDispatchSourceKey(client, orgId, requestId)
+    }
+
+    function buildScheduleDispatchViewSql(scopes, params, alias = 'd') {
+      const clauses = []
+      for (const scopeRow of scopes) {
+        const scope = schedulerScopeSqlBody(scopeRow)
+        if (scope.userIds.length === 0 || scope.scheduleGroupIds.length === 0) continue
+        const conditions = [
+          `${alias}.user_id = ANY(${addScopeArrayParam(params, scope.userIds, 'text')})`,
+          `${alias}.target_schedule_group_id = ANY(${addScopeArrayParam(params, scope.scheduleGroupIds, 'uuid')})`,
+        ]
+        if (scope.departments.length > 0) {
+          conditions.push(`(${alias}.target_department_ref IS NULL OR ${alias}.target_department_ref = ANY(${addScopeArrayParam(params, scope.departments, 'text')}))`)
+        } else {
+          conditions.push(`${alias}.target_department_ref IS NULL`)
+        }
+        clauses.push(`(${conditions.join(' AND ')})`)
+      }
+      return clauses.length ? `AND (${clauses.join(' OR ')})` : 'AND FALSE'
     }
 
     async function resolveAttendanceRequestDraft(parsedData, existingRequest = null) {
@@ -22977,6 +23233,393 @@ module.exports = {
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load request' } })
         }
       })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/schedule-dispatch-requests',
+      async (req, res) => {
+        const parsed = scheduleDispatchCreateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json(validationErrorBody('Invalid schedule-dispatch request payload', formatZodValidationDetails(parsed.error)))
+          return
+        }
+        const orgId = getOrgId(req)
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
+        let input
+        try {
+          input = normalizeScheduleDispatchCreateInput(parsed.data)
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message, ...(Array.isArray(error.details) ? { details: error.details } : {}) } })
+            return
+          }
+          throw error
+        }
+        if (!await enforceShiftEditWindow(res, [input.startDate, input.endDate])) return
+
+        const requestId = randomUUID()
+        const approvalId = `apv_${randomUUID()}`
+        try {
+          const result = await db.transaction(async (trx) => {
+            const groupRows = await trx.query(
+              `SELECT *
+                 FROM attendance_schedule_groups
+                WHERE id = $1 AND org_id = $2 AND is_active = true
+                LIMIT 1`,
+              [input.targetScheduleGroupId, orgId]
+            )
+            const targetGroup = groupRows[0]
+            if (!targetGroup) {
+              throw new HttpError(404, 'NOT_FOUND', 'Target schedule group not found')
+            }
+            const shiftRows = await trx.query(
+              `SELECT id
+                 FROM attendance_shifts
+                WHERE id = $1 AND org_id = $2
+                LIMIT 1`,
+              [input.targetShiftId, orgId]
+            )
+            if (!shiftRows.length) {
+              throw new HttpError(404, 'NOT_FOUND', 'Target shift not found')
+            }
+
+            const target = buildScheduleDispatchSchedulerScopeTarget({
+              userId: input.userId,
+              targetScheduleGroupId: targetGroup.id,
+              targetDepartmentRef: targetGroup.department_ref ?? null,
+            })
+            await assertScheduleDispatchScopeAllowed(trx, orgId, actorAccess, target)
+
+            await acquireScheduleDispatchWindowLock(trx, orgId, input.userId, targetGroup.id, input.slotIndex)
+            const approvalFlow = await resolveScheduleDispatchApprovalFlow(trx, orgId, input.approvalFlowId)
+            const sourceKey = buildScheduleDispatchSourceKey({
+              userId: input.userId,
+              targetScheduleGroupId: targetGroup.id,
+              startDate: input.startDate,
+              endDate: input.endDate,
+              slotIndex: input.slotIndex,
+            })
+            const duplicateRows = await trx.query(
+              `SELECT d.request_id
+                 FROM attendance_schedule_dispatch_requests d
+                 JOIN attendance_requests r ON r.id = d.request_id
+                WHERE d.org_id = $1
+                  AND d.user_id = $2
+                  AND d.target_schedule_group_id = $3
+                  AND d.slot_index = $4
+                  AND d.start_date <= $6::date
+                  AND d.end_date >= $5::date
+                  AND r.status IN ('pending', 'approved')
+                LIMIT 1`,
+              [orgId, input.userId, targetGroup.id, input.slotIndex, input.startDate, input.endDate]
+            )
+            if (duplicateRows.length) {
+              throw new HttpError(409, 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', 'A schedule-dispatch request already exists for this user/group/date window')
+            }
+
+            await acquireAttendanceRequestLock(trx, orgId, input.userId, input.startDate, 'schedule_dispatch')
+            const metadata = {
+              scheduleDispatch: {
+                userId: input.userId,
+                targetScheduleGroupId: targetGroup.id,
+                targetAttendanceGroupId: targetGroup.attendance_group_id ?? null,
+                targetDepartmentRef: targetGroup.department_ref ?? null,
+                targetShiftId: input.targetShiftId,
+                startDate: input.startDate,
+                endDate: input.endDate,
+                slotIndex: input.slotIndex,
+                sourceKey,
+              },
+              approvalFlow: {
+                id: approvalFlow.id,
+                name: approvalFlow.name,
+                steps: approvalFlow.steps,
+                currentStep: 0,
+              },
+            }
+            const draft = {
+              workDate: input.startDate,
+              requestType: 'schedule_dispatch',
+              requestedInAt: null,
+              requestedOutAt: null,
+              reason: input.reason,
+              metadata,
+            }
+            const approvalPayload = buildAttendanceApprovalInstancePayload({
+              approvalId,
+              requestId,
+              orgId,
+              userId: input.userId,
+              requesterName: getUserLabel(req, input.userId),
+              draft,
+            })
+            const approvalAssignments = buildAttendanceApprovalAssignments(draft.metadata?.approvalFlow?.steps, 0)
+            await upsertAttendanceApprovalInstance(trx, approvalPayload)
+            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+
+            const requestRows = await trx.query(
+              `INSERT INTO attendance_requests
+               (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
+               VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7::jsonb)
+               RETURNING *`,
+              [
+                requestId,
+                input.userId,
+                orgId,
+                input.startDate,
+                input.reason,
+                approvalId,
+                JSON.stringify(metadata),
+              ]
+            )
+            await trx.query(
+              `INSERT INTO attendance_schedule_dispatch_requests
+               (request_id, org_id, dispatch_type, user_id, target_schedule_group_id, target_attendance_group_id,
+                target_department_ref, target_shift_id, slot_index, start_date, end_date, publish_status, source_key)
+               VALUES ($1, $2, 'daily', $3, $4, $5, $6, $7, $8, $9::date, $10::date, 'pending', $11)`,
+              [
+                requestId,
+                orgId,
+                input.userId,
+                targetGroup.id,
+                targetGroup.attendance_group_id ?? null,
+                targetGroup.department_ref ?? null,
+                input.targetShiftId,
+                input.slotIndex,
+                input.startDate,
+                input.endDate,
+                sourceKey,
+              ]
+            )
+            const detail = await loadScheduleDispatchDetail(trx, orgId, requestId)
+            return { request: requestRows[0], detail }
+          })
+          emitEvent('attendance.scheduleDispatch.requested', { orgId, requestId, userId: input.userId })
+          res.status(201).json({
+            ok: true,
+            data: {
+              request: mapAttendanceRequestRow(result.request),
+              scheduleDispatch: mapScheduleDispatchRequestRow(result.detail),
+            },
+          })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message, ...(Array.isArray(error.details) && error.details.length ? { details: error.details } : {}) } })
+            return
+          }
+          if (error?.code === '23505' && error?.constraint === 'uq_attendance_schedule_dispatch_requests_source_key') {
+            res.status(409).json({ ok: false, error: { code: 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', message: 'A schedule-dispatch request already exists for this user/group/date window' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance schedule-dispatch tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule-dispatch request creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create schedule-dispatch request' } })
+        }
+      }
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/schedule-dispatch-requests',
+      async (req, res) => {
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const access = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'dispatch' })
+        if (!access) return
+        const status = typeof req.query.status === 'string' && req.query.status.trim() ? req.query.status.trim() : null
+        const userId = typeof req.query.userId === 'string' && req.query.userId.trim() ? req.query.userId.trim() : null
+        const targetScheduleGroupId = typeof req.query.targetScheduleGroupId === 'string' && req.query.targetScheduleGroupId.trim()
+          ? normalizeUuidString(req.query.targetScheduleGroupId)
+          : null
+        if (typeof req.query.targetScheduleGroupId === 'string' && req.query.targetScheduleGroupId.trim() && !targetScheduleGroupId) {
+          respondInvalidUuid(res, 'targetScheduleGroupId')
+          return
+        }
+        const from = typeof req.query.from === 'string' && req.query.from.trim() ? normalizeDateOnlyStrict(req.query.from) : null
+        const to = typeof req.query.to === 'string' && req.query.to.trim() ? normalizeDateOnlyStrict(req.query.to) : null
+        if ((req.query.from && !from) || (req.query.to && !to)) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'from/to must use YYYY-MM-DD format' } })
+          return
+        }
+        try {
+          const buildWhere = (params) => {
+            const clauses = ['d.org_id = $1']
+            if (status) {
+              params.push(status)
+              clauses.push(`r.status = $${params.length}`)
+            }
+            if (userId) {
+              params.push(userId)
+              clauses.push(`d.user_id = $${params.length}`)
+            }
+            if (targetScheduleGroupId) {
+              params.push(targetScheduleGroupId)
+              clauses.push(`d.target_schedule_group_id = $${params.length}`)
+            }
+            if (from) {
+              params.push(from)
+              clauses.push(`d.end_date >= $${params.length}::date`)
+            }
+            if (to) {
+              params.push(to)
+              clauses.push(`d.start_date <= $${params.length}::date`)
+            }
+            const scopeClause = access.access.fullAdmin ? '' : buildScheduleDispatchViewSql(access.scopes, params, 'd')
+            return `WHERE ${clauses.join(' AND ')} ${scopeClause}`
+          }
+          const countParams = [orgId]
+          const countWhere = buildWhere(countParams)
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+               FROM attendance_schedule_dispatch_requests d
+               JOIN attendance_requests r ON r.id = d.request_id
+              ${countWhere}`,
+            countParams
+          )
+          const rowParams = [orgId]
+          const rowWhere = buildWhere(rowParams)
+          rowParams.push(pageSize, offset)
+          const rows = await db.query(
+            `SELECT d.*, r.status AS request_status, r.work_date AS request_work_date, r.reason AS request_reason,
+                    r.metadata AS request_metadata, r.approval_instance_id AS approval_instance_id
+               FROM attendance_schedule_dispatch_requests d
+               JOIN attendance_requests r ON r.id = d.request_id
+              ${rowWhere}
+              ORDER BY d.created_at DESC
+              LIMIT $${rowParams.length - 1} OFFSET $${rowParams.length}`,
+            rowParams
+          )
+          res.json({ ok: true, data: { items: rows.map(mapScheduleDispatchRequestRow), total: Number(countRows[0]?.total ?? 0), page, pageSize } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance schedule-dispatch tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule-dispatch request list failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list schedule-dispatch requests' } })
+        }
+      }
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/schedule-dispatch-requests/:id',
+      async (req, res) => {
+        const orgId = getOrgId(req)
+        const requestId = normalizeUuidString(req.params.id)
+        if (!requestId) {
+          respondInvalidUuid(res)
+          return
+        }
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
+        try {
+          const detail = await loadScheduleDispatchDetail(db, orgId, requestId)
+          if (!detail) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule-dispatch request not found' } })
+            return
+          }
+          await assertScheduleDispatchScopeAllowed(db, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget(detail))
+          res.json({ ok: true, data: { scheduleDispatch: mapScheduleDispatchRequestRow(detail) } })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance schedule-dispatch tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule-dispatch request fetch failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load schedule-dispatch request' } })
+        }
+      }
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/schedule-dispatch-requests/:id/cancel',
+      async (req, res) => {
+        const orgId = getOrgId(req)
+        const requestId = normalizeUuidString(req.params.id)
+        if (!requestId) {
+          respondInvalidUuid(res)
+          return
+        }
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
+        try {
+          const detail = await db.transaction(async (trx) => {
+            const row = await loadScheduleDispatchDetail(trx, orgId, requestId, { forUpdate: true })
+            if (!row) {
+              throw new HttpError(404, 'NOT_FOUND', 'Schedule-dispatch request not found')
+            }
+            await assertScheduleDispatchScopeAllowed(trx, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget(row))
+            if (row.request_status !== 'pending') {
+              throw new HttpError(400, 'INVALID_STATUS', 'Schedule-dispatch request is already resolved')
+            }
+            if (row.approval_instance_id) {
+              const approvalRows = await trx.query(
+                'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+                [row.approval_instance_id]
+              )
+              if (approvalRows.length > 0) {
+                const approval = approvalRows[0]
+                const newVersion = Number(approval.version ?? 0) + 1
+                await trx.query(
+                  'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
+                  ['cancelled', newVersion, row.approval_instance_id]
+                )
+                await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
+                await trx.query(
+                  `INSERT INTO approval_records
+                   (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
+                   VALUES ($1, 'revoke', $2, $3, NULL, $4, 'cancelled', $5, $6, '{}'::jsonb, $7, $8)`,
+                  [
+                    row.approval_instance_id,
+                    actorAccess.userId,
+                    getUserLabel(req, actorAccess.userId),
+                    approval.status,
+                    approval.version,
+                    newVersion,
+                    req.ip ?? null,
+                    req.get('user-agent') ?? null,
+                  ]
+                )
+              }
+            }
+            await trx.query(
+              `UPDATE attendance_requests
+                  SET status = 'cancelled',
+                      resolved_by = $3,
+                      resolved_at = now(),
+                      updated_at = now()
+                WHERE id = $1 AND org_id = $2`,
+              [requestId, orgId, actorAccess.userId]
+            )
+            await closeScheduleDispatchRequest(trx, orgId, requestId)
+            return loadScheduleDispatchDetail(trx, orgId, requestId)
+          })
+          emitEvent('attendance.scheduleDispatch.cancelled', { orgId, requestId, userId: detail?.user_id })
+          res.json({ ok: true, data: { scheduleDispatch: mapScheduleDispatchRequestRow({ ...detail, request_status: 'cancelled', publish_status: 'cancelled' }) } })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance schedule-dispatch tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule-dispatch cancel failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to cancel schedule-dispatch request' } })
+        }
+      }
     )
 
     context.api.http.addRoute(
@@ -23743,6 +24386,19 @@ module.exports = {
           const newVersion = Number(approval.version ?? 0) + 1
           const resolvedAt = new Date()
 
+          if (requestType === 'schedule_dispatch' && action === 'approve' && isFinalApproval) {
+            await assertScheduleDispatchRequestScopeAllowed(trx, orgId, requestId, {
+              userId: requesterId,
+              orgId,
+              fullAdmin: await hasAttendanceAdminAccess(requesterId),
+            }, { forUpdate: true })
+            throw new HttpError(
+              422,
+              'SCHEDULE_DISPATCH_FINAL_WRITER_PENDING',
+              'Schedule-dispatch final approval is not available until dispatch finalization is enabled'
+            )
+          }
+
           const nextStepIndex = isFinalApproval ? currentStepIndex : currentStepIndex + 1
           await trx.query(
             `UPDATE approval_instances
@@ -23845,6 +24501,8 @@ module.exports = {
 	            )
 	            if (requestType === 'shift_swap' && action !== 'approve') {
 	              await archiveShiftSwapSourceKey(trx, orgId, requestId)
+	            } else if (requestType === 'schedule_dispatch' && action !== 'approve') {
+	              await closeScheduleDispatchRequest(trx, orgId, requestId)
 	            }
 	          } else {
 	            await trx.query(
@@ -24020,9 +24678,10 @@ module.exports = {
             }
 
             // The generic 'adjustment' audit event covers missed/correction/leave/overtime. outdoor_punch
-            // writes its OWN real punch event above, and shift_swap writes schedule rows only, so neither
+            // writes its OWN real punch event above, shift_swap writes schedule rows only, and
+            // schedule_dispatch is finalized by its dedicated D3 writer, so none of those request types
             // must also get an adjustment event.
-            if (requestType !== 'outdoor_punch' && requestType !== 'shift_swap') {
+            if (requestType !== 'outdoor_punch' && requestType !== 'shift_swap' && requestType !== 'schedule_dispatch') {
               const eventMeta = {
                 requestId,
                 requestType,
@@ -24124,8 +24783,16 @@ module.exports = {
           if (requestRow.status !== 'pending') {
             throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
           }
+          const requestOrgId = requestRow.org_id ?? DEFAULT_ORG_ID
+          if (requestRow.request_type === 'schedule_dispatch') {
+            await assertScheduleDispatchRequestScopeAllowed(trx, requestOrgId, requestId, {
+              userId: requesterId,
+              orgId: requestOrgId,
+              fullAdmin: await hasAttendanceAdminAccess(requesterId),
+            }, { forUpdate: true })
+          }
 
-          if (requestRow.user_id !== requesterId) {
+          if (requestRow.request_type !== 'schedule_dispatch' && requestRow.user_id !== requesterId) {
             const allowed = await canAccessOtherUsers(requesterId)
             if (!allowed) {
               throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
@@ -24172,20 +24839,22 @@ module.exports = {
           }
 
           const resolvedAt = new Date()
-	          await trx.query(
-	            `UPDATE attendance_requests
-	             SET status = $2, resolved_by = $3, resolved_at = $4, updated_at = now()
-	             WHERE id = $1`,
-	            [requestId, 'cancelled', requesterId, resolvedAt]
-	          )
-	          if (requestRow.request_type === 'shift_swap') {
-	            await archiveShiftSwapSourceKey(trx, requestRow.org_id ?? DEFAULT_ORG_ID, requestId)
-	          }
+          await trx.query(
+            `UPDATE attendance_requests
+             SET status = $2, resolved_by = $3, resolved_at = $4, updated_at = now()
+             WHERE id = $1`,
+            [requestId, 'cancelled', requesterId, resolvedAt]
+          )
+          if (requestRow.request_type === 'shift_swap') {
+            await archiveShiftSwapSourceKey(trx, requestRow.org_id ?? DEFAULT_ORG_ID, requestId)
+          } else if (requestRow.request_type === 'schedule_dispatch') {
+            await closeScheduleDispatchRequest(trx, requestOrgId, requestId)
+          }
 
-	          return {
+          return {
             requestId,
             status: 'cancelled',
-            orgId: requestRow.org_id ?? DEFAULT_ORG_ID,
+            orgId: requestOrgId,
             userId: requestRow.user_id,
           }
         })
