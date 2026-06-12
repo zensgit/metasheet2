@@ -20,6 +20,10 @@ export default defineConfig({
     hookTimeout: 15000,
     setupFiles: ['./tests/setup.integration.ts'],
     reporter: ['verbose'],
+    // Integration specs share one real Postgres and several org-global settings rows.
+    // Run files serially so route-level tests that temporarily change settings cannot
+    // bleed into another file's server process while it is asserting default behavior.
+    fileParallelism: false,
     maxConcurrency: 1,
     globalTeardown: './tests/globalTeardown.ts',
   },
