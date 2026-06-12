@@ -22219,6 +22219,249 @@ module.exports = {
       )
     }
 
+    const SHIFT_SWAP_PRODUCER_TYPE = 'shift_swap'
+
+    function buildShiftSwapReplacementProducerKey(requestId, userId, workDate, slotIndex) {
+      return [
+        SHIFT_SWAP_PRODUCER_TYPE,
+        requestId,
+        userId,
+        workDate,
+        normalizeAttendanceScheduleSlotIndex(slotIndex, 0),
+      ].join(':')
+    }
+
+    function assertShiftSwapSourceStillMatches(row, expected, field) {
+      const current = normalizeShiftSwapSourceSnapshot(row, field)
+      const expectedWorkDate = normalizeShiftSwapDetailDate(expected.workDate)
+      const expectedStartDate = normalizeShiftSwapDetailDate(expected.startDate)
+      const expectedEndDate = normalizeShiftSwapDetailDate(expected.endDate)
+      const matches =
+        current.id === expected.assignmentId
+        && current.userId === expected.userId
+        && current.shiftId === expected.shiftId
+        && current.slotIndex === normalizeAttendanceScheduleSlotIndex(expected.slotIndex, 0)
+        && current.workDate === expectedWorkDate
+        && current.startDate === expectedStartDate
+        && current.endDate === expectedEndDate
+        && current.publishStatus === expected.publishStatus
+        && current.producerType === (expected.producerType ?? null)
+        && current.assignmentKind === expected.assignmentKind
+      if (!matches) {
+        throw new HttpError(
+          409,
+          'SHIFT_SWAP_SOURCE_CHANGED',
+          'Shift-swap source assignment changed after the request was created',
+          singleValidationDetail(field, 'Source assignment no longer matches the captured swap snapshot')
+        )
+      }
+      return current
+    }
+
+    function throwAttendanceScheduleAssignmentConflict(conflict) {
+      throw new HttpError(
+        409,
+        'ATTENDANCE_SCHEDULE_ASSIGNMENT_CONFLICT',
+        getAttendanceScheduleAssignmentConflictMessage(conflict),
+        conflict
+      )
+    }
+
+    async function enforceShiftSwapEditWindow(client, dates) {
+      const settings = await getSettings(client)
+      const violation = evaluateShiftEditWindow(settings?.shiftEditPolicy, dates, normalizeDateOnly(new Date()))
+      if (!violation) return
+      throw new HttpError(
+        422,
+        'SHIFT_EDIT_WINDOW_EXCEEDED',
+        `Schedule edit window exceeded: ${violation.earliest} is before the earliest editable date ${violation.boundary}`,
+        {
+          earliestDate: violation.earliest,
+          boundaryDate: violation.boundary,
+          mode: violation.mode,
+        }
+      )
+    }
+
+    async function insertShiftSwapReplacementAssignment(client, {
+      orgId,
+      requestId,
+      actorId,
+      targetUserId,
+      source,
+      multiShiftEnabled,
+      shift,
+    }) {
+      const replacementId = randomUUID()
+      const producerKey = buildShiftSwapReplacementProducerKey(requestId, targetUserId, source.workDate, source.slotIndex)
+      const rows = await client.query(
+        `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active,
+          publish_status, published_at, published_by, locked_at,
+          assignment_kind, producer_type, producer_ref_id, producer_key, producer_run_id)
+         VALUES
+         ($1, $2, $3, $4, $5, $6, $6, true,
+          'published', now(), $7, now(),
+          'regular', $8, $9, $10, $9)
+         RETURNING *`,
+        [
+          replacementId,
+          orgId,
+          targetUserId,
+          source.shiftId,
+          source.slotIndex,
+          source.workDate,
+          actorId,
+          SHIFT_SWAP_PRODUCER_TYPE,
+          requestId,
+          producerKey,
+        ]
+      )
+      const row = rows[0]
+      const conflict = await findAttendanceScheduleAssignmentConflict(client, {
+        kind: 'shift',
+        orgId,
+        userId: targetUserId,
+        startDate: source.workDate,
+        endDate: source.workDate,
+        isActive: true,
+        slotIndex: source.slotIndex,
+        multiShiftEnabled,
+        shift,
+        excludeId: replacementId,
+      })
+      if (conflict) throwAttendanceScheduleAssignmentConflict(conflict)
+      return row
+    }
+
+    async function finalizeShiftSwapRequest(client, { orgId, requestId, actorId }) {
+      const detail = await loadShiftSwapDetail(client, orgId, requestId, { forUpdate: true })
+      if (!detail) {
+        throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
+      }
+      if (detail.counterparty_status !== 'accepted') {
+        throw new HttpError(422, 'SHIFT_SWAP_COUNTERPARTY_CONSENT_REQUIRED', 'Counterparty must accept before shift-swap approval can finalize')
+      }
+      if (detail.requester_replacement_assignment_id || detail.counterparty_replacement_assignment_id || detail.finalized_at) {
+        throw new HttpError(409, 'SHIFT_SWAP_ALREADY_FINALIZED', 'Shift-swap request is already finalized')
+      }
+
+      const lockIds = [detail.requester_assignment_id, detail.counterparty_assignment_id].sort()
+      const lockedRows = new Map()
+      for (const assignmentId of lockIds) {
+        lockedRows.set(
+          assignmentId,
+          await loadShiftSwapSourceAssignment(client, orgId, assignmentId, { forUpdate: true })
+        )
+      }
+      const requesterSource = assertShiftSwapSourceStillMatches(
+        lockedRows.get(detail.requester_assignment_id),
+        {
+          assignmentId: detail.requester_assignment_id,
+          userId: detail.requester_user_id,
+          shiftId: detail.requester_shift_id,
+          slotIndex: detail.requester_slot_index,
+          workDate: detail.requester_work_date,
+          startDate: detail.requester_start_date,
+          endDate: detail.requester_end_date,
+          publishStatus: detail.requester_publish_status,
+          producerType: detail.requester_producer_type ?? null,
+          assignmentKind: detail.requester_assignment_kind,
+        },
+        'requesterAssignmentId'
+      )
+      const counterpartySource = assertShiftSwapSourceStillMatches(
+        lockedRows.get(detail.counterparty_assignment_id),
+        {
+          assignmentId: detail.counterparty_assignment_id,
+          userId: detail.counterparty_user_id,
+          shiftId: detail.counterparty_shift_id,
+          slotIndex: detail.counterparty_slot_index,
+          workDate: detail.counterparty_work_date,
+          startDate: detail.counterparty_start_date,
+          endDate: detail.counterparty_end_date,
+          publishStatus: detail.counterparty_publish_status,
+          producerType: detail.counterparty_producer_type ?? null,
+          assignmentKind: detail.counterparty_assignment_kind,
+        },
+        'counterpartyAssignmentId'
+      )
+
+      await acquireAttendanceScheduleAssignmentLocks(client, orgId, [requesterSource.userId, counterpartySource.userId])
+      await enforceShiftSwapEditWindow(client, [
+        requesterSource.workDate,
+        counterpartySource.workDate,
+      ])
+
+      const shiftRows = await client.query(
+        `SELECT * FROM attendance_shifts
+          WHERE org_id = $1 AND id = ANY($2::uuid[])`,
+        [orgId, [requesterSource.shiftId, counterpartySource.shiftId]]
+      )
+      const shiftsById = new Map(shiftRows.map(row => [row.id, row]))
+      const requesterShift = shiftsById.get(requesterSource.shiftId)
+      const counterpartyShift = shiftsById.get(counterpartySource.shiftId)
+      if (!requesterShift || !counterpartyShift) {
+        throw new HttpError(409, 'SHIFT_SWAP_SOURCE_CHANGED', 'Shift-swap source shift no longer exists')
+      }
+
+      const settings = await getSettings(client)
+      const multiShiftDay = normalizeMultiShiftDaySetting(settings?.multiShiftDay)
+      await client.query(
+        `UPDATE attendance_shift_assignments
+            SET is_active = false, updated_at = now()
+          WHERE org_id = $1 AND id = ANY($2::uuid[])`,
+        [orgId, [requesterSource.id, counterpartySource.id]]
+      )
+
+      const requesterReplacement = await insertShiftSwapReplacementAssignment(client, {
+        orgId,
+        requestId,
+        actorId,
+        targetUserId: requesterSource.userId,
+        source: counterpartySource,
+        multiShiftEnabled: multiShiftDay.enabled,
+        shift: counterpartyShift,
+      })
+      const counterpartyReplacement = await insertShiftSwapReplacementAssignment(client, {
+        orgId,
+        requestId,
+        actorId,
+        targetUserId: counterpartySource.userId,
+        source: requesterSource,
+        multiShiftEnabled: multiShiftDay.enabled,
+        shift: requesterShift,
+      })
+
+      const affectedDates = Array.from(new Set([requesterSource.workDate, counterpartySource.workDate])).sort()
+      for (const targetUserId of [requesterSource.userId, counterpartySource.userId]) {
+        for (const affectedDate of affectedDates) {
+          await enforceShiftComplianceCap(client, {
+            orgId,
+            userId: targetUserId,
+            fromDate: affectedDate,
+            toDate: affectedDate,
+          })
+        }
+      }
+
+      const updatedRows = await client.query(
+        `UPDATE attendance_shift_swap_requests
+            SET requester_replacement_assignment_id = $3,
+                counterparty_replacement_assignment_id = $4,
+                finalized_at = now(),
+                updated_at = now()
+          WHERE org_id = $1 AND request_id = $2
+          RETURNING *`,
+        [orgId, requestId, requesterReplacement.id, counterpartyReplacement.id]
+      )
+      return {
+        detail: updatedRows[0] ?? detail,
+        requesterReplacement,
+        counterpartyReplacement,
+      }
+    }
+
     async function loadActiveApprovalFlowForRequestType(client, orgId, requestType, flowId) {
       if (flowId) {
         const rows = await client.query(
@@ -23463,9 +23706,6 @@ module.exports = {
           const requestMetadata = normalizeMetadata(requestRow.metadata)
           const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
           const requestType = requestRow.request_type
-          if (action === 'approve' && requestType === 'shift_swap') {
-            throw new HttpError(422, 'SHIFT_SWAP_FINALIZATION_DEFERRED', 'Shift-swap approval finalization is not wired yet')
-          }
           const flowMeta = normalizeMetadata(requestMetadata.approvalFlow)
           const flowSteps = normalizeApprovalSteps(flowMeta.steps)
           const rawStepIndex = Number(flowMeta.currentStep ?? 0)
@@ -23540,6 +23780,19 @@ module.exports = {
           )
 
           const nextMetadata = { ...requestMetadata }
+          let shiftSwapFinalization = null
+          if (action === 'approve' && isFinalApproval && requestType === 'shift_swap') {
+            shiftSwapFinalization = await finalizeShiftSwapRequest(trx, {
+              orgId,
+              requestId,
+              actorId: requesterId,
+            })
+            nextMetadata.shiftSwapFinalization = {
+              requesterReplacementAssignmentId: shiftSwapFinalization.requesterReplacement.id,
+              counterpartyReplacementAssignmentId: shiftSwapFinalization.counterpartyReplacement.id,
+              finalizedAt: new Date().toISOString(),
+            }
+          }
           if (action === 'approve' && isFinalApproval && requestType === 'overtime') {
             const overtimeSegmentation = await maybeBuildOvertimeSegmentationSnapshot(trx, {
               orgId,
@@ -23578,7 +23831,7 @@ module.exports = {
 	               WHERE id = $1`,
 	              [requestId, newStatus, requesterId, resolvedAt, JSON.stringify(nextMetadata)]
 	            )
-	            if (requestType === 'shift_swap') {
+	            if (requestType === 'shift_swap' && action !== 'approve') {
 	              await archiveShiftSwapSourceKey(trx, orgId, requestId)
 	            }
 	          } else {
@@ -23755,8 +24008,9 @@ module.exports = {
             }
 
             // The generic 'adjustment' audit event covers missed/correction/leave/overtime. outdoor_punch
-            // writes its OWN real punch event above, so it must NOT also get an adjustment event.
-            if (requestType !== 'outdoor_punch') {
+            // writes its OWN real punch event above, and shift_swap writes schedule rows only, so neither
+            // must also get an adjustment event.
+            if (requestType !== 'outdoor_punch' && requestType !== 'shift_swap') {
               const eventMeta = {
                 requestId,
                 requestType,
@@ -23808,6 +24062,7 @@ module.exports = {
         })
         res.json({ ok: true, data: result })
       } catch (error) {
+        if (respondShiftComplianceCapExceeded(res, error)) return
         if (error instanceof HttpError) {
           res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
           return
