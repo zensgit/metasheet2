@@ -56,15 +56,19 @@ describe('meta-automation-labels', () => {
     expect(automationActionTypeLabel('send_email', false)).toBe('Send email')
     expect(automationActionTypeLabel('send_email', true)).toBe('发送邮件')
     expect(automationActionTypeLabel('send_dingtalk_group_message', true)).toBe('发送钉钉群消息')
+    expect(automationActionTypeLabel('parallel_branch', false)).toBe('Parallel branch')
+    expect(automationActionTypeLabel('parallel_branch', true)).toBe('并行分支')
     expect(automationActionTypeLabel('notify', true)).toBe('发送通知')
     expect(automationActionTypeLabel('update_field', true)).toBe('更新字段值')
     expect(automationActionTypeLabel('future_action', true)).toBe('future_action')
   })
 
-  it('explains required WorkflowJob mode for both wait and branch actions', () => {
+  it('explains required WorkflowJob mode for wait and branch actions', () => {
     expect(automationLabel('editor.executionModeRequiredHint', false)).toContain('condition branch')
+    expect(automationLabel('editor.executionModeRequiredHint', false)).toContain('parallel branch')
     expect(automationLabel('editor.executionModeRequiredHint', false)).toContain('wait for callback')
     expect(automationLabel('editor.executionModeRequiredHint', true)).toContain('条件分支')
+    expect(automationLabel('editor.executionModeRequiredHint', true)).toContain('并行分支')
     expect(automationLabel('editor.executionModeRequiredHint', true)).toContain('等待回调')
   })
 

@@ -494,7 +494,7 @@
               </div>
               <template
                 v-for="accessState in [publicFormAccessState(action.config.publicFormViewId)]"
-                :key="`group-public-form-access-${idx}`"
+                :key="`group-public-form-access-${idx}-${accessState.level}`"
               >
                 <div
                   v-if="accessState.hasSelection"
@@ -812,7 +812,7 @@
               </div>
               <template
                 v-for="accessState in [publicFormAccessState(action.config.publicFormViewId)]"
-                :key="`person-public-form-access-${idx}`"
+                :key="`person-public-form-access-${idx}-${accessState.level}`"
               >
                 <div
                   v-if="accessState.hasSelection"
@@ -983,6 +983,48 @@
                 <div v-if="conditionBranchKeyError" class="meta-rule-editor__error" data-field="branch-key-error">{{ conditionBranchKeyError }}</div>
               </template>
             </div>
+
+            <!-- A6-3-4/W3-2a parallel_branch builder (join-all only; no canvas / worker-parallel controls) -->
+            <div v-if="action.type === 'parallel_branch'" class="meta-rule-editor__action-config" data-action-config="parallel_branch">
+              <div v-if="action.config.parallelBranchUnsupportedReason" class="meta-rule-editor__alert" data-field="parallel-branch-readonly">
+                {{ automationLabel('parallelBranch.readOnly', isZh) }}
+              </div>
+              <template v-else>
+                <div class="meta-rule-editor__hint">{{ automationLabel('parallelBranch.hint', isZh) }}</div>
+                <div v-for="(branch, bIdx) in action.config.parallelBranches" :key="bIdx" class="meta-rule-editor__branch" :data-parallel-branch-index="bIdx">
+                  <div class="meta-rule-editor__branch-header">
+                    <input v-model="branch.key" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.key', isZh)" data-field="parallel-branch-key" />
+                    <input v-model="branch.label" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.label', isZh)" data-field="parallel-branch-label" />
+                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" data-action="remove-parallel-branch" @click="removeParallelBranch(action, bIdx)">&times;</button>
+                  </div>
+                  <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-parallel-branch-action-index="aIdx">
+                    <select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
+                      <option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t">{{ automationActionTypeLabel(t, isZh) }}</option>
+                    </select>
+                    <template v-if="bAct.type === 'update_record'">
+                      <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
+                        <select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm">
+                          <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
+                          <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
+                        </select>
+                        <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.value', isZh)" />
+                        <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchFieldPair(bAct, pIdx)">&times;</button>
+                      </div>
+                      <button class="meta-rule-editor__btn" type="button" data-action="add-parallel-branch-field" @click="addBranchFieldPair(bAct)">{{ automationLabel('parallelBranch.addField', isZh) }}</button>
+                    </template>
+                    <template v-else-if="bAct.type === 'send_notification'">
+                      <input v-model="bAct.userId" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.userIds', isZh)" />
+                      <input v-model="bAct.message" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.message', isZh)" />
+                    </template>
+                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchAction(branch, aIdx)">&times;</button>
+                  </div>
+                  <button class="meta-rule-editor__btn" type="button" data-action="add-parallel-branch-action" @click="addBranchAction(branch)">{{ automationLabel('parallelBranch.addAction', isZh) }}</button>
+                </div>
+                <button class="meta-rule-editor__btn" type="button" data-action="add-parallel-branch" @click="addParallelBranch(action)">{{ automationLabel('parallelBranch.addBranch', isZh) }}</button>
+                <div v-if="parallelBranchKeyError" class="meta-rule-editor__error" data-field="parallel-branch-key-error">{{ parallelBranchKeyError }}</div>
+                <div v-if="parallelBranchActionError" class="meta-rule-editor__error" data-field="parallel-branch-action-error">{{ parallelBranchActionError }}</div>
+              </template>
+            </div>
           </div>
           <button
             v-if="draft.actions.length < 3"
@@ -1040,7 +1082,6 @@ import type {
   AutomationTriggerType,
   AutomationActionType,
   ConditionOperator,
-  AutomationAction,
   AutomationCondition,
   AutomationConditionNode,
   ConditionGroup,
@@ -1097,6 +1138,14 @@ import {
   parseConditionBranchDraft,
   validateConditionBranchKeys,
 } from '../utils/conditionBranchAuthoring'
+import {
+  type ParallelBranchDraft,
+  buildParallelBranchConfig,
+  parallelBranchUnsupportedReason,
+  parseParallelBranchDraft,
+  validateParallelBranchActions,
+  validateParallelBranchKeys,
+} from '../utils/parallelBranchAuthoring'
 
 interface FieldPair {
   fieldId: string
@@ -1133,6 +1182,10 @@ type DraftActionConfig = Record<string, unknown> & {
   defaultBranch?: DefaultBranchDraft | null
   branchUnsupportedReason?: string | null
   branchOriginal?: Record<string, unknown> | null
+  // A6-3-4/W3-2a parallel_branch authoring (supported → editable draft; unsupported → read-only + original preserved)
+  parallelBranches?: ParallelBranchDraft[]
+  parallelBranchUnsupportedReason?: string | null
+  parallelBranchOriginal?: Record<string, unknown> | null
 }
 
 interface DraftAction {
@@ -1210,6 +1263,7 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'send_dingtalk_person_message',
   'wait_for_callback',
   'condition_branch',
+  'parallel_branch',
 ]
 
 // A6-3-2a: BRANCH_AUTHORABLE_ACTION_TYPES (the v1 in-branch action subset) is imported from
@@ -1647,6 +1701,14 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
     const parsed = parseConditionBranchDraft(config)
     return { branches: parsed.branches, defaultBranch: parsed.defaultBranch, branchUnsupportedReason: null, branchOriginal: null }
   }
+  if (type === 'parallel_branch') {
+    const reason = parallelBranchUnsupportedReason(config)
+    if (reason) {
+      return { parallelBranchUnsupportedReason: reason, parallelBranchOriginal: config, parallelBranches: [] }
+    }
+    const parsed = parseParallelBranchDraft(config)
+    return { parallelBranches: parsed.branches, parallelBranchUnsupportedReason: null, parallelBranchOriginal: null }
+  }
   if (type === 'update_record') {
     const fields = isPlainRecord(config.fields)
       ? config.fields
@@ -1745,11 +1807,11 @@ function draftFromRule(rule: AutomationRule): Draft {
 const draft = ref<Draft>(emptyDraft())
 const conditionEditorEntries = computed(() => collectConditionEditorEntries(draft.value.conditions.conditions))
 
-// A6-2b/A6-3-2a: wait_for_callback AND condition_branch both REQUIRE execution_mode
+// A6-2b/A6-3-2a/A6-3-4: wait_for_callback, condition_branch, and parallel_branch all REQUIRE execution_mode
 // 'workflow_job_v1' — the backend fail-closes a legacy rule that contains either. So whenever such
 // an action is present the job-mode toggle is forced on (and disabled), and buildPayload enforces it
 // regardless of toggle/loaded state.
-const JOB_MODE_REQUIRING_ACTION_TYPES: AutomationActionType[] = ['wait_for_callback', 'condition_branch']
+const JOB_MODE_REQUIRING_ACTION_TYPES: AutomationActionType[] = ['wait_for_callback', 'condition_branch', 'parallel_branch']
 const requiresJobMode = computed(() =>
   draft.value.actions.some((a) => JOB_MODE_REQUIRING_ACTION_TYPES.includes(a.type)),
 )
@@ -1763,6 +1825,9 @@ function createEmptyBranchDraft(index = 1): BranchDraft {
 }
 function createEmptyDefaultBranchDraft(): DefaultBranchDraft {
   return { key: 'default', label: '', actions: [createEmptyBranchActionDraft()] }
+}
+function createEmptyParallelBranchDraft(index = 1): ParallelBranchDraft {
+  return { key: `branch_${index}`, label: '', actions: [createEmptyBranchActionDraft()] }
 }
 
 // A6-3-2a read-only guard (point #3) + branch-key validation (point #1) over the draft's
@@ -1785,6 +1850,30 @@ const conditionBranchKeyError = computed<string | null>(() => {
   }
   return null
 })
+const parallelBranchReadOnlyReason = computed<string | null>(() => {
+  for (const a of draft.value.actions) {
+    if (a.type === 'parallel_branch' && a.config.parallelBranchUnsupportedReason) return a.config.parallelBranchUnsupportedReason
+  }
+  return null
+})
+const parallelBranchKeyError = computed<string | null>(() => {
+  for (const a of draft.value.actions) {
+    if (a.type === 'parallel_branch' && !a.config.parallelBranchUnsupportedReason) {
+      const err = validateParallelBranchKeys({ branches: a.config.parallelBranches ?? [] })
+      if (err) return err
+    }
+  }
+  return null
+})
+const parallelBranchActionError = computed<string | null>(() => {
+  for (const a of draft.value.actions) {
+    if (a.type === 'parallel_branch' && !a.config.parallelBranchUnsupportedReason) {
+      const err = validateParallelBranchActions({ branches: a.config.parallelBranches ?? [] })
+      if (err) return err
+    }
+  }
+  return null
+})
 
 // A6-3-2a branch-builder mutations (operate on the draft action's config in place; Vue deep-reactive).
 function addBranch(action: DraftAction): void {
@@ -1800,10 +1889,10 @@ function addBranchCondition(branch: BranchDraft): void {
 function removeBranchCondition(branch: BranchDraft, index: number): void {
   branch.conditions.splice(index, 1)
 }
-function addBranchAction(branch: BranchDraft | DefaultBranchDraft): void {
+function addBranchAction(branch: BranchDraft | DefaultBranchDraft | ParallelBranchDraft): void {
   branch.actions.push(createEmptyBranchActionDraft())
 }
-function removeBranchAction(branch: BranchDraft | DefaultBranchDraft, index: number): void {
+function removeBranchAction(branch: BranchDraft | DefaultBranchDraft | ParallelBranchDraft, index: number): void {
   branch.actions.splice(index, 1)
 }
 function onBranchActionTypeChange(action: BranchActionDraft): void {
@@ -1829,6 +1918,13 @@ function addDefaultBranch(action: DraftAction): void {
 }
 function removeDefaultBranch(action: DraftAction): void {
   action.config.defaultBranch = null
+}
+function addParallelBranch(action: DraftAction): void {
+  const branches = action.config.parallelBranches ?? (action.config.parallelBranches = [])
+  branches.push(createEmptyParallelBranchDraft(branches.length + 1))
+}
+function removeParallelBranch(action: DraftAction, index: number): void {
+  action.config.parallelBranches?.splice(index, 1)
 }
 
 function setExecutionMode(checked: boolean): void {
@@ -1949,6 +2045,9 @@ const canSave = computed(() => {
   if (draft.value.actions.length < 1) return false
   if (conditionBranchReadOnlyReason.value) return false // A6-3-2a point #3: never save a non-round-trippable loaded branch
   if (conditionBranchKeyError.value) return false // A6-3-2a point #1: branch key safe/unique mirror
+  if (parallelBranchReadOnlyReason.value) return false // A6-3-4/W3-2a: never save a non-round-trippable loaded join
+  if (parallelBranchKeyError.value) return false // W3-2a: frontend mirror of backend branch bounds/keys
+  if (parallelBranchActionError.value) return false // W3-2a: nested branch actions must be executable, not executor-failing shells
   if (!draft.value.conditions.conditions.every(areConditionsComplete)) return false
   for (const action of draft.value.actions) {
     if (action.type === 'send_dingtalk_group_message') {
@@ -1996,10 +2095,6 @@ function addGroupToGroup(path: ConditionPath) {
   const group = groupAtPath(path)
   if (!group) return
   group.conditions.push(createBlankConditionGroup())
-}
-
-function removeCondition(idx: number) {
-  removeConditionNode([idx])
 }
 
 function removeConditionNode(path: ConditionPath) {
@@ -2555,6 +2650,8 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
   switch (type) {
     case 'condition_branch':
       return { branches: [createEmptyBranchDraft(1)], defaultBranch: null, branchUnsupportedReason: null, branchOriginal: null }
+    case 'parallel_branch':
+      return { parallelBranches: [createEmptyParallelBranchDraft(1)], parallelBranchUnsupportedReason: null, parallelBranchOriginal: null }
     case 'update_record':
       return { fieldUpdates: [] }
     case 'create_record':
@@ -2599,9 +2696,7 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
 
 function onDraftActionTypeChange(action: DraftAction) {
   action.config = defaultConfigForActionType(action.type)
-  // A6-2b: selecting wait_for_callback auto-enables the REQUIRED job mode (the backend fail-closes a
-  // legacy rule containing a wait step) — so the UI can't create a "suspends" rule that fails at runtime.
-  if (action.type === 'wait_for_callback') draft.value.executionMode = 'workflow_job_v1'
+  if (JOB_MODE_REQUIRING_ACTION_TYPES.includes(action.type)) draft.value.executionMode = 'workflow_job_v1'
 }
 
 function removeAction(idx: number) {
@@ -2660,6 +2755,17 @@ function buildPayload(): Partial<AutomationRule> {
         config: {
           fields: fieldPairsToRecord(action.config.fieldUpdates),
         },
+      }
+    }
+    if (action.type === 'parallel_branch') {
+      if (action.config.parallelBranchUnsupportedReason && action.config.parallelBranchOriginal) {
+        return { type: action.type, config: action.config.parallelBranchOriginal }
+      }
+      return {
+        type: action.type,
+        config: buildParallelBranchConfig({
+          branches: action.config.parallelBranches ?? [],
+        }),
       }
     }
     if (action.type === 'create_record') {

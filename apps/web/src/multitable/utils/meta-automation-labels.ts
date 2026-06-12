@@ -142,6 +142,16 @@ export type AutomationLabelKey =
   | 'conditionBranch.addBranch'
   | 'conditionBranch.default'
   | 'conditionBranch.addDefault'
+  | 'parallelBranch.readOnly'
+  | 'parallelBranch.hint'
+  | 'parallelBranch.key'
+  | 'parallelBranch.label'
+  | 'parallelBranch.value'
+  | 'parallelBranch.userIds'
+  | 'parallelBranch.message'
+  | 'parallelBranch.addField'
+  | 'parallelBranch.addAction'
+  | 'parallelBranch.addBranch'
   | 'testRun.warning'
   | 'testRun.confirmSuffix'
   | 'testRun.unsavedHint'
@@ -374,6 +384,16 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'conditionBranch.addBranch',
   'conditionBranch.default',
   'conditionBranch.addDefault',
+  'parallelBranch.readOnly',
+  'parallelBranch.hint',
+  'parallelBranch.key',
+  'parallelBranch.label',
+  'parallelBranch.value',
+  'parallelBranch.userIds',
+  'parallelBranch.message',
+  'parallelBranch.addField',
+  'parallelBranch.addAction',
+  'parallelBranch.addBranch',
   'testRun.warning',
   'testRun.confirmSuffix',
   'testRun.unsavedHint',
@@ -565,8 +585,8 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     zh: '开启后，本规则每个动作的运行都会保存为持久的 WorkflowJob 记录；关闭则使用默认的轻量日志。',
   },
   'editor.executionModeRequiredHint': {
-    en: 'Required and locked on: this rule has an action that requires durable WorkflowJob records (wait for callback or condition branch).',
-    zh: '已强制开启并锁定：本规则包含需要持久 WorkflowJob 记录的动作（等待回调或条件分支），无法关闭。',
+    en: 'Required and locked on: this rule has an action that requires durable WorkflowJob records (wait for callback, condition branch, or parallel branch).',
+    zh: '已强制开启并锁定：本规则包含需要持久 WorkflowJob 记录的动作（等待回调、条件分支或并行分支），无法关闭。',
   },
   'trigger.title': { en: 'Trigger', zh: '触发器' },
   'trigger.watchField': { en: 'Watch field', zh: '监听字段' },
@@ -625,6 +645,22 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'conditionBranch.addBranch': { en: '+ Branch', zh: '+ 分支' },
   'conditionBranch.default': { en: 'Default branch (no condition)', zh: '默认分支（无条件）' },
   'conditionBranch.addDefault': { en: '+ Default branch', zh: '+ 默认分支' },
+  'parallelBranch.readOnly': {
+    en: 'This parallel branch rule uses constructs not editable in this version — read-only (save is disabled to avoid flattening it).',
+    zh: '该并行分支规则包含本版本不可编辑的结构 —— 只读（已禁用保存以避免压扁丢失）。',
+  },
+  'parallelBranch.hint': {
+    en: 'Run all branches and join after every branch finishes. Branch actions are limited to update-record / send-notification in v1.',
+    zh: '同时运行所有分支，并在所有分支结束后汇合。v1 分支内动作限更新记录 / 发送通知。',
+  },
+  'parallelBranch.key': { en: 'Branch key', zh: '分支 key' },
+  'parallelBranch.label': { en: 'Label (optional)', zh: '标签（可选）' },
+  'parallelBranch.value': { en: 'Value', zh: '值' },
+  'parallelBranch.userIds': { en: 'User IDs (comma-separated)', zh: '用户 ID（逗号分隔）' },
+  'parallelBranch.message': { en: 'Message', zh: '消息' },
+  'parallelBranch.addField': { en: '+ Field', zh: '+ 字段' },
+  'parallelBranch.addAction': { en: '+ Action', zh: '+ 动作' },
+  'parallelBranch.addBranch': { en: '+ Branch', zh: '+ 分支' },
   'testRun.warning': { en: 'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users.', zh: '测试运行会执行已保存规则，并可能向已配置的钉钉群或用户发送真实消息。' },
   'testRun.confirmSuffix': { en: 'Unsaved changes are not included. Continue?', zh: '未保存的更改不会包含在内。是否继续？' },
   'testRun.unsavedHint': { en: 'Save this automation before running a test.', zh: '请先保存此自动化，再运行测试。' },
@@ -770,12 +806,14 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.resumeError.generic': { en: 'Resume failed.', zh: '恢复失败。' },
 }
 
+type UnknownAutomationString = string & Record<never, never>
+
 export function automationLabel(key: AutomationLabelKey, isZh: boolean): string {
   const entry = LABELS[key]
   return isZh ? entry.zh : entry.en
 }
 
-export function automationStatusLabel(status: AutomationStatus | (string & {}), isZh: boolean): string {
+export function automationStatusLabel(status: AutomationStatus | UnknownAutomationString, isZh: boolean): string {
   if (status === 'success') return automationLabel('status.success', isZh)
   if (status === 'failed') return automationLabel('status.failed', isZh)
   if (status === 'skipped') return automationLabel('status.skipped', isZh)
@@ -788,7 +826,7 @@ export function automationStatusLabel(status: AutomationStatus | (string & {}), 
   return String(status)
 }
 
-export function automationActionTypeLabel(type: AutomationActionType | (string & {}), isZh: boolean): string {
+export function automationActionTypeLabel(type: AutomationActionType | UnknownAutomationString, isZh: boolean): string {
   switch (type) {
     case 'update_record':
       return isZh ? '更新记录' : 'Update record'
@@ -811,6 +849,8 @@ export function automationActionTypeLabel(type: AutomationActionType | (string &
       return isZh ? '等待回调（挂起）' : 'Wait for callback (suspend)'
     case 'condition_branch':
       return isZh ? '条件分支' : 'Condition branch'
+    case 'parallel_branch':
+      return isZh ? '并行分支' : 'Parallel branch'
     case 'update_field':
       return isZh ? '更新字段值' : 'Update field value'
     default:
@@ -818,7 +858,7 @@ export function automationActionTypeLabel(type: AutomationActionType | (string &
   }
 }
 
-export function automationTriggerTypeLabel(type: AutomationTriggerType | (string & {}), isZh: boolean): string {
+export function automationTriggerTypeLabel(type: AutomationTriggerType | UnknownAutomationString, isZh: boolean): string {
   switch (type) {
     case 'record.created':
       return isZh ? '当记录创建时' : 'When record created'
@@ -841,7 +881,7 @@ export function automationTriggerTypeLabel(type: AutomationTriggerType | (string
   }
 }
 
-export function automationTriggerConditionLabel(condition: AutomationTriggerCondition | (string & {}), isZh: boolean): string {
+export function automationTriggerConditionLabel(condition: AutomationTriggerCondition | UnknownAutomationString, isZh: boolean): string {
   switch (condition) {
     case 'any':
       return isZh ? '任意变化' : 'Any change'
@@ -854,7 +894,7 @@ export function automationTriggerConditionLabel(condition: AutomationTriggerCond
   }
 }
 
-export function automationCronPresetLabel(value: AutomationCronPresetValue | (string & {}), isZh: boolean): string {
+export function automationCronPresetLabel(value: AutomationCronPresetValue | UnknownAutomationString, isZh: boolean): string {
   switch (value) {
     case '*/5 * * * *':
       return isZh ? '每 5 分钟' : 'Every 5 minutes'
@@ -871,7 +911,7 @@ export function automationCronPresetLabel(value: AutomationCronPresetValue | (st
   }
 }
 
-export function automationConditionOperatorLabel(operator: ConditionOperator | (string & {}), isZh: boolean): string {
+export function automationConditionOperatorLabel(operator: ConditionOperator | UnknownAutomationString, isZh: boolean): string {
   switch (operator) {
     case 'equals':
       return isZh ? '等于' : 'Equals'
@@ -911,7 +951,7 @@ export function automationConditionValuePlaceholder(widget: AutomationConditionV
 }
 
 export function automationCardTriggerSummary(
-  triggerType: AutomationTriggerType | (string & {}),
+  triggerType: AutomationTriggerType | UnknownAutomationString,
   fieldName: string,
   isZh: boolean,
 ): string {
@@ -926,7 +966,7 @@ export function automationCardTriggerSummary(
 }
 
 export function automationCardActionSummary(
-  actionType: AutomationActionType | (string & {}),
+  actionType: AutomationActionType | UnknownAutomationString,
   fieldName: string,
   isZh: boolean,
 ): string {
@@ -953,7 +993,7 @@ export function automationCardStats(count: number, status: AutomationCardStatTyp
   return `${count} ${automationLabel(key, isZh)}`
 }
 
-export function automationDingTalkPresetLabel(preset: AutomationDingTalkPreset | (string & {}), isZh: boolean): string {
+export function automationDingTalkPresetLabel(preset: AutomationDingTalkPreset | UnknownAutomationString, isZh: boolean): string {
   switch (preset) {
     case 'form_request':
       return isZh ? '表单填写' : 'Form request'
@@ -966,7 +1006,7 @@ export function automationDingTalkPresetLabel(preset: AutomationDingTalkPreset |
   }
 }
 
-export function automationDingTalkTemplateTokenLabel(token: AutomationDingTalkTemplateTokenKey | (string & {}), isZh: boolean): string {
+export function automationDingTalkTemplateTokenLabel(token: AutomationDingTalkTemplateTokenKey | UnknownAutomationString, isZh: boolean): string {
   switch (token) {
     case 'recordId':
       return isZh ? '记录 ID' : 'Record ID'
@@ -981,7 +1021,7 @@ export function automationDingTalkTemplateTokenLabel(token: AutomationDingTalkTe
   }
 }
 
-export function automationDingTalkDestinationScopeLabel(scope: AutomationDingTalkDestinationScope | (string & {}), isZh: boolean): string {
+export function automationDingTalkDestinationScopeLabel(scope: AutomationDingTalkDestinationScope | UnknownAutomationString, isZh: boolean): string {
   switch (scope) {
     case 'org':
       return isZh ? '组织目录' : 'Organization catalog'
@@ -1006,7 +1046,7 @@ export function automationDingTalkDestinationSubtitle(scope: AutomationDingTalkD
   return isZh ? '私有' : 'private'
 }
 
-export function automationDingTalkPersonSubjectLabel(subject: AutomationDingTalkPersonSubject | (string & {}), isZh: boolean): string {
+export function automationDingTalkPersonSubjectLabel(subject: AutomationDingTalkPersonSubject | UnknownAutomationString, isZh: boolean): string {
   switch (subject) {
     case 'member-group':
       return isZh ? '成员组' : 'Member group'
@@ -1021,7 +1061,7 @@ export function automationDingTalkPersonAccessLabel(accessLevel: string, isZh: b
   return accessLevel ? `${isZh ? '权限：' : 'Access: '}${accessLevel}` : ''
 }
 
-export function automationDingTalkPersonStatusLabel(status: AutomationDingTalkPersonStatus | (string & {}), isZh: boolean): string {
+export function automationDingTalkPersonStatusLabel(status: AutomationDingTalkPersonStatus | UnknownAutomationString, isZh: boolean): string {
   switch (status) {
     case 'memberGroupCheckedIndividually':
       return isZh ? '成员组成员会逐个检查钉钉投递条件' : 'Member group members are checked individually for DingTalk delivery'
