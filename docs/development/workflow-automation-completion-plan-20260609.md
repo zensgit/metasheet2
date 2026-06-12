@@ -122,9 +122,9 @@ operate a practical business workflow using existing product surfaces:
 | W5-0 | Approval completion event contract scope-gate | Landed #2413 | Defines terminal approval event taxonomy, redacted payload, idempotency key, post-commit emission boundary, and test matrix without adding automation behavior. |
 | W5-1 | Approval completion event contract implementation | Landed #2414 (`184f2293c`) | `approval.approved/rejected/revoked/cancelled` payload is versioned, redacted, idempotent, emitted post-commit, and tested without adding automation action yet. `return` remains a non-terminal rework transition. |
 | W6-0 | Automation `start_approval` scope-gate | Scope-gate document added; runtime not started | `automation-start-approval-scope-gate-20260610.md` locks action config, idempotency, bridge persistence, waiting/resume semantics, redaction, and tests. |
-| W6-1 | Automation `start_approval` runtime | Landed #2469 | Starts one approval instance from a published template, persists the approval bridge, creates a suspended C1 job, resumes/fails from W5 terminal completion events, and guards retry duplicates. |
+| W6-1 | Automation `start_approval` runtime | Landed #2469; operator smoke pending #2480 | Starts one approval instance from a published template, persists the approval bridge, creates a suspended C1 job, resumes/fails from W5 terminal completion events, and guards retry duplicates. #2480 is the deployed/operator validation gate for approval-approved resume, approval-terminal fail/skip, retry duplicate guard, and redacted Admin runs output. |
 | W7-0 | Approval result backwrite scope-gate | Scope-gate document added; runtime not started | `automation-approval-result-backwrite-scope-gate-20260611.md` locks explicit mapping, idempotency, permission/field guards, redaction, and tests. |
-| W7-1 | Approval result backwrite runtime | Not started; after W6 operator smoke or named runtime unlock | Explicit mapping writes approved/rejected/revoked/cancelled outcomes to multitable record fields with audit and permission checks; `return` transition backwrite needs a separate named scope if required. |
+| W7-1 | Approval result backwrite runtime | Not started; after #2480 PASS or named runtime unlock | Explicit mapping writes approved/rejected/revoked/cancelled outcomes to multitable record fields with audit and permission checks; `return` transition backwrite needs a separate named scope if required. |
 | W8 | BPMN compile/preview adapter | Scope-gate + A6-4a implementation plan recorded; implementation not started | `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md` locks the constrained subset, side-effect-free preview, gap report, and hard no-live-runtime boundary. `multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md` narrows the first build slice to a pure compiler module + unit tests, with route deferred. Runtime implementation still needs explicit opt-in. |
 | W9 | Public webhook resume token emitter | Not started; use-case gated | External consumer can receive a token/callback URL safely; auth, expiry, replay, and redaction are locked before public route. |
 | W10 | Field-visibility / richer approval authoring | Optional follow-up | Existing `visibilityRule` data can be authored, not only preserved; unsupported graph constructs remain fail-closed. |
@@ -152,8 +152,10 @@ and add only `bpmnCompilePreview` + unit tests.
 
 **W7 approval result backwrite** remains the next cross-surface business-write
 candidate. W7-0 has a scope-gate document, but W7-1 runtime remains separately
-gated because it writes business data and changes record state. It should not
-preempt A6-4a unless the owner names a concrete result-backwrite use case.
+gated because it writes business data and changes record state. The normal W7-1
+re-entry proof is #2480 PASS for W6 `start_approval`; otherwise the owner must
+name a concrete result-backwrite use case. W7 should not preempt A6-4a by
+default.
 
 ## 5. Non-goals for v1
 
@@ -178,6 +180,8 @@ needed, one verification/runbook:
 - Cross-surface completion source: this document.
 - W6 `start_approval` bridge scope:
   `automation-start-approval-scope-gate-20260610.md`.
+- W6 deployed/operator smoke:
+  #2480.
 - W7 approval result backwrite scope:
   `automation-approval-result-backwrite-scope-gate-20260611.md`.
 - A6-3-4 / W3 parallel join-all scope:
