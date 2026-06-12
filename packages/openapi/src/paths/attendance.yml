@@ -2434,6 +2434,15 @@ paths:
                     - name: 人事复核
                       approver_role_ids: [attendance-admin]
                   is_active: true
+              scheduleDispatch:
+                summary: Approval flow for schedule dispatch requests
+                value:
+                  name: 调度审批
+                  requestType: schedule_dispatch
+                  steps:
+                    - name: 门店负责人
+                      approverUserIds: [store-owner-001]
+                  isActive: true
               leaveCompat:
                 summary: Manual-test friendly payload using type plus stringified steps
                 value:

@@ -713,7 +713,8 @@
               "leave",
               "overtime",
               "outdoor_punch",
-              "shift_swap"
+              "shift_swap",
+              "schedule_dispatch"
             ]
           },
           "requested_in_at": {
@@ -13148,6 +13149,22 @@
                       }
                     ],
                     "is_active": true
+                  }
+                },
+                "scheduleDispatch": {
+                  "summary": "Approval flow for schedule dispatch requests",
+                  "value": {
+                    "name": "调度审批",
+                    "requestType": "schedule_dispatch",
+                    "steps": [
+                      {
+                        "name": "门店负责人",
+                        "approverUserIds": [
+                          "store-owner-001"
+                        ]
+                      }
+                    ],
+                    "isActive": true
                   }
                 },
                 "leaveCompat": {

@@ -47,6 +47,9 @@ const REQUEST_TYPES = [
   // OPTIONAL shift-swap SW1 (#2538 design-lock): approval envelope type only; generic /requests
   // must not create it because swap needs structured assignment snapshots + counterparty consent.
   'shift_swap',
+  // OPTIONAL dispatch/multisite D1 (#2546 design-lock): approval envelope type only; generic
+  // /requests must not create it because dispatch needs a structured target-group/date-range detail.
+  'schedule_dispatch',
 ]
 const OUTDOOR_APPROVAL_EVENT_SOURCE = 'outdoor_approval'
 // ② S2-0 (#2325 design-lock): event sources that ONLY a trusted internal writer may set — never accepted
@@ -17138,6 +17141,7 @@ function attendanceRequestTypeLabel(requestType) {
     overtime: '加班',
     outdoor_punch: '外勤打卡',
     shift_swap: '换班',
+    schedule_dispatch: '调度',
   }
   return labels[requestType] ?? String(requestType ?? '考勤')
 }
@@ -22527,6 +22531,14 @@ module.exports = {
           'SHIFT_SWAP_DEDICATED_ROUTE_ONLY',
           'shift_swap requests are created by the attendance shift-swap route, not the requests API',
           singleValidationDetail('requestType', 'shift_swap is not creatable via the requests API')
+        )
+      }
+      if (requestType === 'schedule_dispatch') {
+        throw new HttpError(
+          422,
+          'SCHEDULE_DISPATCH_VIA_DEDICATED_ROUTE',
+          'schedule_dispatch requests are created by the attendance schedule-dispatch route, not the requests API',
+          singleValidationDetail('requestType', 'schedule_dispatch is not creatable via the requests API')
         )
       }
 
