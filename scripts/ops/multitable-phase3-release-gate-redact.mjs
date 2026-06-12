@@ -37,14 +37,42 @@ const STRING_PATTERNS = [
     '$1$2$3<redacted>$3',
   ],
   [
-    /\b(postgres(?:ql)?:\/\/)[^@\s"'<>]+@/gi,
-    '$1<redacted>@',
-  ],
-  [
-    /\b(mysql:\/\/)[^@\s"'<>]+@/gi,
-    '$1<redacted>@',
+    // Use URL parsing rather than a first-@ regex so raw `@` characters in
+    // username/password do not leak.
+    /\b(?:postgres(?:ql)?|mysql):\/\/[^\s<>]+/gi,
+    redactDatabaseUrlCredentials,
   ],
 ]
+
+function redactDatabaseUrlCredentials(value) {
+  try {
+    const url = new URL(value)
+    if (!/^(postgres(?:ql)?|mysql):$/i.test(url.protocol)) return value
+    if (!url.username && !url.password) return value
+    return `${url.protocol}//<redacted>@${url.host}${url.pathname}${url.search}${url.hash}`
+  } catch {
+    return redactMalformedDatabaseUrlCredentials(value)
+  }
+}
+
+function redactMalformedDatabaseUrlCredentials(value) {
+  const match = /^(postgres(?:ql)?|mysql):\/\/(.+)$/i.exec(value)
+  if (!match) return value
+  const scheme = match[1]
+  const rest = match[2]
+  const at = findDatabaseAuthoritySeparator(rest)
+  if (at <= 0 || at === rest.length - 1) return value
+  return `${scheme}://<redacted>@${rest.slice(at + 1)}`
+}
+
+function findDatabaseAuthoritySeparator(rest) {
+  const hostPattern = /^(?:\[[^\]\s]+\]|[A-Za-z0-9][A-Za-z0-9.-]*)(?::\d+)?(?=$|[/?#])/
+  for (let index = 0; index < rest.length; index += 1) {
+    if (rest[index] !== '@') continue
+    if (hostPattern.test(rest.slice(index + 1))) return index
+  }
+  return -1
+}
 
 const STRUCTURED_FIELDS = new Set([
   'authToken',

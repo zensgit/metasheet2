@@ -23,7 +23,9 @@
 
 export const REDACTION_VERSION = 1
 
-const STRING_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+type StringReplacement = string | ((substring: string, ...args: unknown[]) => string)
+
+const STRING_PATTERNS: ReadonlyArray<readonly [RegExp, StringReplacement]> = [
   // DingTalk robot webhook (token-bearing) — must run before the generic
   // `access_token=` rule so the whole URL is masked, not just its token.
   [/https:\/\/oapi\.dingtalk\.com\/robot\/send\?access_token=[A-Za-z0-9._~-]+/gi, '<dingtalk-robot-webhook-redacted>'],
@@ -48,9 +50,43 @@ const STRING_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
     /\b(MULTITABLE_EMAIL_SMOKE_(?:TO|FROM|SUBJECT))(\s*[:=]\s*)("?)([^&\s"'<>]+)\3/g,
     '$1$2$3<redacted>$3',
   ],
-  [/\b(postgres(?:ql)?:\/\/)[^@\s"'<>]+@/gi, '$1<redacted>@'],
-  [/\b(mysql:\/\/)[^@\s"'<>]+@/gi, '$1<redacted>@'],
+  [
+    // Use URL parsing rather than a first-@ regex so raw `@` characters in
+    // username/password do not leak into persisted execution snapshots.
+    /\b(?:postgres(?:ql)?|mysql):\/\/[^\s<>]+/gi,
+    redactDatabaseUrlCredentials,
+  ],
 ]
+
+function redactDatabaseUrlCredentials(value: string): string {
+  try {
+    const url = new URL(value)
+    if (!/^(postgres(?:ql)?|mysql):$/i.test(url.protocol)) return value
+    if (!url.username && !url.password) return value
+    return `${url.protocol}//<redacted>@${url.host}${url.pathname}${url.search}${url.hash}`
+  } catch {
+    return redactMalformedDatabaseUrlCredentials(value)
+  }
+}
+
+function redactMalformedDatabaseUrlCredentials(value: string): string {
+  const match = /^(postgres(?:ql)?|mysql):\/\/(.+)$/i.exec(value)
+  if (!match) return value
+  const scheme = match[1]
+  const rest = match[2]
+  const at = findDatabaseAuthoritySeparator(rest)
+  if (at <= 0 || at === rest.length - 1) return value
+  return `${scheme}://<redacted>@${rest.slice(at + 1)}`
+}
+
+function findDatabaseAuthoritySeparator(rest: string): number {
+  const hostPattern = /^(?:\[[^\]\s]+\]|[A-Za-z0-9][A-Za-z0-9.-]*)(?::\d+)?(?=$|[/?#])/
+  for (let index = 0; index < rest.length; index += 1) {
+    if (rest[index] !== '@') continue
+    if (hostPattern.test(rest.slice(index + 1))) return index
+  }
+  return -1
+}
 
 /**
  * Key names (NORMALIZED: lowercased, `-`/`_` stripped) whose values are masked
@@ -93,7 +129,9 @@ function normalizeKey(key: string): string {
 export function redactString(value: unknown): string {
   let result = String(value ?? '')
   for (const [pattern, replacement] of STRING_PATTERNS) {
-    result = result.replace(pattern, replacement)
+    result = typeof replacement === 'string'
+      ? result.replace(pattern, replacement)
+      : result.replace(pattern, replacement)
   }
   return result
 }

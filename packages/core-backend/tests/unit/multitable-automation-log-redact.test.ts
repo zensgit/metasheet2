@@ -17,6 +17,42 @@ describe('automation-log-redact (shared backend redactor)', () => {
       expect(redactString(`token ${jwt}`)).toContain('<jwt:redacted>')
     })
 
+    it('scrubs database URI credentials containing raw @ characters before persistence', () => {
+      const postgres = redactString('dsn postgres://u@ser:p@ss@db.example.com:5432/app')
+      expect(postgres).toContain('postgres://<redacted>@db.example.com:5432/app')
+      expect(postgres).not.toContain('u@ser')
+      expect(postgres).not.toContain('p@ss')
+      expect(postgres).not.toContain('ss@db')
+
+      const mysql = redactString('mysql://root:r@w@10.0.0.5:3306/data')
+      expect(mysql).toBe('mysql://<redacted>@10.0.0.5:3306/data')
+      expect(mysql).not.toContain('r@w')
+      expect(mysql).not.toContain('w@10')
+    })
+
+    it('scrubs malformed database URI credentials containing reserved delimiters before persistence', () => {
+      for (const secret of ['pa#ss', 'pa?ss', 'pa/ss', 'pa)ss', "pa'ss"]) {
+        const out = redactString(`postgres://user:${secret}@db.example.com:5432/app`)
+        expect(out).toBe('postgres://<redacted>@db.example.com:5432/app')
+        expect(out).not.toContain(secret)
+      }
+
+      const mysql = redactString('mysql://root:r)w@10.0.0.5:3306/data')
+      expect(mysql).toBe('mysql://<redacted>@10.0.0.5:3306/data')
+      expect(mysql).not.toContain('r)w')
+    })
+
+    it('preserves the database host when malformed URI query text contains @', () => {
+      const out = redactString('postgres://user:pa/ss@db.example.com:5432/app?notify=a@b')
+      expect(out).toBe('postgres://<redacted>@db.example.com:5432/app?notify=a@b')
+      expect(out).not.toContain('pa/ss')
+    })
+
+    it('does not scrub database URLs without userinfo', () => {
+      expect(redactString('postgres://db.example.com:5432/app')).toBe('postgres://db.example.com:5432/app')
+      expect(redactString('mysql://10.0.0.5:3306/data')).toBe('mysql://10.0.0.5:3306/data')
+    })
+
     it('masks the DingTalk robot webhook URL wholesale', () => {
       const url = 'https://oapi.dingtalk.com/robot/send?access_token=abcDEF123._~-'
       expect(redactString(`delivery to ${url}`)).toContain('<dingtalk-robot-webhook-redacted>')

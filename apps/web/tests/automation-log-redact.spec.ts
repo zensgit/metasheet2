@@ -98,6 +98,42 @@ describe('redactString', () => {
     expect(b).not.toContain('root:rootpw')
   })
 
+  it('masks database URI credentials containing raw @ characters', () => {
+    const postgres = redactString('postgres://u@ser:p@ss@db.example.com:5432/app')
+    expect(postgres).toBe('postgres://<redacted>@db.example.com:5432/app')
+    expect(postgres).not.toContain('u@ser')
+    expect(postgres).not.toContain('p@ss')
+    expect(postgres).not.toContain('ss@db')
+
+    const mysql = redactString('mysql://root:r@w@10.0.0.5:3306/data')
+    expect(mysql).toBe('mysql://<redacted>@10.0.0.5:3306/data')
+    expect(mysql).not.toContain('r@w')
+    expect(mysql).not.toContain('w@10')
+  })
+
+  it('masks malformed database URI credentials containing reserved delimiters', () => {
+    for (const secret of ['pa#ss', 'pa?ss', 'pa/ss', 'pa)ss', "pa'ss"]) {
+      const out = redactString(`postgres://user:${secret}@db.example.com:5432/app`)
+      expect(out).toBe('postgres://<redacted>@db.example.com:5432/app')
+      expect(out).not.toContain(secret)
+    }
+
+    const mysql = redactString('mysql://root:r)w@10.0.0.5:3306/data')
+    expect(mysql).toBe('mysql://<redacted>@10.0.0.5:3306/data')
+    expect(mysql).not.toContain('r)w')
+  })
+
+  it('preserves the database host when malformed URI query text contains @', () => {
+    const out = redactString('postgres://user:pa/ss@db.example.com:5432/app?notify=a@b')
+    expect(out).toBe('postgres://<redacted>@db.example.com:5432/app?notify=a@b')
+    expect(out).not.toContain('pa/ss')
+  })
+
+  it('does not mask database URLs without userinfo', () => {
+    expect(redactString('postgres://db.example.com:5432/app')).toBe('postgres://db.example.com:5432/app')
+    expect(redactString('mysql://10.0.0.5:3306/data')).toBe('mysql://10.0.0.5:3306/data')
+  })
+
   it('masks bare email addresses in free text', () => {
     const out = redactString('Notification delivery failed to qa-private@example.com after 3 retries')
     expect(out).toContain('<email:redacted>')
