@@ -66,7 +66,7 @@
 
 ### A6 — 收敛引擎（已落 A6-1/A6-2；剩余需求驱动）
 依赖序：**持久 WorkflowJob runtime → suspend/resume（先 webhook 后 delay）→ branch/parallel（DAG）→ BPMN compile/preview adapter → approval-as-job**。
-- **执行细节（per-rung 最小改动集 / 测试面 / gate）**：见 `multitable-automation-a6-execution-plan-20260601.md`；A6-1 enable-writer 在该文档已 deep-scout（build-ready），A6-2..A6-5 仅 plan-level（设计待各自 scout 在用例点名时再写）。状态仍以 `…-todo-20260527.md` 清单为准。
+- **执行细节（per-rung 最小改动集 / 测试面 / gate）**：见 `multitable-automation-a6-execution-plan-20260601.md` 的历史分解；A6-1/A6-2/A6-3 的已落状态、A6-4 的 scope-gate + A6-4a plan、以及仍冻结的后续项，以下方 bullets 和 `…-todo-20260527.md` 清单为准。
 - **A6-0 scout**：`multitable-automation-a6-convergence-scout-20260529.md` 只记录边界/顺序/测试面；它不是 runtime unlock。
 - **A6-1 scout**：`multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md` 已回答第一片 runtime 的七个设计问题。
 - **✅ A6-1 COMPLETE end-to-end（2026-06，不再 dormant）**：runtime **#2130**（`multitable_automation_jobs` 表 + rule-level `execution_mode` + inline linear job persistence fail-closed + A1 redaction 复用 + A2 detail prefer-jobs/legacy-fallback）+ **enable-writer #2191**（createRule/updateRule 接 `execution_mode`，service 层 enum 严格校验）+ **admin UI toggle #2193**（规则编辑器复选框，默认关）。净效果：管理员勾选规则 → 该规则每个动作持久化为 C1 WorkflowJob，A2/A3 可见。验收 runbook：`multitable-automation-a6-1-acceptance-runbook-20260602.md`。状态以 `…-todo-20260527.md` 为准。
