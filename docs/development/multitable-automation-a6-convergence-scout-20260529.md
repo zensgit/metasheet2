@@ -82,7 +82,7 @@ The dependency order is fixed, but it is not a schedule.
 | A6-1 | Persistent WorkflowJob runtime | Landed and enabled end-to-end (#2130/#2191/#2193) | done |
 | A6-2 | Suspend/resume | Landed end-to-end (#2237/#2245/#2257); delay/timer still deferred | done for admin-gated v1 |
 | A6-3 | Branch/parallel DAG | `condition_branch` and `parallel_branch` `joinMode: all` landed; branch-local waits and join-any still gated | partially done |
-| A6-4 | BPMN adapter | Scope gate recorded in `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`; implementation not started | named demand |
+| A6-4 | BPMN adapter | Scope gate recorded in `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`; A6-4a implementation plan recorded in `multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`; implementation not started | named demand |
 | A6-5 | Approval-as-job | First `start_approval` bridge slice landed (#2469); result backwrite / follow-ups still gated | partially done |
 
 The sections below retain the original design rationale for each rung. The table
@@ -154,8 +154,11 @@ gap report.
 
 The detailed A6-4 scope gate is now recorded in
 `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`.
-That document is the current contract for any implementation; this section is
-kept as the original A6-0 positioning.
+The first implementation slice is narrowed further by
+`multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`:
+A6-4a is pure compiler module + unit tests only, with the route deferred to
+A6-4b. Those documents are the current contract for any implementation; this
+section is kept as the original A6-0 positioning.
 
 Goal: use BPMN as a modeling/preview language, not as a runtime.
 
@@ -274,12 +277,13 @@ A6 must not:
 
 ## Current Recommendation
 
-After A6-3 `condition_branch` + parallel `join_all`, the next A6 runtime work
-still requires a named demand. A6-4 is now scoped as compile-preview only, but
-implementation should not start without explicit owner opt-in using the re-entry
-signal in `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`.
+After A6-3 `condition_branch` + parallel `join_all`, the next A6 work still
+requires a named demand. A6-4 is now scoped as compile-preview only, and A6-4a
+has a build-ready implementation plan, but implementation must not start without
+explicit owner opt-in using the re-entry signal in
+`multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`.
 
-The healthiest next technical action, when demand appears, is a small A6-1
-runtime PR: feature-flagged persistent job runtime for linear automation, with
-legacy rules unchanged by default. Anything beyond that is exciting, sharp, and
-currently too large to sneak in through a side door.
+The healthiest next technical action, when that demand appears, is A6-4a:
+a pure `bpmnCompilePreview` compiler module plus unit tests, no route, no
+persistence, no `BPMNWorkflowEngine`, and no live deploy/start path. The
+read-only route belongs to A6-4b only after the compiler output is stable.
