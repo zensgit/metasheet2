@@ -65,6 +65,11 @@ const OPS_CHECKS = [
     command: ['node', '--test', 'scripts/ops/dingtalk-public-form-mobile-signoff.test.mjs'],
   },
   {
+    id: 'ops-attendance-c5-real-dingtalk-preflight',
+    label: 'Attendance C5 real DingTalk preflight',
+    command: ['node', '--test', 'scripts/ops/attendance-c5-real-dingtalk-preflight.test.mjs'],
+  },
+  {
     id: 'ops-diff-check',
     label: 'Git whitespace diff check',
     command: ['git', 'diff', '--check'],

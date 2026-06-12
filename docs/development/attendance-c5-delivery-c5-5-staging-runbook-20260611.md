@@ -39,6 +39,7 @@ Two channel modes are intentionally separate:
 6. **Real DingTalk mode only:** provide a staging DingTalk recipient:
    - `DINGTALK_SMOKE_EXTERNAL_USER_ID=<real_dingtalk_userid>` for all three smoke recipients, or role-specific `DINGTALK_SMOKE_SUBJECT_USER_ID`, `DINGTALK_SMOKE_OWNER_USER_ID`, `DINGTALK_SMOKE_SUB_OWNER_USER_ID`;
    - real DingTalk work-notification runtime config must be present. The smoke supports either backend env vars (`DINGTALK_APP_KEY`, `DINGTALK_APP_SECRET`, `DINGTALK_AGENT_ID`) or `DINGTALK_SMOKE_CONFIG_INTEGRATION_ID=<existing_dingtalk_integration_id>`, which copies that integration's stored config into the temporary synthetic integrations.
+7. **Real DingTalk mode only:** run the read-only preflight below before sending any real work notifications.
 
 ## Run Fake-Channel Smoke
 
@@ -82,6 +83,36 @@ it keeps C5 at 🟡 because no real DingTalk work notification was sent.
 ## Run Real DingTalk Smoke
 
 This sends six real DingTalk work notifications: two sources times subject, owner, and sub_owner. Use a test DingTalk user or a staging-only recipient.
+
+### Preflight Real DingTalk Inputs
+
+The preflight is read-only: it checks C5 tables, DingTalk config availability, recipient inputs, token availability, and due delivery rows. It does not seed smoke rows and does not send DingTalk messages. It also omits secret values from stdout, JSON, and Markdown outputs.
+
+Run this first from the same staging context that will run the real smoke:
+
+```bash
+BASE_URL=http://127.0.0.1:8082 \
+DATABASE_URL=postgresql://USER@127.0.0.1:5432/metasheet \
+DINGTALK_SMOKE_EXTERNAL_USER_ID=<real_dingtalk_userid> \
+SMOKE_TOKEN=<staging-admin-jwt> \
+node scripts/ops/attendance-c5-real-dingtalk-preflight.mjs \
+  --database-url "$DATABASE_URL" \
+  --env-file docker/app.staging.env
+```
+
+If staging uses stored DingTalk integration config rather than backend env vars, add:
+
+```bash
+DINGTALK_SMOKE_CONFIG_INTEGRATION_ID=<existing_dingtalk_integration_id>
+```
+
+Expected ready output:
+
+```json
+{"ok":true,"overallStatus":"ready","missingCheckIds":[],"jsonPath":"output/attendance-c5-real-dingtalk-preflight/summary.json","mdPath":"output/attendance-c5-real-dingtalk-preflight/summary.md"}
+```
+
+If the preflight returns `overallStatus:"blocked"`, fix the listed checks before running the real smoke. Do not use `--allow-blocked` as a completion signal; it is only for capturing a blocked report artifact.
 
 ```bash
 BASE_URL=http://127.0.0.1:8082 \
