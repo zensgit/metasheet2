@@ -4,6 +4,10 @@ import AttendanceView from '../src/views/AttendanceView.vue'
 import { useLocale } from '../src/composables/useLocale'
 import { apiFetch } from '../src/utils/api'
 
+const authMockState = vi.hoisted(() => ({
+  currentUserId: 'swap-user-a',
+}))
+
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
     plugins: ref([
@@ -17,6 +21,12 @@ vi.mock('../src/composables/usePlugins', () => ({
     loading: ref(false),
     error: ref(null),
     fetchPlugins: vi.fn().mockResolvedValue(undefined),
+  }),
+}))
+
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getCurrentUserId: vi.fn(async () => authMockState.currentUserId),
   }),
 }))
 
@@ -346,6 +356,146 @@ function installZeroStateMock(): void {
   })
 }
 
+function installShiftSwapSelfServiceMock(options: { actorUserId?: string } = {}) {
+  const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+  const createBodies: unknown[] = []
+  const acceptCalls: string[] = []
+  const rejectCalls: string[] = []
+  const cancelCalls: string[] = []
+  const actorUserId = options.actorUserId ?? 'swap-user-a'
+  vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url
+    const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+
+    if (url.includes('/api/attendance/assignments?')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [
+            {
+              assignment: {
+                id: 'assignment-a',
+                userId: 'swap-user-a',
+                shiftId: 'shift-a',
+                startDate: '2026-04-15',
+                endDate: '2026-04-15',
+                isActive: true,
+                publishStatus: 'published',
+                assignmentKind: 'regular',
+                producerType: null,
+                slotIndex: 0,
+              },
+              shift: { id: 'shift-a', name: 'Morning', timezone: 'Asia/Shanghai', workStartTime: '09:00', workEndTime: '18:00', lateGraceMinutes: 10, earlyGraceMinutes: 5, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
+            },
+            {
+              assignment: {
+                id: 'assignment-b',
+                userId: 'swap-user-b',
+                shiftId: 'shift-b',
+                startDate: '2026-04-16',
+                endDate: '2026-04-16',
+                isActive: true,
+                publishStatus: 'published',
+                assignmentKind: 'regular',
+                producerType: null,
+                slotIndex: 0,
+              },
+              shift: { id: 'shift-b', name: 'Evening', timezone: 'Asia/Shanghai', workStartTime: '13:00', workEndTime: '22:00', lateGraceMinutes: 10, earlyGraceMinutes: 5, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
+            },
+          ],
+          total: 2,
+        },
+      })
+    }
+
+    if (url.includes('/api/attendance/shift-swap-requests?')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [
+            {
+              requestId: 'swap-request-1',
+              requestStatus: 'pending',
+              requesterUserId: 'swap-user-a',
+              counterpartyUserId: 'swap-user-b',
+              counterpartyStatus: 'pending',
+              requesterAssignmentId: 'assignment-a',
+              counterpartyAssignmentId: 'assignment-b',
+              requesterWorkDate: '2026-04-15',
+              counterpartyWorkDate: '2026-04-16',
+            },
+          ].filter(item => item.requesterUserId === actorUserId || item.counterpartyUserId === actorUserId),
+          total: actorUserId === 'swap-user-a' || actorUserId === 'swap-user-b' ? 1 : 0,
+        },
+      })
+    }
+
+    if (url.endsWith('/api/attendance/shift-swap-requests') && method === 'POST') {
+      createBodies.push(JSON.parse(String((init as RequestInit | undefined)?.body || '{}')))
+      return jsonResponse(201, {
+        ok: true,
+        data: {
+          request: { id: 'swap-request-1', request_type: 'shift_swap', status: 'pending', work_date: '2026-04-15', metadata: {} },
+          shiftSwap: { requestId: 'swap-request-1', counterpartyStatus: 'pending' },
+        },
+      })
+    }
+
+    if (url.endsWith('/api/attendance/shift-swap-requests/swap-request-1/accept') && method === 'POST') {
+      acceptCalls.push(url)
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          shiftSwap: {
+            requestId: 'swap-request-1',
+            requestStatus: 'pending',
+            requesterUserId: 'swap-user-a',
+            counterpartyUserId: 'swap-user-b',
+            counterpartyStatus: 'accepted',
+          },
+        },
+      })
+    }
+
+    if (url.endsWith('/api/attendance/shift-swap-requests/swap-request-1/reject') && method === 'POST') {
+      rejectCalls.push(url)
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          shiftSwap: {
+            requestId: 'swap-request-1',
+            requestStatus: 'rejected',
+            requesterUserId: 'swap-user-a',
+            counterpartyUserId: 'swap-user-b',
+            counterpartyStatus: 'rejected',
+          },
+        },
+      })
+    }
+
+    if (url.endsWith('/api/attendance/shift-swap-requests/swap-request-1/cancel') && method === 'POST') {
+      cancelCalls.push(url)
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          shiftSwap: {
+            requestId: 'swap-request-1',
+            requestStatus: 'cancelled',
+            requesterUserId: 'swap-user-a',
+            counterpartyUserId: 'swap-user-b',
+            counterpartyStatus: 'pending',
+          },
+        },
+      })
+    }
+
+    if (defaultImpl) return defaultImpl(input, init)
+    return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+  })
+
+  return { createBodies, acceptCalls, rejectCalls, cancelCalls }
+}
+
 describe('Attendance self-service dashboard', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -355,6 +505,7 @@ describe('Attendance self-service dashboard', () => {
     vi.clearAllMocks()
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-04-15T08:00:00Z'))
+    authMockState.currentUserId = 'swap-user-a'
     HTMLElement.prototype.scrollIntoView = vi.fn()
     window.localStorage.clear()
     window.localStorage.setItem('metasheet_locale', 'en')
@@ -603,6 +754,110 @@ describe('Attendance self-service dashboard', () => {
     expect(overtimeRule!.disabled).toBe(false)
     expect(overtimeRule!.value).toBe('ot-default')
     expect(overtimeRule!.textContent).toContain('Standard Overtime')
+  })
+
+  it('submits shift-swap requests through the dedicated route with exact assignment ids', async () => {
+    authMockState.currentUserId = 'swap-user-a'
+    const { createBodies } = installShiftSwapSelfServiceMock({ actorUserId: 'swap-user-a' })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const requestType = container!.querySelector<HTMLSelectElement>('#attendance-request-type')
+    expect(requestType).toBeTruthy()
+    requestType!.value = 'shift_swap'
+    requestType!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(3)
+
+    const requesterAssignment = container!.querySelector<HTMLSelectElement>('#attendance-shift-swap-requester-assignment')
+    const counterpartyAssignment = container!.querySelector<HTMLSelectElement>('#attendance-shift-swap-counterparty-assignment')
+    expect(requesterAssignment).toBeTruthy()
+    expect(counterpartyAssignment).toBeTruthy()
+    expect(requesterAssignment!.value).toBe('assignment-a')
+    expect(counterpartyAssignment!.value).toBe('assignment-b')
+
+    const reason = container!.querySelector<HTMLInputElement>('#attendance-request-reason')
+    expect(reason).toBeTruthy()
+    reason!.value = 'Need to swap with evening shift'
+    reason!.dispatchEvent(new Event('input', { bubbles: true }))
+
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+
+    expect(createBodies).toEqual([
+      {
+        requesterAssignmentId: 'assignment-a',
+        counterpartyAssignmentId: 'assignment-b',
+        reason: 'Need to swap with evening shift',
+      },
+    ])
+    const genericRequestPosts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).endsWith('/api/attendance/requests')
+      && String((init as RequestInit | undefined)?.method || 'GET').toUpperCase() === 'POST',
+    )
+    expect(genericRequestPosts).toEqual([])
+  })
+
+  it('lets the counterparty accept a pending shift-swap request from the dedicated list', async () => {
+    authMockState.currentUserId = 'swap-user-b'
+    const { acceptCalls } = installShiftSwapSelfServiceMock({ actorUserId: 'swap-user-b' })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const shiftSwapSection = container!.querySelector<HTMLElement>('[data-shift-swap-requests]')
+    expect(shiftSwapSection).toBeTruthy()
+    expect(shiftSwapSection!.textContent).toContain('Counterparty pending')
+    expect(shiftSwapSection!.textContent).toContain('swap-user-a')
+    expect(shiftSwapSection!.textContent).toContain('swap-user-b')
+    expect(shiftSwapSection!.textContent).toContain('Accept swap')
+    expect(shiftSwapSection!.textContent).toContain('Reject swap')
+    expect(shiftSwapSection!.textContent).not.toContain('Cancel')
+
+    findButton(container!, 'Accept swap').click()
+    await flushUi(4)
+
+    expect(acceptCalls).toEqual(['/api/attendance/shift-swap-requests/swap-request-1/accept'])
+  })
+
+  it('lets the counterparty reject a pending shift-swap request through the dedicated route', async () => {
+    authMockState.currentUserId = 'swap-user-b'
+    const { rejectCalls } = installShiftSwapSelfServiceMock({ actorUserId: 'swap-user-b' })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const shiftSwapSection = container!.querySelector<HTMLElement>('[data-shift-swap-requests]')
+    expect(shiftSwapSection).toBeTruthy()
+    expect(shiftSwapSection!.textContent).toContain('Reject swap')
+    expect(shiftSwapSection!.textContent).not.toContain('Cancel')
+
+    findButton(container!, 'Reject swap').click()
+    await flushUi(4)
+
+    expect(rejectCalls).toEqual(['/api/attendance/shift-swap-requests/swap-request-1/reject'])
+  })
+
+  it('lets the requester cancel a pending shift-swap request through the dedicated route', async () => {
+    authMockState.currentUserId = 'swap-user-a'
+    const { cancelCalls } = installShiftSwapSelfServiceMock({ actorUserId: 'swap-user-a' })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const shiftSwapSection = container!.querySelector<HTMLElement>('[data-shift-swap-requests]')
+    expect(shiftSwapSection).toBeTruthy()
+    expect(shiftSwapSection!.textContent).toContain('Cancel')
+    expect(shiftSwapSection!.textContent).not.toContain('Accept swap')
+    expect(shiftSwapSection!.textContent).not.toContain('Reject swap')
+
+    const cancel = Array.from(shiftSwapSection!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === 'Cancel')
+    expect(cancel).toBeTruthy()
+    cancel!.click()
+    await flushUi(4)
+
+    expect(cancelCalls).toEqual(['/api/attendance/shift-swap-requests/swap-request-1/cancel'])
   })
 
   it('explains zero-data onboarding when no attendance records exist yet', async () => {

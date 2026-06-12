@@ -308,6 +308,14 @@
             <button
               class="attendance__btn"
               type="button"
+              data-selfservice-action="shift-swap"
+              @click="openQuickRequestDraft('shift_swap')"
+            >
+              {{ tr('Shift swap', '换班申请') }}
+            </button>
+            <button
+              class="attendance__btn"
+              type="button"
               data-selfservice-action="records"
               @click="scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.records)"
             >
@@ -708,8 +716,46 @@
                 <option value="time_correction">{{ tr('Time correction', '时间更正') }}</option>
                 <option value="leave">{{ tr('Leave', '请假') }}</option>
                 <option value="overtime">{{ tr('Overtime', '加班') }}</option>
+                <option value="shift_swap">{{ tr('Shift swap', '换班') }}</option>
               </select>
             </label>
+            <template v-if="isShiftSwapRequest">
+              <label class="attendance__field" for="attendance-shift-swap-requester-assignment">
+                <span>{{ tr('My published shift', '我的已发布班次') }}</span>
+                <select
+                  id="attendance-shift-swap-requester-assignment"
+                  name="shiftSwapRequesterAssignment"
+                  v-model="requestForm.requesterAssignmentId"
+                  :disabled="requesterShiftSwapAssignmentOptions.length === 0"
+                >
+                  <option value="" disabled>{{ tr('Select your shift', '选择我的班次') }}</option>
+                  <option v-for="item in requesterShiftSwapAssignmentOptions" :key="item.assignment.id" :value="item.assignment.id">
+                    {{ formatShiftSwapAssignmentOption(item) }}
+                  </option>
+                </select>
+              </label>
+              <label class="attendance__field" for="attendance-shift-swap-counterparty-assignment">
+                <span>{{ tr('Coworker published shift', '对方已发布班次') }}</span>
+                <select
+                  id="attendance-shift-swap-counterparty-assignment"
+                  name="shiftSwapCounterpartyAssignment"
+                  v-model="requestForm.counterpartyAssignmentId"
+                  :disabled="counterpartyShiftSwapAssignmentOptions.length === 0"
+                >
+                  <option value="" disabled>{{ tr('Select coworker shift', '选择对方班次') }}</option>
+                  <option v-for="item in counterpartyShiftSwapAssignmentOptions" :key="item.assignment.id" :value="item.assignment.id">
+                    {{ formatShiftSwapAssignmentOption(item) }}
+                  </option>
+                </select>
+              </label>
+              <p class="attendance__field-hint attendance__field--full">
+                {{
+                  shiftSwapAssignmentOptions.length === 0
+                    ? tr('No published single-day regular assignments are available for shift swap yet.', '当前没有可用于换班的已发布单日常规排班。')
+                    : tr('Only published single-day regular assignments can be submitted for this first shift-swap slice.', '首版换班仅支持已发布的单日常规排班。')
+                }}
+              </p>
+            </template>
             <label v-if="isLeaveRequest" class="attendance__field" for="attendance-request-leave-type">
               <span>{{ tr('Leave type', '请假类型') }}</span>
               <select
@@ -744,7 +790,7 @@
                 {{ tr('Ask an attendance admin to enable an active overtime rule before submitting overtime requests.', '请联系考勤管理员启用可用加班规则后再提交加班申请。') }}
               </small>
             </label>
-            <label class="attendance__field" for="attendance-request-in">
+            <label v-if="!isShiftSwapRequest" class="attendance__field" for="attendance-request-in">
               <span>{{ isLeaveOrOvertimeRequest ? tr('Start', '开始') : tr('Requested in', '申请打卡入') }}</span>
               <input
                 id="attendance-request-in"
@@ -753,7 +799,7 @@
                 type="datetime-local"
               />
             </label>
-            <label class="attendance__field" for="attendance-request-out">
+            <label v-if="!isShiftSwapRequest" class="attendance__field" for="attendance-request-out">
               <span>{{ isLeaveOrOvertimeRequest ? tr('End', '结束') : tr('Requested out', '申请打卡出') }}</span>
               <input
                 id="attendance-request-out"
@@ -837,13 +883,62 @@
                   <span>{{ tr('Out', '出') }}: {{ formatDateTime(item.requested_out_at) }}</span>
                 </div>
                 <div class="attendance__request-actions" v-if="item.status === 'pending'">
-                  <button v-if="!isFocusedAttendanceRequest(item)" class="attendance__btn" @click="cancelRequest(item.id)">{{ tr('Cancel', '取消') }}</button>
+                  <button v-if="!isFocusedAttendanceRequest(item)" class="attendance__btn" @click="cancelRequest(item.id, item.request_type)">{{ tr('Cancel', '取消') }}</button>
                   <template v-if="canReviewFocusedAttendanceRequest(item)">
                     <button class="attendance__btn" @click="resolveRequest(item.id, 'approve')">{{ tr('Approve', '批准') }}</button>
                     <button class="attendance__btn attendance__btn--danger" @click="resolveRequest(item.id, 'reject')">
                       {{ tr('Reject', '驳回') }}
                     </button>
                   </template>
+                </div>
+              </li>
+            </ul>
+          </div>
+
+          <div class="attendance__requests" data-shift-swap-requests>
+            <div class="attendance__requests-header">
+              <span>{{ tr('Shift-swap requests', '换班申请') }}</span>
+              <button class="attendance__btn" :disabled="shiftSwapLoading" @click="loadShiftSwapRequests">
+                {{ shiftSwapLoading ? tr('Loading...', '加载中...') : tr('Reload shift swaps', '重载换班') }}
+              </button>
+            </div>
+            <div v-if="shiftSwapRequests.length === 0" class="attendance__empty">{{ tr('No shift-swap requests.', '暂无换班申请。') }}</div>
+            <ul v-else class="attendance__request-list">
+              <li
+                v-for="item in shiftSwapRequests"
+                :key="item.requestId"
+                class="attendance__request-item"
+                :data-shift-swap-request-id="item.requestId"
+              >
+                <div>
+                  <strong>{{ item.requesterWorkDate }}</strong>
+                  <span>{{ tr('with', '与') }}</span>
+                  <strong>{{ item.counterpartyWorkDate }}</strong>
+                  <span class="attendance__status-chip" :class="`attendance__status-chip--${item.requestStatus || 'pending'}`">
+                    {{ formatStatus(item.requestStatus || 'pending') }}
+                  </span>
+                  <span class="attendance__status-chip" :class="`attendance__status-chip--${item.counterpartyStatus}`">
+                    {{ formatShiftSwapCounterpartyStatus(item.counterpartyStatus) }}
+                  </span>
+                </div>
+                <div class="attendance__request-meta">
+                  <span>{{ tr('Requester', '发起人') }}: {{ item.requesterUserId }}</span>
+                  <span>{{ tr('Counterparty', '对方') }}: {{ item.counterpartyUserId }}</span>
+                </div>
+                <div class="attendance__request-meta">
+                  <span>{{ tr('Requester assignment', '发起人排班') }}: {{ item.requesterAssignmentId }}</span>
+                  <span>{{ tr('Counterparty assignment', '对方排班') }}: {{ item.counterpartyAssignmentId }}</span>
+                </div>
+                <div class="attendance__request-actions" v-if="item.requestStatus === 'pending'">
+                  <button v-if="canAcceptShiftSwap(item)" class="attendance__btn" @click="respondShiftSwap(item.requestId, 'accept')">
+                    {{ tr('Accept swap', '同意换班') }}
+                  </button>
+                  <button v-if="canRejectShiftSwap(item)" class="attendance__btn attendance__btn--danger" @click="respondShiftSwap(item.requestId, 'reject')">
+                    {{ tr('Reject swap', '拒绝换班') }}
+                  </button>
+                  <button v-if="canCancelShiftSwap(item)" class="attendance__btn" @click="cancelShiftSwapRequest(item.requestId)">
+                    {{ tr('Cancel', '取消') }}
+                  </button>
                 </div>
               </li>
             </ul>
@@ -6104,6 +6199,7 @@
                     <option value="time_correction">{{ tr('Time correction', '时间更正') }}</option>
                     <option value="leave">{{ tr('Leave', '请假') }}</option>
                     <option value="overtime">{{ tr('Overtime', '加班') }}</option>
+                    <option value="shift_swap">{{ tr('Shift swap', '换班') }}</option>
                   </select>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-approval-active">
@@ -8098,6 +8194,31 @@ interface AttendanceRequest {
   metadata?: Record<string, any>
 }
 
+interface AttendanceShiftSwapRequest {
+  requestId: string
+  request_id?: string
+  requestStatus: string | null
+  request_status?: string | null
+  requesterUserId: string
+  requester_user_id?: string
+  counterpartyUserId: string
+  counterparty_user_id?: string
+  counterpartyStatus: string
+  counterparty_status?: string
+  requesterAssignmentId: string
+  requester_assignment_id?: string
+  counterpartyAssignmentId: string
+  counterparty_assignment_id?: string
+  requesterWorkDate: string
+  requester_work_date?: string
+  counterpartyWorkDate: string
+  counterparty_work_date?: string
+  requesterSlotIndex?: number
+  requester_slot_index?: number
+  counterpartySlotIndex?: number
+  counterparty_slot_index?: number
+}
+
 interface AttendanceRequestReportItem {
   requestType: string
   status: string
@@ -8129,6 +8250,7 @@ type AttendanceSelfServiceActionKey =
   | 'missing-punch'
   | 'leave'
   | 'overtime'
+  | 'shift_swap'
   | 'records'
   | 'request-report'
 
@@ -8847,6 +8969,8 @@ interface AttendanceAssignment {
   slot_index?: number | null
   publishStatus?: AttendanceSchedulePublishStatus | null
   publish_status?: AttendanceSchedulePublishStatus | null
+  producerType?: string | null
+  producer_type?: string | null
   lockedAt?: string | null
   locked_at?: string | null
   assignmentKind?: 'regular' | 'temporary' | null
@@ -9181,6 +9305,8 @@ const recordTimelineById = ref<Record<string, AttendancePunchEvent[]>>({})
 const recordTimelineErrorById = ref<Record<string, string>>({})
 const recordTimelineSupported = ref<boolean | null>(null)
 const requests = ref<AttendanceRequest[]>([])
+const shiftSwapRequests = ref<AttendanceShiftSwapRequest[]>([])
+const shiftSwapLoading = ref(false)
 const focusedAttendanceRequestId = computed(() => props.initialRequestId.trim())
 const anomalies = ref<AttendanceAnomaly[]>([])
 const anomaliesLoading = ref(false)
@@ -9448,6 +9574,7 @@ const provisionRolePermissions: Record<ProvisionRole, string[]> = {
 
 const shifts = ref<AttendanceShift[]>([])
 const assignments = ref<AttendanceAssignmentItem[]>([])
+const shiftSwapAssignments = ref<AttendanceAssignmentItem[]>([])
 const holidays = ref<AttendanceHoliday[]>([])
 // PR2 raw/effective split (Codex Must-Fix #1): `holidays` keeps feeding the
 // admin Holiday CRUD section (holidaySectionBindings); the personal overview
@@ -10907,6 +11034,7 @@ function attendanceAssignmentResolverUserIds(): string[] {
     userIds.push(userId)
   }
   for (const item of assignments.value) pushUserId(item.assignment.userId)
+  for (const item of shiftSwapAssignments.value) pushUserId(item.assignment.userId)
   for (const item of rotationAssignments.value) pushUserId(item.assignment.userId)
   return userIds
 }
@@ -12319,12 +12447,15 @@ const requestForm = reactive({
   reason: '',
   leaveTypeId: '',
   overtimeRuleId: '',
+  requesterAssignmentId: '',
+  counterpartyAssignmentId: '',
   minutes: '',
   attachmentUrl: '',
 })
 
 const isLeaveRequest = computed(() => requestForm.requestType === 'leave')
 const isOvertimeRequest = computed(() => requestForm.requestType === 'overtime')
+const isShiftSwapRequest = computed(() => requestForm.requestType === 'shift_swap')
 const isLeaveOrOvertimeRequest = computed(() => isLeaveRequest.value || isOvertimeRequest.value)
 
 const settingsForm = reactive({
@@ -13080,6 +13211,7 @@ function formatRequestType(value: string): string {
         time_correction: '时间更正',
         leave: '请假申请',
         overtime: '加班申请',
+        shift_swap: '换班申请',
       }
     : {
         missed_check_in: 'Missed check-in',
@@ -13087,8 +13219,16 @@ function formatRequestType(value: string): string {
         time_correction: 'Time correction',
         leave: 'Leave request',
         overtime: 'Overtime request',
+        shift_swap: 'Shift-swap request',
       }
   return map[value] ?? value
+}
+
+function formatShiftSwapCounterpartyStatus(value: string | null | undefined): string {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'accepted') return tr('Counterparty accepted', '对方已同意')
+  if (normalized === 'rejected') return tr('Counterparty rejected', '对方已拒绝')
+  return tr('Counterparty pending', '待对方确认')
 }
 
 function selfServiceRequestSubtitle(item: AttendanceRequest): string {
@@ -13315,6 +13455,10 @@ async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Pro
   }
   if (action === 'overtime') {
     await openQuickRequestDraft('overtime')
+    return
+  }
+  if (action === 'shift_swap') {
+    await openQuickRequestDraft('shift_swap')
     return
   }
   if (action === 'records') {
@@ -17173,6 +17317,94 @@ async function loadRequests() {
     : loadedRequests
 }
 
+function normalizeShiftSwapRequest(row: Record<string, any>): AttendanceShiftSwapRequest | null {
+  const requestId = String(row.requestId ?? row.request_id ?? '').trim()
+  if (!requestId) return null
+  return {
+    requestId,
+    request_id: requestId,
+    requestStatus: String(row.requestStatus ?? row.request_status ?? '').trim() || null,
+    request_status: String(row.requestStatus ?? row.request_status ?? '').trim() || null,
+    requesterUserId: String(row.requesterUserId ?? row.requester_user_id ?? '').trim(),
+    requester_user_id: String(row.requesterUserId ?? row.requester_user_id ?? '').trim(),
+    counterpartyUserId: String(row.counterpartyUserId ?? row.counterparty_user_id ?? '').trim(),
+    counterparty_user_id: String(row.counterpartyUserId ?? row.counterparty_user_id ?? '').trim(),
+    counterpartyStatus: String(row.counterpartyStatus ?? row.counterparty_status ?? 'pending').trim() || 'pending',
+    counterparty_status: String(row.counterpartyStatus ?? row.counterparty_status ?? 'pending').trim() || 'pending',
+    requesterAssignmentId: String(row.requesterAssignmentId ?? row.requester_assignment_id ?? '').trim(),
+    requester_assignment_id: String(row.requesterAssignmentId ?? row.requester_assignment_id ?? '').trim(),
+    counterpartyAssignmentId: String(row.counterpartyAssignmentId ?? row.counterparty_assignment_id ?? '').trim(),
+    counterparty_assignment_id: String(row.counterpartyAssignmentId ?? row.counterparty_assignment_id ?? '').trim(),
+    requesterWorkDate: String(row.requesterWorkDate ?? row.requester_work_date ?? '').slice(0, 10),
+    requester_work_date: String(row.requesterWorkDate ?? row.requester_work_date ?? '').slice(0, 10),
+    counterpartyWorkDate: String(row.counterpartyWorkDate ?? row.counterparty_work_date ?? '').slice(0, 10),
+    counterparty_work_date: String(row.counterpartyWorkDate ?? row.counterparty_work_date ?? '').slice(0, 10),
+    requesterSlotIndex: Number(row.requesterSlotIndex ?? row.requester_slot_index ?? 0) || 0,
+    requester_slot_index: Number(row.requesterSlotIndex ?? row.requester_slot_index ?? 0) || 0,
+    counterpartySlotIndex: Number(row.counterpartySlotIndex ?? row.counterparty_slot_index ?? 0) || 0,
+    counterparty_slot_index: Number(row.counterpartySlotIndex ?? row.counterparty_slot_index ?? 0) || 0,
+  }
+}
+
+async function loadShiftSwapRequests() {
+  shiftSwapLoading.value = true
+  try {
+    const query = buildQuery({
+      orgId: normalizedOrgId(),
+      userId: normalizedUserId(),
+      page: '1',
+      pageSize: '20',
+    })
+    const response = await apiFetch(`/api/attendance/shift-swap-requests?${query.toString()}`)
+    if (response.status === 403 || response.status === 404) {
+      shiftSwapRequests.value = []
+      return
+    }
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw createApiError(response, data, tr('Failed to load shift-swap requests', '加载换班申请失败'))
+    }
+    shiftSwapRequests.value = (Array.isArray(data.data?.items) ? data.data.items : [])
+      .map((item: Record<string, any>) => normalizeShiftSwapRequest(item))
+      .filter((item: AttendanceShiftSwapRequest | null): item is AttendanceShiftSwapRequest => Boolean(item))
+  } catch (error) {
+    shiftSwapRequests.value = []
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load shift-swap requests', '加载换班申请失败'),
+      requestTimezoneContextHint.value,
+      'request-resolve',
+    )
+  } finally {
+    shiftSwapLoading.value = false
+  }
+}
+
+async function loadShiftSwapAssignmentOptions() {
+  try {
+    const query = buildQuery({
+      orgId: normalizedOrgId(),
+      publishStatus: 'published',
+      page: '1',
+      pageSize: '200',
+    })
+    const response = await apiFetch(`/api/attendance/assignments?${query.toString()}`)
+    if (response.status === 403 || response.status === 404) {
+      shiftSwapAssignments.value = []
+      return
+    }
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      shiftSwapAssignments.value = []
+      return
+    }
+    shiftSwapAssignments.value = Array.isArray(data.data?.items) ? data.data.items : []
+    void resolveAttendanceAssignmentUserLabels()
+  } catch {
+    shiftSwapAssignments.value = []
+  }
+}
+
 async function loadFocusedAttendanceRequestBestEffort(): Promise<AttendanceRequest | null> {
   try {
     return await loadFocusedAttendanceRequest()
@@ -17255,7 +17487,11 @@ async function refreshAll(): Promise<boolean> {
   try {
     const tasks = [loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()]
     if (showOverview.value) {
-      tasks.push(loadLeaveTypes({ activeOnly: true }), loadOvertimeRules({ activeOnly: true }))
+      tasks.push(
+        loadLeaveTypes({ activeOnly: true }),
+        loadOvertimeRules({ activeOnly: true }),
+        loadShiftSwapRequests(),
+      )
     }
     const results = await Promise.allSettled(tasks)
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
@@ -17433,6 +17669,15 @@ function validateRequestForm(): string | null {
     }
   }
 
+  if (requestType === 'shift_swap') {
+    if (!requestForm.requesterAssignmentId) return tr('Select your published shift', '请选择我的已发布班次')
+    if (!requestForm.counterpartyAssignmentId) return tr('Select the coworker published shift', '请选择对方已发布班次')
+    if (requestForm.requesterAssignmentId === requestForm.counterpartyAssignmentId) {
+      return tr('Shift-swap assignments must be different', '换班双方排班不能相同')
+    }
+    return null
+  }
+
   if (requestType === 'missed_check_in' && !hasIn) {
     return tr('Requested in time is required', '补签上班时间为必填项')
   }
@@ -17475,6 +17720,26 @@ async function submitRequest() {
       return
     }
     const orgValue = normalizedOrgId()
+    if (requestForm.requestType === 'shift_swap') {
+      const payload = {
+        requesterAssignmentId: requestForm.requesterAssignmentId,
+        counterpartyAssignmentId: requestForm.counterpartyAssignmentId,
+        reason: requestForm.reason || undefined,
+        orgId: orgValue,
+      }
+      const response = await apiFetch('/api/attendance/shift-swap-requests', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      const data = await response.json().catch(() => null)
+      if (!response.ok || !data?.ok) {
+        throw createApiError(response, data, tr('Shift-swap request failed', '换班申请失败'))
+      }
+      setStatus(appendStatusContext(tr('Shift-swap request submitted.', '换班申请已提交。'), requestTimezoneContextHint.value))
+      await loadRequests()
+      await loadShiftSwapRequests()
+      return
+    }
     const minutesValue = String(requestForm.minutes ?? '').trim()
     const minutes = minutesValue.length > 0 ? Number(minutesValue) : undefined
     const payload = {
@@ -17502,7 +17767,7 @@ async function submitRequest() {
   } catch (error: any) {
     setStatusFromErrorWithContext(
       error,
-      tr('Request failed', '申请失败'),
+      requestForm.requestType === 'shift_swap' ? tr('Shift-swap request failed', '换班申请失败') : tr('Request failed', '申请失败'),
       requestTimezoneContextHint.value,
       'request-submit',
     )
@@ -17558,7 +17823,74 @@ async function resolveRequest(id: string, action: 'approve' | 'reject') {
   }
 }
 
-async function cancelRequest(id: string) {
+function canAcceptShiftSwap(item: AttendanceShiftSwapRequest): boolean {
+  const actor = currentUserId.value ?? ''
+  return item.counterpartyStatus === 'pending' && item.counterpartyUserId === actor
+}
+
+function canRejectShiftSwap(item: AttendanceShiftSwapRequest): boolean {
+  return canAcceptShiftSwap(item)
+}
+
+function canCancelShiftSwap(item: AttendanceShiftSwapRequest): boolean {
+  const requester = currentUserId.value ?? ''
+  return item.requestStatus === 'pending' && item.requesterUserId === requester
+}
+
+async function respondShiftSwap(id: string, action: 'accept' | 'reject') {
+  try {
+    const response = await apiFetch(`/api/attendance/shift-swap-requests/${encodeURIComponent(id)}/${action}`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw createApiError(response, data, tr('Shift-swap update failed', '换班处理失败'))
+    }
+    setStatus(appendStatusContext(
+      action === 'accept' ? tr('Shift-swap accepted.', '已同意换班。') : tr('Shift-swap rejected.', '已拒绝换班。'),
+      requestTimezoneContextHint.value,
+    ))
+    await loadRequests()
+    await loadShiftSwapRequests()
+  } catch (error) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Shift-swap update failed', '换班处理失败'),
+      requestTimezoneContextHint.value,
+      'request-resolve',
+    )
+  }
+}
+
+async function cancelShiftSwapRequest(id: string) {
+  try {
+    const response = await apiFetch(`/api/attendance/shift-swap-requests/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw createApiError(response, data, tr('Shift-swap cancel failed', '取消换班失败'))
+    }
+    setStatus(appendStatusContext(tr('Shift-swap request cancelled.', '换班申请已取消。'), requestTimezoneContextHint.value))
+    await loadRequests()
+    await loadShiftSwapRequests()
+  } catch (error) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Shift-swap cancel failed', '取消换班失败'),
+      requestTimezoneContextHint.value,
+      'request-cancel',
+    )
+  }
+}
+
+async function cancelRequest(id: string, requestType = '') {
+  if (requestType === 'shift_swap') {
+    await cancelShiftSwapRequest(id)
+    return
+  }
   try {
     const response = await apiFetch(`/api/attendance/requests/${id}/cancel`, {
       method: 'POST',
@@ -17899,6 +18231,31 @@ function formatTemporaryReplacementAssignmentOption(item: AttendanceAssignmentIt
   return `${userLabel} · ${item.shift.name} · ${assignmentDateRangeLabel(item.assignment)} · ${assignmentSlotLabel(item.assignment)}`
 }
 
+function isSingleDayAssignment(assignment: AttendanceAssignment): boolean {
+  return Boolean(assignment.startDate && assignment.endDate && assignment.startDate === assignment.endDate)
+}
+
+function assignmentProducerType(assignment: AttendanceAssignment): string {
+  return String(assignment.producerType ?? assignment.producer_type ?? '').trim()
+}
+
+function isShiftSwapSourceCandidate(item: AttendanceAssignmentItem): boolean {
+  return assignmentPublishStatus(item.assignment) === 'published'
+    && item.assignment.isActive !== false
+    && assignmentKind(item.assignment) === 'regular'
+    && !assignmentProducerType(item.assignment)
+    && isSingleDayAssignment(item.assignment)
+}
+
+function shiftSwapRequesterUserId(): string {
+  return currentUserId.value ?? ''
+}
+
+function formatShiftSwapAssignmentOption(item: AttendanceAssignmentItem): string {
+  const userLabel = attendanceAssignmentUserPrimaryLabel(item.assignment.userId) || item.assignment.userId
+  return `${userLabel} · ${item.shift.name} · ${item.assignment.startDate} · ${assignmentSlotLabel(item.assignment)}`
+}
+
 const temporaryReplacementAssignmentOptions = computed(() =>
   assignments.value.filter((item) =>
     assignmentPublishStatus(item.assignment) === 'published'
@@ -17910,6 +18267,24 @@ const temporaryReplacementAssignmentOptions = computed(() =>
 const selectedTemporaryReplacementAssignment = computed(() =>
   temporaryReplacementAssignmentOptions.value.find((item) => item.assignment.id === temporaryAssignmentForm.replacementAssignmentId) ?? null,
 )
+
+const shiftSwapAssignmentOptions = computed(() =>
+  shiftSwapAssignments.value.filter(isShiftSwapSourceCandidate),
+)
+
+const requesterShiftSwapAssignmentOptions = computed(() => {
+  const requesterUserId = shiftSwapRequesterUserId()
+  return shiftSwapAssignmentOptions.value.filter(item => item.assignment.userId === requesterUserId)
+})
+
+const counterpartyShiftSwapAssignmentOptions = computed(() => {
+  const requesterUserId = shiftSwapRequesterUserId()
+  const requesterAssignmentId = requestForm.requesterAssignmentId
+  return shiftSwapAssignmentOptions.value.filter(item =>
+    item.assignment.id !== requesterAssignmentId
+    && (!requesterUserId || item.assignment.userId !== requesterUserId),
+  )
+})
 
 function applyTemporaryReplacementDefaults(item: AttendanceAssignmentItem | null): void {
   if (!item) return
@@ -17935,6 +18310,26 @@ watch(temporaryReplacementAssignmentOptions, (options) => {
   }
   temporaryAssignmentForm.replacementAssignmentId = options[0]?.assignment.id ?? ''
   applyTemporaryReplacementDefaults(options[0] ?? null)
+}, { immediate: true })
+
+watch(requesterShiftSwapAssignmentOptions, (options) => {
+  if (requestForm.requesterAssignmentId && options.some((item) => item.assignment.id === requestForm.requesterAssignmentId)) {
+    return
+  }
+  requestForm.requesterAssignmentId = options[0]?.assignment.id ?? ''
+}, { immediate: true })
+
+watch(counterpartyShiftSwapAssignmentOptions, (options) => {
+  if (requestForm.counterpartyAssignmentId && options.some((item) => item.assignment.id === requestForm.counterpartyAssignmentId)) {
+    return
+  }
+  requestForm.counterpartyAssignmentId = options[0]?.assignment.id ?? ''
+}, { immediate: true })
+
+watch(isShiftSwapRequest, (enabled) => {
+  if (enabled) {
+    void loadShiftSwapAssignmentOptions()
+  }
 }, { immediate: true })
 
 function normalizeAssignmentPublishStatus(value: unknown): AttendanceSchedulePublishStatus {
