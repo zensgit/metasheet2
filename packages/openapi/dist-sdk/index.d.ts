@@ -1569,7 +1569,6 @@ export interface paths {
                         };
                     };
                 };
-                400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
             };
@@ -1626,6 +1625,7 @@ export interface paths {
                         };
                     };
                 };
+                400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
             };
@@ -1683,6 +1683,297 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/shift-swap-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List shift-swap requests visible to the current user */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional requester/counterparty filter. Cross-user access requires elevated attendance privileges. */
+                    userId?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceShiftSwapRequest"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /**
+         * Create a shift-swap request
+         * @description Creates the shift-swap approval envelope and counterparty-consent record. Final schedule mutation is handled by a later approval-finalization slice.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description Published single-day manual assignment owned by the requester. */
+                        requesterAssignmentId: string;
+                        /** @description Compatibility snake_case alias for requesterAssignmentId. */
+                        requester_assignment_id?: string;
+                        /** @description Published single-day manual assignment owned by the counterparty. */
+                        counterpartyAssignmentId: string;
+                        /** @description Compatibility snake_case alias for counterpartyAssignmentId. */
+                        counterparty_assignment_id?: string;
+                        reason?: string;
+                        approvalFlowId?: string;
+                        /** @description Compatibility snake_case alias for approvalFlowId. */
+                        approval_flow_id?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                request?: components["schemas"]["AttendanceRequest"];
+                                shiftSwap?: components["schemas"]["AttendanceShiftSwapRequest"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/shift-swap-requests/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a shift-swap request by id */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                shiftSwap?: components["schemas"]["AttendanceShiftSwapRequest"];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/shift-swap-requests/{id}/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Accept counterparty consent for a shift-swap request */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                shiftSwap?: components["schemas"]["AttendanceShiftSwapRequest"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/shift-swap-requests/{id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reject counterparty consent for a shift-swap request */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                shiftSwap?: components["schemas"]["AttendanceShiftSwapRequest"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/shift-swap-requests/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel a pending shift-swap request */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                shiftSwap?: components["schemas"]["AttendanceShiftSwapRequest"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
             };
         };
         delete?: never;
@@ -7345,6 +7636,102 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/multitable/templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List built-in multitable templates */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                templates?: components["schemas"]["MultitableTemplate"][];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/templates/{templateId}/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Install a built-in multitable template as a new base */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    templateId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        baseName?: string;
+                        workspaceId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["MultitableTemplateInstallResult"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/context": {
         parameters: {
             query?: never;
@@ -7472,6 +7859,108 @@ export interface paths {
                 404: components["responses"]["NotFound"];
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets/{sheetId}/import-xlsx": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Import XLSX rows into a multitable sheet */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "multipart/form-data": {
+                        /** Format: binary */
+                        file: string;
+                        /** @description Optional workbook sheet name. Defaults to first sheet. */
+                        sheetName?: string;
+                        /** @description Optional JSON object mapping zero-based XLSX column indexes to field IDs. */
+                        mapping?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Import summary */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MultitableXlsxImportResponse"];
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets/{sheetId}/export-xlsx": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export a multitable sheet as XLSX */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional view guard. The route verifies the view belongs to the sheet. */
+                    viewId?: string;
+                };
+                header?: never;
+                path: {
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description XLSX workbook */
+                200: {
+                    headers: {
+                        /** @description Whether the export hit the server-side row cap. */
+                        "X-MetaSheet-XLSX-Truncated"?: "true" | "false";
+                        /** @description Attachment filename header. */
+                        "Content-Disposition"?: string;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": string;
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -7625,6 +8114,234 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/multitable/sheets/{sheetId}/records/{recordId}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List multitable record revision history */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                    offset?: number;
+                };
+                header?: never;
+                path: {
+                    sheetId: string;
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items: components["schemas"]["MultitableRecordRevision"][];
+                                limit: number;
+                                offset: number;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets/{sheetId}/records/{recordId}/subscriptions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Load current user's subscription status for a record
+         * @description Returns whether the authenticated user is subscribed to a record. Older runtimes may also include a legacy `items` watcher list; clients should use `subscribed` and `subscription`.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Current user's subscription status */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["MultitableRecordSubscriptionStatus"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets/{sheetId}/records/{recordId}/subscriptions/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Subscribe the current user to a record */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Subscribed */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["MultitableRecordSubscriptionStatus"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        post?: never;
+        /** Unsubscribe the current user from a record */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Unsubscribed */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["MultitableRecordSubscriptionStatus"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/record-subscription-notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List current user's record subscription notifications */
+        get: {
+            parameters: {
+                query?: {
+                    sheetId?: string;
+                    recordId?: string;
+                    limit?: number;
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Current user's notifications */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items: components["schemas"]["MultitableRecordSubscriptionNotification"][];
+                                limit: number;
+                                offset: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/sheets/{sheetId}/permissions/{subjectType}/{subjectId}": {
         parameters: {
             query?: never;
@@ -7739,8 +8456,7 @@ export interface paths {
                         id?: string;
                         sheetId: string;
                         name: string;
-                        /** @enum {string} */
-                        type?: "string" | "number" | "boolean" | "date" | "formula" | "select" | "link" | "lookup" | "rollup" | "attachment";
+                        type?: components["schemas"]["MultitableFieldType"];
                         property?: {
                             [key: string]: unknown;
                         };
@@ -7842,8 +8558,7 @@ export interface paths {
                 content: {
                     "application/json": {
                         name?: string;
-                        /** @enum {string} */
-                        type?: "string" | "number" | "boolean" | "date" | "formula" | "select" | "link" | "lookup" | "rollup" | "attachment";
+                        type?: components["schemas"]["MultitableFieldType"];
                         property?: {
                             [key: string]: unknown;
                         };
@@ -7937,7 +8652,7 @@ export interface paths {
                         id?: string;
                         sheetId: string;
                         name: string;
-                        type?: string;
+                        type?: components["schemas"]["MultitableViewType"];
                         filterInfo?: {
                             [key: string]: unknown;
                         };
@@ -8039,7 +8754,7 @@ export interface paths {
                 content: {
                     "application/json": {
                         name?: string;
-                        type?: string;
+                        type?: components["schemas"]["MultitableViewType"];
                         filterInfo?: {
                             [key: string]: unknown;
                         };
@@ -13318,7 +14033,7 @@ export interface components {
             /** Format: date */
             work_date?: string;
             /** @enum {string} */
-            request_type?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime" | "outdoor_punch" | "shift_swap";
+            request_type?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime" | "outdoor_punch" | "shift_swap" | "schedule_dispatch";
             /** Format: date-time */
             requested_in_at?: string | null;
             /** Format: date-time */
@@ -13333,6 +14048,66 @@ export interface components {
             metadata?: Record<string, never>;
             /** Format: date-time */
             created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
+        };
+        AttendanceShiftSwapRequest: {
+            requestId?: string;
+            request_id?: string;
+            orgId?: string;
+            org_id?: string;
+            /** @enum {string} */
+            requestStatus?: "pending" | "approved" | "rejected" | "cancelled";
+            /** @enum {string} */
+            request_status?: "pending" | "approved" | "rejected" | "cancelled";
+            requesterUserId?: string;
+            requester_user_id?: string;
+            counterpartyUserId?: string;
+            counterparty_user_id?: string;
+            /** @enum {string} */
+            counterpartyStatus?: "pending" | "accepted" | "rejected";
+            /** @enum {string} */
+            counterparty_status?: "pending" | "accepted" | "rejected";
+            requesterAssignmentId?: string;
+            requester_assignment_id?: string;
+            counterpartyAssignmentId?: string;
+            counterparty_assignment_id?: string;
+            requesterReplacementAssignmentId?: string | null;
+            requester_replacement_assignment_id?: string | null;
+            counterpartyReplacementAssignmentId?: string | null;
+            counterparty_replacement_assignment_id?: string | null;
+            /** Format: date */
+            requesterWorkDate?: string;
+            /** Format: date */
+            requester_work_date?: string;
+            /** Format: date */
+            counterpartyWorkDate?: string;
+            /** Format: date */
+            counterparty_work_date?: string;
+            requesterShiftId?: string;
+            requester_shift_id?: string;
+            counterpartyShiftId?: string;
+            counterparty_shift_id?: string;
+            requesterSlotIndex?: number;
+            requester_slot_index?: number;
+            counterpartySlotIndex?: number;
+            counterparty_slot_index?: number;
+            sourceKey?: string;
+            source_key?: string;
+            /** Format: date-time */
+            counterpartyRespondedAt?: string | null;
+            /** Format: date-time */
+            counterparty_responded_at?: string | null;
+            /** Format: date-time */
+            finalizedAt?: string | null;
+            /** Format: date-time */
+            finalized_at?: string | null;
+            /** Format: date-time */
+            createdAt?: string;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updatedAt?: string;
             /** Format: date-time */
             updated_at?: string;
         };
@@ -13716,6 +14491,91 @@ export interface components {
             /** Format: date-time */
             updatedAt?: string;
         };
+        /**
+         * @description Data Factory DF-N2-1 provenance event type. `row_skipped` is reserved/deferred and is not accepted by this contract.
+         * @enum {string}
+         */
+        ProvenanceEventType: "source_read" | "row_imported" | "row_edited" | "mapping_applied" | "validation_failed" | "dry_run_previewed" | "target_write_attempted" | "target_write_succeeded" | "target_write_failed" | "row_retried" | "row_exported";
+        /** @description Data Factory DF-N2-1 row provenance event contract. This component freezes the redacted event shape only; no route or runtime persistence is introduced here. */
+        ProvenanceEvent: {
+            runId: string;
+            rowId: string;
+            eventType: components["schemas"]["ProvenanceEventType"];
+            /** Format: date-time */
+            at: string;
+            /** @description Redacted safe attributes only. Tokens, passwords, authorization headers, connection strings, raw payloads, and customer secrets must not be exposed. */
+            attrs: {
+                [key: string]: unknown;
+            };
+        };
+        /** @description Data Factory DF-N2-2c read-only timeline entry — one redacted provenance event in a row's cross-run timeline (GET /api/integration/provenance?rowId=...). Reads the integration_provenance_by_row view (migration 060); attrs were redacted at write (DF-N2-2b scrub gate), the read path does NOT re-redact. */
+        ProvenanceTimelineEntry: {
+            runId: string;
+            pipelineId: string;
+            rowId: string;
+            eventType: components["schemas"]["ProvenanceEventType"];
+            /** Format: date-time */
+            at: string;
+            /** @description Redacted safe attributes only (redacted at write; never tokens/passwords/connection-strings/raw payloads). */
+            attrs: {
+                [key: string]: unknown;
+            };
+            /** @description Stable ordinal of the event within its run (the view's WITH ORDINALITY). */
+            eventIndex: number;
+            runStatus: string;
+            runMode: string;
+            /**
+             * Format: date-time
+             * @description Run creation time; the read-route from/to window bounds whole runs by this field.
+             */
+            runCreatedAt: string;
+        };
+        /**
+         * @description DF-T1A connector action operation kind. read/preview/export are non-mutating; upsert is a write (always gated). Submit/Audit/BOM are intentionally NOT modeled here.
+         * @enum {string}
+         */
+        ConnectorActionOperation: "read" | "preview" | "upsert" | "export";
+        /** @description One business input for a connector action. References data by `source` (e.g. record.FNumber); never an inline literal value (no secrets in metadata). */
+        ConnectorActionInput: {
+            name: string;
+            source?: string;
+            required?: boolean;
+        };
+        /** @description DF-T1A connector action metadata — one safe, named operation exposed by a connector profile, as metadata around an existing adapter method. Latent contract: authorizes no generic HTTP client, user JavaScript, or SQL. Write actions (upsert) are always gated. */
+        ConnectorAction: {
+            actionId: string;
+            connectorKind: string;
+            operation: components["schemas"]["ConnectorActionOperation"];
+            label?: string;
+            request: {
+                method: string;
+                /** @description Relative to the connector base URL — no scheme/host/backslash, and no query (?) or fragment (#); query/header/body go through inputs. */
+                path: string;
+                inputs: {
+                    path?: components["schemas"]["ConnectorActionInput"][];
+                    query?: components["schemas"]["ConnectorActionInput"][];
+                    header?: components["schemas"]["ConnectorActionInput"][];
+                    body?: components["schemas"]["ConnectorActionInput"][];
+                };
+            };
+            output: {
+                recordPath: string;
+                successPath: string;
+                successValue?: unknown;
+                errorPath: string;
+            };
+            safety: {
+                readOnly: boolean;
+                allowBatch: boolean;
+                maxRowsPreview: number;
+                requiresApproval: boolean;
+            };
+            /** @description Derived — true for a write op OR requiresApproval; the UI renders gated actions disabled. */
+            gated: boolean;
+            help?: {
+                [key: string]: unknown;
+            };
+        };
         AttendanceShift: {
             id?: string;
             orgId?: string;
@@ -13773,6 +14633,47 @@ export interface components {
             isActive?: boolean;
             /** @deprecated */
             is_active?: boolean;
+            /** @enum {string} */
+            assignmentKind?: "regular" | "temporary";
+            /**
+             * @deprecated
+             * @enum {string}
+             */
+            assignment_kind?: "regular" | "temporary";
+            /** @enum {string|null} */
+            temporaryMode?: "replace" | null;
+            /**
+             * @deprecated
+             * @enum {string|null}
+             */
+            temporary_mode?: "replace" | null;
+            /** @enum {string|null} */
+            temporaryReplacesKind?: "shift" | "rule" | null;
+            /**
+             * @deprecated
+             * @enum {string|null}
+             */
+            temporary_replaces_kind?: "shift" | "rule" | null;
+            /** Format: uuid */
+            temporaryReplacesAssignmentId?: string | null;
+            /**
+             * Format: uuid
+             * @deprecated
+             */
+            temporary_replaces_assignment_id?: string | null;
+            temporaryReason?: string | null;
+            /** @deprecated */
+            temporary_reason?: string | null;
+            temporaryCreatedBy?: string | null;
+            /** @deprecated */
+            temporary_created_by?: string | null;
+            /** Format: date-time */
+            temporaryCreatedAt?: string | null;
+            /**
+             * Format: date-time
+             * @deprecated
+             */
+            temporary_created_at?: string | null;
         };
         AttendanceHoliday: {
             id?: string;
@@ -13852,11 +14753,61 @@ export interface components {
             name?: string;
             description?: string | null;
         };
+        MultitableTemplateField: {
+            id: string;
+            name: string;
+            type: components["schemas"]["MultitableFieldType"];
+            order?: number;
+            options?: string[];
+            property?: {
+                [key: string]: unknown;
+            };
+            description?: string;
+        };
+        MultitableTemplateView: {
+            id: string;
+            name: string;
+            type: components["schemas"]["MultitableViewType"];
+            groupByFieldId?: string;
+            dateFieldId?: string;
+            titleFieldId?: string;
+            hiddenFieldIds?: string[];
+            config?: {
+                [key: string]: unknown;
+            };
+        };
+        MultitableTemplateSheet: {
+            id: string;
+            name: string;
+            description?: string | null;
+            fields: components["schemas"]["MultitableTemplateField"][];
+            views: components["schemas"]["MultitableTemplateView"][];
+        };
+        MultitableTemplate: {
+            id: string;
+            name: string;
+            description: string;
+            category: string;
+            icon: string;
+            color: string;
+            sheets: components["schemas"]["MultitableTemplateSheet"][];
+        };
+        MultitableTemplateInstallResult: {
+            template: components["schemas"]["MultitableTemplate"];
+            base: components["schemas"]["MultitableBase"];
+            sheets: components["schemas"]["MultitableSheet"][];
+            fields: components["schemas"]["MultitableField"][];
+            views: components["schemas"]["MultitableView"][];
+        };
+        /** @enum {string} */
+        MultitableViewType: "grid" | "form" | "kanban" | "gallery" | "calendar" | "timeline" | "gantt" | "hierarchy";
+        /** @enum {string} */
+        MultitableFieldType: "string" | "number" | "boolean" | "date" | "dateTime" | "formula" | "select" | "multiSelect" | "link" | "person" | "lookup" | "rollup" | "attachment" | "currency" | "percent" | "rating" | "url" | "email" | "phone" | "barcode" | "location" | "longText" | "autoNumber" | "createdTime" | "modifiedTime" | "createdBy" | "modifiedBy";
         MultitableView: {
             id?: string;
             sheetId?: string;
             name?: string;
-            type?: string;
+            type?: components["schemas"]["MultitableViewType"];
             filterInfo?: {
                 [key: string]: unknown;
             };
@@ -13874,8 +14825,7 @@ export interface components {
         MultitableField: {
             id?: string;
             name?: string;
-            /** @enum {string} */
-            type?: "string" | "number" | "boolean" | "date" | "formula" | "select" | "link" | "lookup" | "rollup" | "attachment";
+            type?: components["schemas"]["MultitableFieldType"];
             property?: {
                 [key: string]: unknown;
             };
@@ -13890,6 +14840,63 @@ export interface components {
             version?: number;
             data?: {
                 [key: string]: unknown;
+            };
+        };
+        MultitableRecordSubscription: {
+            /** Format: uuid */
+            id: string;
+            sheetId: string;
+            recordId: string;
+            userId: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        MultitableRecordSubscriptionStatus: {
+            subscribed: boolean;
+            subscription: components["schemas"]["MultitableRecordSubscription"] | null;
+            /** @description Legacy watcher list emitted by older runtimes. Clients should rely on `subscribed` and `subscription` for the current user. */
+            items?: components["schemas"]["MultitableRecordSubscription"][];
+        };
+        /** @enum {string} */
+        MultitableRecordSubscriptionNotificationType: "record.updated" | "comment.created";
+        MultitableRecordSubscriptionNotification: {
+            /** Format: uuid */
+            id: string;
+            sheetId: string;
+            recordId: string;
+            userId: string;
+            eventType: components["schemas"]["MultitableRecordSubscriptionNotificationType"];
+            actorId: string | null;
+            revisionId: string | null;
+            commentId: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            readAt: string | null;
+        };
+        MultitableXlsxImportResponse: {
+            ok?: boolean;
+            data?: {
+                sheetId?: string;
+                sheetName?: string;
+                headers?: string[];
+                mapping?: {
+                    [key: string]: string;
+                };
+                unmappedHeaders?: string[];
+                unmappedFields?: string[];
+                attempted?: number;
+                imported?: number;
+                failed?: number;
+                failures?: {
+                    rowIndex?: number;
+                    message?: string;
+                    code?: string;
+                }[];
+                createdRecordIds?: string[];
+                truncated?: boolean;
             };
         };
         MultitableCommentsScope: {
@@ -13916,6 +14923,25 @@ export interface components {
         MultitableRecordVersion: {
             recordId: string;
             version: number;
+        };
+        MultitableRecordRevision: {
+            id: string;
+            sheetId: string;
+            recordId: string;
+            version: number;
+            /** @enum {string} */
+            action: "create" | "update" | "delete";
+            source: string;
+            actorId: string | null;
+            changedFieldIds: string[];
+            patch: {
+                [key: string]: unknown;
+            };
+            snapshot: {
+                [key: string]: unknown;
+            } | null;
+            /** Format: date-time */
+            createdAt: string;
         };
         MultitableComputedRecord: {
             recordId: string;
@@ -13958,6 +14984,8 @@ export interface components {
             computedFilterSort?: boolean;
             ignoredSortFieldIds?: string[];
             ignoredFilterFieldIds?: string[];
+            capabilityOrigin?: components["schemas"]["MultitableCapabilityOrigin"];
+            permissions?: components["schemas"]["MultitableScopedPermissions"];
         };
         MultitableCapabilities: {
             canRead: boolean;
@@ -13965,14 +14993,16 @@ export interface components {
             canEditRecord: boolean;
             canDeleteRecord: boolean;
             canManageFields: boolean;
+            canManageSheetAccess: boolean;
             canManageViews: boolean;
             canComment: boolean;
             canManageAutomation: boolean;
+            canExport: boolean;
         };
         /** @enum {string} */
         MultitableSheetPermissionAccessLevel: "read" | "write" | "write-own" | "admin";
         /** @enum {string} */
-        MultitableSheetPermissionSubjectType: "user" | "role";
+        MultitableSheetPermissionSubjectType: "user" | "role" | "member-group";
         MultitableSheetPermissionEntry: {
             subjectType: components["schemas"]["MultitableSheetPermissionSubjectType"];
             subjectId: string;
@@ -13999,6 +15029,39 @@ export interface components {
         };
         MultitableFieldCapabilities: {
             [key: string]: components["schemas"]["MultitableFieldCapability"];
+        };
+        MultitableCapabilityOrigin: {
+            /** @enum {string} */
+            source: "admin" | "global-rbac" | "sheet-grant" | "sheet-scope";
+            hasSheetAssignments: boolean;
+        };
+        MultitableFieldPermission: {
+            visible: boolean;
+            readOnly: boolean;
+        };
+        MultitableFieldPermissions: {
+            [key: string]: components["schemas"]["MultitableFieldPermission"];
+        };
+        MultitableViewPermission: {
+            canAccess: boolean;
+            canConfigure: boolean;
+            canDelete: boolean;
+        };
+        MultitableViewPermissions: {
+            [key: string]: components["schemas"]["MultitableViewPermission"];
+        };
+        MultitableRowActions: {
+            canEdit: boolean;
+            canDelete: boolean;
+            canComment: boolean;
+        };
+        MultitableScopedPermissions: {
+            fieldPermissions?: components["schemas"]["MultitableFieldPermissions"];
+            viewPermissions?: components["schemas"]["MultitableViewPermissions"];
+            rowActions?: components["schemas"]["MultitableRowActions"];
+            rowActionOverrides?: {
+                [key: string]: components["schemas"]["MultitableRowActions"];
+            };
         };
         MultitableDependencyNode: {
             fieldId: string;
@@ -14034,10 +15097,12 @@ export interface components {
         MultitableContext: {
             base?: components["schemas"]["MultitableBase"] | null;
             sheet?: components["schemas"]["MultitableSheet"] | null;
-            sheets?: components["schemas"]["MultitableSheet"][];
-            views?: components["schemas"]["MultitableView"][];
-            capabilities?: components["schemas"]["MultitableCapabilities"];
-            fieldCapabilities?: components["schemas"]["MultitableFieldCapabilities"] | null;
+            sheets: components["schemas"]["MultitableSheet"][];
+            views: components["schemas"]["MultitableView"][];
+            capabilities: components["schemas"]["MultitableCapabilities"];
+            capabilityOrigin: components["schemas"]["MultitableCapabilityOrigin"];
+            fieldPermissions: components["schemas"]["MultitableFieldPermissions"];
+            viewPermissions: components["schemas"]["MultitableViewPermissions"];
         };
         MultitableViewData: {
             id: string;
@@ -14045,8 +15110,6 @@ export interface components {
             rows: components["schemas"]["MultitableRecord"][];
             linkSummaries?: components["schemas"]["MultitableViewLinkSummaries"];
             attachmentSummaries?: components["schemas"]["MultitableViewAttachmentSummaries"];
-            fieldCapabilities?: components["schemas"]["MultitableFieldCapabilities"] | null;
-            dependencyGraph?: components["schemas"]["MultitableDependencyGraph"] | null;
             view?: components["schemas"]["MultitableView"] | null;
             meta?: components["schemas"]["MultitableViewMeta"];
             page?: components["schemas"]["MultitablePage"];
@@ -14057,8 +15120,10 @@ export interface components {
             fields: components["schemas"]["MultitableField"][];
             record: components["schemas"]["MultitableRecord"];
             capabilities: components["schemas"]["MultitableCapabilities"];
-            fieldCapabilities?: components["schemas"]["MultitableFieldCapabilities"] | null;
-            dependencyGraph?: components["schemas"]["MultitableDependencyGraph"] | null;
+            capabilityOrigin: components["schemas"]["MultitableCapabilityOrigin"];
+            fieldPermissions: components["schemas"]["MultitableFieldPermissions"];
+            viewPermissions?: components["schemas"]["MultitableViewPermissions"];
+            rowActions: components["schemas"]["MultitableRowActions"];
             commentsScope: components["schemas"]["MultitableCommentsScope"];
             linkSummaries: components["schemas"]["MultitableLinkSummaryMap"];
             attachmentSummaries?: components["schemas"]["MultitableAttachmentSummaryMap"];
@@ -14072,8 +15137,10 @@ export interface components {
             view?: components["schemas"]["MultitableView"] | null;
             fields: components["schemas"]["MultitableField"][];
             capabilities: components["schemas"]["MultitableCapabilities"];
-            fieldCapabilities?: components["schemas"]["MultitableFieldCapabilities"] | null;
-            dependencyGraph?: components["schemas"]["MultitableDependencyGraph"] | null;
+            capabilityOrigin?: components["schemas"]["MultitableCapabilityOrigin"];
+            fieldPermissions: components["schemas"]["MultitableFieldPermissions"];
+            viewPermissions?: components["schemas"]["MultitableViewPermissions"];
+            rowActions?: components["schemas"]["MultitableRowActions"];
             record?: components["schemas"]["MultitableRecord"] | null;
             commentsScope?: components["schemas"]["MultitableCommentsScope"] | null;
             attachmentSummaries?: components["schemas"]["MultitableAttachmentSummaryMap"];

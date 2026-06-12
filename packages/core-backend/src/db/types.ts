@@ -86,6 +86,7 @@ export interface Database {
   attendance_records: AttendanceRecordsTable
   attendance_requests: AttendanceRequestsTable
   attendance_shift_swap_requests: AttendanceShiftSwapRequestsTable
+  attendance_schedule_dispatch_requests: AttendanceScheduleDispatchRequestsTable
   attendance_rules: AttendanceRulesTable
   attendance_shifts: AttendanceShiftsTable
   attendance_shift_assignments: AttendanceShiftAssignmentsTable
@@ -1062,7 +1063,7 @@ export interface AttendanceRequestsTable {
   user_id: string
   org_id: string
   work_date: ColumnType<string, string | undefined, string>
-  request_type: 'missed_check_in' | 'missed_check_out' | 'time_correction' | 'leave' | 'overtime' | 'outdoor_punch' | 'shift_swap'
+  request_type: 'missed_check_in' | 'missed_check_out' | 'time_correction' | 'leave' | 'overtime' | 'outdoor_punch' | 'shift_swap' | 'schedule_dispatch'
   requested_in_at: NullableTimestamp
   requested_out_at: NullableTimestamp
   reason: string | null
@@ -1103,6 +1104,27 @@ export interface AttendanceShiftSwapRequestsTable {
   counterparty_assignment_kind: string
   source_key: string
   counterparty_responded_at: NullableTimestamp
+  finalized_at: NullableTimestamp
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceScheduleDispatchRequestsTable {
+  request_id: string
+  org_id: string
+  dispatch_type: 'daily'
+  user_id: string
+  target_schedule_group_id: string
+  target_attendance_group_id: string | null
+  target_department_ref: string | null
+  target_shift_id: string
+  slot_index: number
+  start_date: ColumnType<string, string | undefined, string>
+  end_date: ColumnType<string, string | undefined, string>
+  publish_status: 'pending' | 'published' | 'cancelled'
+  source_key: string
+  assignment_ids: string[]
+  membership_id: string | null
   finalized_at: NullableTimestamp
   created_at: CreatedAt
   updated_at: UpdatedAt
