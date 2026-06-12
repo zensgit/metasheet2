@@ -2,6 +2,7 @@
 
 > Status: **VERIFICATION(收官文档)** · 计划/TODO:`multitable-ai-field-staged-arc-{development-plan,todo}-20260610.md`(#2474)
 > 方法:每环 = 勘察(file:line)→ 设计锁定(多 agent 事实核验)→ fail-first → 实现 → 独立对抗审查 → 发现修复(major 加 delta 复审)→ CI → admin-squash。审查工件存 `/tmp/*-review-claude-2026061*.md`。
+> 回填 2026-06-11:本文原始收口点为 M0→M3;M4 公式 AI 辅助随后已通过 #2518(设计)→#2520(`62460217f`,实现)→#2521(`f9a663eb9`,会话验证)闭合。当前 AI staged 主线状态以 `multitable-ai-field-staged-arc-todo-20260610.md` 的 M0→M4 回填为准。
 
 ## 0. 总览
 
@@ -31,8 +32,8 @@
 
 ## 2. 已知边缘与 follow-up 池(全部已登记)
 
-scatter 后端 x/y 维度 · gauge 非加性聚合文案 · 异步 chunk 加载失败兜底 · 图表持久化 type 校验(F4 既有)· API-authored aiShortcut canonicalization · all-sources-deleted 阻塞保存恢复 UX · stripUrlUserinfo 首-@ 边角 · 台账 aging(NiFi 对标既有 GAP)· S4 残留(field-PATCH 翻转/provisioning 旁路)· main 上烂掉的 multitable-view-config.api.test.ts(4/7 红,CI 不跑)· M4 公式 AI 辅助(deferred-eval 门)· C1 PM 门(G-4 样例数据/G-6 T7 回滚/onboarding)。
+scatter 后端 x/y 维度 · gauge 非加性聚合文案 · 异步 chunk 加载失败兜底 · 图表持久化 type 校验(F4 既有)· API-authored aiShortcut canonicalization · all-sources-deleted 阻塞保存恢复 UX · stripUrlUserinfo 首-@ 边角 · 台账 aging(NiFi 对标既有 GAP)· S4 残留(field-PATCH 翻转/provisioning 旁路)· main 上烂掉的 multitable-view-config.api.test.ts(4/7 红,CI 不跑)· 公式 AI 后续优化(deferred-eval/多候选等,独立 opt-in)· C1 PM 门(G-4 样例数据/G-6 T7 回滚/onboarding)。
 
 ## 3. TODO 终态
 
-主线 M0→M3 **全闭**(7 PR:#2476/#2478/#2481/#2486/#2489/#2490/#2491/#2494),T1/T3/T6 关闭;副线 S1/S2/S3/S4/S5a **全闭**(#2475/#2503/#2492/#2488/#2497)。仍门控:M4(deferred-eval + 独立 opt-in)· S5b(staging 实跑,operator-gated)· C1 PM 件(G-4/T7/onboarding)· §2 follow-up 池。**本 arc 共 14 个 PR、6 轮多 agent 设计核验、9 轮独立对抗审查(2 个 major 实弹:M2 跨 IO 持锁、A-full 前传 F1 同级)、全程零真实 provider 调用。**后续总目标见 benchmark-surpass goal(滚动 refresh → 阶梯 → staged arc)。
+原始收口时主线 M0→M3 **全闭**(7 PR:#2476/#2478/#2481/#2486/#2489/#2490/#2491/#2494),T1/T3/T6 关闭;副线 S1/S2/S3/S4/S5a **全闭**(#2475/#2503/#2492/#2488/#2497)。2026-06-11 回填后,M4 公式 AI 辅助也已闭合(#2518/#2520/#2521),所以当前 AI staged 主线为 **M0→M4 全闭**。仍门控:S5b(staging 实跑,operator-gated)· C1 PM 件(G-4/T7/onboarding)· §2 follow-up 池。**本 arc 原始收口共 14 个 PR、6 轮多 agent 设计核验、9 轮独立对抗审查(2 个 major 实弹:M2 跨 IO 持锁、A-full 前传 F1 同级)、全程零真实 provider 调用。**后续总目标见 benchmark-surpass goal(滚动 refresh → 阶梯 → staged arc)。

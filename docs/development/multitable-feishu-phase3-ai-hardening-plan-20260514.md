@@ -16,6 +16,15 @@ Date: 2026-05-14
 
 ## Status
 
+> 2026-06-11 status backfill: this 2026-05-14 plan is a historical
+> activation snapshot. The AI shortcut / formula-assist lanes were later
+> re-scoped and delivered through the AI staged arc: M1 #2486, M2 #2490,
+> M3 #2494, M4 design #2518, M4 implementation #2520, and session
+> verification #2521. Do not use the deferred Lane A / Lane B tables below as
+> current AI status; use `multitable-ai-field-staged-arc-todo-20260610.md` and
+> `multitable-benchmark-arc-session-verification-20260611.md` for current
+> routing.
+
 This document starts the next multitable Feishu-parity phase after the signed RC and Phase 2 closeout.
 
 Current repository evidence shows the core multitable product line is no longer blocked by the original Feishu parity gaps:

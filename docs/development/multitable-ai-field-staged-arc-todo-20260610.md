@@ -3,9 +3,11 @@
 > Date: 2026-06-10 · 配套计划:`multitable-ai-field-staged-arc-development-plan-20260610.md`
 > 标记:✅ done · ⬜ todo(opt-in 后可动手)· 🔒 gated(被前置环/决策阻塞)
 > 纪律:主线每环独立 opt-in;副线各项独立小 PR;AI 一律 fail-closed + 脱敏。
+> 回填 2026-06-11:M4 公式 AI 辅助已按设计锁定 #2518 → 实现 #2520 → 会话验证 #2521 闭合;主线 M0→M4 全闭。
 
 ## 0. 依据(2026-06-10 完成度审计,5-agent 条目级核验)
 
+- 注:本节保留 2026-06-10 审计快照原貌;其中 AI 未建判断已被 2026-06-11 回填的 M0→M4 合并事实取代。
 - 总纲 §9 八步:①D2 🟡(10k ✅/50k-100k 阻塞)②虚拟化 ✅决策关闭 ③D3 ✅ ④BI polish ✅ ⑤dry-run ✅ ⑥**AI ❌未建** ⑦模板 🟡(中心+install ✅/preview-onboarding ❌)⑧cross-base ❌(前提已齐)。
 - RC 100%(69 项核验为真)· Phase2 功能 100% · Phase3 硬化门 ✅ + AI lanes 真实未建 · 多系列图表已由 BI v2-d(#2297→#2354)落地(open-items 标记 stale)。
 - 审计工件:`/tmp/multitable-feishu-completion-audit-20260610.md`。
@@ -17,7 +19,7 @@
 - [x] ✅ **M1b A1 实现**(#2486 MERGED `6a91b22c4` 2026-06-10):resolver + internal admin 路由 + tsx 门脚本;18 单元/路由 + 5 门测试 fail-first;审查泄漏狩猎 7 对抗场景零泄漏,APPROVE-WITH-NITS 全修后合并。**M1 整环闭合。**
 - [x] ✅ **M2 A2 shortcut 后端**(#2490 MERGED `1e677208` 2026-06-11):design #2489 + 实现(preview/run、createRecordWriteHelpers 工厂(/patch 同源)、provider 客户端 fetchFn DI + E-12 双确认、台账 migration、**reserve-then-settle 配额**);审查 F1 major(跨 IO 持锁)→ 重构 → delta 复审 FIX-VERIFIED + NF-1 中文估算修复。**T1 + T6 关闭。**
 - [x] ✅ **M3 A3 前端**(#2494 MERGED `a5809db11` 2026-06-11):配置区(双腿 clobber 防护)+ 抽屉/单元格触发(busy 三面统一)+ run 适配器(自回声豁免)+ usage-summary;审查 F3/F4 合并前修。**T3 关闭 → 主线 M0→M3 全闭。**
-- [ ] 🔒 **M4 B2 公式 AI 辅助**(gated on M1-M3 验证 + 独立 opt-in)。
+- [x] ✅ **M4 B2 公式 AI 辅助**(#2520 MERGED `62460217f` 2026-06-11):design #2518 + 实现(NL→formula suggest、`canManageFields` 产品路径、单候选同步、A2 reserve-then-settle 台账/配额复用、formula dry-run 校验、前端候选接受写回 textarea);record values 构造上不入 prompt,审查零发现。**主线 M0→M4 全闭。**
 
 ## 2. 副线 — parity 清尾(已获 owner 总 opt-in 2026-06-10,可并行)
 
@@ -29,7 +31,8 @@
 
 ## 3. 收官
 
-- [x] ✅ **验证 MD**(本 PR):`multitable-ai-field-staged-arc-verification-20260611.md` — 14 PR 全弧证据链 + 终态。
+- [x] ✅ **AI staged 主线验证 MD**:`multitable-ai-field-staged-arc-verification-20260611.md` — M0→M3 证据链 + 终态。
+- [x] ✅ **会话执行验证 MD**(#2521 `f9a663eb9`):`multitable-benchmark-arc-session-verification-20260611.md` — M4 公式 AI 辅助与 2026-06-11 阶梯执行收敛 checkpoint。
 
 ## 4. 明确不做(各既有 gate)
 
