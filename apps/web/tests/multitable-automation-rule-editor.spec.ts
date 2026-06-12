@@ -308,7 +308,7 @@ describe('MetaAutomationRuleEditor', () => {
       .toBe('记录 {{recordId}} 已变更。状态：{{record.status}}')
   })
 
-  it('does not offer unsupported lock_record actions for new automation rules', async () => {
+  it('offers lock_record as a first-class action for new automation rules', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
 
@@ -322,10 +322,13 @@ describe('MetaAutomationRuleEditor', () => {
     expect(actionValues).toContain('send_dingtalk_group_message')
     expect(actionValues).toContain('send_dingtalk_person_message')
     expect(actionValues).toContain('wait_for_callback')
-    expect(actionValues).not.toContain('lock_record')
+    // rank 8: lock_record is now a complete contract → re-exposed as a selectable, enabled action.
+    expect(actionValues).toContain('lock_record')
+    const lockOption = Array.from(actionSelect.options).find((option) => option.value === 'lock_record')
+    expect(lockOption?.disabled).toBe(false)
   })
 
-  it('keeps existing lock_record actions visible but disabled for compatibility', async () => {
+  it('keeps existing lock_record actions selectable and enabled', async () => {
     const { container } = mount({
       visible: true,
       sheetId: 'sheet_1',
@@ -342,7 +345,9 @@ describe('MetaAutomationRuleEditor', () => {
     const lockOption = Array.from(actionSelect.options).find((option) => option.value === 'lock_record')
     expect(actionSelect.value).toBe('lock_record')
     expect(lockOption).toBeTruthy()
-    expect(lockOption?.disabled).toBe(true)
+    // rank 8: lock_record is a complete contract → the existing rule's option stays selectable & enabled
+    // (previously hidden behind the #2278 stop-gap that disabled the then-broken action).
+    expect(lockOption?.disabled).toBe(false)
   })
 
   it('localizes test-run warning and confirm text while leaving runtime status messages raw', async () => {

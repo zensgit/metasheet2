@@ -504,6 +504,9 @@ describe('multitable records helper', () => {
         title: 'Broken compressor',
         priority: 'urgent',
       },
+      locked: false,
+      lockedBy: null,
+      lockedAt: null,
     })
   })
 
@@ -537,6 +540,9 @@ describe('multitable records helper', () => {
         priority: 'urgent',
         refundAmount: 88.5,
       },
+      locked: false,
+      lockedBy: null,
+      lockedAt: null,
     })
   })
 
@@ -571,6 +577,9 @@ describe('multitable records helper', () => {
         priority: 'urgent',
         scheduledAt: null,
       },
+      locked: false,
+      lockedBy: null,
+      lockedAt: null,
     })
   })
 
@@ -658,6 +667,9 @@ describe('multitable records helper', () => {
           title: 'A compressor',
           priority: 'urgent',
         },
+        locked: false,
+        lockedBy: null,
+        lockedAt: null,
       },
       {
         id: 'rec_b',
@@ -668,6 +680,9 @@ describe('multitable records helper', () => {
           title: 'B compressor',
           priority: 'normal',
         },
+        locked: false,
+        lockedBy: null,
+        lockedAt: null,
       },
     ])
   })
@@ -730,6 +745,9 @@ describe('multitable records helper', () => {
           title: 'Broken compressor',
           priority: 'urgent',
         },
+        locked: false,
+        lockedBy: null,
+        lockedAt: null,
       },
     ])
   })
