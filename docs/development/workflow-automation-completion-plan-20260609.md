@@ -2,7 +2,7 @@
 
 Date: 2026-06-09
 
-Grounded on: `origin/main@34b0327cf`
+Grounded on: `origin/main@79bda929`
 
 Scope: MetaSheet2 workflow, approval, and multitable automation as one product
 target. This is a completion definition and execution ledger, not a sprint
