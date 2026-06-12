@@ -17877,16 +17877,42 @@ module.exports = {
       })
     }
 
-    async function assertAttendanceScheduleGroupEditAllowed(req, res, { groupId, actorAccess } = {}) {
+    async function canEditAttendanceScheduleGroup(access, groupRow) {
+      if (!access || !groupRow) return false
+      if (access.fullAdmin) return true
+      const actorContext = await loadAttendanceScopeContextForUser(db, access.orgId, access.userId)
+      const scopes = (await loadActiveAttendanceSchedulerScopesForActor(access.orgId, actorContext))
+        .filter(scope => normalizeStringArray(scope.actions).includes('edit'))
+      return scopes.some(scope => attendanceSchedulerScopeMatchesScheduleGroupRow(scope, groupRow))
+    }
+
+    async function assertAttendanceScheduleGroupEditAllowed(req, res, { groupId, actorAccess, groupRow } = {}) {
       const access = actorAccess ?? await resolveAttendanceSchedulerScopeActor(req, res)
       if (!access) return null
-      if (access.fullAdmin) return access
 
-      return assertAttendanceSchedulerScopeAllowed(req, res, {
-        action: 'edit',
-        target: { scheduleGroupIds: [groupId] },
-        actorAccess: access,
-      })
+      try {
+        let row = groupRow
+        if (!row) {
+          const rows = await db.query(
+            'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
+            [groupId, access.orgId]
+          )
+          row = rows[0]
+        }
+        if (!await canEditAttendanceScheduleGroup(access, row)) {
+          respondAttendanceSchedulerScopeForbidden(res)
+          return null
+        }
+        return access
+      } catch (error) {
+        if (isDatabaseSchemaError(error)) {
+          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+          return null
+        }
+        logger.error('Attendance schedule group edit scheduler scope guard failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Scheduler scope check failed' } })
+        return null
+      }
     }
 
     async function assertAttendanceScheduleGroupParentAllowed(client, { orgId, groupId, parentId }) {
@@ -31453,7 +31479,7 @@ module.exports = {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule group not found' } })
             return
           }
-          const access = await assertAttendanceScheduleGroupEditAllowed(req, res, { groupId, actorAccess })
+          const access = await assertAttendanceScheduleGroupEditAllowed(req, res, { groupId, actorAccess, groupRow: existingRows[0] })
           if (!access) return
           const rows = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleGroupTreeLock(trx, orgId)
@@ -31464,7 +31490,24 @@ module.exports = {
             if (!lockedRows.length) {
               throw new HttpError(404, 'NOT_FOUND', 'Schedule group not found')
             }
+            if (!await canEditAttendanceScheduleGroup(actorAccess, lockedRows[0])) {
+              throw new HttpError(403, 'SCHEDULER_SCOPE_FORBIDDEN', 'Scheduler scope does not allow this attendance scheduling action')
+            }
             const input = normalizeAttendanceScheduleGroupInput(parsed.data, lockedRows[0])
+            const proposedRow = {
+              ...lockedRows[0],
+              name: input.name,
+              code: input.code,
+              description: input.description,
+              attendance_group_id: input.attendanceGroupId,
+              parent_id: input.parentId,
+              department_ref: input.departmentRef,
+              source: input.source,
+              is_active: input.isActive,
+            }
+            if (!await canEditAttendanceScheduleGroup(actorAccess, proposedRow)) {
+              throw new HttpError(403, 'SCHEDULER_SCOPE_FORBIDDEN', 'Scheduler scope does not allow this attendance scheduling action')
+            }
             await assertAttendanceScheduleGroupParentAllowed(trx, {
               orgId,
               groupId,
@@ -31547,10 +31590,20 @@ module.exports = {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule group not found' } })
             return
           }
-          const access = await assertAttendanceScheduleGroupEditAllowed(req, res, { groupId, actorAccess })
+          const access = await assertAttendanceScheduleGroupEditAllowed(req, res, { groupId, actorAccess, groupRow: existingRows[0] })
           if (!access) return
           const rows = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleGroupTreeLock(trx, orgId)
+            const lockedRows = await trx.query(
+              'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
+              [groupId, orgId]
+            )
+            if (!lockedRows.length) {
+              throw new HttpError(404, 'NOT_FOUND', 'Schedule group not found')
+            }
+            if (!await canEditAttendanceScheduleGroup(actorAccess, lockedRows[0])) {
+              throw new HttpError(403, 'SCHEDULER_SCOPE_FORBIDDEN', 'Scheduler scope does not allow this attendance scheduling action')
+            }
             await assertAttendanceScheduleGroupCanDeactivate(trx, orgId, groupId)
             return trx.query(
               `UPDATE attendance_schedule_groups
