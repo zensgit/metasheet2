@@ -765,6 +765,179 @@
           }
         }
       },
+      "AttendanceShiftSwapRequest": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string"
+          },
+          "requestStatus": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "rejected",
+              "cancelled"
+            ]
+          },
+          "request_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "rejected",
+              "cancelled"
+            ]
+          },
+          "requesterUserId": {
+            "type": "string"
+          },
+          "requester_user_id": {
+            "type": "string"
+          },
+          "counterpartyUserId": {
+            "type": "string"
+          },
+          "counterparty_user_id": {
+            "type": "string"
+          },
+          "counterpartyStatus": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "accepted",
+              "rejected"
+            ]
+          },
+          "counterparty_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "accepted",
+              "rejected"
+            ]
+          },
+          "requesterAssignmentId": {
+            "type": "string"
+          },
+          "requester_assignment_id": {
+            "type": "string"
+          },
+          "counterpartyAssignmentId": {
+            "type": "string"
+          },
+          "counterparty_assignment_id": {
+            "type": "string"
+          },
+          "requesterReplacementAssignmentId": {
+            "type": "string",
+            "nullable": true
+          },
+          "requester_replacement_assignment_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "counterpartyReplacementAssignmentId": {
+            "type": "string",
+            "nullable": true
+          },
+          "counterparty_replacement_assignment_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "requesterWorkDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "requester_work_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "counterpartyWorkDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "counterparty_work_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "requesterShiftId": {
+            "type": "string"
+          },
+          "requester_shift_id": {
+            "type": "string"
+          },
+          "counterpartyShiftId": {
+            "type": "string"
+          },
+          "counterparty_shift_id": {
+            "type": "string"
+          },
+          "requesterSlotIndex": {
+            "type": "integer"
+          },
+          "requester_slot_index": {
+            "type": "integer"
+          },
+          "counterpartySlotIndex": {
+            "type": "integer"
+          },
+          "counterparty_slot_index": {
+            "type": "integer"
+          },
+          "sourceKey": {
+            "type": "string"
+          },
+          "source_key": {
+            "type": "string"
+          },
+          "counterpartyRespondedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "counterparty_responded_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "finalizedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "finalized_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "AttendanceAnomaly": {
         "type": "object",
         "properties": {
@@ -9225,6 +9398,417 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/attendance/shift-swap-requests": {
+      "x-plugin": "plugin-attendance",
+      "post": {
+        "summary": "Create a shift-swap request",
+        "description": "Creates the shift-swap approval envelope and counterparty-consent record. Final schedule mutation is handled by a later approval-finalization slice.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "requesterAssignmentId": {
+                    "type": "string",
+                    "description": "Published single-day manual assignment owned by the requester."
+                  },
+                  "requester_assignment_id": {
+                    "type": "string",
+                    "description": "Compatibility snake_case alias for requesterAssignmentId."
+                  },
+                  "counterpartyAssignmentId": {
+                    "type": "string",
+                    "description": "Published single-day manual assignment owned by the counterparty."
+                  },
+                  "counterparty_assignment_id": {
+                    "type": "string",
+                    "description": "Compatibility snake_case alias for counterpartyAssignmentId."
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "approvalFlowId": {
+                    "type": "string"
+                  },
+                  "approval_flow_id": {
+                    "type": "string",
+                    "description": "Compatibility snake_case alias for approvalFlowId."
+                  }
+                },
+                "required": [
+                  "requesterAssignmentId",
+                  "counterpartyAssignmentId"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "request": {
+                          "$ref": "#/components/schemas/AttendanceRequest"
+                        },
+                        "shiftSwap": {
+                          "$ref": "#/components/schemas/AttendanceShiftSwapRequest"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "get": {
+        "summary": "List shift-swap requests visible to the current user",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "userId",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional requester/counterparty filter. Cross-user access requires elevated attendance privileges."
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/AttendanceShiftSwapRequest"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        },
+                        "page": {
+                          "type": "integer"
+                        },
+                        "pageSize": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/attendance/shift-swap-requests/{id}": {
+      "x-plugin": "plugin-attendance",
+      "get": {
+        "summary": "Get a shift-swap request by id",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "shiftSwap": {
+                          "$ref": "#/components/schemas/AttendanceShiftSwapRequest"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/attendance/shift-swap-requests/{id}/accept": {
+      "x-plugin": "plugin-attendance",
+      "post": {
+        "summary": "Accept counterparty consent for a shift-swap request",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "shiftSwap": {
+                          "$ref": "#/components/schemas/AttendanceShiftSwapRequest"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/attendance/shift-swap-requests/{id}/reject": {
+      "x-plugin": "plugin-attendance",
+      "post": {
+        "summary": "Reject counterparty consent for a shift-swap request",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "shiftSwap": {
+                          "$ref": "#/components/schemas/AttendanceShiftSwapRequest"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/attendance/shift-swap-requests/{id}/cancel": {
+      "x-plugin": "plugin-attendance",
+      "post": {
+        "summary": "Cancel a pending shift-swap request",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "shiftSwap": {
+                          "$ref": "#/components/schemas/AttendanceShiftSwapRequest"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
           }
         }
       }

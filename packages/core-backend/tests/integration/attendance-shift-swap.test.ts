@@ -39,7 +39,7 @@ const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_U
 const describeDb = dbUrl ? describe : describe.skip
 const ORG = 'default'
 
-describeDb('shift-swap SW1 envelope (real DB, route-level)', () => {
+describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
@@ -72,6 +72,7 @@ describeDb('shift-swap SW1 envelope (real DB, route-level)', () => {
        ))`,
       [ORG, userPattern],
     ).catch(() => undefined)
+    await pool.query(`DELETE FROM attendance_approval_flows WHERE org_id = $1 AND name LIKE $2`, [ORG, userPattern]).catch(() => undefined)
     await pool.query(`DELETE FROM attendance_shift_assignments WHERE org_id = $1 AND user_id LIKE $2`, [ORG, userPattern]).catch(() => undefined)
     await pool.query(`DELETE FROM attendance_shifts WHERE org_id = $1 AND name LIKE $2`, [ORG, userPattern]).catch(() => undefined)
   }
@@ -83,6 +84,81 @@ describeDb('shift-swap SW1 envelope (real DB, route-level)', () => {
     } catch (error) {
       expect((error as { code?: string }).code).toBe(code)
     }
+  }
+
+  async function seedSwapPair(prefix: string, options: {
+    requesterEndDate?: string
+    requesterPublishStatus?: string
+    requesterProducerType?: string | null
+    requesterAssignmentKind?: string
+  } = {}) {
+    const requester = `${prefix}-a`
+    const counterparty = `${prefix}-b`
+    const shiftA = randomUUID()
+    const shiftB = randomUUID()
+    const assignmentA = randomUUID()
+    const assignmentB = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_shifts (id, org_id, name, work_start_time, work_end_time)
+       VALUES ($1, $2, $3, '09:00', '13:00'), ($4, $2, $5, '14:00', '18:00')`,
+      [shiftA, ORG, `${prefix}-shift-a`, shiftB, `${prefix}-shift-b`],
+    )
+    const producerRefId = options.requesterProducerType ? randomUUID() : null
+    const producerRunId = options.requesterProducerType ? randomUUID() : null
+    const producerKey = options.requesterProducerType ? `${prefix}:producer` : null
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+       (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, publish_status, assignment_kind,
+        producer_type, producer_ref_id, producer_key, producer_run_id)
+       VALUES
+       ($1, $2, $3, $4, 0, '2049-06-14', $5, true, $6, $7, $8, $9, $10, $11),
+       ($12, $2, $13, $14, 0, '2049-06-15', '2049-06-15', true, 'published', 'regular', NULL, NULL, NULL, NULL)`,
+      [
+        assignmentA,
+        ORG,
+        requester,
+        shiftA,
+        options.requesterEndDate ?? '2049-06-14',
+        options.requesterPublishStatus ?? 'published',
+        options.requesterAssignmentKind ?? 'regular',
+        options.requesterProducerType ?? null,
+        producerRefId,
+        producerKey,
+        producerRunId,
+        assignmentB,
+        counterparty,
+        shiftB,
+      ],
+    )
+    return { requester, counterparty, shiftA, shiftB, assignmentA, assignmentB }
+  }
+
+  async function seedExtraSource(prefix: string, userSuffix = 'c') {
+    const user = `${prefix}-${userSuffix}`
+    const shiftId = randomUUID()
+    const assignmentId = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_shifts (id, org_id, name, work_start_time, work_end_time)
+       VALUES ($1, $2, $3, '10:00', '14:00')`,
+      [shiftId, ORG, `${prefix}-shift-${userSuffix}`],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+       (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, publish_status, assignment_kind)
+       VALUES ($1, $2, $3, $4, 0, '2049-06-16', '2049-06-16', true, 'published', 'regular')`,
+      [assignmentId, ORG, user, shiftId],
+    )
+    return { user, shiftId, assignmentId }
+  }
+
+  async function seedApprovalFlow(prefix: string, requestType: string, isActive = true) {
+    const id = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_approval_flows (id, org_id, name, request_type, steps, is_active)
+       VALUES ($1, $2, $3, $4, '[]'::jsonb, $5)`,
+      [id, ORG, `${prefix}-flow-${requestType}-${isActive ? 'active' : 'inactive'}`, requestType, isActive],
+    )
+    return id
   }
 
   beforeAll(async () => {
@@ -219,6 +295,278 @@ describeDb('shift-swap SW1 envelope (real DB, route-level)', () => {
 
       await expectPgReject(insertDetail(duplicateRequestId, `${prefix}:source`), '23505')
       await expectPgReject(insertDetail(multiDayRequestId, `${prefix}:multi`, '2049-06-16'), '23514')
+    } finally {
+      await cleanupPrefix(prefix)
+    }
+  })
+
+  it('creates a dedicated shift-swap request, records counterparty consent, and keeps final approval deferred', async () => {
+    const prefix = `swap-api-${Date.now().toString(36)}`
+    try {
+      const pair = await seedSwapPair(prefix)
+      const requesterToken = await mintToken(pair.requester, 'attendance:read,attendance:write,attendance:approve')
+      const counterpartyToken = await mintToken(pair.counterparty, 'attendance:read,attendance:write')
+      const otherToken = await mintToken(`${prefix}-other`, 'attendance:read,attendance:write')
+
+      const create = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST',
+        headers: authHeaders(requesterToken),
+        body: JSON.stringify({
+          requesterAssignmentId: pair.assignmentA,
+          counterpartyAssignmentId: pair.assignmentB,
+          reason: 'swap api smoke',
+        }),
+      })
+      expect(create.status).toBe(201)
+      const createBody = create.body as {
+        data?: {
+          request?: { id?: string; request_type?: string; status?: string }
+          shiftSwap?: { counterpartyStatus?: string; requesterWorkDate?: string; counterpartyWorkDate?: string }
+        }
+      }
+      const requestId = createBody.data?.request?.id
+      expect(requestId).toBeTruthy()
+      expect(createBody.data?.request?.request_type).toBe('shift_swap')
+      expect(createBody.data?.shiftSwap?.counterpartyStatus).toBe('pending')
+      expect(createBody.data?.shiftSwap?.requesterWorkDate).toBe('2049-06-14')
+      expect(createBody.data?.shiftSwap?.counterpartyWorkDate).toBe('2049-06-15')
+
+      const list = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        headers: authHeaders(requesterToken),
+      })
+      expect(list.status).toBe(200)
+      const listed = (list.body as { data?: { items?: Array<{ requestId?: string }> } } | undefined)?.data?.items ?? []
+      expect(listed.some(item => item.requestId === requestId)).toBe(true)
+
+      const readAsCounterparty = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests/${requestId}`, {
+        headers: authHeaders(counterpartyToken),
+      })
+      expect(readAsCounterparty.status).toBe(200)
+
+      const otherAccept = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests/${requestId}/accept`, {
+        method: 'POST',
+        headers: authHeaders(otherToken),
+        body: '{}',
+      })
+      expect(otherAccept.status).toBe(403)
+
+      const accept = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests/${requestId}/accept`, {
+        method: 'POST',
+        headers: authHeaders(counterpartyToken),
+        body: '{}',
+      })
+      expect(accept.status).toBe(200)
+      expect((accept.body as { data?: { shiftSwap?: { counterpartyStatus?: string } } } | undefined)?.data?.shiftSwap?.counterpartyStatus).toBe('accepted')
+
+      const approve = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(requesterToken),
+        body: JSON.stringify({ comment: 'not yet' }),
+      })
+      expect(approve.status).toBe(422)
+      expect((approve.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_SWAP_FINALIZATION_DEFERRED')
+
+      const persisted = (await pool.query(
+        `SELECT r.status, d.counterparty_status, d.requester_replacement_assignment_id, d.counterparty_replacement_assignment_id
+           FROM attendance_requests r
+           JOIN attendance_shift_swap_requests d ON d.request_id = r.id
+          WHERE r.id = $1`,
+        [requestId],
+      )).rows[0]
+      expect(persisted.status).toBe('pending')
+      expect(persisted.counterparty_status).toBe('accepted')
+      expect(persisted.requester_replacement_assignment_id).toBeNull()
+      expect(persisted.counterparty_replacement_assignment_id).toBeNull()
+    } finally {
+      await cleanupPrefix(prefix)
+    }
+  })
+
+  it('hard-blocks a source assignment while a shift-swap request is pending, then releases it after cancel', async () => {
+    const prefix = `swap-dupe-${Date.now().toString(36)}`
+    try {
+      const pair = await seedSwapPair(prefix)
+      const third = await seedExtraSource(prefix, 'c')
+      const requesterToken = await mintToken(pair.requester, 'attendance:read,attendance:write')
+
+      const first = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST',
+        headers: authHeaders(requesterToken),
+        body: JSON.stringify({
+          requesterAssignmentId: pair.assignmentA,
+          counterpartyAssignmentId: pair.assignmentB,
+        }),
+      })
+      expect(first.status).toBe(201)
+      const firstRequestId = (first.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+      expect(firstRequestId).toBeTruthy()
+
+      const duplicateSource = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST',
+        headers: authHeaders(requesterToken),
+        body: JSON.stringify({
+          requesterAssignmentId: pair.assignmentA,
+          counterpartyAssignmentId: third.assignmentId,
+        }),
+      })
+      expect(duplicateSource.status).toBe(409)
+      expect((duplicateSource.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('DUPLICATE_SHIFT_SWAP_SOURCE')
+
+      const cancel = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests/${firstRequestId}/cancel`, {
+        method: 'POST',
+        headers: authHeaders(requesterToken),
+        body: '{}',
+      })
+      expect(cancel.status).toBe(200)
+      expect((cancel.body as { data?: { shiftSwap?: { requestStatus?: string } } } | undefined)?.data?.shiftSwap?.requestStatus).toBe('cancelled')
+
+      const afterCancel = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST',
+        headers: authHeaders(requesterToken),
+        body: JSON.stringify({
+          requesterAssignmentId: pair.assignmentA,
+          counterpartyAssignmentId: pair.assignmentB,
+        }),
+      })
+      expect(afterCancel.status).toBe(201)
+    } finally {
+      await cleanupPrefix(prefix)
+    }
+  })
+
+  it('requires an explicit approvalFlowId to be an active shift_swap flow', async () => {
+    const prefix = `swap-flow-${Date.now().toString(36)}`
+    try {
+      const pair = await seedSwapPair(prefix)
+      const requesterToken = await mintToken(pair.requester, 'attendance:read,attendance:write')
+      const leaveFlowId = await seedApprovalFlow(prefix, 'leave', true)
+      const inactiveSwapFlowId = await seedApprovalFlow(prefix, 'shift_swap', false)
+      const activeSwapFlowId = await seedApprovalFlow(prefix, 'shift_swap', true)
+
+      for (const approvalFlowId of [leaveFlowId, inactiveSwapFlowId]) {
+        const invalidFlow = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+          method: 'POST',
+          headers: authHeaders(requesterToken),
+          body: JSON.stringify({
+            requesterAssignmentId: pair.assignmentA,
+            counterpartyAssignmentId: pair.assignmentB,
+            approvalFlowId,
+          }),
+        })
+        expect(invalidFlow.status).toBe(422)
+        expect((invalidFlow.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_SWAP_APPROVAL_FLOW_REQUIRED')
+      }
+
+      const countBeforeValid = Number((await pool.query(
+        `SELECT count(*)::int AS n
+           FROM attendance_requests
+          WHERE org_id = $1 AND user_id = $2 AND request_type = 'shift_swap'`,
+        [ORG, pair.requester],
+      )).rows[0].n)
+      expect(countBeforeValid).toBe(0)
+
+      const validFlow = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST',
+        headers: authHeaders(requesterToken),
+        body: JSON.stringify({
+          requesterAssignmentId: pair.assignmentA,
+          counterpartyAssignmentId: pair.assignmentB,
+          approvalFlowId: activeSwapFlowId,
+        }),
+      })
+      expect(validFlow.status).toBe(201)
+      const requestId = (validFlow.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+      expect(requestId).toBeTruthy()
+      const metadata = (await pool.query(
+        `SELECT metadata FROM attendance_requests WHERE id = $1`,
+        [requestId],
+      )).rows[0]?.metadata as { approvalFlow?: { id?: string } } | undefined
+      expect(metadata?.approvalFlow?.id).toBe(activeSwapFlowId)
+    } finally {
+      await cleanupPrefix(prefix)
+    }
+  })
+
+  it('rejects unsupported source snapshots before creating a shift-swap envelope', async () => {
+    const multiPrefix = `swap-multiday-${Date.now().toString(36)}`
+    const generatedPrefix = `swap-generated-${Date.now().toString(36)}`
+    try {
+      const multi = await seedSwapPair(multiPrefix, { requesterEndDate: '2049-06-16' })
+      const multiToken = await mintToken(multi.requester, 'attendance:read,attendance:write')
+      const multiRes = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST',
+        headers: authHeaders(multiToken),
+        body: JSON.stringify({ requesterAssignmentId: multi.assignmentA, counterpartyAssignmentId: multi.assignmentB }),
+      })
+      expect(multiRes.status).toBe(422)
+      expect((multiRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_SWAP_SOURCE_NOT_SINGLE_DAY')
+
+      const generated = await seedSwapPair(generatedPrefix, { requesterProducerType: 'fixed_schedule' })
+      const generatedToken = await mintToken(generated.requester, 'attendance:read,attendance:write')
+      const generatedRes = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST',
+        headers: authHeaders(generatedToken),
+        body: JSON.stringify({ requesterAssignmentId: generated.assignmentA, counterpartyAssignmentId: generated.assignmentB }),
+      })
+      expect(generatedRes.status).toBe(422)
+      expect((generatedRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_SWAP_SOURCE_UNSUPPORTED')
+
+      const count = Number((await pool.query(
+        `SELECT count(*)::int AS n FROM attendance_requests
+          WHERE org_id = $1 AND request_type = 'shift_swap' AND user_id LIKE ANY($2::text[])`,
+        [ORG, [`${multiPrefix}%`, `${generatedPrefix}%`]],
+      )).rows[0].n)
+      expect(count).toBe(0)
+    } finally {
+      await cleanupPrefix(multiPrefix)
+      await cleanupPrefix(generatedPrefix)
+    }
+  })
+
+  it('lets the counterparty reject and closes the approval envelope without schedule writes', async () => {
+    const prefix = `swap-reject-${Date.now().toString(36)}`
+    try {
+      const pair = await seedSwapPair(prefix)
+      const requesterToken = await mintToken(pair.requester, 'attendance:read,attendance:write')
+      const counterpartyToken = await mintToken(pair.counterparty, 'attendance:read,attendance:write')
+      const create = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST',
+        headers: authHeaders(requesterToken),
+        body: JSON.stringify({ requesterAssignmentId: pair.assignmentA, counterpartyAssignmentId: pair.assignmentB }),
+      })
+      expect(create.status).toBe(201)
+      const requestId = (create.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+      expect(requestId).toBeTruthy()
+
+      const reject = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests/${requestId}/reject`, {
+        method: 'POST',
+        headers: authHeaders(counterpartyToken),
+        body: '{}',
+      })
+      expect(reject.status).toBe(200)
+      expect((reject.body as { data?: { shiftSwap?: { counterpartyStatus?: string; requestStatus?: string } } } | undefined)?.data?.shiftSwap?.counterpartyStatus).toBe('rejected')
+      expect((reject.body as { data?: { shiftSwap?: { requestStatus?: string } } } | undefined)?.data?.shiftSwap?.requestStatus).toBe('rejected')
+
+      const statusRows = await pool.query(
+        `SELECT r.status AS request_status, ai.status AS approval_status,
+                d.requester_replacement_assignment_id, d.counterparty_replacement_assignment_id
+           FROM attendance_requests r
+           JOIN attendance_shift_swap_requests d ON d.request_id = r.id
+           LEFT JOIN approval_instances ai ON ai.id = r.approval_instance_id
+          WHERE r.id = $1`,
+        [requestId],
+      )
+      expect(statusRows.rows[0].request_status).toBe('rejected')
+      expect(statusRows.rows[0].approval_status).toBe('rejected')
+      expect(statusRows.rows[0].requester_replacement_assignment_id).toBeNull()
+      expect(statusRows.rows[0].counterparty_replacement_assignment_id).toBeNull()
+
+      const retry = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST',
+        headers: authHeaders(requesterToken),
+        body: JSON.stringify({ requesterAssignmentId: pair.assignmentA, counterpartyAssignmentId: pair.assignmentB }),
+      })
+      expect(retry.status).toBe(201)
     } finally {
       await cleanupPrefix(prefix)
     }
