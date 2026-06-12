@@ -62,6 +62,7 @@ creating schedule groups, members, or scopes.
 ```bash
 BASE_URL=http://127.0.0.1:8082 \
 DATABASE_URL=postgresql://USER@127.0.0.1:5432/metasheet \
+DEPLOY_SHA=<deployed-backend-image-sha> \
 node scripts/ops/staging-attendance-small-org-so3-smoke.mjs
 ```
 
@@ -70,6 +71,7 @@ Fallback when dev-token is disabled:
 ```bash
 BASE_URL=http://127.0.0.1:8082 \
 DATABASE_URL=postgresql://USER@127.0.0.1:5432/metasheet \
+DEPLOY_SHA=<deployed-backend-image-sha> \
 ADMIN_TOKEN='<admin bearer>' \
 SCOPED_TOKEN='<non-admin scoped bearer>' \
 SCOPED_USER_ID='<scoped-token-subject>' \
@@ -80,6 +82,7 @@ Optional:
 
 ```bash
 ORG_ID=default
+DEPLOY_SHA=<sha>
 ```
 
 The scoped subject must remain synthetic; use a disposable `smallorg-so3-*` user
@@ -89,6 +92,7 @@ for fallback tokens.
 
 ```text
 SO3 small-org staging smoke @ http://127.0.0.1:8082 (org default, stamp smallorg-so3-...)
+  PASS  DB cleanup/assertion channel reachable and SO tables exist
   PASS  admin auth/list reachable (200)
   PASS  create schedule group smallorg-so3-...-root
   PASS  create schedule group smallorg-so3-...-child
