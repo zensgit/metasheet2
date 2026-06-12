@@ -353,6 +353,9 @@ attendanceIntegrationDescribe(
       await requireAttendanceTable(pool, 'attendance_rotation_assignments')
       await requireAttendanceTable(pool, 'attendance_groups')
       await requireAttendanceTable(pool, 'attendance_group_members')
+      await requireAttendanceTable(pool, 'attendance_schedule_groups')
+      await requireAttendanceTable(pool, 'attendance_schedule_group_members')
+      await requireAttendanceTable(pool, 'attendance_scheduler_scopes')
       await requireAttendanceTable(pool, 'attendance_rule_template_library')
       await requireAttendanceTable(pool, 'attendance_rule_template_versions')
     } catch (error) {
@@ -5584,6 +5587,156 @@ attendanceIntegrationDescribe(
       }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
+  it('hardens schedule group parent links before exposing small-organization editing', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    expect(dbUrl).toBeTruthy()
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const adminUserId = `attendance-small-org-admin-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+    const codePrefix = `so0-${runSuffix}`
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdIds: string[] = []
+    const foreignParentId = randomUuidV4()
+
+    const createGroup = async (body: Record<string, unknown>) => {
+      const response = await requestJson(`${baseUrl}/api/attendance/schedule-groups`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      })
+      expect(response.status, response.raw).toBe(200)
+      const data = (response.body as { data?: { id?: string } } | undefined)?.data
+      expect(data?.id).toBeTruthy()
+      if (data?.id) createdIds.push(data.id)
+      return data as any
+    }
+
+    const expectRouteError = (response: HttpResponse, status: number, code: string) => {
+      expect(response.status, response.raw).toBe(status)
+      const error = (response.body as { error?: { code?: string } } | undefined)?.error
+      expect(error?.code).toBe(code)
+    }
+
+    try {
+      const root = await createGroup({
+        name: `SO0 Root ${runSuffix}`,
+        code: `${codePrefix}-root`,
+        departmentRef: `dept-root-${runSuffix}`,
+      })
+      const child = await createGroup({
+        name: `SO0 Child ${runSuffix}`,
+        code: `${codePrefix}-child`,
+        parentId: root.id,
+        departmentRef: `dept-child-${runSuffix}`,
+      })
+
+      const childLookup = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${child.id}`, { headers })
+      expect(childLookup.status).toBe(200)
+      const childData = (childLookup.body as { data?: { parentId?: string | null; departmentRef?: string | null } } | undefined)?.data
+      expect(childData?.parentId).toBe(root.id)
+      expect(childData?.departmentRef).toBe(`dept-child-${runSuffix}`)
+
+      const partialUpdate = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${child.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ name: `SO0 Child Renamed ${runSuffix}` }),
+      })
+      expect(partialUpdate.status, partialUpdate.raw).toBe(200)
+      const partialData = (partialUpdate.body as { data?: { parentId?: string | null; departmentRef?: string | null } } | undefined)?.data
+      expect(partialData?.parentId).toBe(root.id)
+      expect(partialData?.departmentRef).toBe(`dept-child-${runSuffix}`)
+
+      const selfParentUpdate = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${root.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ parentId: root.id }),
+      })
+      expectRouteError(selfParentUpdate, 422, 'SCHEDULE_GROUP_PARENT_CYCLE')
+      const rootAfterSelfParent = await pool.query('SELECT parent_id FROM attendance_schedule_groups WHERE id = $1', [root.id])
+      expect(rootAfterSelfParent.rows[0]?.parent_id).toBeNull()
+
+      const inactiveParent = await createGroup({
+        name: `SO0 Inactive Parent ${runSuffix}`,
+        code: `${codePrefix}-inactive`,
+        isActive: false,
+      })
+      const inactiveParentChild = await requestJson(`${baseUrl}/api/attendance/schedule-groups`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `SO0 Invalid Inactive Child ${runSuffix}`,
+          code: `${codePrefix}-inactive-child`,
+          parentId: inactiveParent.id,
+        }),
+      })
+      expectRouteError(inactiveParentChild, 422, 'SCHEDULE_GROUP_PARENT_INVALID')
+
+      await pool.query(
+        `INSERT INTO attendance_schedule_groups (id, org_id, name, code, is_active)
+         VALUES ($1, $2, $3, $4, true)`,
+        [foreignParentId, 'other-org', `SO0 Foreign Parent ${runSuffix}`, `${codePrefix}-foreign`]
+      )
+      const foreignParentChild = await requestJson(`${baseUrl}/api/attendance/schedule-groups`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `SO0 Invalid Foreign Child ${runSuffix}`,
+          code: `${codePrefix}-foreign-child`,
+          parentId: foreignParentId,
+        }),
+      })
+      expectRouteError(foreignParentChild, 422, 'SCHEDULE_GROUP_PARENT_INVALID')
+
+      const cycleUpdate = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${root.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ parentId: child.id }),
+      })
+      expectRouteError(cycleUpdate, 422, 'SCHEDULE_GROUP_PARENT_CYCLE')
+      const rootAfterCycle = await pool.query('SELECT parent_id FROM attendance_schedule_groups WHERE id = $1', [root.id])
+      expect(rootAfterCycle.rows[0]?.parent_id).toBeNull()
+
+      const deleteParent = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${root.id}`, {
+        method: 'DELETE',
+        headers,
+      })
+      expectRouteError(deleteParent, 409, 'SCHEDULE_GROUP_HAS_ACTIVE_CHILDREN')
+
+      const deactivateParent = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${root.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ isActive: false }),
+      })
+      expectRouteError(deactivateParent, 409, 'SCHEDULE_GROUP_HAS_ACTIVE_CHILDREN')
+      const rootAfterDeactivate = await pool.query('SELECT is_active FROM attendance_schedule_groups WHERE id = $1', [root.id])
+      expect(rootAfterDeactivate.rows[0]?.is_active).toBe(true)
+    } finally {
+      await pool.query(
+        `DELETE FROM attendance_schedule_group_members
+         WHERE schedule_group_id IN (
+           SELECT id FROM attendance_schedule_groups WHERE code LIKE $1
+         )`,
+        [`${codePrefix}%`]
+      ).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_schedule_groups WHERE code LIKE $1', [`${codePrefix}%`]).catch(() => undefined)
+      if (createdIds.length) {
+        await pool.query('DELETE FROM attendance_schedule_groups WHERE id = ANY($1::uuid[])', [createdIds]).catch(() => undefined)
+      }
+      await pool.query('DELETE FROM attendance_schedule_groups WHERE id = $1', [foreignParentId]).catch(() => undefined)
       await pool.end().catch(() => undefined)
     }
   })
