@@ -85,6 +85,7 @@ export interface Database {
   attendance_events: AttendanceEventsTable
   attendance_records: AttendanceRecordsTable
   attendance_requests: AttendanceRequestsTable
+  attendance_shift_swap_requests: AttendanceShiftSwapRequestsTable
   attendance_rules: AttendanceRulesTable
   attendance_shifts: AttendanceShiftsTable
   attendance_shift_assignments: AttendanceShiftAssignmentsTable
@@ -1061,7 +1062,7 @@ export interface AttendanceRequestsTable {
   user_id: string
   org_id: string
   work_date: ColumnType<string, string | undefined, string>
-  request_type: 'missed_check_in' | 'missed_check_out' | 'time_correction' | 'leave' | 'overtime' | 'outdoor_punch'
+  request_type: 'missed_check_in' | 'missed_check_out' | 'time_correction' | 'leave' | 'overtime' | 'outdoor_punch' | 'shift_swap'
   requested_in_at: NullableTimestamp
   requested_out_at: NullableTimestamp
   reason: string | null
@@ -1070,6 +1071,39 @@ export interface AttendanceRequestsTable {
   resolved_by: string | null
   resolved_at: NullableTimestamp
   metadata: JSONColumnType<Record<string, unknown> | null>
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceShiftSwapRequestsTable {
+  request_id: string
+  org_id: string
+  requester_user_id: string
+  counterparty_user_id: string
+  counterparty_status: 'pending' | 'accepted' | 'rejected'
+  requester_assignment_id: string
+  counterparty_assignment_id: string
+  requester_replacement_assignment_id: string | null
+  counterparty_replacement_assignment_id: string | null
+  requester_work_date: ColumnType<string, string | undefined, string>
+  counterparty_work_date: ColumnType<string, string | undefined, string>
+  requester_shift_id: string
+  counterparty_shift_id: string
+  requester_slot_index: number
+  counterparty_slot_index: number
+  requester_start_date: ColumnType<string, string | undefined, string>
+  requester_end_date: ColumnType<string, string | undefined, string>
+  counterparty_start_date: ColumnType<string, string | undefined, string>
+  counterparty_end_date: ColumnType<string, string | undefined, string>
+  requester_publish_status: string
+  counterparty_publish_status: string
+  requester_producer_type: string | null
+  counterparty_producer_type: string | null
+  requester_assignment_kind: string
+  counterparty_assignment_kind: string
+  source_key: string
+  counterparty_responded_at: NullableTimestamp
+  finalized_at: NullableTimestamp
   created_at: CreatedAt
   updated_at: UpdatedAt
 }

@@ -711,7 +711,9 @@
               "missed_check_out",
               "time_correction",
               "leave",
-              "overtime"
+              "overtime",
+              "outdoor_punch",
+              "shift_swap"
             ]
           },
           "requested_in_at": {

@@ -466,7 +466,7 @@ components:
           format: date
         request_type:
           type: string
-          enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
+          enum: [missed_check_in, missed_check_out, time_correction, leave, overtime, outdoor_punch, shift_swap]
         requested_in_at:
           type: string
           format: date-time
