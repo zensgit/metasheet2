@@ -93,9 +93,17 @@
             </select>
           </label>
           <label class="meta-field-mgr__toggle">
-            <input v-model="linkDraft.limitSingleRecord" type="checkbox" />
+            <input
+              v-model="linkDraft.limitSingleRecord"
+              type="checkbox"
+              :disabled="linkSingleRecordLockedByHierarchy"
+              data-test="link-single-record-toggle"
+            />
             <span>{{ ml('field.limitSingleLinkedRecord') }}</span>
           </label>
+          <div v-if="linkSingleRecordLockedByHierarchy" class="meta-field-mgr__hint" data-test="hierarchy-parent-link-lock">
+            {{ ml('field.hierarchyParentLinkLocked') }}
+          </div>
         </template>
 
         <template v-else-if="configTargetType === 'person'">
@@ -756,6 +764,10 @@ const props = defineProps<{
   fields: MetaField[]
   sheets: MetaSheet[]
   sheetId: string
+  // S4 companion guard: hierarchy reparent writes a single `[parentRecordId]`
+  // into the configured parent link field, so the field manager must not offer
+  // a downgrade path from single-value link to multi-value link for those IDs.
+  hierarchyParentFieldIds?: string[]
   // #5b: formula dry-run callback (the workbench wires it to client.dryRunFormula). Optional so the
   // panel degrades gracefully (button hidden) where no fn is provided.
   dryRunFn?: (params: { sheetId: string; expression: string; sampleValues: Record<string, unknown>; recordId?: string }) => Promise<DryRunResult>
@@ -888,6 +900,13 @@ const configTarget = computed(() => props.fields.find((field) => field.id === co
 const deleteTarget = computed(() => props.fields.find((field) => field.id === deleteTargetId.value) ?? null)
 const linkSourceFields = computed(() => props.fields.filter((field) => field.type === 'link'))
 const targetSheets = computed(() => props.sheets.filter((sheet) => sheet.id !== props.sheetId))
+const hierarchyParentFieldIdSet = computed(() => new Set(props.hierarchyParentFieldIds ?? []))
+const linkSingleRecordLockedByHierarchy = computed(() => {
+  const target = configTarget.value
+  return target?.type === 'link'
+    && target.property?.limitSingleRecord === true
+    && hierarchyParentFieldIdSet.value.has(target.id)
+})
 const formulaSourceFields = computed(() =>
   props.fields.filter((field) => field.id !== configTarget.value?.id && field.type !== 'formula'),
 )
@@ -1231,7 +1250,7 @@ function serializeFieldDraft(type: string | null): string {
   if (type === 'link') {
     return JSON.stringify({
       foreignSheetId: linkDraft.foreignSheetId,
-      limitSingleRecord: linkDraft.limitSingleRecord,
+      limitSingleRecord: linkSingleRecordLockedByHierarchy.value || linkDraft.limitSingleRecord,
     })
   }
   if (type === 'person') {
@@ -1724,7 +1743,7 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     return {
       foreignSheetId: linkDraft.foreignSheetId,
       foreignDatasheetId: linkDraft.foreignSheetId,
-      limitSingleRecord: linkDraft.limitSingleRecord,
+      limitSingleRecord: linkSingleRecordLockedByHierarchy.value || linkDraft.limitSingleRecord,
     }
   }
   if (normalizedType === 'person') {
