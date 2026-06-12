@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto'
 
 const BASE_URL = (process.env.BASE_URL || process.env.BASE || '').replace(/\/$/, '')
 const DATABASE_URL = process.env.DATABASE_URL || ''
+const DEPLOY_SHA = process.env.DEPLOY_SHA || '<sha>'
 const ORG_ID = process.env.ORG_ID || 'default'
 
 if (!BASE_URL || !DATABASE_URL) {
@@ -355,4 +356,4 @@ if (failures.length) {
   process.exit(1)
 }
 
-console.log(`\n=== PASS — ${pass} passed, 0 failed ===  SMALL_ORG_SO3_STAGING_SMOKE_PASS deploy=<sha> stamp=${STAMP} residue=0`)
+console.log(`\n=== PASS — ${pass} passed, 0 failed ===  SMALL_ORG_SO3_STAGING_SMOKE_PASS deploy=${DEPLOY_SHA} stamp=${STAMP} residue=0`)
