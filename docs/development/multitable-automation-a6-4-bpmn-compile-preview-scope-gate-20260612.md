@@ -160,6 +160,9 @@ landed contracts." It must not mean "safe to deploy as BPMN."
 
 ## Implementation Entry Point
 
+Detailed A6-4a implementation checklist:
+`multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`.
+
 The first implementation PR should start with a pure module and route only if the
 module is already deterministic:
 

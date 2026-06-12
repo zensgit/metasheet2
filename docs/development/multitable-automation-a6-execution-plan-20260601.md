@@ -215,6 +215,8 @@ rung.
 
 Scope gate:
 `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`.
+A6-4a implementation checklist:
+`multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`.
 
 - **Adds:** parse a constrained BPMN subset, compile-**preview** into automation/approval
   definitions, and return a gap report for unsupported nodes.
