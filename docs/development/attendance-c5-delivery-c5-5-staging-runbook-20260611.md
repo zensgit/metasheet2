@@ -114,6 +114,37 @@ Expected ready output:
 
 If the preflight returns `overallStatus:"blocked"`, fix the listed checks before running the real smoke. Do not use `--allow-blocked` as a completion signal; it is only for capturing a blocked report artifact.
 
+### 2026-06-12 preflight deployment evidence
+
+After #2530 added the preflight, staging was deployed to `890a2ad5091552fcd8feffa669a2c35d76683d44` but exposed a
+deployment substrate gap: the backend runner image did not include `scripts/ops`, so the preflight script was not
+available inside `/app`. #2531 fixed that by copying `/app/scripts` into the backend runner image and gating the
+Dockerfile contract in `DingTalk P4 ops regression gate`.
+
+Staging was then deployed to `ed02917626dd302299cc3001e55c519d6004b7de`; `/health` reported the same build commit and
+image tag, and the backend container directly passed:
+
+```text
+preflight-script-in-image-ok
+```
+
+The read-only preflight then ran from the deployed backend container. It did not seed rows and did not send DingTalk
+messages. Current result:
+
+```text
+overallStatus=blocked
+missingCheckIds=dingtalk-config,recipient,auth-token
+tables=pass
+due-deliveries=pass (0 due rows)
+directory-state=0 active DingTalk integrations, 0 accounts, 0 links
+```
+
+Before running the real smoke, provide:
+
+- DingTalk work-notification config: backend env with app key/secret/agent id, or `DINGTALK_SMOKE_CONFIG_INTEGRATION_ID`;
+- a test recipient via `DINGTALK_SMOKE_EXTERNAL_USER_ID` or the three role-specific recipient ids;
+- a staging admin token via `SMOKE_TOKEN`/`TOKEN`, or the deploy-host token fallback.
+
 ```bash
 BASE_URL=http://127.0.0.1:8082 \
 DATABASE_URL=postgresql://USER@127.0.0.1:5432/metasheet \
