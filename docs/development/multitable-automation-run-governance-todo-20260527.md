@@ -312,6 +312,7 @@ complete.
 - [x] A6-3-4 frontend and admin-runs readability — LANDED #2500 `4408239d0` + #2501 `88f5f538a` (2026-06-12): editor authoring for `parallel_branch` with workflow-job auto-lock and admin runs detail showing branch labels/child jobs. **A6-3-4/W3 join-all closed end-to-end.**
 - [ ] A6-3-5 join-any / cancellation semantics — gated after join-all runtime.
 - [x] A6-4 / W8 BPMN compile/preview scope-gate — `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`: side-effect-free preview + deterministic gap report only; no live BPMN runtime, no deploy/start, no persistence.
+- [x] A6-4a implementation plan — `multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`: first implementation PR must be a pure compiler module + unit tests only; route deferred to A6-4b; no `BPMNWorkflowEngine` import.
 - [ ] A6-4 BPMN compile/preview adapter implementation — not started; requires explicit modeling/preview opt-in.
 - [x] A6-5 / W6-1 `start_approval` approval-as-job bridge — LANDED #2469: creates one approval instance from a published template, persists the bridge row, writes suspended / terminal C1 jobs, resumes/fails from W5 completion events, and guards A5 retry duplicates.
 - [x] W7-0 approval result backwrite scope-gate — `automation-approval-result-backwrite-scope-gate-20260611.md`: explicit mapping only; durable idempotent attempt state; permission/field guards; no approval form/comment/profile leakage; runtime remains gated.
