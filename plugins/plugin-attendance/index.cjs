@@ -22543,6 +22543,21 @@ module.exports = {
       return `schedule_dispatch:${userId}:${targetScheduleGroupId}:${startDate}:${endDate}:${Number(slotIndex ?? 0)}`
     }
 
+    async function acquireScheduleDispatchWindowLock(client, orgId, userId, targetScheduleGroupId, slotIndex) {
+      try {
+        await client.query(
+          'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+          [
+            `attendance-schedule-dispatch:${String(orgId ?? '')}`,
+            `${String(userId ?? '')}:${String(targetScheduleGroupId ?? '')}:${Number(slotIndex ?? 0)}`,
+          ]
+        )
+      } catch (_error) {
+        // Best-effort: if advisory locks are unavailable, the exact source_key unique index still catches exact
+        // duplicates, but overlapping windows rely on the pre-insert SELECT.
+      }
+    }
+
     function buildScheduleDispatchSchedulerScopeTarget(value) {
       const target = {
         userIds: [value.userId ?? value.user_id].filter(Boolean),
@@ -22667,6 +22682,15 @@ module.exports = {
         [orgId, requestId]
       )
       return rows[0] ?? null
+    }
+
+    async function assertScheduleDispatchRequestScopeAllowed(client, orgId, requestId, actorAccess, { forUpdate = false } = {}) {
+      const detail = await loadScheduleDispatchDetail(client, orgId, requestId, { forUpdate })
+      if (!detail) {
+        throw new HttpError(400, 'SCHEDULE_DISPATCH_DETAIL_MISSING', 'Schedule-dispatch request detail is missing')
+      }
+      await assertScheduleDispatchScopeAllowed(client, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget(detail))
+      return detail
     }
 
     async function archiveScheduleDispatchSourceKey(client, orgId, requestId) {
@@ -23268,6 +23292,7 @@ module.exports = {
             })
             await assertScheduleDispatchScopeAllowed(trx, orgId, actorAccess, target)
 
+            await acquireScheduleDispatchWindowLock(trx, orgId, input.userId, targetGroup.id, input.slotIndex)
             const approvalFlow = await resolveScheduleDispatchApprovalFlow(trx, orgId, input.approvalFlowId)
             const sourceKey = buildScheduleDispatchSourceKey({
               userId: input.userId,
@@ -23281,10 +23306,14 @@ module.exports = {
                  FROM attendance_schedule_dispatch_requests d
                  JOIN attendance_requests r ON r.id = d.request_id
                 WHERE d.org_id = $1
-                  AND d.source_key = $2
+                  AND d.user_id = $2
+                  AND d.target_schedule_group_id = $3
+                  AND d.slot_index = $4
+                  AND d.start_date <= $6::date
+                  AND d.end_date >= $5::date
                   AND r.status IN ('pending', 'approved')
                 LIMIT 1`,
-              [orgId, sourceKey]
+              [orgId, input.userId, targetGroup.id, input.slotIndex, input.startDate, input.endDate]
             )
             if (duplicateRows.length) {
               throw new HttpError(409, 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', 'A schedule-dispatch request already exists for this user/group/date window')
@@ -24358,6 +24387,11 @@ module.exports = {
           const resolvedAt = new Date()
 
           if (requestType === 'schedule_dispatch' && action === 'approve' && isFinalApproval) {
+            await assertScheduleDispatchRequestScopeAllowed(trx, orgId, requestId, {
+              userId: requesterId,
+              orgId,
+              fullAdmin: await hasAttendanceAdminAccess(requesterId),
+            }, { forUpdate: true })
             throw new HttpError(
               422,
               'SCHEDULE_DISPATCH_FINAL_WRITER_PENDING',
@@ -24749,8 +24783,16 @@ module.exports = {
           if (requestRow.status !== 'pending') {
             throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
           }
+          const requestOrgId = requestRow.org_id ?? DEFAULT_ORG_ID
+          if (requestRow.request_type === 'schedule_dispatch') {
+            await assertScheduleDispatchRequestScopeAllowed(trx, requestOrgId, requestId, {
+              userId: requesterId,
+              orgId: requestOrgId,
+              fullAdmin: await hasAttendanceAdminAccess(requesterId),
+            }, { forUpdate: true })
+          }
 
-          if (requestRow.user_id !== requesterId) {
+          if (requestRow.request_type !== 'schedule_dispatch' && requestRow.user_id !== requesterId) {
             const allowed = await canAccessOtherUsers(requesterId)
             if (!allowed) {
               throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
@@ -24797,22 +24839,22 @@ module.exports = {
           }
 
           const resolvedAt = new Date()
-	          await trx.query(
-	            `UPDATE attendance_requests
-	             SET status = $2, resolved_by = $3, resolved_at = $4, updated_at = now()
-	             WHERE id = $1`,
-	            [requestId, 'cancelled', requesterId, resolvedAt]
-	          )
-	          if (requestRow.request_type === 'shift_swap') {
-	            await archiveShiftSwapSourceKey(trx, requestRow.org_id ?? DEFAULT_ORG_ID, requestId)
-	          } else if (requestRow.request_type === 'schedule_dispatch') {
-	            await closeScheduleDispatchRequest(trx, requestRow.org_id ?? DEFAULT_ORG_ID, requestId)
-	          }
+          await trx.query(
+            `UPDATE attendance_requests
+             SET status = $2, resolved_by = $3, resolved_at = $4, updated_at = now()
+             WHERE id = $1`,
+            [requestId, 'cancelled', requesterId, resolvedAt]
+          )
+          if (requestRow.request_type === 'shift_swap') {
+            await archiveShiftSwapSourceKey(trx, requestRow.org_id ?? DEFAULT_ORG_ID, requestId)
+          } else if (requestRow.request_type === 'schedule_dispatch') {
+            await closeScheduleDispatchRequest(trx, requestOrgId, requestId)
+          }
 
-	          return {
+          return {
             requestId,
             status: 'cancelled',
-            orgId: requestRow.org_id ?? DEFAULT_ORG_ID,
+            orgId: requestOrgId,
             userId: requestRow.user_id,
           }
         })

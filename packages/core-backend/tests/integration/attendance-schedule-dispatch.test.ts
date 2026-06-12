@@ -322,6 +322,18 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
       expect(duplicate.status, duplicate.raw).toBe(409)
       expect((duplicate.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('DUPLICATE_SCHEDULE_DISPATCH_REQUEST')
 
+      const overlapping = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
+        method: 'POST',
+        headers: authHeaders(token),
+        body: JSON.stringify({
+          ...payload,
+          startDate: '2049-08-02',
+          endDate: '2049-08-02',
+        }),
+      })
+      expect(overlapping.status, overlapping.raw).toBe(409)
+      expect((overlapping.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('DUPLICATE_SCHEDULE_DISPATCH_REQUEST')
+
       const list = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests?userId=${encodeURIComponent(userId)}&pageSize=20`, {
         headers: authHeaders(token),
       })
@@ -477,6 +489,61 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
 
       const recreateAfterCancel = await createScheduleDispatchRequest(token, cancelPayload)
       expect(recreateAfterCancel).not.toBe(cancelRequestId)
+    } finally {
+      await cleanupPrefix(prefix)
+    }
+  })
+
+  it('serializes concurrent overlapping schedule-dispatch creates for the same user, group, and slot', async () => {
+    const prefix = `dispatch-concurrent-${Date.now().toString(36)}`
+    const userId = `${prefix}-user`
+    const token = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const { scheduleGroupId, shiftId } = await seedDispatchTargets(prefix)
+    const approvalFlowId = await seedDispatchFlow(prefix)
+    const basePayload = {
+      userId,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: shiftId,
+      slotIndex: 0,
+      approvalFlowId,
+    }
+    try {
+      const [first, second] = await Promise.all([
+        requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
+          method: 'POST',
+          headers: authHeaders(token),
+          body: JSON.stringify({
+            ...basePayload,
+            startDate: '2049-08-06',
+            endDate: '2049-08-08',
+          }),
+        }),
+        requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
+          method: 'POST',
+          headers: authHeaders(token),
+          body: JSON.stringify({
+            ...basePayload,
+            startDate: '2049-08-07',
+            endDate: '2049-08-09',
+          }),
+        }),
+      ])
+      const statuses = [first.status, second.status].sort((a, b) => a - b)
+      expect(statuses).toEqual([201, 409])
+      const duplicate = [first, second].find(response => response.status === 409)
+      expect((duplicate?.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('DUPLICATE_SCHEDULE_DISPATCH_REQUEST')
+      const activeCount = Number((await pool.query(
+        `SELECT count(*)::int AS n
+           FROM attendance_schedule_dispatch_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.org_id = $1
+            AND d.user_id = $2
+            AND d.target_schedule_group_id = $3
+            AND d.slot_index = 0
+            AND r.status IN ('pending', 'approved')`,
+        [ORG, userId, scheduleGroupId],
+      )).rows[0].n)
+      expect(activeCount).toBe(1)
     } finally {
       await cleanupPrefix(prefix)
     }
