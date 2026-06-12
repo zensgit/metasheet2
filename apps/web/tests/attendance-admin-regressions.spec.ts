@@ -771,6 +771,42 @@ describe('Attendance admin regressions', () => {
     ).toEqual([])
   })
 
+  it('exposes shift_swap as an approval-flow type and saves it through the admin form', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const name = container!.querySelector<HTMLInputElement>('#attendance-approval-name')
+    const requestType = container!.querySelector<HTMLSelectElement>('#attendance-approval-type')
+    expect(name).toBeTruthy()
+    expect(requestType).toBeTruthy()
+    expect(Array.from(requestType!.options).map(option => option.value)).toContain('shift_swap')
+
+    name!.value = 'Shift swap approval'
+    name!.dispatchEvent(new Event('input', { bubbles: true }))
+    requestType!.value = 'shift_swap'
+    requestType!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const createFlow = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => (button.textContent || '').includes('Create flow'))
+    expect(createFlow).toBeTruthy()
+    createFlow!.click()
+    await flushUi(6)
+
+    const postCall = vi.mocked(apiFetch).mock.calls.find(([url, init]) =>
+      String(url) === '/api/attendance/approval-flows'
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'POST',
+    )
+    expect(postCall).toBeTruthy()
+    expect(JSON.parse(String((postCall![1] as RequestInit | undefined)?.body || '{}'))).toEqual({
+      name: 'Shift swap approval',
+      requestType: 'shift_swap',
+      steps: [],
+      isActive: true,
+    })
+  })
+
   it('renders scheduler scopes as a read-only registry under scheduling admin', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
