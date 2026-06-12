@@ -17136,6 +17136,8 @@ function attendanceRequestTypeLabel(requestType) {
     time_correction: '时间更正',
     leave: '请假',
     overtime: '加班',
+    outdoor_punch: '外勤打卡',
+    shift_swap: '换班',
   }
   return labels[requestType] ?? String(requestType ?? '考勤')
 }
@@ -22008,6 +22010,228 @@ module.exports = {
       }
     }
 
+    const shiftSwapCreateSchema = z.object({
+      requesterAssignmentId: z.string().optional(),
+      requester_assignment_id: z.string().optional(),
+      counterpartyAssignmentId: z.string().optional(),
+      counterparty_assignment_id: z.string().optional(),
+      reason: z.string().optional(),
+      approvalFlowId: z.string().optional(),
+      approval_flow_id: z.string().optional(),
+    })
+
+    function normalizeShiftSwapDetailDate(value) {
+      return normalizeDateOnly(value) ?? (typeof value === 'string' ? value.slice(0, 10) : null)
+    }
+
+    function mapShiftSwapRequestRow(row) {
+      const requesterWorkDate = normalizeShiftSwapDetailDate(row.requester_work_date)
+      const counterpartyWorkDate = normalizeShiftSwapDetailDate(row.counterparty_work_date)
+      const requesterStartDate = normalizeShiftSwapDetailDate(row.requester_start_date)
+      const requesterEndDate = normalizeShiftSwapDetailDate(row.requester_end_date)
+      const counterpartyStartDate = normalizeShiftSwapDetailDate(row.counterparty_start_date)
+      const counterpartyEndDate = normalizeShiftSwapDetailDate(row.counterparty_end_date)
+      return {
+        requestId: row.request_id,
+        request_id: row.request_id,
+        orgId: row.org_id ?? DEFAULT_ORG_ID,
+        org_id: row.org_id ?? DEFAULT_ORG_ID,
+        requestStatus: row.request_status ?? row.status ?? null,
+        request_status: row.request_status ?? row.status ?? null,
+        requesterUserId: row.requester_user_id,
+        requester_user_id: row.requester_user_id,
+        counterpartyUserId: row.counterparty_user_id,
+        counterparty_user_id: row.counterparty_user_id,
+        counterpartyStatus: row.counterparty_status,
+        counterparty_status: row.counterparty_status,
+        requesterAssignmentId: row.requester_assignment_id,
+        requester_assignment_id: row.requester_assignment_id,
+        counterpartyAssignmentId: row.counterparty_assignment_id,
+        counterparty_assignment_id: row.counterparty_assignment_id,
+        requesterReplacementAssignmentId: row.requester_replacement_assignment_id ?? null,
+        requester_replacement_assignment_id: row.requester_replacement_assignment_id ?? null,
+        counterpartyReplacementAssignmentId: row.counterparty_replacement_assignment_id ?? null,
+        counterparty_replacement_assignment_id: row.counterparty_replacement_assignment_id ?? null,
+        requesterWorkDate,
+        requester_work_date: requesterWorkDate,
+        counterpartyWorkDate,
+        counterparty_work_date: counterpartyWorkDate,
+        requesterShiftId: row.requester_shift_id,
+        requester_shift_id: row.requester_shift_id,
+        counterpartyShiftId: row.counterparty_shift_id,
+        counterparty_shift_id: row.counterparty_shift_id,
+        requesterSlotIndex: Number.isFinite(Number(row.requester_slot_index)) ? Number(row.requester_slot_index) : 0,
+        requester_slot_index: Number.isFinite(Number(row.requester_slot_index)) ? Number(row.requester_slot_index) : 0,
+        counterpartySlotIndex: Number.isFinite(Number(row.counterparty_slot_index)) ? Number(row.counterparty_slot_index) : 0,
+        counterparty_slot_index: Number.isFinite(Number(row.counterparty_slot_index)) ? Number(row.counterparty_slot_index) : 0,
+        requesterStartDate,
+        requester_start_date: requesterStartDate,
+        requesterEndDate,
+        requester_end_date: requesterEndDate,
+        counterpartyStartDate,
+        counterparty_start_date: counterpartyStartDate,
+        counterpartyEndDate,
+        counterparty_end_date: counterpartyEndDate,
+        requesterPublishStatus: row.requester_publish_status,
+        requester_publish_status: row.requester_publish_status,
+        counterpartyPublishStatus: row.counterparty_publish_status,
+        counterparty_publish_status: row.counterparty_publish_status,
+        requesterProducerType: row.requester_producer_type ?? null,
+        requester_producer_type: row.requester_producer_type ?? null,
+        counterpartyProducerType: row.counterparty_producer_type ?? null,
+        counterparty_producer_type: row.counterparty_producer_type ?? null,
+        requesterAssignmentKind: row.requester_assignment_kind,
+        requester_assignment_kind: row.requester_assignment_kind,
+        counterpartyAssignmentKind: row.counterparty_assignment_kind,
+        counterparty_assignment_kind: row.counterparty_assignment_kind,
+        sourceKey: row.source_key,
+        source_key: row.source_key,
+        counterpartyRespondedAt: row.counterparty_responded_at ?? null,
+        counterparty_responded_at: row.counterparty_responded_at ?? null,
+        finalizedAt: row.finalized_at ?? null,
+        finalized_at: row.finalized_at ?? null,
+        createdAt: row.created_at ?? null,
+        created_at: row.created_at ?? null,
+        updatedAt: row.updated_at ?? null,
+        updated_at: row.updated_at ?? null,
+      }
+    }
+
+    function buildShiftSwapSourceError(code, message, field) {
+      return new HttpError(422, code, message, singleValidationDetail(field, message))
+    }
+
+    function normalizeShiftSwapSourceSnapshot(row, field) {
+      if (!row) {
+        throw new HttpError(404, 'SHIFT_SWAP_ASSIGNMENT_NOT_FOUND', 'Shift-swap source assignment not found', singleValidationDetail(field, 'Assignment not found'))
+      }
+      const startDate = normalizeDateOnly(row.start_date)
+      const endDate = normalizeDateOnly(row.end_date)
+      if (!startDate || !endDate || startDate !== endDate) {
+        throw buildShiftSwapSourceError('SHIFT_SWAP_SOURCE_NOT_SINGLE_DAY', 'Shift-swap v1 requires a single-day source assignment', field)
+      }
+      if (row.is_active === false) {
+        throw buildShiftSwapSourceError('SHIFT_SWAP_SOURCE_UNSUPPORTED', 'Shift-swap source assignment must be active', field)
+      }
+      const publishStatus = normalizeAttendanceSchedulePublishStatus(row.publish_status)
+      if (publishStatus !== 'published') {
+        throw buildShiftSwapSourceError('SHIFT_SWAP_SOURCE_UNSUPPORTED', 'Shift-swap source assignment must be published', field)
+      }
+      if ((row.assignment_kind ?? 'regular') !== 'regular') {
+        throw buildShiftSwapSourceError('SHIFT_SWAP_SOURCE_UNSUPPORTED', 'Shift-swap source assignment must be a regular assignment', field)
+      }
+      if (row.producer_type) {
+        throw buildShiftSwapSourceError('SHIFT_SWAP_SOURCE_UNSUPPORTED', 'Shift-swap source assignment must be manually managed', field)
+      }
+      if (row.covered_by_temporary === true || row.covered_by_temporary === 't') {
+        throw buildShiftSwapSourceError('SHIFT_SWAP_SOURCE_TEMPORARY_COVERED', 'Shift-swap source assignment is currently covered by a temporary replacement', field)
+      }
+      return {
+        id: row.id,
+        orgId: row.org_id ?? DEFAULT_ORG_ID,
+        userId: row.user_id,
+        shiftId: row.shift_id,
+        slotIndex: normalizeAttendanceScheduleSlotIndex(row.slot_index, 0),
+        startDate,
+        endDate,
+        workDate: startDate,
+        publishStatus,
+        producerType: row.producer_type ?? null,
+        assignmentKind: row.assignment_kind ?? 'regular',
+      }
+    }
+
+    async function loadShiftSwapSourceAssignment(client, orgId, assignmentId, options = {}) {
+      const forUpdate = options.forUpdate === true ? 'FOR UPDATE OF a' : ''
+      const rows = await client.query(
+        `SELECT a.*,
+                EXISTS (
+                  SELECT 1
+                    FROM attendance_shift_assignments t
+                   WHERE t.org_id = a.org_id
+                     AND t.temporary_replaces_assignment_id = a.id
+                     AND COALESCE(t.is_active, true) = true
+                ) AS covered_by_temporary
+           FROM attendance_shift_assignments a
+          WHERE a.id = $1 AND a.org_id = $2
+          ${forUpdate}`,
+        [assignmentId, orgId]
+      )
+      return rows[0] ?? null
+    }
+
+    async function loadShiftSwapDetail(client, orgId, requestId, options = {}) {
+      const lockClause = options.forUpdate === true ? 'FOR UPDATE OF d, r' : ''
+      const rows = await client.query(
+        `SELECT d.*, r.status AS request_status, r.work_date AS request_work_date, r.reason AS request_reason,
+                r.metadata AS request_metadata, r.approval_instance_id AS approval_instance_id
+           FROM attendance_shift_swap_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.org_id = $1 AND d.request_id = $2
+          ${lockClause}`,
+        [orgId, requestId]
+      )
+      return rows[0] ?? null
+    }
+
+    async function ensureShiftSwapAccess(row, actorId, actionLabel) {
+      if (row.requester_user_id === actorId || row.counterparty_user_id === actorId) return
+      const allowed = await canAccessOtherUsers(actorId)
+      if (!allowed) {
+        throw new HttpError(403, 'FORBIDDEN', `No access to ${actionLabel}`)
+      }
+    }
+
+    function buildShiftSwapSourceKey(requesterAssignmentId, counterpartyAssignmentId) {
+      return `shift_swap:${[requesterAssignmentId, counterpartyAssignmentId].sort().join(':')}`
+    }
+
+    async function findShiftSwapSourceConflict(client, orgId, assignmentIds) {
+      const ids = Array.from(new Set((assignmentIds ?? []).filter(Boolean)))
+      if (!ids.length) return null
+      const rows = await client.query(
+        `SELECT d.request_id, d.requester_assignment_id, d.counterparty_assignment_id, r.status
+           FROM attendance_shift_swap_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.org_id = $1
+            AND r.status IN ('pending', 'approved')
+            AND (
+              d.requester_assignment_id = ANY($2::uuid[])
+              OR d.counterparty_assignment_id = ANY($2::uuid[])
+            )
+          ORDER BY r.created_at DESC
+          LIMIT 1`,
+        [orgId, ids]
+      )
+      return rows[0] ?? null
+    }
+
+    async function archiveShiftSwapSourceKey(client, orgId, requestId) {
+      await client.query(
+        `UPDATE attendance_shift_swap_requests
+            SET source_key = CASE
+                  WHEN source_key LIKE '%' || ':closed:' || request_id::text THEN source_key
+                  ELSE source_key || ':closed:' || request_id::text
+                END,
+                updated_at = now()
+          WHERE org_id = $1 AND request_id = $2`,
+        [orgId, requestId]
+      )
+    }
+
+    async function loadActiveApprovalFlowForRequestType(client, orgId, requestType, flowId) {
+      if (flowId) {
+        const rows = await client.query(
+          `SELECT * FROM attendance_approval_flows
+           WHERE org_id = $1 AND id = $2 AND request_type = $3 AND is_active = true
+           LIMIT 1`,
+          [orgId, flowId, requestType]
+        )
+        return rows.length ? mapApprovalFlowRow(rows[0]) : null
+      }
+      return loadApprovalFlow(client, orgId, { requestType })
+    }
+
     async function resolveAttendanceRequestDraft(parsedData, existingRequest = null) {
       const orgId = existingRequest?.org_id ?? DEFAULT_ORG_ID
       const existingMetadata = normalizeMetadata(existingRequest?.metadata)
@@ -22501,6 +22725,548 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'POST',
+      '/api/attendance/shift-swap-requests',
+      withPermission('attendance:write', async (req, res) => {
+        const parsed = shiftSwapCreateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json(
+            validationErrorBody(
+              'Invalid shift-swap request payload',
+              formatZodValidationDetails(parsed.error)
+            )
+          )
+          return
+        }
+        const actorUserId = getUserId(req)
+        if (!actorUserId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+        const orgId = getOrgId(req)
+        let requesterAssignmentId
+        let counterpartyAssignmentId
+        let approvalFlowId
+        try {
+          requesterAssignmentId = normalizeRequestUuidReferenceInput(
+            firstDefinedValue(parsed.data.requesterAssignmentId, parsed.data.requester_assignment_id),
+            null,
+            'requesterAssignmentId'
+          )
+          counterpartyAssignmentId = normalizeRequestUuidReferenceInput(
+            firstDefinedValue(parsed.data.counterpartyAssignmentId, parsed.data.counterparty_assignment_id),
+            null,
+            'counterpartyAssignmentId'
+          )
+          approvalFlowId = normalizeRequestUuidReferenceInput(
+            firstDefinedValue(parsed.data.approvalFlowId, parsed.data.approval_flow_id),
+            null,
+            'approvalFlowId'
+          )
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message, details: error.details } })
+            return
+          }
+          throw error
+        }
+        if (!requesterAssignmentId || !counterpartyAssignmentId) {
+          res.status(400).json(
+            validationErrorBody(
+              'Both requesterAssignmentId and counterpartyAssignmentId are required',
+              [
+                { field: 'requesterAssignmentId', message: 'Required' },
+                { field: 'counterpartyAssignmentId', message: 'Required' },
+              ]
+            )
+          )
+          return
+        }
+        if (requesterAssignmentId === counterpartyAssignmentId) {
+          res.status(422).json({ ok: false, error: { code: 'SHIFT_SWAP_ASSIGNMENTS_MUST_DIFFER', message: 'Shift-swap source assignments must be different' } })
+          return
+        }
+
+        const reason = normalizeOptionalText(parsed.data.reason)
+        const requestId = randomUUID()
+        const approvalId = `apv_${randomUUID()}`
+
+        try {
+          const result = await db.transaction(async (trx) => {
+            const lockedSourceRows = new Map()
+            for (const assignmentId of [requesterAssignmentId, counterpartyAssignmentId].sort()) {
+              lockedSourceRows.set(
+                assignmentId,
+                await loadShiftSwapSourceAssignment(trx, orgId, assignmentId, { forUpdate: true })
+              )
+            }
+            const requesterRow = lockedSourceRows.get(requesterAssignmentId)
+            const counterpartyRow = lockedSourceRows.get(counterpartyAssignmentId)
+            const requesterSource = normalizeShiftSwapSourceSnapshot(requesterRow, 'requesterAssignmentId')
+            const counterpartySource = normalizeShiftSwapSourceSnapshot(counterpartyRow, 'counterpartyAssignmentId')
+
+            if (requesterSource.userId !== actorUserId) {
+              const allowed = await canAccessOtherUsers(actorUserId)
+              if (!allowed) {
+                throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
+              }
+            }
+            if (requesterSource.userId === counterpartySource.userId) {
+              throw new HttpError(422, 'SHIFT_SWAP_REQUIRES_TWO_USERS', 'Shift-swap requires two different users')
+            }
+
+            const sourceKey = buildShiftSwapSourceKey(requesterAssignmentId, counterpartyAssignmentId)
+            const duplicateRows = await trx.query(
+              `SELECT d.request_id
+                 FROM attendance_shift_swap_requests d
+                 JOIN attendance_requests r ON r.id = d.request_id
+                WHERE d.org_id = $1 AND d.source_key = $2
+                  AND r.status IN ('pending', 'approved')
+                LIMIT 1`,
+              [orgId, sourceKey]
+            )
+            if (duplicateRows.length) {
+              throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_REQUEST', 'A shift-swap request already exists for these assignments')
+            }
+            const sourceConflict = await findShiftSwapSourceConflict(trx, orgId, [requesterAssignmentId, counterpartyAssignmentId])
+            if (sourceConflict) {
+              throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_SOURCE', 'A shift-swap request is already pending or approved for one of these source assignments')
+            }
+
+            await acquireAttendanceRequestLock(trx, orgId, requesterSource.userId, requesterSource.workDate, 'shift_swap')
+            const approvalFlow = await loadActiveApprovalFlowForRequestType(trx, orgId, 'shift_swap', approvalFlowId)
+            if (approvalFlowId && !approvalFlow) {
+              throw new HttpError(422, 'SHIFT_SWAP_APPROVAL_FLOW_REQUIRED', 'Shift-swap approval flow does not exist or is inactive', singleValidationDetail('approvalFlowId', 'Provide an active shift_swap approvalFlowId'))
+            }
+            const metadata = {
+              shiftSwap: {
+                requesterAssignmentId,
+                counterpartyAssignmentId,
+                requesterUserId: requesterSource.userId,
+                counterpartyUserId: counterpartySource.userId,
+                requesterWorkDate: requesterSource.workDate,
+                counterpartyWorkDate: counterpartySource.workDate,
+              },
+            }
+            if (approvalFlow) {
+              metadata.approvalFlow = {
+                id: approvalFlow.id,
+                name: approvalFlow.name,
+                steps: approvalFlow.steps,
+                currentStep: 0,
+              }
+            }
+            const draft = {
+              workDate: requesterSource.workDate,
+              requestType: 'shift_swap',
+              requestedInAt: null,
+              requestedOutAt: null,
+              reason,
+              metadata,
+            }
+            const approvalPayload = buildAttendanceApprovalInstancePayload({
+              approvalId,
+              requestId,
+              orgId,
+              userId: requesterSource.userId,
+              requesterName: getUserLabel(req, requesterSource.userId),
+              draft,
+            })
+            const approvalAssignments = buildAttendanceApprovalAssignments(draft.metadata?.approvalFlow?.steps, 0)
+            await upsertAttendanceApprovalInstance(trx, approvalPayload)
+            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+
+            const requestRows = await trx.query(
+              `INSERT INTO attendance_requests
+               (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
+               VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7::jsonb)
+               RETURNING *`,
+              [
+                requestId,
+                requesterSource.userId,
+                orgId,
+                requesterSource.workDate,
+                reason,
+                approvalId,
+                JSON.stringify(metadata),
+              ]
+            )
+
+            await trx.query(
+              `INSERT INTO attendance_shift_swap_requests
+               (request_id, org_id, requester_user_id, counterparty_user_id,
+                requester_assignment_id, counterparty_assignment_id,
+                requester_work_date, counterparty_work_date,
+                requester_shift_id, counterparty_shift_id,
+                requester_slot_index, counterparty_slot_index,
+                requester_start_date, requester_end_date,
+                counterparty_start_date, counterparty_end_date,
+                requester_publish_status, counterparty_publish_status,
+                requester_producer_type, counterparty_producer_type,
+                requester_assignment_kind, counterparty_assignment_kind,
+                source_key)
+               VALUES
+               ($1, $2, $3, $4,
+                $5, $6,
+                $7, $8,
+                $9, $10,
+                $11, $12,
+                $13, $14,
+                $15, $16,
+                $17, $18,
+                $19, $20,
+                $21, $22,
+                $23)`,
+              [
+                requestId,
+                orgId,
+                requesterSource.userId,
+                counterpartySource.userId,
+                requesterSource.id,
+                counterpartySource.id,
+                requesterSource.workDate,
+                counterpartySource.workDate,
+                requesterSource.shiftId,
+                counterpartySource.shiftId,
+                requesterSource.slotIndex,
+                counterpartySource.slotIndex,
+                requesterSource.startDate,
+                requesterSource.endDate,
+                counterpartySource.startDate,
+                counterpartySource.endDate,
+                requesterSource.publishStatus,
+                counterpartySource.publishStatus,
+                requesterSource.producerType,
+                counterpartySource.producerType,
+                requesterSource.assignmentKind,
+                counterpartySource.assignmentKind,
+                sourceKey,
+              ]
+            )
+            const detail = await loadShiftSwapDetail(trx, orgId, requestId)
+            return { request: requestRows[0], detail }
+          })
+
+          emitEvent('attendance.shiftSwap.requested', { orgId, requestId, userId: result.request.user_id })
+          res.status(201).json({
+            ok: true,
+            data: {
+              request: mapAttendanceRequestRow(result.request),
+              shiftSwap: mapShiftSwapRequestRow(result.detail),
+            },
+          })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({
+              ok: false,
+              error: {
+                code: error.code,
+                message: error.message,
+                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+              },
+            })
+            return
+          }
+          if (error?.code === '23505' && error?.constraint === 'uq_attendance_shift_swap_requests_source_key') {
+            res.status(409).json({ ok: false, error: { code: 'DUPLICATE_SHIFT_SWAP_REQUEST', message: 'A shift-swap request already exists for these assignments' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
+            return
+          }
+          logger.error('Attendance shift-swap request creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create shift-swap request' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/shift-swap-requests',
+      withPermission('attendance:read', async (req, res) => {
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const targetUserId = typeof req.query.userId === 'string' && req.query.userId.trim() ? req.query.userId.trim() : requesterId
+        if (targetUserId !== requesterId) {
+          const allowed = await canAccessOtherUsers(requesterId)
+          if (!allowed) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'No access to other users' } })
+            return
+          }
+        }
+        try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+               FROM attendance_shift_swap_requests d
+               JOIN attendance_requests r ON r.id = d.request_id
+              WHERE d.org_id = $1
+                AND (d.requester_user_id = $2 OR d.counterparty_user_id = $2)`,
+            [orgId, targetUserId]
+          )
+          const rows = await db.query(
+            `SELECT d.*, r.status AS request_status, r.work_date AS request_work_date, r.reason AS request_reason,
+                    r.metadata AS request_metadata, r.approval_instance_id AS approval_instance_id
+               FROM attendance_shift_swap_requests d
+               JOIN attendance_requests r ON r.id = d.request_id
+              WHERE d.org_id = $1
+                AND (d.requester_user_id = $2 OR d.counterparty_user_id = $2)
+              ORDER BY d.created_at DESC
+              LIMIT $3 OFFSET $4`,
+            [orgId, targetUserId, pageSize, offset]
+          )
+          res.json({ ok: true, data: { items: rows.map(mapShiftSwapRequestRow), total: Number(countRows[0]?.total ?? 0), page, pageSize } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
+            return
+          }
+          logger.error('Attendance shift-swap request list failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list shift-swap requests' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/shift-swap-requests/:id',
+      withPermission('attendance:read', async (req, res) => {
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const requestId = normalizeUuidString(req.params.id)
+        if (!requestId) {
+          respondInvalidUuid(res)
+          return
+        }
+        try {
+          const detail = await loadShiftSwapDetail(db, orgId, requestId)
+          if (!detail) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift-swap request not found' } })
+            return
+          }
+          await ensureShiftSwapAccess(detail, requesterId, 'view shift-swap request')
+          res.json({ ok: true, data: { shiftSwap: mapShiftSwapRequestRow(detail) } })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
+            return
+          }
+          logger.error('Attendance shift-swap request fetch failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load shift-swap request' } })
+        }
+      })
+    )
+
+    async function respondShiftSwapConsent(req, res, decision) {
+      const requesterId = getUserId(req)
+      if (!requesterId) {
+        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+        return
+      }
+      const orgId = getOrgId(req)
+      const requestId = normalizeUuidString(req.params.id)
+      if (!requestId) {
+        respondInvalidUuid(res)
+        return
+      }
+      try {
+        const detail = await db.transaction(async (trx) => {
+          const row = await loadShiftSwapDetail(trx, orgId, requestId, { forUpdate: true })
+          if (!row) {
+            throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
+          }
+          if (row.counterparty_user_id !== requesterId) {
+            throw new HttpError(403, 'FORBIDDEN', 'Only the counterparty can decide shift-swap consent')
+          }
+          if (row.request_status !== 'pending') {
+            throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
+          }
+          if (row.counterparty_status !== 'pending') {
+            throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
+          }
+          await trx.query(
+            `UPDATE attendance_shift_swap_requests
+                SET counterparty_status = $3,
+                    counterparty_responded_at = now(),
+                    updated_at = now()
+              WHERE org_id = $1 AND request_id = $2`,
+            [orgId, requestId, decision]
+          )
+          if (decision === 'rejected') {
+            if (row.approval_instance_id) {
+              const approvalRows = await trx.query(
+                'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+                [row.approval_instance_id]
+              )
+              if (approvalRows.length > 0) {
+                const approval = approvalRows[0]
+                const newVersion = Number(approval.version ?? 0) + 1
+                await trx.query(
+                  'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
+                  ['rejected', newVersion, row.approval_instance_id]
+                )
+                await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
+                await trx.query(
+                  `INSERT INTO approval_records
+                   (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
+                   VALUES ($1, 'reject', $2, $3, NULL, $4, 'rejected', $5, $6, '{}'::jsonb, $7, $8)`,
+                  [
+                    row.approval_instance_id,
+                    requesterId,
+                    getUserLabel(req, requesterId),
+                    approval.status,
+                    approval.version,
+                    newVersion,
+                    req.ip ?? null,
+                    req.get('user-agent') ?? null,
+                  ]
+                )
+              }
+            }
+	            await trx.query(
+	              `UPDATE attendance_requests
+	                  SET status = 'rejected',
+	                      resolved_by = $3,
+	                      resolved_at = now(),
+	                      updated_at = now()
+	                WHERE id = $1 AND org_id = $2`,
+	              [requestId, orgId, requesterId]
+	            )
+	            await archiveShiftSwapSourceKey(trx, orgId, requestId)
+	          }
+	          return loadShiftSwapDetail(trx, orgId, requestId)
+	        })
+        emitEvent(`attendance.shiftSwap.${decision}`, { orgId, requestId, userId: requesterId })
+        res.json({ ok: true, data: { shiftSwap: mapShiftSwapRequestRow({ ...detail, request_status: decision === 'rejected' ? 'rejected' : detail.request_status }) } })
+      } catch (error) {
+        if (error instanceof HttpError) {
+          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+          return
+        }
+        if (isDatabaseSchemaError(error)) {
+          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
+          return
+        }
+        logger.error('Attendance shift-swap consent update failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update shift-swap consent' } })
+      }
+    }
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/shift-swap-requests/:id/accept',
+      withPermission('attendance:write', async (req, res) => respondShiftSwapConsent(req, res, 'accepted'))
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/shift-swap-requests/:id/reject',
+      withPermission('attendance:write', async (req, res) => respondShiftSwapConsent(req, res, 'rejected'))
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/shift-swap-requests/:id/cancel',
+      withPermission('attendance:write', async (req, res) => {
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const requestId = normalizeUuidString(req.params.id)
+        if (!requestId) {
+          respondInvalidUuid(res)
+          return
+        }
+        try {
+          const detail = await db.transaction(async (trx) => {
+            const row = await loadShiftSwapDetail(trx, orgId, requestId, { forUpdate: true })
+            if (!row) {
+              throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
+            }
+            if (row.requester_user_id !== requesterId) {
+              const allowed = await canAccessOtherUsers(requesterId)
+              if (!allowed) {
+                throw new HttpError(403, 'FORBIDDEN', 'No access to cancel shift-swap request')
+              }
+            }
+            if (row.request_status !== 'pending') {
+              throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
+            }
+            if (row.approval_instance_id) {
+              const approvalRows = await trx.query(
+                'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+                [row.approval_instance_id]
+              )
+              if (approvalRows.length > 0) {
+                const approval = approvalRows[0]
+                const newVersion = Number(approval.version ?? 0) + 1
+                await trx.query(
+                  'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
+                  ['cancelled', newVersion, row.approval_instance_id]
+                )
+                await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
+                await trx.query(
+                  `INSERT INTO approval_records
+                   (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
+                   VALUES ($1, 'revoke', $2, $3, NULL, $4, 'cancelled', $5, $6, '{}'::jsonb, $7, $8)`,
+                  [
+                    row.approval_instance_id,
+                    requesterId,
+                    getUserLabel(req, requesterId),
+                    approval.status,
+                    approval.version,
+                    newVersion,
+                    req.ip ?? null,
+                    req.get('user-agent') ?? null,
+                  ]
+                )
+              }
+            }
+	            await trx.query(
+	              `UPDATE attendance_requests
+	                  SET status = 'cancelled',
+	                      resolved_by = $3,
+	                      resolved_at = now(),
+	                      updated_at = now()
+	                WHERE id = $1 AND org_id = $2`,
+	              [requestId, orgId, requesterId]
+	            )
+	            await archiveShiftSwapSourceKey(trx, orgId, requestId)
+	            return loadShiftSwapDetail(trx, orgId, requestId)
+	          })
+          emitEvent('attendance.shiftSwap.cancelled', { orgId, requestId, userId: requesterId })
+          res.json({ ok: true, data: { shiftSwap: mapShiftSwapRequestRow({ ...detail, request_status: 'cancelled' }) } })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
+            return
+          }
+          logger.error('Attendance shift-swap cancel failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to cancel shift-swap request' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'PUT',
       '/api/attendance/requests/:id',
       withPermission('attendance:write', async (req, res) => {
@@ -22697,6 +23463,9 @@ module.exports = {
           const requestMetadata = normalizeMetadata(requestRow.metadata)
           const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
           const requestType = requestRow.request_type
+          if (action === 'approve' && requestType === 'shift_swap') {
+            throw new HttpError(422, 'SHIFT_SWAP_FINALIZATION_DEFERRED', 'Shift-swap approval finalization is not wired yet')
+          }
           const flowMeta = normalizeMetadata(requestMetadata.approvalFlow)
           const flowSteps = normalizeApprovalSteps(flowMeta.steps)
           const rawStepIndex = Number(flowMeta.currentStep ?? 0)
@@ -22802,17 +23571,20 @@ module.exports = {
             }
           }
 
-          if (isFinalApproval) {
-            await trx.query(
-              `UPDATE attendance_requests
-               SET status = $2, resolved_by = $3, resolved_at = $4, metadata = $5::jsonb, updated_at = now()
-               WHERE id = $1`,
-              [requestId, newStatus, requesterId, resolvedAt, JSON.stringify(nextMetadata)]
-            )
-          } else {
-            await trx.query(
-              `UPDATE attendance_requests
-               SET metadata = $2::jsonb, updated_at = now()
+	          if (isFinalApproval) {
+	            await trx.query(
+	              `UPDATE attendance_requests
+	               SET status = $2, resolved_by = $3, resolved_at = $4, metadata = $5::jsonb, updated_at = now()
+	               WHERE id = $1`,
+	              [requestId, newStatus, requesterId, resolvedAt, JSON.stringify(nextMetadata)]
+	            )
+	            if (requestType === 'shift_swap') {
+	              await archiveShiftSwapSourceKey(trx, orgId, requestId)
+	            }
+	          } else {
+	            await trx.query(
+	              `UPDATE attendance_requests
+	               SET metadata = $2::jsonb, updated_at = now()
                WHERE id = $1`,
               [requestId, JSON.stringify(nextMetadata)]
             )
@@ -23133,14 +23905,17 @@ module.exports = {
           }
 
           const resolvedAt = new Date()
-          await trx.query(
-            `UPDATE attendance_requests
-             SET status = $2, resolved_by = $3, resolved_at = $4, updated_at = now()
-             WHERE id = $1`,
-            [requestId, 'cancelled', requesterId, resolvedAt]
-          )
+	          await trx.query(
+	            `UPDATE attendance_requests
+	             SET status = $2, resolved_by = $3, resolved_at = $4, updated_at = now()
+	             WHERE id = $1`,
+	            [requestId, 'cancelled', requesterId, resolvedAt]
+	          )
+	          if (requestRow.request_type === 'shift_swap') {
+	            await archiveShiftSwapSourceKey(trx, requestRow.org_id ?? DEFAULT_ORG_ID, requestId)
+	          }
 
-          return {
+	          return {
             requestId,
             status: 'cancelled',
             orgId: requestRow.org_id ?? DEFAULT_ORG_ID,

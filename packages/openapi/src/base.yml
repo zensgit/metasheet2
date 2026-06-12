@@ -500,6 +500,96 @@ components:
           type: string
           format: date-time
 
+    AttendanceShiftSwapRequest:
+      type: object
+      properties:
+        requestId: { type: string }
+        request_id: { type: string }
+        orgId: { type: string }
+        org_id: { type: string }
+        requestStatus:
+          type: string
+          enum: [pending, approved, rejected, cancelled]
+        request_status:
+          type: string
+          enum: [pending, approved, rejected, cancelled]
+        requesterUserId: { type: string }
+        requester_user_id: { type: string }
+        counterpartyUserId: { type: string }
+        counterparty_user_id: { type: string }
+        counterpartyStatus:
+          type: string
+          enum: [pending, accepted, rejected]
+        counterparty_status:
+          type: string
+          enum: [pending, accepted, rejected]
+        requesterAssignmentId: { type: string }
+        requester_assignment_id: { type: string }
+        counterpartyAssignmentId: { type: string }
+        counterparty_assignment_id: { type: string }
+        requesterReplacementAssignmentId:
+          type: string
+          nullable: true
+        requester_replacement_assignment_id:
+          type: string
+          nullable: true
+        counterpartyReplacementAssignmentId:
+          type: string
+          nullable: true
+        counterparty_replacement_assignment_id:
+          type: string
+          nullable: true
+        requesterWorkDate:
+          type: string
+          format: date
+        requester_work_date:
+          type: string
+          format: date
+        counterpartyWorkDate:
+          type: string
+          format: date
+        counterparty_work_date:
+          type: string
+          format: date
+        requesterShiftId: { type: string }
+        requester_shift_id: { type: string }
+        counterpartyShiftId: { type: string }
+        counterparty_shift_id: { type: string }
+        requesterSlotIndex: { type: integer }
+        requester_slot_index: { type: integer }
+        counterpartySlotIndex: { type: integer }
+        counterparty_slot_index: { type: integer }
+        sourceKey: { type: string }
+        source_key: { type: string }
+        counterpartyRespondedAt:
+          type: string
+          format: date-time
+          nullable: true
+        counterparty_responded_at:
+          type: string
+          format: date-time
+          nullable: true
+        finalizedAt:
+          type: string
+          format: date-time
+          nullable: true
+        finalized_at:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
     AttendanceAnomaly:
       type: object
       properties:
