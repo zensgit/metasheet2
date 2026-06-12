@@ -23,6 +23,19 @@ import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapter
 // Zod schemas for request validation
 const ConnectionConfigSchema = z.record(z.union([z.string(), z.number(), z.boolean()]))
 
+const DataSourceOptionsSchema = z.object({
+  autoConnect: z.boolean().optional(),
+  timeout: z.number().optional(),
+  retryAttempts: z.number().optional(),
+  // Read-only is the default; set false to permit write SQL via /query.
+  readOnly: z.boolean().optional(),
+  // PLM/Yuantus per-source scope. PLMAdapter.connect() turns these into the
+  // actual x-tenant-id / x-org-id headers when no higher-precedence global/env
+  // scope or hand-set header is already serving the source.
+  tenantId: z.string().min(1).optional(),
+  orgId: z.string().min(1).optional()
+})
+
 const DataSourceCreateSchema = z.object({
   id: z.string().min(1, 'ID is required'),
   name: z.string().min(1, 'Name is required'),
@@ -30,13 +43,7 @@ const DataSourceCreateSchema = z.object({
     errorMap: () => ({ message: 'Unsupported data source type' })
   }),
   connection: ConnectionConfigSchema,
-  options: z.object({
-    autoConnect: z.boolean().optional(),
-    timeout: z.number().optional(),
-    retryAttempts: z.number().optional(),
-    // Read-only is the default; set false to permit write SQL via /query.
-    readOnly: z.boolean().optional()
-  }).optional(),
+  options: DataSourceOptionsSchema.optional(),
   credentials: z.object({
     username: z.string().optional(),
     password: z.string().optional(),
@@ -54,13 +61,7 @@ const DataSourceCreateSchema = z.object({
 const DataSourceUpdateSchema = z.object({
   name: z.string().min(1).optional(),
   connection: ConnectionConfigSchema.optional(),
-  options: z.object({
-    autoConnect: z.boolean().optional(),
-    timeout: z.number().optional(),
-    retryAttempts: z.number().optional(),
-    // Read-only is the default; set false to permit write SQL via /query.
-    readOnly: z.boolean().optional()
-  }).optional(),
+  options: DataSourceOptionsSchema.optional(),
   poolConfig: z.object({
     min: z.number().min(0).optional(),
     max: z.number().min(1).optional(),
