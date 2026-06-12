@@ -363,6 +363,7 @@
       :ai-preview-fn="aiPreviewFn"
       :ai-preview-busy="aiShortcutBusy"
       :ai-usage-summary-fn="aiUsageSummaryFn"
+      :formula-suggest-fn="formulaSuggestFn"
       @update:dirty="fieldManagerDirty = $event"
       @close="showFieldManager = false" @create-field="onCreateField" @update-field="onUpdateField" @delete-field="onDeleteField"
     />
@@ -609,6 +610,10 @@ function onGridAiRun(recordId: string, field: MetaField) {
 const aiPreviewFn = (params: { recordId: string; config: AiShortcutConfigInput }) =>
   aiShortcut.previewWithConfig(params.recordId, params.config)
 const aiUsageSummaryFn = () => workbench.client.aiUsageSummary()
+// M4 / Lane B2: NL→formula suggest routes through the SAME composable guard
+// (sheet-scoped; the unified pending/countdown covers this entry point too).
+const formulaSuggestFn = (params: { instruction: string }) =>
+  aiShortcut.suggestFormula(workbench.activeSheetId.value, params.instruction)
 
 const showComments = ref(false)
 const selectedCommentFieldId = ref<string | null>(null)

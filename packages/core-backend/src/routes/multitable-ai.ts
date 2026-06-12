@@ -50,7 +50,8 @@ import { normalizeJson } from '../multitable/field-codecs'
 import { poolManager } from '../integration/db/connection-pool'
 import { eventBus } from '../integration/events/event-bus'
 import { createRateLimiter } from '../middleware/rate-limiter'
-import { ensureRecordWriteAllowed } from '../multitable/permission-service'
+import { ensureRecordWriteAllowed, resolveSheetCapabilities } from '../multitable/permission-service'
+import { loadFieldsForSheet } from '../multitable/loaders'
 
 /**
  * Multitable AI routes — A1 readiness (M1b) + A2 shortcut preview/run (M2).
@@ -103,7 +104,8 @@ type PoolLike = ConnectionPool & { query: QueryFn }
 interface ShortcutRequestContext {
   pool: PoolLike
   sheetId: string
-  recordId: string
+  /** null for sheet-scoped attempts (M4 suggest: NL→formula is field-authoring, not a record read). */
+  recordId: string | null
   fieldId: string | null
   action: AiUsageAction
   userId: string
@@ -639,7 +641,112 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
     }
   })
 
+  /**
+   * M4 / Lane B2 — NL→formula suggest (INTERNAL, not in OpenAPI). The user
+   * describes a formula in natural language; the model proposes ONE candidate
+   * expression which the client then validates through the EXISTING zero-cost
+   * `POST /formula/dry-run` + Test flow (no auto-persist — the user accepts
+   * manually). Design lock:
+   * docs/development/multitable-ai-formula-assist-m4-design-20260611.md.
+   *
+   * RBAC (§1.4, 修正二): `canManageFields` — formula authoring is a SHEET-LEVEL
+   * field operation, NOT record-level (so NOT requireRecordReadable/
+   * canEditRecord). Posture matches A2: per-route guard, not in OpenAPI.
+   *
+   * Data minimization (§1.2): the prompt context is the sheet field list as
+   * NAMES + TYPES ONLY — record values NEVER enter the prompt (no data[]). The
+   * assembled prompt still passes the SAME A2 unsafe_input redactString gate
+   * (secret-shaped field names / instruction → 422), and the attempt rides the
+   * SHARED reserve-then-settle pipeline (sheet-scoped: record_id/field_id NULL,
+   * action=suggest). Status mapping reuses A2 (blocked/rate_limited/
+   * quota_exhausted/unsafe_input/provider_error).
+   */
+  router.post('/sheets/:sheetId/ai/suggest-formula', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const schema = z.object({
+      instruction: z.string().min(1).max(SUGGEST_FORMULA_MAX_INSTRUCTION_LENGTH),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!sheetId || !parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: !sheetId ? 'sheetId is required' : parsed.error?.message } })
+    }
+    const instruction = parsed.data.instruction.trim()
+    if (!instruction) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'instruction is required' } })
+    }
+
+    try {
+      const pool = poolManager.get() as unknown as PoolLike
+      const query = pool.query.bind(pool) as QueryFn
+
+      // Field-authoring gate (sheet-scoped): resolveSheetCapabilities yields the
+      // SAME canManageFields primitive the formula field write/dry-run paths use.
+      const { access, capabilities } = await resolveSheetCapabilities(req, query, sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
+      }
+      if (!capabilities.canManageFields) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'You cannot manage fields on this sheet' } })
+      }
+
+      // Schema metadata only — NAMES + TYPES, no record `data[]` (§1.2). Same
+      // {id,type}-style column-metadata posture as the dry-run engine.
+      const fields = await loadFieldsForSheet(query as AiUsageQueryFn, sheetId)
+      const prompt = buildFormulaSuggestPrompt(instruction, fields)
+
+      await executeShortcut(
+        req,
+        res,
+        { pool, sheetId, recordId: null, fieldId: null, action: 'suggest', userId: access.userId },
+        prompt,
+        // The reservation is already settled to 'succeeded' with actual usage;
+        // suggest only ships the candidate (no write, no auto-persist — the
+        // client runs it through the existing /formula/dry-run + Test flow).
+        async (result) => {
+          res.json({
+            ok: true,
+            data: {
+              status: 'succeeded',
+              action: 'suggest',
+              candidate: result.text ?? '',
+              usage: result.usage,
+              estimatedCostUsd: result.estimatedCostUsd,
+              provider: result.provider,
+              model: result.model,
+            },
+          })
+        },
+      )
+    } catch (err) {
+      console.error('[multitable-ai] suggest-formula failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to suggest formula' } })
+    }
+  })
+
   return router
+}
+
+/** M4 §1.2: NL description length cap (mirrors the A2 instruction cap surface). */
+export const SUGGEST_FORMULA_MAX_INSTRUCTION_LENGTH = 500
+
+/**
+ * Assemble the NL→formula suggest prompt from the sheet schema (M4 §1.2). The
+ * context is the field list as NAME + TYPE ONLY — record values are NEVER
+ * included (no `data[]`), so no per-record read happens on this path. The
+ * `{fldId}`-reference convention is surfaced so the model proposes an
+ * expression the existing dry-run engine can parse.
+ */
+export function buildFormulaSuggestPrompt(instruction: string, fields: { id: string; name: string; type: string }[]): string {
+  const fieldLines = fields.map((field) => `- ${field.name} (id: ${field.id}, type: ${field.type})`).join('\n')
+  return [
+    'You are a formula assistant for a multidimensional table. Propose ONE formula expression that fulfils the user request.',
+    'Reference fields by their id wrapped in braces, e.g. {fld_price}. Return ONLY the formula expression, no prose, no code fences.',
+    '',
+    'Available fields (name, id, type — no values are provided):',
+    fieldLines || '- (no fields)',
+    '',
+    `User request: ${instruction}`,
+  ].join('\n')
 }
 
 function resolvePersistedShortcutConfig(

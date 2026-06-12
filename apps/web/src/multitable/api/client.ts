@@ -861,6 +861,17 @@ export interface AiShortcutRunData {
   model: string | null
 }
 
+export interface AiSuggestFormulaData {
+  status: 'succeeded'
+  action: 'suggest'
+  /** The proposed formula expression — the client runs it through the existing dry-run + Test flow. */
+  candidate: string
+  usage: AiShortcutUsage | null
+  estimatedCostUsd: number
+  provider: string | null
+  model: string | null
+}
+
 export interface AiUsageSummary {
   callerDayTokens: number
   callerWeekTokens: number
@@ -1216,6 +1227,19 @@ export class MultitableApiClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ recordId: input.recordId, fieldId: input.fieldId }),
+    })
+    return this.parseJson(res)
+  }
+
+  // NL→formula suggest (M4 / Lane B2). Field-authoring (canManageFields) gate;
+  // the prompt context is the sheet field NAMES + TYPES only (no record values
+  // server-side). Returns ONE candidate expression for the caller to validate
+  // through the existing dry-run + Test flow (no auto-persist).
+  async aiSuggestFormula(sheetId: string, input: { instruction: string }): Promise<AiSuggestFormulaData> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/ai/suggest-formula`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instruction: input.instruction }),
     })
     return this.parseJson(res)
   }

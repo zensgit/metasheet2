@@ -43,7 +43,13 @@ export const AI_USAGE_LEDGER_TABLE = 'multitable_ai_usage_ledger'
 /** Q-4 (instance daily USD) aggregation/lock subject. */
 export const AI_USAGE_INSTANCE_SUBJECT_KEY = '__instance__'
 
-export type AiUsageAction = 'preview' | 'run'
+/**
+ * `suggest` (M4 / Lane B2): NL→formula suggestion. Type-only addition — a
+ * suggest row is SHEET-SCOPED (record_id/field_id NULL, both already nullable
+ * per migration zzzz20260611090000); reserve/settle/quota SUM never filter by
+ * scope so the windows are byte-identical to preview/run accounting.
+ */
+export type AiUsageAction = 'preview' | 'run' | 'suggest'
 
 export type AiUsageLedgerStatus =
   | 'succeeded'

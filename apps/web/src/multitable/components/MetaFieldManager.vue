@@ -173,6 +173,47 @@
               {{ diagnostic.message }}
             </div>
           </div>
+          <!-- M4 / Lane B2: NL→formula suggest. Describe → generate ONE candidate →
+               accept (copies into the expression textarea) → Test validates. -->
+          <div v-if="formulaSuggestFn" class="meta-field-mgr__field meta-field-mgr__formula-suggest" data-test="formula-suggest">
+            <span>{{ ml('field.formulaSuggest.heading') }}</span>
+            <textarea
+              v-model="formulaSuggestInstruction"
+              class="meta-field-mgr__textarea"
+              :maxlength="FORMULA_SUGGEST_MAX_INSTRUCTION_LENGTH"
+              :placeholder="ml('field.formulaSuggest.placeholder')"
+              data-test="formula-suggest-instruction"
+            ></textarea>
+            <span class="meta-field-mgr__hint">{{ ml('field.formulaSuggest.hint') }}</span>
+            <button
+              type="button"
+              class="meta-field-mgr__dryrun-btn"
+              :disabled="!formulaSuggestCanRun"
+              data-test="formula-suggest-generate"
+              @click="runFormulaSuggest"
+            >
+              {{ formulaSuggestRunning ? ml('field.formulaSuggest.generating') : ml('field.formulaSuggest.generate') }}
+            </button>
+            <div v-if="formulaSuggestError" class="meta-field-mgr__formula-diagnostic meta-field-mgr__formula-diagnostic--error" data-test="formula-suggest-error">{{ formulaSuggestError }}</div>
+            <div v-else-if="formulaSuggestCandidate" class="meta-field-mgr__dryrun-result" data-test="formula-suggest-candidate">
+              <div class="meta-field-mgr__dryrun-result-head">
+                <strong>{{ ml('field.formulaSuggest.candidateHeading') }}</strong>
+              </div>
+              <code class="meta-field-mgr__dryrun-value meta-field-mgr__formula-suggest-code" data-test="formula-suggest-candidate-code">{{ formulaSuggestCandidate }}</code>
+              <div class="meta-field-mgr__formula-suggest-actions">
+                <button type="button" class="meta-field-mgr__dryrun-btn" data-test="formula-suggest-accept" @click="acceptFormulaSuggest">
+                  {{ ml('field.formulaSuggest.accept') }}
+                </button>
+                <button type="button" class="meta-field-mgr__dryrun-btn" data-test="formula-suggest-reject" @click="rejectFormulaSuggest">
+                  {{ ml('field.formulaSuggest.reject') }}
+                </button>
+                <button type="button" class="meta-field-mgr__dryrun-btn" :disabled="!formulaSuggestCanRun" data-test="formula-suggest-regenerate" @click="runFormulaSuggest">
+                  {{ ml('field.formulaSuggest.regenerate') }}
+                </button>
+              </div>
+            </div>
+            <div v-if="formulaSuggestAccepted" class="meta-field-mgr__hint" data-test="formula-suggest-accepted">{{ ml('field.formulaSuggest.acceptedHint') }}</div>
+          </div>
           <!-- #5b dry-run: evaluate the UNSAVED expression against sample data (server response only) -->
           <div v-if="dryRunFn" class="meta-field-mgr__field meta-field-mgr__dryrun">
             <div v-if="dryRunReferencedFields.length" class="meta-field-mgr__dryrun-samples">
@@ -603,6 +644,7 @@ import {
   AI_SHORTCUT_MAX_SOURCE_FIELDS,
   AI_SHORTCUT_MAX_TARGET_LANG_LENGTH,
   fetchAiUsageSummaryWithProbeCache,
+  type AiFormulaSuggestOutcome,
   type AiShortcutPreviewOutcome,
 } from '../composables/useAiShortcut'
 import type { AiShortcutConfigInput, AiShortcutKind, AiShortcutPreviewData, AiUsageSummary } from '../api/client'
@@ -731,6 +773,11 @@ const props = defineProps<{
   aiPreviewBusy?: boolean
   // A3 §2.4: admin usage summary (403 probe is session-cached by the helper).
   aiUsageSummaryFn?: () => Promise<AiUsageSummary>
+  // M4 / Lane B2: NL→formula suggest over the inline instruction. The
+  // workbench wires this to useAiShortcut.suggestFormula so the unified
+  // in-flight guard + countdown cover this entry point too. null outcome =
+  // guarded no-op (another AI request is in flight / countdown active).
+  formulaSuggestFn?: (params: { instruction: string }) => Promise<AiFormulaSuggestOutcome | null>
 }>()
 
 const emit = defineEmits<{
@@ -966,6 +1013,79 @@ watch(() => formulaDraft.expression, () => {
   dryRunRunning.value = false
   dryRunSeq++
 })
+
+// ---- M4 / Lane B2: NL→formula suggest (describe → candidate → accept) ----
+const FORMULA_SUGGEST_MAX_INSTRUCTION_LENGTH = 500
+const formulaSuggestInstruction = ref('')
+const formulaSuggestCandidate = ref('')
+const formulaSuggestError = ref('')
+const formulaSuggestRunning = ref(false)
+// The expression value we last copied via Accept. The "accepted, run Test" hint
+// shows only while the textarea still holds exactly that — a manual edit (or a
+// reset) makes it stale automatically (no watcher-ordering hazard).
+const formulaSuggestAcceptedExpression = ref<string | null>(null)
+const formulaSuggestAccepted = computed(
+  () => formulaSuggestAcceptedExpression.value !== null && formulaDraft.expression === formulaSuggestAcceptedExpression.value,
+)
+let formulaSuggestSeq = 0
+
+const formulaSuggestCanRun = computed(() =>
+  Boolean(props.formulaSuggestFn) &&
+  formulaSuggestInstruction.value.trim().length > 0 &&
+  !formulaSuggestRunning.value &&
+  // Review F3: countdown / cross-surface in-flight → disable, like the AI preview.
+  !props.aiPreviewBusy,
+)
+
+async function runFormulaSuggest() {
+  if (!props.formulaSuggestFn || !formulaSuggestCanRun.value) return
+  const seq = ++formulaSuggestSeq
+  formulaSuggestRunning.value = true
+  formulaSuggestError.value = ''
+  formulaSuggestCandidate.value = ''
+  formulaSuggestAcceptedExpression.value = null
+  try {
+    const outcome = await props.formulaSuggestFn({ instruction: formulaSuggestInstruction.value.trim() })
+    if (seq !== formulaSuggestSeq) return
+    if (!outcome) return // unified in-flight guard refused (another AI request active)
+    if ('error' in outcome) {
+      // AI-state errors use the §2.3 copy (fall back to the raw message for unknown codes).
+      formulaSuggestError.value = aiShortcutErrorMessage(outcome.error.code, isZh.value) ?? outcome.error.message
+      return
+    }
+    formulaSuggestCandidate.value = outcome.data.candidate
+  } finally {
+    if (seq === formulaSuggestSeq) formulaSuggestRunning.value = false
+  }
+}
+
+// Accept = copy the candidate into the expression textarea (no auto-persist —
+// the user still runs Test/dry-run + Save). The expression watch clears the
+// candidate, so re-show the "accepted" hint explicitly.
+function acceptFormulaSuggest() {
+  if (!formulaSuggestCandidate.value) return
+  const accepted = formulaSuggestCandidate.value
+  formulaDraft.expression = accepted
+  formulaSuggestCandidate.value = ''
+  formulaSuggestError.value = ''
+  formulaSuggestAcceptedExpression.value = accepted
+}
+
+function rejectFormulaSuggest() {
+  formulaSuggestCandidate.value = ''
+  formulaSuggestError.value = ''
+  formulaSuggestAcceptedExpression.value = null
+}
+
+function resetFormulaSuggestState() {
+  formulaSuggestInstruction.value = ''
+  formulaSuggestCandidate.value = ''
+  formulaSuggestError.value = ''
+  formulaSuggestRunning.value = false
+  formulaSuggestAcceptedExpression.value = null
+  formulaSuggestSeq++
+}
+
 const fieldConfigSchemaChanged = computed(() =>
   Boolean(configTarget.value && configDraftType.value && displayFieldType(configTarget.value) !== configDraftType.value),
 )
@@ -1076,6 +1196,7 @@ function resetDrafts() {
   formulaFunctionSearch.value = ''
   formulaFunctionCategory.value = 'all'
   resetDryRunState()
+  resetFormulaSuggestState()
   attachmentDraft.maxFiles = 1
   attachmentDraft.acceptedMimeTypesText = ''
   currencyDraft.code = 'CNY'

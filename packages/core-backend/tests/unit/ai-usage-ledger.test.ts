@@ -75,6 +75,27 @@ describe('insertAiUsageLedgerEntry', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0].params).toContain('blocked')
   })
+
+  it('M4-T10: a sheet-scoped suggest row inserts action=suggest with NULL field_id/record_id', async () => {
+    const { calls, query } = captureQuery()
+    await insertAiUsageLedgerEntry(query, {
+      subjectKey: 'user-1',
+      userId: 'user-1',
+      sheetId: 'sheet-1',
+      // No fieldId/recordId — the NL→formula suggest is sheet-scoped (§1.1).
+      action: 'suggest',
+      promptTokens: 14,
+      completionTokens: 9,
+      estimatedCostUsd: 0.0005,
+      status: 'succeeded',
+    })
+    expect(calls).toHaveLength(1)
+    // INSERT param order: (id,subject_key,user_id,sheet_id,field_id,record_id,action,…)
+    const params = calls[0].params
+    expect(params[4]).toBeNull() // field_id NULL
+    expect(params[5]).toBeNull() // record_id NULL
+    expect(params[6]).toBe('suggest') // action
+  })
 })
 
 describe('checkAiUsageQuota', () => {
