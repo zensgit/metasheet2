@@ -1,43 +1,45 @@
 # Multitable Automation A6 Convergence Scout / Scope Gate — 2026-05-29
 
-Status: docs-only scout / scope gate
+Status: historical docs-only scout / scope gate; current rung status lives in
+`multitable-automation-run-governance-todo-20260527.md`
 Scope: A6 capability-half planning only
-Runtime: not started
+Runtime at A6-0 time: not started. Later A6 runtime slices have landed by
+explicit opt-in; see the decomposition table below.
 Companions:
 - `docs/development/run-governance-forward-plan-20260528.md`
 - `docs/development/multitable-automation-run-governance-todo-20260527.md`
 - `docs/development/multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md`
+- `docs/development/multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`
 - `docs/research/approval-automation-convergence-rfc-20260526.md`
 
 ## Verdict
 
-A6 can be opened only as a docs-only scout / scope-gate slice right now. A6
-runtime remains frozen and demand-gated.
+At A6-0 time, A6 could be opened only as a docs-only scout / scope-gate slice.
+Later runtime slices landed only after separate owner opt-ins. Remaining A6
+rungs are still demand-gated.
 
-The next runtime step is not "build the workflow engine". The A6-1 persistent
-`WorkflowJob` runtime scout is now recorded in
-`multitable-automation-a6-1-workflowjob-runtime-scout-20260530.md`; runtime
-still requires a separate implementation unlock with a feature flag /
-compatibility gate and no default behavior change for existing automation rules.
+The next runtime step is still not "build the workflow engine". Current status
+has moved past A6-1/A6-2 and the first A6-3 graph slices; remaining rungs still
+require separate implementation unlocks with narrow compatibility gates.
 
 This document records the sequence, boundaries, risks, and future test surface so
 the next runtime unlock starts from a smaller, auditable shape.
 
 ## Grounding
 
-Current `origin/main` already has the governance substrate:
+Current `origin/main` already has the governance substrate and several landed
+A6 runtime slices:
 
 - C1 `WorkflowJob` contract exists in
   `packages/core-backend/src/multitable/workflow-job-contract.ts`. It defines
   `queued/running/suspended/resolved/failed/skipped/rejected/errored`, suspend
   reasons, strict normalizers, and legacy status bridges.
-- The automation runs API consumes C1 only at the read boundary:
-  `packages/core-backend/src/routes/automation.ts` maps persisted steps with
-  `toWorkflowJobView()` and accepts future statuses as legal empty filters.
-- The automation executor is still linear and fail-stop:
-  `packages/core-backend/src/multitable/automation-executor.ts` builds one
-  `AutomationExecution`, runs `executeActions()` sequentially, and stops after
-  the first failed action.
+- The automation runs API consumes C1 at the read boundary and now also renders
+  persisted A6 job lineage from the `multitable_automation_jobs` plane.
+- The automation executor has moved beyond the original linear-only state:
+  A6-2 `wait_for_callback`, A6-3 `condition_branch`, and A6-3 parallel
+  `joinMode: 'all'` are landed, while branch-local waits and join-any remain
+  gated.
 - A5 retry is whole-execution replay only:
   `packages/core-backend/src/multitable/automation-service.ts` re-runs the
   current enabled rule with the stored trigger event and stamps
@@ -77,12 +79,14 @@ The dependency order is fixed, but it is not a schedule.
 | Step | Name | First deliverable after opt-in | Gate |
 |---|---|---|---|
 | A6-0 | Scout / scope gate | This docs-only document | done by this slice |
-| A6-1 | Persistent WorkflowJob runtime | ✅ LANDED #2130 (dormant; enable path deferred) | done (dormant) |
-| A6-1e | Enable-writer (API/UI sets `execution_mode`) | makes A6-1 live in production | named demand |
-| A6-2 | Suspend/resume | external-event/webhook resume before delay/timer resume | named demand |
-| A6-3 | Branch/parallel DAG | condition/parallel nodes with upstream/downstream graph fields | named demand |
-| A6-4 | BPMN adapter | compile/preview + gap report only; no live BPMN runtime | named demand |
-| A6-5 | Approval-as-job | `start_approval` + completion-event contract, then bridge | double-gated |
+| A6-1 | Persistent WorkflowJob runtime | Landed and enabled end-to-end (#2130/#2191/#2193) | done |
+| A6-2 | Suspend/resume | Landed end-to-end (#2237/#2245/#2257); delay/timer still deferred | done for admin-gated v1 |
+| A6-3 | Branch/parallel DAG | `condition_branch` and `parallel_branch` `joinMode: all` landed; branch-local waits and join-any still gated | partially done |
+| A6-4 | BPMN adapter | Scope gate recorded in `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`; implementation not started | named demand |
+| A6-5 | Approval-as-job | First `start_approval` bridge slice landed (#2469); result backwrite / follow-ups still gated | partially done |
+
+The sections below retain the original design rationale for each rung. The table
+above and the TODO checklist are the current status sources.
 
 ### A6-1 — Persistent WorkflowJob Runtime
 
@@ -147,6 +151,11 @@ This is also the real landing zone for BPMN gateways. Without A6-3,
 gap report.
 
 ### A6-4 — BPMN Compile/Preview Adapter
+
+The detailed A6-4 scope gate is now recorded in
+`multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`.
+That document is the current contract for any implementation; this section is
+kept as the original A6-0 positioning.
 
 Goal: use BPMN as a modeling/preview language, not as a runtime.
 
@@ -265,7 +274,10 @@ A6 must not:
 
 ## Current Recommendation
 
-Stop after the A6-1 scout unless a named A6 runtime demand is provided.
+After A6-3 `condition_branch` + parallel `join_all`, the next A6 runtime work
+still requires a named demand. A6-4 is now scoped as compile-preview only, but
+implementation should not start without explicit owner opt-in using the re-entry
+signal in `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`.
 
 The healthiest next technical action, when demand appears, is a small A6-1
 runtime PR: feature-flagged persistent job runtime for linear automation, with
