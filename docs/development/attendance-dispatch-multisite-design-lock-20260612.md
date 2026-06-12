@@ -15,12 +15,12 @@
 
 ## 1. Pre-flight
 
-Current main: `fe0b4b9f1`（#2545，SO3 closeout）。
+D0 review baseline: `88f5f538a`（#2501，#2546 merge-base；已包含 #2545 SO3 closeout）。
 
 查重结果：
 
 - open PR：没有 attendance/dispatch/multisite 调度 PR。
-- remote branch：`feat/attendance-scheduling` 存在，但与 current `origin/main` **无 merge-base**，且是旧版大分支（`c41904dc9 feat(attendance): add scheduling with shifts, holidays, and off-day support`）。不复用、不 rebase、不把它当当前并行工作。
+- remote branch：`feat/attendance-scheduling` 存在，但与 D0 review baseline **无 merge-base**，且是旧版大分支（`c41904dc9 feat(attendance): add scheduling with shifts, holidays, and off-day support`）。不复用、不 rebase、不把它当当前并行工作。
 - existing substrate:
   - `attendance_schedule_groups` / `attendance_schedule_group_members` 已有 parent/dept、effective window、source、scope guard。
   - `attendance_scheduler_scopes` 已有 `dispatch` action，但它当前是排班写入/自动对班/小组织成员管理权限，不是“人员调度”产品能力。
@@ -127,6 +127,7 @@ Create validates:
 - approvalFlowId, when provided, points to an active `schedule_dispatch` flow; when omitted, exactly one active `schedule_dispatch` flow must exist.
 - dates obey `shiftEditPolicy`.
 - actor has scheduler-scope `dispatch` to `{ userIds:[userId], scheduleGroupIds:[targetScheduleGroupId], departments:[target.department_ref] }`, unless central admin.
+- `target_department_ref` is copied from the reloaded target schedule group, never trusted from client input.
 - target date range does not already have a pending/approved dispatch request with the same source key.
 - generic `/api/attendance/requests` create/update rejects `schedule_dispatch` with `SCHEDULE_DISPATCH_VIA_DEDICATED_ROUTE`.
 
@@ -142,7 +143,7 @@ Inside the approval transaction:
 2. Reject if already `finalized_at` or assignment ids exist.
 3. Lock `attendance_shift_assignments` for the target user via existing per-user assignment lock.
 4. Re-load target group and target shift; reject if inactive/missing.
-5. Re-run scheduler-scope dispatch authorization for the actor if needed.
+5. Re-run scheduler-scope `dispatch` authorization for the final approving actor against the reloaded `{ userId, targetScheduleGroupId, target.department_ref }`, unless central admin. This is mandatory: `attendance:approve` / approval-flow permission alone is not enough to materialize a schedule write outside the actor's dispatch scope.
 6. Re-run `shiftEditPolicy`.
 7. Insert one published direct assignment per date or a single date-range assignment:
    - v1 should prefer **one date-range assignment** if the same shift/slot applies for the full interval, because existing assignment conflict and resolver logic support ranges.
@@ -195,6 +196,7 @@ Required before any runtime PR can be called complete:
 - parent `attendance_requests` row maps `user_id` to dispatched user and `work_date` to `start_date`.
 - create route with no scope -> 403 for scope-only actor.
 - create route with target schedule group/user dispatch scope -> 201.
+- final approve with `attendance:approve` but no matching `dispatch` scope -> 403 and rollback; matching dispatch scope or central admin -> allowed.
 - final approve writes exactly one `producer_type='schedule_dispatch'` assignment and optional membership row.
 - repeat/replay final approve does not duplicate assignment/membership.
 - conflict guard: existing published assignment same slot/date -> 409/422 and approval rollback.
