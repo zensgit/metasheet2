@@ -7646,7 +7646,7 @@ function normalizeAttendanceScheduleGroupInput(value, existing = null) {
     ? normalizeOptionalUuidField('parentId', value.parentId)
     : existing?.parent_id ?? existing?.parentId ?? null
   if (parentId && existing?.id && parentId === existing.id) {
-    throw new HttpError(400, 'VALIDATION_ERROR', 'parentId cannot reference the same schedule group')
+    throw new HttpError(422, 'SCHEDULE_GROUP_PARENT_CYCLE', 'Schedule group parent would create a cycle')
   }
   return {
     name,
@@ -7711,6 +7711,13 @@ async function acquireAttendanceScheduleGroupMemberLock(client, orgId, scheduleG
   await client.query(
     'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
     ['attendance-schedule-group-member', buildAttendanceScheduleGroupMemberLockKey(orgId, scheduleGroupId, userId)]
+  )
+}
+
+async function acquireAttendanceScheduleGroupTreeLock(client, orgId) {
+  await client.query(
+    'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+    ['attendance-schedule-group-tree', String(orgId ?? '')]
   )
 }
 
@@ -17880,6 +17887,61 @@ module.exports = {
         target: { scheduleGroupIds: [groupId] },
         actorAccess: access,
       })
+    }
+
+    async function assertAttendanceScheduleGroupParentAllowed(client, { orgId, groupId, parentId }) {
+      if (!parentId) return
+      if (groupId && parentId === groupId) {
+        throw new HttpError(422, 'SCHEDULE_GROUP_PARENT_CYCLE', 'Schedule group parent would create a cycle')
+      }
+
+      const parentRows = await client.query(
+        `SELECT id, parent_id, is_active
+         FROM attendance_schedule_groups
+         WHERE id = $1 AND org_id = $2
+         LIMIT 1`,
+        [parentId, orgId]
+      )
+      if (!parentRows.length || parentRows[0].is_active === false) {
+        throw new HttpError(422, 'SCHEDULE_GROUP_PARENT_INVALID', 'Schedule group parent must be an active group in the same organization')
+      }
+
+      const seen = new Set()
+      if (groupId) seen.add(groupId)
+      let cursor = parentRows[0]
+      while (cursor?.parent_id) {
+        const nextParentId = cursor.parent_id
+        if (seen.has(nextParentId)) {
+          throw new HttpError(422, 'SCHEDULE_GROUP_PARENT_CYCLE', 'Schedule group parent would create a cycle')
+        }
+        seen.add(nextParentId)
+        const nextRows = await client.query(
+          `SELECT id, parent_id, is_active
+           FROM attendance_schedule_groups
+           WHERE id = $1 AND org_id = $2
+           LIMIT 1`,
+          [nextParentId, orgId]
+        )
+        if (!nextRows.length || nextRows[0].is_active === false) {
+          throw new HttpError(422, 'SCHEDULE_GROUP_PARENT_INVALID', 'Schedule group parent chain must stay inside active groups in the same organization')
+        }
+        cursor = nextRows[0]
+      }
+    }
+
+    async function assertAttendanceScheduleGroupCanDeactivate(client, orgId, groupId) {
+      const childRows = await client.query(
+        `SELECT id
+         FROM attendance_schedule_groups
+         WHERE org_id = $1
+           AND parent_id = $2
+           AND is_active = true
+         LIMIT 1`,
+        [orgId, groupId]
+      )
+      if (childRows.length) {
+        throw new HttpError(409, 'SCHEDULE_GROUP_HAS_ACTIVE_CHILDREN', 'Schedule group has active child groups')
+      }
     }
 
     async function assertAttendanceGroupFixedScheduleActionsAllowed(req, res, { groupId, actions, actorAccess } = {}) {
@@ -31314,28 +31376,39 @@ module.exports = {
           throw error
         }
         try {
-          const rows = await db.query(
-            `INSERT INTO attendance_schedule_groups (
-               org_id, name, code, description, attendance_group_id, parent_id, department_ref,
-               source, is_active, created_by, updated_by, created_at, updated_at
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, now(), now())
-             RETURNING *`,
-            [
+          const rows = await db.transaction(async (trx) => {
+            await acquireAttendanceScheduleGroupTreeLock(trx, orgId)
+            await assertAttendanceScheduleGroupParentAllowed(trx, {
               orgId,
-              input.name,
-              input.code,
-              input.description,
-              input.attendanceGroupId,
-              input.parentId,
-              input.departmentRef,
-              input.source,
-              input.isActive,
-              actorId,
-            ]
-          )
+              parentId: input.parentId,
+            })
+            return trx.query(
+              `INSERT INTO attendance_schedule_groups (
+                 org_id, name, code, description, attendance_group_id, parent_id, department_ref,
+                 source, is_active, created_by, updated_by, created_at, updated_at
+               )
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, now(), now())
+               RETURNING *`,
+              [
+                orgId,
+                input.name,
+                input.code,
+                input.description,
+                input.attendanceGroupId,
+                input.parentId,
+                input.departmentRef,
+                input.source,
+                input.isActive,
+                actorId,
+              ]
+            )
+          })
           res.json({ ok: true, data: mapAttendanceScheduleGroupRow(rows[0]) })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
           if (error?.code === '23505') {
             res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Schedule group name or code already exists' } })
             return
@@ -31382,35 +31455,53 @@ module.exports = {
           }
           const access = await assertAttendanceScheduleGroupEditAllowed(req, res, { groupId, actorAccess })
           if (!access) return
-          const input = normalizeAttendanceScheduleGroupInput(parsed.data, existingRows[0])
-          const rows = await db.query(
-            `UPDATE attendance_schedule_groups
-             SET name = $3,
-                 code = $4,
-                 description = $5,
-                 attendance_group_id = $6,
-                 parent_id = $7,
-                 department_ref = $8,
-                 source = $9,
-                 is_active = $10,
-                 updated_by = $11,
-                 updated_at = now()
-             WHERE id = $1 AND org_id = $2
-             RETURNING *`,
-            [
-              groupId,
+          const rows = await db.transaction(async (trx) => {
+            await acquireAttendanceScheduleGroupTreeLock(trx, orgId)
+            const lockedRows = await trx.query(
+              'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
+              [groupId, orgId]
+            )
+            if (!lockedRows.length) {
+              throw new HttpError(404, 'NOT_FOUND', 'Schedule group not found')
+            }
+            const input = normalizeAttendanceScheduleGroupInput(parsed.data, lockedRows[0])
+            await assertAttendanceScheduleGroupParentAllowed(trx, {
               orgId,
-              input.name,
-              input.code,
-              input.description,
-              input.attendanceGroupId,
-              input.parentId,
-              input.departmentRef,
-              input.source,
-              input.isActive,
-              access.userId,
-            ]
-          )
+              groupId,
+              parentId: input.parentId,
+            })
+            if (lockedRows[0].is_active !== false && input.isActive === false) {
+              await assertAttendanceScheduleGroupCanDeactivate(trx, orgId, groupId)
+            }
+            return trx.query(
+              `UPDATE attendance_schedule_groups
+               SET name = $3,
+                   code = $4,
+                   description = $5,
+                   attendance_group_id = $6,
+                   parent_id = $7,
+                   department_ref = $8,
+                   source = $9,
+                   is_active = $10,
+                   updated_by = $11,
+                   updated_at = now()
+               WHERE id = $1 AND org_id = $2
+               RETURNING *`,
+              [
+                groupId,
+                orgId,
+                input.name,
+                input.code,
+                input.description,
+                input.attendanceGroupId,
+                input.parentId,
+                input.departmentRef,
+                input.source,
+                input.isActive,
+                access.userId,
+              ]
+            )
+          })
           res.json({ ok: true, data: mapAttendanceScheduleGroupRow(rows[0]) })
         } catch (error) {
           if (error instanceof HttpError) {
@@ -31458,19 +31549,27 @@ module.exports = {
           }
           const access = await assertAttendanceScheduleGroupEditAllowed(req, res, { groupId, actorAccess })
           if (!access) return
-          const rows = await db.query(
-            `UPDATE attendance_schedule_groups
-             SET is_active = false, updated_by = $3, updated_at = now()
-             WHERE id = $1 AND org_id = $2
-             RETURNING *`,
-            [groupId, orgId, access.userId]
-          )
+          const rows = await db.transaction(async (trx) => {
+            await acquireAttendanceScheduleGroupTreeLock(trx, orgId)
+            await assertAttendanceScheduleGroupCanDeactivate(trx, orgId, groupId)
+            return trx.query(
+              `UPDATE attendance_schedule_groups
+               SET is_active = false, updated_by = $3, updated_at = now()
+               WHERE id = $1 AND org_id = $2
+               RETURNING *`,
+              [groupId, orgId, access.userId]
+            )
+          })
           if (!rows.length) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule group not found' } })
             return
           }
           res.json({ ok: true, data: mapAttendanceScheduleGroupRow(rows[0]) })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
             return

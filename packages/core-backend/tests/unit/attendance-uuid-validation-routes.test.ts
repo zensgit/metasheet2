@@ -2374,6 +2374,7 @@ describe('attendance UUID route validation', () => {
       const rbac = rbacQueryResult(sql, params, true)
       if (rbac !== undefined) return rbac
       if (sql.includes('SELECT * FROM attendance_schedule_groups WHERE id = $1')) return [scheduleGroupRow()]
+      if (sql.includes('pg_advisory_xact_lock')) return []
       if (sql.includes('UPDATE attendance_schedule_groups') && sql.includes('SET name = $3')) {
         return [scheduleGroupRow({ name: 'Line A Prime', updated_by: params[10] })]
       }
@@ -2401,6 +2402,7 @@ describe('attendance UUID route validation', () => {
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeEditRow()]
+      if (sql.includes('pg_advisory_xact_lock')) return []
       if (sql.includes('UPDATE attendance_schedule_groups') && sql.includes('SET name = $3')) {
         return [scheduleGroupRow({ name: 'Line A Prime', updated_by: params[10] })]
       }
@@ -2471,6 +2473,8 @@ describe('attendance UUID route validation', () => {
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeEditRow()]
+      if (sql.includes('pg_advisory_xact_lock')) return []
+      if (sql.includes('FROM attendance_schedule_groups') && sql.includes('parent_id = $2')) return []
       if (sql.includes('UPDATE attendance_schedule_groups') && sql.includes('SET is_active = false')) {
         return [scheduleGroupRow({ is_active: false, updated_by: params[2] })]
       }
