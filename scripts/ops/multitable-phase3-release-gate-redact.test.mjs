@@ -141,6 +141,10 @@ test('redactString masks malformed database URI credentials containing reserved 
   const mysql = redactString('mysql://root:r)w@10.0.0.5:3306/data')
   assert.equal(mysql, 'mysql://<redacted>@10.0.0.5:3306/data')
   assert.doesNotMatch(mysql, /r\)w/)
+
+  const internalHost = redactString('postgres://user:pa/ss@db_service:5432/app')
+  assert.equal(internalHost, 'postgres://<redacted>@db_service:5432/app')
+  assert.doesNotMatch(internalHost, /pa\/ss/)
 })
 
 test('redactString preserves the database host when malformed URI query text contains @', () => {

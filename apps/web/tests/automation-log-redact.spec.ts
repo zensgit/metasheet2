@@ -121,6 +121,10 @@ describe('redactString', () => {
     const mysql = redactString('mysql://root:r)w@10.0.0.5:3306/data')
     expect(mysql).toBe('mysql://<redacted>@10.0.0.5:3306/data')
     expect(mysql).not.toContain('r)w')
+
+    const internalHost = redactString('postgres://user:pa/ss@db_service:5432/app')
+    expect(internalHost).toBe('postgres://<redacted>@db_service:5432/app')
+    expect(internalHost).not.toContain('pa/ss')
   })
 
   it('preserves the database host when malformed URI query text contains @', () => {

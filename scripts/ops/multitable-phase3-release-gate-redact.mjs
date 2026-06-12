@@ -66,7 +66,7 @@ function redactMalformedDatabaseUrlCredentials(value) {
 }
 
 function findDatabaseAuthoritySeparator(rest) {
-  const hostPattern = /^(?:\[[^\]\s]+\]|[A-Za-z0-9][A-Za-z0-9.-]*)(?::\d+)?(?=$|[/?#])/
+  const hostPattern = /^(?:\[[^\]\s]+\]|[A-Za-z0-9_][A-Za-z0-9_.-]*)(?::\d+)?(?=$|[/?#])/
   for (let index = 0; index < rest.length; index += 1) {
     if (rest[index] !== '@') continue
     if (hostPattern.test(rest.slice(index + 1))) return index
