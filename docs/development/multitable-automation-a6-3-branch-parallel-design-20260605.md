@@ -4,7 +4,7 @@ Status: **A6-3 design-lock / scope gate; A6-3-1 + A6-3-2 + A6-3-4 join-all lande
 
 Runtime: **A6-3-1 `condition_branch` exclusive runtime landed; A6-3-2 frontend/readability landed; A6-3-4 `parallel_branch` join-all landed; A6-3-3 and join-any still gated**
 
-Grounded on: `origin/main@83801c668`
+Grounded on: `origin/main@c4778105b`
 Companions:
 
 - `docs/development/multitable-automation-a6-convergence-scout-20260529.md`
@@ -26,25 +26,35 @@ this docs-only design-lock first**. A6-3-1, A6-3-2, and A6-3-4 later landed by
 explicit opt-in; the remaining A6-3-3 and join-any work still requires a
 separate explicit opt-in.
 
-The first runtime slice must be **A6-3-1 `condition_branch` / exclusive branch
-v1**, not full parallel DAG. Parallel fan-out and join semantics are important,
-but they are a larger executor rewrite and should land after the branch
-representation, C1 job view, and skip semantics are proven on real Postgres.
+The first runtime slice was **A6-3-1 `condition_branch` / exclusive branch
+v1**, not full parallel DAG. Parallel fan-out and join semantics were kept as a
+later rung and have since landed as A6-3-4 `parallel_branch` / `join_all`.
 
 This slice must not pull in approval, BPMN, attendance, data-factory, K3, public
 webhooks, or a new workflow designer runtime. It is automation-only.
 
 ## 1. Current Code Grounding
 
-The current runtime has enough foundation for A6-3, but it is still linear:
+At the original design-lock, the runtime had enough foundation for A6-3 but was
+still linear. As of the 2026-06-12 status refresh, the shipped runtime has three
+automation graph shapes while still reusing the existing C1 job plane:
 
-- `AutomationExecutor.executeActions()` runs `rule.actions` by array index,
-  sequentially, and stops after the first failed action.
-- `wait_for_callback` is the only non-linear-ish step today. It suspends in
-  opted-in `workflow_job_v1` rules and resumes from `suspendIndex + 1`.
+- Plain `AutomationExecutor.executeActions()` still runs top-level
+  `rule.actions` by array index and stops after the first failed top-level
+  action.
+- `condition_branch` can run one selected branch and persist selected child
+  jobs under the same execution.
+- `parallel_branch` with `joinMode: 'all'` can fan out every configured branch,
+  persist parent/branch-child lineage, wait for every branch to settle, and
+  aggregate fail/skip semantics. `join_any`, cancellation, branch-local waits,
+  and nested branches remain separate gated rungs.
+- `wait_for_callback` suspends in opted-in `workflow_job_v1` rules and resumes
+  from `suspendIndex + 1`; branch-local suspend/resume is still not part of the
+  shipped branch/parallel runtime.
 - `AutomationJobService.lifecycleFor()` writes deterministic job ids as
-  `${executionId}:job:${stepIndex}` and uses `upstream_job_id` as the previous
-  step's job id. That is currently a linear chain.
+  `${executionId}:job:${stepIndex}` for top-level jobs and the shipped branch /
+  parallel runtimes extend that identity scheme with nested step keys rather
+  than adding a second observability table.
 - `AutomationJobService.listByExecution()` returns C1 WorkflowJob views and
   hydrates suspend descriptors for `suspended` jobs.
 - `workflow-job-contract.ts` already has the needed C1 vocabulary:
@@ -360,10 +370,19 @@ First acceptable frontend slice:
 - States that A6-3 runtime requires separate explicit owner opt-in per sub-rung.
   That happened for A6-3-1/A6-3-2/A6-3-4; A6-3-3 and A6-3-5 still require it.
 
-## 12. Recommended Next Opt-In Phrase
+## 12. Remaining Opt-In Phrases
 
-If accepted, the runtime unlock should be explicit:
+A6-3-1/A6-3-2/A6-3-4 have already landed. Remaining A6-3 unlocks must still be
+explicit and narrow, for example:
 
-> Start A6-3-1 condition_branch runtime v1 only: opt-in
-> `workflow_job_v1`, exclusive branch, no parallel, no BPMN, no approval bridge,
-> real Postgres tests.
+> Start A6-3-3 branch-local wait/nesting only: allow `wait_for_callback` inside
+> selected branches with stable nested resume cursor, rule-drift guard, and real
+> Postgres suspend/resume tests; no join-any, BPMN, approval bridge, or public
+> webhook emitter.
+
+or:
+
+> Start A6-3-5 join-any/cancellation only: keep `parallel_branch` constrained,
+> add explicit sibling cancellation/ignored-branch audit semantics, and prove C1
+> job lineage in real Postgres; no BPMN, approval bridge, or public webhook
+> emitter.
