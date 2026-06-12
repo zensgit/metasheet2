@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3-1 `condition_branch` exclusive-branch runtime LANDED #2321 `127b29dd9` (2026-06-05; design-lock `multitable-automation-a6-3-branch-parallel-design-20260605.md`) + A6-3-2a editor LANDED #2339 `960ea9315` + A6-3-2b admin-runs readability LANDED #2348 `4b44f25c6`; A6-3 v1 operator/API/UI trial PASS (#2367/#2371), with no current A6-3-3 unlock signal; A6-3-4/W3-0 parallel join-all scope-gate added (runtime not started); A6-5 / W6-1 `start_approval` bridge LANDED #2469; W7-0 approval result backwrite scope-gate added (runtime not started); A6-3-3 (wait/nesting in branches) / parallel join-all runtime / join-any still gated; A6-4 BPMN compile/preview and public webhook/token emitter remain demand-gated.
+Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3-1 `condition_branch` exclusive-branch runtime LANDED #2321 `127b29dd9` (2026-06-05; design-lock `multitable-automation-a6-3-branch-parallel-design-20260605.md`) + A6-3-2a editor LANDED #2339 `960ea9315` + A6-3-2b admin-runs readability LANDED #2348 `4b44f25c6`; A6-3 v1 operator/API/UI trial PASS (#2367/#2371), with no current A6-3-3 unlock signal; A6-3-4/W3 parallel join-all LANDED end-to-end (#2496 runtime `b161080b8`, #2500 editor `4408239d0`, #2501 admin-runs readability `88f5f538a`, 2026-06-12); A6-5 / W6-1 `start_approval` bridge LANDED #2469; W7-0 approval result backwrite scope-gate added (runtime not started); A6-3-3 (wait/nesting in branches) / join-any cancellation semantics still gated; A6-4 BPMN compile/preview and public webhook/token emitter remain demand-gated.
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, read-boundary wired only); RFC #1885
 
@@ -27,9 +27,10 @@ The governance half and named A5 retry runtime are complete on `origin/main`:
 
 This closeout did NOT mark the convergence engine complete at the time. Current status:
 A6-1 and A6-2 are complete end-to-end; A6-3-1 `condition_branch` exclusive-branch runtime
-landed (#2321), and A6-3-2 frontend/runs readability landed (#2339 + #2348). A6-3-3 /
-parallel-join remain gated; A6-5/W6-1 `start_approval` later landed separately in #2469;
-A6-4 remains a separate future unlock. Later trial
+landed (#2321), A6-3-2 frontend/runs readability landed (#2339 + #2348), and
+A6-3-4/W3 parallel `join_all` landed end-to-end (#2496 + #2500 + #2501). A6-3-3
+branch-local wait/nesting and A6-3-5 join-any remain gated; A6-5/W6-1
+`start_approval` later landed separately in #2469; A6-4 remains a separate future unlock. Later trial
 evidence (#2367/#2371) confirmed the A6-3 v1 surface is enough for the tested
 condition-branch flow and did not produce a branch-local wait/nesting demand.
 
@@ -78,8 +79,9 @@ W7-1 runtime remains gated.
 - A4 / A5: completed by explicit opt-in (#2039 + #2047); retry UI,
   idempotency keys, and re-fetch-current-record context remain future opt-ins.
 - A6: A6-0/A6-3 design-locks are docs-only; A6-1/A6-2 + A6-3-1 `condition_branch` runtime
-  + A6-3-2 frontend/readability + A6-5/W6-1 `start_approval` bridge landed by explicit
-  opt-in; A6-3-3 + parallel-join, A6-4 BPMN, public webhook/token emitter, and W7 result
+  + A6-3-2 frontend/readability + A6-3-4/W3 parallel `join_all` + A6-5/W6-1
+  `start_approval` bridge landed by explicit opt-in; A6-3-3 + join-any, A6-4 BPMN,
+  public webhook/token emitter, and W7 result
   backwrite runtime remain demand-gated.
 
 ## Current Baseline
@@ -125,11 +127,14 @@ Landed (capability half) — A6-1 COMPLETE, end-to-end & reachable in production
 - A6-2b suspend/resume FRONTEND (admin Resume UI on suspended steps + `wait_for_callback` editor that
   auto-locks `workflow_job_v1`; token admin-detail-only, never rendered) — LANDED #2245 cee99c8e4
   (2026-06-04). **A6-2 now closed end-to-end.**
+- A6-3 exclusive condition branch + parallel join-all — LANDED through #2321/#2339/#2348 and
+  #2496/#2500/#2501. **A6-3 now covers first-match/default branching plus fan-out/fan-in
+  `join_all`; branch-local waits and join-any remain separate.**
 
 Deferred (capability half — A6, frozen/demand-gated):
 - A6-2 delay/timer resume (v1 was webhook/external only; delay/timer later forces a durable
   scheduler/worker/leader)
-- A6-3-3 branch-local wait/nesting; A6-3-4/W3-1 parallel join-all runtime; A6-3-5 join-any;
+- A6-3-3 branch-local wait/nesting; A6-3-5 join-any;
   A6-4 BPMN compile/preview adapter; public webhook/token emitter; W7 approval result backwrite
 
 ## Milestones
@@ -302,7 +307,8 @@ complete.
 - [x] A6-3 v1 operator/API/UI trial — PASS #2367/#2371; no A6-3-3 demand surfaced.
 - [ ] A6-3-3 `wait_for_callback` / nested `condition_branch` inside branches — gated (forbidden in A6-3-1); open only for a named branch-local wait/nesting scenario.
 - [x] A6-3-4 / W3-0 parallel fan-out + join-all scope-gate — `multitable-automation-a6-3-parallel-join-all-scope-gate-20260611.md`: `parallel_branch`, `joinMode: all` only, C1 fan-out/fan-in graph, fail/skip semantics, and no BPMN/approval/webhook expansion.
-- [ ] A6-3-4 / W3-1 parallel fan-out + join-all runtime — not started; named opt-in required.
+- [x] A6-3-4 / W3-1 parallel fan-out + join-all runtime — LANDED #2496 `b161080b8` (2026-06-11): canonical `parallel_branch` action, `joinMode: all`, service/executor fail-closed validation, C1 parent/branch-child fan-out/fan-in lineage, fail/skip aggregation, and real-DB seam tests.
+- [x] A6-3-4 frontend and admin-runs readability — LANDED #2500 `4408239d0` + #2501 `88f5f538a` (2026-06-12): editor authoring for `parallel_branch` with workflow-job auto-lock and admin runs detail showing branch labels/child jobs. **A6-3-4/W3 join-all closed end-to-end.**
 - [ ] A6-3-5 join-any / cancellation semantics — gated after join-all runtime.
 - [ ] A6-4 BPMN compile/preview adapter — not started.
 - [x] A6-5 / W6-1 `start_approval` approval-as-job bridge — LANDED #2469: creates one approval instance from a published template, persists the bridge row, writes suspended / terminal C1 jobs, resumes/fails from W5 completion events, and guards A5 retry duplicates.

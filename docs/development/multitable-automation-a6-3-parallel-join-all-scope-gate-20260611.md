@@ -4,6 +4,12 @@ Type: **A6-3-4 docs-only scope-gate**.
 
 Grounded on: `origin/main@699a1b15`.
 
+Status refresh (2026-06-12): **runtime/editor/runs-readability landed** via
+#2496 (`b161080b8`), #2500 (`4408239d0`), and #2501 (`88f5f538a`). This document
+now serves as the historical contract for that slice; `join_any`, branch-local
+waits, nested branches, BPMN, approval coupling, and public webhook emitters
+remain out of scope / demand-gated.
+
 Companion:
 
 - `docs/development/multitable-automation-a6-3-branch-parallel-design-20260605.md`
@@ -17,9 +23,8 @@ Companion:
 
 ## 0. Verdict
 
-A6-3-4 may be scoped as the next automation graph rung, but runtime remains
-gated. This document locks the first parallel slice as **fan-out + join-all
-only**.
+A6-3-4 was scoped as the next automation graph rung and later landed as
+**fan-out + join-all only**.
 
 The runtime PR may add a `parallel_branch` action that runs all configured
 branches, records branch child jobs in the existing C1 job plane, and continues
@@ -304,15 +309,14 @@ A6-3-4 must not:
 
 W3-0 is complete when this docs-only scope gate is merged.
 
-A6-3-4/W3-1 runtime is complete only when:
+A6-3-4/W3-1 runtime is complete because:
 
-1. A runtime PR lands `parallel_branch` with `joinMode: 'all'` under this
+1. Runtime PR #2496 landed `parallel_branch` with `joinMode: 'all'` under this
    contract.
 2. Real-DB tests prove fan-out/fan-in C1 job shape and fail/skip behavior.
-3. Admin runs can explain parent/child jobs without leaking sensitive data.
+3. Admin runs can explain parent/child jobs without leaking sensitive data via
+   #2501; editor authoring landed via #2500.
 4. `workflow-automation-completion-plan-20260609.md`,
    `multitable-automation-run-governance-todo-20260527.md`, and
-   `multitable-automation-a6-execution-plan-20260601.md` are updated to mark
-   W3-1 runtime landed.
-
-Until then, A6-3-4 remains scoped but not implemented.
+   `multitable-automation-a6-execution-plan-20260601.md` now mark W3-1 runtime
+   landed.

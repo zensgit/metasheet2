@@ -1,8 +1,8 @@
 # Multitable Automation A6-3 Branch / Parallel DAG Design-Lock (2026-06-05)
 
-Status: **A6-3 design-lock / scope gate; A6-3-1 + A6-3-2 landed**
+Status: **A6-3 design-lock / scope gate; A6-3-1 + A6-3-2 + A6-3-4 join-all landed**
 
-Runtime: **A6-3-1 `condition_branch` exclusive runtime landed; A6-3-2 frontend/readability landed; A6-3-3 and parallel/join still gated**
+Runtime: **A6-3-1 `condition_branch` exclusive runtime landed; A6-3-2 frontend/readability landed; A6-3-4 `parallel_branch` join-all landed; A6-3-3 and join-any still gated**
 
 Grounded on: `origin/main@83801c668`
 Companions:
@@ -15,15 +15,16 @@ Companions:
 
 ## 0. Verdict
 
-> **2026-06-09 status refresh**: this design-lock originally froze the shape
+> **2026-06-12 status refresh**: this design-lock originally froze the shape
 > before runtime. Since then, A6-3-1 landed via #2321, A6-3-2a editor landed
-> via #2339, and A6-3-2b runs readability landed via #2348. The remaining
-> design-lock boundaries still apply to A6-3-3 and parallel/join.
+> via #2339, A6-3-2b runs readability landed via #2348, and A6-3-4
+> parallel fan-out + `join_all` landed via #2496/#2500/#2501. The remaining
+> design-lock boundaries still apply to A6-3-3 and join-any.
 
 A6-3 was opened as the next automation-only capability rung, but **only through
-this docs-only design-lock first**. A6-3-1 and A6-3-2 later landed by explicit
-opt-in; the remaining A6-3-3 and parallel/join work still requires a separate
-explicit opt-in.
+this docs-only design-lock first**. A6-3-1, A6-3-2, and A6-3-4 later landed by
+explicit opt-in; the remaining A6-3-3 and join-any work still requires a
+separate explicit opt-in.
 
 The first runtime slice must be **A6-3-1 `condition_branch` / exclusive branch
 v1**, not full parallel DAG. Parallel fan-out and join semantics are important,
@@ -99,7 +100,8 @@ branch v1 does not smuggle in a suspension schema change.
 ### A6-3-4 — Parallel fan-out + `join_all`
 
 Run multiple branches independently and continue only after all selected
-branches finish. This is a separate runtime opt-in after exclusive branch v1.
+branches finish. This landed as the first parallel runtime/frontend/readability
+slice via #2496/#2500/#2501.
 
 ### A6-3-5 — `join_any` / cancellation semantics
 
@@ -225,7 +227,8 @@ list remains the source:
 
 ## 5. Parallel Shape (A6-3-4, Not A6-3-1)
 
-Parallel fan-out is deferred. When opened, it should add a separate action type:
+Parallel fan-out was deferred from A6-3-1 and later landed as A6-3-4. It adds a
+separate action type:
 
 ```ts
 parallel_branch
@@ -354,7 +357,8 @@ First acceptable frontend slice:
 - Creates this A6-3 design-lock.
 - Updates tracker pointers only.
 - No runtime, migration, route, UI, OpenAPI, or test changes.
-- States that A6-3 runtime still requires a separate explicit owner opt-in.
+- States that A6-3 runtime requires separate explicit owner opt-in per sub-rung.
+  That happened for A6-3-1/A6-3-2/A6-3-4; A6-3-3 and A6-3-5 still require it.
 
 ## 12. Recommended Next Opt-In Phrase
 
