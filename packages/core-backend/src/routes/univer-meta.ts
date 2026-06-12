@@ -866,6 +866,9 @@ type LookupFieldConfig = {
   linkFieldId: string
   targetFieldId: string
   foreignSheetId?: string
+  // §2a.3: deliberate same-base projection opt-out. Honored ONLY for same-base lookups; a
+  // cross-base lookup of an unreadable foreign field is ALWAYS masked (flag ignored).
+  skipForeignFieldMasking?: boolean
 }
 
 type RollupAggregation = 'count' | 'sum' | 'avg' | 'min' | 'max'
@@ -875,6 +878,8 @@ type RollupFieldConfig = {
   targetFieldId: string
   aggregation: RollupAggregation
   foreignSheetId?: string
+  // §2a.3: see LookupFieldConfig.skipForeignFieldMasking — same semantics for rollup configs.
+  skipForeignFieldMasking?: boolean
 }
 
 function parseLinkFieldConfig(property: unknown): LinkFieldConfig | null {
@@ -902,6 +907,7 @@ function parseLookupFieldConfig(property: unknown): LookupFieldConfig | null {
     linkFieldId: linkFieldId.trim(),
     targetFieldId: targetFieldId.trim(),
     ...(foreignSheetId ? { foreignSheetId } : {}),
+    ...(obj.skipForeignFieldMasking === true ? { skipForeignFieldMasking: true } : {}),
   }
 }
 
@@ -933,6 +939,7 @@ function parseRollupFieldConfig(property: unknown): RollupFieldConfig | null {
     targetFieldId: targetFieldId.trim(),
     aggregation,
     ...(foreignSheetId ? { foreignSheetId } : {}),
+    ...(obj.skipForeignFieldMasking === true ? { skipForeignFieldMasking: true } : {}),
   }
 }
 
@@ -1743,7 +1750,7 @@ async function recalcNewRecordFormulas(
     .filter((v): v is RelationalLinkField => !!v && !!v.cfg)
   const linkValuesByRecord = await loadLinkValuesByRecord(query, recordIds, relationalLinkFields)
   // Hydrate same-record lookup/rollup into row.data (perm-scoped foreign read inside).
-  await applyLookupRollup(req, query, fields, rows, relationalLinkFields, linkValuesByRecord)
+  await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
 
   const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
   for (const row of rows) {
@@ -1758,9 +1765,164 @@ async function recalcNewRecordFormulas(
   return results
 }
 
+/**
+ * §2a.3 — per (foreignSheetId) actor-scoped foreign-field readability + cross-base flag.
+ * `readableFieldIds` = the foreign fields the actor may read (visible !== false under the
+ * foreign sheet's subject-scoped field_permissions), mirroring the export/view derivation.
+ * `crossBase` = foreign base_id ≠ source base_id (null vs non-null counts as cross-base;
+ * both null / equal counts as same-base). Decided ONCE per foreign sheet, never per record.
+ */
+type ForeignFieldReadability = { readableFieldIds: Set<string>; crossBase: boolean }
+
+async function resolveForeignFieldReadability(
+  req: Request,
+  query: QueryFn,
+  sourceBaseId: string | null,
+  foreignSheetIds: Iterable<string>,
+): Promise<Map<string, ForeignFieldReadability>> {
+  const out = new Map<string, ForeignFieldReadability>()
+  const unique = Array.from(new Set(Array.from(foreignSheetIds).filter(Boolean)))
+  if (unique.length === 0) return out
+  const access = await resolveRequestAccess(req)
+  for (const foreignSheetId of unique) {
+    const [foreignSheet, foreignFields, capabilities, fieldScopeMap] = await Promise.all([
+      loadSheetRowShared(query, foreignSheetId),
+      loadFieldsForSheetShared(query, foreignSheetId),
+      // Capabilities don't affect field VISIBILITY (only readOnly), but resolve them so the
+      // foreign-sheet derivation matches the export/view path exactly.
+      resolveSheetReadableCapabilities(req, query, foreignSheetId).then((r) => r.capabilities),
+      access.userId ? loadFieldPermissionScopeMap(query, foreignSheetId, access.userId) : Promise.resolve(new Map<string, FieldPermissionScope>()),
+    ])
+    const readableFieldIds = computeAllowedFieldIds(foreignFields as UniverMetaField[], capabilities, fieldScopeMap)
+    // null vs non-null ⇒ cross-base (mask); equal (incl. both null) ⇒ same-base.
+    const foreignBaseId = foreignSheet?.baseId ?? null
+    const crossBase = foreignBaseId !== sourceBaseId
+    out.set(foreignSheetId, { readableFieldIds, crossBase })
+  }
+  return out
+}
+
+/**
+ * §2a.3 — given the per-foreign-sheet readability map + a lookup/rollup config, decide whether
+ * the config's foreign target field must be MASKED for the actor. A field is masked when the
+ * actor cannot read it AND (cross-base OR (same-base AND no opt-out)). Returns false when the
+ * foreign field is readable, when the foreign sheet is unknown, or when same-base opt-out is set.
+ */
+function shouldMaskForeignField(
+  readability: Map<string, ForeignFieldReadability>,
+  foreignSheetId: string | undefined,
+  targetFieldId: string,
+  skipForeignFieldMasking: boolean | undefined,
+): boolean {
+  if (!foreignSheetId) return false
+  const entry = readability.get(foreignSheetId)
+  if (!entry) return false
+  if (entry.readableFieldIds.has(targetFieldId)) return false // actor can read it → flows normally
+  // Unreadable foreign field: cross-base masks unconditionally; same-base masks unless opted out.
+  if (entry.crossBase) return true
+  return skipForeignFieldMasking !== true
+}
+
+/**
+ * §2a.3 export taint-check — returns the subset of `exportFormulaFieldIds` whose materialized
+ * value must be DROPPED from the export because the formula (directly OR transitively via
+ * formula→formula dependency edges within this sheet) reads a lookup/rollup field whose foreign
+ * target field is masked for `req`'s actor (cross-base unconditional / same-base default unless
+ * opt-out). Transitive closure is bounded to same-sheet formula→formula edges, which is the
+ * model `formula_dependencies` records; cross-sheet formula chaining is not part of the model.
+ */
+async function resolveTaintedFormulaExportFieldIds(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+  exportFormulaFieldIds: Set<string>,
+): Promise<Set<string>> {
+  if (exportFormulaFieldIds.size === 0) return new Set()
+
+  const fields = (await loadFieldsForSheetShared(query, sheetId)) as UniverMetaField[]
+  // Map each lookup/rollup field id → its parsed config (the foreign target it reads).
+  const computedConfigById = new Map<string, LookupFieldConfig | RollupFieldConfig>()
+  const linkConfigById = new Map<string, LinkFieldConfig>()
+  for (const f of fields) {
+    if (f.type === 'link') {
+      const cfg = parseLinkFieldConfig(f.property)
+      if (cfg) linkConfigById.set(f.id, cfg)
+    } else if (f.type === 'lookup') {
+      const cfg = parseLookupFieldConfig(f.property)
+      if (cfg) computedConfigById.set(f.id, cfg)
+    } else if (f.type === 'rollup') {
+      const cfg = parseRollupFieldConfig(f.property)
+      if (cfg) computedConfigById.set(f.id, cfg)
+    }
+  }
+  const formulaFieldIds = new Set(fields.filter((f) => f.type === 'formula').map((f) => f.id))
+  // No computed fields on this sheet → nothing a formula could taint-leak.
+  if (computedConfigById.size === 0) return new Set()
+
+  // All in-sheet dependency edges (field_id depends_on depends_on_field_id, same sheet).
+  const depRes = await query(
+    `SELECT field_id, depends_on_field_id FROM formula_dependencies
+     WHERE sheet_id = $1 AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $1)`,
+    [sheetId],
+  )
+  const dependsOnByField = new Map<string, Set<string>>()
+  for (const raw of depRes.rows as Array<{ field_id?: unknown; depends_on_field_id?: unknown }>) {
+    const fieldId = typeof raw.field_id === 'string' ? raw.field_id : ''
+    const dep = typeof raw.depends_on_field_id === 'string' ? raw.depends_on_field_id : ''
+    if (!fieldId || !dep) continue
+    const set = dependsOnByField.get(fieldId) ?? new Set<string>()
+    set.add(dep)
+    dependsOnByField.set(fieldId, set)
+  }
+
+  // Resolve foreign-field readability ONCE for every foreign sheet any computed field references.
+  const sourceSheet = await loadSheetRowShared(query, sheetId)
+  const sourceBaseId = sourceSheet?.baseId ?? null
+  const foreignSheetIds = new Set<string>()
+  for (const cfg of computedConfigById.values()) {
+    const fs = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
+    if (fs) foreignSheetIds.add(fs)
+  }
+  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, foreignSheetIds)
+
+  // A computed (lookup/rollup) field is "masked" iff its foreign target field is masked.
+  const maskedComputedFieldIds = new Set<string>()
+  for (const [fieldId, cfg] of computedConfigById.entries()) {
+    const fs = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
+    if (shouldMaskForeignField(readability, fs, cfg.targetFieldId, cfg.skipForeignFieldMasking)) {
+      maskedComputedFieldIds.add(fieldId)
+    }
+  }
+  if (maskedComputedFieldIds.size === 0) return new Set()
+
+  // For each exportable formula field, transitively resolve whether it reaches a masked computed
+  // field via same-sheet formula→formula edges (bounded — visited-guarded, no cycles).
+  const tainted = new Set<string>()
+  for (const formulaFieldId of exportFormulaFieldIds) {
+    const stack = [formulaFieldId]
+    const visited = new Set<string>()
+    let leaks = false
+    while (stack.length > 0) {
+      const current = stack.pop() as string
+      if (visited.has(current)) continue
+      visited.add(current)
+      for (const dep of dependsOnByField.get(current) ?? []) {
+        if (maskedComputedFieldIds.has(dep)) { leaks = true; break }
+        // Only chase further through formula→formula edges (a formula's deps that are themselves
+        // formulas); a dep on a non-formula, non-masked-computed field is a leaf.
+        if (formulaFieldIds.has(dep)) stack.push(dep)
+      }
+      if (leaks) break
+    }
+    if (leaks) tainted.add(formulaFieldId)
+  }
+  return tainted
+}
+
 async function applyLookupRollup(
   req: Request,
   query: QueryFn,
+  sourceSheetId: string,
   fields: UniverMetaField[],
   rows: UniverMetaRecord[],
   relationalLinkFields: RelationalLinkField[],
@@ -1824,6 +1986,18 @@ async function applyLookupRollup(
 
   const readableForeignSheetIds = await resolveReadableSheetIds(req, query, foreignIdsBySheet.keys())
 
+  // §2a.3 — resolve foreign-FIELD-level readability + cross-base for every readable foreign sheet
+  // (one scope-map load per foreign sheet, batched — never per record). Source base_id is needed
+  // for the cross-base decision; load it once.
+  const sourceSheet = await loadSheetRowShared(query, sourceSheetId)
+  const sourceBaseId = sourceSheet?.baseId ?? null
+  const foreignFieldReadability = await resolveForeignFieldReadability(
+    req,
+    query,
+    sourceBaseId,
+    Array.from(foreignIdsBySheet.keys()).filter((id) => readableForeignSheetIds.has(id)),
+  )
+
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [foreignSheetId, ids] of foreignIdsBySheet.entries()) {
     if (!readableForeignSheetIds.has(foreignSheetId)) continue
@@ -1840,10 +2014,16 @@ async function applyLookupRollup(
     foreignRecordsBySheet.set(foreignSheetId, recordMap)
   }
 
-  const resolveLookupValues = (record: UniverMetaRecord, cfg: LookupFieldConfig): unknown[] => {
+  const resolveLookupValues = (record: UniverMetaRecord, cfg: LookupFieldConfig | RollupFieldConfig): unknown[] => {
     const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
     if (!foreignSheetId) return []
     if (!readableForeignSheetIds.has(foreignSheetId)) return []
+    // §2a.3: fail-closed foreign-FIELD mask — if the actor can't read the foreign target field,
+    // mask it (cross-base unconditional / same-base default unless opt-out). Same gate for
+    // lookup AND rollup (both read data[targetFieldId]).
+    if (shouldMaskForeignField(foreignFieldReadability, foreignSheetId, cfg.targetFieldId, cfg.skipForeignFieldMasking)) {
+      return []
+    }
     const linkIds = getLinkIds(record, cfg.linkFieldId)
     if (linkIds.length === 0) return []
     const foreignMap = foreignRecordsBySheet.get(foreignSheetId)
@@ -2027,7 +2207,7 @@ async function computeDependentLookupRollupRecords(
       relationalLinkFields,
     )
 
-    await applyLookupRollup(req, query, fields, rows, relationalLinkFields, linkValuesByRecord)
+    await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
 
     // A-full (design #2410): one-hop formula recompute on the related records. A related
     // lookup/rollup is "affected" only when it resolves to the edited source sheet, its
@@ -2474,7 +2654,7 @@ export function createRecordWriteHelpers(req: Request, _pool?: { query: QueryFn 
     filterRecordFieldSummaryMap,
     serializeLinkSummaryMap,
     serializeAttachmentSummaryMap,
-    applyLookupRollup: (q, f, rows, rl, lv) => applyLookupRollup(req, q, f, rows, rl, lv),
+    applyLookupRollup: (q, sid, f, rows, rl, lv) => applyLookupRollup(req, q, sid, f, rows, rl, lv),
     computeDependentLookupRollupRecords: (q, sourceSheetId, ids, changed) =>
       computeDependentLookupRollupRecords(req, q, sourceSheetId, ids, changed),
     recalculateFormulaFields,
@@ -2694,7 +2874,7 @@ async function loadDashboardSourceRows(args: {
       rows.map((row) => row.id),
       relationalLinkFields,
     )
-    await applyLookupRollup(req, query, fields, rows, relationalLinkFields, linkValuesByRecord)
+    await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
   }
 
   if (filterInfo) {
@@ -6463,8 +6643,27 @@ export function univerMetaRouter(): Router {
         hiddenFieldIds: viewHiddenFieldIds,
         fieldScopeMap,
       })
-      const fields = visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false)
-      const fieldIds = new Set(fields.map((field) => field.id))
+      let fields = visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false)
+      let fieldIds = new Set(fields.map((field) => field.id))
+
+      // §2a.3 export taint-check (fail-closed): formula values are MATERIALIZED into
+      // meta_records.data, and this export path reads them RAW (no applyLookupRollup), so a
+      // formula over a lookup/rollup of an UNREADABLE foreign field would leak the value. For
+      // each exportable formula field, walk its formula_dependencies; if it (transitively, via
+      // formula→formula edges) depends on a lookup/rollup whose foreign target field is masked
+      // for THIS actor (cross-base unconditional / same-base default unless opt-out), drop the
+      // WHOLE formula column — consistent with the field-level export masking above.
+      const tainted = await resolveTaintedFormulaExportFieldIds(
+        req,
+        pool.query.bind(pool),
+        sheetId,
+        new Set(fields.filter((field) => field.type === 'formula').map((field) => field.id)),
+      )
+      if (tainted.size > 0) {
+        fields = fields.filter((field) => !tainted.has(field.id))
+        fieldIds = new Set(fields.map((field) => field.id))
+      }
+
       const rows: Array<Array<string | number | boolean | null | undefined>> = []
       let cursor: string | undefined
       let truncated = false
@@ -6733,7 +6932,7 @@ export function univerMetaRouter(): Router {
               .filter((v): v is RelationalLinkField => !!v && !!v.cfg)
             const row: UniverMetaRecord = { id: recordId, version: 0, data: rawData }
             const linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), [recordId], relationalLinkFields)
-            await applyLookupRollup(req, pool.query.bind(pool), referencedComputedFields, [row], relationalLinkFields, linkValuesByRecord)
+            await applyLookupRollup(req, pool.query.bind(pool), sheetId, referencedComputedFields, [row], relationalLinkFields, linkValuesByRecord)
           }
           // D3c field mask, sheet-scope (hiddenFieldIds: [] — display-consistency defer, see #5c design-lock §4).
           // scope.visible is the real field-read gate; a denied field is omitted → becomes missing_sample.
@@ -6948,6 +7147,7 @@ export function univerMetaRouter(): Router {
           await applyLookupRollup(
             req,
             pool.query.bind(pool),
+            sheetId,
             fields,
             all,
             relationalLinkFields,
@@ -7057,6 +7257,7 @@ export function univerMetaRouter(): Router {
       await applyLookupRollup(
         req,
         pool.query.bind(pool),
+        sheetId,
         fields,
         rows,
         relationalLinkFields,
@@ -8143,7 +8344,7 @@ export function univerMetaRouter(): Router {
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
-      await applyLookupRollup(req, pool.query.bind(pool), fields, [record], relationalLinkFields, linkValuesByRecord)
+      await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, [record], relationalLinkFields, linkValuesByRecord)
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
       // #2015 read-path field mask: D3c security composite (layer-2 property.hidden ∧ layer-3
       // field_permissions.visible), mirroring export-xlsx / dry-run #5c-a. hiddenFieldIds:[] keeps layer-1

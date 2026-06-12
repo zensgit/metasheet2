@@ -278,6 +278,7 @@ export interface RecordWriteHelpers {
   /** Async helpers that depend on `req` context (permission resolution). */
   applyLookupRollup: (
     query: QueryFn,
+    sourceSheetId: string,
     fields: UniverMetaField[],
     rows: UniverMetaRecord[],
     relationalLinkFields: RelationalLinkField[],
@@ -840,6 +841,7 @@ export class RecordWriteService {
 
       await h.applyLookupRollup(
         this.pool.query.bind(this.pool),
+        sheetId,
         fields,
         rows,
         relationalLinkFields,
