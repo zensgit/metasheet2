@@ -18,7 +18,10 @@ The smoke runs the same shift-swap HTTP chain used by the employee/admin UI:
 - final approval creates exactly two published replacement assignments with
   deterministic `producer_type='shift_swap'`, `producer_ref_id`, `producer_key`,
   and `producer_run_id`;
-- effective-calendar follows the swapped schedule for both users;
+- effective-calendar follows the swapped schedule for both users. In single-slot
+  mode the public response may expose only `effective.source='shift'`; the exact
+  source/replacement shift ids are proven by the DB assignment assertions, and
+  the smoke also validates `shiftId` when the API exposes `effective.slots[]`;
 - `attendance_events` and `attendance_records` stay unchanged;
 - cleanup restores settings and removes the smoke rows with residue `0`.
 
@@ -109,8 +112,8 @@ SW5 shift-swap staging smoke @ http://127.0.0.1:8082 (org default, stamp shift-s
   PASS  create shift counterparty-source
   PASS  create published source assignment requester
   PASS  create published source assignment counterparty
-  PASS  pre-swap requester effective-calendar sees source shift A
-  PASS  pre-swap counterparty effective-calendar sees source shift B
+  PASS  pre-swap requester effective-calendar sees a shift source
+  PASS  pre-swap counterparty effective-calendar sees a shift source
   PASS  create shift_swap approval flow
   PASS  create shift-swap request
   PASS  requester list sees the pending shift-swap request
@@ -121,8 +124,8 @@ SW5 shift-swap staging smoke @ http://127.0.0.1:8082 (org default, stamp shift-s
   PASS  exactly two replacement assignments exist
   PASS  requester replacement has counterparty shift/date and deterministic provenance
   PASS  counterparty replacement has requester shift/date and deterministic provenance
-  PASS  post-swap requester effective-calendar sees counterparty shift on counterparty date
-  PASS  post-swap counterparty effective-calendar sees requester shift on requester date
+  PASS  post-swap requester effective-calendar sees a shift source on counterparty date
+  PASS  post-swap counterparty effective-calendar sees a shift source on requester date
   PASS  attendance_events and attendance_records are unchanged by the swap finalizer
 --- restore + cleanup ---
   PASS  restore original settings
@@ -144,8 +147,9 @@ keeping `调度` separate, and add a dated backfill like:
 > shift-swap request; counterparty accepted; final approval soft-deactivated
 > exactly the two source rows and created exactly two published
 > `producer_type='shift_swap'` replacement rows with deterministic provenance;
-> effective-calendar followed the swapped shifts for both users; events/records
-> stayed unchanged; settings restored; cleanup residue=0. SW1 #2539 → SW2 #2540
+> effective-calendar showed the swapped shift-source days for both users while
+> DB assertions proved the exact replacement shift ids; events/records stayed
+> unchanged; settings restored; cleanup residue=0. SW1 #2539 → SW2 #2540
 > → SW3 #2541 → SW4 #2542 → SW5 staging closed `换班` ✅. `调度` still separate
 > OPTIONAL.
 
