@@ -79,11 +79,16 @@ function listTsFiles(dir: string): string[] {
 
 // Count CALL-sites of a helper in a file (exclude its `function`/`async function` definition; interface
 // members `name: (` and generic defs `name<T>(` already don't match `name(`). Returns line numbers.
+// Comment lines are skipped: the gate tracks real egress call-sites, so a prose mention of `helper(` inside
+// a JSDoc/`//` comment (e.g. the §2a.3 chokepoint doc citing `filterRecordDataByFieldIds(...)`) must NOT
+// inflate the count — that would let a future real ungated call-site hide under a phantom comment slot.
+const COMMENT_LINE_RE = /^\s*(\/\/|\*|\/\*)/
 function callSiteLines(content: string, helper: string): number[] {
   const callRe = new RegExp(`\\b${helper}\\s*\\(`)
   const defRe = new RegExp(`\\bfunction\\s+${helper}\\b`)
   const lines: number[] = []
   content.split('\n').forEach((line, i) => {
+    if (COMMENT_LINE_RE.test(line)) return
     if (callRe.test(line) && !defRe.test(line)) lines.push(i + 1)
   })
   return lines
