@@ -141,7 +141,7 @@ import {
   RecordValidationFailedError as RecordCreateValidationFailedError,
   RecordPatchFieldValidationError as RecordServicePatchFieldValidationError,
 } from '../multitable/record-service'
-import { canUnlock, mapRecordLockState } from '../multitable/record-lock'
+import { canUnlock, ensureRecordNotLocked, mapRecordLockState } from '../multitable/record-lock'
 import {
   acquireAutoNumberSheetWriteLock,
   allocateAutoNumberValues,
@@ -3328,6 +3328,7 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
         existing.data[avatarFieldId] !== nextData[avatarFieldId]
 
       if (changed) {
+        // lock-exempt: internal people-directory sync — system sheet, not a user-facing record edit path.
         await query(
           `UPDATE meta_records
            SET data = $1::jsonb, version = version + 1, updated_at = now()
@@ -3822,6 +3823,14 @@ class ValidationError extends Error {
   constructor(public message: string) {
     super(message)
     this.name = 'ValidationError'
+  }
+}
+
+/** Thrown by `ensureRecordNotLocked` on a throw-based route path (form-submit edit) → 403. */
+class RecordLockedError extends Error {
+  constructor(message = 'Record is locked') {
+    super(message)
+    this.name = 'RecordLockedError'
   }
 }
 
@@ -5876,6 +5885,7 @@ export function univerMetaRouter(): Router {
           if (!isUndefinedTableError(err, 'meta_links')) throw err
         }
 
+        // lock-exempt: field-delete schema op — drops the deleted field's key sheet-wide; not a per-record user edit.
         await query('UPDATE meta_records SET data = data - $1 WHERE sheet_id = $2', [fieldId, sheetId])
         await query('UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2', [sheetId, order])
 
@@ -8014,7 +8024,7 @@ export function univerMetaRouter(): Router {
 
         if (recordId) {
           const currentRes = await query(
-            'SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+            'SELECT id, version, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
             [recordId, view.sheetId],
           )
           if ((currentRes as any).rows.length === 0) {
@@ -8024,12 +8034,16 @@ export function univerMetaRouter(): Router {
           if (!ensureRecordWriteAllowed(effectiveCapabilities, effectiveSheetScope, effectiveAccess, typeof currentRow?.created_by === 'string' ? currentRow.created_by : null, 'edit')) {
             throw new ValidationError('Record editing is not allowed for this row')
           }
+          // Record-lock guard (rank-8 review B2; decision d/e). The form-submit EDIT branch is reachable
+          // only by an authenticated member with edit rights — exactly the non-locker the lock must stop.
+          ensureRecordNotLocked(getRequestActorId(req), currentRow, () => new RecordLockedError())
           const serverVersion = Number(currentRow?.version ?? 1)
           if (typeof parsed.data.expectedVersion === 'number' && parsed.data.expectedVersion !== serverVersion) {
             throw new VersionConflictError(recordId, serverVersion)
           }
 
           if (Object.keys(patch).length > 0) {
+            // lock-guarded: form-submit EDIT (B2) — ensureRecordNotLocked enforced just above.
             const updateRes = await query(
               `UPDATE meta_records
                SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
@@ -8245,6 +8259,9 @@ export function univerMetaRouter(): Router {
       }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      if (err instanceof RecordLockedError) {
+        return sendForbidden(res, err.message)
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
@@ -9123,6 +9140,23 @@ export function univerMetaRouter(): Router {
           creatorMap.get(attachmentRow.recordId),
           'edit',
         )) return sendForbidden(res, 'Record editing is not allowed for this row')
+        // Record-lock guard (rank-8 review B3; decision d/e). Removing an attachment mutates the
+        // record's `data`, so it is an EDIT — blocked on a locked record for a non-locker/owner.
+        const lockRes = await pool.query(
+          'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
+          [attachmentRow.recordId, attachmentRow.sheetId],
+        )
+        const lockRow = lockRes.rows[0] as
+          | { locked?: unknown; locked_by?: unknown; created_by?: unknown }
+          | undefined
+        if (lockRow) {
+          try {
+            ensureRecordNotLocked(getRequestActorId(req), lockRow, () => new RecordLockedError())
+          } catch (lockErr) {
+            if (lockErr instanceof RecordLockedError) return sendForbidden(res, lockErr.message)
+            throw lockErr
+          }
+        }
       } else if (!ensureRecordWriteAllowed(
         sheetCapabilities.capabilities,
         sheetCapabilities.sheetScope,
@@ -9149,6 +9183,7 @@ export function univerMetaRouter(): Router {
             const currentIds = normalizeAttachmentIds(data[fieldId])
             const nextIds = currentIds.filter((id) => id !== attachmentId)
             if (nextIds.length !== currentIds.length) {
+              // lock-guarded: attachment-delete record edit (B3) — ensureRecordNotLocked enforced before this txn.
               const updateRes = await query(
                 `UPDATE meta_records
                  SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
@@ -9403,6 +9438,7 @@ export function univerMetaRouter(): Router {
           return sendForbidden(res, 'Record editing is not allowed for this row')
         }
         const lockedBy = actorId ?? access.userId
+        // lock-mgmt: LOCK action — sets the lock columns (own canEditRecord authority above).
         await pool.query(
           `UPDATE meta_records SET locked = true, locked_by = $2, locked_at = NOW(), version = version + 1, updated_at = NOW()
            WHERE id = $1 AND sheet_id = $3`,
@@ -9416,6 +9452,7 @@ export function univerMetaRouter(): Router {
         }, capabilities)) {
           return sendForbidden(res, 'Not allowed to unlock this record')
         }
+        // lock-mgmt: UNLOCK action — clears the lock columns (own canUnlock authority above).
         await pool.query(
           `UPDATE meta_records SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
            WHERE id = $1 AND sheet_id = $2`,

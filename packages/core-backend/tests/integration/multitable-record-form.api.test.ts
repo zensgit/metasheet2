@@ -1035,9 +1035,9 @@ describe('Multitable record and form context API', () => {
           expect(params).toEqual(['sheet_vendors', ['vendor_1']])
           return { rows: [{ id: 'vendor_1' }] }
         }
-        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
-          return { rows: [{ id: 'rec_existing', version: 5 }] }
+          return { rows: [{ id: 'rec_existing', version: 5, created_by: null, locked: false, locked_by: null }] }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
           expect(params).toEqual([JSON.stringify({ fld_title: 'Updated title', fld_vendor_link: ['vendor_1'] }), 'rec_existing', 'sheet_ops'])
@@ -1171,9 +1171,9 @@ describe('Multitable record and form context API', () => {
           expect(params).toEqual(['sheet_vendors', ['vendor_1']])
           return { rows: [{ id: 'vendor_1' }] }
         }
-        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
-          return { rows: [{ id: 'rec_existing', version: 3 }] }
+          return { rows: [{ id: 'rec_existing', version: 3, created_by: null, locked: false, locked_by: null }] }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
           expect(params).toEqual([JSON.stringify({ fld_title: 'Patched title', fld_vendor_link: ['vendor_1'] }), 'rec_existing', 'sheet_ops'])

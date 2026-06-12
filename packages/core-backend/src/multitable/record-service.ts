@@ -44,7 +44,7 @@ import {
   type NotifyRecordSubscribersInput,
 } from './record-subscription-service'
 import { ensureRecordWriteAllowed, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
-import { canEditWhileLocked } from './record-lock'
+import { ensureRecordNotLocked } from './record-lock'
 
 export type QueryFn = (
   sql: string,
@@ -689,13 +689,9 @@ export class RecordService {
     }
 
     // Record-lock guard (decision d/e): a locked record cannot be deleted unless the actor is the
-    // locker or owner. No silent admin bypass — an admin must explicitly unlock first.
-    if (recordRow.locked === true && !canEditWhileLocked(actorId, {
-      lockedBy: typeof recordRow.locked_by === 'string' ? recordRow.locked_by : null,
-      createdBy,
-    })) {
-      throw new RecordPermissionError('Record is locked')
-    }
+    // locker or owner. No silent admin bypass — an admin must explicitly unlock first. Routed through
+    // the ONE shared rule (`ensureRecordNotLocked`) so every mutation path enforces it identically.
+    ensureRecordNotLocked(actorId, recordRow, () => new RecordPermissionError('Record is locked'))
 
     await this.pool.transaction(async ({ query }) => {
       const lockedRecordRes = await query(
@@ -734,6 +730,7 @@ export class RecordService {
         snapshot,
       })
 
+      // lock-guarded: single DELETE — ensureRecordNotLocked enforced above (rejects before this txn).
       await query('DELETE FROM meta_records WHERE id = $1', [recordId])
     })
 
@@ -935,16 +932,9 @@ export class RecordService {
         throw new RecordPermissionError('Record editing is not allowed for this row')
       }
       // Record-lock guard (decision d/e): a locked record is read-only unless the actor is the locker
-      // or owner. No silent admin bypass — an admin must explicitly unlock first.
-      if (currentRow.locked === true && !canEditWhileLocked(
-        patchActorId,
-        {
-          lockedBy: typeof currentRow.locked_by === 'string' ? currentRow.locked_by : null,
-          createdBy: typeof currentRow.created_by === 'string' ? currentRow.created_by : null,
-        },
-      )) {
-        throw new RecordPermissionError('Record is locked')
-      }
+      // or owner. No silent admin bypass — an admin must explicitly unlock first. Routed through the
+      // ONE shared rule (`ensureRecordNotLocked`) so every mutation path enforces it identically.
+      ensureRecordNotLocked(patchActorId, currentRow, () => new RecordPermissionError('Record is locked'))
 
       const serverVersion = Number(currentRow.version ?? 1)
       if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
@@ -975,6 +965,7 @@ export class RecordService {
       }
 
       if (Object.keys(patch).length > 0) {
+        // lock-guarded: single PATCH — ensureRecordNotLocked enforced above in this txn.
         const updateRes = await query(
           `UPDATE meta_records
            SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4

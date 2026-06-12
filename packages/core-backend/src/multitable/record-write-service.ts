@@ -35,7 +35,7 @@ import {
   notifyRecordSubscribersBestEffort,
   type NotifyRecordSubscribersInput,
 } from './record-subscription-service'
-import { canEditWhileLocked } from './record-lock'
+import { ensureRecordNotLocked } from './record-lock'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -584,15 +584,14 @@ export class RecordWriteService {
         }
 
         // Record-lock guard (decision d/e): a locked record is read-only unless the actor is the
-        // locker or owner. No silent admin bypass — an admin must explicitly unlock first.
-        if (
-          recordRow?.locked === true &&
-          !canEditWhileLocked(actorId, {
-            lockedBy: typeof recordRow?.locked_by === 'string' ? recordRow.locked_by : null,
-            createdBy: typeof recordRow?.created_by === 'string' ? recordRow.created_by : null,
-          })
-        ) {
-          throw new RecordValidationError(`Record is locked: ${recordId}`, 'FORBIDDEN')
+        // locker or owner. No silent admin bypass — an admin must explicitly unlock first. Routed
+        // through the ONE shared rule (`ensureRecordNotLocked`) so every mutation path matches.
+        if (recordRow) {
+          ensureRecordNotLocked(
+            actorId,
+            recordRow,
+            () => new RecordValidationError(`Record is locked: ${recordId}`, 'FORBIDDEN'),
+          )
         }
 
         const serverVersion = Number(recordRow?.version ?? 1)
@@ -695,7 +694,7 @@ export class RecordWriteService {
           }
         }
 
-        // Apply patch
+        // lock-guarded: bulk/multi-record PATCH — ensureRecordNotLocked enforced per record above.
         const updateRes = await query(
           `UPDATE meta_records
            SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4

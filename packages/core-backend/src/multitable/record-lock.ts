@@ -58,6 +58,48 @@ export function canEditWhileLocked(actorId: string | null, record: LockableRecor
   return false
 }
 
+/** The subset of a persisted record row this guard reads to decide whether a mutation is locked-out. */
+export interface LockGuardRow {
+  locked?: unknown
+  locked_by?: unknown
+  created_by?: unknown
+}
+
+/** Normalize a raw `meta_records` row's lock-relevant columns into a `LockableRecord`. */
+export function lockableFromRow(row: LockGuardRow): LockableRecord {
+  return {
+    lockedBy: typeof row.locked_by === 'string' ? row.locked_by : null,
+    createdBy: typeof row.created_by === 'string' ? row.created_by : null,
+  }
+}
+
+/**
+ * THE ONE record-lock mutation gate (decision d/e/f — centralized after the rank-8 review found the lock
+ * was advisory on three un-enumerated write paths + the plugin SDK). EVERY path that edits or deletes an
+ * existing `meta_records` row by user/rule/plugin intent MUST route through this helper instead of
+ * re-deriving the `locked && !canEditWhileLocked(...)` check inline. A future mutation path that forgets
+ * it trips the durable structural guard (`multitable-record-lock-guard.guard.test.ts`).
+ *
+ *  - `actorId` is the EFFECTIVE actor of the mutation: the request user, the automation's actor, etc.
+ *    A trusted system recompute (formula/auto-number/lookup materialization) is lock-EXEMPT by design
+ *    (the lock means "read-only to USERS"); those paths deliberately do NOT call this.
+ *  - An ACTOR-LESS caller (e.g. the plugin SDK, which carries no per-record actor identity) passes
+ *    `actorId = null`; `canEditWhileLocked(null, …)` is always false, so a locked record is hard
+ *    read-only to it — the lock can only be lifted via the explicit unlock action.
+ *
+ * Throws the error produced by `makeError()` (so each surface keeps its native error type / HTTP shape)
+ * when the row is locked and the actor is not the locker or owner. No-ops otherwise.
+ */
+export function ensureRecordNotLocked(
+  actorId: string | null,
+  row: LockGuardRow,
+  makeError: () => Error,
+): void {
+  if (row.locked !== true) return
+  if (canEditWhileLocked(actorId, lockableFromRow(row))) return
+  throw makeError()
+}
+
 /** Normalize raw DB row lock columns into the wire-facing metadata shape. */
 export function mapRecordLockState(row: {
   locked?: unknown
