@@ -251,7 +251,12 @@ function createHttpAdapter({ system, fetchImpl = globalThis.fetch, logger } = {}
       if (logger && typeof logger.warn === 'function') {
         logger.warn(`[plugin-integration-core] HTTP adapter request failed: ${method} ${path}`)
       }
-      throw error
+      throw new HttpAdapterError(`HTTP adapter request failed before response: ${method} ${path}`, {
+        code: 'FETCH_FAILED',
+        method,
+        path,
+        causeName: error && error.name ? error.name : undefined,
+      })
     } finally {
       if (timeout) clearTimeout(timeout)
     }

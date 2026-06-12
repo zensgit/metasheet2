@@ -58,6 +58,9 @@ function createFetchMock() {
         ],
       })
     }
+    if (parsed.pathname === '/api/network-sink' && options.method === 'POST') {
+      throw new TypeError('fetch failed')
+    }
     if (parsed.pathname === '/api/fail') {
       return jsonResponse(500, { error: 'boom' })
     }
@@ -104,6 +107,10 @@ function createSystem(overrides = {}) {
           path: '/api/fail',
           operations: ['read'],
         },
+        network_sink: {
+          path: '/api/network-sink',
+          operations: ['upsert'],
+        },
       },
     },
     ...overrides,
@@ -127,8 +134,8 @@ async function main() {
 
   // --- 2. listObjects/getSchema read local config -----------------------
   const objects = await adapter.listObjects()
-  assert.equal(objects.length, 3)
   assert.deepEqual(objects.find((object) => object.name === 'materials').operations, ['read', 'upsert'])
+  assert.deepEqual(objects.find((object) => object.name === 'network_sink').operations, ['upsert'])
 
   const schema = await adapter.getSchema({ object: 'materials' })
   assert.equal(schema.object, 'materials')
@@ -268,6 +275,23 @@ async function main() {
   }
   assert.ok(httpFailure instanceof HttpAdapterError, 'non-2xx response rejects with HttpAdapterError')
   assert.equal(httpFailure.status, 500)
+
+  const networkFailure = await adapter.upsert({
+    object: 'network_sink',
+    records: [{ code: 'A-01' }],
+    keyFields: ['code'],
+  }).catch((error) => error)
+  assert.ok(networkFailure instanceof HttpAdapterError, 'fetch-layer failure rejects with HttpAdapterError')
+  assert.equal(networkFailure.details.code, 'FETCH_FAILED')
+  assert.equal(networkFailure.details.method, 'POST')
+  assert.equal(networkFailure.details.path, '/api/network-sink')
+  assert.equal(networkFailure.details.causeName, 'TypeError')
+  assert.match(networkFailure.message, /HTTP adapter request failed before response: POST \/api\/network-sink/)
+  assert.doesNotMatch(
+    JSON.stringify({ message: networkFailure.message, details: networkFailure.details }),
+    /plm\.example\.test|token-1|key-1/,
+    'fetch failure details stay values-free',
+  )
 
   console.log('✓ http-adapter: config-driven read/upsert tests passed')
 }
