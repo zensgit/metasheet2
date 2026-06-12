@@ -3,6 +3,7 @@ import { createHash } from 'crypto'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
 import { MultitableRecordNotFoundError, MultitableRecordValidationError } from './record-errors'
 import type { MultitableField } from './field-codecs'
+import { mapRecordLockState } from './record-lock'
 
 export type MultitableRecordsQueryFn = (
   sql: string,
@@ -42,6 +43,11 @@ export type LoadedMultitableRecord = {
   modifiedBy?: string | null
   createdAt?: string | null
   updatedAt?: string | null
+  // Record-locking metadata (design #2278 follow-up). TOP-LEVEL — NOT a `data` field, so it is never
+  // swept by the §2a.3 record-data masking.
+  locked: boolean
+  lockedBy: string | null
+  lockedAt: string | null
 }
 
 export type CursorPaginatedResult<T> = {
@@ -230,6 +236,7 @@ function mapRecordRow(row: any, fields: MultitableField[]): LoadedMultitableReco
     ...(modifiedBy !== null ? { modifiedBy } : {}),
     ...(createdAt !== null ? { createdAt } : {}),
     ...(updatedAt !== null ? { updatedAt } : {}),
+    ...mapRecordLockState(row),
   }
 }
 
@@ -290,7 +297,7 @@ export async function queryRecords(
   const offsetParamIndex = offset !== undefined ? params.length : null
 
   const sqlParts = [
-    'SELECT id, sheet_id, version, data, created_at, updated_at, created_by, modified_by FROM meta_records',
+    'SELECT id, sheet_id, version, data, created_at, updated_at, created_by, modified_by, locked, locked_by, locked_at FROM meta_records',
     `WHERE ${where.join(' AND ')}`,
     orderSql,
   ]
@@ -361,7 +368,7 @@ export async function queryRecordsWithCursor(
     : `ORDER BY id ${direction}`
 
   const sql = [
-    'SELECT id, sheet_id, version, data, created_at, updated_at, created_by, modified_by FROM meta_records',
+    'SELECT id, sheet_id, version, data, created_at, updated_at, created_by, modified_by, locked, locked_by, locked_at FROM meta_records',
     `WHERE ${where.join(' AND ')}`,
     orderSql,
     `LIMIT $${fetchLimitIndex}`,

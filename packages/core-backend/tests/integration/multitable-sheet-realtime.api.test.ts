@@ -164,9 +164,9 @@ describe('Multitable sheet realtime events', () => {
         if (sql.includes('SELECT pg_advisory_xact_lock')) {
           return { rows: [] }
         }
-        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_1', 'sheet_ops'])
-          return { rows: [{ id: 'rec_1', version: 4, created_by: 'user_realtime_1' }] }
+          return { rows: [{ id: 'rec_1', version: 4, created_by: 'user_realtime_1', locked: false, locked_by: null }] }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
           expect(params).toEqual([
@@ -238,9 +238,9 @@ describe('Multitable sheet realtime events', () => {
         if (sql.includes('FROM field_permissions')) {
           return { rows: [] }
         }
-        if (sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
           expect(params).toEqual(['sheet_ops', 'rec_1'])
-          return { rows: [{ id: 'rec_1', version: 2, data: { fld_title: 'Original title' }, created_by: 'user_realtime_1' }] }
+          return { rows: [{ id: 'rec_1', version: 2, data: { fld_title: 'Original title' }, created_by: 'user_realtime_1', locked: false, locked_by: null }] }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('WHERE sheet_id = $2 AND id = $3')) {
           expect(params).toEqual([

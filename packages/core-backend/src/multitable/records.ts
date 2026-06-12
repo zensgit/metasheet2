@@ -6,7 +6,8 @@ import {
 } from './auto-number-service'
 import { fieldTypeRegistry } from './field-type-registry'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
-import { MultitableRecordNotFoundError, MultitableRecordValidationError } from './record-errors'
+import { MultitableRecordLockedError, MultitableRecordNotFoundError, MultitableRecordValidationError } from './record-errors'
+import { ensureRecordNotLocked, mapRecordLockState } from './record-lock'
 import {
   listRecords as listRecordsViaQueryService,
   queryRecords as queryRecordsViaQueryService,
@@ -392,7 +393,7 @@ export async function getRecord(
   input: GetMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
   const recordRes = await input.query(
-    'SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+    'SELECT id, sheet_id, version, data, locked, locked_by, locked_at FROM meta_records WHERE id = $1 AND sheet_id = $2',
     [input.recordId, input.sheetId],
   )
   const row = (recordRes.rows as any[])[0]
@@ -404,6 +405,7 @@ export async function getRecord(
     sheetId: String(row.sheet_id),
     version: Number(row.version ?? 1),
     data: normalizeRecordData(row.data),
+    ...mapRecordLockState(row),
   }
 }
 
@@ -425,6 +427,26 @@ export async function queryRecordsWithCursor(
   return queryRecordsWithCursorViaQueryService(input)
 }
 
+/**
+ * Plugin-SDK record-lock chokepoint (rank-8 review M1). The plugin path is actor-less — it carries no
+ * per-record actor — so `ensureRecordNotLocked(null, …)` rejects ANY edit/delete of a locked record
+ * (`canEditWhileLocked(null, …)` is always false). The lock can only be lifted via the explicit unlock
+ * action. Reads the lock columns through the same `query` so it participates in the caller's transaction.
+ */
+async function guardRecordNotLockedForPlugin(
+  query: MultitableRecordsQueryFn,
+  sheetId: string,
+  recordId: string,
+): Promise<void> {
+  const res = await query(
+    'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
+    [recordId, sheetId],
+  )
+  const row = res.rows[0] as { locked?: unknown; locked_by?: unknown; created_by?: unknown } | undefined
+  if (!row) return // not found — surfaced later by the caller's own missing-row handling
+  ensureRecordNotLocked(null, row, () => new MultitableRecordLockedError('Record is locked'))
+}
+
 export async function patchRecord(
   input: PatchMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
@@ -436,12 +458,16 @@ export async function patchRecord(
     sheetId: input.sheetId,
     recordId: input.recordId,
   })
+  // Record-lock guard (rank-8 review M1; decision d/e). The plugin SDK carries no per-record actor
+  // identity → `ensureRecordNotLocked(null, …)` makes a locked record hard read-only to plugins.
+  await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
   const { patch, linkUpdates } = await buildNormalizedPatch(query, fields, input.changes)
   const nextData = {
     ...existing.data,
     ...patch,
   }
 
+  // lock-guarded: plugin-SDK patchRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
   const updated = await query(
     `UPDATE meta_records
      SET data = $1::jsonb, version = version + 1, updated_at = now()
@@ -460,6 +486,9 @@ export async function patchRecord(
     sheetId: existing.sheetId,
     version: Number.isFinite(version) ? version : existing.version + 1,
     data: nextData,
+    locked: existing.locked,
+    lockedBy: existing.lockedBy,
+    lockedAt: existing.lockedAt,
   }
 }
 
@@ -504,8 +533,13 @@ export async function deleteRecord(
   const query = input.query
   await loadSheetAndFields(query, input.sheetId)
 
+  // Record-lock guard (rank-8 review M1; decision d). Actor-less plugin path → a locked record cannot
+  // be deleted via the SDK (it must be unlocked first through the explicit unlock action).
+  await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
+
   await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [input.recordId])
 
+  // lock-guarded: plugin-SDK deleteRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
   const deleted = await query(
     `DELETE FROM meta_records
      WHERE id = $1 AND sheet_id = $2

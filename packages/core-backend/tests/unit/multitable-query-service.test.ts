@@ -48,7 +48,7 @@ describe('multitable query-service', () => {
     ])
 
     await expect(listRecords({ query, sheetId: 'sheet_1' })).resolves.toEqual([
-      { id: 'rec_1', sheetId: 'sheet_1', version: 3, data: { title: 'A' } },
+      { id: 'rec_1', sheetId: 'sheet_1', version: 3, data: { title: 'A' }, locked: false, lockedBy: null, lockedAt: null },
     ])
   })
 
@@ -102,6 +102,9 @@ describe('multitable query-service', () => {
           created_by_sys: 'user_creator',
           modified_by_sys: 'user_editor',
         },
+        locked: false,
+        lockedBy: null,
+        lockedAt: null,
       },
     ])
 
@@ -141,7 +144,7 @@ describe('multitable query-service', () => {
 
     const result = await queryRecordsWithCursor({ query, sheetId: 'sheet_1', limit: 1 })
     expect(result.items).toEqual([
-      { id: 'rec_1', sheetId: 'sheet_1', version: 1, data: { title: 'A' } },
+      { id: 'rec_1', sheetId: 'sheet_1', version: 1, data: { title: 'A' }, locked: false, lockedBy: null, lockedAt: null },
     ])
     expect(result.hasMore).toBe(true)
     expect(result.nextCursor).toBe(encodeRecordCursor('rec_1', 'rec_1'))

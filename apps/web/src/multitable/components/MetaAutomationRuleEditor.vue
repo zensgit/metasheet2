@@ -1264,12 +1264,18 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'wait_for_callback',
   'condition_branch',
   'parallel_branch',
+  // lock_record is now a complete contract (record-locking storage + write-path enforcement, rank 8),
+  // so it is a first-class selectable action — both for new rules and to keep existing lock_record rules
+  // editable (it must appear in SUPPORTED so an existing rule's option isn't dropped to empty).
+  'lock_record',
 ]
 
 // A6-3-2a: BRANCH_AUTHORABLE_ACTION_TYPES (the v1 in-branch action subset) is imported from
 // ../utils/conditionBranchAuthoring — the single source of truth shared with the seam + tests.
 
-const UNSUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = ['lock_record']
+// lock_record is now a complete contract (record-locking storage + write-path enforcement), so it is
+// re-exposed in the rule-editor dropdown (reversing the #2278 stop-gap that hid the then-broken action).
+const UNSUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = []
 
 function isUnsupportedSelectableActionType(type: AutomationActionType): boolean {
   return UNSUPPORTED_SELECTABLE_ACTION_TYPES.includes(type)

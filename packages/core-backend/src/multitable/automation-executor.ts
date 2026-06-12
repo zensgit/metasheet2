@@ -6,6 +6,7 @@
 import { randomUUID } from 'crypto'
 import { Logger } from '../core/logger'
 import { redactString } from './automation-log-redact'
+import { ensureRecordNotLocked } from './record-lock'
 import {
   DingTalkBusinessError,
   DingTalkRequestError,
@@ -1462,6 +1463,22 @@ export class AutomationExecutor {
     const patch = Object.fromEntries(Object.entries(fields))
 
     try {
+      // Record-lock guard (rank-8 review B1; decisions d/e/f). An automation acting on behalf of its
+      // actor is NOT implicitly the locker/owner — overwriting a locked record is blocked. To write
+      // through a lock the rule must first run a `lock_record{locked:false}` action (decision f). The
+      // step fails honestly so it surfaces in the execution log.
+      const lockRes = await this.deps.queryFn(
+        'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [context.recordId, context.sheetId],
+      )
+      const lockRow = lockRes.rows[0] as
+        | { locked?: unknown; locked_by?: unknown; created_by?: unknown }
+        | undefined
+      if (lockRow) {
+        ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
+      }
+
+      // lock-guarded: automation update_record (B1) — ensureRecordNotLocked enforced just above.
       await this.deps.queryFn(
         `UPDATE meta_records
          SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb,
@@ -2043,14 +2060,27 @@ export class AutomationExecutor {
     config: Record<string, unknown>,
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
-    const locked = config.locked !== false // default to true
+    const locked = config.locked !== false // default to true (decision f: config.locked === false → unlock)
 
     try {
-      await this.deps.queryFn(
-        `UPDATE meta_records SET locked = $1, version = version + 1, updated_at = NOW()
-         WHERE id = $2 AND sheet_id = $3`,
-        [locked, context.recordId, context.sheetId],
-      )
+      if (locked) {
+        // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
+        const lockedBy = typeof context.actorId === 'string' && context.actorId.trim() ? context.actorId : 'system'
+        await this.deps.queryFn(
+          `UPDATE meta_records
+           SET locked = true, locked_by = $1, locked_at = NOW(), version = version + 1, updated_at = NOW()
+           WHERE id = $2 AND sheet_id = $3`,
+          [lockedBy, context.recordId, context.sheetId],
+        )
+      } else {
+        // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
+        await this.deps.queryFn(
+          `UPDATE meta_records
+           SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
+           WHERE id = $1 AND sheet_id = $2`,
+          [context.recordId, context.sheetId],
+        )
+      }
 
       return {
         actionType: 'lock_record',
@@ -2058,6 +2088,7 @@ export class AutomationExecutor {
         output: { locked, recordId: context.recordId },
       }
     } catch (err) {
+      // Failures surface honestly in the automation execution log instead of crashing the run.
       return { actionType: 'lock_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
     }
   }

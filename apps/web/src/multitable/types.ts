@@ -120,6 +120,12 @@ export interface MetaRecord {
   id: string
   version: number
   data: Record<string, unknown>
+  // Record-locking metadata (top-level, NOT a data field). `canUnlock` is the server-authoritative
+  // per-row gate for showing the unlock action; only meaningful when `locked` is true.
+  locked?: boolean
+  lockedBy?: string | null
+  lockedAt?: string | null
+  canUnlock?: boolean
 }
 
 // --- Pagination ---

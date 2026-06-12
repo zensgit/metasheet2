@@ -100,7 +100,7 @@ describe('Multitable record and form context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read', 'comments:write'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1')) {
           expect(params).toEqual(['rec_1'])
           return {
             rows: [{
@@ -566,7 +566,7 @@ describe('Multitable record and form context API', () => {
             }],
           }
         }
-        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
           expect(params).toEqual(['rec_perm_1', 'sheet_ops'])
           return {
             rows: [{
@@ -602,7 +602,7 @@ describe('Multitable record and form context API', () => {
             }],
           }
         }
-        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1')) {
           expect(params).toEqual(['rec_perm_1'])
           return {
             rows: [{
@@ -740,7 +740,7 @@ describe('Multitable record and form context API', () => {
             }
           }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC')) {
+        if (sql.includes('SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC')) {
           expect(params).toEqual(['sheet_orders'])
           return {
             rows: [
@@ -801,6 +801,10 @@ describe('Multitable record and form context API', () => {
           fld_vendor_link: ['vendor_1'],
           fld_files: ['att_view_1'],
         },
+        // Record-locking metadata now rides top-level on every row (unlocked → false/null).
+        locked: false,
+        lockedBy: null,
+        lockedAt: null,
       },
     ])
     expect(response.body.data.linkSummaries).toEqual({
@@ -856,7 +860,7 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
-        if (sql.includes('SELECT id, version, data, COUNT(*) OVER()::int AS total') && sql.includes('WHERE sheet_id = $1 AND (')) {
+        if (sql.includes('SELECT id, version, data, locked, locked_by, locked_at, COUNT(*) OVER()::int AS total') && sql.includes('WHERE sheet_id = $1 AND (')) {
           expect(params).toEqual(['sheet_orders', '%120%', 'fld_name', 'fld_amount', 1, 0])
           return {
             rows: [
@@ -887,6 +891,9 @@ describe('Multitable record and form context API', () => {
           fld_name: 'Beta rollout',
           fld_amount: 1200,
         },
+        locked: false,
+        lockedBy: null,
+        lockedAt: null,
       },
     ])
     expect(response.body.data.page).toEqual({
@@ -1028,9 +1035,9 @@ describe('Multitable record and form context API', () => {
           expect(params).toEqual(['sheet_vendors', ['vendor_1']])
           return { rows: [{ id: 'vendor_1' }] }
         }
-        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
-          return { rows: [{ id: 'rec_existing', version: 5 }] }
+          return { rows: [{ id: 'rec_existing', version: 5, created_by: null, locked: false, locked_by: null }] }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
           expect(params).toEqual([JSON.stringify({ fld_title: 'Updated title', fld_vendor_link: ['vendor_1'] }), 'rec_existing', 'sheet_ops'])
@@ -1135,7 +1142,7 @@ describe('Multitable record and form context API', () => {
       queryHandler: async (sql, params) => {
         if (
           sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1')
-          || sql.includes('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1')
+          || sql.includes('SELECT id, sheet_id, created_by, locked, locked_by FROM meta_records WHERE id = $1')
         ) {
           expect(params).toEqual(['rec_existing'])
           return { rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops' }] }
@@ -1164,9 +1171,9 @@ describe('Multitable record and form context API', () => {
           expect(params).toEqual(['sheet_vendors', ['vendor_1']])
           return { rows: [{ id: 'vendor_1' }] }
         }
-        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
-          return { rows: [{ id: 'rec_existing', version: 3 }] }
+          return { rows: [{ id: 'rec_existing', version: 3, created_by: null, locked: false, locked_by: null }] }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
           expect(params).toEqual([JSON.stringify({ fld_title: 'Patched title', fld_vendor_link: ['vendor_1'] }), 'rec_existing', 'sheet_ops'])

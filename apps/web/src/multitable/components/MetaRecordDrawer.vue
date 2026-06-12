@@ -55,6 +55,19 @@
         >{{ l('record.history') }}</button>
       </div>
       <div v-if="subscriptionError" class="meta-record-drawer__watch-error">{{ subscriptionError }}</div>
+      <div v-if="record?.locked" class="meta-record-drawer__lock-banner" data-test="record-lock-banner">
+        <span class="meta-record-drawer__lock-icon" aria-hidden="true">&#x1F512;</span>
+        <span class="meta-record-drawer__lock-status">{{ l('record.locked') }}</span>
+        <span v-if="record.lockedBy" class="meta-record-drawer__lock-meta">{{ l('record.lockedBy') }}: {{ record.lockedBy }}</span>
+        <span v-if="record.lockedAt" class="meta-record-drawer__lock-meta">{{ l('record.lockedAt') }}: {{ record.lockedAt }}</span>
+        <button
+          v-if="record.canUnlock"
+          type="button"
+          class="meta-record-drawer__btn meta-record-drawer__lock-unlock"
+          data-test="record-unlock-action"
+          @click="emit('toggle-lock', { recordId: record.id, locked: false })"
+        >{{ l('record.unlock') }}</button>
+      </div>
       <div v-if="activeTab === 'details'" class="meta-record-drawer__fields">
       <div v-for="field in visibleFields" :key="field.id" class="meta-record-drawer__field">
         <div class="meta-record-drawer__field-header">
@@ -350,6 +363,7 @@ const emit = defineEmits<{
   (e: 'close'): void
   (e: 'delete'): void
   (e: 'patch', fieldId: string, value: unknown): void
+  (e: 'toggle-lock', payload: { recordId: string; locked: boolean }): void
   (e: 'toggle-comments'): void
   (e: 'comment-field', field: MetaField): void
   (e: 'open-automation'): void

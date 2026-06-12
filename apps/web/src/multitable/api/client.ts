@@ -1321,6 +1321,20 @@ export class MultitableApiClient {
     return this.parseJson(res)
   }
 
+  // Record locking (design #2278 follow-up): { locked: true } locks, { locked: false } unlocks.
+  async setRecordLock(
+    recordId: string,
+    locked: boolean,
+    params?: { sheetId?: string; viewId?: string },
+  ): Promise<{ recordId: string; locked: boolean; lockedBy: string | null; lockedAt: string | null }> {
+    const res = await this.fetch(`/api/multitable/records/${recordId}/lock`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ locked, ...params }),
+    })
+    return this.parseJson(res)
+  }
+
   async patchRecords(input: PatchRecordsInput): Promise<PatchResult> {
     const res = await this.fetch('/api/multitable/patch', {
       method: 'POST',

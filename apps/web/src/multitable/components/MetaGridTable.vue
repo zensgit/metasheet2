@@ -157,6 +157,22 @@
               <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
                 <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? l('grid.collapseRow') : l('grid.expandRow')" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
                 <span>{{ startIndex + ri + 1 }}</span>
+                <span
+                  v-if="isRowLocked(row.id)"
+                  class="meta-grid__lock-indicator"
+                  :title="l('grid.lockedIndicator')"
+                  :aria-label="l('grid.lockedIndicator')"
+                  data-test="row-lock-indicator"
+                >&#x1F512;</span>
+                <button
+                  v-if="canShowLockAction(row.id)"
+                  type="button"
+                  class="meta-grid__lock-action"
+                  :aria-label="isRowLocked(row.id) ? l('grid.unlockRow') : l('grid.lockRow')"
+                  :title="isRowLocked(row.id) ? l('grid.unlockRow') : l('grid.lockRow')"
+                  data-test="row-lock-action"
+                  @click.stop="emit('toggle-lock', { recordId: row.id, locked: !isRowLocked(row.id) })"
+                >{{ isRowLocked(row.id) ? '🔓' : '🔒' }}</button>
                 <button
                   v-if="resolveRowActions(row.id).canComment"
                   type="button"
@@ -390,6 +406,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'select-record', recordId: string): void
   (e: 'open-comments', recordId: string): void
+  (e: 'toggle-lock', payload: { recordId: string; locked: boolean }): void
   (e: 'open-field-comments', payload: { recordId: string; fieldId: string }): void
   (e: 'toggle-sort', fieldId: string): void
   (e: 'patch-cell', recordId: string, fieldId: string, value: unknown, version: number): void
@@ -548,7 +565,23 @@ function resolveRowActions(recordId: string): MetaRowActions {
     canComment: props.canComment !== false,
   }
 }
+// Record-locking (design #2278 follow-up): index rows so the lock indicator + lock/unlock action +
+// read-only-while-locked visual can resolve a row's lock state by id without scanning.
+const recordById = computed(() => {
+  const map = new Map<string, MetaRecord>()
+  for (const row of props.rows) map.set(row.id, row)
+  return map
+})
+const isRowLocked = (recordId: string): boolean => recordById.value.get(recordId)?.locked === true
+const canUnlockRow = (recordId: string): boolean => recordById.value.get(recordId)?.canUnlock === true
+// Show the lock/unlock affordance per `canUnlock` (decision b): a LOCKED row shows "unlock" only to an
+// actor the server says can unlock it; an UNLOCKED row shows "lock" to anyone who can edit the row.
+function canShowLockAction(recordId: string): boolean {
+  return isRowLocked(recordId) ? canUnlockRow(recordId) : resolveRowActions(recordId).canEdit
+}
+
 const isEditable = (recordId: string, f: MetaField) =>
+  !isRowLocked(recordId) &&
   resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !isSystemField(f) && !props.fieldReadOnlyIds?.includes(f.id)
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 

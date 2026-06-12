@@ -339,6 +339,7 @@ export class MultitableFormulaEngine {
       // Merge only the computed formula keys (`data || $patch`) so a concurrent
       // write to other fields between this SELECT and UPDATE is not clobbered. No
       // version bump: formula values are derived, not an authoritative user edit.
+      // lock-exempt: system formula materialization — derived value, no user actor (lock = read-only to USERS).
       await query(
         `UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3`,
         [JSON.stringify(updates), recordId, sheetId],
