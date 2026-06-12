@@ -6243,6 +6243,211 @@
                 {{ tr('No planning signals in the current range.', '当前区间暂无排班信号。') }}
               </div>
 
+              <div class="attendance__admin-subsection" data-attendance-small-org-cockpit>
+                <div class="attendance__admin-section-header">
+                  <div>
+                    <h5>{{ tr('Small scheduling organizations', '小组织排班') }}</h5>
+                    <small class="attendance__field-hint">
+                      {{ tr('Schedule groups are operational grouping and responsibility boundaries. Shifts, rotations, and fixed schedules still create the schedule facts.', '排班组是排班工作台里的分组与负责人边界；班次、轮班和固定排班仍负责产生排班事实。') }}
+                    </small>
+                  </div>
+                  <button class="attendance__btn" :disabled="scheduleGroupAdminLoading" @click="loadScheduleGroupAdminCockpit">
+                    {{ scheduleGroupAdminLoading ? tr('Loading...', '加载中...') : tr('Reload groups', '重载排班组') }}
+                  </button>
+                </div>
+
+                <p v-if="scheduleGroupAdminTruncationWarning" class="attendance__field-hint attendance__field-hint--warn" data-attendance-small-org-groups-cap>
+                  {{ scheduleGroupAdminTruncationWarning }}
+                </p>
+
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field" for="attendance-small-org-name">
+                    <span>{{ tr('Name', '名称') }}</span>
+                    <input id="attendance-small-org-name" v-model="scheduleGroupForm.name" type="text" />
+                  </label>
+                  <label class="attendance__field" for="attendance-small-org-code">
+                    <span>{{ tr('Code', '编码') }}</span>
+                    <input id="attendance-small-org-code" v-model="scheduleGroupForm.code" type="text" :placeholder="tr('optional', '可选')" />
+                  </label>
+                  <label class="attendance__field" for="attendance-small-org-parent">
+                    <span>{{ tr('Parent schedule group', '上级排班组') }}</span>
+                    <select id="attendance-small-org-parent" v-model="scheduleGroupForm.parentId">
+                      <option value="">{{ tr('Top level', '顶层') }}</option>
+                      <option v-for="group in scheduleGroupParentOptions" :key="group.id" :value="group.id">
+                        {{ scheduleGroupTreeLabel(group) }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="attendance__field" for="attendance-small-org-attendance-group">
+                    <span>{{ tr('Linked attendance group', '关联考勤组') }}</span>
+                    <select id="attendance-small-org-attendance-group" v-model="scheduleGroupForm.attendanceGroupId">
+                      <option value="">{{ tr('None', '无') }}</option>
+                      <option v-for="group in attendanceGroups" :key="group.id" :value="group.id">
+                        {{ group.name }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="attendance__field" for="attendance-small-org-department">
+                    <span>{{ tr('Department reference', '部门引用') }}</span>
+                    <input id="attendance-small-org-department" v-model="scheduleGroupForm.departmentRef" type="text" :placeholder="tr('preserve synced department id', '保留同步部门 ID')" />
+                  </label>
+                  <label class="attendance__field attendance__field--full" for="attendance-small-org-description">
+                    <span>{{ tr('Description', '说明') }}</span>
+                    <input id="attendance-small-org-description" v-model="scheduleGroupForm.description" type="text" />
+                  </label>
+                  <label class="attendance__field attendance__checkbox-field" for="attendance-small-org-active">
+                    <input id="attendance-small-org-active" v-model="scheduleGroupForm.isActive" type="checkbox" />
+                    <span>{{ tr('Active', '启用') }}</span>
+                  </label>
+                </div>
+                <div class="attendance__admin-actions">
+                  <button
+                    class="attendance__btn attendance__btn--primary"
+                    :disabled="scheduleGroupSaving"
+                    data-attendance-small-org-save
+                    @click="saveScheduleGroup"
+                  >
+                    {{ scheduleGroupSaving ? tr('Saving...', '保存中...') : scheduleGroupEditingId ? tr('Update schedule group', '更新排班组') : tr('Create schedule group', '创建排班组') }}
+                  </button>
+                  <button class="attendance__btn" :disabled="scheduleGroupSaving" data-attendance-small-org-new @click="startCreateScheduleGroup">
+                    {{ tr('New group', '新建排班组') }}
+                  </button>
+                </div>
+
+                <div v-if="scheduleGroupAdminRows.length === 0" class="attendance__empty" data-attendance-small-org-empty>
+                  {{ tr('No schedule groups loaded.', '暂无已加载排班组。') }}
+                </div>
+                <div v-else class="attendance__table-wrapper">
+                  <table class="attendance__table" data-attendance-small-org-groups>
+                    <thead>
+                      <tr>
+                        <th>{{ tr('Schedule group', '排班组') }}</th>
+                        <th>{{ tr('Parent', '上级') }}</th>
+                        <th>{{ tr('Linked attendance group', '关联考勤组') }}</th>
+                        <th>{{ tr('Department', '部门') }}</th>
+                        <th>{{ tr('Members', '成员') }}</th>
+                        <th>{{ tr('Assignments', '排班') }}</th>
+                        <th>{{ tr('Source', '来源') }}</th>
+                        <th>{{ tr('State', '状态') }}</th>
+                        <th>{{ tr('Actions', '操作') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="row in scheduleGroupAdminRows" :key="row.group.id" data-attendance-small-org-row>
+                        <td>
+                          <strong>{{ scheduleGroupTreeIndent(row.depth) }}{{ row.group.name }}</strong>
+                          <div class="attendance__field-hint">{{ row.group.code || row.group.id }}</div>
+                        </td>
+                        <td>{{ scheduleGroupParentName(row.group) }}</td>
+                        <td>{{ scheduleGroupAttendanceGroupName(row.group.attendanceGroupId) }}</td>
+                        <td>{{ row.group.departmentRef || '-' }}</td>
+                        <td>{{ row.group.memberCount ?? 0 }}</td>
+                        <td>{{ scheduleGroupAssignmentCount(row.group) }}</td>
+                        <td>{{ row.group.source || 'manual' }}</td>
+                        <td>
+                          <span class="attendance__status-chip" :class="row.group.isActive === false ? 'attendance__status-chip--inactive' : 'attendance__status-chip--ok'">
+                            {{ row.group.isActive === false ? tr('Inactive', '停用') : tr('Active', '启用') }}
+                          </span>
+                        </td>
+                        <td class="attendance__table-actions">
+                          <button class="attendance__btn" type="button" data-attendance-small-org-edit @click="editScheduleGroup(row.group)">
+                            {{ tr('Edit', '编辑') }}
+                          </button>
+                          <button class="attendance__btn" type="button" data-attendance-small-org-members @click="openScheduleGroupMembers(row.group)">
+                            {{ tr('Members', '成员') }}
+                          </button>
+                          <button
+                            class="attendance__btn attendance__btn--danger"
+                            type="button"
+                            data-attendance-small-org-deactivate
+                            :disabled="scheduleGroupDeletingId === row.group.id || row.group.isActive === false"
+                            @click="deactivateScheduleGroup(row.group)"
+                          >
+                            {{ tr('Deactivate', '停用') }}
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div v-if="selectedScheduleGroupForMembers" class="attendance__admin-subsection" data-attendance-small-org-members-panel>
+                  <div class="attendance__admin-section-header">
+                    <div>
+                      <h6 class="attendance__subheading">{{ tr('Schedule group members', '排班组成员') }}</h6>
+                      <small class="attendance__field-hint">{{ selectedScheduleGroupForMembers.name }}</small>
+                    </div>
+                    <button class="attendance__btn" :disabled="scheduleGroupMemberLoading" @click="loadScheduleGroupMembers">
+                      {{ scheduleGroupMemberLoading ? tr('Loading...', '加载中...') : tr('Reload members', '重载成员') }}
+                    </button>
+                  </div>
+                  <p v-if="scheduleGroupMemberTruncationWarning" class="attendance__field-hint attendance__field-hint--warn" data-attendance-small-org-members-cap>
+                    {{ scheduleGroupMemberTruncationWarning }}
+                  </p>
+                  <div class="attendance__admin-grid">
+                    <label class="attendance__field attendance__field--full" for="attendance-small-org-member-user-ids">
+                      <span>{{ tr('User IDs', '员工 ID') }}</span>
+                      <textarea id="attendance-small-org-member-user-ids" v-model="scheduleGroupMemberForm.userIds" rows="2" :placeholder="tr('Comma or newline separated', '逗号或换行分隔')" />
+                    </label>
+                    <label class="attendance__field" for="attendance-small-org-member-role">
+                      <span>{{ tr('Role', '角色') }}</span>
+                      <select id="attendance-small-org-member-role" v-model="scheduleGroupMemberForm.role">
+                        <option value="member">{{ tr('Member', '成员') }}</option>
+                        <option value="lead">{{ tr('Lead', '负责人') }}</option>
+                        <option value="backup">{{ tr('Backup', '备份') }}</option>
+                      </select>
+                    </label>
+                    <label class="attendance__field" for="attendance-small-org-member-from">
+                      <span>{{ tr('Effective from', '生效开始') }}</span>
+                      <input id="attendance-small-org-member-from" v-model="scheduleGroupMemberForm.effectiveFrom" type="date" />
+                    </label>
+                    <label class="attendance__field" for="attendance-small-org-member-to">
+                      <span>{{ tr('Effective to', '生效结束') }}</span>
+                      <input id="attendance-small-org-member-to" v-model="scheduleGroupMemberForm.effectiveTo" type="date" />
+                    </label>
+                  </div>
+                  <div class="attendance__admin-actions">
+                    <button
+                      class="attendance__btn attendance__btn--primary"
+                      :disabled="scheduleGroupMemberSaving"
+                      data-attendance-small-org-member-add
+                      @click="addScheduleGroupMembers"
+                    >
+                      {{ scheduleGroupMemberSaving ? tr('Saving...', '保存中...') : tr('Add members', '添加成员') }}
+                    </button>
+                  </div>
+                  <div v-if="scheduleGroupMembers.length === 0" class="attendance__empty">
+                    {{ tr('No members in this schedule group.', '该排班组暂无成员。') }}
+                  </div>
+                  <div v-else class="attendance__table-wrapper">
+                    <table class="attendance__table" data-attendance-small-org-members>
+                      <thead>
+                        <tr>
+                          <th>{{ tr('User', '员工') }}</th>
+                          <th>{{ tr('Role', '角色') }}</th>
+                          <th>{{ tr('Effective window', '生效窗口') }}</th>
+                          <th>{{ tr('Source', '来源') }}</th>
+                          <th>{{ tr('Actions', '操作') }}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="member in scheduleGroupMembers" :key="member.id" data-attendance-small-org-member-row>
+                          <td>{{ member.userId }}</td>
+                          <td>{{ scheduleGroupMemberRoleLabel(member.role) }}</td>
+                          <td>{{ scheduleGroupMemberWindowLabel(member) }}</td>
+                          <td>{{ member.source || 'manual' }}</td>
+                          <td class="attendance__table-actions">
+                            <button class="attendance__btn attendance__btn--danger" type="button" data-attendance-small-org-member-remove @click="removeScheduleGroupMember(member)">
+                              {{ tr('Remove', '移除') }}
+                            </button>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
               <div v-if="advancedSchedulingWorkbenchGroups.length === 0" class="attendance__empty">
                 {{ tr('No active schedule groups yet.', '暂无启用的排班组。') }}
               </div>
@@ -8762,6 +8967,33 @@ interface AttendanceAdvancedSchedulingGroupItem {
   isActive?: boolean
 }
 
+interface AttendanceScheduleGroupAdminItem {
+  id: string
+  orgId?: string
+  name: string
+  code?: string | null
+  description?: string | null
+  attendanceGroupId?: string | null
+  parentId?: string | null
+  departmentRef?: string | null
+  source?: string | null
+  isActive?: boolean
+  memberCount?: number | null
+  assignedUserCount?: number | null
+  shiftAssignmentCount?: number | null
+  rotationAssignmentCount?: number | null
+}
+
+interface AttendanceScheduleGroupMemberItem {
+  id: string
+  scheduleGroupId?: string | null
+  userId: string
+  effectiveFrom?: string | null
+  effectiveTo?: string | null
+  role?: 'member' | 'lead' | 'backup' | string | null
+  source?: string | null
+}
+
 interface AttendanceAdvancedSchedulingWorkbench {
   range?: {
     from: string | null
@@ -9364,6 +9596,166 @@ const advancedSchedulingWorkbenchMetricItems = computed(() => {
 const advancedSchedulingWorkbenchGroups = computed(() =>
   advancedSchedulingWorkbench.value?.scheduleGroups?.items ?? []
 )
+
+const scheduleGroupAdminTruncationWarning = computed(() => {
+  if (scheduleGroupAdminTotal.value <= scheduleGroupAdminItems.value.length) return ''
+  return tr(
+    `Showing first ${scheduleGroupAdminItems.value.length} of ${scheduleGroupAdminTotal.value} schedule groups.`,
+    `仅显示前 ${scheduleGroupAdminItems.value.length}/${scheduleGroupAdminTotal.value} 个排班组。`,
+  )
+})
+
+const scheduleGroupMemberTruncationWarning = computed(() => {
+  if (scheduleGroupMembersTotal.value <= scheduleGroupMembers.value.length) return ''
+  return tr(
+    `Showing first ${scheduleGroupMembers.value.length} of ${scheduleGroupMembersTotal.value} members.`,
+    `仅显示前 ${scheduleGroupMembers.value.length}/${scheduleGroupMembersTotal.value} 名成员。`,
+  )
+})
+
+const scheduleGroupById = computed(() => {
+  const map = new Map<string, AttendanceScheduleGroupAdminItem>()
+  for (const group of scheduleGroupAdminItems.value) map.set(group.id, group)
+  return map
+})
+
+const scheduleGroupAdminRows = computed<Array<{ group: AttendanceScheduleGroupAdminItem; depth: number }>>(() => {
+  const children = new Map<string, AttendanceScheduleGroupAdminItem[]>()
+  const roots: AttendanceScheduleGroupAdminItem[] = []
+  const sorted = [...scheduleGroupAdminItems.value].sort((left, right) => {
+    if ((left.isActive === false) !== (right.isActive === false)) return left.isActive === false ? 1 : -1
+    return (left.name || '').localeCompare(right.name || '') || (left.code || '').localeCompare(right.code || '')
+  })
+  for (const group of sorted) {
+    const parentId = group.parentId || ''
+    if (!parentId || !scheduleGroupById.value.has(parentId)) {
+      roots.push(group)
+      continue
+    }
+    const list = children.get(parentId) ?? []
+    list.push(group)
+    children.set(parentId, list)
+  }
+  const rows: Array<{ group: AttendanceScheduleGroupAdminItem; depth: number }> = []
+  const seen = new Set<string>()
+  const visit = (group: AttendanceScheduleGroupAdminItem, depth: number) => {
+    if (seen.has(group.id)) return
+    seen.add(group.id)
+    rows.push({ group, depth })
+    for (const child of children.get(group.id) ?? []) visit(child, depth + 1)
+  }
+  for (const group of roots) visit(group, 0)
+  for (const group of sorted) visit(group, 0)
+  return rows
+})
+
+const scheduleGroupParentOptions = computed(() =>
+  scheduleGroupAdminRows.value
+    .map(row => row.group)
+    .filter(group => group.id !== scheduleGroupEditingId.value && group.isActive !== false)
+)
+
+const selectedScheduleGroupForMembers = computed(() =>
+  scheduleGroupAdminItems.value.find(group => group.id === scheduleGroupMemberGroupId.value) ?? null
+)
+
+function scheduleGroupWorkbenchCounts(groupId: string): Partial<AttendanceScheduleGroupAdminItem> {
+  const item = advancedSchedulingWorkbenchGroups.value.find(group => group.id === groupId)
+  if (!item) return {}
+  return {
+    memberCount: item.memberCount,
+    assignedUserCount: item.assignedUserCount,
+    shiftAssignmentCount: item.shiftAssignmentCount,
+    rotationAssignmentCount: item.rotationAssignmentCount,
+  }
+}
+
+function normalizeScheduleGroupAdminItem(value: any): AttendanceScheduleGroupAdminItem | null {
+  if (!value || typeof value !== 'object') return null
+  const id = String(value.id || '').trim()
+  const name = String(value.name || '').trim()
+  if (!id || !name) return null
+  return {
+    id,
+    orgId: value.orgId ?? value.org_id,
+    name,
+    code: value.code ?? null,
+    description: value.description ?? null,
+    attendanceGroupId: value.attendanceGroupId ?? value.attendance_group_id ?? null,
+    parentId: value.parentId ?? value.parent_id ?? null,
+    departmentRef: value.departmentRef ?? value.department_ref ?? null,
+    source: value.source ?? 'manual',
+    isActive: value.isActive ?? value.is_active ?? true,
+    memberCount: value.memberCount ?? value.member_count ?? null,
+    assignedUserCount: value.assignedUserCount ?? value.assigned_user_count ?? null,
+    shiftAssignmentCount: value.shiftAssignmentCount ?? value.shift_assignment_count ?? null,
+    rotationAssignmentCount: value.rotationAssignmentCount ?? value.rotation_assignment_count ?? null,
+    ...scheduleGroupWorkbenchCounts(id),
+  }
+}
+
+function normalizeScheduleGroupMemberItem(value: any): AttendanceScheduleGroupMemberItem | null {
+  if (!value || typeof value !== 'object') return null
+  const id = String(value.id || '').trim()
+  const userId = String(value.userId ?? value.user_id ?? '').trim()
+  if (!id || !userId) return null
+  return {
+    id,
+    scheduleGroupId: value.scheduleGroupId ?? value.schedule_group_id ?? null,
+    userId,
+    effectiveFrom: value.effectiveFrom ?? value.effective_from ?? null,
+    effectiveTo: value.effectiveTo ?? value.effective_to ?? null,
+    role: value.role ?? 'member',
+    source: value.source ?? 'manual',
+  }
+}
+
+function scheduleGroupDepth(groupId: string): number {
+  let depth = 0
+  const seen = new Set<string>()
+  let current = scheduleGroupById.value.get(groupId)
+  while (current?.parentId && scheduleGroupById.value.has(current.parentId) && !seen.has(current.parentId)) {
+    seen.add(current.parentId)
+    depth += 1
+    current = scheduleGroupById.value.get(current.parentId)
+  }
+  return depth
+}
+
+function scheduleGroupTreeIndent(depth: number): string {
+  return depth > 0 ? `${'— '.repeat(Math.min(depth, 6))}` : ''
+}
+
+function scheduleGroupTreeLabel(group: AttendanceScheduleGroupAdminItem): string {
+  const prefix = scheduleGroupTreeIndent(scheduleGroupDepth(group.id))
+  return `${prefix}${group.name}`
+}
+
+function scheduleGroupParentName(group: AttendanceScheduleGroupAdminItem): string {
+  if (!group.parentId) return tr('Top level', '顶层')
+  return scheduleGroupById.value.get(group.parentId)?.name ?? group.parentId
+}
+
+function scheduleGroupAttendanceGroupName(groupId?: string | null): string {
+  if (!groupId) return '-'
+  return attendanceGroups.value.find(group => group.id === groupId)?.name ?? groupId
+}
+
+function scheduleGroupAssignmentCount(group: AttendanceScheduleGroupAdminItem): number {
+  return Number(group.shiftAssignmentCount ?? 0) + Number(group.rotationAssignmentCount ?? 0)
+}
+
+function scheduleGroupMemberRoleLabel(role?: string | null): string {
+  if (role === 'lead') return tr('Lead', '负责人')
+  if (role === 'backup') return tr('Backup', '备份')
+  return tr('Member', '成员')
+}
+
+function scheduleGroupMemberWindowLabel(member: AttendanceScheduleGroupMemberItem): string {
+  const from = member.effectiveFrom || tr('Any start', '不限开始')
+  const to = member.effectiveTo || tr('Any end', '不限结束')
+  return `${from} - ${to}`
+}
 
 const advancedSchedulingWorkbenchDiagnostics = computed(() =>
   advancedSchedulingWorkbench.value?.diagnostics ?? []
@@ -10196,6 +10588,10 @@ const approvalFlows = ref<AttendanceApprovalFlow[]>([])
 const rotationRules = ref<AttendanceRotationRule[]>([])
 const rotationAssignments = ref<AttendanceRotationAssignmentItem[]>([])
 const advancedSchedulingWorkbench = ref<AttendanceAdvancedSchedulingWorkbench | null>(null)
+const scheduleGroupAdminItems = ref<AttendanceScheduleGroupAdminItem[]>([])
+const scheduleGroupAdminTotal = ref(0)
+const scheduleGroupMembers = ref<AttendanceScheduleGroupMemberItem[]>([])
+const scheduleGroupMembersTotal = ref(0)
 const comprehensiveHoursPreview = ref<AttendanceComprehensiveHoursPreviewResult | null>(null)
 const ruleSets = ref<AttendanceRuleSet[]>([])
 const ruleTemplateSystemText = ref('[]')
@@ -10284,6 +10680,13 @@ const assignmentEditingPublishStatus = ref<AttendanceSchedulePublishStatus | nul
 const assignmentPublishStatusFilter = ref<AttendanceSchedulePublishStatusFilter>('all')
 const selectedDraftAssignmentIds = ref<string[]>([])
 const advancedSchedulingWorkbenchLoading = ref(false)
+const scheduleGroupAdminLoading = ref(false)
+const scheduleGroupSaving = ref(false)
+const scheduleGroupDeletingId = ref<string | null>(null)
+const scheduleGroupEditingId = ref<string | null>(null)
+const scheduleGroupMemberGroupId = ref('')
+const scheduleGroupMemberLoading = ref(false)
+const scheduleGroupMemberSaving = ref(false)
 const comprehensiveHoursPreviewLoading = ref(false)
 const comprehensiveHoursPreviewStatus = ref<{ kind: 'info' | 'warn' | 'error'; message: string }>({
   kind: 'info',
@@ -12326,6 +12729,23 @@ const attendanceGroupForm = reactive({
   ruleSetId: '',
   attendanceType: 'fixed_shift' as AttendanceGroupType,
   description: '',
+})
+
+const scheduleGroupForm = reactive({
+  name: '',
+  code: '',
+  parentId: '',
+  attendanceGroupId: '',
+  departmentRef: '',
+  description: '',
+  isActive: true,
+})
+
+const scheduleGroupMemberForm = reactive({
+  userIds: '',
+  role: 'member' as 'member' | 'lead' | 'backup',
+  effectiveFrom: '',
+  effectiveTo: '',
 })
 
 const payrollTemplateForm = reactive({
@@ -18700,6 +19120,283 @@ async function loadAdvancedSchedulingWorkbench() {
   }
 }
 
+function resetScheduleGroupForm() {
+  scheduleGroupEditingId.value = null
+  scheduleGroupForm.name = ''
+  scheduleGroupForm.code = ''
+  scheduleGroupForm.parentId = ''
+  scheduleGroupForm.attendanceGroupId = ''
+  scheduleGroupForm.departmentRef = ''
+  scheduleGroupForm.description = ''
+  scheduleGroupForm.isActive = true
+}
+
+function startCreateScheduleGroup() {
+  resetScheduleGroupForm()
+}
+
+function editScheduleGroup(item: AttendanceScheduleGroupAdminItem) {
+  scheduleGroupEditingId.value = item.id
+  scheduleGroupForm.name = item.name
+  scheduleGroupForm.code = item.code ?? ''
+  scheduleGroupForm.parentId = item.parentId ?? ''
+  scheduleGroupForm.attendanceGroupId = item.attendanceGroupId ?? ''
+  scheduleGroupForm.departmentRef = item.departmentRef ?? ''
+  scheduleGroupForm.description = item.description ?? ''
+  scheduleGroupForm.isActive = item.isActive !== false
+}
+
+async function loadScheduleGroupAdminCockpit() {
+  scheduleGroupAdminLoading.value = true
+  try {
+    const query = buildQuery({
+      orgId: normalizedOrgId(),
+      page: '1',
+      pageSize: '200',
+      includeInactive: 'true',
+    })
+    const response = await apiFetch(`/api/attendance/schedule-groups?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load schedule groups', '加载排班组失败')))
+    }
+    adminForbidden.value = false
+    const items = Array.isArray(data.data?.items)
+      ? data.data.items.map(normalizeScheduleGroupAdminItem).filter(Boolean) as AttendanceScheduleGroupAdminItem[]
+      : []
+    scheduleGroupAdminItems.value = items
+    scheduleGroupAdminTotal.value = Number(data.data?.total ?? items.length) || items.length
+    if (scheduleGroupMemberGroupId.value && !items.some(group => group.id === scheduleGroupMemberGroupId.value)) {
+      scheduleGroupMemberGroupId.value = ''
+      scheduleGroupMembers.value = []
+      scheduleGroupMembersTotal.value = 0
+    }
+    if (scheduleGroupEditingId.value) {
+      const edited = items.find(group => group.id === scheduleGroupEditingId.value)
+      if (edited) editScheduleGroup(edited)
+    }
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to load schedule groups', '加载排班组失败')), 'error')
+  } finally {
+    scheduleGroupAdminLoading.value = false
+  }
+}
+
+function buildScheduleGroupPayload(): Record<string, unknown> {
+  return {
+    name: scheduleGroupForm.name.trim(),
+    code: scheduleGroupForm.code.trim() || null,
+    description: scheduleGroupForm.description.trim() || null,
+    attendanceGroupId: scheduleGroupForm.attendanceGroupId || null,
+    parentId: scheduleGroupForm.parentId || null,
+    departmentRef: scheduleGroupForm.departmentRef.trim() || null,
+    isActive: scheduleGroupForm.isActive,
+  }
+}
+
+async function saveScheduleGroup() {
+  scheduleGroupSaving.value = true
+  try {
+    const payload = buildScheduleGroupPayload()
+    if (!String(payload.name || '').trim()) {
+      throw new Error(tr('Schedule group name is required', '排班组名称为必填项'))
+    }
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const suffix = query.toString()
+    const path = scheduleGroupEditingId.value
+      ? `/api/attendance/schedule-groups/${encodeURIComponent(scheduleGroupEditingId.value)}${suffix ? `?${suffix}` : ''}`
+      : `/api/attendance/schedule-groups${suffix ? `?${suffix}` : ''}`
+    const response = await apiFetch(path, {
+      method: scheduleGroupEditingId.value ? 'PUT' : 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to save schedule group', '保存排班组失败')))
+    }
+    adminForbidden.value = false
+    const saved = normalizeScheduleGroupAdminItem(data.data)
+    await loadAdvancedSchedulingWorkbench()
+    await loadScheduleGroupAdminCockpit()
+    if (saved?.id) {
+      const fresh = scheduleGroupAdminItems.value.find(group => group.id === saved.id) ?? saved
+      editScheduleGroup(fresh)
+    }
+    setStatus(tr('Schedule group saved.', '排班组已保存。'))
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to save schedule group', '保存排班组失败')), 'error')
+  } finally {
+    scheduleGroupSaving.value = false
+  }
+}
+
+async function deactivateScheduleGroup(item: AttendanceScheduleGroupAdminItem) {
+  if (!window.confirm(tr('Deactivate this schedule group?', '确认停用该排班组吗？'))) return
+  scheduleGroupDeletingId.value = item.id
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const suffix = query.toString()
+    const response = await apiFetch(`/api/attendance/schedule-groups/${encodeURIComponent(item.id)}${suffix ? `?${suffix}` : ''}`, {
+      method: 'DELETE',
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to deactivate schedule group', '停用排班组失败')))
+    }
+    adminForbidden.value = false
+    await loadAdvancedSchedulingWorkbench()
+    await loadScheduleGroupAdminCockpit()
+    if (scheduleGroupEditingId.value === item.id) resetScheduleGroupForm()
+    if (scheduleGroupMemberGroupId.value === item.id) {
+      scheduleGroupMemberGroupId.value = ''
+      scheduleGroupMembers.value = []
+      scheduleGroupMembersTotal.value = 0
+    }
+    setStatus(tr('Schedule group deactivated.', '排班组已停用。'))
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to deactivate schedule group', '停用排班组失败')), 'error')
+  } finally {
+    scheduleGroupDeletingId.value = null
+  }
+}
+
+function resetScheduleGroupMemberForm() {
+  scheduleGroupMemberForm.userIds = ''
+  scheduleGroupMemberForm.role = 'member'
+  scheduleGroupMemberForm.effectiveFrom = ''
+  scheduleGroupMemberForm.effectiveTo = ''
+}
+
+async function openScheduleGroupMembers(item: AttendanceScheduleGroupAdminItem) {
+  scheduleGroupMemberGroupId.value = item.id
+  resetScheduleGroupMemberForm()
+  await loadScheduleGroupMembers()
+}
+
+async function loadScheduleGroupMembers() {
+  const groupId = scheduleGroupMemberGroupId.value
+  if (!groupId) {
+    scheduleGroupMembers.value = []
+    scheduleGroupMembersTotal.value = 0
+    return
+  }
+  scheduleGroupMemberLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId(), page: '1', pageSize: '200' })
+    const response = await apiFetch(`/api/attendance/schedule-groups/${encodeURIComponent(groupId)}/members?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load schedule group members', '加载排班组成员失败')))
+    }
+    adminForbidden.value = false
+    const items = Array.isArray(data.data?.items)
+      ? data.data.items.map(normalizeScheduleGroupMemberItem).filter(Boolean) as AttendanceScheduleGroupMemberItem[]
+      : []
+    scheduleGroupMembers.value = items
+    scheduleGroupMembersTotal.value = Number(data.data?.total ?? items.length) || items.length
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to load schedule group members', '加载排班组成员失败')), 'error')
+  } finally {
+    scheduleGroupMemberLoading.value = false
+  }
+}
+
+function buildScheduleGroupMemberPayload(): Record<string, unknown> {
+  return {
+    userIds: parseUserIdList(scheduleGroupMemberForm.userIds),
+    role: scheduleGroupMemberForm.role,
+    effectiveFrom: scheduleGroupMemberForm.effectiveFrom || null,
+    effectiveTo: scheduleGroupMemberForm.effectiveTo || null,
+    source: 'manual',
+  }
+}
+
+async function addScheduleGroupMembers() {
+  const groupId = scheduleGroupMemberGroupId.value
+  if (!groupId) {
+    setStatus(tr('Select a schedule group first.', '请先选择排班组。'), 'error')
+    return
+  }
+  const payload = buildScheduleGroupMemberPayload()
+  if (!Array.isArray(payload.userIds) || payload.userIds.length === 0) {
+    setStatus(tr('Enter at least one user ID.', '请至少输入一个员工 ID。'), 'error')
+    return
+  }
+  scheduleGroupMemberSaving.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const suffix = query.toString()
+    const response = await apiFetch(`/api/attendance/schedule-groups/${encodeURIComponent(groupId)}/members${suffix ? `?${suffix}` : ''}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to add schedule group members', '添加排班组成员失败')))
+    }
+    adminForbidden.value = false
+    resetScheduleGroupMemberForm()
+    await loadScheduleGroupMembers()
+    await loadAdvancedSchedulingWorkbench()
+    await loadScheduleGroupAdminCockpit()
+    setStatus(tr('Schedule group members added.', '排班组成员已添加。'))
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to add schedule group members', '添加排班组成员失败')), 'error')
+  } finally {
+    scheduleGroupMemberSaving.value = false
+  }
+}
+
+async function removeScheduleGroupMember(member: AttendanceScheduleGroupMemberItem) {
+  const groupId = scheduleGroupMemberGroupId.value
+  if (!groupId || !member.id) return
+  scheduleGroupMemberSaving.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const suffix = query.toString()
+    const response = await apiFetch(`/api/attendance/schedule-groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(member.id)}${suffix ? `?${suffix}` : ''}`, {
+      method: 'DELETE',
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to remove schedule group member', '移除排班组成员失败')))
+    }
+    adminForbidden.value = false
+    await loadScheduleGroupMembers()
+    await loadAdvancedSchedulingWorkbench()
+    await loadScheduleGroupAdminCockpit()
+    setStatus(tr('Schedule group member removed.', '排班组成员已移除。'))
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to remove schedule group member', '移除排班组成员失败')), 'error')
+  } finally {
+    scheduleGroupMemberSaving.value = false
+  }
+}
+
 async function previewComprehensiveHours() {
   const userIds = comprehensiveHoursUserIds()
   if (userIds.length === 0) {
@@ -21467,6 +22164,7 @@ async function loadAdminData() {
       loadOvertimeRules(),
       loadApprovalFlows(),
       loadAdvancedSchedulingWorkbench(),
+      loadScheduleGroupAdminCockpit(),
       loadRotationRules(),
       loadShifts(),
       loadAssignments(),
