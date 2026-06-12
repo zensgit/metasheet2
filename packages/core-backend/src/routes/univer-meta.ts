@@ -2135,20 +2135,23 @@ async function applyLookupRollup(
     foreignRecordsBySheet.set(foreignSheetId, recordMap)
   }
 
-  const resolveLookupValues = (record: UniverMetaRecord, cfg: LookupFieldConfig | RollupFieldConfig): unknown[] => {
+  const resolveLookupValues = (
+    record: UniverMetaRecord,
+    cfg: LookupFieldConfig | RollupFieldConfig,
+  ): { values: unknown[]; masked: boolean } => {
     const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
-    if (!foreignSheetId) return []
-    if (!readableForeignSheetIds.has(foreignSheetId)) return []
+    if (!foreignSheetId) return { values: [], masked: false }
+    if (!readableForeignSheetIds.has(foreignSheetId)) return { values: [], masked: true }
     // §2a.3: fail-closed foreign-FIELD mask — if the actor can't read the foreign target field,
     // mask it (cross-base unconditional / same-base default unless opt-out). Same gate for
     // lookup AND rollup (both read data[targetFieldId]).
     if (shouldMaskForeignField(foreignFieldReadability, foreignSheetId, cfg.targetFieldId, cfg.skipForeignFieldMasking)) {
-      return []
+      return { values: [], masked: true }
     }
     const linkIds = getLinkIds(record, cfg.linkFieldId)
-    if (linkIds.length === 0) return []
+    if (linkIds.length === 0) return { values: [], masked: false }
     const foreignMap = foreignRecordsBySheet.get(foreignSheetId)
-    if (!foreignMap) return []
+    if (!foreignMap) return { values: [], masked: true }
     const values: unknown[] = []
     for (const id of linkIds) {
       const data = foreignMap.get(id)
@@ -2157,7 +2160,7 @@ async function applyLookupRollup(
       if (value === null || value === undefined) continue
       values.push(value)
     }
-    return values
+    return { values, masked: false }
   }
 
   const aggregateRollup = (values: unknown[], aggregation: RollupAggregation): number | null => {
@@ -2179,7 +2182,7 @@ async function applyLookupRollup(
         row.data[fieldId] = []
         continue
       }
-      row.data[fieldId] = resolveLookupValues(row, cfg)
+      row.data[fieldId] = resolveLookupValues(row, cfg).values
     }
 
     for (const [fieldId, cfg] of rollupConfigs.entries()) {
@@ -2187,8 +2190,8 @@ async function applyLookupRollup(
         row.data[fieldId] = null
         continue
       }
-      const values = resolveLookupValues(row, cfg)
-      row.data[fieldId] = aggregateRollup(values, cfg.aggregation)
+      const { values, masked } = resolveLookupValues(row, cfg)
+      row.data[fieldId] = masked ? null : aggregateRollup(values, cfg.aggregation)
     }
   }
 }

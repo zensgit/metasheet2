@@ -49,6 +49,8 @@ const FLD_LU_X = `fld_ffm_lux_${TS}` // lookup over cross-base denied target
 const FLD_LU_S_DEFAULT = `fld_ffm_lusd_${TS}` // lookup over same-base denied target (default → mask)
 const FLD_LU_S_OPTOUT = `fld_ffm_luso_${TS}` // lookup over same-base denied target WITH opt-out
 const FLD_LU_OK = `fld_ffm_luok_${TS}` // lookup over readable same-base target (must stay present)
+const FLD_ROLL_X_COUNT = `fld_ffm_rxc_${TS}` // count rollup over cross-base denied target
+const FLD_ROLL_OK_COUNT = `fld_ffm_rok_${TS}` // count rollup over readable same-base target
 
 const REC_FX = `rec_ffm_fx_${TS}` // cross-base foreign record (XTARGET = 7)
 const REC_FS = `rec_ffm_fs_${TS}` // same-base foreign record (STARGET = 11, SOK = 13)
@@ -113,6 +115,12 @@ describeIfDatabase('multitable lookup foreign-field mask — read/JSON (GA-T2a, 
     // same-base lookup over a READABLE target → value present (no regression)
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_LU_OK, MS, 'LookupOk', 'lookup', JSON.stringify({ linkFieldId: FLD_LINK_S, targetFieldId: FLD_SOK, foreignSheetId: FS_S }), 6])
+    // count rollup over a denied target must not emit a concrete 0: null means masked/no visible value.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_ROLL_X_COUNT, MS, 'RollupXCount', 'rollup', JSON.stringify({ linkFieldId: FLD_LINK_X, targetFieldId: FLD_XTARGET, foreignSheetId: FS_X, aggregation: 'count' }), 7])
+    // count rollup over a readable target remains a concrete count.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_ROLL_OK_COUNT, MS, 'RollupOkCount', 'rollup', JSON.stringify({ linkFieldId: FLD_LINK_S, targetFieldId: FLD_SOK, foreignSheetId: FS_S, aggregation: 'count' }), 8])
 
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
       [REC_M, MS, JSON.stringify({ [FLD_LINK_X]: [REC_FX], [FLD_LINK_S]: [REC_FS] })])
@@ -168,5 +176,15 @@ describeIfDatabase('multitable lookup foreign-field mask — read/JSON (GA-T2a, 
   test('lookup of a READABLE foreign field is unaffected (no regression)', async () => {
     const data = await readRowData()
     expect(data[FLD_LU_OK]).toEqual([13])
+  })
+
+  test('count rollup over a DENIED foreign field is masked as null, not a concrete zero', async () => {
+    const data = await readRowData()
+    expect(data[FLD_ROLL_X_COUNT]).toBeNull()
+  })
+
+  test('count rollup over a READABLE foreign field still returns a concrete count', async () => {
+    const data = await readRowData()
+    expect(data[FLD_ROLL_OK_COUNT]).toBe(1)
   })
 })
