@@ -2281,6 +2281,8 @@ async function applyLookupRollup(
   ): { values: unknown[]; masked: boolean } => {
     const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
     if (!foreignSheetId) return { values: [], masked: false }
+    const linkIds = getLinkIds(record, cfg.linkFieldId)
+    if (linkIds.length === 0) return { values: [], masked: false }
     if (!readableForeignSheetIds.has(foreignSheetId)) return { values: [], masked: true }
     // §2a.3: fail-closed foreign-FIELD mask — if the actor can't read the foreign target field,
     // mask it (cross-base unconditional / same-base default unless opt-out). Same gate for
@@ -2288,8 +2290,6 @@ async function applyLookupRollup(
     if (shouldMaskForeignField(foreignFieldReadability, foreignSheetId, cfg.targetFieldId, cfg.skipForeignFieldMasking)) {
       return { values: [], masked: true }
     }
-    const linkIds = getLinkIds(record, cfg.linkFieldId)
-    if (linkIds.length === 0) return { values: [], masked: false }
     const foreignMap = foreignRecordsBySheet.get(foreignSheetId)
     if (!foreignMap) return { values: [], masked: true }
     const values: unknown[] = []

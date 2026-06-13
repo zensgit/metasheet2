@@ -70,11 +70,13 @@ const readRowData = async (): Promise<Record<string, unknown>> => {
 }
 
 const readEmptyRowData = async (): Promise<Record<string, unknown>> => {
-  const res = await request(app).get('/api/multitable/view').query({ sheetId: MS })
+  // Read only the empty-link row so another row in the same response cannot prime the foreign-sheet
+  // readability set. A readable count rollup with no links must still be a concrete 0.
+  const res = await request(app).get(`/api/multitable/records/${REC_M_EMPTY}`).query({ sheetId: MS })
   expect(res.status).toBe(200)
-  const rows = res.body?.data?.rows as Array<{ id: string; data: Record<string, unknown> }>
-  const row = rows.find((r) => r.id === REC_M_EMPTY)
+  const row = res.body?.data?.record as { id: string; data: Record<string, unknown> } | undefined
   expect(row).toBeDefined()
+  expect(row!.id).toBe(REC_M_EMPTY)
   return row!.data
 }
 
