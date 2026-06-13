@@ -7,6 +7,7 @@ import type { Request, Response } from 'express';
 import { Router } from 'express'
 import { WorkflowDesigner, type WorkflowDefinition } from '../workflow/WorkflowDesigner'
 import { BPMNWorkflowEngine } from '../workflow/BPMNWorkflowEngine'
+import { compileBpmnPreview } from '../workflow/bpmnCompilePreview'
 import {
   appendWorkflowDraftExecution,
   canDeployWorkflowDraft,
@@ -600,6 +601,7 @@ router.post(
               : [],
             bpmnXml: workflowDefinition.bpmnXml,
             createdBy: userId,
+            sourceMode: 'bpmn_xml',
           })
         : await (async () => {
             const visualDefinition = workflowDefinition as unknown as WorkflowDefinition
@@ -830,6 +832,7 @@ router.put(
           bpmnXml: updates.bpmnXml,
           createdBy: workflow.createdBy,
           status: workflow.status,
+          sourceMode: 'bpmn_xml',
         })
       } else {
         const currentDefinition = await designer.loadWorkflow(id)
@@ -922,6 +925,7 @@ router.post(
         shares: [],
         executions: [],
         visual: workflow.visual,
+        sourceMode: workflow.sourceMode,
       })
 
       await recordWorkflowAnalytics({
@@ -1119,6 +1123,85 @@ router.post(
       })
     }
   }
+)
+
+/**
+ * POST /api/workflow-designer/workflows/:id/compile-preview
+ * Compile a side-effect-free BPMN/visual preview from the saved draft
+ */
+router.post(
+  '/workflows/:id/compile-preview',
+  authenticate,
+  param('id').isString(),
+  validate,
+  async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params
+      const userId = req.user?.id?.toString()
+
+      const workflow = await designer.loadWorkflowDraft(id)
+      if (!workflow) {
+        return res.status(404).json({
+          success: false,
+          error: 'Workflow not found',
+        })
+      }
+
+      if (!hasWorkflowDraftAccess(workflow, userId)) {
+        return res.status(403).json({
+          success: false,
+          error: 'Access denied',
+        })
+      }
+
+      if (workflow.bpmnXml && workflow.sourceMode === 'bpmn_xml') {
+        return res.json({
+          success: true,
+          data: compileBpmnPreview({
+            mode: 'bpmn_xml',
+            workflowId: workflow.id,
+            sourceVersion: workflow.version,
+            bpmnXml: workflow.bpmnXml,
+          }),
+        })
+      }
+
+      if (workflow.visual) {
+        return res.json({
+          success: true,
+          data: compileBpmnPreview({
+            mode: 'visual',
+            workflowId: workflow.id,
+            sourceVersion: workflow.version,
+            visual: workflow.visual,
+          }),
+        })
+      }
+
+      if (workflow.bpmnXml) {
+        return res.json({
+          success: true,
+          data: compileBpmnPreview({
+            mode: 'bpmn_xml',
+            workflowId: workflow.id,
+            sourceVersion: workflow.version,
+            bpmnXml: workflow.bpmnXml,
+          }),
+        })
+      }
+
+      return res.status(400).json({
+        success: false,
+        error: 'Workflow draft has no visual definition or BPMN XML to preview',
+      })
+    } catch (error: unknown) {
+      logger.error('Failed to compile workflow preview:', error as Error)
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to compile workflow preview',
+      })
+    }
+  },
 )
 
 /**

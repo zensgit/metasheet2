@@ -124,6 +124,23 @@ export interface BpmnWorkflowDraftInput {
   shares?: WorkflowDraftRecord['shares']
   executions?: WorkflowDraftRecord['executions']
   visual?: WorkflowDefinition | null
+  sourceMode?: 'visual' | 'bpmn_xml'
+}
+
+function normalizeBpmnForSourceModeCompare(value: string): string {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
+function inferWorkflowDraftSourceMode(
+  visual: WorkflowDefinition | null | undefined,
+  bpmnXml: string | undefined,
+  convertVisualToBpmn: (visual: WorkflowDefinition) => string,
+): 'visual' | 'bpmn_xml' | undefined {
+  if (!bpmnXml) return visual ? 'visual' : undefined
+  if (!visual) return 'bpmn_xml'
+  return normalizeBpmnForSourceModeCompare(bpmnXml) === normalizeBpmnForSourceModeCompare(convertVisualToBpmn(visual))
+    ? 'visual'
+    : 'bpmn_xml'
 }
 
 export class WorkflowDesigner extends EventEmitter {
@@ -430,6 +447,7 @@ export class WorkflowDesigner extends EventEmitter {
         tags: definition.tags || existing?.tags || [],
         shares: existing?.shares || [],
         executions: existing?.executions || [],
+        sourceMode: 'visual',
       })
 
       // Save to database using workflow_definitions table
@@ -503,8 +521,12 @@ export class WorkflowDesigner extends EventEmitter {
       }
 
       const record = toWorkflowDraftRecord(workflow)
+      if (!record.sourceMode) {
+        record.sourceMode = inferWorkflowDraftSourceMode(record.visual, record.bpmnXml, (visual) => this.convertToBPMN(visual))
+      }
       if (!record.bpmnXml && record.visual) {
         record.bpmnXml = this.convertToBPMN(record.visual)
+        record.sourceMode = record.sourceMode ?? 'visual'
       }
       return record
     } catch (error) {
@@ -526,6 +548,7 @@ export class WorkflowDesigner extends EventEmitter {
         tags: input.tags || existing?.tags || [],
         shares: input.shares || existing?.shares || [],
         executions: input.executions || existing?.executions || [],
+        sourceMode: input.sourceMode ?? existing?.sourceMode ?? (input.visual ? 'visual' : 'bpmn_xml'),
       })
 
       await db
