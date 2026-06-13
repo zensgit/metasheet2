@@ -129,7 +129,7 @@ operate a practical business workflow using existing product surfaces:
 | W9 | Public webhook resume token emitter | Not started; use-case gated | External consumer can receive a token/callback URL safely; auth, expiry, replay, and redaction are locked before public route. |
 | W10 | Field-visibility / richer approval authoring | Optional follow-up | Existing `visibilityRule` data can be authored, not only preserved; unsupported graph constructs remain fail-closed. |
 
-## 4. Recommended Next Slice
+## 4. Recommended Next Slice After Explicit Unlock
 
 W6 **automation `start_approval`** landed after the dedicated W6-0 scope-gate:
 `docs/development/automation-start-approval-scope-gate-20260610.md`.
@@ -143,10 +143,12 @@ Why:
    start an approval through `start_approval`, and W5-1 gives it a stable
    terminal completion signal.
 
-The next lowest-risk technical slice is **W8/A6-4a BPMN compile-preview pure
-compiler**: it advances the Workflow Designer layer without writing business
-data, adding a route, or starting a live BPMN runtime. It is still gated by the
-A6-4 re-entry phrase; when unlocked, the first PR should follow
+If the owner explicitly unlocks the Workflow Designer/BPMN line, the next
+lowest-risk technical slice is **W8/A6-4a BPMN compile-preview pure compiler**:
+it advances the Workflow Designer layer without writing business data, adding a
+route, or starting a live BPMN runtime. This is **not** automatically unlocked
+by "continue automation" or by the W6 runbook work. It still requires the A6-4
+re-entry phrase; once unlocked, the first PR should follow
 `multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`
 and add only `bpmnCompilePreview` + unit tests.
 
