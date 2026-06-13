@@ -44,11 +44,13 @@ const FUTURE_CROSS = `sheet_toctou_future_cross_${TS}` // will be created in BAS
 const FUTURE_SAME = `sheet_toctou_future_same_${TS}` // will be created in BASE_A → same-base
 const FUTURE_NULL = `sheet_toctou_future_null_${TS}` // created with null base → cross-base vs set-base source
 const FUTURE_ALIAS = `sheet_toctou_future_alias_${TS}` // referenced via the datasheetId alias
+const FUTURE_SEED_SAME = `sheet_toctou_future_seed_same_${TS}` // POST /sheets + seed:true, SAME base as source
 
 const FLD_CROSS = `fld_toctou_cross_${TS}`
 const FLD_SAME = `fld_toctou_same_${TS}`
 const FLD_NULL = `fld_toctou_null_${TS}`
 const FLD_ALIAS = `fld_toctou_alias_${TS}`
+const FLD_SEED_SAME = `fld_toctou_seed_same_${TS}`
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
@@ -91,11 +93,16 @@ describeIfDatabase('②a wall — sheet-create TOCTOU close (§2a.4-c, real DB)'
       [FLD_NULL, SHEET_A, 'Link Future Null', 'link', JSON.stringify({ foreignSheetId: FUTURE_NULL }), 3])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_ALIAS, SHEET_A, 'Link Future Alias', 'link', JSON.stringify({ datasheetId: FUTURE_ALIAS }), 4])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_SEED_SAME, SHEET_A, 'Link Future Seed Same', 'link', JSON.stringify({ foreignSheetId: FUTURE_SEED_SAME }), 5])
   })
 
   afterAll(async () => {
-    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET_A]).catch(() => {})
-    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[SHEET_A, FUTURE_CROSS, FUTURE_SAME, FUTURE_NULL, FUTURE_ALIAS]]).catch(() => {})
+    const allSheets = [SHEET_A, FUTURE_CROSS, FUTURE_SAME, FUTURE_NULL, FUTURE_ALIAS, FUTURE_SEED_SAME]
+    await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [allSheets]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [allSheets]).catch(() => {})
+    await q('DELETE FROM meta_views WHERE sheet_id = ANY($1::text[])', [allSheets]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [allSheets]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE_A, BASE_B]]).catch(() => {})
   })
 
@@ -158,5 +165,28 @@ describeIfDatabase('②a wall — sheet-create TOCTOU close (§2a.4-c, real DB)'
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(true)
     expect(await sheetExists(FUTURE_SAME)).toBe(true)
+  })
+
+  // §2a.4-c (centralized-chokepoint no-false-positive): POST /sheets with seed:true SAME base. The route
+  // inserts the sheet at BASE_A (caller-chosen) BEFORE calling createSeededSheet within the same txn, so
+  // the centralized guard's existence check sees the row → isGenuinelyNew=false → it skips (it must NOT
+  // re-reject against the LEGACY base, which would false-positive this legit caller-chosen-base seed).
+  // This is the only test that turns RED if the chokepoint gate regresses to running against base_legacy.
+  test('TOCTOU compat (seed:true SAME base): POST /sheets + seed does NOT false-positive — 200, created at the caller base', async () => {
+    const res = await request(buildApp(USER)).post('/api/multitable/sheets').send({
+      id: FUTURE_SEED_SAME,
+      baseId: BASE_A,
+      name: 'Same Base Seed Target',
+      seed: true,
+    })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(res.body.data.sheet.seeded).toBe(true)
+    // Created at the caller-chosen BASE_A (route insert), NOT rejected and NOT relocated to the legacy base.
+    const r = await q('SELECT base_id FROM meta_sheets WHERE id = $1', [FUTURE_SEED_SAME])
+    const rows = r.rows as Array<{ base_id: string | null }>
+    expect(rows).toHaveLength(1)
+    expect(rows[0].base_id).toBe(BASE_A)
   })
 })
