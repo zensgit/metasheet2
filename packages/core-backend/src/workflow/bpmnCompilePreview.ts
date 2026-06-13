@@ -113,6 +113,22 @@ const SERVICE_ACTION_TYPES = new Set<AutomationActionType>([
   'start_approval',
 ])
 
+const CONDITION_BRANCH_PATH_ACTION_TYPES = new Set<AutomationActionType>([
+  'update_record',
+  'create_record',
+  'send_webhook',
+  'send_notification',
+  'send_email',
+  'send_dingtalk_group_message',
+  'send_dingtalk_person_message',
+  'lock_record',
+])
+
+const PARALLEL_BRANCH_PATH_ACTION_TYPES = new Set<AutomationActionType>([
+  'update_record',
+  'send_notification',
+])
+
 export function compileBpmnPreview(input: BpmnCompilePreviewInput): BpmnCompilePreview {
   const source = buildSource(input)
   const normalized = input.mode === 'visual'
@@ -158,7 +174,7 @@ export function compileBpmnPreview(input: BpmnCompilePreviewInput): BpmnCompileP
 
   for (const node of sortedNodes(normalized.nodes)) {
     if (state.consumedNodes.has(node.id)) continue
-    compileStandaloneNode(node, state)
+    compileStandaloneNode(node, graph, state)
   }
 
   return finalizePreview({
@@ -373,7 +389,7 @@ function buildGraph(definition: NormalizedDefinition): Graph {
   return { nodes, outgoing, incoming }
 }
 
-function compileStandaloneNode(node: NormalizedNode, state: CompileState): void {
+function compileStandaloneNode(node: NormalizedNode, graph: Graph, state: CompileState): void {
   if (STRUCTURAL_NODE_TYPES.has(node.type)) {
     addMapping(state, node, 'structural', node.type)
     state.consumedNodes.add(node.id)
@@ -407,10 +423,12 @@ function compileStandaloneNode(node: NormalizedNode, state: CompileState): void 
   }
   if (UNSUPPORTED_NODE_TYPES.has(node.type)) {
     addGap(state, node, `Unsupported BPMN element${node.name ? `: ${node.name}` : ''}`, 'unsupported')
+    if (isGatewayNodeType(node.type)) consumeGatewaySubgraph(node, graph, state)
     return
   }
   if (node.type === 'exclusiveGateway' || node.type === 'parallelGateway') {
     addGap(state, node, `${node.type} is not representable by the A6-4a conservative mapping`, 'unsupported')
+    consumeGatewaySubgraph(node, graph, state)
     return
   }
   addGap(state, node, `Unsupported BPMN element type: ${node.type}`, 'unsupported')
@@ -423,7 +441,7 @@ function compileExclusiveGateway(node: NormalizedNode, graph: Graph, state: Comp
   const defaultEdge = findDefaultEdge(node, outgoing)
   if (!defaultEdge) {
     addGap(state, node, 'Exclusive gateway requires one default path to map to condition_branch', 'unsupported')
-    state.consumedNodes.add(node.id)
+    consumeGatewaySubgraph(node, graph, state)
     return
   }
 
@@ -441,13 +459,13 @@ function compileExclusiveGateway(node: NormalizedNode, graph: Graph, state: Comp
     const condition = conditionGroupFromEdge(edge)
     if (!condition) {
       addGap(state, node, `Exclusive gateway path ${edge.id} has no representable condition`, 'unsupported')
-      state.consumedNodes.add(node.id)
+      consumeGatewaySubgraph(node, graph, state)
       return
     }
-    const path = compileLinearAutomationPath(edge.target, null, graph)
+    const path = compileLinearAutomationPath(edge.target, null, graph, CONDITION_BRANCH_PATH_ACTION_TYPES)
     if (path.ok === false) {
       addGap(state, node, `Exclusive gateway path ${edge.id} is not representable: ${path.reason}`, path.requiredRung)
-      state.consumedNodes.add(node.id)
+      consumeGatewaySubgraph(node, graph, state)
       return
     }
     path.consumedNodeIds.forEach((id) => consumedInGateway.add(id))
@@ -460,10 +478,10 @@ function compileExclusiveGateway(node: NormalizedNode, graph: Graph, state: Comp
     })
   }
 
-  const defaultPath = compileLinearAutomationPath(defaultEdge.target, null, graph)
+  const defaultPath = compileLinearAutomationPath(defaultEdge.target, null, graph, CONDITION_BRANCH_PATH_ACTION_TYPES)
   if (defaultPath.ok === false) {
     addGap(state, node, `Exclusive gateway default path is not representable: ${defaultPath.reason}`, defaultPath.requiredRung)
-    state.consumedNodes.add(node.id)
+    consumeGatewaySubgraph(node, graph, state)
     return
   }
   defaultPath.consumedNodeIds.forEach((id) => consumedInGateway.add(id))
@@ -499,14 +517,14 @@ function compileParallelGateway(node: NormalizedNode, graph: Graph, state: Compi
     const path = compilePathToParallelJoin(edge.target, graph)
     if (path.ok === false) {
       addGap(state, node, `Parallel gateway branch ${edge.id} is not representable: ${path.reason}`, path.requiredRung)
-      state.consumedNodes.add(node.id)
+      consumeGatewaySubgraph(node, graph, state)
       return
     }
     if (!joinId) {
       joinId = path.joinId
     } else if (joinId !== path.joinId) {
       addGap(state, node, 'Parallel gateway branches do not converge on the same join', 'unsupported')
-      state.consumedNodes.add(node.id)
+      consumeGatewaySubgraph(node, graph, state)
       return
     }
     path.consumedNodeIds.forEach((id) => consumedInGateway.add(id))
@@ -520,7 +538,7 @@ function compileParallelGateway(node: NormalizedNode, graph: Graph, state: Compi
 
   if (!joinId || branches.length < 2) {
     addGap(state, node, 'Parallel gateway requires at least two branches and a matching join', 'unsupported')
-    state.consumedNodes.add(node.id)
+    consumeGatewaySubgraph(node, graph, state)
     return
   }
 
@@ -541,10 +559,25 @@ function compileParallelGateway(node: NormalizedNode, graph: Graph, state: Compi
   for (const id of consumedInGateway) state.consumedNodes.add(id)
 }
 
+function consumeGatewaySubgraph(node: NormalizedNode, graph: Graph, state: CompileState): void {
+  const stack = [node.id]
+  const seen = new Set<string>()
+  while (stack.length > 0) {
+    const currentId = stack.pop()
+    if (!currentId || seen.has(currentId)) continue
+    seen.add(currentId)
+    state.consumedNodes.add(currentId)
+    for (const edge of graph.outgoing.get(currentId) ?? []) {
+      stack.push(edge.target)
+    }
+  }
+}
+
 function compileLinearAutomationPath(
   startNodeId: string,
   stopNodeId: string | null,
   graph: Graph,
+  allowedActionTypes: Set<AutomationActionType>,
 ): { ok: true; actions: AutomationAction[]; consumedNodeIds: string[] } | { ok: false; reason: string; requiredRung: BpmnCompilePreviewGap['requiredRung'] } {
   const actions: AutomationAction[] = []
   const consumedNodeIds: string[] = []
@@ -572,6 +605,9 @@ function compileLinearAutomationPath(
 
     const action = automationActionFromServiceTask(node)
     if (!action) return { ok: false, reason: `service task ${node.id} has no supported action config`, requiredRung: 'unsupported' }
+    if (!allowedActionTypes.has(action.type)) {
+      return { ok: false, reason: `service task ${node.id} action ${action.type} is not supported in this branch context`, requiredRung: 'unsupported' }
+    }
     actions.push(action)
     consumedNodeIds.push(node.id)
 
@@ -602,6 +638,7 @@ function compilePathToParallelJoin(
     if (node.type === 'parallelGateway') {
       const incoming = graph.incoming.get(node.id) ?? []
       if (incoming.length < 2) return { ok: false, reason: `parallel gateway ${node.id} is not a join`, requiredRung: 'unsupported' }
+      if (actions.length === 0) return { ok: false, reason: 'parallel branch must contain at least one action', requiredRung: 'unsupported' }
       return { ok: true, joinId: node.id, actions, consumedNodeIds }
     }
     if (node.type !== 'serviceTask') {
@@ -613,6 +650,9 @@ function compilePathToParallelJoin(
     }
     const action = automationActionFromServiceTask(node)
     if (!action) return { ok: false, reason: `service task ${node.id} has no supported action config`, requiredRung: 'unsupported' }
+    if (!PARALLEL_BRANCH_PATH_ACTION_TYPES.has(action.type)) {
+      return { ok: false, reason: `service task ${node.id} action ${action.type} is not supported in parallel_branch`, requiredRung: 'unsupported' }
+    }
     actions.push(action)
     consumedNodeIds.push(node.id)
 
@@ -622,6 +662,13 @@ function compilePathToParallelJoin(
   }
 
   return { ok: false, reason: 'branch did not reach a parallel join', requiredRung: 'unsupported' }
+}
+
+function isGatewayNodeType(type: string): boolean {
+  return type === 'exclusiveGateway'
+    || type === 'parallelGateway'
+    || type === 'inclusiveGateway'
+    || type === 'eventBasedGateway'
 }
 
 function automationActionFromServiceTask(node: NormalizedNode): AutomationAction | null {

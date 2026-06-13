@@ -132,6 +132,32 @@ describe('compileBpmnPreview — A6-4a pure compiler', () => {
     ])
   })
 
+  it('keeps branch-local wait/start primitives out of condition_branch preview until A6-3-3', () => {
+    const result = previewFor(workflow([
+      node('gw_decide', 'exclusiveGateway'),
+      node('task_wait', 'serviceTask', action('wait_for_callback', { callbackKey: 'callback-1' })),
+      node('task_default', 'serviceTask', action('update_record', { fields: { status: 'fallback' } })),
+      node('end_wait', 'endEvent'),
+      node('end_default', 'endEvent'),
+    ], [
+      edge('flow_wait', 'gw_decide', 'task_wait', { condition: 'needsCallback == true' }),
+      edge('flow_default', 'gw_decide', 'task_default', { type: 'default' }),
+      edge('flow_wait_end', 'task_wait', 'end_wait'),
+      edge('flow_default_end', 'task_default', 'end_default'),
+    ]))
+
+    expect(result.supported).toBe(false)
+    expect(result.automationPreview?.actions).toEqual([])
+    expect(result.gapReport).toEqual([
+      {
+        bpmnElementId: 'gw_decide',
+        bpmnElementType: 'exclusiveGateway',
+        reason: 'Exclusive gateway path flow_wait is not representable: service task task_wait action wait_for_callback is not supported in this branch context',
+        requiredRung: 'unsupported',
+      },
+    ])
+  })
+
   it('maps visual parallel split/join to parallel_branch join-all', () => {
     const visual = workflow([
       node('gw_split', 'parallelGateway'),
@@ -180,6 +206,54 @@ describe('compileBpmnPreview — A6-4a pure compiler', () => {
     })
   })
 
+  it('keeps parallel_branch preview aligned with the landed A6-3-4 branch action set', () => {
+    const result = previewFor(workflow([
+      node('gw_split', 'parallelGateway'),
+      node('task_webhook', 'serviceTask', action('send_webhook', { url: 'https://example.test/hook' })),
+      node('task_notify', 'serviceTask', action('send_notification', { userIds: ['u1'], message: 'ready' })),
+      node('gw_join', 'parallelGateway'),
+    ], [
+      edge('flow_webhook', 'gw_split', 'task_webhook'),
+      edge('flow_notify', 'gw_split', 'task_notify'),
+      edge('flow_webhook_join', 'task_webhook', 'gw_join'),
+      edge('flow_notify_join', 'task_notify', 'gw_join'),
+    ]))
+
+    expect(result.supported).toBe(false)
+    expect(result.automationPreview?.actions).toEqual([])
+    expect(result.gapReport).toEqual([
+      {
+        bpmnElementId: 'gw_split',
+        bpmnElementType: 'parallelGateway',
+        reason: 'Parallel gateway branch flow_webhook is not representable: service task task_webhook action send_webhook is not supported in parallel_branch',
+        requiredRung: 'unsupported',
+      },
+    ])
+  })
+
+  it('keeps empty visual parallel branches out of supported parallel_branch preview', () => {
+    const result = previewFor(workflow([
+      node('gw_split', 'parallelGateway'),
+      node('task_notify', 'serviceTask', action('send_notification', { userIds: ['u1'], message: 'ready' })),
+      node('gw_join', 'parallelGateway'),
+    ], [
+      edge('flow_empty', 'gw_split', 'gw_join'),
+      edge('flow_notify', 'gw_split', 'task_notify'),
+      edge('flow_notify_join', 'task_notify', 'gw_join'),
+    ]))
+
+    expect(result.supported).toBe(false)
+    expect(result.automationPreview?.actions).toEqual([])
+    expect(result.gapReport).toEqual([
+      {
+        bpmnElementId: 'gw_split',
+        bpmnElementType: 'parallelGateway',
+        reason: 'Parallel gateway branch flow_empty is not representable: parallel branch must contain at least one action',
+        requiredRung: 'unsupported',
+      },
+    ])
+  })
+
   it('reports gaps for unmatched or ambiguous parallel gateways', () => {
     const result = previewFor(workflow([
       node('gw_split', 'parallelGateway'),
@@ -222,6 +296,28 @@ describe('compileBpmnPreview — A6-4a pure compiler', () => {
       ['sub', 'subProcess', 'unsupported'],
     ])
     expect(result.gapReport.find((gap) => gap.bpmnElementId === 'script_secret')?.reason).toContain('Bearer <redacted>')
+  })
+
+  it('does not leak unsupported gateway downstream service tasks into top-level preview actions', () => {
+    const result = previewFor(workflow([
+      node('inclusive', 'inclusiveGateway' as WorkflowNode['type']),
+      node('task_after', 'serviceTask', action('update_record', { fields: { status: 'after' } })),
+      node('end', 'endEvent'),
+    ], [
+      edge('flow_after', 'inclusive', 'task_after'),
+      edge('flow_end', 'task_after', 'end'),
+    ]))
+
+    expect(result.supported).toBe(false)
+    expect(result.automationPreview?.actions).toEqual([])
+    expect(result.gapReport).toEqual([
+      {
+        bpmnElementId: 'inclusive',
+        bpmnElementType: 'inclusiveGateway',
+        reason: 'Unsupported BPMN element: inclusive',
+        requiredRung: 'unsupported',
+      },
+    ])
   })
 
   it('reports timer/message/signal catch events as gated gaps and never maps them to wait_for_callback', () => {
