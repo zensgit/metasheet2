@@ -95,12 +95,12 @@ describe('compileBpmnPreview — A6-4a pure compiler', () => {
     expect(actions).toHaveLength(1)
     expect(actions[0]?.type).toBe('condition_branch')
     expect(actions[0]?.config.branches[0]).toMatchObject({
-      key: 'vip',
+      key: 'task_vip',
       conditions: { conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
       actions: [{ type: 'update_record' }],
     })
     expect(actions[0]?.config.defaultBranch).toMatchObject({
-      key: 'fallback',
+      key: 'default_task_default',
       actions: [{ type: 'send_notification' }],
     })
     expect(result.mappingReport).toContainEqual({
@@ -109,6 +109,27 @@ describe('compileBpmnPreview — A6-4a pure compiler', () => {
       target: 'automation',
       targetKind: 'condition_branch',
     })
+  })
+
+  it('emits top-level automation preview actions in graph order, not node-id or gateway-first order', () => {
+    const result = previewFor(workflow([
+      node('start', 'startEvent'),
+      node('task_pre', 'serviceTask', action('update_record', { fields: { stage: 'pre' } })),
+      node('gw_decide', 'exclusiveGateway'),
+      node('task_branch', 'serviceTask', action('update_record', { fields: { stage: 'branch' } })),
+      node('task_default', 'serviceTask', action('send_notification', { userIds: ['ops'], message: 'fallback' })),
+    ], [
+      edge('flow_start_pre', 'start', 'task_pre'),
+      edge('flow_pre_gw', 'task_pre', 'gw_decide'),
+      edge('flow_branch', 'gw_decide', 'task_branch', { condition: 'tier == "vip"' }),
+      edge('flow_default', 'gw_decide', 'task_default', { type: 'default' }),
+    ]))
+
+    expect(result.supported).toBe(true)
+    expect((result.automationPreview?.actions as Array<{ type: string }>).map((a) => a.type)).toEqual([
+      'update_record',
+      'condition_branch',
+    ])
   })
 
   it('reports a gap for visual exclusive gateway without a default path', () => {
@@ -158,6 +179,23 @@ describe('compileBpmnPreview — A6-4a pure compiler', () => {
     ])
   })
 
+  it('does not mark invalid service-task configs as supported', () => {
+    const result = previewFor(workflow([
+      node('send_email_missing_fields', 'serviceTask', action('send_email', {})),
+    ]))
+
+    expect(result.supported).toBe(false)
+    expect(result.automationPreview?.actions).toEqual([])
+    expect(result.gapReport).toEqual([
+      {
+        bpmnElementId: 'send_email_missing_fields',
+        bpmnElementType: 'serviceTask',
+        reason: 'Service task does not declare a supported automation action shape',
+        requiredRung: 'unsupported',
+      },
+    ])
+  })
+
   it('maps visual parallel split/join to parallel_branch join-all', () => {
     const visual = workflow([
       node('gw_split', 'parallelGateway'),
@@ -186,8 +224,8 @@ describe('compileBpmnPreview — A6-4a pure compiler', () => {
         config: {
           joinMode: 'all',
           branches: [
-            { key: 'Notify_branch', label: 'Notify branch', actions: [{ type: 'send_notification', config: { userIds: ['u1'], message: 'ready' } }] },
-            { key: 'Ops_branch', label: 'Ops branch', actions: [{ type: 'update_record', config: { fields: { status: 'ops' } } }] },
+            { key: 'task_notify', label: 'Notify branch', actions: [{ type: 'send_notification', config: { userIds: ['u1'], message: 'ready' } }] },
+            { key: 'task_ops', label: 'Ops branch', actions: [{ type: 'update_record', config: { fields: { status: 'ops' } } }] },
           ],
         },
       },
@@ -270,6 +308,34 @@ describe('compileBpmnPreview — A6-4a pure compiler', () => {
         bpmnElementId: 'gw_split',
         bpmnElementType: 'parallelGateway',
         reason: 'Parallel gateway branch flow_a is not representable: service task task_a must lead to one join path',
+        requiredRung: 'unsupported',
+      },
+    ])
+  })
+
+  it('does not hide unsupported nodes inside a failed gateway subgraph', () => {
+    const result = previewFor(workflow([
+      node('gw_no_default', 'exclusiveGateway'),
+      node('script_branch', 'scriptTask'),
+      node('task_branch', 'serviceTask', action('update_record', { fields: { status: 'ok' } })),
+    ], [
+      edge('flow_script', 'gw_no_default', 'script_branch', { condition: 'kind == "script"' }),
+      edge('flow_task', 'gw_no_default', 'task_branch', { condition: 'kind == "task"' }),
+    ]))
+
+    expect(result.supported).toBe(false)
+    expect(result.automationPreview?.actions).toEqual([])
+    expect(result.gapReport).toEqual([
+      {
+        bpmnElementId: 'gw_no_default',
+        bpmnElementType: 'exclusiveGateway',
+        reason: 'Exclusive gateway requires one default path to map to condition_branch',
+        requiredRung: 'unsupported',
+      },
+      {
+        bpmnElementId: 'script_branch',
+        bpmnElementType: 'scriptTask',
+        reason: 'Unsupported BPMN element: script_branch',
         requiredRung: 'unsupported',
       },
     ])
@@ -375,6 +441,32 @@ describe('compileBpmnPreview — A6-4a pure compiler', () => {
         },
       ],
     })
+  })
+
+  it('does not lift service tasks out of unsupported BPMN XML subprocess scopes', () => {
+    const result = compileBpmnPreview({
+      mode: 'bpmn_xml',
+      bpmnXml: `
+        <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL">
+          <bpmn:process id="proc">
+            <bpmn:subProcess id="sub_1">
+              <bpmn:serviceTask id="nested_send" actionType="send_notification" config="{&quot;userIds&quot;:[&quot;u1&quot;],&quot;message&quot;:&quot;hello&quot;}" />
+            </bpmn:subProcess>
+          </bpmn:process>
+        </bpmn:definitions>
+      `,
+    })
+
+    expect(result.supported).toBe(false)
+    expect(result.automationPreview?.actions).toEqual([])
+    expect(result.gapReport).toEqual([
+      {
+        bpmnElementId: 'sub_1',
+        bpmnElementType: 'subProcess',
+        reason: 'Unsupported BPMN element',
+        requiredRung: 'unsupported',
+      },
+    ])
   })
 
   it('redacts secret-shaped values in returned preview sections', () => {

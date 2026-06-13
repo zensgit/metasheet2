@@ -1,6 +1,10 @@
 import { redactValue } from '../multitable/automation-log-redact'
 import type { AutomationAction, AutomationActionType } from '../multitable/automation-actions'
-import type { AutomationCondition, ConditionGroup } from '../multitable/automation-conditions'
+import {
+  normalizeConditionGroupInput,
+  type AutomationCondition,
+  type ConditionGroup,
+} from '../multitable/automation-conditions'
 import type { WorkflowDefinition } from './WorkflowDesigner'
 
 export type BpmnCompilePreviewInput =
@@ -74,12 +78,13 @@ interface NormalizedDefinition {
 }
 
 interface CompileState {
-  actions: AutomationAction[]
+  actions: Array<{ sourceNodeId: string; action: AutomationAction }>
   approvalPreview: BpmnCompilePreview['approvalPreview']
   mappings: BpmnCompilePreviewMapping[]
   gaps: BpmnCompilePreviewGap[]
   warnings: string[]
   consumedNodes: Set<string>
+  order: Map<string, number>
   source: BpmnCompilePreview['source']
 }
 
@@ -129,6 +134,8 @@ const PARALLEL_BRANCH_PATH_ACTION_TYPES = new Set<AutomationActionType>([
   'send_notification',
 ])
 
+const XML_UNSUPPORTED_SCOPE_NODE_TYPES = new Set(['subProcess', 'callActivity'])
+
 export function compileBpmnPreview(input: BpmnCompilePreviewInput): BpmnCompilePreview {
   const source = buildSource(input)
   const normalized = input.mode === 'visual'
@@ -149,6 +156,7 @@ export function compileBpmnPreview(input: BpmnCompilePreviewInput): BpmnCompileP
     })
   }
 
+  const graph = buildGraph(normalized)
   const state: CompileState = {
     actions: [],
     approvalPreview: undefined,
@@ -156,9 +164,9 @@ export function compileBpmnPreview(input: BpmnCompilePreviewInput): BpmnCompileP
     gaps: [],
     warnings: [],
     consumedNodes: new Set(),
+    order: buildNodeOrder(normalized, graph),
     source,
   }
-  const graph = buildGraph(normalized)
 
   for (const node of sortedNodes(normalized.nodes)) {
     if (node.type === 'exclusiveGateway') {
@@ -181,7 +189,7 @@ export function compileBpmnPreview(input: BpmnCompilePreviewInput): BpmnCompileP
     source,
     supported: state.gaps.length === 0,
     automationPreview: {
-      actions: state.actions,
+      actions: automationActionsFromState(state),
       requiresExecutionMode: 'workflow_job_v1',
     },
     ...(state.approvalPreview ? { approvalPreview: state.approvalPreview } : {}),
@@ -273,6 +281,7 @@ function parseXmlNodes(xml: string): NormalizedNode[] {
     'subProcess',
     'callActivity',
   ]
+  const unsupportedRanges = findUnsupportedXmlScopeRanges(xml)
   const out: NormalizedNode[] = []
   const seen = new Set<string>()
 
@@ -280,6 +289,7 @@ function parseXmlNodes(xml: string): NormalizedNode[] {
     const paired = new RegExp(`<(?:[A-Za-z_][\\w.-]*:)?${type}\\b([^>]*)>([\\s\\S]*?)<\\/(?:[A-Za-z_][\\w.-]*:)?${type}>`, 'g')
     const selfClosing = new RegExp(`<(?:[A-Za-z_][\\w.-]*:)?${type}\\b([^>]*)\\/>`, 'g')
     for (const match of xml.matchAll(paired)) {
+      if (!XML_UNSUPPORTED_SCOPE_NODE_TYPES.has(type) && isIndexInsideRange(match.index ?? -1, unsupportedRanges)) continue
       const node = nodeFromXmlMatch(type, match[1] ?? '', match[2] ?? '')
       if (node && !seen.has(node.id)) {
         seen.add(node.id)
@@ -287,6 +297,7 @@ function parseXmlNodes(xml: string): NormalizedNode[] {
       }
     }
     for (const match of xml.matchAll(selfClosing)) {
+      if (!XML_UNSUPPORTED_SCOPE_NODE_TYPES.has(type) && isIndexInsideRange(match.index ?? -1, unsupportedRanges)) continue
       const node = nodeFromXmlMatch(type, match[1] ?? '', '')
       if (node && !seen.has(node.id)) {
         seen.add(node.id)
@@ -296,6 +307,21 @@ function parseXmlNodes(xml: string): NormalizedNode[] {
   }
 
   return out
+}
+
+function findUnsupportedXmlScopeRanges(xml: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = []
+  for (const type of XML_UNSUPPORTED_SCOPE_NODE_TYPES) {
+    const paired = new RegExp(`<(?:[A-Za-z_][\\w.-]*:)?${type}\\b[^>]*>[\\s\\S]*?<\\/(?:[A-Za-z_][\\w.-]*:)?${type}>`, 'g')
+    for (const match of xml.matchAll(paired)) {
+      ranges.push({ start: match.index ?? 0, end: (match.index ?? 0) + (match[0]?.length ?? 0) })
+    }
+  }
+  return ranges
+}
+
+function isIndexInsideRange(index: number, ranges: Array<{ start: number; end: number }>): boolean {
+  return index >= 0 && ranges.some((range) => index > range.start && index < range.end)
 }
 
 function nodeFromXmlMatch(type: string, attrText: string, body: string): NormalizedNode | null {
@@ -401,7 +427,7 @@ function compileStandaloneNode(node: NormalizedNode, graph: Graph, state: Compil
       addGap(state, node, 'Service task does not declare a supported automation action shape', 'unsupported')
       return
     }
-    state.actions.push(action)
+    state.actions.push({ sourceNodeId: node.id, action })
     addMapping(state, node, 'automation', action.type)
     state.consumedNodes.add(node.id)
     return
@@ -469,7 +495,7 @@ function compileExclusiveGateway(node: NormalizedNode, graph: Graph, state: Comp
       return
     }
     path.consumedNodeIds.forEach((id) => consumedInGateway.add(id))
-    const key = uniqueBranchKey(edge.label ?? edge.target, branchKeys)
+    const key = uniqueBranchKey(edge.target, branchKeys)
     branches.push({
       key,
       ...(edge.label ? { label: edge.label } : {}),
@@ -486,15 +512,18 @@ function compileExclusiveGateway(node: NormalizedNode, graph: Graph, state: Comp
   }
   defaultPath.consumedNodeIds.forEach((id) => consumedInGateway.add(id))
 
-  const defaultBranchKey = uniqueBranchKey(defaultEdge.label ?? `default_${defaultEdge.target}`, branchKeys)
+  const defaultBranchKey = uniqueBranchKey(`default_${defaultEdge.target}`, branchKeys)
   state.actions.push({
-    type: 'condition_branch',
-    config: {
-      branches,
-      defaultBranch: {
-        key: defaultBranchKey,
-        ...(defaultEdge.label ? { label: defaultEdge.label } : {}),
-        actions: defaultPath.actions,
+    sourceNodeId: node.id,
+    action: {
+      type: 'condition_branch',
+      config: {
+        branches,
+        defaultBranch: {
+          key: defaultBranchKey,
+          ...(defaultEdge.label ? { label: defaultEdge.label } : {}),
+          actions: defaultPath.actions,
+        },
       },
     },
   })
@@ -528,7 +557,7 @@ function compileParallelGateway(node: NormalizedNode, graph: Graph, state: Compi
       return
     }
     path.consumedNodeIds.forEach((id) => consumedInGateway.add(id))
-    const key = uniqueBranchKey(edge.label ?? edge.target, branchKeys)
+    const key = uniqueBranchKey(edge.target, branchKeys)
     branches.push({
       key,
       ...(edge.label ? { label: edge.label } : {}),
@@ -549,10 +578,13 @@ function compileParallelGateway(node: NormalizedNode, graph: Graph, state: Compi
   }
 
   state.actions.push({
-    type: 'parallel_branch',
-    config: {
-      joinMode: 'all',
-      branches,
+    sourceNodeId: node.id,
+    action: {
+      type: 'parallel_branch',
+      config: {
+        joinMode: 'all',
+        branches,
+      },
     },
   })
   addMapping(state, node, 'automation', 'parallel_branch')
@@ -567,10 +599,31 @@ function consumeGatewaySubgraph(node: NormalizedNode, graph: Graph, state: Compi
     if (!currentId || seen.has(currentId)) continue
     seen.add(currentId)
     state.consumedNodes.add(currentId)
+    const current = graph.nodes.get(currentId)
+    if (current && current.id !== node.id) addSubgraphGapIfNeeded(state, current, graph)
     for (const edge of graph.outgoing.get(currentId) ?? []) {
       stack.push(edge.target)
     }
   }
+}
+
+function addSubgraphGapIfNeeded(state: CompileState, node: NormalizedNode, graph: Graph): void {
+  if (STRUCTURAL_NODE_TYPES.has(node.type) || node.type === 'serviceTask') return
+  if (node.type === 'userTask' && approvalPreviewFromUserTask(node)) return
+  if (CATCH_NODE_TYPES.has(node.type)) {
+    addCatchEventGap(state, node)
+    return
+  }
+  if (UNSUPPORTED_NODE_TYPES.has(node.type)) {
+    addGap(state, node, `Unsupported BPMN element${node.name ? `: ${node.name}` : ''}`, 'unsupported')
+    return
+  }
+  if (node.type === 'exclusiveGateway' || node.type === 'parallelGateway') {
+    if (node.type === 'parallelGateway' && (graph.incoming.get(node.id) ?? []).length > 1) return
+    addGap(state, node, `${node.type} is not representable inside a failed gateway subgraph`, 'unsupported')
+    return
+  }
+  addGap(state, node, `Unsupported BPMN element type: ${node.type}`, 'unsupported')
 }
 
 function compileLinearAutomationPath(
@@ -690,26 +743,80 @@ function actionFromTypeAndConfig(typeValue: unknown, configValue: unknown): Auto
   if (typeof typeValue !== 'string') return null
   if (!SERVICE_ACTION_TYPES.has(typeValue as AutomationActionType)) return null
   if (!isRecord(configValue)) return null
+  if (!automationActionConfigIsSupported(typeValue as AutomationActionType, configValue)) return null
   return {
     type: typeValue as AutomationActionType,
     config: { ...configValue },
   }
 }
 
+function automationActionConfigIsSupported(type: AutomationActionType, config: Record<string, unknown>): boolean {
+  switch (type) {
+    case 'update_record':
+      return isRecord(config.fields)
+    case 'create_record':
+      return Boolean(stringValue(config.sheetId)) && isRecord(config.data)
+    case 'send_webhook':
+      return Boolean(stringValue(config.url))
+    case 'send_notification':
+      return stringArray(config.userIds).length > 0 && Boolean(stringValue(config.message))
+    case 'send_email':
+      return stringArray(config.recipients).length > 0
+        && Boolean(stringValue(config.subjectTemplate))
+        && Boolean(stringValue(config.bodyTemplate))
+    case 'send_dingtalk_group_message':
+      return Boolean(stringValue(config.titleTemplate)) && Boolean(stringValue(config.bodyTemplate))
+    case 'send_dingtalk_person_message':
+      return stringArray(config.userIds).length > 0
+        && Boolean(stringValue(config.titleTemplate))
+        && Boolean(stringValue(config.bodyTemplate))
+    case 'lock_record':
+      return typeof config.locked === 'boolean'
+    case 'wait_for_callback':
+      return config.reason === undefined || config.reason === 'external_event'
+    case 'start_approval':
+      return Boolean(stringValue(config.templateId))
+        && nonEmptyStringRecord(config.formDataMapping)
+        && requesterConfigIsSupported(config.requester)
+    case 'condition_branch':
+    case 'parallel_branch':
+      return false
+    default:
+      return false
+  }
+}
+
 function approvalPreviewFromUserTask(node: NormalizedNode): BpmnCompilePreview['approvalPreview'] | null {
   const direct = node.properties.approvalPreview
-  if (isRecord(direct)) return { ...direct }
+  if (isSupportedApprovalPreview(direct)) return { ...direct }
   const formSchema = node.properties.formSchema
   const approvalGraph = node.properties.approvalGraph
   const runtimeGraphPreview = node.properties.runtimeGraphPreview
-  if (formSchema || approvalGraph || runtimeGraphPreview) {
+  const candidate = {
+    ...(formSchema ? { formSchema } : {}),
+    ...(approvalGraph ? { approvalGraph } : {}),
+    ...(runtimeGraphPreview ? { runtimeGraphPreview } : {}),
+  }
+  if (isSupportedApprovalPreview(candidate)) {
     return {
-      ...(formSchema ? { formSchema } : {}),
-      ...(approvalGraph ? { approvalGraph } : {}),
-      ...(runtimeGraphPreview ? { runtimeGraphPreview } : {}),
+      ...candidate,
     }
   }
   return null
+}
+
+function isSupportedApprovalPreview(value: unknown): value is BpmnCompilePreview['approvalPreview'] {
+  if (!isRecord(value)) return false
+  const approvalGraph = value.approvalGraph
+  const runtimeGraphPreview = value.runtimeGraphPreview
+  if (!graphLike(approvalGraph) && !graphLike(runtimeGraphPreview)) return false
+  if (value.formSchema !== undefined && !isRecord(value.formSchema) && !Array.isArray(value.formSchema)) return false
+  return true
+}
+
+function graphLike(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return isRecord(value.nodes) || Array.isArray(value.nodes)
 }
 
 function mergeApprovalPreview(
@@ -735,11 +842,23 @@ function conditionGroupFromEdge(edge: NormalizedEdge): ConditionGroup | null {
   if (!raw) return null
 
   const parsedJson = parseJsonValue(raw)
-  if (isConditionGroup(parsedJson)) return parsedJson
-  if (isAutomationCondition(parsedJson)) return { conjunction: 'AND', conditions: [parsedJson] }
+  if (parsedJson !== undefined) {
+    const normalized = normalizeConditionInput(parsedJson)
+    if (normalized) return normalized
+  }
 
   const parsedExpression = parseSimpleConditionExpression(raw)
   return parsedExpression ? { conjunction: 'AND', conditions: [parsedExpression] } : null
+}
+
+function normalizeConditionInput(value: unknown): ConditionGroup | null {
+  try {
+    if (isConditionGroup(value)) return normalizeConditionGroupInput(value)
+    if (isAutomationCondition(value)) return normalizeConditionGroupInput({ conjunction: 'AND', conditions: [value] })
+    return null
+  } catch {
+    return null
+  }
 }
 
 function parseSimpleConditionExpression(raw: string): AutomationCondition | null {
@@ -776,6 +895,23 @@ function isAutomationCondition(value: unknown): value is AutomationCondition {
 
 function isConditionGroup(value: unknown): value is ConditionGroup {
   return isRecord(value) && Array.isArray(value.conditions)
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+}
+
+function nonEmptyStringRecord(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  const entries = Object.entries(value)
+  return entries.length > 0 && entries.every(([key, entry]) => key.trim().length > 0 && typeof entry === 'string' && entry.trim().length > 0)
+}
+
+function requesterConfigIsSupported(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!isRecord(value)) return false
+  return value.mode === undefined || value.mode === 'trigger_actor' || value.mode === 'rule_creator'
 }
 
 function addCatchEventGap(state: CompileState, node: NormalizedNode): void {
@@ -825,6 +961,45 @@ function finalizePreview(preview: BpmnCompilePreview): BpmnCompilePreview {
     warnings: [...preview.warnings].sort(),
   }
   return redactValue(sorted) as BpmnCompilePreview
+}
+
+function automationActionsFromState(state: CompileState): AutomationAction[] {
+  return [...state.actions]
+    .sort((a, b) => orderForNode(state, a.sourceNodeId) - orderForNode(state, b.sourceNodeId)
+      || a.sourceNodeId.localeCompare(b.sourceNodeId)
+      || a.action.type.localeCompare(b.action.type))
+    .map((entry) => entry.action)
+}
+
+function orderForNode(state: CompileState, nodeId: string): number {
+  return state.order.get(nodeId) ?? Number.MAX_SAFE_INTEGER
+}
+
+function buildNodeOrder(definition: NormalizedDefinition, graph: Graph): Map<string, number> {
+  const order = new Map<string, number>()
+  const queue = sortedNodes(definition.nodes)
+    .filter((node) => node.type === 'startEvent')
+    .map((node) => node.id)
+  if (queue.length === 0) {
+    queue.push(...sortedNodes(definition.nodes).map((node) => node.id))
+  }
+  let index = 0
+  while (queue.length > 0) {
+    const id = queue.shift()
+    if (!id || order.has(id)) continue
+    order.set(id, index)
+    index += 1
+    for (const edge of graph.outgoing.get(id) ?? []) {
+      if (!order.has(edge.target)) queue.push(edge.target)
+    }
+  }
+  for (const node of sortedNodes(definition.nodes)) {
+    if (!order.has(node.id)) {
+      order.set(node.id, index)
+      index += 1
+    }
+  }
+  return order
 }
 
 function compareMapping(a: BpmnCompilePreviewMapping, b: BpmnCompilePreviewMapping): number {
