@@ -191,4 +191,53 @@ describeIfDatabase('②a wall — cross-base link validation (§2a.2, real DB)',
     const parsed = typeof row?.property === 'string' ? JSON.parse(row.property) : row?.property
     expect(parsed?.foreignSheetId).toBe(SHEET_B)
   })
+
+  // GA-T1c (type-conversion bypass): the wall must fire on a non-link → link conversion even when the
+  // PATCH carries NO foreign key. POST a `string` field with a cross-base foreignSheetId stashed in its
+  // property (the wall no-ops for non-link), then PATCH `{type:'link'}` with no property — `nextProperty`
+  // falls back to the stored cross-base target. Without the conversion clause this materialized a
+  // silently-cross-base link that never hit the wall.
+  test('GA-T1c: converting a string field (with a stashed cross-base target) to link is rejected (4xx)', async () => {
+    const fieldId = `fld_xbw_t1c_${TS}`
+    // Step 1: a string field can carry an arbitrary property; the wall no-ops for non-link types.
+    await request(buildApp(USER)).post('/api/multitable/fields').send({
+      sheetId: SHEET_A,
+      id: fieldId,
+      name: 'Stashed Cross Target',
+      type: 'string',
+      property: { foreignSheetId: SHEET_B },
+    }).expect(201)
+
+    // Step 2: convert to link with NO property in the payload — the gate must still fire on the conversion.
+    const res = await request(buildApp(USER))
+      .patch(`/api/multitable/fields/${fieldId}`)
+      .send({ type: 'link' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    // The field must NOT have been converted into a cross-base link.
+    const r = await q('SELECT type FROM meta_fields WHERE id = $1', [fieldId])
+    expect((r.rows as Array<{ type: string }>)[0]?.type).toBe('string')
+  })
+
+  // GA-T4c (conversion compat): a non-link → link conversion whose effective target is SAME-base must
+  // still succeed — the conversion clause must not over-reject legitimate conversions.
+  test('GA-T4c: converting a string field (same-base stashed target) to link succeeds (200)', async () => {
+    const fieldId = `fld_xbw_t4c_${TS}`
+    await request(buildApp(USER)).post('/api/multitable/fields').send({
+      sheetId: SHEET_A,
+      id: fieldId,
+      name: 'Stashed Same Target',
+      type: 'string',
+      property: { foreignSheetId: SHEET_A2 },
+    }).expect(201)
+
+    const res = await request(buildApp(USER))
+      .patch(`/api/multitable/fields/${fieldId}`)
+      .send({ type: 'link' })
+
+    expect(res.status).toBe(200)
+    const r = await q('SELECT type FROM meta_fields WHERE id = $1', [fieldId])
+    expect((r.rows as Array<{ type: string }>)[0]?.type).toBe('link')
+  })
 })

@@ -5812,7 +5812,15 @@ export function univerMetaRouter(): Router {
         // RAW payload carrying a foreign-sheet key is load-bearing — a rename-only PATCH on a
         // pre-existing (possibly legacy cross-base) link must NOT reload the stored target and 400
         // (GA-T4b). Covers all foreign-key aliases.
-        if (linkForeignKeyInPayload(parsed.data.property)) {
+        //
+        // ALSO fire on a non-link → link TYPE CONVERSION (`nextType==='link' && currentType!=='link'`):
+        // otherwise a two-step bypass slips through — POST a `string` field with a cross-base
+        // `foreignSheetId` stashed in its property (the wall no-ops for non-link), then PATCH `{type:'link'}`
+        // with NO property; the raw payload carries no foreign key, but `nextProperty` falls back to the
+        // stored cross-base target and is canonicalized into a real link that never hit the wall. On a
+        // conversion we MUST validate the effective `nextProperty`. (link→link rename keeps currentType
+        // 'link' so this clause stays false → GA-T4b compat preserved.)
+        if (linkForeignKeyInPayload(parsed.data.property) || (nextType === 'link' && currentType !== 'link')) {
           const linkBaseError = await validateLinkFieldConfig(req, query, sheetId, nextType, nextProperty)
           if (linkBaseError) {
             throw new ValidationError(linkBaseError)
