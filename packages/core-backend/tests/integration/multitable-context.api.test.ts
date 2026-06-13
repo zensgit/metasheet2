@@ -23,6 +23,17 @@ function createMockPool(queryHandler: QueryHandler) {
     if (sql.includes('FROM record_permissions')) {
       return { rows: [], rowCount: 0 }
     }
+    // ②a §2a write-path guards reached before each per-test handler runs (the
+    // sheet/field-create chokepoints): the link-target materialization advisory
+    // lock (#2578) and the retroactive-cross-base link scan (#2576,
+    // validateSheetCreateNoRetroactiveCrossBaseLink). The mock world has no
+    // inbound cross-base link, so both no-op cleanly with empty rows.
+    if (sql.includes('pg_advisory_xact_lock')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('source_base_id')) {
+      return { rows: [], rowCount: 0 }
+    }
     return queryHandler(sql, params)
   })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
