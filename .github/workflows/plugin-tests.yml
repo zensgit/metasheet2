@@ -200,6 +200,8 @@ jobs:
             tests/integration/multitable-lookup-foreign-field-mask-aggregate.test.ts \
             tests/integration/multitable-lookup-foreign-field-mask-sibling-reads.test.ts \
             tests/integration/multitable-lookup-foreign-field-mask-convergence.test.ts \
+            tests/integration/multitable-cross-base-link-wall.test.ts \
+            tests/integration/multitable-base-readable-resolver.test.ts \
             tests/integration/multitable-sheet-realtime.api.test.ts \
             tests/integration/rooms.basic.test.ts \
             tests/integration/multitable-automation-retry.test.ts \

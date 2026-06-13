@@ -902,6 +902,19 @@ function parseLinkFieldConfig(property: unknown): LinkFieldConfig | null {
   }
 }
 
+/**
+ * ②a §2a.2 compat gate — does the RAW request payload explicitly carry a link foreign-sheet key?
+ * Mirrors the aiShortcut / expression payload-presence gates: the cross-base wall fires only when the
+ * caller is actually (re)writing the link target, so a rename-only PATCH on a pre-existing (possibly
+ * legacy cross-base) link is not retroactively rejected (GA-T4b). Covers ALL `parseLinkFieldConfig`
+ * foreign aliases so a cross-base link sent under `datasheetId` cannot bypass the wall.
+ */
+const LINK_FOREIGN_KEYS = ['foreignSheetId', 'foreignDatasheetId', 'datasheetId'] as const
+function linkForeignKeyInPayload(payloadProperty: unknown): boolean {
+  if (typeof payloadProperty === 'undefined' || payloadProperty === null) return false
+  return LINK_FOREIGN_KEYS.some((key) => Object.prototype.hasOwnProperty.call(payloadProperty, key))
+}
+
 function parseLookupFieldConfig(property: unknown): LookupFieldConfig | null {
   const obj = normalizeJson(property)
   const linkFieldId = obj.relatedLinkFieldId ?? obj.linkFieldId ?? obj.linkedFieldId ?? obj.sourceFieldId
@@ -1001,6 +1014,56 @@ async function validateLookupRollupConfig(
   const { capabilities } = await resolveSheetCapabilities(req, query, linkCfg.foreignSheetId)
   if (!capabilities.canRead) {
     throw new PermissionError(`Insufficient permissions to read linked sheet: ${linkCfg.foreignSheetId}`)
+  }
+
+  return null
+}
+
+/**
+ * ②a §2a.2 — the cross-base WALL. A `link` field may not silently span two bases: the foreign sheet's
+ * `base_id` must equal the source sheet's `base_id`. This closes the STRUCTURAL hole — today the
+ * backend accepts ANY `foreignSheetId` regardless of base ("no cross-base" was only a UI convention).
+ *
+ * ZERO opt-out (first slice): there is no `foreignBaseId` flag yet — every silently-cross-base link is
+ * rejected. The explicit cross-base opt-in is ②b, a separate later lane.
+ *
+ * Cross-base is detected by strict `===` on the two `base_id` values, so it INCLUDES null-vs-non-null
+ * (a null/legacy base and a set base count as cross-base; null-vs-null is same-base and allowed). The
+ * `req` argument is intentionally unused: this is a pure structural base comparison — the foreign-sheet
+ * READ-permission masking is §2a.3's job (adding a perm check here would over-reach). Returns a Chinese-
+ * with-id error string (matching `validateLookupRollupConfig`'s style) or null. The foreign value is
+ * extracted via `parseLinkFieldConfig` so all aliases (foreignSheetId / foreignDatasheetId /
+ * datasheetId) are covered.
+ *
+ * Caller compat: invoke ONLY when the payload explicitly carries a foreign-sheet key (see
+ * `linkForeignKeyInPayload`) — a rename-only PATCH on a pre-existing (possibly legacy cross-base) link
+ * must NOT be retroactively rejected (GA-T4b). When no foreign key is present this returns null anyway,
+ * but the caller-side presence gate is the authoritative compat boundary.
+ */
+async function validateLinkFieldConfig(
+  _req: Request,
+  query: QueryFn,
+  sourceSheetId: string,
+  type: UniverMetaField['type'],
+  property: unknown,
+): Promise<string | null> {
+  if (type !== 'link') return null
+
+  const linkCfg = parseLinkFieldConfig(property)
+  // No foreign sheet in the payload → nothing to validate (e.g. an incomplete draft). The authoritative
+  // compat gate lives at the call sites; this internal guard is defensive.
+  if (!linkCfg) return null
+
+  const sourceSheet = await loadSheetRowShared(query, sourceSheetId)
+  const foreignSheet = await loadSheetRowShared(query, linkCfg.foreignSheetId)
+  // Foreign sheet not found (missing / soft-deleted): existence is out of this slice's scope — don't
+  // null-deref and don't block here. The source sheet is reliably present at both write chokepoints.
+  if (!foreignSheet) return null
+
+  const sourceBaseId = sourceSheet?.baseId ?? null
+  const foreignBaseId = foreignSheet.baseId ?? null
+  if (sourceBaseId !== foreignBaseId) {
+    return `链接字段不能跨 base：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} base=${foreignBaseId ?? 'null'}`
   }
 
   return null
@@ -5432,6 +5495,14 @@ export function univerMetaRouter(): Router {
         if (configError) {
           throw new ValidationError(configError)
         }
+        // ②a §2a.2 — cross-base WALL (create). Fire only when the payload explicitly carries a link
+        // foreign-sheet key (any alias), mirroring the aiShortcut/expression presence gates.
+        if (linkForeignKeyInPayload(parsed.data.property)) {
+          const linkBaseError = await validateLinkFieldConfig(req, query, sheetId, type, property)
+          if (linkBaseError) {
+            throw new ValidationError(linkBaseError)
+          }
+        }
         // A2 (§2.1): sanitizeFieldProperty passes unknown keys through, so the
         // aiShortcut config is validated explicitly at this write chokepoint.
         const aiShortcutError = await validateAiShortcutFieldProperty(query as unknown as QueryFn, sheetId, property)
@@ -5735,6 +5806,17 @@ export function univerMetaRouter(): Router {
         const configError = await validateLookupRollupConfig(req, query, sheetId, nextType, nextProperty)
         if (configError) {
           throw new ValidationError(configError)
+        }
+        // ②a §2a.2 — cross-base WALL (update). Lazy/on-edit, exactly like the expression/aiShortcut
+        // re-validation below: `nextProperty` falls back to the STORED `row.property`, so gating on the
+        // RAW payload carrying a foreign-sheet key is load-bearing — a rename-only PATCH on a
+        // pre-existing (possibly legacy cross-base) link must NOT reload the stored target and 400
+        // (GA-T4b). Covers all foreign-key aliases.
+        if (linkForeignKeyInPayload(parsed.data.property)) {
+          const linkBaseError = await validateLinkFieldConfig(req, query, sheetId, nextType, nextProperty)
+          if (linkBaseError) {
+            throw new ValidationError(linkBaseError)
+          }
         }
         // A2 (§2.1): validate aiShortcut only when the payload explicitly carries it
         // (mirrors the lazy expression re-validation below) — a rename-only PATCH on a
