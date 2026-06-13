@@ -153,6 +153,20 @@ test('redactString preserves the database host when malformed URI query text con
   assert.doesNotMatch(out, /pa\/ss/)
 })
 
+test('redactString masks adjacent and nested database URLs', () => {
+  const adjacent = redactString('postgres://u:p@db/app,mysql://root:rootpw@other/db')
+  assert.equal(adjacent, 'postgres://<redacted>@db/app,mysql://<redacted>@other/db')
+  assert.doesNotMatch(adjacent, /u:p|root:rootpw/)
+
+  const nested = redactString('postgres://u:p@db/app?next=mysql://root:rootpw@other/db')
+  assert.equal(nested, 'postgres://<redacted>@db/app?next=mysql://<redacted>@other/db')
+  assert.doesNotMatch(nested, /u:p|root:rootpw/)
+
+  const nestedOnly = redactString('postgres://db/app?next=mysql://root:rootpw@other/db')
+  assert.equal(nestedOnly, 'postgres://db/app?next=mysql://<redacted>@other/db')
+  assert.doesNotMatch(nestedOnly, /root:rootpw/)
+})
+
 test('redactString does not mask database URLs without userinfo', () => {
   assert.equal(redactString('postgres://db.example.com:5432/app'), 'postgres://db.example.com:5432/app')
   assert.equal(redactString('mysql://10.0.0.5:3306/data'), 'mysql://10.0.0.5:3306/data')

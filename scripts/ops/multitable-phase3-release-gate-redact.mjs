@@ -10,6 +10,8 @@
 
 export const REDACTION_VERSION = 1
 
+const DATABASE_URL_PATTERN = /\b(?:postgres(?:ql)?|mysql):\/\/[^\s<>]+/gi
+
 const STRING_PATTERNS = [
   [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <redacted>'],
   [/\beyJ[A-Za-z0-9._-]{20,}/g, '<jwt:redacted>'],
@@ -39,7 +41,7 @@ const STRING_PATTERNS = [
   [
     // Use URL parsing rather than a first-@ regex so raw `@` characters in
     // username/password do not leak.
-    /\b(?:postgres(?:ql)?|mysql):\/\/[^\s<>]+/gi,
+    DATABASE_URL_PATTERN,
     redactDatabaseUrlCredentials,
   ],
 ]
@@ -48,11 +50,16 @@ function redactDatabaseUrlCredentials(value) {
   try {
     const url = new URL(value)
     if (!/^(postgres(?:ql)?|mysql):$/i.test(url.protocol)) return value
-    if (!url.username && !url.password) return value
-    return `${url.protocol}//<redacted>@${url.host}${url.pathname}${url.search}${url.hash}`
+    const suffix = redactNestedDatabaseUrls(`${url.pathname}${url.search}${url.hash}`)
+    if (!url.username && !url.password) return `${url.protocol}//${url.host}${suffix}`
+    return `${url.protocol}//<redacted>@${url.host}${suffix}`
   } catch {
     return redactMalformedDatabaseUrlCredentials(value)
   }
+}
+
+function redactNestedDatabaseUrls(value) {
+  return value.replace(DATABASE_URL_PATTERN, redactDatabaseUrlCredentials)
 }
 
 function redactMalformedDatabaseUrlCredentials(value) {
@@ -62,7 +69,7 @@ function redactMalformedDatabaseUrlCredentials(value) {
   const rest = match[2]
   const at = findDatabaseAuthoritySeparator(rest)
   if (at <= 0 || at === rest.length - 1) return value
-  return `${scheme}://<redacted>@${rest.slice(at + 1)}`
+  return `${scheme}://<redacted>@${redactNestedDatabaseUrls(rest.slice(at + 1))}`
 }
 
 function findDatabaseAuthoritySeparator(rest) {

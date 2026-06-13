@@ -133,6 +133,22 @@ describe('redactString', () => {
     expect(out).not.toContain('pa/ss')
   })
 
+  it('masks adjacent and nested database URLs', () => {
+    const adjacent = redactString('postgres://u:p@db/app,mysql://root:rootpw@other/db')
+    expect(adjacent).toBe('postgres://<redacted>@db/app,mysql://<redacted>@other/db')
+    expect(adjacent).not.toContain('u:p')
+    expect(adjacent).not.toContain('root:rootpw')
+
+    const nested = redactString('postgres://u:p@db/app?next=mysql://root:rootpw@other/db')
+    expect(nested).toBe('postgres://<redacted>@db/app?next=mysql://<redacted>@other/db')
+    expect(nested).not.toContain('u:p')
+    expect(nested).not.toContain('root:rootpw')
+
+    const nestedOnly = redactString('postgres://db/app?next=mysql://root:rootpw@other/db')
+    expect(nestedOnly).toBe('postgres://db/app?next=mysql://<redacted>@other/db')
+    expect(nestedOnly).not.toContain('root:rootpw')
+  })
+
   it('does not mask database URLs without userinfo', () => {
     expect(redactString('postgres://db.example.com:5432/app')).toBe('postgres://db.example.com:5432/app')
     expect(redactString('mysql://10.0.0.5:3306/data')).toBe('mysql://10.0.0.5:3306/data')
