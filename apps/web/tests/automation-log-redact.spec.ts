@@ -127,6 +127,28 @@ describe('redactString', () => {
     expect(internalHost).not.toContain('pa/ss')
   })
 
+  it('masks malformed database URI credentials mixing raw @ with reserved delimiters', () => {
+    const slash = redactString('postgres://user:pa@ss/word@db.example.com:5432/app')
+    expect(slash).toBe('postgres://<redacted>@db.example.com:5432/app')
+    expect(slash).not.toContain('pa@ss')
+    expect(slash).not.toContain('word@db')
+
+    const query = redactString('postgres://user:pa@ss?word@db.example.com:5432/app')
+    expect(query).toBe('postgres://<redacted>@db.example.com:5432/app')
+    expect(query).not.toContain('pa@ss')
+    expect(query).not.toContain('word@db')
+
+    const hash = redactString('postgres://user:pa@ss#word@db.example.com:5432/app')
+    expect(hash).toBe('postgres://<redacted>@db.example.com:5432/app')
+    expect(hash).not.toContain('pa@ss')
+    expect(hash).not.toContain('word@db')
+
+    const mysql = redactString('mysql://root:r@w/ord@10.0.0.5:3306/data')
+    expect(mysql).toBe('mysql://<redacted>@10.0.0.5:3306/data')
+    expect(mysql).not.toContain('r@w')
+    expect(mysql).not.toContain('ord@10')
+  })
+
   it('preserves the database host when malformed URI query text contains @', () => {
     const out = redactString('postgres://user:pa/ss@db.example.com:5432/app?notify=a@b')
     expect(out).toBe('postgres://<redacted>@db.example.com:5432/app?notify=a@b')

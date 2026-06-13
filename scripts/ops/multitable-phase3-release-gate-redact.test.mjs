@@ -147,6 +147,24 @@ test('redactString masks malformed database URI credentials containing reserved 
   assert.doesNotMatch(internalHost, /pa\/ss/)
 })
 
+test('redactString masks malformed database URI credentials mixing raw @ with reserved delimiters', () => {
+  const slash = redactString('postgres://user:pa@ss/word@db.example.com:5432/app')
+  assert.equal(slash, 'postgres://<redacted>@db.example.com:5432/app')
+  assert.doesNotMatch(slash, /pa@ss|word@db/)
+
+  const query = redactString('postgres://user:pa@ss?word@db.example.com:5432/app')
+  assert.equal(query, 'postgres://<redacted>@db.example.com:5432/app')
+  assert.doesNotMatch(query, /pa@ss|word@db/)
+
+  const hash = redactString('postgres://user:pa@ss#word@db.example.com:5432/app')
+  assert.equal(hash, 'postgres://<redacted>@db.example.com:5432/app')
+  assert.doesNotMatch(hash, /pa@ss|word@db/)
+
+  const mysql = redactString('mysql://root:r@w/ord@10.0.0.5:3306/data')
+  assert.equal(mysql, 'mysql://<redacted>@10.0.0.5:3306/data')
+  assert.doesNotMatch(mysql, /r@w|ord@10/)
+})
+
 test('redactString preserves the database host when malformed URI query text contains @', () => {
   const out = redactString('postgres://user:pa/ss@db.example.com:5432/app?notify=a@b')
   assert.equal(out, 'postgres://<redacted>@db.example.com:5432/app?notify=a@b')
