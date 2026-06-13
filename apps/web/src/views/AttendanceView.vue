@@ -943,6 +943,41 @@
               </li>
             </ul>
           </div>
+
+          <div class="attendance__requests" data-schedule-dispatch-requests>
+            <div class="attendance__requests-header">
+              <span>{{ tr('Schedule-dispatch requests', '调度申请') }}</span>
+              <button class="attendance__btn" :disabled="loading" @click="reloadRequestsWithStatus">
+                {{ tr('Reload', '重载') }}
+              </button>
+            </div>
+            <div v-if="employeeScheduleDispatchRequests.length === 0" class="attendance__empty">
+              {{ tr('No schedule-dispatch requests in this range.', '当前区间暂无调度申请。') }}
+            </div>
+            <ul v-else class="attendance__request-list">
+              <li
+                v-for="item in employeeScheduleDispatchRequests"
+                :key="item.id"
+                class="attendance__request-item"
+                data-schedule-dispatch-request-row
+              >
+                <div>
+                  <strong>{{ employeeScheduleDispatchDateRangeLabel(item) }}</strong>
+                  <span class="attendance__status-chip" :class="`attendance__status-chip--${item.status}`">
+                    {{ formatStatus(item.status) }}
+                  </span>
+                </div>
+                <div class="attendance__request-meta">
+                  <span>{{ tr('Target group', '目标排班组') }}: {{ employeeScheduleDispatchTargetGroup(item) }}</span>
+                  <span>{{ tr('Target shift', '目标班次') }}: {{ employeeScheduleDispatchTargetShift(item) }}</span>
+                  <span>{{ tr('Slot', '槽位') }}: {{ employeeScheduleDispatchSlot(item) }}</span>
+                </div>
+                <div class="attendance__request-meta" v-if="requestReasonText(item)">
+                  <span>{{ tr('Reason', '原因') }}: {{ requestReasonText(item) }}</span>
+                </div>
+              </li>
+            </ul>
+          </div>
         </div>
 
         <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)">
@@ -6544,6 +6579,128 @@
                 </div>
               </div>
 
+              <div class="attendance__admin-subsection" data-attendance-schedule-dispatch>
+                <div class="attendance__admin-section-header">
+                  <div>
+                    <h5>{{ tr('Daily schedule dispatch', '按天调度') }}</h5>
+                    <small class="attendance__field-hint">
+                      {{ tr('Create approval-driven daily dispatch requests for an employee to work in a target schedule group. Hourly support and cost allocation are not part of v1.', '创建审批驱动的按天调度申请，将员工调度到目标排班组工作；首版不支持小时支援或成本分摊。') }}
+                    </small>
+                  </div>
+                  <button class="attendance__btn" :disabled="scheduleDispatchLoading" data-attendance-schedule-dispatch-reload @click="loadScheduleDispatchRequests">
+                    {{ scheduleDispatchLoading ? tr('Loading...', '加载中...') : tr('Reload dispatch', '重载调度') }}
+                  </button>
+                </div>
+
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field" for="attendance-schedule-dispatch-user">
+                    <span>{{ tr('Employee user ID', '员工 ID') }}</span>
+                    <input id="attendance-schedule-dispatch-user" v-model="scheduleDispatchForm.userId" type="text" data-attendance-schedule-dispatch-user />
+                  </label>
+                  <label class="attendance__field" for="attendance-schedule-dispatch-group">
+                    <span>{{ tr('Target schedule group', '目标排班组') }}</span>
+                    <select id="attendance-schedule-dispatch-group" v-model="scheduleDispatchForm.targetScheduleGroupId" data-attendance-schedule-dispatch-group>
+                      <option value="" disabled>{{ tr('Select schedule group', '选择排班组') }}</option>
+                      <option v-for="group in scheduleDispatchGroupOptions" :key="group.id" :value="group.id">
+                        {{ scheduleGroupTreeLabel(group) }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="attendance__field" for="attendance-schedule-dispatch-shift">
+                    <span>{{ tr('Target shift', '目标班次') }}</span>
+                    <select id="attendance-schedule-dispatch-shift" v-model="scheduleDispatchForm.targetShiftId" data-attendance-schedule-dispatch-shift>
+                      <option value="" disabled>{{ tr('Select shift', '选择班次') }}</option>
+                      <option v-for="shift in shifts" :key="shift.id" :value="shift.id">
+                        {{ shift.name }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="attendance__field" for="attendance-schedule-dispatch-start">
+                    <span>{{ tr('Start date', '开始日期') }}</span>
+                    <input id="attendance-schedule-dispatch-start" v-model="scheduleDispatchForm.startDate" type="date" data-attendance-schedule-dispatch-start />
+                  </label>
+                  <label class="attendance__field" for="attendance-schedule-dispatch-end">
+                    <span>{{ tr('End date', '结束日期') }}</span>
+                    <input id="attendance-schedule-dispatch-end" v-model="scheduleDispatchForm.endDate" type="date" data-attendance-schedule-dispatch-end />
+                  </label>
+                  <label v-if="multiShiftDayForm.enabled" class="attendance__field" for="attendance-schedule-dispatch-slot">
+                    <span>{{ tr('Slot index', '槽位') }}</span>
+                    <input
+                      id="attendance-schedule-dispatch-slot"
+                      v-model="scheduleDispatchForm.slotIndex"
+                      type="number"
+                      min="0"
+                      :max="multiShiftSlotMaxIndex"
+                      data-attendance-schedule-dispatch-slot
+                    />
+                  </label>
+                  <label class="attendance__field" for="attendance-schedule-dispatch-flow">
+                    <span>{{ tr('Approval flow', '审批流') }}</span>
+                    <select id="attendance-schedule-dispatch-flow" v-model="scheduleDispatchForm.approvalFlowId" data-attendance-schedule-dispatch-flow>
+                      <option value="">{{ tr('Auto when exactly one active flow exists', '仅一个启用流程时自动选择') }}</option>
+                      <option v-for="flow in scheduleDispatchApprovalFlowOptions" :key="flow.id" :value="flow.id">
+                        {{ flow.name }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="attendance__field attendance__field--full" for="attendance-schedule-dispatch-reason">
+                    <span>{{ tr('Reason', '原因') }}</span>
+                    <input id="attendance-schedule-dispatch-reason" v-model="scheduleDispatchForm.reason" type="text" :placeholder="tr('Optional', '可选')" data-attendance-schedule-dispatch-reason />
+                  </label>
+                </div>
+                <div class="attendance__admin-actions">
+                  <button
+                    class="attendance__btn attendance__btn--primary"
+                    type="button"
+                    :disabled="scheduleDispatchSaving"
+                    data-attendance-schedule-dispatch-create
+                    @click="createScheduleDispatchRequest"
+                  >
+                    {{ scheduleDispatchSaving ? tr('Submitting...', '提交中...') : tr('Create daily dispatch', '创建按天调度') }}
+                  </button>
+                </div>
+
+                <p v-if="scheduleDispatchTruncationWarning" class="attendance__field-hint attendance__field-hint--warn" data-attendance-schedule-dispatch-cap>
+                  {{ scheduleDispatchTruncationWarning }}
+                </p>
+                <div v-if="scheduleDispatchRequests.length === 0" class="attendance__empty" data-attendance-schedule-dispatch-empty>
+                  {{ tr('No schedule-dispatch requests loaded.', '暂无已加载调度申请。') }}
+                </div>
+                <div v-else class="attendance__table-wrapper">
+                  <table class="attendance__table" data-attendance-schedule-dispatch-requests>
+                    <thead>
+                      <tr>
+                        <th>{{ tr('Employee', '员工') }}</th>
+                        <th>{{ tr('Target', '目标') }}</th>
+                        <th>{{ tr('Date range', '日期区间') }}</th>
+                        <th>{{ tr('Slot', '槽位') }}</th>
+                        <th>{{ tr('Status', '状态') }}</th>
+                        <th>{{ tr('Assignments', '排班事实') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="item in scheduleDispatchRequests" :key="item.requestId" data-attendance-schedule-dispatch-row>
+                        <td>{{ item.userId }}</td>
+                        <td>
+                          <strong>{{ scheduleDispatchGroupLabel(item.targetScheduleGroupId) }}</strong>
+                          <div class="attendance__field-hint">{{ scheduleDispatchShiftLabel(item.targetShiftId) }}</div>
+                          <div v-if="item.targetDepartmentRef" class="attendance__field-hint">{{ item.targetDepartmentRef }}</div>
+                        </td>
+                        <td>{{ scheduleDispatchDateRangeLabel(item) }}</td>
+                        <td>{{ item.slotIndex }}</td>
+                        <td>
+                          <span class="attendance__status-chip" :class="`attendance__status-chip--${item.requestStatus || 'pending'}`">
+                            {{ formatStatus(item.requestStatus || 'pending') }}
+                          </span>
+                          <div class="attendance__field-hint">{{ scheduleDispatchPublishStatusLabel(item.publishStatus) }}</div>
+                        </td>
+                        <td>{{ scheduleDispatchAssignmentSummary(item) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
               <div v-if="advancedSchedulingWorkbenchGroups.length === 0" class="attendance__empty">
                 {{ tr('No active schedule groups yet.', '暂无启用的排班组。') }}
               </div>
@@ -8219,6 +8376,30 @@ interface AttendanceShiftSwapRequest {
   counterparty_slot_index?: number
 }
 
+interface AttendanceScheduleDispatchRequest {
+  id?: string
+  requestId: string
+  requestStatus: string | null
+  userId: string
+  targetScheduleGroupId: string
+  targetAttendanceGroupId?: string | null
+  targetDepartmentRef?: string | null
+  targetShiftId: string
+  slotIndex: number
+  startDate: string
+  endDate: string
+  publishStatus: string
+  assignmentIds: string[]
+  membershipId?: string | null
+  finalizedAt?: string | null
+  request?: {
+    id?: string
+    status?: string | null
+    reason?: string | null
+    workDate?: string | null
+  }
+}
+
 interface AttendanceRequestReportItem {
   requestType: string
   status: string
@@ -9307,6 +9488,10 @@ const recordTimelineSupported = ref<boolean | null>(null)
 const requests = ref<AttendanceRequest[]>([])
 const shiftSwapRequests = ref<AttendanceShiftSwapRequest[]>([])
 const shiftSwapLoading = ref(false)
+const scheduleDispatchRequests = ref<AttendanceScheduleDispatchRequest[]>([])
+const scheduleDispatchRequestsTotal = ref(0)
+const scheduleDispatchLoading = ref(false)
+const scheduleDispatchSaving = ref(false)
 const focusedAttendanceRequestId = computed(() => props.initialRequestId.trim())
 const anomalies = ref<AttendanceAnomaly[]>([])
 const anomaliesLoading = ref(false)
@@ -9740,6 +9925,14 @@ const scheduleGroupMemberTruncationWarning = computed(() => {
   )
 })
 
+const scheduleDispatchTruncationWarning = computed(() => {
+  if (scheduleDispatchRequestsTotal.value <= scheduleDispatchRequests.value.length) return ''
+  return tr(
+    `Showing first ${scheduleDispatchRequests.value.length} of ${scheduleDispatchRequestsTotal.value} schedule-dispatch requests.`,
+    `仅显示前 ${scheduleDispatchRequests.value.length}/${scheduleDispatchRequestsTotal.value} 条调度申请。`,
+  )
+})
+
 const scheduleGroupById = computed(() => {
   const map = new Map<string, AttendanceScheduleGroupAdminItem>()
   for (const group of scheduleGroupAdminItems.value) map.set(group.id, group)
@@ -9775,6 +9968,12 @@ const scheduleGroupAdminRows = computed<Array<{ group: AttendanceScheduleGroupAd
   for (const group of sorted) visit(group, 0)
   return rows
 })
+
+const scheduleDispatchGroupOptions = computed(() =>
+  scheduleGroupAdminRows.value
+    .map(row => row.group)
+    .filter(group => group.isActive !== false)
+)
 
 const scheduleGroupParentOptions = computed(() =>
   scheduleGroupAdminRows.value
@@ -9882,6 +10081,32 @@ function scheduleGroupMemberWindowLabel(member: AttendanceScheduleGroupMemberIte
   const from = member.effectiveFrom || tr('Any start', '不限开始')
   const to = member.effectiveTo || tr('Any end', '不限结束')
   return `${from} - ${to}`
+}
+
+function scheduleDispatchGroupLabel(groupId: string): string {
+  return scheduleGroupById.value.get(groupId)?.name
+    ?? advancedSchedulingWorkbenchGroups.value.find(group => group.id === groupId)?.name
+    ?? groupId
+}
+
+function scheduleDispatchShiftLabel(shiftId: string): string {
+  return shifts.value.find(shift => shift.id === shiftId)?.name ?? shiftId
+}
+
+function scheduleDispatchDateRangeLabel(item: Pick<AttendanceScheduleDispatchRequest, 'startDate' | 'endDate'>): string {
+  return item.startDate && item.endDate && item.startDate !== item.endDate ? `${item.startDate} - ${item.endDate}` : item.startDate
+}
+
+function scheduleDispatchPublishStatusLabel(status: string): string {
+  if (status === 'published') return tr('Published schedule written', '已写入排班')
+  if (status === 'cancelled') return tr('Closed without schedule write', '已关闭，未写入排班')
+  return tr('Pending schedule write', '待写入排班')
+}
+
+function scheduleDispatchAssignmentSummary(item: AttendanceScheduleDispatchRequest): string {
+  if (item.assignmentIds.length > 0) return item.assignmentIds.join(', ')
+  if (item.membershipId) return tr('Membership written only', '仅写入成员窗口')
+  return '--'
 }
 
 const advancedSchedulingWorkbenchDiagnostics = computed(() =>
@@ -12453,6 +12678,17 @@ const requestForm = reactive({
   attachmentUrl: '',
 })
 
+const scheduleDispatchForm = reactive({
+  userId: '',
+  targetScheduleGroupId: '',
+  targetShiftId: '',
+  startDate: toDateInput(today),
+  endDate: toDateInput(today),
+  slotIndex: '0',
+  approvalFlowId: '',
+  reason: '',
+})
+
 const isLeaveRequest = computed(() => requestForm.requestType === 'leave')
 const isOvertimeRequest = computed(() => requestForm.requestType === 'overtime')
 const isShiftSwapRequest = computed(() => requestForm.requestType === 'shift_swap')
@@ -12576,6 +12812,9 @@ const selectedAutoShiftPreviewItems = computed(() => {
 // Real data source for the flow picker: the org's ACTIVE outdoor_punch approval flows (no fake picker).
 const outdoorApprovalFlowOptions = computed(() =>
   approvalFlows.value.filter((flow) => flow.requestType === 'outdoor_punch' && flow.isActive),
+)
+const scheduleDispatchApprovalFlowOptions = computed(() =>
+  approvalFlows.value.filter((flow) => flow.requestType === 'schedule_dispatch' && flow.isActive),
 )
 
 const calendarPolicyOverrideDiagnostics = computed(() => buildCalendarPolicyOverrideDiagnostics(settingsForm.calendarPolicyOverrides))
@@ -17346,6 +17585,106 @@ function normalizeShiftSwapRequest(row: Record<string, any>): AttendanceShiftSwa
   }
 }
 
+function normalizeScheduleDispatchRequest(row: Record<string, any>): AttendanceScheduleDispatchRequest | null {
+  const requestId = String(row.requestId ?? row.request_id ?? row.id ?? '').trim()
+  if (!requestId) return null
+  const assignmentIdsRaw = row.assignmentIds ?? row.assignment_ids
+  const assignmentIds = Array.isArray(assignmentIdsRaw)
+    ? assignmentIdsRaw.map(item => String(item || '').trim()).filter(Boolean)
+    : []
+  return {
+    id: requestId,
+    requestId,
+    requestStatus: String(row.requestStatus ?? row.request_status ?? row.request?.status ?? '').trim() || null,
+    userId: String(row.userId ?? row.user_id ?? '').trim(),
+    targetScheduleGroupId: String(row.targetScheduleGroupId ?? row.target_schedule_group_id ?? '').trim(),
+    targetAttendanceGroupId: row.targetAttendanceGroupId ?? row.target_attendance_group_id ?? null,
+    targetDepartmentRef: row.targetDepartmentRef ?? row.target_department_ref ?? null,
+    targetShiftId: String(row.targetShiftId ?? row.target_shift_id ?? '').trim(),
+    slotIndex: Number(row.slotIndex ?? row.slot_index ?? 0) || 0,
+    startDate: String(row.startDate ?? row.start_date ?? '').slice(0, 10),
+    endDate: String(row.endDate ?? row.end_date ?? row.startDate ?? row.start_date ?? '').slice(0, 10),
+    publishStatus: String(row.publishStatus ?? row.publish_status ?? 'pending').trim() || 'pending',
+    assignmentIds,
+    membershipId: row.membershipId ?? row.membership_id ?? null,
+    finalizedAt: row.finalizedAt ?? row.finalized_at ?? null,
+    request: row.request,
+  }
+}
+
+function scheduleDispatchMetadata(item: AttendanceRequest): Record<string, any> {
+  const metadata = item.metadata
+  const dispatch = metadata?.scheduleDispatch
+  return dispatch && typeof dispatch === 'object' ? dispatch as Record<string, any> : {}
+}
+
+const employeeScheduleDispatchRequests = computed(() =>
+  requests.value.filter(item => item.request_type === 'schedule_dispatch')
+)
+
+function employeeScheduleDispatchDateRangeLabel(item: AttendanceRequest): string {
+  const dispatch = scheduleDispatchMetadata(item)
+  const start = String(dispatch.startDate ?? dispatch.start_date ?? item.work_date ?? '').slice(0, 10)
+  const end = String(dispatch.endDate ?? dispatch.end_date ?? start).slice(0, 10)
+  return start && end && start !== end ? `${start} - ${end}` : (start || item.work_date)
+}
+
+function employeeScheduleDispatchTargetGroup(item: AttendanceRequest): string {
+  const dispatch = scheduleDispatchMetadata(item)
+  return String(dispatch.targetScheduleGroupId ?? dispatch.target_schedule_group_id ?? '--')
+}
+
+function employeeScheduleDispatchTargetShift(item: AttendanceRequest): string {
+  const dispatch = scheduleDispatchMetadata(item)
+  return String(dispatch.targetShiftId ?? dispatch.target_shift_id ?? '--')
+}
+
+function employeeScheduleDispatchSlot(item: AttendanceRequest): number {
+  const dispatch = scheduleDispatchMetadata(item)
+  const parsed = Number(dispatch.slotIndex ?? dispatch.slot_index ?? 0)
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0
+}
+
+async function loadScheduleDispatchRequests() {
+  scheduleDispatchLoading.value = true
+  try {
+    const query = buildQuery({
+      orgId: normalizedOrgId(),
+      page: '1',
+      pageSize: '200',
+    })
+    const response = await apiFetch(`/api/attendance/schedule-dispatch-requests?${query.toString()}`)
+    if (response.status === 403 || response.status === 404) {
+      scheduleDispatchRequests.value = []
+      scheduleDispatchRequestsTotal.value = 0
+      return
+    }
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw createApiError(response, data, tr('Failed to load schedule-dispatch requests', '加载调度申请失败'))
+    }
+    const items = Array.isArray(data.data?.items)
+      ? data.data.items
+        .map((item: Record<string, any>) => normalizeScheduleDispatchRequest(item))
+        .filter((item: AttendanceScheduleDispatchRequest | null): item is AttendanceScheduleDispatchRequest => Boolean(item))
+      : []
+    scheduleDispatchRequests.value = items
+    const total = Number(data.data?.total ?? items.length)
+    scheduleDispatchRequestsTotal.value = Number.isFinite(total) && total >= 0 ? total : items.length
+  } catch (error) {
+    scheduleDispatchRequests.value = []
+    scheduleDispatchRequestsTotal.value = 0
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load schedule-dispatch requests', '加载调度申请失败'),
+      requestTimezoneContextHint.value,
+      'admin',
+    )
+  } finally {
+    scheduleDispatchLoading.value = false
+  }
+}
+
 async function loadShiftSwapRequests() {
   shiftSwapLoading.value = true
   try {
@@ -19578,6 +19917,84 @@ async function loadScheduleGroupAdminCockpit() {
     setStatus(readErrorMessage(error, tr('Failed to load schedule groups', '加载排班组失败')), 'error')
   } finally {
     scheduleGroupAdminLoading.value = false
+  }
+}
+
+function resetScheduleDispatchForm() {
+  scheduleDispatchForm.userId = ''
+  scheduleDispatchForm.targetScheduleGroupId = ''
+  scheduleDispatchForm.targetShiftId = ''
+  scheduleDispatchForm.startDate = toDateInput(today)
+  scheduleDispatchForm.endDate = toDateInput(today)
+  scheduleDispatchForm.slotIndex = '0'
+  scheduleDispatchForm.approvalFlowId = ''
+  scheduleDispatchForm.reason = ''
+}
+
+function buildScheduleDispatchPayload(): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    userId: scheduleDispatchForm.userId.trim(),
+    targetScheduleGroupId: scheduleDispatchForm.targetScheduleGroupId,
+    targetShiftId: scheduleDispatchForm.targetShiftId,
+    startDate: scheduleDispatchForm.startDate,
+    endDate: scheduleDispatchForm.endDate || scheduleDispatchForm.startDate,
+    slotIndex: multiShiftDayForm.enabled ? normalizeAssignmentSlotIndex(scheduleDispatchForm.slotIndex) : 0,
+  }
+  const approvalFlowId = scheduleDispatchForm.approvalFlowId.trim()
+  if (approvalFlowId) payload.approvalFlowId = approvalFlowId
+  const reason = scheduleDispatchForm.reason.trim()
+  if (reason) payload.reason = reason
+  return payload
+}
+
+async function createScheduleDispatchRequest() {
+  if (scheduleDispatchSaving.value) return
+  const payload = buildScheduleDispatchPayload()
+  if (!String(payload.userId || '').trim()) {
+    setStatus(tr('Employee user ID is required for daily dispatch.', '按天调度需要填写员工 ID。'), 'error')
+    return
+  }
+  if (!payload.targetScheduleGroupId) {
+    setStatus(tr('Select a target schedule group for daily dispatch.', '请选择按天调度的目标排班组。'), 'error')
+    return
+  }
+  if (!payload.targetShiftId) {
+    setStatus(tr('Select a target shift for daily dispatch.', '请选择按天调度的目标班次。'), 'error')
+    return
+  }
+  if (!payload.startDate || !payload.endDate) {
+    setStatus(tr('Select a date range for daily dispatch.', '请选择按天调度日期区间。'), 'error')
+    return
+  }
+  scheduleDispatchSaving.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const suffix = query.toString()
+    const response = await apiFetch(`/api/attendance/schedule-dispatch-requests${suffix ? `?${suffix}` : ''}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw createForbiddenError()
+    }
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw createApiError(response, data, tr('Schedule dispatch request failed', '创建调度申请失败'))
+    }
+    adminForbidden.value = false
+    resetScheduleDispatchForm()
+    await loadScheduleDispatchRequests()
+    setStatus(tr('Daily schedule dispatch request created.', '按天调度申请已创建。'))
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Schedule dispatch request failed', '创建调度申请失败'),
+      requestTimezoneContextHint.value,
+      'admin',
+    )
+  } finally {
+    scheduleDispatchSaving.value = false
   }
 }
 
@@ -22560,6 +22977,7 @@ async function loadAdminData() {
       loadApprovalFlows(),
       loadAdvancedSchedulingWorkbench(),
       loadScheduleGroupAdminCockpit(),
+      loadScheduleDispatchRequests(),
       loadRotationRules(),
       loadShifts(),
       loadAssignments(),
