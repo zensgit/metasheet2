@@ -64,7 +64,7 @@
 - **健壮性闭合**：`/test` 与 retry 的 HTTP serialization invariant 已闭合；log-read failure uses safe fallback, not 500.
 - **锁姿态**：本 A5 v1 closed。后续 retry UI / idempotency / live-record-context 都是新 opt-in，不属于本 closed slice。
 
-### A6 — 收敛引擎（已落 A6-1/A6-2；剩余需求驱动）
+### A6 — 收敛引擎（已落 A6-1/A6-2/A6-3；剩余需求驱动）
 依赖序：**持久 WorkflowJob runtime → suspend/resume（先 webhook 后 delay）→ branch/parallel（DAG）→ BPMN compile/preview adapter → approval-as-job**。
 - **执行细节（per-rung 最小改动集 / 测试面 / gate）**：见 `multitable-automation-a6-execution-plan-20260601.md` 的历史分解；A6-1/A6-2/A6-3 的已落状态、A6-4 的 scope-gate + A6-4a plan、以及仍冻结的后续项，以下方 bullets 和 `…-todo-20260527.md` 清单为准。
 - **A6-0 scout**：`multitable-automation-a6-convergence-scout-20260529.md` 只记录边界/顺序/测试面；它不是 runtime unlock。
