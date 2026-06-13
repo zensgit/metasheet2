@@ -86,6 +86,10 @@ test('multitable openapi stays aligned with runtime contracts', () => {
     paths['/api/multitable/templates/{templateId}/install']?.post?.responses?.['201']?.content?.['application/json']?.schema?.properties?.data?.$ref,
     '#/components/schemas/MultitableTemplateInstallResult',
   )
+  assert.deepEqual(
+    Object.keys(paths['/api/multitable/templates/{templateId}/install']?.post?.requestBody?.content?.['application/json']?.schema?.properties ?? {}).sort(),
+    ['baseId', 'baseName', 'workspaceId'],
+  )
   assert.equal(
     schemas.MultitableTemplateField?.properties?.type?.$ref,
     '#/components/schemas/MultitableFieldType',

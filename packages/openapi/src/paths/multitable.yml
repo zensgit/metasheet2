@@ -96,10 +96,15 @@ paths:
             schema:
               type: object
               properties:
+                baseId:
+                  type: string
+                  maxLength: 50
                 baseName:
                   type: string
+                  maxLength: 255
                 workspaceId:
                   type: string
+                  maxLength: 100
       responses:
         '201':
           description: Created
