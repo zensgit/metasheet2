@@ -46,6 +46,7 @@
             :class="{
               'meta-calendar__cell--outside': !cell.inMonth,
               'meta-calendar__cell--today': cell.isToday,
+              'meta-calendar__cell--drag-over': dragOverDate === cell.dateStr,
             }"
             :role="cell.inMonth ? 'button' : undefined"
             :tabindex="cell.inMonth ? 0 : -1"
@@ -53,6 +54,9 @@
             :aria-disabled="!cell.inMonth ? 'true' : undefined"
             @click="canCreate && cell.inMonth && emit('create-record', buildCreateRecordData(cell.dateStr))"
             @keydown="onCellKeydown($event, cellIdx, monthCells)"
+            @dragover="canReschedule && cell.inMonth ? onCellDragOver(cell.dateStr, $event) : undefined"
+            @dragleave="dragOverDate = null"
+            @drop="cell.inMonth ? onCellDrop(cell.dateStr) : resetDrag(); dragOverDate = null"
           >
             <div class="meta-calendar__day-head">
               <span class="meta-calendar__day-num">{{ cell.day }}</span>
@@ -90,8 +94,14 @@
                 v-for="ev in cell.events"
                 :key="ev.id"
                 class="meta-calendar__event"
-                :class="{ 'meta-calendar__event--attachment': ev.isAttachmentTitle }"
+                :class="{
+                  'meta-calendar__event--attachment': ev.isAttachmentTitle,
+                  'meta-calendar__event--draggable': eventDraggable(ev),
+                }"
+                :draggable="eventDraggable(ev)"
                 @click.stop="emit('select-record', ev.id)"
+                @dragstart="onEventDragStart(ev, cell.dateStr, $event)"
+                @dragend="resetDrag(); dragOverDate = null"
               >
                 <div class="meta-calendar__event-copy">
                   <MetaAttachmentList
@@ -145,12 +155,16 @@
             class="meta-calendar__cell meta-calendar__cell--week"
             :class="{
               'meta-calendar__cell--today': cell.isToday,
+              'meta-calendar__cell--drag-over': dragOverDate === cell.dateStr,
             }"
             role="button"
             tabindex="0"
             :aria-label="cellAriaLabel(cell)"
             @click="canCreate && emit('create-record', buildCreateRecordData(cell.dateStr))"
             @keydown="onCellKeydown($event, cellIdx, weekCells)"
+            @dragover="canReschedule ? onCellDragOver(cell.dateStr, $event) : undefined"
+            @dragleave="dragOverDate = null"
+            @drop="onCellDrop(cell.dateStr); dragOverDate = null"
           >
             <div class="meta-calendar__day-head">
               <span class="meta-calendar__day-num">{{ cell.day }}</span>
@@ -188,8 +202,14 @@
                 v-for="ev in cell.events"
                 :key="ev.id"
                 class="meta-calendar__event"
-                :class="{ 'meta-calendar__event--attachment': ev.isAttachmentTitle }"
+                :class="{
+                  'meta-calendar__event--attachment': ev.isAttachmentTitle,
+                  'meta-calendar__event--draggable': eventDraggable(ev),
+                }"
+                :draggable="eventDraggable(ev)"
                 @click.stop="emit('select-record', ev.id)"
+                @dragstart="onEventDragStart(ev, cell.dateStr, $event)"
+                @dragend="resetDrag(); dragOverDate = null"
               >
                 <div class="meta-calendar__event-copy">
                   <MetaAttachmentList
@@ -377,6 +397,7 @@ const props = defineProps<{
   fields: MetaField[]
   loading: boolean
   canCreate?: boolean
+  canEdit?: boolean
   canComment?: boolean
   viewConfig?: Record<string, unknown> | null
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
@@ -398,6 +419,10 @@ const emit = defineEmits<{
   (e: 'create-record', data: Record<string, unknown>): void
   (e: 'update-view-config', input: { config: Record<string, unknown> }): void
   (e: 'visible-range-change', range: CalendarVisibleRange): void
+  // Drag-to-reschedule rewrites the configured date field via the SAME single-
+  // cell patch path Kanban uses (recordId, fieldId, value, version). Optimistic
+  // UI + version/conflict rollback live in useMultitableGrid.patchCell.
+  (e: 'patch-cell', recordId: string, fieldId: string, value: unknown, version: number): void
 }>()
 
 const dateFieldId = ref<string | null>(null)
@@ -462,6 +487,10 @@ type CalendarEvent = {
   title: string
   attachments: MetaAttachment[]
   isAttachmentTitle: boolean
+  // version drives the optimistic-concurrency check on patch; locked mirrors the
+  // record's top-level lock flag (rank-8) so a locked event refuses to drag.
+  version: number
+  locked: boolean
 }
 
 function attachmentIds(row: MetaRecord, field: MetaField): string[] {
@@ -511,7 +540,7 @@ const eventsByDate = computed(() => {
     for (let cursor = new Date(start); cursor.getTime() <= safeEnd.getTime(); cursor.setDate(cursor.getDate() + 1)) {
       const dateStr = fmt(cursor.getFullYear(), cursor.getMonth() + 1, cursor.getDate())
       if (!map[dateStr]) map[dateStr] = []
-      map[dateStr].push({ id: row.id, title, attachments, isAttachmentTitle })
+      map[dateStr].push({ id: row.id, title, attachments, isAttachmentTitle, version: row.version, locked: row.locked === true })
     }
   }
   return map
@@ -763,6 +792,63 @@ function cellAriaLabel(cell: CalendarCell): string {
   return calendarCellAriaLabel(dateLabel, annotations, total, isZh.value)
 }
 
+// --- Drag-to-reschedule ---
+// Mirrors MetaKanbanView's drag-write precedent: stash the dragged record's id,
+// version and origin day in a local var on dragstart (NOT dataTransfer, so the
+// behaviour is independent of a working DataTransfer), then on a cell drop emit
+// the single-cell `patch-cell` so the shared grid path handles the optimistic
+// write + version/lock/mask rejection + rollback.
+let dragRecordId: string | null = null
+let dragVersion = 0
+let dragOriginDate: string | null = null
+const dragOverDate = ref<string | null>(null)
+
+const canReschedule = computed(() => props.canEdit === true && !!dateField.value)
+
+function onCellDragOver(targetDate: string, e: DragEvent) {
+  if (!dragRecordId) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  dragOverDate.value = targetDate
+}
+
+function eventDraggable(ev: CalendarEvent): boolean {
+  // A locked record's event must never be draggable (rank-8 record lock).
+  return canReschedule.value && !ev.locked
+}
+
+function onEventDragStart(ev: CalendarEvent, originDate: string, e: DragEvent) {
+  if (!eventDraggable(ev)) {
+    e.preventDefault()
+    return
+  }
+  dragRecordId = ev.id
+  dragVersion = ev.version
+  dragOriginDate = originDate
+  e.dataTransfer?.setData('text/plain', ev.id)
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+}
+
+function onCellDrop(targetDate: string) {
+  if (!dragRecordId || !dateField.value || !canReschedule.value) {
+    resetDrag()
+    return
+  }
+  // Same-day drop is a no-op — nothing changed, so do not patch.
+  if (targetDate === dragOriginDate) {
+    resetDrag()
+    return
+  }
+  emit('patch-cell', dragRecordId, dateField.value.id, targetDate, dragVersion)
+  resetDrag()
+}
+
+function resetDrag() {
+  dragRecordId = null
+  dragVersion = 0
+  dragOriginDate = null
+}
+
 function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[]) {
   let next = cellIdx
   if (e.key === 'ArrowRight') next = cellIdx + 1
@@ -817,6 +903,7 @@ function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[])
 .meta-calendar__cell--outside .meta-calendar__day-num { color: #ccc; }
 .meta-calendar__cell--today { background: #ecf5ff; }
 .meta-calendar__cell--today .meta-calendar__day-num { color: #409eff; font-weight: 700; }
+.meta-calendar__cell--drag-over { background: #ecf5ff; outline: 2px solid #409eff; outline-offset: -2px; }
 .meta-calendar__cell--week { min-height: 120px; }
 .meta-calendar__day-head { display: flex; align-items: baseline; justify-content: space-between; gap: 4px; margin-bottom: 2px; }
 .meta-calendar__day-num { font-size: 12px; color: #666; margin-bottom: 2px; }
@@ -844,6 +931,8 @@ function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[])
 .meta-calendar__events { display: flex; flex-direction: column; gap: 2px; }
 .meta-calendar__event { padding: 2px 4px; background: #409eff; color: #fff; border-radius: 3px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; display: flex; align-items: center; gap: 6px; }
 .meta-calendar__event:hover { background: #337ecc; }
+.meta-calendar__event--draggable { cursor: grab; }
+.meta-calendar__event--draggable:active { cursor: grabbing; }
 .meta-calendar__event--attachment { background: #f8fafc; color: #334155; border: 1px solid #dbeafe; white-space: normal; }
 .meta-calendar__event--attachment:hover { background: #eff6ff; }
 .meta-calendar__event-copy { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; }
