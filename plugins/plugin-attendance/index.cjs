@@ -22543,6 +22543,28 @@ module.exports = {
       return `schedule_dispatch:${userId}:${targetScheduleGroupId}:${startDate}:${endDate}:${Number(slotIndex ?? 0)}`
     }
 
+    function resolveScheduleDispatchSlotIndex(settings, value) {
+      const multiShiftDay = normalizeMultiShiftDaySetting(settings?.multiShiftDay)
+      const slotIndex = normalizeAttendanceScheduleSlotIndex(value, 0)
+      if (!multiShiftDay.enabled && slotIndex !== 0) {
+        throw new HttpError(
+          422,
+          'SCHEDULE_DISPATCH_SLOT_UNAVAILABLE',
+          'schedule_dispatch slotIndex must be 0 unless multi-shift day is enabled',
+          singleValidationDetail('slotIndex', 'Must be 0 unless multi-shift day is enabled')
+        )
+      }
+      if (multiShiftDay.enabled && (slotIndex < 0 || slotIndex >= multiShiftDay.maxSlots)) {
+        throw new HttpError(
+          400,
+          'VALIDATION_ERROR',
+          `slotIndex must be between 0 and ${multiShiftDay.maxSlots - 1}`,
+          singleValidationDetail('slotIndex', `Must be between 0 and ${multiShiftDay.maxSlots - 1}`)
+        )
+      }
+      return { slotIndex, multiShiftDay }
+    }
+
     async function acquireScheduleDispatchWindowLock(client, orgId, userId, targetScheduleGroupId, slotIndex) {
       try {
         await client.query(
@@ -22714,6 +22736,176 @@ module.exports = {
         [orgId, requestId]
       )
       await archiveScheduleDispatchSourceKey(client, orgId, requestId)
+    }
+
+    async function enforceScheduleDispatchEditWindow(client, dates) {
+      const settings = await getSettings(client)
+      const violation = evaluateShiftEditWindow(settings?.shiftEditPolicy, dates, normalizeDateOnly(new Date()))
+      if (!violation) return
+      throw new HttpError(
+        422,
+        'SHIFT_EDIT_WINDOW_EXCEEDED',
+        `Schedule edit window exceeded: ${violation.earliest} is before the earliest editable date ${violation.boundary}`,
+        {
+          earliestDate: violation.earliest,
+          boundaryDate: violation.boundary,
+          mode: violation.mode,
+        }
+      )
+    }
+
+    async function maybeInsertScheduleDispatchMembership(client, {
+      orgId,
+      detail,
+      targetGroup,
+      actorId,
+    }) {
+      await acquireAttendanceScheduleGroupMemberLock(client, orgId, targetGroup.id, detail.user_id)
+      const existingRows = await client.query(
+        `SELECT id
+           FROM attendance_schedule_group_members
+          WHERE org_id = $1
+            AND schedule_group_id = $2
+            AND user_id = $3
+            AND COALESCE(effective_from, DATE '0001-01-01') <= COALESCE($5::date, DATE '9999-12-31')
+            AND COALESCE(effective_to, DATE '9999-12-31') >= COALESCE($4::date, DATE '0001-01-01')
+          LIMIT 1`,
+        [orgId, targetGroup.id, detail.user_id, detail.start_date, detail.end_date]
+      )
+      if (existingRows.length) return null
+      const rows = await client.query(
+        `INSERT INTO attendance_schedule_group_members (
+           org_id, schedule_group_id, user_id, effective_from, effective_to, role,
+           source, created_by, updated_by, created_at, updated_at
+         )
+         VALUES ($1, $2, $3, $4::date, $5::date, 'member', 'schedule_dispatch', $6, $6, now(), now())
+         RETURNING *`,
+        [orgId, targetGroup.id, detail.user_id, detail.start_date, detail.end_date, actorId]
+      )
+      return rows[0] ?? null
+    }
+
+    async function finalizeScheduleDispatchRequest(client, { orgId, requestId, actorId, actorAccess }) {
+      const detail = await loadScheduleDispatchDetail(client, orgId, requestId, { forUpdate: true })
+      if (!detail) {
+        throw new HttpError(400, 'SCHEDULE_DISPATCH_DETAIL_MISSING', 'Schedule-dispatch request detail is missing')
+      }
+      if (detail.finalized_at || (Array.isArray(detail.assignment_ids) && detail.assignment_ids.length > 0)) {
+        throw new HttpError(409, 'SCHEDULE_DISPATCH_ALREADY_FINALIZED', 'Schedule-dispatch request is already finalized')
+      }
+
+      const groupRows = await client.query(
+        `SELECT *
+           FROM attendance_schedule_groups
+          WHERE id = $1 AND org_id = $2 AND is_active = true
+          LIMIT 1
+          FOR SHARE`,
+        [detail.target_schedule_group_id, orgId]
+      )
+      const targetGroup = groupRows[0]
+      if (!targetGroup) {
+        throw new HttpError(409, 'SCHEDULE_DISPATCH_TARGET_UNAVAILABLE', 'Target schedule group is no longer active')
+      }
+      const shiftRows = await client.query(
+        `SELECT *
+           FROM attendance_shifts
+          WHERE id = $1 AND org_id = $2
+          LIMIT 1
+          FOR SHARE`,
+        [detail.target_shift_id, orgId]
+      )
+      const targetShift = shiftRows[0]
+      if (!targetShift) {
+        throw new HttpError(409, 'SCHEDULE_DISPATCH_TARGET_UNAVAILABLE', 'Target shift is no longer available')
+      }
+
+      await assertScheduleDispatchScopeAllowed(client, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget({
+        userId: detail.user_id,
+        targetScheduleGroupId: targetGroup.id,
+        targetDepartmentRef: targetGroup.department_ref ?? null,
+      }))
+      const settings = await getSettings(client)
+      const slotResolution = resolveScheduleDispatchSlotIndex(settings, detail.slot_index)
+      await acquireScheduleDispatchWindowLock(client, orgId, detail.user_id, targetGroup.id, slotResolution.slotIndex)
+      await acquireAttendanceScheduleAssignmentLocks(client, orgId, [detail.user_id])
+      await enforceScheduleDispatchEditWindow(client, [detail.start_date, detail.end_date])
+
+      const draft = {
+        kind: 'shift',
+        orgId,
+        userId: detail.user_id,
+        shiftId: detail.target_shift_id,
+        startDate: detail.start_date,
+        endDate: detail.end_date,
+        isActive: true,
+        slotIndex: slotResolution.slotIndex,
+        multiShiftEnabled: slotResolution.multiShiftDay.enabled,
+        shift: targetShift,
+      }
+      const conflict = await findAttendanceScheduleAssignmentConflict(client, draft)
+      if (conflict) throwAttendanceScheduleAssignmentConflict(conflict)
+
+      const assignmentRows = await client.query(
+        `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active,
+          publish_status, published_at, published_by, locked_at,
+          assignment_kind, producer_type, producer_ref_id, producer_key, producer_run_id)
+         VALUES
+         ($1, $2, $3, $4, $5, $6::date, $7::date, true,
+          'published', now(), $8, now(),
+          'regular', 'schedule_dispatch', $9, $10, $9)
+         RETURNING *`,
+        [
+          randomUUID(),
+          orgId,
+          detail.user_id,
+          detail.target_shift_id,
+          slotResolution.slotIndex,
+          detail.start_date,
+          detail.end_date,
+          actorId,
+          requestId,
+          detail.source_key,
+        ]
+      )
+      const assignment = assignmentRows[0]
+      await enforceShiftComplianceCap(client, {
+        orgId,
+        userId: detail.user_id,
+        fromDate: detail.start_date,
+        toDate: detail.end_date,
+      })
+      const membership = await maybeInsertScheduleDispatchMembership(client, {
+        orgId,
+        detail,
+        targetGroup,
+        actorId,
+      })
+      const finalizedRows = await client.query(
+        `UPDATE attendance_schedule_dispatch_requests
+            SET publish_status = 'published',
+                assignment_ids = $3::uuid[],
+                membership_id = $4,
+                finalized_at = now(),
+                target_attendance_group_id = $5,
+                target_department_ref = $6,
+                updated_at = now()
+          WHERE org_id = $1 AND request_id = $2
+          RETURNING *`,
+        [
+          orgId,
+          requestId,
+          [assignment.id],
+          membership?.id ?? null,
+          targetGroup.attendance_group_id ?? null,
+          targetGroup.department_ref ?? null,
+        ]
+      )
+      return {
+        detail: finalizedRows[0] ?? detail,
+        assignment,
+        membership,
+      }
     }
 
     function buildScheduleDispatchViewSql(scopes, params, alias = 'd') {
@@ -23284,6 +23476,8 @@ module.exports = {
             if (!shiftRows.length) {
               throw new HttpError(404, 'NOT_FOUND', 'Target shift not found')
             }
+            const settings = await getSettings(trx)
+            const slotResolution = resolveScheduleDispatchSlotIndex(settings, input.slotIndex)
 
             const target = buildScheduleDispatchSchedulerScopeTarget({
               userId: input.userId,
@@ -23292,14 +23486,14 @@ module.exports = {
             })
             await assertScheduleDispatchScopeAllowed(trx, orgId, actorAccess, target)
 
-            await acquireScheduleDispatchWindowLock(trx, orgId, input.userId, targetGroup.id, input.slotIndex)
+            await acquireScheduleDispatchWindowLock(trx, orgId, input.userId, targetGroup.id, slotResolution.slotIndex)
             const approvalFlow = await resolveScheduleDispatchApprovalFlow(trx, orgId, input.approvalFlowId)
             const sourceKey = buildScheduleDispatchSourceKey({
               userId: input.userId,
               targetScheduleGroupId: targetGroup.id,
               startDate: input.startDate,
               endDate: input.endDate,
-              slotIndex: input.slotIndex,
+              slotIndex: slotResolution.slotIndex,
             })
             const duplicateRows = await trx.query(
               `SELECT d.request_id
@@ -23313,7 +23507,7 @@ module.exports = {
                   AND d.end_date >= $5::date
                   AND r.status IN ('pending', 'approved')
                 LIMIT 1`,
-              [orgId, input.userId, targetGroup.id, input.slotIndex, input.startDate, input.endDate]
+              [orgId, input.userId, targetGroup.id, slotResolution.slotIndex, input.startDate, input.endDate]
             )
             if (duplicateRows.length) {
               throw new HttpError(409, 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', 'A schedule-dispatch request already exists for this user/group/date window')
@@ -23329,7 +23523,7 @@ module.exports = {
                 targetShiftId: input.targetShiftId,
                 startDate: input.startDate,
                 endDate: input.endDate,
-                slotIndex: input.slotIndex,
+                slotIndex: slotResolution.slotIndex,
                 sourceKey,
               },
               approvalFlow: {
@@ -23387,7 +23581,7 @@ module.exports = {
                 targetGroup.attendance_group_id ?? null,
                 targetGroup.department_ref ?? null,
                 input.targetShiftId,
-                input.slotIndex,
+                slotResolution.slotIndex,
                 input.startDate,
                 input.endDate,
                 sourceKey,
@@ -24386,19 +24580,6 @@ module.exports = {
           const newVersion = Number(approval.version ?? 0) + 1
           const resolvedAt = new Date()
 
-          if (requestType === 'schedule_dispatch' && action === 'approve' && isFinalApproval) {
-            await assertScheduleDispatchRequestScopeAllowed(trx, orgId, requestId, {
-              userId: requesterId,
-              orgId,
-              fullAdmin: await hasAttendanceAdminAccess(requesterId),
-            }, { forUpdate: true })
-            throw new HttpError(
-              422,
-              'SCHEDULE_DISPATCH_FINAL_WRITER_PENDING',
-              'Schedule-dispatch final approval is not available until dispatch finalization is enabled'
-            )
-          }
-
           const nextStepIndex = isFinalApproval ? currentStepIndex : currentStepIndex + 1
           await trx.query(
             `UPDATE approval_instances
@@ -24448,6 +24629,26 @@ module.exports = {
           )
 
           const nextMetadata = { ...requestMetadata }
+          let scheduleDispatchFinalization = null
+          if (requestType === 'schedule_dispatch' && action === 'approve' && isFinalApproval) {
+            scheduleDispatchFinalization = await finalizeScheduleDispatchRequest(trx, {
+              orgId,
+              requestId,
+              actorId: requesterId,
+              actorAccess: {
+                userId: requesterId,
+                orgId,
+                fullAdmin: await hasAttendanceAdminAccess(requesterId),
+              },
+            })
+            nextMetadata.scheduleDispatchFinalization = {
+              assignmentIds: [scheduleDispatchFinalization.assignment.id],
+              membershipId: scheduleDispatchFinalization.membership?.id ?? null,
+              finalizedAt: scheduleDispatchFinalization.detail.finalized_at
+                ? new Date(scheduleDispatchFinalization.detail.finalized_at).toISOString()
+                : new Date().toISOString(),
+            }
+          }
           let shiftSwapFinalization = null
           if (action === 'approve' && isFinalApproval && requestType === 'shift_swap') {
             shiftSwapFinalization = await finalizeShiftSwapRequest(trx, {

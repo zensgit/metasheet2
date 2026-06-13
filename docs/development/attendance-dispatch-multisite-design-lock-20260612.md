@@ -31,7 +31,7 @@ Current landed status（2026-06-12）:
 
 - D1 contract is landed in #2551.
 - D2 dedicated create/list/read/cancel API is landed in #2553, including generic final-approval/cancel cleanup guards while the final writer is pending.
-- D3 final approval writer is still not landed; the final-approval scope revalidation in this design remains the D3 acceptance lock.
+- D3 final approval writer is code-green in the 2026-06-13 implementation slice: final approval writes the published assignment + optional schedule-group membership, revalidates latest target-group department dispatch scope, and covers conflict/edit-window/shiftCompliance rollback in real-DB tests. D4 UI and D5 staging smoke remain pending, so the capability stays 🟡 rather than ✅.
 
 ## 2. Scope
 
@@ -202,26 +202,30 @@ Already covered by landed D1/D2 (#2551/#2553):
 - parent `attendance_requests` row maps `user_id` to dispatched user and `work_date` to `start_date`.
 - create route with no scope -> 403 for scope-only actor.
 - create route with target schedule group + user + target department dispatch scope -> 201.
-- generic final approve rechecks stored dispatch scope and then fails closed with `SCHEDULE_DISPATCH_FINAL_WRITER_PENDING`; generic reject/cancel closes the detail row and archives `source_key`.
+- generic reject/cancel closes the detail row and archives `source_key`.
 
-D3 final-writer required tests before assignment/member writes can be called complete:
+D3 final-writer coverage in the 2026-06-13 code-green slice:
 
-- final approve with `attendance:approve` but no matching `dispatch` scope -> 403 and rollback before write; matching dispatch scope or central admin may proceed to the D3 writer.
+- final approve with approval permission/scope but no matching latest target-group department `dispatch` scope -> 403 and rollback before write; matching dispatch scope or central admin may proceed to the D3 writer.
 - final approve writes exactly one `producer_type='schedule_dispatch'` assignment and optional membership row.
 - repeat/replay final approve does not duplicate assignment/membership.
-- conflict guard: existing published assignment same slot/date -> 409/422 and approval rollback.
+- conflict guard: existing assignment same slot/date -> 409 and approval rollback.
 - shiftCompliance cap exceeded -> 422 and approval rollback.
 - `shiftEditPolicy` exceeded -> 422 and approval rollback.
-- multi-shift disabled rejects non-zero slot; enabled accepts non-overlapping non-zero slot.
-- effective-calendar and planned-minutes see the dispatch assignment with no special resolver path.
-- staging smoke: create target group/shift/user, create dispatch request, approve, assert effective-calendar shows target shift, provenance exact, membership window present/reused, cleanup residue=0.
+- multi-shift disabled rejects non-zero slot at create and finalization; enabled accepts an in-range non-zero slot.
+- generic adjustment event remains excluded for `schedule_dispatch`.
+
+Still required before the dispatch capability can flip ✅:
+
+- D4 admin/employee UI.
+- D5 staging smoke: create target group/shift/user, create dispatch request, approve, assert effective-calendar shows target shift, provenance exact, membership window present/reused, cleanup residue=0.
 
 ## 9. Slice Plan
 
 - D0 design-lock (this PR) — docs only.
 - D1 latent schema + request type enum + runtime constants/labels + typed DB union + approval-flow support + OpenAPI/SDK generated contract + generic `/requests` rejection — landed #2551.
 - D2 dedicated create/list/read/cancel API and route-level tests — landed #2553.
-- D3 final approval writer + conflict/edit-window/compliance/scope guards.
+- D3 final approval writer + conflict/edit-window/compliance/scope guards — code-green in the 2026-06-13 implementation slice.
 - D4 admin/employee UI.
 - D5 staging smoke harness/runbook + staging closeout.
 - D6 permanent dispatch design-lock (optional, later).
