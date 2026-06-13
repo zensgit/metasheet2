@@ -45,12 +45,16 @@ const FUTURE_SAME = `sheet_toctou_future_same_${TS}` // will be created in BASE_
 const FUTURE_NULL = `sheet_toctou_future_null_${TS}` // created with null base → cross-base vs set-base source
 const FUTURE_ALIAS = `sheet_toctou_future_alias_${TS}` // referenced via the datasheetId alias
 const FUTURE_SEED_SAME = `sheet_toctou_future_seed_same_${TS}` // POST /sheets + seed:true, SAME base as source
+const FUTURE_LOCKED_CROSS = `sheet_toctou_future_locked_cross_${TS}` // used by the advisory-lock serialization test
+const FUTURE_LOCKED_FIELD = `sheet_toctou_future_locked_field_${TS}` // route-created link points here while lock is held
 
 const FLD_CROSS = `fld_toctou_cross_${TS}`
 const FLD_SAME = `fld_toctou_same_${TS}`
 const FLD_NULL = `fld_toctou_null_${TS}`
 const FLD_ALIAS = `fld_toctou_alias_${TS}`
 const FLD_SEED_SAME = `fld_toctou_seed_same_${TS}`
+const FLD_LOCKED_CROSS = `fld_toctou_locked_cross_${TS}`
+const FLD_LOCKED_CREATE = `fld_toctou_locked_create_${TS}`
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
@@ -76,6 +80,38 @@ const sheetExists = async (sheetId: string): Promise<boolean> => {
   return (r.rows as unknown[]).length > 0
 }
 
+const linkTargetMaterializationLockKey = (sheetId: string): string => `multitable:link-target:${sheetId}`
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+async function runWhileAdvisoryLockHeld<T>(sheetId: string, start: () => Promise<T>): Promise<T> {
+  const client = await poolManager.get().getInternalPool().connect()
+  const lockKey = linkTargetMaterializationLockKey(sheetId)
+  await client.query('SELECT pg_advisory_lock(hashtext($1))', [lockKey])
+  let settled = false
+  const requestPromise = start().then(
+    (value) => {
+      settled = true
+      return value
+    },
+    (error) => {
+      settled = true
+      throw error
+    },
+  )
+  try {
+    await sleep(100)
+    const settledWhileLocked = settled
+    await client.query('SELECT pg_advisory_unlock(hashtext($1))', [lockKey])
+    const result = await requestPromise
+    expect(settledWhileLocked).toBe(false)
+    return result
+  } finally {
+    await client.query('SELECT pg_advisory_unlock(hashtext($1))', [lockKey]).catch(() => {})
+    client.release()
+  }
+}
+
 describeIfDatabase('②a wall — sheet-create TOCTOU close (§2a.4-c, real DB)', () => {
   beforeAll(async () => {
     await q('INSERT INTO meta_bases (id, name) VALUES ($1, $2)', [BASE_A, 'TOCTOU Base A'])
@@ -95,10 +131,21 @@ describeIfDatabase('②a wall — sheet-create TOCTOU close (§2a.4-c, real DB)'
       [FLD_ALIAS, SHEET_A, 'Link Future Alias', 'link', JSON.stringify({ datasheetId: FUTURE_ALIAS }), 4])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_SEED_SAME, SHEET_A, 'Link Future Seed Same', 'link', JSON.stringify({ foreignSheetId: FUTURE_SEED_SAME }), 5])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_LOCKED_CROSS, SHEET_A, 'Link Future Locked Cross', 'link', JSON.stringify({ foreignSheetId: FUTURE_LOCKED_CROSS }), 6])
   })
 
   afterAll(async () => {
-    const allSheets = [SHEET_A, FUTURE_CROSS, FUTURE_SAME, FUTURE_NULL, FUTURE_ALIAS, FUTURE_SEED_SAME]
+    const allSheets = [
+      SHEET_A,
+      FUTURE_CROSS,
+      FUTURE_SAME,
+      FUTURE_NULL,
+      FUTURE_ALIAS,
+      FUTURE_SEED_SAME,
+      FUTURE_LOCKED_CROSS,
+      FUTURE_LOCKED_FIELD,
+    ]
     await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [allSheets]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [allSheets]).catch(() => {})
     await q('DELETE FROM meta_views WHERE sheet_id = ANY($1::text[])', [allSheets]).catch(() => {})
@@ -188,5 +235,50 @@ describeIfDatabase('②a wall — sheet-create TOCTOU close (§2a.4-c, real DB)'
     const rows = r.rows as Array<{ base_id: string | null }>
     expect(rows).toHaveLength(1)
     expect(rows[0].base_id).toBe(BASE_A)
+  })
+
+  // §2a.4-d (concurrency): POST /sheets must take the same per-target advisory lock used by link field
+  // writes before it scans for existing link fields. Holding the session-level version of that lock makes
+  // the real HTTP route wait; if this regresses, the request settles while the lock is still held.
+  test('TOCTOU concurrency: sheet create waits on the target materialization advisory lock before validating retroactive links', async () => {
+    const res = await runWhileAdvisoryLockHeld(FUTURE_LOCKED_CROSS, () =>
+      request(buildApp(USER))
+        .post('/api/multitable/sheets')
+        .send({
+          id: FUTURE_LOCKED_CROSS,
+          baseId: BASE_B,
+          name: 'Locked Retroactive Cross Target',
+        })
+        .timeout({ deadline: 5000 }),
+    )
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    expect(await sheetExists(FUTURE_LOCKED_CROSS)).toBe(false)
+  })
+
+  // §2a.4-d (concurrency): POST /fields must take the same per-target advisory lock before validating or
+  // inserting a link to a not-yet-existent target. This is the symmetric half of the materialization race:
+  // link writes and target-sheet creation now serialize on `multitable:link-target:<sheetId>`.
+  test('TOCTOU concurrency: link field create waits on the target materialization advisory lock', async () => {
+    const res = await runWhileAdvisoryLockHeld(FUTURE_LOCKED_FIELD, () =>
+      request(buildApp(USER))
+        .post('/api/multitable/fields')
+        .send({
+          id: FLD_LOCKED_CREATE,
+          sheetId: SHEET_A,
+          name: 'Locked Future Link',
+          type: 'link',
+          property: { foreignSheetId: FUTURE_LOCKED_FIELD },
+        })
+        .timeout({ deadline: 5000 }),
+    )
+
+    expect(res.status).toBe(201)
+    expect(res.body.ok).toBe(true)
+    const fieldRes = await q('SELECT property FROM meta_fields WHERE id = $1', [FLD_LOCKED_CREATE])
+    expect((fieldRes.rows as Array<{ property: { foreignSheetId?: string } }>)[0]?.property?.foreignSheetId).toBe(
+      FUTURE_LOCKED_FIELD,
+    )
   })
 })
