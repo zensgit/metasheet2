@@ -879,4 +879,169 @@ describe('MetaFieldManager', () => {
 
     app.unmount()
   })
+
+  it('locks single-record link mode when the field is used as a hierarchy parent', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [{ id: 'sheet_2', name: 'Related' }],
+          fields: [
+            {
+              id: 'fld_parent',
+              name: 'Parent',
+              type: 'link',
+              property: { foreignSheetId: 'sheet_2', limitSingleRecord: true },
+            },
+          ],
+          hierarchyParentFieldIds: ['fld_parent'],
+          onUpdateField: updateSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    const singleToggle = container.querySelector('[data-test="link-single-record-toggle"]') as HTMLInputElement
+    expect(singleToggle.disabled).toBe(true)
+    expect(singleToggle.checked).toBe(true)
+    expect(container.querySelector('[data-test="hierarchy-parent-link-lock"]')?.textContent).toContain('hierarchy parent')
+
+    // Even a synthetic event cannot downgrade the emitted property.
+    singleToggle.checked = false
+    singleToggle.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save field settings'))
+      ?.click()
+    await nextTick()
+
+    expect(updateSpy).toHaveBeenCalledWith('fld_parent', {
+      property: {
+        foreignSheetId: 'sheet_2',
+        foreignDatasheetId: 'sheet_2',
+        limitSingleRecord: true,
+      },
+    })
+
+    app.unmount()
+  })
+
+  it('locks single-record person link mode when the user field is used as a hierarchy parent', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [{ id: 'sheet_1', name: 'Current' }],
+          fields: [
+            {
+              id: 'fld_user_parent',
+              name: 'Owner',
+              type: 'link',
+              property: { refKind: 'user', limitSingleRecord: true },
+            },
+          ],
+          hierarchyParentFieldIds: ['fld_user_parent'],
+          onUpdateField: updateSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    const singleToggle = container.querySelector('[data-test="person-single-record-toggle"]') as HTMLInputElement
+    expect(singleToggle.disabled).toBe(true)
+    expect(singleToggle.checked).toBe(true)
+    expect(container.querySelector('[data-test="hierarchy-parent-link-lock"]')?.textContent).toContain('hierarchy parent')
+
+    // Even a synthetic event cannot downgrade the emitted person/user link property.
+    singleToggle.checked = false
+    singleToggle.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save field settings'))
+      ?.click()
+    await nextTick()
+
+    expect(updateSpy).toHaveBeenCalledWith('fld_user_parent', {
+      property: {
+        limitSingleRecord: true,
+      },
+    })
+
+    app.unmount()
+  })
+
+  it('still allows unrelated link fields to switch to multi-record mode', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [{ id: 'sheet_2', name: 'Related' }],
+          fields: [
+            {
+              id: 'fld_vendor',
+              name: 'Vendor',
+              type: 'link',
+              property: { foreignSheetId: 'sheet_2', limitSingleRecord: true },
+            },
+          ],
+          hierarchyParentFieldIds: ['fld_parent'],
+          onUpdateField: updateSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    const singleToggle = container.querySelector('[data-test="link-single-record-toggle"]') as HTMLInputElement
+    expect(singleToggle.disabled).toBe(false)
+    singleToggle.checked = false
+    singleToggle.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save field settings'))
+      ?.click()
+    await nextTick()
+
+    expect(updateSpy).toHaveBeenCalledWith('fld_vendor', {
+      property: {
+        foreignSheetId: 'sheet_2',
+        foreignDatasheetId: 'sheet_2',
+        limitSingleRecord: false,
+      },
+    })
+
+    app.unmount()
+  })
 })
