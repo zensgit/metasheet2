@@ -1030,6 +1030,19 @@ export function baseIdsAreCrossBase(a: string | null, b: string | null): boolean
   return a !== b
 }
 
+function linkTargetMaterializationLockKey(sheetId: string): string {
+  return `multitable:link-target:${sheetId}`
+}
+
+async function acquireLinkTargetMaterializationLock(query: QueryFn, sheetId: string): Promise<void> {
+  await query('SELECT pg_advisory_xact_lock(hashtext($1))', [linkTargetMaterializationLockKey(sheetId)])
+}
+
+function getLinkTargetSheetIdForMaterializationLock(type: UniverMetaField['type'], property: unknown): string | null {
+  if (type !== 'link') return null
+  return parseLinkFieldConfig(property)?.foreignSheetId ?? null
+}
+
 /**
  * ②a §2a.2 — the cross-base WALL. A `link` field may not silently span two bases: the foreign sheet's
  * `base_id` must equal the source sheet's `base_id`. This closes the STRUCTURAL hole — today the
@@ -3891,6 +3904,7 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
     const existing = await query('SELECT id FROM meta_sheets WHERE id = $1', [args.sheetId])
     const isGenuinelyNew = (existing.rows as unknown[]).length === 0
     if (isGenuinelyNew) {
+      await acquireLinkTargetMaterializationLock(query as unknown as QueryFn, args.sheetId)
       const retroactiveCrossBase = await validateSheetCreateNoRetroactiveCrossBaseLink(query, args.sheetId, baseId)
       if (retroactiveCrossBase) {
         throw new CrossBaseLinkError(retroactiveCrossBase)
@@ -5585,6 +5599,10 @@ export function univerMetaRouter(): Router {
         // ②a §2a.2 — cross-base WALL (create). Fire only when the payload explicitly carries a link
         // foreign-sheet key (any alias), mirroring the aiShortcut/expression presence gates.
         if (linkForeignKeyInPayload(parsed.data.property)) {
+          const lockTargetSheetId = getLinkTargetSheetIdForMaterializationLock(type, property)
+          if (lockTargetSheetId) {
+            await acquireLinkTargetMaterializationLock(query as unknown as QueryFn, lockTargetSheetId)
+          }
           const linkBaseError = await validateLinkFieldConfig(req, query, sheetId, type, property)
           if (linkBaseError) {
             throw new ValidationError(linkBaseError)
@@ -5908,6 +5926,10 @@ export function univerMetaRouter(): Router {
         // conversion we MUST validate the effective `nextProperty`. (link→link rename keeps currentType
         // 'link' so this clause stays false → GA-T4b compat preserved.)
         if (linkForeignKeyInPayload(parsed.data.property) || (nextType === 'link' && currentType !== 'link')) {
+          const lockTargetSheetId = getLinkTargetSheetIdForMaterializationLock(nextType, nextProperty)
+          if (lockTargetSheetId) {
+            await acquireLinkTargetMaterializationLock(query as unknown as QueryFn, lockTargetSheetId)
+          }
           const linkBaseError = await validateLinkFieldConfig(req, query, sheetId, nextType, nextProperty)
           if (linkBaseError) {
             throw new ValidationError(linkBaseError)
@@ -6816,6 +6838,7 @@ export function univerMetaRouter(): Router {
         // ②a §2a.4-c TOCTOU close: reject if creating this sheet (with this resolved baseId) would
         // retroactively make an EXISTING link field cross-base (a link previously pointed at this
         // not-yet-existent sheet id from a source sheet in a different base). Mirrors the §2a.2 wall.
+        await acquireLinkTargetMaterializationLock(query as unknown as QueryFn, sheetId)
         const retroactiveCrossBase = await validateSheetCreateNoRetroactiveCrossBaseLink(
           query as unknown as QueryFn,
           sheetId,
