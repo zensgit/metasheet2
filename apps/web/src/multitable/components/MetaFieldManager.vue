@@ -111,9 +111,17 @@
             {{ ml('field.personHint') }}
           </div>
           <label class="meta-field-mgr__toggle">
-            <input v-model="personDraft.limitSingleRecord" type="checkbox" />
+            <input
+              v-model="personDraft.limitSingleRecord"
+              type="checkbox"
+              :disabled="linkSingleRecordLockedByHierarchy"
+              data-test="person-single-record-toggle"
+            />
             <span>{{ ml('field.limitSinglePerson') }}</span>
           </label>
+          <div v-if="linkSingleRecordLockedByHierarchy" class="meta-field-mgr__hint" data-test="hierarchy-parent-link-lock">
+            {{ ml('field.hierarchyParentLinkLocked') }}
+          </div>
         </template>
 
         <template v-else-if="configTargetType === 'lookup'">
@@ -1255,7 +1263,7 @@ function serializeFieldDraft(type: string | null): string {
   }
   if (type === 'person') {
     return JSON.stringify({
-      limitSingleRecord: personDraft.limitSingleRecord,
+      limitSingleRecord: linkSingleRecordLockedByHierarchy.value || personDraft.limitSingleRecord,
     })
   }
   if (type === 'lookup') {
@@ -1747,7 +1755,7 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     }
   }
   if (normalizedType === 'person') {
-    return { limitSingleRecord: personDraft.limitSingleRecord }
+    return { limitSingleRecord: linkSingleRecordLockedByHierarchy.value || personDraft.limitSingleRecord }
   }
   if (normalizedType === 'lookup') {
     if (!lookupDraft.linkFieldId || !linkSourceFields.value.some((field) => field.id === lookupDraft.linkFieldId) || !lookupDraft.targetFieldId) {
