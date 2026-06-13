@@ -494,6 +494,7 @@ vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({
     props: {
       visible: { type: Boolean, default: false },
       fields: { type: Array, default: () => [] },
+      hierarchyParentFieldIds: { type: Array, default: () => [] },
     },
     emits: ['create-field', 'update:dirty'],
     render() {
@@ -501,9 +502,15 @@ vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({
         .map((field) => field.id ?? '')
         .filter((fieldId) => fieldId.length > 0)
         .join(',')
+      const hierarchyParentFieldIds = (this.$props.hierarchyParentFieldIds as string[])
+        .filter((fieldId) => fieldId.length > 0)
+        .join(',')
       return h(
         'div',
-        { 'data-field-manager-field-ids': fieldIds },
+        {
+          'data-field-manager-field-ids': fieldIds,
+          'data-field-manager-hierarchy-parent-ids': hierarchyParentFieldIds,
+        },
         [
           h(
             'button',
@@ -1154,6 +1161,29 @@ describe('MultitableWorkbench view wiring', () => {
 
     expect(container!.querySelector('[data-view-manager-field-ids]')?.getAttribute('data-view-manager-field-ids'))
       .toBe('fld_title,fld_view_hidden')
+  })
+
+  it('passes active-sheet hierarchy parent field ids into the field manager', async () => {
+    workbenchMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_parent', name: 'Parent', type: 'link', property: { foreignSheetId: 'sheet_orders', limitSingleRecord: true } },
+      { id: 'fld_other_parent', name: 'Other Parent', type: 'link', property: { foreignSheetId: 'sheet_other', limitSingleRecord: true } },
+    ]
+    workbenchMock.views.value = [
+      ...workbenchMock.views.value,
+      { id: 'view_hierarchy', sheetId: 'sheet_orders', name: 'Hierarchy', type: 'hierarchy', config: { parentFieldId: ' fld_parent ' } },
+      { id: 'view_other_hierarchy', sheetId: 'sheet_other', name: 'Other Hierarchy', type: 'hierarchy', config: { parentFieldId: 'fld_other_parent' } },
+    ]
+
+    mountWorkbench()
+    await flushUi()
+
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    managerButtons.find((button) => button.textContent?.includes('Fields'))?.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-field-manager-hierarchy-parent-ids]')?.getAttribute('data-field-manager-hierarchy-parent-ids'))
+      .toBe('fld_parent')
   })
 
   it('opens sheet access manager and refreshes sheet state after updates', async () => {

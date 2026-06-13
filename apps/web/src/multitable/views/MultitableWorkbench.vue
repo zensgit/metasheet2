@@ -355,11 +355,19 @@
       @cancel-import="cancelImport"
       @import="onBulkImport"
     />
-    <MetaLinkPicker :visible="linkPickerVisible" :field="linkPickerField" :current-value="linkPickerCurrentValue"
-      @close="linkPickerVisible = false" @confirm="onLinkPickerConfirm"
+    <MetaLinkPicker
+      :visible="linkPickerVisible"
+      :field="linkPickerField"
+      :current-value="linkPickerCurrentValue"
+      @close="linkPickerVisible = false"
+      @confirm="onLinkPickerConfirm"
     />
     <MetaFieldManager
-      :visible="showFieldManager" :fields="propertyVisibleWorkbenchFields" :sheets="workbench.sheets.value" :sheet-id="workbench.activeSheetId.value"
+      :visible="showFieldManager"
+      :fields="propertyVisibleWorkbenchFields"
+      :sheets="workbench.sheets.value"
+      :sheet-id="workbench.activeSheetId.value"
+      :hierarchy-parent-field-ids="hierarchyParentFieldIds"
       :dry-run-fn="dryRunFormulaFn"
       :current-record-id="selectedRecordId"
       :ai-preview-fn="aiPreviewFn"
@@ -421,7 +429,6 @@ import { useRouter } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
-import { apiFetch } from '../../utils/api'
 import type { CalendarVisibleRange } from '../../composables/useCalendarDays'
 import {
   EffectiveCalendarFetchError,
@@ -1264,6 +1271,12 @@ async function resolveLinkedImportValue(rawValue: string, field: MetaField): Pro
 }
 
 const propertyVisibleWorkbenchFields = computed(() => filterPropertyVisibleFields(workbench.fields.value))
+const hierarchyParentFieldIds = computed(() =>
+  workbench.views.value
+    .filter((view) => view.type === 'hierarchy' && view.sheetId === workbench.activeSheetId.value)
+    .map((view) => typeof view.config?.parentFieldId === 'string' ? view.config.parentFieldId.trim() : '')
+    .filter((fieldId): fieldId is string => fieldId.length > 0),
+)
 const propertyVisibleGridFields = computed(() => filterPropertyVisibleFields(grid.fields.value))
 
 const uploadAttachmentFn: MetaAttachmentUploadFn = async (file: File, context?: MetaAttachmentUploadContext) =>
