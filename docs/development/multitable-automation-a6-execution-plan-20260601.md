@@ -34,7 +34,7 @@ treatment **on purpose**:
   A6-3-3 branch-local wait/nesting and A6-3-5 join-any stay deferred. A6-5's first `start_approval` bridge slice **landed via #2469**
   as a named cross-surface carve-out on top of A6-2 + W5 completion events. A6-4 now has
   a docs-only scope gate (`multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`);
-  implementation remains not started.
+  the A6-4a pure compiler slice **landed via #2568**. A6-4b route / live runtime remain not started.
 
 The original ladder was:
 **A6-1 enable-writer → A6-2 suspend/resume → A6-3 branch/parallel DAG → A6-4 BPMN
@@ -190,8 +190,8 @@ Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
 > can run `parallel_branch` with `joinMode: 'all'`, persist C1 parent/branch-child fan-out/fan-in
 > lineage, and aggregate fail/skip semantics; the editor can author the constrained `parallel_branch`
 > shape with `workflow_job_v1` auto-lock; admin runs detail can explain branch labels and child
-> jobs. **Still deferred:** A6-3-3 branch-local wait/nesting, A6-3-5 join-any/cancellation, A6-4
-> BPMN compile/preview, public webhook/token emitter, and W7 result backwrite runtime.
+> jobs. **Still deferred:** A6-3-3 branch-local wait/nesting, A6-3-5 join-any/cancellation, A6-4b
+> read-only BPMN compile/preview route, public webhook/token emitter, and W7 result backwrite runtime.
 > Design-lock detail below retained for the record.
 
 The design-lock pinned the first runtime slice as **A6-3-1 `condition_branch` /
@@ -211,7 +211,7 @@ rung.
   independent, join-all waits, join-any cancels with explicit audit, branch failures
   isolated).
 
-## 4. A6-4 BPMN compile/preview adapter — SCOPED (implementation not started)
+## 4. A6-4 BPMN compile/preview adapter — A6-4a LANDED, A6-4b deferred
 
 Scope gate:
 `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`.
@@ -220,13 +220,16 @@ A6-4a implementation checklist:
 
 - **Adds:** parse a constrained BPMN subset, compile-**preview** into automation/approval
   definitions, and return a gap report for unsupported nodes.
+- **A6-4a landed:** #2568 `0f214a222` adds only the pure `bpmnCompilePreview`
+  compiler module + unit tests. It has no route, DB write, migration, frontend,
+  persistence, deploy/start path, or live BPMN runtime.
 - **Must not — permanent positioning:** never execute BPMN, never a second status model,
   never a separate audit/log store, no side-effecting preview. BPMN is a modeling/preview
   input, never a fourth runtime.
 - **Depends on:** landed A6-3 `condition_branch` and `parallel_branch` `joinMode: 'all'`
   mappings. Branch-local waits, join-any, public webhook/token emitters, and result backwrite
   remain gaps unless their own rungs are explicitly unlocked.
-- **Gate:** a named modeling/preview demand. "Continue automation" is not enough.
+- **Gate:** A6-4b route still requires a named modeling/preview demand. "Continue automation" is not enough.
 - **Test surface:** preview side-effect-free, deterministic gap report, gateway mappings backed
   by A6-3 tests, no live BPMN route, no `BPMNWorkflowEngine.deployProcess()` /
   `startProcess()` call, and no writes to BPMN, workflow, automation, approval, execution, or

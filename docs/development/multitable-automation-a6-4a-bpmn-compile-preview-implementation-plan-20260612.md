@@ -1,18 +1,18 @@
 # Multitable Automation A6-4a BPMN Compile/Preview Implementation Plan - 2026-06-12
 
-Status: docs-only implementation plan
+Status: docs-only implementation plan; implemented by #2568
 
 Grounded on: `origin/main@508c8aa2d`
 
 Parent scope gate:
 `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`
 
-Runtime: not started
+Runtime: no live runtime; A6-4a pure compiler landed #2568; A6-4b route not started
 
 ## Verdict
 
-A6-4a, if explicitly unlocked, should implement only the pure compiler core for
-BPMN / Workflow Designer compile-preview.
+A6-4a, explicitly unlocked on 2026-06-13, implemented only the pure compiler
+core for BPMN / Workflow Designer compile-preview in #2568.
 
 It must not add a route, DB write, migration, live BPMN execution path, frontend
 entry point, or persistence side effect. The route belongs to A6-4b, after the
@@ -195,7 +195,8 @@ The redaction test must include at least:
 
 ## A6-4b Follow Slice
 
-Only after A6-4a lands, A6-4b may add the read-only route:
+After A6-4a landed in #2568, A6-4b may add the read-only route only under a
+separate explicit opt-in:
 
 ```text
 POST /api/workflow-designer/workflows/:id/compile-preview
@@ -213,8 +214,9 @@ A6-4b must:
 
 ## Re-entry
 
-This document is not an implementation authorization by itself. The owner still
-must explicitly unlock A6-4a using the parent scope gate language:
+This document is not an authorization for A6-4b by itself. A6-4a has landed; the
+owner still must explicitly unlock any route/UI follow-up using the parent
+scope gate language:
 
 > Start A6-4 BPMN compile-preview adapter only: side-effect-free preview +
 > deterministic gap report, no deploy/start/live BPMN runtime, no persistence,

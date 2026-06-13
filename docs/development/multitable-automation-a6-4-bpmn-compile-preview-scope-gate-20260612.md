@@ -1,13 +1,13 @@
 # Multitable Automation A6-4 BPMN Compile/Preview Scope Gate - 2026-06-12
 
-Status: docs-only scope gate
+Status: docs-only scope gate; A6-4a pure compiler landed later in #2568
 
 Grounded on: `origin/main@52ce8279d`
 
 Scope: A6-4 / W8 only - BPMN as a compile/preview and gap-report input for the
 existing automation + approval substrate.
 
-Runtime: not started
+Runtime: no live runtime; A6-4a pure compiler landed #2568; A6-4b route not started
 
 ## Verdict
 
@@ -163,8 +163,8 @@ landed contracts." It must not mean "safe to deploy as BPMN."
 Detailed A6-4a implementation checklist:
 `multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`.
 
-The first implementation PR should start with a pure module and route only if the
-module is already deterministic:
+The first implementation PR landed as #2568 with only a pure module + unit
+tests. The route remains a separate A6-4b opt-in after the module is stable:
 
 1. Build a pure compiler function that accepts normalized designer/BPMN input.
 2. Add unit tests for supported and unsupported mappings.
@@ -183,13 +183,17 @@ That route name is intentionally different from `deploy`, `test`, `start`, or
 
 ## Required Tests
 
-The implementation PR must include focused tests before merge:
+A6-4a and A6-4b test different risk surfaces. The pure compiler slice (#2568)
+must cover deterministic compile/mapping/gap/redaction behavior without routes
+or writes. The later A6-4b route slice must add route-level no-persistence and
+no-live-engine tests before merge.
 
 1. **Side-effect free:** preview does not call deploy/start/publish/create/update
    services and performs no DB writes except ordinary read queries needed to load
-   the draft.
+   the draft. Route-level proof belongs to A6-4b.
 2. **No live BPMN engine:** spies or dependency injection prove the preview route
    does not call `BPMNWorkflowEngine.deployProcess()` or `startProcess()`.
+   Route-level proof belongs to A6-4b.
 3. **Exclusive gateway mapping:** a valid exclusive gateway maps to
    `condition_branch`; missing default or unrepresentable condition goes to
    `gapReport`.
@@ -220,10 +224,14 @@ example:
 
 ## Exit Criteria for This Scope Gate
 
-This docs-only scope gate is complete when:
+This docs-only scope gate was complete when:
 
 - the A6 execution plan points to this file for A6-4 detail;
-- the run-governance TODO distinguishes "A6-4 scope-gate recorded" from
-  "A6-4 implementation not started";
-- the workflow/automation completion ledger lists W8 as scoped but not built;
+- the run-governance TODO distinguished "A6-4 scope-gate recorded" from the
+  then-unbuilt implementation state at scope-gate time;
+- the workflow/automation completion ledger listed W8 as scoped but not built
+  at scope-gate time;
 - no runtime files, migrations, routes, or tests change in this PR.
+
+Later status: #2568 landed A6-4a as a pure compiler module + unit tests only.
+That does not open A6-4b route work or any live BPMN runtime.
