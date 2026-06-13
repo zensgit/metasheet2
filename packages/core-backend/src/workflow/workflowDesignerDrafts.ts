@@ -3,6 +3,7 @@ import type { WorkflowDefinition } from './WorkflowDesigner'
 export interface StoredWorkflowDefinitionEnvelope {
   visual?: WorkflowDefinition | null
   bpmn?: string | null
+  sourceMode?: 'visual' | 'bpmn_xml'
   description?: string
   category?: string
   tags?: string[]
@@ -57,6 +58,7 @@ export interface WorkflowDraftRecord {
   category?: string
   tags: string[]
   bpmnXml?: string
+  sourceMode?: 'visual' | 'bpmn_xml'
   visual?: WorkflowDefinition | null
   shares: WorkflowDraftShare[]
   executions: WorkflowDraftExecution[]
@@ -122,6 +124,7 @@ export function parseStoredWorkflowDefinition(definition: unknown): StoredWorkfl
   return {
     visual,
     bpmn: typeof parsed.bpmn === 'string' ? parsed.bpmn : null,
+    sourceMode: parsed.sourceMode === 'bpmn_xml' ? 'bpmn_xml' : parsed.sourceMode === 'visual' ? 'visual' : undefined,
     description: typeof parsed.description === 'string' ? parsed.description : undefined,
     category: typeof parsed.category === 'string' ? parsed.category : undefined,
     tags: Array.isArray(parsed.tags) ? parsed.tags.filter((tag): tag is string => typeof tag === 'string') : [],
@@ -139,10 +142,12 @@ export function buildStoredWorkflowDefinition(input: {
   tags?: string[]
   shares?: WorkflowDraftShare[]
   executions?: WorkflowDraftExecution[]
+  sourceMode?: 'visual' | 'bpmn_xml'
 }): StoredWorkflowDefinitionEnvelope {
   return {
     visual: input.visual ?? null,
     bpmn: input.bpmnXml,
+    sourceMode: input.sourceMode ?? (input.visual ? 'visual' : 'bpmn_xml'),
     description: input.description,
     category: input.category,
     tags: input.tags ?? [],
@@ -167,6 +172,7 @@ export function toWorkflowDraftRecord(row: WorkflowDefinitionRowLike): WorkflowD
     category: stored.category,
     tags: stored.tags ?? [],
     bpmnXml: stored.bpmn ?? undefined,
+    sourceMode: stored.sourceMode,
     visual: stored.visual ?? null,
     shares: stored.shares ?? [],
     executions: stored.executions ?? [],

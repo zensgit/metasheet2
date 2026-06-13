@@ -22,6 +22,7 @@ export type MetaManagerLabelKey =
   | 'formatting.noFieldsHint' | 'formatting.saveRules'
   | 'field.title' | 'field.empty' | 'field.options' | 'field.optionValue'
   | 'field.targetSheet' | 'field.selectSheet' | 'field.limitSingleLinkedRecord'
+  | 'field.hierarchyParentLinkLocked'
   | 'field.personHint' | 'field.limitSinglePerson'
   | 'field.linkField' | 'field.selectLinkField'
   | 'field.foreignSheetId' | 'field.targetFieldId'
@@ -162,6 +163,10 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.targetSheet': { en: 'Target sheet', zh: '目标表' },
   'field.selectSheet': { en: 'Select sheet', zh: '选择表' },
   'field.limitSingleLinkedRecord': { en: 'Limit to a single linked record', zh: '限制为单条关联记录' },
+  'field.hierarchyParentLinkLocked': {
+    en: 'This field is used as a hierarchy parent field, so it must remain single-record.',
+    zh: '此字段正在作为层级父字段使用，必须保持单条关联。',
+  },
   'field.personHint': {
     en: 'People fields use the system people sheet preset and stay hidden from normal sheet navigation.',
     zh: '人员字段使用系统人员表预设，并在普通表导航中保持隐藏。',
