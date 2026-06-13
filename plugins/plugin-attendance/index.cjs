@@ -22284,6 +22284,7 @@ module.exports = {
     }
 
     const SHIFT_SWAP_PRODUCER_TYPE = 'shift_swap'
+    const SCHEDULE_DISPATCH_PROTECTED_PRODUCER_TYPES = [SHIFT_SWAP_PRODUCER_TYPE, AUTO_SHIFT_MATCH_PRODUCER_TYPE]
 
     function buildShiftSwapReplacementProducerKey(requestId, userId, workDate, slotIndex) {
       return [
@@ -22328,6 +22329,48 @@ module.exports = {
         'ATTENDANCE_SCHEDULE_ASSIGNMENT_CONFLICT',
         getAttendanceScheduleAssignmentConflictMessage(conflict),
         conflict
+      )
+    }
+
+    async function assertScheduleDispatchProtectedRowsAbsent(client, { orgId, detail }) {
+      const rows = await client.query(
+        `SELECT id, assignment_kind, producer_type, slot_index, start_date, end_date
+           FROM attendance_shift_assignments
+          WHERE org_id = $1
+            AND user_id = $2
+            AND COALESCE(is_active, true) = true
+            AND COALESCE(publish_status, 'published') = 'published'
+            AND start_date <= COALESCE($4::date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}')
+            AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+            AND (
+              assignment_kind = 'temporary'
+              OR producer_type = ANY($5::text[])
+            )
+          ORDER BY start_date DESC, created_at DESC, id
+          LIMIT 1`,
+        [
+          orgId,
+          detail.user_id,
+          detail.start_date,
+          detail.end_date,
+          SCHEDULE_DISPATCH_PROTECTED_PRODUCER_TYPES,
+        ]
+      )
+      const row = rows[0]
+      if (!row) return
+      throw new HttpError(
+        409,
+        'SCHEDULE_DISPATCH_PROTECTED_ASSIGNMENT_CONFLICT',
+        'Schedule dispatch cannot be finalized over a protected generated assignment',
+        {
+          conflictType: 'protected_generated_assignment',
+          assignmentId: row.id,
+          assignmentKind: row.assignment_kind ?? 'regular',
+          producerType: row.producer_type ?? null,
+          slotIndex: normalizeAttendanceScheduleSlotIndex(row.slot_index, 0),
+          startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
+          endDate: normalizeAttendanceScheduleAssignmentEndDate(row.end_date),
+        }
       )
     }
 
@@ -22762,17 +22805,18 @@ module.exports = {
     }) {
       await acquireAttendanceScheduleGroupMemberLock(client, orgId, targetGroup.id, detail.user_id)
       const existingRows = await client.query(
-        `SELECT id
+        `SELECT *
            FROM attendance_schedule_group_members
           WHERE org_id = $1
             AND schedule_group_id = $2
             AND user_id = $3
             AND COALESCE(effective_from, DATE '0001-01-01') <= COALESCE($5::date, DATE '9999-12-31')
             AND COALESCE(effective_to, DATE '9999-12-31') >= COALESCE($4::date, DATE '0001-01-01')
+          ORDER BY effective_from NULLS FIRST, effective_to NULLS LAST, id
           LIMIT 1`,
         [orgId, targetGroup.id, detail.user_id, detail.start_date, detail.end_date]
       )
-      if (existingRows.length) return null
+      if (existingRows.length) return existingRows[0]
       const rows = await client.query(
         `INSERT INTO attendance_schedule_group_members (
            org_id, schedule_group_id, user_id, effective_from, effective_to, role,
@@ -22829,6 +22873,7 @@ module.exports = {
       await acquireScheduleDispatchWindowLock(client, orgId, detail.user_id, targetGroup.id, slotResolution.slotIndex)
       await acquireAttendanceScheduleAssignmentLocks(client, orgId, [detail.user_id])
       await enforceScheduleDispatchEditWindow(client, [detail.start_date, detail.end_date])
+      await assertScheduleDispatchProtectedRowsAbsent(client, { orgId, detail })
 
       const draft = {
         kind: 'shift',
