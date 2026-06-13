@@ -39,7 +39,7 @@
  *      field-read-gate tracker §3). It is therefore correctly NOT in the live-record allowlist. If a
  *      migration ever creates `table_rows`, that path re-arms and MUST re-enter this inventory + be gated.
  */
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
 import { describe, expect, test } from 'vitest'
@@ -180,11 +180,19 @@ describe('n2 raw record-data projection guard — egress-guard blind-spot closur
       'FROM table_rows',
     )
     // Assert no migration creates `table_rows` — the table's absence is what keeps the path inert.
-    const migrationsDir = join(SRC, 'db', 'migrations')
-    const migrationFiles = readdirSync(migrationsDir).filter((f) => f.endsWith('.ts'))
-    const createsTableRows = migrationFiles.filter((f) =>
-      /create\s+table[^;]*\btable_rows\b/i.test(readFileSync(join(migrationsDir, f), 'utf8')),
-    )
+    // Cover BOTH forms — raw SQL `CREATE TABLE … table_rows` AND the Kysely builder
+    // `createTable('table_rows')` (the dominant style in this repo: a `create\s+table` regex alone
+    // misses it) — across BOTH migration sets: the TS set under `src/db/migrations` and the older
+    // package-root `migrations/*.sql` set.
+    const CREATES_TABLE_ROWS = /create\s+table[^;]*\btable_rows\b|createTable\(\s*['"`]\s*table_rows/i
+    const migrationDirs = [join(SRC, 'db', 'migrations'), join(SRC, '..', 'migrations')]
+    const createsTableRows = migrationDirs.flatMap((dir) => {
+      if (!existsSync(dir)) return []
+      return readdirSync(dir)
+        .filter((f) => f.endsWith('.ts') || f.endsWith('.sql'))
+        .filter((f) => CREATES_TABLE_ROWS.test(readFileSync(join(dir, f), 'utf8')))
+        .map((f) => relative(SRC, join(dir, f)).split(sep).join('/'))
+    })
     expect(
       createsTableRows,
       `A migration now creates \`table_rows\`, re-arming the unmasked routes/views.ts → DefaultViewDataProvider ` +
