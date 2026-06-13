@@ -74,6 +74,7 @@
     "verify:multitable-feishu-rc:api-smoke:test": "node --test scripts/ops/multitable-feishu-rc-api-smoke.test.mjs",
     "verify:multitable-openapi:parity": "pnpm exec tsx packages/openapi/tools/build.ts && node --test scripts/ops/multitable-openapi-parity.test.mjs",
     "verify:multitable-yjs:contract": "node --test scripts/ops/multitable-yjs-contract-parity.test.mjs",
+    "ops:multitable-dangling-link-sweep": "node scripts/ops/multitable-dangling-link-sweep.mjs",
     "verify:multitable-release:phase3": "node scripts/ops/multitable-phase3-release-gate.mjs --gate release:phase3",
     "verify:multitable-perf:large-table": "node scripts/ops/multitable-phase3-release-gate.mjs --gate perf:large-table",
     "verify:multitable-perf:baseline-harness:test": "node --test scripts/ops/multitable-perf-baseline-upload.test.mjs",
