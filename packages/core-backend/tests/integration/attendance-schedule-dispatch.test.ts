@@ -71,6 +71,8 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
       [ORG, pattern],
     ).catch(() => undefined)
     await pool.query(`DELETE FROM attendance_requests WHERE org_id = $1 AND user_id LIKE $2`, [ORG, pattern]).catch(() => undefined)
+    await pool.query(`DELETE FROM attendance_shift_assignments WHERE org_id = $1 AND user_id LIKE $2`, [ORG, pattern]).catch(() => undefined)
+    await pool.query(`DELETE FROM attendance_schedule_group_members WHERE org_id = $1 AND user_id LIKE $2`, [ORG, pattern]).catch(() => undefined)
     await pool.query(`DELETE FROM attendance_approval_flows WHERE org_id = $1 AND name LIKE $2`, [ORG, pattern]).catch(() => undefined)
     await pool.query(`DELETE FROM attendance_scheduler_scopes WHERE org_id = $1 AND subject_ref LIKE $2`, [ORG, pattern]).catch(() => undefined)
     await pool.query(`DELETE FROM attendance_schedule_groups WHERE org_id = $1 AND name LIKE $2`, [ORG, pattern]).catch(() => undefined)
@@ -142,6 +144,16 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     const requestId = (create.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
     expect(requestId).toBeTruthy()
     return requestId as string
+  }
+
+  async function saveAttendanceSettings(token: string, payload: Record<string, unknown>) {
+    const res = await requestJson(`${baseUrl}/api/attendance/settings`, {
+      method: 'PUT',
+      headers: authHeaders(token),
+      body: JSON.stringify(payload),
+    })
+    expect(res.status, res.raw).toBe(200)
+    return res
   }
 
   beforeAll(async () => {
@@ -257,7 +269,7 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
       targetShiftId: shiftId,
       startDate: '2049-08-01',
       endDate: '2049-08-03',
-      slotIndex: 1,
+      slotIndex: 0,
       reason: `${prefix} support`,
       approvalFlowId,
     }
@@ -281,7 +293,7 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
         targetAttendanceGroupId: attendanceGroupId,
         targetDepartmentRef: departmentRef,
         targetShiftId: shiftId,
-        slotIndex: 1,
+        slotIndex: 0,
         startDate: '2049-08-01',
         endDate: '2049-08-03',
         publishStatus: 'pending',
@@ -380,7 +392,7 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     }
   })
 
-  it('keeps schedule-dispatch out of generic request finalization until the D3 writer exists', async () => {
+  it('finalizes schedule-dispatch approvals into published assignments and membership rows', async () => {
     const prefix = `dispatch-resolution-${Date.now().toString(36)}`
     const token = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
     const { scheduleGroupId, shiftId } = await seedDispatchTargets(prefix)
@@ -400,40 +412,123 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
         headers: authHeaders(token),
         body: JSON.stringify({ comment: `${prefix} approve` }),
       })
-      expect(approve.status, approve.raw).toBe(422)
-      expect((approve.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULE_DISPATCH_FINAL_WRITER_PENDING')
+      expect(approve.status, approve.raw).toBe(200)
+      expect((approve.body as { data?: { status?: string } } | undefined)?.data?.status).toBe('approved')
 
-      const afterApproveAttempt = await pool.query(
+      const afterApprove = await pool.query(
         `SELECT r.status AS request_status, ai.status AS approval_status, d.publish_status,
-                d.assignment_ids, d.membership_id, d.finalized_at, d.source_key
+                d.assignment_ids, d.membership_id, d.finalized_at, d.source_key,
+                r.metadata -> 'scheduleDispatchFinalization' AS finalization
            FROM attendance_schedule_dispatch_requests d
            JOIN attendance_requests r ON r.id = d.request_id
            LEFT JOIN approval_instances ai ON ai.id = r.approval_instance_id
           WHERE d.request_id = $1`,
         [requestId],
       )
-      expect(afterApproveAttempt.rows[0]).toMatchObject({
-        request_status: 'pending',
-        approval_status: 'pending',
-        publish_status: 'pending',
-        assignment_ids: [],
-        membership_id: null,
-        finalized_at: null,
+      const approvedRow = afterApprove.rows[0]
+      expect(approvedRow).toMatchObject({
+        request_status: 'approved',
+        approval_status: 'approved',
+        publish_status: 'published',
         source_key: `schedule_dispatch:${payload.userId}:${scheduleGroupId}:2049-08-04:2049-08-04:0`,
       })
+      expect(approvedRow.finalized_at).toBeTruthy()
+      expect(approvedRow.assignment_ids).toHaveLength(1)
+      expect(approvedRow.membership_id).toBeTruthy()
+      expect(approvedRow.finalization).toMatchObject({
+        assignmentIds: approvedRow.assignment_ids,
+        membershipId: approvedRow.membership_id,
+      })
+
+      const assignment = (await pool.query(
+        `SELECT id, user_id, shift_id, slot_index, start_date, end_date, is_active,
+                publish_status, published_by, locked_at, assignment_kind,
+                producer_type, producer_ref_id, producer_key, producer_run_id
+           FROM attendance_shift_assignments
+          WHERE org_id = $1 AND producer_type = 'schedule_dispatch' AND producer_ref_id = $2::uuid`,
+        [ORG, requestId],
+      )).rows[0]
+      expect(assignment).toMatchObject({
+        id: approvedRow.assignment_ids[0],
+        user_id: payload.userId,
+        shift_id: shiftId,
+        slot_index: 0,
+        is_active: true,
+        publish_status: 'published',
+        published_by: `${prefix}-admin`,
+        assignment_kind: 'regular',
+        producer_type: 'schedule_dispatch',
+        producer_key: `schedule_dispatch:${payload.userId}:${scheduleGroupId}:2049-08-04:2049-08-04:0`,
+      })
+      expect(String(assignment.producer_ref_id)).toBe(requestId)
+      expect(String(assignment.producer_run_id)).toBe(requestId)
+      expect(assignment.locked_at).toBeTruthy()
+      expect(dateOnly(assignment.start_date)).toBe('2049-08-04')
+      expect(dateOnly(assignment.end_date)).toBe('2049-08-04')
+
+      const membership = (await pool.query(
+        `SELECT id, schedule_group_id, user_id, effective_from, effective_to, role, source
+           FROM attendance_schedule_group_members
+          WHERE org_id = $1 AND id = $2`,
+        [ORG, approvedRow.membership_id],
+      )).rows[0]
+      expect(membership).toMatchObject({
+        id: approvedRow.membership_id,
+        schedule_group_id: scheduleGroupId,
+        user_id: payload.userId,
+        role: 'member',
+        source: 'schedule_dispatch',
+      })
+      expect(dateOnly(membership.effective_from)).toBe('2049-08-04')
+      expect(dateOnly(membership.effective_to)).toBe('2049-08-04')
+
       const sideEffectsAfterApprove = await pool.query(
         `SELECT
            (SELECT count(*)::int FROM attendance_events WHERE org_id = $1 AND meta ->> 'requestId' = $2) AS event_count,
-           (SELECT count(*)::int FROM attendance_shift_assignments WHERE org_id = $1 AND producer_type = 'schedule_dispatch') AS assignment_count,
-           (SELECT count(*)::int FROM attendance_schedule_group_members WHERE org_id = $1 AND user_id = $3) AS membership_count`,
+           (SELECT count(*)::int FROM attendance_shift_assignments WHERE org_id = $1 AND producer_type = 'schedule_dispatch' AND producer_ref_id = $2::uuid) AS assignment_count,
+           (SELECT count(*)::int FROM attendance_schedule_group_members WHERE org_id = $1 AND user_id = $3 AND source = 'schedule_dispatch') AS membership_count`,
         [ORG, requestId, payload.userId],
       )
       expect(sideEffectsAfterApprove.rows[0]).toMatchObject({
         event_count: 0,
-        assignment_count: 0,
-        membership_count: 0,
+        assignment_count: 1,
+        membership_count: 1,
       })
 
+      const replay = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(token),
+        body: JSON.stringify({ comment: `${prefix} replay` }),
+      })
+      expect(replay.status, replay.raw).toBe(400)
+      expect((replay.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('INVALID_STATUS')
+      const countsAfterReplay = await pool.query(
+        `SELECT
+           (SELECT count(*)::int FROM attendance_shift_assignments WHERE org_id = $1 AND producer_type = 'schedule_dispatch' AND producer_ref_id = $2::uuid) AS assignment_count,
+           (SELECT count(*)::int FROM attendance_schedule_group_members WHERE org_id = $1 AND user_id = $3 AND source = 'schedule_dispatch') AS membership_count`,
+        [ORG, requestId, payload.userId],
+      )
+      expect(countsAfterReplay.rows[0]).toMatchObject({ assignment_count: 1, membership_count: 1 })
+    } finally {
+      await cleanupPrefix(prefix)
+    }
+  })
+
+  it('closes schedule-dispatch detail rows on reject and cancel without materializing assignments', async () => {
+    const prefix = `dispatch-close-${Date.now().toString(36)}`
+    const token = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const { scheduleGroupId, shiftId } = await seedDispatchTargets(prefix)
+    const approvalFlowId = await seedDispatchFlow(prefix)
+    const payload = {
+      userId: `${prefix}-user`,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: shiftId,
+      startDate: '2049-08-04',
+      endDate: '2049-08-04',
+      approvalFlowId,
+    }
+    try {
+      const requestId = await createScheduleDispatchRequest(token, payload)
       const reject = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/reject`, {
         method: 'POST',
         headers: authHeaders(token),
@@ -455,6 +550,13 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
         publish_status: 'cancelled',
       })
       expect(String(rejectedRows.rows[0].source_key)).toContain(':archived:')
+      const rejectedSideEffects = await pool.query(
+        `SELECT
+           (SELECT count(*)::int FROM attendance_shift_assignments WHERE org_id = $1 AND producer_type = 'schedule_dispatch' AND producer_ref_id = $2::uuid) AS assignment_count,
+           (SELECT count(*)::int FROM attendance_schedule_group_members WHERE org_id = $1 AND user_id = $3 AND source = 'schedule_dispatch') AS membership_count`,
+        [ORG, requestId, payload.userId],
+      )
+      expect(rejectedSideEffects.rows[0]).toMatchObject({ assignment_count: 0, membership_count: 0 })
 
       const recreateAfterReject = await createScheduleDispatchRequest(token, payload)
       expect(recreateAfterReject).not.toBe(requestId)
@@ -586,6 +688,7 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     const dispatchedUserId = `${prefix}-user`
     const previousRbacBypass = process.env.RBAC_BYPASS
     const { scheduleGroupId, shiftId, departmentRef } = await seedDispatchTargets(prefix)
+    const updatedDepartmentRef = `${prefix}-dept-updated`
     const sibling = await seedDispatchTargets(`${prefix}-sibling`)
     const approvalFlowId = await seedDispatchFlow(prefix)
     const token = await mintToken(scopedUserId, 'attendance:read,attendance:write')
@@ -698,6 +801,307 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     } finally {
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
+      await cleanupPrefix(prefix)
+    }
+  })
+
+  it('revalidates dispatch scope at final approval before materializing schedule writes', async () => {
+    const prefix = `dispatch-final-scope-${Date.now().toString(36)}`
+    const adminToken = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const approvalActorId = `${prefix}-approver`
+    const dispatchedUserId = `${prefix}-user`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const { scheduleGroupId, shiftId, departmentRef } = await seedDispatchTargets(prefix)
+    const updatedDepartmentRef = `${prefix}-dept-updated`
+    const approvalFlowId = await seedDispatchFlow(prefix)
+    const approvalToken = await mintToken(approvalActorId, 'attendance:read,attendance:approve')
+    const payload = {
+      userId: dispatchedUserId,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: shiftId,
+      startDate: '2049-08-22',
+      endDate: '2049-08-22',
+      approvalFlowId,
+    }
+    try {
+      const requestId = await createScheduleDispatchRequest(adminToken, payload)
+      await pool.query(
+        `UPDATE attendance_schedule_groups
+            SET department_ref = $1, updated_at = now()
+          WHERE org_id = $2 AND id = $3`,
+        [updatedDepartmentRef, ORG, scheduleGroupId],
+      )
+      process.env.RBAC_BYPASS = 'false'
+
+      await pool.query(
+        `INSERT INTO attendance_scheduler_scopes
+         (id, org_id, subject_type, subject_ref, actions, scope, is_active, created_by, updated_by)
+         VALUES ($1, $2, 'user', $3, ARRAY['approve']::text[], $4::jsonb, true, 'integration-test', 'integration-test')`,
+        [randomUUID(), ORG, approvalActorId, JSON.stringify({ userIds: [dispatchedUserId] })],
+      )
+      const approveOnly = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(approvalToken),
+        body: JSON.stringify({ comment: `${prefix} approve-only` }),
+      })
+      expect(approveOnly.status, approveOnly.raw).toBe(403)
+      expect((approveOnly.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULER_SCOPE_FORBIDDEN')
+
+      await pool.query(
+        `INSERT INTO attendance_scheduler_scopes
+         (id, org_id, subject_type, subject_ref, actions, scope, is_active, created_by, updated_by)
+         VALUES ($1, $2, 'user', $3, ARRAY['dispatch']::text[], $4::jsonb, true, 'integration-test', 'integration-test')`,
+        [randomUUID(), ORG, approvalActorId, JSON.stringify({ userIds: [dispatchedUserId], scheduleGroupIds: [scheduleGroupId] })],
+      )
+      const missingDepartment = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(approvalToken),
+        body: JSON.stringify({ comment: `${prefix} missing-department` }),
+      })
+      expect(missingDepartment.status, missingDepartment.raw).toBe(403)
+      expect((missingDepartment.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULER_SCOPE_FORBIDDEN')
+
+      await pool.query(
+        `INSERT INTO attendance_scheduler_scopes
+         (id, org_id, subject_type, subject_ref, actions, scope, is_active, created_by, updated_by)
+         VALUES ($1, $2, 'user', $3, ARRAY['dispatch']::text[], $4::jsonb, true, 'integration-test', 'integration-test')`,
+        [randomUUID(), ORG, approvalActorId, JSON.stringify({ userIds: [dispatchedUserId], scheduleGroupIds: [scheduleGroupId], departments: [departmentRef] })],
+      )
+      const staleDepartment = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(approvalToken),
+        body: JSON.stringify({ comment: `${prefix} stale-department` }),
+      })
+      expect(staleDepartment.status, staleDepartment.raw).toBe(403)
+      expect((staleDepartment.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULER_SCOPE_FORBIDDEN')
+
+      const beforeAllowed = await pool.query(
+        `SELECT r.status AS request_status, d.publish_status,
+                (SELECT count(*)::int FROM attendance_shift_assignments WHERE org_id = $1 AND producer_type = 'schedule_dispatch' AND producer_ref_id = $2::uuid) AS assignment_count
+           FROM attendance_schedule_dispatch_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.request_id = $2`,
+        [ORG, requestId],
+      )
+      expect(beforeAllowed.rows[0]).toMatchObject({
+        request_status: 'pending',
+        publish_status: 'pending',
+        assignment_count: 0,
+      })
+
+      await pool.query(
+        `INSERT INTO attendance_scheduler_scopes
+         (id, org_id, subject_type, subject_ref, actions, scope, is_active, created_by, updated_by)
+         VALUES ($1, $2, 'user', $3, ARRAY['dispatch']::text[], $4::jsonb, true, 'integration-test', 'integration-test')`,
+        [randomUUID(), ORG, approvalActorId, JSON.stringify({ userIds: [dispatchedUserId], scheduleGroupIds: [scheduleGroupId], departments: [updatedDepartmentRef] })],
+      )
+      const allowed = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(approvalToken),
+        body: JSON.stringify({ comment: `${prefix} allowed` }),
+      })
+      expect(allowed.status, allowed.raw).toBe(200)
+      expect((allowed.body as { data?: { status?: string } } | undefined)?.data?.status).toBe('approved')
+      const afterAllowed = await pool.query(
+        `SELECT d.publish_status, d.target_department_ref,
+                (SELECT count(*)::int FROM attendance_shift_assignments WHERE org_id = $1 AND producer_type = 'schedule_dispatch' AND producer_ref_id = $2::uuid) AS assignment_count
+           FROM attendance_schedule_dispatch_requests d
+          WHERE d.request_id = $2`,
+        [ORG, requestId],
+      )
+      expect(afterAllowed.rows[0]).toMatchObject({
+        publish_status: 'published',
+        target_department_ref: updatedDepartmentRef,
+        assignment_count: 1,
+      })
+    } finally {
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await cleanupPrefix(prefix)
+    }
+  })
+
+  it('enforces schedule-dispatch slot semantics at create and final approval', async () => {
+    const prefix = `dispatch-final-slot-${Date.now().toString(36)}`
+    const token = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const { scheduleGroupId, shiftId } = await seedDispatchTargets(prefix)
+    const approvalFlowId = await seedDispatchFlow(prefix)
+    const userId = `${prefix}-user`
+    const payloadBase = {
+      userId,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: shiftId,
+      approvalFlowId,
+    }
+    const assertPendingWithoutDispatchAssignment = async (requestId: string) => {
+      const rows = await pool.query(
+        `SELECT r.status AS request_status, d.publish_status,
+                (SELECT count(*)::int FROM attendance_shift_assignments WHERE org_id = $1 AND producer_type = 'schedule_dispatch' AND producer_ref_id = $2::uuid) AS assignment_count
+           FROM attendance_schedule_dispatch_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.request_id = $2`,
+        [ORG, requestId],
+      )
+      expect(rows.rows[0]).toMatchObject({
+        request_status: 'pending',
+        publish_status: 'pending',
+        assignment_count: 0,
+      })
+    }
+    try {
+      await saveAttendanceSettings(token, { multiShiftDay: { enabled: false, maxSlots: 3 } })
+      const disabledCreate = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
+        method: 'POST',
+        headers: authHeaders(token),
+        body: JSON.stringify({
+          ...payloadBase,
+          startDate: '2049-08-25',
+          endDate: '2049-08-25',
+          slotIndex: 1,
+        }),
+      })
+      expect(disabledCreate.status, disabledCreate.raw).toBe(422)
+      expect((disabledCreate.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULE_DISPATCH_SLOT_UNAVAILABLE')
+      const createdCount = Number((await pool.query(
+        `SELECT count(*)::int AS n FROM attendance_requests WHERE org_id = $1 AND user_id = $2 AND request_type = 'schedule_dispatch'`,
+        [ORG, userId],
+      )).rows[0].n)
+      expect(createdCount).toBe(0)
+
+      const latentRequestId = await createScheduleDispatchRequest(token, {
+        ...payloadBase,
+        startDate: '2049-08-26',
+        endDate: '2049-08-26',
+        slotIndex: 0,
+      })
+      await pool.query(
+        `UPDATE attendance_schedule_dispatch_requests
+            SET slot_index = 1, updated_at = now()
+          WHERE org_id = $1 AND request_id = $2`,
+        [ORG, latentRequestId],
+      )
+      const latentApprove = await requestJson(`${baseUrl}/api/attendance/requests/${latentRequestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(token),
+        body: JSON.stringify({ comment: `${prefix} latent-slot` }),
+      })
+      expect(latentApprove.status, latentApprove.raw).toBe(422)
+      expect((latentApprove.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULE_DISPATCH_SLOT_UNAVAILABLE')
+      await assertPendingWithoutDispatchAssignment(latentRequestId)
+
+      await saveAttendanceSettings(token, { multiShiftDay: { enabled: true, maxSlots: 2 } })
+      const slotOneRequestId = await createScheduleDispatchRequest(token, {
+        ...payloadBase,
+        startDate: '2049-08-27',
+        endDate: '2049-08-27',
+        slotIndex: 1,
+      })
+      const slotOneApprove = await requestJson(`${baseUrl}/api/attendance/requests/${slotOneRequestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(token),
+        body: JSON.stringify({ comment: `${prefix} enabled-slot` }),
+      })
+      expect(slotOneApprove.status, slotOneApprove.raw).toBe(200)
+      const slotOneAssignment = (await pool.query(
+        `SELECT slot_index
+           FROM attendance_shift_assignments
+          WHERE org_id = $1 AND producer_type = 'schedule_dispatch' AND producer_ref_id = $2::uuid`,
+        [ORG, slotOneRequestId],
+      )).rows[0]
+      expect(slotOneAssignment?.slot_index).toBe(1)
+    } finally {
+      await saveAttendanceSettings(token, { multiShiftDay: { enabled: false, maxSlots: 3 } }).catch(() => undefined)
+      await cleanupPrefix(prefix)
+    }
+  })
+
+  it('keeps final schedule-dispatch approval transactional across conflict, edit-window, and compliance guards', async () => {
+    const prefix = `dispatch-final-guards-${Date.now().toString(36)}`
+    const token = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const { scheduleGroupId, shiftId } = await seedDispatchTargets(prefix)
+    const approvalFlowId = await seedDispatchFlow(prefix)
+    const userId = `${prefix}-user`
+    const payloadBase = {
+      userId,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: shiftId,
+      approvalFlowId,
+    }
+    const assertPendingWithoutDispatchAssignment = async (requestId: string) => {
+      const rows = await pool.query(
+        `SELECT r.status AS request_status, d.publish_status,
+                (SELECT count(*)::int FROM attendance_shift_assignments WHERE org_id = $1 AND producer_type = 'schedule_dispatch' AND producer_ref_id = $2::uuid) AS assignment_count,
+                (SELECT count(*)::int FROM attendance_schedule_group_members WHERE org_id = $1 AND user_id = $3 AND source = 'schedule_dispatch') AS membership_count
+           FROM attendance_schedule_dispatch_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.request_id = $2`,
+        [ORG, requestId, userId],
+      )
+      expect(rows.rows[0]).toMatchObject({
+        request_status: 'pending',
+        publish_status: 'pending',
+        assignment_count: 0,
+        membership_count: 0,
+      })
+    }
+    try {
+      const conflictRequestId = await createScheduleDispatchRequest(token, {
+        ...payloadBase,
+        startDate: '2049-08-23',
+        endDate: '2049-08-23',
+      })
+      await pool.query(
+        `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active)
+         VALUES ($1, $2, $3, $4, 0, '2049-08-23', '2049-08-23', true)`,
+        [randomUUID(), ORG, userId, shiftId],
+      )
+      const conflict = await requestJson(`${baseUrl}/api/attendance/requests/${conflictRequestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(token),
+        body: JSON.stringify({ comment: `${prefix} conflict` }),
+      })
+      expect(conflict.status, conflict.raw).toBe(409)
+      expect((conflict.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ATTENDANCE_SCHEDULE_ASSIGNMENT_CONFLICT')
+      await assertPendingWithoutDispatchAssignment(conflictRequestId)
+
+      const editWindowRequestId = await createScheduleDispatchRequest(token, {
+        ...payloadBase,
+        startDate: '2020-01-10',
+        endDate: '2020-01-10',
+      })
+      await saveAttendanceSettings(token, { shiftEditPolicy: { mode: 'past_locked', windowDays: 0 } })
+      const editWindow = await requestJson(`${baseUrl}/api/attendance/requests/${editWindowRequestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(token),
+        body: JSON.stringify({ comment: `${prefix} edit-window` }),
+      })
+      expect(editWindow.status, editWindow.raw).toBe(422)
+      expect((editWindow.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_EDIT_WINDOW_EXCEEDED')
+      await assertPendingWithoutDispatchAssignment(editWindowRequestId)
+
+      await saveAttendanceSettings(token, {
+        shiftEditPolicy: { mode: 'unrestricted', windowDays: 0 },
+        shiftCompliance: { enforcement: 'block', dailyMaxMinutes: 60, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+      })
+      const complianceRequestId = await createScheduleDispatchRequest(token, {
+        ...payloadBase,
+        startDate: '2049-08-24',
+        endDate: '2049-08-24',
+      })
+      const compliance = await requestJson(`${baseUrl}/api/attendance/requests/${complianceRequestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(token),
+        body: JSON.stringify({ comment: `${prefix} compliance` }),
+      })
+      expect(compliance.status, compliance.raw).toBe(422)
+      expect((compliance.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SHIFT_COMPLIANCE_CAP_EXCEEDED')
+      await assertPendingWithoutDispatchAssignment(complianceRequestId)
+    } finally {
+      await saveAttendanceSettings(token, {
+        shiftEditPolicy: { mode: 'unrestricted', windowDays: 0 },
+        shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
+      }).catch(() => undefined)
       await cleanupPrefix(prefix)
     }
   })
