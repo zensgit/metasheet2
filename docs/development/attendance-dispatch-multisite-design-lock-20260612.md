@@ -235,7 +235,7 @@ Still required before the dispatch capability can flip ✅:
 - D2 dedicated create/list/read/cancel API and route-level tests — landed #2553.
 - D3 final approval writer + conflict/edit-window/compliance/scope guards — code-green in the 2026-06-13 implementation slice.
 - D4 admin/employee UI — code-green in the 2026-06-13 implementation slice.
-- D5 staging smoke harness/runbook + staging closeout.
+- D5 staging smoke harness/runbook — prepared in the 2026-06-13 prep slice; staging closeout still pending.
 - D6 permanent dispatch design-lock (optional, later).
 - D7 hourly support/cost split/report design-lock (optional, later).
 
