@@ -1171,7 +1171,7 @@ describe('MultitableWorkbench view wiring', () => {
     ]
     workbenchMock.views.value = [
       ...workbenchMock.views.value,
-      { id: 'view_hierarchy', sheetId: 'sheet_orders', name: 'Hierarchy', type: 'hierarchy', config: { parentFieldId: 'fld_parent' } },
+      { id: 'view_hierarchy', sheetId: 'sheet_orders', name: 'Hierarchy', type: 'hierarchy', config: { parentFieldId: ' fld_parent ' } },
       { id: 'view_other_hierarchy', sheetId: 'sheet_other', name: 'Other Hierarchy', type: 'hierarchy', config: { parentFieldId: 'fld_other_parent' } },
     ]
 

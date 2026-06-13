@@ -1274,7 +1274,7 @@ const propertyVisibleWorkbenchFields = computed(() => filterPropertyVisibleField
 const hierarchyParentFieldIds = computed(() =>
   workbench.views.value
     .filter((view) => view.type === 'hierarchy' && view.sheetId === workbench.activeSheetId.value)
-    .map((view) => typeof view.config?.parentFieldId === 'string' ? view.config.parentFieldId : '')
+    .map((view) => typeof view.config?.parentFieldId === 'string' ? view.config.parentFieldId.trim() : '')
     .filter((fieldId): fieldId is string => fieldId.length > 0),
 )
 const propertyVisibleGridFields = computed(() => filterPropertyVisibleFields(grid.fields.value))
