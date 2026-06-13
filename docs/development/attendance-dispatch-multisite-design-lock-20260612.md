@@ -201,7 +201,7 @@ Already covered by landed D1/D2 (#2551/#2553):
 - approval-flow create/list/select supports `requestType='schedule_dispatch'`; create route rejects missing/ambiguous/inactive flow.
 - parent `attendance_requests` row maps `user_id` to dispatched user and `work_date` to `start_date`.
 - create route with no scope -> 403 for scope-only actor.
-- create route with target schedule group/user dispatch scope -> 201.
+- create route with target schedule group + user + target department dispatch scope -> 201.
 - generic final approve rechecks stored dispatch scope and then fails closed with `SCHEDULE_DISPATCH_FINAL_WRITER_PENDING`; generic reject/cancel closes the detail row and archives `source_key`.
 
 D3 final-writer required tests before assignment/member writes can be called complete:
