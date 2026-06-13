@@ -1020,6 +1020,17 @@ async function validateLookupRollupConfig(
 }
 
 /**
+ * ②a §2a.4 — the single source of truth for "are these two bases DIFFERENT bases". STRICT and
+ * null-aware: a null/legacy base and a set base count as cross-base (`!==`); null-vs-null is same-base;
+ * set-vs-same-set is same-base. Shared by the §2a.2 wall (`validateLinkFieldConfig`) and the §2a.4-c
+ * sheet-create TOCTOU guard so they cannot drift; the §2a.4-b ops sweep replicates this in SQL via
+ * `IS DISTINCT FROM`. Exported for the pure unit test that pins the rule.
+ */
+export function baseIdsAreCrossBase(a: string | null, b: string | null): boolean {
+  return a !== b
+}
+
+/**
  * ②a §2a.2 — the cross-base WALL. A `link` field may not silently span two bases: the foreign sheet's
  * `base_id` must equal the source sheet's `base_id`. This closes the STRUCTURAL hole — today the
  * backend accepts ANY `foreignSheetId` regardless of base ("no cross-base" was only a UI convention).
@@ -1062,10 +1073,54 @@ async function validateLinkFieldConfig(
 
   const sourceBaseId = sourceSheet?.baseId ?? null
   const foreignBaseId = foreignSheet.baseId ?? null
-  if (sourceBaseId !== foreignBaseId) {
+  if (baseIdsAreCrossBase(sourceBaseId, foreignBaseId)) {
     return `链接字段不能跨 base：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} base=${foreignBaseId ?? 'null'}`
   }
 
+  return null
+}
+
+/**
+ * ②a §2a.4-c — sheet-create TOCTOU close. The §2a.2 wall (`validateLinkFieldConfig`) can only compare
+ * bases when BOTH sheets exist; a link created against a not-yet-existent foreign sheet id slips through
+ * (the wall no-ops). The hole is closed from the OTHER side: when a sheet is created with a caller-chosen
+ * id + baseId, reject if some EXISTING link field's foreignSheetId equals this new sheet's id while that
+ * field's source sheet is in a DIFFERENT base than the new sheet's baseId (a retroactively-cross-base
+ * link). Symmetric to the wall, applied at sheet-create.
+ *
+ * The foreign target is matched across the parseLinkFieldConfig aliases in the SAME precedence
+ * (`foreignDatasheetId` → `foreignSheetId` → `datasheetId`, trimmed) so an aliased link cannot bypass
+ * the check; only `type = 'link'` fields are considered. Base comparison reuses `baseIdsAreCrossBase`
+ * (null-aware). Returns a Chinese-with-id error string (matching the wall's style) or null. The new
+ * sheet does not exist yet, so its base is supplied by the caller (`newSheetBaseId`).
+ */
+async function validateSheetCreateNoRetroactiveCrossBaseLink(
+  query: QueryFn,
+  newSheetId: string,
+  newSheetBaseId: string | null,
+): Promise<string | null> {
+  // Existing link fields whose effective foreign target (alias-aware) is this new sheet id, joined to
+  // their source sheet's base_id. NULLIF('') drops empty-string aliases so they don't match a real id.
+  const res = await query(
+    `SELECT mf.id AS field_id, s.base_id AS source_base_id
+       FROM meta_fields mf
+       JOIN meta_sheets s ON s.id = mf.sheet_id
+      WHERE mf.type = 'link'
+        AND COALESCE(
+              NULLIF(trim(mf.property ->> 'foreignDatasheetId'), ''),
+              NULLIF(trim(mf.property ->> 'foreignSheetId'), ''),
+              NULLIF(trim(mf.property ->> 'datasheetId'), '')
+            ) = $1`,
+    [newSheetId],
+  )
+  const rows = (res as { rows: Array<{ field_id: unknown; source_base_id: unknown }> }).rows
+  for (const row of rows) {
+    const sourceBaseId = typeof row.source_base_id === 'string' ? row.source_base_id : null
+    if (baseIdsAreCrossBase(sourceBaseId, newSheetBaseId)) {
+      const fieldId = String(row.field_id)
+      return `创建该 sheet 会使现有链接字段跨 base：字段 ${fieldId} 的源表 base=${sourceBaseId ?? 'null'}，新 sheet ${newSheetId} base=${newSheetBaseId ?? 'null'}`
+    }
+  }
   return null
 }
 
@@ -3886,6 +3941,18 @@ class ValidationError extends Error {
   constructor(public message: string) {
     super(message)
     this.name = 'ValidationError'
+  }
+}
+
+/**
+ * ②a §2a.4-c — thrown by the sheet-create TOCTOU guard. Distinct from `ValidationError` (which the
+ * POST /sheets catch maps to 403 FORBIDDEN for the permission cases): a retroactively-cross-base sheet
+ * create is a 400 VALIDATION_ERROR, mirroring the §2a.2 wall's reject code.
+ */
+class CrossBaseLinkError extends Error {
+  constructor(public message: string) {
+    super(message)
+    this.name = 'CrossBaseLinkError'
   }
 }
 
@@ -6726,6 +6793,18 @@ export function univerMetaRouter(): Router {
           }
         }
 
+        // ②a §2a.4-c TOCTOU close: reject if creating this sheet (with this resolved baseId) would
+        // retroactively make an EXISTING link field cross-base (a link previously pointed at this
+        // not-yet-existent sheet id from a source sheet in a different base). Mirrors the §2a.2 wall.
+        const retroactiveCrossBase = await validateSheetCreateNoRetroactiveCrossBaseLink(
+          query as unknown as QueryFn,
+          sheetId,
+          baseId,
+        )
+        if (retroactiveCrossBase) {
+          throw new CrossBaseLinkError(retroactiveCrossBase)
+        }
+
         const insert = await query(
           `INSERT INTO meta_sheets (id, base_id, name, description)
            VALUES ($1, $2, $3, $4)
@@ -6756,6 +6835,9 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { sheet: { id: sheetId, baseId, name, description, seeded: seed } } })
     } catch (err) {
+      if (err instanceof CrossBaseLinkError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      }
       if (err instanceof ValidationError) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: err.message } })
       }
