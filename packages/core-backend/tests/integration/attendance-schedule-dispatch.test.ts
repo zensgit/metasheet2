@@ -514,6 +514,60 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     }
   })
 
+  it('reuses an existing target membership as the finalized schedule-dispatch context', async () => {
+    const prefix = `dispatch-membership-reuse-${Date.now().toString(36)}`
+    const token = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const { scheduleGroupId, shiftId } = await seedDispatchTargets(prefix)
+    const approvalFlowId = await seedDispatchFlow(prefix)
+    const userId = `${prefix}-user`
+    const existingMembershipId = randomUUID()
+    const payload = {
+      userId,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: shiftId,
+      startDate: '2049-08-05',
+      endDate: '2049-08-05',
+      approvalFlowId,
+    }
+    try {
+      await pool.query(
+        `INSERT INTO attendance_schedule_group_members
+         (id, org_id, schedule_group_id, user_id, effective_from, effective_to, role, source)
+         VALUES ($1, $2, $3, $4, '2049-08-01', '2049-08-31', 'member', 'manual')`,
+        [existingMembershipId, ORG, scheduleGroupId, userId],
+      )
+
+      const requestId = await createScheduleDispatchRequest(token, payload)
+      const approve = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(token),
+        body: JSON.stringify({ comment: `${prefix} approve` }),
+      })
+      expect(approve.status, approve.raw).toBe(200)
+
+      const rows = await pool.query(
+        `SELECT d.membership_id,
+                r.metadata -> 'scheduleDispatchFinalization' AS finalization,
+                (SELECT count(*)::int FROM attendance_schedule_group_members
+                  WHERE org_id = $1 AND user_id = $3 AND schedule_group_id = $4) AS membership_count,
+                (SELECT count(*)::int FROM attendance_schedule_group_members
+                  WHERE org_id = $1 AND user_id = $3 AND source = 'schedule_dispatch') AS dispatch_membership_count
+           FROM attendance_schedule_dispatch_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.request_id = $2`,
+        [ORG, requestId, userId, scheduleGroupId],
+      )
+      expect(rows.rows[0]).toMatchObject({
+        membership_id: existingMembershipId,
+        membership_count: 1,
+        dispatch_membership_count: 0,
+      })
+      expect(rows.rows[0].finalization).toMatchObject({ membershipId: existingMembershipId })
+    } finally {
+      await cleanupPrefix(prefix)
+    }
+  })
+
   it('closes schedule-dispatch detail rows on reject and cancel without materializing assignments', async () => {
     const prefix = `dispatch-close-${Date.now().toString(36)}`
     const token = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
@@ -1009,6 +1063,72 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
         [ORG, slotOneRequestId],
       )).rows[0]
       expect(slotOneAssignment?.slot_index).toBe(1)
+    } finally {
+      await saveAttendanceSettings(token, { multiShiftDay: { enabled: false, maxSlots: 3 } }).catch(() => undefined)
+      await cleanupPrefix(prefix)
+    }
+  })
+
+  it('blocks final schedule-dispatch approval over protected generated rows even when multi-shift slots do not conflict', async () => {
+    const prefix = `dispatch-protected-row-${Date.now().toString(36)}`
+    const token = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const { scheduleGroupId, shiftId } = await seedDispatchTargets(prefix)
+    const approvalFlowId = await seedDispatchFlow(prefix)
+    const userId = `${prefix}-user`
+    const protectedShiftId = randomUUID()
+    const protectedAssignmentId = randomUUID()
+    const protectedProducerRunId = randomUUID()
+    try {
+      await saveAttendanceSettings(token, { multiShiftDay: { enabled: true, maxSlots: 2 } })
+      await pool.query(
+        `INSERT INTO attendance_shifts (id, org_id, name, work_start_time, work_end_time)
+         VALUES ($1, $2, $3, '00:00', '01:00')`,
+        [protectedShiftId, ORG, `${prefix}-protected-shift`],
+      )
+      await pool.query(
+        `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active,
+          publish_status, assignment_kind, producer_type, producer_ref_id, producer_key, producer_run_id)
+         VALUES
+         ($1, $2, $3, $4, 1, '2049-08-26', '2049-08-26', true,
+          'published', 'regular', 'auto_shift_match', $5, $6, $5)`,
+        [protectedAssignmentId, ORG, userId, protectedShiftId, protectedProducerRunId, `${prefix}:auto-shift`],
+      )
+
+      const requestId = await createScheduleDispatchRequest(token, {
+        userId,
+        targetScheduleGroupId: scheduleGroupId,
+        targetShiftId: shiftId,
+        startDate: '2049-08-26',
+        endDate: '2049-08-26',
+        slotIndex: 0,
+        approvalFlowId,
+      })
+      const approve = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, {
+        method: 'POST',
+        headers: authHeaders(token),
+        body: JSON.stringify({ comment: `${prefix} protected row` }),
+      })
+      expect(approve.status, approve.raw).toBe(409)
+      expect((approve.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULE_DISPATCH_PROTECTED_ASSIGNMENT_CONFLICT')
+
+      const rows = await pool.query(
+        `SELECT r.status AS request_status, d.publish_status,
+                (SELECT count(*)::int FROM attendance_shift_assignments
+                  WHERE org_id = $1 AND producer_type = 'schedule_dispatch' AND producer_ref_id = $2::uuid) AS assignment_count,
+                (SELECT count(*)::int FROM attendance_schedule_group_members
+                  WHERE org_id = $1 AND user_id = $3 AND source = 'schedule_dispatch') AS membership_count
+           FROM attendance_schedule_dispatch_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.request_id = $2`,
+        [ORG, requestId, userId],
+      )
+      expect(rows.rows[0]).toMatchObject({
+        request_status: 'pending',
+        publish_status: 'pending',
+        assignment_count: 0,
+        membership_count: 0,
+      })
     } finally {
       await saveAttendanceSettings(token, { multiShiftDay: { enabled: false, maxSlots: 3 } }).catch(() => undefined)
       await cleanupPrefix(prefix)
