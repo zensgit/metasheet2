@@ -30,6 +30,7 @@ describe('workflowDesignerDrafts helpers', () => {
       shares: [],
       executions: [],
       format: 'bpmn-only',
+      sourceMode: 'bpmn_xml',
     })
   })
 
