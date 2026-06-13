@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3-1 `condition_branch` exclusive-branch runtime LANDED #2321 `127b29dd9` (2026-06-05; design-lock `multitable-automation-a6-3-branch-parallel-design-20260605.md`) + A6-3-2a editor LANDED #2339 `960ea9315` + A6-3-2b admin-runs readability LANDED #2348 `4b44f25c6`; A6-3 v1 operator/API/UI trial PASS (#2367/#2371), with no current A6-3-3 unlock signal; A6-3-4/W3 parallel join-all LANDED end-to-end (#2496 runtime `b161080b8`, #2500 editor `4408239d0`, #2501 admin-runs readability `88f5f538a`, 2026-06-12); A6-5 / W6-1 `start_approval` bridge LANDED #2469, with deployed/operator smoke tracked by #2480 + `automation-start-approval-operator-smoke-runbook-20260613.md`; W7-0 approval result backwrite scope-gate added (runtime not started); A6-4 BPMN compile/preview scope-gate added (runtime not started); A6-3-3 (wait/nesting in branches) / join-any cancellation semantics and public webhook/token emitter remain demand-gated.
+Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3-1 `condition_branch` exclusive-branch runtime LANDED #2321 `127b29dd9` (2026-06-05; design-lock `multitable-automation-a6-3-branch-parallel-design-20260605.md`) + A6-3-2a editor LANDED #2339 `960ea9315` + A6-3-2b admin-runs readability LANDED #2348 `4b44f25c6`; A6-3 v1 operator/API/UI trial PASS (#2367/#2371), with no current A6-3-3 unlock signal; A6-3-4/W3 parallel join-all LANDED end-to-end (#2496 runtime `b161080b8`, #2500 editor `4408239d0`, #2501 admin-runs readability `88f5f538a`, 2026-06-12); A6-5 / W6-1 `start_approval` bridge LANDED #2469, with deployed/operator smoke tracked by #2480 + `automation-start-approval-operator-smoke-runbook-20260613.md`; W7-0 approval result backwrite scope-gate added (runtime not started); A6-4a BPMN compile/preview pure compiler LANDED #2568 `0f214a222` (2026-06-13; no route, persistence, deploy/start, or live BPMN runtime); A6-4b read-only route and A6-3-3 (wait/nesting in branches) / join-any cancellation semantics and public webhook/token emitter remain demand-gated.
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, read-boundary wired only); RFC #1885
 
@@ -30,8 +30,9 @@ A6-1 and A6-2 are complete end-to-end; A6-3-1 `condition_branch` exclusive-branc
 landed (#2321), A6-3-2 frontend/runs readability landed (#2339 + #2348), and
 A6-3-4/W3 parallel `join_all` landed end-to-end (#2496 + #2500 + #2501). A6-3-3
 branch-local wait/nesting and A6-3-5 join-any remain gated; A6-5/W6-1
-`start_approval` later landed separately in #2469; A6-4 now has a docs-only compile/preview
-scope-gate but remains a separate future implementation unlock. Later trial
+`start_approval` later landed separately in #2469; A6-4a pure BPMN compile/preview
+compiler later landed in #2568, while the read-only route and any live BPMN runtime remain
+separate future unlocks. Later trial
 evidence (#2367/#2371) confirmed the A6-3 v1 surface is enough for the tested
 condition-branch flow and did not produce a branch-local wait/nesting demand.
 
@@ -83,7 +84,7 @@ operator smoke tracked by #2480 and
   idempotency keys, and re-fetch-current-record context remain future opt-ins.
 - A6: A6-0/A6-3/A6-4 design-locks are docs-only; A6-1/A6-2 + A6-3-1 `condition_branch` runtime
   + A6-3-2 frontend/readability + A6-3-4/W3 parallel `join_all` + A6-5/W6-1
-  `start_approval` bridge landed by explicit opt-in; A6-3-3 + join-any, A6-4 BPMN,
+  `start_approval` bridge + A6-4a pure BPMN compiler landed by explicit opt-in; A6-3-3 + join-any, A6-4b route,
   public webhook/token emitter, and W7 result
   backwrite runtime remain demand-gated.
 
@@ -315,7 +316,8 @@ complete.
 - [ ] A6-3-5 join-any / cancellation semantics — gated after join-all runtime.
 - [x] A6-4 / W8 BPMN compile/preview scope-gate — `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`: side-effect-free preview + deterministic gap report only; no live BPMN runtime, no deploy/start, no persistence.
 - [x] A6-4a implementation plan — `multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`: first implementation PR must be a pure compiler module + unit tests only; route deferred to A6-4b; no `BPMNWorkflowEngine` import.
-- [ ] A6-4 BPMN compile/preview adapter implementation — not started; requires explicit modeling/preview opt-in.
+- [x] A6-4a BPMN compile/preview pure compiler — LANDED #2568 `0f214a222` (2026-06-13): adds `bpmnCompilePreview` + unit tests only; maps gateways to existing A6-3 `condition_branch` / `parallel_branch` primitives; deterministic mapping/gap reports; no route, DB write, persistence, deploy/start, or live BPMN runtime.
+- [ ] A6-4b read-only BPMN compile/preview route — not started; requires explicit modeling/preview opt-in and must keep no-live-runtime / no-persistence guards.
 - [x] A6-5 / W6-1 `start_approval` approval-as-job bridge — LANDED #2469: creates one approval instance from a published template, persists the bridge row, writes suspended / terminal C1 jobs, resumes/fails from W5 completion events, and guards A5 retry duplicates.
 - [x] W7-0 approval result backwrite scope-gate — `automation-approval-result-backwrite-scope-gate-20260611.md`: explicit mapping only; durable idempotent attempt state; permission/field guards; no approval form/comment/profile leakage; runtime remains gated.
 - [ ] W7-1 approval result backwrite runtime — not started; waits for W6 operator smoke (#2480 + `automation-start-approval-operator-smoke-runbook-20260613.md`) or named runtime unlock.
