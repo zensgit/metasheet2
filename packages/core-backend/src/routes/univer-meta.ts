@@ -3877,6 +3877,26 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
 
   const run = async (query: QueryFn) => {
     const baseId = await ensureLegacyBase(query)
+
+    // ②a §2a.4-c TOCTOU close — CENTRALIZED chokepoint. `createSeededSheet` is the sheet-create sink for
+    // BOTH POST /sheets (sheet pre-inserted by the route at the caller-chosen base, route-guarded there)
+    // and GET /view?seed=true (caller-chosen id, NO route guard). Gating the guard HERE — keyed to a
+    // GENUINELY-NEW insert — covers every caller (incl. future ones) by construction.
+    //
+    // Fire only when this sheet does NOT exist yet (i.e. the INSERT below will actually create it at the
+    // legacy `baseId`). The POST /sheets path already inserted the sheet at its resolved (caller-chosen)
+    // base before reaching here, so it exists → skip (the INSERT no-ops via ON CONFLICT). Re-running the
+    // guard there with the LEGACY baseId would false-positive the legit caller-chosen-base create. When
+    // the sheet IS new (the seed path), validate against the base it is ACTUALLY created at (legacy).
+    const existing = await query('SELECT id FROM meta_sheets WHERE id = $1', [args.sheetId])
+    const isGenuinelyNew = (existing.rows as unknown[]).length === 0
+    if (isGenuinelyNew) {
+      const retroactiveCrossBase = await validateSheetCreateNoRetroactiveCrossBaseLink(query, args.sheetId, baseId)
+      if (retroactiveCrossBase) {
+        throw new CrossBaseLinkError(retroactiveCrossBase)
+      }
+    }
+
     await query(
       `INSERT INTO meta_sheets (id, base_id, name, description)
        VALUES ($1, $2, $3, $4)
@@ -7778,6 +7798,11 @@ export function univerMetaRouter(): Router {
       }
       return res.json({ ok: true, data: view })
     } catch (err) {
+      // ②a §2a.4-c: a centralized sheet-create TOCTOU rejection surfaced by the `seed=true` branch
+      // (createSeededSheet) maps to 400 VALIDATION_ERROR, mirroring POST /sheets (:6838).
+      if (err instanceof CrossBaseLinkError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
