@@ -31,7 +31,8 @@ Current landed status（2026-06-12）:
 
 - D1 contract is landed in #2551.
 - D2 dedicated create/list/read/cancel API is landed in #2553, including generic final-approval/cancel cleanup guards while the final writer is pending.
-- D3 final approval writer is code-green in the 2026-06-13 implementation slice: final approval writes the published assignment + optional schedule-group membership, revalidates latest target-group department dispatch scope, and covers conflict/edit-window/shiftCompliance rollback in real-DB tests. D4 UI and D5 staging smoke remain pending, so the capability stays 🟡 rather than ✅.
+- D3 final approval writer is code-green in the 2026-06-13 implementation slice: final approval writes the published assignment + optional schedule-group membership, revalidates latest target-group department dispatch scope, and covers conflict/edit-window/shiftCompliance rollback in real-DB tests.
+- D4 admin/employee UI is code-green in the 2026-06-13 implementation slice: admin can create/read daily schedule-dispatch requests from Advanced scheduling, and employees can read their own `schedule_dispatch` requests from the generic requests feed. D5 staging smoke remains pending, so the capability stays 🟡 rather than ✅.
 
 ## 2. Scope
 
@@ -215,9 +216,16 @@ D3 final-writer coverage in the 2026-06-13 code-green slice:
 - multi-shift disabled rejects non-zero slot at create and finalization; enabled accepts an in-range non-zero slot.
 - generic adjustment event remains excluded for `schedule_dispatch`.
 
+D4 UI coverage in the 2026-06-13 code-green slice:
+
+- admin create form maps user, target schedule group, target shift, date range, optional approval flow/reason, and slot index when multi-shift is enabled into the dedicated strict `POST /api/attendance/schedule-dispatch-requests` body.
+- admin read-only list uses the dedicated list endpoint with `page=1&pageSize=200` and a no-silent-caps warning when `total > items.length`.
+- admin selects expose only active target schedule groups and active `schedule_dispatch` approval flows.
+- employee view filters the generic `/api/attendance/requests` feed for `request_type='schedule_dispatch'`; it does not load the admin/scoped schedule-dispatch endpoint and remains read-only.
+- copy says “按天调度” / daily dispatch and does not claim hourly support or cost allocation.
+
 Still required before the dispatch capability can flip ✅:
 
-- D4 admin/employee UI.
 - D5 staging smoke: create target group/shift/user, create dispatch request, approve, assert effective-calendar shows target shift, provenance exact, membership window present/reused, cleanup residue=0.
 
 ## 9. Slice Plan
@@ -226,7 +234,7 @@ Still required before the dispatch capability can flip ✅:
 - D1 latent schema + request type enum + runtime constants/labels + typed DB union + approval-flow support + OpenAPI/SDK generated contract + generic `/requests` rejection — landed #2551.
 - D2 dedicated create/list/read/cancel API and route-level tests — landed #2553.
 - D3 final approval writer + conflict/edit-window/compliance/scope guards — code-green in the 2026-06-13 implementation slice.
-- D4 admin/employee UI.
+- D4 admin/employee UI — code-green in the 2026-06-13 implementation slice.
 - D5 staging smoke harness/runbook + staging closeout.
 - D6 permanent dispatch design-lock (optional, later).
 - D7 hourly support/cost split/report design-lock (optional, later).

@@ -117,6 +117,8 @@ describe('Attendance admin regressions', () => {
   let attendanceApprovalFlowsData: unknown[] | null = null
   let attendanceGroupsData: unknown[] | null = null
   let scheduleGroupsData: unknown[] | null = null
+  let scheduleDispatchRequestsData: Record<string, unknown> | null = null
+  let attendanceRequestsData: unknown[] | null = null
   let autoShiftPreviewStatus = 200
   let autoShiftPreviewData: Record<string, unknown> | null = null
   let autoShiftApplyStatus = 200
@@ -132,6 +134,8 @@ describe('Attendance admin regressions', () => {
     attendanceApprovalFlowsData = null
     attendanceGroupsData = null
     scheduleGroupsData = null
+    scheduleDispatchRequestsData = null
+    attendanceRequestsData = null
     autoShiftPreviewStatus = 200
     autoShiftPreviewData = null
     autoShiftApplyStatus = 200
@@ -302,6 +306,31 @@ describe('Attendance admin regressions', () => {
             page: 1,
             pageSize: 200,
           },
+        })
+      }
+      if (url.includes('/api/attendance/schedule-dispatch-requests')) {
+        const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+        if (method === 'POST') {
+          const body = JSON.parse(String((init as { body?: string } | undefined)?.body || '{}'))
+          return jsonResponse(201, {
+            ok: true,
+            data: {
+              scheduleDispatch: {
+                id: 'dispatch-created',
+                requestId: 'request-created',
+                requestStatus: 'pending',
+                publishStatus: 'pending',
+                assignmentIds: [],
+                membershipId: null,
+                finalizedAt: null,
+                ...body,
+              },
+            },
+          })
+        }
+        return jsonResponse(200, {
+          ok: true,
+          data: scheduleDispatchRequestsData ?? { items: [], total: 0, page: 1, pageSize: 200 },
         })
       }
       if (url.includes('/api/attendance/groups')) {
@@ -555,6 +584,28 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-day',
+                name: 'Day Shift',
+                code: 'day-shift',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                workingDays: [1, 2, 3, 4, 5],
+                startTime: '09:00',
+                endTime: '18:00',
+                breakMinutes: 60,
+                isActive: true,
+              },
+            ],
+            total: 1,
+          },
+        })
+      }
       if (url.includes('/api/attendance/records')) {
         return jsonResponse(200, {
           ok: true,
@@ -622,6 +673,17 @@ describe('Attendance admin regressions', () => {
           return jsonResponse(500, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'settings unavailable' } })
         }
         return jsonResponse(200, { ok: true, data: attendanceSettingsData ?? {} })
+      }
+      if (url.includes('/api/attendance/requests')
+        && !url.includes('/api/attendance/requests/')
+        && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'GET') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: attendanceRequestsData ?? [],
+            total: attendanceRequestsData?.length ?? 0,
+          },
+        })
       }
       if (url.includes('/api/attendance/auto-shift-matching/apply')) {
         if (autoShiftApplyStatus >= 400) {
@@ -4116,6 +4178,174 @@ describe('Attendance admin regressions', () => {
     expect(buttons.join(' ')).toContain('Create schedule group')
     expect(buttons.join(' ')).toContain('Edit')
     expect(buttons.join(' ')).toContain('Deactivate')
+  })
+
+  it('creates a daily schedule-dispatch request with strict body mapping and no silent caps', async () => {
+    attendanceSettingsData = { multiShiftDay: { enabled: true, maxSlots: 2 } }
+    scheduleGroupsData = [
+      {
+        id: 'sg-dispatch',
+        name: 'Branch A',
+        code: 'branch-a',
+        parentId: null,
+        departmentRef: 'dept-branch-a',
+        attendanceGroupId: 'group-a',
+        source: 'manual',
+        isActive: true,
+      },
+      {
+        id: 'sg-inactive',
+        name: 'Inactive Branch',
+        code: 'inactive-branch',
+        source: 'manual',
+        isActive: false,
+      },
+    ]
+    attendanceApprovalFlowsData = [
+      { id: 'flow-dispatch-active', name: 'Dispatch Flow', requestType: 'schedule_dispatch', isActive: true, steps: [] },
+      { id: 'flow-dispatch-inactive', name: 'Inactive Dispatch Flow', requestType: 'schedule_dispatch', isActive: false, steps: [] },
+      { id: 'flow-leave', name: 'Leave Flow', requestType: 'leave', isActive: true, steps: [] },
+    ]
+    scheduleDispatchRequestsData = {
+      items: [
+        {
+          requestId: 'dispatch-existing',
+          requestStatus: 'approved',
+          userId: 'user-existing',
+          targetScheduleGroupId: 'sg-dispatch',
+          targetShiftId: 'shift-day',
+          slotIndex: 0,
+          startDate: '2026-06-18',
+          endDate: '2026-06-19',
+          publishStatus: 'published',
+          assignmentIds: ['assignment-a', 'assignment-b'],
+          request: { status: 'approved', reason: 'Previous coverage' },
+        },
+      ],
+      total: 250,
+      page: 1,
+      pageSize: 200,
+    }
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')!.click()
+    await flushUi(4)
+
+    const section = container!.querySelector<HTMLElement>('[data-attendance-schedule-dispatch]')!
+    expect(section).toBeTruthy()
+    expect(section.textContent).toContain('Daily schedule dispatch')
+    expect(section.textContent).toContain('Hourly support and cost allocation are not part of v1')
+    const dispatchListCalls = vi.mocked(apiFetch).mock.calls.filter(([input, init]) => {
+      const parsed = new URL(String(input), 'http://localhost')
+      return parsed.pathname === '/api/attendance/schedule-dispatch-requests'
+        && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'GET'
+    })
+    expect(dispatchListCalls.length).toBeGreaterThan(0)
+    expect(dispatchListCalls.some(([input]) => {
+      const parsed = new URL(String(input), 'http://localhost')
+      return parsed.searchParams.get('page') === '1'
+        && parsed.searchParams.get('pageSize') === '200'
+    })).toBe(true)
+    expect(section.querySelector('[data-attendance-schedule-dispatch-cap]')?.textContent).toContain('Showing first 1 of 250')
+    expect(section.querySelector('[data-attendance-schedule-dispatch-row]')?.textContent).toContain('Branch A')
+    expect(section.querySelector('[data-attendance-schedule-dispatch-row]')?.textContent).toContain('Day Shift')
+    expect(section.querySelector('[data-attendance-schedule-dispatch-row]')?.textContent).toContain('assignment-a, assignment-b')
+
+    const groupSelect = section.querySelector<HTMLSelectElement>('[data-attendance-schedule-dispatch-group]')!
+    expect(Array.from(groupSelect.options).map(option => option.value)).toEqual(['', 'sg-dispatch'])
+    const flowSelect = section.querySelector<HTMLSelectElement>('[data-attendance-schedule-dispatch-flow]')!
+    expect(Array.from(flowSelect.options).map(option => option.value)).toEqual(['', 'flow-dispatch-active'])
+
+    setInput(section, '[data-attendance-schedule-dispatch-user]', 'user-dispatch')
+    groupSelect.value = 'sg-dispatch'
+    groupSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const shiftSelect = section.querySelector<HTMLSelectElement>('[data-attendance-schedule-dispatch-shift]')!
+    shiftSelect.value = 'shift-day'
+    shiftSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section, '[data-attendance-schedule-dispatch-start]', '2026-06-20')
+    setInput(section, '[data-attendance-schedule-dispatch-end]', '2026-06-21')
+    setInput(section, '[data-attendance-schedule-dispatch-slot]', '1')
+    flowSelect.value = 'flow-dispatch-active'
+    flowSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section, '[data-attendance-schedule-dispatch-reason]', 'Cover Branch A')
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-schedule-dispatch-create]')!.click()
+    await flushUi(8)
+
+    const createCall = vi.mocked(apiFetch).mock.calls.find(([input, init]) =>
+      String(input).includes('/api/attendance/schedule-dispatch-requests')
+      && String((init as { method?: string } | undefined)?.method || '').toUpperCase() === 'POST'
+    )
+    expect(createCall).toBeTruthy()
+    const createUrl = new URL(String(createCall![0]), 'http://localhost')
+    expect(createUrl.pathname).toBe('/api/attendance/schedule-dispatch-requests')
+    expect(createUrl.search).toBe('')
+    expect(JSON.parse(String((createCall![1] as RequestInit).body))).toEqual({
+      userId: 'user-dispatch',
+      targetScheduleGroupId: 'sg-dispatch',
+      targetShiftId: 'shift-day',
+      startDate: '2026-06-20',
+      endDate: '2026-06-21',
+      slotIndex: 1,
+      approvalFlowId: 'flow-dispatch-active',
+      reason: 'Cover Branch A',
+    })
+  })
+
+  it('shows employee schedule-dispatch requests read-only without loading the admin dispatch endpoint', async () => {
+    attendanceRequestsData = [
+      {
+        id: 'request-dispatch-employee',
+        work_date: '2026-06-20',
+        request_type: 'schedule_dispatch',
+        requested_in_at: null,
+        requested_out_at: null,
+        reason: 'Temporary branch support',
+        status: 'pending',
+        metadata: {
+          scheduleDispatch: {
+            targetScheduleGroupId: 'sg-branch-a',
+            targetShiftId: 'shift-day',
+            startDate: '2026-06-20',
+            endDate: '2026-06-21',
+            slotIndex: 1,
+          },
+        },
+      },
+      {
+        id: 'request-leave',
+        work_date: '2026-06-20',
+        request_type: 'leave',
+        requested_in_at: null,
+        requested_out_at: null,
+        reason: 'Annual leave',
+        status: 'pending',
+        metadata: {},
+      },
+    ]
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const section = container!.querySelector<HTMLElement>('[data-schedule-dispatch-requests]')!
+    expect(section).toBeTruthy()
+    expect(section.querySelectorAll('[data-schedule-dispatch-request-row]')).toHaveLength(1)
+    expect(section.textContent).toContain('2026-06-20 - 2026-06-21')
+    expect(section.textContent).toContain('sg-branch-a')
+    expect(section.textContent).toContain('shift-day')
+    expect(section.textContent).toContain('Temporary branch support')
+    expect(section.textContent).not.toContain('Annual leave')
+    const buttons = Array.from(section.querySelectorAll<HTMLButtonElement>('button')).map(button => button.textContent || '')
+    expect(buttons.join(' ')).toContain('Reload')
+    expect(buttons.join(' ')).not.toContain('Create')
+    expect(buttons.join(' ')).not.toContain('Cancel')
+
+    const requestedUrls = vi.mocked(apiFetch).mock.calls.map(call => String(call[0]))
+    expect(requestedUrls.some(url => url.includes('/api/attendance/schedule-dispatch-requests'))).toBe(false)
   })
 
   it('saves and deactivates schedule groups with exact strict bodies and no silent caps', async () => {
