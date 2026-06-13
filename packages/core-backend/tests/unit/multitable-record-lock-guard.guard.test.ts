@@ -9,9 +9,9 @@
  * in `record-lock.ts`) and routed every path through it. This guard prevents the whack-a-mole from
  * regressing.
  *
- * HOW IT WORKS: it enumerates EVERY `UPDATE meta_records` / `DELETE FROM meta_records` statement across
- * the audited runtime source files (migrations + tests excluded) and requires each site to carry, on
- * the line immediately above the SQL, exactly one explicit disposition marker comment:
+ * HOW IT WORKS: it enumerates EVERY `meta_records` mutation statement across the WHOLE runtime tree
+ * (`src/**`, with `db/migrations` + tests + dist excluded — see SCAN below) and requires each site to
+ * carry, on the line immediately above the SQL, exactly one explicit disposition marker comment:
  *
  *   • `// lock-guarded:<reason>`  → GUARDED       — the site routes through the ONE shared lock rule
  *                                                   (`ensureRecordNotLocked` in record-lock.ts). The
@@ -29,26 +29,46 @@
  * edit/delete path that forgets the lock guard therefore trips RED by construction, exactly as the
  * §2a.3 taint chokepoint guard does. A GUARDED label without a real guard call elsewhere is separately
  * anchored by the cross-check below + the real-DB canaries (`multitable-record-lock-bypass.test.ts`).
+ *
+ * SCAN (n2 hardening): this guard previously keyed on a FIXED 7-file `AUDITED_FILES` list, so a
+ * `meta_records` mutation introduced in any OTHER `src` file was invisible. It now recursively walks the
+ * WHOLE backend `src` tree (every runtime `.ts`), so a new mutation file trips RED by construction.
+ * Excluded by design:
+ *   • the `db/migrations` tree — one-shot schema/backfill ops, never a live user/plugin mutation surface
+ *     (lock = "read-only to USERS"; a migration has no user actor). Migrations are SYSTEM-exempt wholesale.
+ *   • `.test.ts` / `.spec.ts` / `.d.ts` files, `node_modules`, `dist` — not runtime mutation surfaces.
  */
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readdirSync, readFileSync } from 'node:fs'
+import { join, relative, sep } from 'node:path'
 
 import { describe, expect, test } from 'vitest'
 
 const SRC = join(__dirname, '../../src')
 const read = (rel: string) => readFileSync(join(SRC, rel), 'utf8')
 
-/** The audited runtime source files that mutate `meta_records` by id (migrations + tests are excluded:
- *  migrations are one-shot schema/backfill ops, never a live user/plugin mutation surface). */
-const AUDITED_FILES = [
-  'multitable/records.ts',
-  'multitable/record-service.ts',
-  'multitable/record-write-service.ts',
-  'multitable/automation-executor.ts',
-  'multitable/formula-engine.ts',
-  'multitable/auto-number-service.ts',
-  'routes/univer-meta.ts',
-] as const
+/**
+ * Recursively list every runtime `.ts` file under `src/`, returning paths RELATIVE to `src/` with `/`
+ * separators (so site keys are stable across platforms). Excludes the migration tree (system-exempt
+ * wholesale), tests, and build output. This is the whole-`src` scan that replaces the old fixed list.
+ */
+function listRuntimeTsFiles(): string[] {
+  const out: string[] = []
+  const walk = (absDir: string): void => {
+    for (const entry of readdirSync(absDir, { withFileTypes: true })) {
+      const abs = join(absDir, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'migrations') continue
+        walk(abs)
+        continue
+      }
+      if (!entry.name.endsWith('.ts')) continue
+      if (entry.name.endsWith('.d.ts') || entry.name.endsWith('.test.ts') || entry.name.endsWith('.spec.ts')) continue
+      out.push(relative(SRC, abs).split(sep).join('/'))
+    }
+  }
+  walk(SRC)
+  return out.sort()
+}
 
 /** How many physical lines ABOVE the SQL line the disposition marker may sit (allow a blank/`SET` line). */
 const MARKER_WINDOW = 3
@@ -62,7 +82,16 @@ interface Site {
   disposition: Disposition | null
 }
 
-const MUTATION_RE = /\b(?:UPDATE meta_records|DELETE FROM meta_records)\b/
+/**
+ * Every form a `meta_records` row-mutation can take in this codebase:
+ *   • raw SQL `UPDATE meta_records` / `DELETE FROM meta_records` (the only forms in use today), and
+ *   • the Kysely query-builder forms `.updateTable('meta_records')` / `.deleteFrom('meta_records')`
+ *     (any quote style), added pre-emptively so a future builder-style mutation is also caught.
+ * `SELECT ... FOR UPDATE` row locks do NOT match (the token before `meta_records` is `FROM`, not the
+ * mutation verb), so the read-then-lock pattern is correctly not flagged as a mutation.
+ */
+const MUTATION_RE =
+  /\b(?:UPDATE meta_records|DELETE FROM meta_records)\b|(?:updateTable|deleteFrom)\(\s*['"`]meta_records['"`]/
 
 function classify(window: string): Disposition | null {
   if (/\/\/\s*lock-guarded:/.test(window)) return 'GUARDED'
@@ -88,13 +117,15 @@ function enumerateSites(file: string, src: string): Site[] {
 }
 
 describe('rank-8 record-lock mutation-path guard — durable structural guard', () => {
-  const allSites = AUDITED_FILES.flatMap((file) => enumerateSites(file, read(file)))
+  const allSites = listRuntimeTsFiles().flatMap((file) => enumerateSites(file, read(file)))
 
   test('the enumeration finds the expected mutation surface (smoke — not zero, not exploded)', () => {
     // 16 known sites at authoring time (3 services + 1 plugin × 2 + automation update + 2 lock-mgmt ×2
     // surfaces + univer-meta form/attachment/people/field-drop/lock/unlock + formula + auto-number).
-    // A count change is FINE — it just means you added/removed a mutation site; the per-site assertion
-    // below is the real gate. This bound only flags an extractor that silently matched nothing.
+    // The scan is now whole-`src` (not a fixed file list), so a count change is FINE — it just means you
+    // added/removed a mutation site (possibly in a NEW file the old 7-file list would have missed); the
+    // per-site assertion below is the real gate. This bound only flags an extractor that matched nothing
+    // (walk broke) or exploded (regex over-matched a non-mutation token).
     expect(allSites.length).toBeGreaterThanOrEqual(14)
     expect(allSites.length).toBeLessThanOrEqual(40)
   })
