@@ -18,7 +18,7 @@
 |---|---|---|---|
 | **治理半**（observability：快照→脱敏→只读 API→admin UI→可达） | 运行可观测/可审计/可诊断 | **✅ 100% + 文档固化** | 否 —— 已关闭，不重开 |
 | **Retry 能力薄片**（A4/A5：whole-execution retry） | 失败/跳过 run 可由 admin 显式确认后整 run 重跑 | **✅ 100% for A5 v1** | 否 —— 已关闭；UI/idempotency/record-refresh 另需 opt-in |
-| **收敛引擎能力半**（A6：persistent jobs / suspend/resume / branch / DAG / approval-as-job） | automation+approval 统一到 WorkflowJob 引擎 | **🟡 A6-1 + A6-2 已完成**；A6-3 exclusive branch + parallel `join_all` 已落地；A6-4 scope-gate + A6-4a implementation plan 已记录、implementation 未启动；A6-3-3 / join-any / W7 follow-ups 未启动 | 否 —— **剩余 A6 rungs 仍需具名 opt-in；A6-4/A6-5 follow-ups 受需求闸** |
+| **收敛引擎能力半**（A6：persistent jobs / suspend/resume / branch / DAG / approval-as-job） | automation+approval 统一到 WorkflowJob 引擎 | **🟡 A6-1/A6-2/A6-3 已落地**（persistent jobs、suspend/resume、exclusive branch + parallel `join_all`）；A6-4 scope-gate + A6-4a implementation plan 已记录、implementation 未启动；A6-3-3 / join-any / W7 follow-ups 未启动 | 否 —— **剩余 A6 rungs 仍需具名 opt-in；A6-4/A6-5 follow-ups 受需求闸** |
 
 > **grounded 2026-06-12**：`/retry` 路由实现 A5 whole-execution retry；A6-1 persist-job runtime 已生产可达（#2130/#2191/#2193）；A6-2 suspend/resume 已生产可达（#2237/#2245，admin-gated v1，operator UAT #2257）；A6-3 has `condition_branch` and parallel `join_all` runtime/editor/runs-readability (#2321/#2339/#2348/#2496/#2500/#2501)。C1 契约现被 A2 读边界、A6-1 job 持久化、A6-2 suspended job/resume、A6-3 branch/parallel job lineage 使用。A6-4/W8 BPMN compile-preview has a docs-only scope gate and an A6-4a pure-compiler implementation plan; **仍无** A6-3-3 branch-local wait/nesting、join-any、BPMN adapter implementation、W7 result backwrite runtime, or public webhook/token emitter.
 
