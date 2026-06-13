@@ -104,6 +104,25 @@ export const MANAGED_SHEET_PERMISSION_CODES = [
   'multitable:admin',
 ]
 
+// ── Permission-code constants (BASE scope — ②a 2a.1 primitive) ──────────────
+//
+// Base-level governance codes, a DISTINCT scope from the sheet-level codes above (kept in their own
+// Sets — folding them into SHEET_READ_* would be semantically wrong). They name the kernel-internal
+// authority to read / administer a whole multitable base. This is the THIN scaffold ②b will build on
+// (an opt-in cross-base READ path); central RBAC / auth are untouched. `multitable:base:admin` implies
+// read. The §2a.2 wall does NOT consult these (it compares two base_id strings only).
+export const BASE_READ_PERMISSION_CODES = new Set([
+  'multitable:base:read',
+  'multitable:base:admin',
+  // a multitable admin implicitly governs every base
+  'multitable:admin',
+])
+
+export const BASE_ADMIN_PERMISSION_CODES = new Set([
+  'multitable:base:admin',
+  'multitable:admin',
+])
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export type MultitableSheetPermissionSubjectType = 'user' | 'role' | 'member-group'
@@ -1206,4 +1225,40 @@ export async function resolveReadableSheetIds(
     }
   }
   return readableSheetIds
+}
+
+/**
+ * ②a 2a.1 — base-level readability resolver (SCAFFOLD, unwired).
+ *
+ * Mirrors `resolveReadableSheetIds` at the base granularity: returns whether the requesting actor may
+ * READ the given base. There is no `base_permissions` table at this stage, so readability derives from:
+ *   1. admin role → any base;
+ *   2. a global base-read grant (`multitable:base:read` / `:base:admin` / `multitable:admin`) → any base;
+ *   3. base ownership (`meta_bases.owner_id` === actor) → that base.
+ * A missing / soft-deleted base is NOT readable (no null-deref).
+ *
+ * This is the primitive ②b will consume when an opt-in cross-base READ path opens. It is deliberately
+ * UNWIRED here: the §2a.2 wall compares two base_id strings and does not call this. It does NOT touch
+ * central RBAC / auth — it is kernel-internal to multitable.
+ */
+export async function resolveBaseReadable(
+  req: Request,
+  query: QueryFn,
+  baseId: string,
+): Promise<boolean> {
+  const normalizedBaseId = baseId.trim()
+  if (!normalizedBaseId) return false
+
+  const access = await resolveRequestAccess(req)
+  if (access.isAdminRole) return true
+  if (access.permissions.some((code) => BASE_READ_PERMISSION_CODES.has(code))) return true
+
+  const res = await query(
+    'SELECT owner_id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
+    [normalizedBaseId],
+  )
+  const row = (res.rows as Array<{ owner_id: unknown }>)[0]
+  if (!row) return false
+  const ownerId = typeof row.owner_id === 'string' ? row.owner_id.trim() : ''
+  return Boolean(ownerId) && Boolean(access.userId) && ownerId === access.userId
 }
