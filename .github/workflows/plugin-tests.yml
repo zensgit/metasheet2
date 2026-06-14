@@ -160,7 +160,7 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for after-sales integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/after-sales-plugin.install.test.ts --reporter=dot
 
-      - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + foreign-field taint mask + dashboard authz + realtime invalidation + automation retry provenance + webhook outbound chain + AI shortcut run + AI ledger retention sweep)
+      - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + foreign-field taint mask + dashboard authz + realtime invalidation + automation retry provenance + cross-base governed automation writes + webhook outbound chain + AI shortcut run + AI ledger retention sweep)
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
@@ -205,7 +205,10 @@ jobs:
             tests/integration/multitable-cross-base-seed-view-toctou.test.ts \
             tests/integration/multitable-dangling-link-sweep.test.ts \
             tests/integration/multitable-base-readable-resolver.test.ts \
+            tests/integration/multitable-base-writable-resolver.test.ts \
             tests/integration/multitable-cross-base-link-optin.test.ts \
+            tests/integration/multitable-cross-base-automation-write.test.ts \
+            tests/integration/multitable-cross-base-automation-write-rule.test.ts \
             tests/integration/multitable-sheet-realtime.api.test.ts \
             tests/integration/rooms.basic.test.ts \
             tests/integration/multitable-automation-retry.test.ts \

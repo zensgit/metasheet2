@@ -177,6 +177,42 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * ②b cross-base write SHAPE validation at rule-save time (fail-closed before any run). This validates
+ * ADDRESSING SHAPE only — the actual base-write AUTHORITY + claim==truth are re-checked per run in the
+ * executor write-gate (`evaluateCrossBaseWrite`). When a record-mutating action declares a non-empty
+ * `targetBaseId` (opting into cross-base):
+ *  - `update_record` MUST also carry a non-empty `targetSheetId` AND `targetRecordId` (the trigger
+ *    record is not in the target base, so the update has no record to address otherwise — §2.4).
+ *  - `create_record` needs nothing more (its `sheetId` is the target sheet).
+ * A malformed cross-base config → rejected at save. (Same-base actions — no `targetBaseId` — pass.)
+ */
+function validateCrossBaseWriteConfig(config: Record<string, unknown>, actionType: string, path: string): string | null {
+  if (actionType !== 'update_record') return null
+  const targetBaseId = typeof config.targetBaseId === 'string' ? config.targetBaseId.trim() : ''
+  if (!targetBaseId) return null // same-base (or no opt-in) — nothing to validate
+  const targetSheetId = typeof config.targetSheetId === 'string' ? config.targetSheetId.trim() : ''
+  const targetRecordId = typeof config.targetRecordId === 'string' ? config.targetRecordId.trim() : ''
+  if (!targetSheetId || !targetRecordId) {
+    return `${path}: cross-base update_record requires targetSheetId and targetRecordId when targetBaseId is set`
+  }
+  return null
+}
+
+function validateCrossBaseWriteActionConfigs(
+  actionType: string,
+  actionConfig: Record<string, unknown>,
+  actions: AutomationAction[] | null | undefined,
+): string | null {
+  const topLevel = validateCrossBaseWriteConfig(actionConfig, actionType, 'actionConfig')
+  if (topLevel) return topLevel
+  for (const [index, action] of (actions ?? []).entries()) {
+    const error = validateCrossBaseWriteConfig(action.config, action.type, `actions[${index}].config`)
+    if (error) return error
+  }
+  return null
+}
+
 function validateActionObject(action: unknown, path: string): AutomationAction {
   if (!isRecord(action)) {
     throw new AutomationRuleValidationError(`${path} must be an object`)
@@ -646,6 +682,8 @@ export class AutomationService {
     if (sendEmailValidationError) throw new AutomationRuleValidationError(sendEmailValidationError)
     const startApprovalValidationError = validateStartApprovalActionConfigs(input.actionType, actionConfig, actionsForValidation)
     if (startApprovalValidationError) throw new AutomationRuleValidationError(startApprovalValidationError)
+    const crossBaseWriteValidationError = validateCrossBaseWriteActionConfigs(input.actionType, actionConfig, actionsForValidation)
+    if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
     const linkValidationError = await validateDingTalkAutomationLinks(
       this.queryFn,
       sheetId,
@@ -785,6 +823,12 @@ export class AutomationService {
         actionsForValidation,
       )
       if (startApprovalValidationError) throw new AutomationRuleValidationError(startApprovalValidationError)
+      const crossBaseWriteValidationError = validateCrossBaseWriteActionConfigs(
+        nextActionType,
+        normalizedNextActionConfig,
+        actionsForValidation,
+      )
+      if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
       const linkValidationError = await validateDingTalkAutomationLinks(
         this.queryFn,
         sheetId,
