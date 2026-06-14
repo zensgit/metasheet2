@@ -209,6 +209,7 @@ jobs:
             tests/integration/multitable-cross-base-link-optin.test.ts \
             tests/integration/multitable-cross-base-automation-write.test.ts \
             tests/integration/multitable-cross-base-automation-write-rule.test.ts \
+            tests/integration/multitable-cross-base-write-quota.test.ts \
             tests/integration/multitable-sheet-realtime.api.test.ts \
             tests/integration/rooms.basic.test.ts \
             tests/integration/multitable-automation-retry.test.ts \
