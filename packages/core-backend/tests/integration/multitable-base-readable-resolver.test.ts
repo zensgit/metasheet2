@@ -29,6 +29,7 @@ const ADMIN = `u_brr_admin_${TS}`
 
 const BASE_A = `base_brr_a_${TS}` // owned by OWNER
 const BASE_B = `base_brr_b_${TS}` // owned by someone else
+const DEL_BASE = `base_brr_del_${TS}` // SOFT-DELETED (deleted_at set), owned by OWNER
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
@@ -49,10 +50,13 @@ describeIfDatabase('②a 2a.1 — resolveBaseReadable scaffold (real DB)', () =>
   beforeAll(async () => {
     await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1, $2, $3)', [BASE_A, 'BRR Base A', OWNER])
     await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1, $2, $3)', [BASE_B, 'BRR Base B', OTHER])
+    // A soft-deleted base owned by OWNER — seed `deleted_at` directly; no runtime path produces this
+    // state today, so it must be SQL-injected to exercise the resolver's `deleted_at IS NULL` filter.
+    await q('INSERT INTO meta_bases (id, name, owner_id, deleted_at) VALUES ($1, $2, $3, NOW())', [DEL_BASE, 'BRR Soft-Deleted Base', OWNER])
   })
 
   afterAll(async () => {
-    await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE_A, BASE_B]]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE_A, BASE_B, DEL_BASE]]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
@@ -85,5 +89,19 @@ describeIfDatabase('②a 2a.1 — resolveBaseReadable scaffold (real DB)', () =>
   test('a missing / soft-deleted base is not readable (no null-deref)', async () => {
     const query = poolManager.get().query.bind(poolManager.get())
     expect(await resolveBaseReadable(reqAs(OWNER), query, `base_brr_missing_${TS}`)).toBe(false)
+  })
+
+  // NIT-1 (symmetry with resolveBaseWritable): the target-base existence SELECT (`deleted_at IS NULL`)
+  // must run BEFORE the admin / base-read-grant short-circuit, so a soft-deleted base is NOT readable for
+  // ANYONE — including an admin OR a global multitable:base:read grant holder. Under the OLD ordering both
+  // short-circuited to `true` ahead of the SELECT (this canary is RED on that ordering: admin + grant flip
+  // true→false here). OWNER returns false under either ordering (its derivation also needs the now-missing
+  // row), so the discriminating flips are the admin and grant assertions.
+  test('NIT-1: a SOFT-DELETED base is not readable even for an admin OR a base-read-grant holder (nor its owner)', async () => {
+    const query = poolManager.get().query.bind(poolManager.get())
+    const grantee = `u_brr_delgrant_${TS}`
+    expect(await resolveBaseReadable(reqAs(ADMIN, { admin: true }), query, DEL_BASE)).toBe(false)
+    expect(await resolveBaseReadable(reqAs(grantee, { perms: ['multitable:base:read'] }), query, DEL_BASE)).toBe(false)
+    expect(await resolveBaseReadable(reqAs(OWNER), query, DEL_BASE)).toBe(false)
   })
 })
