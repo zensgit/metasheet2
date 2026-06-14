@@ -1460,11 +1460,15 @@ export class AutomationExecutor {
   // ── ②b cross-base write-gate (shared by create_record + update_record) ────
 
   /**
-   * Resolve a record sheet's base_id via the executor's queryFn. Returns `undefined` for a missing
-   * sheet (caller treats as null base), `null` for a legacy/null base.
+   * Resolve a record sheet's base_id via the executor's queryFn. Returns `undefined` for a missing OR
+   * SOFT-DELETED sheet (caller treats as an unresolvable target → fail-closed), `null` for a legacy/null
+   * base. NIT-1: the `deleted_at IS NULL` filter ensures a soft-deleted target sheet resolves to "no row"
+   * so a cross-base write into a logically-deleted sheet cannot resolve a target base (mirrors the REST
+   * record-create guard at record-service.ts). The state is unreachable today (sheets are hard-deleted)
+   * but this hardens against a future sheet-soft-delete feature.
    */
   private async resolveSheetBaseId(sheetId: string): Promise<string | null | undefined> {
-    const res = await this.deps.queryFn('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])
+    const res = await this.deps.queryFn('SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
     const row = (res.rows as Array<{ base_id?: unknown }>)[0]
     if (!row) return undefined
     return typeof row.base_id === 'string' ? row.base_id : null
@@ -1491,8 +1495,23 @@ export class AutomationExecutor {
     declaredTargetBaseId: string | undefined,
     context: ExecutionContext,
   ): Promise<CrossBaseWriteGate> {
+    // NIT-1: check the RAW three-state result of the TARGET sheet lookup BEFORE the `?? null` collapse.
+    // `undefined` = the target sheet is missing or SOFT-DELETED (resolveSheetBaseId filters deleted_at) →
+    // the write target is unresolvable → fail-closed. This must precede the `?? null` normalization, else
+    // a soft-deleted target (undefined → null) would collapse against a legacy-null trigger base
+    // (null === null → same-base) and silently SKIP the gate. Treating it as a cross-base rejection keeps
+    // legitimate legacy-null-base SAME-BASE writes (both sides null, both rows present) unaffected.
+    const rawTargetBaseId = await this.resolveSheetBaseId(targetSheetId)
+    if (rawTargetBaseId === undefined) {
+      return {
+        crossBase: true,
+        ok: false,
+        error: `Cross-base write target sheet ${targetSheetId} is missing or soft-deleted (no resolvable base)`,
+      }
+    }
+
     const triggerBaseId = (await this.resolveSheetBaseId(context.sheetId)) ?? null
-    const targetBaseId = (await this.resolveSheetBaseId(targetSheetId)) ?? null
+    const targetBaseId = rawTargetBaseId ?? null
 
     // Same-base (null-aware, mirrors `baseIdsAreCrossBase` = strict `!==`): null-vs-null and
     // same-set are same-base; a null/legacy base vs a set base is cross-base.

@@ -1293,6 +1293,18 @@ export async function resolveBaseWritable(
   const normalizedBaseId = baseId.trim()
   if (!normalizedBaseId) return false
 
+  // NIT-1: target-base EXISTENCE first (mirrors the owner SELECT's `deleted_at IS NULL` guard). A
+  // missing / soft-deleted base is NOT writable by ANYONE — including an admin/grant holder. Resolving
+  // existence BEFORE the admin/grant short-circuit closes the latent hole where the short-circuit
+  // returned `true` ahead of this check, so the documented "a missing/soft-deleted base → false"
+  // intent was dead code for admins. The owner derivation below reuses this same row.
+  const baseRes = await query(
+    'SELECT owner_id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
+    [normalizedBaseId],
+  )
+  const baseRow = (baseRes.rows as Array<{ owner_id: unknown }>)[0]
+  if (!baseRow) return false // missing / soft-deleted target base → fail-closed (even for an admin)
+
   // Effective permission codes (user_permissions ∪ role_permissions), narrowed by namespace admission so
   // the write gate is never MORE permissive than the codebase's effective-permission resolution.
   const codesRes = await query(
@@ -1314,13 +1326,7 @@ export async function resolveBaseWritable(
   const codes = await filterPermissionCodesByNamespaceAdmission(normalizedUserId, rawCodes)
   if (codes.some((code) => BASE_WRITE_PERMISSION_CODES.has(code))) return true
 
-  // base ownership (symmetric with resolveBaseReadable).
-  const res = await query(
-    'SELECT owner_id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
-    [normalizedBaseId],
-  )
-  const row = (res.rows as Array<{ owner_id: unknown }>)[0]
-  if (!row) return false
-  const ownerId = typeof row.owner_id === 'string' ? row.owner_id.trim() : ''
+  // base ownership (symmetric with resolveBaseReadable) — reuses the existence row resolved above.
+  const ownerId = typeof baseRow.owner_id === 'string' ? baseRow.owner_id.trim() : ''
   return Boolean(ownerId) && ownerId === normalizedUserId
 }

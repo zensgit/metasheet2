@@ -42,6 +42,13 @@ const BASE_B = `base_xw_b_${TS}` // target base (cross-base write sink)
 const SHEET_A = `sheet_xw_a_${TS}` // trigger sheet (BASE_A)
 const SHEET_B = `sheet_xw_b_${TS}` // cross-base target sheet (BASE_B)
 
+// NIT-1 soft-delete canary fixtures (dedicated — never mutate the shared BASE_B/SHEET_B which
+// sibling tests reuse live). The soft-deleted state is UNREACHABLE through any runtime path today
+// (sheets are hard-deleted, bases are never deleted), so these seed `deleted_at` directly via SQL.
+const DEL_BASE = `base_xw_del_${TS}` // a SOFT-DELETED base (deleted_at set), owned by OWNER
+const LIVE_SHEET_IN_DEL_BASE = `sheet_xw_indelbase_${TS}` // a LIVE sheet pointing at DEL_BASE
+const DEL_SHEET_IN_LIVE_BASE = `sheet_xw_del_${TS}` // a SOFT-DELETED sheet in the LIVE BASE_B
+
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
 function makeExecutor(): { executor: AutomationExecutor; eventBus: EventBus } {
@@ -102,12 +109,18 @@ describeIfDatabase('②b automation — governed cross-base writes + close §1.3
        VALUES ($1, 'multitable:base:admin') ON CONFLICT DO NOTHING`,
       [ADMIN_CODE],
     )
+
+    // NIT-1 soft-delete canary fixtures — seed `deleted_at` directly (no runtime path produces it).
+    await q('INSERT INTO meta_bases (id, name, owner_id, deleted_at) VALUES ($1, $2, $3, NOW())', [DEL_BASE, 'XW Soft-Deleted Base', OWNER])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)', [LIVE_SHEET_IN_DEL_BASE, DEL_BASE, 'Live sheet in soft-deleted base'])
+    await q('INSERT INTO meta_sheets (id, base_id, name, deleted_at) VALUES ($1, $2, $3, NOW())', [DEL_SHEET_IN_LIVE_BASE, BASE_B, 'Soft-deleted sheet in live base'])
   })
 
   afterAll(async () => {
-    await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[SHEET_A, SHEET_B]]).catch(() => {})
-    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[SHEET_A, SHEET_B]]).catch(() => {})
-    await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE_A, BASE_B]]).catch(() => {})
+    const sheets = [SHEET_A, SHEET_B, LIVE_SHEET_IN_DEL_BASE, DEL_SHEET_IN_LIVE_BASE]
+    await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [sheets]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE_A, BASE_B, DEL_BASE]]).catch(() => {})
     await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[ADMIN_CODE]]).catch(() => {})
   })
 
@@ -297,5 +310,74 @@ describeIfDatabase('②b automation — governed cross-base writes + close §1.3
     const exec = await executor.execute(rule, { recordId: '', sheetId: SHEET_A, actorId: null, data: {}, _triggeredBy: 'schedule' } as never)
     expect(exec.steps[0]?.status).toBe('failed')
     expect(await countRecords(SHEET_B)).toBe(before) // fail-closed: no write
+  })
+
+  // ── XW-6: NIT-1 — soft-deleted / missing target base or sheet → fail-closed ──
+  // The soft-deleted state is UNREACHABLE through any runtime path today (sheets are hard-deleted,
+  // bases are never deleted), so each fixture seeds `deleted_at` directly. The gate must STILL reject
+  // a cross-base write into a logically-deleted target, for an ADMIN *and* a base-OWNER actor, so a
+  // future soft-delete feature cannot silently re-arm a zombie/resurrection write. RED on pre-fix HEAD
+  // (the admin short-circuit / the unfiltered sheet lookup lets the write land); GREEN after.
+
+  test('XW-6a: cross-base create into a LIVE sheet in a SOFT-DELETED base, by an ADMIN actor → step failed, NO write', async () => {
+    const { executor } = makeExecutor()
+    const before = await countRecords(LIVE_SHEET_IN_DEL_BASE)
+    const rule = ruleWith(
+      // claim == truth (DEL_BASE is the live sheet's actual base) — the only thing that should reject
+      // is base existence. ADMIN holds multitable:base:admin, which today short-circuits BEFORE the
+      // deleted_at check → zombie INSERT into a soft-deleted base.
+      { type: 'create_record', config: { sheetId: LIVE_SHEET_IN_DEL_BASE, targetBaseId: DEL_BASE, data: { v: 'xw6a' } } },
+      OWNER,
+    )
+    const exec = await executor.execute(rule, { recordId: '', sheetId: SHEET_A, actorId: ADMIN_CODE, data: {} })
+    expect(exec.steps[0]?.status).toBe('failed')
+    expect(await countRecords(LIVE_SHEET_IN_DEL_BASE)).toBe(before) // fail-closed: no write into a soft-deleted base
+  })
+
+  test('XW-6b: cross-base create into a LIVE sheet in a SOFT-DELETED base, by the base OWNER → step failed, NO write', async () => {
+    const { executor } = makeExecutor()
+    const before = await countRecords(LIVE_SHEET_IN_DEL_BASE)
+    // OWNER owns DEL_BASE — the owner path is already deleted_at-guarded, so this should ALSO reject
+    // (mirrors how the owner SELECT requires existence). Locks in symmetry: admin and owner alike.
+    const rule = ruleWith(
+      { type: 'create_record', config: { sheetId: LIVE_SHEET_IN_DEL_BASE, targetBaseId: DEL_BASE, data: { v: 'xw6b' } } },
+      OWNER,
+    )
+    const exec = await executor.execute(rule, { recordId: '', sheetId: SHEET_A, actorId: OWNER, data: {} })
+    expect(exec.steps[0]?.status).toBe('failed')
+    expect(await countRecords(LIVE_SHEET_IN_DEL_BASE)).toBe(before)
+  })
+
+  test('XW-6c: cross-base create into a SOFT-DELETED sheet (in a live base), by the base OWNER → step failed, NO write', async () => {
+    const { executor } = makeExecutor()
+    const before = await countRecords(DEL_SHEET_IN_LIVE_BASE)
+    // The target sheet is soft-deleted but its base (BASE_B) is LIVE and owned by OWNER. Pre-fix the
+    // sheet→base lookup has no deleted_at filter, so claim==truth passes and the owner is writable on
+    // the live base → an OWNER (non-admin) row lands in a soft-deleted sheet. Post-fix the soft-deleted
+    // sheet resolves to "no row" → target base unresolvable → fail-closed.
+    const rule = ruleWith(
+      { type: 'create_record', config: { sheetId: DEL_SHEET_IN_LIVE_BASE, targetBaseId: BASE_B, data: { v: 'xw6c' } } },
+      OWNER,
+    )
+    const exec = await executor.execute(rule, { recordId: '', sheetId: SHEET_A, actorId: OWNER, data: {} })
+    expect(exec.steps[0]?.status).toBe('failed')
+    expect(await countRecords(DEL_SHEET_IN_LIVE_BASE)).toBe(before)
+  })
+
+  test('XW-6d: cross-base UPDATE into a LIVE sheet in a SOFT-DELETED base, by an ADMIN actor → step failed, target unchanged', async () => {
+    const { executor } = makeExecutor()
+    const recId = `rec_xw6d_${TS}`
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [recId, LIVE_SHEET_IN_DEL_BASE, JSON.stringify({ v: 'old' })])
+    try {
+      const rule = ruleWith(
+        { type: 'update_record', config: { targetBaseId: DEL_BASE, targetSheetId: LIVE_SHEET_IN_DEL_BASE, targetRecordId: recId, fields: { v: 'mutated' } } },
+        OWNER,
+      )
+      const exec = await executor.execute(rule, { recordId: 'trigger_rec', sheetId: SHEET_A, actorId: ADMIN_CODE, data: {} })
+      expect(exec.steps[0]?.status).toBe('failed')
+      expect((await recordData(recId))?.v).toBe('old') // unchanged: no write into a soft-deleted base
+    } finally {
+      await q('DELETE FROM meta_records WHERE id = $1', [recId]).catch(() => {})
+    }
   })
 })

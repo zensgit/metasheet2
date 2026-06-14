@@ -76,7 +76,17 @@ function createMockRule(overrides: Partial<AutomationRule> = {}): AutomationRule
 function createMockDeps(overrides: Partial<AutomationDeps> = {}): AutomationDeps {
   return {
     eventBus: new EventBus(),
-    queryFn: vi.fn(async () => ({ rows: [], rowCount: 0 })),
+    // NIT-1: a `meta_sheets` lookup must resolve an EXISTING sheet so the ②b cross-base write-gate can
+    // resolve a base. Empty rows model a MISSING / soft-deleted sheet, which the gate now (correctly)
+    // fail-closes on — that is NOT the same-base intent of these specs. Returning a UNIFORM base for
+    // every sheet keeps trigger and target in the same base → no gate fires (do NOT vary the base, or a
+    // `create_record { sheetId }` to a different sheet becomes cross-base-without-targetBaseId → rejected).
+    queryFn: vi.fn(async (sql: unknown) => {
+      if (typeof sql === 'string' && /FROM meta_sheets/i.test(sql)) {
+        return { rows: [{ base_id: 'base_mock' }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    }),
     fetchFn: vi.fn(async () => new Response('OK', { status: 200 })) as unknown as typeof fetch,
     ...overrides,
   }

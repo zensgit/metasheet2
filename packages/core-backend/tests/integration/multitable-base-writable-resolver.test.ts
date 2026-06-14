@@ -25,6 +25,7 @@ const NOBODY = `u_bww_nobody_${TS}` // no grant, owns nothing → write nothing
 
 const BASE_A = `base_bww_a_${TS}` // owned by OWNER
 const BASE_B = `base_bww_b_${TS}` // owned by someone else
+const DEL_BASE = `base_bww_del_${TS}` // SOFT-DELETED (deleted_at set), owned by OWNER
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
@@ -32,6 +33,8 @@ describeIfDatabase('②b automation — resolveBaseWritable resolver (real DB)',
   beforeAll(async () => {
     await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1, $2, $3)', [BASE_A, 'BWW Base A', OWNER])
     await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1, $2, $3)', [BASE_B, 'BWW Base B', `u_bww_other_${TS}`])
+    // A soft-deleted base owned by OWNER — seed `deleted_at` directly (no runtime path produces it).
+    await q('INSERT INTO meta_bases (id, name, owner_id, deleted_at) VALUES ($1, $2, $3, NOW())', [DEL_BASE, 'BWW Soft-Deleted Base', OWNER])
 
     await q(
       `INSERT INTO permissions (code, name, description)
@@ -53,7 +56,7 @@ describeIfDatabase('②b automation — resolveBaseWritable resolver (real DB)',
 
   afterAll(async () => {
     await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[ADMIN_CODE]]).catch(() => {})
-    await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE_A, BASE_B]]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE_A, BASE_B, DEL_BASE]]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
@@ -87,5 +90,14 @@ describeIfDatabase('②b automation — resolveBaseWritable resolver (real DB)',
     const query = poolManager.get().query.bind(poolManager.get())
     // OWNER owns NO record for this id → owner derivation finds nothing → false.
     expect(await resolveBaseWritable(OWNER, query, `base_bww_missing_${TS}`)).toBe(false)
+  })
+
+  // NIT-1: the existence check must run BEFORE the admin/grant short-circuit, so even an admin/grant
+  // holder is NOT writable on a soft-deleted base (the short-circuit previously returned true first).
+  // RED on pre-fix HEAD (admin short-circuits before the deleted_at SELECT); GREEN after the reorder.
+  test('fail-closed: a SOFT-DELETED base is not writable even for an admin-grant holder OR the owner', async () => {
+    const query = poolManager.get().query.bind(poolManager.get())
+    expect(await resolveBaseWritable(ADMIN_CODE, query, DEL_BASE)).toBe(false)
+    expect(await resolveBaseWritable(OWNER, query, DEL_BASE)).toBe(false)
   })
 })
