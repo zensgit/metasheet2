@@ -1258,15 +1258,23 @@ export async function resolveBaseReadable(
   if (!normalizedBaseId) return false
 
   const access = await resolveRequestAccess(req)
-  if (access.isAdminRole) return true
-  if (access.permissions.some((code) => BASE_READ_PERMISSION_CODES.has(code))) return true
 
+  // Symmetry with `resolveBaseWritable`'s NIT-1: resolve target-base EXISTENCE FIRST. A missing /
+  // soft-deleted base is NOT readable by ANYONE — including an admin / base-read-grant holder — which is
+  // what the docstring promises; previously the admin/grant short-circuits returned `true` ahead of this
+  // check, leaving "a missing/soft-deleted base → false" as dead code for those authorities. The owner
+  // derivation below reuses this same row. (Soft-delete is runtime-unreachable today; this hardens
+  // against a future base soft-delete feature and keeps the two base resolvers consistent.)
   const res = await query(
     'SELECT owner_id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
     [normalizedBaseId],
   )
   const row = (res.rows as Array<{ owner_id: unknown }>)[0]
-  if (!row) return false
+  if (!row) return false // missing / soft-deleted base → not readable, even for admin / grant
+
+  if (access.isAdminRole) return true
+  if (access.permissions.some((code) => BASE_READ_PERMISSION_CODES.has(code))) return true
+
   const ownerId = typeof row.owner_id === 'string' ? row.owner_id.trim() : ''
   return Boolean(ownerId) && Boolean(access.userId) && ownerId === access.userId
 }
