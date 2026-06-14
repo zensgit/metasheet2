@@ -1135,8 +1135,15 @@ describe('Multitable context API', () => {
           return { rows: [{ id: 'sheet_ops' }] }
         }
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
-          expect(params).toEqual(['sheet_ops'])
-          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
+          // loadSheetRow is hit TWICE here: once for the source sheet (sheet_ops) and once by the §2a.2
+          // cross-base wall (`validateLinkFieldConfig`) for the FOREIGN sheet — which, for a native person
+          // field, is the freshly-provisioned people sheet (`peopleSheetId`), since the person
+          // normalization overwrites the spoofed foreignSheetId. Echo a SAME-BASE (base_ops) row keyed by
+          // the requested id so source-base == foreign-base → the wall sees a same-base link and passes.
+          // A fixed ['sheet_ops'] assertion mis-fires on the peopleSheetId lookup.
+          const requestedSheetId = String(params?.[0] ?? '')
+          expect([requestedSheetId === 'sheet_ops', requestedSheetId === peopleSheetId]).toContain(true)
+          return { rows: [{ id: requestedSheetId, base_id: 'base_ops', name: 'Orders', description: null }] }
         }
         if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
           expect(params).toEqual(['base_ops'])
@@ -1268,8 +1275,12 @@ describe('Multitable context API', () => {
           }
         }
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
-          expect(params).toEqual(['sheet_ops'])
-          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
+          // Same as the create-field test: loadSheetRow serves both the source sheet (sheet_ops) and the
+          // §2a.2 wall's FOREIGN-sheet lookup (the provisioned people sheet, peopleSheetId). Echo a
+          // SAME-BASE (base_ops) row keyed by the requested id so the wall sees a same-base link and passes.
+          const requestedSheetId = String(params?.[0] ?? '')
+          expect([requestedSheetId === 'sheet_ops', requestedSheetId === peopleSheetId]).toContain(true)
+          return { rows: [{ id: requestedSheetId, base_id: 'base_ops', name: 'Orders', description: null }] }
         }
         if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
           expect(params).toEqual(['base_ops'])
