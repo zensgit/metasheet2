@@ -205,6 +205,7 @@ jobs:
             tests/integration/multitable-cross-base-seed-view-toctou.test.ts \
             tests/integration/multitable-dangling-link-sweep.test.ts \
             tests/integration/multitable-base-readable-resolver.test.ts \
+            tests/integration/multitable-cross-base-link-optin.test.ts \
             tests/integration/multitable-sheet-realtime.api.test.ts \
             tests/integration/rooms.basic.test.ts \
             tests/integration/multitable-automation-retry.test.ts \

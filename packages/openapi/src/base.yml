@@ -2101,6 +2101,16 @@ components:
         property:
           type: object
           additionalProperties: true
+          properties:
+            foreignBaseId:
+              type: string
+              description: >-
+                Cross-base opt-in claim for a `link` field (②b). When present, the link is permitted to
+                target a foreign sheet in a DIFFERENT base IFF this value equals the foreign sheet's actual
+                base_id (claim == truth); a mismatched or absent value keeps the cross-base link rejected.
+                Immutable after create. Cross-base READ additionally requires foreign-base read permission;
+                a reader lacking it sees foreign data masked (and a 403 on the explicit link-options pull).
+                Omitted for same-base links.
         options:
           type: array
           items:
