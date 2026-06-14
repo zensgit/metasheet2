@@ -65,6 +65,12 @@ function assertRelativePath(path, field) {
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
 }
 
+function pathForDiagnostics(path) {
+  const queryOrFragmentIndex = String(path).search(/[?#]/)
+  if (queryOrFragmentIndex === -1) return path
+  return path.slice(0, queryOrFragmentIndex) || '/'
+}
+
 function getPath(value, path) {
   if (!path) return value
   return String(path).split('.').reduce((current, key) => {
@@ -212,7 +218,9 @@ function createHttpAdapter({ system, fetchImpl = globalThis.fetch, logger } = {}
   }
 
   async function requestJson(path, { method = 'GET', query, headers, body } = {}) {
-    const url = buildUrl(baseUrl, path, query)
+    const normalizedPath = assertRelativePath(path, 'path')
+    const diagnosticPath = pathForDiagnostics(normalizedPath)
+    const url = buildUrl(baseUrl, normalizedPath, query)
     const controller = typeof AbortController === 'function' ? new AbortController() : null
     const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
     const requestHeaders = mergeHeaders(
@@ -222,35 +230,56 @@ function createHttpAdapter({ system, fetchImpl = globalThis.fetch, logger } = {}
     )
 
     try {
-      const response = await fetchImpl(url, {
-        method,
-        headers: requestHeaders,
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: controller ? controller.signal : undefined,
-      })
-      const data = await parseResponseBody(response)
+      let response
+      try {
+        response = await fetchImpl(url, {
+          method,
+          headers: requestHeaders,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: controller ? controller.signal : undefined,
+        })
+      } catch (error) {
+        if (error && error.name === 'AbortError') {
+          throw new HttpAdapterError(`HTTP adapter request timed out: ${method} ${diagnosticPath}`, {
+            code: 'TIMEOUT',
+            method,
+            path: diagnosticPath,
+            timeoutMs,
+          })
+        }
+        if (logger && typeof logger.warn === 'function') {
+          logger.warn(`[plugin-integration-core] HTTP adapter request failed: ${method} ${diagnosticPath}`)
+        }
+        throw new HttpAdapterError(`HTTP adapter request failed before response: ${method} ${diagnosticPath}`, {
+          code: 'FETCH_FAILED',
+          method,
+          path: diagnosticPath,
+          causeName: error && error.name ? error.name : undefined,
+        })
+      }
+      let data
+      try {
+        data = await parseResponseBody(response)
+      } catch (error) {
+        throw new HttpAdapterError(`HTTP adapter response body read failed: ${method} ${diagnosticPath}`, {
+          code: 'RESPONSE_READ_FAILED',
+          status: response && response.status,
+          method,
+          path: diagnosticPath,
+          causeName: error && error.name ? error.name : undefined,
+        })
+      }
       if (!responseOk(response)) {
-        throw new HttpAdapterError(`HTTP adapter request failed: ${method} ${path}`, {
+        throw new HttpAdapterError(`HTTP adapter request failed: ${method} ${diagnosticPath}`, {
           status: response.status,
           body: data,
           method,
-          path,
+          path: diagnosticPath,
         })
       }
       return { response, data, url, headers: requestHeaders }
     } catch (error) {
-      if (error && error.name === 'AbortError') {
-        throw new HttpAdapterError(`HTTP adapter request timed out: ${method} ${path}`, {
-          code: 'TIMEOUT',
-          method,
-          path,
-          timeoutMs,
-        })
-      }
       if (error instanceof HttpAdapterError) throw error
-      if (logger && typeof logger.warn === 'function') {
-        logger.warn(`[plugin-integration-core] HTTP adapter request failed: ${method} ${path}`)
-      }
       throw error
     } finally {
       if (timeout) clearTimeout(timeout)
@@ -405,6 +434,7 @@ module.exports = {
   __internals: {
     buildUrl,
     getPath,
+    pathForDiagnostics,
     normalizeBaseUrl,
     normalizeObjects,
     credentialHeaders,
