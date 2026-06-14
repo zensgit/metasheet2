@@ -8,6 +8,7 @@ import { Logger } from '../core/logger'
 import { redactString } from './automation-log-redact'
 import { ensureRecordNotLocked } from './record-lock'
 import { resolveBaseWritable } from './permission-service'
+import { MemoryRateLimitStore, type RateLimitStore } from '../middleware/rate-limiter'
 import {
   DingTalkBusinessError,
   DingTalkRequestError,
@@ -674,16 +675,66 @@ export interface ExecutionContext {
 
 // ── Dependencies interface for action executors ───────────────────────────
 
+/**
+ * Cross-base write QUOTA configuration. Caps the RATE of AUTHORIZED cross-base automation writes per
+ * TARGET base inside a rolling window. Optional on AutomationDeps: when omitted the executor uses a
+ * process-global default (env-configurable, see CROSS_BASE_WRITE_QUOTA_*). Same-base writes are never
+ * counted (the gate short-circuits same-base before the quota), so this is zero-regression.
+ */
+export interface CrossBaseWriteQuotaConfig {
+  /** Max authorized cross-base writes allowed per target base within `windowMs`. */
+  limit: number
+  /** Rolling window length in milliseconds. */
+  windowMs: number
+  /**
+   * Counter store. Reuses the rate-limiter `RateLimitStore` (increment-then-check) primitive. Inject a
+   * private `MemoryRateLimitStore` in tests so a low limit cannot perturb the process-global default.
+   * Omit to share the executor's default singleton store.
+   */
+  store?: RateLimitStore
+}
+
+// ── Cross-base write quota defaults (process-global; env-configurable) ─────
+// Defensible generous default: 60 authorized cross-base writes per target base per 60s. Tuned to protect
+// a target base from an automation storm while never tripping legitimate human-paced or modest-fan-out
+// automation. CAVEAT: the default store is IN-PROCESS, so under N replicas the effective ceiling is
+// ~limit×N. The shared Redis-backed RateLimitStore exists (rate-limiter.ts) if a cluster-wide cap is ever
+// required; that is out of scope for v1.
+const DEFAULT_CROSS_BASE_WRITE_QUOTA_LIMIT = 60
+const DEFAULT_CROSS_BASE_WRITE_QUOTA_WINDOW_MS = 60_000
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw.trim() === '') return fallback
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback
+}
+
+/** Resolve the process-global default quota from env once (re-read per call is cheap and test-friendly). */
+function defaultCrossBaseWriteQuota(): { limit: number; windowMs: number } {
+  return {
+    limit: readPositiveIntEnv('CROSS_BASE_WRITE_QUOTA_LIMIT', DEFAULT_CROSS_BASE_WRITE_QUOTA_LIMIT),
+    windowMs: readPositiveIntEnv('CROSS_BASE_WRITE_QUOTA_WINDOW_MS', DEFAULT_CROSS_BASE_WRITE_QUOTA_WINDOW_MS),
+  }
+}
+
+// Module-level default counter store. A SINGLETON so cross-base write accounting is independent of how
+// many AutomationExecutor instances exist (a per-instance Map would reset on every re-construction and
+// silently defeat the guardrail). `unref`'d cleanup timer prunes expired windows.
+const defaultCrossBaseWriteQuotaStore = new MemoryRateLimitStore(DEFAULT_CROSS_BASE_WRITE_QUOTA_WINDOW_MS)
+
 export interface AutomationDeps {
   eventBus: EventBus
   queryFn: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
   fetchFn?: typeof fetch
   notificationService?: Pick<NotificationService, 'send'>
+  /** Optional cross-base write quota override (limit/window/store). Omit → process-global default. */
+  crossBaseWriteQuota?: CrossBaseWriteQuotaConfig
 }
 
 // ②b cross-base write-gate verdict. `crossBase: false` → same-base, no gate (zero regression).
 // `crossBase: true` → cross-base; `ok` discriminates allowed vs the fail-closed rejection (with reason).
-type CrossBaseWriteGate =
+export type CrossBaseWriteGate =
   | { crossBase: false }
   | { crossBase: true; ok: true }
   | { crossBase: true; ok: false; error: string }
@@ -692,9 +743,19 @@ type CrossBaseWriteGate =
 
 export class AutomationExecutor {
   private deps: AutomationDeps
+  /** Resolved cross-base write quota (injected override or process-global default). */
+  private readonly crossBaseQuotaLimit: number
+  private readonly crossBaseQuotaWindowMs: number
+  private readonly crossBaseQuotaStore: RateLimitStore
 
   constructor(deps: AutomationDeps) {
     this.deps = deps
+    const override = deps.crossBaseWriteQuota
+    const def = defaultCrossBaseWriteQuota()
+    this.crossBaseQuotaLimit = override?.limit ?? def.limit
+    this.crossBaseQuotaWindowMs = override?.windowMs ?? def.windowMs
+    // Injected store wins (test isolation); else the module-level singleton default.
+    this.crossBaseQuotaStore = override?.store ?? defaultCrossBaseWriteQuotaStore
   }
 
   /**
@@ -1551,7 +1612,54 @@ export class AutomationExecutor {
         error: `Cross-base write denied: trigger actor lacks base-write on ${targetBaseId}`,
       }
     }
+
+    // Per-target-base write QUOTA — the LAST gate before an authorized cross-base write. Caps the RATE of
+    // authorized cross-base writes per target base within a rolling window to protect a target base from
+    // an automation storm. Same-base writes never reach here (the early returns above short-circuit
+    // same-base), so this is zero-regression. Increment-then-check: limit N → N writes allowed, the N+1th
+    // rejected fail-closed (step `failed`, NO row), mirroring the rejections above. The counter is keyed
+    // by the resolved TARGET base, so each base has an isolated budget. NOTE: for update_record the
+    // lock/addressing checks run AFTER this point, so a blocked-by-lock or not-found update still consumes
+    // a slot — intentional: this throttles authorized cross-base WRITE ATTEMPTS, the right unit for DB
+    // protection.
+    const quotaReject = await this.checkCrossBaseWriteQuota(targetBaseId)
+    if (quotaReject) return quotaReject
+
     return { crossBase: true, ok: true }
+  }
+
+  /**
+   * Increment-and-check the per-target-base cross-base write quota. Returns a fail-closed
+   * `CrossBaseWriteGate` rejection when the target base has exceeded its limit within the window, else
+   * `null` (allowed). Reuses the rate-limiter `RateLimitStore` (memory/Redis) increment primitive.
+   */
+  private async checkCrossBaseWriteQuota(
+    targetBaseId: string,
+  ): Promise<Extract<CrossBaseWriteGate, { ok: false }> | null> {
+    const key = `crossbase-write-quota:${targetBaseId}`
+    let count: number
+    try {
+      const res = await this.crossBaseQuotaStore.increment(key, this.crossBaseQuotaWindowMs)
+      count = res.count
+    } catch (err) {
+      // A counter-store failure must NOT silently disable the guardrail (fail-open) nor wrongly block a
+      // legitimate write. The memory store cannot throw; a Redis store could. Log and ALLOW this single
+      // write (the store, not the actor, failed) — consistent with the rate-limiter middleware, which
+      // falls back rather than 429-ing on store error.
+      logger.warn('Cross-base write quota store error; allowing this write', {
+        targetBaseId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return null
+    }
+    if (count > this.crossBaseQuotaLimit) {
+      return {
+        crossBase: true,
+        ok: false,
+        error: `Cross-base write quota exceeded for target base ${targetBaseId}: limit ${this.crossBaseQuotaLimit} per ${this.crossBaseQuotaWindowMs}ms`,
+      }
+    }
+    return null
   }
 
   // ── Individual action executors ─────────────────────────────────────────
