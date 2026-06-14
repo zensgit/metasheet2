@@ -116,6 +116,8 @@ TS 侧 :1130-1136 循环改为:跨 base 时,若 `claimed_foreign_base === newShe
 
 **推荐 (b)**,且它正是 §7 的 owner 决策项:更干净(不在热路径加重判分支)、claim 即真相、杜绝"先建同 base link 再 PATCH 加 `foreignBaseId` 谎称跨 base"。本文档把 §2.5 ↔ §7-决策3 显式连起来:选 (b) 则 S2/S3 无需扩 `LINK_FOREIGN_KEYS`,只需在 PATCH 路径拒绝 `foreignBaseId` 变更。
 
+**N3 校正 — slice-1 IMPL 比早稿更严(已合入 #2582)**:slice 1 已采纳 (b) 并落地于 PATCH chokepoint 的 immutability 闸(`univer-meta.ts:6015-6023`):`if (foreignBaseIdInPayload(parsed.data.property)) { if (extractForeignBaseId(payload) !== extractForeignBaseId(stored)) throw 400 "foreignBaseId 建后不可变" }`,且**在结构墙(:6037)之前**执行。这有一个早稿未点明的**正确(fail-closed)后果**:**非 link→link 转换若 PATCH 携带 `foreignBaseId`(哪怕值正确),一律 400**——因为被转换的非 link 字段存储 property 无 `foreignBaseId`(`extractForeignBaseId(stored)===null`),任何非空 claim 都被判为"改 claim"而拒。语义即:**跨 base 链接必须建即跨 base,不可经 PATCH 由非 link 转换得到**;这是有意的收紧,不是早稿 §5 XB-5 误写的"有正确 claim 放行"。早稿 XB-5 已同步更正。(本节为 doc-matches-impl 对齐,**不改任何代码**。)
+
 ---
 
 ## 3. 读权限语义 — base 门 + 字段掩码双层
@@ -129,8 +131,8 @@ TS 侧 :1130-1136 循环改为:跨 base 时,若 `claimed_foreign_base === newShe
 - **Sink A — lookup/rollup hydration + formula-taint(共享派生)**:`resolveForeignFieldReadability`(:1945-1971)是喂给 lookup/rollup 物化**与** formula-taint 的**共享**派生。在其内,当 `crossBase`(:1967)为真时,先调 `resolveBaseReadable(req, query, actualForeignBaseId)`;**失败 ⇒ 该外表 `readableFieldIds` 置空**(等同所有外表字段不可读 → `shouldMaskForeignField` :1988 不命中放行 → 全掩码)。一处接线同时覆盖 lookup/rollup 物化与 formula 物化两个消费者。签名 `(req, query, baseId)` 直接可用,`actualForeignBaseId` 即 :1966 已算出的 `foreignBaseId`。
 - **Sink B — 直读 link 摘要(独立路径,sheet 级 gate)**:**两处**仅按 sheet 级(`resolveReadableSheetIds` / `resolveSheetReadableCapabilities`)gate,**不查 base**:
   - `buildLinkSummaries`(:3557 `resolveReadableSheetIds`;:3611 `readableSheetIds.has(...)` 决定该外表摘要是否清空)——内联 link 摘要(/view、单记录读、写回 echo)。
-  - `GET /link-records` 选择器端点(:9105-9106 `resolveSheetReadableCapabilities(...).canRead` → :9106 `if (!capabilities.canRead) return sendForbidden`)——link-picker 读外表候选。
-  跨 base link 一旦开放,这两处必须**追加 base-read 门**:对 cross-base 外表,`readableSheetIds`/`canRead` 通过后**再**判 `resolveBaseReadable(foreignBase)`,失败则该外表摘要清空(Sink B-1)/端点 403(Sink B-2)。否则 slice 1 直接漏:有外表 sheet 读但无外表 base 读的 actor 可经 `/link-records` 枚举外表记录。
+  - `GET /fields/:fieldId/link-options` 选择器端点(univer-meta.ts:9169)——link-picker 读外表候选。**注(N1 校正)**:本文早稿误称该端点为 `/link-records`;真实路由是 `GET /fields/:fieldId/link-options`。**且 slice 1 已合入**该端点的跨 base base-read 门:`if (baseIdsAreCrossBase(sourceBaseId, foreignBaseId)) { baseReadable = await resolveBaseReadable(req, query, foreignBaseId); if (!baseReadable) return sendForbidden(res) }`(:9226-9230),故 Sink B-2 已落地、非待办。
+  跨 base link 一旦开放,这两处必须**追加 base-read 门**:对 cross-base 外表,`readableSheetIds`(Sink B-1)通过后**再**判 `resolveBaseReadable(foreignBase)`,失败则该外表摘要清空;Sink B-2(link-options 端点)已按上式 403。否则有外表 sheet 读但无外表 base 读的 actor 可经 link-options 枚举外表记录。
 
 ### 3.3 与 §2a.3 掩码的分层(精确)
 - base 门(§3.2)= **粗门**:能否进这个 base。
@@ -140,7 +142,7 @@ TS 侧 :1130-1136 循环改为:跨 base 时,若 `claimed_foreign_base === newShe
 ### 3.4 D3 golden 扩展(新维度,非新框架)
 在现有真库 golden(`multitable-permission-golden-d3d1.test.ts` / `-d3d2.test.ts`,`describeIfDatabase` + plugin-tests.yml DB step)加**一个新维度**:`cross-base × {base-read granted, base-read denied}`,叠在既有 FIELD × VIEW 维度上。断言:
 - cross-base + base-read granted + 字段可读 → 值出现;
-- cross-base + base-read **denied** → 全外表数据不出(Sink A hydration 空 / Sink B 摘要空 / `/link-records` 403);
+- cross-base + base-read **denied** → 全外表数据不出(Sink A hydration 空 / Sink B 摘要空 / `link-options` 端点 403);
 - cross-base + base-read granted + 字段 field-permission denied → 字段仍被 §2a.3 掩(双层验证)。
 复用既有 seed/route harness,不引新测试框架。
 
@@ -157,14 +159,14 @@ TS 侧 :1130-1136 循环改为:跨 base 时,若 `claimed_foreign_base === newShe
    - **OpenAPI parity**:`MultitableField.property` 当前 `additionalProperties: true`(base.yml:2101-2103),故 parity 闸(`verify:multitable-openapi:parity`)不会拒它,但 spec **未记载** `foreignBaseId`。按 wire 纪律,在 spec 显式记 link property 的 `foreignBaseId`(描述其 opt-in 语义),并跑 `pnpm exec tsx packages/openapi/tools/build.ts` 重建 dist。
    - **wire round-trip 集成测试**:`foreignBaseId` 经真 wire(POST field → 读回 field / property)往返保真——正是 wire-vs-fixture 陷阱要堵的(白名单/pick/select 投影会静默丢字段)。
 2. **墙 opt-in 路径**:§2.2 的 S1 改动 + §2.4 的 S4 SQL 改动;S2/S3 按 §2.5 推荐 (b) 在 PATCH 拒 `foreignBaseId` 变更(immutable)。
-3. **base-read 读门**:§3.2 Sink A(`resolveForeignFieldReadability` 内接 `resolveBaseReadable`)+ Sink B-1(`buildLinkSummaries`)+ Sink B-2(`/link-records`)三处接线。
+3. **base-read 读门**:§3.2 Sink A(`resolveForeignFieldReadability` 内接 `resolveBaseReadable`)+ Sink B-1(`buildLinkSummaries`)+ Sink B-2(`link-options` 端点)三处接线。
 4. **golden 扩展**:§3.4 的 cross-base × base-read 维度。
 
 **显式 DEFER 到各自独立 gated 切片**(切片边界理由附后):
 - **跨 base AUTOMATION**:`update_record`(executor:1460-1502,patch `context.sheetId`,无 `targetSheetId`)/ `create_record`(`CreateRecordConfig` automation-actions.ts:42 只有 `sheetId`;executor:1510-1528 直 INSERT 无 base 校验)加 `targetBaseId` + 执行期目标-base 写权限校验。**理由**:automation 是**写**侧跨 base,触及"执行期 actor 对目标 base 的写权",与 slice 1 的**读**门是不同权限域 + 不同 chokepoint(executor vs route);混入会让一个 PR 同时改读写两套语义,不可独立审/回滚。
 - **Yjs 跨 base fan-out**:房间 `sheet:{sheetId}` 已 base-agnostic(#2510 §1),FOL-1(#2464)一跳失效信号可跨 base 工作,但跨 base fan-out 覆盖面是独立验证项。**理由**:实时层无新协议但需独立 fan-out 正确性测试,与权限契约正交。
 - **base 级速率限制 / 配额**:防 Base A 触发器 thrash Base B。**理由**:仅在 automation 切片开放后才有攻击面,naturally 跟在 automation 之后。
-- **前端**:cross-base link picker(`/link-records` 跨 base 列)+ base 切换器。**理由**:单独 frontend 环,后端契约稳固后再做。
+- **前端**:cross-base link picker(`link-options` 跨 base 列)+ base 切换器。**理由**:单独 frontend 环,后端契约稳固后再做。
 
 **切片边界总理由**:slice 1 = "**开一条受治理的跨 base 读链接**"——schema 一致性 + 墙 opt-in + 读门 + golden,全是**读侧 + 结构**,自包含、一个权限域、可独立审与回滚。写侧(automation)、实时(Yjs)、防滥用(quota)、UI 各自是不同域/层,强行同 PR 会破坏"一次一个显式 opt-in"的 staged 纪律。
 
@@ -180,11 +182,11 @@ TS 侧 :1130-1136 循环改为:跨 base 时,若 `claimed_foreign_base === newShe
 | XB-1b | CREATE 跨 base link 带 `foreignBaseId` **不等于**外表实际 base | **拒绝 4xx**;字段未建(claim 不一致) |
 | XB-1c | CREATE 跨 base link **不带** `foreignBaseId`(裸跨 base) | **拒绝 4xx**(墙 §1.2 现状,opt-in 缺失) |
 | XB-1d(退化) | CREATE 跨 base link 指向 **null/legacy-base 外表**,带任意 `foreignBaseId` | **拒绝 4xx**(无具体 base 可声明,§2.2 退化用例) |
-| XB-2 | reader **缺外表 base-read**,读含跨 base lookup 的记录 / 经 `/link-records` 拉外表候选 | hydration 空 / 摘要空 / 端点 403(Sink A+B 都验) |
+| XB-2 | reader **缺外表 base-read**,读含跨 base lookup 的记录 / 经 `link-options` 端点拉外表候选 | hydration 空 / 摘要空 / 端点 403(Sink A+B 都验) |
 | XB-2b | reader **有外表 base-read** 但外表字段 field-permission denied | base 门过、§2a.3 字段仍掩(双层) |
 | XB-3 | 同 base link / lookup 现状回归 | **不受影响**(opt-in 不动同 base 路径) |
 | XB-4 | `foreignBaseId` 经真 wire 往返(POST field → 读回 property) | 保真,不被 sanitizer/codec 丢(wire-vs-fixture) |
-| XB-5(转换) | 非 link→link 转换,stash 跨 base 目标 + 带正确 `foreignBaseId` vs 无/错 claim | 有正确 claim 放行;无/错 claim 拒(:5928 条款 + opt-in) |
+| XB-5(转换,**N3 校正**) | 非 link→link 转换,stash 跨 base 目标 + 带 `foreignBaseId` claim(正确或错) | **一律拒 400**(fail-closed)。原因见 §2.5 注:非 link 字段的存储 property 无 `foreignBaseId`(`extractForeignBaseId(stored)===null`),转换 PATCH 带任意非空 `foreignBaseId` → `payloadForeignBaseId !== storedForeignBaseId` → 命中 immutability 闸(:6015-6023 "foreignBaseId 建后不可变"),**在结构墙(:6037)之前**拒绝。即:跨 base 链接**必须建即跨 base**,不可经 PATCH 转换得到。无 claim 但 stash 跨 base 目标的转换则由结构墙(:6037,`claimed===null` 拒)兜底。 |
 | XB-6(seed TOCTOU) | 先建带 `foreignBaseId=X` 的跨 base link,后在 base X 建该外表 sheet(POST /sheets 与 seed 路径各一) | TOCTOU **不**回溯拒绝合法 opt-in(§2.4);claim≠新 base 时仍拒 |
 
 XB-1c/XB-3 锚定"墙现状不被 opt-in 撕开";XB-2/XB-2b 锚定双层读门;XB-4 锚定 wire 纪律;XB-6 锚定 S4 SQL 改动。
@@ -211,7 +213,7 @@ XB-1c/XB-3 锚定"墙现状不被 opt-in 撕开";XB-2/XB-2b 锚定双层读门;X
 | 1 | 开跨 base 读是否**需外表 base 属主显式 grant**,还是由 `resolveBaseReadable` 现有派生(admin/grant-code/owner)即可? | (a) 必须 foreign-base owner 显式 grant;(b) 沿用 §1.1 已建派生(owner/admin/base-read 码) | **(b)** — §1.1 原语已含 owner+grant-code+admin 三派生,够用;不引第二套授权机制(避免与 central RBAC 纠缠) |
 | 2 | 跨 base **automation** 是否随 slice 1 一起开? | (a) 一起;(b) 默认 **OFF**,等其独立 gated 切片 | **(b)** — automation 是写侧 + 不同 chokepoint(§4 DEFER 理由);slice 1 只读 |
 | 3 | `foreignBaseId` 是否**建后不可变**(immutable-after-create)? | (a) 可变(则须扩 `LINK_FOREIGN_KEYS` 触发重判,§2.5a);(b) 不可变(PATCH 拒改,§2.5b) | **(b)** — claim 即真相、杜绝两步绕过、不在热路径加重判分支(§2.5↔本项耦合) |
-| 4 | base-read **denied** 时跨 base 读的姿态? | (a) 静默掩码(外表数据不出,与字段掩码同姿态);(b) 显式 403/错误 | **(a)** 用于 hydration/摘要 sink(与 §2a.3 同姿态,不泄露"存在"),**(b)** 仅用于 `/link-records` 这类**显式拉外表**的端点(已有 `sendForbidden` 语义,:9106) |
+| 4 | base-read **denied** 时跨 base 读的姿态? | (a) 静默掩码(外表数据不出,与字段掩码同姿态);(b) 显式 403/错误 | **(a)** 用于 hydration/摘要 sink(与 §2a.3 同姿态,不泄露"存在"),**(b)** 仅用于 `link-options` 这类**显式拉外表**的端点(已有 `sendForbidden` 语义,:9230) |
 
 ---
 
