@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto'
 import { Logger } from '../core/logger'
 import { redactString } from './automation-log-redact'
 import { ensureRecordNotLocked } from './record-lock'
+import { resolveBaseWritable } from './permission-service'
 import {
   DingTalkBusinessError,
   DingTalkRequestError,
@@ -679,6 +680,13 @@ export interface AutomationDeps {
   fetchFn?: typeof fetch
   notificationService?: Pick<NotificationService, 'send'>
 }
+
+// ②b cross-base write-gate verdict. `crossBase: false` → same-base, no gate (zero regression).
+// `crossBase: true` → cross-base; `ok` discriminates allowed vs the fail-closed rejection (with reason).
+type CrossBaseWriteGate =
+  | { crossBase: false }
+  | { crossBase: true; ok: true }
+  | { crossBase: true; ok: false; error: string }
 
 // ── Executor class ────────────────────────────────────────────────────────
 
@@ -1449,6 +1457,73 @@ export class AutomationExecutor {
     }
   }
 
+  // ── ②b cross-base write-gate (shared by create_record + update_record) ────
+
+  /**
+   * Resolve a record sheet's base_id via the executor's queryFn. Returns `undefined` for a missing
+   * sheet (caller treats as null base), `null` for a legacy/null base.
+   */
+  private async resolveSheetBaseId(sheetId: string): Promise<string | null | undefined> {
+    const res = await this.deps.queryFn('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])
+    const row = (res.rows as Array<{ base_id?: unknown }>)[0]
+    if (!row) return undefined
+    return typeof row.base_id === 'string' ? row.base_id : null
+  }
+
+  /**
+   * ②b write-gate: decide whether a record-mutating action's resolved target sheet is a CROSS-BASE
+   * write, and if so enforce the governed contract. Same-base (target sheet base === trigger base,
+   * null-aware) → `{ crossBase: false }` with NO new gate (zero regression). Cross-base → ALL of:
+   *   1. an explicit `targetBaseId` is provided AND `targetBaseId === target sheet's actual base_id`
+   *      (claim == truth; mirrors the §2a.2 link wall's `claimed === actualForeignBaseId`). A cross-base
+   *      write WITHOUT `targetBaseId`, or with a mismatched one → reject (closes the §1.3 ungated hole).
+   *   2. `resolveBaseWritable(context.actorId, queryFn, targetBaseId)` is true — the EFFECTIVE ACTOR is
+   *      the TRIGGER actor (RATIFIED decision 2); a null actorId (e.g. scheduled trigger) fails this
+   *      because `resolveBaseWritable` is fail-closed on no userId. NO fallback to the rule owner.
+   * Returns a discriminated result; on any rejection the caller records a FAILED step (never a write).
+   *
+   * The trigger base is `context.sheetId`'s base. Note the same-base happy path still issues ONE base
+   * lookup per side; that is read-only and cannot fail the write — a missing trigger sheet base and a
+   * missing target sheet base both normalize to null and (null === null) stays same-base.
+   */
+  private async evaluateCrossBaseWrite(
+    targetSheetId: string,
+    declaredTargetBaseId: string | undefined,
+    context: ExecutionContext,
+  ): Promise<CrossBaseWriteGate> {
+    const triggerBaseId = (await this.resolveSheetBaseId(context.sheetId)) ?? null
+    const targetBaseId = (await this.resolveSheetBaseId(targetSheetId)) ?? null
+
+    // Same-base (null-aware, mirrors `baseIdsAreCrossBase` = strict `!==`): null-vs-null and
+    // same-set are same-base; a null/legacy base vs a set base is cross-base.
+    if (triggerBaseId === targetBaseId) return { crossBase: false }
+
+    // Cross-base: require an explicit, consistent opt-in (claim == truth). A non-null `targetBaseId`
+    // claim that equals the target sheet's ACTUAL base passes; absent or mismatched (incl. a claim vs a
+    // null actual base) rejects.
+    const claimed = typeof declaredTargetBaseId === 'string' && declaredTargetBaseId.trim()
+      ? declaredTargetBaseId.trim()
+      : null
+    if (claimed === null || claimed !== targetBaseId) {
+      return {
+        crossBase: true,
+        ok: false,
+        error: `Cross-base write requires an explicit targetBaseId equal to the target sheet's base: target sheet ${targetSheetId} base=${targetBaseId ?? 'null'}, declared=${claimed ?? 'null'}`,
+      }
+    }
+
+    // Trigger-actor base-write authority (fail-closed: null actor → false).
+    const writable = await resolveBaseWritable(context.actorId ?? null, this.deps.queryFn, targetBaseId)
+    if (!writable) {
+      return {
+        crossBase: true,
+        ok: false,
+        error: `Cross-base write denied: trigger actor lacks base-write on ${targetBaseId}`,
+      }
+    }
+    return { crossBase: true, ok: true }
+  }
+
   // ── Individual action executors ─────────────────────────────────────────
 
   private async executeUpdateRecord(
@@ -1462,18 +1537,60 @@ export class AutomationExecutor {
 
     const patch = Object.fromEntries(Object.entries(fields))
 
+    // ②b cross-base addressing. The resolved target sheet is `config.targetSheetId ?? context.sheetId`.
+    // For a CROSS-BASE update, `targetSheetId` + `targetRecordId` are REQUIRED (the trigger record is not
+    // in the target base) — the lock-check AND the write both retarget to the TARGET record. For a
+    // SAME-BASE update they default to the trigger record (unchanged, back-compat).
+    const targetSheetId = (config.targetSheetId as string) || context.sheetId
+    const declaredTargetBaseId = typeof config.targetBaseId === 'string' ? config.targetBaseId : undefined
+
     try {
+      const gate = await this.evaluateCrossBaseWrite(targetSheetId, declaredTargetBaseId, context)
+      let effectiveSheetId = context.sheetId
+      let effectiveRecordId = context.recordId
+      if (gate.crossBase) {
+        if (gate.ok === false) {
+          return { actionType: 'update_record', status: 'failed', error: gate.error }
+        }
+        // Cross-base requires the full explicit target triple (§2.4 / decision 5). The executor is the
+        // last line of defense even if rule-save validation were bypassed.
+        const targetRecordId = typeof config.targetRecordId === 'string' ? config.targetRecordId : ''
+        if (!config.targetSheetId || !targetRecordId) {
+          return {
+            actionType: 'update_record',
+            status: 'failed',
+            error: 'Cross-base update_record requires targetBaseId + targetSheetId + targetRecordId',
+          }
+        }
+        effectiveSheetId = targetSheetId
+        effectiveRecordId = targetRecordId
+      }
+
       // Record-lock guard (rank-8 review B1; decisions d/e/f). An automation acting on behalf of its
       // actor is NOT implicitly the locker/owner — overwriting a locked record is blocked. To write
       // through a lock the rule must first run a `lock_record{locked:false}` action (decision f). The
-      // step fails honestly so it surfaces in the execution log.
+      // step fails honestly so it surfaces in the execution log. ②b LOCK-REDIRECT: the SELECT below
+      // and the UPDATE further down BOTH read `effectiveSheetId`/`effectiveRecordId` so a cross-base
+      // update checks the TARGET record's lock (not the trigger record's) — lock priority over base-write.
       const lockRes = await this.deps.queryFn(
         'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
-        [context.recordId, context.sheetId],
+        [effectiveRecordId, effectiveSheetId],
       )
       const lockRow = lockRes.rows[0] as
         | { locked?: unknown; locked_by?: unknown; created_by?: unknown }
         | undefined
+      // ②b claim==truth for the record: a cross-base update must address a record that ACTUALLY lives in
+      // `targetSheetId`. If the lock SELECT found no row, the targetRecordId does not exist in
+      // targetSheetId → fail-closed (decision 4: never a silent no-op success). Same-base keeps its
+      // pre-②b leniency (a missing trigger record yields a 0-row UPDATE reported as success) to avoid
+      // any behavior regression.
+      if (gate.crossBase && !lockRow) {
+        return {
+          actionType: 'update_record',
+          status: 'failed',
+          error: `Cross-base update_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+        }
+      }
       if (lockRow) {
         ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
       }
@@ -1485,13 +1602,13 @@ export class AutomationExecutor {
              version = version + 1,
              updated_at = NOW()
          WHERE id = $2 AND sheet_id = $3`,
-        [JSON.stringify(patch), context.recordId, context.sheetId],
+        [JSON.stringify(patch), effectiveRecordId, effectiveSheetId],
       )
 
       // Emit event for chaining
       this.deps.eventBus.emit('multitable.record.updated', {
-        sheetId: context.sheetId,
-        recordId: context.recordId,
+        sheetId: effectiveSheetId,
+        recordId: effectiveRecordId,
         changes: fields,
         actorId: context.actorId,
         _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
@@ -1508,10 +1625,21 @@ export class AutomationExecutor {
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
     const targetSheetId = (config.sheetId as string) || context.sheetId
+    const declaredTargetBaseId = typeof config.targetBaseId === 'string' ? config.targetBaseId : undefined
     const data = (config.data as Record<string, unknown>) ?? {}
     const recordId = `rec_${randomUUID()}`
 
     try {
+      // ②b write-gate (closes the §1.3 ungated hole). Pre-②b this method did a BARE INSERT to
+      // `config.sheetId ?? context.sheetId` with ZERO permission check, so an automation could create a
+      // record in ANY base's sheet ungated. Now a CROSS-BASE create (target sheet base ≠ trigger base)
+      // demands an explicit consistent `targetBaseId` (claim == truth) + trigger-actor base-write;
+      // a SAME-BASE create is unchanged (no gate).
+      const gate = await this.evaluateCrossBaseWrite(targetSheetId, declaredTargetBaseId, context)
+      if (gate.crossBase && gate.ok === false) {
+        return { actionType: 'create_record', status: 'failed', error: gate.error }
+      }
+
       await this.deps.queryFn(
         `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)`,
         [recordId, targetSheetId, JSON.stringify(data)],

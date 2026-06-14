@@ -43,6 +43,7 @@ import {
   type RecordPermissionScope,
   type ViewPermissionScope,
 } from './permission-derivation'
+import { filterPermissionCodesByNamespaceAdmission } from '../rbac/namespace-admission'
 
 export { deriveRowActions, type MultitableRowActions } from './access'
 
@@ -122,6 +123,13 @@ export const BASE_ADMIN_PERMISSION_CODES = new Set([
   'multitable:base:admin',
   'multitable:admin',
 ])
+
+// ②b automation slice — base-level WRITE authority. RATIFIED decision 1 (a): `base:admin` IMPLIES write
+// — there is no separate `base:write` code at this stage, so the write code-set is IDENTICAL to
+// `BASE_ADMIN_PERMISSION_CODES`. This makes the cross-base automation write-gate deliberately HIGH
+// (base-writable ≡ base-admin-or-owner); a finer `multitable:base:write` tier is a future opt-in. Like
+// the read codes, the §2a.2 wall does NOT consult these (it compares two base_id strings only).
+export const BASE_WRITE_PERMISSION_CODES = BASE_ADMIN_PERMISSION_CODES
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -1261,4 +1269,58 @@ export async function resolveBaseReadable(
   if (!row) return false
   const ownerId = typeof row.owner_id === 'string' ? row.owner_id.trim() : ''
   return Boolean(ownerId) && Boolean(access.userId) && ownerId === access.userId
+}
+
+/**
+ * ②b automation slice — base-level WRITE resolver (the write-side counterpart of `resolveBaseReadable`).
+ *
+ * Unlike `resolveBaseReadable`, this takes an ALREADY-RESOLVED `userId`, NOT a `Request`: the automation
+ * executor has no `req`, only a `queryFn`. It mirrors the `start_approval` requester-resolution mechanism
+ * (`listRbacPermissionCodes`) — fetch the user's effective permission codes (user_permissions ∪
+ * role_permissions, then narrowed by namespace admission so a namespace-revoked code cannot grant write)
+ * and grant write when any is a `BASE_WRITE_PERMISSION_CODES` code (= `multitable:base:admin` /
+ * `multitable:admin`), OR when the user owns the base (`meta_bases.owner_id`, mirroring
+ * `resolveBaseReadable`'s owner derivation). FAIL-CLOSED: no userId → false; a missing / soft-deleted
+ * base → false. It does NOT touch central RBAC / auth — kernel-internal to multitable.
+ */
+export async function resolveBaseWritable(
+  userId: string | null | undefined,
+  query: QueryFn,
+  baseId: string,
+): Promise<boolean> {
+  const normalizedUserId = typeof userId === 'string' ? userId.trim() : ''
+  if (!normalizedUserId) return false // fail-closed: no identity → no write
+  const normalizedBaseId = baseId.trim()
+  if (!normalizedBaseId) return false
+
+  // Effective permission codes (user_permissions ∪ role_permissions), narrowed by namespace admission so
+  // the write gate is never MORE permissive than the codebase's effective-permission resolution.
+  const codesRes = await query(
+    `SELECT DISTINCT permission_code AS code FROM (
+       SELECT up.permission_code
+         FROM user_permissions up
+        WHERE up.user_id = $1
+       UNION ALL
+       SELECT rp.permission_code
+         FROM user_roles ur
+         JOIN role_permissions rp ON rp.role_id = ur.role_id
+        WHERE ur.user_id = $1
+     ) t`,
+    [normalizedUserId],
+  )
+  const rawCodes = (codesRes.rows as Array<{ code: unknown }>)
+    .map((r) => (typeof r.code === 'string' ? r.code : ''))
+    .filter(Boolean)
+  const codes = await filterPermissionCodesByNamespaceAdmission(normalizedUserId, rawCodes)
+  if (codes.some((code) => BASE_WRITE_PERMISSION_CODES.has(code))) return true
+
+  // base ownership (symmetric with resolveBaseReadable).
+  const res = await query(
+    'SELECT owner_id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
+    [normalizedBaseId],
+  )
+  const row = (res.rows as Array<{ owner_id: unknown }>)[0]
+  if (!row) return false
+  const ownerId = typeof row.owner_id === 'string' ? row.owner_id.trim() : ''
+  return Boolean(ownerId) && ownerId === normalizedUserId
 }

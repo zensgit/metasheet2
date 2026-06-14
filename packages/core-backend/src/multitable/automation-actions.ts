@@ -35,12 +35,30 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
 /** Config shape for update_record */
 export interface UpdateRecordConfig {
   fields: Record<string, unknown>
+  /**
+   * ②b cross-base write opt-in. When `targetBaseId` is set and ≠ the trigger base, this is a GOVERNED
+   * cross-base update: it requires FULL explicit addressing (`targetSheetId` + `targetRecordId`) because
+   * the trigger record is not in the target base. The executor write-gate then re-verifies, per run,
+   * that the TRIGGER ACTOR holds base-WRITE on `targetBaseId` and that `targetSheetId ∈ targetBaseId` /
+   * `targetRecordId ∈ targetSheetId` (claim == truth). All three absent = same-base trigger-record
+   * update (unchanged, back-compat).
+   */
+  targetBaseId?: string
+  targetSheetId?: string
+  targetRecordId?: string
 }
 
 /** Config shape for create_record */
 export interface CreateRecordConfig {
   sheetId: string
   data: Record<string, unknown>
+  /**
+   * ②b cross-base write opt-in. When `targetBaseId` is set and ≠ the trigger base, this is a GOVERNED
+   * cross-base create: the executor write-gate re-verifies, per run, that the TRIGGER ACTOR holds
+   * base-WRITE on `targetBaseId` and that the resolved target sheet (`sheetId`) actually lives in
+   * `targetBaseId` (claim == truth). Absent = same-base create (unchanged, back-compat).
+   */
+  targetBaseId?: string
 }
 
 /** Config shape for send_webhook */
