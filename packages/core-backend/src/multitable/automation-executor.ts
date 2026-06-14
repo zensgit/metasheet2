@@ -1495,6 +1495,19 @@ export class AutomationExecutor {
     declaredTargetBaseId: string | undefined,
     context: ExecutionContext,
   ): Promise<CrossBaseWriteGate> {
+    // Fast-path: a write to the SAME sheet as the trigger, with no explicit cross-base `targetBaseId`,
+    // is DEFINITIONALLY same-base — a sheet cannot exist in two bases — so skip the base lookups
+    // entirely. This keeps a legitimate same-sheet write from fail-closing when the sheet row is
+    // momentarily unresolvable (e.g. an executor whose queryFn doesn't model meta_sheets), while leaving
+    // the cross-base path FULLY gated: a DIFFERENT target sheet (the §1.3 create-to-another-base vector)
+    // OR any explicit `targetBaseId` claim still resolves the bases and enforces the contract below.
+    const declaredBaseClaim = typeof declaredTargetBaseId === 'string' && declaredTargetBaseId.trim()
+      ? declaredTargetBaseId.trim()
+      : null
+    if (targetSheetId === context.sheetId && declaredBaseClaim === null) {
+      return { crossBase: false }
+    }
+
     // NIT-1: check the RAW three-state result of the TARGET sheet lookup BEFORE the `?? null` collapse.
     // `undefined` = the target sheet is missing or SOFT-DELETED (resolveSheetBaseId filters deleted_at) →
     // the write target is unresolvable → fail-closed. This must precede the `?? null` normalization, else
@@ -1519,10 +1532,8 @@ export class AutomationExecutor {
 
     // Cross-base: require an explicit, consistent opt-in (claim == truth). A non-null `targetBaseId`
     // claim that equals the target sheet's ACTUAL base passes; absent or mismatched (incl. a claim vs a
-    // null actual base) rejects.
-    const claimed = typeof declaredTargetBaseId === 'string' && declaredTargetBaseId.trim()
-      ? declaredTargetBaseId.trim()
-      : null
+    // null actual base) rejects. (`declaredBaseClaim` computed at the top, reused here.)
+    const claimed = declaredBaseClaim
     if (claimed === null || claimed !== targetBaseId) {
       return {
         crossBase: true,
