@@ -208,9 +208,17 @@ export function sanitizeFieldProperty(
       typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
         ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
         : ''
+    // ②b slice 1 — promote foreignBaseId (the cross-base opt-in claim) to an EXPLICIT normalized key
+    // (trim; empty → omitted), mirroring univer-meta.ts's sanitizeFieldProperty so the claim is
+    // contractual, not incidental `...obj` passthrough (wire-vs-fixture).
+    const foreignBaseId =
+      typeof obj.foreignBaseId === 'string' && obj.foreignBaseId.trim().length > 0
+        ? obj.foreignBaseId.trim()
+        : ''
     return {
       ...obj,
       ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId } : {}),
+      ...(foreignBaseId ? { foreignBaseId } : {}),
       limitSingleRecord: obj.limitSingleRecord === true,
       ...(typeof obj.refKind === 'string' && obj.refKind.trim().length > 0
         ? { refKind: obj.refKind.trim() }

@@ -325,6 +325,10 @@ export interface RecordWriteHelpers {
   ) => Promise<Map<string, Map<string, string[]>>>
   buildLinkSummaries: (
     query: QueryFn,
+    // ②b — the SOURCE sheet id, required so buildLinkSummaries can resolve the source base and apply
+    // the cross-base base-read gate (Sink B-1). Positional + required so every caller is forced to pass
+    // it (a missing arg would silently re-open the cross-base summary leak).
+    sourceSheetId: string,
     rows: UniverMetaRecord[],
     relationalLinkFields: RelationalLinkField[],
     linkValuesByRecord: Map<string, Map<string, string[]>>,
@@ -994,6 +998,7 @@ export class RecordWriteService {
             h.serializeLinkSummaryMap(
               await h.buildLinkSummaries(
                 this.pool.query.bind(this.pool),
+                sheetId,
                 updates.map((update) => ({ id: update.recordId, version: 0, data: {} })),
                 relationalLinkFields,
                 await h.loadLinkValuesByRecord(

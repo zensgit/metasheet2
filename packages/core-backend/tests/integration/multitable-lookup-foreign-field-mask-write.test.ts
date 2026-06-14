@@ -52,8 +52,11 @@ function buildApp(userId: string): Express {
     ;(req as any).user = {
       id: userId,
       roles: ['member'],
-      perms: ['multitable:read', 'multitable:write'],
-      permissions: ['multitable:read', 'multitable:write'],
+      // ②b: foreign sheet is cross-base; grant `multitable:base:read` so the actor clears the new §3.2
+      // coarse base-read gate and this suite keeps isolating FIELD-level masking (DENY cases stay masked
+      // by the field gate). Base-gate axis covered by XB-2* in multitable-cross-base-link-optin.test.ts.
+      perms: ['multitable:read', 'multitable:write', 'multitable:base:read'],
+      permissions: ['multitable:read', 'multitable:write', 'multitable:base:read'],
     }
     next()
   })

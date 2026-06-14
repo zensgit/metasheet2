@@ -48,6 +48,21 @@ const FIELDS = [
 const SECRET_FIELD = FIELDS[2].id
 const RECORD_ID = `rec_d3d1_${TS}`
 
+// ②b cross-base dimension — a SECOND base + a cross-base foreign sheet + a link/lookup/formula on
+// SHEET_ID, so the export golden can assert the new §3.2 base-read coarse gate ON TOP of the existing
+// FIELD × VIEW dimensions. The export path serializes only MATERIALIZED data, so (mirroring the proven
+// multitable-lookup-foreign-field-mask-export pattern) the value surfaced is a FORMULA over the lookup:
+// when Sink A masks the lookup, §2a.3 taints the formula → its column is dropped; otherwise it exports.
+const XBASE_ID = `base_d3d1_xb_${TS}` // foreign base (no owner → base-read only via grant code)
+const XFOREIGN_SHEET = `sheet_d3d1_xf_${TS}` // cross-base foreign sheet (in XBASE_ID)
+const XFOREIGN_FIELD = `fld_d3d1_xf_${TS}` // foreign numeric field surfaced by the lookup
+const XLINK_FIELD = `fld_d3d1_xlink_${TS}` // opted-in cross-base link on SHEET_ID
+const XLOOKUP_FIELD = `fld_d3d1_xlu_${TS}` // lookup over the foreign field (Sink A consumer)
+const XFORMULA_FIELD = `fld_d3d1_xf2_${TS}` // formula over the lookup (the materialized export carrier)
+const XFOREIGN_RECORD = `rec_d3d1_xf_${TS}`
+const XFOREIGN_NUM = 91 // the foreign numeric value (denied target)
+const XFORMULA_VALUE = '92' // materialized = lookup(91)+1, asserted in the export CELLS (flat)
+
 // Mutable so a single app can test both the authorized non-admin user and the no-read user.
 let currentUser: { id: string; roles: string[]; perms: string[] } = {
   id: USER_ID,
@@ -108,6 +123,30 @@ describeIfDatabase('multitable permission golden matrix — D3d-1 (field tri-sta
     await q('INSERT INTO meta_views (id, sheet_id, name, type, hidden_field_ids) VALUES ($1, $2, $3, $4, $5::jsonb)', [
       VIEW_HIDDEN, SHEET_ID, 'Hidden', 'grid', JSON.stringify([SECRET_FIELD]),
     ])
+
+    // ②b cross-base dimension seed: a foreign base + cross-base foreign sheet with a numeric field, an
+    // opted-in cross-base link (foreignBaseId == XBASE_ID), a lookup over the foreign field, and a
+    // formula over the lookup on SHEET_ID. The formula value is MATERIALIZED (as the write path would
+    // persist) = lookup(91)+1 = 92; the export reads it RAW, but §2a.3 taint drops it whenever the
+    // lookup is masked (Sink A base gate OR field gate). The dependency edge is the taint edge.
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1, $2)', [XBASE_ID, 'D3d1 Cross Base'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)', [XFOREIGN_SHEET, XBASE_ID, 'D3d1 Cross Foreign'])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [XFOREIGN_FIELD, XFOREIGN_SHEET, 'XForeign', 'number', '{}', 1])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
+      [XFOREIGN_RECORD, XFOREIGN_SHEET, JSON.stringify({ [XFOREIGN_FIELD]: XFOREIGN_NUM })])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [XLINK_FIELD, SHEET_ID, 'XLink', 'link', JSON.stringify({ foreignSheetId: XFOREIGN_SHEET, foreignBaseId: XBASE_ID }), 4])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [XLOOKUP_FIELD, SHEET_ID, 'XLookup', 'lookup', JSON.stringify({ linkFieldId: XLINK_FIELD, targetFieldId: XFOREIGN_FIELD, foreignSheetId: XFOREIGN_SHEET }), 5])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [XFORMULA_FIELD, SHEET_ID, 'XFormula', 'formula', JSON.stringify({ expression: `={${XLOOKUP_FIELD}}+1` }), 6])
+    await q('UPDATE meta_records SET data = data || $2::jsonb WHERE id = $1',
+      [RECORD_ID, JSON.stringify({ [XLINK_FIELD]: [XFOREIGN_RECORD], [XFORMULA_FIELD]: Number(XFORMULA_VALUE) })])
+    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)',
+      [`lnk_d3d1_xb_${TS}`, XLINK_FIELD, RECORD_ID, XFOREIGN_RECORD])
+    await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,$4)',
+      [SHEET_ID, XFORMULA_FIELD, XLOOKUP_FIELD, SHEET_ID])
   })
 
   afterEach(async () => {
@@ -118,6 +157,12 @@ describeIfDatabase('multitable permission golden matrix — D3d-1 (field tri-sta
 
   afterAll(async () => {
     // best-effort cleanup (FK cascade from sheet covers fields/records)
+    // ②b cross-base dimension teardown first (links + deps + field_permissions + foreign sheet/base).
+    await q('DELETE FROM formula_dependencies WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
+    await q('DELETE FROM meta_links WHERE field_id = $1', [XLINK_FIELD]).catch(() => {})
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [XFOREIGN_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [XFOREIGN_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [XBASE_ID]).catch(() => {})
     await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_views WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
@@ -188,5 +233,43 @@ describeIfDatabase('multitable permission golden matrix — D3d-1 (field tri-sta
     currentUser = { id: USER_ID, roles: ['member'], perms: [] } // no multitable:read
     const { status } = await exportHeaderAndCells()
     expect(status).toBe(403)
+  })
+
+  // ── ②b CROSS-BASE dimension (NEW) — base-read coarse gate × field mask, layered on FIELD × VIEW ──
+  // Asserts §3.4's three rows on the EXPORT cell (Sink A path, via the §2a.3 formula-taint that the
+  // export sink reads). The Sink B summary + the /link-options 403 legs of §3.4's "denied" row are
+  // locked separately by XB-2/2b/2c in multitable-cross-base-link-optin.test.ts (export only does Sink A).
+  describe('cross-base × base-read (§3.4)', () => {
+    test('cross-base + base-read GRANTED + foreign field readable → formula-over-lookup value EXPORTED', async () => {
+      currentUser = { id: USER_ID, roles: ['member'], perms: ['multitable:read', 'multitable:base:read'] }
+      const { status, header, flat } = await exportHeaderAndCells()
+      expect(status).toBe(200)
+      expect(header).toContain('XFormula')
+      expect(flat).toContain(XFORMULA_VALUE)
+    })
+
+    test('cross-base + base-read DENIED → foreign sheet masked (Sink A) → formula tainted, value ABSENT', async () => {
+      currentUser = { id: USER_ID, roles: ['member'], perms: ['multitable:read'] } // no base-read, not owner
+      const { status, header, flat } = await exportHeaderAndCells()
+      expect(status).toBe(200)
+      expect(header).not.toContain('XFormula') // whole formula column dropped, fail-closed
+      expect(flat).not.toContain(XFORMULA_VALUE)
+    })
+
+    test('cross-base + base-read GRANTED + foreign field FIELD-permission denied → still masked (double layer)', async () => {
+      currentUser = { id: USER_ID, roles: ['member'], perms: ['multitable:read', 'multitable:base:read'] }
+      // deny the foreign field at field level for this actor; base gate is open but §2a.3 still masks
+      // (cross-base unconditional field mask → lookup masked → formula tainted).
+      await q(
+        'INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1, $2, $3, $4, $5, $6)',
+        [XFOREIGN_SHEET, XFOREIGN_FIELD, 'user', USER_ID, false, false],
+      )
+      const { status, header, flat } = await exportHeaderAndCells()
+      expect(status).toBe(200)
+      expect(header).not.toContain('XFormula')
+      expect(flat).not.toContain(XFORMULA_VALUE)
+      // teardown this extra grant (afterEach only clears SHEET_ID's field_permissions, not the foreign sheet's).
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_id = $3', [XFOREIGN_SHEET, XFOREIGN_FIELD, USER_ID])
+    })
   })
 })

@@ -49,6 +49,7 @@ import {
   loadSheetPermissionScopeMap,
   loadViewPermissionScopeMap,
   requiresOwnWriteRowPolicy,
+  resolveBaseReadable,
   resolveReadableSheetIds,
   resolveSheetCapabilities,
   resolveSheetReadableCapabilities,
@@ -869,6 +870,11 @@ function filterVisibleSheetRows<T extends { description?: unknown }>(rows: T[]):
 type LinkFieldConfig = {
   foreignSheetId: string
   limitSingleRecord: boolean
+  // ②b slice 1 — explicit cross-base opt-in claim. Present only when the link declares a foreign base;
+  // a same-base link omits it (back-compat). The §2a.2 wall allows the cross-base link IFF this equals
+  // the foreign sheet's actual base_id (claim == truth). Extracted explicitly (not via incidental
+  // spread) so it round-trips the real wire — see the wire-vs-fixture rule.
+  foreignBaseId?: string
 }
 
 type LookupFieldConfig = {
@@ -896,9 +902,14 @@ function parseLinkFieldConfig(property: unknown): LinkFieldConfig | null {
   const foreign = obj.foreignDatasheetId ?? obj.foreignSheetId ?? obj.datasheetId
   if (typeof foreign !== 'string' || foreign.trim().length === 0) return null
 
+  // ②b slice 1 — the explicit cross-base opt-in claim (trim; empty → omitted).
+  const claimedBase = typeof obj.foreignBaseId === 'string' && obj.foreignBaseId.trim().length > 0
+    ? obj.foreignBaseId.trim()
+    : undefined
   return {
     foreignSheetId: foreign.trim(),
     limitSingleRecord: obj.limitSingleRecord === true,
+    ...(claimedBase ? { foreignBaseId: claimedBase } : {}),
   }
 }
 
@@ -913,6 +924,25 @@ const LINK_FOREIGN_KEYS = ['foreignSheetId', 'foreignDatasheetId', 'datasheetId'
 function linkForeignKeyInPayload(payloadProperty: unknown): boolean {
   if (typeof payloadProperty === 'undefined' || payloadProperty === null) return false
   return LINK_FOREIGN_KEYS.some((key) => Object.prototype.hasOwnProperty.call(payloadProperty, key))
+}
+
+/**
+ * ②b §2.5(b) / decision (c) — does the RAW PATCH payload explicitly carry a `foreignBaseId` key?
+ * Mirrors `linkForeignKeyInPayload`: immutability is enforced only when the caller is actually
+ * (re)writing the claim, so a rename-only / unrelated PATCH (no `foreignBaseId` key) leaves the stored
+ * claim untouched (and the explicit codec keeps it from being dropped).
+ */
+function foreignBaseIdInPayload(payloadProperty: unknown): boolean {
+  if (typeof payloadProperty === 'undefined' || payloadProperty === null) return false
+  return Object.prototype.hasOwnProperty.call(payloadProperty, 'foreignBaseId')
+}
+
+/** ②b — normalized cross-base opt-in claim (trim; empty/absent → null) from a (possibly stored) property. */
+function extractForeignBaseId(property: unknown): string | null {
+  const obj = normalizeJson(property)
+  return typeof obj.foreignBaseId === 'string' && obj.foreignBaseId.trim().length > 0
+    ? obj.foreignBaseId.trim()
+    : null
 }
 
 function parseLookupFieldConfig(property: unknown): LookupFieldConfig | null {
@@ -1085,9 +1115,21 @@ async function validateLinkFieldConfig(
   if (!foreignSheet) return null
 
   const sourceBaseId = sourceSheet?.baseId ?? null
-  const foreignBaseId = foreignSheet.baseId ?? null
-  if (baseIdsAreCrossBase(sourceBaseId, foreignBaseId)) {
-    return `链接字段不能跨 base：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} base=${foreignBaseId ?? 'null'}`
+  // ②b §2: disambiguated names. `actualForeignBaseId` = the foreign sheet's real base; `claimed` =
+  // the opt-in declaration carried in the link property (null when absent).
+  const actualForeignBaseId = foreignSheet.baseId ?? null
+  const claimed = linkCfg.foreignBaseId ?? null
+  if (baseIdsAreCrossBase(sourceBaseId, actualForeignBaseId)) {
+    // ②b opt-in short-circuit — a cross-base link is allowed IFF it carries an EXPLICIT foreignBaseId
+    // EQUAL to the foreign sheet's real base (claim == truth; you can't declare a wrong base). A
+    // degenerate null/legacy-base foreign sheet has no concrete base to claim, so it can never opt in
+    // (claimed===null falls through to reject; a non-null claim !== null actual also rejects). This is a
+    // pure consistency gate — the foreign READ-permission check is §3 (base-read) + §2a.3 (field mask),
+    // NOT here (adding a perm check in this structural wall would over-reach).
+    if (claimed !== null && claimed === actualForeignBaseId) {
+      return null
+    }
+    return `链接字段跨 base 需显式 foreignBaseId 且与外表实际 base 一致：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} 实际 base=${actualForeignBaseId ?? 'null'}，声明=${claimed ?? 'null'}`
   }
 
   return null
@@ -1115,7 +1157,8 @@ async function validateSheetCreateNoRetroactiveCrossBaseLink(
   // Existing link fields whose effective foreign target (alias-aware) is this new sheet id, joined to
   // their source sheet's base_id. NULLIF('') drops empty-string aliases so they don't match a real id.
   const res = await query(
-    `SELECT mf.id AS field_id, s.base_id AS source_base_id
+    `SELECT mf.id AS field_id, s.base_id AS source_base_id,
+            NULLIF(trim(mf.property ->> 'foreignBaseId'), '') AS claimed_foreign_base
        FROM meta_fields mf
        JOIN meta_sheets s ON s.id = mf.sheet_id
       WHERE mf.type = 'link'
@@ -1126,9 +1169,17 @@ async function validateSheetCreateNoRetroactiveCrossBaseLink(
             ) = $1`,
     [newSheetId],
   )
-  const rows = (res as { rows: Array<{ field_id: unknown; source_base_id: unknown }> }).rows
+  const rows = (res as { rows: Array<{ field_id: unknown; source_base_id: unknown; claimed_foreign_base: unknown }> }).rows
   for (const row of rows) {
     const sourceBaseId = typeof row.source_base_id === 'string' ? row.source_base_id : null
+    const claimedForeignBase = typeof row.claimed_foreign_base === 'string' ? row.claimed_foreign_base : null
+    // ②b §2.4 — an EXISTING link that already opted into the base this new sheet is being created in
+    // (claim == new sheet's base) is a LEGITIMATE cross-base link; the TOCTOU guard must NOT retroactively
+    // reject it. The wall (§2) will accept it at write-time because its claim equals the foreign sheet's
+    // (now-materialized) real base. A non-opted-in (or wrong-claim) link still blocks.
+    if (claimedForeignBase !== null && claimedForeignBase === newSheetBaseId) {
+      continue
+    }
     if (baseIdsAreCrossBase(sourceBaseId, newSheetBaseId)) {
       const fieldId = String(row.field_id)
       return `创建该 sheet 会使现有链接字段跨 base：字段 ${fieldId} 的源表 base=${sourceBaseId ?? 'null'}，新 sheet ${newSheetId} base=${newSheetBaseId ?? 'null'}`
@@ -1484,9 +1535,16 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
     const foreignSheetId = typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
       ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
       : ''
+    // ②b slice 1 — promote foreignBaseId (the cross-base opt-in claim) to an EXPLICIT normalized key
+    // (trim; empty → omitted) so it survives even if the `...obj` passthrough is later tightened
+    // (wire-vs-fixture: the claim is contractual, not incidental).
+    const foreignBaseId = typeof obj.foreignBaseId === 'string' && obj.foreignBaseId.trim().length > 0
+      ? obj.foreignBaseId.trim()
+      : ''
     return {
       ...obj,
       ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId } : {}),
+      ...(foreignBaseId ? { foreignBaseId } : {}),
       limitSingleRecord: obj.limitSingleRecord === true,
       ...(typeof obj.refKind === 'string' && obj.refKind.trim().length > 0 ? { refKind: obj.refKind.trim() } : {}),
     }
@@ -1961,10 +2019,23 @@ async function resolveForeignFieldReadability(
       resolveSheetReadableCapabilities(req, query, foreignSheetId).then((r) => r.capabilities),
       access.userId ? loadFieldPermissionScopeMap(query, foreignSheetId, access.userId) : Promise.resolve(new Map<string, FieldPermissionScope>()),
     ])
-    const readableFieldIds = computeAllowedFieldIds(foreignFields as UniverMetaField[], capabilities, fieldScopeMap)
+    let readableFieldIds = computeAllowedFieldIds(foreignFields as UniverMetaField[], capabilities, fieldScopeMap)
     // null vs non-null ⇒ cross-base (mask); equal (incl. both null) ⇒ same-base.
     const foreignBaseId = foreignSheet?.baseId ?? null
     const crossBase = foreignBaseId !== sourceBaseId
+    // ②b §3.2 Sink A — base-read COARSE gate, ONLY for cross-base foreign sheets. A reader lacking
+    // base-read on the foreign base sees the WHOLE foreign sheet's readable-field set emptied (→
+    // shouldMaskForeignField :1988 never short-circuits → every foreign field masked → lookup/rollup
+    // hydration AND formula-taint both drop it). This is a strict ADD on top of the §2a.3 field mask
+    // (it only REDUCES visibility, never widens it — §6.2.2). Same-base is never touched (XB-3). A null
+    // foreign base is unreadable by definition (can't opt in / can't grant) → mask (also crash-safe:
+    // resolveBaseReadable would throw on null).
+    if (crossBase) {
+      const baseReadable = foreignBaseId != null && (await resolveBaseReadable(req, query, foreignBaseId))
+      if (!baseReadable) {
+        readableFieldIds = new Set<string>()
+      }
+    }
     out.set(foreignSheetId, { readableFieldIds, crossBase })
   }
   return out
@@ -2922,7 +2993,7 @@ export function createRecordWriteHelpers(req: Request, _pool?: { query: QueryFn 
     recalculateFormulaFields: (q, sid, f, ids, changed, hydrated) =>
       recalculateFormulaFields(req, q, sid, f, ids, changed, hydrated),
     loadLinkValuesByRecord,
-    buildLinkSummaries: (q, rows, rl, lv) => buildLinkSummaries(req, q, rows, rl, lv),
+    buildLinkSummaries: (q, sourceSheetId, rows, rl, lv) => buildLinkSummaries(req, q, sourceSheetId, rows, rl, lv),
     buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),
     ensureAttachmentIdsExist,
   }
@@ -3531,6 +3602,7 @@ async function ensureAttachmentIdsExist(
 async function buildLinkSummaries(
   req: Request,
   query: QueryFn,
+  sourceSheetId: string,
   rows: UniverMetaRecord[],
   relationalLinkFields: RelationalLinkField[],
   linkValuesByRecord: Map<string, Map<string, string[]>>,
@@ -3555,6 +3627,24 @@ async function buildLinkSummaries(
   }
 
   const readableSheetIds = await resolveReadableSheetIds(req, query, idsBySheet.keys())
+
+  // ②b §3.2 Sink B-1 — base-read COARSE gate on the inline link summaries. resolveReadableSheetIds
+  // only checks SHEET-level read, so a sheet-readable-but-base-unreadable actor could enumerate a
+  // cross-base foreign sheet's records (id + display) via every summary consumer (/view, single-record
+  // read, write-echo). For each CROSS-BASE foreign sheet (foreign base ≠ source base), require
+  // resolveBaseReadable; failure DROPS it from readableSheetIds, so the existing :3611 gate masks the
+  // summary AND the display-field load + foreign-record load below skip it (one gate, all consumers,
+  // no wasted loads). Same-base is untouched; a null foreign base is unreadable (mask) and crash-safe.
+  // Decision (d): silent mask here (omit summaries) — the explicit pull endpoint 403s separately.
+  const sourceSheet = await loadSheetRowShared(query, sourceSheetId)
+  const sourceBaseId = sourceSheet?.baseId ?? null
+  for (const foreignSheetId of Array.from(readableSheetIds)) {
+    const foreignSheet = await loadSheetRowShared(query, foreignSheetId)
+    const foreignBaseId = foreignSheet?.baseId ?? null
+    if (!baseIdsAreCrossBase(sourceBaseId, foreignBaseId)) continue
+    const baseReadable = foreignBaseId != null && (await resolveBaseReadable(req, query, foreignBaseId))
+    if (!baseReadable) readableSheetIds.delete(foreignSheetId)
+  }
 
   // F5-followup (#2106): the foreign-record `display` echoed in link summaries is the value of the foreign
   // sheet's default display field. resolveReadableSheetIds gates SHEET-level read, but the display field
@@ -5912,6 +6002,22 @@ export function univerMetaRouter(): Router {
         if (configError) {
           throw new ValidationError(configError)
         }
+        // ②b decision (c) — foreignBaseId is IMMUTABLE after create. A PATCH that explicitly carries a
+        // `foreignBaseId` DIFFERENT from the stored field's claim is rejected (not silently ignored).
+        // Gating on the RAW payload (not nextProperty) is load-bearing: nextProperty falls back to the
+        // stored property, so re-asserting nothing must not 400 (GA-T4b parity). Re-sending the SAME
+        // claim is allowed (no-op). This blocks the two-step bypass (create a same-base link, then PATCH
+        // a `foreignBaseId` to falsely claim cross-base) and means the wall's claim==truth check, once
+        // passed at create, can never be retroactively desynced.
+        if (foreignBaseIdInPayload(parsed.data.property)) {
+          const storedForeignBaseId = extractForeignBaseId(row.property)
+          const payloadForeignBaseId = extractForeignBaseId(parsed.data.property)
+          if (payloadForeignBaseId !== storedForeignBaseId) {
+            throw new ValidationError(
+              `foreignBaseId 建后不可变：当前=${storedForeignBaseId ?? 'null'}，请求=${payloadForeignBaseId ?? 'null'}`,
+            )
+          }
+        }
         // ②a §2a.2 — cross-base WALL (update). Lazy/on-edit, exactly like the expression/aiShortcut
         // re-validation below: `nextProperty` falls back to the STORED `row.property`, so gating on the
         // RAW payload carrying a foreign-sheet key is load-bearing — a rename-only PATCH on a
@@ -7718,6 +7824,7 @@ export function univerMetaRouter(): Router {
               await buildLinkSummaries(
                 req,
                 pool.query.bind(pool),
+                sheetId,
                 rows,
                 relationalLinkFields,
                 linkValuesByRecord,
@@ -8896,7 +9003,7 @@ export function univerMetaRouter(): Router {
       record.data = filterRecordDataByFieldIds(record.data, allowedFieldIds)
       const linkSummaries = filterSingleRecordFieldSummaryMap(
         Object.fromEntries(
-          Array.from((await buildLinkSummaries(req, pool.query.bind(pool), [record], relationalLinkFields, linkValuesByRecord)).get(record.id)?.entries() ?? []),
+          Array.from((await buildLinkSummaries(req, pool.query.bind(pool), sheetId, [record], relationalLinkFields, linkValuesByRecord)).get(record.id)?.entries() ?? []),
         ),
         allowedFieldIds,
       )
@@ -9105,6 +9212,20 @@ export function univerMetaRouter(): Router {
       const { access: foreignAccess, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
       if (!capabilities.canRead) return sendForbidden(res)
 
+      // ②b §3.2 Sink B-2 / decision (d) — the EXPLICIT cross-base candidate pull. Unlike the inline
+      // summary sinks (silent mask), this endpoint deliberately enumerates the foreign sheet's records,
+      // so a sheet-readable-but-base-unreadable actor would leak them. For a CROSS-BASE foreign sheet
+      // (source base ≠ foreign base) require base-read; failure → 403 (explicit, matching the existing
+      // sendForbidden semantics). Placed BEFORE the `selected` summaries and the candidate pull so it
+      // short-circuits both. Same-base is untouched (200 as before); a null foreign base is unreadable.
+      const sourceSheetRow = await loadSheetRow(pool.query.bind(pool), String(fieldRow.sheet_id))
+      const sourceBaseId = sourceSheetRow?.baseId ?? null
+      const foreignBaseId = targetSheet.baseId ?? null
+      if (baseIdsAreCrossBase(sourceBaseId, foreignBaseId)) {
+        const baseReadable = foreignBaseId != null && (await resolveBaseReadable(req, pool.query.bind(pool), foreignBaseId))
+        if (!baseReadable) return sendForbidden(res)
+      }
+
       let selected: LinkedRecordSummary[] = []
       if (recordId) {
         const sourceRecordRes = await pool.query(
@@ -9123,6 +9244,7 @@ export function univerMetaRouter(): Router {
         const linkSummaries = await buildLinkSummaries(
           req,
           pool.query.bind(pool),
+          String(fieldRow.sheet_id),
           [{ id: recordId, version: 0, data: {} }],
           [{ fieldId, cfg: linkConfig }],
           linkValuesByRecord,
