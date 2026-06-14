@@ -11,7 +11,11 @@
  * browser bundle without leaking secrets into rendered DOM nodes.
  */
 
-const STRING_PATTERNS: Array<[RegExp, string]> = [
+type StringReplacement = string | ((substring: string, ...args: unknown[]) => string)
+
+const DATABASE_URL_PATTERN = /\b(?:postgres(?:ql)?|mysql):\/\/[^\s<>]+/gi
+
+const STRING_PATTERNS: Array<[RegExp, StringReplacement]> = [
   // Bearer auth header
   [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <redacted>'],
   // JWT (eyJ-prefixed)
@@ -40,9 +44,9 @@ const STRING_PATTERNS: Array<[RegExp, string]> = [
     /\b(MULTITABLE_EMAIL_SMOKE_(?:TO|FROM|SUBJECT))(\s*[:=]\s*)("?)([^&\s"'<>]+)\3/g,
     '$1$2$3<redacted>$3',
   ],
-  // Postgres / MySQL connection URI credentials
-  [/\b(postgres(?:ql)?:\/\/)[^@\s"'<>]+@/gi, '$1<redacted>@'],
-  [/\b(mysql:\/\/)[^@\s"'<>]+@/gi, '$1<redacted>@'],
+  // Postgres / MySQL connection URI credentials. Uses URL parsing rather than
+  // a first-@ regex so raw `@` characters in username/password do not leak.
+  [DATABASE_URL_PATTERN, redactDatabaseUrlCredentials],
   // Bare email addresses surfaced in free-text fields (error messages,
   // step output strings, audit lines). Runs AFTER env-style and
   // SMTP_*/SMOKE_* patterns so legitimate `KEY=value` assignments are
@@ -55,6 +59,56 @@ const STRING_PATTERNS: Array<[RegExp, string]> = [
     '<email:redacted>',
   ],
 ]
+
+function redactDatabaseUrlCredentials(value: string): string {
+  const match = /^(postgres(?:ql)?|mysql):\/\/(.+)$/i.exec(value)
+  if (!match) return value
+  const scheme = match[1]
+  const rest = match[2]
+  const leadingHost = parseLeadingDatabaseHost(rest)
+  const firstAt = rest.indexOf('@')
+  if (leadingHost && (firstAt < 0 || leadingHost.end < firstAt)) {
+    return `${scheme}://${leadingHost.host}${redactNestedDatabaseUrls(rest.slice(leadingHost.end))}`
+  }
+
+  const at = findDatabaseAuthoritySeparator(rest)
+  if (at <= 0 || at === rest.length - 1) return value
+  return `${scheme}://<redacted>@${redactNestedDatabaseUrls(rest.slice(at + 1))}`
+}
+
+function redactNestedDatabaseUrls(value: string): string {
+  return value.replace(DATABASE_URL_PATTERN, redactDatabaseUrlCredentials)
+}
+
+function parseLeadingDatabaseHost(rest: string): { host: string; end: number } | null {
+  const match = /^(?:\[[^\]\s]+\]|[A-Za-z0-9_][A-Za-z0-9_.-]*)(?::\d+)?(?=$|[/?#])/.exec(rest)
+  return match ? { host: match[0], end: match[0].length } : null
+}
+
+function findDatabaseAuthoritySeparator(rest: string): number {
+  let bestIndex = -1
+  let bestScore = -1
+  for (let index = 0; index < rest.length; index += 1) {
+    if (rest[index] !== '@') continue
+    // If another database URL starts before this `@`, this candidate belongs to
+    // a nested URL in the path/query rather than to the outer URL's authority.
+    if (/(?:postgres(?:ql)?|mysql):\/\//i.test(rest.slice(0, index))) continue
+    const host = parseLeadingDatabaseHost(rest.slice(index + 1))
+    if (!host) continue
+    const score = scoreDatabaseHost(host.host)
+    if (score > bestScore) {
+      bestScore = score
+      bestIndex = index
+    }
+  }
+  return bestIndex
+}
+
+function scoreDatabaseHost(host: string): number {
+  if (host.startsWith('[') || /:\d+$/.test(host) || /\d+\.\d+\.\d+\.\d+/.test(host)) return 3
+  if (host.includes('.') || host.includes('_')) return 2
+  return 1
+}
 
 /**
  * Object keys whose values are treated as opaque secrets regardless
@@ -110,7 +164,9 @@ export const REDACTION_VERSION = 1
 export function redactString(value: unknown): string {
   let result = String(value ?? '')
   for (const [pattern, replacement] of STRING_PATTERNS) {
-    result = result.replace(pattern, replacement)
+    result = typeof replacement === 'string'
+      ? result.replace(pattern, replacement)
+      : result.replace(pattern, replacement)
   }
   return result
 }

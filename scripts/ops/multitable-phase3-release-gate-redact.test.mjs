@@ -121,6 +121,75 @@ test('redactString masks mysql URI credentials', () => {
   assert.doesNotMatch(out, /root:rootpw/)
 })
 
+test('redactString masks database URI credentials containing raw @ characters', () => {
+  const postgres = redactString('postgres://u@ser:p@ss@db.example.com:5432/app')
+  assert.equal(postgres, 'postgres://<redacted>@db.example.com:5432/app')
+  assert.doesNotMatch(postgres, /u@ser|p@ss|ss@db/)
+
+  const mysql = redactString('mysql://root:r@w@10.0.0.5:3306/data')
+  assert.equal(mysql, 'mysql://<redacted>@10.0.0.5:3306/data')
+  assert.doesNotMatch(mysql, /r@w|w@10/)
+})
+
+test('redactString masks malformed database URI credentials containing reserved delimiters', () => {
+  for (const secret of ['pa#ss', 'pa?ss', 'pa/ss', 'pa)ss', "pa'ss"]) {
+    const out = redactString(`postgres://user:${secret}@db.example.com:5432/app`)
+    assert.equal(out, 'postgres://<redacted>@db.example.com:5432/app')
+    assert.doesNotMatch(out, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
+
+  const mysql = redactString('mysql://root:r)w@10.0.0.5:3306/data')
+  assert.equal(mysql, 'mysql://<redacted>@10.0.0.5:3306/data')
+  assert.doesNotMatch(mysql, /r\)w/)
+
+  const internalHost = redactString('postgres://user:pa/ss@db_service:5432/app')
+  assert.equal(internalHost, 'postgres://<redacted>@db_service:5432/app')
+  assert.doesNotMatch(internalHost, /pa\/ss/)
+})
+
+test('redactString masks malformed database URI credentials mixing raw @ with reserved delimiters', () => {
+  const slash = redactString('postgres://user:pa@ss/word@db.example.com:5432/app')
+  assert.equal(slash, 'postgres://<redacted>@db.example.com:5432/app')
+  assert.doesNotMatch(slash, /pa@ss|word@db/)
+
+  const query = redactString('postgres://user:pa@ss?word@db.example.com:5432/app')
+  assert.equal(query, 'postgres://<redacted>@db.example.com:5432/app')
+  assert.doesNotMatch(query, /pa@ss|word@db/)
+
+  const hash = redactString('postgres://user:pa@ss#word@db.example.com:5432/app')
+  assert.equal(hash, 'postgres://<redacted>@db.example.com:5432/app')
+  assert.doesNotMatch(hash, /pa@ss|word@db/)
+
+  const mysql = redactString('mysql://root:r@w/ord@10.0.0.5:3306/data')
+  assert.equal(mysql, 'mysql://<redacted>@10.0.0.5:3306/data')
+  assert.doesNotMatch(mysql, /r@w|ord@10/)
+})
+
+test('redactString preserves the database host when malformed URI query text contains @', () => {
+  const out = redactString('postgres://user:pa/ss@db.example.com:5432/app?notify=a@b')
+  assert.equal(out, 'postgres://<redacted>@db.example.com:5432/app?notify=a@b')
+  assert.doesNotMatch(out, /pa\/ss/)
+})
+
+test('redactString masks adjacent and nested database URLs', () => {
+  const adjacent = redactString('postgres://u:p@db/app,mysql://root:rootpw@other/db')
+  assert.equal(adjacent, 'postgres://<redacted>@db/app,mysql://<redacted>@other/db')
+  assert.doesNotMatch(adjacent, /u:p|root:rootpw/)
+
+  const nested = redactString('postgres://u:p@db/app?next=mysql://root:rootpw@other/db')
+  assert.equal(nested, 'postgres://<redacted>@db/app?next=mysql://<redacted>@other/db')
+  assert.doesNotMatch(nested, /u:p|root:rootpw/)
+
+  const nestedOnly = redactString('postgres://db/app?next=mysql://root:rootpw@other/db')
+  assert.equal(nestedOnly, 'postgres://db/app?next=mysql://<redacted>@other/db')
+  assert.doesNotMatch(nestedOnly, /root:rootpw/)
+})
+
+test('redactString does not mask database URLs without userinfo', () => {
+  assert.equal(redactString('postgres://db.example.com:5432/app'), 'postgres://db.example.com:5432/app')
+  assert.equal(redactString('mysql://10.0.0.5:3306/data'), 'mysql://10.0.0.5:3306/data')
+})
+
 test('redactValue masks structured fields by name', () => {
   const obj = {
     authToken: 'realtokenvalue1234567890',

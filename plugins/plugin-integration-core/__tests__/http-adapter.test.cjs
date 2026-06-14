@@ -58,6 +58,18 @@ function createFetchMock() {
         ],
       })
     }
+    if (parsed.pathname === '/api/network-sink' && options.method === 'POST') {
+      throw new TypeError('fetch failed')
+    }
+    if (parsed.pathname === '/api/body-read-fail') {
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          throw new TypeError('socket closed token=raw-secret')
+        },
+      }
+    }
     if (parsed.pathname === '/api/fail') {
       return jsonResponse(500, { error: 'boom' })
     }
@@ -104,6 +116,18 @@ function createSystem(overrides = {}) {
           path: '/api/fail',
           operations: ['read'],
         },
+        network_sink: {
+          path: '/api/network-sink',
+          operations: ['upsert'],
+        },
+        network_sink_with_query: {
+          upsertPath: '/api/network-sink?token=raw-secret#frag',
+          operations: ['upsert'],
+        },
+        body_read_failing: {
+          path: '/api/body-read-fail?token=raw-secret',
+          operations: ['read'],
+        },
       },
     },
     ...overrides,
@@ -127,8 +151,8 @@ async function main() {
 
   // --- 2. listObjects/getSchema read local config -----------------------
   const objects = await adapter.listObjects()
-  assert.equal(objects.length, 3)
   assert.deepEqual(objects.find((object) => object.name === 'materials').operations, ['read', 'upsert'])
+  assert.deepEqual(objects.find((object) => object.name === 'network_sink').operations, ['upsert'])
 
   const schema = await adapter.getSchema({ object: 'materials' })
   assert.equal(schema.object, 'materials')
@@ -219,6 +243,7 @@ async function main() {
     { label: 'control-character path', healthPath: '/health\nX-Injected: yes' },
   ]
   for (const { label, healthPath } of unsafePaths) {
+    const beforeCalls = calls.length
     const unsafeAdapter = createHttpAdapter({
       system: createSystem({
         config: {
@@ -231,6 +256,7 @@ async function main() {
     const unsafe = await unsafeAdapter.testConnection().catch((error) => error)
     assert.equal(unsafe.ok, false, `${label} is rejected by testConnection`)
     assert.equal(unsafe.code, 'HTTP_TEST_FAILED', `${label} reports HTTP_TEST_FAILED`)
+    assert.equal(calls.length, beforeCalls, `${label} is rejected before fetch`)
   }
 
   const unsafeObjectAdapter = createHttpAdapter({
@@ -268,6 +294,49 @@ async function main() {
   }
   assert.ok(httpFailure instanceof HttpAdapterError, 'non-2xx response rejects with HttpAdapterError')
   assert.equal(httpFailure.status, 500)
+
+  const networkFailure = await adapter.upsert({
+    object: 'network_sink',
+    records: [{ code: 'A-01' }],
+    keyFields: ['code'],
+  }).catch((error) => error)
+  assert.ok(networkFailure instanceof HttpAdapterError, 'fetch-layer failure rejects with HttpAdapterError')
+  assert.equal(networkFailure.details.code, 'FETCH_FAILED')
+  assert.equal(networkFailure.details.method, 'POST')
+  assert.equal(networkFailure.details.path, '/api/network-sink')
+  assert.equal(networkFailure.details.causeName, 'TypeError')
+  assert.match(networkFailure.message, /HTTP adapter request failed before response: POST \/api\/network-sink/)
+  assert.doesNotMatch(
+    JSON.stringify({ message: networkFailure.message, details: networkFailure.details }),
+    /plm\.example\.test|token-1|key-1/,
+    'fetch failure details stay values-free',
+  )
+
+  const queryNetworkFailure = await adapter.upsert({
+    object: 'network_sink_with_query',
+    records: [{ code: 'A-01' }],
+    keyFields: ['code'],
+  }).catch((error) => error)
+  assert.ok(queryNetworkFailure instanceof HttpAdapterError, 'query-bearing path still reaches fetch')
+  assert.equal(queryNetworkFailure.details.code, 'FETCH_FAILED')
+  assert.equal(queryNetworkFailure.details.path, '/api/network-sink')
+  assert.doesNotMatch(
+    JSON.stringify({ message: queryNetworkFailure.message, details: queryNetworkFailure.details }),
+    /raw-secret|#frag|\?/,
+    'query-bearing fetch failure diagnostics strip query and fragment',
+  )
+
+  const responseReadFailure = await adapter.read({ object: 'body_read_failing' }).catch((error) => error)
+  assert.ok(responseReadFailure instanceof HttpAdapterError, 'response body read failure rejects with HttpAdapterError')
+  assert.equal(responseReadFailure.details.code, 'RESPONSE_READ_FAILED')
+  assert.equal(responseReadFailure.details.status, 200)
+  assert.equal(responseReadFailure.details.path, '/api/body-read-fail')
+  assert.equal(responseReadFailure.details.causeName, 'TypeError')
+  assert.doesNotMatch(
+    JSON.stringify({ message: responseReadFailure.message, details: responseReadFailure.details }),
+    /raw-secret|socket closed|\?/,
+    'response body read failure diagnostics avoid raw cause messages and query values',
+  )
 
   console.log('✓ http-adapter: config-driven read/upsert tests passed')
 }
