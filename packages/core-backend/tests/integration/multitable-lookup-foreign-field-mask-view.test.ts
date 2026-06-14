@@ -49,10 +49,13 @@ const FLD_LU_X = `fld_ffm_lux_${TS}` // lookup over cross-base denied target
 const FLD_LU_S_DEFAULT = `fld_ffm_lusd_${TS}` // lookup over same-base denied target (default → mask)
 const FLD_LU_S_OPTOUT = `fld_ffm_luso_${TS}` // lookup over same-base denied target WITH opt-out
 const FLD_LU_OK = `fld_ffm_luok_${TS}` // lookup over readable same-base target (must stay present)
+const FLD_ROLL_X_COUNT = `fld_ffm_rxc_${TS}` // count rollup over cross-base denied target
+const FLD_ROLL_OK_COUNT = `fld_ffm_rok_${TS}` // count rollup over readable same-base target
 
 const REC_FX = `rec_ffm_fx_${TS}` // cross-base foreign record (XTARGET = 7)
 const REC_FS = `rec_ffm_fs_${TS}` // same-base foreign record (STARGET = 11, SOK = 13)
 const REC_M = `rec_ffm_m_${TS}` // main record linking to both
+const REC_M_EMPTY = `rec_ffm_me_${TS}` // main record with no links; readable count rollup must be 0
 
 let app: Express
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -63,6 +66,17 @@ const readRowData = async (): Promise<Record<string, unknown>> => {
   const rows = res.body?.data?.rows as Array<{ id: string; data: Record<string, unknown> }>
   const row = rows.find((r) => r.id === REC_M)
   expect(row).toBeDefined()
+  return row!.data
+}
+
+const readEmptyRowData = async (): Promise<Record<string, unknown>> => {
+  // Read only the empty-link row so another row in the same response cannot prime the foreign-sheet
+  // readability set. A readable count rollup with no links must still be a concrete 0.
+  const res = await request(app).get(`/api/multitable/records/${REC_M_EMPTY}`).query({ sheetId: MS })
+  expect(res.status).toBe(200)
+  const row = res.body?.data?.record as { id: string; data: Record<string, unknown> } | undefined
+  expect(row).toBeDefined()
+  expect(row!.id).toBe(REC_M_EMPTY)
   return row!.data
 }
 
@@ -113,9 +127,17 @@ describeIfDatabase('multitable lookup foreign-field mask — read/JSON (GA-T2a, 
     // same-base lookup over a READABLE target → value present (no regression)
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_LU_OK, MS, 'LookupOk', 'lookup', JSON.stringify({ linkFieldId: FLD_LINK_S, targetFieldId: FLD_SOK, foreignSheetId: FS_S }), 6])
+    // count rollup over a denied target must not emit a concrete 0: null means masked/no visible value.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_ROLL_X_COUNT, MS, 'RollupXCount', 'rollup', JSON.stringify({ linkFieldId: FLD_LINK_X, targetFieldId: FLD_XTARGET, foreignSheetId: FS_X, aggregation: 'count' }), 7])
+    // count rollup over a readable target remains a concrete count.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_ROLL_OK_COUNT, MS, 'RollupOkCount', 'rollup', JSON.stringify({ linkFieldId: FLD_LINK_S, targetFieldId: FLD_SOK, foreignSheetId: FS_S, aggregation: 'count' }), 8])
 
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
       [REC_M, MS, JSON.stringify({ [FLD_LINK_X]: [REC_FX], [FLD_LINK_S]: [REC_FS] })])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
+      [REC_M_EMPTY, MS, JSON.stringify({})])
     await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)',
       [`lnk_x_${TS}`, FLD_LINK_X, REC_M, REC_FX])
     await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)',
@@ -168,5 +190,20 @@ describeIfDatabase('multitable lookup foreign-field mask — read/JSON (GA-T2a, 
   test('lookup of a READABLE foreign field is unaffected (no regression)', async () => {
     const data = await readRowData()
     expect(data[FLD_LU_OK]).toEqual([13])
+  })
+
+  test('count rollup over a DENIED foreign field is masked as null, not a concrete zero', async () => {
+    const data = await readRowData()
+    expect(data[FLD_ROLL_X_COUNT]).toBeNull()
+  })
+
+  test('count rollup over a READABLE foreign field still returns a concrete count', async () => {
+    const data = await readRowData()
+    expect(data[FLD_ROLL_OK_COUNT]).toBe(1)
+  })
+
+  test('count rollup over a READABLE foreign field with no links returns concrete zero', async () => {
+    const data = await readEmptyRowData()
+    expect(data[FLD_ROLL_OK_COUNT]).toBe(0)
   })
 })
