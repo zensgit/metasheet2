@@ -13,7 +13,7 @@
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
@@ -125,6 +125,24 @@ describeIfDatabase('M4 suggest-formula (real DB)', () => {
     }
   })
 
+  // Leak-proof cap reset: a test that throws mid-body (e.g. an estimate-aware
+  // admission rejection on its FIRST assertion) would otherwise skip a trailing
+  // inline `delete process.env.…CAP` and leak a low cap into later tests. Reset
+  // ONLY the per-test cap keys after EACH test; the suite-level enabling vars
+  // from beforeAll are left intact.
+  const PER_TEST_CAP_KEYS = [
+    'MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP',
+    'MULTITABLE_AI_TENANT_WEEKLY_TOKEN_CAP',
+    'MULTITABLE_AI_ACCOUNT_DAILY_USD_CAP',
+  ] as const
+  afterEach(() => {
+    for (const key of PER_TEST_CAP_KEYS) {
+      const value = savedEnv.get(key)
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+
   test('sentinel: DATABASE_URL set', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
   })
@@ -185,12 +203,14 @@ describeIfDatabase('M4 suggest-formula (real DB)', () => {
   })
 
   test('M4-T8: a daily token cap reached via a suggest row blocks the NEXT suggest (quota interference works both ways)', async () => {
-    // Fresh subject so the window starts empty. The readiness resolver floors
-    // the daily cap at 1000 (min), so the first suggest consumes EXACTLY 1000.
+    // Fresh subject so the window starts empty. Estimate-aware admission counts
+    // each suggest's own conservative estimate (prompt.length + maxOutputTokens
+    // ≈ 1.1k); cap 1500 admits the first suggest (window 0) but not the second
+    // (window settles to the ~1000 ACTUAL below, +estimate > 1500).
     const capUser = `u_m4_cap_${TS}`
     currentUser = { id: capUser, roles: ['member'], perms: ['multitable:write'] }
-    process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP = '1000'
-    stubUsage = { input_tokens: 600, output_tokens: 400 } // exactly the cap
+    process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP = '1500'
+    stubUsage = { input_tokens: 600, output_tokens: 400 } // ACTUAL ≤ estimate (no overshoot)
 
     const first = await suggestReq('first formula')
     expect(first.status).toBe(200)
@@ -206,8 +226,6 @@ describeIfDatabase('M4 suggest-formula (real DB)', () => {
     const rows = await ledgerRows(capUser)
     expect(rows.map((row) => row.status)).toEqual(['succeeded', 'quota_exhausted'])
     expect(rows.every((row) => row.action === 'suggest')).toBe(true)
-
-    delete process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP
   })
 
   test('M4-T2: canManageFields gate — a read-only actor is 403', async () => {
