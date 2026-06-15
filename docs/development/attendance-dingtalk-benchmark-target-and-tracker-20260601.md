@@ -104,6 +104,35 @@
 
 ---
 
+## 0.4 下一阶段目标（2026-06-15 锁定）
+
+> 目标名：**考勤年假 / 法定假余额引擎**。refresh 审计 v2（#2617）档 A #1 的下一主线；**复用 ④ comp-time grant-lot ledger（`attendance_leave_balances`/`_events`，已 leave_type 泛型→无 ledger DDL）+ C4 `AttendanceScheduler` 过期基座**，不重开已闭环能力，不混入其它配额假/调度/换班。**关键 reframe**：年假是 computed entitlement（f(累计工龄, 日历位置)），非 comp_time 的幂等事件入账 → v1 = snapshot accrual + 可审计 accrual-run provenance + manual adjustment（reconcile 不做）。design-lock 已落 **#2622**（`attendance-annual-leave-balance-engine-design-lock-20260615.md`）。继续遵守 §6：每 slice 独立 opt-in，合并后回填。
+
+### In scope
+
+| 顺序 | 项 | 当前状态 | 完成口径 |
+|---|---|---|---|
+| L0 | latent config + `deductLeaveBalance` 抽取 | ⬜ | `annualLeavePolicy` 默认全关 + 抽参数化 deduct helper（`deductionBasis`），**comp_time C3 真 DB 逐字节不变** |
+| L1 | expiry `source_type` 泛化 | ⬜ | 按 `leave_type_code` 派生（`annual_leave_expiry`），**`comp_time_expiry` 不回归**（重跑 C4） |
+| L2 | accrual snapshot 引擎 + run provenance + manual adjustment | ⬜ | eligibility gate（连续满 12 个月，否则 `NOT_ELIGIBLE_UNDER_ONE_YEAR`）+ 累计工龄阶梯 + 满足条件新进员工首年折算 + `attendance_leave_accrual_runs(_run_items id PK)` + 缺工龄字段/时区 skip 可见 + **手工调整动 lot 非 event-only** |
+| L3 | 年假审批扣减 | ⬜ | final approval gated `annual` → `deductLeaveBalance(standard_day)`，不足 block 不预支 |
+| L4 | 结转 / 年末过期 | ⬜ | org 时区年末 `expires_at` + `annual_leave_expiry`，重复 tick 不重复 |
+| L5 | admin UI | ⬜ | 余额 / policy 配置 / 手工调整 / skip reasons |
+| L6 | staging smoke | ⬜ | 端到端 + residue=0 |
+
+### Out of this target
+
+- reconcile 对账式、预支 / 负余额、其它配额假（病假配额等）、payroll 回写：v1 不做。
+- 调度 / 换班 / 小组织 / 多门店、C5 之外通知渠道：各自另起目标。
+- §1 OUT 红线不变。
+
+### 完成口径
+
+- 默认 **OFF**、org opt-in；snapshot v1 + manual adjustment 必备；工龄默认 `cumulative_service`（需 `cumulativeServiceStartDate` 字段，`hire_date` 仅 `company_tenure`）；结转默认次年末（org-tz 边界，**产品默认非法定**）。
+- MUST = 运行时强制 + 反向测试 + 1 条 staging 联调（同 §1）。default tier preset 依据《职工带薪年休假条例》（国务院令第514号）+《企业职工带薪年休假实施办法》（人社部令第1号）。
+
+---
+
 ## 1. H2 目标档位（产品负责人 2026-06-01 最终版）
 
 > 验收口径：MUST 项 = **后端运行时强制 + 前端可配 + 反向（权限/校验）测试 + 1 条 staging 联调** 才算 ✅；不是"能展示"算完。
