@@ -1195,9 +1195,7 @@ export class AutomationService {
     if (suspension.resumeCursor.kind === 'invalid') {
       return { status: 409, code: 'SUSPENSION_CURSOR_INVALID', message: 'Suspension resume cursor is invalid; cannot resume safely' }
     }
-    if (suspension.resumeCursor.kind === 'condition_branch') {
-      return { status: 409, code: 'BRANCH_RESUME_UNAVAILABLE', message: 'Branch-local resume is not yet available for this suspension' }
-    }
+    const resumeCursor = suspension.resumeCursor // top_level | { condition_branch, cursor }
     // Re-load the CURRENT rule (D4); fail closed if missing/disabled (T7).
     const rule = await this.getRule(suspension.ruleId)
     if (!rule || !rule.enabled) {
@@ -1208,6 +1206,31 @@ export class AutomationService {
     const currentFp = computeActionFingerprint(execRule.actions)
     if (currentFp.count !== suspension.actionFingerprint.count || currentFp.hash !== suspension.actionFingerprint.hash) {
       return { status: 409, code: 'RULE_CHANGED', message: 'Rule actions changed since suspend; cannot resume safely' }
+    }
+    // A6-3-3 branch drift guard (still BEFORE the claim): the selected branch must still exist and
+    // its action sequence must match the suspend-time fingerprint, else resume could re-enter the
+    // wrong branch position. The top-level fingerprint above only covers top-level action types.
+    if (resumeCursor.kind === 'condition_branch') {
+      const branchCursor = resumeCursor.cursor
+      const parentAction = execRule.actions[branchCursor.parentStepIndex]
+      const parentConfig = (parentAction?.config ?? {}) as {
+        branches?: Array<{ key?: unknown; actions?: AutomationAction[] }>
+        defaultBranch?: { key?: unknown; actions?: AutomationAction[] } | null
+      }
+      const branch = [
+        ...(Array.isArray(parentConfig.branches) ? parentConfig.branches : []),
+        ...(parentConfig.defaultBranch ? [parentConfig.defaultBranch] : []),
+      ].find((candidate) => candidate.key === branchCursor.branchKey)
+      if (!parentAction || parentAction.type !== 'condition_branch' || !branch || !Array.isArray(branch.actions)) {
+        return { status: 409, code: 'RULE_CHANGED', message: 'Selected branch no longer exists; cannot resume safely' }
+      }
+      const branchFp = computeActionFingerprint(branch.actions)
+      if (
+        branchFp.count !== branchCursor.branchActionFingerprint.count ||
+        branchFp.hash !== branchCursor.branchActionFingerprint.hash
+      ) {
+        return { status: 409, code: 'RULE_CHANGED', message: 'Selected branch actions changed since suspend; cannot resume safely' }
+      }
     }
     // Re-fetch the live record (D4); fail closed if it was deleted during the wait (T9).
     let recordData: Record<string, unknown> = {}
@@ -1251,7 +1274,9 @@ export class AutomationService {
     const lineageIds = await this.collectExecutionLineageIds(execution)
     const rootExecutionId = lineageIds.at(-1) ?? execution.id
     const jobLifecycle = this.buildJobLifecycle(execution.id, execRule, triggerEvent, rootExecutionId)
-    const continued = await this.executor.continueExecution(execution, execRule, context, suspension.stepIndex, jobLifecycle)
+    const continued = resumeCursor.kind === 'condition_branch'
+      ? await this.executor.continueBranchExecution(execution, execRule, context, resumeCursor.cursor, jobLifecycle)
+      : await this.executor.continueExecution(execution, execRule, context, suspension.stepIndex, jobLifecycle)
     try {
       await this.logService.updateRecordedExecution(continued)
     } catch (err) {
