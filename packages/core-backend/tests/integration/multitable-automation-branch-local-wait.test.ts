@@ -396,6 +396,49 @@ describeIfDatabase('multitable automation branch-local wait (A6-3-3a, real DB)',
     expect(susp.rows[0].status).toBe('pending') // token NOT claimed
   })
 
+  // §5 (cursor binding) — a STRUCTURALLY-VALID cursor whose branchActionIndex points at a NON-wait
+  // action must fail closed pre-claim. The branch fingerprint only hashes action TYPES, so without the
+  // wait-type + deterministic-id guard this cursor would pass, claim the token, and settle a non-wait
+  // action as if it were the suspended wait.
+  test('semantic-corrupt cursor: valid-shaped cursor at a non-wait branch action → 409, token NOT claimed, no job settles', async () => {
+    const svc = makeService(okFetch)
+    const ruleId = await createRule(svc, 'semantic', HAPPY_RULE_ACTIONS, HAPPY_BRANCH_ACTION.config)
+    const recId = `rec_semantic_${TS}`
+    await seedRecord(recId, { amount: 700000 })
+    const exec = await run(svc, ruleId, HAPPY_RULE_ACTIONS, recId, { amount: 700000 })
+    const token = await tokenFor(exec.id)
+
+    // Read the real cursor (correct branch fingerprint), then re-point branchActionIndex at index 0
+    // (send_notification, a NON-wait) with the deterministic ids for index 0 — so the branch fingerprint
+    // guard still passes and ONLY the new wait-type / id-binding check can catch it.
+    const before = await q('SELECT resume_cursor FROM multitable_automation_suspensions WHERE execution_id = $1', [exec.id])
+    const real = typeof before.rows[0].resume_cursor === 'string'
+      ? JSON.parse(before.rows[0].resume_cursor)
+      : before.rows[0].resume_cursor
+    const semanticCorrupt = {
+      kind: 'condition_branch',
+      parentStepIndex: 0,
+      branchKey: 'high_amount',
+      branchActionIndex: 0, // send_notification — NOT the wait at index 1
+      stepKey: '0.branch.high_amount.0',
+      parentJobId: `${exec.id}:job:0`,
+      branchJobId: `${exec.id}:job:0:branch:high_amount:0`,
+      upstreamJobId: `${exec.id}:job:0`,
+      branchActionFingerprint: real.branchActionFingerprint, // unchanged → fingerprint guard passes
+    }
+    await q(
+      'UPDATE multitable_automation_suspensions SET resume_cursor = $1::jsonb WHERE execution_id = $2',
+      [JSON.stringify(semanticCorrupt), exec.id],
+    )
+
+    expect(await svc.resumeExecution(token, 'admin_semantic')).toMatchObject({ status: 409, code: 'SUSPENSION_CURSOR_INVALID' })
+    // Pre-claim → token stays pending, and the suspended branch wait child was NOT settled.
+    const after = await q('SELECT status FROM multitable_automation_suspensions WHERE execution_id = $1', [exec.id])
+    expect(after.rows[0].status).toBe('pending')
+    const waitJob = await q('SELECT status FROM multitable_automation_jobs WHERE id = $1', [`${exec.id}:job:0:branch:high_amount:1`])
+    expect(waitJob.rows[0].status).toBe('suspended') // no settle happened
+  })
+
   // §5 — single-use token: the second resume is rejected.
   test('second resume → 409 ALREADY_RESUMED (single-use token, §5)', async () => {
     const svc = makeService(okFetch)

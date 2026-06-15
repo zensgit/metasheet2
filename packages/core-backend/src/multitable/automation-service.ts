@@ -1231,6 +1231,30 @@ export class AutomationService {
       ) {
         return { status: 409, code: 'RULE_CHANGED', message: 'Selected branch actions changed since suspend; cannot resume safely' }
       }
+      // Semantic-corruption guard (still BEFORE the claim). The branch fingerprint only hashes branch
+      // action TYPES, so a structurally-valid cursor whose branchActionIndex points at a NON-wait action
+      // (with tampered ids) would otherwise pass and let continueBranchExecution settle that non-wait
+      // action as the suspended wait. The cursor must (a) point at a branch-local wait_for_callback, and
+      // (b) carry the deterministic ids for this execution + branch position (stepKey / parentJobId /
+      // branchJobId / upstreamJobId are pure functions of executionId + parentStepIndex + branchKey +
+      // branchActionIndex). Any mismatch fails closed.
+      if (branch.actions[branchCursor.branchActionIndex]?.type !== 'wait_for_callback') {
+        return { status: 409, code: 'SUSPENSION_CURSOR_INVALID', message: 'Resume cursor does not point at a branch-local wait; cannot resume safely' }
+      }
+      const expectedStepKey = `${branchCursor.parentStepIndex}.branch.${branchCursor.branchKey}.${branchCursor.branchActionIndex}`
+      const expectedParentJobId = `${suspension.executionId}:job:${branchCursor.parentStepIndex}`
+      const expectedBranchJobId = `${suspension.executionId}:job:${branchCursor.parentStepIndex}:branch:${branchCursor.branchKey}:${branchCursor.branchActionIndex}`
+      const expectedUpstreamJobId = branchCursor.branchActionIndex === 0
+        ? expectedParentJobId
+        : `${suspension.executionId}:job:${branchCursor.parentStepIndex}:branch:${branchCursor.branchKey}:${branchCursor.branchActionIndex - 1}`
+      if (
+        branchCursor.stepKey !== expectedStepKey ||
+        branchCursor.parentJobId !== expectedParentJobId ||
+        branchCursor.branchJobId !== expectedBranchJobId ||
+        branchCursor.upstreamJobId !== expectedUpstreamJobId
+      ) {
+        return { status: 409, code: 'SUSPENSION_CURSOR_INVALID', message: 'Resume cursor ids are inconsistent with the branch position; cannot resume safely' }
+      }
     }
     // Re-fetch the live record (D4); fail closed if it was deleted during the wait (T9).
     let recordData: Record<string, unknown> = {}
