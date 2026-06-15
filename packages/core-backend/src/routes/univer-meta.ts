@@ -1846,23 +1846,63 @@ async function loadLinkValuesByRecord(
   const linkValuesByRecord = new Map<string, Map<string, string[]>>()
   if (relationalLinkFields.length === 0 || recordIds.length === 0) return linkValuesByRecord
 
-  const fieldIds = relationalLinkFields.map((l) => l.fieldId)
-  const linkRes = await query(
-    `SELECT field_id, record_id, foreign_record_id
-     FROM meta_links
-     WHERE field_id = ANY($1::text[]) AND record_id = ANY($2::text[])`,
-    [fieldIds, recordIds],
-  )
-
-  for (const raw of linkRes.rows as any[]) {
-    const recordId = String(raw.record_id)
-    const fieldId = String(raw.field_id)
-    const foreignId = String(raw.foreign_record_id)
+  const pushValue = (recordId: string, fieldId: string, value: string): void => {
     const recordMap = linkValuesByRecord.get(recordId) ?? new Map<string, string[]>()
     const list = recordMap.get(fieldId) ?? []
-    list.push(foreignId)
+    list.push(value)
     recordMap.set(fieldId, list)
     linkValuesByRecord.set(recordId, recordMap)
+  }
+
+  // Bidirectional / mirror links (design 2026-06-14) — partition the link fields by side. A DERIVED
+  // (mirror) field carries `cfg.mirrorOf` = the paired FORWARD field's id; its value set is the REVERSE
+  // projection of the SAME single edge (no stored mirror row). Forward fields read as before. Centralizing
+  // the split here makes every read consumer (/view, single-record read :9007, write-echo) resolve the
+  // reverse identically — wiring it per-call-site would risk a canary hitting an unconverted path.
+  const forwardFields = relationalLinkFields.filter((l) => !l.cfg.mirrorOf)
+  const derivedFields = relationalLinkFields.filter((l) => l.cfg.mirrorOf)
+
+  // Forward — the canonical read: WHERE field_id IN (forward ids) AND record_id IN (records) → foreign ids.
+  if (forwardFields.length > 0) {
+    const fieldIds = forwardFields.map((l) => l.fieldId)
+    const linkRes = await query(
+      `SELECT field_id, record_id, foreign_record_id
+       FROM meta_links
+       WHERE field_id = ANY($1::text[]) AND record_id = ANY($2::text[])`,
+      [fieldIds, recordIds],
+    )
+    for (const raw of linkRes.rows as any[]) {
+      pushValue(String(raw.record_id), String(raw.field_id), String(raw.foreign_record_id))
+    }
+  }
+
+  // Reverse — for derived (mirror) fields: WHERE field_id IN (paired forward ids = mirrorOf) AND
+  // foreign_record_id IN (records) → the SOURCE record_id is the linked value, surfaced under the MIRROR
+  // field's id. Served by idx_meta_links_foreign (no migration). Multiple mirror fields may share one
+  // forward field, so map mirrorOf → mirror field ids and fan each matching row out to all of them.
+  if (derivedFields.length > 0) {
+    const mirrorFieldsByForwardId = new Map<string, string[]>()
+    for (const { fieldId, cfg } of derivedFields) {
+      const forwardId = cfg.mirrorOf as string
+      const list = mirrorFieldsByForwardId.get(forwardId) ?? []
+      list.push(fieldId)
+      mirrorFieldsByForwardId.set(forwardId, list)
+    }
+    const forwardIds = Array.from(mirrorFieldsByForwardId.keys())
+    const reverseRes = await query(
+      `SELECT field_id, record_id, foreign_record_id
+       FROM meta_links
+       WHERE field_id = ANY($1::text[]) AND foreign_record_id = ANY($2::text[])`,
+      [forwardIds, recordIds],
+    )
+    for (const raw of reverseRes.rows as any[]) {
+      const forwardId = String(raw.field_id)
+      const thisRecordId = String(raw.foreign_record_id) // the mirror record being read
+      const sourceRecordId = String(raw.record_id) // the reverse-linked source record
+      for (const mirrorFieldId of mirrorFieldsByForwardId.get(forwardId) ?? []) {
+        pushValue(thisRecordId, mirrorFieldId, sourceRecordId)
+      }
+    }
   }
 
   return linkValuesByRecord
