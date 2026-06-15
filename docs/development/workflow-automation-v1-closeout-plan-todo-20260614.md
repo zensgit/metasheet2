@@ -54,6 +54,7 @@ graph/runtime expansions listed later in this file.
 | Approval authoring MVP | Landed and UAT accepted. Template create/edit/publish/start works for the MVP path. |
 | A6-4a BPMN pure compiler | Landed #2568. Pure function and unit tests only. |
 | A6-4b BPMN compile-preview route | Landed #2577 (`b5646fa71`). Read-only route calls the pure compiler without persistence or live BPMN runtime. |
+| A6-4c BPMN compile-preview UI | Landed #2604. Read-only Workflow Designer dialog consuming the A6-4b route: source mode, supported status, redacted automation actions + approval graph (collapsible JSON), mapping/gap reports, warnings. No deploy/start/persist; stale-response guarded via a request-id composable. |
 
 ## 2. Definition Of Done For v1
 
@@ -61,12 +62,13 @@ Workflow automation v1 is DONE when all mandatory boxes below are checked.
 
 - [x] Status docs are reconciled so no canonical tracker still marks A6-4b as
       unstarted after #2577.
-- [ ] Workflow Designer exposes a read-only compile-preview UI backed by
-      `POST /api/workflow-designer/workflows/:id/compile-preview`.
-- [ ] The compile-preview UI clearly separates:
+- [x] Workflow Designer exposes a read-only compile-preview UI backed by
+      `POST /api/workflow-designer/workflows/:id/compile-preview`. (Landed #2604.)
+- [x] The compile-preview UI clearly separates:
       `automationPreview`, `approvalPreview`, `mappingReport`, `gapReport`, and
-      warnings.
-- [ ] The compile-preview UI contains no deploy/start/publish/save side effect,
+      warnings. (Automation actions and approval graph are shown read-only as
+      backend-redacted collapsible JSON, not flattened to a count.)
+- [x] The compile-preview UI contains no deploy/start/publish/save side effect,
       no live BPMN runtime entry, and no "run this workflow" affordance.
 - [ ] W6 `start_approval` deployed/operator smoke (#2480) is PASS or explicitly
       accepted as deferred by the owner.
@@ -104,7 +106,7 @@ Acceptance:
 
 ### T1 - A6-4c Workflow Designer Compile-Preview UI
 
-Status: not started.
+Status: LANDED #2604.
 
 Goal: make the landed compile-preview route usable from the Workflow Designer
 without adding persistence or runtime execution.
@@ -147,16 +149,18 @@ Suggested implementation shape:
 
 Acceptance:
 
-- [ ] User can open compile-preview from Workflow Designer.
-- [ ] The response is readable enough to explain which automation/approval
-      primitives would be used.
-- [ ] Unsupported BPMN elements are visible as gaps with rung names where
+- [x] User can open compile-preview from Workflow Designer.
+- [x] The response is readable enough to explain which automation/approval
+      primitives would be used. (Mapping report + redacted action/approval JSON.)
+- [x] Unsupported BPMN elements are visible as gaps with rung names where
       applicable.
-- [ ] Tests prove the panel is read-only and side-effect-free from the UI layer.
+- [x] Tests prove the panel is read-only and side-effect-free from the UI layer.
 
 ### T2 - W6 `start_approval` Deployed Operator Smoke
 
-Status: open issue #2480.
+Status: open issue #2480. Runbook `/api` co-tenancy preflight hard-gate
+formalized in #2608 (§2.1). The deployed smoke itself still waits on the
+host-side `/api` routing fix before §3-§6 can run.
 
 Goal: validate deployed UI, routing, auth, and admin runs readability for the
 already-landed W6 bridge.
@@ -256,9 +260,9 @@ These are not required for v1 closeout unless a concrete scenario demands them.
 
 ## 5. Recommended Execution Order
 
-1. T0 tracker reconciliation - completed by this docs slice.
-2. T1 A6-4c Workflow Designer compile-preview UI.
-3. T2 W6 operator smoke.
+1. T0 tracker reconciliation - completed (#2592).
+2. T1 A6-4c Workflow Designer compile-preview UI - LANDED #2604.
+3. T2 W6 operator smoke - runbook preflight #2608; smoke pending host-side `/api` fix.
 4. T3 W7 result backwrite only if T2 passes or owner explicitly unlocks.
 5. T4 final closeout.
 

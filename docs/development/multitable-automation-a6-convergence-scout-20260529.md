@@ -82,7 +82,7 @@ The dependency order is fixed, but it is not a schedule.
 | A6-1 | Persistent WorkflowJob runtime | Landed and enabled end-to-end (#2130/#2191/#2193) | done |
 | A6-2 | Suspend/resume | Landed end-to-end (#2237/#2245/#2257); delay/timer still deferred | done for admin-gated v1 |
 | A6-3 | Branch/parallel DAG | `condition_branch` and `parallel_branch` `joinMode: all` landed; branch-local waits and join-any still gated | partially done |
-| A6-4 | BPMN adapter | Scope gate recorded in `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`; A6-4a pure compiler landed #2568; A6-4b read-only route landed #2577; A6-4c Workflow Designer UI and any live-runtime path remain not started | named demand |
+| A6-4 | BPMN adapter | Scope gate recorded in `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`; A6-4a pure compiler landed #2568; A6-4b read-only route landed #2577; A6-4c Workflow Designer UI landed #2604 (read-only); the live-runtime path remains not started | named demand |
 | A6-5 | Approval-as-job | First `start_approval` bridge slice landed (#2469); result backwrite / follow-ups still gated | partially done |
 
 The sections below retain the original design rationale for each rung. The table
@@ -280,7 +280,8 @@ A6 must not:
 
 After A6-3 `condition_branch` + parallel `join_all`, A6-4a landed by explicit
 opt-in as a pure `bpmnCompilePreview` compiler module plus unit tests (#2568),
-and A6-4b landed the read-only compile-preview route (#2577). The next A6-4
-work still requires a named demand: A6-4c may add only the Workflow Designer UI
-for that route, and must keep the same no-live-runtime / no-persistence
-boundary.
+and A6-4b landed the read-only compile-preview route (#2577). A6-4c then landed
+the read-only Workflow Designer compile-preview UI for that route (#2604). The
+next A6-4 work still requires a named demand: live BPMN runtime (out of scope
+for v1) or BPMN create-from-preview, each keeping the no-live-runtime /
+no-persistence boundary until separately scoped.
