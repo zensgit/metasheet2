@@ -8,8 +8,10 @@
 
 - 只读数据库接入 Data Factory 源系统: 已经基本可用。
 - 可交付定义: C6 外部写能力完成并通过实体机验收后，才称为完整交付。
-- 下一步建议: C2-close 已通过实体机 smoke；C3 core runtime + CI real-DB wire lock 已落地。
-  C3 bind-time/index hardening 随 C4 配置体验继续；Large-BOM #2425 的 C3/C4 实体机全链路验证另行继续。
+- 下一步建议: C2-close 已通过实体机 smoke；C3 core runtime + CI real-DB wire lock 已落地；
+  C4 配置体验 baseline 已落地（source/object/schema picker、source-field picker、watermark config）。
+  Large-BOM #2425 的 scoped C3/C4 实体机全链路验证已 PASS/CLOSED；Windows 短 TEMP zip 部署 caveat
+  另由 #2642 跟踪，不阻塞 runtime gate。
 - 不建议: 现在直接开 C6。C6 是最大风险刀，必须等只读链路、增量链路、K3 generic seam 都稳定后再开。
 
 ## 收口顺序
@@ -17,9 +19,9 @@
 | 顺序 | 阶段 | 状态 | 目标 | 主要风险 |
 | --- | --- | --- | --- | --- |
 | P0 | ②b arc 收口权限/契约修复 | done (#2597) | 已排已合并主线风险 | related-echo 跨 base 泄漏 |
-| C2-close | 只读数据库链路 smoke 收口 | done (#2600) | 证明当前 read-only bridge 可稳定测试 | 实体机配置漂移 |
+| C2-close | 只读数据库链路 smoke 收口 | done (issue #2600) | 证明当前 read-only bridge 可稳定测试 | 实体机配置漂移 |
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
-| C4 | UI / 配置体验统一 | gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
+| C4 | UI / 配置体验统一 | baseline done (#2643/#2646/#2649); polish gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | gated | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
 | Release | 总包 + 实体机验收 | gated | 交付签收 | 包内容/部署/证据不完整 |
@@ -72,7 +74,7 @@ TODO:
 
 目标: 证明当前 `data-source:sql-readonly` 可以作为 Data Factory 源系统稳定使用。
 
-状态: 已完成，#2600 实体机 smoke PASS。
+状态: 已完成，issue #2600 实体机 smoke PASS。
 
 验证锚点:
 
@@ -154,8 +156,9 @@ TODO:
     `data-source:sql-readonly` adapter -> host facade -> `DataSourceManager` -> `PostgresAdapter` -> Postgres。
   - 锁住 `where`/`orderBy` 穿透、`updated_at + id` 复合 cursor 推进、以及 SQL BIGINT
     monotonic id 字符串保真。
-  - 注意: 这关闭 C3 watermark 的 real-DB wire lock；不等于 #2425 Large-BOM C3/C4
-    实体机 run/plan/apply/idempotence 全链路 PASS。
+  - 注意: 这关闭 C3 watermark 的 real-DB wire lock；#2425 Large-BOM C3/C4
+    实体机 run/plan/checkpoint-apply/re-pull idempotence 是后续独立 gate，已在
+    `b6383d4d3` 包上 PASS/CLOSED。
 
 完成条件:
 
@@ -178,17 +181,29 @@ TODO:
 
 TODO:
 
-- [ ] Workbench data-source source picker 完整化: connection / object / schema / table。
-- [ ] column picker: 支持选择 source object 字段。
-- [ ] watermark 配置 UI: 基于已落地 C3 runtime 补齐配置体验，避免操作员继续依赖内部 JSON。
+- [x] Workbench data-source source picker 完整化: connection / object / schema / table。
+  - #2643 / squash `c1ec03fb7`.
+  - 结构化 bridge object picker 从 `/api/data-sources` schema 生成 schema/table 选项；保存仍只落
+    `config.dataSourceId + object`，不复制凭据。
+- [x] column picker: 支持选择 source object 字段。
+  - #2646 / squash `c71b7dd12`.
+  - mapping editor 的 `sourceField` 在已加载 source schema 时变为字段下拉；保留 stale value 作为显式
+    “当前值（未在来源 schema 中）”，不静默清空旧配置。
+- [x] watermark 配置 UI: 基于已落地 C3 runtime 补齐配置体验，避免操作员继续依赖内部 JSON。
+  - #2649 / squash `34f53a4cc`.
+  - incremental 模式保存 `options.watermark`；manual/full 不带 watermark。
+  - `data-source:sql-readonly + updated_at` 必须使用当前 source schema 中的 watermark field 和不同的
+    tiebreaker；source system/object 切换会清理旧 schema，避免 stale schema 误放行。
 - [ ] preview 中显示 read-only/source-only 边界。
 - [ ] 错误提示产品化: auth、owner mismatch、missing object、missing schema、unsupported source。
-- [ ] 凭据边界: UI 只能引用 `dataSourceId`，不得输入或复制 credentials。
+- [x] 凭据边界: UI 只能引用 `dataSourceId`，不得输入或复制 credentials。
+  - C2/C4 UI 保存路径只引用 dataSourceId；#2600 实体机 smoke 也验证 Workbench 不复制凭据。
 
 完成条件:
 
-- 操作员能在 UI 内完成配置，不需要知道内部 JSON shape。
+- baseline: 操作员能在 UI 内完成 read-only source/object/schema/column/watermark 配置，不需要知道内部 JSON shape。
 - `/data-sources` 仍是唯一凭据管理面。
+- polish 仍 gated: read-only/source-only 边界展示和错误提示产品化仍可继续小 PR；这些不改变 runtime 合同。
 
 ## C5 - K3 Generic MSSQL Seam
 
