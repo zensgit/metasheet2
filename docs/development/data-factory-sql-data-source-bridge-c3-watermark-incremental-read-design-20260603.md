@@ -180,11 +180,18 @@ argument is the same wire-vs-fixture class of bug.)
   `where` pass-through to `DataSourceManager.select`; parameterized-only; writable-source still rejected.
   Facade unit test covers pass-through, malformed `orderBy` fail-closed, uppercase direction normalization,
   and the existing no-fallback / writable-source guard. Landed in #2609 / squash `1586c3841`.
+- 🔒 **C3-2a — structured `where` logical groups:** widen adapter structured reads to express the
+  `updated_at` composite keyset predicate as `field > last OR (field = last AND tiebreaker > lastTie)`;
+  keep all values parameterized; reject malformed logical groups and unknown `$` operators fail-closed;
+  add MySQL operator parity with Postgres/MSSQL. This is a prerequisite only — no watermark predicate is
+  generated yet, and the offset/full path stays unchanged.
 - 🔒 **C3-2 — adapter watermark mode (plugin):** type-conditional keyset (Seam B) + cursor model (Seam C);
   unit tests incl. the **no-miss** and **no-stall** negative controls and offset/full coexistence.
-- 🔒 **C3-3 — watermark-config plumbing + bind-time validation:** extend `pipeline.options.watermark` to
-  `{ type, field, tiebreaker? }`, pass the resolved config into `read()` (Seam D); validate column
-  exists/orderable/indexed and `updated_at` has a tiebreaker, else **fail closed** (Seam E bind-time).
+- ✅ **C3-3a — watermark-config plumbing (runner → read request):** extend `pipeline.options.watermark` to
+  `{ type, field, tiebreaker? }`, pass the resolved config into `read()` (Seam D), and require
+  `updated_at` configs to declare a tiebreaker for the `data-source:sql-readonly` bridge. Landed in #2619
+  / squash `7f61709ea`; the remaining column exists/orderable/indexed validation stays gated with the
+  runtime slices.
 - ✅ **C2-0 — honor equality `filters`:** parameterized equality `filters` already pass through as `where`
   before C3 runtime.
 - 🔒 **C3-4 — filter + watermark composition lock:** keep those equality filters AND'd with the watermark
@@ -197,8 +204,8 @@ argument is the same wire-vs-fixture class of bug.)
   facade→`DataSourceManager`→real-adapter→DB keyset path — this real-DB test is the acceptance keystone.
 
 **All remaining C3-2..C3-5 work stays 🔒** until both a real volume/perf signal **and** a separate opt-in.
-Build order: C3-3 (config/validation) → C3-2 (adapter mode) → C3-4
-(filter+watermark composition) → C3-5 (real-DB lock).
+Build order from the current mainline: C3-2a (structured `where` groups) → C3-2 (adapter mode + cursor)
+→ C3-4 (filter+watermark composition) → C3-5 (real-DB lock).
 
 ## Acceptance checklist (the locks — for the impl slices)
 

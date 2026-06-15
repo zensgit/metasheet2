@@ -77,7 +77,7 @@ interface MongoDocument extends Record<string, unknown> {
 
 import type {
   DbValue,
-  WhereValue,
+  WhereClause,
   QueryOptions,
   QueryResult,
   SchemaInfo,
@@ -301,7 +301,7 @@ export class MongoDBAdapter extends BaseDataAdapter {
   async update<T = Record<string, DbValue>>(
     collection: string,
     data: Record<string, DbValue>,
-    where: Record<string, WhereValue>
+    where: WhereClause
   ): Promise<QueryResult<T>> {
     if (!this.db) {
       throw new Error('Not connected to database')
@@ -333,7 +333,7 @@ export class MongoDBAdapter extends BaseDataAdapter {
     }
   }
 
-  async delete<T = Record<string, DbValue>>(collection: string, where: Record<string, WhereValue>): Promise<QueryResult<T>> {
+  async delete<T = Record<string, DbValue>>(collection: string, where: WhereClause): Promise<QueryResult<T>> {
     if (!this.db) {
       throw new Error('Not connected to database')
     }
@@ -511,10 +511,16 @@ export class MongoDBAdapter extends BaseDataAdapter {
     return uri
   }
 
-  private buildMongoFilter(where: Record<string, WhereValue>): MongoFilter {
+  private buildMongoFilter(where: WhereClause): MongoFilter {
     const filter: MongoFilter = {}
 
     for (const [key, value] of Object.entries(where)) {
+      if (value === undefined) {
+        continue
+      }
+      if (key === '$or' || key === '$and') {
+        throw new Error(`${key} logical where groups are not supported by the MongoDB adapter`)
+      }
       if (value === null) {
         filter[key] = null
       } else if (Array.isArray(value)) {

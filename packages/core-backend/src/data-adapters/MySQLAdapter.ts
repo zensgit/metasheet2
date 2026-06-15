@@ -49,7 +49,8 @@ import type {
   ColumnInfo,
   IndexInfo,
   ForeignKeyInfo,
-  DbValue
+  DbValue,
+  WhereClause
 } from './BaseAdapter';
 import {
   BaseDataAdapter,
@@ -84,6 +85,105 @@ export class MySQLAdapter extends BaseDataAdapter {
     // A2: backtick-quote PER SEGMENT so a schema-qualified name becomes `schema`.`table`. The base
     // sanitizer validates each segment and throws on illegal input.
     return this.sanitizeIdentifier(identifier).split('.').map(seg => `\`${seg}\``).join('.')
+  }
+
+  private getMySQLOperator(op: string): string {
+    const operators: Record<string, string> = {
+      $gt: '>',
+      $gte: '>=',
+      $lt: '<',
+      $lte: '<=',
+      $ne: '!=',
+      $like: 'LIKE',
+      $ilike: 'LIKE',
+      $in: 'IN',
+      $nin: 'NOT IN',
+      $between: 'BETWEEN'
+    }
+    const operator = operators[op]
+    if (!operator) {
+      throw new Error(`Unsupported where operator: ${op}`)
+    }
+    return operator
+  }
+
+  private buildMySQLWhereClause(where: WhereClause): { sql: string; params: DbValue[] } {
+    const result = this.buildMySQLWhereConditions(where)
+    return {
+      sql: result.conditions.length > 0 ? `WHERE ${result.conditions.join(' AND ')}` : '',
+      params: result.params
+    }
+  }
+
+  private buildMySQLWhereConditions(where: WhereClause): { conditions: string[]; params: DbValue[] } {
+    const conditions: string[] = []
+    const params: DbValue[] = []
+
+    for (const [key, value] of Object.entries(where)) {
+      if (value === undefined) {
+        continue
+      }
+      if (key === '$or' || key === '$and') {
+        if (!Array.isArray(value) || value.length === 0) {
+          throw new Error(`${key} must be a non-empty array of where clauses`)
+        }
+        const nestedParts: string[] = []
+        const clauses = value as WhereClause[]
+        for (const clause of clauses) {
+          if (!clause || typeof clause !== 'object' || Array.isArray(clause)) {
+            throw new Error(`${key} entries must be where clause objects`)
+          }
+          const nested = this.buildMySQLWhereConditions(clause)
+          params.push(...nested.params)
+          if (nested.conditions.length === 0) {
+            throw new Error(`${key} entries must not be empty`)
+          }
+          nestedParts.push(`(${nested.conditions.join(' AND ')})`)
+        }
+        conditions.push(`(${nestedParts.join(key === '$or' ? ' OR ' : ' AND ')})`)
+      } else if (value === null) {
+        conditions.push(`${this.sanitizeMySQLIdentifier(key)} IS NULL`)
+      } else if (Array.isArray(value)) {
+        const list = value as DbValue[]
+        const placeholders = list.map(() => '?').join(', ')
+        conditions.push(`${this.sanitizeMySQLIdentifier(key)} IN (${placeholders})`)
+        params.push(...list)
+      } else if (value && typeof value === 'object') {
+        const entries = Object.entries(value)
+        if (entries.length > 0 && entries.some(([op]) => op.startsWith('$'))) {
+          for (const [op, operatorValue] of entries) {
+            if (operatorValue === undefined) continue
+            const operator = this.getMySQLOperator(op)
+            if (op === '$in' || op === '$nin') {
+              if (!Array.isArray(operatorValue) || operatorValue.length === 0) {
+                throw new Error(`${op} must be a non-empty array`)
+              }
+              const values = operatorValue as DbValue[]
+              const placeholders = values.map(() => '?').join(', ')
+              conditions.push(`${this.sanitizeMySQLIdentifier(key)} ${operator} (${placeholders})`)
+              params.push(...values)
+            } else if (op === '$between') {
+              if (!Array.isArray(operatorValue) || operatorValue.length !== 2) {
+                throw new Error('$between must be a two-value array')
+              }
+              conditions.push(`${this.sanitizeMySQLIdentifier(key)} BETWEEN ? AND ?`)
+              params.push(...(operatorValue as [DbValue, DbValue]))
+            } else {
+              conditions.push(`${this.sanitizeMySQLIdentifier(key)} ${operator} ?`)
+              params.push(operatorValue as DbValue)
+            }
+          }
+        } else {
+          conditions.push(`${this.sanitizeMySQLIdentifier(key)} = ?`)
+          params.push(value as DbValue)
+        }
+      } else {
+        conditions.push(`${this.sanitizeMySQLIdentifier(key)} = ?`)
+        params.push(value as DbValue)
+      }
+    }
+
+    return { conditions, params }
   }
 
   async connect(): Promise<void> {
@@ -202,26 +302,10 @@ export class MySQLAdapter extends BaseDataAdapter {
       }
     }
 
-    // Add where clause
     if (options.where && Object.keys(options.where).length > 0) {
-      const conditions: string[] = []
-
-      for (const [key, value] of Object.entries(options.where)) {
-        if (value === null) {
-          conditions.push(`${this.sanitizeMySQLIdentifier(key)} IS NULL`)
-        } else if (Array.isArray(value)) {
-          const placeholders = value.map(() => '?').join(', ')
-          conditions.push(`${this.sanitizeMySQLIdentifier(key)} IN (${placeholders})`)
-          params.push(...value)
-        } else {
-          conditions.push(`${this.sanitizeMySQLIdentifier(key)} = ?`)
-          params.push(value)
-        }
-      }
-
-      if (conditions.length > 0) {
-        sql += ` WHERE ${conditions.join(' AND ')}`
-      }
+      const whereClause = this.buildMySQLWhereClause(options.where)
+      sql += ` ${whereClause.sql}`
+      params.push(...whereClause.params)
     }
 
     // Add order by
@@ -290,7 +374,7 @@ export class MySQLAdapter extends BaseDataAdapter {
     return result
   }
 
-  async update<T = Record<string, unknown>>(table: string, data: Record<string, unknown>, where: Record<string, unknown>): Promise<QueryResult<T>> {
+  async update<T = Record<string, unknown>>(table: string, data: Record<string, unknown>, where: WhereClause): Promise<QueryResult<T>> {
     const setClause: string[] = []
     const values: unknown[] = []
 
@@ -299,44 +383,33 @@ export class MySQLAdapter extends BaseDataAdapter {
       values.push(value)
     }
 
-    const whereConditions: string[] = []
-    for (const [key, value] of Object.entries(where)) {
-      if (value === null) {
-        whereConditions.push(`${this.sanitizeMySQLIdentifier(key)} IS NULL`)
-      } else {
-        whereConditions.push(`${this.sanitizeMySQLIdentifier(key)} = ?`)
-        values.push(value)
-      }
+    const whereClause = this.buildMySQLWhereClause(where)
+    if (!whereClause.sql) {
+      throw new Error('MySQL update requires a non-empty where clause')
     }
+    values.push(...whereClause.params)
 
     const sql = `
       UPDATE ${this.sanitizeMySQLIdentifier(table)}
       SET ${setClause.join(', ')}
-      WHERE ${whereConditions.join(' AND ')}
+      ${whereClause.sql}
     `
 
     return this.query<T>(sql, values)
   }
 
-  async delete<T = Record<string, unknown>>(table: string, where: Record<string, unknown>): Promise<QueryResult<T>> {
-    const conditions: string[] = []
-    const values: unknown[] = []
-
-    for (const [key, value] of Object.entries(where)) {
-      if (value === null) {
-        conditions.push(`${this.sanitizeMySQLIdentifier(key)} IS NULL`)
-      } else {
-        conditions.push(`${this.sanitizeMySQLIdentifier(key)} = ?`)
-        values.push(value)
-      }
+  async delete<T = Record<string, unknown>>(table: string, where: WhereClause): Promise<QueryResult<T>> {
+    const whereClause = this.buildMySQLWhereClause(where)
+    if (!whereClause.sql) {
+      throw new Error('MySQL delete requires a non-empty where clause')
     }
 
     const sql = `
       DELETE FROM ${this.sanitizeMySQLIdentifier(table)}
-      WHERE ${conditions.join(' AND ')}
+      ${whereClause.sql}
     `
 
-    return this.query<T>(sql, values)
+    return this.query<T>(sql, whereClause.params)
   }
 
   async getSchema(schema?: string): Promise<SchemaInfo> {

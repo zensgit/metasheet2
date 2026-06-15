@@ -37,6 +37,11 @@ export interface WhereOperators {
 
 // Type for where clause values
 export type WhereValue = DbValue | WhereOperators
+export interface WhereClause {
+  [key: string]: WhereValue | WhereClause[] | undefined
+  $or?: WhereClause[]
+  $and?: WhereClause[]
+}
 
 export interface DataSourceConfig {
   id: string
@@ -57,7 +62,7 @@ export interface QueryOptions {
   limit?: number
   offset?: number
   orderBy?: Array<{ column: string; direction: 'asc' | 'desc' }>
-  where?: Record<string, WhereValue>
+  where?: WhereClause
   select?: string[]
   joins?: Array<{
     table: string
@@ -171,7 +176,7 @@ export function isBoolean(value: ConfigValue | undefined): value is boolean {
 }
 
 // Type guard for WhereOperators
-function isWhereOperator(value: WhereValue): value is WhereOperators {
+function isWhereOperator(value: unknown): value is WhereOperators {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     return false
   }
@@ -214,8 +219,8 @@ export abstract class BaseDataAdapter extends EventEmitter {
   abstract query<T = Record<string, DbValue>>(sql: string, params?: DbValue[]): Promise<QueryResult<T>>
   abstract select<T = Record<string, DbValue>>(table: string, options?: QueryOptions): Promise<QueryResult<T>>
   abstract insert<T = Record<string, DbValue>>(table: string, data: Record<string, DbValue> | Record<string, DbValue>[]): Promise<QueryResult<T>>
-  abstract update<T = Record<string, DbValue>>(table: string, data: Record<string, DbValue>, where: Record<string, WhereValue>): Promise<QueryResult<T>>
-  abstract delete<T = Record<string, DbValue>>(table: string, where: Record<string, WhereValue>): Promise<QueryResult<T>>
+  abstract update<T = Record<string, DbValue>>(table: string, data: Record<string, DbValue>, where: WhereClause): Promise<QueryResult<T>>
+  abstract delete<T = Record<string, DbValue>>(table: string, where: WhereClause): Promise<QueryResult<T>>
 
   // Schema operations
   abstract getSchema(schema?: string): Promise<SchemaInfo>
@@ -300,25 +305,74 @@ export abstract class BaseDataAdapter extends EventEmitter {
     return limit
   }
 
-  protected buildWhereClause(where: Record<string, WhereValue>): { sql: string; params: DbValue[] } {
+  protected buildWhereClause(where: WhereClause): { sql: string; params: DbValue[] } {
+    const result = this.buildWhereConditions(where, 1)
+    return {
+      sql: result.conditions.length > 0 ? `WHERE ${result.conditions.join(' AND ')}` : '',
+      params: result.params
+    }
+  }
+
+  private buildWhereConditions(
+    where: WhereClause,
+    startParamIndex: number
+  ): { conditions: string[]; params: DbValue[]; nextParamIndex: number } {
     const conditions: string[] = []
     const params: DbValue[] = []
-    let paramIndex = 1
+    let paramIndex = startParamIndex
 
     for (const [key, value] of Object.entries(where)) {
-      if (value === null) {
+      if (value === undefined) {
+        continue
+      }
+      if (key === '$or' || key === '$and') {
+        if (!Array.isArray(value) || value.length === 0) {
+          throw new Error(`${key} must be a non-empty array of where clauses`)
+        }
+        const nestedParts: string[] = []
+        const clauses = value as WhereClause[]
+        for (const clause of clauses) {
+          if (!clause || typeof clause !== 'object' || Array.isArray(clause)) {
+            throw new Error(`${key} entries must be where clause objects`)
+          }
+          const nested = this.buildWhereConditions(clause, paramIndex)
+          paramIndex = nested.nextParamIndex
+          params.push(...nested.params)
+          if (nested.conditions.length === 0) {
+            throw new Error(`${key} entries must not be empty`)
+          }
+          nestedParts.push(`(${nested.conditions.join(' AND ')})`)
+        }
+        conditions.push(`(${nestedParts.join(key === '$or' ? ' OR ' : ' AND ')})`)
+      } else if (value === null) {
         conditions.push(`${this.sanitizeIdentifier(key)} IS NULL`)
       } else if (Array.isArray(value)) {
-        const placeholders = value.map(() => `$${paramIndex++}`).join(', ')
+        const list = value as DbValue[]
+        const placeholders = list.map(() => `$${paramIndex++}`).join(', ')
         conditions.push(`${this.sanitizeIdentifier(key)} IN (${placeholders})`)
-        params.push(...value)
+        params.push(...list)
       } else if (isWhereOperator(value)) {
         // Handle operators like { $gt: 5, $lt: 10 }
         for (const [op, val] of Object.entries(value)) {
           if (val !== undefined) {
             const operator = this.getOperator(op)
-            conditions.push(`${this.sanitizeIdentifier(key)} ${operator} $${paramIndex++}`)
-            params.push(val)
+            if (op === '$in' || op === '$nin') {
+              if (!Array.isArray(val) || val.length === 0) {
+                throw new Error(`${op} must be a non-empty array`)
+              }
+              const placeholders = val.map(() => `$${paramIndex++}`).join(', ')
+              conditions.push(`${this.sanitizeIdentifier(key)} ${operator} (${placeholders})`)
+              params.push(...val)
+            } else if (op === '$between') {
+              if (!Array.isArray(val) || val.length !== 2) {
+                throw new Error('$between must be a two-value array')
+              }
+              conditions.push(`${this.sanitizeIdentifier(key)} BETWEEN $${paramIndex++} AND $${paramIndex++}`)
+              params.push(...val)
+            } else {
+              conditions.push(`${this.sanitizeIdentifier(key)} ${operator} $${paramIndex++}`)
+              params.push(val)
+            }
           }
         }
       } else if (typeof value === 'object' && value !== null) {
@@ -332,8 +386,9 @@ export abstract class BaseDataAdapter extends EventEmitter {
     }
 
     return {
-      sql: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '',
-      params
+      conditions,
+      params,
+      nextParamIndex: paramIndex
     }
   }
 
@@ -350,7 +405,11 @@ export abstract class BaseDataAdapter extends EventEmitter {
       $nin: 'NOT IN',
       $between: 'BETWEEN'
     }
-    return operators[op] || '='
+    const operator = operators[op]
+    if (!operator) {
+      throw new Error(`Unsupported where operator: ${op}`)
+    }
+    return operator
   }
 
   // A3: the redacted cause of the most recent connect/test failure (null when healthy).
