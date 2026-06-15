@@ -42,7 +42,10 @@ export interface ConditionBranchResumeCursor {
   branchActionFingerprint: ActionFingerprint
 }
 
-export type AutomationResumeCursor = { kind: 'top_level' } | ConditionBranchResumeCursor
+// A STORED cursor is always a branch cursor — a top-level suspension stores NULL, not a
+// cursor object. The `top_level` discriminator lives only on ParsedResumeCursor (the
+// in-memory parse RESULT), never on a persisted value.
+export type AutomationResumeCursor = ConditionBranchResumeCursor
 
 export type ParsedResumeCursor =
   | { kind: 'top_level' }
@@ -86,10 +89,13 @@ export function parseResumeCursor(raw: unknown): ParsedResumeCursor {
   }
 
   if (typeof raw !== 'object') return { kind: 'invalid', reason: 'not_an_object' }
-  // Arrays have typeof 'object' but no `kind` → fall through to unknown_kind below.
+  // A non-null cursor OBJECT is NEVER the top-level path. Only SQL NULL / absent (or a
+  // JSON `null`) means "no cursor / legacy A6-2 top-level". A stored object — including a
+  // corrupt `{ kind: 'top_level' }`, an array (no `kind`), or any unknown kind — fails
+  // closed as invalid, so a corrupted branch suspension can never resume at the top-level
+  // step_index. We never persist a top-level cursor object (top-level rows store NULL).
   const cursor = raw as Record<string, unknown>
 
-  if (cursor.kind === 'top_level') return { kind: 'top_level' }
   if (cursor.kind !== 'condition_branch') return { kind: 'invalid', reason: 'unknown_kind' }
 
   if (!isNonNegativeInt(cursor.parentStepIndex)) return { kind: 'invalid', reason: 'bad_parentStepIndex' }

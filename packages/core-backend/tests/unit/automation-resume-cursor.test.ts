@@ -20,11 +20,16 @@ function validBranchCursor(overrides: Record<string, unknown> = {}): Record<stri
 }
 
 describe('parseResumeCursor — A6-3-3 fail-closed safety invariant', () => {
-  it('treats only NULL / undefined as the top-level (A6-2 legacy) path', () => {
+  it('treats only NULL / undefined (or a JSON null) as the top-level (A6-2 legacy) path', () => {
     expect(parseResumeCursor(null)).toEqual({ kind: 'top_level' })
     expect(parseResumeCursor(undefined)).toEqual({ kind: 'top_level' })
-    expect(parseResumeCursor('null')).toEqual({ kind: 'top_level' }) // JSON-encoded null column
-    expect(parseResumeCursor({ kind: 'top_level' })).toEqual({ kind: 'top_level' })
+    expect(parseResumeCursor('null')).toEqual({ kind: 'top_level' }) // JSON-encoded SQL NULL only
+  })
+
+  it('rejects a non-null { kind: "top_level" } OBJECT (corruption, not the legacy path)', () => {
+    // The fail-open we are closing: a stored object must never force top-level resume.
+    expect(parseResumeCursor({ kind: 'top_level' })).toEqual({ kind: 'invalid', reason: 'unknown_kind' })
+    expect(parseResumeCursor('{"kind":"top_level"}')).toEqual({ kind: 'invalid', reason: 'unknown_kind' })
   })
 
   it('parses a valid condition_branch cursor (object or JSON string)', () => {
