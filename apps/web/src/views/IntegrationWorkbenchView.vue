@@ -1221,6 +1221,13 @@
             生成 JSON 预览
           </button>
         </div>
+        <p
+          v-if="sourceReadOnlyBoundaryNotice"
+          class="integration-workbench__hint integration-workbench__hint--strong"
+          data-testid="source-readonly-boundary-notice"
+        >
+          {{ sourceReadOnlyBoundaryNotice }}
+        </p>
         <pre data-testid="payload-preview">{{ previewText }}</pre>
         <div
           v-if="previewProvenance"
@@ -2038,6 +2045,10 @@ const protocolSplitNotice = computed(() => {
   return ''
 })
 const isSqlReadonlySourceSelected = computed(() => selectedSourceSystem.value?.kind === DATA_SOURCE_BRIDGE_KIND)
+const sourceReadOnlyBoundaryNotice = computed(() => {
+  if (!isSqlReadonlySourceSelected.value) return ''
+  return '当前来源是 SQL 只读通道：Payload 预览和 dry-run 只读取数据库源；Save-only 只写目标系统，不会写回该数据库连接。'
+})
 const showWatermarkConfig = computed(() => pipelineMode.value === 'incremental')
 const watermarkConfigError = computed(() => {
   if (!showWatermarkConfig.value) return ''
