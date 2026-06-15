@@ -206,6 +206,7 @@ export function sanitizeFieldProperty(
   }
 
   if (type === 'link') {
+    const { foreignBaseId: _omitForeignBaseId, ...cleanObj } = obj
     const foreignSheetId =
       typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
         ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
@@ -218,9 +219,9 @@ export function sanitizeFieldProperty(
         ? obj.foreignBaseId.trim()
         : ''
     return {
-      ...obj,
+      ...cleanObj,
       ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId } : {}),
-      ...(foreignBaseId ? { foreignBaseId } : {}),
+      ...(foreignSheetId && foreignBaseId ? { foreignBaseId } : {}),
       limitSingleRecord: obj.limitSingleRecord === true,
       ...(typeof obj.refKind === 'string' && obj.refKind.trim().length > 0
         ? { refKind: obj.refKind.trim() }
