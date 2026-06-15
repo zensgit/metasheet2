@@ -1187,6 +1187,17 @@ export class AutomationService {
     if (suspension.status !== 'pending') {
       return { status: 409, code: 'ALREADY_RESUMED', message: `Suspension is ${suspension.status}, not resumable` }
     }
+    // A6-3-3 resume-cursor gate — fail closed BEFORE any token claim:
+    // - `invalid`: a non-null but malformed / unknown cursor must NEVER fall back to the
+    //   top-level step_index path (that is the corrupt-branch-cursor fail-open we close).
+    // - `condition_branch`: branch-aware resume lands in the next slice; until then fail
+    //   closed rather than mis-resume a branch suspension via the top-level path.
+    if (suspension.resumeCursor.kind === 'invalid') {
+      return { status: 409, code: 'SUSPENSION_CURSOR_INVALID', message: 'Suspension resume cursor is invalid; cannot resume safely' }
+    }
+    if (suspension.resumeCursor.kind === 'condition_branch') {
+      return { status: 409, code: 'BRANCH_RESUME_UNAVAILABLE', message: 'Branch-local resume is not yet available for this suspension' }
+    }
     // Re-load the CURRENT rule (D4); fail closed if missing/disabled (T7).
     const rule = await this.getRule(suspension.ruleId)
     if (!rule || !rule.enabled) {
