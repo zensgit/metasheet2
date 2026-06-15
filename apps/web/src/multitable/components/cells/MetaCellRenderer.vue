@@ -31,6 +31,12 @@
       <code class="meta-cell-renderer__barcode">{{ displayValue }}</code>
     </template>
 
+    <!-- qrcode: render-only QR image of the cell's string value -->
+    <template v-else-if="field.type === 'qrcode'">
+      <span v-if="qrSvg" class="meta-cell-renderer__qrcode" :title="displayValue" v-html="qrSvg" />
+      <span v-else class="meta-cell-renderer__qrcode-empty">{{ displayValue }}</span>
+    </template>
+
     <!-- location -->
     <template v-else-if="field.type === 'location'">
       <span class="meta-cell-renderer__location" :title="displayValue">{{ displayValue }}</span>
@@ -169,6 +175,7 @@ import { formatFieldDisplay } from '../../utils/field-display'
 import { isSystemFieldType } from '../../utils/system-fields'
 import { resolveRatingFieldProperty } from '../../utils/field-config'
 import { percentGaugeAria, ratingGaugeAria } from '../../utils/meta-core-labels'
+import { qrSvgFromText } from '../../utils/qr-code'
 
 const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[]; attachmentSummaries?: MetaAttachment[] }>()
 const { isZh } = useLocale()
@@ -183,6 +190,20 @@ const displayValue = computed(() => {
   })
 })
 const isSystemField = computed(() => isSystemFieldType(props.field.type))
+
+// Render-only QR: encode the cell's own string value into an inline SVG. On an
+// over-capacity / unencodable value, fall back to null so the cell shows the
+// plain text instead of breaking the grid.
+const qrSvg = computed<string | null>(() => {
+  if (props.field.type !== 'qrcode') return null
+  const raw = props.value
+  if (raw === null || raw === undefined || raw === '') return null
+  try {
+    return qrSvgFromText(String(raw), { size: 64, border: 2 })
+  } catch {
+    return null
+  }
+})
 
 const dateDisplay = computed(() => {
   const v = props.value
@@ -436,6 +457,19 @@ const conditionalClass = computed(() => {
   border-radius: 4px;
   padding: 1px 5px;
   color: #334155;
+}
+.meta-cell-renderer__qrcode {
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+.meta-cell-renderer__qrcode :deep(svg) {
+  width: 32px;
+  height: 32px;
+}
+.meta-cell-renderer__qrcode-empty {
+  font-size: 12px;
+  color: #64748b;
 }
 .meta-cell-renderer__location {
   display: inline-flex;

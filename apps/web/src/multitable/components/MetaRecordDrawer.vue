@@ -139,6 +139,16 @@
             @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
           />
           <input
+            v-else-if="canEditField(field.id) && field.type === 'qrcode'"
+            :id="`drawer_field_${field.id}`"
+            class="meta-record-drawer__input"
+            type="text"
+            inputmode="text"
+            :placeholder="lc('cell.qrcodePlaceholder')"
+            :value="textControlValue(record.data[field.id])"
+            @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
+          />
+          <input
             v-else-if="canEditField(field.id) && field.type === 'location'"
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
@@ -230,6 +240,11 @@
             <div v-if="attachmentErrors[field.id]" class="meta-record-drawer__error">{{ attachmentErrors[field.id] }}</div>
           </div>
           <span v-else class="meta-record-drawer__text">{{ formatValue(field, record.data[field.id]) }}</span>
+          <div
+            v-if="field.type === 'qrcode' && drawerQrSvg(record.data[field.id])"
+            class="meta-record-drawer__qrcode"
+            v-html="drawerQrSvg(record.data[field.id])"
+          />
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-record-drawer__link-summary">{{ linkPreview(field.id) }}</div>
         </div>
         <!-- A3 §2.3/§2.4: per-field AI state — pending / error copy (by code) / per-run tokens. -->
@@ -333,6 +348,7 @@ import {
   locationValueFromAddress,
 } from '../utils/field-display'
 import { isSystemField } from '../utils/system-fields'
+import { qrSvgFromText } from '../utils/qr-code'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -632,6 +648,17 @@ function formatValue(field: MetaField, v: unknown): string {
 
 function textControlValue(value: unknown): string {
   return value === null || value === undefined ? '' : String(value)
+}
+
+// Render-only QR preview for qrcode fields: encode the stored string value.
+// Returns null for empty / unencodable values so no image is shown.
+function drawerQrSvg(value: unknown): string | null {
+  if (value === null || value === undefined || value === '') return null
+  try {
+    return qrSvgFromText(String(value), { size: 132, border: 3 })
+  } catch {
+    return null
+  }
 }
 
 function multiSelectValue(fieldId: string): string[] {

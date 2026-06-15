@@ -79,6 +79,20 @@
       @keydown.escape="emit('cancel')"
     />
 
+    <!-- qrcode: text-backed source string; the QR image renders read-only in the cell/drawer. -->
+    <input
+      v-else-if="field.type === 'qrcode'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="text"
+      inputmode="text"
+      :placeholder="l('cell.qrcodePlaceholder')"
+      :value="textControlValue(modelValue)"
+      @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
+
     <!-- location: address-only editor; coordinates can still be supplied through API. -->
     <input
       v-else-if="field.type === 'location'"
