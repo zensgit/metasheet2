@@ -1570,6 +1570,22 @@ export class AutomationExecutor {
     }
   }
 
+  /**
+   * B1-a1: run a SINGLE action with a caller-built context, reusing the exact
+   * per-action dispatch (`executeSingleAction`) — same handlers, same audit
+   * hooks — as the rule-triggered path, WITHOUT the rule-execution/job shell.
+   * Used by the button/run route so a button click is NOT a parallel execution
+   * path. The CALLER is responsible for dispatch-time authorization (visibility
+   * != executability — re-evaluate the underlying action's own gate as the
+   * actor, server-side) and for writing the audit row.
+   */
+  async runSingleAction(
+    action: AutomationAction,
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult> {
+    return this.executeSingleAction(action, context)
+  }
+
   private async executeSingleAction(
     action: AutomationAction,
     context: ExecutionContext,
@@ -1612,6 +1628,14 @@ export class AutomationExecutor {
             status: 'failed',
             error: 'start_approval requires execution_mode workflow_job_v1',
           }
+          break
+        case 'record_click':
+          // B1 button field — executor-owned INERT action. Records an auditable
+          // click with ZERO business side effect (no record write, no outbound,
+          // no job). The audit row is written by the caller (button/run route);
+          // here we only return a succeeded step so the click runs through the
+          // SAME dispatch as every other action (no parallel path).
+          result = { actionType: 'record_click', status: 'success' }
           break
         default:
           result = {

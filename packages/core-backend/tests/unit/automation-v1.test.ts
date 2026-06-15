@@ -5,6 +5,7 @@ import { AutomationScheduler, parseCronToIntervalMs } from '../../src/multitable
 import { matchesTrigger } from '../../src/multitable/automation-triggers'
 import type { AutomationTrigger, AutomationTriggerType } from '../../src/multitable/automation-triggers'
 import { EventBus } from '../../src/integration/events/event-bus'
+import { ALL_ACTION_TYPES, type AutomationAction } from '../../src/multitable/automation-actions'
 
 // ── DB mock for AutomationLogService ──────────────────────────────────────
 
@@ -4034,5 +4035,36 @@ describe('AutomationJobService — A6-1 persistence + C1 read', () => {
     expect(views[0].error).toBeUndefined() // null → absent (C1)
     expect(views[1].error).toBe('boom')
     for (const v of views) expect(() => normalizeWorkflowJob(v)).not.toThrow()
+  })
+})
+
+describe('runSingleAction — B1-a1 executor-owned record_click inert action', () => {
+  const ctx = () => ({
+    executionId: 'btn_test', ruleId: 'btn', sheetId: 's1', recordId: 'r1',
+    recordData: {}, ruleCreatedBy: '', actorId: 'u1', triggerEvent: {},
+  })
+
+  it('record_click is a registered action type', () => {
+    expect(ALL_ACTION_TYPES).toContain('record_click')
+  })
+
+  it('dispatches record_click to a succeeded step with ZERO side effect', async () => {
+    const deps = createMockDeps()
+    const executor = new AutomationExecutor(deps)
+    const action: AutomationAction = { type: 'record_click', config: {} }
+    const result = await executor.runSingleAction(action, ctx())
+    expect(result.actionType).toBe('record_click')
+    expect(result.status).toBe('success')
+    // inert: no DB write/read, no outbound — proves it is not a real-action path
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('runSingleAction reuses the same dispatch as the rule path (unknown type -> failed, not thrown)', async () => {
+    const deps = createMockDeps()
+    const executor = new AutomationExecutor(deps)
+    const result = await executor.runSingleAction({ type: 'definitely_not_a_type' as AutomationAction['type'], config: {} }, ctx())
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain('Unknown action type')
   })
 })
