@@ -5667,10 +5667,10 @@ export function univerMetaRouter(): Router {
       }
       return {}
     }
-    // Lock D: only fields whose authoritative value is a scalar in meta_records.data. Everything the
-    // write spine refuses to write (computed, link, attachment, system-auto, and the no-value `button`
-    // trigger) is excluded here too — otherwise a legacy `button`/system key lingering in data would
-    // enter the diff and turn into a spine RESTORE_FORBIDDEN, blocking an otherwise-restorable record.
+    // Lock D: this set gates the SCALAR-data path. Computed/system-auto/attachment are non-data and
+    // excluded; `button` is the no-value trigger (also caught by raw type below). `link` is listed as a
+    // defensive backstop, but link fields never reach this check — they are handled by a dedicated SET
+    // path (Slice 2a) above the scalar branch, which re-syncs meta_links + the mirror through the spine.
     const NON_RESTORABLE_TYPES = new Set([
       'formula', 'lookup', 'rollup', 'link', 'attachment', 'button',
       'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy',
@@ -5748,13 +5748,27 @@ export function univerMetaRouter(): Router {
         }
       }
 
-      // Faithful set ∪ unset diff over restorable fields only.
+      // Faithful set ∪ unset diff over restorable fields.
+      const asLinkIds = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : typeof v === 'string' && v ? [v] : [])
       const diff: RecordChange[] = []
       for (const [fid, guard] of fieldById.entries()) {
-        if (!isRestorableType(guard.type)) continue
         if (rawTypeById.get(fid) === 'button') continue // no-value trigger (mapFieldType folds it to 'string')
         const inSnap = Object.prototype.hasOwnProperty.call(targetSnapshot, fid)
         const inCur = Object.prototype.hasOwnProperty.call(currentData, fid)
+        // Slice 2a — link fields: restore the snapshot's link id array (or [] when absent at version N)
+        // as a SET routed through patchRecords, which re-syncs meta_links + the twoWay mirror fan-out.
+        // NEVER a data-`unset` (that touches only the data mirror and would desync the join table).
+        // Only emit when the id set actually differs (preserves no-op). The link config (guard.link)
+        // drives the spine's meta_links sync; a snapshot referencing a now-deleted foreign record is
+        // rejected fail-closed by the spine's link-target validation (VALIDATION_ERROR).
+        if (guard.type === 'link') {
+          const target = inSnap ? asLinkIds(targetSnapshot[fid]) : []
+          if (!sameValue(asLinkIds(currentData[fid]), target)) {
+            diff.push({ recordId, fieldId: fid, value: target, expectedVersion: currentVersion, op: 'set' })
+          }
+          continue
+        }
+        if (!isRestorableType(guard.type)) continue
         if (inSnap) {
           if (!sameValue(currentData[fid], targetSnapshot[fid])) {
             diff.push({ recordId, fieldId: fid, value: targetSnapshot[fid], expectedVersion: currentVersion, op: 'set' })
