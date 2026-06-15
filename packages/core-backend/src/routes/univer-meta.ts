@@ -243,6 +243,7 @@ const MULTITABLE_FIELD_TYPES = [
   'email',
   'phone',
   'barcode',
+  'qrcode',
   'location',
   'longText',
   'autoNumber',
@@ -282,6 +283,7 @@ type UniverMetaField = {
     | 'email'
     | 'phone'
     | 'barcode'
+    | 'qrcode'
     | 'location'
     | 'longText'
     | 'autoNumber'
@@ -1143,6 +1145,9 @@ async function validateLinkFieldConfig(
   // the opt-in declaration carried in the link property (null when absent).
   const actualForeignBaseId = foreignSheet.baseId ?? null
   const claimed = linkCfg.foreignBaseId ?? null
+  if (claimed !== null && claimed !== actualForeignBaseId) {
+    return `链接字段 foreignBaseId 需与外表实际 base 一致：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} 实际 base=${actualForeignBaseId ?? 'null'}，声明=${claimed ?? 'null'}`
+  }
   if (baseIdsAreCrossBase(sourceBaseId, actualForeignBaseId)) {
     // Bidirectional / mirror links MVP (design 2026-06-14 §7.2) — cross-base bidirectional is DEFERRED.
     // A two-way link must be same-base, even if it carries a valid cross-base `foreignBaseId` opt-in
@@ -1157,7 +1162,7 @@ async function validateLinkFieldConfig(
     // (claimed===null falls through to reject; a non-null claim !== null actual also rejects). This is a
     // pure consistency gate — the foreign READ-permission check is §3 (base-read) + §2a.3 (field mask),
     // NOT here (adding a perm check in this structural wall would over-reach).
-    if (claimed !== null && claimed === actualForeignBaseId) {
+    if (claimed !== null) {
       return null
     }
     return `链接字段跨 base 需显式 foreignBaseId 且与外表实际 base 一致：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} 实际 base=${actualForeignBaseId ?? 'null'}，声明=${claimed ?? 'null'}`
@@ -1318,6 +1323,28 @@ const normalizeAttachmentIds = normalizeAttachmentIdsShared
 
 function normalizeSearchTerm(value: unknown): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : ''
+}
+
+/**
+ * Parse an optional `fieldIds` column-selection query param for export.
+ * Accepts the comma-joined form (`?fieldIds=a,c`) and the repeated form
+ * (`?fieldIds=a&fieldIds=c`); trims and drops empty tokens. Returns `undefined`
+ * when nothing usable is supplied (= "no selection" → export all permitted columns,
+ * preserving the pre-selection default behavior). A non-empty result is a SELECTION
+ * hint only — the caller MUST intersect it with the already-permitted/masked field
+ * set; it can only narrow, never widen.
+ */
+function parseFieldIdSelection(value: unknown): Set<string> | undefined {
+  const raw: unknown[] = Array.isArray(value) ? value : value === undefined ? [] : [value]
+  const ids = new Set<string>()
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue
+    for (const token of entry.split(',')) {
+      const id = token.trim()
+      if (id) ids.add(id)
+    }
+  }
+  return ids.size > 0 ? ids : undefined
 }
 
 function isSearchableFieldType(type: UniverMetaField['type']): boolean {
@@ -1563,6 +1590,7 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
   }
 
   if (type === 'link') {
+    const { foreignBaseId: _omitForeignBaseId, ...cleanObj } = obj
     const foreignSheetId = typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
       ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
       : ''
@@ -1580,9 +1608,9 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
       ? obj.mirrorOf.trim()
       : ''
     return {
-      ...obj,
+      ...cleanObj,
       ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId } : {}),
-      ...(foreignBaseId ? { foreignBaseId } : {}),
+      ...(foreignSheetId && foreignBaseId ? { foreignBaseId } : {}),
       limitSingleRecord: obj.limitSingleRecord === true,
       ...(typeof obj.refKind === 'string' && obj.refKind.trim().length > 0 ? { refKind: obj.refKind.trim() } : {}),
       ...(obj.twoWay === true ? { twoWay: true } : {}),
@@ -2637,7 +2665,18 @@ async function computeDependentLookupRollupRecords(
   }
 
   const allowedFieldIdsBySheet = new Map<string, Set<string>>()
+  // ②b arc closeout — related-record write echoes are another cross-base read sink. Sheet-read
+  // alone is not enough: mirror the link-summary base-read gate so PATCH and the A2 AI-shortcut
+  // path cannot echo related ids or computed values from a base the caller cannot read.
+  const sourceSheet = await loadSheetRowShared(query, sourceSheetId)
+  const sourceBaseId = sourceSheet?.baseId ?? null
   for (const sheetId of rowsBySheet.keys()) {
+    const relatedSheet = await loadSheetRowShared(query, sheetId)
+    const relatedBaseId = relatedSheet?.baseId ?? null
+    if (baseIdsAreCrossBase(sourceBaseId, relatedBaseId)) {
+      const baseReadable = relatedBaseId != null && (await resolveBaseReadable(req, query, relatedBaseId))
+      if (!baseReadable) continue
+    }
     const fields = fieldsBySheet.get(sheetId) ?? []
     if (fields.length === 0) continue
     const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
@@ -6136,6 +6175,9 @@ export function univerMetaRouter(): Router {
         // a `foreignBaseId` to falsely claim cross-base) and means the wall's claim==truth check, once
         // passed at create, can never be retroactively desynced.
         if (foreignBaseIdInPayload(parsed.data.property)) {
+          if (!linkForeignKeyInPayload(parsed.data.property)) {
+            throw new ValidationError('foreignBaseId PATCH 必须同时携带 foreignSheetId')
+          }
           const storedForeignBaseId = extractForeignBaseId(row.property)
           const payloadForeignBaseId = extractForeignBaseId(parsed.data.property)
           if (payloadForeignBaseId !== storedForeignBaseId) {
@@ -7256,6 +7298,12 @@ export function univerMetaRouter(): Router {
   router.get('/sheets/:sheetId/export-xlsx', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
+    // Optional column selection: caller picks a SUBSET of columns to export. Accept both the
+    // comma-joined form (?fieldIds=a,c) and the repeated form (?fieldIds=a&fieldIds=c). Empty /
+    // absent → undefined (export all permitted columns = unchanged behavior). This is a SELECTION
+    // hint only; it is intersected with the permitted/masked field set below and can ONLY narrow,
+    // never widen — a denied/masked/tainted id requested here stays excluded.
+    const requestedFieldIds = parseFieldIdSelection(req.query.fieldIds)
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     }
@@ -7300,6 +7348,29 @@ export function univerMetaRouter(): Router {
       if (fieldIds.size !== fields.length) {
         fields = fields.filter((field) => fieldIds.has(field.id))
         fieldIds = new Set(fields.map((field) => field.id))
+      }
+
+      // Column selection (optional). CRITICAL SECURITY INVARIANT: the requested `fieldIds` are
+      // intersected with the FULLY-MASKED set computed above (`fields` already excludes
+      // field_permissions-denied, view-hidden, and §2a.3 formula-tainted columns). Selection can
+      // ONLY narrow this set, never widen it — a denied/masked/tainted id requested here is simply
+      // absent from `fields` and so drops out of the intersection (it cannot bypass the mask).
+      // Filter in place to preserve sheet field order (headers + cell projection). Unknown/foreign
+      // ids fall out of the intersection. If the selection resolves to ZERO exportable columns
+      // (all requested ids were foreign or masked), fail with 400 rather than emitting an empty
+      // workbook — an empty export is almost certainly a client bug, not an intended request.
+      if (requestedFieldIds) {
+        fields = fields.filter((field) => requestedFieldIds.has(field.id))
+        fieldIds = new Set(fields.map((field) => field.id))
+        if (fields.length === 0) {
+          return res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'fieldIds selection resolved to no exportable columns (unknown or not permitted)',
+            },
+          })
+        }
       }
 
       const rows: Array<Array<string | number | boolean | null | undefined>> = []

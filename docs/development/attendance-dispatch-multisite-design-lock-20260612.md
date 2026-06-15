@@ -27,12 +27,13 @@ D0 review baseline: `88f5f538a`（#2501，#2546 merge-base；已包含 #2545 SO3
   - `attendance_shift_assignments` 已有 `slot_index`、publish lifecycle、`producer_type/ref/key/run_id` provenance。
   - `shift_swap` 已证明 request envelope + dedicated route + final-approval writer + producer assignment 的模式可行。
 
-Current landed status（2026-06-12）:
+Current landed status（2026-06-14）:
 
 - D1 contract is landed in #2551.
 - D2 dedicated create/list/read/cancel API is landed in #2553, including generic final-approval/cancel cleanup guards while the final writer is pending.
-- D3 final approval writer is code-green in the 2026-06-13 implementation slice: final approval writes the published assignment + optional schedule-group membership, revalidates latest target-group department dispatch scope, and covers conflict/edit-window/shiftCompliance rollback in real-DB tests.
-- D4 admin/employee UI is code-green in the 2026-06-13 implementation slice: admin can create/read daily schedule-dispatch requests from Advanced scheduling, and employees can read their own `schedule_dispatch` requests from the generic requests feed. D5 staging smoke remains pending, so the capability stays 🟡 rather than ✅.
+- D3 final approval writer is code-green in the 2026-06-13 implementation slices: final approval writes the published assignment + optional schedule-group membership, revalidates latest target-group department dispatch scope, covers conflict/edit-window/shiftCompliance rollback in real-DB tests, and #2570 adds fail-closed protection for overlapping temporary / shift-swap / auto-shift generated rows plus existing-membership id reuse.
+- D4 admin/employee UI is code-green in the 2026-06-13 implementation slice: admin can create/read daily schedule-dispatch requests from Advanced scheduling, and employees can read their own `schedule_dispatch` requests from the generic requests feed.
+- D5 staging smoke passed on deploy `9179c65bb4a6d0014801896645f6108e94466a79` with stamp `dispatch-d5-mqegy7eh`, `workDate=2026-07-06`, `targetUser=dispatch-d5-mqegy7eh-user`, 27/27 checks, and cleanup residue=0. The dispatch capability is now ✅.
 
 ## 2. Scope
 
@@ -224,18 +225,18 @@ D4 UI coverage in the 2026-06-13 code-green slice:
 - employee view filters the generic `/api/attendance/requests` feed for `request_type='schedule_dispatch'`; it does not load the admin/scoped schedule-dispatch endpoint and remains read-only.
 - copy says “按天调度” / daily dispatch and does not claim hourly support or cost allocation.
 
-Still required before the dispatch capability can flip ✅:
+Completion evidence for dispatch ✅:
 
-- D5 staging smoke: create target group/shift/user, create dispatch request, approve, assert effective-calendar shows target shift, provenance exact, membership window present/reused, cleanup residue=0.
+- D5 staging smoke created target group/shift/user, created a `schedule_dispatch` request, approved it, asserted exact published assignment provenance, `source='schedule_dispatch'` membership window, effective-calendar `source='shift'`, replay idempotence, no generic adjustment event, settings restore, and cleanup residue=0 (`SCHEDULE_DISPATCH_D5_STAGING_SMOKE_PASS deploy=9179c65bb4a6d0014801896645f6108e94466a79 stamp=dispatch-d5-mqegy7eh workDate=2026-07-06 targetUser=dispatch-d5-mqegy7eh-user residue=0`).
 
 ## 9. Slice Plan
 
 - D0 design-lock (this PR) — docs only.
 - D1 latent schema + request type enum + runtime constants/labels + typed DB union + approval-flow support + OpenAPI/SDK generated contract + generic `/requests` rejection — landed #2551.
 - D2 dedicated create/list/read/cancel API and route-level tests — landed #2553.
-- D3 final approval writer + conflict/edit-window/compliance/scope guards — code-green in the 2026-06-13 implementation slice.
+- D3 final approval writer + conflict/edit-window/compliance/scope/protected-generated-row guards — code-green in the 2026-06-13 implementation slices (#2569 + #2570).
 - D4 admin/employee UI — code-green in the 2026-06-13 implementation slice.
-- D5 staging smoke harness/runbook — prepared in the 2026-06-13 prep slice; staging closeout still pending.
+- D5 staging smoke harness/runbook — prepared in the 2026-06-13 prep slice; staging closeout passed on 2026-06-14 (`dispatch-d5-mqegy7eh`, residue=0).
 - D6 permanent dispatch design-lock (optional, later).
 - D7 hourly support/cost split/report design-lock (optional, later).
 

@@ -24,8 +24,11 @@ same APIs used by the D4 admin UI and the existing approval resolver:
   `producer_key`, and `producer_run_id`;
 - final approval writes the target schedule-group membership window with
   `source='schedule_dispatch'`;
-- effective-calendar follows the new dispatch assignment and shows the target
-  shift for the target user/date;
+- effective-calendar follows the new dispatch assignment and resolves through
+  the shift path for the target user/date. The exact target shift is asserted
+  through the published assignment provenance because the single-slot
+  effective-calendar response does not expose `shiftId` unless `slots[]` is
+  enabled by multi-shift/temp overlays;
 - replay approval is rejected and does not create duplicate assignments or
   memberships;
 - no generic adjustment event is written;
@@ -40,7 +43,8 @@ surface in web tests.
 1. Deploy a main build that includes:
    - D1 schema/envelope and request type support;
    - D2 dedicated create/list/read/cancel API;
-   - D3 final approval writer;
+   - D3 final approval writer plus #2570 generated-row hardening
+     (`d85cfbf7` or later);
    - D4 admin/employee UI `#2571` (`31850251c`).
 2. Staging migrations are current through the schedule-dispatch detail table
    migration and the `schedule_dispatch` request-type constraint.
@@ -113,7 +117,7 @@ D5 schedule-dispatch staging smoke @ http://127.0.0.1:8082 (org default, target 
   PASS  create target shift
   PASS  create target schedule group
   PASS  create schedule_dispatch approval flow
-  PASS  before approval, effective-calendar does not yet show the dispatch target shift
+  PASS  before approval, effective-calendar does not expose the dispatch target shift id
   PASS  create schedule-dispatch request
   PASS  create response maps parent/detail fields to dispatched user and date window
   PASS  pending request has no assignment or membership side effects
@@ -122,7 +126,7 @@ D5 schedule-dispatch staging smoke @ http://127.0.0.1:8082 (org default, target 
   PASS  attendance_requests metadata records the dispatch finalization ids
   PASS  published schedule-dispatch assignment has exact target, date, and provenance
   PASS  schedule-dispatch membership window is present with exact target group/user/date
-  PASS  effective-calendar shows the dispatched target shift after approval
+  PASS  effective-calendar resolves through the shift path after approval
   PASS  replay approval is rejected without duplicate materialization
   PASS  replay leaves one assignment, one membership, and no generic adjustment event
 --- restore + cleanup ---
@@ -146,7 +150,7 @@ dated backfill like:
 > envelope/detail with no side effects; final approval
 > wrote exactly one published `producer_type='schedule_dispatch'` assignment
 > with deterministic provenance and one `source='schedule_dispatch'`
-> membership window; effective-calendar showed the target shift; replay did not
+> membership window; effective-calendar resolved through the shift path; replay did not
 > duplicate; no generic adjustment event; settings restored; cleanup residue=0.
 > D1–D4 + D5 staging closed `调度` ✅.
 
@@ -169,9 +173,11 @@ dated backfill like:
 - assignment provenance mismatch: D3 finalizer is not writing the locked
   `schedule_dispatch:{requestId/user/date/slot}` facts; do not flip ✅.
 - membership missing or wrong date window: D3 membership side fact regressed.
-- effective-calendar does not show the target shift: the assignment resolver is
-  not seeing the published dispatch row, or staging is not running the deployed
-  SHA.
+- effective-calendar does not resolve through the shift path: the assignment
+  resolver is not seeing the published dispatch row, or staging is not running
+  the deployed SHA. The exact target shift id is verified by the published
+  assignment provenance assertion because single-slot effective-calendar does
+  not expose `shiftId`.
 - residue nonzero: inspect rows with the printed `dispatch-d5-*` stamp, target
   user id, created request id, and approval instance business key before
   rerunning.

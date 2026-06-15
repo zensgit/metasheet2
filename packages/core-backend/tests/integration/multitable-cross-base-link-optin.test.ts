@@ -291,6 +291,80 @@ describeIfDatabase('②b slice 1 — cross-base link foreignBaseId opt-in + base
     expect(await fieldExists(fieldId)).toBe(true)
   })
 
+  test('XB-3b: CREATE same-base link with truthful own-base foreignBaseId succeeds', async () => {
+    const fieldId = `fld_xbo_t3b_${TS}`
+    const res = await request(buildApp(OWNER, WRITE)).post('/api/multitable/fields').send({
+      sheetId: SHEET_A,
+      id: fieldId,
+      name: 'Same Base Truthful Claim',
+      type: 'link',
+      property: { foreignSheetId: SHEET_A2, foreignBaseId: BASE_A },
+    })
+
+    expect(res.status).toBe(201)
+    expect((await fieldProperty(fieldId))?.foreignBaseId).toBe(BASE_A)
+  })
+
+  test('XB-3c: CREATE same-base link with a stale external foreignBaseId is rejected', async () => {
+    const fieldId = `fld_xbo_t3c_${TS}`
+    const res = await request(buildApp(OWNER, WRITE)).post('/api/multitable/fields').send({
+      sheetId: SHEET_A,
+      id: fieldId,
+      name: 'Same Base Stale External Claim',
+      type: 'link',
+      property: { foreignSheetId: SHEET_A2, foreignBaseId: BASE_B },
+    })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    expect(await fieldExists(fieldId)).toBe(false)
+  })
+
+  test('XB-3d: CREATE same-base link drops empty and non-string foreignBaseId claims', async () => {
+    const emptyFieldId = `fld_xbo_t3d_empty_${TS}`
+    const nonStringFieldId = `fld_xbo_t3d_num_${TS}`
+
+    await request(buildApp(OWNER, WRITE)).post('/api/multitable/fields').send({
+      sheetId: SHEET_A,
+      id: emptyFieldId,
+      name: 'Same Base Empty Claim',
+      type: 'link',
+      property: { foreignSheetId: SHEET_A2, foreignBaseId: '   ' },
+    }).expect(201)
+
+    await request(buildApp(OWNER, WRITE)).post('/api/multitable/fields').send({
+      sheetId: SHEET_A,
+      id: nonStringFieldId,
+      name: 'Same Base Non String Claim',
+      type: 'link',
+      property: { foreignSheetId: SHEET_A2, foreignBaseId: 42 },
+    }).expect(201)
+
+    expect((await fieldProperty(emptyFieldId))?.foreignBaseId).toBeUndefined()
+    expect((await fieldProperty(nonStringFieldId))?.foreignBaseId).toBeUndefined()
+  })
+
+  test('XB-immut-orphan: PATCH re-sending only the stored foreignBaseId is rejected', async () => {
+    const fieldId = `fld_xbo_immutorphan_${TS}`
+    await request(buildApp(OWNER, WRITE)).post('/api/multitable/fields').send({
+      sheetId: SHEET_A,
+      id: fieldId,
+      name: 'XB Immut Orphan',
+      type: 'link',
+      property: { foreignSheetId: SHEET_B, foreignBaseId: BASE_B },
+    }).expect(201)
+
+    const res = await request(buildApp(OWNER, WRITE))
+      .patch(`/api/multitable/fields/${fieldId}`)
+      .send({ property: { foreignBaseId: BASE_B } })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    const property = await fieldProperty(fieldId)
+    expect(property?.foreignSheetId).toBe(SHEET_B)
+    expect(property?.foreignBaseId).toBe(BASE_B)
+  })
+
   // ── XB-6 (TOCTOU): an opted-in link does NOT block the legit late sheet-create ─
   test('XB-6: a pre-seeded foreignBaseId-matching link does NOT block creating its target sheet; a non-opted-in link still blocks', async () => {
     // Pre-seed a cross-base link from SHEET_A (BASE_A) targeting the not-yet-existent SHEET_LATE,

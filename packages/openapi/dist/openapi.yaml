@@ -2238,6 +2238,7 @@ components:
         - email
         - phone
         - barcode
+        - qrcode
         - location
         - longText
         - autoNumber
@@ -12733,6 +12734,24 @@ paths:
           description: >-
             Optional view guard. The route verifies the view belongs to the
             sheet.
+        - in: query
+          name: fieldIds
+          schema:
+            oneOf:
+              - type: string
+              - type: array
+                items:
+                  type: string
+          style: form
+          explode: true
+          description: >-
+            Optional column selection. A comma-joined string (`a,c`) or repeated
+            param (`fieldIds=a&fieldIds=c`) naming the field ids to export. The
+            selection is INTERSECTED with the already-permitted/masked field set
+            (field permissions, view-hidden, and §2a.3 formula-taint) — it can
+            only NARROW the export, never widen it; denied/masked/tainted or
+            unknown ids are dropped. Omit to export all permitted columns. A
+            selection that resolves to zero exportable columns → 400.
       responses:
         '200':
           description: XLSX workbook

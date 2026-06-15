@@ -339,6 +339,10 @@ function effectiveShiftId(item) {
   return item?.effective?.shiftId || item?.effective?.shift_id || slotShiftId(effectiveSlots(item)[0]) || null
 }
 
+function effectiveSource(item) {
+  return item?.effective?.source ?? null
+}
+
 async function main() {
   console.log(`D5 schedule-dispatch staging smoke @ ${BASE_URL} (org ${ORG_ID}, target ${TARGET_USER}, workDate ${WORK_DATE}, stamp ${STAMP})`)
   assertSyntheticTargetUser()
@@ -366,7 +370,7 @@ async function main() {
 
   const before = await effectiveItem()
   ok(effectiveShiftId(before) !== targetShiftId,
-    'before approval, effective-calendar does not yet show the dispatch target shift', before?.effective)
+    'before approval, effective-calendar does not expose the dispatch target shift id', before?.effective)
 
   const requestId = await createScheduleDispatchRequest({
     scheduleGroupId: targetScheduleGroupId,
@@ -471,10 +475,10 @@ async function main() {
     'schedule-dispatch membership window is present with exact target group/user/date', membership)
 
   const after = await effectiveItem()
-  ok(effectiveShiftId(after) === targetShiftId,
-    'effective-calendar shows the dispatched target shift after approval', {
+  ok(effectiveSource(after) === 'shift',
+    'effective-calendar resolves through the shift path after approval', {
       expectedShiftId: targetShiftId,
-      actualShiftId: effectiveShiftId(after),
+      exposedShiftId: effectiveShiftId(after),
       effective: after?.effective,
     })
 
@@ -488,7 +492,7 @@ async function main() {
     `SELECT
        (SELECT count(*)::int FROM attendance_shift_assignments WHERE org_id = $1 AND producer_type = 'schedule_dispatch' AND producer_ref_id = $2::uuid) AS assignment_count,
        (SELECT count(*)::int FROM attendance_schedule_group_members WHERE org_id = $1 AND user_id = $3 AND source = 'schedule_dispatch') AS membership_count,
-       (SELECT count(*)::int FROM attendance_events WHERE org_id = $1 AND meta ->> 'requestId' = $2) AS event_count`,
+       (SELECT count(*)::int FROM attendance_events WHERE org_id = $1 AND meta ->> 'requestId' = $2::text) AS event_count`,
     [ORG_ID, requestId, TARGET_USER],
   ))[0]
   ok(Number(countsAfterReplay?.assignment_count) === 1

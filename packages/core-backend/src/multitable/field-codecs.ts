@@ -21,6 +21,7 @@ export type MultitableFieldType =
   | 'email'
   | 'phone'
   | 'barcode'
+  | 'qrcode'
   | 'location'
   | 'longText'
   | 'autoNumber'
@@ -112,6 +113,7 @@ export function mapFieldType(type: string): MultitableFieldType | string {
   if (normalized === 'email') return 'email'
   if (normalized === 'phone') return 'phone'
   if (normalized === 'barcode' || normalized === 'bar_code' || normalized === 'bar-code') return 'barcode'
+  if (normalized === 'qrcode' || normalized === 'qr_code' || normalized === 'qr-code' || normalized === 'qr') return 'qrcode'
   if (
     normalized === 'location' ||
     normalized === 'geo' ||
@@ -204,6 +206,7 @@ export function sanitizeFieldProperty(
   }
 
   if (type === 'link') {
+    const { foreignBaseId: _omitForeignBaseId, ...cleanObj } = obj
     const foreignSheetId =
       typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
         ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
@@ -227,9 +230,9 @@ export function sanitizeFieldProperty(
         ? obj.mirrorOf.trim()
         : ''
     return {
-      ...obj,
+      ...cleanObj,
       ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId } : {}),
-      ...(foreignBaseId ? { foreignBaseId } : {}),
+      ...(foreignSheetId && foreignBaseId ? { foreignBaseId } : {}),
       limitSingleRecord: obj.limitSingleRecord === true,
       ...(typeof obj.refKind === 'string' && obj.refKind.trim().length > 0
         ? { refKind: obj.refKind.trim() }
@@ -382,7 +385,7 @@ export function sanitizeFieldProperty(
     return { ...obj, timezone }
   }
 
-  if (type === 'url' || type === 'email' || type === 'phone' || type === 'barcode' || type === 'location' || type === 'longText') {
+  if (type === 'url' || type === 'email' || type === 'phone' || type === 'barcode' || type === 'qrcode' || type === 'location' || type === 'longText') {
     return obj
   }
 
@@ -542,6 +545,23 @@ export function validateBarcodeValue(value: unknown, fieldId: string): string | 
   return trimmed
 }
 
+// QR-code field is text-backed like barcode: the stored value is the plain
+// string (URL/text) that the frontend renders into a QR image. Render-only —
+// the codec never produces image data, only validates/normalizes the source
+// string. Cap matches barcode; QR can encode more, but 256 keeps cells sane.
+export function validateQrcodeValue(value: unknown, fieldId: string): string | null {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value !== 'string' && typeof value !== 'number') {
+    throw new Error(`QR code value must be a string for ${fieldId}`)
+  }
+  const trimmed = String(value).trim()
+  if (trimmed === '') return null
+  if (trimmed.length > 256) {
+    throw new Error(`QR code value must be 256 characters or fewer for ${fieldId}`)
+  }
+  return trimmed
+}
+
 export type LocationValue = {
   address: string
   latitude?: number
@@ -665,6 +685,7 @@ export function coerceBatch1Value(
   if (fieldType === 'email') return validateEmailValue(value, fieldId)
   if (fieldType === 'phone') return validatePhoneValue(value, fieldId)
   if (fieldType === 'barcode') return validateBarcodeValue(value, fieldId)
+  if (fieldType === 'qrcode') return validateQrcodeValue(value, fieldId)
   if (fieldType === 'location') return validateLocationValue(value, fieldId)
   if (fieldType === 'dateTime') return validateDateTimeValue(value, fieldId)
   return value
@@ -678,6 +699,7 @@ export const BATCH1_FIELD_TYPES: ReadonlySet<string> = new Set([
   'email',
   'phone',
   'barcode',
+  'qrcode',
   'location',
   'dateTime',
 ])

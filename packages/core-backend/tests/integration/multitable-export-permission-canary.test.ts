@@ -105,8 +105,16 @@ async function createApp(mockArgs: Parameters<typeof createMockPool>[0]) {
   return app
 }
 
-async function exportRows(app: express.Express, viewId?: string): Promise<string[][]> {
-  const url = `/api/multitable/sheets/${SHEET_ID}/export-xlsx${viewId ? `?viewId=${viewId}` : ''}`
+async function exportRows(
+  app: express.Express,
+  viewId?: string,
+  fieldIds?: string,
+): Promise<string[][]> {
+  const params = new URLSearchParams()
+  if (viewId) params.set('viewId', viewId)
+  if (fieldIds !== undefined) params.set('fieldIds', fieldIds)
+  const qs = params.toString()
+  const url = `/api/multitable/sheets/${SHEET_ID}/export-xlsx${qs ? `?${qs}` : ''}`
   const response = await request(app)
     .get(url)
     .buffer(true)
@@ -159,5 +167,80 @@ describe('multitable export permission projection (D3c regression)', () => {
     // export must apply view.hidden_field_ids (D3c), not just validate viewId existence.
     expect(header).not.toContain('Secret')
     expect(flat).not.toContain('topsecret')
+  })
+})
+
+describe('multitable export column selection (fieldIds intersection, mask-preserving)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+
+  test('fieldIds=[Name,Secret] subset → only Name+Amount? no — exports requested INTERSECT visible (Name only of the two has no extra restriction)', async () => {
+    // No extra restriction: all 3 are visible. Selecting a subset narrows the export.
+    const app = await createApp({})
+    const rows = await exportRows(app, undefined, 'fld_name,fld_secret')
+    const header = rows[0] ?? []
+    // Field order is preserved (sheet order), Amount excluded (not requested).
+    expect(header).toEqual(['Name', 'Secret'])
+    expect(header).not.toContain('Amount')
+  })
+
+  test('SECURITY CANARY: fieldIds including a DENIED field must STILL exclude it (selection cannot bypass field_permissions mask)', async () => {
+    // user is denied fld_secret via field_permissions; caller requests it explicitly.
+    const app = await createApp({
+      fieldPermissionRows: [{ field_id: 'fld_secret', visible: false, read_only: false }],
+    })
+    // request BOTH a permitted field and the denied one — selection must not widen.
+    const rows = await exportRows(app, undefined, 'fld_name,fld_secret')
+    const header = rows[0] ?? []
+    const flat = rows.flat()
+    // The load-bearing invariant: fieldIds intersects ON TOP of the mask, never bypasses it.
+    expect(header).toEqual(['Name'])
+    expect(header).not.toContain('Secret')
+    expect(flat).not.toContain('topsecret')
+  })
+
+  test('SECURITY CANARY (view-hidden): fieldIds including a view.hidden_field_ids field must STILL exclude it', async () => {
+    const app = await createApp({
+      viewRow: {
+        id: 'view_secret',
+        sheet_id: SHEET_ID,
+        name: 'Secret View',
+        type: 'grid',
+        filter_info: null,
+        sort_info: null,
+        group_info: null,
+        hidden_field_ids: ['fld_secret'],
+        config: null,
+      },
+    })
+    const rows = await exportRows(app, 'view_secret', 'fld_name,fld_secret')
+    const header = rows[0] ?? []
+    const flat = rows.flat()
+    expect(header).toEqual(['Name'])
+    expect(flat).not.toContain('topsecret')
+  })
+
+  test('REGRESSION: no fieldIds → unchanged behavior (all permitted columns exported)', async () => {
+    const app = await createApp({})
+    const rows = await exportRows(app)
+    const header = rows[0] ?? []
+    expect(header).toEqual(['Name', 'Amount', 'Secret'])
+  })
+
+  test('foreign/unknown id in fieldIds → ignored (intersection drops it)', async () => {
+    const app = await createApp({})
+    const rows = await exportRows(app, undefined, 'fld_name,fld_does_not_exist')
+    const header = rows[0] ?? []
+    expect(header).toEqual(['Name'])
+  })
+
+  test('all-foreign fieldIds (selection resolves to zero exportable columns) → 400, not an empty/200 file', async () => {
+    const app = await createApp({})
+    const response = await request(app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx?fieldIds=nope1,nope2`)
+      .expect(400)
+    expect(response.body?.error?.code).toBe('VALIDATION_ERROR')
   })
 })

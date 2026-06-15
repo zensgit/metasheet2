@@ -74,6 +74,7 @@ export type UniverMetaField = {
     | 'email'
     | 'phone'
     | 'barcode'
+    | 'qrcode'
     | 'location'
     | 'longText'
     | 'autoNumber'
