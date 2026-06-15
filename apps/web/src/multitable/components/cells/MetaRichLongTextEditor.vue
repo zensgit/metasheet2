@@ -69,6 +69,9 @@
       @input="onInput"
       @blur="onBlur"
       @paste="onPaste"
+      @keydown.meta.enter.prevent="onConfirm"
+      @keydown.ctrl.enter.prevent="onConfirm"
+      @keydown.escape.prevent="emit('cancel')"
     />
   </div>
 </template>
@@ -151,6 +154,20 @@ function onBlur(): void {
   const value = currentValue()
   emit('update:modelValue', value)
   emit('change', value)
+}
+
+/**
+ * Cmd/Ctrl+Enter = confirm, mirroring the plain textarea's commit keybinding. Push
+ * the current value on all three channels (live model, `change` commit, `confirm`)
+ * so every host commits correctly: the grid cell editor commits on `confirm`, the
+ * drawer on `change`, buffered hosts on `update:modelValue`. (Plain Enter inserts a
+ * newline as usual — only the modifier chord commits.)
+ */
+function onConfirm(): void {
+  const value = currentValue()
+  emit('update:modelValue', value)
+  emit('change', value)
+  emit('confirm')
 }
 
 /** Paste as PLAIN text only — never trust pasted HTML in the editor surface. */

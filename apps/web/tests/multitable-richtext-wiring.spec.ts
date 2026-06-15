@@ -125,6 +125,53 @@ describe('cell editor (MetaCellEditor) — rich vs plain editor selection', () =
     app.unmount()
     container.remove()
   })
+
+  // The grid commits a cell edit ONLY on the editor's `confirm` event and cancels
+  // on `cancel` (MetaGridTable has no blur/click-away commit). So the rich editor
+  // MUST forward confirm/cancel through MetaCellEditor or inline rich edits silently
+  // never save — a data-loss path these tests lock.
+  it('forwards confirm (Cmd/Ctrl+Enter) so the grid can commit an inline rich edit', async () => {
+    const confirmSpy = vi.fn()
+    const updateSpy = vi.fn()
+    const { container, app } = mount(MetaCellEditor, {
+      field: RICH,
+      modelValue: '<b>x</b>',
+      recordId: 'rec_1',
+      'onUpdate:modelValue': updateSpy,
+      onConfirm: confirmSpy,
+      onCancel: vi.fn(),
+      onOpenLinkPicker: vi.fn(),
+    })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }))
+    await nextTick()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    // The latest value is pushed before confirm so the grid reads the current edit.
+    expect(updateSpy).toHaveBeenCalled()
+    app.unmount()
+    container.remove()
+  })
+
+  it('forwards cancel (Escape) so the grid can cancel an inline rich edit', async () => {
+    const cancelSpy = vi.fn()
+    const { container, app } = mount(MetaCellEditor, {
+      field: RICH,
+      modelValue: '<b>x</b>',
+      recordId: 'rec_1',
+      'onUpdate:modelValue': vi.fn(),
+      onConfirm: vi.fn(),
+      onCancel: cancelSpy,
+      onOpenLinkPicker: vi.fn(),
+    })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await nextTick()
+    expect(cancelSpy).toHaveBeenCalledTimes(1)
+    app.unmount()
+    container.remove()
+  })
 })
 
 describe('MetaRichLongTextEditor — commit semantics (drawer PATCH-on-blur, no flood)', () => {
