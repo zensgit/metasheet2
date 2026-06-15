@@ -22,6 +22,11 @@ interface ExpiredCompTimeBalanceRow {
 export class AttendanceExpiryService {
   constructor(private readonly query: AttendanceExpiryQuery = defaultQuery as AttendanceExpiryQuery) {}
 
+  // Expires every aged lot across ALL leave types (#2622 §5: the scan has no leave-type filter). The
+  // expire event's source_type is derived per leave_type_code (comp_time → comp_time_expiry, annual →
+  // annual_leave_expiry, else {type}_expiry) inside the single atomic statement, preserving the #2267
+  // claim (events bound to the UPDATE RETURNING → a dup/leader-failed tick writes 0 events). The
+  // comp_time-era method/type names are kept so the ④ C4-1 no-regress test re-runs verbatim.
   async expireCompTimeBalances(): Promise<ExpiredCompTimeBalance[]> {
     const result = await this.query<ExpiredCompTimeBalanceRow>(
       `WITH candidates AS (
@@ -44,12 +49,17 @@ export class AttendanceExpiryService {
             AND b.remaining_minutes > 0
             AND b.expires_at IS NOT NULL
             AND b.expires_at <= now()
-          RETURNING b.org_id, b.user_id, b.id AS balance_id, c.remaining_minutes AS expired_minutes
+          RETURNING b.org_id, b.user_id, b.id AS balance_id, c.remaining_minutes AS expired_minutes, b.leave_type_code
        ),
        inserted_events AS (
          INSERT INTO attendance_leave_balance_events
            (org_id, user_id, balance_id, event_type, delta_minutes, source_type)
-         SELECT org_id, user_id, balance_id, 'expire', -expired_minutes, 'comp_time_expiry'
+         SELECT org_id, user_id, balance_id, 'expire', -expired_minutes,
+                CASE leave_type_code
+                  WHEN 'comp_time' THEN 'comp_time_expiry'
+                  WHEN 'annual' THEN 'annual_leave_expiry'
+                  ELSE leave_type_code || '_expiry'
+                END
            FROM expired
          RETURNING balance_id
        )
