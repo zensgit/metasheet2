@@ -296,6 +296,14 @@
             <div v-if="item.changedFieldIds.length" class="meta-record-drawer__history-fields">
               {{ historyFieldLabels(item.changedFieldIds) }}
             </div>
+            <button
+              v-if="canRestoreTo(item)"
+              type="button"
+              class="meta-record-drawer__history-restore"
+              data-test="record-history-restore"
+              :title="l('record.restoreTitle')"
+              @click="requestRestore(item)"
+            >{{ l('record.restore') }}</button>
           </li>
         </ol>
       </div>
@@ -404,6 +412,10 @@ const emit = defineEmits<{
   (e: 'open-automation'): void
   (e: 'open-link-picker', field: MetaField): void
   (e: 'navigate', recordId: string): void
+  /** Slice 3: request restore of this record to a prior revision. The parent (workbench) owns
+   * the apiClient.restoreRecordVersion call + confirm + record refresh — consistent with how the
+   * drawer emits 'patch' / 'delete' / 'toggle-lock' rather than mutating directly. */
+  (e: 'restore', payload: { recordId: string; targetVersion: number; expectedVersion: number }): void
   /** A3: AI shortcut triggers (workbench resolves them through useAiShortcut). */
   (e: 'ai-preview', field: MetaField): void
   (e: 'ai-run', field: MetaField): void
@@ -640,6 +652,25 @@ function historyActionLabel(action: MetaRecordRevision['action']): string {
   if (action === 'create') return l('record.historyActionCreated')
   if (action === 'delete') return l('record.historyActionDeleted')
   return l('record.historyActionUpdated')
+}
+
+// Slice 3: a prior NON-delete revision is restorable when the user can edit the record. The current
+// version (== record.version) shows no button (restoring to it is a no-op). Delete revisions are not
+// restorable here (undelete is Slice 2b → the endpoint returns RESTORE_UNSUPPORTED).
+function canRestoreTo(item: MetaRecordRevision): boolean {
+  return (
+    props.canEdit
+    && props.rowActions?.canEdit !== false
+    && !!props.record
+    && item.action !== 'delete'
+    && item.version !== props.record.version
+  )
+}
+
+function requestRestore(item: MetaRecordRevision): void {
+  const record = props.record
+  if (!record || !canRestoreTo(item)) return
+  emit('restore', { recordId: record.id, targetVersion: item.version, expectedVersion: record.version })
 }
 
 function historyFieldLabels(fieldIds: string[]): string {

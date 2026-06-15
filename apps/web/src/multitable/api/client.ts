@@ -864,6 +864,17 @@ export interface AiShortcutUsage {
   completionTokens: number
 }
 
+// Layer 1 record-level version restore (POST .../restore).
+export interface RestoreRecordResult {
+  recordId: string
+  newVersion: number
+  /** true when the restorable diff was empty — no write, no new revision. */
+  noop: boolean
+  restoredFieldIds: string[]
+  /** Always [] under atomic reject; reserved for a future partial-restore mode. */
+  skippedFieldIds: string[]
+}
+
 export interface AiShortcutPreviewData {
   status: 'succeeded'
   action: 'preview'
@@ -1369,6 +1380,29 @@ export class MultitableApiClient {
       body: JSON.stringify(input),
     })
     return this.parseJson(res)
+  }
+
+  /**
+   * Restore a record to a prior revision (Layer 1). On failure the thrown
+   * MultitableApiError carries `.code` — VERSION_CONFLICT (409) / VERSION_EXPIRED (410) /
+   * RESTORE_UNSUPPORTED · SNAPSHOT_UNAVAILABLE · SCHEMA_DRIFT (422) / RESTORE_FORBIDDEN (403) —
+   * so callers can branch on the documented contract without string-matching messages.
+   */
+  async restoreRecordVersion(
+    sheetId: string,
+    recordId: string,
+    targetVersion: number,
+    expectedVersion: number,
+  ): Promise<RestoreRecordResult> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/restore`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetVersion, expectedVersion }),
+      },
+    )
+    return this.parseJson<RestoreRecordResult>(res)
   }
 
   // --- Form submit ---

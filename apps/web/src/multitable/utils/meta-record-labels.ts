@@ -38,6 +38,9 @@ export type MetaRecordLabelKey =
   | 'record.details' | 'record.history'
   | 'record.historyLoading' | 'record.historyUnavailable' | 'record.historyEmpty'
   | 'record.historyActionCreated' | 'record.historyActionDeleted' | 'record.historyActionUpdated'
+  // --- Layer 1 record-level restore (Slice 3) ---
+  | 'record.restore' | 'record.restoreTitle' | 'record.restoreConfirm'
+  | 'record.restoreSuccess' | 'record.restoreNoop' | 'record.errorRestore'
   // FE-owned static fallback strings (the `error?.message ?? l(...)`
   // pattern from T3A2). Backend error.message remains raw when present.
   | 'record.errorHistoryLoad' | 'record.errorWatchLoad' | 'record.errorWatchUpdate'
@@ -80,6 +83,12 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.historyActionCreated': { en: 'Created', zh: '已创建' },
   'record.historyActionDeleted': { en: 'Deleted', zh: '已删除' },
   'record.historyActionUpdated': { en: 'Updated', zh: '已更新' },
+  'record.restore': { en: 'Restore', zh: '恢复' },
+  'record.restoreTitle': { en: 'Restore the record to this version', zh: '将记录恢复到此版本' },
+  'record.restoreConfirm': { en: 'Restore this record to the selected version? This creates a new version; it does not erase history.', zh: '将记录恢复到所选版本？这会生成一条新版本，不会抹除历史。' },
+  'record.restoreSuccess': { en: 'Restored', zh: '已恢复' },
+  'record.restoreNoop': { en: 'Already at this version', zh: '已是该版本' },
+  'record.errorRestore': { en: 'Restore failed', zh: '恢复失败' },
   'record.errorHistoryLoad': { en: 'Failed to load history', zh: '加载历史失败' },
   'record.errorWatchLoad': { en: 'Failed to load watch status', zh: '加载关注状态失败' },
   'record.errorWatchUpdate': { en: 'Failed to update watch status', zh: '更新关注状态失败' },
