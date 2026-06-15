@@ -379,3 +379,193 @@ export function evaluateConditionalFormattingRules(
   }
   return { rowStyle, cellStyles, matchedRuleIds }
 }
+
+// ===========================================================================
+// Range-based SCALE formatting (A5: data bar / color scale / icon set)
+// ---------------------------------------------------------------------------
+// Distinct from the operator-match rules above: a scale rule is NOT "match →
+// style"; it applies to EVERY cell of a numeric field, mapping each value
+// against the field's min/max range. min/max is computed over the records
+// passed in (caller scopes them to already-loaded, already-masked rows — the
+// same client-side discipline as the A2 export picker; a full-column server
+// aggregate is a separate gated follow-up). A5-1 implements `dataBar`;
+// `colorScale` / `iconSet` land in A5-2 / A5-3 (sanitizer rejects them until
+// then, so a forward-dated config can't half-render).
+// ===========================================================================
+
+export const CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT = 20
+
+export type ConditionalFormattingScaleKind = 'dataBar' | 'colorScale' | 'iconSet'
+
+export type ConditionalFormattingScaleRange = {
+  mode: 'auto' | 'fixed'
+  min?: number
+  max?: number
+}
+
+export type ConditionalFormattingDataBarConfig = {
+  color: string
+  negativeColor?: string
+  showValue?: boolean
+}
+
+export type ConditionalFormattingScaleRule = {
+  id: string
+  order: number
+  fieldId: string
+  kind: ConditionalFormattingScaleKind
+  enabled: boolean
+  range: ConditionalFormattingScaleRange
+  dataBar?: ConditionalFormattingDataBarConfig
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+export function sanitizeConditionalFormattingScaleRule(input: unknown): ConditionalFormattingScaleRule | null {
+  if (!isPlainObject(input)) return null
+  const id = typeof input.id === 'string' && input.id.trim() ? input.id.trim() : null
+  const fieldId = typeof input.fieldId === 'string' && input.fieldId.trim() ? input.fieldId.trim() : null
+  if (!id || !fieldId) return null
+
+  // A5-1 supports dataBar only; colorScale / iconSet are added in A5-2 / A5-3.
+  if (input.kind !== 'dataBar') return null
+
+  const orderRaw = typeof input.order === 'number' && Number.isFinite(input.order) ? input.order : 0
+  const enabled = input.enabled !== false
+
+  const rangeRaw = isPlainObject(input.range) ? input.range : {}
+  let range: ConditionalFormattingScaleRange
+  if (rangeRaw.mode === 'fixed') {
+    const min = toFiniteNumber(rangeRaw.min)
+    const max = toFiniteNumber(rangeRaw.max)
+    if (min === null || max === null || min === max) return null
+    range = { mode: 'fixed', min: Math.min(min, max), max: Math.max(min, max) }
+  } else {
+    range = { mode: 'auto' }
+  }
+
+  const barRaw = isPlainObject(input.dataBar) ? input.dataBar : {}
+  const color = sanitizeHex(barRaw.color)
+  if (!color) return null
+  const dataBar: ConditionalFormattingDataBarConfig = { color }
+  const negativeColor = sanitizeHex(barRaw.negativeColor)
+  if (negativeColor) dataBar.negativeColor = negativeColor
+  if (barRaw.showValue === true) dataBar.showValue = true
+
+  return { id, order: Math.floor(orderRaw), fieldId, kind: 'dataBar', enabled, range, dataBar }
+}
+
+export function sanitizeConditionalFormattingScaleRules(input: unknown): ConditionalFormattingScaleRule[] {
+  if (!Array.isArray(input)) return []
+  const out: ConditionalFormattingScaleRule[] = []
+  for (const item of input) {
+    const rule = sanitizeConditionalFormattingScaleRule(item)
+    if (rule) out.push(rule)
+    if (out.length >= CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT) break
+  }
+  return out
+    .map((rule, index) => ({ rule, index }))
+    .sort((a, b) => a.rule.order - b.rule.order || a.index - b.index)
+    .map((entry) => entry.rule)
+}
+
+export function extractScaleRulesFromConfig(config: unknown): ConditionalFormattingScaleRule[] {
+  if (!isPlainObject(config)) return []
+  return sanitizeConditionalFormattingScaleRules(config.conditionalFormattingScaleRules)
+}
+
+/** Per-cell derived presentation for a scale rule. A5-1: data bar only. */
+export type FieldScalePresentation = {
+  /** Data-bar fill, 0..100, as a fraction of (value - min) / (max - min). */
+  barPct: number
+  /** Bar color — `negativeColor` for negative values when configured, else `color`. */
+  barColor: string
+  /** True when the source value is negative (render may baseline differently). */
+  negative: boolean
+}
+
+export type FieldScaleResult = {
+  rule: ConditionalFormattingScaleRule
+  min: number
+  max: number
+  byRecordId: Record<string, FieldScalePresentation>
+}
+
+export type FieldScaleMap = {
+  /** fieldId -> computed range + per-record presentation. */
+  byField: Record<string, FieldScaleResult>
+}
+
+const EMPTY_SCALE_MAP: FieldScaleMap = Object.freeze({
+  byField: Object.freeze({}) as Record<string, FieldScaleResult>,
+}) as FieldScaleMap
+
+/**
+ * Pre-compute data-bar presentation per (fieldId, recordId). For each enabled
+ * scale rule, compute the field's [min,max] over `records` (auto) or use the
+ * rule's fixed range, then map each finite value to a fill percent. Records
+ * whose value is non-numeric are skipped (no bar). A degenerate range
+ * (min === max) renders a full bar for every present value.
+ */
+export function buildFieldScaleMap(
+  rules: ConditionalFormattingScaleRule[],
+  records: ReadonlyArray<{ id?: string; data?: Record<string, unknown> }>,
+  options: { precomputedRange?: Record<string, { min: number; max: number }> } = {},
+): FieldScaleMap {
+  if (!rules.length || !records.length) return EMPTY_SCALE_MAP
+  const byField: Record<string, FieldScaleResult> = {}
+
+  for (const rule of rules) {
+    if (!rule.enabled || rule.kind !== 'dataBar' || !rule.dataBar) continue
+    if (byField[rule.fieldId]) continue // first rule per field wins (mirrors cell-style precedence)
+
+    // Resolve range.
+    let min: number
+    let max: number
+    if (rule.range.mode === 'fixed' && typeof rule.range.min === 'number' && typeof rule.range.max === 'number') {
+      min = rule.range.min
+      max = rule.range.max
+    } else {
+      const preset = options.precomputedRange?.[rule.fieldId]
+      if (preset) {
+        min = preset.min
+        max = preset.max
+      } else {
+        let lo = Infinity
+        let hi = -Infinity
+        for (const record of records) {
+          const v = toComparableNumber(record?.data?.[rule.fieldId])
+          if (v === null) continue
+          if (v < lo) lo = v
+          if (v > hi) hi = v
+        }
+        if (lo === Infinity) continue // no numeric values → no bars for this field
+        min = lo
+        max = hi
+      }
+    }
+
+    const span = max - min
+    const byRecordId: Record<string, FieldScalePresentation> = {}
+    for (const record of records) {
+      if (!record?.id) continue
+      const v = toComparableNumber(record.data?.[rule.fieldId])
+      if (v === null) continue
+      const pct = span <= 0 ? 100 : Math.max(0, Math.min(100, ((v - min) / span) * 100))
+      const negative = v < 0
+      const barColor = negative && rule.dataBar.negativeColor ? rule.dataBar.negativeColor : rule.dataBar.color
+      byRecordId[record.id] = { barPct: pct, barColor, negative }
+    }
+    byField[rule.fieldId] = { rule, min, max, byRecordId }
+  }
+
+  if (Object.keys(byField).length === 0) return EMPTY_SCALE_MAP
+  return { byField }
+}
