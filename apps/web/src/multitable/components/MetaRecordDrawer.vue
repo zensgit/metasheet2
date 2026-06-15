@@ -120,6 +120,16 @@
             :value="textControlValue(record.data[field.id])"
             @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
           />
+          <!-- rich longText: minimal rich editor (server re-sanitizes on write).
+               Patch on `change` (blur) only — mirrors the plain textarea's @change so
+               the drawer issues ONE server PATCH per edit, never one per keystroke. -->
+          <MetaRichLongTextEditor
+            v-else-if="canEditField(field.id) && field.type === 'longText' && isRichLongTextField(field)"
+            :model-value="record.data[field.id]"
+            :is-zh="isZh"
+            @change="emit('patch', field.id, $event)"
+          />
+          <!-- plain longText: unchanged textarea -->
           <textarea
             v-else-if="canEditField(field.id) && field.type === 'longText'"
             :id="`drawer_field_${field.id}`"
@@ -239,6 +249,12 @@
             </div>
             <div v-if="attachmentErrors[field.id]" class="meta-record-drawer__error">{{ attachmentErrors[field.id] }}</div>
           </div>
+          <!-- read-only rich longText: formatted render via the single sanitized
+               component (§7 drawer shows the formatted render). -->
+          <MetaRichLongTextRender
+            v-else-if="field.type === 'longText' && isRichLongTextField(field)"
+            :html="record.data[field.id]"
+          />
           <span v-else class="meta-record-drawer__text">{{ formatValue(field, record.data[field.id]) }}</span>
           <div
             v-if="field.type === 'qrcode' && drawerQrSvg(record.data[field.id])"
@@ -317,6 +333,9 @@ import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
 import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
+import MetaRichLongTextRender from './cells/MetaRichLongTextRender.vue'
+import MetaRichLongTextEditor from './cells/MetaRichLongTextEditor.vue'
+import { isRichLongTextField } from '../utils/rich-longtext'
 import {
   resolveCommentAffordanceStateClass,
   resolveFieldCommentAffordance,
