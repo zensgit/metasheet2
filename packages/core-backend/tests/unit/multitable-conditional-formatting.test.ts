@@ -8,6 +8,11 @@ import {
   sanitizeConditionalFormattingRule,
   sanitizeConditionalFormattingRules,
   type ConditionalFormattingRule,
+  CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT,
+  buildFieldScaleMap,
+  extractScaleRulesFromConfig,
+  sanitizeConditionalFormattingScaleRule,
+  sanitizeConditionalFormattingScaleRules,
 } from '../../src/multitable/conditional-formatting-service'
 import type { MultitableField } from '../../src/multitable/field-codecs'
 
@@ -438,5 +443,117 @@ describe('evaluateConditionalFormattingRules — first-match-wins', () => {
       FIELDS_BY_ID,
     )
     expect(result.matchedRuleIds).toEqual(['x'])
+  })
+})
+
+describe('conditional formatting — range-based SCALE rules (A5-1 data bar)', () => {
+  const validBar = (over: Record<string, unknown> = {}) => ({
+    id: 's1', fieldId: 'fld_n', kind: 'dataBar', order: 0,
+    range: { mode: 'auto' }, dataBar: { color: '#2196f3' }, ...over,
+  })
+
+  describe('sanitizeConditionalFormattingScaleRule', () => {
+    it('accepts a valid dataBar rule with auto range', () => {
+      const r = sanitizeConditionalFormattingScaleRule(validBar())
+      expect(r).toEqual({ id: 's1', order: 0, fieldId: 'fld_n', kind: 'dataBar', enabled: true, range: { mode: 'auto' }, dataBar: { color: '#2196f3' } })
+    })
+
+    it('rejects colorScale / iconSet until A5-2 / A5-3', () => {
+      expect(sanitizeConditionalFormattingScaleRule(validBar({ kind: 'colorScale' }))).toBeNull()
+      expect(sanitizeConditionalFormattingScaleRule(validBar({ kind: 'iconSet' }))).toBeNull()
+    })
+
+    it('requires id, fieldId, and a valid hex bar color', () => {
+      expect(sanitizeConditionalFormattingScaleRule(validBar({ id: '' }))).toBeNull()
+      expect(sanitizeConditionalFormattingScaleRule(validBar({ fieldId: '  ' }))).toBeNull()
+      expect(sanitizeConditionalFormattingScaleRule(validBar({ dataBar: { color: 'blue' } }))).toBeNull()
+      expect(sanitizeConditionalFormattingScaleRule(validBar({ dataBar: {} }))).toBeNull()
+    })
+
+    it('normalizes a fixed range and rejects a degenerate (min === max) one', () => {
+      const r = sanitizeConditionalFormattingScaleRule(validBar({ range: { mode: 'fixed', min: 100, max: 0 } }))
+      expect(r?.range).toEqual({ mode: 'fixed', min: 0, max: 100 })
+      expect(sanitizeConditionalFormattingScaleRule(validBar({ range: { mode: 'fixed', min: 5, max: 5 } }))).toBeNull()
+      // fixed mode with non-numeric bounds → reject (no silent fallback to auto)
+      expect(sanitizeConditionalFormattingScaleRule(validBar({ range: { mode: 'fixed', min: 'x', max: 9 } }))).toBeNull()
+    })
+
+    it('carries negativeColor + showValue when valid', () => {
+      const r = sanitizeConditionalFormattingScaleRule(validBar({ dataBar: { color: '#2196f3', negativeColor: '#f44336', showValue: true } }))
+      expect(r?.dataBar).toEqual({ color: '#2196f3', negativeColor: '#f44336', showValue: true })
+    })
+
+    it('caps and order-sorts via sanitizeConditionalFormattingScaleRules', () => {
+      const many = Array.from({ length: CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT + 5 }, (_, i) => validBar({ id: `s${i}`, fieldId: `f${i}`, order: i }))
+      expect(sanitizeConditionalFormattingScaleRules(many)).toHaveLength(CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT)
+      const sorted = sanitizeConditionalFormattingScaleRules([validBar({ id: 'b', fieldId: 'f2', order: 5 }), validBar({ id: 'a', fieldId: 'f1', order: 1 })])
+      expect(sorted.map((r) => r.id)).toEqual(['a', 'b'])
+    })
+
+    it('extractScaleRulesFromConfig reads the conditionalFormattingScaleRules key', () => {
+      const rules = extractScaleRulesFromConfig({ conditionalFormattingScaleRules: [validBar()] })
+      expect(rules).toHaveLength(1)
+      expect(extractScaleRulesFromConfig({})).toEqual([])
+    })
+  })
+
+  describe('buildFieldScaleMap (data bar)', () => {
+    const recs = [
+      { id: 'r1', data: { fld_n: 0 } },
+      { id: 'r2', data: { fld_n: 50 } },
+      { id: 'r3', data: { fld_n: 100 } },
+    ]
+    const rule = sanitizeConditionalFormattingScaleRule(validBar())!
+
+    it('maps values to fill percent over the auto min/max', () => {
+      const map = buildFieldScaleMap([rule], recs)
+      const f = map.byField.fld_n
+      expect(f.min).toBe(0)
+      expect(f.max).toBe(100)
+      expect(f.byRecordId.r1.barPct).toBe(0)
+      expect(f.byRecordId.r2.barPct).toBe(50)
+      expect(f.byRecordId.r3.barPct).toBe(100)
+      expect(f.byRecordId.r2.barColor).toBe('#2196f3')
+    })
+
+    it('renders a full bar for a degenerate (all-equal) range', () => {
+      const map = buildFieldScaleMap([rule], [{ id: 'a', data: { fld_n: 7 } }, { id: 'b', data: { fld_n: 7 } }])
+      expect(map.byField.fld_n.byRecordId.a.barPct).toBe(100)
+      expect(map.byField.fld_n.byRecordId.b.barPct).toBe(100)
+    })
+
+    it('colors negatives with negativeColor and flags them', () => {
+      const negRule = sanitizeConditionalFormattingScaleRule(validBar({ dataBar: { color: '#2196f3', negativeColor: '#f44336' } }))!
+      const map = buildFieldScaleMap([negRule], [{ id: 'a', data: { fld_n: -10 } }, { id: 'b', data: { fld_n: 10 } }])
+      expect(map.byField.fld_n.byRecordId.a.negative).toBe(true)
+      expect(map.byField.fld_n.byRecordId.a.barColor).toBe('#f44336')
+      expect(map.byField.fld_n.byRecordId.b.negative).toBe(false)
+      expect(map.byField.fld_n.byRecordId.b.barColor).toBe('#2196f3')
+    })
+
+    it('skips non-numeric values (no bar) and clamps fixed-range out-of-bounds', () => {
+      const fixed = sanitizeConditionalFormattingScaleRule(validBar({ range: { mode: 'fixed', min: 0, max: 100 } }))!
+      const map = buildFieldScaleMap([fixed], [
+        { id: 'a', data: { fld_n: 'n/a' } },
+        { id: 'b', data: { fld_n: 200 } }, // above max → clamp 100
+        { id: 'c', data: { fld_n: -50 } }, // below min → clamp 0
+      ])
+      expect(map.byField.fld_n.byRecordId.a).toBeUndefined()
+      expect(map.byField.fld_n.byRecordId.b.barPct).toBe(100)
+      expect(map.byField.fld_n.byRecordId.c.barPct).toBe(0)
+    })
+
+    it('first rule per field wins (mirrors cell-style precedence)', () => {
+      const r1 = sanitizeConditionalFormattingScaleRule(validBar({ id: 'a', order: 0, dataBar: { color: '#111111' } }))!
+      const r2 = sanitizeConditionalFormattingScaleRule(validBar({ id: 'b', order: 1, dataBar: { color: '#222222' } }))!
+      const map = buildFieldScaleMap([r1, r2], recs)
+      expect(map.byField.fld_n.rule.id).toBe('a')
+      expect(map.byField.fld_n.byRecordId.r2.barColor).toBe('#111111')
+    })
+
+    it('returns an empty map when a field has no numeric values', () => {
+      const map = buildFieldScaleMap([rule], [{ id: 'a', data: { fld_n: 'x' } }])
+      expect(map.byField.fld_n).toBeUndefined()
+    })
   })
 })
