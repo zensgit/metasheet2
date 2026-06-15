@@ -159,6 +159,22 @@ const DEFAULT_SETTINGS = {
     enabled: false,
     expiresInDays: null,
   },
+  // 年假/法定假余额引擎 (annual/statutory leave-balance engine) — L0 latent config
+  // (design-lock attendance-annual-leave-balance-engine-design-lock-20260615, #2622).
+  // Default OFF; nothing reads this yet (L2 accrual engine consumes it). tiers = the statutory
+  // preset by 累计工作时间 (1–10y=5d / 10–20y=10d / ≥20y=15d), org-configurable.
+  annualLeavePolicy: {
+    enabled: false,
+    tenureMode: 'cumulative_service',
+    standardDayMinutes: 480,
+    tiers: [
+      { minYears: 1, maxYears: 10, days: 5 },
+      { minYears: 10, maxYears: 20, days: 10 },
+      { minYears: 20, maxYears: null, days: 15 },
+    ],
+    carryover: { enabled: false },
+    timezone: null,
+  },
   // 加班三段引擎 (overtime segmentation) — O2 runtime switch. Default OFF means
   // overtime requests keep today's single total-minute metadata until an org opts in.
   overtimeSegmentation: {
@@ -11649,6 +11665,7 @@ function normalizeSettings(raw) {
     },
     comprehensiveHours: normalizeAttendanceComprehensiveHoursSettings(raw.comprehensiveHours),
     compTimeFromOvertime: normalizeCompTimeFromOvertimeSetting(raw.compTimeFromOvertime),
+    annualLeavePolicy: normalizeAnnualLeavePolicySetting(raw.annualLeavePolicy),
     overtimeSegmentation: normalizeOvertimeSegmentationSetting(raw.overtimeSegmentation),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
   }
@@ -11718,6 +11735,53 @@ function normalizeCompTimeFromOvertimeSetting(raw) {
     enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_SETTINGS.compTimeFromOvertime.enabled,
     expiresInDays,
   }
+}
+
+// 年假/法定假余额引擎 — L0 latent normalize (design-lock #2622). Fills defaults + validates the
+// org-configurable shape; enforces nothing (no accrual/deduction wiring lands until L2/L3).
+function normalizeAnnualLeavePolicySetting(raw) {
+  const config = raw && typeof raw === 'object' ? raw : {}
+  const fallback = DEFAULT_SETTINGS.annualLeavePolicy
+  const tenureModeRaw = typeof config.tenureMode === 'string' ? config.tenureMode.trim() : ''
+  const tenureMode = ['cumulative_service', 'company_tenure'].includes(tenureModeRaw)
+    ? tenureModeRaw
+    : fallback.tenureMode
+  const standardDayMinutesRaw = Number(config.standardDayMinutes)
+  const standardDayMinutes = Number.isInteger(standardDayMinutesRaw) && standardDayMinutesRaw > 0
+    ? standardDayMinutesRaw
+    : fallback.standardDayMinutes
+  const carryoverRaw = config.carryover && typeof config.carryover === 'object' ? config.carryover : {}
+  const timezoneRaw = typeof config.timezone === 'string' ? config.timezone.trim() : ''
+  return {
+    enabled: typeof config.enabled === 'boolean' ? config.enabled : fallback.enabled,
+    tenureMode,
+    standardDayMinutes,
+    tiers: normalizeAnnualLeaveTiers(config.tiers, fallback.tiers),
+    carryover: {
+      enabled: typeof carryoverRaw.enabled === 'boolean' ? carryoverRaw.enabled : fallback.carryover.enabled,
+    },
+    timezone: timezoneRaw.length > 0 ? timezoneRaw : null,
+  }
+}
+
+// A tier = { minYears >= 0, maxYears > minYears or null = open-ended, days >= 0 }. Any malformed
+// entry falls the whole list back to the statutory preset, so a bad PUT can never silently persist
+// a broken accrual ladder. A well-formed empty list is allowed (org explicitly disables tiers).
+function normalizeAnnualLeaveTiers(raw, fallbackTiers) {
+  const clone = () => fallbackTiers.map((tier) => ({ ...tier }))
+  if (!Array.isArray(raw)) return clone()
+  const tiers = []
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') return clone()
+    const minYears = Number(entry.minYears)
+    const days = Number(entry.days)
+    const maxYears = entry.maxYears === null || entry.maxYears === undefined ? null : Number(entry.maxYears)
+    if (!Number.isFinite(minYears) || minYears < 0) return clone()
+    if (!Number.isFinite(days) || days < 0) return clone()
+    if (maxYears !== null && (!Number.isFinite(maxYears) || maxYears <= minYears)) return clone()
+    tiers.push({ minYears, maxYears, days })
+  }
+  return tiers
 }
 
 function normalizeOvertimeSegmentationSetting(raw) {
@@ -11864,6 +11928,16 @@ function mergeSettings(base, update) {
     compTimeFromOvertime: {
       ...(base?.compTimeFromOvertime || {}),
       ...(update?.compTimeFromOvertime || {}),
+    },
+    annualLeavePolicy: {
+      ...(base?.annualLeavePolicy || {}),
+      ...(update?.annualLeavePolicy || {}),
+      // deep-merge carryover so a partial update (e.g. only { enabled }) keeps siblings; tiers is an
+      // array → replaced wholesale when an update provides it (partial tier merges are meaningless).
+      carryover: {
+        ...(base?.annualLeavePolicy?.carryover || {}),
+        ...(update?.annualLeavePolicy?.carryover || {}),
+      },
     },
     overtimeSegmentation: {
       ...(base?.overtimeSegmentation || {}),
@@ -15245,33 +15319,29 @@ function respondShiftComplianceCapExceeded(res, error) {
   return true
 }
 
-// ④ C3 (#2230 design-lock): deduct comp-time (调休) balance on a comp_time leave's final approval.
-// FIFO by soonest expiry then oldest grant, over active lots with remaining_minutes > 0. Runs entirely
-// inside the caller's approval txn: lots are SELECT … FOR UPDATE (no concurrent double-spend), each
-// touched lot's remaining_minutes is reduced (status → 'exhausted' at zero) and a 'deduct' event is
-// written (delta < 0, back-linked to the leave request for reconciliation). When the active balance is
-// short of the requested minutes the whole call throws → the approval txn rolls back → 422
-// COMP_TIME_BALANCE_INSUFFICIENT (no partial approval in v1). Idempotency comes from the pending→approved
-// transition guard: resolveRequest locks the request row FOR UPDATE and rejects re-approve before reaching
-// here, so a repeated approve never double-deducts.
-async function deductCompTimeBalance(trx, { orgId, userId, requestId, minutes }) {
-  const deductMinutes = Math.floor(Number(minutes) || 0)
+// Generalized FIFO leave-balance deduction engine (④ C3 extracted for the 年假/法定假 L0, #2622).
+// Draws `amountMinutes` from the given leave-type's active lots, expiring/oldest first, writing one
+// deduct event per touched lot. Insufficient active balance → HttpError(422, insufficientCode) → the
+// caller's approval txn rolls back. The CALLER owns amount semantics (deductionBasis): comp_time
+// passes actual minutes; 年假 L3 will pass standard-day minutes (requestedDays × standardDayMinutes).
+async function deductLeaveBalance(trx, { orgId, userId, leaveTypeCode, amountMinutes, sourceType, insufficientCode, insufficientLabel, sourceId }) {
+  const deductMinutes = Math.floor(Number(amountMinutes) || 0)
   if (deductMinutes <= 0) return { deducted: 0, lots: 0 }
   const lots = (await trx.query(
     `SELECT id, remaining_minutes, status
        FROM attendance_leave_balances
-      WHERE org_id = $1 AND user_id = $2 AND leave_type_code = 'comp_time'
+      WHERE org_id = $1 AND user_id = $2 AND leave_type_code = $3
         AND status = 'active' AND remaining_minutes > 0
       ORDER BY expires_at ASC NULLS LAST, granted_at ASC
       FOR UPDATE`,
-    [orgId, userId]
+    [orgId, userId, leaveTypeCode]
   )).map((row) => ({ id: row.id, remaining: Number(row.remaining_minutes), status: row.status }))
   const available = lots.reduce((sum, lot) => sum + lot.remaining, 0)
   if (available < deductMinutes) {
     throw new HttpError(
       422,
-      'COMP_TIME_BALANCE_INSUFFICIENT',
-      `Comp-time balance insufficient: requested ${deductMinutes} min, available ${available} min`
+      insufficientCode,
+      `${insufficientLabel} balance insufficient: requested ${deductMinutes} min, available ${available} min`
     )
   }
   let remaining = deductMinutes
@@ -15289,13 +15359,33 @@ async function deductCompTimeBalance(trx, { orgId, userId, requestId, minutes })
     await trx.query(
       `INSERT INTO attendance_leave_balance_events
          (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
-       VALUES ($1, $2, $3, 'deduct', $4, 'comp_time_leave', $5)`,
-      [orgId, userId, lot.id, -take, requestId]
+       VALUES ($1, $2, $3, 'deduct', $4, $5, $6)`,
+      [orgId, userId, lot.id, -take, sourceType, sourceId]
     )
     remaining -= take
     touched += 1
   }
   return { deducted: deductMinutes, lots: touched }
+}
+
+// ④ C3 (#2230 design-lock): comp_time (调休) balance deduction on a comp_time leave's final approval —
+// a thin wrapper over the generalized engine so the call site and comp_time behavior stay byte-identical
+// (leave_type_code='comp_time', source_type='comp_time_leave', the same COMP_TIME_BALANCE_INSUFFICIENT
+// code/message, the same floor(minutes)/<=0 short-circuit). No partial approval in v1: a short balance
+// throws → the approval txn rolls back. Idempotency is the pending→approved transition guard —
+// resolveRequest locks the request row FOR UPDATE and rejects re-approve before reaching here, so a
+// repeated approve never double-deducts.
+async function deductCompTimeBalance(trx, { orgId, userId, requestId, minutes }) {
+  return deductLeaveBalance(trx, {
+    orgId,
+    userId,
+    leaveTypeCode: 'comp_time',
+    amountMinutes: minutes,
+    sourceType: 'comp_time_leave',
+    insufficientCode: 'COMP_TIME_BALANCE_INSUFFICIENT',
+    insufficientLabel: 'Comp-time',
+    sourceId: requestId,
+  })
 }
 
 async function loadAttendanceComprehensiveActualMinutesByUser(db, orgId, userIds, period) {
@@ -18533,6 +18623,22 @@ module.exports = {
       compTimeFromOvertime: z.object({
         enabled: z.boolean().optional(),
         expiresInDays: z.number().int().positive().nullable().optional(),
+      }).optional(),
+      // 年假/法定假余额引擎 — L0 latent config (design-lock #2622). Round-trips through PUT/GET; no
+      // runtime reads it until L2 (accrual). tiers = org-configurable statutory bands.
+      annualLeavePolicy: z.object({
+        enabled: z.boolean().optional(),
+        tenureMode: z.enum(['cumulative_service', 'company_tenure']).optional(),
+        standardDayMinutes: z.number().int().positive().optional(),
+        tiers: z.array(z.object({
+          minYears: z.number().min(0),
+          maxYears: z.number().positive().nullable(),
+          days: z.number().min(0),
+        })).optional(),
+        carryover: z.object({
+          enabled: z.boolean().optional(),
+        }).optional(),
+        timezone: z.string().nullable().optional(),
       }).optional(),
       // 加班三段引擎 O2: request metadata snapshot switch. Default false preserves
       // today's total-only overtime metadata; later slices consume the snapshot.

@@ -7493,6 +7493,14 @@ attendanceIntegrationDescribe(
           },
           multiShiftDay: { enabled: true, maxSlots: 3 },
           compTimeFromOvertime: { enabled: true, expiresInDays: 45 },
+          annualLeavePolicy: {
+            enabled: true,
+            tenureMode: 'company_tenure',
+            standardDayMinutes: 600,
+            tiers: [{ minYears: 0, maxYears: 5, days: 3 }, { minYears: 5, maxYears: null, days: 8 }],
+            carryover: { enabled: true },
+            timezone: 'Asia/Shanghai',
+          },
           overtimeSegmentation: { enabled: true },
           autoShiftMatching: {
             enabled: true,
@@ -7524,6 +7532,7 @@ attendanceIntegrationDescribe(
           shiftCompliance?: Record<string, unknown>
           multiShiftDay?: Record<string, unknown>
           compTimeFromOvertime?: Record<string, unknown>
+          annualLeavePolicy?: Record<string, unknown>
           overtimeSegmentation?: Record<string, unknown>
           autoShiftMatching?: Record<string, unknown>
         }
@@ -7537,6 +7546,17 @@ attendanceIntegrationDescribe(
       })
       expect(reloaded?.multiShiftDay).toEqual({ enabled: true, maxSlots: 3 })
       expect(reloaded?.compTimeFromOvertime).toEqual({ enabled: true, expiresInDays: 45 })
+      // 年假/法定假 L0 latent config — round-trips through the PUT zod schema + persist + normalize
+      // (incl. a custom tiers ladder and an org timezone), proving the new sub-shape isn't silently
+      // stripped (the save-path drift class). Nothing reads it yet; L2 accrual consumes it.
+      expect(reloaded?.annualLeavePolicy).toEqual({
+        enabled: true,
+        tenureMode: 'company_tenure',
+        standardDayMinutes: 600,
+        tiers: [{ minYears: 0, maxYears: 5, days: 3 }, { minYears: 5, maxYears: null, days: 8 }],
+        carryover: { enabled: true },
+        timezone: 'Asia/Shanghai',
+      })
       expect(reloaded?.overtimeSegmentation).toEqual({ enabled: true })
       expect(reloaded?.autoShiftMatching).toEqual({
         enabled: true,
