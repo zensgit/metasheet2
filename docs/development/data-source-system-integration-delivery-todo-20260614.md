@@ -8,7 +8,7 @@
 
 - 只读数据库接入 Data Factory 源系统: 已经基本可用。
 - 可交付定义: C6 外部写能力完成并通过实体机验收后，才称为完整交付。
-- 下一步建议: 进入 C2-close，只做当前 main/package 的实体机 read-only smoke 收口。
+- 下一步建议: 等待 C2-close 实体机 read-only smoke 收口 (#2600)；等待期间只做文档/设计对齐，不提前打开 C3 runtime。
 - 不建议: 现在直接开 C6。C6 是最大风险刀，必须等只读链路、增量链路、K3 generic seam 都稳定后再开。
 
 ## 收口顺序
@@ -71,6 +71,12 @@ TODO:
 
 目标: 证明当前 `data-source:sql-readonly` 可以作为 Data Factory 源系统稳定使用。
 
+验证锚点:
+
+- issue: #2600 `[C2-close] read-only SQL data-source smoke matrix on entity machine`
+- package: `metasheet-multitable-onprem-v2.5.0-datasource-c2close-20260614-f483bfdac`
+- release: `multitable-onprem-datasource-c2close-20260614-f483bfdac`
+
 已完成基线:
 
 - [x] `/data-sources` 管理数据库连接。
@@ -106,8 +112,8 @@ TODO:
 
 TODO:
 
-- [ ] C3-1 facade / adapter 支持 `orderBy` 与 watermark 查询参数。
-- [ ] C3-2 runner 持久化和恢复 mode-tagged cursor。
+- [ ] C3-1 facade / adapter 支持 `orderBy` 与 watermark 查询参数；`where`/equality `filters` 已有，必须保留。
+- [ ] C3-2 adapter 实现 in-run mode-tagged cursor；跨 run 仍复用现有 watermark store，不改 store schema。
 - [ ] C3-3 `updated_at + id` 复合游标实现和测试。
 - [ ] C3-4 `monotonic_id` 游标实现和测试。
 - [ ] C3-5 实体机 real-DB smoke: 跨页同 timestamp 不漏读、不卡住、可 resume。
@@ -117,6 +123,7 @@ TODO:
 - 同 timestamp 大批量数据不会漏读。
 - `>=` 型 stall 和 `>` 型 tie miss 都被测试锁住。
 - offset full-read 仍可作为 fallback，不被破坏。
+- 当前 equality `filters` 不能因 watermark 模式被旁路；C3 测试必须覆盖 filter + watermark 同时存在。
 - watermark 列必须有索引/`EXPLAIN` 验证；否则可能比全量扫描更差。
 - 时间戳精度并列风暴必须进入测试。
 - 迟到提交漏读属于固有限制: 要么记为限制，要么设计安全重扫窗。

@@ -3,7 +3,9 @@
 > **Design-first. No runtime in this slice.** Lifts the C0 **Seam-3 deferral** ("incremental + watermark
 > are deferred until a watermark-column convention exists") for the `data-source:sql-readonly` bridge:
 > teach the bridge's `read()` to **honor the watermark argument the pipeline-runner already passes**, as a
-> parameterized **keyset** `WHERE … ORDER BY … LIMIT` over the existing read-only facade. **Impl stays 🔒**
+> parameterized **keyset** `WHERE … ORDER BY … LIMIT` over the existing read-only facade. Equality
+> `filters`/`where` support has since landed and must be preserved; the remaining facade gap is
+> `orderBy`. **Impl stays 🔒**
 > — gated on (a) a real volume / slow-full-reread signal, (b) this convention, and (c) a separate opt-in.
 > Read-only; **no read-contract change**; does **not** touch the K3 channel, central RBAC, or auth.
 
@@ -21,9 +23,11 @@ reads. Two things have since become clear from reading `origin/main`:
    `where` and `orderBy` (`BaseAdapter.ts:56`), and `DataSourceManager.select` passes them straight to the
    adapter. So `WHERE wm > :last ORDER BY wm ASC LIMIT n` is already expressible underneath.
 
-The **only** reason the bridge is full/manual today is that **its `read()` ignores `request.watermark`**
-(does pure offset), and the **read-only facade narrows `select` to `{ limit, offset }`** — dropping the
-`where`/`orderBy` the manager already has. C3 closes exactly that gap.
+The remaining reason the bridge is full/manual today is that **its `read()` ignores `request.watermark`**
+(does pure offset), and the **read-only facade narrows `select` to `{ limit, offset, where }`** — still
+dropping the `orderBy` the manager already has. Earlier C2-0 hardening already taught the bridge to honor
+equality `filters` through structured `where`; C3 closes the watermark/keyset half without regressing that
+filter path.
 
 This is **design-ahead**. The prior decision stands — full-table offset paging works, and C3 impl is built
 only on a **real** large-source / full-reread-too-slow signal. This document is the convention so that, when
@@ -31,9 +35,9 @@ that signal appears, the impl is a small, pre-reviewed slice and not a scramble.
 
 ## Scope boundary (the load-bearing sentence)
 
-C3 adds **one** capability: the bridge's `read()` **honors the runner's `watermark` (and `filters`)
-argument** as a parameterized **keyset** read, by **widening the read-only facade `select` to accept
-`where` + `orderBy`**.
+C3 adds **one** capability: the bridge's `read()` **honors the runner's `watermark` argument** as a
+parameterized **keyset** read, by **widening the read-only facade `select` to accept `orderBy`** and by
+composing the already-supported equality `filters` / `where` with the watermark predicate.
 
 It does **NOT**: change the read contract (the `watermark` / `filters` / `cursor` slots already exist in
 `normalizeReadRequest`); build or alter the watermark store (it exists); add a write path (`upsert` stays
@@ -45,18 +49,19 @@ and workbench UIs; or add cross-owner grants. Owner-scope and read-only stay exa
 
 | Piece | Already exists | The gap C3 fills |
 |---|---|---|
-| Read contract | `read({object,limit,cursor,filters,watermark}) → {records,nextCursor,done}` — `watermark` + `filters` slots present (`normalizeReadRequest`, `contracts.cjs:91`); `nextCursor` is a string (`createReadResult:126`) | bridge `read()` uses only `object/limit/cursor` (offset); **ignores `watermark` + `filters`** |
+| Read contract | `read({object,limit,cursor,filters,watermark}) → {records,nextCursor,done}` — `watermark` + `filters` slots present (`normalizeReadRequest`, `contracts.cjs:91`); `nextCursor` is a string (`createReadResult:126`) | bridge `read()` still uses offset paging and **ignores `watermark`**; equality `filters` are already honored through structured `where` |
 | Runner | `mode`, `resolveWatermarkConfig`, `watermarkStore` (get/set/advance), `deriveNextWatermark` (`watermark.cjs`); passes `watermark:{field:value}` into `read()` and advances after success (`pipeline-runner.cjs`) | runner passes **only `{field:value}`**, not the `type` / tiebreaker the keyset needs (see Seam D) |
-| DB layer | `BaseAdapter.QueryOptions` has `where` + `orderBy` (`BaseAdapter.ts:56`); `DataSourceManager.select` passes them through (`:530`) | the **read-only facade** narrows `select` to `{ limit, offset }` (`data-source-plugin-facade.ts`) — drops `where`/`orderBy` |
+| DB layer | `BaseAdapter.QueryOptions` has `where` + `orderBy` (`BaseAdapter.ts:56`); `DataSourceManager.select` passes them through (`:530`) | the **read-only facade** narrows `select` to `{ limit, offset, where }` (`data-source-plugin-facade.ts`) — drops `orderBy` |
 | Precedent (do **not** depend on) | `k3-wise-sqlserver-executor.cjs:234` already builds `WHERE wm > v ORDER BY orderBy` (strict `>`, single `orderBy=keyField`, one bounded page per run, `done:true`) | K3 is the **red-line** channel; its strict-`>` is safe only because its `keyField` is **unique/monotonic**. The bridge must **generalize it safely** for the non-unique `updated_at` default — not copy it, not import it |
 
 ## The design — five seams
 
 ### Seam A — widen the read-only facade `select` (the one new host power)
 
-Extend the facade `select` options from `{ limit, offset }` to `{ limit, offset, where, orderBy }` and pass
-them through to `DataSourceManager.select` (which already accepts `QueryOptions.where` / `orderBy`). This is
-the **only** host-side change.
+Extend the facade `select` options from `{ limit, offset, where }` to `{ limit, offset, where, orderBy }`
+and pass them through to `DataSourceManager.select` (which already accepts `QueryOptions.where` /
+`orderBy`). This is the **only** host-side change left for C3; `where` pass-through is already present and
+must be preserved.
 
 It stays within the read-only / no-injection seam:
 - **Parameterized only** — `where`/`orderBy` are structured (`{ column, op, value }` / `{ column, direction }`),
@@ -125,14 +130,14 @@ C3 adopts **D-recommended**: extend `pipeline.options.watermark` to `{ type, fie
 the resolved config into `read()`. `updated_at` **requires** a declared `tiebreaker` (a unique column);
 absent one, bind-time validation fails closed (Seam E).
 
-### Seam E — honor `filters` in the same `where` (close the silent drop)
+### Seam E — preserve `filters` in the same `where` (do not regress C2-0)
 
-The runner **already passes `filters`** into `read()`, and the bridge **already drops them** (same as
-watermark today). Since Seam A widens the facade to `where` anyway — the shared enabler — C3 **honors
-`request.filters`** as additional **equality** predicates in the same parameterized `where`, AND'd with the
-watermark predicate. This removes a silent drop of an argument the runner is actively sending. (The
-alternative — keep ignoring `filters` — is rejected: silently dropping an actively-sent argument is a latent
-trap, exactly the wire-vs-fixture class of bug.)
+The runner **already passes `filters`** into `read()`, and the bridge now normalizes primitive equality
+filters into structured `where` before calling the host facade. C3 must preserve that path and AND it with
+the watermark predicate in the same parameterized `where`. This prevents a regression back to the old
+silent-drop behavior while keeping filters as exact equality predicates only. (The alternative — treating
+watermark as a separate mode that bypasses filters — is rejected: silently dropping an actively-sent
+argument is the same wire-vs-fixture class of bug.)
 
 ## Correctness principles (stated, each a negative control at impl time)
 
@@ -172,24 +177,28 @@ trap, exactly the wire-vs-fixture class of bug.)
 ## Phased decomposition (gated — each a separate explicit opt-in)
 
 - ✅ **C3 design** (this document).
-- 🔒 **C3-1 — facade widen (host):** `select` options `+ where + orderBy`, pass-through to
-  `DataSourceManager.select`; parameterized-only; writable-source still rejected. Facade unit test (incl. a
-  negative control that no raw SQL / no write reaches the manager).
+- 🔒 **C3-1 — facade widen (host):** `select` options `+ orderBy` while preserving the already-landed
+  `where` pass-through to `DataSourceManager.select`; parameterized-only; writable-source still rejected.
+  Facade unit test (incl. a negative control that no raw SQL / no write reaches the manager).
 - 🔒 **C3-2 — adapter watermark mode (plugin):** type-conditional keyset (Seam B) + cursor model (Seam C);
   unit tests incl. the **no-miss** and **no-stall** negative controls and offset/full coexistence.
 - 🔒 **C3-3 — watermark-config plumbing + bind-time validation:** extend `pipeline.options.watermark` to
   `{ type, field, tiebreaker? }`, pass the resolved config into `read()` (Seam D); validate column
   exists/orderable/indexed and `updated_at` has a tiebreaker, else **fail closed** (Seam E bind-time).
-- 🔒 **C3-4 — honor `filters`** (Seam E) as parameterized equality predicates AND'd with the watermark
-  predicate (closes the current silent drop); negative control: a filter value cannot inject SQL.
+- ✅ **C2-0 — honor equality `filters`:** parameterized equality `filters` already pass through as `where`
+  before C3 runtime.
+- 🔒 **C3-4 — filter + watermark composition lock:** keep those equality filters AND'd with the watermark
+  predicate; negative control: a filter value cannot inject SQL and cannot be dropped when watermark mode is
+  active.
 - 🔒 **C3-5 — real-DB locking test (the keystone, wire-vs-fixture):** against a **real** Postgres (and the
   MSSQL smoke), an incremental run reads **only** rows beyond the stored watermark; same-timestamp
   boundary/stall cases hold; a no-watermark run still does the full re-read; cross-owner is still fail-closed.
   Per the entity-machine lesson (#2205), the committed fake-facade unit tests do **not** prove the
   facade→`DataSourceManager`→real-adapter→DB keyset path — this real-DB test is the acceptance keystone.
 
-**All C3-1..C3-5 stay 🔒** until both a real volume/perf signal **and** a separate opt-in. Build order:
-C3-1 (facade) → C3-3 (config/validation) → C3-2 (adapter mode) → C3-4 (filters) → C3-5 (real-DB lock).
+**All remaining C3-1..C3-5 work stays 🔒** until both a real volume/perf signal **and** a separate opt-in.
+Build order: C3-1 (facade `orderBy`) → C3-3 (config/validation) → C3-2 (adapter mode) → C3-4
+(filter+watermark composition) → C3-5 (real-DB lock).
 
 ## Acceptance checklist (the locks — for the impl slices)
 
