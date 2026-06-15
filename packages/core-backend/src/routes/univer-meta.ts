@@ -4335,11 +4335,13 @@ async function validateGanttDependencyConfig(
 // link field via a generic record patch (no dedicated reparent endpoint), so a MULTI-value
 // link used as parent gets silently overwritten on every drag-to-reparent. Reject saving a
 // hierarchy view whose explicit parentFieldId is not a single-value (`limitSingleRecord`)
-// link field. An absent parentFieldId is allowed (runtime auto/first-link fallback unchanged).
-// Documented residuals (accepted): (a) PATCH /fields/:fieldId can later flip limitSingleRecord
-// or the field type without view re-validation — same pre-existing class as gantt's dependency
-// field, follow-up candidate; (b) provisioning ensureView/createView bypass route-layer view
-// validation by design (template library ships no hierarchy views today).
+// same-sheet link field. An absent parentFieldId is allowed (runtime auto/first-link fallback unchanged).
+// PATCH /fields/:fieldId carries the matching reverse guard below: once a hierarchy
+// view explicitly uses a single-value link as its parent field, that field cannot
+// be downgraded to multi-value, non-link, or a different target sheet while the
+// view still points at it.
+// Documented residual (accepted): provisioning ensureView/createView bypasses
+// route-layer view validation by design (template library ships no hierarchy views today).
 async function validateHierarchyParentLinkConfig(
   query: QueryFn,
   sheetId: string,
@@ -4347,7 +4349,7 @@ async function validateHierarchyParentLinkConfig(
   config: Record<string, unknown>,
 ): Promise<string | null> {
   if (viewType !== 'hierarchy') return null
-  const parentFieldId = typeof config.parentFieldId === 'string' ? config.parentFieldId.trim() : ''
+  const parentFieldId = normalizeHierarchyParentFieldId(config.parentFieldId)
   if (!parentFieldId) return null
 
   const fieldRes = await query(
@@ -4360,11 +4362,68 @@ async function validateHierarchyParentLinkConfig(
   }
 
   const field = serializeFieldRow(fieldRow)
-  if (field.type !== 'link' || (field.property ?? {}).limitSingleRecord !== true) {
+  if (!isSameSheetSingleValueHierarchyParentLink(sheetId, field.type, field.property)) {
     return `Hierarchy parent field must be a single-value link field: ${parentFieldId}`
   }
 
   return null
+}
+
+function normalizeHierarchyParentFieldId(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function normalizeHierarchyViewConfig(
+  viewType: string,
+  config: Record<string, unknown>,
+): Record<string, unknown> {
+  if (viewType !== 'hierarchy' || typeof config.parentFieldId !== 'string') return config
+
+  const normalizedParentFieldId = normalizeHierarchyParentFieldId(config.parentFieldId)
+  const nextConfig = { ...config }
+  if (normalizedParentFieldId) {
+    nextConfig.parentFieldId = normalizedParentFieldId
+  } else {
+    delete nextConfig.parentFieldId
+  }
+  return nextConfig
+}
+
+function isSameSheetSingleValueHierarchyParentLink(
+  sheetId: string,
+  type: UniverMetaField['type'],
+  property: Record<string, unknown> | null | undefined,
+): boolean {
+  const obj = property ?? {}
+  const foreignSheetId = stringFromRecord(obj, ['foreignSheetId', 'foreignDatasheetId', 'datasheetId'])
+  return type === 'link' && obj.limitSingleRecord === true && foreignSheetId === sheetId
+}
+
+async function validateHierarchyParentFieldMutation(
+  query: QueryFn,
+  sheetId: string,
+  fieldId: string,
+  currentType: UniverMetaField['type'],
+  currentProperty: Record<string, unknown>,
+  nextType: UniverMetaField['type'],
+  nextProperty: Record<string, unknown>,
+): Promise<string | null> {
+  if (!isSameSheetSingleValueHierarchyParentLink(sheetId, currentType, currentProperty)) return null
+  if (isSameSheetSingleValueHierarchyParentLink(sheetId, nextType, nextProperty)) return null
+
+  const viewRes = await query(
+    `SELECT id, name, config
+     FROM meta_views
+     WHERE sheet_id = $1
+       AND type = $2
+       AND config ? 'parentFieldId'`,
+    [sheetId, 'hierarchy'],
+  )
+  const viewRow = (viewRes.rows as any[]).find((row) =>
+    normalizeHierarchyParentFieldId(normalizeJson(row.config).parentFieldId) === fieldId)
+  if (!viewRow) return null
+
+  return `Cannot change hierarchy parent field ${fieldId}: update or remove the hierarchy view parentFieldId first.`
 }
 
 class PermissionError extends Error {
@@ -6160,6 +6219,7 @@ export function univerMetaRouter(): Router {
         sheetId = String(row.sheet_id)
         const currentOrder = Number(row.order ?? 0)
         const currentType = mapFieldType(String(row.type))
+        const currentProperty = normalizeJson(row.property)
 
         const nextName = typeof parsed.data.name === 'string' ? parsed.data.name.trim() : String(row.name)
         const requestedType = parsed.data.type ?? mapFieldType(String(row.type))
@@ -6264,6 +6324,18 @@ export function univerMetaRouter(): Router {
               `无法将该字段转换为公式：已有公式字段引用它：${referrers.map((id) => `{${id}}`).join('、')}`,
             )
           }
+        }
+        const hierarchyParentMutationError = await validateHierarchyParentFieldMutation(
+          query as unknown as QueryFn,
+          sheetId,
+          fieldId,
+          currentType,
+          currentProperty,
+          nextType,
+          nextProperty,
+        )
+        if (hierarchyParentMutationError) {
+          throw new ValidationError(hierarchyParentMutationError)
         }
 
         if (typeof desiredOrder === 'number' && desiredOrder !== currentOrder) {
@@ -6521,7 +6593,7 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
 
-      const incomingConfig: Record<string, unknown> = parsed.data.config ?? {}
+      const incomingConfig: Record<string, unknown> = normalizeHierarchyViewConfig(type, parsed.data.config ?? {})
       const incomingRules = incomingConfig.conditionalFormattingRules
       if (Array.isArray(incomingRules) && incomingRules.length > CONDITIONAL_FORMATTING_RULE_LIMIT) {
         return res.status(400).json({
@@ -6634,7 +6706,10 @@ export function univerMetaRouter(): Router {
       const nextSort = parsed.data.sortInfo ?? normalizeJson(row.sort_info)
       const nextGroup = parsed.data.groupInfo ?? normalizeJson(row.group_info)
       const nextHiddenFieldIds = parsed.data.hiddenFieldIds ?? normalizeJsonArray(row.hidden_field_ids)
-      const nextConfig = parsed.data.config ?? normalizeJson(row.config)
+      const nextConfig = normalizeHierarchyViewConfig(
+        nextType,
+        parsed.data.config ?? normalizeJson(row.config),
+      )
       const incomingRules = (nextConfig as Record<string, unknown>).conditionalFormattingRules
       if (Array.isArray(incomingRules) && incomingRules.length > CONDITIONAL_FORMATTING_RULE_LIMIT) {
         return res.status(400).json({
