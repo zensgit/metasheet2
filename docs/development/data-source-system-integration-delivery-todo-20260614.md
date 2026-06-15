@@ -23,7 +23,7 @@
 | C2-close | 只读数据库链路 smoke 收口 | done (issue #2600) | 证明当前 read-only bridge 可稳定测试 | 实体机配置漂移 |
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
-| C5 | K3 generic MSSQL seam | gated | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
+| C5 | K3 generic MSSQL seam | design-first | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
 | Release | 总包 + 实体机验收 | gated | 交付签收 | 包内容/部署/证据不完整 |
 
@@ -106,7 +106,8 @@ TODO:
 
 - 操作员可以从 UI 创建/选择只读数据库源，并完成 dry-run read。
 - 失败路径可读、不可泄漏、不可误判为系统崩溃。
-- C3 watermark、C6 external write、K3 Save/Submit/Audit/BOM 在本 smoke 中均未运行，仍是后续 gated 项。
+- C3 watermark、C6 external write、K3 Save/Submit/Audit/BOM 在本 C2 smoke 中均未运行；C5 SQL seam
+  也不得新开这些 K3 行为。既有 K3 WebAPI 路径按其自身 gate 管理，不由本文的数据库连接 smoke 放行。
 
 ## C3 - Incremental / Watermark Runtime
 
@@ -221,6 +222,9 @@ TODO:
 
 目标: 把 K3 SQL Server 相关通道逐步靠近 generic MSSQL 能力，但不打开 K3 禁区。
 
+状态: C5-0 设计切片已写入 `docs/development/data-source-system-integration-c5-k3-generic-mssql-seam-design-20260615.md`；
+runtime/helper/smoke 仍保持后续 gated opt-in。
+
 边界:
 
 - 不打开 K3 Submit。
@@ -230,7 +234,13 @@ TODO:
 
 TODO:
 
-- [ ] 设计先行: 哪些 MSSQL helper 可复用，哪些 K3 专属逻辑必须保留。
+- [x] C5-0 设计先行: 哪些 MSSQL helper 可复用，哪些 K3 专属逻辑必须保留。
+  - 设计锁: 安全 seam 是 read-only MSSQL helper contract，不是 `DataSourceManager`、不是完整
+    `MSSQLAdapter`、也不是把 `erp:k3-wise-sqlserver` 改成 `data-source:sql-readonly`。
+  - 可复用: server/port parsing、timeout/TLS option building、identifier quoting、bounded structured SELECT、
+    metadata query helpers、values-free error normalization。
+  - K3-only: object manifests、read/write table allowlists、operation checks、默认 middle-table write guard、
+    既有 backend-only direct-table exception、adapter metadata / advanced UI posture。
 - [ ] 抽共享只读 helper: TLS + INFORMATION_SCHEMA introspection 等只读能力可共用，由 generic `MSSQLAdapter` 和 K3 路径共同消费。
 - [ ] 结构守卫测试: shared helper 不导出任何写接口。
 - [ ] TLS / schema introspection / read-only smoke 与 generic MSSQL 对齐。
