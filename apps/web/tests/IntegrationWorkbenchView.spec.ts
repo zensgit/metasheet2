@@ -2334,6 +2334,130 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi()
   })
 
+  it('C4-2: maps source fields through a schema-backed picker and sends the selected field in preview', async () => {
+    const previewBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP Target', roles: ['target'], supports: ['upsert'], advanced: false },
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['read'], advanced: true },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'ds_bridge_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'Warehouse bridge',
+            kind: 'data-source:sql-readonly',
+            role: 'source',
+            status: 'active',
+            config: { dataSourceId: 'pg-1', object: 'public.items' },
+          },
+          {
+            id: 'target_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'ERP target',
+            kind: 'http',
+            role: 'target',
+            status: 'active',
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems/ds_bridge_1/objects')) {
+        return jsonResponse([{ name: 'public.items', label: 'Items', operations: ['read'], source: 'data-source:sql-readonly' }])
+      }
+      if (url.startsWith('/api/integration/external-systems/ds_bridge_1/schema')) {
+        return jsonResponse({
+          object: 'public.items',
+          fields: [
+            { name: 'materialCode', label: 'Material Code', type: 'string' },
+            { name: 'itemName', label: 'Item Name', type: 'string' },
+          ],
+        })
+      }
+      if (url.startsWith('/api/integration/external-systems/target_1/objects')) {
+        return jsonResponse([{ name: 'material', label: 'Material', operations: ['upsert'], target: 'http' }])
+      }
+      if (url.startsWith('/api/integration/external-systems/target_1/schema')) {
+        return jsonResponse({
+          object: 'material',
+          fields: [
+            { name: 'FNumber', label: 'Material number', type: 'string', required: true },
+            { name: 'FName', label: 'Material name', type: 'string' },
+          ],
+          template: { id: 'material.v1', bodyKey: 'Data' },
+        })
+      }
+      if (url === '/api/integration/templates/preview') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        previewBodies.push(body)
+        return jsonResponse({
+          valid: true,
+          payload: { Data: { FNumber: 'MAT-001' } },
+          targetRecord: { FNumber: 'MAT-001' },
+          errors: [],
+          transformErrors: [],
+          validationErrors: [],
+          schemaErrors: [],
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi(8)
+
+    ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).checked = true
+    container.querySelector('[data-testid="show-advanced-connectors"]')!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'ds_bridge_1'
+    sourceSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="load-source-objects"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    const targetSystemSelect = container.querySelector('[data-testid="target-system"]') as HTMLSelectElement
+    targetSystemSelect.value = 'target_1'
+    targetSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="load-target-objects"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    const sourceField = container.querySelector('[data-testid="source-field-0"]') as HTMLSelectElement
+    expect(sourceField.tagName).toBe('SELECT')
+    expect(container.querySelector('[data-testid="source-field-picker-help-0"]')?.textContent).toContain('不显示行值')
+    const optionTexts = Array.from(sourceField.options).map((option) => option.textContent?.trim())
+    expect(optionTexts).toContain('当前值 · code（未在来源 schema 中）')
+    expect(optionTexts).toContain('Material Code · materialCode · string')
+    expect(optionTexts).toContain('Item Name · itemName · string')
+
+    sourceField.value = 'materialCode'
+    sourceField.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    expect(previewBodies).toHaveLength(1)
+    expect(previewBodies[0]).toMatchObject({
+      fieldMappings: [
+        { sourceField: 'materialCode', targetField: 'FNumber' },
+        { sourceField: 'name', targetField: 'FName' },
+      ],
+    })
+    expect(JSON.stringify(previewBodies[0])).not.toMatch(/password|token|secret|credential/i)
+  })
+
   it('C3: shows an enabled approval automation entry for an entitled Yuantus PLM data-source bridge and marks stubbed actions', async () => {
     const capabilityCalls: string[] = []
     apiFetchMock.mockImplementation(async (url: string) => {
