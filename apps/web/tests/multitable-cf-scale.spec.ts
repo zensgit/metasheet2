@@ -155,6 +155,7 @@ describe('FE conditional-formatting scale mirror (A5-2 color scale)', () => {
       { id: 'r1', data: { fld_n: 0 } },
       { id: 'r2', data: { fld_n: 25 } },
       { id: 'r3', data: { fld_n: 50 } },
+      { id: 'rU', data: { fld_n: 75 } },
       { id: 'r4', data: { fld_n: 100 } },
     ]
 
@@ -174,6 +175,7 @@ describe('FE conditional-formatting scale mirror (A5-2 color scale)', () => {
       expect(f.byRecordId.r1.scaleColor).toBe('#ff0000')
       expect(f.byRecordId.r2.scaleColor).toBe('#ff8000')
       expect(f.byRecordId.r3.scaleColor).toBe('#ffff00')
+      expect(f.byRecordId.rU.scaleColor).toBe('#80ff00') // t=0.75 → mid↔max halfway (upper-segment interior)
       expect(f.byRecordId.r4.scaleColor).toBe('#00ff00')
     })
 
