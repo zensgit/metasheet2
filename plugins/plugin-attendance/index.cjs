@@ -11781,15 +11781,18 @@ function normalizeAnnualLeaveTiers(raw, fallbackTiers) {
     if (maxYears !== null && (!Number.isFinite(maxYears) || maxYears <= minYears)) return clone()
     tiers.push({ minYears, maxYears, days })
   }
-  // Ladder integrity (#2622 P2): the parsed tiers must form a contiguous, ascending, non-overlapping
-  // ladder with at most ONE trailing open-ended (maxYears=null) band — no gaps, no overlaps, no
-  // out-of-order, and no open-ended band followed by another tier. Any violation falls the WHOLE list
-  // back to the statutory preset (a broken ladder is never persisted). Gaps count as malformed: a
-  // statutory ladder is contiguous, so a gap is almost always a mistake rather than "this band gets none".
+  // Ladder integrity (#2622 P2): a non-empty tiers list must form a contiguous, ascending,
+  // non-overlapping ladder that ENDS in exactly one open-ended (maxYears=null) band — no gaps,
+  // overlaps, out-of-order, an open-ended band mid-list, or a closed last band (which would leave the
+  // most-senior employees with no matching tier). Any violation falls the WHOLE list back to the
+  // statutory preset (a broken ladder is never persisted). Gaps and a closed tail both count as
+  // malformed: statutory bands are contiguous and cover all eligible tenure. An empty list is allowed
+  // (an org explicitly configuring no accrual bands).
   for (let i = 1; i < tiers.length; i++) {
     if (tiers[i - 1].maxYears === null) return clone()
     if (tiers[i].minYears !== tiers[i - 1].maxYears) return clone()
   }
+  if (tiers.length > 0 && tiers[tiers.length - 1].maxYears !== null) return clone()
   return tiers
 }
 

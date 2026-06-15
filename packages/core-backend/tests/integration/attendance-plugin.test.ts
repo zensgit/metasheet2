@@ -7508,6 +7508,16 @@ attendanceIntegrationDescribe(
       })
       expect(okLadder.status, JSON.stringify(okLadder.body)).toBe(200)
       expect((await readAnnual())?.tiers).toEqual([{ minYears: 0, maxYears: 3, days: 4 }, { minYears: 3, maxYears: null, days: 9 }])
+
+      // (5) a non-empty ladder with a CLOSED last band (no open-ended tail) leaves the most-senior
+      //     employees with no matching tier → malformed → falls back to the statutory preset.
+      const closedTail = await putAnnual({
+        enabled: true,
+        timezone: 'Asia/Shanghai',
+        tiers: [{ minYears: 1, maxYears: 10, days: 5 }],
+      })
+      expect(closedTail.status, JSON.stringify(closedTail.body)).toBe(200)
+      expect((await readAnnual())?.tiers).toEqual(statutoryPreset)
     } finally {
       // restore default-OFF so the shared local DB doesn't leak enabled=true into later tests.
       await putAnnual({ enabled: false, timezone: null }).catch(() => undefined)
