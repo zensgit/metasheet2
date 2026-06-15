@@ -1634,7 +1634,7 @@ async function loadBridgeDataSources(): Promise<void> {
     bridgeDataSources.value = await listDataSources()
     bridgeDataSourcesLoaded.value = true
   } catch (error) {
-    bridgeDataSourcesError.value = error instanceof Error ? error.message : String(error)
+    bridgeDataSourcesError.value = formatWorkbenchConnectionError(error, 'bridge-data-sources')
   }
 }
 
@@ -1697,7 +1697,7 @@ async function loadBridgeDataSourceObjects(dataSourceId: string): Promise<void> 
     ]
   } catch (error) {
     if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.dataSourceId.trim() !== id) return
-    bridgeDataSourceObjectsError.value = error instanceof Error ? error.message : String(error)
+    bridgeDataSourceObjectsError.value = formatWorkbenchConnectionError(error, 'bridge-schema')
   } finally {
     if (requestId === bridgeDataSourceObjectRequestId) bridgeDataSourceObjectsLoading.value = false
   }
@@ -2418,6 +2418,62 @@ function setStatus(message: string, kind: 'success' | 'error' | 'idle' = 'idle')
   statusKind.value = kind
 }
 
+type WorkbenchConnectionErrorContext = 'bridge-data-sources' | 'bridge-schema' | 'test' | 'objects' | 'schema'
+
+function rawErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  return String(error || '')
+}
+
+function friendlyConnectionErrorMessage(message: string): string {
+  const text = message || ''
+  if (/Data source with id ['"][^'"]+['"] not found|ExternalSystemNotFound|DATA_SOURCE_NOT_FOUND|external system .*not found/i.test(text)) {
+    return '引用的连接或数据源不存在、已删除，或不属于当前账号/工作区；请重新选择 /data-sources 连接并保存。'
+  }
+  if (/^(?:401|403)(?:\s|$)|DATA_SOURCE_PRINCIPAL_REQUIRED|owner principal|principal required|missing principal|unauthori[sz]ed|forbidden|access denied|permission|无权|权限/i.test(text)) {
+    return '当前账号无权读取该连接或 schema；请确认登录账号、tenant/workspace、以及 /data-sources 权限。'
+  }
+  if (/object required|missing object|object not found|table not found|unknown object|unknown table|relation .*does not exist|找不到.*(?:对象|表|视图)/i.test(text)) {
+    return '找不到当前对象/表/视图；请重新加载对象列表并选择仍存在的对象。'
+  }
+  if (/not found|不存在|已删除/i.test(text)) {
+    return '引用的连接或数据源不存在、已删除，或不属于当前账号/工作区；请重新选择 /data-sources 连接并保存。'
+  }
+  if (/schema blocked|schema unavailable|empty schema|no columns|columns?|schema|列信息/i.test(text)) {
+    return '无法读取 schema/列信息；请检查数据源权限、schema 可见性或数据库驱动返回。'
+  }
+  if (/unsupported|writable|not readable|source kind|adapter|不支持|不可读/i.test(text)) {
+    return '当前连接不是可读 source 或不支持 SQL 只读通道；请选择 data-source:sql-readonly source。'
+  }
+  // SQL/data-source bridge errors can contain driver messages, object names, or connection hints.
+  // Keep the bridge fallback values-free; non-bridge systems still use the legacy raw path.
+  return '连接请求失败；请重试，或让管理员查看服务端日志中的对应错误。'
+}
+
+function workbenchConnectionErrorPrefix(context: WorkbenchConnectionErrorContext, side?: WorkbenchSide): string {
+  const label = side === 'target' ? '目标' : '来源'
+  if (context === 'bridge-data-sources') return '加载 /data-sources 连接失败'
+  if (context === 'bridge-schema') return '加载 SQL 表/视图失败'
+  if (context === 'test') return `${label}连接测试失败`
+  if (context === 'schema') return `加载${label} schema 失败`
+  return `加载${label}对象失败`
+}
+
+function formatWorkbenchConnectionError(error: unknown, context: WorkbenchConnectionErrorContext, side?: WorkbenchSide): string {
+  return `${workbenchConnectionErrorPrefix(context, side)}：${friendlyConnectionErrorMessage(rawErrorMessage(error))}`
+}
+
+function selectedSystemForSide(side: WorkbenchSide): WorkbenchExternalSystem | null {
+  return side === 'source' ? selectedSourceSystem.value : selectedTargetSystem.value
+}
+
+function formatSideConnectionError(error: unknown, context: Extract<WorkbenchConnectionErrorContext, 'test' | 'objects' | 'schema'>, side: WorkbenchSide, systemKind?: string): string {
+  if (systemKind === DATA_SOURCE_BRIDGE_KIND) {
+    return formatWorkbenchConnectionError(error, context, side)
+  }
+  return rawErrorMessage(error)
+}
+
 function currentScope() {
   return {
     tenantId: scope.tenantId.trim() || 'default',
@@ -3075,7 +3131,13 @@ async function refreshTableActionConflictPolicies(actionId = selectedTableAction
 function connectionStatusLabel(system: WorkbenchExternalSystem | null): string {
   if (!system) return '未选择'
   if (system.status === 'active') return system.lastTestedAt ? '已连接' : '可用'
-  if (system.status === 'error') return system.lastError ? `异常：${system.lastError}（点击"测试连接"重新激活）` : '异常（点击"测试连接"重新激活）'
+  if (system.status === 'error') {
+    if (!system.lastError) return '异常（点击"测试连接"重新激活）'
+    const message = system.kind === DATA_SOURCE_BRIDGE_KIND
+      ? friendlyConnectionErrorMessage(system.lastError)
+      : system.lastError
+    return `异常：${message}（点击"测试连接"重新激活）`
+  }
   return '未启用'
 }
 
@@ -3096,19 +3158,25 @@ async function testSystem(side: WorkbenchSide): Promise<void> {
     return
   }
   const label = side === 'source' ? '数据源' : '目标'
+  const requestSystem = selectedSystemForSide(side)
+  const requestSystemKind = requestSystem?.kind || ''
   // Capture the status BEFORE the test so a recovery (error → active) can be reported explicitly —
   // result.system already carries the post-test status, so it can't tell us where we came from.
-  const priorStatus = (side === 'source' ? selectedSourceSystem.value : selectedTargetSystem.value)?.status
+  const priorStatus = requestSystem?.status
   try {
     const result = await testExternalSystemConnection(systemId, currentScope())
     if (result.system) replaceSystem(result.system)
     if (result.ok) {
       setStatus(priorStatus === 'error' ? `${label}连接已恢复，已重新激活` : `${label}连接测试通过`, 'success')
     } else {
-      setStatus(`${label}连接测试失败：${result.message || result.code || 'unknown error'}`, 'error')
+      const failure = result.message || result.code || 'unknown error'
+      const failureMessage = requestSystemKind === DATA_SOURCE_BRIDGE_KIND
+        ? formatWorkbenchConnectionError(failure, 'test', side)
+        : `${label}连接测试失败：${failure}`
+      setStatus(failureMessage, 'error')
     }
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(formatSideConnectionError(error, 'test', side, requestSystemKind), 'error')
   }
 }
 
@@ -3118,6 +3186,7 @@ async function loadObjects(side: WorkbenchSide): Promise<void> {
     setStatus(`${side === 'source' ? '数据源' : '目标'}系统未选择`, 'error')
     return
   }
+  const requestSystemKind = selectedSystemForSide(side)?.kind || ''
   try {
     const objects = await listExternalSystemObjects(systemId, currentScope())
     if (side === 'source') {
@@ -3130,7 +3199,7 @@ async function loadObjects(side: WorkbenchSide): Promise<void> {
     if (objects.length > 0) await loadSchema(side)
     setStatus(`已加载 ${objects.length} 个${side === 'source' ? '来源' : '目标'}数据集`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(formatSideConnectionError(error, 'objects', side, requestSystemKind), 'error')
   }
 }
 
@@ -3142,9 +3211,14 @@ function handleSourceSystemChange(): void {
 }
 
 async function handleSourceObjectChange(): Promise<void> {
+  const requestSystemKind = selectedSourceSystem.value?.kind || ''
   sourceSchema.value = { object: '', fields: [] }
   sourceSchemaSystemId.value = ''
-  await loadSchema('source')
+  try {
+    await loadSchema('source')
+  } catch (error) {
+    setStatus(formatSideConnectionError(error, 'schema', 'source', requestSystemKind), 'error')
+  }
 }
 
 async function loadSchema(side: WorkbenchSide): Promise<void> {
