@@ -31,7 +31,10 @@ treatment **on purpose**:
   A6-3's first runtime slice (A6-3-1 `condition_branch` / exclusive branch v1) **landed via #2321**;
   the A6-3-2 frontend/readability slice **landed via #2339 + #2348**; the
   A6-3-4/W3 parallel fan-out + join-all slice **landed via #2496 + #2500 + #2501**.
-  A6-3-3 branch-local wait/nesting and A6-3-5 join-any stay deferred. A6-5's first `start_approval` bridge slice **landed via #2469**
+  A6-3-3 now has a docs-only branch-local wait scope gate
+  (`multitable-automation-a6-3-3-branch-local-wait-scope-gate-20260615.md`);
+  its backend/frontend runtime remains not started, and A6-3-5 join-any stays
+  deferred. A6-5's first `start_approval` bridge slice **landed via #2469**
   as a named cross-surface carve-out on top of A6-2 + W5 completion events. A6-4 now has
   a docs-only scope gate (`multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`);
   the A6-4a pure compiler slice **landed via #2568**, the A6-4b read-only route
@@ -182,9 +185,11 @@ Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
 > `4b44f25c6`)**: the rule editor can author a minimal `condition_branch` config (flat branch
 > conditions, `update_record` / `send_notification` branch action subset, default branch, read-only
 > never-flatten guard for richer loaded shapes, `workflow_job_v1` auto-lock), and the admin runs detail
-> shows selected branch `label (key)` plus branch child jobs. **Still deferred, each its own opt-in:**
-> A6-3-3 `wait_for_callback` / nested-`condition_branch` inside branches; A6-3 join-any / cancellation
-> semantics. A6-3-4/W3-0 has a docs-only scope gate:
+> shows selected branch `label (key)` plus branch child jobs. **A6-3-3 now has a docs-only
+> branch-local wait scope gate**:
+> `multitable-automation-a6-3-3-branch-local-wait-scope-gate-20260615.md`.
+> Its runtime/frontend remain separate build PRs. Nested `condition_branch` inside branches and
+> A6-3 join-any / cancellation semantics remain deferred. A6-3-4/W3-0 has a docs-only scope gate:
 > `multitable-automation-a6-3-parallel-join-all-scope-gate-20260611.md`.
 >
 > **✅ A6-3-4/W3 parallel fan-out + join-all LANDED 2026-06-11/12 — #2496 (squash
@@ -192,7 +197,7 @@ Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
 > can run `parallel_branch` with `joinMode: 'all'`, persist C1 parent/branch-child fan-out/fan-in
 > lineage, and aggregate fail/skip semantics; the editor can author the constrained `parallel_branch`
 > shape with `workflow_job_v1` auto-lock; admin runs detail can explain branch labels and child
-> jobs. **Still deferred:** A6-3-3 branch-local wait/nesting, A6-3-5 join-any/cancellation,
+> jobs. **Still deferred:** A6-3-3 backend/frontend runtime, A6-3-5 join-any/cancellation,
 > public webhook/token emitter, live BPMN runtime, and W7 result backwrite runtime. (A6-4c
 > read-only compile-preview UI landed #2604.)
 > Design-lock detail below retained for the record.
@@ -208,8 +213,10 @@ rung.
 - **Must not (this rung):** no BPMN import; no approval coupling.
 - **Depends on:** A6-2 (job persistence + resume stable before fan-out/join).
 - **Gate:** A6-3-4/W3 `join_all` landed after named opt-in (#2496/#2500/#2501).
-  `join_any`, branch-local waits/nesting, BPMN, and approval coupling still need
-  separate named opt-ins.
+  A6-3-3 branch-local wait now has a scope gate, but still needs separate
+  backend/frontend build opt-ins. `join_any`, nested branch shapes beyond
+  branch-local wait, BPMN, and approval coupling still need separate named
+  opt-ins.
 - **Test surface:** see A6-0 scout "→ A6-3" (branch picks exactly one, parallel fan-out
   independent, join-all waits, join-any cancels with explicit audit, branch failures
   isolated).
