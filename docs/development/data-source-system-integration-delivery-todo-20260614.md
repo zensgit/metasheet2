@@ -1,6 +1,6 @@
 # 数据库连接与系统对接交付收尾 TODO
 
-状态日期: 2026-06-14
+状态日期: 2026-06-15
 
 本文只跟踪“数据库连接能力接入系统并最终可交付”的剩余开发量。它不替代各功能线自己的设计文档/验证文档；每个 runtime 写能力仍然必须单独 opt-in、单独 PR、单独实体机验证。
 
@@ -8,7 +8,8 @@
 
 - 只读数据库接入 Data Factory 源系统: 已经基本可用。
 - 可交付定义: C6 外部写能力完成并通过实体机验收后，才称为完整交付。
-- 下一步建议: C2-close 已通过实体机 smoke；C3-1 facade `orderBy` seam 已落地；继续 C3 incremental / watermark runtime，但 runtime 仍需单独 opt-in。
+- 下一步建议: C2-close 已通过实体机 smoke；C3 core runtime + CI real-DB wire lock 已落地。
+  C3 bind-time/index hardening 随 C4 配置体验继续；Large-BOM #2425 的 C3/C4 实体机全链路验证另行继续。
 - 不建议: 现在直接开 C6。C6 是最大风险刀，必须等只读链路、增量链路、K3 generic seam 都稳定后再开。
 
 ## 收口顺序
@@ -17,7 +18,7 @@
 | --- | --- | --- | --- | --- |
 | P0 | ②b arc 收口权限/契约修复 | done (#2597) | 已排已合并主线风险 | related-echo 跨 base 泄漏 |
 | C2-close | 只读数据库链路 smoke 收口 | done (#2600) | 证明当前 read-only bridge 可稳定测试 | 实体机配置漂移 |
-| C3 | incremental / watermark runtime | gated; C3-1 done (#2609), C3-3a done (#2619) | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
+| C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | gated | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
@@ -126,15 +127,35 @@ TODO:
   - #2619 / squash `7f61709ea`.
   - 目标: adapter 后续实现 keyset 时读取同一个 runner-resolved config，不再自己猜 `type/field/tiebreaker`。
   - 边界: 不生成 watermark `where/orderBy`，不改变 offset cursor，不打开 C3-2/C3-3 runtime。
-- [ ] C3-2a structured `where` 逻辑分组 + MySQL operator parity。
+- [x] C3-2a structured `where` 逻辑分组 + MySQL operator parity。
+  - #2625 / squash `c2c59994c`.
   - 目标: 先让 Postgres/MSSQL/MySQL 的 structured read 能表达
     `field > last OR (field = last AND tiebreaker > lastTie)`，为 `updated_at + id`
     复合 keyset 铺底。
   - 边界: 不生成 watermark predicate，不解析/推进 cursor，不改变 offset full-read 行为，不新增写能力。
-- [ ] C3-2 adapter 实现 in-run mode-tagged cursor；跨 run 仍复用现有 watermark store，不改 store schema。
-- [ ] C3-3 `updated_at + id` 复合游标实现和测试。
-- [ ] C3-4 `monotonic_id` 游标实现和测试。
-- [ ] C3-5 实体机 real-DB smoke: 跨页同 timestamp 不漏读、不卡住、可 resume。
+- [x] C3-2 adapter 实现 watermark keyset runtime + in-run mode-tagged cursor；跨 run 仍复用现有
+  watermark store，不改 store schema。
+  - #2628 / squash `f587cf122`.
+  - 当前实现 slice: `data-source:sql-readonly.read()` 在有 `watermark + watermarkConfig` 时生成
+    type-conditional structured `where/orderBy`。
+  - `updated_at`: 第一页从 store floor 用 `>=` bounded re-read，后续页用 `(field,tiebreaker)` composite cursor。
+  - `monotonic_id`: 严格 `field > last` 单键 cursor；SQL BIGINT 值按 integer string 传递，避免 JS Number
+    精度丢失。
+  - offset/full-read 无 watermark 时保持原路径；wrong-mode cursor fail-closed；watermark cursor 不原样写入 run
+    details，只存 values-free redacted marker。
+  - 若读到 `maxPages` cap 仍未完成，run 标记 partial 且不推进 watermark，避免跳过未读行。
+- [x] C3-4 filter + watermark composition lock（unit 层）。
+  - #2628 / squash `f587cf122`.
+  - plugin adapter unit 层已覆盖 equality `filters` 与 watermark predicate 的 structured `$and`
+    组合、注入拒绝、以及 maxPages partial/no-watermark-advance。
+- [x] C3-5 CI real-DB wire-vs-fixture lock: 跨页同 timestamp 不漏读、不卡住、可 resume。
+  - #2631 / squash `834b4e41d`.
+  - 新增 Node 20 real-DB integration test，走真实路径:
+    `data-source:sql-readonly` adapter -> host facade -> `DataSourceManager` -> `PostgresAdapter` -> Postgres。
+  - 锁住 `where`/`orderBy` 穿透、`updated_at + id` 复合 cursor 推进、以及 SQL BIGINT
+    monotonic id 字符串保真。
+  - 注意: 这关闭 C3 watermark 的 real-DB wire lock；不等于 #2425 Large-BOM C3/C4
+    实体机 run/plan/apply/idempotence 全链路 PASS。
 
 完成条件:
 
@@ -142,6 +163,9 @@ TODO:
 - `>=` 型 stall 和 `>` 型 tie miss 都被测试锁住。
 - offset full-read 仍可作为 fallback，不被破坏。
 - 当前 equality `filters` 不能因 watermark 模式被旁路；C3 测试必须覆盖 filter + watermark 同时存在。
+- watermark cursor 不能原样进入 run details / evidence；只能落 values-free redacted marker。
+- `maxPagesReached` 必须使 run 进入 partial 且不推进 watermark，不能把截断读伪装成成功。
+- CI real-DB test 必须断言 facade -> manager -> adapter -> DB 路径保留 structured `where/orderBy`。
 - watermark 列必须有索引/`EXPLAIN` 验证；否则可能比全量扫描更差。
 - 时间戳精度并列风暴必须进入测试。
 - 迟到提交漏读属于固有限制: 要么记为限制，要么设计安全重扫窗。
@@ -156,7 +180,7 @@ TODO:
 
 - [ ] Workbench data-source source picker 完整化: connection / object / schema / table。
 - [ ] column picker: 支持选择 source object 字段。
-- [ ] watermark 配置 UI: 随 C3 一次纳入，避免先做一版只支持全量读的配置面。
+- [ ] watermark 配置 UI: 基于已落地 C3 runtime 补齐配置体验，避免操作员继续依赖内部 JSON。
 - [ ] preview 中显示 read-only/source-only 边界。
 - [ ] 错误提示产品化: auth、owner mismatch、missing object、missing schema、unsupported source。
 - [ ] 凭据边界: UI 只能引用 `dataSourceId`，不得输入或复制 credentials。

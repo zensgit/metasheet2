@@ -32,6 +32,10 @@ export default defineConfig({
       'tests/integration/comments.api.test.ts',
       'tests/integration/events-api.test.ts',
       'tests/integration/multitable-attachments.api.test.ts',
+      // multitable-context.api.test.ts needs setup.integration.ts + a live DB (its template
+      // catalog/install routes go through rbacGuard, which 403s under the default setup). It
+      // stays excluded HERE but is now wired INTO the `Run multitable real-DB integration`
+      // job (plugin-tests.yml), where it is green — so it is CI-covered, not invisible debt.
       'tests/integration/multitable-context.api.test.ts',
       'tests/integration/multitable-record-form.api.test.ts',
       'tests/integration/multitable-sheet-permissions.api.test.ts',

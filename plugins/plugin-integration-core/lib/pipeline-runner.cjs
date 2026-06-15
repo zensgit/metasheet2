@@ -27,6 +27,7 @@ const MAX_BATCH_SIZE = 10000
 const DEFAULT_MAX_PAGES = 100
 const MAX_RUN_PAGES = 10000
 const DATA_SOURCE_SQL_READONLY_KIND = 'data-source:sql-readonly'
+const SENSITIVE_WATERMARK_CURSOR_PREFIX = 'dswm1:'
 // DF-N2-2b: per-run cap on appended provenance events. Keeps the
 // integration_runs.provenance_events JSONB column bounded (~300 bytes/event →
 // ~150KB) so a large run cannot bloat the row. Overflow is surfaced as a counter
@@ -63,6 +64,17 @@ function normalizePositiveIntegerOption(value, { defaultValue, max }) {
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function buildCursorRunDetails(cursor) {
+  if (typeof cursor === 'string' && cursor.startsWith(SENSITIVE_WATERMARK_CURSOR_PREFIX)) {
+    return {
+      nextCursor: null,
+      nextCursorRedacted: true,
+      nextCursorKind: 'watermark',
+    }
+  }
+  return { nextCursor: cursor }
 }
 
 function resolveTargetOptions(pipeline = {}) {
@@ -712,14 +724,16 @@ function createPipelineRunner(deps = {}) {
           break
         }
         if (readResult.done || !readResult.nextCursor) {
+          cursor = null
           exitedNormally = true
           break
         }
         cursor = readResult.nextCursor
       }
       const maxPagesReached = !exitedNormally && page >= maxPages
+      const watermarkMayAdvance = !dryRun && metrics.rowsFailed === 0 && !maxPagesReached
 
-      if (!dryRun && metrics.rowsFailed === 0 && lastSuccessfulWatermark) {
+      if (watermarkMayAdvance && lastSuccessfulWatermark) {
         const advance = typeof watermarkStore.advanceWatermark === 'function'
           ? watermarkStore.advanceWatermark.bind(watermarkStore)
           : watermarkStore.setWatermark.bind(watermarkStore)
@@ -731,15 +745,15 @@ function createPipelineRunner(deps = {}) {
       }
 
       metrics.durationMs = Math.max(0, clock() - started)
-      const status = metrics.rowsFailed > 0 ? 'partial' : 'succeeded'
+      const status = metrics.rowsFailed > 0 || maxPagesReached ? 'partial' : 'succeeded'
       let finishRunWarning = null
       try {
         run = await runLogger.finishRun(run, metrics, status, {
           provenanceEvents,
           details: {
             dryRun,
-            watermarkAdvanced: !dryRun && metrics.rowsFailed === 0 && Boolean(lastSuccessfulWatermark),
-            nextCursor: cursor,
+            watermarkAdvanced: watermarkMayAdvance && Boolean(lastSuccessfulWatermark),
+            ...buildCursorRunDetails(cursor),
             erpFeedback,
             ...(targetWriteSummaries.length > 0 && {
               targetWriteSummaries,

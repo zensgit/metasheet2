@@ -105,7 +105,7 @@ describe('checkAiUsageQuota', () => {
     const { calls, query } = captureQuery([
       { user_daily_tokens: '0', user_weekly_tokens: '0', instance_daily_usd: '0' },
     ])
-    const decision = await checkAiUsageQuota(query, 'user-1', caps)
+    const decision = await checkAiUsageQuota(query, 'user-1', caps, { tokens: 1, costUsd: 0 })
     expect(decision.allowed).toBe(true)
     expect(calls[0].sql).toContain(AI_USAGE_LEDGER_TABLE)
     expect(calls[0].sql.toLowerCase()).not.toContain('status')
@@ -115,7 +115,7 @@ describe('checkAiUsageQuota', () => {
     const { query } = captureQuery([
       { user_daily_tokens: '1000', user_weekly_tokens: '1000', instance_daily_usd: '0' },
     ])
-    const decision = await checkAiUsageQuota(query, 'user-1', caps)
+    const decision = await checkAiUsageQuota(query, 'user-1', caps, { tokens: 1, costUsd: 0 })
     expect(decision).toEqual({ allowed: false, reason: 'user_daily_tokens' })
   })
 
@@ -123,7 +123,7 @@ describe('checkAiUsageQuota', () => {
     const { query } = captureQuery([
       { user_daily_tokens: '10', user_weekly_tokens: '5000', instance_daily_usd: '0' },
     ])
-    const decision = await checkAiUsageQuota(query, 'user-1', caps)
+    const decision = await checkAiUsageQuota(query, 'user-1', caps, { tokens: 1, costUsd: 0 })
     expect(decision).toEqual({ allowed: false, reason: 'user_weekly_tokens' })
   })
 
@@ -131,7 +131,35 @@ describe('checkAiUsageQuota', () => {
     const { query } = captureQuery([
       { user_daily_tokens: '10', user_weekly_tokens: '10', instance_daily_usd: '10.01' },
     ])
-    const decision = await checkAiUsageQuota(query, 'user-1', caps)
+    const decision = await checkAiUsageQuota(query, 'user-1', caps, { tokens: 1, costUsd: 0 })
+    expect(decision).toEqual({ allowed: false, reason: 'instance_daily_usd' })
+  })
+
+  // NO-OVERSHOOT keystone: a single request must be rejected BEFORE it crosses the cap from under it.
+  // RED on pre-fix HEAD (admission compared the prior SUM only: 990 >= 1000 is false → ALLOWED, and the
+  // request overshot to 1010; only the NEXT request was blocked). GREEN now that the request's own
+  // estimate counts at admission.
+  it('NO-OVERSHOOT: an estimate that would cross the daily token cap is blocked under-cap (990 + 20 > 1000)', async () => {
+    const { query } = captureQuery([
+      { user_daily_tokens: '990', user_weekly_tokens: '990', instance_daily_usd: '0' },
+    ])
+    const decision = await checkAiUsageQuota(query, 'user-1', caps, { tokens: 20, costUsd: 0 })
+    expect(decision).toEqual({ allowed: false, reason: 'user_daily_tokens' })
+  })
+
+  it('NO-OVERSHOOT: an exactly-fitting request is still allowed (990 + 10 == 1000)', async () => {
+    const { query } = captureQuery([
+      { user_daily_tokens: '990', user_weekly_tokens: '990', instance_daily_usd: '0' },
+    ])
+    const decision = await checkAiUsageQuota(query, 'user-1', caps, { tokens: 10, costUsd: 0 })
+    expect(decision.allowed).toBe(true)
+  })
+
+  it('NO-OVERSHOOT (cost cap — real money): an estimate that would cross the USD cap is blocked under-cap (9.99 + 0.02 > 10)', async () => {
+    const { query } = captureQuery([
+      { user_daily_tokens: '0', user_weekly_tokens: '0', instance_daily_usd: '9.99' },
+    ])
+    const decision = await checkAiUsageQuota(query, 'user-1', caps, { tokens: 1, costUsd: 0.02 })
     expect(decision).toEqual({ allowed: false, reason: 'instance_daily_usd' })
   })
 })
@@ -153,7 +181,7 @@ describe('sumAiUsageWindows (A3 §2.4 — shared SUM source for quota + summary)
     const { calls, query } = captureQuery([
       { user_daily_tokens: '0', user_weekly_tokens: '0', instance_daily_usd: '0' },
     ])
-    await checkAiUsageQuota(query, 'user-1', { tenantDailyTokenCap: 1, tenantWeeklyTokenCap: 1, accountDailyUsdCap: 1 })
+    await checkAiUsageQuota(query, 'user-1', { tenantDailyTokenCap: 1, tenantWeeklyTokenCap: 1, accountDailyUsdCap: 1 }, { tokens: 0, costUsd: 0 })
     const sumsCalls = calls.filter((call) => call.sql.includes('user_daily_tokens'))
     expect(sumsCalls).toHaveLength(1)
   })
@@ -175,7 +203,10 @@ describe('withAiUsageQuotaLock', () => {
 })
 
 describe('reserveAiUsage (review-fix F1 — reserve-then-settle)', () => {
-  const caps = { tenantDailyTokenCap: 1000, tenantWeeklyTokenCap: 5000, accountDailyUsdCap: 10 }
+  // Daily cap is set comfortably ABOVE one conservative single-request estimate (25 + 1024 = 1049)
+  // so the happy-path reserve fits under it; estimate-aware admission would otherwise reject a
+  // single request whose conservative estimate exceeds the remaining budget (the no-overshoot fix).
+  const caps = { tenantDailyTokenCap: 5000, tenantWeeklyTokenCap: 50000, accountDailyUsdCap: 10 }
   const input: AiUsageReservationInput = {
     subjectKey: 'user-1',
     userId: 'user-1',
@@ -225,7 +256,8 @@ describe('reserveAiUsage (review-fix F1 — reserve-then-settle)', () => {
 
   it('quota exhausted → zero-usage quota_exhausted row in the SAME tx, no reservation', async () => {
     const { calls, pool } = reservePool([
-      { user_daily_tokens: '1000', user_weekly_tokens: '1000', instance_daily_usd: '0' },
+      // window already AT the daily cap → any further request's estimate pushes it over → blocked.
+      { user_daily_tokens: '5000', user_weekly_tokens: '1000', instance_daily_usd: '0' },
     ])
     const result = await reserveAiUsage(pool, input)
     expect(result).toEqual({ reserved: false, reason: 'user_daily_tokens' })
