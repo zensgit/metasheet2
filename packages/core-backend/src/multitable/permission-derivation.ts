@@ -58,6 +58,11 @@ export function isFieldAlwaysReadOnly(field: Pick<FieldLike, 'type' | 'property'
   if (field.type === 'formula' || field.type === 'lookup' || field.type === 'rollup') return true
   if (isSystemFieldType(field.type)) return true
   const property = field.property ?? {}
+  // Bidirectional / mirror links (design 2026-06-14) — the DERIVED (mirror) side is always read-only,
+  // independent of the property-load path (codec injects readOnly:true, but a raw / SQL-seeded field may
+  // lack it). Keying directly on `mirrorOf` makes BOTH write services reject a PATCH on the mirror, so the
+  // single canonical meta_links edge can never gain a second materialized row (the spine invariant).
+  if (typeof property.mirrorOf === 'string' && property.mirrorOf.length > 0) return true
   return property.readonly === true || property.readOnly === true
 }
 

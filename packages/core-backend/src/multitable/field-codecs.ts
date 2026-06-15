@@ -218,6 +218,17 @@ export function sanitizeFieldProperty(
       typeof obj.foreignBaseId === 'string' && obj.foreignBaseId.trim().length > 0
         ? obj.foreignBaseId.trim()
         : ''
+    // Bidirectional / mirror links (design 2026-06-14) — mirror univer-meta.ts's sanitizeFieldProperty so
+    // the pairing config (twoWay / mirrorFieldId / mirrorOf) is contractual, not incidental `...obj`
+    // passthrough (wire-vs-fixture). The derived side (`mirrorOf` set) is forced read-only.
+    const mirrorFieldId =
+      typeof obj.mirrorFieldId === 'string' && obj.mirrorFieldId.trim().length > 0
+        ? obj.mirrorFieldId.trim()
+        : ''
+    const mirrorOf =
+      typeof obj.mirrorOf === 'string' && obj.mirrorOf.trim().length > 0
+        ? obj.mirrorOf.trim()
+        : ''
     return {
       ...cleanObj,
       ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId } : {}),
@@ -226,6 +237,9 @@ export function sanitizeFieldProperty(
       ...(typeof obj.refKind === 'string' && obj.refKind.trim().length > 0
         ? { refKind: obj.refKind.trim() }
         : {}),
+      ...(obj.twoWay === true ? { twoWay: true } : {}),
+      ...(mirrorFieldId ? { mirrorFieldId } : {}),
+      ...(mirrorOf ? { mirrorOf, readOnly: true } : {}),
     }
   }
 
