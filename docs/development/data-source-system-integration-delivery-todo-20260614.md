@@ -9,7 +9,8 @@
 - 只读数据库接入 Data Factory 源系统: 已经基本可用。
 - 可交付定义: C6 外部写能力完成并通过实体机验收后，才称为完整交付。
 - 下一步建议: C2-close 已通过实体机 smoke；C3 core runtime + CI real-DB wire lock 已落地；
-  C4 配置体验 baseline 已落地（source/object/schema picker、source-field picker、watermark config）。
+  C4 配置体验和已知 polish 已落地（source/object/schema picker、source-field picker、watermark config、
+  read-only/source-only 边界提示、SQL bridge values-free 错误提示）。
   Large-BOM #2425 的 scoped C3/C4 实体机全链路验证已 PASS/CLOSED；Windows 短 TEMP zip 部署 caveat
   另由 #2642 跟踪，不阻塞 runtime gate。
 - 不建议: 现在直接开 C6。C6 是最大风险刀，必须等只读链路、增量链路、K3 generic seam 都稳定后再开。
@@ -21,7 +22,7 @@
 | P0 | ②b arc 收口权限/契约修复 | done (#2597) | 已排已合并主线风险 | related-echo 跨 base 泄漏 |
 | C2-close | 只读数据库链路 smoke 收口 | done (issue #2600) | 证明当前 read-only bridge 可稳定测试 | 实体机配置漂移 |
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
-| C4 | UI / 配置体验统一 | baseline done (#2643/#2646/#2649); polish gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
+| C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | gated | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
 | Release | 总包 + 实体机验收 | gated | 交付签收 | 包内容/部署/证据不完整 |
@@ -194,8 +195,18 @@ TODO:
   - incremental 模式保存 `options.watermark`；manual/full 不带 watermark。
   - `data-source:sql-readonly + updated_at` 必须使用当前 source schema 中的 watermark field 和不同的
     tiebreaker；source system/object 切换会清理旧 schema，避免 stale schema 误放行。
-- [ ] preview 中显示 read-only/source-only 边界。
-- [ ] 错误提示产品化: auth、owner mismatch、missing object、missing schema、unsupported source。
+- [x] preview 中显示 read-only/source-only 边界。
+  - #2652 / squash `828d1356b`.
+  - Workbench payload preview 面板在选中 `data-source:sql-readonly` 来源时显示只读边界:
+    Payload 预览和 dry-run 只读取数据库源；Save-only 只写目标系统，不会写回该数据库连接。
+  - 边界: display-only；不改 backend/runtime/DB/K3/external write。
+- [x] 错误提示产品化: auth、owner mismatch、missing object、missing schema、unsupported source。
+  - #2655 / squash `2d53bce14`.
+  - SQL readonly / data-source bridge 的 schema picker、source object load/test、connection badge 和 async
+    delayed error 都走 values-free、可操作错误提示；非 bridge 系统保留 legacy raw status。
+  - 测试锁住 dangling/not-found 不泄漏 dataSourceId、owner-principal 权限提示、unknown SQL driver
+    error 不回显 password/token/database hints、以及切换 source 后延迟失败仍按请求开始时的 bridge kind 脱敏。
+  - 边界: Workbench presentation/status only；不改 backend/runtime/API/logging/K3/external write 合同。
 - [x] 凭据边界: UI 只能引用 `dataSourceId`，不得输入或复制 credentials。
   - C2/C4 UI 保存路径只引用 dataSourceId；#2600 实体机 smoke 也验证 Workbench 不复制凭据。
 
@@ -203,7 +214,8 @@ TODO:
 
 - baseline: 操作员能在 UI 内完成 read-only source/object/schema/column/watermark 配置，不需要知道内部 JSON shape。
 - `/data-sources` 仍是唯一凭据管理面。
-- polish 仍 gated: read-only/source-only 边界展示和错误提示产品化仍可继续小 PR；这些不改变 runtime 合同。
+- 后续 C4 仅保留 demand-gated UX polish；当前交付链路不再依赖手写 JSON，也不再依赖 raw SQL bridge
+  错误文本来排障。任何新 polish 不得改变 runtime 合同。
 
 ## C5 - K3 Generic MSSQL Seam
 
