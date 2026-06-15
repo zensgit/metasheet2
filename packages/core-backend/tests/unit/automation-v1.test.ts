@@ -2382,9 +2382,10 @@ describe('AutomationService — Rule CRUD', () => {
     await expect(promise).rejects.toThrow('requires execution_mode workflow_job_v1')
   })
 
-  it('A6-3-1: createRule rejects wait_for_callback inside a condition_branch branch', async () => {
-    const promise = service.createRule('sheet_1', {
-      name: 'Nested wait branch',
+  it('A6-3-3: createRule ACCEPTS branch-local wait_for_callback in a workflow_job_v1 rule', async () => {
+    dbExecuteResults.push([]) // for insertInto().execute()
+    const rule = await service.createRule('sheet_1', {
+      name: 'Branch-local wait',
       triggerType: 'record.created',
       triggerConfig: {},
       actionType: 'condition_branch',
@@ -2409,7 +2410,75 @@ describe('AutomationService — Rule CRUD', () => {
       createdBy: 'user_1',
     })
 
-    await expect(promise).rejects.toThrow('cannot contain wait_for_callback until A6-3-3')
+    // A6-3-3: branch-local wait is no longer rejected; the rule persists.
+    expect(rule).toBeTruthy()
+  })
+
+  it('A6-3-3: createRule still rejects branch-local start_approval (out of scope)', async () => {
+    const promise = service.createRule('sheet_1', {
+      name: 'Nested approval branch',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'condition_branch',
+      actionConfig: {
+        branches: [{
+          key: 'needs_approval',
+          conditions: { logic: 'and', conditions: [{ fieldId: 'status', operator: 'equals', value: 'pending' }] },
+          actions: [{ type: 'start_approval', config: {} }],
+        }],
+      },
+      actions: [{
+        type: 'condition_branch',
+        config: {
+          branches: [{
+            key: 'needs_approval',
+            conditions: { logic: 'and', conditions: [{ fieldId: 'status', operator: 'equals', value: 'pending' }] },
+            actions: [{ type: 'start_approval', config: {} }],
+          }],
+        },
+      }],
+      executionMode: 'workflow_job_v1',
+      createdBy: 'user_1',
+    })
+
+    await expect(promise).rejects.toThrow('cannot contain start_approval until A6-3-3')
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
+  it('A6-3-3: createRule still rejects nested condition_branch inside a branch (out of scope)', async () => {
+    // Well-formed inner condition_branch so ONLY the nesting rule can fire (not a malformed-config error).
+    const innerBranch = {
+      type: 'condition_branch',
+      config: {
+        branches: [{
+          key: 'inner',
+          conditions: { logic: 'and', conditions: [{ fieldId: 'status', operator: 'equals', value: 'x' }] },
+          actions: [{ type: 'update_record', config: { fields: {} } }],
+        }],
+      },
+    }
+    const outer = {
+      type: 'condition_branch',
+      config: {
+        branches: [{
+          key: 'outer',
+          conditions: { logic: 'and', conditions: [{ fieldId: 'status', operator: 'equals', value: 'pending' }] },
+          actions: [innerBranch],
+        }],
+      },
+    }
+    const promise = service.createRule('sheet_1', {
+      name: 'Nested branch',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'condition_branch',
+      actionConfig: outer.config,
+      actions: [outer],
+      executionMode: 'workflow_job_v1',
+      createdBy: 'user_1',
+    })
+
+    await expect(promise).rejects.toThrow('cannot contain nested condition_branch')
     expect(dbExecuteResults).toHaveLength(0)
   })
 

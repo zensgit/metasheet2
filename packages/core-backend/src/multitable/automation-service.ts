@@ -263,9 +263,8 @@ function validateConditionBranchConfig(config: unknown, path: string): Automatio
       if (nested.type === 'parallel_branch') {
         throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain parallel_branch until a later nested-DAG slice`)
       }
-      if (nested.type === 'wait_for_callback') {
-        throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain wait_for_callback until A6-3-3`)
-      }
+      // A6-3-3: branch-local wait_for_callback is allowed — condition_branch already forces
+      // workflow_job_v1 at the rule level, so the wait is only reachable in an opted-in rule.
       if (nested.type === 'start_approval') {
         throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain start_approval until A6-3-3`)
       }
@@ -292,9 +291,7 @@ function validateConditionBranchConfig(config: unknown, path: string): Automatio
       if (nested.type === 'parallel_branch') {
         throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain parallel_branch until a later nested-DAG slice`)
       }
-      if (nested.type === 'wait_for_callback') {
-        throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain wait_for_callback until A6-3-3`)
-      }
+      // A6-3-3: branch-local wait_for_callback is allowed (see branches loop above).
       if (nested.type === 'start_approval') {
         throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain start_approval until A6-3-3`)
       }
@@ -1072,6 +1069,19 @@ export class AutomationService {
             action,
           })
           .then(() => undefined),
+      // A6-3-3: a branch-local wait_for_callback persists the branch suspension (with cursor)
+      // + a suspended branch-child job, then the executor stops; resume continues the branch tail.
+      onSuspendBranch: (cursor, action: AutomationAction): Promise<void> =>
+        this.suspensionService
+          .createBranchLocal({
+            executionId,
+            rule: { id: rule.id, sheetId: rule.sheetId, actions: rule.actions },
+            recordId: ((triggerEvent as Record<string, unknown>)?.recordId as string) ?? '',
+            triggerEvent,
+            cursor,
+            action,
+          })
+          .then(() => undefined),
       // W6-1: create one approval, then either suspend pending completion or continue immediately
       // if the approval auto-completed during createApproval().
       onStartApproval: async (stepIndex: number, action: AutomationAction, context: ExecutionContext) => {
@@ -1177,6 +1187,15 @@ export class AutomationService {
     if (suspension.status !== 'pending') {
       return { status: 409, code: 'ALREADY_RESUMED', message: `Suspension is ${suspension.status}, not resumable` }
     }
+    // A6-3-3 resume-cursor gate — fail closed BEFORE any token claim:
+    // - `invalid`: a non-null but malformed / unknown cursor must NEVER fall back to the
+    //   top-level step_index path (that is the corrupt-branch-cursor fail-open we close).
+    // - `condition_branch`: branch-aware resume lands in the next slice; until then fail
+    //   closed rather than mis-resume a branch suspension via the top-level path.
+    if (suspension.resumeCursor.kind === 'invalid') {
+      return { status: 409, code: 'SUSPENSION_CURSOR_INVALID', message: 'Suspension resume cursor is invalid; cannot resume safely' }
+    }
+    const resumeCursor = suspension.resumeCursor // top_level | { condition_branch, cursor }
     // Re-load the CURRENT rule (D4); fail closed if missing/disabled (T7).
     const rule = await this.getRule(suspension.ruleId)
     if (!rule || !rule.enabled) {
@@ -1187,6 +1206,55 @@ export class AutomationService {
     const currentFp = computeActionFingerprint(execRule.actions)
     if (currentFp.count !== suspension.actionFingerprint.count || currentFp.hash !== suspension.actionFingerprint.hash) {
       return { status: 409, code: 'RULE_CHANGED', message: 'Rule actions changed since suspend; cannot resume safely' }
+    }
+    // A6-3-3 branch drift guard (still BEFORE the claim): the selected branch must still exist and
+    // its action sequence must match the suspend-time fingerprint, else resume could re-enter the
+    // wrong branch position. The top-level fingerprint above only covers top-level action types.
+    if (resumeCursor.kind === 'condition_branch') {
+      const branchCursor = resumeCursor.cursor
+      const parentAction = execRule.actions[branchCursor.parentStepIndex]
+      const parentConfig = (parentAction?.config ?? {}) as {
+        branches?: Array<{ key?: unknown; actions?: AutomationAction[] }>
+        defaultBranch?: { key?: unknown; actions?: AutomationAction[] } | null
+      }
+      const branch = [
+        ...(Array.isArray(parentConfig.branches) ? parentConfig.branches : []),
+        ...(parentConfig.defaultBranch ? [parentConfig.defaultBranch] : []),
+      ].find((candidate) => candidate.key === branchCursor.branchKey)
+      if (!parentAction || parentAction.type !== 'condition_branch' || !branch || !Array.isArray(branch.actions)) {
+        return { status: 409, code: 'RULE_CHANGED', message: 'Selected branch no longer exists; cannot resume safely' }
+      }
+      const branchFp = computeActionFingerprint(branch.actions)
+      if (
+        branchFp.count !== branchCursor.branchActionFingerprint.count ||
+        branchFp.hash !== branchCursor.branchActionFingerprint.hash
+      ) {
+        return { status: 409, code: 'RULE_CHANGED', message: 'Selected branch actions changed since suspend; cannot resume safely' }
+      }
+      // Semantic-corruption guard (still BEFORE the claim). The branch fingerprint only hashes branch
+      // action TYPES, so a structurally-valid cursor whose branchActionIndex points at a NON-wait action
+      // (with tampered ids) would otherwise pass and let continueBranchExecution settle that non-wait
+      // action as the suspended wait. The cursor must (a) point at a branch-local wait_for_callback, and
+      // (b) carry the deterministic ids for this execution + branch position (stepKey / parentJobId /
+      // branchJobId / upstreamJobId are pure functions of executionId + parentStepIndex + branchKey +
+      // branchActionIndex). Any mismatch fails closed.
+      if (branch.actions[branchCursor.branchActionIndex]?.type !== 'wait_for_callback') {
+        return { status: 409, code: 'SUSPENSION_CURSOR_INVALID', message: 'Resume cursor does not point at a branch-local wait; cannot resume safely' }
+      }
+      const expectedStepKey = `${branchCursor.parentStepIndex}.branch.${branchCursor.branchKey}.${branchCursor.branchActionIndex}`
+      const expectedParentJobId = `${suspension.executionId}:job:${branchCursor.parentStepIndex}`
+      const expectedBranchJobId = `${suspension.executionId}:job:${branchCursor.parentStepIndex}:branch:${branchCursor.branchKey}:${branchCursor.branchActionIndex}`
+      const expectedUpstreamJobId = branchCursor.branchActionIndex === 0
+        ? expectedParentJobId
+        : `${suspension.executionId}:job:${branchCursor.parentStepIndex}:branch:${branchCursor.branchKey}:${branchCursor.branchActionIndex - 1}`
+      if (
+        branchCursor.stepKey !== expectedStepKey ||
+        branchCursor.parentJobId !== expectedParentJobId ||
+        branchCursor.branchJobId !== expectedBranchJobId ||
+        branchCursor.upstreamJobId !== expectedUpstreamJobId
+      ) {
+        return { status: 409, code: 'SUSPENSION_CURSOR_INVALID', message: 'Resume cursor ids are inconsistent with the branch position; cannot resume safely' }
+      }
     }
     // Re-fetch the live record (D4); fail closed if it was deleted during the wait (T9).
     let recordData: Record<string, unknown> = {}
@@ -1230,7 +1298,9 @@ export class AutomationService {
     const lineageIds = await this.collectExecutionLineageIds(execution)
     const rootExecutionId = lineageIds.at(-1) ?? execution.id
     const jobLifecycle = this.buildJobLifecycle(execution.id, execRule, triggerEvent, rootExecutionId)
-    const continued = await this.executor.continueExecution(execution, execRule, context, suspension.stepIndex, jobLifecycle)
+    const continued = resumeCursor.kind === 'condition_branch'
+      ? await this.executor.continueBranchExecution(execution, execRule, context, resumeCursor.cursor, jobLifecycle)
+      : await this.executor.continueExecution(execution, execRule, context, suspension.stepIndex, jobLifecycle)
     try {
       await this.logService.updateRecordedExecution(continued)
     } catch (err) {
