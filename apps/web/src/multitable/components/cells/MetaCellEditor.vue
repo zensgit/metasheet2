@@ -52,7 +52,18 @@
       />
     </div>
 
-    <!-- longText: multiline REST editor -->
+    <!-- rich longText: minimal rich editor (server re-sanitizes on write). Forward
+         confirm/cancel so the grid host commits (Cmd/Ctrl+Enter) and cancels (Esc),
+         matching the plain textarea's commit contract. -->
+    <MetaRichLongTextEditor
+      v-else-if="field.type === 'longText' && isRichLongTextField(field)"
+      :model-value="modelValue"
+      :is-zh="isZh"
+      @update:model-value="emit('update:modelValue', $event)"
+      @confirm="emit('confirm')"
+      @cancel="emit('cancel')"
+    />
+    <!-- plain longText: unchanged multiline REST editor -->
     <textarea
       v-else-if="field.type === 'longText'"
       ref="inputRef"
@@ -303,6 +314,8 @@ import { ref, computed, onMounted, toRef } from 'vue'
 import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaField } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
 import MetaYjsPresenceChip from '../MetaYjsPresenceChip.vue'
+import MetaRichLongTextEditor from './MetaRichLongTextEditor.vue'
+import { isRichLongTextField } from '../../utils/rich-longtext'
 import {
   attachmentAcceptAttr,
   resolveAttachmentFieldProperty,
