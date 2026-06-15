@@ -176,6 +176,7 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/multitable-permission-golden-d3d1.test.ts \
             tests/integration/multitable-permission-golden-d3d2.test.ts \
+            tests/integration/multitable-context.api.test.ts \
             tests/integration/multitable-view-aggregate.test.ts \
             tests/integration/multitable-typed-query-numeric-view.test.ts \
             tests/integration/multitable-formula-over-lookup-view.test.ts \
