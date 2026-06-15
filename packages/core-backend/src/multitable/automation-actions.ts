@@ -17,6 +17,7 @@ export type AutomationActionType =
   | 'condition_branch'
   | 'start_approval'
   | 'parallel_branch'
+  | 'record_click'
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'update_record',
@@ -32,6 +33,7 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'condition_branch',
   'start_approval',
   'parallel_branch',
+  'record_click',
 ]
 
 /** Config shape for update_record */
@@ -185,6 +187,26 @@ export interface ParallelBranchConfig {
     label?: string
     actions: AutomationAction[]
   }>
+}
+
+/**
+ * Config shape for record_click (B1-a1 button/action field — the executor-owned
+ * INERT first action).
+ *
+ * Design lock: docs/development/multitable-button-field-b1s0-designlock-20260615.md §3.2.
+ * `record_click` is dispatched by the SAME executor as every other action (no
+ * bypass) but has ZERO business side effects: it writes no record, makes no
+ * egress, starts no job. Its only job is to settle `succeeded` so the button
+ * run-route can audit + return a record context. Its execution gate is
+ * `record-readable` (re-evaluated as the actor in the run-route preflight, §4 —
+ * visible ≠ executable). v1 takes NO required params.
+ */
+export interface RecordClickConfig {
+  /**
+   * Optional free-form note echoed back in the inert step output (e.g. a button
+   * label) — never interpreted, never written anywhere with side effects.
+   */
+  note?: string
 }
 
 export interface AutomationAction {

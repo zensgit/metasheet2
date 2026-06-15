@@ -1,0 +1,76 @@
+/**
+ * Migration: B1-a1 — widen the automation action-type CHECK constraint to
+ * include `record_click` (the executor-owned INERT action behind the
+ * button/action field; design lock
+ * docs/development/multitable-button-field-b1s0-designlock-20260615.md §3.2).
+ *
+ * Keeps `chk_automation_action_type` aligned with the app-level
+ * `ALL_ACTION_TYPES`. NULL-safe: only the enum widens; no table or column is
+ * added in this slice. The button run-route never inserts into `automation_rules`
+ * (it dispatches per-action via the executor seam) — this widening exists purely
+ * to keep the DB constraint and `ALL_ACTION_TYPES` in lockstep so the drift
+ * guard stays green and a future rule-authored `record_click` is persistable.
+ */
+
+import { sql, type Kysely } from 'kysely'
+
+export const AUTOMATION_ACTION_TYPES_WITH_RECORD_CLICK = [
+  'notify',
+  'update_field',
+  'update_record',
+  'create_record',
+  'delete_record',
+  'send_webhook',
+  'send_notification',
+  'send_email',
+  'send_dingtalk_group_message',
+  'send_dingtalk_person_message',
+  'lock_record',
+  'wait_for_callback',
+  'condition_branch',
+  'start_approval',
+  'parallel_branch',
+  'record_click',
+] as const
+
+export const AUTOMATION_ACTION_TYPES_BEFORE_RECORD_CLICK = [
+  'notify',
+  'update_field',
+  'update_record',
+  'create_record',
+  'delete_record',
+  'send_webhook',
+  'send_notification',
+  'send_email',
+  'send_dingtalk_group_message',
+  'send_dingtalk_person_message',
+  'lock_record',
+  'wait_for_callback',
+  'condition_branch',
+  'start_approval',
+  'parallel_branch',
+] as const
+
+function quotedActions(actions: readonly string[]): string {
+  return actions.map((action) => `'${action}'`).join(', ')
+}
+
+async function replaceAutomationActionTypeConstraint(
+  db: Kysely<unknown>,
+  actions: readonly string[],
+): Promise<void> {
+  await sql`ALTER TABLE automation_rules DROP CONSTRAINT IF EXISTS chk_automation_action_type`.execute(db)
+  await sql.raw(`
+    ALTER TABLE automation_rules
+    ADD CONSTRAINT chk_automation_action_type
+    CHECK (action_type IN (${quotedActions(actions)}))
+  `).execute(db)
+}
+
+export async function up(db: Kysely<unknown>): Promise<void> {
+  await replaceAutomationActionTypeConstraint(db, AUTOMATION_ACTION_TYPES_WITH_RECORD_CLICK)
+}
+
+export async function down(db: Kysely<unknown>): Promise<void> {
+  await replaceAutomationActionTypeConstraint(db, AUTOMATION_ACTION_TYPES_BEFORE_RECORD_CLICK)
+}

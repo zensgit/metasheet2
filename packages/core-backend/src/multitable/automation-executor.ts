@@ -1570,6 +1570,30 @@ export class AutomationExecutor {
     }
   }
 
+  /**
+   * B1-a1 (button/action field) narrow public seam: dispatch ONE action through
+   * the SAME per-action path the rule executor uses (`executeSingleAction`),
+   * WITHOUT minting a full `AutomationExecution` / running a rule. The button
+   * run-route (routes/multitable-button-run.ts) composes a minimal
+   * `ExecutionContext` and calls this so a click inherits the executor's
+   * per-action handler, audit semantics, and cross-base governance — design lock
+   * §3.1 ("只经 executor 派发,不开旁路").
+   *
+   * AUTHORIZATION IS NOT DONE HERE. Executor action handlers run with
+   * rule/system authority (`ruleCreatedBy` is treated as the write authority), so
+   * "could dispatch" must never be read as "actor is allowed". Per §4 the
+   * action's own gate is re-evaluated AS THE ACTOR in the route preflight before
+   * this is ever reached. The B1-a1 supported-action scope-gate (only
+   * `record_click`) is likewise a ROUTE concern, not enforced here — this seam is
+   * legitimately general so write-class actions can bind in later gated slices.
+   */
+  async dispatchSingleAction(
+    action: AutomationAction,
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult> {
+    return this.executeSingleAction(action, context)
+  }
+
   private async executeSingleAction(
     action: AutomationAction,
     context: ExecutionContext,
@@ -1611,6 +1635,27 @@ export class AutomationExecutor {
             actionType: 'start_approval',
             status: 'failed',
             error: 'start_approval requires execution_mode workflow_job_v1',
+          }
+          break
+        case 'record_click':
+          // B1-a1 (design lock §3.2): the executor-owned INERT action behind the
+          // button/action field. Dispatched through the SAME executor as every
+          // other action (no bypass) but with ZERO business side effects — no
+          // record write, no egress, no job. It only settles `succeeded` so the
+          // button run-route can audit + return a record context. The executor
+          // does NOT authorize here: per §4 (visible ≠ executable) the
+          // `record-readable` gate is re-evaluated as the ACTOR in the run-route
+          // preflight, never trusting "button visible".
+          result = {
+            actionType: 'record_click',
+            status: 'success',
+            output: {
+              kind: 'record_click',
+              recordId: context.recordId,
+              ...(typeof (action.config as { note?: unknown })?.note === 'string'
+                ? { note: (action.config as { note: string }).note }
+                : {}),
+            },
           }
           break
         default:

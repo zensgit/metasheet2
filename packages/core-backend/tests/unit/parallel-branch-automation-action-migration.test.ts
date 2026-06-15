@@ -7,10 +7,11 @@ import {
 
 describe('parallel_branch automation action migration (A6-3-4 / W3-1)', () => {
   it('keeps this constraint in sync with app-level action types except those added by later migrations', () => {
-    // This is no longer the LATEST migration (delete_record widened the constraint afterwards — see
-    // `delete-record-automation-action-migration.test.ts` for the live "latest in sync" guard). Every
-    // app-level action type except the ones introduced by a strictly-later migration must already be here.
-    const ADDED_BY_LATER_MIGRATIONS = new Set<string>(['delete_record'])
+    // This is no longer the LATEST migration (delete_record then record_click widened the constraint
+    // afterwards — see `record-click-automation-action-migration.test.ts` for the live "latest in sync"
+    // guard). Every app-level action type except the ones introduced by a strictly-later migration must
+    // already be here.
+    const ADDED_BY_LATER_MIGRATIONS = new Set<string>(['delete_record', 'record_click'])
     for (const actionType of ALL_ACTION_TYPES) {
       if (ADDED_BY_LATER_MIGRATIONS.has(actionType)) continue
       expect(AUTOMATION_ACTION_TYPES_WITH_PARALLEL_BRANCH).toContain(actionType)

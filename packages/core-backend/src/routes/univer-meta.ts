@@ -1429,6 +1429,14 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   }
   if (normalized === 'createdby' || normalized === 'created_by' || normalized === 'created-by') return 'createdBy'
   if (normalized === 'modifiedby' || normalized === 'modified_by' || normalized === 'modified-by') return 'modifiedBy'
+  // B1-a1: close a B1-a0 (#2648) follow-through gap. B1-a0 added the 'button'
+  // case to field-codecs.ts's mapFieldType but NOT to this route-layer SHADOW
+  // copy, so a button field read through the record/patch context degraded to
+  // 'string' (harmless-empty, ledger §4, since a button is value-less) — but the
+  // button/run preflight cannot detect `field.type === 'button'` without it.
+  // Adding it is strictly MORE correct (no value-path change: a button never
+  // carries a record value).
+  if (normalized === 'button') return 'button'
   if (
     normalized === 'longtext' ||
     normalized === 'long_text' ||
@@ -1708,6 +1716,29 @@ function sanitizeFieldPropertyByType(type: UniverMetaField['type'], property: un
 
   if (type === 'createdTime' || type === 'modifiedTime' || type === 'createdBy' || type === 'modifiedBy') {
     return { ...obj, readOnly: true }
+  }
+
+  if (type === 'button') {
+    // B1-a1: mirror field-codecs.ts's button block in this route-layer SHADOW
+    // serializer (B1-a0 added it to field-codecs only). A value-less, non-editable
+    // action trigger: whitelist the §6 config SHAPE only (so editing one key never
+    // drops actionConfig — §7 FieldManager-merge lock) and force readOnly. The
+    // `actionType ∈ AutomationActionType` enum check + actionConfig safety guard are
+    // enforced at the run route (multitable-button-run.ts), NOT here.
+    const next: Record<string, unknown> = { readOnly: true }
+    if (typeof obj.label === 'string' && obj.label.trim()) next.label = obj.label.trim()
+    if (obj.variant === 'primary' || obj.variant === 'secondary' || obj.variant === 'danger') {
+      next.variant = obj.variant
+    }
+    if (typeof obj.actionType === 'string' && obj.actionType.trim()) next.actionType = obj.actionType.trim()
+    if (isPlainObject(obj.actionConfig)) next.actionConfig = obj.actionConfig
+    if (isPlainObject(obj.confirm)) {
+      const c = obj.confirm
+      const confirm: Record<string, unknown> = { enabled: c.enabled === true }
+      if (typeof c.message === 'string' && c.message.trim()) confirm.message = c.message.trim()
+      next.confirm = confirm
+    }
+    return next
   }
 
   return obj
