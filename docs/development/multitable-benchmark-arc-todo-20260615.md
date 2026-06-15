@@ -52,7 +52,7 @@ design — it lands with B1-b once a browser session can verify render→click).
 | A5 design-lock (scale rule model + security locks + slice plan) | ✅ | #2637 |
 | A5-1 data-bar backend contract (`sanitize…ScaleRule` + `buildFieldScaleMap`) | ✅ | #2639 |
 | A5-1 data-bar FE mirror + grid render | ✅ | #2640 |
-| **A5-2 color-scale + A5-3 icon-set backend + FE mirror** | 🟦 **in review** | **PR #2663** — BE 70 + FE 24 tests, tsc + vue-tsc green, suite 3296/3296; byte-identical FE↔BE mirror |
+| **A5-2 color-scale + A5-3 icon-set backend + FE mirror** | ✅ merged via **#2664** (parallel) | landed by the parallel session **incl. the kind-aware render**; this session's independent build (#2663) converged on the same sanitizer/`buildFieldScaleMap` design → **closed redundant** (4th same-arc collision) |
 | A5-2 / A5-3 grid render (MetaGridTable) + dialog (ConditionalFormattingDialog) | 🔒 browser-gated | — |
 
 A5-2 + A5-3 are combined into **one** backend PR (they extend the identical
@@ -61,12 +61,11 @@ conflict on those hot functions and stall on merge cadence), with separate test
 blocks per kind. Render + dialog stay browser-gated (visual contrast / alignment
 need a real browser, per the design-lock's honest verification boundary).
 
-**Render-slice blocker (carried from #2663):** the sanitizer now ACCEPTS
-colorScale/iconSet, but `MetaGridTable.vue:606` is still kind-blind (paints a
-data-bar gradient from any scale entry → `linear-gradient(…undefined…)` for the
-new kinds). Safe intermediate state today (the dialog, the only config producer,
-is still dataBar-only, so no reachable UI emits these), but the render slice MUST
-make the cell renderer kind-aware **before** colorScale/iconSet authoring ships.
+**Render-slice blocker — RESOLVED by #2664:** the kind-blind `MetaGridTable`
+window (a colorScale/iconSet config would have rendered `linear-gradient(…undefined…)`)
+was closed by #2664, which landed the kind-aware cell render alongside the
+sanitizer. (This session's #2663 had flagged it as a follow-up; #2664 did it in the
+same PR.)
 
 ## 3. Export full-fidelity (A2) — masking-flag verification
 
@@ -79,7 +78,7 @@ make the cell renderer kind-aware **before** colorScale/iconSet authoring ships.
 ## 4. Remaining ladder (gated — from #2650 §5)
 
 **browser-gated** (backend autonomous; terminal slice needs a browser): B1-b /
-B1-c · A5-2/A5-3 render · A3 inline-link record expand · A4 form-logic depth
+B1-c · A3 inline-link record expand · A4 form-logic depth
 (required-if / multi-page / prefill / redirect) · B4 dashboard non-chart widgets ·
 B5 longText in-cell @mention · B6 comment emoji reactions.
 
@@ -100,10 +99,9 @@ C2 template industry content (PM/SME) · C4 mobile / PWA (no named demand).
 
 ## 6. Cleanup (this session's superseded drafts)
 
-- #2644 (button scope-gate) — **superseded** by the merged design-lock #2645
-  (which deliberately chose a different design); close.
-- #2641 (飞书 refresh audit, research) — overlaps the merged ladder refresh #2629;
-  owner to confirm close vs keep.
+- #2644 (button scope-gate) — **CLOSED** (superseded by merged design-lock #2645).
+- #2641 (飞书 refresh research) — **CLOSED** (overlaps merged ladder #2629; branch retained).
+- #2663 (this session's A5-2/A5-3) — **CLOSED redundant** (merged #2664 landed it + render).
 - This doc (#2647) — rewritten from the old B1-centric draft into this tracker.
 
 ## 7. Re-entry

@@ -8,9 +8,12 @@ tier of "余下多维表功能开发" driven to completion this session.
 
 Per #2650 §0, "余下开发" splits by terminal gate; only the **autonomous** tier
 (pure backend, unit + tsc closeable) can be driven to *done* without a privileged
-actor. This session drove that tier to completion:
+actor. That tier is now **complete on main** — though a parallel session won the
+merge race on the build slices. The state + this session's net durable contributions:
 
-- **A5-2 color-scale + A5-3 icon-set backend** — built, verified, draft **PR #2663**.
+- **A5-2 color-scale + A5-3 icon-set backend** — landed on main via **#2664**
+  (parallel session, incl. the kind-aware render); independently built here
+  (#2663, **closed redundant**) — convergent validation, 4th same-arc collision.
 - **A2 export masking-flag** — verified **SAFE** (no fix needed); concern closed.
 - **Button-arc independent audit** — produced a B1-c gate checklist (handoff).
 
@@ -18,7 +21,16 @@ The **browser-gated** and **owner/ops-gated** tiers cannot be auto-completed; th
 are design-locked and gate-marked in the tracker, not faked as "verified." Merge of
 #2663 is the owner's (nothing auto-merges).
 
-## 1. Development delivered — A5-2 / A5-3 conditional-format scale backend (PR #2663)
+## 1. A5-2 / A5-3 conditional-format scale backend — landed via #2664 (parallel); independently validated here
+
+**Status:** A5-2/A5-3 landed on `main` via the parallel session's **#2664**, which
+also shipped the kind-aware grid render. This session independently built the same
+slice (PR **#2663**, now **closed redundant**) — the two builds converged on the
+same sanitizer / `buildFieldScaleMap` extension, which is confirmatory. The
+contract + verification below describe this session's independent build; #2664 is
+the merged implementation (equivalent design — its degenerate `min==max` → max-stop
+vs this build's mid-stop is a documented design choice, not a defect — and #2664
+additionally shipped the render this build had deferred as browser-gated).
 
 Extends the A5-1 data-bar scale machinery to the two remaining range styles.
 
@@ -121,12 +133,12 @@ A3 inline-link expand · A4 form-logic depth · B4 dashboard widgets · B5 longT
 row-level rule permissions · B2 AI auto-trigger · B3 native synced tables · C1 SMTP
 creds · C2 template content · C4 mobile · A2 server-side full-dataset export.
 
-## 5. Cleanup + open PRs from this session
+## 5. PRs from this session
 
-- **PR #2663** — A5-2/A5-3 backend (draft, ready for review).
-- **PR #2647** — execution tracker + this closeout (draft).
-- **#2644** (button scope-gate) — superseded by merged #2645; recommend close.
-- **#2641** (飞书 refresh research) — overlaps merged #2629; owner to decide.
+- **PR #2647** — execution tracker + this closeout + the button-arc audit (open).
+- **#2663** (A5-2/A5-3) — **CLOSED redundant** (merged #2664 landed it + render).
+- **#2644** (button scope-gate) — **CLOSED** (superseded by merged #2645).
+- **#2641** (飞书 research) — **CLOSED** (overlaps merged #2629; branch retained).
 
 ## 6. Re-entry
 
