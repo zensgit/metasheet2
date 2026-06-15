@@ -20,12 +20,15 @@
  *  - Concurrency (review-fix F1, RESERVE-THEN-SETTLE): `reserveAiUsage` runs a
  *    SHORT transaction — pg advisory xact locks in FIXED order ('__instance__'
  *    first, then the subject; hashtext keying, autoNumber #1406 precedent) →
- *    sweep stale reservations → SUM check (in_flight reservations count) →
- *    INSERT an `in_flight` reservation row at a CONSERVATIVE estimate → COMMIT
- *    (locks + pooled connection release here; the provider call is NEVER made
- *    under the lock). `settleAiUsageReservation` later UPDATEs the row to the
- *    ACTUAL usage + final status. N parallel attempts cannot overshoot the cap
- *    because every concurrent reserve sees earlier in_flight estimates.
+ *    sweep stale reservations → estimate-aware quota check (the prior SUM —
+ *    in_flight reservations included — PLUS this request's own conservative
+ *    estimate, vs the cap) → INSERT an `in_flight` reservation row at that
+ *    CONSERVATIVE estimate → COMMIT (locks + pooled connection release here; the
+ *    provider call is NEVER made under the lock). `settleAiUsageReservation`
+ *    later UPDATEs the row to the ACTUAL usage + final status. No overshoot on
+ *    EITHER axis: N parallel attempts cannot compound past the cap (each concurrent
+ *    reserve sees earlier in_flight estimates), and a SINGLE request cannot cross
+ *    the cap from under it (admission counts its own estimate — `checkAiUsageQuota`).
  *  - Stale-reservation safety: a crash between reserve and settle leaves an
  *    `in_flight` row counted against quota. The next reserve (any subject —
  *    the '__instance__' lock is always held first, so the global sweep is
@@ -177,24 +180,43 @@ export async function sumAiUsageWindows(
   }
 }
 
+/** This request's own conservative estimate, counted against the caps at admission time. */
+export interface AiUsageQuotaEstimate {
+  /** prompt + completion tokens (both windows are token-summed). */
+  tokens: number
+  costUsd: number
+}
+
 /**
  * Quota decision over the shared window sums. Caller runs this under
  * `withAiUsageQuotaLock` and FAILS CLOSED (blocked) when it throws.
+ *
+ * Admission counts THIS request's own `estimate` (not just the prior window SUM):
+ * a request is rejected when admitting it would push a window OVER its cap, so a
+ * single request cannot cross the cap from under it. This is the no-overshoot
+ * guarantee promised by the RESERVE-THEN-SETTLE header — the prior SUM check alone
+ * blocked only the NEXT request, letting the crossing request overshoot by its own
+ * estimate. An exactly-fitting request (`sum + estimate == cap`) is still allowed;
+ * a real request (estimate ≥ 1) still blocks at/over a full window, so the
+ * "already full" behaviour is unchanged.
  */
 export async function checkAiUsageQuota(
   query: AiUsageQueryFn,
   subjectKey: string,
   caps: AiUsageQuotaCaps,
+  estimate: AiUsageQuotaEstimate,
 ): Promise<AiUsageQuotaDecision> {
   const sums = await sumAiUsageWindows(query, subjectKey)
+  const estTokens = Math.max(0, estimate.tokens)
+  const estUsd = Math.max(0, estimate.costUsd)
 
-  if (sums.userDailyTokens >= caps.tenantDailyTokenCap) {
+  if (sums.userDailyTokens + estTokens > caps.tenantDailyTokenCap) {
     return { allowed: false, reason: 'user_daily_tokens' }
   }
-  if (sums.userWeeklyTokens >= caps.tenantWeeklyTokenCap) {
+  if (sums.userWeeklyTokens + estTokens > caps.tenantWeeklyTokenCap) {
     return { allowed: false, reason: 'user_weekly_tokens' }
   }
-  if (sums.instanceDailyUsd >= caps.accountDailyUsdCap) {
+  if (sums.instanceDailyUsd + estUsd > caps.accountDailyUsdCap) {
     return { allowed: false, reason: 'instance_daily_usd' }
   }
   return { allowed: true }
@@ -260,9 +282,10 @@ export type AiUsageReservationResult =
  *   → sweep stale in_flight reservations (crash-orphaned; > staleAfterMs old)
  *     to zero-usage status='abandoned' (global sweep: safe because every
  *     reserve holds the '__instance__' lock first)
- *   → SUM quota check (in_flight estimates count — that is the no-overshoot
- *     guarantee; an exhausted window inserts the zero-usage quota_exhausted
- *     row in the same tx)
+ *   → estimate-aware quota check (prior SUM incl. in_flight estimates, PLUS this
+ *     request's own estimate, vs the cap — the no-overshoot guarantee on both the
+ *     concurrency and the single-request axis; a would-be-overshooting window
+ *     inserts the zero-usage quota_exhausted row in the same tx)
  *   → INSERT the 'in_flight' reservation row at the conservative estimate
  *   → COMMIT (locks + connection released; the provider call happens OUTSIDE).
  */
@@ -280,7 +303,13 @@ export async function reserveAiUsage(
       [Math.max(0, Math.round(input.staleAfterMs))],
     )
 
-    const decision = await checkAiUsageQuota(query, input.subjectKey, input.caps)
+    // No-overshoot: count THIS reservation's own conservative estimate at admission so a single
+    // request cannot push a window past the cap (the in_flight row inserted below makes it visible
+    // to the NEXT reserve; this makes it count against ITSELF too — the same estimate used for the row).
+    const decision = await checkAiUsageQuota(query, input.subjectKey, input.caps, {
+      tokens: Math.max(0, input.estimatedPromptTokens) + Math.max(0, input.estimatedCompletionTokens),
+      costUsd: input.estimatedCostUsd,
+    })
     // `in`-guard (not `!decision.allowed`): non-strict tsconfig, no boolean-discriminant narrowing.
     if ('reason' in decision) {
       await insertAiUsageLedgerEntry(query, {
