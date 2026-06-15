@@ -6,6 +6,7 @@
 export type AutomationActionType =
   | 'update_record'
   | 'create_record'
+  | 'delete_record'
   | 'send_webhook'
   | 'send_notification'
   | 'send_email'
@@ -20,6 +21,7 @@ export type AutomationActionType =
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'update_record',
   'create_record',
+  'delete_record',
   'send_webhook',
   'send_notification',
   'send_email',
@@ -59,6 +61,21 @@ export interface CreateRecordConfig {
    * `targetBaseId` (claim == truth). Absent = same-base create (unchanged, back-compat).
    */
   targetBaseId?: string
+}
+
+/** Config shape for delete_record */
+export interface DeleteRecordConfig {
+  /**
+   * ②b / Phase C2 cross-base DELETE opt-in. When `targetBaseId` is set and ≠ the trigger base, this is a
+   * GOVERNED cross-base delete (a delete is a write for abuse-accounting): it requires FULL explicit
+   * addressing (`targetSheetId` + `targetRecordId`) because the trigger record is not in the target base.
+   * The executor write-gate then re-verifies, per run, that the TRIGGER ACTOR holds base-WRITE on
+   * `targetBaseId` and that `targetSheetId ∈ targetBaseId` / `targetRecordId ∈ targetSheetId`
+   * (claim == truth). All three absent = same-base trigger-record delete (back-compat).
+   */
+  targetBaseId?: string
+  targetSheetId?: string
+  targetRecordId?: string
 }
 
 /** Config shape for send_webhook */
@@ -113,6 +130,17 @@ export interface SendDingTalkPersonMessageConfig {
 /** Config shape for lock_record */
 export interface LockRecordConfig {
   locked: boolean
+  /**
+   * Phase C2 cross-base LOCK opt-in. Locking a record in ANOTHER base is a denial-of-edit on foreign
+   * data — a governance surface gated by the SAME primitive as a cross-base write (`base:write` on the
+   * target base, NOT base:admin; lock is an edit-class affordance). When `targetBaseId` is set and ≠ the
+   * trigger base, FULL explicit addressing (`targetSheetId` + `targetRecordId`) is required and the lock
+   * verifies claim == truth (the target record actually lives in `targetSheetId ∈ targetBaseId`) +
+   * trigger-actor base-write. All three absent = same-base trigger-record lock (unchanged, back-compat).
+   */
+  targetBaseId?: string
+  targetSheetId?: string
+  targetRecordId?: string
 }
 
 /**
