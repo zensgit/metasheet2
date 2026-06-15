@@ -26,6 +26,7 @@ result backwrite; no BPMN live runtime.
 | 3.5 — resume-cursor fail-closed gate | `c2854f79d` | `automation-service.ts` `resumeExecution()` dispatches on the parsed cursor: `invalid` → `409 SUSPENSION_CURSOR_INVALID` (never a top-level fallback). |
 | 4 — branch-aware resume orchestration | `199fdcffb` | `resumeExecution` adds the branch fingerprint drift guard BEFORE the token claim, then routes a `condition_branch` cursor to `continueBranchExecution`. `continueBranchExecution` settles the branch wait → runs the branch tail → settles the parent → runs the top-level tail (scope-gate §4.3). |
 | 4.x — skipped-job fix | `e29199da6` | On a resumed branch-tail failure, `continueBranchExecution` writes `skipped` C1 jobs for the REMAINING branch children AND the REMAINING top-level actions (mirrors the initial `executeConditionBranch` / `executeActions` fail-stop) so the job plane is complete instead of leaving downstream work invisible. |
+| 4.y — pre-claim cursor-binding guard | `98ef122a5` | `resumeExecution` also requires (pre-claim) that the cursor points at a `wait_for_callback` AND carries the deterministic ids (`stepKey` / `parentJobId` / `branchJobId` / `upstreamJobId`) for its branch position — a structurally-valid cursor at a non-wait action with tampered-consistent ids would otherwise claim the token and settle a non-wait action as the wait. → `409 SUSPENSION_CURSOR_INVALID`. |
 | 5a — `listByExecution` stepKey hydration | `bd3e472dc` | `automation-job-service.ts` `listByExecution()` now hydrates the C1 suspend descriptor by job `step_key`, not top-level `step_index`. See §2. |
 | 5b — real-DB high-amount E2E | `8c2242fc9` | `tests/integration/multitable-automation-branch-local-wait.test.ts` — the un-draft gate. See §4. |
 | 5c — this verification doc | (this commit) | Records the runtime + the exact verification evidence. |
@@ -87,7 +88,8 @@ invalid-cursor case to the `resumeExecution` → 409 path and does not call
   (notify) `resolved`, branch wait child `suspended`, downstream branch + top
   level absent.
 - §4.3 resume semantics — slices 4/4.x: load by token → validate `pending` →
-  current rule + enabled → top-level fingerprint → branch fingerprint + cursor
+  current rule + enabled → top-level fingerprint → branch fingerprint → cursor
+  binding (points at a `wait_for_callback` + deterministic stepKey/job ids)
   → re-fetch record → read execution before claim → single-use claim → settle
   branch wait → branch tail → settle parent → top-level tail.
 
@@ -99,6 +101,7 @@ invalid-cursor case to the `resumeExecution` → 409 path and does not call
 | top-level action fingerprint changed | `409 RULE_CHANGED`, token kept | resumeExecution (shared; suspend-resume T8) |
 | selected branch path changed / key removed | `409 RULE_CHANGED`, token kept | E2E `drift guard before claim` |
 | corrupt non-null resume cursor | `409 SUSPENSION_CURSOR_INVALID`, token kept | E2E `invalid cursor` |
+| structurally-valid cursor at a non-wait action / inconsistent derived ids | `409 SUSPENSION_CURSOR_INVALID`, token kept, no job settles | E2E `semantic-corrupt cursor` |
 | record deleted while waiting | `404 RECORD_GONE`, token kept | resumeExecution (shared; suspend-resume T9) |
 | second resume | `409 ALREADY_RESUMED` | E2E `second resume` |
 | post-claim branch-tail failure | execution terminal `failed`; remaining branch + top-level jobs `skipped` | E2E `branch-tail failure on resume` |
@@ -170,7 +173,7 @@ pnpm --filter @metasheet/core-backend exec vitest \
   tests/integration/multitable-automation-branch-local-wait.test.ts
 ```
 
-Result: **10 passed (10)** — the `describeIfDatabase` sentinel test confirms
+Result: **11 passed (11)** — the `describeIfDatabase` sentinel test confirms
 `DATABASE_URL` is set, so the suite actually RAN (not skipped). Each assertion
 shape:
 
@@ -183,6 +186,7 @@ shape:
 | HAPPY-high resume | §4.3 / §6.7 | PASS | resume returns `execution`, `success`, `initiatedBy=admin_resume`; jobs `0`/`0.branch.high_amount.0..2`/`1` all `resolved`; record `status=approved_after_review`; suspension `resumed` |
 | drift guard before claim | §5 branch drift | PASS | mutate SELECTED branch actions only (top-level fingerprint stays equal) → `409 RULE_CHANGED`; suspension still `pending` |
 | invalid cursor | §5 fail-closed | PASS | corrupt `resume_cursor` to `{kind:'top_level'}` → `409 SUSPENSION_CURSOR_INVALID`; suspension still `pending` (token NOT claimed) |
+| semantic-corrupt cursor | §5 cursor binding | PASS | valid-shaped cursor re-pointed at index 0 (send_notification) + consistent ids + unchanged branch fingerprint → `409 SUSPENSION_CURSOR_INVALID`; suspension `pending`; branch wait child `0.branch.high_amount.1` stays `suspended` (no settle) |
 | second resume | §5 single-use | PASS | first resume succeeds; second → `409 ALREADY_RESUMED` |
 | branch-tail failure on resume | §5 + slice-4 | PASS | post-wait `send_webhook` returns 500 → execution terminal `failed`; `0.branch.high_amount.2`=`failed`; remaining branch child `0.branch.high_amount.3`=`skipped`; parent `0`=`failed`; remaining top-level `1`=`skipped`; record never `should_not_run` |
 
@@ -207,7 +211,7 @@ disambiguation test is what discriminates the fix.)
 
 `vitest --config vitest.integration.config.ts run` over the new E2E +
 `multitable-automation-suspend-resume.test.ts` + `multitable-automation-jobs.test.ts`
-(all share `listByExecution`) → **29 passed (29)** (10 + 11 + 8).
+(all share `listByExecution`) → **30 passed (30)** (11 + 11 + 8).
 
 ## Out-of-scope (still rejected, by design)
 
