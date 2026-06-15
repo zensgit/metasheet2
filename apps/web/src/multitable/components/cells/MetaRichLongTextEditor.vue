@@ -69,6 +69,7 @@
       @input="onInput"
       @blur="onBlur"
       @paste="onPaste"
+      @drop="onDrop"
       @keydown.meta.enter.prevent="onConfirm"
       @keydown.ctrl.enter.prevent="onConfirm"
       @keydown.escape.prevent="emit('cancel')"
@@ -176,6 +177,20 @@ function onPaste(event: ClipboardEvent): void {
   const text = event.clipboardData?.getData('text/plain') ?? ''
   // execCommand insertText keeps the caret behavior natural; sanitize on the
   // subsequent input emit covers the result regardless.
+  document.execCommand('insertText', false, text)
+  emitLive()
+}
+
+/**
+ * Drop as PLAIN text only — mirror of `onPaste`. A drag-drop of HTML (e.g.
+ * `<img src=x onerror=...>`) would otherwise be inserted as live markup into the
+ * contenteditable and could fire an inline handler in THIS user's surface before
+ * the sanitize-on-emit runs (self-XSS). preventDefault + plain-text insert closes
+ * that surface; the emitted value is still sanitized regardless.
+ */
+function onDrop(event: DragEvent): void {
+  event.preventDefault()
+  const text = event.dataTransfer?.getData('text/plain') ?? ''
   document.execCommand('insertText', false, text)
   emitLive()
 }

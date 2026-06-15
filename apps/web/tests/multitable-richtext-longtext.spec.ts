@@ -28,6 +28,14 @@ function hasExecutableResidue(html: string): boolean {
     low.includes('<svg') ||
     low.includes('<img') ||
     low.includes('javascript:') ||
+    low.includes('vbscript:') ||
+    low.includes('data:text/html') ||
+    low.includes('<math') ||
+    low.includes('<template') ||
+    low.includes('<base') ||
+    low.includes('<meta') ||
+    low.includes('srcdoc') ||
+    low.includes('formaction') ||
     low.includes('onerror') ||
     low.includes('onmouseover') ||
     /\son\w+\s*=/.test(low) ||
@@ -51,6 +59,21 @@ describe('rich-longText FE sanitizer — §8 XSS canaries (every one neutralized
       name: 'mXSS noscript breakout',
       payload: '<noscript><p title="</noscript><img src=x onerror=alert(1)>">',
     },
+    // Extra adversarial probes (review N1/N2) — namespace confusion, DOM clobbering,
+    // alternative protocols, and document-level vectors. The allow-list excludes all of
+    // these tags/attrs; these canaries pin the regression net against a future config edit.
+    { name: 'MathML namespace confusion', payload: '<math><mtext><script>alert(1)</script></mtext></math>' },
+    { name: 'svg script', payload: '<svg><script>alert(1)</script></svg>' },
+    { name: 'svg foreignObject', payload: '<svg><foreignObject><img src=x onerror=alert(1)></foreignObject></svg>' },
+    { name: 'template smuggling', payload: '<template><img src=x onerror=alert(1)></template>' },
+    { name: 'iframe srcdoc', payload: '<iframe srcdoc="<img src=x onerror=alert(1)>"></iframe>' },
+    { name: 'DOM clobbering id=form', payload: '<form id="form"><input name="attributes"></form>' },
+    { name: 'formaction button', payload: '<button formaction="javascript:alert(1)">x</button>' },
+    { name: 'base href hijack', payload: '<base href="//evil/">' },
+    { name: 'meta refresh', payload: '<meta http-equiv="refresh" content="0;url=javascript:alert(1)">' },
+    { name: 'vbscript link', payload: '<a href="vbscript:msgbox(1)">x</a>' },
+    { name: 'data:text/html link', payload: '<a href="data:text/html,<script>alert(1)</script>">x</a>' },
+    { name: 'whitespace-split javascript: link', payload: '<a href="java\tscript:alert(1)">x</a>' },
   ]
 
   for (const { name, payload } of canaries) {
