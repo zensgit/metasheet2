@@ -1,79 +1,105 @@
-# Multitable Benchmark-Surpass Track — Development Goal + TODO (2026-06-15)
+# Multitable Remaining-Development — Execution Tracker (goal) — 2026-06-15
 
-Type: development goal + gated TODO ledger (trackable). Not a schedule.
+Type: **execution tracker** for driving the remaining multitable development to
+completion as a goal. Not a schedule, not a competing map.
 
-Driver: the owner-set standing goal — multitable driven by **对标并超越** the
-leading 多维表格 product. Each refresh audit re-ranks the gap ladder; each arc and
-each slice within an arc is a **separate named opt-in** — never auto-advance.
+The canonical remaining-dev **map** (honest terminal-gate taxonomy + per-item
+verification status) is `multitable-remaining-goal-dev-verification-20260615.md`
+(#2650, merged). **This tracker references that map — it does not re-derive it.**
+The standing driver is the owner-set goal: multitable driven by 对标并超越 the
+leading 多维表格 product; the benchmark evidence lives in the research companion,
+not here. This tracker uses MetaSheet's own capability names only.
 
-Rationale + the benchmark evidence (external-product comparison, citations) live
-in the research companion, NOT here: `docs/research/multitable-feishu-refresh-audit-20260615.md`
-(PR #2641). This committed plan uses MetaSheet's own capability names only.
+## 0. Honest completion ceiling
 
-Markers: ✅ done · ⬜ ready / in progress (current opt-in) · 🔒 gated (needs its
-own named opt-in / a prereq).
+Per #2650 §0, "余下开发" splits by **terminal gate**, and only one tier can be
+driven to *done* without a privileged actor:
 
-## 0. Current arc — B1: button / action field
+- **autonomous** — pure backend, unit + tsc closeable → can be built + verified to
+  a reviewable draft PR by this session.
+- **browser-gated** — backend is autonomous, but the terminal slice (visual /
+  interaction) needs a real browser; render/dialog cannot be self-verified.
+- **owner/ops-gated** — needs a privileged action (staging baseline, ops creds,
+  product charter, security-review lane); no autonomous code path.
 
-A value-less `button` field type whose cell, on click, runs **one** bound action
-on its row's record by reusing the existing single-action execution path. Inherits
-all record permission / lock / cross-base / redaction / observability gates — no
-new automation-engine code (prereq verified: synthetic `btn_` rule_id has no FK;
-the C1 runs read path is sheet-scoped).
+So "持续开发直至完成" means: drive the **autonomous** tier to built + verified +
+draft-PR'd; design-lock + gate-mark the rest. Merge stays with the owner —
+nothing auto-merges; each slice is reviewed.
 
-Scope gate (the contract): `multitable-button-action-field-scope-gate-20260615.md`
-(PR #2644, ready for review).
+Markers: ✅ done + merged · 🟦 built, in review (draft PR this session) ·
+⬜ ready / in progress · 🔒 gated (own opt-in / prereq).
 
-| Slice | State | What | Acceptance |
-|---|---|---|---|
-| B1-a field-type + codec | ⬜ in progress (PR pending) | register the value-less `button` type; codec accepts `{label, exactly-one existing action}`, rejects empty label / 0 or 2+ actions / unknown action / the 4 suspending-branching actions; `validate` rejects any stored value | sanitizeProperty accept/reject unit tests + value-PATCH rejected; tsc clean |
-| B1-b run endpoint | 🔒 after B1-a + owner go | authenticated, record-scoped POST that runs the bound action via the existing single-action engine (synthetic non-persisted single-action `workflow_job_v1` envelope); explicit record-write capability check; lock / cross-base / redaction inherited; one C1 job + execution-log row | real-DB: action runs + writes; 401/403/lock/404 fail-closed; one C1 job (`resolved`) + log whose `btn_` rule_id resolves to no rule; wire round-trip; double-run = two executions |
-| B1-c FE cell | 🔒 after B1-b | render label + clickable control (not editable, no editor on dblclick); invoke the endpoint; in-flight disable + result toast; disabled when locked / no write capability | renders + invokes; never writes a value; disabled states |
+## 1. Button / action field (B1) — backend COMPLETE, FE gated
 
-**Definition of done (B1):** all three slices landed + the real-DB B1-b E2E green;
-out-of-scope items below stay rejected.
+| Slice | State | Evidence |
+|---|---|---|
+| B1-S0 design-lock (exclusion matrix + inert-action + run-API contract) | ✅ | #2645 |
+| B1-a0 backend codec + §2 value-field exclusions + write-rejection | ✅ | #2648 |
+| B1-a1 executor core — `record_click` inert action + `runSingleAction` seam | ✅ | #2653 |
+| B1-a1 route — `button/run` + univer-meta type-map drift fix | ✅ | #2657 |
+| B1-b grid / record-detail render (button cell, states) | 🔒 browser-gated | — |
+| B1-c FieldManager config UI (create/edit button, bind action, picker) | 🔒 browser-gated | — |
 
-**B1 hard out-of-scope (each = its own future opt-in):** no new action types; no
-multi-action / conditional / triggered / scheduled runs; no suspending-branching
-bound actions (`wait_for_callback` / `start_approval` / `condition_branch` /
-`parallel_branch`); no new RBAC tier; no bypass of locks / permission / redaction;
-no public/unauthenticated endpoint; no persisted synthetic rule.
+B1 backend is done end-to-end (codec → exclusions → executor seam → authenticated
+run endpoint, visible≠executable enforced server-side). Only the two **frontend**
+slices remain, both browser-gated (FE `types.ts` still has no `button` member by
+design — it lands with B1-b once a browser session can verify render→click).
 
-## 1. Post-B1 ladder (demand-gated, ranked by the 2026-06-15 refresh audit)
+## 2. Conditional-format range styles (A5) — data-bar done, scale backend in review
 
-Each is a separate arc; open only on a named demand + when its gate clears. The
-ranking is the audit's; it re-ranks on the next refresh.
+| Slice | State | Evidence |
+|---|---|---|
+| A5 design-lock (scale rule model + security locks + slice plan) | ✅ | #2637 |
+| A5-1 data-bar backend contract (`sanitize…ScaleRule` + `buildFieldScaleMap`) | ✅ | #2639 |
+| A5-1 data-bar FE mirror + grid render | ✅ | #2640 |
+| **A5-2 color-scale + A5-3 icon-set backend + FE mirror** | 🟦 **in review (this session)** | draft PR |
+| A5-2 / A5-3 grid render (MetaGridTable) + dialog (ConditionalFormattingDialog) | 🔒 browser-gated | — |
 
-| Arc | State | Capability | Gate |
-|---|---|---|---|
-| A1 | 🔒 | grid row virtualization / windowing (large tables) | L; ops — needs the perf baseline first |
-| B4 | 🔒 | dashboard non-chart widgets (metrics, pivot, filter linkage) | small chain → L; named demand |
-| A5 | 🔒 | conditional-format depth (data bars / color scales / icon sets) | M; named demand |
-| A4 | 🔒 | form-logic depth (required-if / multi-page / prefill / redirect) | M; named demand |
-| B2 | 🔒 | AI field rings + AI-automation node | L per ring; product charter |
-| B7 | 🔒 | row-level rule-engine permissions (value-based) | L; owner + adversarial review |
-| B3 | 🔒 | native synced / external-source tables | XL; owner — parked |
+A5-2 + A5-3 are combined into **one** backend PR (they extend the identical
+sanitizer / `buildFieldScaleMap` / FE-mirror functions — separate branches would
+conflict on those hot functions and stall on merge cadence), with separate test
+blocks per kind. Render + dialog stay browser-gated (visual contrast / alignment
+need a real browser, per the design-lock's honest verification boundary).
 
-**Already at parity-or-ahead (the "surpass" wins, keep, don't rebuild):** governed
-cross-base writes + rate quota + claim==truth; security-grade masked export + leak
-canary + sanitize/AI-taint chokepoints; formula-over-lookup with in-memory
-hydration; the just-landed branch-local wait + condition-branch + parallel join-all
-automation engine. Honest reverse-gap: the benchmark leads on AI / scale / BI
-richness — surpass concentrates in governance / security / workflow orchestration.
+## 3. Export full-fidelity (A2) — masking-flag verification
 
-## 2. Execution discipline
+| Item | State | Note |
+|---|---|---|
+| A2 export column/row picker | ✅ | #2635 |
+| A2 server-side masking-flag verification (+ fix if real) | ⬜ next (this session) | #2650 §4 flagged a possible FE-export bypass of server field masking; verify the `grid.rows`-already-masked claim, fix if the bypass is real |
 
-- **One opt-in at a time.** B1-a is the only ⬜ now; B1-b/B1-c and every §1 arc are
-  🔒 until separately named. "Continue the arc" is enough to advance the next B1
-  slice; opening a §1 arc needs naming that capability + its gate clearing.
-- **Contract-first per arc:** scope-gate (docs) → owner review → runtime slices.
-- **Each runtime slice proves out** with the tests its scope-gate pins (real-DB for
-  any write/endpoint), and is reviewed before merge — nothing auto-merges.
-- **Refresh re-ranks:** before picking the arc after B1, re-run the audit (the
-  ladder above is a snapshot, not a queue).
+## 4. Remaining ladder (gated — from #2650 §5)
 
-## 3. Re-entry
+**browser-gated** (backend autonomous; terminal slice needs a browser): B1-b /
+B1-c · A5-2/A5-3 render · A3 inline-link record expand · A4 form-logic depth
+(required-if / multi-page / prefill / redirect) · B4 dashboard non-chart widgets ·
+B5 longText in-cell @mention · B6 comment emoji reactions.
 
-After B1 closes: re-run the refresh audit → re-rank §1 → pick the next arc by
-value × reachability (A1 is highest-value but ops-gated; B4 is the likely next
-buildable). Update this ledger's markers as slices land.
+**owner/ops-gated** (need a privileged action): A1 grid virtualization (owner S5b
+staging baseline) · B7 row-level rule permissions (security-review lane) · B2 AI
+auto-trigger · B3 native synced tables (owner charter) · C1 SMTP (ops creds) ·
+C2 template industry content (PM/SME) · C4 mobile / PWA (no named demand).
+
+## 5. Execution discipline
+
+- **Autonomous tier, in order:** A5-2/A5-3 backend (in review) → A2 masking verify.
+  Each = contract-grounded build → adversarial verify → harden → **draft** PR with
+  the tests its design-lock pins; reviewed before merge; nothing auto-merges.
+- **Re-verify before each build** against `origin/main` AND open PRs/branches — a
+  parallel session has been shipping this arc; an in-flight PR won't appear in
+  `origin/main`. (This tracker's discipline after two same-arc collisions.)
+- **Gated tiers** get design-lock + honest markers, never an auto "verified".
+
+## 6. Cleanup (this session's superseded drafts)
+
+- #2644 (button scope-gate) — **superseded** by the merged design-lock #2645
+  (which deliberately chose a different design); close.
+- #2641 (飞书 refresh audit, research) — overlaps the merged ladder refresh #2629;
+  owner to confirm close vs keep.
+- This doc (#2647) — rewritten from the old B1-centric draft into this tracker.
+
+## 7. Re-entry
+
+When the autonomous tier closes, produce the dev + verification MD, then re-run
+the refresh audit to re-rank the gated ladder (§4) before opening any browser- or
+owner-gated arc — each remains a separate named opt-in.
