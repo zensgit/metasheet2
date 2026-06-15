@@ -153,6 +153,7 @@ import { univerMetaRouter } from './routes/univer-meta'
 import { dashboardRouter } from './routes/dashboard'
 import { createAutomationRoutes } from './routes/automation'
 import { createMultitableAiRoutes } from './routes/multitable-ai'
+import { createMultitableButtonRoutes } from './routes/multitable-button'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
@@ -1111,6 +1112,8 @@ export class MetaSheetServer {
     //   A2 shortcut (POST /sheets/:sheetId/ai/shortcut/{preview,run}, record RBAC).
     // See routes/multitable-ai.ts header.
     this.app.use('/api/multitable', createMultitableAiRoutes())
+    // B1-a1 button field run endpoint. See routes/multitable-button.ts header.
+    this.app.use('/api/multitable', createMultitableButtonRoutes())
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {
