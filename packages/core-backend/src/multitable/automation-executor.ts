@@ -2528,9 +2528,9 @@ export class AutomationExecutor {
 
       if (locked) {
         const lockedBy = typeof context.actorId === 'string' && context.actorId.trim() ? context.actorId : 'system'
-        // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
         // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base uses the gate's
         // fast-path (byte-identical to pre-C2); a cross-base lock is rejected unless claim==truth + base-write.
+        // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
         await this.deps.queryFn(
           `UPDATE meta_records
            SET locked = true, locked_by = $1, locked_at = NOW(), version = version + 1, updated_at = NOW()
@@ -2538,9 +2538,9 @@ export class AutomationExecutor {
           [lockedBy, effectiveRecordId, effectiveSheetId],
         )
       } else {
-        // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
         // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base fast-path keeps
         // this byte-identical to pre-C2; a cross-base unlock is rejected unless claim==truth + base-write.
+        // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
         await this.deps.queryFn(
           `UPDATE meta_records
            SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
