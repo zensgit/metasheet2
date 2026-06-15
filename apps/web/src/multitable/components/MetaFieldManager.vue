@@ -92,7 +92,7 @@
             <input
               v-model="linkDraft.crossBase"
               type="checkbox"
-              :disabled="linkBaseAxisLocked"
+              :disabled="linkCrossBaseToggleLocked"
               data-test="link-cross-base-toggle"
               @change="onCrossBaseToggle"
             />
@@ -1009,11 +1009,18 @@ const linkSingleRecordLockedByHierarchy = computed(() => {
 })
 // --- Cross-base link picker (design 2026-06-14) ---
 // True when editing an EXISTING field that already stores a foreignBaseId:
-// foreignBaseId is immutable, so the cross-base toggle AND the base <select>
-// are read-only (only the foreign sheet within the locked base may change).
+// foreignBaseId is immutable, so the base <select> is read-only (only the
+// foreign sheet within the locked base may change).
 const linkBaseAxisLocked = computed(() =>
   Boolean(configTarget.value) && resolveLinkFieldProperty(configTarget.value?.property).foreignBaseId !== null,
 )
+// The cross-base TOGGLE is locked for ANY existing field — not just one that is
+// already cross-base. Same-base↔cross-base re-targeting after create is a
+// DEFERRED capability (design §7) AND unsafe: an existing same-base link's
+// values are record IDs in the CURRENT base, so flipping it to a foreign base
+// would silently break every linked value. So toggling is a create-only
+// affordance; existing fields keep their stored cross-base-ness, read-only.
+const linkCrossBaseToggleLocked = computed(() => Boolean(configTarget.value))
 // The active base id, inferred from the current sheet (props carries no baseId).
 // Used only to exclude the current sheet from the foreign-sheet list when the
 // picked foreign base IS the active base (you can't link a sheet to itself).
@@ -1084,10 +1091,17 @@ function resetCrossBaseState() {
 
 // Toggle handler — clears the OTHER mode's selection so a stale sheet id can
 // never leak into an emit. Off->on loads the base list; on->off restores the
-// same-base path. Disabled in edit mode (immutability), so this only fires for
-// new fields.
+// same-base path. The handler guard (not just `:disabled`) is the real
+// enforcement: jsdom can dispatch `change` on a disabled checkbox, so a
+// synthetic event must not be able to flip an existing field's cross-base-ness
+// (mirrors the hierarchy single-record lock's defense-in-depth).
 function onCrossBaseToggle() {
-  if (linkBaseAxisLocked.value) return
+  if (configTarget.value) {
+    // Existing field: re-targeting is forbidden. Snap the toggle back to the
+    // stored cross-base-ness regardless of the synthetic event.
+    linkDraft.crossBase = resolveLinkFieldProperty(configTarget.value.property).foreignBaseId !== null
+    return
+  }
   linkDraft.foreignSheetId = ''
   linkDraft.foreignBaseId = ''
   resetCrossBaseState()
@@ -1946,7 +1960,15 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     return { options, ...validationProperty }
   }
   if (normalizedType === 'link') {
-    if (linkDraft.crossBase) {
+    // Defense-in-depth (mirrors the hierarchy single-record lock): cross-base-ness
+    // is immutable after create. When editing a field whose STORED foreignBaseId
+    // was null, never emit a cross-base property even if the toggle was somehow
+    // flipped — same-base↔cross-base re-targeting is deferred + unsafe (existing
+    // values are IDs in the current base). The toggle :disabled + handler guard
+    // already prevent this in the UI; this guarantees the emit too.
+    const editingSameBaseLink = Boolean(configTarget.value)
+      && resolveLinkFieldProperty(configTarget.value?.property).foreignBaseId === null
+    if (linkDraft.crossBase && !editingSameBaseLink) {
       // Cross-base: validate the foreign sheet against the FETCHED foreign-base
       // list (not same-base targetSheets), and require a foreignBaseId. A 403 /
       // transport error on the foreign base blocks the save (fail-closed) — it

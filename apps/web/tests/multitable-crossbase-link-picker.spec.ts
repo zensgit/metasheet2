@@ -262,6 +262,96 @@ describe('Cross-base link field picker (MetaFieldManager)', () => {
     app.unmount()
   })
 
+  // Edit immutability (data-safety): an existing SAME-BASE link must not be
+  // re-targetable to a cross-base — that is deferred (design §7) and would break
+  // the field's existing values (record IDs in the current base). The toggle is
+  // present but DISABLED, and a synthetic change cannot flip it on / emit
+  // foreignBaseId.
+  it('locks (disables) the cross-base toggle when editing an existing same-base link and never emits foreignBaseId', async () => {
+    const listBasesFn = vi.fn().mockResolvedValue([{ id: 'base_other', name: 'Other' }])
+    const listForeignSheetsFn = vi.fn().mockResolvedValue([{ id: 'sheet_far', baseId: 'base_other', name: 'Far' }])
+    const updateSpy = vi.fn()
+    const { container, app } = mountManager({
+      listBasesFn,
+      listForeignSheetsFn,
+      onUpdateField: updateSpy,
+      fields: [
+        // Same-base link: foreignSheetId in the current base, NO foreignBaseId.
+        { id: 'fld_same', name: 'Same', type: 'link', property: { foreignSheetId: 'sheet_2', limitSingleRecord: false } },
+      ],
+    })
+    await flush()
+
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await flush()
+
+    const toggle = container.querySelector('[data-test="link-cross-base-toggle"]') as HTMLInputElement
+    expect(toggle).not.toBeNull()
+    expect(toggle.checked).toBe(false)
+    expect(toggle.disabled).toBe(true)
+
+    // Even a synthetic change cannot turn it cross-base. (Like the hierarchy
+    // single-record lock test, the contract is the EMITTED property + that the
+    // cross-base UI never activates — not the disabled checkbox's DOM `.checked`,
+    // which jsdom won't re-sync when the bound ref stays false.)
+    toggle.checked = true
+    toggle.dispatchEvent(new Event('change', { bubbles: true }))
+    await flush()
+    expect(listBasesFn).not.toHaveBeenCalled()
+    // The cross-base block (base <select>) never renders → toggle stayed off.
+    expect(container.querySelector('[data-test="link-cross-base-select"]')).toBeNull()
+
+    // Saving still emits a SAME-BASE property — no foreignBaseId leaks in.
+    ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save field settings'))
+      ?.click()
+    await flush()
+    expect(updateSpy).toHaveBeenCalledTimes(1)
+    expect(updateSpy.mock.calls[0][1].property).not.toHaveProperty('foreignBaseId')
+
+    app.unmount()
+  })
+
+  // Edit-time 403 (the PRIMARY row-#6 scenario): open an existing CROSS-BASE
+  // field whose foreign base is now unreadable → gated notice + stored ids, no
+  // crash, and a save is blocked (never a silent same-base save).
+  it('renders a gated state and blocks save when an existing cross-base field’s foreign base became unreadable', async () => {
+    const listBasesFn = vi.fn().mockResolvedValue([])
+    const listForeignSheetsFn = vi.fn().mockRejectedValue(new Error('forbidden'))
+    const updateSpy = vi.fn()
+    const { container, app } = mountManager({
+      listBasesFn,
+      listForeignSheetsFn,
+      onUpdateField: updateSpy,
+      fields: [
+        { id: 'fld_x', name: 'X-link', type: 'link', property: { foreignSheetId: 'sheet_far', foreignBaseId: 'base_gone', limitSingleRecord: false } },
+      ],
+    })
+    await flush()
+
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await flush()
+
+    // Toggle on (stored cross-base), base axis locked, gated notice shown, no crash.
+    const toggle = container.querySelector('[data-test="link-cross-base-toggle"]') as HTMLInputElement
+    expect(toggle.checked).toBe(true)
+    expect(toggle.disabled).toBe(true)
+    expect(container.querySelector('[data-test="link-cross-base-unreadable"]')).not.toBeNull()
+    // Stored base id still shown in the locked select (raw-id fallback, list empty).
+    const baseSelect = container.querySelector('[data-test="link-cross-base-select"]') as HTMLSelectElement
+    expect(baseSelect.value).toBe('base_gone')
+    expect(container.querySelector('[data-test="link-cross-base-sheet-select"]')).toBeNull()
+
+    // Save is blocked — no silent same-base downgrade.
+    ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save field settings'))
+      ?.click()
+    await flush()
+    expect(updateSpy).not.toHaveBeenCalled()
+
+    app.unmount()
+  })
+
   // Row #7 — reset on close/reopen: linkDraft (incl. foreignBaseId) resets so a
   // new field does not inherit a stale foreign base from a prior edit.
   it('resets cross-base draft when reopening for a new field after editing a cross-base field', async () => {
