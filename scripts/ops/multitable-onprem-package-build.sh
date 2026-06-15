@@ -30,6 +30,7 @@ REQUIRED_PATHS=(
   "apps/web/package.json"
   "packages/core-backend/dist"
   "packages/core-backend/package.json"
+  "packages/mssql-readonly-utils"
   # The packaged migration runner loads SQL migrations from
   # packages/core-backend/migrations via migration-provider.ts. Keep this
   # source directory in the package so Windows/on-prem installs apply
@@ -355,6 +356,7 @@ EOF
     "apps/web/dist",
     "packages/core-backend/dist",
     "packages/core-backend/migrations",
+    "packages/mssql-readonly-utils",
     "plugins",
     "scripts/ops",
     "docker",

@@ -159,13 +159,27 @@ function verify_root_runtime_dependencies() {
 
 function verify_integration_plugin_runtime_dependencies() {
   local root="$1"
+  local workspace_yaml="${root}/pnpm-workspace.yaml"
+  local lockfile="${root}/pnpm-lock.yaml"
+  local core_backend_package_json="${root}/packages/core-backend/package.json"
   local plugin_package_json="${root}/plugins/plugin-integration-core/package.json"
   local sql_executor="${root}/plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-executor.cjs"
+  local mssql_helper_package_json="${root}/packages/mssql-readonly-utils/package.json"
+  local mssql_helper="${root}/packages/mssql-readonly-utils/index.cjs"
   local plugin_entry="${root}/plugins/plugin-integration-core/index.cjs"
 
+  search_fixed_string '"@metasheet/mssql-readonly-utils"' "$core_backend_package_json" || die "core-backend package.json must include the shared MSSQL read-only helper dependency"
   search_fixed_string '"mssql"' "$plugin_package_json" || die "plugin-integration-core package.json must include mssql for the built-in SQL Server read executor"
+  search_fixed_string '"@metasheet/mssql-readonly-utils"' "$plugin_package_json" || die "plugin-integration-core package.json must include the shared MSSQL read-only helper dependency"
+  search_fixed_string "  - 'packages/*'" "$workspace_yaml" || die "pnpm-workspace.yaml must include packages/* so workspace helper packages resolve during deploy dependency refresh"
+  search_fixed_string 'version: link:../mssql-readonly-utils' "$lockfile" || die "pnpm-lock.yaml must link core-backend to packages/mssql-readonly-utils for frozen deploy installs"
+  search_fixed_string 'version: link:../../packages/mssql-readonly-utils' "$lockfile" || die "pnpm-lock.yaml must link plugin-integration-core to packages/mssql-readonly-utils for frozen deploy installs"
+  search_fixed_string '"name": "@metasheet/mssql-readonly-utils"' "$mssql_helper_package_json" || die "shared MSSQL helper package.json must declare @metasheet/mssql-readonly-utils"
+  search_fixed_string '"main": "index.cjs"' "$mssql_helper_package_json" || die "shared MSSQL helper package.json must expose index.cjs as its runtime main"
   search_fixed_string 'createK3WiseSqlServerReadOnlyExecutor' "$sql_executor" || die "SQL Server read-only executor must be packaged"
-  search_fixed_string 'SELECT TOP' "$sql_executor" || die "SQL Server executor must build bounded read-only SELECT statements"
+  search_fixed_string 'buildSharedSimpleSelectQuery' "$sql_executor" || die "SQL Server executor must call the shared bounded read-only SELECT helper"
+  search_fixed_string 'function buildSimpleSelectQuery' "$mssql_helper" || die "shared MSSQL helper must package the bounded SELECT builder"
+  search_fixed_string 'SELECT TOP' "$mssql_helper" || die "shared MSSQL helper must build bounded read-only SELECT statements"
   search_fixed_string 'SQLSERVER_WRITE_EXECUTOR_DISABLED' "$sql_executor" || die "SQL Server executor must keep built-in writes disabled"
   search_fixed_string 'createK3WiseSqlServerChannelFactory({ queryExecutor: sqlServerQueryExecutor })' "$plugin_entry" || die "plugin runtime must inject the built-in SQL Server query executor"
 }
