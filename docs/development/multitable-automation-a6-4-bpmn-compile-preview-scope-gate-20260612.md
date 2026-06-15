@@ -9,7 +9,8 @@ Scope: A6-4 / W8 only - BPMN as a compile/preview and gap-report input for the
 existing automation + approval substrate.
 
 Runtime: no live runtime; A6-4a pure compiler landed #2568; A6-4b read-only
-route landed #2577; A6-4c Workflow Designer UI not started
+route landed #2577; A6-4c Workflow Designer UI landed #2604 (read-only); live
+BPMN runtime still out of scope
 
 ## Verdict
 
@@ -166,8 +167,8 @@ Detailed A6-4a implementation checklist:
 `multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`.
 
 The first implementation PR landed as #2568 with only a pure module + unit
-tests. The read-only route landed later as #2577. The Workflow Designer UI
-remains a separate A6-4c opt-in after the route contract is stable:
+tests. The read-only route landed later as #2577. The read-only Workflow Designer
+UI then landed as A6-4c in #2604, following these steps:
 
 1. Build a pure compiler function that accepts normalized designer/BPMN input.
 2. Add unit tests for supported and unsupported mappings.
