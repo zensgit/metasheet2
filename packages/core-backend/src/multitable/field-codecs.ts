@@ -386,7 +386,7 @@ export function sanitizeFieldProperty(
     return { ...obj, timezone }
   }
 
-  if (type === 'url' || type === 'email' || type === 'phone' || type === 'barcode' || type === 'qrcode' || type === 'location' || type === 'longText') {
+  if (type === 'url' || type === 'email' || type === 'phone' || type === 'barcode' || type === 'qrcode' || type === 'location') {
     return obj
   }
 
