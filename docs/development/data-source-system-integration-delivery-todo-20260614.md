@@ -8,7 +8,7 @@
 
 - 只读数据库接入 Data Factory 源系统: 已经基本可用。
 - 可交付定义: C6 外部写能力完成并通过实体机验收后，才称为完整交付。
-- 下一步建议: 等待 C2-close 实体机 read-only smoke 收口 (#2600)；等待期间只做文档/设计对齐，不提前打开 C3 runtime。
+- 下一步建议: C2-close 已通过实体机 smoke；进入 C3 incremental / watermark，但 runtime 仍需单独 opt-in。
 - 不建议: 现在直接开 C6。C6 是最大风险刀，必须等只读链路、增量链路、K3 generic seam 都稳定后再开。
 
 ## 收口顺序
@@ -16,7 +16,7 @@
 | 顺序 | 阶段 | 状态 | 目标 | 主要风险 |
 | --- | --- | --- | --- | --- |
 | P0 | ②b arc 收口权限/契约修复 | done (#2597) | 已排已合并主线风险 | related-echo 跨 base 泄漏 |
-| C2-close | 只读数据库链路 smoke 收口 | TODO | 证明当前 read-only bridge 可稳定测试 | 实体机配置漂移 |
+| C2-close | 只读数据库链路 smoke 收口 | done (#2600) | 证明当前 read-only bridge 可稳定测试 | 实体机配置漂移 |
 | C3 | incremental / watermark runtime | gated | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | gated | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
@@ -71,11 +71,16 @@ TODO:
 
 目标: 证明当前 `data-source:sql-readonly` 可以作为 Data Factory 源系统稳定使用。
 
+状态: 已完成，#2600 实体机 smoke PASS。
+
 验证锚点:
 
 - issue: #2600 `[C2-close] read-only SQL data-source smoke matrix on entity machine`
 - package: `metasheet-multitable-onprem-v2.5.0-datasource-c2close-20260614-f483bfdac`
 - release: `multitable-onprem-datasource-c2close-20260614-f483bfdac`
+- evidence: PostgreSQL / MySQL-MariaDB / SQL Server 全部通过 testConnection / listObjects /
+  getSchema / read dry-run；`rowsRead > 0`，`rowsWritten = 0`，`rowsFailed = 0`；Workbench
+  只保存 `dataSourceId+object`，凭据仍只在 `/data-sources`。
 
 已完成基线:
 
@@ -85,18 +90,19 @@ TODO:
 - [x] schema/object 加载和 dry-run read 主链路已实体机验证过。
 - [x] dangling/stale `dataSourceId` 已返回清晰 4xx；C2-close 不再包含开发项。
 
-剩余 TODO:
+完成项:
 
-- [ ] 当前 main/package 上再跑实体机 smoke。
-- [ ] PostgreSQL: testConnection / listObjects / getSchema / read smoke。
-- [ ] MySQL: testConnection / listObjects / getSchema / read smoke。
-- [ ] SQL Server: testConnection / listObjects / getSchema / read smoke。
-- [ ] issue 留 values-free 证据: 不贴连接串、账号、密码、表数据值。
+- [x] 当前 main/package 上再跑实体机 smoke。
+- [x] PostgreSQL: testConnection / listObjects / getSchema / read smoke。
+- [x] MySQL/MariaDB: testConnection / listObjects / getSchema / read smoke。
+- [x] SQL Server: testConnection / listObjects / getSchema / read smoke。
+- [x] issue 留 values-free 证据: 不贴连接串、账号、密码、表数据值。
 
 完成条件:
 
 - 操作员可以从 UI 创建/选择只读数据库源，并完成 dry-run read。
 - 失败路径可读、不可泄漏、不可误判为系统崩溃。
+- C3 watermark、C6 external write、K3 Save/Submit/Audit/BOM 在本 smoke 中均未运行，仍是后续 gated 项。
 
 ## C3 - Incremental / Watermark Runtime
 
