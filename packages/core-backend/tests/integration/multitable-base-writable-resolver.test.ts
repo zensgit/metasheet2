@@ -14,13 +14,18 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { resolveBaseWritable } from '../../src/multitable/permission-service'
+import {
+  BASE_ADMIN_PERMISSION_CODES,
+  BASE_WRITE_PERMISSION_CODES,
+  resolveBaseWritable,
+} from '../../src/multitable/permission-service'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
 const TS = Date.now()
 const OWNER = `u_bww_owner_${TS}` // owns BASE_A only
 const ADMIN_CODE = `u_bww_admincode_${TS}` // holds multitable:base:admin grant → write any base
+const WRITE_CODE = `u_bww_writecode_${TS}` // C3: holds ONLY multitable:base:write → write any base, NOT admin
 const NOBODY = `u_bww_nobody_${TS}` // no grant, owns nothing → write nothing
 
 const BASE_A = `base_bww_a_${TS}` // owned by OWNER
@@ -52,10 +57,27 @@ describeIfDatabase('②b automation — resolveBaseWritable resolver (real DB)',
        VALUES ($1, 'multitable:base:admin') ON CONFLICT DO NOTHING`,
       [ADMIN_CODE],
     )
+    // C3 — the finer write-not-admin tier.
+    await q(
+      `INSERT INTO permissions (code, name, description)
+       VALUES ('multitable:base:write', 'Base Write', 'C3 finer write tier')
+       ON CONFLICT (code) DO NOTHING`,
+    )
+    await q(
+      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1, $2, $1, 'x', 'user', '[]'::jsonb, TRUE, FALSE)
+       ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
+      [WRITE_CODE, `${WRITE_CODE}@example.test`],
+    )
+    await q(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       VALUES ($1, 'multitable:base:write') ON CONFLICT DO NOTHING`,
+      [WRITE_CODE],
+    )
   })
 
   afterAll(async () => {
-    await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[ADMIN_CODE]]).catch(() => {})
+    await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[ADMIN_CODE, WRITE_CODE]]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE_A, BASE_B, DEL_BASE]]).catch(() => {})
   })
 
@@ -79,6 +101,22 @@ describeIfDatabase('②b automation — resolveBaseWritable resolver (real DB)',
     expect(await resolveBaseWritable(NOBODY, query, BASE_B)).toBe(false)
   })
 
+  // C3 KEYSTONE — a holder of ONLY the finer `multitable:base:write` grant can write any base.
+  // RED on pre-C3 HEAD: `base:write` was in NO write set, so resolveBaseWritable returned false for
+  // this holder. GREEN after C3 adds it to BASE_WRITE_PERMISSION_CODES. This is the observable effect
+  // of the finer tier: write authority WITHOUT base:admin.
+  test('C3: a holder of only multitable:base:write can write any base (the finer write-not-admin tier)', async () => {
+    const query = poolManager.get().query.bind(poolManager.get())
+    expect(await resolveBaseWritable(WRITE_CODE, query, BASE_A)).toBe(true)
+    expect(await resolveBaseWritable(WRITE_CODE, query, BASE_B)).toBe(true)
+  })
+
+  // C3 — the write tier stays fail-closed on the same edges as admin/owner.
+  test('C3: a base:write holder is still blocked on a soft-deleted base (existence check precedes the grant)', async () => {
+    const query = poolManager.get().query.bind(poolManager.get())
+    expect(await resolveBaseWritable(WRITE_CODE, query, DEL_BASE)).toBe(false)
+  })
+
   test('fail-closed: null/empty userId → false (no identity, no write)', async () => {
     const query = poolManager.get().query.bind(poolManager.get())
     expect(await resolveBaseWritable(null, query, BASE_A)).toBe(false)
@@ -99,5 +137,30 @@ describeIfDatabase('②b automation — resolveBaseWritable resolver (real DB)',
     const query = poolManager.get().query.bind(poolManager.get())
     expect(await resolveBaseWritable(ADMIN_CODE, query, DEL_BASE)).toBe(false)
     expect(await resolveBaseWritable(OWNER, query, DEL_BASE)).toBe(false)
+  })
+})
+
+// C3 — the permission-code SPLIT invariants (no DB needed, so CI's no-DB unit job guards them too).
+// The advisor's divergence rule: after the two Sets diverge, each consumer must want the exact set it
+// names. These assertions are RED on pre-C3 HEAD (where the two Sets were the SAME object).
+describe('C3 — finer base:write tier: permission-code set invariants', () => {
+  test('multitable:base:write is in the WRITE set (the new write-not-admin door)', () => {
+    expect(BASE_WRITE_PERMISSION_CODES.has('multitable:base:write')).toBe(true)
+  })
+
+  test('multitable:base:write is NOT in the ADMIN set (a future admin-only gate must reject write-only)', () => {
+    expect(BASE_ADMIN_PERMISSION_CODES.has('multitable:base:write')).toBe(false)
+  })
+
+  test('monotone: every ADMIN code still grants write (base:admin / multitable:admin imply write)', () => {
+    for (const code of BASE_ADMIN_PERMISSION_CODES) {
+      expect(BASE_WRITE_PERMISSION_CODES.has(code)).toBe(true)
+    }
+  })
+
+  test('the two sets are now DISTINCT objects (BASE_WRITE is no longer aliased to BASE_ADMIN)', () => {
+    expect(BASE_WRITE_PERMISSION_CODES).not.toBe(BASE_ADMIN_PERMISSION_CODES)
+    // WRITE is a strict superset: it has exactly one code ADMIN lacks (base:write).
+    expect(BASE_WRITE_PERMISSION_CODES.size).toBe(BASE_ADMIN_PERMISSION_CODES.size + 1)
   })
 })

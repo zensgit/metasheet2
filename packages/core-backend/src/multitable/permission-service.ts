@@ -124,12 +124,18 @@ export const BASE_ADMIN_PERMISSION_CODES = new Set([
   'multitable:admin',
 ])
 
-// ②b automation slice — base-level WRITE authority. RATIFIED decision 1 (a): `base:admin` IMPLIES write
-// — there is no separate `base:write` code at this stage, so the write code-set is IDENTICAL to
-// `BASE_ADMIN_PERMISSION_CODES`. This makes the cross-base automation write-gate deliberately HIGH
-// (base-writable ≡ base-admin-or-owner); a finer `multitable:base:write` tier is a future opt-in. Like
-// the read codes, the §2a.2 wall does NOT consult these (it compares two base_id strings only).
-export const BASE_WRITE_PERMISSION_CODES = BASE_ADMIN_PERMISSION_CODES
+// ②b automation slice — base-level WRITE authority. Phase C3 (2026-06-14) realizes the finer
+// `multitable:base:write` tier the earlier slice deferred. The write code-set is now a DISTINCT
+// Set that is a strict superset of `BASE_ADMIN_PERMISSION_CODES`: `base:write` grants
+// write-not-admin, while `base:admin` / `multitable:admin` continue to IMPLY write. The split is
+// MONOTONE + ADDITIVE — no existing code-holder loses or gains authority; the only change is that a
+// new, lower-privilege write door opens. `BASE_ADMIN_PERMISSION_CODES` is no longer aliased, so a
+// future admin-only gate that consults it will correctly reject a write-only holder. Like the read
+// codes, the §2a.2 wall does NOT consult these (it compares two base_id strings only).
+export const BASE_WRITE_PERMISSION_CODES = new Set([
+  'multitable:base:write',
+  ...BASE_ADMIN_PERMISSION_CODES,
+])
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -1286,8 +1292,9 @@ export async function resolveBaseReadable(
  * executor has no `req`, only a `queryFn`. It mirrors the `start_approval` requester-resolution mechanism
  * (`listRbacPermissionCodes`) — fetch the user's effective permission codes (user_permissions ∪
  * role_permissions, then narrowed by namespace admission so a namespace-revoked code cannot grant write)
- * and grant write when any is a `BASE_WRITE_PERMISSION_CODES` code (= `multitable:base:admin` /
- * `multitable:admin`), OR when the user owns the base (`meta_bases.owner_id`, mirroring
+ * and grant write when any is a `BASE_WRITE_PERMISSION_CODES` code (Phase C3: `multitable:base:write`
+ * — the finer write-not-admin tier — OR `multitable:base:admin` / `multitable:admin`, which imply
+ * write), OR when the user owns the base (`meta_bases.owner_id`, mirroring
  * `resolveBaseReadable`'s owner derivation). FAIL-CLOSED: no userId → false; a missing / soft-deleted
  * base → false. It does NOT touch central RBAC / auth — kernel-internal to multitable.
  */
