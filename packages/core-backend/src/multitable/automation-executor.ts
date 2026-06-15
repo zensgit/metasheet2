@@ -9,6 +9,7 @@ import { redactString } from './automation-log-redact'
 import { isRichLongTextProperty, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
 import { resolveBaseWritable } from './permission-service'
+import { publishMultitableSheetRealtime } from './realtime-publish'
 import { MemoryRateLimitStore, type RateLimitStore } from '../middleware/rate-limiter'
 import {
   DingTalkBusinessError,
@@ -1703,6 +1704,34 @@ export class AutomationExecutor {
     return payload
   }
 
+  /**
+   * C1 — publish a real-time invalidation for an automation record write to the EFFECTIVE sheet's
+   * room (target sheet for cross-base, trigger sheet for same-base). Same gated audience as a REST
+   * write to that sheet already reaches (relative invariance — origin base does not change who is in
+   * the target room). For a CROSS-BASE write the trigger `actorId` is omitted so a trigger-base
+   * principal is not surfaced to the target base's subscribers; same-base passes it through (the
+   * UI "who changed" / self-echo hint). Best-effort: never fails the authorized write.
+   */
+  private publishRecordRealtime(
+    kind: 'record-updated' | 'record-created' | 'record-deleted',
+    sheetId: string,
+    recordId: string,
+    crossBase: boolean,
+    context: ExecutionContext,
+  ): void {
+    try {
+      publishMultitableSheetRealtime({
+        spreadsheetId: sheetId,
+        source: 'multitable',
+        kind,
+        recordId,
+        actorId: crossBase ? undefined : (context.actorId ?? undefined),
+      })
+    } catch {
+      // publishMultitableSheetRealtime already swallows its own errors; this is belt-and-suspenders.
+    }
+  }
+
   private async executeUpdateRecord(
     config: Record<string, unknown>,
     context: ExecutionContext,
@@ -1797,6 +1826,13 @@ export class AutomationExecutor {
         actorId: context.actorId,
         _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
       })
+
+      // C1 real-time fan-out: invalidate the EFFECTIVE sheet's room (target for cross-base, trigger for
+      // same-base) so its gated subscribers see the change live — automation writes were previously
+      // invisible to the real-time layer (closeout §5). Same audience/gate as a REST write to that sheet
+      // (relative invariance). actorId is omitted for cross-base so a trigger-base actor id is not
+      // surfaced to the target base's subscribers.
+      this.publishRecordRealtime('record-updated', effectiveSheetId, effectiveRecordId, gate.crossBase, context)
 
       return { actionType: 'update_record', status: 'success', output: { updatedFields: Object.keys(fields) } }
     } catch (err) {
@@ -1896,6 +1932,9 @@ export class AutomationExecutor {
         _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
       })
 
+      // C1 real-time fan-out (see executeUpdateRecord) — invalidate the effective sheet's room.
+      this.publishRecordRealtime('record-deleted', effectiveSheetId, effectiveRecordId, gate.crossBase, context)
+
       return { actionType: 'delete_record', status: 'success', output: { recordId: effectiveRecordId, sheetId: effectiveSheetId } }
     } catch (err) {
       return { actionType: 'delete_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
@@ -1942,6 +1981,9 @@ export class AutomationExecutor {
         actorId: context.actorId,
         _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
       })
+
+      // C1 real-time fan-out (see executeUpdateRecord) — invalidate the target sheet's room.
+      this.publishRecordRealtime('record-created', targetSheetId, recordId, gate.crossBase, context)
 
       return { actionType: 'create_record', status: 'success', output: { recordId, sheetId: targetSheetId } }
     } catch (err) {
