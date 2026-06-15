@@ -27,6 +27,10 @@
         <el-icon><CircleCheck /></el-icon>
         验证
       </el-button>
+      <el-button @click="$emit('compile-preview')">
+        <el-icon><View /></el-icon>
+        编译预览
+      </el-button>
       <el-button type="primary" :loading="saving" @click="$emit('save-workflow')">
         <el-icon><Upload /></el-icon>
         保存
@@ -49,6 +53,7 @@ import {
   Promotion,
   Setting,
   Upload,
+  View,
   ZoomIn,
   ZoomOut,
 } from '@element-plus/icons-vue'
@@ -68,6 +73,7 @@ defineEmits<{
   (event: 'open-template-picker'): void
   (event: 'toggle-properties'): void
   (event: 'validate-workflow'): void
+  (event: 'compile-preview'): void
   (event: 'save-workflow'): void
   (event: 'deploy-workflow'): void
 }>()

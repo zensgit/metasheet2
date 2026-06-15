@@ -13,6 +13,7 @@
       @open-template-picker="openTemplatePicker"
       @toggle-properties="showProperties = !showProperties"
       @validate-workflow="validateWorkflow"
+      @compile-preview="openCompilePreview"
       @save-workflow="saveWorkflow"
       @deploy-workflow="deployWorkflow"
     />
@@ -98,6 +99,15 @@
       </div>
     </el-dialog>
 
+    <!-- Compile Preview Dialog (A6-4c, read-only) -->
+    <el-dialog v-model="showCompilePreview" title="编译预览（只读）" width="640px">
+      <WorkflowCompilePreviewPanel
+        :result="compilePreviewResult"
+        :loading="compilePreviewLoading"
+        :error="compilePreviewError"
+      />
+    </el-dialog>
+
     <WorkflowTemplateDialog
       v-model="showTemplates"
       :template-loading="templateLoading"
@@ -170,6 +180,7 @@ import {
   type WorkflowDesignerTemplateDetail,
   type WorkflowDesignerTemplateListItem,
 } from './workflowDesignerPersistence'
+import { useWorkflowCompilePreview } from './workflowDesignerCompilePreview'
 import {
   invalidateWorkflowDraftCatalogCache,
   invalidateWorkflowTemplateCatalogCache,
@@ -189,6 +200,7 @@ import WorkflowPropertyPanel from '../components/workflow/WorkflowPropertyPanel.
 import WorkflowDesignerToolbar from '../components/workflow/WorkflowDesignerToolbar.vue'
 import WorkflowPalette from '../components/workflow/WorkflowPalette.vue'
 import WorkflowCanvasShell from '../components/workflow/WorkflowCanvasShell.vue'
+import WorkflowCompilePreviewPanel from '../components/workflow/WorkflowCompilePreviewPanel.vue'
 
 // Types
 interface PaletteItem {
@@ -243,6 +255,25 @@ const showProperties = ref(true)
 const showValidation = ref(false)
 const showTemplates = ref(false)
 const validationErrors = ref<ReturnType<typeof validateWorkflowElements>>([])
+
+// A6-4c read-only BPMN compile preview (consumes A6-4b route #2577).
+// The composable owns the request-id race guard so a stale late response can
+// never overwrite a newer preview.
+const {
+  visible: showCompilePreview,
+  loading: compilePreviewLoading,
+  error: compilePreviewError,
+  result: compilePreviewResult,
+  run: runCompilePreview,
+} = useWorkflowCompilePreview()
+
+function openCompilePreview() {
+  if (!workflowId.value) {
+    ElMessage.info('请先保存工作流，然后再进行编译预览。')
+    return
+  }
+  void runCompilePreview(workflowId.value)
+}
 const templateLoading = ref(false)
 const applyingTemplate = ref(false)
 const templateError = ref('')
