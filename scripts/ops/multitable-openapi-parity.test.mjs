@@ -28,6 +28,7 @@ const expectedFieldTypes = [
   'email',
   'phone',
   'barcode',
+  'qrcode',
   'location',
   'longText',
   'autoNumber',

@@ -2055,6 +2055,7 @@ components:
         - email
         - phone
         - barcode
+        - qrcode
         - location
         - longText
         - autoNumber

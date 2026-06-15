@@ -24,6 +24,7 @@ export type MetaFieldType =
   | 'email'
   | 'phone'
   | 'barcode'
+  | 'qrcode'
   | 'location'
   | 'longText'
   | 'autoNumber'

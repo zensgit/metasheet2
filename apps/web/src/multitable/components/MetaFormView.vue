@@ -66,6 +66,21 @@
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
           />
           <input
+            v-else-if="field.type === 'qrcode'"
+            :id="`field_${field.id}`"
+            class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+            type="text"
+            inputmode="text"
+            :placeholder="lc('cell.qrcodePlaceholder')"
+            :disabled="isFieldReadOnly(field.id)"
+            :aria-required="field.required ? 'true' : undefined"
+            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
+            :value="textControlValue(formData[field.id])"
+            @input="formData[field.id] = ($event.target as HTMLInputElement).value"
+          />
+          <input
             v-else-if="field.type === 'location'"
             :id="`field_${field.id}`"
             class="meta-form-view__input"

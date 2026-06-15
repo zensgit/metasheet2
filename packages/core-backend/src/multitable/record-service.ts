@@ -241,6 +241,7 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   if (normalized === 'email') return 'email'
   if (normalized === 'phone') return 'phone'
   if (normalized === 'barcode' || normalized === 'bar_code' || normalized === 'bar-code') return 'barcode'
+  if (normalized === 'qrcode' || normalized === 'qr_code' || normalized === 'qr-code' || normalized === 'qr') return 'qrcode'
   if (
     normalized === 'location' ||
     normalized === 'geo' ||
