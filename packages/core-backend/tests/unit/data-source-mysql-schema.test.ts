@@ -56,6 +56,10 @@ class FakeMySQLAdapter extends MySQLAdapter {
   }
 }
 
+function normalizeSql(sql: string): string {
+  return sql.replace(/\s+/g, ' ').trim()
+}
+
 describe('MySQLAdapter schema metadata', () => {
   it('uses non-reserved metadata aliases and maps returned column fields', async () => {
     const adapter = new FakeMySQLAdapter(cfg)
@@ -93,5 +97,73 @@ describe('MySQLAdapter schema metadata', () => {
         comment: undefined,
       },
     ])
+  })
+})
+
+describe('MySQLAdapter structured read SQL', () => {
+  it('selects with structured OR groups for C3 composite keyset predicates', async () => {
+    const adapter = new FakeMySQLAdapter(cfg)
+
+    await adapter.select('stock_info', {
+      where: {
+        status: 'open',
+        $or: [
+          { updated_at: { $gt: '2026-06-01T00:00:00.000Z' } },
+          {
+            updated_at: '2026-06-01T00:00:00.000Z',
+            id: { $gt: 42 },
+          },
+        ],
+      },
+      orderBy: [
+        { column: 'updated_at', direction: 'asc' },
+        { column: 'id', direction: 'asc' },
+      ],
+      limit: 100,
+    })
+
+    expect(normalizeSql(adapter.queries[0].sql)).toBe(
+      'SELECT * FROM `stock_info` WHERE `status` = ? AND ((`updated_at` > ?) OR (`updated_at` = ? AND `id` > ?)) ORDER BY `updated_at` ASC, `id` ASC LIMIT 100'
+    )
+    expect(adapter.queries[0].params).toEqual([
+      'open',
+      '2026-06-01T00:00:00.000Z',
+      '2026-06-01T00:00:00.000Z',
+      42,
+    ])
+    expect(adapter.queries[0].sql).not.toContain('2026-06-01')
+  })
+
+  it('rejects malformed structured groups before the query is issued', async () => {
+    const adapter = new FakeMySQLAdapter(cfg)
+
+    await expect(adapter.select('stock_info', {
+      where: { $or: [] },
+      limit: 1,
+    })).rejects.toThrow(/\$or must be a non-empty array/)
+
+    expect(adapter.queries).toHaveLength(0)
+  })
+
+  it('rejects unsupported operators before the query is issued', async () => {
+    const adapter = new FakeMySQLAdapter(cfg)
+
+    await expect(adapter.select('stock_info', {
+      where: { updated_at: { $after: '2026-06-01T00:00:00.000Z' } as never },
+      limit: 1,
+    })).rejects.toThrow(/Unsupported where operator/)
+
+    expect(adapter.queries).toHaveLength(0)
+  })
+
+  it('does not turn an empty update/delete where into a full-table write', async () => {
+    const adapter = new FakeMySQLAdapter(cfg)
+
+    await expect(adapter.update('stock_info', { status: 'closed' }, {}))
+      .rejects.toThrow(/requires a non-empty where clause/)
+    await expect(adapter.delete('stock_info', {}))
+      .rejects.toThrow(/requires a non-empty where clause/)
+
+    expect(adapter.queries).toHaveLength(0)
   })
 })

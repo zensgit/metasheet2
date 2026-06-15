@@ -1,6 +1,6 @@
 import { EventEmitter } from 'eventemitter3'
 import type { Kysely } from 'kysely'
-import type { BaseDataAdapter, DataSourceConfig, QueryOptions, QueryResult, DbValue, WhereValue, ConnectionConfig, Credentials, AdapterOptions } from './BaseAdapter'
+import type { BaseDataAdapter, DataSourceConfig, QueryOptions, QueryResult, DbValue, WhereClause, ConnectionConfig, Credentials, AdapterOptions } from './BaseAdapter'
 import { PostgresAdapter } from './PostgresAdapter'
 import { HTTPAdapter } from './HTTPAdapter'
 import { MSSQLAdapter } from './MSSQLAdapter'
@@ -562,7 +562,7 @@ export class DataSourceManager extends EventEmitter {
     dataSourceId: string,
     table: string,
     data: Record<string, DbValue>,
-    where: Record<string, WhereValue>
+    where: WhereClause
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
@@ -577,7 +577,7 @@ export class DataSourceManager extends EventEmitter {
   async delete<T = Record<string, DbValue>>(
     dataSourceId: string,
     table: string,
-    where: Record<string, WhereValue>
+    where: WhereClause
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
@@ -596,7 +596,7 @@ export class DataSourceManager extends EventEmitter {
     targetId: string,
     targetTable: string,
     options?: {
-      where?: Record<string, WhereValue>
+      where?: WhereClause
       batchSize?: number
       transform?: (row: Record<string, DbValue>) => Record<string, DbValue>
     }

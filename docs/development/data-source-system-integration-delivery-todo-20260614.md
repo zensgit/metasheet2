@@ -17,7 +17,7 @@
 | --- | --- | --- | --- | --- |
 | P0 | ②b arc 收口权限/契约修复 | done (#2597) | 已排已合并主线风险 | related-echo 跨 base 泄漏 |
 | C2-close | 只读数据库链路 smoke 收口 | done (#2600) | 证明当前 read-only bridge 可稳定测试 | 实体机配置漂移 |
-| C3 | incremental / watermark runtime | gated; C3-1 done (#2609) | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
+| C3 | incremental / watermark runtime | gated; C3-1 done (#2609), C3-3a done (#2619) | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | gated | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
@@ -121,10 +121,16 @@ TODO:
 - [x] C3-1 facade 支持 `orderBy` 并保留 `where`/equality `filters` passthrough。
   - #2609 / squash `1586c3841`.
   - 仍是 host-side seam；未打开 watermark runtime、未改变 adapter cursor、未新增写能力。
-- [ ] C3-3a runner 透传 resolved `watermarkConfig`，并对 `data-source:sql-readonly`
+- [x] C3-3a runner 透传 resolved `watermarkConfig`，并对 `data-source:sql-readonly`
   的 `updated_at` 增量配置强制声明 tiebreaker。
+  - #2619 / squash `7f61709ea`.
   - 目标: adapter 后续实现 keyset 时读取同一个 runner-resolved config，不再自己猜 `type/field/tiebreaker`。
   - 边界: 不生成 watermark `where/orderBy`，不改变 offset cursor，不打开 C3-2/C3-3 runtime。
+- [ ] C3-2a structured `where` 逻辑分组 + MySQL operator parity。
+  - 目标: 先让 Postgres/MSSQL/MySQL 的 structured read 能表达
+    `field > last OR (field = last AND tiebreaker > lastTie)`，为 `updated_at + id`
+    复合 keyset 铺底。
+  - 边界: 不生成 watermark predicate，不解析/推进 cursor，不改变 offset full-read 行为，不新增写能力。
 - [ ] C3-2 adapter 实现 in-run mode-tagged cursor；跨 run 仍复用现有 watermark store，不改 store schema。
 - [ ] C3-3 `updated_at + id` 复合游标实现和测试。
 - [ ] C3-4 `monotonic_id` 游标实现和测试。

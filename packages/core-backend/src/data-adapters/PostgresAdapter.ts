@@ -10,7 +10,7 @@ import type {
   IndexInfo,
   ForeignKeyInfo,
   DbValue,
-  WhereValue
+  WhereClause
 } from './BaseAdapter';
 import {
   BaseDataAdapter,
@@ -233,7 +233,7 @@ export class PostgresAdapter extends BaseDataAdapter {
     return this.query<T>(sql, values)
   }
 
-  async update<T = Record<string, DbValue>>(table: string, data: Record<string, DbValue>, where: Record<string, WhereValue>): Promise<QueryResult<T>> {
+  async update<T = Record<string, DbValue>>(table: string, data: Record<string, DbValue>, where: WhereClause): Promise<QueryResult<T>> {
     const setClause: string[] = []
     const values: DbValue[] = []
     let paramIndex = 1
@@ -260,7 +260,7 @@ export class PostgresAdapter extends BaseDataAdapter {
     return this.query<T>(sql, [...values, ...whereClause.params])
   }
 
-  async delete<T = Record<string, DbValue>>(table: string, where: Record<string, WhereValue>): Promise<QueryResult<T>> {
+  async delete<T = Record<string, DbValue>>(table: string, where: WhereClause): Promise<QueryResult<T>> {
     const whereClause = this.buildWhereClause(where)
 
     const sql = `

@@ -15,7 +15,7 @@ import type {
   IndexInfo,
   ForeignKeyInfo,
   DbValue,
-  WhereValue,
+  WhereClause,
   Transaction,
   ConnectionConfig
 } from './BaseAdapter';
@@ -373,7 +373,7 @@ export class MSSQLAdapter extends BaseDataAdapter {
   async update<T = Record<string, DbValue>>(
     table: string,
     data: Record<string, DbValue>,
-    where: Record<string, WhereValue>
+    where: WhereClause
   ): Promise<QueryResult<T>> {
     const setClause: string[] = []
     const values: DbValue[] = []
@@ -397,7 +397,7 @@ export class MSSQLAdapter extends BaseDataAdapter {
 
   async delete<T = Record<string, DbValue>>(
     table: string,
-    where: Record<string, WhereValue>
+    where: WhereClause
   ): Promise<QueryResult<T>> {
     const whereClause = this.buildWhereClause(where)
     const sql = `DELETE FROM ${this.quoteIdent(table)} OUTPUT DELETED.* ${whereClause.sql}`
