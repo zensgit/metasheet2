@@ -180,13 +180,19 @@ argument is the same wire-vs-fixture class of bug.)
   `where` pass-through to `DataSourceManager.select`; parameterized-only; writable-source still rejected.
   Facade unit test covers pass-through, malformed `orderBy` fail-closed, uppercase direction normalization,
   and the existing no-fallback / writable-source guard. Landed in #2609 / squash `1586c3841`.
-- 🔒 **C3-2a — structured `where` logical groups:** widen adapter structured reads to express the
+- ✅ **C3-2a — structured `where` logical groups:** widen adapter structured reads to express the
   `updated_at` composite keyset predicate as `field > last OR (field = last AND tiebreaker > lastTie)`;
   keep all values parameterized; reject malformed logical groups and unknown `$` operators fail-closed;
   add MySQL operator parity with Postgres/MSSQL. This is a prerequisite only — no watermark predicate is
-  generated yet, and the offset/full path stays unchanged.
-- 🔒 **C3-2 — adapter watermark mode (plugin):** type-conditional keyset (Seam B) + cursor model (Seam C);
-  unit tests incl. the **no-miss** and **no-stall** negative controls and offset/full coexistence.
+  generated yet, and the offset/full path stays unchanged. Landed in #2625 / squash `c2c59994c`.
+- 🔒 **C3-2 — adapter watermark mode (plugin):** type-conditional keyset (Seam B) + cursor model (Seam C).
+  Current implementation slice wires `data-source:sql-readonly.read()` so `watermark + watermarkConfig`
+  generates structured `where/orderBy`, with `updated_at` first-page `>=` store-floor seeding and
+  subsequent in-run `(field,tiebreaker)` composite cursors, plus `monotonic_id` strict `>`.
+  SQL BIGINT monotonic values are preserved as integer strings, not coerced through JS `Number`.
+  Offset/full coexistence and wrong-mode cursor fail-closed behavior are unit-locked. Runtime run details
+  redact watermark cursors (they contain source values), and max-page truncation is partial/no-watermark-advance
+  rather than a silent succeeded run. C3-5 remains the real-DB acceptance gate.
 - ✅ **C3-3a — watermark-config plumbing (runner → read request):** extend `pipeline.options.watermark` to
   `{ type, field, tiebreaker? }`, pass the resolved config into `read()` (Seam D), and require
   `updated_at` configs to declare a tiebreaker for the `data-source:sql-readonly` bridge. Landed in #2619
@@ -204,7 +210,7 @@ argument is the same wire-vs-fixture class of bug.)
   facade→`DataSourceManager`→real-adapter→DB keyset path — this real-DB test is the acceptance keystone.
 
 **All remaining C3-2..C3-5 work stays 🔒** until both a real volume/perf signal **and** a separate opt-in.
-Build order from the current mainline: C3-2a (structured `where` groups) → C3-2 (adapter mode + cursor)
+Build order from the current mainline: C3-2 (adapter mode + cursor)
 → C3-4 (filter+watermark composition) → C3-5 (real-DB lock).
 
 ## Acceptance checklist (the locks — for the impl slices)
@@ -212,6 +218,8 @@ Build order from the current mainline: C3-2a (structured `where` groups) → C3-
 - ⬜ `monotonic_id`: strict `>`, single-key order, progress guaranteed.
 - ⬜ `updated_at`: composite keyset `(field, tiebreaker)` — **no-miss** across a same-timestamp page boundary.
 - ⬜ `updated_at`: a same-timestamp batch larger than `limit` **still advances** (no stall).
+- ⬜ Watermark cursors remain internal: raw cursor values are not persisted in run details / evidence.
+- ⬜ Source page-cap truncation (`maxPagesReached`) is partial and blocks watermark advance.
 - ⬜ Across-run resume: first page seeds from the store floor (`>` mono / `>=`+dedup `updated_at`); subsequent
   pages use the in-run composite cursor; no `watermarkStore` schema change.
 - ⬜ Mode coexistence: no watermark ⇒ the C1 offset/full path is byte-for-byte unchanged.
