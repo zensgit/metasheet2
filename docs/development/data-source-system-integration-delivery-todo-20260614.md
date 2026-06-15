@@ -223,8 +223,8 @@ TODO:
 目标: 把 K3 SQL Server 相关通道逐步靠近 generic MSSQL 能力，但不打开 K3 禁区。
 
 状态: C5-0 设计切片已写入 `docs/development/data-source-system-integration-c5-k3-generic-mssql-seam-design-20260615.md`；
-C5-1 latent helper contract 已落地为 `@metasheet/mssql-readonly-utils`，但 generic MSSQL / K3 executor
-生产调用点仍未迁移。C5-2/C5-3/C5-4 保持后续 gated opt-in。
+C5-1 latent helper contract 已落地为 `@metasheet/mssql-readonly-utils`；C5-2 已把 generic `MSSQLAdapter`
+的 endpoint/TLS/identifier 稳定面接到 helper。K3 executor 生产调用点仍未迁移；C5-3/C5-4 保持后续 gated opt-in。
 
 边界:
 
@@ -254,7 +254,12 @@ TODO:
   - 边界: 不改 `MSSQLAdapter`、不改 `k3-wise-sqlserver-executor.cjs`、不改任何 production call site。
 - [x] 结构守卫测试: shared helper 不导出任何写接口，neutral helper 不 import core/plugin internals；
   core-backend 不 import plugin internals，K3 plugin 不 import `DataSourceManager` / `MSSQLAdapter`。
-- [ ] C5-2: generic `MSSQLAdapter` 迁移到 helper，保持现有 MSSQL adapter tests / smoke harness 行为不漂移。
+- [x] C5-2: generic `MSSQLAdapter` 最小生产接线到 helper，保持现有 MSSQL adapter tests / smoke harness 行为不漂移。
+  - 已迁移: server/port parsing、legacy TLS option building、MSSQL identifier quoting。
+  - 未迁移: `WhereClause` builder 仍留在 `BaseAdapter`，避免本刀改变 Postgres/MySQL/MSSQL shared where 语义；
+    INFORMATION_SCHEMA schema introspection 仍留在 `MSSQLAdapter`，等 C5-4 smoke 对齐。
+  - core-backend 将 helper 从 devDependency 提升为 runtime dependency；generic adapter 生产代码现在按 package name
+    import helper。
 - [ ] C5-3: K3 default SQL Server executor 迁移到 helper 的 test/select 路径，保持 K3 read/write guard 不漂移。
 - [ ] C5-4: TLS / schema introspection / read-only smoke 与 generic MSSQL 对齐，并跑实体机 K3/MSSQL smoke。
 - [ ] 实体机 K3/MSSQL smoke。

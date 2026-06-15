@@ -33,6 +33,7 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
+    "@metasheet/mssql-readonly-utils": "workspace:*",
     "@types/bcryptjs": "^3.0.0",
     "@wendellhu/redi": "^1.1.0",
     "ajv": "^8.12.0",
@@ -70,7 +71,6 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
-    "@metasheet/mssql-readonly-utils": "workspace:*",
     "@types/bcrypt": "^5.0.2",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.25",
