@@ -41,13 +41,13 @@
 
 ### 3.1 不变量:只经 executor 派发,不开旁路
 
-`button/run` 只组装 `{ sheetId, recordId, fieldId, actorId, recordData }` 上下文,然后调用**既有 action executor**(`automation-executor.ts:1346 switch(action.type)`),继承其 per-action 权限闸、审计(`automation-log-service` + redact)、跨 base 治理墙(`evaluateCrossBaseWrite`)。button **不新增任何 action 语义,只加一个触发面**。`actionType` 取值 = `AutomationActionType` 集合内。
+`button/run` 只组装 `{ sheetId, recordId, fieldId, actorId, recordData }` 上下文,然后调用**既有 action executor**(单-action 派发在 `automation-executor.ts:1581` 的 `private executeSingleAction`(:1573)内 `switch(action.type)`;`execute()` 入口在 :776。**勘误:本设计锁初稿误写 :1346,经 origin/main 核验更正为 :1581**),继承其 per-action 权限闸、审计(`automation-log-service` + redact)、跨 base 治理墙(`evaluateCrossBaseWrite`)。button **不新增任何 action 语义,只加一个触发面**。`actionType` 取值 = `AutomationActionType` 集合内。
 
 ### 3.2 修正:首 action = executor-owned inert action(新增 action type,非旁路)
 
 "不开旁路" ≠ "不新增 action type"——两者不等价。现有 `AutomationActionType`(update_record/create_record/delete_record/send_webhook/send_notification/send_email/send_dingtalk_*/lock_record/wait_for_callback/condition_branch/start_approval/parallel_branch)**没有 inert 类型**,故首刀不能是纯 no-op,除非:
 
-**决策:新增一个 executor 名下的 inert action(暂名 `record_click`,见命名注)**,在 `automation-executor.ts:1346` 加一个 `case`:只写审计/点击记录、**零业务副作用**(不写记录、不外发)。它是 executor 自己派发的动作,**满足"统一 executor"**;又**满足"最安全首刀"**(爆炸面为零)。严格优于以 `send_notification` 起步(后者有真外发副作用 + 投递语义)。
+**决策:新增一个 executor 名下的 inert action(暂名 `record_click`,见命名注)**,在 `automation-executor.ts:1581`(`executeSingleAction` 的 `switch`)加一个 `case`:只写审计/点击记录、**零业务副作用**(不写记录、不外发)。它是 executor 自己派发的动作,**满足"统一 executor"**;又**满足"最安全首刀"**(爆炸面为零)。严格优于以 `send_notification` 起步(后者有真外发副作用 + 投递语义)。
 
 - **inert action 的闸** = `record-readable`(零副作用,能读该记录即可点击;仍服从 §4 的"执行授权 = action 自身闸")。
 - **picker 可见性**(是否出现在通用自动化 action 选择器,`MetaAutomationManager.vue`/`MetaAutomationRuleEditor.vue`)= **B1-c 的 UI 决策**;倾向 button 上下文专用、从自动化构建器过滤(inert 点击在定时/触发自动化里无意义)。B1-a1 只管注册+派发。
