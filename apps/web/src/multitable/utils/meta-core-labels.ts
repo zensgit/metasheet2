@@ -42,6 +42,11 @@ export type MetaCoreLabelKey =
   | 'toolbar.importRecords' | 'toolbar.import'
   | 'toolbar.exportCsv' | 'toolbar.exportExcel' | 'toolbar.exportExcelXlsx' | 'toolbar.exportXlsx'
   | 'toolbar.newRecord'
+  // --- Export options dialog (A2: column/row selection) ---
+  | 'export.title' | 'export.close' | 'export.columns' | 'export.selectAll' | 'export.clearAll'
+  | 'export.rowScope' | 'export.allRows' | 'export.selectedRows'
+  | 'export.format' | 'export.formatCsv' | 'export.formatXlsx'
+  | 'export.noColumns' | 'export.cancel' | 'export.confirm' | 'export.openAria'
   // --- Row density ---
   | 'density.compact' | 'density.normal' | 'density.expanded'
   // --- MetaGridTable static ---
@@ -134,6 +139,21 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'toolbar.exportExcel': { en: 'Export Excel', zh: '导出 Excel' },
   'toolbar.exportExcelXlsx': { en: 'Export Excel (.xlsx)', zh: '导出 Excel (.xlsx)' },
   'toolbar.exportXlsx': { en: 'Export XLSX', zh: '导出 XLSX' },
+  'export.title': { en: 'Export options', zh: '导出选项' },
+  'export.close': { en: 'Close', zh: '关闭' },
+  'export.columns': { en: 'Columns', zh: '列' },
+  'export.selectAll': { en: 'Select all', zh: '全选' },
+  'export.clearAll': { en: 'Clear all', zh: '清空' },
+  'export.rowScope': { en: 'Rows', zh: '行' },
+  'export.allRows': { en: 'All loaded rows', zh: '全部已加载行' },
+  'export.selectedRows': { en: 'Selected rows only', zh: '仅选中行' },
+  'export.format': { en: 'Format', zh: '格式' },
+  'export.formatCsv': { en: 'CSV', zh: 'CSV' },
+  'export.formatXlsx': { en: 'Excel (.xlsx)', zh: 'Excel (.xlsx)' },
+  'export.noColumns': { en: 'Select at least one column to export.', zh: '请至少选择一列导出。' },
+  'export.cancel': { en: 'Cancel', zh: '取消' },
+  'export.confirm': { en: 'Export', zh: '导出' },
+  'export.openAria': { en: 'Export options', zh: '导出选项' },
   'toolbar.newRecord': { en: '+ New Record', zh: '+ 新建记录' },
 
   'density.compact': { en: 'Compact', zh: '紧凑' },
