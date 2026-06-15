@@ -4822,6 +4822,79 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④/年假 L2a — accrual provenance schema invariants (runs/run_items CHECK·UNIQUE·FK; users service-start column)', async () => {
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = 'default'
+    const userPrefix = `l2a-${runSuffix}`
+    const rejects = async (text: string, params: unknown[], code: string, label: string) => {
+      let err: { code?: string } | null = null
+      try { await pool.query(text, params) } catch (e) { err = e as { code?: string } }
+      expect({ label, code: err?.code }).toEqual({ label, code })
+    }
+    try {
+      // The cumulative-service tenure anchor exists on users (never hire_date for cumulative_service mode).
+      const col = await pool.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'cumulative_service_start_date'`,
+      )
+      expect(col.rowCount).toBe(1)
+
+      // runs header CHECK invariants (enum + positive standard day).
+      const runInsert = `INSERT INTO attendance_leave_accrual_runs
+        (org_id, period_key, leave_type_code, policy_version, tenure_mode, timezone, standard_day_minutes, tiers, triggered_by)
+        VALUES ($1, $2, 'annual', 'v1', $3, 'Asia/Shanghai', $4, '[]'::jsonb, $5)`
+      await rejects(runInsert, [orgId, `annual:${runSuffix}:a`, 'bogus', 480, 'manual'], '23514', 'tenure_mode must be a valid enum')
+      await rejects(runInsert, [orgId, `annual:${runSuffix}:b`, 'cumulative_service', 0, 'manual'], '23514', 'standard_day_minutes must be > 0')
+      await rejects(runInsert, [orgId, `annual:${runSuffix}:c`, 'cumulative_service', 480, 'bogus'], '23514', 'triggered_by must be a valid enum')
+
+      // a valid run anchors the run_items checks.
+      const run = await pool.query<{ id: string }>(`${runInsert} RETURNING id`, [orgId, `annual:${runSuffix}:ok`, 'cumulative_service', 480, 'manual'])
+      const runId = run.rows[0]?.id
+      expect(runId).toBeTruthy()
+
+      // a granted run item is valid; its id is the provenance back-link a lot's source_id points to.
+      const granted = await pool.query<{ id: string }>(
+        `INSERT INTO attendance_leave_accrual_run_items
+           (run_id, org_id, user_id, leave_type_code, tenure_years, tier_days, proration_factor, entitlement_minutes, status)
+         VALUES ($1, $2, $3, 'annual', 12, 10, NULL, 4800, 'granted') RETURNING id`,
+        [runId, orgId, `${userPrefix}-g`],
+      )
+      expect(granted.rows[0]?.id).toBeTruthy()
+
+      // (1) one computed row per (run, user, leave type) -> a dup is a 23505 unique violation.
+      await rejects(
+        `INSERT INTO attendance_leave_accrual_run_items (run_id, org_id, user_id, leave_type_code, entitlement_minutes, status)
+         VALUES ($1, $2, $3, 'annual', 999, 'granted')`,
+        [runId, orgId, `${userPrefix}-g`], '23505', 'one computed row per run/user/leave_type',
+      )
+
+      // (2) a dangling run_id -> FK violation (23503).
+      await rejects(
+        `INSERT INTO attendance_leave_accrual_run_items (run_id, org_id, user_id, leave_type_code, entitlement_minutes, status)
+         VALUES ('00000000-0000-4000-8000-000000000000', $1, $2, 'annual', 100, 'granted')`,
+        [orgId, `${userPrefix}-fk`], '23503', 'run_id must reference a run',
+      )
+
+      // (3) CHECK invariants (23514): status enum, entitlement >= 0, and granted<->no-reason / skipped<->reason.
+      const itemInsert = `INSERT INTO attendance_leave_accrual_run_items
+        (run_id, org_id, user_id, leave_type_code, entitlement_minutes, status, skip_reason)
+        VALUES ($1, $2, $3, 'annual', $4, $5, $6)`
+      await rejects(itemInsert, [runId, orgId, `${userPrefix}-s1`, 100, 'bogus', null], '23514', 'status must be a valid enum')
+      await rejects(itemInsert, [runId, orgId, `${userPrefix}-s2`, -1, 'granted', null], '23514', 'entitlement_minutes must be >= 0')
+      await rejects(itemInsert, [runId, orgId, `${userPrefix}-s3`, 100, 'granted', 'SOME_REASON'], '23514', 'granted row must not carry a skip_reason')
+      await rejects(itemInsert, [runId, orgId, `${userPrefix}-s4`, 0, 'skipped', null], '23514', 'skipped row must carry a skip_reason')
+
+      // a skipped row WITH a reason is valid — the provenance always records why it skipped.
+      const skipped = await pool.query(itemInsert, [runId, orgId, `${userPrefix}-ok-skip`, 0, 'skipped', 'NOT_ELIGIBLE_UNDER_ONE_YEAR'])
+      expect(skipped.rowCount).toBe(1)
+    } finally {
+      await pool.query(`DELETE FROM attendance_leave_accrual_runs WHERE period_key LIKE $1`, [`annual:${runSuffix}%`]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('A2 auto-shift auto-write ledger — active-run claim and item invariants are DB-enforced (latent schema)', async () => {
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
     if (!dbUrl) return
