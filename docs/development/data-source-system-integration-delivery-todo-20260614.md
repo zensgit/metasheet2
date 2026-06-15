@@ -224,7 +224,8 @@ TODO:
 
 状态: C5-0 设计切片已写入 `docs/development/data-source-system-integration-c5-k3-generic-mssql-seam-design-20260615.md`；
 C5-1 latent helper contract 已落地为 `@metasheet/mssql-readonly-utils`；C5-2 已把 generic `MSSQLAdapter`
-的 endpoint/TLS/identifier 稳定面接到 helper。K3 executor 生产调用点仍未迁移；C5-3/C5-4 保持后续 gated opt-in。
+的 endpoint/TLS/identifier 稳定面接到 helper；C5-3 已把 K3 default SQL Server executor 的 endpoint/timeout/limit/simple-select
+接到 helper，同时保留 K3 strict identifier/read/write guard。C5-4 保持后续 gated opt-in。
 
 边界:
 
@@ -260,7 +261,11 @@ TODO:
     INFORMATION_SCHEMA schema introspection 仍留在 `MSSQLAdapter`，等 C5-4 smoke 对齐。
   - core-backend 将 helper 从 devDependency 提升为 runtime dependency；generic adapter 生产代码现在按 package name
     import helper。
-- [ ] C5-3: K3 default SQL Server executor 迁移到 helper 的 test/select 路径，保持 K3 read/write guard 不漂移。
+- [x] C5-3: K3 default SQL Server executor 迁移到 helper 的 test/select 路径，保持 K3 read/write guard 不漂移。
+  - 已迁移: endpoint parsing、timeout / limit policy、structured simple SELECT builder、identifier quoting primitive。
+  - K3 guard 保留: executor 在调用 helper 前仍先执行 K3 strict identifier policy（最多 schema.table、每段字母/下划线开头）；
+    不继承 generic MSSQL helper 的 numeric-leading / 多段 identifier 放宽。
+  - built-in `insertMany` 仍抛 `SQLSERVER_WRITE_EXECUTOR_DISABLED`；K3 Submit/Audit/BOM/direct table write scope 不变。
 - [ ] C5-4: TLS / schema introspection / read-only smoke 与 generic MSSQL 对齐，并跑实体机 K3/MSSQL smoke。
 - [ ] 实体机 K3/MSSQL smoke。
 
