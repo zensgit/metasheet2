@@ -1,13 +1,15 @@
 # Multitable Automation A6-4a BPMN Compile/Preview Implementation Plan - 2026-06-12
 
-Status: docs-only implementation plan; implemented by #2568
+Status: docs-only implementation plan; implemented by #2568; A6-4b route later
+landed in #2577
 
 Grounded on: `origin/main@508c8aa2d`
 
 Parent scope gate:
 `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`
 
-Runtime: no live runtime; A6-4a pure compiler landed #2568; A6-4b route not started
+Runtime: no live runtime; A6-4a pure compiler landed #2568; A6-4b read-only
+route landed #2577; A6-4c Workflow Designer UI not started
 
 ## Verdict
 
@@ -15,8 +17,9 @@ A6-4a, explicitly unlocked on 2026-06-13, implemented only the pure compiler
 core for BPMN / Workflow Designer compile-preview in #2568.
 
 It must not add a route, DB write, migration, live BPMN execution path, frontend
-entry point, or persistence side effect. The route belongs to A6-4b, after the
-compiler output is deterministic and unit-tested.
+entry point, or persistence side effect. That route was intentionally split into
+A6-4b and later landed in #2577 after the compiler output was deterministic and
+unit-tested. The Workflow Designer UI remains a separate A6-4c slice.
 
 ## Why A6-4a Is Split From The Route
 
@@ -193,9 +196,9 @@ The redaction test must include at least:
     `bpmnCompilePreview.ts` does not import `BPMNWorkflowEngine`, route modules,
     `db`, or approval / automation mutating services.
 
-## A6-4b Follow Slice
+## A6-4b Follow Slice - Landed In #2577
 
-After A6-4a landed in #2568, A6-4b may add the read-only route only under a
+After A6-4a landed in #2568, A6-4b added the read-only route in #2577 under a
 separate explicit opt-in:
 
 ```text
@@ -214,9 +217,10 @@ A6-4b must:
 
 ## Re-entry
 
-This document is not an authorization for A6-4b by itself. A6-4a has landed; the
-owner still must explicitly unlock any route/UI follow-up using the parent
-scope gate language:
+This document is not an authorization for additional BPMN work by itself.
+A6-4a landed in #2568 and A6-4b landed in #2577; the remaining follow-up is
+A6-4c Workflow Designer UI, which still requires explicit opt-in and must keep
+the parent scope gate language:
 
 > Start A6-4 BPMN compile-preview adapter only: side-effect-free preview +
 > deterministic gap report, no deploy/start/live BPMN runtime, no persistence,
