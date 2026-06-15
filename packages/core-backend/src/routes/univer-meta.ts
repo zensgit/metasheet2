@@ -1289,6 +1289,28 @@ function normalizeSearchTerm(value: unknown): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : ''
 }
 
+/**
+ * Parse an optional `fieldIds` column-selection query param for export.
+ * Accepts the comma-joined form (`?fieldIds=a,c`) and the repeated form
+ * (`?fieldIds=a&fieldIds=c`); trims and drops empty tokens. Returns `undefined`
+ * when nothing usable is supplied (= "no selection" → export all permitted columns,
+ * preserving the pre-selection default behavior). A non-empty result is a SELECTION
+ * hint only — the caller MUST intersect it with the already-permitted/masked field
+ * set; it can only narrow, never widen.
+ */
+function parseFieldIdSelection(value: unknown): Set<string> | undefined {
+  const raw: unknown[] = Array.isArray(value) ? value : value === undefined ? [] : [value]
+  const ids = new Set<string>()
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue
+    for (const token of entry.split(',')) {
+      const id = token.trim()
+      if (id) ids.add(id)
+    }
+  }
+  return ids.size > 0 ? ids : undefined
+}
+
 function isSearchableFieldType(type: UniverMetaField['type']): boolean {
   return type === 'string' || type === 'longText' || type === 'number' || type === 'date' || type === 'select' || type === 'multiSelect' || type === 'formula'
 }
@@ -7133,6 +7155,12 @@ export function univerMetaRouter(): Router {
   router.get('/sheets/:sheetId/export-xlsx', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
+    // Optional column selection: caller picks a SUBSET of columns to export. Accept both the
+    // comma-joined form (?fieldIds=a,c) and the repeated form (?fieldIds=a&fieldIds=c). Empty /
+    // absent → undefined (export all permitted columns = unchanged behavior). This is a SELECTION
+    // hint only; it is intersected with the permitted/masked field set below and can ONLY narrow,
+    // never widen — a denied/masked/tainted id requested here stays excluded.
+    const requestedFieldIds = parseFieldIdSelection(req.query.fieldIds)
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     }
@@ -7177,6 +7205,29 @@ export function univerMetaRouter(): Router {
       if (fieldIds.size !== fields.length) {
         fields = fields.filter((field) => fieldIds.has(field.id))
         fieldIds = new Set(fields.map((field) => field.id))
+      }
+
+      // Column selection (optional). CRITICAL SECURITY INVARIANT: the requested `fieldIds` are
+      // intersected with the FULLY-MASKED set computed above (`fields` already excludes
+      // field_permissions-denied, view-hidden, and §2a.3 formula-tainted columns). Selection can
+      // ONLY narrow this set, never widen it — a denied/masked/tainted id requested here is simply
+      // absent from `fields` and so drops out of the intersection (it cannot bypass the mask).
+      // Filter in place to preserve sheet field order (headers + cell projection). Unknown/foreign
+      // ids fall out of the intersection. If the selection resolves to ZERO exportable columns
+      // (all requested ids were foreign or masked), fail with 400 rather than emitting an empty
+      // workbook — an empty export is almost certainly a client bug, not an intended request.
+      if (requestedFieldIds) {
+        fields = fields.filter((field) => requestedFieldIds.has(field.id))
+        fieldIds = new Set(fields.map((field) => field.id))
+        if (fields.length === 0) {
+          return res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'fieldIds selection resolved to no exportable columns (unknown or not permitted)',
+            },
+          })
+        }
       }
 
       const rows: Array<Array<string | number | boolean | null | undefined>> = []
