@@ -486,7 +486,7 @@ export class RecordWriteService {
 
         if (field.type === 'longText') {
           try {
-            validateLongTextValue(change.value, change.fieldId)
+            validateLongTextValue(change.value, change.fieldId, field.property)
           } catch (error) {
             throw new RecordValidationError(error instanceof Error ? error.message : String(error))
           }
@@ -640,7 +640,7 @@ export class RecordWriteService {
 
           if (field.type === 'longText') {
             try {
-              patch[change.fieldId] = validateLongTextValue(change.value, change.fieldId)
+              patch[change.fieldId] = validateLongTextValue(change.value, change.fieldId, field.property)
             } catch (error) {
               throw new RecordValidationError(error instanceof Error ? error.message : String(error))
             }

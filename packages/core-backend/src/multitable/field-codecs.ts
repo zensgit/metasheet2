@@ -1,3 +1,4 @@
+import sanitizeHtml from 'sanitize-html'
 import { normalizeAutoNumberProperty } from './auto-number-property'
 import { fieldTypeRegistry } from './field-type-registry'
 
@@ -368,8 +369,19 @@ export function sanitizeFieldProperty(
     return { ...obj, timezone }
   }
 
-  if (type === 'url' || type === 'email' || type === 'phone' || type === 'barcode' || type === 'location' || type === 'longText') {
+  if (type === 'url' || type === 'email' || type === 'phone' || type === 'barcode' || type === 'location') {
     return obj
+  }
+
+  if (type === 'longText') {
+    // `rich` flag (§4) — strict boolean: only `true` opts into rich-text mode; junk → false.
+    // This is pure / read-path-safe (runs on every serializeFieldRow); the populated-field
+    // toggle rejection (§4 backward-compat) lives in the field-UPDATE route handler, which
+    // has the prior field state + a DB connection to count existing values.
+    const next = { ...obj }
+    if (next.rich === true) next.rich = true
+    else delete next.rich
+    return next
   }
 
   if (type === 'autoNumber') {
@@ -507,10 +519,122 @@ export function validatePhoneValue(value: unknown, fieldId: string): string | nu
   return trimmed
 }
 
-export function validateLongTextValue(value: unknown, fieldId: string): string | null {
+/**
+ * Rich-text `longText` — XSS-safe-by-construction sanitizer (§5 of the design-lock).
+ *
+ * This is the AUTHORITATIVE write-path defense. The allow-list below is the single
+ * source of truth for what a stored rich-`longText` value may contain. Anything not
+ * on the list is removed, so every persisted byte is allow-list-clean ("inert by
+ * construction"). The FE render lane re-sanitizes client-side (DOMPurify, mXSS
+ * defense) but TRUSTS this storage invariant — every user-content writer of
+ * `meta_records.data` MUST route rich-`longText` through `sanitizeRichLongText`.
+ *
+ * Allow-list (§5):
+ *  - tags: b strong i em u s · a · ul ol li · h1 h2 h3 · p br blockquote code pre
+ *  - attrs: href on <a> only; protocols http/https/mailto; forced rel/target on links
+ *  - dropped WITH CONTENTS: script style iframe object embed form svg (no inner-text leak)
+ *  - dropped: all on* handlers, style/class/id/src/data-* and any non-listed attr/tag
+ */
+const RICH_LONGTEXT_SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
+  allowedTags: [
+    'b', 'strong', 'i', 'em', 'u', 's',
+    'a',
+    'ul', 'ol', 'li',
+    'h1', 'h2', 'h3',
+    'p', 'br', 'blockquote', 'code', 'pre',
+  ],
+  // `rel`/`target` are FORCED by transformTags below (never user-controlled), but must
+  // be allow-listed or sanitize-html would strip them after the transform adds them.
+  allowedAttributes: {
+    a: ['href', 'rel', 'target'],
+  },
+  // Decode-then-check protocol allow-list; rejects `javascript:` and `&#106;avascript:`
+  // (entity-encoded) alike. `allowProtocolRelative:false` blocks `//evil.com`.
+  allowedSchemes: ['http', 'https', 'mailto'],
+  allowedSchemesByTag: { a: ['http', 'https', 'mailto'] },
+  allowProtocolRelative: false,
+  // Drop these WITH their contents — sanitize-html's default would unwrap and KEEP
+  // inner text, which leaks `<noscript>…`-style payloads. Listing them in
+  // nonTextTags removes the element and everything inside it.
+  nonTextTags: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'svg', 'noscript', 'textarea', 'title'],
+  // Force safe link rels + new-tab on every surviving <a>. Drops links whose href was
+  // stripped (protocol rejected) so we never emit a bare <a> with a dead/unsafe href.
+  transformTags: {
+    a: (tagName, attribs) => {
+      const href = typeof attribs.href === 'string' ? attribs.href : ''
+      if (!href) {
+        // href was rejected by the scheme allow-list → keep the text, drop the anchor.
+        return { tagName: 'span', attribs: {} }
+      }
+      return {
+        tagName: 'a',
+        attribs: {
+          href,
+          rel: 'noopener noreferrer',
+          target: '_blank',
+        },
+      }
+    },
+  },
+  // No CSS/style processing at all.
+  allowedStyles: {},
+  disallowedTagsMode: 'discard',
+}
+
+/**
+ * Sanitize a rich-`longText` HTML string against the §5 allow-list. Pure, no DOM.
+ * Returns allow-list-clean HTML. Used by `validateLongTextValue` (the 5 record-write
+ * validators) AND directly by other user-content writers (automation actions) so the
+ * stored invariant holds at every write boundary, not just one line.
+ */
+export function sanitizeRichLongText(value: string): string {
+  return sanitizeHtml(value, RICH_LONGTEXT_SANITIZE_OPTIONS)
+}
+
+/**
+ * True iff a field property opts the `longText` field into rich-text mode.
+ * `property.rich === true` strictly (junk → not rich).
+ */
+export function isRichLongTextProperty(property: unknown): boolean {
+  return isPlainObject(property) && property.rich === true
+}
+
+/**
+ * Unified plain-text projection (§7). Strip tags from a (possibly rich) `longText`
+ * value down to its text content, decoding entities. ONE helper, used by xlsx export
+ * (so a cell is the text, not `<p>…</p>`) and anywhere search/display needs text not
+ * markup. Safe to call on plain (non-rich) values too — they have no tags, so the
+ * decode-only pass returns them effectively unchanged.
+ */
+export function richLongTextToPlainText(value: string): string {
+  return sanitizeHtml(value, { allowedTags: [], allowedAttributes: {} })
+}
+
+/**
+ * Single write-path validator for `longText`, invoked from all 5 record-write call
+ * sites (record-service ×2, record-write-service ×2, univer-meta form-submit ×1).
+ *
+ * The `property` argument is REQUIRED (not optional) on purpose: a call site that
+ * forgets to thread the field property would otherwise silently no-op the sanitizer
+ * (an unsanitized stored write that isolated unit tests still pass). Requiring it
+ * turns "did every site wire it?" into a `tsc` compile error.
+ *
+ * When the field is rich (`property.rich === true`), the value is sanitized against
+ * the §5 allow-list before it is returned for storage — so the persisted value is
+ * inert by construction. Plain (non-rich) `longText` is returned verbatim (unchanged
+ * legacy behavior).
+ */
+export function validateLongTextValue(
+  value: unknown,
+  fieldId: string,
+  property: unknown,
+): string | null {
   if (value === null || value === undefined || value === '') return null
   if (typeof value !== 'string') {
     throw new Error(`Long text value must be a string for ${fieldId}`)
+  }
+  if (isRichLongTextProperty(property)) {
+    return sanitizeRichLongText(value)
   }
   return value
 }

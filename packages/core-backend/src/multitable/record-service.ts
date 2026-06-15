@@ -82,6 +82,8 @@ type FieldMutationGuard = {
   readOnly: boolean
   hidden: boolean
   link?: LinkFieldConfig | null
+  /** Normalized property — carries the longText `rich` flag for the write-path sanitizer. */
+  property?: Record<string, unknown>
 }
 
 export class VersionConflictError extends Error {
@@ -358,6 +360,7 @@ function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, Fiel
         type: field.type,
         readOnly: isFieldAlwaysReadOnly(field),
         hidden: isFieldPermissionHidden(field),
+        property,
       }
       if (field.type === 'select') {
         return [field.id, { ...base, options: field.options?.map((option) => option.value) ?? [] }] as const
@@ -548,7 +551,7 @@ export class RecordService {
 
         if (field.type === 'longText') {
           try {
-            patch[fieldId] = validateLongTextValue(value, fieldId)
+            patch[fieldId] = validateLongTextValue(value, fieldId, field.property)
           } catch (error) {
             throw new RecordValidationError(error instanceof Error ? error.message : String(error))
           }
@@ -872,7 +875,7 @@ export class RecordService {
       }
       if (field.type === 'longText') {
         try {
-          patch[fieldId] = validateLongTextValue(value, fieldId)
+          patch[fieldId] = validateLongTextValue(value, fieldId, field.property)
         } catch (error) {
           fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
         }

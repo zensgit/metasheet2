@@ -8342,7 +8342,7 @@ export function univerMetaRouter(): Router {
 
         if (field.type === 'longText') {
           try {
-            patch[fieldId] = validateLongTextValue(value, fieldId)
+            patch[fieldId] = validateLongTextValue(value, fieldId, field.property)
           } catch (error) {
             fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
           }
