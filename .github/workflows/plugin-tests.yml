@@ -136,6 +136,13 @@ jobs:
         run: |
           pnpm --filter @metasheet/core-backend test
 
+      - name: Run rich-text longText XSS write-sanitizer canaries
+        # Security-critical: the write-path sanitizer is the authoritative XSS defense
+        # for rich-text longText. Run the canary suite explicitly (and fail-fast) so it
+        # stays gated even if the default vitest discovery globs ever change.
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run tests/unit/richtext-longtext-sanitizer.test.ts --reporter=dot
+
       - name: Start Postgres
         uses: ankane/setup-postgres@v1
         with:
