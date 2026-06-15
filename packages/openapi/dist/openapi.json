@@ -3191,6 +3191,18 @@
               "foreignBaseId": {
                 "type": "string",
                 "description": "Cross-base opt-in claim for a `link` field (②b). When present, the link is permitted to target a foreign sheet in a DIFFERENT base IFF this value equals the foreign sheet's actual base_id (claim == truth); a mismatched or absent value keeps the cross-base link rejected. Immutable after create. Cross-base READ additionally requires foreign-base read permission; a reader lacking it sees foreign data masked (and a 403 on the explicit link-options pull). Omitted for same-base links."
+              },
+              "twoWay": {
+                "type": "boolean",
+                "description": "Bidirectional / mirror links MVP. When `true`, this `link` field participates in a paired (two-way) relationship: the foreign sheet has a paired field that surfaces the reverse of the SAME `meta_links` edge (a derived read-projection — no materialized mirror row, no write-back). Same-base only in the MVP. Omitted for ordinary one-directional links."
+              },
+              "mirrorFieldId": {
+                "type": "string",
+                "description": "Bidirectional / mirror links MVP. Id of the paired `link` field on the foreign sheet. The pairing is symmetric (each side's `mirrorFieldId` names the other) and validated at field create/patch; the two sides must be same-base."
+              },
+              "mirrorOf": {
+                "type": "string",
+                "description": "Bidirectional / mirror links MVP — present ONLY on the DERIVED (mirror) side. Its value is the paired FORWARD field's id. A field with `mirrorOf` set resolves the reverse projection of the forward edge (`WHERE field_id=mirrorOf AND foreign_record_id=<record>`) and is forced READ-ONLY (mirror-side editing is deferred), so the single canonical edge never gains a second row."
               }
             }
           },

@@ -175,6 +175,7 @@ jobs:
             tests/integration/multitable-formula-over-lookup-create-view.test.ts \
             tests/integration/multitable-formula-over-lookup-afull-view.test.ts \
             tests/integration/multitable-fol1-related-invalidation.test.ts \
+            tests/integration/multitable-bidirectional-mirror-links.test.ts \
             tests/integration/multitable-formula-dryrun.test.ts \
             tests/integration/multitable-records-read-field-mask.test.ts \
             tests/integration/multitable-readpath-search-filter-field-mask.test.ts \

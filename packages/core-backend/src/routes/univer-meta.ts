@@ -877,6 +877,18 @@ type LinkFieldConfig = {
   // the foreign sheet's actual base_id (claim == truth). Extracted explicitly (not via incidental
   // spread) so it round-trips the real wire — see the wire-vs-fixture rule.
   foreignBaseId?: string
+  // Bidirectional / mirror links MVP (design 2026-06-14). The reverse is a DERIVED read-projection of
+  // the SINGLE forward `meta_links` edge (no materialized mirror row, no migration, no write-back).
+  //   - `twoWay`: this link participates in a paired (two-way) relationship.
+  //   - `mirrorFieldId`: id of the paired field on the foreign sheet (symmetric: each side names the other).
+  //   - `mirrorOf`: read-only marker present ONLY on the DERIVED (mirror) side; its value = the paired
+  //     FORWARD field's id. When set, this field RESOLVES the reverse projection
+  //     (`WHERE field_id=mirrorOf AND foreign_record_id=<this record>`, served by idx_meta_links_foreign)
+  //     and is forced read-only (the codec promotes `readOnly:true`) so the single-edge invariant holds.
+  // All three are promoted explicitly in the codec (wire-vs-fixture), same as `foreignBaseId`.
+  twoWay?: boolean
+  mirrorFieldId?: string
+  mirrorOf?: string
 }
 
 type LookupFieldConfig = {
@@ -908,10 +920,22 @@ function parseLinkFieldConfig(property: unknown): LinkFieldConfig | null {
   const claimedBase = typeof obj.foreignBaseId === 'string' && obj.foreignBaseId.trim().length > 0
     ? obj.foreignBaseId.trim()
     : undefined
+  // Bidirectional / mirror links (design 2026-06-14). Parsed explicitly (trim; empty → omitted) so the
+  // pairing config round-trips the wire. `mirrorOf` (the derived-side marker) is the discriminator used
+  // by the reverse read; `twoWay`/`mirrorFieldId` drive the forward-side invalidation fan-out.
+  const mirrorFieldId = typeof obj.mirrorFieldId === 'string' && obj.mirrorFieldId.trim().length > 0
+    ? obj.mirrorFieldId.trim()
+    : undefined
+  const mirrorOf = typeof obj.mirrorOf === 'string' && obj.mirrorOf.trim().length > 0
+    ? obj.mirrorOf.trim()
+    : undefined
   return {
     foreignSheetId: foreign.trim(),
     limitSingleRecord: obj.limitSingleRecord === true,
     ...(claimedBase ? { foreignBaseId: claimedBase } : {}),
+    ...(obj.twoWay === true ? { twoWay: true } : {}),
+    ...(mirrorFieldId ? { mirrorFieldId } : {}),
+    ...(mirrorOf ? { mirrorOf } : {}),
   }
 }
 
@@ -1125,6 +1149,13 @@ async function validateLinkFieldConfig(
     return `链接字段 foreignBaseId 需与外表实际 base 一致：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} 实际 base=${actualForeignBaseId ?? 'null'}，声明=${claimed ?? 'null'}`
   }
   if (baseIdsAreCrossBase(sourceBaseId, actualForeignBaseId)) {
+    // Bidirectional / mirror links MVP (design 2026-06-14 §7.2) — cross-base bidirectional is DEFERRED.
+    // A two-way link must be same-base, even if it carries a valid cross-base `foreignBaseId` opt-in
+    // (this fires BEFORE the ②b opt-in short-circuit so the opt-in cannot rescue a cross-base pairing).
+    // Uses only this field's own config, so create-order / paired-field existence is irrelevant.
+    if (linkCfg.twoWay === true) {
+      return `二维（双向）链接 MVP 不支持跨 base 配对：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} base=${actualForeignBaseId ?? 'null'}`
+    }
     // ②b opt-in short-circuit — a cross-base link is allowed IFF it carries an EXPLICIT foreignBaseId
     // EQUAL to the foreign sheet's real base (claim == truth; you can't declare a wrong base). A
     // degenerate null/legacy-base foreign sheet has no concrete base to claim, so it can never opt in
@@ -1569,12 +1600,25 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
     const foreignBaseId = typeof obj.foreignBaseId === 'string' && obj.foreignBaseId.trim().length > 0
       ? obj.foreignBaseId.trim()
       : ''
+    // Bidirectional / mirror links (design 2026-06-14) — promote the pairing keys explicitly (wire-vs-fixture).
+    const mirrorFieldId = typeof obj.mirrorFieldId === 'string' && obj.mirrorFieldId.trim().length > 0
+      ? obj.mirrorFieldId.trim()
+      : ''
+    const mirrorOf = typeof obj.mirrorOf === 'string' && obj.mirrorOf.trim().length > 0
+      ? obj.mirrorOf.trim()
+      : ''
     return {
       ...cleanObj,
       ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId } : {}),
       ...(foreignSheetId && foreignBaseId ? { foreignBaseId } : {}),
       limitSingleRecord: obj.limitSingleRecord === true,
       ...(typeof obj.refKind === 'string' && obj.refKind.trim().length > 0 ? { refKind: obj.refKind.trim() } : {}),
+      ...(obj.twoWay === true ? { twoWay: true } : {}),
+      ...(mirrorFieldId ? { mirrorFieldId } : {}),
+      // The derived (mirror) side is read-only: `mirrorOf` set ⇒ force `readOnly:true` so both write
+      // services reject a PATCH on it (isFieldAlwaysReadOnly honors property.readOnly) — this is what
+      // keeps the single canonical edge from gaining a second, materialized row.
+      ...(mirrorOf ? { mirrorOf, readOnly: true } : {}),
     }
   }
 
@@ -1837,26 +1881,105 @@ async function loadLinkValuesByRecord(
   const linkValuesByRecord = new Map<string, Map<string, string[]>>()
   if (relationalLinkFields.length === 0 || recordIds.length === 0) return linkValuesByRecord
 
-  const fieldIds = relationalLinkFields.map((l) => l.fieldId)
-  const linkRes = await query(
-    `SELECT field_id, record_id, foreign_record_id
-     FROM meta_links
-     WHERE field_id = ANY($1::text[]) AND record_id = ANY($2::text[])`,
-    [fieldIds, recordIds],
-  )
-
-  for (const raw of linkRes.rows as any[]) {
-    const recordId = String(raw.record_id)
-    const fieldId = String(raw.field_id)
-    const foreignId = String(raw.foreign_record_id)
+  const pushValue = (recordId: string, fieldId: string, value: string): void => {
     const recordMap = linkValuesByRecord.get(recordId) ?? new Map<string, string[]>()
     const list = recordMap.get(fieldId) ?? []
-    list.push(foreignId)
+    list.push(value)
     recordMap.set(fieldId, list)
     linkValuesByRecord.set(recordId, recordMap)
   }
 
+  // Bidirectional / mirror links (design 2026-06-14) — partition the link fields by side. A DERIVED
+  // (mirror) field carries `cfg.mirrorOf` = the paired FORWARD field's id; its value set is the REVERSE
+  // projection of the SAME single edge (no stored mirror row). Forward fields read as before. Centralizing
+  // the split here makes every read consumer (/view, single-record read :9007, write-echo) resolve the
+  // reverse identically — wiring it per-call-site would risk a canary hitting an unconverted path.
+  const forwardFields = relationalLinkFields.filter((l) => !l.cfg.mirrorOf)
+  const derivedFields = relationalLinkFields.filter((l) => l.cfg.mirrorOf)
+
+  // Forward — the canonical read: WHERE field_id IN (forward ids) AND record_id IN (records) → foreign ids.
+  if (forwardFields.length > 0) {
+    const fieldIds = forwardFields.map((l) => l.fieldId)
+    const linkRes = await query(
+      `SELECT field_id, record_id, foreign_record_id
+       FROM meta_links
+       WHERE field_id = ANY($1::text[]) AND record_id = ANY($2::text[])`,
+      [fieldIds, recordIds],
+    )
+    for (const raw of linkRes.rows as any[]) {
+      pushValue(String(raw.record_id), String(raw.field_id), String(raw.foreign_record_id))
+    }
+  }
+
+  // Reverse — for derived (mirror) fields: WHERE field_id IN (paired forward ids = mirrorOf) AND
+  // foreign_record_id IN (records) → the SOURCE record_id is the linked value, surfaced under the MIRROR
+  // field's id. Served by idx_meta_links_foreign (no migration). Multiple mirror fields may share one
+  // forward field, so map mirrorOf → mirror field ids and fan each matching row out to all of them.
+  if (derivedFields.length > 0) {
+    const mirrorFieldsByForwardId = new Map<string, string[]>()
+    for (const { fieldId, cfg } of derivedFields) {
+      const forwardId = cfg.mirrorOf as string
+      const list = mirrorFieldsByForwardId.get(forwardId) ?? []
+      list.push(fieldId)
+      mirrorFieldsByForwardId.set(forwardId, list)
+    }
+    const forwardIds = Array.from(mirrorFieldsByForwardId.keys())
+    const reverseRes = await query(
+      `SELECT field_id, record_id, foreign_record_id
+       FROM meta_links
+       WHERE field_id = ANY($1::text[]) AND foreign_record_id = ANY($2::text[])`,
+      [forwardIds, recordIds],
+    )
+    for (const raw of reverseRes.rows as any[]) {
+      const forwardId = String(raw.field_id)
+      const thisRecordId = String(raw.foreign_record_id) // the mirror record being read
+      const sourceRecordId = String(raw.record_id) // the reverse-linked source record
+      for (const mirrorFieldId of mirrorFieldsByForwardId.get(forwardId) ?? []) {
+        pushValue(thisRecordId, mirrorFieldId, sourceRecordId)
+      }
+    }
+  }
+
   return linkValuesByRecord
+}
+
+/**
+ * Bidirectional / mirror links (design 2026-06-14) — RAW-DATA foreign-readability mask (B3 review nit).
+ *
+ * A DERIVED (mirror) field (`cfg.mirrorOf` set) surfaces the REVERSE edges = the *source* (foreign-sheet)
+ * records that link INTO this record. Those source ids are inbound edges this record never authored, so a
+ * record-reader who CANNOT read the mirror's foreign sheet (`cfg.foreignSheetId`) must not learn their
+ * opaque ids + count via the raw `record.data[mirrorFieldId]` array. `buildLinkSummaries` already gates the
+ * summary on `cfg.foreignSheetId` readability; the raw-data array was a SECOND, ungated projection (it leaked
+ * `[A1,A2]` to a foreign-denied actor on /view, single-record GET, and the write-echo). Reuse the SAME
+ * `resolveReadableSheetIds` gate keyed on `cfg.foreignSheetId` and blank the value to `[]` when denied.
+ *
+ * FORWARD link fields are deliberately left UNTOUCHED: their raw-id posture is pre-existing and shared
+ * repo-wide (an outbound edge this record authored), and the task scopes this fix to mirror fields only.
+ * Same-base only by construction (cross-base twoWay/mirror is rejected at field-create), so the cross-base
+ * coarse gate `buildLinkSummaries` adds on top of `resolveReadableSheetIds` is a no-op here — sheet-level
+ * read IS the exact gate. Idempotent / order-independent: mutates `row.data` in place for denied mirrors only.
+ */
+async function maskDerivedMirrorFieldIds(
+  req: Request,
+  query: QueryFn,
+  rows: UniverMetaRecord[],
+  relationalLinkFields: RelationalLinkField[],
+): Promise<void> {
+  const mirrorFields = relationalLinkFields.filter((l) => l.cfg.mirrorOf)
+  if (mirrorFields.length === 0 || rows.length === 0) return
+  const readableSheetIds = await resolveReadableSheetIds(
+    req,
+    query,
+    mirrorFields.map((l) => l.cfg.foreignSheetId),
+  )
+  for (const row of rows) {
+    for (const { fieldId, cfg } of mirrorFields) {
+      if (!readableSheetIds.has(cfg.foreignSheetId)) {
+        row.data[fieldId] = []
+      }
+    }
+  }
 }
 
 /**
@@ -7878,6 +8001,10 @@ export function univerMetaRouter(): Router {
             if (list && list.length > 0) row.data[fieldId] = list
           }
         }
+
+        // B3 review nit: blank a DERIVED (mirror) field's raw reverse ids for an actor who can't read the
+        // mirror's foreign sheet — parity with the buildLinkSummaries gate below. Forward links untouched.
+        await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), rows, relationalLinkFields)
       }
 
       await applyLookupRollup(
@@ -8564,6 +8691,8 @@ export function univerMetaRouter(): Router {
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
+      // B3 review nit: blank a mirror field's raw reverse ids for a foreign-sheet-denied actor (write-echo).
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
       record.data = filterRecordDataByFieldIds(record.data, readableEchoFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
@@ -8782,6 +8911,8 @@ export function univerMetaRouter(): Router {
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
+      // B3 review nit: blank a mirror field's raw reverse ids for a foreign-sheet-denied actor (write-echo).
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
       record.data = filterRecordDataByFieldIds(record.data, readableEchoFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
@@ -9052,6 +9183,9 @@ export function univerMetaRouter(): Router {
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
+      // B3 review nit: blank a mirror field's raw reverse ids for an actor who can't read the mirror's
+      // foreign sheet (parity with the buildLinkSummaries gate below). Forward links untouched.
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
       await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, [record], relationalLinkFields, linkValuesByRecord)
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
       // #2015 read-path field mask: D3c security composite (layer-2 property.hidden ∧ layer-3
