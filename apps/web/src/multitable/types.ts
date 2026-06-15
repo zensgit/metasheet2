@@ -132,6 +132,10 @@ export interface ConditionalFormattingDataBarConfig {
   negativeColor?: string
   showValue?: boolean
 }
+export interface ConditionalFormattingColorScaleStop { at: 'min' | 'mid' | 'max'; color: string }
+export interface ConditionalFormattingColorScaleConfig { stops: ConditionalFormattingColorScaleStop[] }
+export type ConditionalFormattingIconSetName = 'arrows3' | 'traffic3' | 'signs3'
+export interface ConditionalFormattingIconSetConfig { set: ConditionalFormattingIconSetName; thresholds: [number, number] }
 export interface ConditionalFormattingScaleRule {
   id: string
   order: number
@@ -140,6 +144,8 @@ export interface ConditionalFormattingScaleRule {
   enabled: boolean
   range: ConditionalFormattingScaleRange
   dataBar?: ConditionalFormattingDataBarConfig
+  colorScale?: ConditionalFormattingColorScaleConfig
+  iconSet?: ConditionalFormattingIconSetConfig
 }
 export const CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT = 20
 

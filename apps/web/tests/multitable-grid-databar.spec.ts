@@ -86,4 +86,37 @@ describe('MetaGridTable — data-bar conditional formatting (A5-1c render)', () 
     expect(cells[2].style.backgroundColor).toBe('') // operator bg dropped under the bar
     expect(cells[2].style.color).toBe('rgb(17, 17, 17)') // textColor preserved
   })
+
+  // Trap E regression: a colorScale / iconSet presentation has no barPct, so the
+  // grid's data-bar render must NOT build a `linear-gradient(… undefined% …)`.
+  // (A5-2/A5-3 have their own browser-gated render; the grid only draws bars.)
+  it('does NOT render a data-bar gradient for a colorScale presentation', () => {
+    const colorScale = buildFieldScaleMap([
+      sanitizeScaleRule({
+        id: 'cs1', fieldId: 'amount', kind: 'colorScale', order: 0, range: { mode: 'auto' },
+        colorScale: { stops: [{ at: 'min', color: '#000000' }, { at: 'max', color: '#ffffff' }] },
+      })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: colorScale })
+    const cells = dataCells(root)
+    for (const idx of [0, 2, 4]) {
+      expect(cells[idx].style.backgroundImage).toBe('')
+      expect(cells[idx].style.backgroundImage).not.toContain('undefined')
+    }
+  })
+
+  it('does NOT render a data-bar gradient for an iconSet presentation', () => {
+    const iconSet = buildFieldScaleMap([
+      sanitizeScaleRule({
+        id: 'is1', fieldId: 'amount', kind: 'iconSet', order: 0, range: { mode: 'auto' },
+        iconSet: { set: 'arrows3', thresholds: [10, 20] },
+      })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: iconSet })
+    const cells = dataCells(root)
+    for (const idx of [0, 2, 4]) {
+      expect(cells[idx].style.backgroundImage).toBe('')
+      expect(cells[idx].style.backgroundImage).not.toContain('undefined')
+    }
+  })
 })

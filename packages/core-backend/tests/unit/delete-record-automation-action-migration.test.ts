@@ -6,10 +6,13 @@ import {
 } from '../../src/db/migrations/zzzz20260614120000_add_delete_record_automation_action'
 
 describe('delete_record automation action migration (Phase C2)', () => {
-  it('keeps the latest database action constraint in sync with app-level action types', () => {
-    // This migration widens chk_automation_action_type to the CURRENT ALL_ACTION_TYPES — so a future
-    // action type added to the app without a DB migration trips this drift guard RED.
+  it('keeps this constraint in sync with app-level action types except those added by later migrations', () => {
+    // No longer the LATEST migration (record_click widened the constraint afterwards — see
+    // record-click-automation-action-migration.test.ts for the live "latest in sync" guard). Every
+    // app-level action type except the ones introduced by a strictly-later migration must be here.
+    const ADDED_BY_LATER_MIGRATIONS = new Set<string>(['record_click'])
     for (const actionType of ALL_ACTION_TYPES) {
+      if (ADDED_BY_LATER_MIGRATIONS.has(actionType)) continue
       expect(AUTOMATION_ACTION_TYPES_WITH_DELETE_RECORD).toContain(actionType)
     }
   })

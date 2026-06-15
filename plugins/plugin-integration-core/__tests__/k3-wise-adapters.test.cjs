@@ -281,6 +281,8 @@ function testSqlServerConnectionConfigNormalization() {
   }, credentials))
   assert.equal(commaPort.server, '10.0.0.8')
   assert.equal(commaPort.port, 1433)
+  assert.equal(commaPort.options.encrypt, false, 'K3 SQL Server default encrypt posture stays unchanged')
+  assert.equal(commaPort.options.cryptoCredentialsDetails, undefined, 'K3 SQL Server has no legacy TLS options by default')
 
   const colonPort = sqlExecutorInternals.resolveConnectionConfig(createSqlSystem({
     server: 'sql.local:14330',
@@ -297,6 +299,13 @@ function testSqlServerConnectionConfigNormalization() {
   assert.equal(matchingExplicitPort.server, 'sql.local')
   assert.equal(matchingExplicitPort.port, 1433)
 
+  const namedInstancePort = sqlExecutorInternals.resolveConnectionConfig(createSqlSystem({
+    server: 'sql.local\\WISE,14330',
+    database: 'AIS_TEST',
+  }, credentials))
+  assert.equal(namedInstancePort.server, 'sql.local\\WISE')
+  assert.equal(namedInstancePort.port, 14330)
+
   let conflictingPort = null
   try {
     sqlExecutorInternals.resolveConnectionConfig(createSqlSystem({
@@ -309,6 +318,130 @@ function testSqlServerConnectionConfigNormalization() {
   }
   assert.equal(conflictingPort && conflictingPort.code, 'SQLSERVER_PORT_INVALID')
   assert.match(conflictingPort.message, /must match/)
+
+  const legacyTls = sqlExecutorInternals.resolveConnectionConfig(createSqlSystem({
+    server: 'sql.local',
+    database: 'AIS_TEST',
+    legacyTls: true,
+  }, credentials))
+  assert.equal(legacyTls.options.encrypt, true, 'legacy TLS keeps the K3 wire encrypted when explicitly enabled')
+  assert.deepEqual(legacyTls.options.cryptoCredentialsDetails, {
+    minVersion: 'TLSv1',
+    ciphers: 'DEFAULT@SECLEVEL=0',
+  })
+
+  const explicitLegacyTls = sqlExecutorInternals.resolveConnectionConfig(createSqlSystem({
+    server: 'sql.local',
+    database: 'AIS_TEST',
+    legacyTls: true,
+    tlsMinVersion: 'TLSv1.1',
+    tlsCiphers: 'HIGH',
+  }, credentials))
+  assert.equal(explicitLegacyTls.options.encrypt, true)
+  assert.deepEqual(explicitLegacyTls.options.cryptoCredentialsDetails, {
+    minVersion: 'TLSv1.1',
+    ciphers: 'HIGH',
+  })
+
+  assert.throws(
+    () => sqlExecutorInternals.resolveConnectionConfig(createSqlSystem({
+      server: 'sql.local',
+      database: 'AIS_TEST',
+      legacyTls: true,
+      encrypt: false,
+    }, credentials)),
+    (error) => error && error.code === 'SQLSERVER_TLS_CONFLICT',
+    'K3 SQL Server rejects plaintext combined with the legacy TLS downgrade lever',
+  )
+  assert.throws(
+    () => sqlExecutorInternals.resolveConnectionConfig(createSqlSystem({
+      server: 'sql.local',
+      database: 'AIS_TEST',
+      tlsMinVersion: 'TLSv1',
+      encrypt: false,
+    }, credentials)),
+    (error) => error && error.code === 'SQLSERVER_TLS_CONFLICT',
+    'K3 SQL Server rejects plaintext combined with an explicit TLS min version',
+  )
+  assert.throws(
+    () => sqlExecutorInternals.resolveConnectionConfig(createSqlSystem({
+      server: 'sql.local',
+      database: 'AIS_TEST',
+      tlsCiphers: 'DEFAULT@SECLEVEL=0',
+      encrypt: false,
+    }, credentials)),
+    (error) => error && error.code === 'SQLSERVER_TLS_CONFLICT',
+    'K3 SQL Server rejects plaintext combined with explicit TLS ciphers',
+  )
+}
+
+function testK3SqlServerExecutorKeepsK3IdentifierPolicy() {
+  assert.equal(sqlExecutorInternals.quoteIdentifier('dbo.t_ICItem'), '[dbo].[t_ICItem]')
+
+  assert.throws(
+    () => sqlExecutorInternals.quoteIdentifier('tenant.dbo.t_ICItem'),
+    (error) => error && error.code === 'SQLSERVER_IDENTIFIER_INVALID',
+    'K3 executor must not inherit generic helper multi-part identifier policy',
+  )
+  assert.throws(
+    () => sqlExecutorInternals.quoteIdentifier('2024_orders'),
+    (error) => error && error.code === 'SQLSERVER_IDENTIFIER_INVALID',
+    'K3 executor must not inherit generic helper numeric-leading identifier policy',
+  )
+
+  const request = {
+    input() {
+      return request
+    },
+  }
+  assert.throws(
+    () => sqlExecutorInternals.buildSelectQuery({
+      request,
+      table: 'tenant.dbo.t_ICItem',
+      columns: ['FItemID'],
+    }),
+    (error) => error && error.code === 'SQLSERVER_IDENTIFIER_INVALID',
+    'K3 select builder keeps the K3 table allowlist shape before calling the helper',
+  )
+  assert.throws(
+    () => sqlExecutorInternals.buildSelectQuery({
+      request,
+      table: 'dbo.t_ICItem',
+      columns: ['2024_orders'],
+    }),
+    (error) => error && error.code === 'SQLSERVER_IDENTIFIER_INVALID',
+    'K3 select builder keeps the K3 column shape before calling the helper',
+  )
+  assert.throws(
+    () => sqlExecutorInternals.buildSelectQuery({
+      request,
+      table: 'dbo.t_ICItem',
+      columns: ['FItemID'],
+      orderBy: '2024_orders',
+    }),
+    (error) => error && error.code === 'SQLSERVER_IDENTIFIER_INVALID',
+    'K3 select builder keeps the K3 orderBy shape before calling the helper',
+  )
+  assert.throws(
+    () => sqlExecutorInternals.buildSelectQuery({
+      request,
+      table: 'dbo.t_ICItem',
+      columns: ['FItemID'],
+      filters: { 'tenant.dbo.FNumber': 'MAT-001' },
+    }),
+    (error) => error && error.code === 'SQLSERVER_IDENTIFIER_INVALID',
+    'K3 select builder keeps the K3 filter field shape before calling the helper',
+  )
+  assert.throws(
+    () => sqlExecutorInternals.buildSelectQuery({
+      request,
+      table: 'dbo.t_ICItem',
+      columns: ['FItemID'],
+      watermark: { '2024_updated': '2026-01-01T00:00:00.000Z' },
+    }),
+    (error) => error && error.code === 'SQLSERVER_IDENTIFIER_INVALID',
+    'K3 select builder keeps the K3 watermark field shape before calling the helper',
+  )
 }
 
 async function testK3WebApiAdapter() {
@@ -1406,6 +1539,7 @@ async function main() {
   await testK3WebApiNestedDataSaveParse()
   await testK3WebApiCustomerProfile()
   testSqlServerConnectionConfigNormalization()
+  testK3SqlServerExecutorKeepsK3IdentifierPolicy()
   await testK3SqlServerChannel()
   await testK3WebApiAutoFlagCoercion()
   console.log('✓ k3-wise-adapters: WebAPI, SQL Server channel, and auto-flag coercion tests passed')

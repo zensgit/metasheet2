@@ -52,6 +52,8 @@ describe('A2 identifier validation + per-segment quoting', () => {
   it('MSSQL brackets PER SEGMENT: dbo.orders -> [dbo].[orders]; illegal throws', () => {
     expect(mssqlQuote('orders')).toBe('[orders]')
     expect(mssqlQuote('dbo.orders')).toBe('[dbo].[orders]')
+    expect(mssqlQuote('2024_orders')).toBe('[2024_orders]')
+    expect(mssqlQuote('tenant.dbo.orders')).toBe('[tenant].[dbo].[orders]')
     expect(() => mssqlQuote('bad-name')).toThrow(/Invalid identifier/)
   })
 

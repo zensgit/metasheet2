@@ -17,6 +17,10 @@ export type AutomationActionType =
   | 'condition_branch'
   | 'start_approval'
   | 'parallel_branch'
+  // B1: executor-owned INERT action for the button field. Audit-only click, zero
+  // business side effect (no record write / no outbound / no job). Dispatched
+  // through the SAME executor path as every other action (no parallel path).
+  | 'record_click'
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'update_record',
@@ -32,6 +36,7 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'condition_branch',
   'start_approval',
   'parallel_branch',
+  'record_click',
 ]
 
 /** Config shape for update_record */

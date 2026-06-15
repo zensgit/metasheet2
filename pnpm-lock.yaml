@@ -148,6 +148,9 @@ importers:
 
   packages/core-backend:
     dependencies:
+      '@metasheet/mssql-readonly-utils':
+        specifier: workspace:*
+        version: link:../mssql-readonly-utils
       '@types/bcryptjs':
         specifier: ^3.0.0
         version: 3.0.0
@@ -309,6 +312,12 @@ importers:
         specifier: ^1.1.0
         version: 1.6.1(@types/node@20.19.25)(jsdom@27.2.0)(less@4.4.2)
 
+  packages/mssql-readonly-utils:
+    devDependencies:
+      typescript:
+        specifier: ^5.3.3
+        version: 5.8.3
+
   packages/openapi/dist-sdk:
     devDependencies:
       openapi-typescript:
@@ -336,6 +345,9 @@ importers:
 
   plugins/plugin-integration-core:
     dependencies:
+      '@metasheet/mssql-readonly-utils':
+        specifier: workspace:*
+        version: link:../../packages/mssql-readonly-utils
       mssql:
         specifier: ^10.0.4
         version: 10.0.4(@azure/core-client@1.10.1)
