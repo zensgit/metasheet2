@@ -1349,6 +1349,9 @@ export class AutomationExecutor {
         case 'create_record':
           result = await this.executeCreateRecord(action.config, context)
           break
+        case 'delete_record':
+          result = await this.executeDeleteRecord(action.config, context)
+          break
         case 'send_webhook':
           result = await this.executeSendWebhook(action.config, context)
           break
@@ -1798,6 +1801,104 @@ export class AutomationExecutor {
       return { actionType: 'update_record', status: 'success', output: { updatedFields: Object.keys(fields) } }
     } catch (err) {
       return { actionType: 'update_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  private async executeDeleteRecord(
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult> {
+    // Phase C2a cross-base addressing — MIRRORS executeUpdateRecord. The resolved target sheet is
+    // `config.targetSheetId ?? context.sheetId`. For a CROSS-BASE delete, `targetSheetId` +
+    // `targetRecordId` are REQUIRED (the trigger record is not in the target base); for a SAME-BASE
+    // delete they default to the trigger record (back-compat). A delete is a WRITE for abuse-accounting,
+    // so it routes through the SAME `evaluateCrossBaseWrite` gate (same base-writable check, claim==truth,
+    // shared per-target-base quota bucket).
+    const targetSheetId = (config.targetSheetId as string) || context.sheetId
+    const declaredTargetBaseId = typeof config.targetBaseId === 'string' ? config.targetBaseId : undefined
+
+    try {
+      const gate = await this.evaluateCrossBaseWrite(targetSheetId, declaredTargetBaseId, context)
+      let effectiveSheetId = context.sheetId
+      let effectiveRecordId = context.recordId
+      if (gate.crossBase) {
+        if (gate.ok === false) {
+          return { actionType: 'delete_record', status: 'failed', error: gate.error }
+        }
+        // Cross-base requires the full explicit target triple (mirrors update). The executor is the last
+        // line of defense even if rule-save validation were bypassed.
+        const targetRecordId = typeof config.targetRecordId === 'string' ? config.targetRecordId : ''
+        if (!config.targetSheetId || !targetRecordId) {
+          return {
+            actionType: 'delete_record',
+            status: 'failed',
+            error: 'Cross-base delete_record requires targetBaseId + targetSheetId + targetRecordId',
+          }
+        }
+        effectiveSheetId = targetSheetId
+        effectiveRecordId = targetRecordId
+      }
+
+      // Record-lock guard: you cannot delete a record locked by someone you can't unlock. The SELECT and
+      // the DELETE below BOTH read `effectiveSheetId`/`effectiveRecordId`, so a cross-base delete checks
+      // the TARGET record's lock (not the trigger record's) — lock priority over base-write.
+      const lockRes = await this.deps.queryFn(
+        'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [effectiveRecordId, effectiveSheetId],
+      )
+      const lockRow = lockRes.rows[0] as
+        | { locked?: unknown; locked_by?: unknown; created_by?: unknown }
+        | undefined
+      // ②b claim==truth for the record: a cross-base delete must address a record that ACTUALLY lives in
+      // `targetSheetId`. No row → the targetRecordId does not exist there → fail-closed (never a silent
+      // no-op success). Same-base keeps its leniency (a missing trigger record yields a 0-row DELETE
+      // reported as success) to avoid any behavior regression vs the other same-base sinks.
+      if (gate.crossBase && !lockRow) {
+        return {
+          actionType: 'delete_record',
+          status: 'failed',
+          error: `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+        }
+      }
+      if (lockRow) {
+        ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
+      }
+
+      // Clean up links FIRST (mirrors the same-base delete sinks `records.deleteRecord` /
+      // `RecordService.deleteRecord`): the FK cascade only covers the `record_id` side, so the
+      // `foreign_record_id` side must be deleted explicitly or it dangles. (This statement touches
+      // meta_links, NOT meta_records, so the cross-base write-guard regex does not match it.)
+      await this.deps.queryFn(
+        'DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1',
+        [effectiveRecordId],
+      )
+
+      // HARD delete — the system has NO soft-delete for records: `meta_records` has no `deleted_at`
+      // column and both same-base delete sinks (`records.ts`, `record-service.ts`) hard-`DELETE`. A
+      // soft-delete here would target a non-existent column AND would be a silent no-op (no read path
+      // filters `deleted_at`). So this mirrors the proven sinks. No `version = version + 1` (the row is
+      // gone); `sheet_id` scoping matches the update template.
+      // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
+      // delete is rejected before this DELETE unless claim==truth + trigger-actor base-write.
+      // lock-guarded: automation delete_record (C2a) — ensureRecordNotLocked enforced just above.
+      await this.deps.queryFn(
+        'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [effectiveRecordId, effectiveSheetId],
+      )
+
+      // Emit event for chaining (mirrors the updated/created emits + the same-base delete sink's
+      // `multitable.record.deleted` shape). C1 real-time invalidation fan-out to the target base's room
+      // is OUT of this lock — this only emits the domain event; no cross-room publish is wired here.
+      this.deps.eventBus.emit('multitable.record.deleted', {
+        sheetId: effectiveSheetId,
+        recordId: effectiveRecordId,
+        actorId: context.actorId,
+        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
+      })
+
+      return { actionType: 'delete_record', status: 'success', output: { recordId: effectiveRecordId, sheetId: effectiveSheetId } }
+    } catch (err) {
+      return { actionType: 'delete_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
     }
   }
 
@@ -2379,34 +2480,79 @@ export class AutomationExecutor {
   ): Promise<AutomationStepResult> {
     const locked = config.locked !== false // default to true (decision f: config.locked === false → unlock)
 
+    // Phase C2b cross-base addressing — MIRRORS executeUpdateRecord. Locking a record in ANOTHER base is a
+    // denial-of-edit on foreign data, gated by the SAME `evaluateCrossBaseWrite` primitive as a cross-base
+    // write (base:write, not base:admin — lock is an edit-class affordance). The gate's same-base fast-path
+    // (`targetSheetId === context.sheetId && no targetBaseId`) returns `{crossBase:false}` with NO base
+    // lookups, so a same-base lock/unlock is BYTE-IDENTICAL to the pre-C2 behavior (it still writes the
+    // trigger record). A cross-base lock REQUIRES the full target triple + claim==truth (the target record
+    // must actually live in the target sheet). Lock is lock-MGMT (it sets the lock columns), so unlike
+    // update/delete it does NOT call ensureRecordNotLocked.
+    const targetSheetId = (config.targetSheetId as string) || context.sheetId
+    const declaredTargetBaseId = typeof config.targetBaseId === 'string' ? config.targetBaseId : undefined
+
     try {
+      const gate = await this.evaluateCrossBaseWrite(targetSheetId, declaredTargetBaseId, context)
+      let effectiveSheetId = context.sheetId
+      let effectiveRecordId = context.recordId
+      if (gate.crossBase) {
+        if (gate.ok === false) {
+          return { actionType: 'lock_record', status: 'failed', error: gate.error }
+        }
+        const targetRecordId = typeof config.targetRecordId === 'string' ? config.targetRecordId : ''
+        if (!config.targetSheetId || !targetRecordId) {
+          return {
+            actionType: 'lock_record',
+            status: 'failed',
+            error: 'Cross-base lock_record requires targetBaseId + targetSheetId + targetRecordId',
+          }
+        }
+        effectiveSheetId = targetSheetId
+        effectiveRecordId = targetRecordId
+
+        // ②b claim==truth for the record: a cross-base lock must address a record that ACTUALLY lives in
+        // `targetSheetId`. No row → fail-closed (never lock a phantom / silently no-op). Same-base skips
+        // this SELECT entirely (fast-path), preserving byte-identical back-compat.
+        const existsRes = await this.deps.queryFn(
+          'SELECT 1 FROM meta_records WHERE id = $1 AND sheet_id = $2',
+          [effectiveRecordId, effectiveSheetId],
+        )
+        if (!existsRes.rows[0]) {
+          return {
+            actionType: 'lock_record',
+            status: 'failed',
+            error: `Cross-base lock_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+          }
+        }
+      }
+
       if (locked) {
-        // xbase-write-exempt: lock_record writes ONLY context.sheetId/context.recordId (the trigger
-        // record) — it never retargets to a config-declared base, so it is not a cross-base write surface.
-        // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
         const lockedBy = typeof context.actorId === 'string' && context.actorId.trim() ? context.actorId : 'system'
+        // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base uses the gate's
+        // fast-path (byte-identical to pre-C2); a cross-base lock is rejected unless claim==truth + base-write.
+        // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
         await this.deps.queryFn(
           `UPDATE meta_records
            SET locked = true, locked_by = $1, locked_at = NOW(), version = version + 1, updated_at = NOW()
            WHERE id = $2 AND sheet_id = $3`,
-          [lockedBy, context.recordId, context.sheetId],
+          [lockedBy, effectiveRecordId, effectiveSheetId],
         )
       } else {
-        // xbase-write-exempt: unlock writes ONLY context.sheetId/context.recordId (the trigger record),
-        // never a config-declared base — not a cross-base write surface.
+        // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base fast-path keeps
+        // this byte-identical to pre-C2; a cross-base unlock is rejected unless claim==truth + base-write.
         // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
         await this.deps.queryFn(
           `UPDATE meta_records
            SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
            WHERE id = $1 AND sheet_id = $2`,
-          [context.recordId, context.sheetId],
+          [effectiveRecordId, effectiveSheetId],
         )
       }
 
       return {
         actionType: 'lock_record',
         status: 'success',
-        output: { locked, recordId: context.recordId },
+        output: { locked, recordId: effectiveRecordId },
       }
     } catch (err) {
       // Failures surface honestly in the automation execution log instead of crashing the run.
