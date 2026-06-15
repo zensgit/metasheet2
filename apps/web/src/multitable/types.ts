@@ -117,6 +117,32 @@ export interface ConditionalFormattingRule {
 
 export const CONDITIONAL_FORMATTING_RULE_LIMIT = 20
 
+// --- Range-based SCALE conditional formatting (A5: data bar / color scale / icon set) ---
+// Distinct from the operator-match rules above: a scale rule applies to EVERY
+// cell of a numeric field, mapping each value against the field's min/max range.
+// A5-1 = data bar. Mirrors backend conditional-formatting-service.ts.
+export type ConditionalFormattingScaleKind = 'dataBar' | 'colorScale' | 'iconSet'
+export interface ConditionalFormattingScaleRange {
+  mode: 'auto' | 'fixed'
+  min?: number
+  max?: number
+}
+export interface ConditionalFormattingDataBarConfig {
+  color: string
+  negativeColor?: string
+  showValue?: boolean
+}
+export interface ConditionalFormattingScaleRule {
+  id: string
+  order: number
+  fieldId: string
+  kind: ConditionalFormattingScaleKind
+  enabled: boolean
+  range: ConditionalFormattingScaleRange
+  dataBar?: ConditionalFormattingDataBarConfig
+}
+export const CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT = 20
+
 // --- Conditional field-visibility (form-conditional-fields MVP) ---
 // A field's `property.visibilityRule` is a single condition on ANOTHER field's
 // value in the same record; the form view shows/hides the field accordingly.

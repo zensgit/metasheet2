@@ -5,12 +5,16 @@
 // when extending the rule schema.
 
 import type {
+  ConditionalFormattingDataBarConfig,
   ConditionalFormattingOperator,
   ConditionalFormattingRule,
+  ConditionalFormattingScaleRange,
+  ConditionalFormattingScaleRule,
   ConditionalFormattingStyle,
   MetaField,
   MetaRecord,
 } from '../types'
+import { CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT } from '../types'
 
 const HEX_COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
 
@@ -368,4 +372,144 @@ export function composeStyleObject(
   if (bg) css.backgroundColor = bg
   if (fg) css.color = fg
   return Object.keys(css).length > 0 ? css : undefined
+}
+
+// ===========================================================================
+// Range-based SCALE formatting (A5-1: data bar) — frontend mirror of
+// packages/core-backend/src/multitable/conditional-formatting-service.ts.
+// Keep the sanitize/range/build semantics in sync with the canonical backend.
+// ===========================================================================
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+export function sanitizeScaleRule(input: unknown): ConditionalFormattingScaleRule | null {
+  if (!isPlainObject(input)) return null
+  const id = typeof input.id === 'string' && input.id.trim() ? input.id.trim() : null
+  const fieldId = typeof input.fieldId === 'string' && input.fieldId.trim() ? input.fieldId.trim() : null
+  if (!id || !fieldId) return null
+  if (input.kind !== 'dataBar') return null // A5-1: dataBar only (colorScale/iconSet = A5-2/A5-3)
+
+  const orderRaw = typeof input.order === 'number' && Number.isFinite(input.order) ? input.order : 0
+  const enabled = input.enabled !== false
+
+  const rangeRaw = isPlainObject(input.range) ? input.range : {}
+  let range: ConditionalFormattingScaleRange
+  if (rangeRaw.mode === 'fixed') {
+    const min = toFiniteNumber(rangeRaw.min)
+    const max = toFiniteNumber(rangeRaw.max)
+    if (min === null || max === null || min === max) return null
+    range = { mode: 'fixed', min: Math.min(min, max), max: Math.max(min, max) }
+  } else {
+    range = { mode: 'auto' }
+  }
+
+  const barRaw = isPlainObject(input.dataBar) ? input.dataBar : {}
+  const color = sanitizeHex(barRaw.color)
+  if (!color) return null
+  const dataBar: ConditionalFormattingDataBarConfig = { color }
+  const negativeColor = sanitizeHex(barRaw.negativeColor)
+  if (negativeColor) dataBar.negativeColor = negativeColor
+  if (barRaw.showValue === true) dataBar.showValue = true
+
+  return { id, order: Math.floor(orderRaw), fieldId, kind: 'dataBar', enabled, range, dataBar }
+}
+
+export function sanitizeScaleRules(input: unknown): ConditionalFormattingScaleRule[] {
+  if (!Array.isArray(input)) return []
+  const out: ConditionalFormattingScaleRule[] = []
+  for (const item of input) {
+    const rule = sanitizeScaleRule(item)
+    if (rule) out.push(rule)
+    if (out.length >= CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT) break
+  }
+  return out
+    .map((rule, index) => ({ rule, index }))
+    .sort((a, b) => a.rule.order - b.rule.order || a.index - b.index)
+    .map((entry) => entry.rule)
+}
+
+export function extractScaleRulesFromConfig(config: unknown): ConditionalFormattingScaleRule[] {
+  if (!isPlainObject(config)) return []
+  return sanitizeScaleRules(config.conditionalFormattingScaleRules)
+}
+
+export interface FieldScalePresentation {
+  barPct: number
+  barColor: string
+  negative: boolean
+}
+export interface FieldScaleResult {
+  rule: ConditionalFormattingScaleRule
+  min: number
+  max: number
+  byRecordId: Record<string, FieldScalePresentation>
+}
+export interface FieldScaleMap {
+  byField: Record<string, FieldScaleResult>
+}
+
+const EMPTY_SCALE_MAP: FieldScaleMap = Object.freeze({
+  byField: Object.freeze({}) as Record<string, FieldScaleResult>,
+}) as FieldScaleMap
+
+/**
+ * Pre-compute data-bar presentation per (fieldId, recordId). Mirrors the
+ * backend `buildFieldScaleMap`: min/max over the passed records (auto) or the
+ * rule's fixed range; each finite value → 0..100 fill; degenerate range → full
+ * bar; negatives take negativeColor; non-numeric skipped; first rule per field
+ * wins. Caller passes the already-loaded/masked rows (client-side discipline).
+ */
+export function buildFieldScaleMap(
+  rules: ConditionalFormattingScaleRule[],
+  records: ReadonlyArray<MetaRecord | { id?: string; data?: Record<string, unknown> }>,
+): FieldScaleMap {
+  if (!rules.length || !records.length) return EMPTY_SCALE_MAP
+  const byField: Record<string, FieldScaleResult> = {}
+
+  for (const rule of rules) {
+    if (!rule.enabled || rule.kind !== 'dataBar' || !rule.dataBar) continue
+    if (byField[rule.fieldId]) continue
+
+    let min: number
+    let max: number
+    if (rule.range.mode === 'fixed' && typeof rule.range.min === 'number' && typeof rule.range.max === 'number') {
+      min = rule.range.min
+      max = rule.range.max
+    } else {
+      let lo = Infinity
+      let hi = -Infinity
+      for (const record of records) {
+        const v = toComparableNumber(record?.data?.[rule.fieldId])
+        if (v === null) continue
+        if (v < lo) lo = v
+        if (v > hi) hi = v
+      }
+      if (lo === Infinity) continue
+      min = lo
+      max = hi
+    }
+
+    const span = max - min
+    const byRecordId: Record<string, FieldScalePresentation> = {}
+    for (const record of records) {
+      if (!record?.id) continue
+      const v = toComparableNumber(record.data?.[rule.fieldId])
+      if (v === null) continue
+      const pct = span <= 0 ? 100 : Math.max(0, Math.min(100, ((v - min) / span) * 100))
+      const negative = v < 0
+      const barColor = negative && rule.dataBar.negativeColor ? rule.dataBar.negativeColor : rule.dataBar.color
+      byRecordId[record.id] = { barPct: pct, barColor, negative }
+    }
+    byField[rule.fieldId] = { rule, min, max, byRecordId }
+  }
+
+  if (Object.keys(byField).length === 0) return EMPTY_SCALE_MAP
+  return { byField }
 }
