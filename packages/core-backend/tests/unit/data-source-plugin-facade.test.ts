@@ -5,6 +5,7 @@ import {
   DATA_SOURCE_NOT_FOUND_CODE,
   DATA_SOURCE_NOT_READ_ONLY_CODE,
   DATA_SOURCE_PRINCIPAL_REQUIRED_CODE,
+  DATA_SOURCE_QUERY_INVALID_CODE,
   DataSourceUnavailableError,
   MISSING_PRINCIPAL_MESSAGE,
   writableSourceMessage,
@@ -141,6 +142,59 @@ describe('createDataSourcePluginFacade', () => {
       limit: 100,
       offset: 0,
       where,
+    })
+  })
+
+  it('select forwards orderBy with where for C3 keyset reads without opening a query/write surface', async () => {
+    const m = managerStub()
+    const facade = createDataSourcePluginFacade(() => m.manager)
+    const where = { status: 'active' }
+    const orderBy = [
+      { column: 'updated_at', direction: 'asc' as const },
+      { column: 'id', direction: 'asc' as const },
+    ]
+    await facade.select('pg', 'public.items', { limit: 100, offset: 0, where, orderBy }, 'owner-1')
+    expect(m.stub.assertAccess).toHaveBeenCalledWith('pg', 'owner-1')
+    expect(m.stub.select).toHaveBeenCalledWith('pg', 'public.items', {
+      limit: 100,
+      offset: 0,
+      where,
+      orderBy,
+    })
+  })
+
+  it('select rejects malformed orderBy before DataSourceManager.select (direction allowlist)', async () => {
+    const m = managerStub()
+    const facade = createDataSourcePluginFacade(() => m.manager)
+    await expect(
+      facade.select(
+        'pg',
+        'public.items',
+        { limit: 100, offset: 0, orderBy: [{ column: 'id', direction: 'asc;DROP' }] as never },
+        'owner-1'
+      )
+    ).rejects.toMatchObject({
+      status: 422,
+      code: DATA_SOURCE_QUERY_INVALID_CODE,
+      message: 'data source read orderBy[0].direction must be asc or desc',
+    })
+    expect(m.stub.assertAccess).toHaveBeenCalledWith('pg', 'owner-1')
+    expect(m.stub.select).not.toHaveBeenCalled()
+  })
+
+  it('select normalizes uppercase orderBy directions to lowercase before forwarding', async () => {
+    const m = managerStub()
+    const facade = createDataSourcePluginFacade(() => m.manager)
+    await facade.select(
+      'pg',
+      'public.items',
+      { limit: 50, orderBy: [{ column: 'updated_at', direction: 'DESC' }] as never },
+      'owner-1'
+    )
+    expect(m.stub.select).toHaveBeenCalledWith('pg', 'public.items', {
+      limit: 50,
+      offset: undefined,
+      orderBy: [{ column: 'updated_at', direction: 'desc' }],
     })
   })
 

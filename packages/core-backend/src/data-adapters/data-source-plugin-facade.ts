@@ -32,7 +32,7 @@ export interface DataSourceReadOnlyFacade {
   select(
     dataSourceId: string,
     table: string,
-    options: Pick<QueryOptions, 'limit' | 'offset' | 'where'>,
+    options: Pick<QueryOptions, 'limit' | 'offset' | 'where' | 'orderBy'>,
     principal: string | undefined
   ): Promise<QueryResult<Record<string, DbValue>>>
 }
@@ -41,6 +41,7 @@ export const MISSING_PRINCIPAL_MESSAGE = 'data source read requires an owner pri
 export const DATA_SOURCE_PRINCIPAL_REQUIRED_CODE = 'DATA_SOURCE_PRINCIPAL_REQUIRED'
 export const DATA_SOURCE_NOT_FOUND_CODE = 'DATA_SOURCE_NOT_FOUND'
 export const DATA_SOURCE_NOT_READ_ONLY_CODE = 'DATA_SOURCE_NOT_READ_ONLY'
+export const DATA_SOURCE_QUERY_INVALID_CODE = 'DATA_SOURCE_QUERY_INVALID'
 
 export function writableSourceMessage(dataSourceId: string): string {
   return `data source '${dataSourceId}' is writable; the read-only bridge refuses a writable binding`
@@ -91,6 +92,46 @@ function requirePrincipal(principal: string | undefined): string {
     )
   }
   return principal
+}
+
+function normalizeOrderBy(orderBy: QueryOptions['orderBy'] | undefined): QueryOptions['orderBy'] | undefined {
+  if (orderBy === undefined) return undefined
+  if (!Array.isArray(orderBy)) {
+    throw new DataSourceBridgeConfigError(
+      DATA_SOURCE_QUERY_INVALID_CODE,
+      'data source read orderBy must be an array',
+      'DataSourceQueryInvalidError'
+    )
+  }
+  if (orderBy.length === 0) return undefined
+
+  return orderBy.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new DataSourceBridgeConfigError(
+        DATA_SOURCE_QUERY_INVALID_CODE,
+        `data source read orderBy[${index}] must be an object`,
+        'DataSourceQueryInvalidError'
+      )
+    }
+    const column = (entry as { column?: unknown }).column
+    const rawDirection = (entry as { direction?: unknown }).direction
+    const direction = typeof rawDirection === 'string' ? rawDirection.toLowerCase() : ''
+    if (typeof column !== 'string' || column.trim() === '') {
+      throw new DataSourceBridgeConfigError(
+        DATA_SOURCE_QUERY_INVALID_CODE,
+        `data source read orderBy[${index}].column must be a non-empty string`,
+        'DataSourceQueryInvalidError'
+      )
+    }
+    if (direction !== 'asc' && direction !== 'desc') {
+      throw new DataSourceBridgeConfigError(
+        DATA_SOURCE_QUERY_INVALID_CODE,
+        `data source read orderBy[${index}].direction must be asc or desc`,
+        'DataSourceQueryInvalidError'
+      )
+    }
+    return { column, direction }
+  })
 }
 
 /**
@@ -158,6 +199,10 @@ export function createDataSourcePluginFacade(
       }
       if (options.where && Object.keys(options.where).length > 0) {
         queryOptions.where = options.where
+      }
+      const orderBy = normalizeOrderBy(options.orderBy)
+      if (orderBy) {
+        queryOptions.orderBy = orderBy
       }
       return manager.select<Record<string, DbValue>>(dataSourceId, table, queryOptions)
     },
