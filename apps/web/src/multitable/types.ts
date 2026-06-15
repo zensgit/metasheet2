@@ -117,6 +117,18 @@ export interface ConditionalFormattingRule {
 
 export const CONDITIONAL_FORMATTING_RULE_LIMIT = 20
 
+// --- Conditional field-visibility (form-conditional-fields MVP) ---
+// A field's `property.visibilityRule` is a single condition on ANOTHER field's
+// value in the same record; the form view shows/hides the field accordingly.
+// Reuses the conditional-formatting operator vocabulary. PRESENTATION ONLY — not
+// a security boundary (see utils/field-visibility.ts). Mirrors backend
+// `field-visibility-rule.ts`.
+export interface FieldVisibilityRule {
+  fieldId: string
+  operator: ConditionalFormattingOperator
+  value?: unknown
+}
+
 export interface MetaRecord {
   id: string
   version: number

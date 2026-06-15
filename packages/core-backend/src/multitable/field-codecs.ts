@@ -1,6 +1,7 @@
 import sanitizeHtml from 'sanitize-html'
 import { normalizeAutoNumberProperty } from './auto-number-property'
 import { fieldTypeRegistry } from './field-type-registry'
+import { withFieldVisibilityRule } from './field-visibility-rule'
 
 export type MultitableFieldType =
   | 'string'
@@ -197,6 +198,17 @@ function parseRollupAggregation(value: unknown): 'count' | 'sum' | 'avg' | 'min'
 }
 
 export function sanitizeFieldProperty(
+  type: MultitableFieldType | string,
+  property: unknown,
+): Record<string, unknown> {
+  // `visibilityRule` is a CROSS-CUTTING property (any field type may carry it),
+  // so it is sanitized + merged uniformly after the per-type normalization
+  // rather than relying on each branch's incidental `...obj` passthrough (which
+  // would also let a *malformed* rule leak through). See field-visibility-rule.ts.
+  return withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property)
+}
+
+function sanitizeFieldPropertyByType(
   type: MultitableFieldType | string,
   property: unknown,
 ): Record<string, unknown> {
