@@ -691,9 +691,10 @@ describe('RecordWriteService', () => {
         .rejects.toThrow(RecordFieldForbiddenError)
     })
 
-    it('rejects computed fields (formula/lookup/rollup)', async () => {
+    it('rejects computed + non-data fields (formula/lookup/rollup/button)', async () => {
       const service = new RecordWriteService(pool, eventBus as any, helpers)
-      for (const type of ['formula', 'lookup', 'rollup'] as const) {
+      // button (B1) is value-less / click-only — joins the non-data write-rejection class.
+      for (const type of ['formula', 'lookup', 'rollup', 'button'] as const) {
         const changesByRecord = new Map([
           ['rec1', [{ fieldId: 'fld1', value: 'x' }]],
         ])

@@ -31,6 +31,7 @@ export type MultitableFieldType =
   | 'modifiedTime'
   | 'createdBy'
   | 'modifiedBy'
+  | 'button'
 
 export type MultitableField = {
   id: string
@@ -95,6 +96,7 @@ export function mapFieldType(type: string): MultitableFieldType | string {
     return 'dateTime'
   }
   if (normalized === 'formula') return 'formula'
+  if (normalized === 'button') return 'button'
   if (normalized === 'select') return 'select'
   if (
     normalized === 'multiselect' ||
@@ -415,6 +417,29 @@ function sanitizeFieldPropertyByType(
 
   if (type === 'autoNumber') {
     return normalizeAutoNumberProperty(obj)
+  }
+
+  if (type === 'button') {
+    // Button (B1): a value-less, non-editable action trigger. Sanitize the §6
+    // config SHAPE only; `actionType ∈ AutomationActionType` is enforced at the
+    // field create/update route + at execution (B1-a1), NOT here — this read-path
+    // codec stays dependency-light / acyclic (no import of automation-actions).
+    // All §6 keys are whitelisted (so editing one never drops actionConfig), and
+    // the field is always readOnly (clicked, never edited).
+    const next: Record<string, unknown> = { readOnly: true }
+    if (typeof obj.label === 'string' && obj.label.trim()) next.label = obj.label.trim()
+    if (obj.variant === 'primary' || obj.variant === 'secondary' || obj.variant === 'danger') {
+      next.variant = obj.variant
+    }
+    if (typeof obj.actionType === 'string' && obj.actionType.trim()) next.actionType = obj.actionType.trim()
+    if (isPlainObject(obj.actionConfig)) next.actionConfig = obj.actionConfig
+    if (isPlainObject(obj.confirm)) {
+      const c = obj.confirm
+      const confirm: Record<string, unknown> = { enabled: c.enabled === true }
+      if (typeof c.message === 'string' && c.message.trim()) confirm.message = c.message.trim()
+      next.confirm = confirm
+    }
+    return next
   }
 
   if (SYSTEM_FIELD_TYPES.has(type)) {

@@ -646,3 +646,42 @@ describe('exported regex patterns', () => {
     expect(PHONE_REGEX.test('123')).toBe(false)
   })
 })
+
+describe('button field — B1-a0 backend contract', () => {
+  it('mapFieldType recognises button (not falling through to string)', () => {
+    expect(mapFieldType('button')).toBe('button')
+  })
+
+  it('sanitizeFieldProperty round-trips a valid button config + forces readOnly', () => {
+    const p = sanitizeFieldProperty('button', {
+      label: 'Run', variant: 'primary', actionType: 'update_record',
+      actionConfig: { fields: { a: 1 } }, confirm: { enabled: true, message: 'Sure?' },
+    })
+    expect(p).toEqual({
+      readOnly: true, label: 'Run', variant: 'primary', actionType: 'update_record',
+      actionConfig: { fields: { a: 1 } }, confirm: { enabled: true, message: 'Sure?' },
+    })
+  })
+
+  it('drops invalid variant / non-string label / non-object actionConfig; trims actionType; still readOnly', () => {
+    const p = sanitizeFieldProperty('button', {
+      label: 42, variant: 'huge', actionType: '  send_webhook ', actionConfig: 'nope',
+    }) as Record<string, unknown>
+    expect(p.readOnly).toBe(true)
+    expect(p.label).toBeUndefined()
+    expect(p.variant).toBeUndefined()
+    expect(p.actionType).toBe('send_webhook')
+    expect(p.actionConfig).toBeUndefined()
+  })
+
+  it('coerces confirm.enabled to a strict boolean and keeps a string message', () => {
+    const p = sanitizeFieldProperty('button', { confirm: { enabled: 'yes', message: 'ok' } }) as Record<string, unknown>
+    expect(p.confirm).toEqual({ enabled: false, message: 'ok' }) // 'yes' !== true → false
+  })
+
+  it('serializeFieldRow preserves the button type + sanitized property', () => {
+    const f = serializeFieldRow({ id: 'f1', name: 'Act', type: 'button', property: { label: 'Go', actionType: 'update_record' } })
+    expect(f.type).toBe('button')
+    expect(f.property).toMatchObject({ readOnly: true, label: 'Go', actionType: 'update_record' })
+  })
+})
