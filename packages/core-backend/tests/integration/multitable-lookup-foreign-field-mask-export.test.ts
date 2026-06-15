@@ -60,9 +60,10 @@ function buildApp(userId: string): Express {
   return a
 }
 
-async function exportGrid(targetApp: Express): Promise<string[][]> {
+async function exportGrid(targetApp: Express, fieldIds?: string): Promise<string[][]> {
+  const url = `/api/multitable/sheets/${MS}/export-xlsx${fieldIds !== undefined ? `?fieldIds=${encodeURIComponent(fieldIds)}` : ''}`
   const res = await request(targetApp)
-    .get(`/api/multitable/sheets/${MS}/export-xlsx`)
+    .get(url)
     .buffer(true)
     .parse((r, callback) => {
       const chunks: Buffer[] = []
@@ -143,6 +144,30 @@ describeIfDatabase('multitable formula-over-lookup foreign-field mask — export
     const header = rows[0] ?? []
     const flat = rows.flat()
     expect(header).toContain('FormulaCol')
+    expect(flat).toContain('8')
+  })
+
+  // Column-selection invariant against the TAINT leg (the part the mocked-pool canary cannot
+  // reach — no formula_dependencies there): a DENY actor who EXPLICITLY requests the tainted
+  // formula column via fieldIds must STILL be denied it. Selection intersects ON TOP of the
+  // §2a.3 chokepoint mask; it can only narrow, never widen.
+  test('SECURITY: DENY actor requesting the tainted formula column via fieldIds is STILL refused it; the plain column they also request exports', async () => {
+    const rows = await exportGrid(buildApp(DENY_USER), `${FLD_F},${FLD_PLAIN}`)
+    const header = rows[0] ?? []
+    const flat = rows.flat()
+    // tainted column stays masked even though explicitly requested
+    expect(header).not.toContain('FormulaCol')
+    expect(flat).not.toContain('8')
+    // the permitted requested column is the only one exported (selection narrowed to it)
+    expect(header).toEqual(['PlainCol'])
+    expect(flat).toContain('visible')
+  })
+
+  test('ALLOW actor: fieldIds selection of the tainted formula column DOES export it (no denial → intersection keeps it)', async () => {
+    const rows = await exportGrid(buildApp(ALLOW_USER), `${FLD_F},${FLD_PLAIN}`)
+    const header = rows[0] ?? []
+    const flat = rows.flat()
+    expect(header).toEqual(['FormulaCol', 'PlainCol'])
     expect(flat).toContain('8')
   })
 })
