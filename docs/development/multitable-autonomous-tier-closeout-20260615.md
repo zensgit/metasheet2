@@ -91,7 +91,7 @@ security boundary**. No fix required.
 
 ## 3. Verification delivered — button-arc independent audit (B1-c gate checklist)
 
-Full report: `/tmp/multitable-button-arc-audit-claude-20260615.md`. Read-only audit
+Full report: `docs/research/multitable-button-arc-audit-20260615.md`. Read-only audit
 of the merged button arc (#2645/#2648/#2653/#2657), every high/medium finding
 adversarially refuted.
 
