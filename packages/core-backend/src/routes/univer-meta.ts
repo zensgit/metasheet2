@@ -1916,6 +1916,45 @@ async function loadLinkValuesByRecord(
 }
 
 /**
+ * Bidirectional / mirror links (design 2026-06-14) — RAW-DATA foreign-readability mask (B3 review nit).
+ *
+ * A DERIVED (mirror) field (`cfg.mirrorOf` set) surfaces the REVERSE edges = the *source* (foreign-sheet)
+ * records that link INTO this record. Those source ids are inbound edges this record never authored, so a
+ * record-reader who CANNOT read the mirror's foreign sheet (`cfg.foreignSheetId`) must not learn their
+ * opaque ids + count via the raw `record.data[mirrorFieldId]` array. `buildLinkSummaries` already gates the
+ * summary on `cfg.foreignSheetId` readability; the raw-data array was a SECOND, ungated projection (it leaked
+ * `[A1,A2]` to a foreign-denied actor on /view, single-record GET, and the write-echo). Reuse the SAME
+ * `resolveReadableSheetIds` gate keyed on `cfg.foreignSheetId` and blank the value to `[]` when denied.
+ *
+ * FORWARD link fields are deliberately left UNTOUCHED: their raw-id posture is pre-existing and shared
+ * repo-wide (an outbound edge this record authored), and the task scopes this fix to mirror fields only.
+ * Same-base only by construction (cross-base twoWay/mirror is rejected at field-create), so the cross-base
+ * coarse gate `buildLinkSummaries` adds on top of `resolveReadableSheetIds` is a no-op here — sheet-level
+ * read IS the exact gate. Idempotent / order-independent: mutates `row.data` in place for denied mirrors only.
+ */
+async function maskDerivedMirrorFieldIds(
+  req: Request,
+  query: QueryFn,
+  rows: UniverMetaRecord[],
+  relationalLinkFields: RelationalLinkField[],
+): Promise<void> {
+  const mirrorFields = relationalLinkFields.filter((l) => l.cfg.mirrorOf)
+  if (mirrorFields.length === 0 || rows.length === 0) return
+  const readableSheetIds = await resolveReadableSheetIds(
+    req,
+    query,
+    mirrorFields.map((l) => l.cfg.foreignSheetId),
+  )
+  for (const row of rows) {
+    for (const { fieldId, cfg } of mirrorFields) {
+      if (!readableSheetIds.has(cfg.foreignSheetId)) {
+        row.data[fieldId] = []
+      }
+    }
+  }
+}
+
+/**
  * Recalculate `formula` fields for just-updated records when a changed field has
  * a dependent formula in this sheet (per `formula_dependencies`). Delegates the
  * per-record evaluate + materialize to MultitableFormulaEngine.recalculateRecord
@@ -7891,6 +7930,10 @@ export function univerMetaRouter(): Router {
             if (list && list.length > 0) row.data[fieldId] = list
           }
         }
+
+        // B3 review nit: blank a DERIVED (mirror) field's raw reverse ids for an actor who can't read the
+        // mirror's foreign sheet — parity with the buildLinkSummaries gate below. Forward links untouched.
+        await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), rows, relationalLinkFields)
       }
 
       await applyLookupRollup(
@@ -8577,6 +8620,8 @@ export function univerMetaRouter(): Router {
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
+      // B3 review nit: blank a mirror field's raw reverse ids for a foreign-sheet-denied actor (write-echo).
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
       record.data = filterRecordDataByFieldIds(record.data, readableEchoFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
@@ -8795,6 +8840,8 @@ export function univerMetaRouter(): Router {
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
+      // B3 review nit: blank a mirror field's raw reverse ids for a foreign-sheet-denied actor (write-echo).
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
       record.data = filterRecordDataByFieldIds(record.data, readableEchoFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
@@ -9065,6 +9112,9 @@ export function univerMetaRouter(): Router {
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
+      // B3 review nit: blank a mirror field's raw reverse ids for an actor who can't read the mirror's
+      // foreign sheet (parity with the buildLinkSummaries gate below). Forward links untouched.
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
       await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, [record], relationalLinkFields, linkValuesByRecord)
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
       // #2015 read-path field mask: D3c security composite (layer-2 property.hidden ∧ layer-3

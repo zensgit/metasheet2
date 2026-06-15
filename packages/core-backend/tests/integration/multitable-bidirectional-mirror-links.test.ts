@@ -99,6 +99,27 @@ const viewFields = async (sheetId: string): Promise<Array<{ id: string; property
   return (res.body?.data?.fields ?? []) as Array<{ id: string; property?: Record<string, unknown> }>
 }
 
+/** Raw `rows[].data` from /view — the SECOND link projection (separate from linkSummaries). C7-RAW-DATA. */
+const viewRawRecordData = async (
+  sheetId: string,
+  recordId: string,
+): Promise<Record<string, unknown>> => {
+  const res = await request(app).get('/api/multitable/view').query({ sheetId })
+  expect(res.status).toBe(200)
+  const rows = (res.body?.data?.rows ?? []) as Array<{ id: string; data: Record<string, unknown> }>
+  return rows.find((r) => r.id === recordId)?.data ?? {}
+}
+
+/** Raw `record.data` from the single-record GET — the other raw-data wire. C7-RAW-DATA. */
+const getRecordRawData = async (
+  sheetId: string,
+  recordId: string,
+): Promise<Record<string, unknown>> => {
+  const res = await request(app).get(`/api/multitable/records/${recordId}`).query({ sheetId })
+  expect(res.status).toBe(200)
+  return (res.body?.data?.record?.data ?? {}) as Record<string, unknown>
+}
+
 const seedEdge = (fieldId: string, recordId: string, foreignRecordId: string) =>
   q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [fieldId, recordId, foreignRecordId])
 
@@ -209,6 +230,31 @@ describeIfDatabase('multitable bidirectional / mirror links — derived reverse 
     const summaries = await viewLinkSummaries(SB)
     // B is readable, but sheet A is not → the swapped buildLinkSummaries chain masks the mirror content.
     expect(summaries[REC_B1]?.[FLD_B_MIRROR] ?? []).toEqual([])
+  })
+
+  // C7-RAW-DATA — split per endpoint so each raw-data wire witnesses the leak INDEPENDENTLY (a single
+  // combined test short-circuits at the first failing assertion and would never prove the second wire RED).
+  // C7 only inspects `linkSummaries`; the RAW `data[mirrorField]` array is a SECOND projection of the same
+  // reverse edge. For a foreign-sheet(A)-DENIED actor it must be blanked to [] (opaque source ids + count of
+  // the inbound A→B edges would otherwise leak), while a PERMITTED actor still sees the real [A1,A2].
+  test('C7-RAW-DATA (/view): the RAW data[mirrorField] reverse ids are masked for a foreign-denied actor and intact for a permitted actor', async () => {
+    const expectedAll = [REC_A1, REC_A2].sort()
+    // DENIED (sheet A unreadable) — the raw /view data wire must be empty.
+    currentUser = { id: USER_NOA, roles: ['member'], perms: [] }
+    expect(((await viewRawRecordData(SB, REC_B1))[FLD_B_MIRROR] as string[]) ?? []).toEqual([])
+    // PERMITTED (global read) — the raw mirror ids are intact (no over-masking).
+    currentUser = { id: USER_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+    expect((((await viewRawRecordData(SB, REC_B1))[FLD_B_MIRROR] as string[]) ?? []).slice().sort()).toEqual(expectedAll)
+  })
+
+  test('C7-RAW-DATA (single-GET): the RAW data[mirrorField] reverse ids are masked for a foreign-denied actor and intact for a permitted actor', async () => {
+    const expectedAll = [REC_A1, REC_A2].sort()
+    // DENIED (sheet A unreadable) — the single-record GET data wire must be empty.
+    currentUser = { id: USER_NOA, roles: ['member'], perms: [] }
+    expect(((await getRecordRawData(SB, REC_B1))[FLD_B_MIRROR] as string[]) ?? []).toEqual([])
+    // PERMITTED (global read) — the raw mirror ids are intact (no over-masking).
+    currentUser = { id: USER_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+    expect((((await getRecordRawData(SB, REC_B1))[FLD_B_MIRROR] as string[]) ?? []).slice().sort()).toEqual(expectedAll)
   })
 
   test('C3: forward write fans invalidation to the mirror sheet (no forward write back, loop-free)', async () => {
