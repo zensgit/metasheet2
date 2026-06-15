@@ -121,6 +121,10 @@ TODO:
 - [x] C3-1 facade 支持 `orderBy` 并保留 `where`/equality `filters` passthrough。
   - #2609 / squash `1586c3841`.
   - 仍是 host-side seam；未打开 watermark runtime、未改变 adapter cursor、未新增写能力。
+- [ ] C3-3a runner 透传 resolved `watermarkConfig`，并对 `data-source:sql-readonly`
+  的 `updated_at` 增量配置强制声明 tiebreaker。
+  - 目标: adapter 后续实现 keyset 时读取同一个 runner-resolved config，不再自己猜 `type/field/tiebreaker`。
+  - 边界: 不生成 watermark `where/orderBy`，不改变 offset cursor，不打开 C3-2/C3-3 runtime。
 - [ ] C3-2 adapter 实现 in-run mode-tagged cursor；跨 run 仍复用现有 watermark store，不改 store schema。
 - [ ] C3-3 `updated_at + id` 复合游标实现和测试。
 - [ ] C3-4 `monotonic_id` 游标实现和测试。

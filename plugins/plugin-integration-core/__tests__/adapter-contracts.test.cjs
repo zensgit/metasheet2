@@ -80,11 +80,17 @@ async function main() {
     cursor: 'c1',
     filters: { status: 'approved' },
     watermark: { updated_at: '2026-04-24T00:00:00Z' },
+    watermarkConfig: { type: 'updated_at', field: 'updated_at', tiebreaker: 'id' },
   })
   assert.equal(read.object, 'materials')
   assert.equal(read.limit, 10000, 'read limit is capped')
   assert.equal(read.cursor, 'c1')
   assert.deepEqual(read.filters, { status: 'approved' })
+  assert.deepEqual(
+    read.watermarkConfig,
+    { type: 'updated_at', field: 'updated_at', tiebreaker: 'id' },
+    'read normalizer preserves the resolved watermarkConfig payload for C3 adapters',
+  )
 
   const upsert = normalizeUpsertRequest({
     object: 'materials',

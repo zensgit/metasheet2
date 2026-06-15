@@ -98,6 +98,7 @@ function normalizeReadRequest(input = {}) {
     cursor: optionalString(input.cursor, 'cursor'),
     filters: objectOrEmpty(input.filters, 'filters'),
     watermark: objectOrEmpty(input.watermark, 'watermark'),
+    watermarkConfig: objectOrEmpty(input.watermarkConfig, 'watermarkConfig'),
     options: objectOrEmpty(input.options, 'options'),
   }
 }

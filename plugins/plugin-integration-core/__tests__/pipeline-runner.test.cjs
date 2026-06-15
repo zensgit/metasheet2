@@ -126,9 +126,9 @@ function createPipelineRegistry(pipeline, db) {
   }
 }
 
-function createExternalSystemRegistry() {
+function createExternalSystemRegistry({ sourceSystemKind = 'mock-source' } = {}) {
   const systems = new Map([
-    ['source_1', { id: 'source_1', name: 'PLM mock', kind: 'mock-source', role: 'source', config: {} }],
+    ['source_1', { id: 'source_1', name: 'PLM mock', kind: sourceSystemKind, role: 'source', config: {} }],
     ['target_1', { id: 'target_1', name: 'ERP mock', kind: 'mock-target', role: 'target', config: {} }],
   ])
   return {
@@ -142,10 +142,14 @@ function createExternalSystemRegistry() {
   }
 }
 
-function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead, targetUpsert, erpFeedbackWriter } = {}) {
+function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead, sourceSystemKind = 'mock-source', targetUpsert, erpFeedbackWriter } = {}) {
   const db = createMockDb()
   const targetRows = new Map()
   const adapterSystems = []
+  const defaultOptions = {
+    batchSize: 100,
+    watermark: { type: 'updated_at', field: 'updatedAt', tiebreaker: 'code' },
+  }
   const pipeline = {
     id: 'pipe_1',
     tenantId: 'tenant_1',
@@ -158,19 +162,20 @@ function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead
     mode: 'incremental',
     status: 'active',
     idempotencyKeyFields: ['code', 'revision'],
-    options: {
-      batchSize: 100,
-      watermark: { type: 'updated_at', field: 'updatedAt' },
-    },
+    options: defaultOptions,
     fieldMappings: [
       { sourceField: 'code', targetField: 'FNumber', transform: ['trim', 'upper'], validation: [{ type: 'required' }] },
       { sourceField: 'qty', targetField: 'FQty', transform: { fn: 'toNumber' }, validation: [{ type: 'min', value: 1 }] },
       { sourceField: 'name', targetField: 'FName', transform: { fn: 'trim' }, validation: [{ type: 'required' }] },
     ],
     ...pipelineOverrides,
+    options: {
+      ...defaultOptions,
+      ...(pipelineOverrides.options || {}),
+    },
   }
   const adapterRegistry = createAdapterRegistry()
-    .registerAdapter('mock-source', ({ system }) => ({
+    .registerAdapter(sourceSystemKind, ({ system }) => ({
       system,
       async testConnection() { return { ok: true } },
       async listObjects() { return [{ name: 'materials' }] },
@@ -217,7 +222,7 @@ function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead
   const pipelineRegistry = createPipelineRegistry(pipeline, db)
   const runner = createPipelineRunner({
     pipelineRegistry,
-    externalSystemRegistry: createExternalSystemRegistry(),
+    externalSystemRegistry: createExternalSystemRegistry({ sourceSystemKind }),
     adapterRegistry,
     deadLetterStore: createDeadLetterStore({ db, idGenerator: () => `dl_${db.tables.get('integration_dead_letters').length + 1}` }),
     watermarkStore: createWatermarkStore({ db }),
@@ -460,6 +465,133 @@ async function main() {
   assert.equal(incRun2.metrics.rowsRead, 1)
   assert.equal(incRun2.metrics.rowsWritten, 1)
   assert.equal((await incremental.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' })).watermark_value, '2026-04-24T02:00:00.000Z')
+
+  // --- 3b. Incremental reads receive the resolved watermarkConfig ----------
+  {
+    const readInputs = []
+    const configHarness = createRunnerHarness({
+      sourceRecords: [],
+      sourceRead: async (input) => {
+        readInputs.push(input)
+        return createReadResult({
+          records: [
+            { code: 'cfg-01', revision: 'r1', qty: '1', name: 'Config', updatedAt: '2026-04-24T03:00:00.000Z' },
+          ],
+        })
+      },
+      pipelineOverrides: {
+        options: {
+          batchSize: 100,
+          watermark: { type: 'updated_at', field: 'updatedAt', tiebreaker: 'code' },
+        },
+      },
+    })
+    await configHarness.runner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'incremental',
+      triggeredBy: 'manual',
+    })
+    assert.deepEqual(readInputs[0].watermarkConfig, {
+      type: 'updated_at',
+      field: 'updatedAt',
+      tiebreaker: 'code',
+    }, 'runner passes the resolved C3 watermark config to sourceAdapter.read')
+  }
+
+  // --- 3c. SQL bridge updated_at incremental mode requires a tiebreaker ----
+  {
+    let sourceReadCalls = 0
+    const invalidConfig = createRunnerHarness({
+      sourceRecords: [],
+      sourceSystemKind: 'data-source:sql-readonly',
+      sourceRead: async () => {
+        sourceReadCalls += 1
+        return createReadResult({ records: [] })
+      },
+      pipelineOverrides: {
+        options: {
+          batchSize: 100,
+          watermark: { type: 'updated_at', field: 'updatedAt' },
+        },
+      },
+    })
+    await assert.rejects(
+      () => invalidConfig.runner.runPipeline({
+        tenantId: 'tenant_1',
+        pipelineId: 'pipe_1',
+        mode: 'incremental',
+        triggeredBy: 'manual',
+      }),
+      (error) => error && error.details && /updated_at watermark config requires a tiebreaker/.test(error.details.cause),
+      'incremental updated_at without tiebreaker fails closed',
+    )
+    assert.equal(sourceReadCalls, 0, 'invalid watermark config fails before any source read')
+  }
+
+  // --- 3d. Non-bridge incremental sources keep the legacy optional-tiebreaker path.
+  {
+    const readInputs = []
+    const legacySource = createRunnerHarness({
+      sourceRecords: [],
+      sourceRead: async (input) => {
+        readInputs.push(input)
+        return createReadResult({
+          records: [
+            { code: 'legacy-01', revision: 'r1', qty: '1', name: 'Legacy', updatedAt: '2026-04-24T03:30:00.000Z' },
+          ],
+        })
+      },
+      pipelineOverrides: {
+        options: {
+          batchSize: 100,
+          watermark: { type: 'updated_at', field: 'updatedAt' },
+        },
+      },
+    })
+    await legacySource.runner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'incremental',
+      triggeredBy: 'manual',
+    })
+    assert.deepEqual(readInputs[0].watermarkConfig, {
+      type: 'updated_at',
+      field: 'updatedAt',
+    }, 'non-bridge adapters are not forced onto the SQL bridge tiebreaker contract')
+  }
+
+  // --- 3e. monotonic_id incremental mode does not require a tiebreaker -----
+  {
+    const readInputs = []
+    const monotonic = createRunnerHarness({
+      sourceRecords: [],
+      sourceRead: async (input) => {
+        readInputs.push(input)
+        return createReadResult({
+          records: [
+            { code: 'mono-01', revision: 'r1', qty: '1', name: 'Mono', id: 10 },
+          ],
+        })
+      },
+      pipelineOverrides: {
+        options: {
+          batchSize: 100,
+          watermark: { type: 'monotonic_id', field: 'id' },
+        },
+      },
+    })
+    await monotonic.runner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'incremental',
+      triggeredBy: 'manual',
+    })
+    assert.deepEqual(readInputs[0].watermarkConfig, {
+      type: 'monotonic_id',
+      field: 'id',
+    }, 'monotonic_id config is passed without requiring a tiebreaker')
+  }
 
   // --- 4. Dry-run previews records without target/dead-letter/watermark --
   const dryRun = createRunnerHarness({
