@@ -30,6 +30,7 @@ import {
   validateLocationValue,
   validateLongTextValue,
   validatePhoneValue,
+  validateQrcodeValue,
   validateUrlValue,
 } from '../../src/multitable/field-codecs'
 
@@ -42,6 +43,7 @@ describe('mapFieldType — MF2 batch-1', () => {
     expect(mapFieldType('email')).toBe('email')
     expect(mapFieldType('phone')).toBe('phone')
     expect(mapFieldType('barcode')).toBe('barcode')
+    expect(mapFieldType('qrcode')).toBe('qrcode')
     expect(mapFieldType('location')).toBe('location')
     expect(mapFieldType('dateTime')).toBe('dateTime')
   })
@@ -87,9 +89,17 @@ describe('mapFieldType — MF2 batch-1', () => {
     expect(mapFieldType('geo-location')).toBe('location')
   })
 
+  it('recognises qrcode aliases without falling back to barcode/string', () => {
+    expect(mapFieldType('qrcode')).toBe('qrcode')
+    expect(mapFieldType('qr_code')).toBe('qrcode')
+    expect(mapFieldType('qr-code')).toBe('qrcode')
+    expect(mapFieldType('qr')).toBe('qrcode')
+    expect(mapFieldType('  QRCODE  ')).toBe('qrcode')
+  })
+
   it('exposes BATCH1_FIELD_TYPES set with normalized runtime types', () => {
     expect(Array.from(BATCH1_FIELD_TYPES).sort()).toEqual([
-      'barcode', 'currency', 'dateTime', 'email', 'location', 'percent', 'phone', 'rating', 'url',
+      'barcode', 'currency', 'dateTime', 'email', 'location', 'percent', 'phone', 'qrcode', 'rating', 'url',
     ])
   })
 })
@@ -188,6 +198,7 @@ describe('sanitizeFieldProperty — url / email / phone / barcode / location', (
     expect(sanitizeFieldProperty('email', {})).toEqual({})
     expect(sanitizeFieldProperty('phone', {})).toEqual({})
     expect(sanitizeFieldProperty('barcode', {})).toEqual({})
+    expect(sanitizeFieldProperty('qrcode', {})).toEqual({})
     expect(sanitizeFieldProperty('location', {})).toEqual({})
   })
 
@@ -465,6 +476,25 @@ describe('validateBarcodeValue', () => {
   })
 })
 
+describe('validateQrcodeValue', () => {
+  it('trims string and numeric qrcode values (stored as the plain source string)', () => {
+    expect(validateQrcodeValue('  https://metasheet.example/r/1  ', 'fld_qr')).toBe('https://metasheet.example/r/1')
+    expect(validateQrcodeValue(1234567890, 'fld_qr')).toBe('1234567890')
+  })
+
+  it('returns null for empty qrcode values', () => {
+    expect(validateQrcodeValue(null, 'fld_qr')).toBeNull()
+    expect(validateQrcodeValue(undefined, 'fld_qr')).toBeNull()
+    expect(validateQrcodeValue('', 'fld_qr')).toBeNull()
+    expect(validateQrcodeValue('   ', 'fld_qr')).toBeNull()
+  })
+
+  it('rejects object values and overly long strings', () => {
+    expect(() => validateQrcodeValue(['123'], 'fld_qr')).toThrow(/QR code value must be a string/)
+    expect(() => validateQrcodeValue('x'.repeat(257), 'fld_qr')).toThrow(/256 characters/)
+  })
+})
+
 describe('validateLocationValue', () => {
   it('normalizes string addresses', () => {
     expect(validateLocationValue('  Shanghai Tower  ', 'fld_location')).toEqual({ address: 'Shanghai Tower' })
@@ -534,6 +564,7 @@ describe('coerceBatch1Value — dispatch', () => {
     expect(coerceBatch1Value('email', undefined, 'fld', 'a@b.co')).toBe('a@b.co')
     expect(coerceBatch1Value('phone', undefined, 'fld', '+86 138 0000 0000')).toBe('+86 138 0000 0000')
     expect(coerceBatch1Value('barcode', undefined, 'fld', '  6901234567890  ')).toBe('6901234567890')
+    expect(coerceBatch1Value('qrcode', undefined, 'fld', '  https://metasheet.example/r/1  ')).toBe('https://metasheet.example/r/1')
     expect(coerceBatch1Value('location', undefined, 'fld', '  Shanghai Tower  ')).toEqual({ address: 'Shanghai Tower' })
     expect(coerceBatch1Value('dateTime', undefined, 'fld', '2026-05-06T10:30:00+08:00')).toBe('2026-05-06T02:30:00.000Z')
   })

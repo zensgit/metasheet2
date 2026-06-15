@@ -243,6 +243,7 @@ const MULTITABLE_FIELD_TYPES = [
   'email',
   'phone',
   'barcode',
+  'qrcode',
   'location',
   'longText',
   'autoNumber',
@@ -282,6 +283,7 @@ type UniverMetaField = {
     | 'email'
     | 'phone'
     | 'barcode'
+    | 'qrcode'
     | 'location'
     | 'longText'
     | 'autoNumber'
