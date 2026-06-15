@@ -5712,6 +5712,18 @@ export function univerMetaRouter(): Router {
       )
       const revRows = revRes.rows as Array<{ action?: unknown; snapshot?: unknown }>
       if (revRows.length === 0) {
+        // Distinguish a PRUNED target (retention aged it out) from one that never existed: if the
+        // target is below the surviving floor (MIN retained version for this record), it was pruned
+        // → VERSION_EXPIRED. This is data-driven (true whether or not the retention sweep is enabled;
+        // with retention off, MIN is the create version so this never fires spuriously).
+        const floorRes = await pool.query(
+          'SELECT MIN(version) AS min_version FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2',
+          [sheetId, recordId],
+        )
+        const minVersion = Number((floorRes.rows[0] as { min_version?: unknown } | undefined)?.min_version ?? 0)
+        if (minVersion > 0 && targetVersion < minVersion) {
+          return res.status(410).json({ ok: false, error: { code: 'VERSION_EXPIRED', message: `Version ${targetVersion} is older than the retained floor (v${minVersion}) and has been pruned` } })
+        }
         return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: `No revision at version ${targetVersion}` } })
       }
       const targetRev = revRows.find((r) => r.action !== 'delete')

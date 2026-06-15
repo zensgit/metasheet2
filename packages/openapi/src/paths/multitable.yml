@@ -528,6 +528,24 @@ paths:
                       message: { type: string }
                     required: [code, message]
                 required: [ok, error]
+        '410':
+          description: >-
+            VERSION_EXPIRED — the target version is older than the retained floor and has been pruned
+            by the meta-revision retention policy (distinct from VERSION_NOT_FOUND for a version that
+            never existed).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  error:
+                    type: object
+                    properties:
+                      code: { type: string, enum: [VERSION_EXPIRED] }
+                      message: { type: string }
+                    required: [code, message]
+                required: [ok, error]
   /api/multitable/sheets/{sheetId}/records/{recordId}/subscriptions:
     get:
       summary: Load current user's subscription status for a record

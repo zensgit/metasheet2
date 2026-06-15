@@ -26,6 +26,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { sweepMetaRevisionRetention } from '../../src/multitable/meta-revision-retention'
 import { setYjsInvalidatorForRoutes, univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -485,5 +486,45 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
     expect(res.status).toBe(403)
     expect((await liveData(rid))[FLD_A]).toBe('a2') // untouched
+  })
+
+  // ---- Retention (prune + VERSION_EXPIRED) ----
+  const seedManyRevisions = async (count: number): Promise<string> => {
+    const revs: RevSeed[] = Array.from({ length: count }, (_, i) => ({
+      version: i + 1,
+      action: i === 0 ? 'create' : 'update',
+      snapshot: { [FLD_A]: `v${i + 1}` },
+    }))
+    return seedRecord({ [FLD_A]: `v${count}` }, count, revs)
+  }
+
+  test('T13: keep-last-N sweep prunes old versions (keeps the latest); restore to a pruned version → VERSION_EXPIRED', async () => {
+    const rid = await seedManyRevisions(13) // versions 1..13, current = 13
+    const deleted = await sweepMetaRevisionRetention(q, { enabled: true, policy: 'keep-last-n', keepN: 10, retentionDays: 365, batchSize: 5000 })
+    expect(deleted).toBeGreaterThanOrEqual(3) // versions 1,2,3 pruned (may include other suites' rows; bounded)
+
+    // this record retains exactly the latest 10 (versions 4..13); the latest (13) is always kept
+    const rows = await q('SELECT version FROM meta_record_revisions WHERE record_id = $1 ORDER BY version', [rid])
+    const versions = (rows.rows as Array<{ version: number }>).map((r) => Number(r.version))
+    expect(versions).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+
+    // restore to a pruned version → VERSION_EXPIRED (410), distinct from a never-existed VERSION_NOT_FOUND
+    const expired = await restoreReq(rid, { targetVersion: 2, expectedVersion: 13 })
+    expect(expired.status).toBe(410)
+    expect(expired.body.error.code).toBe('VERSION_EXPIRED')
+
+    // a surviving version still restores
+    const ok = await restoreReq(rid, { targetVersion: 5, expectedVersion: 13 })
+    expect(ok.status).toBe(200)
+    expect((await liveData(rid))[FLD_A]).toBe('v5')
+  })
+
+  test('T14: retention disabled (default) is a no-op — deletes nothing', async () => {
+    const rid = await seedManyRevisions(12)
+    const before = await q('SELECT count(*)::int AS n FROM meta_record_revisions WHERE record_id = $1', [rid])
+    const deleted = await sweepMetaRevisionRetention(q, { enabled: false, policy: 'keep-last-n', keepN: 10, retentionDays: 365, batchSize: 5000 })
+    expect(deleted).toBe(0)
+    const after = await q('SELECT count(*)::int AS n FROM meta_record_revisions WHERE record_id = $1', [rid])
+    expect((after.rows[0] as { n: number }).n).toBe((before.rows[0] as { n: number }).n)
   })
 })
