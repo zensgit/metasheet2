@@ -20,6 +20,7 @@ import { toJsonValue } from '../db/type-helpers'
 import { legacyAutomationStatusToJobStatus, normalizeWorkflowJobStatus, type WorkflowJobStatus, type WorkflowJobSuspendReason } from './workflow-job-contract'
 import type { ActionJobLifecycle, ActionJobLifecycleMeta } from './automation-executor'
 import type { AutomationAction } from './automation-actions'
+import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { redactString, redactValue } from './automation-log-redact'
 
 const JOB_SCHEMA_VERSION = 1
@@ -140,6 +141,42 @@ export class AutomationJobService {
         action_type: action.type,
         status: 'suspended', // C1 'suspended' (non-terminal); excluded from TERMINAL_JOB_STATUSES
         upstream_job_id: stepIndex > 0 ? `${executionId}:job:${stepIndex - 1}` : null,
+        result: null,
+        error: null,
+        started_at: now,
+        finished_at: null,
+        duration_ms: null,
+        schema_version: JOB_SCHEMA_VERSION,
+      })
+      .execute()
+  }
+
+  /**
+   * A6-3-3: write the SELECTED branch's suspended wait job as `suspended`, keyed by the
+   * BRANCH step_key / job_id (not the top-level step_index). Mirrors writeSuspendedJob but
+   * positions the C1 job inside the condition_branch lineage so listByExecution hydrates
+   * the suspend descriptor onto the branch child, never onto the top-level parent.
+   */
+  async writeSuspendedBranchJob(
+    executionId: string,
+    rule: { id: string; sheetId?: string },
+    cursor: ConditionBranchResumeCursor,
+    action: AutomationAction,
+    executor: typeof db = db,
+  ): Promise<void> {
+    const now = new Date().toISOString()
+    await executor
+      .insertInto('multitable_automation_jobs')
+      .values({
+        id: cursor.branchJobId,
+        execution_id: executionId,
+        rule_id: rule.id,
+        sheet_id: rule.sheetId ?? null,
+        step_index: cursor.parentStepIndex,
+        step_key: cursor.stepKey,
+        action_type: action.type,
+        status: 'suspended',
+        upstream_job_id: cursor.upstreamJobId,
         result: null,
         error: null,
         started_at: now,

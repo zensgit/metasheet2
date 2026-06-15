@@ -1366,6 +1366,8 @@ export interface MultitableAutomationSuspensionsTable {
   reason: string
   action_fingerprint: JsonValueColumn
   trigger_event: JsonValueColumn
+  // A6-3-3 branch-local resume cursor (nullable + insert-optional; NULL = legacy A6-2 top-level path).
+  resume_cursor: ColumnType<unknown | null, unknown | null | undefined, unknown | null>
   status: string
   created_at: CreatedAt
   resumed_at: Date | string | null
