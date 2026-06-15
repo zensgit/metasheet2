@@ -1,11 +1,13 @@
 # Data Factory — read-only SQL data-source bridge — C3 incremental / watermark read — design (2026-06-03)
 
 > **Status refresh (2026-06-15):** This document began as design-first. The core runtime has since landed
-> through C3-1 (#2609), C3-2a (#2625), C3-3a (#2619), and C3-2/C3-4(unit) (#2628). It lifts the C0
+> through C3-1 (#2609), C3-2a (#2625), C3-3a (#2619), C3-2/C3-4(unit) (#2628), and the
+> C3-5 CI real-DB wire lock (#2631). It lifts the C0
 > **Seam-3 deferral** ("incremental + watermark are deferred until a watermark-column convention exists")
 > for the `data-source:sql-readonly` bridge: the bridge's `read()` now honors the watermark argument the
 > pipeline-runner already passes as a parameterized **keyset** `WHERE … ORDER BY … LIMIT` over the existing
-> read-only facade. **C3-5 real-DB/entity-machine validation remains 🔒** and is the acceptance gate.
+> read-only facade, with the real Postgres path covered in CI. Large-BOM #2425 entity-machine
+> run/plan/apply/idempotence validation remains a separate gate.
 > Read-only; **no read-contract change**; does **not** touch the K3 channel, central RBAC, or auth.
 
 ## Why — lift C0 Seam-3, don't rebuild what exists
@@ -23,14 +25,14 @@ reads. Two things have since become clear from reading `origin/main`:
    adapter. So `WHERE wm > :last ORDER BY wm ASC LIMIT n` is already expressible underneath.
 
 Originally, the remaining reason the bridge was full/manual was that **its `read()` ignored
-`request.watermark`** and did pure offset paging. C3-2/C3-4(unit) now close that adapter/runtime gap in
+`request.watermark`** and did pure offset paging. C3-2/C3-4(unit) close that adapter/runtime gap in
 unit coverage: equality `filters` are preserved through structured `where`, `orderBy` passes through the
-read-only facade, and the bridge composes filters with the watermark keyset predicate. The remaining proof is
-not another helper fixture — it is C3-5: a real DB / entity-machine run proving the full
-facade→`DataSourceManager`→adapter→DB path.
+read-only facade, and the bridge composes filters with the watermark keyset predicate. C3-5 then adds the
+wire-vs-fixture proof: a CI real-DB test drives the full
+facade→`DataSourceManager`→adapter→DB path against Postgres.
 
 This remains conservative rollout work. Full-table offset paging still exists as fallback, the runtime is
-read-only, and C3 is not delivery-complete until C3-5 passes.
+read-only, and C3 remains distinct from the Large-BOM #2425 entity-machine C3/C4 validation gate.
 
 ## Scope boundary (the load-bearing sentence)
 
@@ -46,11 +48,11 @@ and workbench UIs; or add cross-owner grants. Owner-scope and read-only stay exa
 
 ## Grounded current state (verified on `origin/main`)
 
-| Piece | Already exists | Remaining gap after #2628 |
+| Piece | Already exists | Status after #2631 |
 |---|---|---|
-| Read contract | `read({object,limit,cursor,filters,watermark}) → {records,nextCursor,done}` — `watermark` + `filters` slots present (`normalizeReadRequest`, `contracts.cjs:91`); `nextCursor` is a string (`createReadResult:126`) | #2628 makes bridge `read()` honor `watermark + watermarkConfig`; C3-5 must prove the real DB wire path |
-| Runner | `mode`, `resolveWatermarkConfig`, `watermarkStore` (get/set/advance), `deriveNextWatermark` (`watermark.cjs`); passes `watermark:{field:value}` into `read()` and advances after success (`pipeline-runner.cjs`) | #2619 passes the resolved `watermarkConfig`; C3-5 must prove owner-scoped incremental runs preserve it end to end |
-| DB layer | `BaseAdapter.QueryOptions` has `where` + `orderBy` (`BaseAdapter.ts:56`); `DataSourceManager.select` passes them through (`:530`) | #2609/#2625/#2628 unit-lock facade/adapter composition; C3-5 must prove the real adapter/DB behavior |
+| Read contract | `read({object,limit,cursor,filters,watermark}) → {records,nextCursor,done}` — `watermark` + `filters` slots present (`normalizeReadRequest`, `contracts.cjs:91`); `nextCursor` is a string (`createReadResult:126`) | #2628 makes bridge `read()` honor `watermark + watermarkConfig`; #2631 proves the real DB wire path in CI |
+| Runner | `mode`, `resolveWatermarkConfig`, `watermarkStore` (get/set/advance), `deriveNextWatermark` (`watermark.cjs`); passes `watermark:{field:value}` into `read()` and advances after success (`pipeline-runner.cjs`) | #2619 passes the resolved `watermarkConfig`; #2631 covers the owner-scoped facade/adapter DB path for incremental reads |
+| DB layer | `BaseAdapter.QueryOptions` has `where` + `orderBy` (`BaseAdapter.ts:56`); `DataSourceManager.select` passes them through (`:530`) | #2609/#2625/#2628 unit-lock facade/adapter composition; #2631 proves Postgres real-adapter behavior through the host facade |
 | Precedent (do **not** depend on) | `k3-wise-sqlserver-executor.cjs:234` already builds `WHERE wm > v ORDER BY orderBy` (strict `>`, single `orderBy=keyField`, one bounded page per run, `done:true`) | K3 is the **red-line** channel; its strict-`>` is safe only because its `keyField` is **unique/monotonic**. The bridge must **generalize it safely** for the non-unique `updated_at` default — not copy it, not import it |
 
 ## The design — five seams
@@ -150,8 +152,9 @@ argument is the same wire-vs-fixture class of bug.)
   an earlier timestamp **after** the watermark advanced is missed. `monotonic_id` avoids it; a bounded
   **overlap / lag-window** re-read for `updated_at` is a **deferred** sub-option, not v1.
 - **Index or it's a full scan.** `WHERE wm > … ORDER BY wm` without an index on the watermark (and
-  tiebreaker) column is a full table scan — defeating the entire perf purpose. Bind-time validation
-  **recommends/requires** the index; impl notes it loudly.
+  tiebreaker) column is a full table scan — defeating the entire perf purpose. C3 core runtime does
+  not yet enforce index presence; bind-time/index validation remains deferred to the config
+  UX/hardening slice.
 - **Determinism improves, not regresses.** C0 Seam-3 flagged offset paging as correct only under a stable
   order; keyset paging on `(field[, tiebreaker])` is **strictly more stable** than offset — this is a net
   improvement over the current full/manual path.
@@ -169,9 +172,9 @@ argument is the same wire-vs-fixture class of bug.)
 - **No raw SQL** — only structured `where`/`orderBy` built from introspected column names.
 - **No K3** — generic source only; the K3 channel is neither touched nor imported (it is cited only as a
   precedent we deliberately **do not** copy).
-- **Bind-time fail-closed** — `mode=incremental` with **no resolvable watermark field**, an
-  **un-introspectable / non-orderable** column, or `updated_at` with **no tiebreaker** → a clean
-  configuration error, **never a silent full-table scan**.
+- **Bind-time fail-closed** — the landed runtime already rejects `updated_at` without a tiebreaker.
+  `mode=incremental` with **no resolvable watermark field** or an **un-introspectable / non-orderable**
+  column remains a deferred config UX/hardening guard; until then, it must not be described as closed.
 
 ## Phased decomposition (gated — each a separate explicit opt-in)
 
@@ -192,7 +195,7 @@ argument is the same wire-vs-fixture class of bug.)
   SQL BIGINT monotonic values are preserved as integer strings, not coerced through JS `Number`.
   Offset/full coexistence and wrong-mode cursor fail-closed behavior are unit-locked. Runtime run details
   redact watermark cursors (they contain source values), and max-page truncation is partial/no-watermark-advance
-  rather than a silent succeeded run. C3-5 remains the real-DB acceptance gate.
+  rather than a silent succeeded run.
 - ✅ **C3-3a — watermark-config plumbing (runner → read request):** extend `pipeline.options.watermark` to
   `{ type, field, tiebreaker? }`, pass the resolved config into `read()` (Seam D), and require
   `updated_at` configs to declare a tiebreaker for the `data-source:sql-readonly` bridge. Landed in #2619
@@ -202,17 +205,17 @@ argument is the same wire-vs-fixture class of bug.)
   before C3 runtime.
 - ✅ **C3-4 — filter + watermark composition lock (unit):** landed in #2628 / squash `f587cf122`.
   Equality filters are AND'd with the watermark predicate in plugin adapter unit coverage; negative controls
-  cover malformed/injectable values and the max-page no-watermark-advance path. C3-5 remains the
-  real-DB wire-vs-fixture proof that the facade -> `DataSourceManager` -> real adapter -> DB path preserves it.
-- 🔒 **C3-5 — real-DB locking test (the keystone, wire-vs-fixture):** against a **real** Postgres (and the
-  MSSQL smoke), an incremental run reads **only** rows beyond the stored watermark; same-timestamp
-  boundary/stall cases hold; a no-watermark run still does the full re-read; cross-owner is still fail-closed.
+  cover malformed/injectable values and the max-page no-watermark-advance path.
+- ✅ **C3-5 — CI real-DB locking test (the keystone, wire-vs-fixture):** landed in #2631 /
+  squash `834b4e41d`. Against a **real** Postgres in the Node 20 integration workflow, an incremental read
+  preserves equality filters, `orderBy`, composite `updated_at + id` cursor advancement across same-timestamp
+  page boundaries, and SQL BIGINT monotonic id values as strings.
   Per the entity-machine lesson (#2205), the committed fake-facade unit tests do **not** prove the
-  facade→`DataSourceManager`→real-adapter→DB keyset path — this real-DB test is the acceptance keystone.
+  facade→`DataSourceManager`→real-adapter→DB keyset path — #2631 is the committed acceptance proof.
 
-**Remaining C3 runtime gate:** C3-5 stays 🔒 until the real DB / entity-machine validation is run.
-The current mainline has unit-locked the adapter/facade/runtime seams, but not the acceptance keystone:
-real Postgres/MSSQL smoke must still prove the complete wire path and boundary behavior.
+**C3 wire gate status:** C3-5 is now closed by #2631 for the CI Postgres path. It does not replace
+Large-BOM #2425's entity-machine C3/C4 validation, and it does not close the later config-hardening work
+around column existence/orderability/index checks.
 
 ## Acceptance checklist (the locks — for the impl slices)
 
@@ -228,16 +231,20 @@ real Postgres/MSSQL smoke must still prove the complete wire path and boundary b
 - ✅ Cursor mode-tagging: a cursor minted in one mode is **rejected fail-closed** under a different mode (#2628).
 - ✅ `filters` honored as parameterized equality predicates; **no raw SQL / no injection** (#2625 + #2628 unit coverage).
 - ✅ Facade widen exposes **no** write/CRUD/credential method; writable binding still rejected (#2609).
-- ⬜ Owner-scope **fail-closed** preserved on the incremental path (`assertAccess` via `pipeline.createdBy`).
+- ✅ Owner-scope **fail-closed** preserved on the incremental path (`assertAccess` via `pipeline.createdBy`);
+  existing facade/runner tests keep this unchanged by C3.
 - ⬜ Bind-time **fail-closed**: incremental with no resolvable watermark field / non-orderable column /
-  `updated_at` without a tiebreaker ⇒ clean config error, never a silent full scan.
-- ⬜ **Real-DB locking test** green (the keystone) — not just fake-facade units.
+  `updated_at` without a tiebreaker ⇒ clean config error, never a silent full scan. The `updated_at`
+  tiebreaker part is enforced; column existence/orderability/index validation remains deferred with the
+  config UX/hardening work.
+- ✅ **Real-DB locking test** green (the keystone) — not just fake-facade units (#2631).
 
 ## Decision log / deferred
 
-- **Design-ahead origin; runtime landed, acceptance still gated.** The prior "offset works, C3 not needed yet"
-  decision governed the initial rollout. Runtime slices through #2628 are now merged, but the design risk is
-  only fully retired after C3-5 real-DB/entity-machine validation proves the wire path.
+- **Design-ahead origin; core runtime + CI wire proof landed.** The prior "offset works, C3 not needed yet"
+  decision governed the initial rollout. Runtime slices through #2628 are merged, and #2631 proves the
+  facade -> `DataSourceManager` -> real Postgres path. Large-BOM #2425 entity-machine C3/C4 validation remains
+  separate from this bridge-level C3 proof.
 - **K3 precedent cited, never depended on.** `k3-wise-sqlserver-executor` is the red-line channel; C3
   generalizes its watermark→`where` pattern safely for non-unique watermarks **without** touching or
   importing it.
@@ -248,6 +255,6 @@ real Postgres/MSSQL smoke must still prove the complete wire path and boundary b
 ## Gating posture
 
 New integration-core read-only surface → post-GATE **scoped, read-only opt-in**. The runtime slices through
-#2628 have landed; **C3-5 remains a separate explicit validation opt-in** before calling C3 complete. No K3
-surface, no RBAC/auth touch, no write ⇒ low-risk scoped gate. This track stays **parallel to the K3 line**
-and blocks nothing on it.
+#2628 have landed, and #2631 closes the CI real-DB wire-vs-fixture lock. Remaining work here is config
+hardening / UI ergonomics, not another runtime turn-on. No K3 surface, no RBAC/auth touch, no write ⇒ low-risk
+scoped gate. This track stays **parallel to the K3 line** and blocks nothing on it.
