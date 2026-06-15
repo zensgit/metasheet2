@@ -3207,6 +3207,27 @@
               "mirrorOf": {
                 "type": "string",
                 "description": "Bidirectional / mirror links MVP — present ONLY on the DERIVED (mirror) side. Its value is the paired FORWARD field's id. A field with `mirrorOf` set resolves the reverse projection of the forward edge (`WHERE field_id=mirrorOf AND foreign_record_id=<record>`) and is forced READ-ONLY (mirror-side editing is deferred), so the single canonical edge never gains a second row."
+              },
+              "visibilityRule": {
+                "type": "object",
+                "description": "Conditional field-VISIBILITY (form-conditional-fields MVP, 2026-06-14). When present, presentation surfaces (the form view) show/hide THIS field based on a condition evaluated against ANOTHER field's value in the SAME record being entered. Absent ⇒ always visible (backward-compatible). The `operator` vocabulary is shared with conditional formatting (`gt`/`gte`/`lt`/`lte`/`eq`/`neq`/`between`/`contains`/`not_contains`/`is_empty`/ `is_not_empty`/`is_today`/`is_in_last_n_days`/`is_in_next_n_days`/`is_overdue`/`is_true`/ `is_false`); value-less operators omit `value`. PRESENTATION ONLY — a field hidden by this rule is NOT a security boundary; the value is still masked (or not) by the normal field-permission layer. Never a substitute for field permissions.",
+                "required": [
+                  "fieldId",
+                  "operator"
+                ],
+                "properties": {
+                  "fieldId": {
+                    "type": "string",
+                    "description": "Id of the OTHER field in the same record whose value the condition reads."
+                  },
+                  "operator": {
+                    "type": "string",
+                    "description": "Condition operator (shared with conditional-formatting vocabulary)."
+                  },
+                  "value": {
+                    "description": "Comparison operand. Omitted for value-less operators (the `is_*` family); a 2-element array for `between`; a positive integer for the `*_n_days` operators; otherwise a scalar."
+                  }
+                }
               }
             }
           },

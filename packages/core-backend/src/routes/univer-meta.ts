@@ -16,6 +16,7 @@ import {
   isFieldPermissionHidden,
 } from '../multitable/permission-derivation'
 import { validateAiShortcutFieldProperty } from '../multitable/ai-shortcut-config'
+import { withFieldVisibilityRule } from '../multitable/field-visibility-rule'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import {
   deriveCapabilities,
@@ -1583,6 +1584,13 @@ function applyFieldValidationNormalisation(obj: Record<string, unknown>): Record
 }
 
 function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown): Record<string, unknown> {
+  // `visibilityRule` is cross-cutting (any field type) — sanitize + merge it
+  // uniformly so the write path can never leak a malformed rule via `...obj`
+  // passthrough. Mirrors field-codecs.ts's sanitizeFieldProperty (shared helper).
+  return withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property)
+}
+
+function sanitizeFieldPropertyByType(type: UniverMetaField['type'], property: unknown): Record<string, unknown> {
   const obj = applyFieldValidationNormalisation(normalizeJson(property))
   if (type === 'select' || type === 'multiSelect') {
     const options = extractSelectOptions(obj) ?? []
