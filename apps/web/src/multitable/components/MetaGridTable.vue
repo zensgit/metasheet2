@@ -329,7 +329,7 @@ import type {
   RowDensity,
 } from '../types'
 import type { SortRule } from '../composables/useMultitableGrid'
-import { composeStyleObject, type EvaluatedFormatting } from '../utils/conditional-formatting'
+import { composeStyleObject, type EvaluatedFormatting, type FieldScaleMap } from '../utils/conditional-formatting'
 
 interface ConditionalFormattingByRecord {
   byRecordId: Map<string, EvaluatedFormatting>
@@ -388,6 +388,7 @@ const props = defineProps<{
   canComment?: boolean
   commentPresence?: Record<string, MultitableCommentPresenceSummary | undefined>
   conditionalFormatting?: ConditionalFormattingByRecord
+  conditionalFormattingScale?: FieldScaleMap
   aggregationConfig?: Record<string, string>
   aggregates?: Record<string, { fn: string; value: number }>
   aggregateTooLarge?: boolean
@@ -596,15 +597,26 @@ function cellStyle(rid: string, fid: string, ci?: number) {
   const formatStyle = formatting
     ? composeStyleObject(undefined, formatting.cellStyles[fid])
     : undefined
+  // Data bar (A5-1): render the bar as a left-anchored gradient on the cell.
+  // Per design-lock §2.3 the bar takes the cell background; the operator rule's
+  // textColor still applies, but its backgroundColor is dropped so the two
+  // don't fight. Covers both the grouped and flat render paths (both call this).
+  const scale = props.conditionalFormattingScale?.byField[fid]?.byRecordId[rid]
+  const scaleStyle: Record<string, string> | undefined = scale
+    ? { backgroundImage: `linear-gradient(to right, ${scale.barColor} ${scale.barPct}%, transparent ${scale.barPct}%)` }
+    : undefined
+  const effectiveFormat: Record<string, string> | undefined = scale
+    ? (formatStyle?.color ? { color: formatStyle.color } : undefined)
+    : formatStyle
   // frozen body cell: sticky-left + an OPAQUE bg (occludes scrolled-under content). Preserve any
   // conditional-formatting backgroundColor — only fall back to #fff when formatting set none. (Row
   // hover/selection tint is still not shown on frozen cells — accepted MVP limitation; conditional
-  // formatting is NOT lost.)
+  // formatting is NOT lost.) With a data bar present, the opaque base is #fff so the gradient shows.
   const frozenStyle: Record<string, string> | undefined = frozen
-    ? { position: 'sticky', left: `${frozenLeft(ci!)}px`, zIndex: '2', backgroundColor: formatStyle?.backgroundColor ?? '#fff' }
+    ? { position: 'sticky', left: `${frozenLeft(ci!)}px`, zIndex: '2', backgroundColor: effectiveFormat?.backgroundColor ?? '#fff' }
     : undefined
-  if (!widthStyle && !formatStyle && !frozenStyle) return undefined
-  return { ...(widthStyle ?? {}), ...(formatStyle ?? {}), ...(frozenStyle ?? {}) }
+  if (!widthStyle && !effectiveFormat && !scaleStyle && !frozenStyle) return undefined
+  return { ...(widthStyle ?? {}), ...(effectiveFormat ?? {}), ...(scaleStyle ?? {}), ...(frozenStyle ?? {}) }
 }
 
 // ── frozen columns (left-prefix) ──────────────────────────────────────────

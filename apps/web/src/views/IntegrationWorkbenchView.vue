@@ -177,17 +177,30 @@
         <div v-if="isDataSourceBridgeKind" class="integration-workbench__grid integration-workbench__grid--compact" data-testid="data-source-bridge-picker">
           <label>
             <span>数据源(只读)</span>
-            <select v-model="connectionDraft.dataSourceId" data-testid="data-source-bridge-id">
+            <select v-model="connectionDraft.dataSourceId" data-testid="data-source-bridge-id" @change="onBridgeDataSourceChange">
               <option value="">请选择已配置的数据源</option>
               <option v-for="ds in bridgeDataSources" :key="ds.id" :value="ds.id">{{ ds.name }} · {{ ds.type }}</option>
             </select>
           </label>
           <label>
             <span>对象(表 / 视图)</span>
-            <input v-model="connectionDraft.dataSourceObject" data-testid="data-source-bridge-object" placeholder="例如 public.items" />
+            <select
+              v-model="connectionDraft.dataSourceObject"
+              data-testid="data-source-bridge-object"
+              :disabled="bridgeDataSourceObjectsLoading || !connectionDraft.dataSourceId || bridgeDataSourceObjectOptions.length === 0"
+            >
+              <option value="">{{ bridgeDataSourceObjectOptions.length > 0 ? '请选择表 / 视图' : '请先加载表 / 视图列表' }}</option>
+              <option v-for="object in bridgeDataSourceObjectOptions" :key="object.value" :value="object.value">
+                {{ object.label }}
+              </option>
+            </select>
           </label>
+          <p v-if="bridgeDataSourceObjectsLoading" class="integration-workbench__hint" data-testid="data-source-bridge-object-loading">正在加载表 / 视图列表...</p>
+          <p v-if="!bridgeDataSourceObjectsLoading && connectionDraft.dataSourceId && bridgeDataSourceObjectOptions.length === 0 && !bridgeDataSourceObjectsError" class="integration-workbench__hint" data-testid="data-source-bridge-object-empty">没有可选表 / 视图；请回 /data-sources 检查权限或 schema。</p>
+          <p v-if="selectedBridgeObjectSummary" class="integration-workbench__hint" data-testid="data-source-bridge-object-summary">{{ selectedBridgeObjectSummary }}</p>
           <p class="integration-workbench__hint" data-testid="data-source-bridge-hint">凭据由 /data-sources 管理,这里只引用 dataSourceId,不复制账号密码。</p>
           <p v-if="bridgeDataSourcesError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-error">{{ bridgeDataSourcesError }}</p>
+          <p v-if="bridgeDataSourceObjectsError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-object-error">{{ bridgeDataSourceObjectsError }}</p>
         </div>
         <div v-if="connectionDraftDuplicateWarning" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="connection-duplicate-warning">
           {{ connectionDraftDuplicateWarning }}
@@ -1178,8 +1191,8 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
-import { listDataSources } from '../data-sources/api'
-import type { DataSourceListItem } from '../data-sources/types'
+import { getDataSourceSchema, listDataSources } from '../data-sources/api'
+import type { DataSourceListItem, DataSourceTableInfo } from '../data-sources/types'
 import {
   canReadFromSystem,
   canWriteToSystem,
@@ -1308,6 +1321,13 @@ interface ConnectionDraft {
   // The connection only ever references a data_sources id — credentials stay in /data-sources.
   dataSourceId: string
   dataSourceObject: string
+}
+
+interface BridgeDataSourceObjectOption {
+  value: string
+  label: string
+  kind: 'table' | 'view'
+  columnCount: number | null
 }
 
 interface PlmApprovalCapabilityEntry {
@@ -1499,6 +1519,10 @@ const PLM_BOM_MULTITABLE_FEATURE_KEY = 'bom_multitable'
 const bridgeDataSources = ref<DataSourceListItem[]>([])
 const bridgeDataSourcesError = ref('')
 const bridgeDataSourcesLoaded = ref(false)
+const bridgeDataSourceObjectOptions = ref<BridgeDataSourceObjectOption[]>([])
+const bridgeDataSourceObjectsLoading = ref(false)
+const bridgeDataSourceObjectsError = ref('')
+let bridgeDataSourceObjectRequestId = 0
 const plmCapabilitiesBySystemId = ref<Record<string, PlmIntegrationCapabilitiesResult>>({})
 const plmCapabilitiesLoadingSystemIds = ref<Set<string>>(new Set())
 const isDataSourceBridgeKind = computed(() => connectionDraft.kind === DATA_SOURCE_BRIDGE_KIND)
@@ -1515,8 +1539,80 @@ async function loadBridgeDataSources(): Promise<void> {
 
 // Lazy: only fetch the data-source list when the operator actually picks the bridge kind.
 watch(() => connectionDraft.kind, (kind) => {
-  if (kind === DATA_SOURCE_BRIDGE_KIND) void loadBridgeDataSources()
+  if (kind === DATA_SOURCE_BRIDGE_KIND) {
+    void loadBridgeDataSources()
+    if (connectionDraft.dataSourceId.trim()) void loadBridgeDataSourceObjects(connectionDraft.dataSourceId)
+  } else {
+    clearBridgeDataSourceObjects()
+  }
 })
+
+function qualifiedBridgeObjectName(item: DataSourceTableInfo): string {
+  const name = String(item.name || '').trim()
+  const schema = typeof item.schema === 'string' ? item.schema.trim() : ''
+  if (!name) return ''
+  if (!schema || name.includes('.')) return name
+  return `${schema}.${name}`
+}
+
+function bridgeObjectLabel(item: DataSourceTableInfo, kind: 'table' | 'view'): string {
+  const value = qualifiedBridgeObjectName(item)
+  const prefix = kind === 'view' ? '视图' : '表'
+  const columnCount = Array.isArray(item.columns) ? item.columns.length : null
+  return columnCount === null ? `${prefix} · ${value}` : `${prefix} · ${value} · ${columnCount} 列`
+}
+
+function buildBridgeObjectOptions(tables: DataSourceTableInfo[] | undefined, kind: 'table' | 'view'): BridgeDataSourceObjectOption[] {
+  return (Array.isArray(tables) ? tables : [])
+    .map((item) => {
+      const value = qualifiedBridgeObjectName(item)
+      if (!value) return null
+      return {
+        value,
+        label: bridgeObjectLabel(item, kind),
+        kind,
+        columnCount: Array.isArray(item.columns) ? item.columns.length : null,
+      }
+    })
+    .filter((item): item is BridgeDataSourceObjectOption => item !== null)
+}
+
+async function loadBridgeDataSourceObjects(dataSourceId: string): Promise<void> {
+  const id = dataSourceId.trim()
+  const requestId = ++bridgeDataSourceObjectRequestId
+  bridgeDataSourceObjectOptions.value = []
+  bridgeDataSourceObjectsError.value = ''
+  if (!id) {
+    bridgeDataSourceObjectsLoading.value = false
+    return
+  }
+  bridgeDataSourceObjectsLoading.value = true
+  try {
+    const schema = await getDataSourceSchema(id)
+    if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.dataSourceId.trim() !== id) return
+    bridgeDataSourceObjectOptions.value = [
+      ...buildBridgeObjectOptions(schema.tables, 'table'),
+      ...buildBridgeObjectOptions(schema.views, 'view'),
+    ]
+  } catch (error) {
+    if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.dataSourceId.trim() !== id) return
+    bridgeDataSourceObjectsError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    if (requestId === bridgeDataSourceObjectRequestId) bridgeDataSourceObjectsLoading.value = false
+  }
+}
+
+function clearBridgeDataSourceObjects(): void {
+  bridgeDataSourceObjectRequestId += 1
+  bridgeDataSourceObjectOptions.value = []
+  bridgeDataSourceObjectsLoading.value = false
+  bridgeDataSourceObjectsError.value = ''
+}
+
+function onBridgeDataSourceChange(): void {
+  connectionDraft.dataSourceObject = ''
+  void loadBridgeDataSourceObjects(connectionDraft.dataSourceId)
+}
 
 function buildDataSourceBridgeConfig(): Record<string, unknown> {
   const object = connectionDraft.dataSourceObject.trim()
@@ -1770,14 +1866,26 @@ const connectionDraftJsonError = computed(() => {
 })
 const canSaveConnectionDraft = computed(() => {
   // The bridge kind requires BOTH a picked data source AND an object (table/view) — without the
-  // object the source is not readable (v1 has no schema dropdown, so the text input is load-bearing).
-  if (isDataSourceBridgeKind.value && (!connectionDraft.dataSourceId.trim() || !connectionDraft.dataSourceObject.trim())) return false
+  // object the source is not readable. C4-1 requires the object to come from the schema-backed
+  // dropdown; loading/error/empty schema states fail closed instead of accepting a manual string.
+  if (isDataSourceBridgeKind.value) {
+    const selectedObject = connectionDraft.dataSourceObject.trim()
+    const knownObject = bridgeDataSourceObjectOptions.value.some((item) => item.value === selectedObject)
+    if (!connectionDraft.dataSourceId.trim() || !selectedObject || bridgeDataSourceObjectsLoading.value || bridgeDataSourceObjectsError.value || !knownObject) return false
+  }
   return Boolean(
     connectionDraft.name.trim()
     && connectionDraft.kind
     && !connectionDraftRoleWarning.value
     && (isDataSourceBridgeKind.value || !connectionDraftJsonError.value),
   )
+})
+const selectedBridgeObjectSummary = computed(() => {
+  if (!isDataSourceBridgeKind.value || !connectionDraft.dataSourceObject.trim()) return ''
+  const option = bridgeDataSourceObjectOptions.value.find((item) => item.value === connectionDraft.dataSourceObject.trim())
+  if (!option) return ''
+  const kindLabel = option.kind === 'view' ? '视图' : '表'
+  return option.columnCount === null ? `${kindLabel} · 仅保存对象名，不保存行数据。` : `${kindLabel} · ${option.columnCount} 列 · 仅保存对象名，不保存行数据。`
 })
 const sourceDatasetTitle = computed(() => selectedObjectLabel('source') || '请选择来源数据集')
 const targetDatasetTitle = computed(() => selectedObjectLabel('target') || '请选择目标数据集')
@@ -2268,6 +2376,7 @@ function resetConnectionDraft(): void {
   connectionDraft.capabilitiesText = '{}'
   connectionDraft.dataSourceId = ''
   connectionDraft.dataSourceObject = ''
+  clearBridgeDataSourceObjects()
   connectionDraftMode.value = 'new'
 }
 
@@ -2281,6 +2390,7 @@ function editConnection(system: WorkbenchExternalSystem): void {
   connectionDraft.capabilitiesText = stringifyConnectionDraftJson(system.capabilities)
   connectionDraft.dataSourceId = bridgeConfigString(system.config, 'dataSourceId')
   connectionDraft.dataSourceObject = bridgeConfigString(system.config, 'object')
+  if (system.kind === DATA_SOURCE_BRIDGE_KIND) void loadBridgeDataSourceObjects(connectionDraft.dataSourceId)
   connectionDraftMode.value = 'edit'
   inventoryExpanded.value = true
   setStatus(`已载入连接草稿：${system.name}`, 'idle')
@@ -2296,6 +2406,7 @@ function copyConnection(system: WorkbenchExternalSystem): void {
   connectionDraft.capabilitiesText = stringifyConnectionDraftJson(system.capabilities)
   connectionDraft.dataSourceId = bridgeConfigString(system.config, 'dataSourceId')
   connectionDraft.dataSourceObject = bridgeConfigString(system.config, 'object')
+  if (system.kind === DATA_SOURCE_BRIDGE_KIND) void loadBridgeDataSourceObjects(connectionDraft.dataSourceId)
   connectionDraftMode.value = 'copy'
   inventoryExpanded.value = true
   setStatus(`已复制 ${system.name} 为新连接草稿；保存前请改名并确认用途。`, 'idle')

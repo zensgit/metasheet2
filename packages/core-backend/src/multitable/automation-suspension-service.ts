@@ -24,6 +24,11 @@ import { toJsonValue } from '../db/type-helpers'
 import { redactValue } from './automation-log-redact'
 import { AutomationJobService } from './automation-job-service'
 import type { AutomationAction } from './automation-actions'
+import {
+  parseResumeCursor,
+  type ConditionBranchResumeCursor,
+  type ParsedResumeCursor,
+} from './automation-resume-cursor'
 
 /** Suspend-time action sequence fingerprint (D4b rule-drift guard) — non-secret (types only). */
 export interface ActionFingerprint {
@@ -42,6 +47,8 @@ export interface SuspensionRow {
   reason: string
   actionFingerprint: ActionFingerprint
   triggerEvent: unknown
+  /** A6-3-3 branch-local resume cursor, parsed + validated; top_level for legacy A6-2 rows. */
+  resumeCursor: ParsedResumeCursor
   status: string
 }
 
@@ -108,6 +115,54 @@ export class AutomationSuspensionService {
     return resumeToken
   }
 
+  /**
+   * A6-3-3 branch-local suspend: persist the suspension row WITH the structured
+   * resume cursor + the suspended branch-child C1 job (step_key, not top-level
+   * index), atomically. `step_index` stores the parent `condition_branch` index
+   * so the existing top-level locators still work; the cursor carries the branch
+   * detail. The top-level action fingerprint guards the parent position; the
+   * cursor's `branchActionFingerprint` guards the selected branch path.
+   */
+  async createBranchLocal(input: {
+    executionId: string
+    rule: { id: string; sheetId?: string; actions: ReadonlyArray<AutomationAction> }
+    recordId: string
+    triggerEvent: unknown
+    cursor: ConditionBranchResumeCursor
+    action: AutomationAction
+  }): Promise<string> {
+    const resumeToken = randomUUID()
+    const fingerprint = computeActionFingerprint(input.rule.actions)
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto('multitable_automation_suspensions')
+        .values({
+          id: `asp_${randomUUID()}`,
+          execution_id: input.executionId,
+          rule_id: input.rule.id,
+          sheet_id: input.rule.sheetId ?? null,
+          record_id: input.recordId || null,
+          step_index: input.cursor.parentStepIndex,
+          resume_token: resumeToken,
+          reason: 'external_event',
+          action_fingerprint: toJsonValue(fingerprint) as never,
+          trigger_event: input.triggerEvent == null ? null : (toJsonValue(redactValue(input.triggerEvent)) as never),
+          // Non-secret (ids + types only); stored unredacted so resume re-derives the branch position.
+          resume_cursor: toJsonValue(input.cursor) as never,
+          status: 'pending',
+        })
+        .execute()
+      await this.jobService.writeSuspendedBranchJob(
+        input.executionId,
+        { id: input.rule.id, sheetId: input.rule.sheetId },
+        input.cursor,
+        input.action,
+        trx,
+      )
+    })
+    return resumeToken
+  }
+
   /** Look up a suspension by its resume token (null if unknown → route 404). */
   async findByToken(resumeToken: string): Promise<SuspensionRow | null> {
     const row = await db
@@ -150,6 +205,10 @@ export class AutomationSuspensionService {
       reason: row.reason as string,
       actionFingerprint: { count: Number(fp.count ?? 0), hash: String(fp.hash ?? '') },
       triggerEvent: typeof row.trigger_event === 'string' ? JSON.parse(row.trigger_event) : (row.trigger_event ?? null),
+      // NULL → top_level (A6-2 legacy); non-null-but-malformed → invalid (resume fails closed).
+      resumeCursor: parseResumeCursor(
+        typeof row.resume_cursor === 'string' ? row.resume_cursor : (row.resume_cursor ?? null),
+      ),
       status: row.status as string,
     }
   }

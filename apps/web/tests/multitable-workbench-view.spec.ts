@@ -1453,6 +1453,13 @@ describe('MultitableWorkbench view wiring', () => {
       container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
       await flushUi()
 
+      // A2: export buttons now open the export-options dialog (column/row picker);
+      // confirm it (defaults = all scoped columns, all rows) to fire the export.
+      const confirmBtn = document.body.querySelector<HTMLButtonElement>('.meta-export__btn--primary')
+      expect(confirmBtn).not.toBeNull()
+      confirmBtn!.click()
+      await flushUi()
+
       expect(createObjectURLMock).toHaveBeenCalledTimes(1)
       const csv = exportedBlob
         ? await new Promise<string>((resolve, reject) => {

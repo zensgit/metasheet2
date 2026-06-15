@@ -6,6 +6,8 @@
 import { randomUUID } from 'crypto'
 import { Logger } from '../core/logger'
 import { redactString } from './automation-log-redact'
+import { computeActionFingerprint } from './automation-suspension-service'
+import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
 import { resolveBaseWritable } from './permission-service'
@@ -604,6 +606,13 @@ export interface ActionJobLifecycle {
    */
   onSuspend?(stepIndex: number, action: AutomationAction): Promise<void>
   /**
+   * A6-3-3: a `wait_for_callback` inside the SELECTED `condition_branch` — persist the
+   * branch suspension row + a `suspended` branch-child C1 job (via the resume cursor),
+   * then the executor STOPS. The branch tail + top-level tail run on admin resume.
+   * Optional: absent → branch-local wait fails closed.
+   */
+  onSuspendBranch?(cursor: ConditionBranchResumeCursor, action: AutomationAction): Promise<void>
+  /**
    * W6-1: `start_approval` in an opted-in rule — create one approval, persist the
    * approval bridge + a `suspended` C1 job, then STOP. Completion resumes from W5.
    */
@@ -909,6 +918,193 @@ export class AutomationExecutor {
   }
 
   /**
+   * A6-3-3 branch-local resume. The caller (resumeExecution) has claimed the single-use token,
+   * re-loaded the CURRENT rule, verified BOTH the top-level fingerprint AND the selected-branch
+   * fingerprint (drift guard, before the claim), and re-derived `context`. Order (scope-gate §4.3):
+   *   1. settle the suspended branch wait child job → resolved (by branch step_key);
+   *   2. run the branch tail (`branchActions[branchActionIndex+1..]`) under branch job keys;
+   *   3. settle the parent condition_branch job + push its step result;
+   *   4. continue the top-level tail after the parent.
+   * A second wait inside the branch tail re-suspends (execution stays `running`, new suspension
+   * row). Any failure or thrown settle leaves the execution terminal `failed` (B3; no 500 with the
+   * token consumed and the tail unrun).
+   */
+  async continueBranchExecution(
+    execution: AutomationExecution,
+    rule: AutomationRule,
+    context: ExecutionContext,
+    cursor: ConditionBranchResumeCursor,
+    jobLifecycle: ActionJobLifecycle,
+  ): Promise<AutomationExecution> {
+    const startTime = Date.now()
+    execution.status = 'running'
+
+    try {
+      const parentAction = rule.actions[cursor.parentStepIndex]
+      const config = (parentAction?.config ?? {}) as {
+        branches?: Array<{ key?: unknown; actions?: AutomationAction[] }>
+        defaultBranch?: { key?: unknown; actions?: AutomationAction[] } | null
+      }
+      const candidates = [
+        ...(Array.isArray(config.branches) ? config.branches : []),
+        ...(config.defaultBranch ? [config.defaultBranch] : []),
+      ]
+      const branch = candidates.find((candidate) => candidate.key === cursor.branchKey)
+      // Guarded upstream by the branch fingerprint check; defensive fail-closed if it drifted.
+      if (!parentAction || parentAction.type !== 'condition_branch' || !branch || !Array.isArray(branch.actions)) {
+        throw new Error('A6-3-3 resume: selected branch is no longer present in the current rule')
+      }
+      const branchActions = branch.actions
+      const waitAction = branchActions[cursor.branchActionIndex]
+
+      // 1. Settle the suspended branch wait child job → resolved (keeps the C1 branch lineage clean).
+      const waitResult: AutomationStepResult = {
+        actionType: waitAction?.type ?? 'wait_for_callback',
+        status: 'success',
+        durationMs: 0,
+      }
+      await jobLifecycle.onSettled(
+        cursor.parentStepIndex,
+        waitAction ?? parentAction,
+        waitResult,
+        { stepKey: cursor.stepKey, jobId: cursor.branchJobId, upstreamJobId: cursor.upstreamJobId },
+      )
+
+      // 2. Run the branch tail under branch job keys.
+      let upstreamJobId: string | null = cursor.branchJobId
+      let branchFailed = false
+      let branchError: string | undefined
+      let branchSuspendedAgain = false
+      let failedAtBranchIndex = -1
+      for (let i = cursor.branchActionIndex + 1; i < branchActions.length; i++) {
+        const branchAction = branchActions[i]
+        const stepKey = `${cursor.parentStepIndex}.branch.${cursor.branchKey}.${i}`
+        const jobId = `${context.executionId}:job:${cursor.parentStepIndex}:branch:${cursor.branchKey}:${i}`
+        const meta = { stepKey, jobId, upstreamJobId }
+
+        if (branchAction.type === 'wait_for_callback') {
+          if (!jobLifecycle.onSuspendBranch) {
+            branchFailed = true
+            branchError = 'branch-local wait_for_callback requires execution_mode workflow_job_v1'
+            failedAtBranchIndex = i
+            break
+          }
+          await jobLifecycle.onSuspendBranch(
+            {
+              kind: 'condition_branch',
+              parentStepIndex: cursor.parentStepIndex,
+              branchKey: cursor.branchKey,
+              branchActionIndex: i,
+              stepKey,
+              parentJobId: cursor.parentJobId,
+              branchJobId: jobId,
+              upstreamJobId,
+              branchActionFingerprint: cursor.branchActionFingerprint,
+            },
+            branchAction,
+          )
+          branchSuspendedAgain = true
+          break
+        }
+        if (
+          branchAction.type === 'condition_branch' ||
+          branchAction.type === 'parallel_branch' ||
+          branchAction.type === 'start_approval'
+        ) {
+          branchFailed = true
+          branchError = `${branchAction.type} is not supported inside a condition_branch`
+          failedAtBranchIndex = i
+          break
+        }
+
+        await jobLifecycle.onStart(cursor.parentStepIndex, branchAction, meta)
+        const branchActionResult = await this.executeSingleAction(branchAction, context)
+        await jobLifecycle.onSettled(cursor.parentStepIndex, branchAction, branchActionResult, meta)
+        upstreamJobId = jobId
+        if (branchActionResult.status === 'failed') {
+          branchFailed = true
+          branchError = branchActionResult.error ?? `Branch action ${i} failed`
+          failedAtBranchIndex = i
+          break
+        }
+      }
+
+      if (branchSuspendedAgain) {
+        execution.duration = (execution.duration ?? 0) + (Date.now() - startTime)
+        return execution
+      }
+
+      // On branch-tail failure, fail-stop the REMAINING selected-branch actions as `skipped` C1
+      // jobs (branch keys), mirroring the initial executeConditionBranch — keeps the branch job
+      // plane complete instead of leaving downstream branch work invisible.
+      if (branchFailed && failedAtBranchIndex >= 0) {
+        for (let j = failedAtBranchIndex + 1; j < branchActions.length; j++) {
+          const skippedStepKey = `${cursor.parentStepIndex}.branch.${cursor.branchKey}.${j}`
+          const skippedJobId = `${context.executionId}:job:${cursor.parentStepIndex}:branch:${cursor.branchKey}:${j}`
+          await jobLifecycle.onSkipped(cursor.parentStepIndex, branchActions[j], {
+            stepKey: skippedStepKey,
+            jobId: skippedJobId,
+            upstreamJobId,
+          })
+          upstreamJobId = skippedJobId
+        }
+      }
+
+      // 3. Settle the parent condition_branch job + push its step result.
+      const parentStepResult: AutomationStepResult = branchFailed
+        ? {
+            actionType: 'condition_branch',
+            status: 'failed',
+            error: branchError ?? 'Branch tail failed',
+            output: { selectedBranchKey: cursor.branchKey },
+            durationMs: 0,
+          }
+        : {
+            actionType: 'condition_branch',
+            status: 'success',
+            output: { selectedBranchKey: cursor.branchKey, matched: true },
+            durationMs: 0,
+          }
+      execution.steps.push(parentStepResult)
+      await jobLifecycle.onSettled(cursor.parentStepIndex, parentAction, parentStepResult, {
+        jobId: cursor.parentJobId,
+        stepKey: String(cursor.parentStepIndex),
+      })
+
+      // 4. Top-level tail: continue on success; on failure, fail-stop the remaining top-level
+      // actions as `skipped` (job plane + legacy steps), mirroring executeActions' parent-failure skip.
+      if (!branchFailed) {
+        const { suspended } = await this.executeActions(
+          rule.actions, context, execution.steps, jobLifecycle, cursor.parentStepIndex + 1,
+        )
+        if (suspended) {
+          execution.duration = (execution.duration ?? 0) + (Date.now() - startTime)
+          return execution
+        }
+      } else {
+        for (let k = cursor.parentStepIndex + 1; k < rule.actions.length; k++) {
+          await jobLifecycle.onSkipped(k, rule.actions[k])
+          execution.steps.push({ actionType: rule.actions[k].type, status: 'skipped', durationMs: 0 })
+        }
+      }
+
+      const hasFailed = execution.steps.some((step) => step.status === 'failed')
+      const allSkipped = execution.steps.length > 0 && execution.steps.every((step) => step.status === 'skipped')
+      execution.status = hasFailed ? 'failed' : allSkipped ? 'skipped' : 'success'
+      if (hasFailed) {
+        execution.error = execution.steps.find((step) => step.status === 'failed')?.error ?? 'Action failed'
+      }
+    } catch (err) {
+      execution.status = 'failed'
+      execution.error = err instanceof Error ? err.message : String(err)
+    }
+
+    execution.duration = (execution.duration ?? 0) + (Date.now() - startTime)
+    execution.finishedAt = new Date().toISOString()
+    return execution
+  }
+
+  /**
    * Execute actions in sequence. Stop on first failure.
    */
   private async executeActions(
@@ -998,10 +1194,20 @@ export class AutomationExecutor {
 
         await jobLifecycle.onStart(index, action, topLevelMeta)
         const branchResult = await this.executeConditionBranch(index, action, context, jobLifecycle)
-        results.push(branchResult.result)
-        await jobLifecycle.onSettled(index, action, branchResult.result)
+        if (branchResult.suspended) {
+          // A6-3-3 branch-local wait: the branch persisted its suspended child + the
+          // suspension row. The parent condition_branch job stays `running`; admin resume
+          // settles it after the branch tail. Stop the execution here.
+          return { suspended: true }
+        }
+        const branchStepResult = branchResult.result
+        if (!branchStepResult) {
+          throw new Error('condition_branch returned neither a suspension nor a result')
+        }
+        results.push(branchStepResult)
+        await jobLifecycle.onSettled(index, action, branchStepResult)
 
-        if (branchResult.result.status === 'failed') {
+        if (branchStepResult.status === 'failed') {
           for (let i = index + 1; i < actions.length; i++) {
             await jobLifecycle.onSkipped(i, actions[i])
             results.push({ actionType: actions[i].type, status: 'skipped', durationMs: 0 })
@@ -1184,7 +1390,15 @@ export class AutomationExecutor {
     action: AutomationAction,
     context: ExecutionContext,
     jobLifecycle: ActionJobLifecycle,
-  ): Promise<{ result: AutomationStepResult; lastJobId: string }> {
+  ): Promise<{
+    // A6-3-3: `suspended` is set when a branch-local `wait_for_callback` suspended the
+    // execution mid-branch; `cursor` then carries the resume position. Otherwise `result`
+    // is the settled condition_branch step result (one is always present).
+    suspended?: boolean
+    result?: AutomationStepResult
+    lastJobId: string
+    cursor?: ConditionBranchResumeCursor
+  }> {
     const startMs = Date.now()
     const parentJobId = `${context.executionId}:job:${stepIndex}`
     const config = action.config as {
@@ -1271,14 +1485,35 @@ export class AutomationExecutor {
       const meta = { stepKey, jobId, upstreamJobId }
 
       if (branchAction.type === 'wait_for_callback') {
-        const failed: AutomationStepResult = {
-          actionType: 'condition_branch',
-          status: 'failed',
-          error: 'wait_for_callback inside condition_branch is deferred to A6-3-3',
-          output,
-          durationMs: Date.now() - startMs,
+        // A6-3-3 branch-local suspend. Fail closed if no resume capability (shouldn't happen:
+        // condition_branch already requires workflow_job_v1, which supplies onSuspendBranch).
+        if (!jobLifecycle.onSuspendBranch) {
+          return {
+            lastJobId,
+            result: {
+              actionType: 'condition_branch',
+              status: 'failed',
+              error: 'branch-local wait_for_callback requires execution_mode workflow_job_v1',
+              output,
+              durationMs: Date.now() - startMs,
+            },
+          }
         }
-        return { result: failed, lastJobId }
+        const cursor: ConditionBranchResumeCursor = {
+          kind: 'condition_branch',
+          parentStepIndex: stepIndex,
+          branchKey: selectedBranchKey,
+          branchActionIndex: actionIndex,
+          stepKey,
+          parentJobId,
+          branchJobId: jobId,
+          upstreamJobId,
+          branchActionFingerprint: computeActionFingerprint(branchActions),
+        }
+        // Persists the branch suspension row + a `suspended` branch-child C1 job, then STOP.
+        // The parent condition_branch job stays `running`; resume settles it (scope-gate §4.3).
+        await jobLifecycle.onSuspendBranch(cursor, branchAction)
+        return { suspended: true, cursor, lastJobId }
       }
 
       if (branchAction.type === 'condition_branch') {

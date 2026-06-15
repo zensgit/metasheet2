@@ -259,6 +259,7 @@
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           :conditional-formatting="conditionalFormattingByRecord"
+          :conditional-formatting-scale="conditionalFormattingScaleByField"
           :ai-run-enabled="effectiveRowActions.canEdit"
           :ai-run-pending="Boolean(aiShortcut.state.pending)"
           :ai-run-busy="aiShortcutBusy"
@@ -272,6 +273,7 @@
           @open-field-comments="onOpenGridFieldComments"
           @toggle-lock="onToggleRecordLock"
           @ai-run="onGridAiRun"
+          @selection-change="onGridSelectionChange"
         />
       </div>
       <MetaRecordDrawer
@@ -355,6 +357,14 @@
       @close="closeImportModal"
       @cancel-import="cancelImport"
       @import="onBulkImport"
+    />
+    <MetaExportDialog
+      :visible="exportDialogVisible"
+      :fields="scopedGridFields"
+      :selected-row-count="exportSelectedRecordIds.size"
+      :initial-format="exportInitialFormat"
+      @confirm="onExportDialogConfirm"
+      @cancel="exportDialogVisible = false"
     />
     <MetaLinkPicker
       :visible="linkPickerVisible"
@@ -501,6 +511,7 @@ import { subscribeToMultitableCommentSheetRealtime } from '../realtime/comments-
 import MetaViewTabBar from '../components/MetaViewTabBar.vue'
 import MetaToolbar from '../components/MetaToolbar.vue'
 import MetaGridTable from '../components/MetaGridTable.vue'
+import MetaExportDialog, { type ExportConfirmPayload } from '../components/MetaExportDialog.vue'
 import MetaFormView from '../components/MetaFormView.vue'
 import MetaRecordDrawer from '../components/MetaRecordDrawer.vue'
 import MetaCommentsDrawer from '../components/MetaCommentsDrawer.vue'
@@ -538,7 +549,7 @@ import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue }
 import { parseFrozenIds } from '../utils/frozen-columns'
 import { useAiShortcut } from '../composables/useAiShortcut'
 import type { AiShortcutConfigInput } from '../api/client'
-import { buildRecordFormattingMap, extractRulesFromConfig } from '../utils/conditional-formatting'
+import { buildFieldScaleMap, buildRecordFormattingMap, extractRulesFromConfig, extractScaleRulesFromConfig } from '../utils/conditional-formatting'
 import {
   decorateAndSortBases,
   readFavoriteBaseIds,
@@ -894,6 +905,12 @@ const conditionalFormattingByRecord = computed(() => buildRecordFormattingMap(
   conditionalFormattingRules.value,
   grid.rows.value,
   scopedAllFields.value,
+))
+// A5-1: data-bar scale formatting. min/max over the already-loaded/masked rows
+// (client-side discipline; full-column server aggregate is a separate follow-up).
+const conditionalFormattingScaleByField = computed(() => buildFieldScaleMap(
+  extractScaleRulesFromConfig(workbench.activeView.value?.config),
+  grid.rows.value,
 ))
 const readOnlyFieldIds = computed(() =>
   Object.entries(effectiveFieldPermissions.value)
@@ -2535,12 +2552,58 @@ function closeImportModal() {
 }
 
 // --- CSV export ---
-function onExportCsv() {
-  const visibleFields = scopedGridFields.value
-  if (!visibleFields.length) return
-  const header = visibleFields.map((f) => csvEscape(f.name)).join(',')
-  const rows = grid.rows.value.map((row) =>
-    visibleFields.map((f) => {
+// --- Export dialog state (A2) ---
+const exportDialogVisible = ref(false)
+const exportInitialFormat = ref<'csv' | 'xlsx'>('xlsx')
+// Selected row ids surfaced from the grid's existing multi-select (selection-change).
+const exportSelectedRecordIds = ref<Set<string>>(new Set())
+function onGridSelectionChange(recordIds: string[]) {
+  exportSelectedRecordIds.value = new Set(recordIds)
+}
+
+// --- Export (A2: column/row selection via MetaExportDialog) ---
+// The toolbar's CSV/XLSX buttons now open the export-options dialog (column
+// checklist + row scope + format) instead of exporting immediately. Export
+// stays fully client-side over grid.rows — already permission-masked at read
+// time — so filtering already-authorized columns/rows adds no auth surface.
+type GridExportField = (typeof scopedGridFields)['value'][number]
+type GridExportRow = (typeof grid.rows)['value'][number]
+
+function onExportCsv() { openExportDialog('csv') }
+async function onExportXlsx() { openExportDialog('xlsx') }
+
+function openExportDialog(initialFormat: 'csv' | 'xlsx') {
+  if (!scopedGridFields.value.length) return
+  exportInitialFormat.value = initialFormat
+  exportDialogVisible.value = true
+}
+
+function onExportDialogConfirm(payload: ExportConfirmPayload) {
+  exportDialogVisible.value = false
+  const selectedFieldIds = new Set(payload.fieldIds)
+  // Preserve the on-screen column order; ignore unknown ids defensively.
+  const fields = scopedGridFields.value.filter((f) => selectedFieldIds.has(f.id))
+  if (!fields.length) return
+  const rows = payload.rowScope === 'selected'
+    ? grid.rows.value.filter((r) => exportSelectedRecordIds.value.has(r.id))
+    : grid.rows.value
+  if (payload.format === 'csv') doExportCsv(fields, rows)
+  else void doExportXlsx(fields, rows)
+}
+
+function triggerDownload(blob: Blob, extension: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${workbench.activeSheetId.value || 'export'}.${extension}`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function doExportCsv(fields: GridExportField[], rowList: GridExportRow[]) {
+  const header = fields.map((f) => csvEscape(f.name)).join(',')
+  const rows = rowList.map((row) =>
+    fields.map((f) => {
       const v = row.data[f.id]
       if (v === null || v === undefined) return ''
       if (typeof v === 'boolean') return v ? 'true' : 'false'
@@ -2549,13 +2612,7 @@ function onExportCsv() {
     }).join(','),
   )
   const csv = [header, ...rows].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${workbench.activeSheetId.value || 'export'}.csv`
-  a.click()
-  URL.revokeObjectURL(url)
+  triggerDownload(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), 'csv')
 }
 
 function csvEscape(val: string): string {
@@ -2563,15 +2620,12 @@ function csvEscape(val: string): string {
   return val
 }
 
-// --- XLSX export ---
-async function onExportXlsx() {
-  const visibleFields = scopedGridFields.value
-  if (!visibleFields.length) return
+async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[]) {
   try {
     const xlsxModule = (await import('xlsx')) as unknown as Parameters<typeof buildXlsxBuffer>[0]
-    const headers = visibleFields.map((f) => f.name)
-    const rows = grid.rows.value.map((row) =>
-      visibleFields.map((f) => {
+    const headers = fields.map((f) => f.name)
+    const rows = rowList.map((row) =>
+      fields.map((f) => {
         const v = row.data[f.id]
         if (v === null || v === undefined) return ''
         if (typeof v === 'boolean') return v
@@ -2583,13 +2637,7 @@ async function onExportXlsx() {
     )
     const sheetName = (workbench.activeSheetId.value || 'export').slice(0, 31)
     const buffer = buildXlsxBuffer(xlsxModule, { sheetName, headers, rows })
-    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${workbench.activeSheetId.value || 'export'}.xlsx`
-    a.click()
-    URL.revokeObjectURL(url)
+    triggerDownload(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'xlsx')
   } catch (err: any) {
     showError(err?.message ?? wb('toast.excelExportFailed', isZh.value))
   }
