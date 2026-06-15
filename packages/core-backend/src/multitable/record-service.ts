@@ -63,9 +63,11 @@ export type UniverMetaField = MultitableField
 export type LinkFieldConfig = {
   foreignSheetId: string
   limitSingleRecord: boolean
-  // Bidirectional / mirror links (design 2026-06-14) — same fields as the route-layer LinkFieldConfig.
-  // The single-record create/patch path (RecordService) reads `twoWay`/`mirrorFieldId` to fan reverse
-  // invalidation; `mirrorOf` (derived side) is forced read-only by the codec and rejected at write.
+  // Bidirectional / mirror links (design 2026-06-14) — same fields as the route-layer LinkFieldConfig, so
+  // the shared parseLinkFieldConfig output type-checks here. On this single-record path `mirrorOf` IS
+  // consumed (it is carried into the field guard so isFieldAlwaysReadOnly rejects a write to the derived
+  // mirror side); `twoWay`/`mirrorFieldId` are carried for type-parity — the mirror invalidation fan-out
+  // they drive lives on the bulk `/patch` path (RecordWriteService), matching the FOL-1 realtime precedent.
   foreignBaseId?: string
   twoWay?: boolean
   mirrorFieldId?: string
@@ -598,6 +600,13 @@ export class RecordService {
       )
 
       if (linkUpdates.size > 0) {
+        // Bidirectional / mirror links (design 2026-06-14 §4): a forward link write here changes what the
+        // paired mirror RESOLVES TO, but the mirror-sheet realtime invalidation fan-out is wired only on
+        // the bulk `/patch` path (RecordWriteService) — which is the grid's write path. This single-record
+        // create/patch path, like the existing FOL-1 related-record fan-out (also `/patch`-only — this class
+        // has no computeDependentLookupRollupRecords), does NOT push the mirror invalidation. The reverse
+        // READ is correct on every path (resolved in loadLinkValuesByRecord), so mirror data is right on the
+        // next refetch; only the push is deferred, consistent with the established realtime precedent.
         for (const [fieldId, { ids }] of linkUpdates.entries()) {
           for (const foreignId of ids) {
             await query(
@@ -1006,6 +1015,9 @@ export class RecordService {
         nextVersion = serverVersion
       }
 
+      // Bidirectional / mirror links (design 2026-06-14 §4): same as the create path above — the mirror
+      // realtime invalidation fan-out is `/patch`-only (the grid's write path), matching the existing
+      // FOL-1 precedent. The reverse READ stays correct here; only the single-record realtime push is deferred.
       for (const [fieldId, { ids }] of linkUpdates.entries()) {
         const currentLinks = await query(
           'SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2',
