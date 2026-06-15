@@ -41,6 +41,8 @@ const FLD_SECRET = `fld_rstr_secret_${TS}`
 const FLD_FX = `fld_rstr_fx_${TS}`
 const FLD_AUN = `fld_rstr_aun_${TS}`
 const FLD_LK = `fld_rstr_lk_${TS}`
+const FLD_BTN = `fld_rstr_btn_${TS}`
+const FLD_SEL = `fld_rstr_sel_${TS}`
 const USER_W = `u_rstr_writer_${TS}`
 const USER_RO = `u_rstr_ro_${TS}`
 
@@ -130,6 +132,8 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     await f(FLD_FX, 'Formula', 'formula', '{}', 4)
     await f(FLD_AUN, 'AutoNum', 'autoNumber', '{}', 5)
     await f(FLD_LK, 'Link', 'link', '{}', 6)
+    await f(FLD_BTN, 'Button', 'button', '{}', 7)
+    await f(FLD_SEL, 'Select', 'select', JSON.stringify({ options: [{ value: 'x' }, { value: 'y' }] }), 8)
 
     // Layer-3: USER_RO is read_only on SECRET (and a separate visible=false would also gate).
     await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [SHEET_ID, FLD_SECRET, 'user', USER_RO, true, true])
@@ -231,6 +235,8 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('RESTORE_FORBIDDEN')
+    // P3: the error must NOT echo server-derived forbidden field ids (would leak hidden-field metadata).
+    expect(JSON.stringify(res.body)).not.toContain(FLD_SECRET)
     // atomic: nothing written, version unchanged
     const data = await liveData(rid)
     expect(data[FLD_A]).toBe('a2')
@@ -286,6 +292,36 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('SCHEMA_DRIFT')
+  })
+
+  test('T6c: type-change fail-closed — old value invalid under the current field type → VALIDATION_ERROR, nothing written', async () => {
+    // FLD_SEL is now a select with options [x,y]; the v1 snapshot holds a value that is no longer a
+    // valid option (simulating a field whose type/constraints changed since capture).
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_SEL]: 'x' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_SEL]: 'no_longer_valid' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_SEL]: 'x' } }],
+    )
+    const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    // atomic: nothing written (validation precedes the transaction)
+    const data = await liveData(rid)
+    expect(data[FLD_A]).toBe('a2')
+    expect(data[FLD_SEL]).toBe('x')
+  })
+
+  test('T6d: button (no-value trigger) excluded — a legacy button key neither blocks nor is written', async () => {
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_BTN]: 'legacy_btn_now' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_BTN]: 'legacy_btn_old' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_BTN]: 'legacy_btn_now' } }],
+    )
+    const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
+    expect(res.status).toBe(200)
+    expect(res.body.data.restoredFieldIds).toContain(FLD_A)
+    expect(res.body.data.restoredFieldIds).not.toContain(FLD_BTN)
+    expect((await liveData(rid))[FLD_BTN]).toBe('legacy_btn_now') // untouched
   })
 
   test('T7: delete-only version → RESTORE_UNSUPPORTED; update+delete → uses update; hard-deleted record → 404', async () => {

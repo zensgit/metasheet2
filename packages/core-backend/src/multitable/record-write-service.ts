@@ -752,10 +752,12 @@ export class RecordWriteService {
           }
         }
 
-        // lock-guarded: bulk/multi-record PATCH — ensureRecordNotLocked enforced per record above.
-        // When there are unset keys, subtract them first: `(data - keys) || patch`. The empty-array
-        // case is avoided by branching, so existing set-only writes keep byte-identical SQL.
+        // bulk/multi-record PATCH (+restore unset path): the lock rule is enforced per record above via
+        // ensureRecordNotLocked. When there are unset keys, subtract them first: `(data - keys) || patch`;
+        // the empty-array case is branched so existing set-only writes keep byte-identical SQL. Each UPDATE
+        // template below carries its own adjacent lock-guarded marker for the RANK-8 structural scanner.
         const updateRes = unsetIds.length > 0
+          // lock-guarded: ensureRecordNotLocked enforced per record above (unset+set path)
           ? await query(
               `UPDATE meta_records
                SET data = (data - $5::text[]) || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
@@ -763,6 +765,7 @@ export class RecordWriteService {
                RETURNING version`,
               [JSON.stringify(patch), sheetId, recordId, actorId, unsetIds],
             )
+          // lock-guarded: ensureRecordNotLocked enforced per record above (set-only path)
           : await query(
               `UPDATE meta_records
                SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4

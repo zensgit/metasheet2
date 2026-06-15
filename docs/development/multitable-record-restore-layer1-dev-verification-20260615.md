@@ -2,9 +2,8 @@
 
 Companion to the design-lock: `docs/development/multitable-record-restore-layer1-design-20260615.md`.
 
-- **Branch / worktree:** `worktree-claude+multitable-record-restore-l1-20260615` (isolated worktree off `origin/main` @ `c71b7dd12`).
-- **Commit:** `cf25ccd89` — `feat(multitable): record-level version restore (Layer 1)`.
-- **Status:** Implemented + verified locally (typecheck, unit regression, real-DB matrix, OpenAPI parity all green). **Not pushed, no PR opened** — awaiting owner go.
+- **Branch:** `claude/multitable-record-restore-l1-20260615` (rebased onto current `origin/main`). **PR [#2654](https://github.com/zensgit/metasheet2/pull/2654)**.
+- **Status:** Implemented + verified locally (typecheck, unit 81/81, integration 33/33, OpenAPI parity). Maintainer review round (PR #2654) findings P1–P3 addressed — see §7.
 
 ---
 
@@ -61,21 +60,22 @@ vitest … run tests/integration/multitable-record-history-field-mask.test.ts   
 
 **Typecheck:** `npx tsc --noEmit` (packages/core-backend) → **exit 0, 0 errors**.
 
-**Unit regression (the hot write path I edited):**
+**Unit regression (the hot write path I edited + the RANK-8 lock-guard scanner):**
 ```
-vitest run tests/unit/record-write-service.test.ts record-service.test.ts yjs-rest-invalidation.test.ts → 77 passed (77)
+vitest run record-write-service.test.ts record-service.test.ts yjs-rest-invalidation.test.ts \
+            multitable-record-lock-guard.guard.test.ts → 81 passed (81)
 ```
 
 **Integration — new matrix + spine/history regression (single run):**
 ```
 vitest --config vitest.integration.config.ts run \
-  multitable-record-restore.test.ts            → 15 passed
+  multitable-record-restore.test.ts            → 17 passed
   multitable-record-history-field-mask.test.ts →  8 passed
   multitable-record-patch.api.test.ts          →  6 passed
   multitable-patch-partial-success.api.test.ts →  2 passed
-Tests  31 passed (31)
+Tests  33 passed (33)
 ```
-(Executed counts are non-zero — not a `describeIfDatabase` skip-green.)
+(Executed counts are non-zero — not a `describeIfDatabase` skip-green. One combined run flaked once on DB-pool timing and re-ran clean; the standalone restore suite is deterministically 17/17.)
 
 **OpenAPI parity:** `pnpm run verify:multitable-openapi:parity` → build OK; `✔ multitable openapi stays aligned with runtime contracts` (1 pass, 0 fail).
 
@@ -90,6 +90,8 @@ Tests  31 passed (31)
 | T5 / T5b | Differing `formula` / `autoNumber` neither blocks nor is overwritten (Lock D by type). |
 | T6 | Differing `link` not written; `meta_links` row left untouched. |
 | T6b | Snapshot field absent from current schema → `SCHEMA_DRIFT`. |
+| T6c | Type-change fail-closed: old value invalid under the current field type → `VALIDATION_ERROR`, nothing written. |
+| T6d | `button` (no-value trigger) excluded by raw type — neither blocks nor is written. |
 | T7 | Delete-only version → `RESTORE_UNSUPPORTED`; update+delete → uses update; hard-deleted record → 404. |
 | T8 | `null` snapshot → `SNAPSHOT_UNAVAILABLE` (no patch-replay fallback). |
 | T9 | Empty diff → `noop:true`; **stale `expectedVersion` → `VERSION_CONFLICT` even for a no-op**. |
@@ -109,9 +111,15 @@ Tests  31 passed (31)
 
 ## 5. Landing instructions (owner action)
 
-Nothing is pushed. To land:
-1. Push the branch and open a PR against `main` (the worktree is already based on `origin/main` @ `c71b7dd12`; rebase if main advanced).
-2. CI runs the new matrix automatically (enumerated in `plugin-tests.yml`).
-3. The local throwaway DB `metasheet_restore_l1` can be dropped (`dropdb metasheet_restore_l1`).
+On PR [#2654](https://github.com/zensgit/metasheet2/pull/2654), rebased onto current `main`. CI runs the new matrix automatically (enumerated in `plugin-tests.yml`). The local throwaway DB `metasheet_restore_l1` can be dropped (`dropdb metasheet_restore_l1`).
 
 Self-review checklist from the design's §5 is satisfied: no patch-replay restore; restore runs its own layer-3 gate; computed/link/system-auto excluded by type and `meta_links` untouched; `SCHEMA_DRIFT`/`SNAPSHOT_UNAVAILABLE` guards; value-change emits exactly one revision while no-op emits none (concurrency still checked); removed fields are `null` in the revision patch; `targetVersion` resolution excludes deletes; `RecordWriteSource` includes `'restore'`; one write path only; endpoint-scoped (no RBAC/auth central-file change).
+
+## 6. Maintainer review round (PR #2654) — findings addressed
+
+- **[P1, blocker] RANK-8 lock-guard CI failure.** Splitting the spine UPDATE into a set-only / unset+set ternary moved the SQL beyond the single `// lock-guarded:` marker's 3-line scan window, so the structural guard reported "2 mutation site(s) with NO lock disposition" (this was the red `test (18.x)`; `20.x` was the fail-fast cancel). Fix: a `// lock-guarded:` marker now sits immediately above **each** UPDATE template. Verified: `multitable-record-lock-guard.guard.test.ts` 4/4.
+- **[P2] `button` not excluded (Lock D).** `button` is a no-value trigger the write spine refuses. Added it to the Lock D exclusion. Root cause found while fixing: `mapFieldType` has no `button` case, so it folds `button`→`string` and `guard.type` never reports `'button'` (the spine's own `field.type === 'button'` rejection is therefore currently inert too). To stay correct regardless of that shared mapper, restore excludes `button` by its **raw DB type**. New test `T6d`. **Flagged for the button-field track:** `mapFieldType` should map `button`→`button` so the type union + spine rejection + serialization are consistent — intentionally NOT changed here to keep this PR scoped.
+- **[P2] design ↔ impl mismatch on type-change drift.** The design claimed type-change → `SCHEMA_DRIFT`, which Slice 1 cannot detect (no schema-at-capture). Design/checklist corrected to the real semantic: missing-field → `SCHEMA_DRIFT`; type-change → caught fail-closed by the spine value validators (`VALIDATION_ERROR`); precise type-snapshot is Layer 2. New test `T6c` locks the fail-closed behavior.
+- **[P3] forbidden-field-id leak.** `RESTORE_FORBIDDEN` echoed server-derived forbidden field ids (unlike `/patch`, restore derives them from the unmasked snapshot), leaking hidden-field metadata. Message generalized; `T4` now asserts the hidden id is absent from the response.
+
+Not a blocker (per review): the Gemini bot's `recordId` redundancy comment.

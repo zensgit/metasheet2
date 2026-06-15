@@ -38,7 +38,7 @@ Reuse the canonical bulk write spine end-to-end (transaction + optimistic versio
 
 - **`source: 'restore'` extends `RecordWriteSource`.** `post-commit-hooks.ts:1` types it `'rest' | 'yjs-bridge'`; add `'restore'`. The invalidator skip is `=== 'yjs-bridge'`, so `'restore'` correctly **fires** the Yjs invalidation (it is not bridge-origin). The revision `source` column stores `'restore'` too.
 - **No-op still validates `expectedVersion` first.** The optimistic-concurrency check runs before the empty-diff no-op returns (a stale caller must get `VERSION_CONFLICT`, not a misleading `noop: true`). See §3 algorithm ordering.
-- **Schema drift is explicit, not silent.** A snapshot field id that no longer exists in the current sheet schema, or whose type changed since capture, → reject with `SCHEMA_DRIFT` (fail-closed; Slice 1 does not do cross-schema restore). Type-based exclusions (Lock D: computed/link/system-auto/attachment) are handled by type and are *not* drift.
+- **Schema drift is explicit, not silent — to the extent detectable in Slice 1.** A snapshot field id that no longer exists in the current schema → reject with `SCHEMA_DRIFT` (fail-closed). A field whose *type* changed since capture is **not** detected as drift in Slice 1 — no schema-at-capture is stored (that is Layer 2); instead the spine's per-type value validators reject an incompatible old value (→ `VALIDATION_ERROR`, atomic, nothing written). The only residual gap is an old value valid under *both* the old and new type (a benign coercion), accepted and documented as a Layer-2 follow-up. Type-based exclusions (Lock D: computed/link/system-auto/attachment/button) are handled by type and are *not* drift.
 
 ## 1. Evidence
 
@@ -99,8 +99,8 @@ Gap that couples to retention: nothing prunes `meta_record_revisions` — the lo
 - No link-field value restore (Lock D): link fields are excluded from the Slice 1 diff and restored together with `meta_links` handling in Slice 2.
 - No attachment-field restore unless Gate 0 decides otherwise. Recommended deferral: attachment ids in `data` reference externally-retained blobs (attachment-orphan-retention), so an old attachment set may point at GC'd files; restoring it cleanly needs retention-aware handling, not a raw `data` write.
 - No set-to-empty unset (decided): unset is faithful key removal (§3), so version-N reproduction is exact, not merely observable.
-- No restore of computed / link / system-auto (`autoNumber`/`createdTime`/`modifiedTime`/`createdBy`/`modifiedBy`) fields — excluded by type (Lock D).
-- No cross-schema restore: drifted field ids / changed types → `SCHEMA_DRIFT`, not a silent partial restore.
+- No restore of computed / link / `button` / system-auto (`autoNumber`/`createdTime`/`modifiedTime`/`createdBy`/`modifiedBy`) fields — excluded by type (Lock D).
+- No cross-schema restore: a snapshot field id absent from the current schema → `SCHEMA_DRIFT`. A *type* change is not detected as drift in Slice 1 (handled fail-closed by the value validators; see §0); precise type-snapshot detection is Layer 2.
 - No per-field partial-skip restore in this slice; atomic reject is the default (`skippedFieldIds` always `[]`). Partial restore is a deferred opt-in.
 - No new permission model, no RBAC/auth central-file changes — endpoint-scoped kernel polish under the standing K3 lock.
 - No base/sheet-level or schema-inclusive snapshot (Layer 2). No revival or repointing of the dormant view-level `SnapshotService`.
@@ -118,7 +118,7 @@ Request `{ targetVersion, expectedVersion }`; response `{ recordId, newVersion, 
 - `RESTORE_UNSUPPORTED` — `targetVersion` resolves only to a `delete` revision (→ Slice 2). (A hard-deleted current record is `404 NOT_FOUND`, not this.)
 - `RESTORE_FORBIDDEN` — a restorable differing field fails the static guard or the layer-3 pre-check (atomic-reject default).
 - `SNAPSHOT_UNAVAILABLE` — resolved revision has a `null` snapshot (legacy/edge rows); restore cannot source values and refuses rather than guessing.
-- `SCHEMA_DRIFT` — the snapshot references a field absent from the current schema, or a field whose type changed since capture; Slice 1 does not do cross-schema restore.
+- `SCHEMA_DRIFT` — the snapshot references a field absent from the current schema. (A *type* change is not detected as drift in Slice 1 — it is handled fail-closed by the value validators; see §0.)
 - `VERSION_EXPIRED` — reserved: target older than the retention floor once retention lands.
 
 OpenAPI: add the path + all seven error codes + the `noop` response field, parity-locked with `packages/openapi`. Lock that `patch` values MAY be `null` to denote field removal (see the unset primitive below).
@@ -129,7 +129,7 @@ Given current record (`data = C`, server version `Vcur`) and target revision N (
 
 1. Existence: if the current record is absent from `meta_records` → `404 NOT_FOUND` (undelete is Slice 2). Resolve the target: `WHERE version = $targetVersion AND action <> 'delete' ORDER BY created_at DESC LIMIT 1`; none but a `delete` at that version → `RESTORE_UNSUPPORTED`; no revision at all → `VERSION_NOT_FOUND`. If the resolved revision's snapshot is `null` → `SNAPSHOT_UNAVAILABLE` (do not fall back to patch replay).
 2. **Concurrency pre-check (before any no-op):** read current `(C, Vcur)`; if `expectedVersion !== Vcur` → `VERSION_CONFLICT`. This runs for the no-op path too, so a stale caller never gets a misleading `noop: true`.
-3. Compute the **restore diff** over restorable fields only. Exclude **by type** (Lock D): computed (`formula`/`lookup`/`rollup`), `link`, system/auto (`autoNumber`/`createdTime`/`modifiedTime`/`createdBy`/`modifiedBy`), and `attachment` (unless Gate 0 opts in). **Schema drift:** if `S` carries a field id absent from the current schema, or whose type changed since capture → `SCHEMA_DRIFT` (do not silently skip).
+3. Compute the **restore diff** over restorable fields only. Exclude **by type** (Lock D): computed (`formula`/`lookup`/`rollup`), `link`, `button`, system/auto (`autoNumber`/`createdTime`/`modifiedTime`/`createdBy`/`modifiedBy`), and `attachment` (unless Gate 0 opts in). **Schema drift:** if `S` carries a field id absent from the current schema → `SCHEMA_DRIFT` (do not silently skip). A type-changed-but-still-present field is not flagged here; an incompatible old value is rejected downstream by the spine value validators.
    - field in `S` and `C[f] !== S[f]` → **set** f to `S[f]`.
    - field in `C` but not in `S` → **unset** f (it did not exist at version N).
    - (An all-empty `S = {}` is valid — every current restorable field becomes an unset, gated below; it is not a null and not an error.)
@@ -166,7 +166,9 @@ Seed: a record with a visible-writable field, a `read_only` field (layer-3), a c
 - `T5` computed exclusion: a formula field differing between versions does not block restore and is recomputed, not written verbatim.
 - `T5b` system/auto exclusion (Lock D): an `autoNumber` field differing between versions neither blocks restore nor is overwritten — it is excluded by type, and the live `autoNumber` value is unchanged.
 - `T6` link exclusion (Lock D): a link field differing between versions is not written by restore, and `meta_links` for the record is left exactly as-is (no desync); the response reports it neither restored nor as a hard failure.
-- `T6b` schema drift: a snapshot field id absent from the current schema (or whose type changed) → `SCHEMA_DRIFT`; nothing written, no silent partial.
+- `T6b` schema drift: a snapshot field id absent from the current schema → `SCHEMA_DRIFT`; nothing written, no silent partial.
+- `T6c` type-change fail-closed: a field present-but-type-changed whose old value is incompatible with the new type is rejected (`VALIDATION_ERROR`), not silently written.
+- `T6d` button exclusion (Lock D): a legacy `button` key differing between versions does not block restore and is not written.
 - `T7` delete boundary + resolution (Lock C): a version that resolves only to a `delete` revision → `RESTORE_UNSUPPORTED`; a hard-deleted current record → `404`; a version shared by an `update` and a `delete` revision resolves to the `update` after-image.
 - `T8` null-snapshot guard: a resolved revision with `snapshot = null` returns `SNAPSHOT_UNAVAILABLE`; no write, no patch-replay fallback.
 - `T9` empty diff no-op: restoring to the current state with a correct `expectedVersion` writes nothing, bumps no version, emits no revision, returns `noop: true`. A no-op restore with a **stale** `expectedVersion` still returns `VERSION_CONFLICT` (the concurrency check precedes the no-op).
@@ -182,7 +184,7 @@ CI wiring is explicit, not glob-based: the new `tests/integration/multitable-rec
 - Restore sources the unmasked snapshot but runs its **own** layer-3 pre-check (the spine does not); no `visible=false` / `read_only=true` / unknown-permission field is ever written or echoed (Lock B enforced).
 - Computed, `link`, and system-auto (`autoNumber`/`createdTime`/`modifiedTime`/`createdBy`/`modifiedBy`) fields are excluded **by type** (Lock D); `meta_links` is never mutated by Slice 1; dependent computed fields are recomputed via `recalculateFormulaFields` (not `formulaRecalcHook`).
 - Unset is faithful key removal (`unsetFieldIds`), not set-to-empty; removed fields are `null` in the revision `patch` and listed in `changedFieldIds`.
-- Drifted field ids / changed types → `SCHEMA_DRIFT`; a `null` resolved snapshot → `SNAPSHOT_UNAVAILABLE`; neither falls back to patch replay or silent partial.
+- A snapshot field absent from the current schema → `SCHEMA_DRIFT`; a `null` resolved snapshot → `SNAPSHOT_UNAVAILABLE`; a type-changed field with an incompatible old value → `VALIDATION_ERROR` (fail-closed). None falls back to patch replay or a silent partial.
 - A value-changing restore emits exactly one new revision and bumps `version`; an empty-diff restore is a no-op (no revision, no bump) filtered before the `applied===0` skip — but the `expectedVersion` concurrency check still runs (stale no-op → `VERSION_CONFLICT`).
 - `targetVersion` resolution excludes `delete` revisions; hard-deleted record → `404`; ambiguous version resolves to the `update` after-image.
 - `RecordWriteSource` includes `'restore'`; the invalidator skip (`=== 'yjs-bridge'`) leaves restore firing the Yjs invalidator — no live-editor stale-overwrite.

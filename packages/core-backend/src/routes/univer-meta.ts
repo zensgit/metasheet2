@@ -5666,10 +5666,15 @@ export function univerMetaRouter(): Router {
       }
       return {}
     }
-    // Lock D: only fields whose authoritative value is a scalar in meta_records.data.
-    const isRestorableType = (t: string): boolean =>
-      t !== 'formula' && t !== 'lookup' && t !== 'rollup' && t !== 'link' && t !== 'attachment'
-      && t !== 'autoNumber' && t !== 'createdTime' && t !== 'modifiedTime' && t !== 'createdBy' && t !== 'modifiedBy'
+    // Lock D: only fields whose authoritative value is a scalar in meta_records.data. Everything the
+    // write spine refuses to write (computed, link, attachment, system-auto, and the no-value `button`
+    // trigger) is excluded here too — otherwise a legacy `button`/system key lingering in data would
+    // enter the diff and turn into a spine RESTORE_FORBIDDEN, blocking an otherwise-restorable record.
+    const NON_RESTORABLE_TYPES = new Set([
+      'formula', 'lookup', 'rollup', 'link', 'attachment', 'button',
+      'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy',
+    ])
+    const isRestorableType = (t: string): boolean => !NON_RESTORABLE_TYPES.has(t)
     const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
 
     try {
@@ -5724,6 +5729,15 @@ export function univerMetaRouter(): Router {
       }
       const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
 
+      // Raw DB field types — `mapFieldType` currently folds the no-value `button` trigger into
+      // `string`, so guard.type never reports 'button'. Restore excludes the no-value `button` by its
+      // RAW type so it is skipped regardless of that mapping (otherwise a legacy button key in data
+      // would enter the diff and the spine would refuse it, blocking an otherwise-restorable record).
+      const rawTypeRes = await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])
+      const rawTypeById = new Map<string, string>(
+        (rawTypeRes.rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]),
+      )
+
       // Schema drift: a snapshot field id absent from the current schema cannot be restored.
       // (A type-change since capture is not detectable without a stored schema snapshot; the value
       //  validators in the spine act as the backstop, rejecting an incompatible old value.)
@@ -5737,6 +5751,7 @@ export function univerMetaRouter(): Router {
       const diff: RecordChange[] = []
       for (const [fid, guard] of fieldById.entries()) {
         if (!isRestorableType(guard.type)) continue
+        if (rawTypeById.get(fid) === 'button') continue // no-value trigger (mapFieldType folds it to 'string')
         const inSnap = Object.prototype.hasOwnProperty.call(targetSnapshot, fid)
         const inCur = Object.prototype.hasOwnProperty.call(currentData, fid)
         if (inSnap) {
@@ -5749,17 +5764,18 @@ export function univerMetaRouter(): Router {
       }
 
       // Lock B: gate every diff field on BOTH the static guard and restore's own layer-3 pre-check.
-      const forbidden = diff
-        .filter((ch) => {
-          const guard = fieldById.get(ch.fieldId)
-          const perm = fieldPermissions[ch.fieldId]
-          const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
-          const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
-          return !staticOk || !layer3Ok
-        })
-        .map((ch) => ch.fieldId)
-      if (forbidden.length > 0) {
-        return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: `Not permitted to restore field(s): ${forbidden.join(', ')}` } })
+      const hasForbidden = diff.some((ch) => {
+        const guard = fieldById.get(ch.fieldId)
+        const perm = fieldPermissions[ch.fieldId]
+        const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
+        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        return !staticOk || !layer3Ok
+      })
+      if (hasForbidden) {
+        // Generalized message — the forbidden ids are DERIVED server-side from the unmasked snapshot
+        // (not caller-submitted like /patch), so echoing them would leak hidden-field metadata to an
+        // actor denied visibility. The diff is atomic: nothing is written.
+        return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: 'Not permitted to restore one or more fields in this revision' } })
       }
 
       const restoredFieldIds = diff.map((ch) => ch.fieldId)
