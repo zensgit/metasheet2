@@ -580,7 +580,24 @@
           <div class="integration-workbench__mapping-editor">
             <label>
               <span>源字段</span>
-              <input v-model="mapping.sourceField" :data-testid="`source-field-${index}`" placeholder="例如 code" />
+              <select
+                v-if="hasSourceFieldOptions"
+                v-model="mapping.sourceField"
+                :data-testid="`source-field-${index}`"
+              >
+                <option value="">请选择来源字段</option>
+                <option
+                  v-for="option in sourceFieldOptionsForMapping(mapping)"
+                  :key="`${option.stale ? 'stale' : 'schema'}:${option.value}`"
+                  :value="option.value"
+                >
+                  {{ sourceFieldOptionText(option) }}
+                </option>
+              </select>
+              <input v-else v-model="mapping.sourceField" :data-testid="`source-field-${index}`" placeholder="例如 code" />
+              <small v-if="hasSourceFieldOptions" class="integration-workbench__field-help" :data-testid="`source-field-picker-help-${index}`">
+                字段来自来源 schema；这里只保存字段名，不显示行值。
+              </small>
             </label>
             <label>
               <span>目标字段</span>
@@ -1271,6 +1288,13 @@ interface EditableMapping {
   maxValueText: string
 }
 
+interface SourceFieldOption {
+  value: string
+  label: string
+  type: string
+  stale: boolean
+}
+
 interface StagingDatasetCard {
   id: string
   name: string
@@ -1428,6 +1452,19 @@ const stagingSheetId = ref('')
 const sourceSchema = ref<IntegrationObjectSchema>({ object: '', fields: [] })
 const targetSchema = ref<IntegrationObjectSchema>({ object: '', fields: [] })
 const mappings = ref<EditableMapping[]>([])
+const sourceFieldOptions = computed<SourceFieldOption[]>(() => sourceSchema.value.fields
+  .map((field) => {
+    const value = field.name.trim()
+    if (!value) return null
+    return {
+      value,
+      label: field.label ? `${field.label} · ${value}` : value,
+      type: typeof field.type === 'string' ? field.type : '',
+      stale: false,
+    }
+  })
+  .filter((item): item is SourceFieldOption => item !== null))
+const hasSourceFieldOptions = computed(() => sourceFieldOptions.value.length > 0)
 const previewText = ref('尚未生成预览')
 // DF-T1.5: read-only provenance summary derived from a DF-T1 targetPayloadPreview (null = nothing to show).
 const previewProvenance = ref<ReturnType<typeof summarizeFieldProvenance>>(null)
@@ -3173,6 +3210,27 @@ async function useStagingAsTarget(objectId: string): Promise<void> {
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
   }
+}
+
+function sourceFieldOptionText(option: SourceFieldOption): string {
+  if (option.type) return `${option.label} · ${option.type}`
+  return option.label
+}
+
+function sourceFieldOptionsForMapping(mapping: EditableMapping): SourceFieldOption[] {
+  const currentValue = mapping.sourceField.trim()
+  if (!currentValue || sourceFieldOptions.value.some((option) => option.value === currentValue)) {
+    return sourceFieldOptions.value
+  }
+  return [
+    {
+      value: currentValue,
+      label: `当前值 · ${currentValue}（未在来源 schema 中）`,
+      type: '',
+      stale: true,
+    },
+    ...sourceFieldOptions.value,
+  ]
 }
 
 function guessSourceField(targetField: string): string {
