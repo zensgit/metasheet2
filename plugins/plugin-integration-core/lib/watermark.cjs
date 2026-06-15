@@ -69,17 +69,30 @@ function parseWatermarkValue(type, value) {
     }
     return parsed
   }
-  const numeric = Number(value)
-  if (!Number.isFinite(numeric)) {
-    throw new WatermarkError('monotonic_id watermark value must be numeric', { value })
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) {
+      throw new WatermarkError('monotonic_id watermark value must be a safe integer or integer string', { value })
+    }
+    return BigInt(value)
   }
-  return numeric
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (/^-?\d+$/.test(trimmed)) return BigInt(trimmed)
+  }
+  throw new WatermarkError('monotonic_id watermark value must be an integer', { value })
 }
 
 function compareWatermarkValues(type, left, right) {
   if (isBlank(left)) return -1
   if (isBlank(right)) return 1
-  return parseWatermarkValue(type, left) - parseWatermarkValue(type, right)
+  const parsedLeft = parseWatermarkValue(type, left)
+  const parsedRight = parseWatermarkValue(type, right)
+  if (type === 'monotonic_id') {
+    if (parsedLeft > parsedRight) return 1
+    if (parsedLeft < parsedRight) return -1
+    return 0
+  }
+  return parsedLeft - parsedRight
 }
 
 function valueToString(value) {
