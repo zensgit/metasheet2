@@ -601,7 +601,12 @@ function cellStyle(rid: string, fid: string, ci?: number) {
   // Per design-lock §2.3 the bar takes the cell background; the operator rule's
   // textColor still applies, but its backgroundColor is dropped so the two
   // don't fight. Covers both the grouped and flat render paths (both call this).
-  const scale = props.conditionalFormattingScale?.byField[fid]?.byRecordId[rid]
+  const scaleEntry = props.conditionalFormattingScale?.byField[fid]?.byRecordId[rid]
+  // A5-1c renders only the data-bar kind here. A colorScale/iconSet presentation
+  // (scaleColor/iconKey, no barPct — A5-2/A5-3 contracts) must NOT build a bar
+  // gradient, or it would emit `linear-gradient(… undefined% …)` and regress the
+  // shipped data-bar render. Their own render is browser-gated future work.
+  const scale = scaleEntry && typeof scaleEntry.barPct === 'number' ? scaleEntry : undefined
   const scaleStyle: Record<string, string> | undefined = scale
     ? { backgroundImage: `linear-gradient(to right, ${scale.barColor} ${scale.barPct}%, transparent ${scale.barPct}%)` }
     : undefined
