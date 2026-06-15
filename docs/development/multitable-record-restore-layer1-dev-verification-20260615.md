@@ -101,6 +101,9 @@ Tests  31 passed (31)
 
 - **Type-change drift** is only partially covered: a snapshot field *missing* from the schema → `SCHEMA_DRIFT`; a field whose *type changed* since capture is not detectable without a stored schema snapshot (Layer 2), so it falls through to the spine's value validators (→ `VALIDATION_ERROR`), not `SCHEMA_DRIFT`. Documented, fail-closed either way.
 - **Value equality** uses `JSON.stringify` comparison — exact for scalars/arrays; object-key-order is stable because both sides come from the same JSON serializer. Adequate for Slice 1's scalar scope.
+- **Inherited, not independently re-tested (coverage honesty):**
+  - *Row-level write scope (own-vs-all):* enforced by the shared spine — `ensureRecordWriteAllowed(capabilities, sheetScope, access, createdBy, 'edit')` runs inside the `FOR UPDATE` loop (`record-write-service.ts:621`). Restore passes `sheetScope`/`access`, so an own-records-only actor cannot restore another user's record. This is covered by the record-patch suite; the restore matrix uses a full-perm writer and does not re-seed sheet-scope assignments to re-prove it.
+  - *In-transaction anti-TOCTOU:* the restore matrix's T10 exercises the route's **pre-check** (`expectedVersion` ≠ current). The in-txn re-check (a write landing between the route read and the spine's `FOR UPDATE`) is inherited unchanged from `patchRecords` and covered by the patch suite; it is not separately simulated. T10's comment says so.
 - **Not run here:** the full CI multitable real-DB list (ran the affected subset); frontend (Slice 3 — none built); cross-browser. CI will run the new test via the enumerated list on Node 20.
 - **Deferred (separate gated opt-ins, unchanged from the design):** Slice 2 (undelete + link-value restore), Slice 3 (frontend / plugin re-home), retention (`VERSION_EXPIRED`), revision partial-unique index, partial-restore mode.
 

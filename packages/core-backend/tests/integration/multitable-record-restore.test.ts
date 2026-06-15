@@ -339,19 +339,28 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     expect(noop.status).toBe(200)
     expect(noop.body.data.noop).toBe(true)
     expect(noop.body.data.newVersion).toBe(2)
+    // The no-op touched nothing in the DB: version unchanged AND no new revision row.
+    const verRes = await q('SELECT version FROM meta_records WHERE id = $1', [rid])
+    expect(Number((verRes.rows[0] as { version: number }).version)).toBe(2)
+    const cntRes = await q('SELECT count(*)::int AS n FROM meta_record_revisions WHERE record_id = $1', [rid])
+    expect((cntRes.rows[0] as { n: number }).n).toBe(1)
     // stale expectedVersion → conflict (the concurrency check precedes the no-op)
     const stale = await restoreReq(rid, { targetVersion: 2, expectedVersion: 1 })
     expect(stale.status).toBe(409)
     expect(stale.body.error.code).toBe('VERSION_CONFLICT')
   })
 
-  test('T10: a competing version bump between read and apply → VERSION_CONFLICT', async () => {
+  // NOTE: this exercises the route's step-2 concurrency PRE-CHECK (expectedVersion ≠ current).
+  // The in-transaction anti-TOCTOU re-check (a write landing between the route read and the spine's
+  // FOR UPDATE) is inherited unchanged from RecordWriteService.patchRecords and is covered by the
+  // record-patch suite; it is not separately simulated here.
+  test('T10: stale expectedVersion vs current → VERSION_CONFLICT (pre-check)', async () => {
     const rid = await seedRecord(
       { [FLD_A]: 'a2' },
       2,
       [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1' } }, { version: 2, snapshot: { [FLD_A]: 'a2' } }],
     )
-    // Caller believes version is 1, but the record is actually at 2 → conflict (mirrors the TOCTOU race).
+    // Caller believes version is 1, but the record is actually at 2 → conflict.
     const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 1 })
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('VERSION_CONFLICT')
