@@ -458,9 +458,12 @@ describe('conditional formatting — range-based SCALE rules (A5-1 data bar)', (
       expect(r).toEqual({ id: 's1', order: 0, fieldId: 'fld_n', kind: 'dataBar', enabled: true, range: { mode: 'auto' }, dataBar: { color: '#2196f3' } })
     })
 
-    it('rejects colorScale / iconSet until A5-2 / A5-3', () => {
+    it('rejects an unknown kind, and a colorScale/iconSet kind lacking its own config (A5-2/A5-3 add valid configs below)', () => {
+      // `validBar()` only supplies a `dataBar` config, so flipping the kind alone is still rejected.
       expect(sanitizeConditionalFormattingScaleRule(validBar({ kind: 'colorScale' }))).toBeNull()
       expect(sanitizeConditionalFormattingScaleRule(validBar({ kind: 'iconSet' }))).toBeNull()
+      // An unrecognised kind is still rejected (forward-dated-config guard).
+      expect(sanitizeConditionalFormattingScaleRule(validBar({ kind: 'gradientNeo' }))).toBeNull()
     })
 
     it('requires id, fieldId, and a valid hex bar color', () => {
@@ -554,6 +557,232 @@ describe('conditional formatting — range-based SCALE rules (A5-1 data bar)', (
     it('returns an empty map when a field has no numeric values', () => {
       const map = buildFieldScaleMap([rule], [{ id: 'a', data: { fld_n: 'x' } }])
       expect(map.byField.fld_n).toBeUndefined()
+    })
+  })
+})
+
+describe('conditional formatting — SCALE rules (A5-2 color scale)', () => {
+  const validColorScale = (over: Record<string, unknown> = {}) => ({
+    id: 'cs1', fieldId: 'fld_n', kind: 'colorScale', order: 0, range: { mode: 'auto' },
+    colorScale: { stops: [{ at: 'min', color: '#ffffff' }, { at: 'max', color: '#000000' }] },
+    ...over,
+  })
+  // 3-stop classic red→yellow→green (min/mid/max).
+  const ryg = { stops: [
+    { at: 'min', color: '#ff0000' }, { at: 'mid', color: '#ffff00' }, { at: 'max', color: '#00ff00' },
+  ] }
+
+  describe('sanitizeConditionalFormattingScaleRule', () => {
+    it('accepts a 2-stop (min/max) color scale', () => {
+      const r = sanitizeConditionalFormattingScaleRule(validColorScale())
+      expect(r).toEqual({
+        id: 'cs1', order: 0, fieldId: 'fld_n', kind: 'colorScale', enabled: true, range: { mode: 'auto' },
+        colorScale: { stops: [{ at: 'min', color: '#ffffff' }, { at: 'max', color: '#000000' }] },
+      })
+    })
+
+    it('accepts a 3-stop (min/mid/max) color scale and normalizes stop order', () => {
+      // Supply stops out of order — sanitizer must sort min→mid→max.
+      const r = sanitizeConditionalFormattingScaleRule(validColorScale({
+        colorScale: { stops: [
+          { at: 'max', color: '#00ff00' }, { at: 'min', color: '#ff0000' }, { at: 'mid', color: '#ffff00' },
+        ] },
+      }))
+      expect(r?.colorScale?.stops.map((s) => s.at)).toEqual(['min', 'mid', 'max'])
+      expect(r?.colorScale?.stops.map((s) => s.color)).toEqual(['#ff0000', '#ffff00', '#00ff00'])
+    })
+
+    it('rejects 1 stop and 4 stops', () => {
+      expect(sanitizeConditionalFormattingScaleRule(validColorScale({
+        colorScale: { stops: [{ at: 'min', color: '#ffffff' }] },
+      }))).toBeNull()
+      expect(sanitizeConditionalFormattingScaleRule(validColorScale({
+        colorScale: { stops: [
+          { at: 'min', color: '#ffffff' }, { at: 'mid', color: '#888888' },
+          { at: 'max', color: '#000000' }, { at: 'max', color: '#111111' },
+        ] },
+      }))).toBeNull()
+    })
+
+    it('rejects a bad anchor, a bad hex color, and a missing/duplicate anchor', () => {
+      // bad anchor token
+      expect(sanitizeConditionalFormattingScaleRule(validColorScale({
+        colorScale: { stops: [{ at: 'min', color: '#fff' }, { at: 'middle', color: '#000' }] },
+      }))).toBeNull()
+      // bad hex color
+      expect(sanitizeConditionalFormattingScaleRule(validColorScale({
+        colorScale: { stops: [{ at: 'min', color: 'white' }, { at: 'max', color: '#000000' }] },
+      }))).toBeNull()
+      // 2-stop with min+min (duplicate, missing max)
+      expect(sanitizeConditionalFormattingScaleRule(validColorScale({
+        colorScale: { stops: [{ at: 'min', color: '#ffffff' }, { at: 'min', color: '#000000' }] },
+      }))).toBeNull()
+      // 2-stop with mid+max (missing required min)
+      expect(sanitizeConditionalFormattingScaleRule(validColorScale({
+        colorScale: { stops: [{ at: 'mid', color: '#ffffff' }, { at: 'max', color: '#000000' }] },
+      }))).toBeNull()
+      // 3-stop missing mid (min+max+max)
+      expect(sanitizeConditionalFormattingScaleRule(validColorScale({
+        colorScale: { stops: [
+          { at: 'min', color: '#ffffff' }, { at: 'max', color: '#000000' }, { at: 'max', color: '#111111' },
+        ] },
+      }))).toBeNull()
+    })
+
+    it('rejects a missing colorScale config entirely', () => {
+      expect(sanitizeConditionalFormattingScaleRule({ id: 'x', fieldId: 'f', kind: 'colorScale', order: 0, range: { mode: 'auto' } })).toBeNull()
+    })
+  })
+
+  describe('buildFieldScaleMap (color scale)', () => {
+    const recs = [
+      { id: 'r1', data: { fld_n: 0 } },
+      { id: 'r2', data: { fld_n: 25 } },
+      { id: 'r3', data: { fld_n: 50 } },
+      { id: 'r4', data: { fld_n: 100 } },
+    ]
+
+    it('interpolates a 2-stop scale at min / interior / mid / max (exact hex)', () => {
+      const rule = sanitizeConditionalFormattingScaleRule(validColorScale())!
+      const f = buildFieldScaleMap([rule], recs).byField.fld_n
+      expect(f.min).toBe(0)
+      expect(f.max).toBe(100)
+      expect(f.byRecordId.r1.scaleColor).toBe('#ffffff') // t=0  → min color
+      expect(f.byRecordId.r2.scaleColor).toBe('#bfbfbf') // t=0.25
+      expect(f.byRecordId.r3.scaleColor).toBe('#808080') // t=0.5
+      expect(f.byRecordId.r4.scaleColor).toBe('#000000') // t=1  → max color
+      // dataBar-only fields are absent on a colorScale presentation
+      expect(f.byRecordId.r2.barPct).toBeUndefined()
+      expect(f.byRecordId.r2.iconKey).toBeUndefined()
+    })
+
+    it('interpolates a 3-stop scale piecewise with mid anchored at t=0.5 (exact hex)', () => {
+      const rule = sanitizeConditionalFormattingScaleRule(validColorScale({ colorScale: ryg }))!
+      const f = buildFieldScaleMap([rule], recs).byField.fld_n
+      expect(f.byRecordId.r1.scaleColor).toBe('#ff0000') // t=0    → min (red)
+      expect(f.byRecordId.r2.scaleColor).toBe('#ff8000') // t=0.25 → min↔mid halfway (orange)
+      expect(f.byRecordId.r3.scaleColor).toBe('#ffff00') // t=0.5  → mid (yellow)
+      expect(f.byRecordId.r4.scaleColor).toBe('#00ff00') // t=1    → max (green)
+    })
+
+    it('expands 3-digit shorthand hex before interpolating', () => {
+      const rule = sanitizeConditionalFormattingScaleRule(validColorScale({
+        colorScale: { stops: [{ at: 'min', color: '#f00' }, { at: 'max', color: '#00f' }] },
+      }))!
+      const f = buildFieldScaleMap([rule], [{ id: 'a', data: { fld_n: 0 } }, { id: 'b', data: { fld_n: 100 } }, { id: 'm', data: { fld_n: 50 } }]).byField.fld_n
+      expect(f.byRecordId.m.scaleColor).toBe('#800080') // halfway #ff0000 ↔ #0000ff
+    })
+
+    it('degenerate (all-equal) range → mid color (t=0.5)', () => {
+      // 3-stop degenerate → the mid (yellow) stop.
+      const three = sanitizeConditionalFormattingScaleRule(validColorScale({ colorScale: ryg }))!
+      const m3 = buildFieldScaleMap([three], [{ id: 'a', data: { fld_n: 7 } }, { id: 'b', data: { fld_n: 7 } }]).byField.fld_n
+      expect(m3.byRecordId.a.scaleColor).toBe('#ffff00')
+      expect(m3.byRecordId.b.scaleColor).toBe('#ffff00')
+      // 2-stop degenerate → midpoint blend (#808080 for white↔black).
+      const two = sanitizeConditionalFormattingScaleRule(validColorScale())!
+      const m2 = buildFieldScaleMap([two], [{ id: 'a', data: { fld_n: 5 } }, { id: 'b', data: { fld_n: 5 } }]).byField.fld_n
+      expect(m2.byRecordId.a.scaleColor).toBe('#808080')
+    })
+
+    it('handles negatives across the range and skips non-numeric / empty columns', () => {
+      const rule = sanitizeConditionalFormattingScaleRule(validColorScale())!
+      const f = buildFieldScaleMap([rule], [
+        { id: 'a', data: { fld_n: -50 } }, // min
+        { id: 'b', data: { fld_n: 0 } },   // midpoint of [-50, 50] → #808080
+        { id: 'c', data: { fld_n: 50 } },  // max
+        { id: 'd', data: { fld_n: 'n/a' } }, // skipped
+      ]).byField.fld_n
+      expect([f.min, f.max]).toEqual([-50, 50])
+      expect(f.byRecordId.a.scaleColor).toBe('#ffffff')
+      expect(f.byRecordId.b.scaleColor).toBe('#808080')
+      expect(f.byRecordId.c.scaleColor).toBe('#000000')
+      expect(f.byRecordId.d).toBeUndefined()
+      // all-non-numeric column → field omitted
+      expect(buildFieldScaleMap([rule], [{ id: 'x', data: { fld_n: 'x' } }]).byField.fld_n).toBeUndefined()
+    })
+  })
+})
+
+describe('conditional formatting — SCALE rules (A5-3 icon set)', () => {
+  const validIconSet = (over: Record<string, unknown> = {}) => ({
+    id: 'is1', fieldId: 'fld_n', kind: 'iconSet', order: 0, range: { mode: 'auto' },
+    iconSet: { set: 'arrows3', thresholds: [10, 20] },
+    ...over,
+  })
+
+  describe('sanitizeConditionalFormattingScaleRule', () => {
+    it('accepts each valid set with finite ascending thresholds', () => {
+      for (const set of ['arrows3', 'traffic3', 'signs3'] as const) {
+        const r = sanitizeConditionalFormattingScaleRule(validIconSet({ iconSet: { set, thresholds: [10, 20] } }))
+        expect(r?.kind).toBe('iconSet')
+        expect(r?.iconSet).toEqual({ set, thresholds: [10, 20] })
+      }
+    })
+
+    it('accepts equal thresholds (t0 === t1, monotonic non-strict)', () => {
+      const r = sanitizeConditionalFormattingScaleRule(validIconSet({ iconSet: { set: 'arrows3', thresholds: [5, 5] } }))
+      expect(r?.iconSet?.thresholds).toEqual([5, 5])
+    })
+
+    it('rejects an unknown set', () => {
+      expect(sanitizeConditionalFormattingScaleRule(validIconSet({ iconSet: { set: 'stars5', thresholds: [10, 20] } }))).toBeNull()
+    })
+
+    it('rejects non-finite or non-monotonic thresholds, and wrong-arity threshold tuples', () => {
+      expect(sanitizeConditionalFormattingScaleRule(validIconSet({ iconSet: { set: 'arrows3', thresholds: [20, 10] } }))).toBeNull() // descending
+      expect(sanitizeConditionalFormattingScaleRule(validIconSet({ iconSet: { set: 'arrows3', thresholds: [Number.NaN, 20] } }))).toBeNull()
+      expect(sanitizeConditionalFormattingScaleRule(validIconSet({ iconSet: { set: 'arrows3', thresholds: [10, Infinity] } }))).toBeNull()
+      expect(sanitizeConditionalFormattingScaleRule(validIconSet({ iconSet: { set: 'arrows3', thresholds: [10] } }))).toBeNull()
+      expect(sanitizeConditionalFormattingScaleRule(validIconSet({ iconSet: { set: 'arrows3', thresholds: [10, 20, 30] } }))).toBeNull()
+    })
+
+    it('rejects a missing iconSet config entirely', () => {
+      expect(sanitizeConditionalFormattingScaleRule({ id: 'x', fieldId: 'f', kind: 'iconSet', order: 0, range: { mode: 'auto' } })).toBeNull()
+    })
+  })
+
+  describe('buildFieldScaleMap (icon set)', () => {
+    const rule = sanitizeConditionalFormattingScaleRule(validIconSet())! // thresholds [10, 20]
+
+    it('bands values by absolute thresholds (v<t0 low / t0<=v<t1 mid / v>=t1 high)', () => {
+      const f = buildFieldScaleMap([rule], [
+        { id: 'a', data: { fld_n: 5 } },   // < 10 → low
+        { id: 'b', data: { fld_n: 10 } },  // == t0 → mid (lower bound inclusive)
+        { id: 'c', data: { fld_n: 15 } },  // in [10,20) → mid
+        { id: 'd', data: { fld_n: 20 } },  // == t1 → high (upper bound inclusive)
+        { id: 'e', data: { fld_n: 99 } },  // > t1 → high
+      ]).byField.fld_n
+      expect(f.byRecordId.a.iconKey).toBe('low')
+      expect(f.byRecordId.b.iconKey).toBe('mid')
+      expect(f.byRecordId.c.iconKey).toBe('mid')
+      expect(f.byRecordId.d.iconKey).toBe('high')
+      expect(f.byRecordId.e.iconKey).toBe('high')
+      // dataBar fields absent on an iconSet presentation
+      expect(f.byRecordId.c.barPct).toBeUndefined()
+      expect(f.byRecordId.c.scaleColor).toBeUndefined()
+    })
+
+    it('with equal thresholds the middle band is empty (low or high only)', () => {
+      const eq = sanitizeConditionalFormattingScaleRule(validIconSet({ iconSet: { set: 'arrows3', thresholds: [10, 10] } }))!
+      const f = buildFieldScaleMap([eq], [
+        { id: 'a', data: { fld_n: 9 } },   // < 10 → low
+        { id: 'b', data: { fld_n: 10 } },  // 10 < 10 false, 10 < 10 false → high
+        { id: 'c', data: { fld_n: 11 } },  // high
+      ]).byField.fld_n
+      expect(f.byRecordId.a.iconKey).toBe('low')
+      expect(f.byRecordId.b.iconKey).toBe('high')
+      expect(f.byRecordId.c.iconKey).toBe('high')
+    })
+
+    it('handles negatives and skips non-numeric / empty columns', () => {
+      const f = buildFieldScaleMap([rule], [
+        { id: 'a', data: { fld_n: -5 } },   // < 10 → low
+        { id: 'b', data: { fld_n: 'n/a' } }, // skipped
+      ]).byField.fld_n
+      expect(f.byRecordId.a.iconKey).toBe('low')
+      expect(f.byRecordId.b).toBeUndefined()
+      expect(buildFieldScaleMap([rule], [{ id: 'x', data: { fld_n: 'x' } }]).byField.fld_n).toBeUndefined()
     })
   })
 })

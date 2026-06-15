@@ -388,9 +388,16 @@ export function evaluateConditionalFormattingRules(
 // against the field's min/max range. min/max is computed over the records
 // passed in (caller scopes them to already-loaded, already-masked rows — the
 // same client-side discipline as the A2 export picker; a full-column server
-// aggregate is a separate gated follow-up). A5-1 implements `dataBar`;
-// `colorScale` / `iconSet` land in A5-2 / A5-3 (sanitizer rejects them until
-// then, so a forward-dated config can't half-render).
+// aggregate is a separate gated follow-up). A5-1 implements `dataBar`,
+// A5-2 `colorScale` (gradient background), A5-3 `iconSet` (threshold icons).
+//
+// RENDER NOTE (per design-lock §6 sequencing 先 schema/sanitizer → 镜像 → 渲染 →
+// dialog): `buildFieldScaleMap` now derives `scaleColor` / `iconKey` for the new
+// kinds, but the grid renderer (MetaGridTable, browser-gated, OUT of this slice)
+// is still kind-blind — it only paints `barColor`/`barPct` data bars. Per-kind
+// render (gradient bg / icon prefix) + the authoring dialog are the next slices;
+// until then the only producer of scale rules is the (still data-bar-only) dialog,
+// so a colorScale/iconSet config has no reachable UI source.
 // ===========================================================================
 
 export const CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT = 20
@@ -409,6 +416,21 @@ export type ConditionalFormattingDataBarConfig = {
   showValue?: boolean
 }
 
+/** A5-2 color scale: 2 stops (min/max) or 3 stops (min/mid/max), each a hex color. */
+export type ConditionalFormattingColorScaleConfig = {
+  stops: Array<{ at: 'min' | 'mid' | 'max'; color: string }>
+}
+
+/**
+ * A5-3 icon set: a 3-icon set keyed by two ascending thresholds (`[t0, t1]`).
+ * Thresholds are ABSOLUTE values (band by `v < t0` / `t0 <= v < t1` / `v >= t1`),
+ * not percentiles — a percentile mode over the field's min/max is a follow-up.
+ */
+export type ConditionalFormattingIconSetConfig = {
+  set: 'arrows3' | 'traffic3' | 'signs3'
+  thresholds: [number, number]
+}
+
 export type ConditionalFormattingScaleRule = {
   id: string
   order: number
@@ -417,6 +439,58 @@ export type ConditionalFormattingScaleRule = {
   enabled: boolean
   range: ConditionalFormattingScaleRange
   dataBar?: ConditionalFormattingDataBarConfig
+  colorScale?: ConditionalFormattingColorScaleConfig
+  iconSet?: ConditionalFormattingIconSetConfig
+}
+
+const ICON_SETS: ReadonlySet<ConditionalFormattingIconSetConfig['set']> = new Set([
+  'arrows3', 'traffic3', 'signs3',
+])
+
+/** Parse a sanitized `#rgb`/`#rrggbb`/`#rrggbbaa` hex into [r,g,b] 0..255 (alpha ignored). */
+function hexToRgb(hex: string): [number, number, number] {
+  let body = hex.slice(1)
+  if (body.length === 3) body = body[0] + body[0] + body[1] + body[1] + body[2] + body[2]
+  // length 8 (rgba) → drop the trailing alpha pair; interpolation is over RGB only.
+  const r = parseInt(body.slice(0, 2), 16)
+  const g = parseInt(body.slice(2, 4), 16)
+  const b = parseInt(body.slice(4, 6), 16)
+  return [r, g, b]
+}
+
+/** Emit a lowercase `#rrggbb` from [r,g,b], rounding + clamping each channel to 0..255. */
+function rgbToHex(rgb: [number, number, number]): string {
+  const toHex = (n: number): string => {
+    const clamped = Math.max(0, Math.min(255, Math.round(n)))
+    return clamped.toString(16).padStart(2, '0')
+  }
+  return `#${toHex(rgb[0])}${toHex(rgb[1])}${toHex(rgb[2])}`
+}
+
+/** Linear-interpolate two hex colors at fraction t∈[0,1]; emits lowercase `#rrggbb`. */
+function lerpHex(from: string, to: string, t: number): string {
+  const a = hexToRgb(from)
+  const b = hexToRgb(to)
+  const f = Math.max(0, Math.min(1, t))
+  return rgbToHex([
+    a[0] + (b[0] - a[0]) * f,
+    a[1] + (b[1] - a[1]) * f,
+    a[2] + (b[2] - a[2]) * f,
+  ])
+}
+
+/**
+ * Color at normalized position `t`∈[0,1] across the (anchor-sorted) stops.
+ * 2 stops: lerp min↔max over t. 3 stops: piecewise with mid anchored at t=0.5
+ * (t<0.5 lerps min↔mid over t/0.5; else mid↔max over (t-0.5)/0.5; t=0.5 yields
+ * the mid color from either branch). Stops are pre-sorted min→mid→max.
+ */
+function colorScaleAt(stops: ReadonlyArray<{ at: 'min' | 'mid' | 'max'; color: string }>, t: number): string {
+  const clamped = Math.max(0, Math.min(1, t))
+  if (stops.length === 2) return lerpHex(stops[0].color, stops[1].color, clamped)
+  // 3 stops: [min, mid, max]
+  if (clamped <= 0.5) return lerpHex(stops[0].color, stops[1].color, clamped / 0.5)
+  return lerpHex(stops[1].color, stops[2].color, (clamped - 0.5) / 0.5)
 }
 
 function toFiniteNumber(value: unknown): number | null {
@@ -428,38 +502,93 @@ function toFiniteNumber(value: unknown): number | null {
   return null
 }
 
+/** Parse the shared `range` field (auto/fixed); returns null for an invalid fixed range. */
+function sanitizeScaleRange(raw: unknown): ConditionalFormattingScaleRange | null {
+  const rangeRaw = isPlainObject(raw) ? raw : {}
+  if (rangeRaw.mode === 'fixed') {
+    const min = toFiniteNumber(rangeRaw.min)
+    const max = toFiniteNumber(rangeRaw.max)
+    if (min === null || max === null || min === max) return null
+    return { mode: 'fixed', min: Math.min(min, max), max: Math.max(min, max) }
+  }
+  return { mode: 'auto' }
+}
+
+/** Parse + validate `colorScale.stops` (2 anchors min/max, or 3 anchors min/mid/max). */
+function sanitizeColorScale(raw: unknown): ConditionalFormattingColorScaleConfig | null {
+  if (!isPlainObject(raw) || !Array.isArray(raw.stops)) return null
+  const stops: Array<{ at: 'min' | 'mid' | 'max'; color: string }> = []
+  for (const stop of raw.stops) {
+    if (!isPlainObject(stop)) return null
+    const at = stop.at
+    if (at !== 'min' && at !== 'mid' && at !== 'max') return null
+    const color = sanitizeHex(stop.color)
+    if (!color) return null
+    stops.push({ at, color })
+  }
+  if (stops.length < 2 || stops.length > 3) return null
+  // Anchor set must EXACTLY match {min,max} (2) or {min,mid,max} (3) — no dup, no missing.
+  const anchors = new Set(stops.map((s) => s.at))
+  if (anchors.size !== stops.length) return null // duplicate anchor
+  const required = stops.length === 2 ? ['min', 'max'] : ['min', 'mid', 'max']
+  for (const a of required) if (!anchors.has(a as 'min' | 'mid' | 'max')) return null
+  // Normalize to min→mid→max so the builder is order-independent.
+  const order: Record<'min' | 'mid' | 'max', number> = { min: 0, mid: 1, max: 2 }
+  stops.sort((a, b) => order[a.at] - order[b.at])
+  return { stops }
+}
+
+/** Parse + validate `iconSet` (known set + finite, monotonic `[t0, t1]` thresholds). */
+function sanitizeIconSet(raw: unknown): ConditionalFormattingIconSetConfig | null {
+  if (!isPlainObject(raw)) return null
+  const set = raw.set
+  if (typeof set !== 'string' || !ICON_SETS.has(set as ConditionalFormattingIconSetConfig['set'])) return null
+  if (!Array.isArray(raw.thresholds) || raw.thresholds.length !== 2) return null
+  const t0 = toFiniteNumber(raw.thresholds[0])
+  const t1 = toFiniteNumber(raw.thresholds[1])
+  if (t0 === null || t1 === null || t0 > t1) return null // require monotonic ascending (t0 <= t1)
+  return { set: set as ConditionalFormattingIconSetConfig['set'], thresholds: [t0, t1] }
+}
+
 export function sanitizeConditionalFormattingScaleRule(input: unknown): ConditionalFormattingScaleRule | null {
   if (!isPlainObject(input)) return null
   const id = typeof input.id === 'string' && input.id.trim() ? input.id.trim() : null
   const fieldId = typeof input.fieldId === 'string' && input.fieldId.trim() ? input.fieldId.trim() : null
   if (!id || !fieldId) return null
 
-  // A5-1 supports dataBar only; colorScale / iconSet are added in A5-2 / A5-3.
-  if (input.kind !== 'dataBar') return null
-
   const orderRaw = typeof input.order === 'number' && Number.isFinite(input.order) ? input.order : 0
   const enabled = input.enabled !== false
 
-  const rangeRaw = isPlainObject(input.range) ? input.range : {}
-  let range: ConditionalFormattingScaleRange
-  if (rangeRaw.mode === 'fixed') {
-    const min = toFiniteNumber(rangeRaw.min)
-    const max = toFiniteNumber(rangeRaw.max)
-    if (min === null || max === null || min === max) return null
-    range = { mode: 'fixed', min: Math.min(min, max), max: Math.max(min, max) }
-  } else {
-    range = { mode: 'auto' }
+  const range = sanitizeScaleRange(input.range)
+  if (!range) return null
+
+  const base = { id, order: Math.floor(orderRaw), fieldId, enabled, range }
+
+  // Per-kind config. Unknown kinds → null (keeps the forward-dated-config guard).
+  switch (input.kind) {
+    case 'dataBar': {
+      const barRaw = isPlainObject(input.dataBar) ? input.dataBar : {}
+      const color = sanitizeHex(barRaw.color)
+      if (!color) return null
+      const dataBar: ConditionalFormattingDataBarConfig = { color }
+      const negativeColor = sanitizeHex(barRaw.negativeColor)
+      if (negativeColor) dataBar.negativeColor = negativeColor
+      if (barRaw.showValue === true) dataBar.showValue = true
+      return { ...base, kind: 'dataBar', dataBar }
+    }
+    case 'colorScale': {
+      const colorScale = sanitizeColorScale(input.colorScale)
+      if (!colorScale) return null
+      return { ...base, kind: 'colorScale', colorScale }
+    }
+    case 'iconSet': {
+      const iconSet = sanitizeIconSet(input.iconSet)
+      if (!iconSet) return null
+      return { ...base, kind: 'iconSet', iconSet }
+    }
+    default:
+      return null
   }
-
-  const barRaw = isPlainObject(input.dataBar) ? input.dataBar : {}
-  const color = sanitizeHex(barRaw.color)
-  if (!color) return null
-  const dataBar: ConditionalFormattingDataBarConfig = { color }
-  const negativeColor = sanitizeHex(barRaw.negativeColor)
-  if (negativeColor) dataBar.negativeColor = negativeColor
-  if (barRaw.showValue === true) dataBar.showValue = true
-
-  return { id, order: Math.floor(orderRaw), fieldId, kind: 'dataBar', enabled, range, dataBar }
 }
 
 export function sanitizeConditionalFormattingScaleRules(input: unknown): ConditionalFormattingScaleRule[] {
@@ -481,14 +610,24 @@ export function extractScaleRulesFromConfig(config: unknown): ConditionalFormatt
   return sanitizeConditionalFormattingScaleRules(config.conditionalFormattingScaleRules)
 }
 
-/** Per-cell derived presentation for a scale rule. A5-1: data bar only. */
+/**
+ * Per-cell derived presentation for a scale rule. Fields are kind-specific and
+ * all optional: a `dataBar` rule populates `barPct`/`barColor`/`negative`; a
+ * `colorScale` rule populates `scaleColor`; an `iconSet` rule populates
+ * `iconKey`. (Optional, not a discriminated union, so the kind-blind grid
+ * renderer's `${scale.barColor} ${scale.barPct}%` template still type-checks.)
+ */
 export type FieldScalePresentation = {
   /** Data-bar fill, 0..100, as a fraction of (value - min) / (max - min). */
-  barPct: number
+  barPct?: number
   /** Bar color — `negativeColor` for negative values when configured, else `color`. */
-  barColor: string
+  barColor?: string
   /** True when the source value is negative (render may baseline differently). */
-  negative: boolean
+  negative?: boolean
+  /** Color-scale background — interpolated `#rrggbb` at the value's normalized position. */
+  scaleColor?: string
+  /** Icon-set band the value falls in: `'low'` (v<t0) / `'mid'` (t0<=v<t1) / `'high'` (v>=t1). */
+  iconKey?: 'low' | 'mid' | 'high'
 }
 
 export type FieldScaleResult = {
@@ -508,11 +647,20 @@ const EMPTY_SCALE_MAP: FieldScaleMap = Object.freeze({
 }) as FieldScaleMap
 
 /**
- * Pre-compute data-bar presentation per (fieldId, recordId). For each enabled
- * scale rule, compute the field's [min,max] over `records` (auto) or use the
- * rule's fixed range, then map each finite value to a fill percent. Records
- * whose value is non-numeric are skipped (no bar). A degenerate range
- * (min === max) renders a full bar for every present value.
+ * Pre-compute per-(fieldId, recordId) scale presentation for every enabled rule.
+ * For each rule, resolve the field's [min,max] over `records` (auto) or the
+ * rule's fixed range, then derive a kind-specific presentation per finite value:
+ *  - dataBar:    `barPct` (0..100 = (v-min)/(max-min), degenerate min==max → 100),
+ *                `barColor` (negativeColor when v<0 + configured), `negative`.
+ *  - colorScale: `scaleColor` = interpolated hex at the value's normalized
+ *                position t=(v-min)/(max-min); degenerate min==max → t=0.5
+ *                (mid color for 3-stop, midpoint blend for 2-stop — per design-lock).
+ *  - iconSet:    `iconKey` = band by ABSOLUTE thresholds (v<t0 → 'low',
+ *                t0<=v<t1 → 'mid', v>=t1 → 'high'); independent of min/max.
+ * Records whose value is non-numeric are skipped (no entry). A field with no
+ * numeric values is omitted entirely. First rule per field wins (mirrors
+ * cell-style precedence). NOTE: the grid renderer is still kind-blind (paints
+ * only data bars) — per-kind render is the next slice (design-lock §6).
  */
 export function buildFieldScaleMap(
   rules: ConditionalFormattingScaleRule[],
@@ -523,10 +671,14 @@ export function buildFieldScaleMap(
   const byField: Record<string, FieldScaleResult> = {}
 
   for (const rule of rules) {
-    if (!rule.enabled || rule.kind !== 'dataBar' || !rule.dataBar) continue
+    if (!rule.enabled) continue
     if (byField[rule.fieldId]) continue // first rule per field wins (mirrors cell-style precedence)
+    if (rule.kind === 'dataBar' && !rule.dataBar) continue
+    if (rule.kind === 'colorScale' && !rule.colorScale) continue
+    if (rule.kind === 'iconSet' && !rule.iconSet) continue
 
-    // Resolve range.
+    // Resolve range (shared by all kinds; iconSet bands on absolute thresholds but
+    // still carries the data min/max for diagnostics / a future percentile mode).
     let min: number
     let max: number
     if (rule.range.mode === 'fixed' && typeof rule.range.min === 'number' && typeof rule.range.max === 'number') {
@@ -546,7 +698,7 @@ export function buildFieldScaleMap(
           if (v < lo) lo = v
           if (v > hi) hi = v
         }
-        if (lo === Infinity) continue // no numeric values → no bars for this field
+        if (lo === Infinity) continue // no numeric values → omit this field
         min = lo
         max = hi
       }
@@ -558,10 +710,21 @@ export function buildFieldScaleMap(
       if (!record?.id) continue
       const v = toComparableNumber(record.data?.[rule.fieldId])
       if (v === null) continue
-      const pct = span <= 0 ? 100 : Math.max(0, Math.min(100, ((v - min) / span) * 100))
-      const negative = v < 0
-      const barColor = negative && rule.dataBar.negativeColor ? rule.dataBar.negativeColor : rule.dataBar.color
-      byRecordId[record.id] = { barPct: pct, barColor, negative }
+
+      if (rule.kind === 'dataBar' && rule.dataBar) {
+        const pct = span <= 0 ? 100 : Math.max(0, Math.min(100, ((v - min) / span) * 100))
+        const negative = v < 0
+        const barColor = negative && rule.dataBar.negativeColor ? rule.dataBar.negativeColor : rule.dataBar.color
+        byRecordId[record.id] = { barPct: pct, barColor, negative }
+      } else if (rule.kind === 'colorScale' && rule.colorScale) {
+        // Degenerate min==max → t=0.5 (mid/single color per design-lock), else clamp t∈[0,1].
+        const t = span <= 0 ? 0.5 : (v - min) / span
+        byRecordId[record.id] = { scaleColor: colorScaleAt(rule.colorScale.stops, t) }
+      } else if (rule.kind === 'iconSet' && rule.iconSet) {
+        const [t0, t1] = rule.iconSet.thresholds
+        const iconKey: 'low' | 'mid' | 'high' = v < t0 ? 'low' : v < t1 ? 'mid' : 'high'
+        byRecordId[record.id] = { iconKey }
+      }
     }
     byField[rule.fieldId] = { rule, min, max, byRecordId }
   }

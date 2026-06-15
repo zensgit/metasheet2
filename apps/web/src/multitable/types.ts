@@ -132,6 +132,19 @@ export interface ConditionalFormattingDataBarConfig {
   negativeColor?: string
   showValue?: boolean
 }
+/** A5-2 color scale: 2 stops (min/max) or 3 stops (min/mid/max), each a hex color. */
+export interface ConditionalFormattingColorScaleConfig {
+  stops: Array<{ at: 'min' | 'mid' | 'max'; color: string }>
+}
+/**
+ * A5-3 icon set: a 3-icon set keyed by two ascending thresholds (`[t0, t1]`).
+ * Thresholds are ABSOLUTE values (band by `v < t0` / `t0 <= v < t1` / `v >= t1`),
+ * not percentiles — a percentile mode over the field's min/max is a follow-up.
+ */
+export interface ConditionalFormattingIconSetConfig {
+  set: 'arrows3' | 'traffic3' | 'signs3'
+  thresholds: [number, number]
+}
 export interface ConditionalFormattingScaleRule {
   id: string
   order: number
@@ -140,6 +153,8 @@ export interface ConditionalFormattingScaleRule {
   enabled: boolean
   range: ConditionalFormattingScaleRange
   dataBar?: ConditionalFormattingDataBarConfig
+  colorScale?: ConditionalFormattingColorScaleConfig
+  iconSet?: ConditionalFormattingIconSetConfig
 }
 export const CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT = 20
 
