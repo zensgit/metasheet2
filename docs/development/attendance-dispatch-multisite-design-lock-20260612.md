@@ -31,7 +31,7 @@ Current landed status（2026-06-12）:
 
 - D1 contract is landed in #2551.
 - D2 dedicated create/list/read/cancel API is landed in #2553, including generic final-approval/cancel cleanup guards while the final writer is pending.
-- D3 final approval writer is code-green in the 2026-06-13 implementation slice: final approval writes the published assignment + optional schedule-group membership, revalidates latest target-group department dispatch scope, and covers conflict/edit-window/shiftCompliance rollback in real-DB tests.
+- D3 final approval writer is code-green in the 2026-06-13 implementation slices: final approval writes the published assignment + optional schedule-group membership, revalidates latest target-group department dispatch scope, covers conflict/edit-window/shiftCompliance rollback in real-DB tests, and #2570 adds fail-closed protection for overlapping temporary / shift-swap / auto-shift generated rows plus existing-membership id reuse.
 - D4 admin/employee UI is code-green in the 2026-06-13 implementation slice: admin can create/read daily schedule-dispatch requests from Advanced scheduling, and employees can read their own `schedule_dispatch` requests from the generic requests feed. D5 staging smoke remains pending, so the capability stays 🟡 rather than ✅.
 
 ## 2. Scope
@@ -233,7 +233,7 @@ Still required before the dispatch capability can flip ✅:
 - D0 design-lock (this PR) — docs only.
 - D1 latent schema + request type enum + runtime constants/labels + typed DB union + approval-flow support + OpenAPI/SDK generated contract + generic `/requests` rejection — landed #2551.
 - D2 dedicated create/list/read/cancel API and route-level tests — landed #2553.
-- D3 final approval writer + conflict/edit-window/compliance/scope guards — code-green in the 2026-06-13 implementation slice.
+- D3 final approval writer + conflict/edit-window/compliance/scope/protected-generated-row guards — code-green in the 2026-06-13 implementation slices (#2569 + #2570).
 - D4 admin/employee UI — code-green in the 2026-06-13 implementation slice.
 - D5 staging smoke harness/runbook — prepared in the 2026-06-13 prep slice; staging closeout still pending.
 - D6 permanent dispatch design-lock (optional, later).

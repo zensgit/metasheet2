@@ -40,7 +40,8 @@ surface in web tests.
 1. Deploy a main build that includes:
    - D1 schema/envelope and request type support;
    - D2 dedicated create/list/read/cancel API;
-   - D3 final approval writer;
+   - D3 final approval writer plus #2570 generated-row hardening
+     (`d85cfbf7` or later);
    - D4 admin/employee UI `#2571` (`31850251c`).
 2. Staging migrations are current through the schedule-dispatch detail table
    migration and the `schedule_dispatch` request-type constraint.
