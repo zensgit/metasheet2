@@ -266,8 +266,19 @@ TODO:
   - K3 guard 保留: executor 在调用 helper 前仍先执行 K3 strict identifier policy（最多 schema.table、每段字母/下划线开头）；
     不继承 generic MSSQL helper 的 numeric-leading / 多段 identifier 放宽。
   - built-in `insertMany` 仍抛 `SQLSERVER_WRITE_EXECUTOR_DISABLED`；K3 Submit/Audit/BOM/direct table write scope 不变。
-- [ ] C5-4: TLS / schema introspection / read-only smoke 与 generic MSSQL 对齐，并跑实体机 K3/MSSQL smoke。
-- [ ] 实体机 K3/MSSQL smoke。
+- [x] C5-4a: TLS / read-only smoke harness 准备。
+  - K3 default SQL Server executor 支持与 generic MSSQL 同名的 opt-in legacy TLS knobs:
+    `legacyTls` / `tlsMinVersion` / `tlsCiphers`。
+  - K3 默认 TLS 姿态不变；只有显式 legacy TLS knobs 时才添加 `cryptoCredentialsDetails`，且
+    `encrypt=false` + legacy TLS fail-closed。
+  - 新增 `pnpm --filter plugin-integration-core smoke:k3-sqlserver-executor`，通过 K3 channel + built-in executor
+    跑 values-free `testConnection` + bounded read。
+  - 新增 C5 K3/MSSQL smoke runbook，明确 generic `smoke:sqlserver` 负责 schema introspection，K3 smoke 负责
+    `erp:k3-wise-sqlserver` test/select。
+- [ ] C5-4b: 实体机 K3/MSSQL smoke。
+  - 同一批准环境中运行 generic SQL Server smoke + K3 SQL Server executor smoke。
+  - 只回传 package fingerprint、status、TLS knob 名称/布尔、operator-configured object/table 名、计数；
+    不回传 credentials、connection string、raw SQL、row values、K3 payload。
 
 完成条件:
 

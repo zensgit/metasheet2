@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 
 const {
+  buildLegacyTlsOptions,
   buildSimpleSelectQuery: buildSharedSimpleSelectQuery,
   normalizeLimit: normalizeSharedLimit,
   normalizeTimeout: normalizeSharedTimeout,
@@ -127,6 +128,8 @@ function resolveConnectionConfig(system = {}) {
   const database = requiredString(config.database, 'system.config.database')
   const user = requiredString(credentials.username || credentials.user || config.username || config.user, 'system.credentials.username', 'SQLSERVER_CREDENTIALS_REQUIRED')
   const password = requiredString(credentials.password, 'system.credentials.password', 'SQLSERVER_CREDENTIALS_REQUIRED')
+  const legacyTls = buildK3LegacyTlsOptions(config)
+  const encrypt = coerceBoolean(config.encrypt, legacyTls ? true : false)
 
   return {
     server,
@@ -135,11 +138,36 @@ function resolveConnectionConfig(system = {}) {
     user,
     password,
     options: {
-      encrypt: coerceBoolean(config.encrypt, false),
+      encrypt,
       trustServerCertificate: coerceBoolean(config.trustServerCertificate, true),
+      ...(legacyTls ? { cryptoCredentialsDetails: legacyTls } : {}),
     },
     connectionTimeout: normalizeTimeout(config.connectionTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS, 'system.config.connectionTimeoutMs'),
     requestTimeout: normalizeTimeout(config.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS, 'system.config.requestTimeoutMs'),
+  }
+}
+
+function hasLegacyTlsKnob(config) {
+  return config.legacyTls !== undefined ||
+    config.tlsMinVersion !== undefined ||
+    config.tlsCiphers !== undefined
+}
+
+function buildK3LegacyTlsOptions(config) {
+  if (!hasLegacyTlsKnob(config)) return undefined
+  try {
+    return buildLegacyTlsOptions({
+      legacyTls: coerceBoolean(config.legacyTls, false),
+      tlsMinVersion: config.tlsMinVersion,
+      tlsCiphers: config.tlsCiphers,
+      encrypt: coerceBoolean(config.encrypt, true),
+    })
+  } catch (error) {
+    throw wrapHelperError(
+      error,
+      error && error.code ? error.code : 'SQLSERVER_TLS_INVALID',
+      'invalid SQL Server TLS options',
+    )
   }
 }
 
