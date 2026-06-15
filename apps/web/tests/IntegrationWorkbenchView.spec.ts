@@ -2279,7 +2279,7 @@ describe('IntegrationWorkbenchView', () => {
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
       if (url === '/api/data-sources/pg-1/schema') return pgSchema
       if (url === '/api/data-sources/mssql-2/schema') {
-        return new Response(JSON.stringify({ error: { message: 'schema blocked' } }), {
+        return new Response(JSON.stringify({ error: { message: 'schema blocked for project P-001 token=abc' } }), {
           status: 403,
           headers: { 'Content-Type': 'application/json' },
         })
@@ -2324,7 +2324,10 @@ describe('IntegrationWorkbenchView', () => {
     dsSelect.value = 'mssql-2'
     dsSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(8)
-    expect(container.querySelector('[data-testid="data-source-bridge-object-error"]')?.textContent).toContain('schema blocked')
+    const errorText = container.querySelector('[data-testid="data-source-bridge-object-error"]')?.textContent || ''
+    expect(errorText).toContain('无法读取 schema/列信息')
+    expect(errorText).not.toContain('P-001')
+    expect(errorText).not.toContain('token=abc')
     expect((container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement).disabled).toBe(true)
     expect((container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).disabled).toBe(true)
     ;(container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).click()
@@ -2333,6 +2336,275 @@ describe('IntegrationWorkbenchView', () => {
 
     resolvePgSchema(jsonResponse({ tables: [{ name: 'items', schema: 'public' }], views: [] }))
     await flushUi()
+  })
+
+  it('C4-4: shows a values-free actionable message when a SQL bridge source binding is missing', async () => {
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: false, guardrails: { write: { supported: false } } },
+          { kind: 'metasheet:multitable', label: 'MetaSheet multitable', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'ds_bridge_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'Warehouse bridge',
+            kind: 'data-source:sql-readonly',
+            role: 'source',
+            status: 'active',
+            config: { dataSourceId: 'ds-403-gone', object: 'public.items' },
+          },
+          {
+            id: 'ds_bridge_error',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'Broken warehouse bridge',
+            kind: 'data-source:sql-readonly',
+            role: 'source',
+            status: 'error',
+            lastError: "Data source with id 'ds-403-gone' not found",
+            config: { dataSourceId: 'ds-403-gone', object: 'public.items' },
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems/ds_bridge_1/objects')) {
+        return new Response(JSON.stringify({ error: { message: "Data source with id 'ds-403-gone' not found" } }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi()
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'ds_bridge_1'
+    sourceSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="load-source-objects"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    const statusText = container.textContent || ''
+    expect(statusText).toContain('引用的连接或数据源不存在、已删除')
+    expect(statusText).toContain('重新选择 /data-sources')
+    expect(apiFetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/integration/external-systems/ds_bridge_1/objects'))).toBe(true)
+    expect(statusText).not.toContain('当前账号无权')
+    expect(statusText).not.toContain('ds-403-gone')
+  })
+
+  it('C4-4: does not echo unknown SQL bridge connection errors into the workbench status', async () => {
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: false, guardrails: { write: { supported: false } } },
+          { kind: 'metasheet:multitable', label: 'MetaSheet multitable', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'ds_bridge_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'Warehouse bridge',
+            kind: 'data-source:sql-readonly',
+            role: 'source',
+            status: 'active',
+            config: { dataSourceId: 'ds-1', object: 'public.items' },
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems/ds_bridge_1/objects')) {
+        return new Response(JSON.stringify({ error: { message: 'Failed to connect to SQL Server password=secret token=abc database=stockorder' } }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi()
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'ds_bridge_1'
+    sourceSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="load-source-objects"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    const statusText = container.textContent || ''
+    expect(statusText).toContain('连接请求失败')
+    expect(apiFetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/integration/external-systems/ds_bridge_1/objects'))).toBe(true)
+    expect(statusText).not.toContain('password=secret')
+    expect(statusText).not.toContain('token=abc')
+    expect(statusText).not.toContain('stockorder')
+  })
+
+  it('C4-4: maps missing bridge owner-principal errors to the permission guidance', async () => {
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: false, guardrails: { write: { supported: false } } },
+          { kind: 'metasheet:multitable', label: 'MetaSheet multitable', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'ds_bridge_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'Warehouse bridge',
+            kind: 'data-source:sql-readonly',
+            role: 'source',
+            status: 'active',
+            config: { dataSourceId: 'ds-1', object: 'public.items' },
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems/ds_bridge_1/objects')) {
+        return new Response(JSON.stringify({ error: { message: 'DATA_SOURCE_PRINCIPAL_REQUIRED: data source read requires an owner principal (none provided)' } }), {
+          status: 422,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi()
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'ds_bridge_1'
+    sourceSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="load-source-objects"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    const statusText = container.textContent || ''
+    expect(statusText).toContain('当前账号无权读取该连接或 schema')
+    expect(statusText).toContain('/data-sources 权限')
+    expect(statusText).not.toContain('owner principal')
+    expect(statusText).not.toContain('none provided')
+  })
+
+  it('C4-4: keeps delayed SQL bridge errors values-free even after switching the selected source', async () => {
+    let resolveBridgeObjects!: (response: Response) => void
+    const bridgeObjectsResponse = new Promise<Response>((resolve) => { resolveBridgeObjects = resolve })
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') return { ok: true, data: { items: [] } }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: false, guardrails: { write: { supported: false } } },
+          { kind: 'http', label: 'HTTP API', roles: ['source'], supports: ['read'], advanced: false },
+          { kind: 'metasheet:multitable', label: 'MetaSheet multitable', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'ds_bridge_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'Warehouse bridge',
+            kind: 'data-source:sql-readonly',
+            role: 'source',
+            status: 'active',
+            config: { dataSourceId: 'ds-1', object: 'public.items' },
+          },
+          {
+            id: 'http_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'HTTP Source',
+            kind: 'http',
+            role: 'source',
+            status: 'active',
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems/ds_bridge_1/objects')) return bridgeObjectsResponse
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi()
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'ds_bridge_1'
+    sourceSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="load-source-objects"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(apiFetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/integration/external-systems/ds_bridge_1/objects'))).toBe(true)
+    expect(container.textContent || '').not.toContain('连接请求失败')
+    sourceSystemSelect.value = 'http_1'
+    sourceSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(container.textContent || '').not.toContain('连接请求失败')
+
+    resolveBridgeObjects(new Response(JSON.stringify({ error: { message: 'Failed to connect password=secret token=abc database=stockorder' } }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    await flushUi(8)
+
+    const statusText = container.textContent || ''
+    expect(statusText).toContain('连接请求失败')
+    expect(statusText).not.toContain('password=secret')
+    expect(statusText).not.toContain('token=abc')
+    expect(statusText).not.toContain('stockorder')
   })
 
   it('C4-2: maps source fields through a schema-backed picker and sends the selected field in preview', async () => {
