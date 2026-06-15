@@ -352,7 +352,12 @@ async function readAll(adapter, object, filters, options, readStats) {
 
 function readField(row, field) {
   if (!isPlainObject(row) || field === undefined) return undefined
-  return row[field]
+  if (Object.prototype.hasOwnProperty.call(row, field)) return row[field]
+  if (typeof field !== 'string' || field.trim() === '') return undefined
+  const normalized = field.toLowerCase()
+  const matchingKeys = Object.keys(row).filter((key) => key.toLowerCase() === normalized)
+  if (matchingKeys.length !== 1) return undefined
+  return row[matchingKeys[0]]
 }
 
 function matchesByField(rows, field, value) {
