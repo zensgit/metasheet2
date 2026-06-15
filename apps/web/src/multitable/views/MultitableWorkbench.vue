@@ -259,6 +259,7 @@
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           :conditional-formatting="conditionalFormattingByRecord"
+          :conditional-formatting-scale="conditionalFormattingScaleByField"
           :ai-run-enabled="effectiveRowActions.canEdit"
           :ai-run-pending="Boolean(aiShortcut.state.pending)"
           :ai-run-busy="aiShortcutBusy"
@@ -548,7 +549,7 @@ import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue }
 import { parseFrozenIds } from '../utils/frozen-columns'
 import { useAiShortcut } from '../composables/useAiShortcut'
 import type { AiShortcutConfigInput } from '../api/client'
-import { buildRecordFormattingMap, extractRulesFromConfig } from '../utils/conditional-formatting'
+import { buildFieldScaleMap, buildRecordFormattingMap, extractRulesFromConfig, extractScaleRulesFromConfig } from '../utils/conditional-formatting'
 import {
   decorateAndSortBases,
   readFavoriteBaseIds,
@@ -904,6 +905,12 @@ const conditionalFormattingByRecord = computed(() => buildRecordFormattingMap(
   conditionalFormattingRules.value,
   grid.rows.value,
   scopedAllFields.value,
+))
+// A5-1: data-bar scale formatting. min/max over the already-loaded/masked rows
+// (client-side discipline; full-column server aggregate is a separate follow-up).
+const conditionalFormattingScaleByField = computed(() => buildFieldScaleMap(
+  extractScaleRulesFromConfig(workbench.activeView.value?.config),
+  grid.rows.value,
 ))
 const readOnlyFieldIds = computed(() =>
   Object.entries(effectiveFieldPermissions.value)
