@@ -2438,6 +2438,8 @@ describe('IntegrationWorkbenchView', () => {
     const sourceField = container.querySelector('[data-testid="source-field-0"]') as HTMLSelectElement
     expect(sourceField.tagName).toBe('SELECT')
     expect(container.querySelector('[data-testid="source-field-picker-help-0"]')?.textContent).toContain('不显示行值')
+    expect(container.querySelector('[data-testid="source-readonly-boundary-notice"]')?.textContent).toContain('SQL 只读通道')
+    expect(container.querySelector('[data-testid="source-readonly-boundary-notice"]')?.textContent).toContain('不会写回该数据库连接')
     const optionTexts = Array.from(sourceField.options).map((option) => option.textContent?.trim())
     expect(optionTexts).toContain('当前值 · code（未在来源 schema 中）')
     expect(optionTexts).toContain('Material Code · materialCode · string')
