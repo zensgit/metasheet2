@@ -2035,6 +2035,12 @@ describe('IntegrationWorkbenchView', () => {
       }
       if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/data-sources/pg-1/schema') {
+        return jsonResponse({
+          tables: [{ name: 'items', schema: 'public', columns: [{ name: 'id' }, { name: 'name' }] }],
+          views: [{ name: 'item_view', schema: 'reporting', columns: [{ name: 'id' }] }],
+        })
+      }
       if (url === '/api/integration/external-systems' && init?.method === 'POST') {
         const body = JSON.parse(String(init.body || '{}')) as Record<string, unknown>
         upsertBodies.push(body)
@@ -2087,10 +2093,15 @@ describe('IntegrationWorkbenchView', () => {
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
     dsSelect.value = 'pg-1'
     dsSelect.dispatchEvent(new Event('change', { bubbles: true }))
-    const objInput = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLInputElement
-    objInput.value = 'public.items'
-    objInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(8)
+    const objSelect = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement
+    expect(objSelect.tagName).toBe('SELECT')
+    expect(Array.from(objSelect.options).map((option) => option.value)).toEqual(expect.arrayContaining(['public.items', 'reporting.item_view']))
+    expect(container.querySelector('[data-testid="data-source-bridge-object-summary"]')).toBeNull()
+    objSelect.value = 'public.items'
+    objSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
+    expect(container.querySelector('[data-testid="data-source-bridge-object-summary"]')?.textContent).toContain('2 列')
 
     ;(container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).click()
     await flushUi(8)
@@ -2129,6 +2140,9 @@ describe('IntegrationWorkbenchView', () => {
       }
       if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/data-sources/pg-1/schema') {
+        return jsonResponse({ tables: [{ name: 'items', schema: 'public' }], views: [] })
+      }
       throw new Error(`unexpected URL ${url}`)
     })
     apiGetMock.mockReset()
@@ -2159,16 +2173,165 @@ describe('IntegrationWorkbenchView', () => {
     const dsSelect = container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement
     dsSelect.value = 'pg-1'
     dsSelect.dispatchEvent(new Event('change', { bubbles: true }))
-    await flushUi()
+    await flushUi(8)
 
     // dataSourceId picked but object empty → save must stay disabled.
     expect((container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).disabled).toBe(true)
 
-    const objInput = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLInputElement
+    const objInput = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement
     objInput.value = 'public.items'
-    objInput.dispatchEvent(new Event('input', { bubbles: true }))
+    objInput.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
     expect((container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('C4-1: ignores stale schema responses when switching SQL data sources', async () => {
+    let resolvePgSchema!: (response: Response) => void
+    let resolveMssqlSchema!: (response: Response) => void
+    const pgSchema = new Promise<Response>((resolve) => { resolvePgSchema = resolve })
+    const mssqlSchema = new Promise<Response>((resolve) => { resolveMssqlSchema = resolve })
+
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') {
+        return { ok: true, data: { items: [
+          { id: 'pg-1', name: 'Warehouse PG', type: 'postgres', connected: true },
+          { id: 'mssql-2', name: 'ERP MSSQL', type: 'sqlserver', connected: true },
+        ] } }
+      }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target', 'bidirectional'], supports: ['read', 'upsert'], advanced: false },
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: true, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/data-sources/pg-1/schema') return pgSchema
+      if (url === '/api/data-sources/mssql-2/schema') return mssqlSchema
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).checked = true
+    container.querySelector('[data-testid="show-advanced-connectors"]')!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    const kindSelect = container.querySelector('[data-testid="connection-draft-kind"]') as HTMLSelectElement
+    kindSelect.value = 'data-source:sql-readonly'
+    kindSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    const dsSelect = container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement
+    dsSelect.value = 'pg-1'
+    dsSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    dsSelect.value = 'mssql-2'
+    dsSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    resolveMssqlSchema(jsonResponse({ tables: [{ name: 'orders', schema: 'dbo' }], views: [] }))
+    await flushUi(8)
+    let objectSelect = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement
+    expect(Array.from(objectSelect.options).map((option) => option.value)).toContain('dbo.orders')
+
+    resolvePgSchema(jsonResponse({ tables: [{ name: 'items', schema: 'public' }], views: [] }))
+    await flushUi(8)
+    objectSelect = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement
+    expect(Array.from(objectSelect.options).map((option) => option.value)).toContain('dbo.orders')
+    expect(Array.from(objectSelect.options).map((option) => option.value)).not.toContain('public.items')
+  })
+
+  it('C4-1: blocks saving while SQL object discovery is pending or failed', async () => {
+    let resolvePgSchema!: (response: Response) => void
+    const pgSchema = new Promise<Response>((resolve) => { resolvePgSchema = resolve })
+    const upsertBodies: Array<Record<string, unknown>> = []
+
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') {
+        return { ok: true, data: { items: [
+          { id: 'pg-1', name: 'Warehouse PG', type: 'postgres', connected: true },
+          { id: 'mssql-2', name: 'ERP MSSQL', type: 'sqlserver', connected: true },
+        ] } }
+      }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target', 'bidirectional'], supports: ['read', 'upsert'], advanced: false },
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: true, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/data-sources/pg-1/schema') return pgSchema
+      if (url === '/api/data-sources/mssql-2/schema') {
+        return new Response(JSON.stringify({ error: { message: 'schema blocked' } }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (url === '/api/integration/external-systems' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as Record<string, unknown>
+        upsertBodies.push(body)
+        return jsonResponse({ id: 'ds_bridge_1', ...body })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).checked = true
+    container.querySelector('[data-testid="show-advanced-connectors"]')!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    const kindSelect = container.querySelector('[data-testid="connection-draft-kind"]') as HTMLSelectElement
+    kindSelect.value = 'data-source:sql-readonly'
+    kindSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    const nameInput = container.querySelector('[data-testid="connection-draft-name"]') as HTMLInputElement
+    nameInput.value = 'Warehouse bridge'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    const dsSelect = container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement
+    dsSelect.value = 'pg-1'
+    dsSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    expect(container.querySelector('[data-testid="data-source-bridge-object-loading"]')).not.toBeNull()
+    expect((container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement).disabled).toBe(true)
+    expect((container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).disabled).toBe(true)
+
+    dsSelect.value = 'mssql-2'
+    dsSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+    expect(container.querySelector('[data-testid="data-source-bridge-object-error"]')?.textContent).toContain('schema blocked')
+    expect((container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement).disabled).toBe(true)
+    expect((container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).disabled).toBe(true)
+    ;(container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(upsertBodies).toHaveLength(0)
+
+    resolvePgSchema(jsonResponse({ tables: [{ name: 'items', schema: 'public' }], views: [] }))
+    await flushUi()
   })
 
   it('C3: shows an enabled approval automation entry for an entitled Yuantus PLM data-source bridge and marks stubbed actions', async () => {
