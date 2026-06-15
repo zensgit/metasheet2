@@ -7,6 +7,13 @@ export type NormalizedSelectOption = {
 
 export type NormalizedLinkFieldProperty = {
   foreignSheetId: string | null
+  // Cross-base opt-in (design 2026-06-14). Mirrors the backend codec
+  // (`field-codecs.ts:208-239`): present only when a cross-base link is
+  // authored; same-base links resolve this to `null`. Without carrying it
+  // through here the picker would emit the field but read-back would drop it
+  // and the link would silently revert to same-base on reload (the #1781
+  // wire-vs-fixture trap).
+  foreignBaseId: string | null
   limitSingleRecord: boolean
   refKind: string | null
 }
@@ -95,6 +102,7 @@ export function resolveLinkFieldProperty(value: unknown): NormalizedLinkFieldPro
   const property = asRecord(value)
   return {
     foreignSheetId: stringOrNull(property.foreignSheetId ?? property.foreignDatasheetId ?? property.datasheetId),
+    foreignBaseId: stringOrNull(property.foreignBaseId),
     limitSingleRecord: property.limitSingleRecord === true,
     refKind: stringOrNull(property.refKind),
   }
