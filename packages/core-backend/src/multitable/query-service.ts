@@ -277,6 +277,12 @@ export async function queryRecords(
 
   if (search) {
     params.push(`%${search}%`)
+    // Whole-row JSON text search. For rich-`longText` the stored value is sanitized HTML, so
+    // this matches the text content (the dominant case) but also the surviving allow-list tags
+    // (e.g. searching "strong" can hit a `<strong>` wrapper) and can miss a phrase split across
+    // a tag boundary. A tag-stripped per-field projection (§7) for search needs a derived column
+    // or post-filter — deferred (bounded residual); the `richLongTextToPlainText` helper exists
+    // for the follow-on. Export already uses the projection.
     where.push(`data::text ILIKE $${params.length}`)
   }
 

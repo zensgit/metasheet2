@@ -6,6 +6,7 @@
 import { randomUUID } from 'crypto'
 import { Logger } from '../core/logger'
 import { redactString } from './automation-log-redact'
+import { isRichLongTextProperty, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
 import { resolveBaseWritable } from './permission-service'
 import { MemoryRateLimitStore, type RateLimitStore } from '../middleware/rate-limiter'
@@ -1664,6 +1665,41 @@ export class AutomationExecutor {
 
   // ── Individual action executors ─────────────────────────────────────────
 
+  /**
+   * Sanitize rich-`longText` values in an automation write payload (§5).
+   *
+   * The automation `update_record` / `create_record` actions write `meta_records.data`
+   * via a BARE `data || $1::jsonb` SQL — they bypass the 5 record-write validators. A
+   * rich-`longText` value set by an action (its config may template trigger/record data,
+   * so the content is NOT trusted) would otherwise be stored as raw HTML = stored XSS the
+   * write sanitizer never saw. The "inert by construction" storage invariant the FE render
+   * lane trusts must hold at EVERY user-content write boundary, not just the 5 validators.
+   *
+   * Loads the TARGET sheet's longText fields, and for any payload key whose field is rich,
+   * runs `sanitizeRichLongText` in place. Mutates and returns the same object.
+   */
+  private async sanitizeRichLongTextInWritePayload(
+    sheetId: string,
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const keys = Object.keys(payload)
+    if (keys.length === 0) return payload
+    const res = await this.deps.queryFn(
+      `SELECT id, property FROM meta_fields
+       WHERE sheet_id = $1 AND type = 'longText' AND id = ANY($2::text[])`,
+      [sheetId, keys],
+    )
+    for (const row of res.rows as Array<{ id?: unknown; property?: unknown }>) {
+      const fieldId = typeof row.id === 'string' ? row.id : String(row.id ?? '')
+      if (!fieldId || !isRichLongTextProperty(row.property)) continue
+      const value = payload[fieldId]
+      if (typeof value === 'string') {
+        payload[fieldId] = sanitizeRichLongText(value)
+      }
+    }
+    return payload
+  }
+
   private async executeUpdateRecord(
     config: Record<string, unknown>,
     context: ExecutionContext,
@@ -1733,6 +1769,11 @@ export class AutomationExecutor {
         ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
       }
 
+      // rich-longText write-path defense: this bare UPDATE bypasses the 5 record-write
+      // validators, so sanitize any rich-longText value in the patch against the TARGET
+      // sheet's field config before it reaches the DB (inert-by-construction at every writer).
+      await this.sanitizeRichLongTextInWritePayload(effectiveSheetId, patch)
+
       // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
       // update is rejected before this UPDATE unless claim==truth + trigger-actor base-write.
       // lock-guarded: automation update_record (B1) — ensureRecordNotLocked enforced just above.
@@ -1779,6 +1820,11 @@ export class AutomationExecutor {
       if (gate.crossBase && gate.ok === false) {
         return { actionType: 'create_record', status: 'failed', error: gate.error }
       }
+
+      // rich-longText write-path defense: this bare INSERT bypasses the 5 record-write
+      // validators, so sanitize any rich-longText value in `data` against the target sheet's
+      // field config before it reaches the DB (inert-by-construction at every writer).
+      await this.sanitizeRichLongTextInWritePayload(targetSheetId, data)
 
       // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
       // create is rejected before this INSERT unless claim==truth + trigger-actor base-write. This is

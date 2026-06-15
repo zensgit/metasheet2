@@ -105,7 +105,7 @@ import { MultitableFormulaEngine } from '../multitable/formula-engine'
 import { FormulaEngine } from '../formula/engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
-import { BATCH1_FIELD_TYPES, coerceBatch1Value, normalizeMultiSelectValue, validateLongTextValue } from '../multitable/field-codecs'
+import { BATCH1_FIELD_TYPES, coerceBatch1Value, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue } from '../multitable/field-codecs'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import {
   AutomationRuleValidationError,
@@ -6023,6 +6023,29 @@ export function univerMetaRouter(): Router {
         )
         const desiredOrder = parsed.data.order
 
+        // Rich-longText backward-compat gate (§4). Old plain `longText` values were stored
+        // NEVER-SANITIZED; flipping a POPULATED field to `rich` would retroactively reinterpret
+        // that raw text as HTML (a stored-XSS hole the write sanitizer never saw). Reject the
+        // rich toggle-ON unless the field is empty. Gated on an actual OFF→ON transition so a
+        // rename-only PATCH on an already-rich field (or any non-longText field) never trips it.
+        const richTurningOn =
+          nextType === 'longText'
+          && isRichLongTextProperty(nextProperty)
+          && !(currentType === 'longText' && isRichLongTextProperty(row.property))
+        if (richTurningOn) {
+          const populated = await query(
+            `SELECT 1 FROM meta_records
+             WHERE sheet_id = $1 AND data ? $2 AND NULLIF(data ->> $2, '') IS NOT NULL
+             LIMIT 1`,
+            [sheetId, fieldId],
+          )
+          if ((populated as any).rows?.length > 0) {
+            throw new ValidationError(
+              '无法对已有数据的长文本字段开启富文本：历史纯文本值未经过净化。请先清空该字段或新建富文本字段。',
+            )
+          }
+        }
+
         const configError = await validateLookupRollupConfig(req, query, sheetId, nextType, nextProperty)
         if (configError) {
           throw new ValidationError(configError)
@@ -7242,7 +7265,15 @@ export function univerMetaRouter(): Router {
         })
         for (const record of result.items) {
           const data = filterRecordDataByFieldIds(record.data, fieldIds)
-          rows.push(fields.map((field) => serializeXlsxCell(data[field.id])))
+          rows.push(fields.map((field) => {
+            const cell = data[field.id]
+            // Rich-longText export = the §7 plain-text projection, NOT the raw HTML
+            // (a cell must read as text, never `<p>…</p>`).
+            if (field.type === 'longText' && isRichLongTextProperty(field.property) && typeof cell === 'string') {
+              return serializeXlsxCell(richLongTextToPlainText(cell))
+            }
+            return serializeXlsxCell(cell)
+          }))
           if (rows.length >= XLSX_MAX_ROWS) {
             truncated = result.hasMore
             break

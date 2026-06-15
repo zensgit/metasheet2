@@ -12,6 +12,12 @@ import {
   type RecordPatchInput,
   type UniverMetaField,
 } from '../../src/multitable/record-write-service'
+import {
+  AutomationExecutor,
+  type AutomationRule,
+  type AutomationDeps,
+} from '../../src/multitable/automation-executor'
+import { EventBus } from '../../src/integration/events/event-bus'
 
 // ---------------------------------------------------------------------------
 // Mock: publishMultitableSheetRealtime (real-wire round-trip canary)
@@ -348,5 +354,90 @@ describe('sanitizeRichLongText (shared helper for automation + validators)', () 
     expect(out).not.toMatch(/<script/i)
     expect(out).toContain('<strong>keep</strong>')
     expect(out).toMatch(/rel="noopener noreferrer"/)
+  })
+})
+
+// ===========================================================================
+// PART 7 — automation write-path coverage (census closure)
+//
+// update_record / create_record actions write meta_records.data via a BARE SQL
+// UPDATE/INSERT, bypassing the 5 validators. They MUST still store rich-longText
+// inert. We drive the real AutomationExecutor and capture the persisted payload.
+// ===========================================================================
+
+describe('automation update_record / create_record sanitize rich longText', () => {
+  // queryFn that: resolves a uniform base (same-base, no cross-base gate), reports
+  // `fld_notes` as a RICH longText field, and captures the meta_records write payload.
+  function createCapturingDeps(captured: { writes: unknown[][] }): AutomationDeps {
+    return {
+      eventBus: new EventBus(),
+      queryFn: vi.fn(async (sql: unknown, params?: unknown[]) => {
+        const s = String(sql)
+        if (/FROM meta_sheets/i.test(s)) return { rows: [{ base_id: 'base_mock' }], rowCount: 1 }
+        if (/FROM meta_fields/i.test(s) && /type = 'longText'/i.test(s)) {
+          return { rows: [{ id: 'fld_notes', property: { rich: true } }], rowCount: 1 }
+        }
+        if (/UPDATE meta_records|INSERT INTO meta_records/i.test(s)) {
+          captured.writes.push(params ?? [])
+          return { rows: [{ id: 'r1', version: 2 }], rowCount: 1 }
+        }
+        // SELECT FOR UPDATE lock row (update_record path)
+        if (/FROM meta_records/i.test(s)) {
+          return { rows: [{ locked: false, locked_by: null, created_by: 'user1' }], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 0 }
+      }) as AutomationDeps['queryFn'],
+      fetchFn: vi.fn(async () => new Response('OK', { status: 200 })) as unknown as typeof fetch,
+    }
+  }
+
+  const MALICIOUS = '<script>evil()</script><img src=x onerror=alert(1)><b>ok</b>'
+
+  it('update_record sanitizes a rich longText field value before persisting', async () => {
+    const captured = { writes: [] as unknown[][] }
+    const executor = new AutomationExecutor(createCapturingDeps(captured))
+    const rule = {
+      id: 'rule_1',
+      name: 'r',
+      enabled: true,
+      trigger: { type: 'record_updated' as const },
+      actions: [{ type: 'update_record', config: { fields: { fld_notes: MALICIOUS } } }],
+    } as unknown as AutomationRule
+    const result = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1' })
+    expect(result.steps[0].status).toBe('success')
+
+    expect(captured.writes.length).toBeGreaterThan(0)
+    const stored = JSON.parse(String(captured.writes[0][0])) as Record<string, unknown>
+    const value = String(stored.fld_notes ?? '')
+    expect(value.toLowerCase()).not.toContain('<script')
+    expect(value.toLowerCase()).not.toContain('onerror')
+    expect(value).not.toContain('evil()')
+    expect(value).not.toMatch(/<img/i)
+    expect(value).toContain('<b>ok</b>')
+  })
+
+  it('create_record sanitizes a rich longText field value before persisting', async () => {
+    const captured = { writes: [] as unknown[][] }
+    const executor = new AutomationExecutor(createCapturingDeps(captured))
+    const rule = {
+      id: 'rule_2',
+      name: 'r',
+      enabled: true,
+      trigger: { type: 'record_created' as const },
+      actions: [{ type: 'create_record', config: { data: { fld_notes: MALICIOUS } } }],
+    } as unknown as AutomationRule
+    const result = await executor.execute(rule, { recordId: 'r1', sheetId: 'sheet_1' })
+    expect(result.steps[0].status).toBe('success')
+
+    expect(captured.writes.length).toBeGreaterThan(0)
+    // create_record INSERT params = [recordId, sheetId, JSON.stringify(data)] → data is param[2].
+    const insertParams = captured.writes[0]
+    const dataJson = insertParams.map((p) => String(p)).find((p) => p.includes('fld_notes')) ?? '{}'
+    const stored = JSON.parse(dataJson) as Record<string, unknown>
+    const value = String(stored.fld_notes ?? '')
+    expect(value.toLowerCase()).not.toContain('<script')
+    expect(value.toLowerCase()).not.toContain('onerror')
+    expect(value).not.toContain('evil()')
+    expect(value).toContain('<b>ok</b>')
   })
 })
