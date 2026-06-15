@@ -6,6 +6,13 @@
 // unreachable cases (RC4/3DES needing the OpenSSL legacy provider, or plaintext)
 // stay on the sidecar / Bridge Agent line. stream() uses batch fetch, not a true
 // cursor.
+import {
+  buildLegacyTlsOptions,
+  parseSqlServerEndpoint,
+  quoteSqlServerIdentifier,
+  VALID_TLS_MIN_VERSIONS,
+  type LegacyTlsOptions,
+} from '@metasheet/mssql-readonly-utils'
 import type {
   QueryOptions,
   QueryResult,
@@ -60,12 +67,12 @@ interface MssqlColumnRow {
   numeric_scale: number | null
 }
 
-function coerceBoolean(value: unknown, fallback: boolean): boolean {
+function coerceMssqlConfigBoolean(value: unknown, fallback: boolean): boolean {
   if (typeof value === 'boolean') return value
   if (typeof value === 'string') {
-    const s = value.trim().toLowerCase()
-    if (['false', '0', 'no', 'off'].includes(s)) return false
-    if (['true', '1', 'yes', 'on'].includes(s)) return true
+    const normalized = value.trim().toLowerCase()
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true
   }
   return fallback
 }
@@ -96,32 +103,23 @@ export class MSSQLAdapter extends BaseDataAdapter {
     const serverRaw = getStringConfig(this.config.connection.server)
     const explicitPort = getNumberConfig(this.config.connection.port)
 
-    if (host) {
-      return { server: host, ...(explicitPort != null ? { port: explicitPort } : {}) }
+    if (!host && !serverRaw) {
+      throw new Error('SQL Server data source requires connection.host or connection.server')
     }
-    if (serverRaw) {
-      const m = serverRaw.match(/^(.*?)[:,](\d+)$/)
-      if (m) {
-        const parsedPort = parseInt(m[2], 10)
-        if (explicitPort != null && explicitPort !== parsedPort) {
+    try {
+      return parseSqlServerEndpoint({ host, server: serverRaw, port: explicitPort })
+    } catch (error) {
+      if ((error as { code?: string }).code === 'SQLSERVER_PORT_INVALID') {
+        const message = (error as Error).message
+        if (message.startsWith('Conflicting port:')) {
           throw new Error(
-            `Conflicting port: connection.port=${explicitPort} but connection.server specifies ${parsedPort}`
+            `Conflicting port: connection.port=${explicitPort} but connection.server specifies ${String(serverRaw).split(/[,:]/).pop()}`
           )
         }
-        return { server: m[1], port: explicitPort ?? parsedPort }
       }
-      return { server: serverRaw, ...(explicitPort != null ? { port: explicitPort } : {}) }
+      throw error
     }
-    throw new Error('SQL Server data source requires connection.host or connection.server')
   }
-
-  // Valid TLS protocol floors accepted by Node's tls module (B3 validation).
-  private static readonly VALID_TLS_MIN_VERSIONS: readonly string[] = [
-    'TLSv1',
-    'TLSv1.1',
-    'TLSv1.2',
-    'TLSv1.3'
-  ]
 
   /**
    * B3 — per-connection legacy-TLS escape hatch. SECURE BY DEFAULT: returns
@@ -138,59 +136,48 @@ export class MSSQLAdapter extends BaseDataAdapter {
    * The wire stays encrypted (this lowers the floor, it is not `encrypt:false`).
    * Lowering below the secure default emits an audit signal.
    */
-  private buildLegacyTlsOptions(conn: ConnectionConfig): { minVersion?: string; ciphers?: string } | undefined {
-    const legacyTls = coerceBoolean(conn.legacyTls, false)
-    let minVersion = getStringConfig(conn.tlsMinVersion)
-    let ciphers = getStringConfig(conn.tlsCiphers)
-
-    if (legacyTls) {
-      // Documented legacy defaults; explicit keys win.
-      minVersion = minVersion ?? 'TLSv1'
-      ciphers = ciphers ?? 'DEFAULT@SECLEVEL=0'
+  private buildLegacyTlsOptions(conn: ConnectionConfig): LegacyTlsOptions | undefined {
+    let legacyTls: LegacyTlsOptions | undefined
+    try {
+      legacyTls = buildLegacyTlsOptions({
+        legacyTls: coerceMssqlConfigBoolean(conn.legacyTls, false),
+        tlsMinVersion: conn.tlsMinVersion,
+        tlsCiphers: conn.tlsCiphers,
+        encrypt: coerceMssqlConfigBoolean(conn.encrypt, true),
+      })
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      if (code === 'SQLSERVER_TLS_CONFLICT') {
+        throw new Error(
+          'connection.encrypt=false cannot be combined with the legacy-TLS lever ' +
+            '(legacyTls / tlsMinVersion / tlsCiphers): the TLS downgrade keeps the wire ' +
+            'encrypted, while encrypt=false is a separate plaintext escape hatch — use one or the other.'
+        )
+      }
+      if (code === 'SQLSERVER_TLS_MIN_VERSION_INVALID') {
+        throw new Error(
+          `Invalid connection.tlsMinVersion "${getStringConfig(conn.tlsMinVersion)}" ` +
+            `(expected one of ${VALID_TLS_MIN_VERSIONS.join(', ')})`
+        )
+      }
+      throw error
     }
-
-    // No downgrade requested → keep Node/tedious secure defaults (TLSv1.2 floor).
-    if (minVersion === undefined && ciphers === undefined) return undefined
-
-    // B3 lowers the TLS floor but keeps the wire ENCRYPTED. It must not be
-    // combined with connection.encrypt=false — that is a SEPARATE plaintext
-    // escape hatch with a different security posture. Allowing both would make
-    // the audit below falsely claim "wire stays encrypted" for a plaintext
-    // source. Reject the contradiction loudly; the plaintext path is opt-in on
-    // its own (encrypt=false with no TLS-downgrade keys).
-    if (coerceBoolean(conn.encrypt, true) === false) {
-      throw new Error(
-        'connection.encrypt=false cannot be combined with the legacy-TLS lever ' +
-          '(legacyTls / tlsMinVersion / tlsCiphers): the TLS downgrade keeps the wire ' +
-          'encrypted, while encrypt=false is a separate plaintext escape hatch — use one or the other.'
-      )
-    }
-
-    // Enum-strict: never silently fall back to a default for a bad floor value.
-    if (minVersion !== undefined && !MSSQLAdapter.VALID_TLS_MIN_VERSIONS.includes(minVersion)) {
-      throw new Error(
-        `Invalid connection.tlsMinVersion "${minVersion}" ` +
-          `(expected one of ${MSSQLAdapter.VALID_TLS_MIN_VERSIONS.join(', ')})`
-      )
-    }
+    if (legacyTls === undefined) return undefined
 
     // Audit: this source is connecting with a deliberately lowered TLS posture.
     const detail = [
-      minVersion !== undefined ? `minVersion=${minVersion}` : null,
-      ciphers !== undefined ? `ciphers=${ciphers}` : null
+      legacyTls.minVersion !== undefined ? `minVersion=${legacyTls.minVersion}` : null,
+      legacyTls.ciphers !== undefined ? `ciphers=${legacyTls.ciphers}` : null
     ]
       .filter(Boolean)
       .join(', ')
-    this.emit('tls-downgrade', { adapter: this.config.name, minVersion, ciphers })
+    this.emit('tls-downgrade', { adapter: this.config.name, minVersion: legacyTls.minVersion, ciphers: legacyTls.ciphers })
     console.warn(
       `[MSSQLAdapter] legacy TLS enabled for data source "${this.config.name}" (${detail}); ` +
         `wire stays encrypted, scope is this connection only.`
     )
 
-    return {
-      ...(minVersion !== undefined ? { minVersion } : {}),
-      ...(ciphers !== undefined ? { ciphers } : {})
-    }
+    return legacyTls
   }
 
   private buildPoolConfig(): Record<string, unknown> {
@@ -209,8 +196,8 @@ export class MSSQLAdapter extends BaseDataAdapter {
       // cryptoCredentialsDetails (B3) lowers the TLS floor/ciphers per-source
       // for genuinely old servers — still encrypted, opt-in only.
       options: {
-        encrypt: coerceBoolean(conn.encrypt, true),
-        trustServerCertificate: coerceBoolean(conn.trustServerCertificate, true),
+        encrypt: coerceMssqlConfigBoolean(conn.encrypt, true),
+        trustServerCertificate: coerceMssqlConfigBoolean(conn.trustServerCertificate, true),
         ...(legacyTls ? { cryptoCredentialsDetails: legacyTls } : {})
       },
       // ?? (not ||) so an explicit 0 ("no timeout" in mssql) is not overridden.
@@ -272,7 +259,14 @@ export class MSSQLAdapter extends BaseDataAdapter {
   // A2: bracket-quote PER SEGMENT so a schema-qualified name becomes [schema].[table]. The base
   // sanitizer validates each segment and throws on illegal input.
   private quoteIdent(identifier: string): string {
-    return this.sanitizeIdentifier(identifier).split('.').map(seg => `[${seg}]`).join('.')
+    try {
+      return quoteSqlServerIdentifier(identifier)
+    } catch (error) {
+      if ((error as { code?: string }).code === 'SQLSERVER_IDENTIFIER_INVALID') {
+        throw new Error(`Invalid identifier: ${identifier}`)
+      }
+      throw error
+    }
   }
 
   async query<T = Record<string, DbValue>>(sql: string, params?: DbValue[]): Promise<QueryResult<T>> {

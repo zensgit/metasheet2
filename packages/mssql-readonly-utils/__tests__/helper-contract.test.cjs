@@ -95,7 +95,9 @@ function testEndpointAndTls() {
     port: 1433,
   })
   assert.deepEqual(helper.parseSqlServerEndpoint({ server: 'db,1444' }), { server: 'db', port: 1444 })
+  assert.deepEqual(helper.parseSqlServerEndpoint({ server: 'db\\inst,1444' }), { server: 'db\\inst', port: 1444 })
   assertThrowsCode(() => helper.parseSqlServerEndpoint({ server: 'db,1444', port: 1433 }), 'SQLSERVER_PORT_INVALID')
+  assertThrowsCode(() => helper.parseSqlServerEndpoint({ server: 'db\\inst,1444', port: 1433 }), 'SQLSERVER_PORT_INVALID')
 
   assert.deepEqual(helper.buildLegacyTlsOptions({ legacyTls: true }), {
     minVersion: 'TLSv1',
@@ -117,6 +119,15 @@ function testConsumerPolicies() {
   assert.equal(helper.normalizeLimit(undefined, { defaultLimit: 10000, maxLimit: 10000, overMax: 'throw' }), 10000)
   assertThrowsCode(() => helper.normalizeLimit(10001, { maxLimit: 10000, overMax: 'throw' }), 'SQLSERVER_LIMIT_INVALID')
   assert.equal(helper.normalizeLimit(10001, { defaultLimit: 1000, maxLimit: 10000, overMax: 'clamp' }), 10000)
+}
+
+function testSqlServerIdentifierCompatibility() {
+  assert.equal(helper.quoteSqlServerIdentifier('orders'), '[orders]')
+  assert.equal(helper.quoteSqlServerIdentifier('2024_orders'), '[2024_orders]')
+  assert.equal(helper.quoteSqlServerIdentifier('dbo.2024_orders'), '[dbo].[2024_orders]')
+  assert.equal(helper.quoteSqlServerIdentifier('tenant.dbo.orders'), '[tenant].[dbo].[orders]')
+  assertThrowsCode(() => helper.quoteSqlServerIdentifier('tenant..orders'), 'SQLSERVER_IDENTIFIER_INVALID')
+  assertThrowsCode(() => helper.quoteSqlServerIdentifier('bad-name'), 'SQLSERVER_IDENTIFIER_INVALID')
 }
 
 function testGenericWhereClause() {
@@ -190,6 +201,7 @@ testNeutralRuntimeBoundary()
 testRepoImportBoundaries()
 testEndpointAndTls()
 testConsumerPolicies()
+testSqlServerIdentifierCompatibility()
 testGenericWhereClause()
 testSimpleSelectQuery()
 

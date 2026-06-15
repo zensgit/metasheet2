@@ -1,7 +1,7 @@
 'use strict'
 
-const SIMPLE_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
-const QUALIFIED_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/
+const SIMPLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9_]+$/
+const QUALIFIED_IDENTIFIER_PATTERN = /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/
 const VALID_TLS_MIN_VERSIONS = Object.freeze(['TLSv1', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3'])
 
 class SqlServerReadonlyHelperError extends Error {
@@ -84,7 +84,7 @@ function parseSqlServerEndpoint(input = {}) {
   }
 
   const server = requiredString(serverRaw, 'server')
-  const match = server.match(/^([^,:\\]+)([:,])(\d+)$/)
+  const match = server.match(/^(.*?)([:,])(\d+)$/)
   if (!match) {
     return { server, ...(explicitPort === undefined ? {} : { port: explicitPort }) }
   }

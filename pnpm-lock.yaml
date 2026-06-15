@@ -148,6 +148,9 @@ importers:
 
   packages/core-backend:
     dependencies:
+      '@metasheet/mssql-readonly-utils':
+        specifier: workspace:*
+        version: link:../mssql-readonly-utils
       '@types/bcryptjs':
         specifier: ^3.0.0
         version: 3.0.0
@@ -254,9 +257,6 @@ importers:
         specifier: ^3.22.4
         version: 3.25.76
     devDependencies:
-      '@metasheet/mssql-readonly-utils':
-        specifier: workspace:*
-        version: link:../mssql-readonly-utils
       '@types/bcrypt':
         specifier: ^5.0.2
         version: 5.0.2

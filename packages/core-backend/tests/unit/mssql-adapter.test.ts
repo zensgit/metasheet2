@@ -89,6 +89,19 @@ describe('MSSQLAdapter — config mapping', () => {
     expect(cfg.requestTimeout).toBe(12000)
   })
 
+  it('keeps numeric boolean-like security knobs on the legacy fallback path', () => {
+    const cfg = poolConfig({
+      host: 'db',
+      database: 'D',
+      encrypt: 0,
+      legacyTls: 1,
+      trustServerCertificate: 0,
+    })
+    expect(cfg.options.encrypt).toBe(true)
+    expect(cfg.options.trustServerCertificate).toBe(true)
+    expect(cfg.options.cryptoCredentialsDetails).toBeUndefined()
+  })
+
   it('passes an explicit timeout of 0 through (no-timeout), not the default', () => {
     const cfg = poolConfig({ host: 'db', database: 'D', connectionTimeoutMs: 0, requestTimeoutMs: 0 })
     expect(cfg.connectionTimeout).toBe(0)
@@ -98,11 +111,13 @@ describe('MSSQLAdapter — config mapping', () => {
   it('parses server alias (host:port and host,port) and host wins over server', () => {
     expect(poolConfig({ server: 'h1:1444', database: 'D' })).toMatchObject({ server: 'h1', port: 1444 })
     expect(poolConfig({ server: 'h2,1455', database: 'D' })).toMatchObject({ server: 'h2', port: 1455 })
+    expect(poolConfig({ server: 'db\\inst,1444', database: 'D' })).toMatchObject({ server: 'db\\inst', port: 1444 })
     expect(poolConfig({ host: 'hWin', server: 'hLose,1466', port: 1433, database: 'D' })).toMatchObject({ server: 'hWin', port: 1433 })
   })
 
   it('throws on a server-embedded port that conflicts with an explicit port', () => {
     expect(() => poolConfig({ server: 'h,1444', port: 9999, database: 'D' })).toThrow(/Conflicting port/)
+    expect(() => poolConfig({ server: 'db\\inst,1444', port: 9999, database: 'D' })).toThrow(/Conflicting port/)
   })
 })
 
@@ -192,6 +207,19 @@ describe('MSSQLAdapter — SQL generation (fake driver)', () => {
     expect(sql).toMatch(/@p0/)
     expect(sql).not.toMatch(/\$\d/)
     expect(params.p0).toBe(true)
+  })
+
+  it('select: preserves legacy-compatible SQL Server identifier shapes through the helper', async () => {
+    const fp = fakePool()
+    await adapterWithFakePool(fp).select('tenant.dbo.2024_orders', {
+      select: ['2024_amount'],
+      orderBy: [{ column: 'tenant.dbo.2024_created_at', direction: 'asc' }],
+      limit: 5,
+    })
+    const { sql } = fp.calls[0]
+    expect(sql).toContain('[tenant].[dbo].[2024_orders]')
+    expect(sql).toContain('[2024_amount]')
+    expect(sql).toContain('[tenant].[dbo].[2024_created_at] ASC')
   })
 
   it('select: OFFSET/FETCH with ORDER BY when offset is given', async () => {
