@@ -52,7 +52,7 @@ design — it lands with B1-b once a browser session can verify render→click).
 | A5 design-lock (scale rule model + security locks + slice plan) | ✅ | #2637 |
 | A5-1 data-bar backend contract (`sanitize…ScaleRule` + `buildFieldScaleMap`) | ✅ | #2639 |
 | A5-1 data-bar FE mirror + grid render | ✅ | #2640 |
-| **A5-2 color-scale + A5-3 icon-set backend + FE mirror** | 🟦 **in review (this session)** | draft PR |
+| **A5-2 color-scale + A5-3 icon-set backend + FE mirror** | 🟦 **in review** | **PR #2663** — BE 70 + FE 24 tests, tsc + vue-tsc green, suite 3296/3296; byte-identical FE↔BE mirror |
 | A5-2 / A5-3 grid render (MetaGridTable) + dialog (ConditionalFormattingDialog) | 🔒 browser-gated | — |
 
 A5-2 + A5-3 are combined into **one** backend PR (they extend the identical
@@ -61,12 +61,19 @@ conflict on those hot functions and stall on merge cadence), with separate test
 blocks per kind. Render + dialog stay browser-gated (visual contrast / alignment
 need a real browser, per the design-lock's honest verification boundary).
 
+**Render-slice blocker (carried from #2663):** the sanitizer now ACCEPTS
+colorScale/iconSet, but `MetaGridTable.vue:606` is still kind-blind (paints a
+data-bar gradient from any scale entry → `linear-gradient(…undefined…)` for the
+new kinds). Safe intermediate state today (the dialog, the only config producer,
+is still dataBar-only, so no reachable UI emits these), but the render slice MUST
+make the cell renderer kind-aware **before** colorScale/iconSet authoring ships.
+
 ## 3. Export full-fidelity (A2) — masking-flag verification
 
 | Item | State | Note |
 |---|---|---|
 | A2 export column/row picker | ✅ | #2635 |
-| A2 server-side masking-flag verification (+ fix if real) | ⬜ next (this session) | #2650 §4 flagged a possible FE-export bypass of server field masking; verify the `grid.rows`-already-masked claim, fix if the bypass is real |
+| A2 server-side masking-flag verification (+ fix if real) | ⬜ verifying (this session) | #2650 §4 flagged a possible FE-export bypass of server field masking; read-only investigate→refute running, fix only if the bypass is real |
 
 ## 4. Remaining ladder (gated — from #2650 §5)
 
