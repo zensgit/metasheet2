@@ -73,7 +73,8 @@ make the cell renderer kind-aware **before** colorScale/iconSet authoring ships.
 | Item | State | Note |
 |---|---|---|
 | A2 export column/row picker | ✅ | #2635 |
-| A2 server-side masking-flag verification (+ fix if real) | ⬜ verifying (this session) | #2650 §4 flagged a possible FE-export bypass of server field masking; read-only investigate→refute running, fix only if the bypass is real |
+| A2 server-side masking-flag verification | ✅ verified SAFE — **no fix** | investigate + adversarial-refute both agree (high conf): server drops unauthorized values at `GET /view` (`univer-meta.ts:8128` `filterRecordDataByFieldIds`); FE export reads only already-masked `grid.rows` bounded by `scopedGridFields ⊆ allowedFieldIds`; all 4 value-injection channels apply the composite mask. #2650 §4 concern closed |
+| A2 server-side FULL export (beyond loaded page) | 🔒 gated | per design-lock §2.2 a server-aggregate full-dataset export is a separate opt-in; not part of this autonomous tier |
 
 ## 4. Remaining ladder (gated — from #2650 §5)
 
