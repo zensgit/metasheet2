@@ -7455,6 +7455,65 @@ attendanceIntegrationDescribe(
     expect(emptyTemplateBody.error?.message).toContain('required')
   })
 
+  it('④/年假 L0 — config integrity: enabling requires a timezone (422), and a broken tiers ladder falls back to the preset', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const userId = `attendance-annual-l0-guard-${Date.now().toString(36)}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+    const readAnnual = async () => {
+      const r = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
+      return (r.body as { data?: { annualLeavePolicy?: { timezone?: string | null; tiers?: Array<{ minYears: number; maxYears: number | null; days: number }> } } } | undefined)?.data?.annualLeavePolicy
+    }
+    const putAnnual = (annualLeavePolicy: Record<string, unknown>) =>
+      requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ annualLeavePolicy }) })
+    const statutoryPreset = [
+      { minYears: 1, maxYears: 10, days: 5 },
+      { minYears: 10, maxYears: 20, days: 10 },
+      { minYears: 20, maxYears: null, days: 15 },
+    ]
+    try {
+      // (1) enabled=true without a timezone → 422 ANNUAL_LEAVE_TIMEZONE_REQUIRED (no silent UTC fallback).
+      const noTz = await putAnnual({ enabled: true })
+      expect(noTz.status).toBe(422)
+      expect((noTz.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ANNUAL_LEAVE_TIMEZONE_REQUIRED')
+
+      // (2) enabled=false without a timezone → allowed (the guard only fires when enabling).
+      expect((await putAnnual({ enabled: false })).status).toBe(200)
+
+      // (3) enabled=true + explicit timezone but an OVERLAPPING ladder (1–10 and 5–20 overlap) → saved, but
+      //     the malformed ladder falls back to the statutory preset (a broken ladder is never persisted).
+      const overlap = await putAnnual({
+        enabled: true,
+        timezone: 'Asia/Shanghai',
+        tiers: [{ minYears: 1, maxYears: 10, days: 5 }, { minYears: 5, maxYears: 20, days: 10 }],
+      })
+      expect(overlap.status, JSON.stringify(overlap.body)).toBe(200)
+      const afterOverlap = await readAnnual()
+      expect(afterOverlap?.timezone).toBe('Asia/Shanghai')
+      expect(afterOverlap?.tiers).toEqual(statutoryPreset)
+
+      // (4) a contiguous custom ladder (single trailing open-ended band) is preserved — proves the fallback
+      //     is targeted, not a blanket overwrite.
+      const okLadder = await putAnnual({
+        enabled: true,
+        timezone: 'Asia/Shanghai',
+        tiers: [{ minYears: 0, maxYears: 3, days: 4 }, { minYears: 3, maxYears: null, days: 9 }],
+      })
+      expect(okLadder.status, JSON.stringify(okLadder.body)).toBe(200)
+      expect((await readAnnual())?.tiers).toEqual([{ minYears: 0, maxYears: 3, days: 4 }, { minYears: 3, maxYears: null, days: 9 }])
+    } finally {
+      // restore default-OFF so the shared local DB doesn't leak enabled=true into later tests.
+      await putAnnual({ enabled: false, timezone: null }).catch(() => undefined)
+    }
+  })
+
   it('rejects future punches and still allows immediate check-out after check-in when min interval is enabled', async () => {
     if (!baseUrl) return
 

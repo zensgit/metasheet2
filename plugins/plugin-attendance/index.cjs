@@ -11781,6 +11781,15 @@ function normalizeAnnualLeaveTiers(raw, fallbackTiers) {
     if (maxYears !== null && (!Number.isFinite(maxYears) || maxYears <= minYears)) return clone()
     tiers.push({ minYears, maxYears, days })
   }
+  // Ladder integrity (#2622 P2): the parsed tiers must form a contiguous, ascending, non-overlapping
+  // ladder with at most ONE trailing open-ended (maxYears=null) band — no gaps, no overlaps, no
+  // out-of-order, and no open-ended band followed by another tier. Any violation falls the WHOLE list
+  // back to the statutory preset (a broken ladder is never persisted). Gaps count as malformed: a
+  // statutory ladder is contiguous, so a gap is almost always a mistake rather than "this band gets none".
+  for (let i = 1; i < tiers.length; i++) {
+    if (tiers[i - 1].maxYears === null) return clone()
+    if (tiers[i].minYears !== tiers[i - 1].maxYears) return clone()
+  }
   return tiers
 }
 
@@ -37345,6 +37354,15 @@ module.exports = {
         try {
           const current = await getSettings(db)
           const merged = mergeSettings(current, parsed.data)
+          // 年假/法定假 L0 config-integrity guard (#2622 timezone lock): enabling the engine requires a
+          // resolvable timezone — carryover/expiry boundaries are calendar-year-end in org time, so an
+          // unset timezone would silently fall back to UTC (forbidden). L0 requires an EXPLICIT timezone;
+          // inherited-timezone resolution (attendance default rule / org) is an L2/L4 extension. A disabled
+          // policy persists freely.
+          if (merged.annualLeavePolicy?.enabled === true && !merged.annualLeavePolicy?.timezone) {
+            res.status(422).json({ ok: false, error: { code: 'ANNUAL_LEAVE_TIMEZONE_REQUIRED', message: 'annualLeavePolicy.timezone is required when annualLeavePolicy.enabled is true' } })
+            return
+          }
           const saved = await saveSettings(db, merged)
           scheduleAutoAbsence({ db, logger, emit: emitEvent })
           scheduleHolidaySync({ db, logger, emit: emitEvent })
