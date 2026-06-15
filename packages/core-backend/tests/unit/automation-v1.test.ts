@@ -2445,6 +2445,43 @@ describe('AutomationService — Rule CRUD', () => {
     expect(dbExecuteResults).toHaveLength(0)
   })
 
+  it('A6-3-3: createRule still rejects nested condition_branch inside a branch (out of scope)', async () => {
+    // Well-formed inner condition_branch so ONLY the nesting rule can fire (not a malformed-config error).
+    const innerBranch = {
+      type: 'condition_branch',
+      config: {
+        branches: [{
+          key: 'inner',
+          conditions: { logic: 'and', conditions: [{ fieldId: 'status', operator: 'equals', value: 'x' }] },
+          actions: [{ type: 'update_record', config: { fields: {} } }],
+        }],
+      },
+    }
+    const outer = {
+      type: 'condition_branch',
+      config: {
+        branches: [{
+          key: 'outer',
+          conditions: { logic: 'and', conditions: [{ fieldId: 'status', operator: 'equals', value: 'pending' }] },
+          actions: [innerBranch],
+        }],
+      },
+    }
+    const promise = service.createRule('sheet_1', {
+      name: 'Nested branch',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'condition_branch',
+      actionConfig: outer.config,
+      actions: [outer],
+      executionMode: 'workflow_job_v1',
+      createdBy: 'user_1',
+    })
+
+    await expect(promise).rejects.toThrow('cannot contain nested condition_branch')
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
   it('A6-3-1: createRule rejects parallel_branch inside a condition_branch branch', async () => {
     const nestedParallel = {
       type: 'parallel_branch',

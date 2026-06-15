@@ -125,8 +125,9 @@ resumes to `approved_after_review`. Matches §6 steps 1–7.
   `start_approval` branch rejections are unit-asserted in
   `tests/unit/automation-v1.test.ts` (`cannot contain parallel_branch ...`,
   `cannot contain start_approval until A6-3-3`); the nested `condition_branch`
-  rejection is enforced by the validator (lines 261/289) and the executor branch
-  loop. 203 unit tests green.
+  rejection is now also unit-asserted (`cannot contain nested condition_branch`),
+  alongside the validator (lines 261/289) + the executor branch loop. 204 unit
+  tests green.
 - executor suspends a selected branch-local wait and does not run later branch
   actions before resume — E2E `HAPPY-high suspends`.
 - resume continues the selected branch tail then the top-level tail — E2E
@@ -158,7 +159,7 @@ output. Clean (with both slice 5a source and the slice 5b test present).
 ### Unit tests
 
 `vitest run tests/unit/automation-v1.test.ts tests/unit/automation-runs-api.test.ts`
-→ **203 passed** (2 files; automation-v1 = 179, automation-runs-api = 24). The
+→ **204 passed** (2 files; automation-v1 = 180, automation-runs-api = 24). The
 `error: ... jsonb insert failed` log line is an intentional error-path fixture,
 not a failure.
 
