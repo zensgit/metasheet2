@@ -9,6 +9,14 @@
 // disabled unless a deployment explicitly injects a different executor.
 // ---------------------------------------------------------------------------
 
+const {
+  buildSimpleSelectQuery: buildSharedSimpleSelectQuery,
+  normalizeLimit: normalizeSharedLimit,
+  normalizeTimeout: normalizeSharedTimeout,
+  parseSqlServerEndpoint,
+  quoteSqlServerIdentifier,
+} = require('@metasheet/mssql-readonly-utils')
+
 const SIMPLE_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
 const QUALIFIED_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
@@ -52,21 +60,23 @@ function normalizeIdentifier(value, field) {
 
 function quoteIdentifier(value, field = 'identifier') {
   const normalized = normalizeIdentifier(value, field)
-  return normalized.split('.').map((part) => {
-    if (!SIMPLE_IDENTIFIER_PATTERN.test(part)) {
-      throw new SqlServerExecutorError('SQLSERVER_IDENTIFIER_INVALID', `${field} must be a simple identifier`, { field })
-    }
-    return `[${part}]`
-  }).join('.')
+  try {
+    return quoteSqlServerIdentifier(normalized, field)
+  } catch (error) {
+    throw wrapHelperError(error, 'SQLSERVER_IDENTIFIER_INVALID', `${field} must be a simple identifier`)
+  }
 }
 
 function normalizeLimit(value) {
-  if (value === undefined || value === null || value === '') return DEFAULT_MAX_LIMIT
-  const numeric = Number(value)
-  if (!Number.isInteger(numeric) || numeric <= 0) {
-    throw new SqlServerExecutorError('SQLSERVER_LIMIT_INVALID', 'limit must be a positive integer', { field: 'limit' })
+  try {
+    return normalizeSharedLimit(value, {
+      defaultLimit: DEFAULT_MAX_LIMIT,
+      maxLimit: MAX_LIMIT,
+      overMax: 'clamp',
+    })
+  } catch (error) {
+    throw wrapHelperError(error, 'SQLSERVER_LIMIT_INVALID', 'limit must be a positive integer')
   }
-  return Math.min(numeric, MAX_LIMIT)
 }
 
 function coerceBoolean(value, fallback) {
@@ -82,34 +92,32 @@ function coerceBoolean(value, fallback) {
 }
 
 function parseServerAndPort(serverValue, portValue) {
-  const server = requiredString(serverValue, 'system.config.server')
-  const configuredPort = portValue === undefined || portValue === null || portValue === ''
-    ? null
-    : Number(portValue)
-  if (configuredPort !== null && (!Number.isInteger(configuredPort) || configuredPort <= 0 || configuredPort > 65535)) {
-    throw new SqlServerExecutorError('SQLSERVER_PORT_INVALID', 'system.config.port must be a TCP port', {
-      field: 'system.config.port',
+  try {
+    const endpoint = parseSqlServerEndpoint({
+      server: requiredString(serverValue, 'system.config.server'),
+      port: portValue,
     })
-  }
-
-  const hostPortMatch = server.match(/^([^,:\\]+)([:,])(\d+)$/)
-  if (hostPortMatch) {
-    const parsedPort = Number(hostPortMatch[3])
-    if (!Number.isInteger(parsedPort) || parsedPort <= 0 || parsedPort > 65535) {
-      throw new SqlServerExecutorError('SQLSERVER_PORT_INVALID', 'system.config.server contains an invalid port', {
-        field: 'system.config.server',
-      })
-    }
-    if (configuredPort !== null && configuredPort !== parsedPort) {
+    return { server: endpoint.server, port: endpoint.port === undefined ? null : endpoint.port }
+  } catch (error) {
+    if (error && error.code === 'SQLSERVER_PORT_INVALID') {
+      const message = String(error.message || '')
+      if (message.includes('Conflicting port')) {
+        throw new SqlServerExecutorError(
+          'SQLSERVER_PORT_INVALID',
+          'system.config.server port must match system.config.port when both are provided',
+          { field: 'system.config.server' },
+        )
+      }
       throw new SqlServerExecutorError(
         'SQLSERVER_PORT_INVALID',
-        'system.config.server port must match system.config.port when both are provided',
-        { field: 'system.config.server' },
+        error.details && error.details.field === 'server'
+          ? 'system.config.server contains an invalid port'
+          : 'system.config.port must be a TCP port',
+        { field: error.details && error.details.field === 'server' ? 'system.config.server' : 'system.config.port' },
       )
     }
-    return { server: hostPortMatch[1], port: configuredPort === null ? parsedPort : configuredPort }
+    throw wrapHelperError(error, 'SQLSERVER_CONFIG_REQUIRED', 'system.config.server is required')
   }
-  return { server, port: configuredPort }
 }
 
 function resolveConnectionConfig(system = {}) {
@@ -136,12 +144,11 @@ function resolveConnectionConfig(system = {}) {
 }
 
 function normalizeTimeout(value, fallback, field) {
-  if (value === undefined || value === null || value === '') return fallback
-  const numeric = Number(value)
-  if (!Number.isInteger(numeric) || numeric <= 0) {
+  try {
+    return normalizeSharedTimeout(value, { defaultValue: fallback, field, allowZero: false })
+  } catch (error) {
     throw new SqlServerExecutorError('SQLSERVER_TIMEOUT_INVALID', `${field} must be a positive integer`, { field })
   }
-  return numeric
 }
 
 function loadMssqlDriver(requireImpl = require) {
@@ -173,68 +180,49 @@ async function withPool({ driver, system, fn }) {
   }
 }
 
-function normalizeScalar(value, field) {
-  if (value === undefined) return { skip: true }
-  if (value === null) return { value: null }
-  if (value instanceof Date) return { value }
-  if (['string', 'number', 'boolean'].includes(typeof value)) return { value }
-  throw new SqlServerExecutorError('SQLSERVER_FILTER_INVALID', `${field} must be a scalar value`, { field })
-}
-
-function addInput(request, name, value) {
-  request.input(name, value)
-  return `@${name}`
-}
-
-function appendStructuredPredicates({ request, values, operator, parts, prefix }) {
+function assertK3PredicateIdentifiers(values, prefix) {
   if (!isPlainObject(values)) return
-  let index = 0
-  for (const [field, value] of Object.entries(values)) {
-    const quotedField = quoteIdentifier(field, `${prefix}.${field}`)
-    if (Array.isArray(value)) {
-      if (value.length === 0) {
-        parts.push('1 = 0')
-        continue
-      }
-      const placeholders = value.map((item, itemIndex) => {
-        const scalar = normalizeScalar(item, `${prefix}.${field}[${itemIndex}]`)
-        if (scalar.skip) {
-          throw new SqlServerExecutorError('SQLSERVER_FILTER_INVALID', `${prefix}.${field}[${itemIndex}] must be a scalar value`, {
-            field: `${prefix}.${field}[${itemIndex}]`,
-          })
-        }
-        const paramName = `${prefix}_${index}_${itemIndex}`.replace(/[^A-Za-z0-9_]/g, '_')
-        return addInput(request, paramName, scalar.value)
-      })
-      parts.push(`${quotedField} IN (${placeholders.join(', ')})`)
-      index += 1
-      continue
-    }
-    const scalar = normalizeScalar(value, `${prefix}.${field}`)
-    if (scalar.skip) continue
-    if (scalar.value === null) {
-      parts.push(`${quotedField} IS NULL`)
-      index += 1
-      continue
-    }
-    const paramName = `${prefix}_${index}`.replace(/[^A-Za-z0-9_]/g, '_')
-    parts.push(`${quotedField} ${operator} ${addInput(request, paramName, scalar.value)}`)
-    index += 1
+  for (const field of Object.keys(values)) {
+    normalizeIdentifier(field, `${prefix}.${field}`)
   }
 }
 
 function buildSelectQuery({ request, table, columns, limit, filters, watermark, orderBy }) {
-  const safeLimit = normalizeLimit(limit)
-  const tableSql = quoteIdentifier(table, 'table')
-  const columnSql = Array.isArray(columns) && columns.length > 0
-    ? columns.map((column, index) => quoteIdentifier(column, `columns[${index}]`)).join(', ')
-    : '*'
-  const parts = []
-  appendStructuredPredicates({ request, values: filters, operator: '=', parts, prefix: 'filter' })
-  appendStructuredPredicates({ request, values: watermark, operator: '>', parts, prefix: 'watermark' })
-  const whereSql = parts.length > 0 ? ` WHERE ${parts.join(' AND ')}` : ''
-  const orderSql = orderBy ? ` ORDER BY ${quoteIdentifier(orderBy, 'orderBy')}` : ''
-  return `SELECT TOP ${safeLimit} ${columnSql} FROM ${tableSql}${whereSql}${orderSql}`
+  const k3Table = normalizeIdentifier(table, 'table')
+  const k3Columns = Array.isArray(columns) && columns.length > 0
+    ? columns.map((column, index) => normalizeIdentifier(column, `columns[${index}]`))
+    : columns
+  const k3OrderBy = orderBy ? normalizeIdentifier(orderBy, 'orderBy') : orderBy
+  assertK3PredicateIdentifiers(filters, 'filter')
+  assertK3PredicateIdentifiers(watermark, 'watermark')
+
+  try {
+    return buildSharedSimpleSelectQuery({
+      request,
+      table: k3Table,
+      columns: k3Columns,
+      limit,
+      filters,
+      watermark,
+      orderBy: k3OrderBy,
+      limitPolicy: {
+        defaultLimit: DEFAULT_MAX_LIMIT,
+        maxLimit: MAX_LIMIT,
+        overMax: 'clamp',
+      },
+    })
+  } catch (error) {
+    throw wrapHelperError(error, error && error.code ? error.code : 'SQLSERVER_QUERY_INVALID', 'invalid SQL Server query')
+  }
+}
+
+function wrapHelperError(error, fallbackCode, fallbackMessage) {
+  if (error instanceof SqlServerExecutorError) return error
+  return new SqlServerExecutorError(
+    error && typeof error.code === 'string' ? error.code : fallbackCode,
+    error && error.message ? error.message : fallbackMessage,
+    error && isPlainObject(error.details) ? error.details : {},
+  )
 }
 
 function normalizeQueryResult(result) {
