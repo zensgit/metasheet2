@@ -3,7 +3,7 @@
 const { transformRecord } = require('./transform-engine.cjs')
 const { validateRecord } = require('./validator.cjs')
 const { computeRecordIdempotencyKey } = require('./idempotency.cjs')
-const { deriveNextWatermark } = require('./watermark.cjs')
+const { deriveNextWatermark, normalizeWatermarkConfig } = require('./watermark.cjs')
 const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
 
 class PipelineRunnerError extends Error {
@@ -26,6 +26,7 @@ const DEFAULT_BATCH_SIZE = 1000
 const MAX_BATCH_SIZE = 10000
 const DEFAULT_MAX_PAGES = 100
 const MAX_RUN_PAGES = 10000
+const DATA_SOURCE_SQL_READONLY_KIND = 'data-source:sql-readonly'
 // DF-N2-2b: per-run cap on appended provenance events. Keeps the
 // integration_runs.provenance_events JSONB column bounded (~300 bytes/event →
 // ~150KB) so a large run cannot bloat the row. Overflow is surfaced as a counter
@@ -196,12 +197,27 @@ function isTruncatedReplayPayload(value) {
   return Boolean(value && typeof value === 'object' && value.payloadTruncated === true)
 }
 
-function resolveWatermarkConfig(pipeline) {
-  const options = pipeline.options || {}
-  return options.watermark || {
+function resolveWatermarkConfig(pipeline, options = {}) {
+  const pipelineOptions = pipeline.options || {}
+  return normalizeWatermarkConfig(pipelineOptions.watermark || {
     type: 'updated_at',
     field: 'updatedAt',
+  }, {
+    requireTiebreaker: options.requireTiebreaker === true,
+  })
+}
+
+function createReadWatermarkConfig(config) {
+  const out = {
+    type: config.type,
+    field: config.field,
   }
+  if (config.tiebreaker) out.tiebreaker = config.tiebreaker
+  return out
+}
+
+function shouldRequireWatermarkTiebreaker(context, mode) {
+  return mode === 'incremental' && context.sourceSystem && context.sourceSystem.kind === DATA_SOURCE_SQL_READONLY_KIND
 }
 
 function assertActiveSystem(system, field) {
@@ -542,7 +558,10 @@ function createPipelineRunner(deps = {}) {
     })
 
     try {
-      const watermarkConfig = resolveWatermarkConfig(context.pipeline)
+      const watermarkConfig = resolveWatermarkConfig(context.pipeline, {
+        requireTiebreaker: shouldRequireWatermarkTiebreaker(context, mode),
+      })
+      const readWatermarkConfig = mode === 'incremental' ? createReadWatermarkConfig(watermarkConfig) : {}
       const currentWatermark = mode === 'incremental'
         ? await watermarkStore.getWatermark(context.pipeline.id)
         : null
@@ -581,6 +600,7 @@ function createPipelineRunner(deps = {}) {
               limit: effectiveBatchSize,
               cursor,
               watermark: currentWatermark ? { [watermarkConfig.field]: currentWatermark.value } : {},
+              watermarkConfig: readWatermarkConfig,
               filters: sourceReadOptions.filters,
               options: sourceReadOptions.options,
             })

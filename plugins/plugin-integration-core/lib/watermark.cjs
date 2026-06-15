@@ -13,7 +13,7 @@ class WatermarkError extends Error {
   }
 }
 
-function normalizeWatermarkConfig(config = {}) {
+function normalizeWatermarkConfig(config = {}, options = {}) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) {
     throw new WatermarkError('watermark config must be an object')
   }
@@ -21,12 +21,40 @@ function normalizeWatermarkConfig(config = {}) {
   if (!VALID_TYPES.has(type)) {
     throw new WatermarkError(`unsupported watermark type: ${type}`, { type })
   }
-  const field = config.field || config.watermarkField || (type === 'updated_at' ? 'updated_at' : 'id')
-  return {
+  const field = normalizeWatermarkFieldName(
+    config.field || config.watermarkField || (type === 'updated_at' ? 'updated_at' : 'id'),
+    'watermark.field'
+  )
+  const normalized = {
     type,
     field,
     fallbackFields: type === 'updated_at' ? ['updated_at', 'updatedAt'] : ['id'],
   }
+  if (type === 'updated_at') {
+    const tiebreaker = config.tiebreaker || config.tieBreaker || config.tiebreakerField || config.watermarkTiebreaker
+    if (isBlank(tiebreaker)) {
+      if (options.requireTiebreaker === true) {
+        throw new WatermarkError('updated_at watermark config requires a tiebreaker', {
+          field: 'watermark.tiebreaker',
+        })
+      }
+      return normalized
+    }
+    normalized.tiebreaker = normalizeWatermarkFieldName(tiebreaker, 'watermark.tiebreaker')
+    if (normalized.tiebreaker === normalized.field) {
+      throw new WatermarkError('updated_at watermark tiebreaker must be different from field', {
+        field: 'watermark.tiebreaker',
+      })
+    }
+  }
+  return normalized
+}
+
+function normalizeWatermarkFieldName(value, field) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new WatermarkError(`${field} must be a non-empty string`, { field })
+  }
+  return value.trim()
 }
 
 function parseWatermarkValue(type, value) {

@@ -9,6 +9,7 @@ const {
 const {
   createWatermarkStore,
   deriveNextWatermark,
+  normalizeWatermarkConfig,
   WatermarkError,
 } = require(path.join(__dirname, '..', 'lib', 'watermark.cjs'))
 const { createDeadLetterStore } = require(path.join(__dirname, '..', 'lib', 'dead-letter.cjs'))
@@ -200,6 +201,38 @@ async function main() {
   assert.deepEqual(
     deriveNextWatermark([{ id: 7 }, { id: '42' }, { id: 13 }], { type: 'monotonic_id' }),
     { type: 'monotonic_id', value: '42' },
+  )
+  assert.deepEqual(
+    normalizeWatermarkConfig(
+      { type: 'updated_at', field: 'updatedAt', tiebreaker: 'id' },
+      { requireTiebreaker: true },
+    ),
+    {
+      type: 'updated_at',
+      field: 'updatedAt',
+      tiebreaker: 'id',
+      fallbackFields: ['updated_at', 'updatedAt'],
+    },
+    'updated_at configs carry the declared tiebreaker for C3 keyset config plumbing',
+  )
+  assert.deepEqual(
+    normalizeWatermarkConfig({ type: 'monotonic_id', field: 'id' }, { requireTiebreaker: true }),
+    {
+      type: 'monotonic_id',
+      field: 'id',
+      fallbackFields: ['id'],
+    },
+    'monotonic_id does not require a tiebreaker',
+  )
+  assert.throws(
+    () => normalizeWatermarkConfig({ type: 'updated_at', field: 'updatedAt' }, { requireTiebreaker: true }),
+    WatermarkError,
+    'incremental updated_at configs fail closed without a tiebreaker',
+  )
+  assert.throws(
+    () => normalizeWatermarkConfig({ type: 'updated_at', field: 'updatedAt', tiebreaker: 'updatedAt' }, { requireTiebreaker: true }),
+    WatermarkError,
+    'updated_at tiebreaker cannot be the watermark field itself',
   )
 
   const db = createMockDb()
