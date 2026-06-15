@@ -292,6 +292,7 @@ type UniverMetaField = {
     | 'modifiedTime'
     | 'createdBy'
     | 'modifiedBy'
+    | 'button'
   options?: Array<{ value: string; color?: string }>
   order?: number
   property?: Record<string, unknown>

@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { aggregateField, groupRowsByField } from '../../src/multitable/aggregation-helpers'
+import { aggregateField, groupRowsByField, isNumericFieldType } from '../../src/multitable/aggregation-helpers'
 
 describe('aggregateField (locked fns)', () => {
   it('sum/avg/min/max over numeric, skipping non-numeric', () => {
@@ -54,5 +54,14 @@ describe('groupRowsByField (#4-3b-2a)', () => {
   it('a primitive value and its JSON form do not collide', () => {
     const buckets = groupRowsByField([{ g: 1 }, { g: '1' }], 'g')
     expect(buckets.length).toBe(2) // number 1 and string "1" are distinct groups
+  })
+})
+
+describe('button field — aggregation exclusion (B1-a0)', () => {
+  it('isNumericFieldType excludes button (value-less → never aggregated)', () => {
+    expect(isNumericFieldType('button')).toBe(false)
+    // sanity: the numeric allowlist still includes the real numeric types
+    expect(isNumericFieldType('number')).toBe(true)
+    expect(isNumericFieldType('currency')).toBe(true)
   })
 })

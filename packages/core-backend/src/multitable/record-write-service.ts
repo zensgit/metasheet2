@@ -82,6 +82,7 @@ export type UniverMetaField = {
     | 'modifiedTime'
     | 'createdBy'
     | 'modifiedBy'
+    | 'button'
   options?: Array<{ value: string; color?: string }>
   order?: number
   property?: Record<string, unknown>
@@ -438,7 +439,9 @@ export class RecordWriteService {
         // derived server-side, never written by clients. `deriveFieldPermissions`
         // already marks them readonly for the UI; reject here too as the backend
         // backstop so a non-UI client can't pollute record data with a written value.
-        if (field.type === 'formula' || field.type === 'lookup' || field.type === 'rollup') {
+        // button (B1) joins this non-data class: it stores no value and is a click
+        // trigger, never a written cell — reject writes as the same backend backstop.
+        if (field.type === 'formula' || field.type === 'lookup' || field.type === 'rollup' || field.type === 'button') {
           throw new RecordFieldForbiddenError(`Field is readonly: ${change.fieldId}`, change.fieldId)
         }
 
