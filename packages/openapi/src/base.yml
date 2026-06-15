@@ -2112,6 +2112,16 @@ components:
                 Immutable after create. Cross-base READ additionally requires foreign-base read permission;
                 a reader lacking it sees foreign data masked (and a 403 on the explicit link-options pull).
                 Omitted for same-base links.
+            rich:
+              type: boolean
+              description: >-
+                Rich-text opt-in for a `longText` field. When `true`, the field stores sanitized HTML
+                (constrained allow-list: b/strong/i/em/u/s, a[http|https|mailto] with forced
+                rel=noopener target=_blank, ul/ol/li, h1-h3, p/br/blockquote/code/pre) — every value is
+                sanitized SERVER-SIDE on write (the authoritative XSS defense), so the stored value is
+                inert by construction. Default/absent = `false` = plain text (legacy behavior). Toggling
+                `rich` ON is rejected on a field that already holds data (historical plain values were
+                never sanitized). Omitted for plain longText and all non-longText fields.
             twoWay:
               type: boolean
               description: >-

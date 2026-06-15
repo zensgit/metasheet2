@@ -4,6 +4,7 @@ import {
   acquireAutoNumberSheetWriteLock,
   allocateAutoNumberValues,
 } from './auto-number-service'
+import { validateLongTextValue } from './field-codecs'
 import { fieldTypeRegistry } from './field-type-registry'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
 import { MultitableRecordLockedError, MultitableRecordNotFoundError, MultitableRecordValidationError } from './record-errors'
@@ -229,6 +230,12 @@ function normalizeFieldValue(
         throw new MultitableRecordValidationError(`String value must be string: ${field.id}`)
       }
       return value
+    case 'longText':
+      // Route the plugin-SDK record write through the SAME rich-longText sanitizer chokepoint
+      // as the HTTP / form-submit / automation paths. Without this case the value fell to the
+      // `default:` branch (no `longText` def is registered) and a `{rich:true}` value was stored
+      // RAW — a stored-XSS bypass reachable via every plugin's `records.createRecord/patchRecord`.
+      return validateLongTextValue(value, field.id, field.property)
     case 'formula':
       if (typeof value !== 'string') {
         throw new MultitableRecordValidationError(`Formula value must be string: ${field.id}`)

@@ -105,7 +105,7 @@ import { MultitableFormulaEngine } from '../multitable/formula-engine'
 import { FormulaEngine } from '../formula/engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
-import { BATCH1_FIELD_TYPES, coerceBatch1Value, normalizeMultiSelectValue, validateLongTextValue } from '../multitable/field-codecs'
+import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue } from '../multitable/field-codecs'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import {
   AutomationRuleValidationError,
@@ -6163,6 +6163,21 @@ export function univerMetaRouter(): Router {
         )
         const desiredOrder = parsed.data.order
 
+        // Rich-longText backward-compat gate (§4) — shared with the plugin-SDK provisioning
+        // property write so BOTH boundaries reject flipping a POPULATED field to rich (whose old
+        // plain values were never sanitized → retroactive stored-XSS). Gated on an actual OFF→ON
+        // transition so a rename-only PATCH on an already-rich/non-longText field never trips it.
+        await assertRichLongTextToggleAllowed({
+          query: query as unknown as Parameters<typeof assertRichLongTextToggleAllowed>[0]['query'],
+          sheetId,
+          fieldId,
+          currentType,
+          currentProperty: row.property,
+          nextType,
+          nextProperty,
+          makeError: (message) => new ValidationError(message),
+        })
+
         const configError = await validateLookupRollupConfig(req, query, sheetId, nextType, nextProperty)
         if (configError) {
           throw new ValidationError(configError)
@@ -7385,7 +7400,15 @@ export function univerMetaRouter(): Router {
         })
         for (const record of result.items) {
           const data = filterRecordDataByFieldIds(record.data, fieldIds)
-          rows.push(fields.map((field) => serializeXlsxCell(data[field.id])))
+          rows.push(fields.map((field) => {
+            const cell = data[field.id]
+            // Rich-longText export = the §7 plain-text projection, NOT the raw HTML
+            // (a cell must read as text, never `<p>…</p>`).
+            if (field.type === 'longText' && isRichLongTextProperty(field.property) && typeof cell === 'string') {
+              return serializeXlsxCell(richLongTextToPlainText(cell))
+            }
+            return serializeXlsxCell(cell)
+          }))
           if (rows.length >= XLSX_MAX_ROWS) {
             truncated = result.hasMore
             break
@@ -8489,7 +8512,7 @@ export function univerMetaRouter(): Router {
 
         if (field.type === 'longText') {
           try {
-            patch[fieldId] = validateLongTextValue(value, fieldId)
+            patch[fieldId] = validateLongTextValue(value, fieldId, field.property)
           } catch (error) {
             fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
           }
