@@ -1121,6 +1121,9 @@ async function validateLinkFieldConfig(
   // the opt-in declaration carried in the link property (null when absent).
   const actualForeignBaseId = foreignSheet.baseId ?? null
   const claimed = linkCfg.foreignBaseId ?? null
+  if (claimed !== null && claimed !== actualForeignBaseId) {
+    return `链接字段 foreignBaseId 需与外表实际 base 一致：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} 实际 base=${actualForeignBaseId ?? 'null'}，声明=${claimed ?? 'null'}`
+  }
   if (baseIdsAreCrossBase(sourceBaseId, actualForeignBaseId)) {
     // ②b opt-in short-circuit — a cross-base link is allowed IFF it carries an EXPLICIT foreignBaseId
     // EQUAL to the foreign sheet's real base (claim == truth; you can't declare a wrong base). A
@@ -1128,7 +1131,7 @@ async function validateLinkFieldConfig(
     // (claimed===null falls through to reject; a non-null claim !== null actual also rejects). This is a
     // pure consistency gate — the foreign READ-permission check is §3 (base-read) + §2a.3 (field mask),
     // NOT here (adding a perm check in this structural wall would over-reach).
-    if (claimed !== null && claimed === actualForeignBaseId) {
+    if (claimed !== null) {
       return null
     }
     return `链接字段跨 base 需显式 foreignBaseId 且与外表实际 base 一致：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} 实际 base=${actualForeignBaseId ?? 'null'}，声明=${claimed ?? 'null'}`
@@ -1556,6 +1559,7 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
   }
 
   if (type === 'link') {
+    const { foreignBaseId: _omitForeignBaseId, ...cleanObj } = obj
     const foreignSheetId = typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
       ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
       : ''
@@ -1566,9 +1570,9 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
       ? obj.foreignBaseId.trim()
       : ''
     return {
-      ...obj,
+      ...cleanObj,
       ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId } : {}),
-      ...(foreignBaseId ? { foreignBaseId } : {}),
+      ...(foreignSheetId && foreignBaseId ? { foreignBaseId } : {}),
       limitSingleRecord: obj.limitSingleRecord === true,
       ...(typeof obj.refKind === 'string' && obj.refKind.trim().length > 0 ? { refKind: obj.refKind.trim() } : {}),
     }
@@ -2538,7 +2542,18 @@ async function computeDependentLookupRollupRecords(
   }
 
   const allowedFieldIdsBySheet = new Map<string, Set<string>>()
+  // ②b arc closeout — related-record write echoes are another cross-base read sink. Sheet-read
+  // alone is not enough: mirror the link-summary base-read gate so PATCH and the A2 AI-shortcut
+  // path cannot echo related ids or computed values from a base the caller cannot read.
+  const sourceSheet = await loadSheetRowShared(query, sourceSheetId)
+  const sourceBaseId = sourceSheet?.baseId ?? null
   for (const sheetId of rowsBySheet.keys()) {
+    const relatedSheet = await loadSheetRowShared(query, sheetId)
+    const relatedBaseId = relatedSheet?.baseId ?? null
+    if (baseIdsAreCrossBase(sourceBaseId, relatedBaseId)) {
+      const baseReadable = relatedBaseId != null && (await resolveBaseReadable(req, query, relatedBaseId))
+      if (!baseReadable) continue
+    }
     const fields = fieldsBySheet.get(sheetId) ?? []
     if (fields.length === 0) continue
     const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
@@ -6037,6 +6052,9 @@ export function univerMetaRouter(): Router {
         // a `foreignBaseId` to falsely claim cross-base) and means the wall's claim==truth check, once
         // passed at create, can never be retroactively desynced.
         if (foreignBaseIdInPayload(parsed.data.property)) {
+          if (!linkForeignKeyInPayload(parsed.data.property)) {
+            throw new ValidationError('foreignBaseId PATCH 必须同时携带 foreignSheetId')
+          }
           const storedForeignBaseId = extractForeignBaseId(row.property)
           const payloadForeignBaseId = extractForeignBaseId(parsed.data.property)
           if (payloadForeignBaseId !== storedForeignBaseId) {

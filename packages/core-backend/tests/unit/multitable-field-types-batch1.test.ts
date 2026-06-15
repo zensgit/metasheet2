@@ -207,6 +207,30 @@ describe('sanitizeFieldProperty — url / email / phone / barcode / location', (
   })
 })
 
+describe('sanitizeFieldProperty — link foreignBaseId claim', () => {
+  it('normalizes a valid claim only when a foreign target is present', () => {
+    expect(sanitizeFieldProperty('link', {
+      foreignSheetId: ' sheet_b ',
+      foreignBaseId: ' base_b ',
+    })).toMatchObject({
+      foreignSheetId: 'sheet_b',
+      foreignDatasheetId: 'sheet_b',
+      foreignBaseId: 'base_b',
+    })
+
+    expect(sanitizeFieldProperty('link', { foreignBaseId: ' base_b ' })).not.toHaveProperty('foreignBaseId')
+  })
+
+  it('drops empty and non-string claims instead of preserving them through passthrough', () => {
+    for (const foreignBaseId of ['', '   ', null, 42, { id: 'base_b' }]) {
+      expect(sanitizeFieldProperty('link', {
+        foreignSheetId: 'sheet_b',
+        foreignBaseId,
+      })).not.toHaveProperty('foreignBaseId')
+    }
+  })
+})
+
 describe('sanitizeFieldProperty — dateTime', () => {
   it('round-trips a valid IANA timezone', () => {
     expect(sanitizeFieldProperty('dateTime', { timezone: 'Asia/Shanghai' })).toEqual({
