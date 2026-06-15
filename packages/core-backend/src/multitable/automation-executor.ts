@@ -6,6 +6,8 @@
 import { randomUUID } from 'crypto'
 import { Logger } from '../core/logger'
 import { redactString } from './automation-log-redact'
+import { computeActionFingerprint } from './automation-suspension-service'
+import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
 import { resolveBaseWritable } from './permission-service'
@@ -604,6 +606,13 @@ export interface ActionJobLifecycle {
    */
   onSuspend?(stepIndex: number, action: AutomationAction): Promise<void>
   /**
+   * A6-3-3: a `wait_for_callback` inside the SELECTED `condition_branch` — persist the
+   * branch suspension row + a `suspended` branch-child C1 job (via the resume cursor),
+   * then the executor STOPS. The branch tail + top-level tail run on admin resume.
+   * Optional: absent → branch-local wait fails closed.
+   */
+  onSuspendBranch?(cursor: ConditionBranchResumeCursor, action: AutomationAction): Promise<void>
+  /**
    * W6-1: `start_approval` in an opted-in rule — create one approval, persist the
    * approval bridge + a `suspended` C1 job, then STOP. Completion resumes from W5.
    */
@@ -998,10 +1007,20 @@ export class AutomationExecutor {
 
         await jobLifecycle.onStart(index, action, topLevelMeta)
         const branchResult = await this.executeConditionBranch(index, action, context, jobLifecycle)
-        results.push(branchResult.result)
-        await jobLifecycle.onSettled(index, action, branchResult.result)
+        if (branchResult.suspended) {
+          // A6-3-3 branch-local wait: the branch persisted its suspended child + the
+          // suspension row. The parent condition_branch job stays `running`; admin resume
+          // settles it after the branch tail. Stop the execution here.
+          return { suspended: true }
+        }
+        const branchStepResult = branchResult.result
+        if (!branchStepResult) {
+          throw new Error('condition_branch returned neither a suspension nor a result')
+        }
+        results.push(branchStepResult)
+        await jobLifecycle.onSettled(index, action, branchStepResult)
 
-        if (branchResult.result.status === 'failed') {
+        if (branchStepResult.status === 'failed') {
           for (let i = index + 1; i < actions.length; i++) {
             await jobLifecycle.onSkipped(i, actions[i])
             results.push({ actionType: actions[i].type, status: 'skipped', durationMs: 0 })
@@ -1184,7 +1203,15 @@ export class AutomationExecutor {
     action: AutomationAction,
     context: ExecutionContext,
     jobLifecycle: ActionJobLifecycle,
-  ): Promise<{ result: AutomationStepResult; lastJobId: string }> {
+  ): Promise<{
+    // A6-3-3: `suspended` is set when a branch-local `wait_for_callback` suspended the
+    // execution mid-branch; `cursor` then carries the resume position. Otherwise `result`
+    // is the settled condition_branch step result (one is always present).
+    suspended?: boolean
+    result?: AutomationStepResult
+    lastJobId: string
+    cursor?: ConditionBranchResumeCursor
+  }> {
     const startMs = Date.now()
     const parentJobId = `${context.executionId}:job:${stepIndex}`
     const config = action.config as {
@@ -1271,14 +1298,35 @@ export class AutomationExecutor {
       const meta = { stepKey, jobId, upstreamJobId }
 
       if (branchAction.type === 'wait_for_callback') {
-        const failed: AutomationStepResult = {
-          actionType: 'condition_branch',
-          status: 'failed',
-          error: 'wait_for_callback inside condition_branch is deferred to A6-3-3',
-          output,
-          durationMs: Date.now() - startMs,
+        // A6-3-3 branch-local suspend. Fail closed if no resume capability (shouldn't happen:
+        // condition_branch already requires workflow_job_v1, which supplies onSuspendBranch).
+        if (!jobLifecycle.onSuspendBranch) {
+          return {
+            lastJobId,
+            result: {
+              actionType: 'condition_branch',
+              status: 'failed',
+              error: 'branch-local wait_for_callback requires execution_mode workflow_job_v1',
+              output,
+              durationMs: Date.now() - startMs,
+            },
+          }
         }
-        return { result: failed, lastJobId }
+        const cursor: ConditionBranchResumeCursor = {
+          kind: 'condition_branch',
+          parentStepIndex: stepIndex,
+          branchKey: selectedBranchKey,
+          branchActionIndex: actionIndex,
+          stepKey,
+          parentJobId,
+          branchJobId: jobId,
+          upstreamJobId,
+          branchActionFingerprint: computeActionFingerprint(branchActions),
+        }
+        // Persists the branch suspension row + a `suspended` branch-child C1 job, then STOP.
+        // The parent condition_branch job stays `running`; resume settles it (scope-gate §4.3).
+        await jobLifecycle.onSuspendBranch(cursor, branchAction)
+        return { suspended: true, cursor, lastJobId }
       }
 
       if (branchAction.type === 'condition_branch') {

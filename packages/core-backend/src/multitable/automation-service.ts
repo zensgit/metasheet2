@@ -263,9 +263,8 @@ function validateConditionBranchConfig(config: unknown, path: string): Automatio
       if (nested.type === 'parallel_branch') {
         throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain parallel_branch until a later nested-DAG slice`)
       }
-      if (nested.type === 'wait_for_callback') {
-        throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain wait_for_callback until A6-3-3`)
-      }
+      // A6-3-3: branch-local wait_for_callback is allowed — condition_branch already forces
+      // workflow_job_v1 at the rule level, so the wait is only reachable in an opted-in rule.
       if (nested.type === 'start_approval') {
         throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain start_approval until A6-3-3`)
       }
@@ -292,9 +291,7 @@ function validateConditionBranchConfig(config: unknown, path: string): Automatio
       if (nested.type === 'parallel_branch') {
         throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain parallel_branch until a later nested-DAG slice`)
       }
-      if (nested.type === 'wait_for_callback') {
-        throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain wait_for_callback until A6-3-3`)
-      }
+      // A6-3-3: branch-local wait_for_callback is allowed (see branches loop above).
       if (nested.type === 'start_approval') {
         throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain start_approval until A6-3-3`)
       }
@@ -1069,6 +1066,19 @@ export class AutomationService {
             recordId: ((triggerEvent as Record<string, unknown>)?.recordId as string) ?? '',
             triggerEvent,
             stepIndex,
+            action,
+          })
+          .then(() => undefined),
+      // A6-3-3: a branch-local wait_for_callback persists the branch suspension (with cursor)
+      // + a suspended branch-child job, then the executor stops; resume continues the branch tail.
+      onSuspendBranch: (cursor, action: AutomationAction): Promise<void> =>
+        this.suspensionService
+          .createBranchLocal({
+            executionId,
+            rule: { id: rule.id, sheetId: rule.sheetId, actions: rule.actions },
+            recordId: ((triggerEvent as Record<string, unknown>)?.recordId as string) ?? '',
+            triggerEvent,
+            cursor,
             action,
           })
           .then(() => undefined),
