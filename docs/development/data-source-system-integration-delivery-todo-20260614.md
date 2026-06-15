@@ -8,7 +8,7 @@
 
 - 只读数据库接入 Data Factory 源系统: 已经基本可用。
 - 可交付定义: C6 外部写能力完成并通过实体机验收后，才称为完整交付。
-- 下一步建议: C2-close 已通过实体机 smoke；进入 C3 incremental / watermark，但 runtime 仍需单独 opt-in。
+- 下一步建议: C2-close 已通过实体机 smoke；C3-1 facade `orderBy` seam 已落地；继续 C3 incremental / watermark runtime，但 runtime 仍需单独 opt-in。
 - 不建议: 现在直接开 C6。C6 是最大风险刀，必须等只读链路、增量链路、K3 generic seam 都稳定后再开。
 
 ## 收口顺序
@@ -17,7 +17,7 @@
 | --- | --- | --- | --- | --- |
 | P0 | ②b arc 收口权限/契约修复 | done (#2597) | 已排已合并主线风险 | related-echo 跨 base 泄漏 |
 | C2-close | 只读数据库链路 smoke 收口 | done (#2600) | 证明当前 read-only bridge 可稳定测试 | 实体机配置漂移 |
-| C3 | incremental / watermark runtime | gated | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
+| C3 | incremental / watermark runtime | gated; C3-1 done (#2609) | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | gated | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
@@ -118,7 +118,9 @@ TODO:
 
 TODO:
 
-- [ ] C3-1 facade / adapter 支持 `orderBy` 与 watermark 查询参数；`where`/equality `filters` 已有，必须保留。
+- [x] C3-1 facade 支持 `orderBy` 并保留 `where`/equality `filters` passthrough。
+  - #2609 / squash `1586c3841`.
+  - 仍是 host-side seam；未打开 watermark runtime、未改变 adapter cursor、未新增写能力。
 - [ ] C3-2 adapter 实现 in-run mode-tagged cursor；跨 run 仍复用现有 watermark store，不改 store schema。
 - [ ] C3-3 `updated_at + id` 复合游标实现和测试。
 - [ ] C3-4 `monotonic_id` 游标实现和测试。
