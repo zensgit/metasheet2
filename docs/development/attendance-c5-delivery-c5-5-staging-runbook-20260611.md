@@ -145,6 +145,24 @@ Before running the real smoke, provide:
 - a test recipient via `DINGTALK_SMOKE_EXTERNAL_USER_ID` or the three role-specific recipient ids;
 - a staging admin token via `SMOKE_TOKEN`/`TOKEN`, or the deploy-host token fallback.
 
+### 2026-06-14 preflight refresh
+
+After dispatch D5 closeout, staging was on deploy `9179c65bb4a6d0014801896645f6108e94466a79`. The C5 preflight was
+rerun from the deployed backend container with a deploy-host minted temporary admin token. Current result:
+
+```text
+overallStatus=blocked
+missingCheckIds=dingtalk-config,recipient
+tables=pass
+auth-token=pass
+due-deliveries=pass (0 due rows)
+directory-state=0 active DingTalk integrations, 0 accounts, 0 links
+```
+
+The container/host env has `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET`, but still lacks the work-notification
+agent id (`DINGTALK_AGENT_ID` or `DINGTALK_NOTIFY_AGENT_ID`). Before running the real smoke, provide that agent id and
+a test recipient external user id. The auth-token requirement can be satisfied by the existing deploy-host fallback.
+
 ```bash
 BASE_URL=http://127.0.0.1:8082 \
 DATABASE_URL=postgresql://USER@127.0.0.1:5432/metasheet \

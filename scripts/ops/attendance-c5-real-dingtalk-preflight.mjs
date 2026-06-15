@@ -204,6 +204,33 @@ function addCheck(checks, status, id, message, details = {}) {
   checks.push({ id, status, message, details })
 }
 
+function missingEnvConfigInputs(selected) {
+  const missing = []
+  if (!selected.appKey.present) missing.push('DINGTALK_APP_KEY/DINGTALK_CLIENT_ID')
+  if (!selected.appSecret.present) missing.push('DINGTALK_APP_SECRET/DINGTALK_CLIENT_SECRET')
+  if (!selected.agentId.present) missing.push('DINGTALK_AGENT_ID/DINGTALK_NOTIFY_AGENT_ID')
+  return missing
+}
+
+function dingtalkConfigMessage({ envConfigReady, requestedIntegration, requestedIntegrationId, configuredIntegrations, missingEnvInputs }) {
+  if (envConfigReady) {
+    return 'DingTalk app key, app secret, and work-notification agent id are present in env/process'
+  }
+  if (requestedIntegration) {
+    return 'requested DINGTALK_SMOKE_CONFIG_INTEGRATION_ID has complete stored work-notification config'
+  }
+  if (requestedIntegrationId) {
+    return 'requested DINGTALK_SMOKE_CONFIG_INTEGRATION_ID is missing or incomplete'
+  }
+  if (configuredIntegrations.length > 0) {
+    return 'stored DingTalk config exists; set DINGTALK_SMOKE_CONFIG_INTEGRATION_ID to one configured integration id'
+  }
+  if (missingEnvInputs.length > 0 && missingEnvInputs.length < 3) {
+    return `incomplete env DingTalk work-notification config; missing ${missingEnvInputs.join(', ')}`
+  }
+  return 'missing DingTalk work-notification config; provide env config or DINGTALK_SMOKE_CONFIG_INTEGRATION_ID'
+}
+
 export function buildSummary({ env, dbFacts }) {
   const checks = []
   const selected = {
@@ -212,6 +239,7 @@ export function buildSummary({ env, dbFacts }) {
     agentId: pickEnv(env.values, ENV_GROUPS.agentId),
   }
   const envConfigReady = selected.appKey.present && selected.appSecret.present && selected.agentId.present
+  const missingEnvInputs = missingEnvConfigInputs(selected)
 
   const tableStatuses = REQUIRED_TABLES.map(table => ({
     table,
@@ -239,21 +267,20 @@ export function buildSummary({ env, dbFacts }) {
     checks,
     configReady ? 'pass' : 'block',
     'dingtalk-config',
-    envConfigReady
-      ? 'DingTalk app key, app secret, and work-notification agent id are present in env/process'
-      : requestedIntegration
-        ? 'requested DINGTALK_SMOKE_CONFIG_INTEGRATION_ID has complete stored work-notification config'
-        : requestedIntegrationId
-          ? 'requested DINGTALK_SMOKE_CONFIG_INTEGRATION_ID is missing or incomplete'
-          : configuredIntegrations.length > 0
-            ? 'stored DingTalk config exists; set DINGTALK_SMOKE_CONFIG_INTEGRATION_ID to one configured integration id'
-            : 'missing DingTalk work-notification config; provide env config or DINGTALK_SMOKE_CONFIG_INTEGRATION_ID',
+    dingtalkConfigMessage({
+      envConfigReady,
+      requestedIntegration,
+      requestedIntegrationId,
+      configuredIntegrations,
+      missingEnvInputs,
+    }),
     {
       envKeys: {
         appKey: selected.appKey.selectedKey,
         appSecret: selected.appSecret.selectedKey,
         agentId: selected.agentId.selectedKey,
       },
+      missingEnvInputs,
       requestedIntegrationId: requestedIntegrationId || null,
       configuredIntegrationIds: configuredIntegrations.map(item => item.integrationId),
       activeDingTalkIntegrationCount: storedIntegrations.length,
