@@ -140,6 +140,52 @@ async function testNoHit() {
   assert.deepEqual(result.summary.actions, { add: 0, update: 0, skip: 0, inactive: 0, manualConfirm: 0 })
 }
 
+async function testSourceRowsResolveCaseVariantFieldKeys() {
+  {
+    const { adapter } = createAdapter(baseData({
+      DN_PDM_OrderHeadInfo: [{ obj_id: 'ORDER-1', path_id: 'PATH-1' }],
+    }))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, true)
+    assert.equal(result.status, 'expanded')
+    assert.ok(
+      !result.rowErrors.some((error) => error.type === 'missing_order_id'),
+      'case-variant order id must not fail as missing_order_id',
+    )
+    assert.equal(result.rows.length, 2)
+  }
+
+  {
+    const { adapter } = createAdapter(baseData({
+      DN_PDM_OrderHeadInfo: [{ OBJ_ID: 'ORDER-1', obj_id: 'SHOULD_NOT_WIN', path_id: 'PATH-1' }],
+    }))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, true)
+    assert.equal(result.status, 'expanded')
+    assert.equal(
+      result.rows.length,
+      2,
+      'exact field key wins over a case-variant sibling; fallback must not retarget to SHOULD_NOT_WIN',
+    )
+  }
+
+  {
+    const { adapter } = createAdapter(baseData({
+      DN_PDM_OrderHeadInfo: [{ obj_id: 'ORDER-1', Obj_Id: 'ORDER-ALT', path_id: 'PATH-1' }],
+    }))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, false)
+    assert.ok(
+      result.rowErrors.some((error) => error.type === 'missing_order_id'),
+      'ambiguous case-variant field keys fail closed instead of picking the first value',
+    )
+    assert.equal(result.rows.length, 0)
+  }
+}
+
 async function testSameComponentUnderDifferentParentsStaysDistinct() {
   const data = baseData({
     DN_PDM_OrderDetailInfo: [
@@ -366,6 +412,7 @@ async function main() {
   await testSuccessfulExpansion()
   await testReadFailureDiagnosticsAreValuesFree()
   await testNoHit()
+  await testSourceRowsResolveCaseVariantFieldKeys()
   await testSameComponentUnderDifferentParentsStaysDistinct()
   await testFailClosedGuards()
   await testScaleLimitsRemainDiagnosableAndValuesFree()
