@@ -63,6 +63,13 @@ export type UniverMetaField = MultitableField
 export type LinkFieldConfig = {
   foreignSheetId: string
   limitSingleRecord: boolean
+  // Bidirectional / mirror links (design 2026-06-14) — same fields as the route-layer LinkFieldConfig.
+  // The single-record create/patch path (RecordService) reads `twoWay`/`mirrorFieldId` to fan reverse
+  // invalidation; `mirrorOf` (derived side) is forced read-only by the codec and rejected at write.
+  foreignBaseId?: string
+  twoWay?: boolean
+  mirrorFieldId?: string
+  mirrorOf?: string
 }
 
 type CreateFieldGuard = {

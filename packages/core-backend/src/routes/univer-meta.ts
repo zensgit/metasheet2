@@ -875,6 +875,18 @@ type LinkFieldConfig = {
   // the foreign sheet's actual base_id (claim == truth). Extracted explicitly (not via incidental
   // spread) so it round-trips the real wire — see the wire-vs-fixture rule.
   foreignBaseId?: string
+  // Bidirectional / mirror links MVP (design 2026-06-14). The reverse is a DERIVED read-projection of
+  // the SINGLE forward `meta_links` edge (no materialized mirror row, no migration, no write-back).
+  //   - `twoWay`: this link participates in a paired (two-way) relationship.
+  //   - `mirrorFieldId`: id of the paired field on the foreign sheet (symmetric: each side names the other).
+  //   - `mirrorOf`: read-only marker present ONLY on the DERIVED (mirror) side; its value = the paired
+  //     FORWARD field's id. When set, this field RESOLVES the reverse projection
+  //     (`WHERE field_id=mirrorOf AND foreign_record_id=<this record>`, served by idx_meta_links_foreign)
+  //     and is forced read-only (the codec promotes `readOnly:true`) so the single-edge invariant holds.
+  // All three are promoted explicitly in the codec (wire-vs-fixture), same as `foreignBaseId`.
+  twoWay?: boolean
+  mirrorFieldId?: string
+  mirrorOf?: string
 }
 
 type LookupFieldConfig = {
@@ -906,10 +918,22 @@ function parseLinkFieldConfig(property: unknown): LinkFieldConfig | null {
   const claimedBase = typeof obj.foreignBaseId === 'string' && obj.foreignBaseId.trim().length > 0
     ? obj.foreignBaseId.trim()
     : undefined
+  // Bidirectional / mirror links (design 2026-06-14). Parsed explicitly (trim; empty → omitted) so the
+  // pairing config round-trips the wire. `mirrorOf` (the derived-side marker) is the discriminator used
+  // by the reverse read; `twoWay`/`mirrorFieldId` drive the forward-side invalidation fan-out.
+  const mirrorFieldId = typeof obj.mirrorFieldId === 'string' && obj.mirrorFieldId.trim().length > 0
+    ? obj.mirrorFieldId.trim()
+    : undefined
+  const mirrorOf = typeof obj.mirrorOf === 'string' && obj.mirrorOf.trim().length > 0
+    ? obj.mirrorOf.trim()
+    : undefined
   return {
     foreignSheetId: foreign.trim(),
     limitSingleRecord: obj.limitSingleRecord === true,
     ...(claimedBase ? { foreignBaseId: claimedBase } : {}),
+    ...(obj.twoWay === true ? { twoWay: true } : {}),
+    ...(mirrorFieldId ? { mirrorFieldId } : {}),
+    ...(mirrorOf ? { mirrorOf } : {}),
   }
 }
 
@@ -1541,12 +1565,25 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
     const foreignBaseId = typeof obj.foreignBaseId === 'string' && obj.foreignBaseId.trim().length > 0
       ? obj.foreignBaseId.trim()
       : ''
+    // Bidirectional / mirror links (design 2026-06-14) — promote the pairing keys explicitly (wire-vs-fixture).
+    const mirrorFieldId = typeof obj.mirrorFieldId === 'string' && obj.mirrorFieldId.trim().length > 0
+      ? obj.mirrorFieldId.trim()
+      : ''
+    const mirrorOf = typeof obj.mirrorOf === 'string' && obj.mirrorOf.trim().length > 0
+      ? obj.mirrorOf.trim()
+      : ''
     return {
       ...obj,
       ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId } : {}),
       ...(foreignBaseId ? { foreignBaseId } : {}),
       limitSingleRecord: obj.limitSingleRecord === true,
       ...(typeof obj.refKind === 'string' && obj.refKind.trim().length > 0 ? { refKind: obj.refKind.trim() } : {}),
+      ...(obj.twoWay === true ? { twoWay: true } : {}),
+      ...(mirrorFieldId ? { mirrorFieldId } : {}),
+      // The derived (mirror) side is read-only: `mirrorOf` set ⇒ force `readOnly:true` so both write
+      // services reject a PATCH on it (isFieldAlwaysReadOnly honors property.readOnly) — this is what
+      // keeps the single canonical edge from gaining a second, materialized row.
+      ...(mirrorOf ? { mirrorOf, readOnly: true } : {}),
     }
   }
 

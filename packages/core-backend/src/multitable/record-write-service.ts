@@ -96,6 +96,13 @@ export type UniverMetaRecord = {
 export type LinkFieldConfig = {
   foreignSheetId: string
   limitSingleRecord: boolean
+  // Bidirectional / mirror links (design 2026-06-14). `twoWay` + `mirrorFieldId` on the forward side drive
+  // the reverse-projection invalidation fan-out; `mirrorOf` marks the derived (read-only) side. See the
+  // route-layer LinkFieldConfig (univer-meta.ts) for the full semantics — this is the write-service mirror.
+  foreignBaseId?: string
+  twoWay?: boolean
+  mirrorFieldId?: string
+  mirrorOf?: string
 }
 
 export type RelationalLinkField = { fieldId: string; cfg: LinkFieldConfig }
