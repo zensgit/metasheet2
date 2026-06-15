@@ -38,19 +38,43 @@
 
       <section class="compile-preview__section">
         <h4>自动化预览</h4>
-        <p v-if="result.automationPreview" data-testid="compile-preview-automation">
-          {{ result.automationPreview.actionCount }} 个动作 · 需要执行模式
-          {{ result.automationPreview.requiresExecutionMode }}
-        </p>
+        <template v-if="result.automationPreview">
+          <p data-testid="compile-preview-automation">
+            {{ result.automationPreview.actionCount }} 个动作 · 需要执行模式
+            {{ result.automationPreview.requiresExecutionMode }}
+          </p>
+          <details v-if="result.automationPreview.actionCount" class="compile-preview__detail" open>
+            <summary>查看动作配置（已脱敏）</summary>
+            <pre data-testid="compile-preview-automation-actions">{{ toJson(result.automationPreview.actions) }}</pre>
+          </details>
+        </template>
         <p v-else class="compile-preview__muted">无自动化映射</p>
       </section>
 
       <section class="compile-preview__section">
         <h4>审批预览</h4>
-        <p v-if="result.approvalPreview" data-testid="compile-preview-approval">
-          表单：{{ yesNo(result.approvalPreview.hasFormSchema) }} · 审批图：{{ yesNo(result.approvalPreview.hasApprovalGraph) }}
-          · 运行预览：{{ yesNo(result.approvalPreview.hasRuntimeGraphPreview) }}
-        </p>
+        <template v-if="result.approvalPreview">
+          <p data-testid="compile-preview-approval">
+            表单：{{ yesNo(result.approvalPreview.hasFormSchema) }} · 审批图：{{ yesNo(result.approvalPreview.hasApprovalGraph) }}
+            · 运行预览：{{ yesNo(result.approvalPreview.hasRuntimeGraphPreview) }}
+          </p>
+          <details
+            v-if="result.approvalPreview.hasApprovalGraph"
+            class="compile-preview__detail"
+            open
+          >
+            <summary>查看审批图（已脱敏）</summary>
+            <pre data-testid="compile-preview-approval-graph">{{ toJson(result.approvalPreview.approvalGraph) }}</pre>
+          </details>
+          <details v-if="result.approvalPreview.hasFormSchema" class="compile-preview__detail">
+            <summary>查看表单结构（已脱敏）</summary>
+            <pre data-testid="compile-preview-approval-form">{{ toJson(result.approvalPreview.formSchema) }}</pre>
+          </details>
+          <details v-if="result.approvalPreview.hasRuntimeGraphPreview" class="compile-preview__detail">
+            <summary>查看运行预览（已脱敏）</summary>
+            <pre data-testid="compile-preview-approval-runtime">{{ toJson(result.approvalPreview.runtimeGraphPreview) }}</pre>
+          </details>
+        </template>
         <p v-else class="compile-preview__muted">无审批映射</p>
       </section>
 
@@ -70,7 +94,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="mapping in result.mappingReport" :key="mapping.bpmnElementId">
+            <tr v-for="(mapping, index) in result.mappingReport" :key="`${mapping.bpmnElementId}-${index}`">
               <td>{{ mapping.bpmnElementId }}</td>
               <td>{{ mapping.bpmnElementType }}</td>
               <td>{{ targetLabel(mapping.target) }}</td>
@@ -92,7 +116,7 @@
           data-testid="compile-preview-gaps"
         >
           <ul class="compile-preview__gaps">
-            <li v-for="gap in result.gapReport" :key="gap.bpmnElementId">
+            <li v-for="(gap, index) in result.gapReport" :key="`${gap.bpmnElementId}-${index}`">
               <strong>{{ gap.bpmnElementId }}</strong>（{{ gap.bpmnElementType }}）：{{ gap.reason }}
               <em v-if="gap.requiredRung"> · 需要能力：{{ gap.requiredRung }}</em>
             </li>
@@ -133,6 +157,10 @@ const sourceModeLabel = computed(() =>
 
 function yesNo(value: boolean): string {
   return value ? '有' : '无'
+}
+
+function toJson(value: unknown): string {
+  return JSON.stringify(value ?? null, null, 2)
 }
 
 function targetLabel(target: WorkflowCompilePreviewMapping['target']): string {
@@ -201,6 +229,31 @@ function targetLabel(target: WorkflowCompilePreviewMapping['target']): string {
 .compile-preview__table th {
   background: #fafafa;
   font-weight: 600;
+}
+
+.compile-preview__detail {
+  margin-top: 8px;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  padding: 6px 10px;
+  background: #fafafa;
+}
+
+.compile-preview__detail summary {
+  cursor: pointer;
+  color: #606266;
+  font-size: 13px;
+  user-select: none;
+}
+
+.compile-preview__detail pre {
+  margin: 8px 0 0;
+  max-height: 240px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .compile-preview__gaps,

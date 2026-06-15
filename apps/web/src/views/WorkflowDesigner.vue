@@ -13,7 +13,7 @@
       @open-template-picker="openTemplatePicker"
       @toggle-properties="showProperties = !showProperties"
       @validate-workflow="validateWorkflow"
-      @compile-preview="compilePreview"
+      @compile-preview="openCompilePreview"
       @save-workflow="saveWorkflow"
       @deploy-workflow="deployWorkflow"
     />
@@ -171,17 +171,16 @@ import 'element-plus/es/components/tag/style/css'
 import type { WorkflowModelerInstance } from './workflowDesignerRuntime'
 import {
   DEFAULT_WORKFLOW_XML,
-  compileWorkflowPreview,
   deploySavedWorkflowDraft,
   deployWorkflowXml,
   instantiateWorkflowTemplate,
   loadWorkflowDraft,
   saveWorkflowDraft,
-  type WorkflowCompilePreview,
   type WorkflowDesignerPagination,
   type WorkflowDesignerTemplateDetail,
   type WorkflowDesignerTemplateListItem,
 } from './workflowDesignerPersistence'
+import { useWorkflowCompilePreview } from './workflowDesignerCompilePreview'
 import {
   invalidateWorkflowDraftCatalogCache,
   invalidateWorkflowTemplateCatalogCache,
@@ -257,29 +256,23 @@ const showValidation = ref(false)
 const showTemplates = ref(false)
 const validationErrors = ref<ReturnType<typeof validateWorkflowElements>>([])
 
-// A6-4c read-only BPMN compile preview (consumes A6-4b route #2577)
-const showCompilePreview = ref(false)
-const compilePreviewLoading = ref(false)
-const compilePreviewError = ref('')
-const compilePreviewResult = ref<WorkflowCompilePreview | null>(null)
+// A6-4c read-only BPMN compile preview (consumes A6-4b route #2577).
+// The composable owns the request-id race guard so a stale late response can
+// never overwrite a newer preview.
+const {
+  visible: showCompilePreview,
+  loading: compilePreviewLoading,
+  error: compilePreviewError,
+  result: compilePreviewResult,
+  run: runCompilePreview,
+} = useWorkflowCompilePreview()
 
-async function compilePreview() {
+function openCompilePreview() {
   if (!workflowId.value) {
     ElMessage.info('请先保存工作流，然后再进行编译预览。')
     return
   }
-  showCompilePreview.value = true
-  compilePreviewLoading.value = true
-  compilePreviewError.value = ''
-  try {
-    compilePreviewResult.value = await compileWorkflowPreview(workflowId.value)
-  } catch (error) {
-    // Read-only: a failed preview must never mutate the draft; surface inline.
-    compilePreviewResult.value = null
-    compilePreviewError.value = error instanceof Error ? error.message : '编译预览失败'
-  } finally {
-    compilePreviewLoading.value = false
-  }
+  void runCompilePreview(workflowId.value)
 }
 const templateLoading = ref(false)
 const applyingTemplate = ref(false)

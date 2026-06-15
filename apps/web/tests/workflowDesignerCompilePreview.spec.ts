@@ -11,6 +11,7 @@ import {
   type WorkflowCompilePreview,
 } from '../src/views/workflowDesignerPersistence'
 import WorkflowCompilePreviewPanel from '../src/components/workflow/WorkflowCompilePreviewPanel.vue'
+import { useWorkflowCompilePreview } from '../src/views/workflowDesignerCompilePreview'
 
 function flushUi(cycles = 4): Promise<void> {
   return Promise.all(
@@ -25,10 +26,17 @@ function supportedEnvelope() {
       source: { workflowId: 'wf_1', mode: 'visual', sourceVersion: 3 },
       supported: true,
       automationPreview: {
-        actions: [{ type: 'update_record' }, { type: 'send_notification' }],
+        actions: [
+          { type: 'update_record', config: { fields: { status: 'approved' } } },
+          { type: 'send_notification', config: { channel: 'dingtalk' } },
+        ],
         requiresExecutionMode: 'workflow_job_v1',
       },
-      approvalPreview: { formSchema: {}, approvalGraph: {}, runtimeGraphPreview: null },
+      approvalPreview: {
+        formSchema: { fields: [{ key: 'amount' }] },
+        approvalGraph: { mode: 'serial', nodes: ['node_review'] },
+        runtimeGraphPreview: null,
+      },
       mappingReport: [
         {
           bpmnElementId: 'Task_1',
@@ -75,12 +83,20 @@ describe('normalizeCompilePreview', () => {
 
     expect(result.supported).toBe(true)
     expect(result.source).toEqual({ workflowId: 'wf_1', mode: 'visual', sourceVersion: 3 })
-    expect(result.automationPreview).toEqual({ actionCount: 2, requiresExecutionMode: 'workflow_job_v1' })
-    expect(result.approvalPreview).toEqual({
-      hasFormSchema: true,
-      hasApprovalGraph: true,
-      hasRuntimeGraphPreview: false,
+    expect(result.automationPreview?.actionCount).toBe(2)
+    expect(result.automationPreview?.requiresExecutionMode).toBe('workflow_job_v1')
+    // The redacted action payload is preserved (not flattened to a count).
+    expect(result.automationPreview?.actions).toHaveLength(2)
+    expect(result.automationPreview?.actions[0]).toMatchObject({
+      type: 'update_record',
+      config: { fields: { status: 'approved' } },
     })
+    expect(result.approvalPreview?.hasFormSchema).toBe(true)
+    expect(result.approvalPreview?.hasApprovalGraph).toBe(true)
+    expect(result.approvalPreview?.hasRuntimeGraphPreview).toBe(false)
+    // The redacted approval shape is preserved for review.
+    expect(result.approvalPreview?.approvalGraph).toMatchObject({ mode: 'serial', nodes: ['node_review'] })
+    expect(result.approvalPreview?.formSchema).toMatchObject({ fields: [{ key: 'amount' }] })
     expect(result.mappingReport).toHaveLength(2)
     expect(result.mappingReport[1].targetKind).toBe('condition_branch')
     expect(result.gapReport).toHaveLength(0)
@@ -190,6 +206,14 @@ describe('WorkflowCompilePreviewPanel', () => {
     expect(root.querySelector('[data-testid="compile-preview-approval"]')?.textContent).toBeTruthy()
     expect(root.querySelector('[data-testid="compile-preview-no-gaps"]')).toBeTruthy()
 
+    // The reviewable compiled payload is shown read-only (not flattened to a count/flag):
+    const actionsJson = root.querySelector('[data-testid="compile-preview-automation-actions"]')
+    expect(actionsJson?.textContent).toContain('update_record')
+    expect(actionsJson?.textContent).toContain('approved')
+    const approvalGraphJson = root.querySelector('[data-testid="compile-preview-approval-graph"]')
+    expect(approvalGraphJson?.textContent).toContain('serial')
+    expect(approvalGraphJson?.textContent).toContain('node_review')
+
     // Read-only: the panel introduces no actionable affordance at all — no
     // deploy/start/test/publish/save button, link, or role=button control.
     expect(root.querySelectorAll('button')).toHaveLength(0)
@@ -226,5 +250,53 @@ describe('WorkflowCompilePreviewPanel', () => {
     const emptyRoot = mountPanel({ result: null })
     await flushUi()
     expect(emptyRoot.querySelector('[data-testid="compile-preview-empty"]')).toBeTruthy()
+  })
+})
+
+describe('useWorkflowCompilePreview', () => {
+  it('opens, shows loading, clears any prior result, then resolves', async () => {
+    let resolve: (value: WorkflowCompilePreview) => void = () => {}
+    const pending = new Promise<WorkflowCompilePreview>((r) => {
+      resolve = r
+    })
+    const fetcher = vi.fn<[string], Promise<WorkflowCompilePreview>>().mockReturnValueOnce(pending)
+    const cp = useWorkflowCompilePreview(fetcher)
+
+    const run = cp.run('wf_1')
+    expect(cp.visible.value).toBe(true)
+    expect(cp.loading.value).toBe(true)
+    expect(cp.result.value).toBeNull()
+
+    resolve(normalizeCompilePreview(supportedEnvelope()))
+    await run
+
+    expect(fetcher).toHaveBeenCalledWith('wf_1')
+    expect(cp.loading.value).toBe(false)
+    expect(cp.result.value?.supported).toBe(true)
+  })
+
+  it('drops a stale out-of-order response and keeps the newest', async () => {
+    let resolveFirst: (value: WorkflowCompilePreview) => void = () => {}
+    const first = new Promise<WorkflowCompilePreview>((r) => {
+      resolveFirst = r
+    })
+    const firstResult = normalizeCompilePreview(supportedEnvelope())
+    const secondResult = normalizeCompilePreview(unsupportedEnvelope())
+    const fetcher = vi
+      .fn<[string], Promise<WorkflowCompilePreview>>()
+      .mockReturnValueOnce(first)
+      .mockResolvedValueOnce(secondResult)
+    const cp = useWorkflowCompilePreview(fetcher)
+
+    const firstRun = cp.run('wf_1') // request 1 — stays pending
+    await cp.run('wf_2') // request 2 — resolves first, becomes the latest
+    expect(cp.result.value).toEqual(secondResult)
+
+    resolveFirst(firstResult) // request 1 resolves late
+    await firstRun
+
+    // The superseded request must not overwrite the newer result.
+    expect(cp.result.value).toEqual(secondResult)
+    expect(cp.loading.value).toBe(false)
   })
 })

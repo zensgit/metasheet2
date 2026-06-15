@@ -678,12 +678,21 @@ export interface WorkflowCompilePreviewGap {
 export interface WorkflowCompilePreviewAutomation {
   actionCount: number
   requiresExecutionMode: string
+  // The proposed automation actions, already redacted by the backend
+  // (bpmnCompilePreview redactValue). Preserved so the user can review the
+  // compiled action config / branch / parallel shape, not just a count.
+  actions: unknown[]
 }
 
 export interface WorkflowCompilePreviewApproval {
   hasFormSchema: boolean
   hasApprovalGraph: boolean
   hasRuntimeGraphPreview: boolean
+  // Proposed approval-template / runtime shape, backend-redacted. Preserved so
+  // the user can review the compiled approval graph, not just its presence.
+  formSchema?: unknown
+  approvalGraph?: unknown
+  runtimeGraphPreview?: unknown
 }
 
 export interface WorkflowCompilePreview {
@@ -719,13 +728,15 @@ export function normalizeCompilePreview(payload: unknown): WorkflowCompilePrevie
   const automationRaw = data.automationPreview && typeof data.automationPreview === 'object'
     ? asRecord(data.automationPreview)
     : null
+  const automationActions = Array.isArray(automationRaw?.actions) ? automationRaw.actions : []
   const automationPreview: WorkflowCompilePreviewAutomation | null = automationRaw
     ? {
-        actionCount: Array.isArray(automationRaw.actions) ? automationRaw.actions.length : 0,
+        actionCount: automationActions.length,
         requiresExecutionMode:
           typeof automationRaw.requiresExecutionMode === 'string'
             ? automationRaw.requiresExecutionMode
             : 'workflow_job_v1',
+        actions: automationActions,
       }
     : null
 
@@ -737,6 +748,9 @@ export function normalizeCompilePreview(payload: unknown): WorkflowCompilePrevie
         hasFormSchema: approvalRaw.formSchema != null,
         hasApprovalGraph: approvalRaw.approvalGraph != null,
         hasRuntimeGraphPreview: approvalRaw.runtimeGraphPreview != null,
+        formSchema: approvalRaw.formSchema,
+        approvalGraph: approvalRaw.approvalGraph,
+        runtimeGraphPreview: approvalRaw.runtimeGraphPreview,
       }
     : null
 
