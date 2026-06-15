@@ -142,7 +142,9 @@ describeIfDatabase('②b automation — resolveBaseWritable resolver (real DB)',
 
 // C3 — the permission-code SPLIT invariants (no DB needed, so CI's no-DB unit job guards them too).
 // The advisor's divergence rule: after the two Sets diverge, each consumer must want the exact set it
-// names. These assertions are RED on pre-C3 HEAD (where the two Sets were the SAME object).
+// names. Mixed fail-first / regression: the WRITE-membership and distinct-object/size+1 assertions are
+// RED on pre-C3 HEAD (the two Sets were the SAME object); the write-NOT-in-ADMIN and monotone-subset
+// assertions were already GREEN pre-C3 and stand as regression guards that the split stays monotone.
 describe('C3 — finer base:write tier: permission-code set invariants', () => {
   test('multitable:base:write is in the WRITE set (the new write-not-admin door)', () => {
     expect(BASE_WRITE_PERMISSION_CODES.has('multitable:base:write')).toBe(true)

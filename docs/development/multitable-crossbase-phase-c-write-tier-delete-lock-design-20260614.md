@@ -71,7 +71,10 @@ narrower set. A `base:write`-only holder gains base-write — and, because no ad
 - `multitable:admin` holder → still writable (regression).
 - `base:read`-only holder → **not** writable (negative).
 - owner (no codes) → still writable (ownership path intact).
-- A namespace-revoked `base:write` code → not writable (admission still narrows).
+- Namespace admission is **pass-through** for `base:write` (the `multitable` resource is in
+  `NON_NAMESPACED_PERMISSION_RESOURCES`), exactly as it is for `base:admin` — so the new code
+  introduces **no** admission asymmetry vs the existing admin codes. (There is no per-namespace
+  narrowing to test here; the split changes only set-membership, not the admission path.)
 - Cross-base end-to-end: `evaluateCrossBaseWrite` now passes for a `base:write`-only trigger
   actor on the target base (it consumes `resolveBaseWritable`), with the quota still enforced.
 
