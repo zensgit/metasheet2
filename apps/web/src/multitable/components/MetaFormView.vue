@@ -324,6 +324,7 @@ import {
   locationValueFromAddress,
 } from '../utils/field-display'
 import { isSystemField } from '../utils/system-fields'
+import { isFieldVisible } from '../utils/field-visibility'
 
 const props = defineProps<{
   fields: MetaField[]
@@ -362,9 +363,25 @@ const attachmentActivity = ref<Record<string, 'uploading' | 'removing' | 'cleari
 const attachmentOperationErrors = ref<Record<string, string>>({})
 const localAttachmentSummaries = ref<Record<string, Record<string, MetaAttachment>>>({})
 
+const fieldsById = computed<Record<string, MetaField | undefined>>(() => {
+  const map: Record<string, MetaField | undefined> = {}
+  for (const field of props.fields) map[field.id] = field
+  return map
+})
+
 const editableFields = computed(() => {
   const hidden = new Set(props.hiddenFieldIds ?? [])
-  return props.fields.filter((field) => !hidden.has(field.id) && props.fieldPermissions?.[field.id]?.visible !== false)
+  const byId = fieldsById.value
+  // `formData` is read inside `isFieldVisible` (via the rule's dependency
+  // fieldId), so this computed re-evaluates as the user edits the dependency —
+  // conditional fields appear/disappear live. Presentation only: a rule-hidden
+  // field is NOT a security boundary (field permissions still apply, above).
+  return props.fields.filter(
+    (field) =>
+      !hidden.has(field.id) &&
+      props.fieldPermissions?.[field.id]?.visible !== false &&
+      isFieldVisible(field, formData, byId),
+  )
 })
 
 function isFieldReadOnly(fieldId: string): boolean {
