@@ -23,7 +23,7 @@
 | C2-close | 只读数据库链路 smoke 收口 | done (issue #2600) | 证明当前 read-only bridge 可稳定测试 | 实体机配置漂移 |
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
-| C5 | K3 generic MSSQL seam | design-first | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
+| C5 | K3 generic MSSQL seam | C5-0/C5-1 done; C5-2+ gated | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
 | Release | 总包 + 实体机验收 | gated | 交付签收 | 包内容/部署/证据不完整 |
 
@@ -223,7 +223,8 @@ TODO:
 目标: 把 K3 SQL Server 相关通道逐步靠近 generic MSSQL 能力，但不打开 K3 禁区。
 
 状态: C5-0 设计切片已写入 `docs/development/data-source-system-integration-c5-k3-generic-mssql-seam-design-20260615.md`；
-runtime/helper/smoke 仍保持后续 gated opt-in。
+C5-1 latent helper contract 已落地为 `@metasheet/mssql-readonly-utils`，但 generic MSSQL / K3 executor
+生产调用点仍未迁移。C5-2/C5-3/C5-4 保持后续 gated opt-in。
 
 边界:
 
@@ -241,10 +242,21 @@ TODO:
     metadata query helpers、values-free error normalization。
   - K3-only: object manifests、read/write table allowlists、operation checks、默认 middle-table write guard、
     既有 backend-only direct-table exception、adapter metadata / advanced UI posture。
-- [ ] 抽共享只读 helper: TLS + INFORMATION_SCHEMA introspection 等只读能力可共用，由 generic `MSSQLAdapter` 和 K3 路径共同消费。
-- [ ] 结构守卫测试: shared helper 不导出任何写接口。
-- [ ] TLS / schema introspection / read-only smoke 与 generic MSSQL 对齐。
-- [ ] K3 SQL Server executor 只作为 precedent，不成为 generic adapter 的反向依赖。
+- [x] C5-1 抽共享只读 helper contract（latent）:
+  - 新增 neutral workspace package `@metasheet/mssql-readonly-utils`，CJS runtime + TypeScript declarations。
+  - helper exports 只包含 read-only/normalization/building primitives；无 insert/update/delete/upsert/transaction/raw
+    execution 面。
+  - generic `WhereClause` 保留 `$and`/`$or`/comparison operators；K3 simple-select policy 仍拒绝 unsupported
+    operator object；limit/timeout/TLS 均按 consumer policy 锁住。
+  - core-backend TS consumer test 和 plugin-integration-core CJS consumer test 均按 package name import/require。
+  - `plugin-integration-core` 先以 production workspace dependency 引入 helper；本切片仍无 production call-site，
+    但提前验证后续 C5-3 运行时依赖会随插件安装/打包进入解析图。
+  - 边界: 不改 `MSSQLAdapter`、不改 `k3-wise-sqlserver-executor.cjs`、不改任何 production call site。
+- [x] 结构守卫测试: shared helper 不导出任何写接口，neutral helper 不 import core/plugin internals；
+  core-backend 不 import plugin internals，K3 plugin 不 import `DataSourceManager` / `MSSQLAdapter`。
+- [ ] C5-2: generic `MSSQLAdapter` 迁移到 helper，保持现有 MSSQL adapter tests / smoke harness 行为不漂移。
+- [ ] C5-3: K3 default SQL Server executor 迁移到 helper 的 test/select 路径，保持 K3 read/write guard 不漂移。
+- [ ] C5-4: TLS / schema introspection / read-only smoke 与 generic MSSQL 对齐，并跑实体机 K3/MSSQL smoke。
 - [ ] 实体机 K3/MSSQL smoke。
 
 完成条件:
