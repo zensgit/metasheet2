@@ -110,8 +110,11 @@ test('attendance C5 real DingTalk preflight blocks missing real-mode prerequisit
     assert.equal(summary.overallStatus, 'blocked')
     assert.deepEqual(summary.missingCheckIds.sort(), ['auth-token', 'dingtalk-config', 'recipient'].sort())
     assert.equal(summary.checks.find((check) => check.id === 'tables').status, 'pass')
-    assert.equal(summary.checks.find((check) => check.id === 'dingtalk-config').details.envKeys.appKey, 'DINGTALK_APP_KEY')
-    assert.equal(summary.checks.find((check) => check.id === 'dingtalk-config').details.envKeys.appSecret, 'DINGTALK_APP_SECRET')
+    const configCheck = summary.checks.find((check) => check.id === 'dingtalk-config')
+    assert.match(configCheck.message, /missing DINGTALK_AGENT_ID\/DINGTALK_NOTIFY_AGENT_ID/)
+    assert.equal(configCheck.details.envKeys.appKey, 'DINGTALK_APP_KEY')
+    assert.equal(configCheck.details.envKeys.appSecret, 'DINGTALK_APP_SECRET')
+    assert.deepEqual(configCheck.details.missingEnvInputs, ['DINGTALK_AGENT_ID/DINGTALK_NOTIFY_AGENT_ID'])
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
@@ -136,6 +139,7 @@ test('attendance C5 real DingTalk preflight passes with complete env config, rec
     assert.deepEqual(summary.missingCheckIds, [])
     assert.equal(summary.selectedConfigSource, 'env')
     assert.equal(summary.checks.find((check) => check.id === 'dingtalk-config').details.envKeys.appKey, 'DINGTALK_CLIENT_ID')
+    assert.deepEqual(summary.checks.find((check) => check.id === 'dingtalk-config').details.missingEnvInputs, [])
     assert.equal(summary.checks.find((check) => check.id === 'recipient').status, 'pass')
     assert.doesNotMatch(readFileSync(outputJson, 'utf8'), /unit-client-secret|header\.payload\.signature/)
   } finally {
