@@ -258,7 +258,7 @@
           <h2>1. 来源对象选择</h2>
           <label>
             <span>数据源系统</span>
-            <select v-model="sourceSystemId" data-testid="source-system">
+            <select v-model="sourceSystemId" data-testid="source-system" @change="handleSourceSystemChange">
               <option value="">请选择数据源系统</option>
               <option
                 v-for="system in sourceSystems"
@@ -343,7 +343,7 @@
           </div>
           <label>
             <span>来源数据集（从哪里取数）</span>
-            <select v-model="sourceObjectName" data-testid="source-object" @change="loadSchema('source')">
+            <select v-model="sourceObjectName" data-testid="source-object" @change="handleSourceObjectChange">
               <option value="">请选择来源数据集</option>
               <option v-for="object in sourceObjects" :key="object.name" :value="object.name">
                 {{ object.label || object.name }}
@@ -663,6 +663,51 @@
           </select>
           <small class="integration-workbench__field-help" data-testid="pipeline-mode-help">manual 手工触发；incremental 用水位增量；full 重新扫描来源数据集。</small>
         </label>
+        <div v-if="showWatermarkConfig" class="integration-workbench__watermark-config" data-testid="watermark-config">
+          <div class="integration-workbench__grid integration-workbench__grid--compact">
+            <label>
+              <span>水位类型</span>
+              <select v-model="watermarkType" data-testid="watermark-type">
+                <option value="updated_at">updated_at</option>
+                <option value="monotonic_id">monotonic_id</option>
+              </select>
+            </label>
+            <label>
+              <span>水位字段</span>
+              <select v-if="hasSourceFieldOptions" v-model="watermarkField" data-testid="watermark-field">
+                <option value="">请选择水位字段</option>
+                <option
+                  v-for="option in sourceFieldOptionsForValue(watermarkField)"
+                  :key="`${option.stale ? 'stale' : 'schema'}:${option.value}`"
+                  :value="option.value"
+                >
+                  {{ sourceFieldOptionText(option) }}
+                </option>
+              </select>
+              <input v-else v-model="watermarkField" data-testid="watermark-field" placeholder="updated_at" />
+            </label>
+            <label v-if="watermarkType === 'updated_at'">
+              <span>并列判别字段</span>
+              <select v-if="hasSourceFieldOptions" v-model="watermarkTiebreaker" data-testid="watermark-tiebreaker">
+                <option value="">请选择 tiebreaker</option>
+                <option
+                  v-for="option in sourceFieldOptionsForValue(watermarkTiebreaker)"
+                  :key="`${option.stale ? 'stale' : 'schema'}:${option.value}`"
+                  :value="option.value"
+                >
+                  {{ sourceFieldOptionText(option) }}
+                </option>
+              </select>
+              <input v-else v-model="watermarkTiebreaker" data-testid="watermark-tiebreaker" placeholder="id" />
+            </label>
+          </div>
+          <p class="integration-workbench__hint" data-testid="watermark-config-help">
+            保存只写入增量读取配置；不读取数据库、不推进水位、不写外部系统。updated_at 对 SQL 只读源必须配置不同的 tiebreaker。
+          </p>
+          <p v-if="watermarkConfigError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="watermark-config-error">
+            {{ watermarkConfigError }}
+          </p>
+        </div>
         <label>
           <span>幂等字段</span>
           <input v-model="idempotencyFieldsText" data-testid="idempotency-fields" placeholder="code 或 sourceId,revision" />
@@ -1276,6 +1321,7 @@ import PlmBomReviewPanel from '../components/plm/PlmBomReviewPanel.vue'
 type WorkbenchSide = 'source' | 'target'
 type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
 type ExportFormat = 'csv' | 'xlsx'
+type WatermarkType = 'updated_at' | 'monotonic_id'
 
 interface EditableMapping {
   id: string
@@ -1450,6 +1496,7 @@ const sourceObjectName = ref('')
 const targetObjectName = ref('')
 const stagingSheetId = ref('')
 const sourceSchema = ref<IntegrationObjectSchema>({ object: '', fields: [] })
+const sourceSchemaSystemId = ref('')
 const targetSchema = ref<IntegrationObjectSchema>({ object: '', fields: [] })
 const mappings = ref<EditableMapping[]>([])
 const sourceFieldOptions = computed<SourceFieldOption[]>(() => sourceSchema.value.fields
@@ -1465,6 +1512,13 @@ const sourceFieldOptions = computed<SourceFieldOption[]>(() => sourceSchema.valu
   })
   .filter((item): item is SourceFieldOption => item !== null))
 const hasSourceFieldOptions = computed(() => sourceFieldOptions.value.length > 0)
+const sourceFieldOptionValues = computed(() => new Set(sourceFieldOptions.value.map((option) => option.value)))
+const sourceSchemaMatchesSelection = computed(() => Boolean(
+  sourceSystemId.value
+  && sourceObjectName.value
+  && sourceSchemaSystemId.value === sourceSystemId.value
+  && sourceSchema.value.object === sourceObjectName.value,
+))
 const previewText = ref('尚未生成预览')
 // DF-T1.5: read-only provenance summary derived from a DF-T1 targetPayloadPreview (null = nothing to show).
 const previewProvenance = ref<ReturnType<typeof summarizeFieldProvenance>>(null)
@@ -1502,6 +1556,9 @@ const statusKind = ref<'idle' | 'success' | 'error'>('idle')
 const pipelineName = ref('')
 const pipelineMode = ref<IntegrationPipelineMode>('manual')
 const pipelineRunMode = ref<IntegrationPipelineMode>('manual')
+const watermarkType = ref<WatermarkType>('updated_at')
+const watermarkField = ref('updated_at')
+const watermarkTiebreaker = ref('id')
 const idempotencyFieldsText = ref('code')
 const pipelineSampleLimit = ref('20')
 const savedPipelineId = ref('')
@@ -1980,6 +2037,28 @@ const protocolSplitNotice = computed(() => {
   }
   return ''
 })
+const isSqlReadonlySourceSelected = computed(() => selectedSourceSystem.value?.kind === DATA_SOURCE_BRIDGE_KIND)
+const showWatermarkConfig = computed(() => pipelineMode.value === 'incremental')
+const watermarkConfigError = computed(() => {
+  if (!showWatermarkConfig.value) return ''
+  const field = watermarkField.value.trim()
+  const tiebreaker = watermarkTiebreaker.value.trim()
+  if (!field) return 'incremental 模式必须选择水位字段。'
+  if (isSqlReadonlySourceSelected.value && (!sourceSchemaMatchesSelection.value || !hasSourceFieldOptions.value)) {
+    return '请先加载当前来源 schema，再配置 SQL 增量水位字段。'
+  }
+  if (isSqlReadonlySourceSelected.value && hasSourceFieldOptions.value && !sourceFieldOptionValues.value.has(field)) {
+    return '水位字段必须来自当前来源 schema。'
+  }
+  if (watermarkType.value === 'updated_at') {
+    if (isSqlReadonlySourceSelected.value && !tiebreaker) return 'SQL 只读源的 updated_at 水位必须选择 tiebreaker，避免同一时间戳漏读。'
+    if (tiebreaker && tiebreaker === field) return 'tiebreaker 不能和水位字段相同。'
+    if (isSqlReadonlySourceSelected.value && hasSourceFieldOptions.value && tiebreaker && !sourceFieldOptionValues.value.has(tiebreaker)) {
+      return 'tiebreaker 必须来自当前来源 schema。'
+    }
+  }
+  return ''
+})
 const recommendedStagingSourceObject = computed(() => {
   const recommended = recommendedStagingSourceByTarget[targetObjectName.value]
   if (!recommended) return ''
@@ -2040,6 +2119,12 @@ const savePipelineReadinessItems = computed(() => [
     label: '填写幂等字段',
     ready: hasIdempotencyFields.value,
     detail: hasIdempotencyFields.value ? '幂等字段已填写。' : '例如 code 或 sourceId,revision。',
+  },
+  {
+    id: 'watermark',
+    label: '配置增量水位',
+    ready: !watermarkConfigError.value,
+    detail: watermarkConfigError.value || (showWatermarkConfig.value ? '增量水位配置已就绪。' : '非 incremental 模式不需要水位配置。'),
   },
 ])
 const canSavePipeline = computed(() => savePipelineReadinessItems.value.every((item) => item.ready))
@@ -3038,6 +3123,19 @@ async function loadObjects(side: WorkbenchSide): Promise<void> {
   }
 }
 
+function handleSourceSystemChange(): void {
+  sourceObjects.value = []
+  sourceObjectName.value = ''
+  sourceSchema.value = { object: '', fields: [] }
+  sourceSchemaSystemId.value = ''
+}
+
+async function handleSourceObjectChange(): Promise<void> {
+  sourceSchema.value = { object: '', fields: [] }
+  sourceSchemaSystemId.value = ''
+  await loadSchema('source')
+}
+
 async function loadSchema(side: WorkbenchSide): Promise<void> {
   const systemId = side === 'source' ? sourceSystemId.value : targetSystemId.value
   const objectName = side === 'source' ? sourceObjectName.value : targetObjectName.value
@@ -3048,6 +3146,7 @@ async function loadSchema(side: WorkbenchSide): Promise<void> {
   })
   if (side === 'source') {
     sourceSchema.value = schema
+    sourceSchemaSystemId.value = systemId
   } else {
     targetSchema.value = schema
     seedMappingsFromTargetSchema(schema.fields)
@@ -3140,6 +3239,7 @@ async function activateStagingAsSource(objectId: string, successMessage?: string
     sourceSystemId.value = system.id
     sourceObjects.value = buildStagingSourceObjects()
     sourceObjectName.value = objectId
+    sourceSchemaSystemId.value = system.id
     sourceSchema.value = {
       object: objectId,
       fields: descriptorToSchemaFields(descriptor),
@@ -3217,8 +3317,8 @@ function sourceFieldOptionText(option: SourceFieldOption): string {
   return option.label
 }
 
-function sourceFieldOptionsForMapping(mapping: EditableMapping): SourceFieldOption[] {
-  const currentValue = mapping.sourceField.trim()
+function sourceFieldOptionsForValue(value: string): SourceFieldOption[] {
+  const currentValue = value.trim()
   if (!currentValue || sourceFieldOptions.value.some((option) => option.value === currentValue)) {
     return sourceFieldOptions.value
   }
@@ -3231,6 +3331,10 @@ function sourceFieldOptionsForMapping(mapping: EditableMapping): SourceFieldOpti
     },
     ...sourceFieldOptions.value,
   ]
+}
+
+function sourceFieldOptionsForMapping(mapping: EditableMapping): SourceFieldOption[] {
+  return sourceFieldOptionsForValue(mapping.sourceField)
 }
 
 function guessSourceField(targetField: string): string {
@@ -3358,6 +3462,19 @@ function parseOptionalPositiveInteger(value: string): number | undefined {
   return numeric
 }
 
+function buildWatermarkConfig(): Record<string, string> | undefined {
+  if (!showWatermarkConfig.value) return undefined
+  if (watermarkConfigError.value) throw new Error(watermarkConfigError.value)
+  const config: Record<string, string> = {
+    type: watermarkType.value,
+    field: watermarkField.value.trim(),
+  }
+  if (watermarkType.value === 'updated_at' && watermarkTiebreaker.value.trim()) {
+    config.tiebreaker = watermarkTiebreaker.value.trim()
+  }
+  return config
+}
+
 function defaultPipelineName(): string {
   const sourceName = selectedSourceSystem.value?.name || sourceSystemId.value || 'source'
   const targetName = selectedTargetSystem.value?.name || targetSystemId.value || 'target'
@@ -3411,6 +3528,7 @@ function buildPipelinePayload() {
 
   const templateMeta = selectedTemplateMeta()
   const hasTemplate = typeof templateMeta.id === 'string' || typeof templateMeta.endpointPath === 'string'
+  const watermarkConfig = buildWatermarkConfig()
   return {
     ...(savedPipelineId.value.trim() ? { id: savedPipelineId.value.trim() } : {}),
     ...resolvedScope,
@@ -3433,6 +3551,7 @@ function buildPipelinePayload() {
         source: 'generic-integration-workbench',
         version: 'v1',
       },
+      ...(watermarkConfig ? { watermark: watermarkConfig } : {}),
       ...(hasTemplate ? { k3Template: templateMeta } : {}),
     },
     fieldMappings,
@@ -4558,6 +4677,14 @@ watch(selectedTableActionId, (actionId) => {
 
 .integration-workbench__grid--compact {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.integration-workbench__watermark-config {
+  grid-column: 1 / -1;
+  padding: 12px;
+  border: 1px solid #d7deea;
+  border-radius: 8px;
+  background: #f8fafc;
 }
 
 .integration-workbench__dataset-grid {

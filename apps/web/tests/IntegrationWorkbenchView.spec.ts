@@ -715,6 +715,7 @@ describe('IntegrationWorkbenchView', () => {
         },
       },
     })
+    expect(pipelineBodies[0].options).not.toHaveProperty('watermark')
     expect((container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement).value).toBe('pipe_1')
     expect(container.textContent).toContain('Pipeline 已保存：pipe_1')
     expect(container.textContent).toContain('已满足 dry-run 前置条件')
@@ -2456,6 +2457,180 @@ describe('IntegrationWorkbenchView', () => {
       ],
     })
     expect(JSON.stringify(previewBodies[0])).not.toMatch(/password|token|secret|credential/i)
+  })
+
+  it('C4-3: saves schema-backed watermark config for incremental SQL source pipelines', async () => {
+    const pipelineBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP Target', roles: ['target'], supports: ['upsert'], advanced: false },
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['read'], advanced: true },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'ds_bridge_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'Warehouse bridge',
+            kind: 'data-source:sql-readonly',
+            role: 'source',
+            status: 'active',
+            config: { dataSourceId: 'pg-1', object: 'public.items' },
+          },
+          {
+            id: 'target_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'ERP target',
+            kind: 'http',
+            role: 'target',
+            status: 'active',
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems/ds_bridge_1/objects')) {
+        return jsonResponse([
+          { name: 'public.items', label: 'Items', operations: ['read'], source: 'data-source:sql-readonly' },
+          { name: 'public.archive_items', label: 'Archived items', operations: ['read'], source: 'data-source:sql-readonly' },
+        ])
+      }
+      if (url.startsWith('/api/integration/external-systems/ds_bridge_1/schema')) {
+        const requestUrl = new URL(url, 'http://localhost')
+        if (requestUrl.searchParams.get('object') === 'public.archive_items') {
+          return jsonResponse({
+            object: 'public.archive_items',
+            fields: [
+              { name: 'code', label: 'Code', type: 'string' },
+            ],
+          })
+        }
+        return jsonResponse({
+          object: 'public.items',
+          fields: [
+            { name: 'id', label: 'ID', type: 'number' },
+            { name: 'updated_at', label: 'Updated at', type: 'timestamp' },
+            { name: 'code', label: 'Code', type: 'string' },
+          ],
+        })
+      }
+      if (url.startsWith('/api/integration/external-systems/target_1/objects')) {
+        return jsonResponse([{ name: 'material', label: 'Material', operations: ['upsert'], target: 'http' }])
+      }
+      if (url.startsWith('/api/integration/external-systems/target_1/schema')) {
+        return jsonResponse({
+          object: 'material',
+          fields: [
+            { name: 'FNumber', label: 'Material number', type: 'string', required: true },
+          ],
+        })
+      }
+      if (url === '/api/integration/pipelines') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        pipelineBodies.push(body)
+        return jsonResponse({
+          id: 'pipe_watermark',
+          tenantId: 'default',
+          workspaceId: null,
+          ...body,
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi(8)
+
+    ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).checked = true
+    container.querySelector('[data-testid="show-advanced-connectors"]')!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'ds_bridge_1'
+    sourceSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="load-source-objects"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    const targetSystemSelect = container.querySelector('[data-testid="target-system"]') as HTMLSelectElement
+    targetSystemSelect.value = 'target_1'
+    targetSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="load-target-objects"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    const modeSelect = container.querySelector('[data-testid="pipeline-mode"]') as HTMLSelectElement
+    modeSelect.value = 'incremental'
+    modeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    expect(container.querySelector('[data-testid="watermark-config-help"]')?.textContent).toContain('不读取数据库')
+    const fieldSelect = container.querySelector('[data-testid="watermark-field"]') as HTMLSelectElement
+    const tiebreakerSelect = container.querySelector('[data-testid="watermark-tiebreaker"]') as HTMLSelectElement
+    expect(fieldSelect.tagName).toBe('SELECT')
+    expect(Array.from(fieldSelect.options).map((option) => option.value)).toEqual(expect.arrayContaining(['updated_at', 'id', 'code']))
+
+    tiebreakerSelect.value = ''
+    tiebreakerSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(container.querySelector('[data-testid="watermark-config-error"]')?.textContent).toContain('必须选择 tiebreaker')
+    expect((container.querySelector('[data-testid="save-pipeline"]') as HTMLButtonElement).disabled).toBe(true)
+
+    fieldSelect.value = 'updated_at'
+    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    tiebreakerSelect.value = 'id'
+    tiebreakerSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(container.querySelector('[data-testid="watermark-config-error"]')).toBeNull()
+
+    const sourceObjectSelect = container.querySelector('[data-testid="source-object"]') as HTMLSelectElement
+    expect(Array.from(sourceObjectSelect.options).map((option) => option.value)).toEqual(expect.arrayContaining(['public.items', 'public.archive_items']))
+    sourceObjectSelect.value = 'public.archive_items'
+    sourceObjectSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+    expect((container.querySelector('[data-testid="source-object"]') as HTMLSelectElement).value).toBe('public.archive_items')
+    expect(container.querySelector('[data-testid="watermark-config-error"]')?.textContent).toContain('水位字段必须来自当前来源 schema')
+    expect((container.querySelector('[data-testid="save-pipeline"]') as HTMLButtonElement).disabled).toBe(true)
+    ;(container.querySelector('[data-testid="save-pipeline"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(pipelineBodies).toHaveLength(0)
+
+    ;(container.querySelector('[data-testid="source-object"]') as HTMLSelectElement).value = 'public.items'
+    container.querySelector('[data-testid="source-object"]')!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+    ;(container.querySelector('[data-testid="watermark-field"]') as HTMLSelectElement).value = 'updated_at'
+    container.querySelector('[data-testid="watermark-field"]')!.dispatchEvent(new Event('change', { bubbles: true }))
+    ;(container.querySelector('[data-testid="watermark-tiebreaker"]') as HTMLSelectElement).value = 'id'
+    container.querySelector('[data-testid="watermark-tiebreaker"]')!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(container.querySelector('[data-testid="watermark-config-error"]')).toBeNull()
+    ;(container.querySelector('[data-testid="save-pipeline"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    expect(pipelineBodies).toHaveLength(1)
+    expect(pipelineBodies[0]).toMatchObject({
+      sourceSystemId: 'ds_bridge_1',
+      sourceObject: 'public.items',
+      targetSystemId: 'target_1',
+      targetObject: 'material',
+      mode: 'incremental',
+      options: {
+        watermark: {
+          type: 'updated_at',
+          field: 'updated_at',
+          tiebreaker: 'id',
+        },
+      },
+    })
+    expect(JSON.stringify(pipelineBodies[0])).not.toMatch(/password|token|secret|credential/i)
   })
 
   it('C3: shows an enabled approval automation entry for an entitled Yuantus PLM data-source bridge and marks stubbed actions', async () => {
