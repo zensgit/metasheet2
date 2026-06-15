@@ -647,3 +647,157 @@ export async function deleteWorkflowHubTeamView(viewId: string) {
 
   return unwrapEnvelope(payload)
 }
+
+// ---------------------------------------------------------------------------
+// A6-4c BPMN compile-preview (read-only)
+//
+// Consumes the A6-4b read-only route `POST /api/workflow-designer/workflows/:id/
+// compile-preview` (#2577). Strictly read-only: the route loads the saved draft
+// and returns a deterministic compile preview + gap report. This client never
+// deploys, starts, publishes, saves, or mutates the draft.
+// ---------------------------------------------------------------------------
+
+export type WorkflowCompilePreviewSourceMode = 'visual' | 'bpmn_xml'
+
+export interface WorkflowCompilePreviewMapping {
+  bpmnElementId: string
+  bpmnElementType: string
+  target: 'automation' | 'approval' | 'structural'
+  targetKind: string
+}
+
+export interface WorkflowCompilePreviewGap {
+  bpmnElementId: string
+  bpmnElementType: string
+  reason: string
+  // Kept as a forward-compatible string (backend enum:
+  // 'A6-3-3' | 'A6-3-5' | 'W7' | 'public-webhook' | 'unsupported').
+  requiredRung?: string
+}
+
+export interface WorkflowCompilePreviewAutomation {
+  actionCount: number
+  requiresExecutionMode: string
+}
+
+export interface WorkflowCompilePreviewApproval {
+  hasFormSchema: boolean
+  hasApprovalGraph: boolean
+  hasRuntimeGraphPreview: boolean
+}
+
+export interface WorkflowCompilePreview {
+  source: {
+    workflowId?: string
+    mode: WorkflowCompilePreviewSourceMode
+    sourceVersion?: number
+  }
+  supported: boolean
+  automationPreview: WorkflowCompilePreviewAutomation | null
+  approvalPreview: WorkflowCompilePreviewApproval | null
+  mappingReport: WorkflowCompilePreviewMapping[]
+  gapReport: WorkflowCompilePreviewGap[]
+  warnings: string[]
+  raw: unknown
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+}
+
+/**
+ * Pure, defensive mapping of the compile-preview envelope into a read-only view
+ * model. Unknown/unsupported nodes surface as gaps; nothing is silently dropped
+ * into a fake "supported" success (`supported` defaults to false unless the
+ * backend explicitly says true).
+ */
+export function normalizeCompilePreview(payload: unknown): WorkflowCompilePreview {
+  const data = unwrapEnvelope(payload) as Record<string, unknown>
+  const sourceRaw = asRecord(data.source)
+  const mode: WorkflowCompilePreviewSourceMode = sourceRaw.mode === 'bpmn_xml' ? 'bpmn_xml' : 'visual'
+
+  const automationRaw = data.automationPreview && typeof data.automationPreview === 'object'
+    ? asRecord(data.automationPreview)
+    : null
+  const automationPreview: WorkflowCompilePreviewAutomation | null = automationRaw
+    ? {
+        actionCount: Array.isArray(automationRaw.actions) ? automationRaw.actions.length : 0,
+        requiresExecutionMode:
+          typeof automationRaw.requiresExecutionMode === 'string'
+            ? automationRaw.requiresExecutionMode
+            : 'workflow_job_v1',
+      }
+    : null
+
+  const approvalRaw = data.approvalPreview && typeof data.approvalPreview === 'object'
+    ? asRecord(data.approvalPreview)
+    : null
+  const approvalPreview: WorkflowCompilePreviewApproval | null = approvalRaw
+    ? {
+        hasFormSchema: approvalRaw.formSchema != null,
+        hasApprovalGraph: approvalRaw.approvalGraph != null,
+        hasRuntimeGraphPreview: approvalRaw.runtimeGraphPreview != null,
+      }
+    : null
+
+  const mappingReport: WorkflowCompilePreviewMapping[] = Array.isArray(data.mappingReport)
+    ? data.mappingReport
+        .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+        .map((item) => ({
+          bpmnElementId: typeof item.bpmnElementId === 'string' ? item.bpmnElementId : '',
+          bpmnElementType: typeof item.bpmnElementType === 'string' ? item.bpmnElementType : '',
+          target:
+            item.target === 'automation' || item.target === 'approval' || item.target === 'structural'
+              ? item.target
+              : 'structural',
+          targetKind: typeof item.targetKind === 'string' ? item.targetKind : '',
+        }))
+    : []
+
+  const gapReport: WorkflowCompilePreviewGap[] = Array.isArray(data.gapReport)
+    ? data.gapReport
+        .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+        .map((item) => ({
+          bpmnElementId: typeof item.bpmnElementId === 'string' ? item.bpmnElementId : '',
+          bpmnElementType: typeof item.bpmnElementType === 'string' ? item.bpmnElementType : '',
+          reason: typeof item.reason === 'string' ? item.reason : '',
+          requiredRung: typeof item.requiredRung === 'string' ? item.requiredRung : undefined,
+        }))
+    : []
+
+  const warnings = Array.isArray(data.warnings)
+    ? data.warnings.filter((item): item is string => typeof item === 'string')
+    : []
+
+  return {
+    source: {
+      workflowId: typeof sourceRaw.workflowId === 'string' ? sourceRaw.workflowId : undefined,
+      mode,
+      sourceVersion: typeof sourceRaw.sourceVersion === 'number' ? sourceRaw.sourceVersion : undefined,
+    },
+    supported: data.supported === true,
+    automationPreview,
+    approvalPreview,
+    mappingReport,
+    gapReport,
+    warnings,
+    raw: payload,
+  }
+}
+
+/**
+ * Read-only compile preview for a saved workflow draft. POSTs to the A6-4b route
+ * with no body; the route performs no writes. Requires a saved `workflowId`.
+ */
+export async function compileWorkflowPreview(workflowId: string): Promise<WorkflowCompilePreview> {
+  const { response, payload } = await requestJson(
+    `/api/workflow-designer/workflows/${workflowId}/compile-preview`,
+    { method: 'POST' },
+  )
+
+  if (!response.ok) {
+    throw new Error(extractErrorMessage(payload, '编译预览失败'))
+  }
+
+  return normalizeCompilePreview(payload)
+}
