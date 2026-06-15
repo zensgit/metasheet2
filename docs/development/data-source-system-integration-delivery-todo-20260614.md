@@ -126,14 +126,25 @@ TODO:
   - #2619 / squash `7f61709ea`.
   - 目标: adapter 后续实现 keyset 时读取同一个 runner-resolved config，不再自己猜 `type/field/tiebreaker`。
   - 边界: 不生成 watermark `where/orderBy`，不改变 offset cursor，不打开 C3-2/C3-3 runtime。
-- [ ] C3-2a structured `where` 逻辑分组 + MySQL operator parity。
+- [x] C3-2a structured `where` 逻辑分组 + MySQL operator parity。
+  - #2625 / squash `c2c59994c`.
   - 目标: 先让 Postgres/MSSQL/MySQL 的 structured read 能表达
     `field > last OR (field = last AND tiebreaker > lastTie)`，为 `updated_at + id`
     复合 keyset 铺底。
   - 边界: 不生成 watermark predicate，不解析/推进 cursor，不改变 offset full-read 行为，不新增写能力。
-- [ ] C3-2 adapter 实现 in-run mode-tagged cursor；跨 run 仍复用现有 watermark store，不改 store schema。
-- [ ] C3-3 `updated_at + id` 复合游标实现和测试。
-- [ ] C3-4 `monotonic_id` 游标实现和测试。
+- [ ] C3-2 adapter 实现 watermark keyset runtime + in-run mode-tagged cursor；跨 run 仍复用现有
+  watermark store，不改 store schema。
+  - 当前实现 slice: `data-source:sql-readonly.read()` 在有 `watermark + watermarkConfig` 时生成
+    type-conditional structured `where/orderBy`。
+  - `updated_at`: 第一页从 store floor 用 `>=` bounded re-read，后续页用 `(field,tiebreaker)` composite cursor。
+  - `monotonic_id`: 严格 `field > last` 单键 cursor；SQL BIGINT 值按 integer string 传递，避免 JS Number
+    精度丢失。
+  - offset/full-read 无 watermark 时保持原路径；wrong-mode cursor fail-closed；watermark cursor 不原样写入 run
+    details，只存 values-free redacted marker。
+  - 若读到 `maxPages` cap 仍未完成，run 标记 partial 且不推进 watermark，避免跳过未读行。
+- [ ] C3-4 filter + watermark composition lock。
+  - 当前实现 slice 已在 plugin adapter unit 层覆盖 equality `filters` 与 watermark predicate 的 structured `$and`
+    组合；C3-5 仍需真实 DB wire-vs-fixture 验证。
 - [ ] C3-5 实体机 real-DB smoke: 跨页同 timestamp 不漏读、不卡住、可 resume。
 
 完成条件:

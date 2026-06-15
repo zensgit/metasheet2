@@ -16,6 +16,13 @@ const {
 } = require('../lib/adapters/data-source-sql-readonly-source-adapter.cjs')
 
 const SYSTEM = { kind: ADAPTER_KIND, config: { dataSourceId: 'pg-1' } }
+const WATERMARK_CURSOR_PREFIX = 'dswm1:'
+
+function decodeWatermarkCursor(cursor) {
+  assert.equal(typeof cursor, 'string')
+  assert.ok(cursor.startsWith(WATERMARK_CURSOR_PREFIX), 'cursor must be an opaque watermark cursor')
+  return JSON.parse(Buffer.from(cursor.slice(WATERMARK_CURSOR_PREFIX.length), 'base64url').toString('utf8'))
+}
 
 // A fake host facade that records calls and returns canned data.
 function fakeFacade(overrides = {}) {
@@ -163,6 +170,242 @@ async function main() {
     const res = await adapterWith(f).read({ object: 'items', limit: 2, cursor: '4' })
     assert.equal(res.done, false, 'full page => not done')
     assert.equal(res.nextCursor, '6', 'full page => nextCursor = offset + count')
+  }
+
+  // 7b. C3 updated_at watermark: the first page seeds from the store timestamp with >=,
+  //     orders by (field,tiebreaker), and emits a mode-tagged composite cursor.
+  {
+    const timestamp = '2026-06-01T01:00:00.000Z'
+    const f = fakeFacade({
+      select: () => ({
+        data: [
+          { id: 'A-001', updatedAt: timestamp },
+          { id: 'A-002', updatedAt: timestamp },
+        ],
+        metadata: {},
+      }),
+    })
+    const res = await adapterWith(f).read({
+      object: 'items',
+      limit: 2,
+      watermark: { updatedAt: timestamp },
+      watermarkConfig: { type: 'updated_at', field: 'updatedAt', tiebreaker: 'id' },
+    })
+    assert.deepEqual(f.calls.select[0].options, {
+      limit: 2,
+      where: { updatedAt: { $gte: timestamp } },
+      orderBy: [
+        { column: 'updatedAt', direction: 'asc' },
+        { column: 'id', direction: 'asc' },
+      ],
+    })
+    assert.equal(res.done, false)
+    const cursor = decodeWatermarkCursor(res.nextCursor)
+    assert.equal(cursor.mode, 'wm-composite')
+    assert.equal(cursor.field, 'updatedAt')
+    assert.equal(cursor.tiebreaker, 'id')
+    assert.equal(cursor.value, timestamp)
+    assert.equal(cursor.tiebreakerValue, 'A-002')
+    assert.equal(res.metadata.mode, 'wm-composite')
+  }
+
+  // 7c. C3 updated_at watermark: subsequent pages use the in-run composite cursor, so a
+  //     same-timestamp batch larger than the page limit advances instead of stalling.
+  {
+    const timestamp = '2026-06-01T01:00:00.000Z'
+    const f = fakeFacade({
+      select: (options) => {
+        if (!options.where.$or) {
+          return {
+            data: [
+              { id: 'A-001', updatedAt: timestamp },
+              { id: 'A-002', updatedAt: timestamp },
+            ],
+            metadata: {},
+          }
+        }
+        return {
+          data: [
+            { id: 'A-003', updatedAt: timestamp },
+            { id: 'A-004', updatedAt: timestamp },
+          ],
+          metadata: {},
+        }
+      },
+    })
+    const a = adapterWith(f)
+    const first = await a.read({
+      object: 'items',
+      limit: 2,
+      watermark: { updatedAt: timestamp },
+      watermarkConfig: { type: 'updated_at', field: 'updatedAt', tiebreaker: 'id' },
+    })
+    const second = await a.read({
+      object: 'items',
+      limit: 2,
+      cursor: first.nextCursor,
+      watermark: { updatedAt: timestamp },
+      watermarkConfig: { type: 'updated_at', field: 'updatedAt', tiebreaker: 'id' },
+    })
+    assert.deepEqual(f.calls.select[1].options.where, {
+      $or: [
+        { updatedAt: { $gt: timestamp } },
+        { updatedAt: timestamp, id: { $gt: 'A-002' } },
+      ],
+    })
+    assert.equal(decodeWatermarkCursor(second.nextCursor).tiebreakerValue, 'A-004')
+  }
+
+  // 7d. C3 monotonic_id watermark: strict > plus single-key ordering and cursor progress.
+  {
+    const floor = '9007199254740992'
+    const lastId = '9007199254740994'
+    const f = fakeFacade({
+      select: () => ({
+        data: [{ id: '9007199254740993' }, { id: lastId }],
+        metadata: {},
+      }),
+    })
+    const res = await adapterWith(f).read({
+      object: 'items',
+      limit: 2,
+      // The runner's watermark store persists values as strings; the adapter normalizes
+      // monotonic ids as integer strings, preserving SQL BIGINT precision beyond JS safe ints.
+      watermark: { id: floor },
+      watermarkConfig: { type: 'monotonic_id', field: 'id' },
+    })
+    assert.deepEqual(f.calls.select[0].options, {
+      limit: 2,
+      where: { id: { $gt: floor } },
+      orderBy: [{ column: 'id', direction: 'asc' }],
+    })
+    const cursor = decodeWatermarkCursor(res.nextCursor)
+    assert.equal(cursor.mode, 'wm-mono')
+    assert.equal(cursor.value, lastId)
+  }
+
+  // 7d.1. Unsafe numeric monotonic ids fail closed instead of losing SQL BIGINT precision.
+  {
+    const f = fakeFacade()
+    await assert.rejects(
+      () => adapterWith(f).read({
+        object: 'items',
+        limit: 2,
+        watermark: { id: Number.MAX_SAFE_INTEGER + 1 },
+        watermarkConfig: { type: 'monotonic_id', field: 'id' },
+      }),
+      /safe integer or integer string/,
+      'unsafe JS number monotonic ids are rejected before rounding',
+    )
+    assert.equal(f.calls.select.length, 0)
+  }
+
+  // 7e. Filters compose with watermark under one structured AND, so C2 equality filters are
+  //     not silently dropped when C3 incremental mode is active.
+  {
+    const f = fakeFacade({
+      select: () => ({ data: [{ id: 11, tenant: 'north' }], metadata: {} }),
+    })
+    await adapterWith(f).read({
+      object: 'items',
+      limit: 1,
+      filters: { tenant: 'north' },
+      watermark: { id: 10 },
+      watermarkConfig: { type: 'monotonic_id', field: 'id' },
+    })
+    assert.deepEqual(f.calls.select[0].options.where, {
+      $and: [
+        { tenant: 'north' },
+        { id: { $gt: '10' } },
+      ],
+    })
+  }
+
+  // 7e.1. The same filter composition also holds for updated_at's composite shape.
+  {
+    const timestamp = '2026-06-01T01:00:00.000Z'
+    const f = fakeFacade({
+      select: () => ({ data: [{ id: 'A-001', updatedAt: timestamp, tenant: 'north' }], metadata: {} }),
+    })
+    await adapterWith(f).read({
+      object: 'items',
+      limit: 10,
+      filters: { tenant: 'north' },
+      watermark: { updatedAt: timestamp },
+      watermarkConfig: { type: 'updated_at', field: 'updatedAt', tiebreaker: 'id' },
+    })
+    assert.deepEqual(f.calls.select[0].options.where, {
+      $and: [
+        { tenant: 'north' },
+        { updatedAt: { $gte: timestamp } },
+      ],
+    })
+  }
+
+  // 7f. Cursor mode tagging is fail-closed: offset cursors cannot drive watermark reads,
+  //     and watermark cursors cannot drive offset reads.
+  {
+    const f = fakeFacade()
+    const a = adapterWith(f)
+    await assert.rejects(
+      () => a.read({
+        object: 'items',
+        limit: 2,
+        cursor: '6',
+        watermark: { id: 10 },
+        watermarkConfig: { type: 'monotonic_id', field: 'id' },
+      }),
+      /watermark cursor/,
+      'offset cursor is rejected in watermark mode',
+    )
+    const wmCursor = `${WATERMARK_CURSOR_PREFIX}${Buffer.from(JSON.stringify({
+      v: 1,
+      mode: 'wm-mono',
+      type: 'monotonic_id',
+      field: 'id',
+      value: 12,
+    }), 'utf8').toString('base64url')}`
+    await assert.rejects(
+      () => a.read({ object: 'items', limit: 2, cursor: wmCursor }),
+      /watermark cursor cannot be used for offset reads/,
+      'watermark cursor is rejected in offset mode',
+    )
+    assert.equal(f.calls.select.length, 0, 'cursor mode mismatch fails before any facade read')
+  }
+
+  // 7g. updated_at mode requires the runner-resolved tiebreaker; otherwise it would either
+  //     strict-> miss ties or >= stall on a same-timestamp page.
+  {
+    const f = fakeFacade()
+    await assert.rejects(
+      () => adapterWith(f).read({
+        object: 'items',
+        limit: 2,
+        watermark: { updatedAt: '2026-06-01T01:00:00.000Z' },
+        watermarkConfig: { type: 'updated_at', field: 'updatedAt' },
+      }),
+      /watermarkConfig\.tiebreaker/,
+      'updated_at watermark mode requires a tiebreaker',
+    )
+    assert.equal(f.calls.select.length, 0)
+  }
+
+  // 7h. A full incremental page must expose the ordered cursor key on the last record, otherwise
+  //     the adapter cannot advance safely and must fail instead of looping.
+  {
+    const f = fakeFacade({
+      select: () => ({ data: [{ id: 11 }, { noId: true }], metadata: {} }),
+    })
+    await assert.rejects(
+      () => adapterWith(f).read({
+        object: 'items',
+        limit: 2,
+        watermark: { id: 10 },
+        watermarkConfig: { type: 'monotonic_id', field: 'id' },
+      }),
+      /record\.id/,
+      'missing cursor key on a full page fails closed',
+    )
   }
 
   // 8. read surfaces a facade select error (fail-closed; never a silent empty page).
