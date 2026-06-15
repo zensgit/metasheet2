@@ -69,6 +69,39 @@ Evidence to capture:
 - Screenshot of the Admin runs page loading.
 - Any routing/auth error response if the check fails.
 
+### 2.1 `/api` Backend Co-Tenancy Preflight (Hard Gate)
+
+This is the most common reason a deployed smoke fails before any approval logic
+runs, and it has blocked prior operator runs (A6-1/A6-2). On a shared host where
+MetaSheet and another application (e.g. a co-tenant ECM backend) sit behind one
+nginx, `/api/*` can be routed to the **wrong backend**. The symptom is a login or
+API call that returns a co-tenant response — commonly a `401` carrying a tenant
+header that MetaSheet never sets — even though credentials and `JWT_SECRET` are
+correct. It is a routing gap, not an auth bug, and re-issuing tokens will not fix
+it.
+
+Check (stop and mark **FAIL: routing** if any step fails):
+
+1. From the deployed origin, exercise a known MetaSheet-only endpoint and confirm
+   the response is served by the MetaSheet backend, not a co-tenant app.
+2. Compare the deployed response against a backend-direct call (loopback to the
+   MetaSheet backend port) for the same endpoint; they must match.
+3. Inspect response headers for any tenant/app marker that MetaSheet does not
+   emit. Its presence means `/api` is reaching the co-tenant backend.
+
+Unblock (operator / infra, host-side):
+
+- Give MetaSheet `/api` an explicit higher-priority nginx match, e.g.
+  `location ^~ /api/ { proxy_pass http://<metasheet-backend>; }`, so it overrides
+  the co-tenant `/api`.
+- Caveat: if the co-tenant app must keep serving `/api` on the same `server_name`,
+  give MetaSheet its own `server_name` / subdomain instead of sharing the path.
+- Re-run §2 and this preflight after the change; only proceed once a deployed auth
+  round-trip is served by the MetaSheet backend.
+
+Do not run §3–§6 until this gate passes: a green build behind a mis-routed `/api`
+fails in ways that look like feature bugs but are deployment routing.
+
 ## 3. Happy Path: Approval Approved Resumes Tail Once
 
 1. Create or open a test automation rule on the disposable test sheet.
