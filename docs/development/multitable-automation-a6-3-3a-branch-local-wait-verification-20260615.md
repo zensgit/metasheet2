@@ -27,7 +27,7 @@ result backwrite; no BPMN live runtime.
 | 4 — branch-aware resume orchestration | `199fdcffb` | `resumeExecution` adds the branch fingerprint drift guard BEFORE the token claim, then routes a `condition_branch` cursor to `continueBranchExecution`. `continueBranchExecution` settles the branch wait → runs the branch tail → settles the parent → runs the top-level tail (scope-gate §4.3). |
 | 4.x — skipped-job fix | `e29199da6` | On a resumed branch-tail failure, `continueBranchExecution` writes `skipped` C1 jobs for the REMAINING branch children AND the REMAINING top-level actions (mirrors the initial `executeConditionBranch` / `executeActions` fail-stop) so the job plane is complete instead of leaving downstream work invisible. |
 | 5a — `listByExecution` stepKey hydration | `bd3e472dc` | `automation-job-service.ts` `listByExecution()` now hydrates the C1 suspend descriptor by job `step_key`, not top-level `step_index`. See §2. |
-| 5b — real-DB high-amount E2E | `7ef67ece2` | `tests/integration/multitable-automation-branch-local-wait.test.ts` — the un-draft gate. See §4. |
+| 5b — real-DB high-amount E2E | `8c2242fc9` | `tests/integration/multitable-automation-branch-local-wait.test.ts` — the un-draft gate. See §4. |
 | 5c — this verification doc | (this commit) | Records the runtime + the exact verification evidence. |
 
 ## 2. Slice 5a — the stepKey hydration fix (③)
