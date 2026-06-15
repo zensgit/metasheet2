@@ -14,7 +14,7 @@ import express, { type Express } from 'express'
 import request from 'supertest'
 import { Kysely, PostgresDialect } from 'kysely'
 import pg from 'pg'
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { setYjsInvalidatorForRoutes, univerMetaRouter } from '../../src/routes/univer-meta'
@@ -186,6 +186,26 @@ describeIfDatabase('A2 shortcut run (real DB)', () => {
     }
   })
 
+  // Leak-proof cap reset. A test that throws mid-body — e.g. an estimate-aware
+  // admission rejection tripping its FIRST assertion — would otherwise skip a
+  // trailing inline `delete process.env.…CAP` and leak a low cap into every
+  // later test (the original cascade: one daily-cap test breaking turned all six
+  // red). Reset ONLY the per-test cap keys after EACH test; the suite-level
+  // enabling vars (ENABLED/PROVIDER/API_KEY/MODEL/… set in beforeAll) are left
+  // intact, so a single failure can't contaminate the rest of the suite.
+  const PER_TEST_CAP_KEYS = [
+    'MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP',
+    'MULTITABLE_AI_TENANT_WEEKLY_TOKEN_CAP',
+    'MULTITABLE_AI_ACCOUNT_DAILY_USD_CAP',
+  ] as const
+  afterEach(() => {
+    for (const key of PER_TEST_CAP_KEYS) {
+      const value = savedEnv.get(key)
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+
   test('sentinel: DATABASE_URL set', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
   })
@@ -233,8 +253,12 @@ describeIfDatabase('A2 shortcut run (real DB)', () => {
 
   test('A2-T6: user DAILY token cap — second run quota_exhausted with zero provider calls', async () => {
     currentUser = { id: USER_QUOTA_D, roles: ['member'], perms: ['multitable:write'] }
-    process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP = '1000'
-    stubUsage = { input_tokens: 600, output_tokens: 400 } // exactly the cap
+    // Estimate-aware admission: a run is admitted only if prior-SUM + its own
+    // conservative estimate (prompt.length + maxOutputTokens ≈ 1.1k) fits under
+    // the cap. Cap 1500 admits ONE estimate (first run, window 0) but not a
+    // second (window settles to the ~1000 ACTUAL below, +estimate > 1500).
+    process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP = '1500'
+    stubUsage = { input_tokens: 600, output_tokens: 400 } // ACTUAL ≤ estimate (no overshoot)
 
     const first = await runReq(REC_Q1)
     expect(first.status).toBe(200)
@@ -248,13 +272,14 @@ describeIfDatabase('A2 shortcut run (real DB)', () => {
     const rows = await ledgerRows(USER_QUOTA_D)
     expect(rows.map((row) => row.status)).toEqual(['succeeded', 'quota_exhausted'])
     expect(Number(rows[1].prompt_tokens) + Number(rows[1].completion_tokens)).toBe(0) // zero-token row
-
-    delete process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP
   })
 
   test('A2-T6: user WEEKLY token cap — second run quota_exhausted', async () => {
     currentUser = { id: USER_QUOTA_W, roles: ['member'], perms: ['multitable:write'] }
-    process.env.MULTITABLE_AI_TENANT_WEEKLY_TOKEN_CAP = '1000'
+    // Cap 1500 admits one conservative estimate (~1.1k); the second run's
+    // window (the 1000 ACTUAL settled below) + estimate exceeds it. Daily cap
+    // stays at its 100k default so this isolates the WEEKLY window.
+    process.env.MULTITABLE_AI_TENANT_WEEKLY_TOKEN_CAP = '1500'
     stubUsage = { input_tokens: 1000, output_tokens: 0 }
 
     const first = await runReq(REC_W1)
@@ -263,14 +288,16 @@ describeIfDatabase('A2 shortcut run (real DB)', () => {
     const second = await runReq(REC_W2)
     expect(second.status).toBe(429)
     expect(second.body.status).toBe('quota_exhausted')
-
-    delete process.env.MULTITABLE_AI_TENANT_WEEKLY_TOKEN_CAP
   })
 
   test('A2-T6: INSTANCE daily USD cap (Q-4 "__instance__") — blocks ACROSS users', async () => {
     // Scope the instance-wide aggregate to this run: clear today's rows first
     // (this suite is the only ledger writer; local reruns would otherwise accumulate).
     await q(`DELETE FROM ${AI_USAGE_LEDGER_TABLE} WHERE occurred_at >= date_trunc('day', now())`)
+    // No token-cap change needed: the USD ESTIMATE at admission (prompt.length +
+    // 1024 output ≈ $0.016) sits well under $1, so the first call is admitted;
+    // the ~$1.05 ACTUAL cost is settled back and the SECOND call (any user) is
+    // blocked because the instance window + its own estimate now exceeds $1.
     process.env.MULTITABLE_AI_ACCOUNT_DAILY_USD_CAP = '1'
     // claude-sonnet-4-6 估算 pricing: 300k input + 10k output ≈ $1.05 ≥ cap after one call
     stubUsage = { input_tokens: 300_000, output_tokens: 10_000 }
@@ -283,13 +310,14 @@ describeIfDatabase('A2 shortcut run (real DB)', () => {
     const second = await runReq(REC_U2)
     expect(second.status).toBe(429)
     expect(second.body.status).toBe('quota_exhausted')
-
-    delete process.env.MULTITABLE_AI_ACCOUNT_DAILY_USD_CAP
   })
 
   test('A2-T6: concurrency probe — reserve-then-settle (F1), N parallel runs cannot overshoot', async () => {
     currentUser = { id: USER_CONC, roles: ['member'], perms: ['multitable:write'] }
-    process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP = '1000'
+    // Cap 1500 fits exactly ONE conservative estimate (~1.1k) but not two
+    // (~2.3k): of N concurrent reserves, the first inserts an in_flight estimate
+    // that pushes every other reserve over the cap. The winner settles to ACTUAL.
+    process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP = '1500'
     stubUsage = { input_tokens: 1000, output_tokens: 0 }
     const callsBefore = fetchCallCount
 
@@ -306,7 +334,7 @@ describeIfDatabase('A2 shortcut run (real DB)', () => {
     expect(fetchCallCount).toBe(callsBefore + 1) // losers never reached the provider
 
     // Settle path: the winner's reservation row was UPDATEd from the
-    // conservative estimate (ceil(promptChars/4) + maxOutputTokens) to the
+    // conservative estimate (prompt.length + maxOutputTokens) to the
     // ACTUAL provider usage; nothing stays in_flight.
     const rows = await ledgerRows(USER_CONC)
     const succeeded = rows.filter((row) => row.status === 'succeeded')
@@ -321,13 +349,14 @@ describeIfDatabase('A2 shortcut run (real DB)', () => {
       [USER_CONC],
     )
     expect(Number((sumRes.rows[0] as { total: string }).total)).toBe(1000) // SUM(tokens) cap-bounded with ACTUALS after settle
-
-    delete process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP
   })
 
   test('A2-T6: crash-orphaned in_flight reservation — swept to zero-usage abandoned by the next reserve', async () => {
     currentUser = { id: USER_STALE, roles: ['member'], perms: ['multitable:write'] }
-    process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP = '1000'
+    // Cap 1500 admits the run's own conservative estimate (~1.1k) ONLY after the
+    // stale in_flight row is swept to zero; if the sweep did not run, the ~1M
+    // stale tokens would exhaust the cap and the run would block.
+    process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP = '1500'
     stubUsage = { input_tokens: 10, output_tokens: 5 }
 
     // Simulate a crash between reserve and settle: an in_flight reservation old
@@ -356,8 +385,6 @@ describeIfDatabase('A2 shortcut run (real DB)', () => {
     expect(Number(swept.prompt_tokens)).toBe(0)
     expect(Number(swept.completion_tokens)).toBe(0)
     expect(Number(swept.estimated_cost_usd)).toBe(0)
-
-    delete process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP
   })
 
   test('A2-T12: version conflict — 409 passthrough, NO value landed, provider usage STILL ledgered', async () => {

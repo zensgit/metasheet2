@@ -284,6 +284,38 @@ describe('M4 suggest-formula routes (mock pool)', () => {
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
+  it('M4-T5b: NO-OVERSHOOT — window UNDER the cap whose request estimate would cross it → 429, zero outbound', async () => {
+    // cap=1000, window=999 (UNDER the cap). Pre-fix, admission compared the prior SUM only
+    // (999 >= 1000 is false → ADMITTED) and the request overshot the cap; only the NEXT request was
+    // blocked. With estimate-aware admission, this request's own estimate (prompt + completion ≥ 2)
+    // is counted, so 999 + estimate > 1000 → rejected BEFORE any provider call.
+    process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP = '1000'
+    process.env.MULTITABLE_AI_TENANT_WEEKLY_TOKEN_CAP = '1000000'
+    process.env.MULTITABLE_AI_ACCOUNT_DAILY_USD_CAP = '1000'
+    const { poolManager } = await import('../../src/integration/db/connection-pool')
+    const pool = createMockPool()
+    pool.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('FROM multitable_ai_usage_ledger')) {
+        return { rows: [{ user_daily_tokens: '999', user_weekly_tokens: '0', instance_daily_usd: '0' }] }
+      }
+      if (sql.includes('INSERT INTO multitable_ai_usage_ledger')) {
+        ledgerInserts.push(params ?? [])
+        return { rows: [], rowCount: 1 }
+      }
+      if (sql.includes('pg_advisory_xact_lock')) return { rows: [] }
+      if (sql.includes('UPDATE multitable_ai_usage_ledger')) return { rows: [], rowCount: 0 }
+      if (sql.includes('FROM meta_fields WHERE sheet_id')) return { rows: FIELDS.map((f) => ({ ...f })) }
+      if (sql.includes('FROM meta_sheets WHERE id = $1')) return { rows: [{ id: SHEET_ID }] }
+      return { rows: [], rowCount: 0 }
+    })
+    vi.spyOn(poolManager, 'get').mockReturnValue(pool as any)
+
+    const res = await request(app).post(suggestUrl).send({ instruction: 'price times tax' })
+    expect(res.status).toBe(429)
+    expect(res.body.status).toBe('quota_exhausted')
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
   it('M4-T6: validation — empty instruction → 400; over-cap instruction → 400; no outbound', async () => {
     const empty = await request(app).post(suggestUrl).send({ instruction: '   ' })
     expect(empty.status).toBe(400)
