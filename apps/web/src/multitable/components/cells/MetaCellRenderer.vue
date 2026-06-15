@@ -3,9 +3,11 @@
     <!-- string / formula -->
     <template v-if="field.type === 'string' || field.type === 'formula'">{{ displayValue }}</template>
 
-    <!-- long text -->
+    <!-- long text: grid shows the plain-text projection (truncated, fast) for rich
+         fields — never the formatted HTML (§7 grid-vs-drawer). Plain longText is
+         unchanged (mustache-escaped display). -->
     <template v-else-if="field.type === 'longText'">
-      <span class="meta-cell-renderer__long-text">{{ displayValue }}</span>
+      <span class="meta-cell-renderer__long-text">{{ longTextDisplay }}</span>
     </template>
 
     <!-- date -->
@@ -176,6 +178,7 @@ import { isSystemFieldType } from '../../utils/system-fields'
 import { resolveRatingFieldProperty } from '../../utils/field-config'
 import { percentGaugeAria, ratingGaugeAria } from '../../utils/meta-core-labels'
 import { qrSvgFromText } from '../../utils/qr-code'
+import { isRichLongTextField, richLongTextToPlainTextFE } from '../../utils/rich-longtext'
 
 const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[]; attachmentSummaries?: MetaAttachment[] }>()
 const { isZh } = useLocale()
@@ -190,6 +193,16 @@ const displayValue = computed(() => {
   })
 })
 const isSystemField = computed(() => isSystemFieldType(props.field.type))
+
+// Grid long-text display: for a RICH longText field show the tag-stripped
+// plain-text projection (§7 grid-vs-drawer) so the cell reads as text, never
+// `<p>…</p>`. Plain (non-rich) longText keeps the existing formatted display.
+const longTextDisplay = computed(() => {
+  if (isRichLongTextField(props.field)) {
+    return richLongTextToPlainTextFE(props.value)
+  }
+  return displayValue.value
+})
 
 // Render-only QR: encode the cell's own string value into an inline SVG. On an
 // over-capacity / unencodable value, fall back to null so the cell shows the

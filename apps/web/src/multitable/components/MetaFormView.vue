@@ -37,6 +37,19 @@
             :value="textControlValue(formData[field.id])"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
           />
+          <!-- rich longText, read-only: formatted render (§7 form shows the render) -->
+          <MetaRichLongTextRender
+            v-else-if="field.type === 'longText' && isRichLongTextField(field) && isFieldReadOnly(field.id)"
+            :html="formData[field.id]"
+          />
+          <!-- rich longText, editable: minimal rich editor (server re-sanitizes on write) -->
+          <MetaRichLongTextEditor
+            v-else-if="field.type === 'longText' && isRichLongTextField(field)"
+            :model-value="formData[field.id]"
+            :is-zh="isZh"
+            @update:model-value="formData[field.id] = $event"
+          />
+          <!-- plain longText: unchanged textarea -->
           <textarea
             v-else-if="field.type === 'longText'"
             :id="`field_${field.id}`"
@@ -291,6 +304,9 @@ import type {
 } from '../types'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import MetaRichLongTextRender from './cells/MetaRichLongTextRender.vue'
+import MetaRichLongTextEditor from './cells/MetaRichLongTextEditor.vue'
+import { isRichLongTextField } from '../utils/rich-longtext'
 import {
   resolveCommentAffordanceStateClass,
   resolveFieldCommentAffordance,
