@@ -975,6 +975,7 @@ export class AutomationExecutor {
       let branchFailed = false
       let branchError: string | undefined
       let branchSuspendedAgain = false
+      let failedAtBranchIndex = -1
       for (let i = cursor.branchActionIndex + 1; i < branchActions.length; i++) {
         const branchAction = branchActions[i]
         const stepKey = `${cursor.parentStepIndex}.branch.${cursor.branchKey}.${i}`
@@ -985,6 +986,7 @@ export class AutomationExecutor {
           if (!jobLifecycle.onSuspendBranch) {
             branchFailed = true
             branchError = 'branch-local wait_for_callback requires execution_mode workflow_job_v1'
+            failedAtBranchIndex = i
             break
           }
           await jobLifecycle.onSuspendBranch(
@@ -1011,6 +1013,7 @@ export class AutomationExecutor {
         ) {
           branchFailed = true
           branchError = `${branchAction.type} is not supported inside a condition_branch`
+          failedAtBranchIndex = i
           break
         }
 
@@ -1021,6 +1024,7 @@ export class AutomationExecutor {
         if (branchActionResult.status === 'failed') {
           branchFailed = true
           branchError = branchActionResult.error ?? `Branch action ${i} failed`
+          failedAtBranchIndex = i
           break
         }
       }
@@ -1028,6 +1032,22 @@ export class AutomationExecutor {
       if (branchSuspendedAgain) {
         execution.duration = (execution.duration ?? 0) + (Date.now() - startTime)
         return execution
+      }
+
+      // On branch-tail failure, fail-stop the REMAINING selected-branch actions as `skipped` C1
+      // jobs (branch keys), mirroring the initial executeConditionBranch — keeps the branch job
+      // plane complete instead of leaving downstream branch work invisible.
+      if (branchFailed && failedAtBranchIndex >= 0) {
+        for (let j = failedAtBranchIndex + 1; j < branchActions.length; j++) {
+          const skippedStepKey = `${cursor.parentStepIndex}.branch.${cursor.branchKey}.${j}`
+          const skippedJobId = `${context.executionId}:job:${cursor.parentStepIndex}:branch:${cursor.branchKey}:${j}`
+          await jobLifecycle.onSkipped(cursor.parentStepIndex, branchActions[j], {
+            stepKey: skippedStepKey,
+            jobId: skippedJobId,
+            upstreamJobId,
+          })
+          upstreamJobId = skippedJobId
+        }
       }
 
       // 3. Settle the parent condition_branch job + push its step result.
@@ -1051,7 +1071,8 @@ export class AutomationExecutor {
         stepKey: String(cursor.parentStepIndex),
       })
 
-      // 4. Continue the top-level tail after the parent (only when the branch succeeded).
+      // 4. Top-level tail: continue on success; on failure, fail-stop the remaining top-level
+      // actions as `skipped` (job plane + legacy steps), mirroring executeActions' parent-failure skip.
       if (!branchFailed) {
         const { suspended } = await this.executeActions(
           rule.actions, context, execution.steps, jobLifecycle, cursor.parentStepIndex + 1,
@@ -1059,6 +1080,11 @@ export class AutomationExecutor {
         if (suspended) {
           execution.duration = (execution.duration ?? 0) + (Date.now() - startTime)
           return execution
+        }
+      } else {
+        for (let k = cursor.parentStepIndex + 1; k < rule.actions.length; k++) {
+          await jobLifecycle.onSkipped(k, rule.actions[k])
+          execution.steps.push({ actionType: rule.actions[k].type, status: 'skipped', durationMs: 0 })
         }
       }
 
