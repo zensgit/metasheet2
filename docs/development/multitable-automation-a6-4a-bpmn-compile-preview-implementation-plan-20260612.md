@@ -9,7 +9,8 @@ Parent scope gate:
 `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`
 
 Runtime: no live runtime; A6-4a pure compiler landed #2568; A6-4b read-only
-route landed #2577; A6-4c Workflow Designer UI not started
+route landed #2577; A6-4c Workflow Designer UI landed #2604 (read-only); live
+BPMN runtime still out of scope
 
 ## Verdict
 
@@ -19,7 +20,7 @@ core for BPMN / Workflow Designer compile-preview in #2568.
 It must not add a route, DB write, migration, live BPMN execution path, frontend
 entry point, or persistence side effect. That route was intentionally split into
 A6-4b and later landed in #2577 after the compiler output was deterministic and
-unit-tested. The Workflow Designer UI remains a separate A6-4c slice.
+unit-tested. The Workflow Designer UI then landed as the A6-4c slice in #2604.
 
 ## Why A6-4a Is Split From The Route
 
@@ -218,9 +219,9 @@ A6-4b must:
 ## Re-entry
 
 This document is not an authorization for additional BPMN work by itself.
-A6-4a landed in #2568 and A6-4b landed in #2577; the remaining follow-up is
-A6-4c Workflow Designer UI, which still requires explicit opt-in and must keep
-the parent scope gate language:
+A6-4a landed in #2568, A6-4b in #2577, and the A6-4c read-only Workflow Designer
+UI in #2604; any further BPMN work (live runtime, create-from-preview) still
+requires explicit opt-in and must keep the parent scope gate language:
 
 > Start A6-4 BPMN compile-preview adapter only: side-effect-free preview +
 > deterministic gap report, no deploy/start/live BPMN runtime, no persistence,

@@ -39,7 +39,7 @@ Current main already contains the governance and first convergence slices:
 | A6-3-1 condition branch runtime | Landed: `condition_branch`, exclusive first-match/default branch, C1 parent/child/downstream lineage. |
 | A6-3-2 frontend and runs readability | Landed in code: editor builder in `MetaAutomationRuleEditor.vue` and `conditionBranchAuthoring.ts`; runs readability in `AutomationExecutionsView.vue`. |
 | A6-3-4 parallel join-all | Landed end-to-end: backend `parallel_branch` / `joinMode: all` runtime (#2496), editor authoring (#2500), and admin runs readability (#2501). |
-| Still missing | Branch-local wait/nesting, join-any/cancellation, A6-4c Workflow Designer compile-preview UI, public webhook token emitter. |
+| Still missing | Branch-local wait/nesting, join-any/cancellation, live BPMN runtime, public webhook token emitter. (A6-4c read-only Workflow Designer compile-preview UI landed #2604.) |
 
 ### 1.2 Approval
 
@@ -66,7 +66,7 @@ but it is not yet the unified workflow automation authoring layer.
 | BPMN draft API | Existing draft save/load/update/deploy support. |
 | Designer hub/catalog | Existing list/template/team-view/hub improvements. |
 | Runtime positioning | Must stay modeling/preview first. v1 must not route production execution through a separate BPMN runtime. |
-| Still missing | Workflow Designer compile-preview UI. A6-4/W8 scope is locked in `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`; A6-4a pure compiler landed in #2568 and A6-4b read-only route landed in #2577. UI remains deferred; deterministic gap report, side-effect-free preview, and no-live-runtime guards still apply. |
+| Still missing | Live BPMN runtime (out of scope for v1). A6-4/W8 scope is locked in `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`; A6-4a pure compiler landed in #2568, A6-4b read-only route in #2577, and the A6-4c read-only Workflow Designer compile-preview UI in #2604. Deterministic gap report, side-effect-free preview, and no-live-runtime guards still apply. |
 
 ## 2. Definition of Complete v1
 
@@ -125,7 +125,7 @@ operate a practical business workflow using existing product surfaces:
 | W6-1 | Automation `start_approval` runtime | Landed #2469; operator smoke pending #2480 | Starts one approval instance from a published template, persists the approval bridge, creates a suspended C1 job, resumes/fails from W5 terminal completion events, and guards retry duplicates. #2480 is the deployed/operator validation gate for approval-approved resume, approval-terminal fail/skip, retry duplicate guard, and redacted Admin runs output; `automation-start-approval-operator-smoke-runbook-20260613.md` is the values-free operator checklist. |
 | W7-0 | Approval result backwrite scope-gate | Scope-gate document added; runtime not started | `automation-approval-result-backwrite-scope-gate-20260611.md` locks explicit mapping, idempotency, permission/field guards, redaction, and tests. |
 | W7-1 | Approval result backwrite runtime | Not started; after #2480 PASS or named runtime unlock | Explicit mapping writes approved/rejected/revoked/cancelled outcomes to multitable record fields with audit and permission checks; `return` transition backwrite needs a separate named scope if required. |
-| W8 | BPMN compile/preview adapter | A6-4a pure compiler landed #2568; A6-4b read-only route landed #2577; A6-4c UI not started | `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md` locks the constrained subset, side-effect-free preview, gap report, and hard no-live-runtime boundary. `multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md` narrowed the first build slice to a pure compiler module + unit tests, now landed in #2568. #2577 exposes the route without persistence or live BPMN runtime. The Workflow Designer UI still needs explicit opt-in; live BPMN runtime remains out of scope. |
+| W8 | BPMN compile/preview adapter | A6-4a pure compiler landed #2568; A6-4b read-only route landed #2577; A6-4c read-only UI landed #2604 | `multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md` locks the constrained subset, side-effect-free preview, gap report, and hard no-live-runtime boundary. The pure compiler landed in #2568, the read-only route in #2577, and the read-only Workflow Designer compile-preview UI in #2604 (no persistence/deploy/start/live runtime). Live BPMN runtime remains out of scope; BPMN create-from-preview needs a separate named scope. |
 | W9 | Public webhook resume token emitter | Not started; use-case gated | External consumer can receive a token/callback URL safely; auth, expiry, replay, and redaction are locked before public route. |
 | W10 | Field-visibility / richer approval authoring | Optional follow-up | Existing `visibilityRule` data can be authored, not only preserved; unsupported graph constructs remain fail-closed. |
 
@@ -143,13 +143,14 @@ Why:
    start an approval through `start_approval`, and W5-1 gives it a stable
    terminal completion signal.
 
-The Workflow Designer/BPMN line has now taken its first two low-risk code
-slices: **W8/A6-4a BPMN compile-preview pure compiler** landed in #2568, and
-**A6-4b read-only compile-preview route** landed in #2577. Together they
-advance the Workflow Designer layer without writing business data or starting a
-live BPMN runtime. The next possible W8 slice is **A6-4c Workflow Designer
-compile-preview UI**, which must remain read-only and must keep the
-no-persistence / no-live-runtime boundary.
+The Workflow Designer/BPMN line has now taken its three low-risk code slices:
+**W8/A6-4a BPMN compile-preview pure compiler** landed in #2568,
+**A6-4b read-only compile-preview route** landed in #2577, and
+**A6-4c read-only Workflow Designer compile-preview UI** landed in #2604.
+Together they advance the Workflow Designer layer without writing business data
+or starting a live BPMN runtime. Any further W8 work (live BPMN runtime, BPMN
+create-from-preview) is out of v1 scope and needs a separate named decision,
+keeping the no-persistence / no-live-runtime boundary.
 
 **W7 approval result backwrite** remains the next cross-surface business-write
 candidate. W7-0 has a scope-gate document, but W7-1 runtime remains separately
