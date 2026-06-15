@@ -159,9 +159,10 @@ due-deliveries=pass (0 due rows)
 directory-state=0 active DingTalk integrations, 0 accounts, 0 links
 ```
 
-The container/host env has `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET`, but still lacks the work-notification
-agent id (`DINGTALK_AGENT_ID` or `DINGTALK_NOTIFY_AGENT_ID`). Before running the real smoke, provide that agent id and
-a test recipient external user id. The auth-token requirement can be satisfied by the existing deploy-host fallback.
+At that point the container env had `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET`, but lacked the work-notification
+agent id (`DINGTALK_AGENT_ID` or `DINGTALK_NOTIFY_AGENT_ID`) and a test recipient external user id. The 2026-06-14
+closeout below resolved those inputs by injecting staging-host controlled agent/recipient values through a temporary
+`docker exec --env-file` and by minting a staging-native admin token from the backend container.
 
 ```bash
 BASE_URL=http://127.0.0.1:8082 \
@@ -194,7 +195,46 @@ C5_REAL_DINGTALK_STAGING_SMOKE_PASS deploy=<sha> stamp=c5-delivery-... channel=d
 
 On PASS, close C5 in the tracker with deploy SHA, stamp, channel mode, and residue.
 
-### 2026-06-12 real-mode blocker
+### 2026-06-14 real DingTalk staging closeout
+
+After #2601 tightened the preflight output for partial backend env configuration, the same staging deploy
+`9179c65bb4a6d0014801896645f6108e94466a79` was rerun with real DingTalk mode. The run used a temporary env file for
+the agent id, test recipient, and staging-native admin token. No secret/token/recipient values were printed.
+
+Preflight was first rerun from the deployed backend container and reached `overallStatus:"ready"`:
+
+```text
+runtimeInputs agent=yes recipient=yes tokenLength=268 deploy=9179c65bb4a6d0014801896645f6108e94466a79
+preflight overallStatus=ready
+missingCheckIds=[]
+```
+
+The real smoke then sent six DingTalk work notifications: unscheduled reminder and `comp_time` expiry reminder, each to
+subject, owner, and sub_owner. It also exercised retry/idempotency and the C5-4 admin observability API/counters:
+
+```text
+C5 delivery staging smoke @ http://127.0.0.1:8900
+  mode=dingtalk org=org-c5-delivery-mqek2lt9 stamp=c5-delivery-mqek2lt9 deploy=9179c65bb4a6d0014801896645f6108e94466a79
+  real DingTalk work notifications are enabled for this run
+  PASS  unscheduled source produced subject + owner + sub_owner deliveries
+  PASS  comp-time expiry source produced subject + owner + sub_owner deliveries
+  PASS  dingtalk worker claimed and sent the 6 primary C5 deliveries
+  PASS  dingtalk worker sent all primary C5 deliveries exactly once
+  PASS  repeat worker run does not resend already-sent primary deliveries
+  PASS  fake retry probe enters retrying state on first attempt
+  PASS  fake retry probe fails visibly after max attempts
+  PASS  C5-4 admin observability API reads delivery rows (status 200)
+  PASS  C5-4 counters show sent primary rows and failed retry probe
+  PASS  cleanup residue = 0 (deliveries 0, dispatches 0, balances 0, balance_events 0, groups 0, members 0, managers 0, shifts 0, account_links 0, accounts 0, integrations 0, user_roles 0, user_permissions 0, users 0)
+
+=== PASS - 27 passed, 0 failed ===  stamp c5-delivery-mqek2lt9
+C5_REAL_DINGTALK_STAGING_SMOKE_PASS deploy=9179c65bb4a6d0014801896645f6108e94466a79 stamp=c5-delivery-mqek2lt9 channel=dingtalk residue=0
+```
+
+This closes C5-5b. The earlier fake-channel PASS remains useful as delivery-state coverage, but C5 completion now rests
+on this real DingTalk PASS.
+
+### 2026-06-12 real-mode blocker (historical)
 
 The same staging environment could not run the real DingTalk smoke yet: the deployed backend had no
 `DINGTALK_APP_KEY`, `DINGTALK_APP_SECRET`, or `DINGTALK_AGENT_ID` env values, and staging DB had no
