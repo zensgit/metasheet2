@@ -120,12 +120,14 @@
             :value="textControlValue(record.data[field.id])"
             @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
           />
-          <!-- rich longText: minimal rich editor (server re-sanitizes on write) -->
+          <!-- rich longText: minimal rich editor (server re-sanitizes on write).
+               Patch on `change` (blur) only — mirrors the plain textarea's @change so
+               the drawer issues ONE server PATCH per edit, never one per keystroke. -->
           <MetaRichLongTextEditor
             v-else-if="canEditField(field.id) && field.type === 'longText' && isRichLongTextField(field)"
             :model-value="record.data[field.id]"
             :is-zh="isZh"
-            @update:model-value="emit('patch', field.id, $event)"
+            @change="emit('patch', field.id, $event)"
           />
           <!-- plain longText: unchanged textarea -->
           <textarea

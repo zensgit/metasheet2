@@ -15,7 +15,7 @@
 // The allow-list here MUST stay in lock-step with the server's
 // `RICH_LONGTEXT_SANITIZE_OPTIONS` (packages/core-backend/.../field-codecs.ts).
 
-import DOMPurify from 'dompurify'
+import DOMPurify, { type Config as DOMPurifyConfig } from 'dompurify'
 import type { MetaField } from '../types'
 
 /**
@@ -59,7 +59,7 @@ export const RICH_LONGTEXT_ALLOWED_URI_REGEXP = /^(?:https?|mailto):/i
  * The DOMPurify config object passed on EVERY sanitize. Frozen so a consumer
  * cannot mutate the shared policy at runtime.
  */
-export const RICH_LONGTEXT_SANITIZE_CONFIG: Readonly<Record<string, unknown>> = Object.freeze({
+export const RICH_LONGTEXT_SANITIZE_CONFIG: Readonly<DOMPurifyConfig> = Object.freeze({
   ALLOWED_TAGS: [...RICH_LONGTEXT_ALLOWED_TAGS],
   ALLOWED_ATTR: [...RICH_LONGTEXT_ALLOWED_ATTR],
   FORBID_TAGS: [...RICH_LONGTEXT_FORBID_TAGS],
@@ -112,7 +112,8 @@ function ensureLinkHardeningHook(): void {
 export function sanitizeRichLongTextHtml(value: unknown): string {
   if (typeof value !== 'string' || value === '') return ''
   ensureLinkHardeningHook()
-  return DOMPurify.sanitize(value, RICH_LONGTEXT_SANITIZE_CONFIG) as unknown as string
+  // The cfg has no RETURN_DOM* flag, so this overload of sanitize returns a string.
+  return DOMPurify.sanitize(value, RICH_LONGTEXT_SANITIZE_CONFIG)
 }
 
 /**
@@ -134,7 +135,7 @@ export function richLongTextToPlainTextFE(value: unknown): string {
     ALLOWED_TAGS: [],
     ALLOWED_ATTR: [],
     KEEP_CONTENT: true,
-  }) as unknown as string
+  })
   // Collapse residual whitespace introduced by block-tag removal so the grid cell
   // reads as a single clean line of text.
   return stripped.replace(/\s+/g, ' ').trim()

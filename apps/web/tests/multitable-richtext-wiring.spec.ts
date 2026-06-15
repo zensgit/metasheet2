@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaCellRenderer from '../src/multitable/components/cells/MetaCellRenderer.vue'
 import MetaCellEditor from '../src/multitable/components/cells/MetaCellEditor.vue'
+import MetaRichLongTextEditor from '../src/multitable/components/cells/MetaRichLongTextEditor.vue'
 
 // Wiring tests (§6.3/§6.4/§7): verify each surface picks the rich path for a
 // `rich` longText field and the unchanged plain path otherwise (backward-compat).
@@ -121,6 +122,84 @@ describe('cell editor (MetaCellEditor) — rich vs plain editor selection', () =
     expect(emitted.toLowerCase()).not.toContain('onerror')
     expect(emitted.toLowerCase()).not.toContain('<img')
     expect(emitted).toContain('<b>kept</b>')
+    app.unmount()
+    container.remove()
+  })
+})
+
+describe('MetaRichLongTextEditor — commit semantics (drawer PATCH-on-blur, no flood)', () => {
+  function mountEditor(handlers: Record<string, unknown>) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({
+      render: () => h(MetaRichLongTextEditor, { modelValue: '', ...handlers }),
+    })
+    app.mount(container)
+    return { container, app }
+  }
+
+  it('emits `change` only on blur (commit), not on every input', async () => {
+    const changeSpy = vi.fn()
+    const updateSpy = vi.fn()
+    const { container, app } = mountEditor({
+      'onUpdate:modelValue': updateSpy,
+      onChange: changeSpy,
+    })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.innerHTML = '<b>typing</b>'
+    editable.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    // Live updates fired, but no commit yet.
+    expect(updateSpy).toHaveBeenCalled()
+    expect(changeSpy).not.toHaveBeenCalled()
+    // Blur = commit → exactly one `change`.
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy).toHaveBeenCalledTimes(1)
+    expect(changeSpy.mock.calls[0]?.[0]).toContain('<b>typing</b>')
+    app.unmount()
+    container.remove()
+  })
+
+  it('the `change` value is sanitized (commit cannot carry unsafe markup)', async () => {
+    const changeSpy = vi.fn()
+    const { container, app } = mountEditor({ onChange: changeSpy })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.innerHTML = '<img src=x onerror="window.__blurpwn = 1"><i>ok</i>'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    const committed = changeSpy.mock.calls.at(-1)?.[0] as string
+    expect(committed.toLowerCase()).not.toContain('onerror')
+    expect(committed.toLowerCase()).not.toContain('<img')
+    expect(committed).toContain('<i>ok</i>')
+    app.unmount()
+    container.remove()
+  })
+
+  it('does NOT rewrite innerHTML while focused (caret-jump guard)', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({
+      data: () => ({ html: '<b>start</b>' }),
+      render(this: { html: unknown }) {
+        return h(MetaRichLongTextEditor, { modelValue: this.html })
+      },
+      mounted(this: Record<string, unknown>) {
+        this.setHtml = (v: unknown) => { (this as { html: unknown }).html = v }
+      },
+    })
+    const vm = app.mount(container) as unknown as { setHtml: (v: unknown) => void }
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    // Simulate the user actively editing: focus + local DOM change.
+    editable.dispatchEvent(new Event('focus', { bubbles: true }))
+    editable.innerHTML = '<b>user is typing here</b>'
+    // An external model change arrives while focused — must NOT stomp the live DOM.
+    vm.setHtml('<b>start</b>')
+    await nextTick()
+    expect(editable.innerHTML).toBe('<b>user is typing here</b>')
     app.unmount()
     container.remove()
   })

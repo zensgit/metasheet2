@@ -65,6 +65,7 @@
       aria-multiline="true"
       :aria-label="ariaContent"
       data-test="rich-longtext-editor"
+      @focus="onFocus"
       @input="onInput"
       @blur="onBlur"
       @paste="onPaste"
@@ -83,12 +84,23 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  /** Live value on every input — for hosts that buffer locally (form / cell editor). */
   (e: 'update:modelValue', value: string): void
+  /**
+   * Commit-time value, emitted on blur. The drawer listens to THIS (not the live
+   * `update:modelValue`) so it patches the server ONCE per edit session, mirroring
+   * the plain `<textarea>`'s `@change` semantics — never a PATCH per keystroke.
+   */
+  (e: 'change', value: string): void
   (e: 'confirm'): void
   (e: 'cancel'): void
 }>()
 
 const editableRef = ref<HTMLDivElement | null>(null)
+// True while the user is actively editing this surface — used to suppress
+// model→DOM re-sync so a sanitized value flowing back never rewrites innerHTML
+// mid-type and jumps the caret.
+const focused = ref(false)
 
 const zh = () => props.isZh !== false
 
@@ -111,23 +123,34 @@ const listLabels = { ul: zh() ? '无序列表' : 'Bullet list', ol: zh() ? '有�
 const linkLabels = { add: zh() ? '插入链接' : 'Insert link', remove: zh() ? '移除链接' : 'Remove link' }
 
 /**
- * Push the contenteditable's current HTML to the parent. The value is run through
- * the SHARED client sanitizer first so the editor never EMITS markup outside the
- * §5 allow-list. This is NOT the trust boundary (the server re-sanitizes on write
- * regardless) — it just keeps the model clean and consistent with what the render
- * component would show.
+ * Current sanitized HTML of the editable surface. The value is run through the
+ * SHARED client sanitizer so the editor never EMITS markup outside the §5
+ * allow-list. This is NOT the trust boundary (the server re-sanitizes on write
+ * regardless) — it just keeps the model clean and consistent with the render.
  */
-function emitValue(): void {
-  const raw = editableRef.value?.innerHTML ?? ''
-  emit('update:modelValue', sanitizeRichLongTextHtml(raw))
+function currentValue(): string {
+  return sanitizeRichLongTextHtml(editableRef.value?.innerHTML ?? '')
+}
+
+/** Live update (every keystroke / command) — buffered hosts only. */
+function emitLive(): void {
+  emit('update:modelValue', currentValue())
 }
 
 function onInput(): void {
-  emitValue()
+  emitLive()
 }
 
+function onFocus(): void {
+  focused.value = true
+}
+
+/** Blur = commit. Emit BOTH the final live value and the `change` commit event. */
 function onBlur(): void {
-  emitValue()
+  focused.value = false
+  const value = currentValue()
+  emit('update:modelValue', value)
+  emit('change', value)
 }
 
 /** Paste as PLAIN text only — never trust pasted HTML in the editor surface. */
@@ -137,20 +160,20 @@ function onPaste(event: ClipboardEvent): void {
   // execCommand insertText keeps the caret behavior natural; sanitize on the
   // subsequent input emit covers the result regardless.
   document.execCommand('insertText', false, text)
-  emitValue()
+  emitLive()
 }
 
 function exec(command: string): void {
   editableRef.value?.focus()
   document.execCommand(command, false)
-  emitValue()
+  emitLive()
 }
 
 function formatBlock(tag: string): void {
   editableRef.value?.focus()
   // Browsers expect the tag wrapped in <> for formatBlock.
   document.execCommand('formatBlock', false, `<${tag}>`)
-  emitValue()
+  emitLive()
 }
 
 function addLink(): void {
@@ -164,7 +187,7 @@ function addLink(): void {
     return
   }
   document.execCommand('createLink', false, url.trim())
-  emitValue()
+  emitLive()
 }
 
 /**
@@ -175,6 +198,11 @@ function addLink(): void {
 function syncFromModel(): void {
   const el = editableRef.value
   if (!el) return
+  // NEVER rewrite innerHTML while the user is editing: a sanitized value flowing
+  // back from our own emit (or a normalization round-trip) would stomp the live
+  // DOM and jump the caret. Re-sync only applies external changes received while
+  // the surface is blurred.
+  if (focused.value) return
   const next = sanitizeRichLongTextHtml(props.modelValue)
   if (el.innerHTML !== next) el.innerHTML = next
 }
@@ -187,8 +215,8 @@ onMounted(() => {
 watch(
   () => props.modelValue,
   () => {
-    // Only re-sync from an external change; the live-typing path already mutated
-    // the DOM, and syncFromModel's equality guard avoids caret jumps.
+    // Only re-sync external changes; the focus guard in syncFromModel prevents a
+    // mid-type caret jump from our own emitted value flowing back.
     syncFromModel()
   },
 )
