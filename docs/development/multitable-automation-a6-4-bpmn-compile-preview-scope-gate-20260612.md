@@ -1,13 +1,15 @@
 # Multitable Automation A6-4 BPMN Compile/Preview Scope Gate - 2026-06-12
 
-Status: docs-only scope gate; A6-4a pure compiler landed later in #2568
+Status: docs-only scope gate; A6-4a pure compiler landed later in #2568; A6-4b
+read-only route landed later in #2577
 
-Grounded on: `origin/main@52ce8279d`
+Grounded on: `origin/main@741810a15`
 
 Scope: A6-4 / W8 only - BPMN as a compile/preview and gap-report input for the
 existing automation + approval substrate.
 
-Runtime: no live runtime; A6-4a pure compiler landed #2568; A6-4b route not started
+Runtime: no live runtime; A6-4a pure compiler landed #2568; A6-4b read-only
+route landed #2577; A6-4c Workflow Designer UI not started
 
 ## Verdict
 
@@ -164,7 +166,8 @@ Detailed A6-4a implementation checklist:
 `multitable-automation-a6-4a-bpmn-compile-preview-implementation-plan-20260612.md`.
 
 The first implementation PR landed as #2568 with only a pure module + unit
-tests. The route remains a separate A6-4b opt-in after the module is stable:
+tests. The read-only route landed later as #2577. The Workflow Designer UI
+remains a separate A6-4c opt-in after the route contract is stable:
 
 1. Build a pure compiler function that accepts normalized designer/BPMN input.
 2. Add unit tests for supported and unsupported mappings.
@@ -183,17 +186,19 @@ That route name is intentionally different from `deploy`, `test`, `start`, or
 
 ## Required Tests
 
-A6-4a and A6-4b test different risk surfaces. The pure compiler slice (#2568)
-must cover deterministic compile/mapping/gap/redaction behavior without routes
-or writes. The later A6-4b route slice must add route-level no-persistence and
-no-live-engine tests before merge.
+A6-4a, A6-4b, and A6-4c test different risk surfaces. The pure compiler slice
+(#2568) covers deterministic compile/mapping/gap/redaction behavior without
+routes or writes. The A6-4b route slice (#2577) adds route-level
+no-persistence and no-live-engine tests. The later A6-4c UI slice must prove the
+preview panel is read-only and does not add deploy/start/test/publish
+affordances.
 
 1. **Side-effect free:** preview does not call deploy/start/publish/create/update
    services and performs no DB writes except ordinary read queries needed to load
-   the draft. Route-level proof belongs to A6-4b.
+   the draft. Route-level proof belongs to A6-4b and landed in #2577.
 2. **No live BPMN engine:** spies or dependency injection prove the preview route
    does not call `BPMNWorkflowEngine.deployProcess()` or `startProcess()`.
-   Route-level proof belongs to A6-4b.
+   Route-level proof belongs to A6-4b and landed in #2577.
 3. **Exclusive gateway mapping:** a valid exclusive gateway maps to
    `condition_branch`; missing default or unrepresentable condition goes to
    `gapReport`.
@@ -234,4 +239,5 @@ This docs-only scope gate was complete when:
 - no runtime files, migrations, routes, or tests change in this PR.
 
 Later status: #2568 landed A6-4a as a pure compiler module + unit tests only.
-That does not open A6-4b route work or any live BPMN runtime.
+#2577 landed A6-4b as the read-only compile-preview route. That does not open
+A6-4c UI work or any live BPMN runtime.

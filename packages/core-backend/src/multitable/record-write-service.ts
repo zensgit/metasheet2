@@ -74,6 +74,7 @@ export type UniverMetaField = {
     | 'email'
     | 'phone'
     | 'barcode'
+    | 'qrcode'
     | 'location'
     | 'longText'
     | 'autoNumber'
@@ -96,6 +97,13 @@ export type UniverMetaRecord = {
 export type LinkFieldConfig = {
   foreignSheetId: string
   limitSingleRecord: boolean
+  // Bidirectional / mirror links (design 2026-06-14). `twoWay` + `mirrorFieldId` on the forward side drive
+  // the reverse-projection invalidation fan-out; `mirrorOf` marks the derived (read-only) side. See the
+  // route-layer LinkFieldConfig (univer-meta.ts) for the full semantics — this is the write-service mirror.
+  foreignBaseId?: string
+  twoWay?: boolean
+  mirrorFieldId?: string
+  mirrorOf?: string
 }
 
 export type RelationalLinkField = { fieldId: string; cfg: LinkFieldConfig }
@@ -558,6 +566,20 @@ export class RecordWriteService {
     // Step 1: DB transaction
     // -----------------------------------------------------------------------
     const pendingSubscriberNotifications: NotifyRecordSubscribersInput[] = []
+    // Bidirectional / mirror links (design 2026-06-14 §4) — a forward link write changes what the paired
+    // mirror field RESOLVES TO for the touched foreign records. Collect, per mirror-side sheet (= the
+    // forward field's foreignSheetId), the affected foreign record ids (toInsert ∪ toDelete) + the mirror
+    // field id; after commit they join the FOL-1 invalidation fan-out (read-invalidation only — never a
+    // write-back, so no loop). Declared outside the txn closure so it survives to the post-commit fan-out.
+    const mirrorInvalidationBySheet = new Map<string, { recordIds: Set<string>; mirrorFieldIds: Set<string> }>()
+    const collectMirrorInvalidation = (cfg: LinkFieldConfig, foreignRecordIds: string[]): void => {
+      if (cfg.twoWay !== true || !cfg.mirrorFieldId || foreignRecordIds.length === 0) return
+      const mirrorSheetId = cfg.foreignSheetId // the mirror field lives on the forward link's foreign sheet
+      const group = mirrorInvalidationBySheet.get(mirrorSheetId) ?? { recordIds: new Set<string>(), mirrorFieldIds: new Set<string>() }
+      for (const id of foreignRecordIds) group.recordIds.add(id)
+      group.mirrorFieldIds.add(cfg.mirrorFieldId)
+      mirrorInvalidationBySheet.set(mirrorSheetId, group)
+    }
     const updates = await this.pool.transaction(async ({ query }) => {
       const updated: Array<{ recordId: string; version: number }> = []
 
@@ -731,13 +753,24 @@ export class RecordWriteService {
 
         // Sync link table
         if (linkUpdates.size > 0) {
-          for (const [fieldId, { ids }] of linkUpdates.entries()) {
+          for (const [fieldId, { ids, cfg }] of linkUpdates.entries()) {
             if (ids.length === 0) {
+              // Full clear — every currently-linked foreign record loses this edge, so its mirror
+              // projection changed. Read the existing set first (for the twoWay fan-out) THEN delete.
+              let clearedIds: string[] = []
+              if (cfg.twoWay === true && cfg.mirrorFieldId) {
+                const current = await query(
+                  'SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2',
+                  [fieldId, recordId],
+                )
+                clearedIds = (current as any).rows.map((r: any) => String(r.foreign_record_id))
+              }
               try {
                 await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
               } catch (err) {
                 throw err
               }
+              collectMirrorInvalidation(cfg, clearedIds)
               continue
             }
 
@@ -756,6 +789,8 @@ export class RecordWriteService {
             const next = new Set(ids)
             const toDelete = existingIds.filter((id) => !next.has(id))
             const toInsert = ids.filter((id) => !existing.has(id))
+            // The mirror projection of any foreign record gained OR lost from this forward field changed.
+            collectMirrorInvalidation(cfg, [...toInsert, ...toDelete])
 
             if (toDelete.length > 0) {
               try {
@@ -927,6 +962,27 @@ export class RecordWriteService {
       }
       group.recordIds.push(record.recordId)
       for (const fieldId of record.affectedFieldIds) group.fieldIds.add(fieldId)
+    }
+
+    // Bidirectional / mirror links (design 2026-06-14 §4) — fold the forward-write mirror invalidation
+    // (collected in Step 1) into the SAME affected map, so the mirror records on the paired sheet ride the
+    // existing FOL-1 fan-out: post-commit Yjs invalidation (below) + the realtime invalidation broadcast
+    // (Step 6). The fieldIds carry the mirror field id (a pure invalidation signal — receivers refetch
+    // under their own mask; no values, no recordPatches, no forward write → no loop). De-dup recordIds vs
+    // any already-present FOL-1 record on the same sheet (the affected map uses arrays).
+    for (const [mirrorSheetId, group] of mirrorInvalidationBySheet.entries()) {
+      let existing = affectedRelatedBySheet.get(mirrorSheetId)
+      if (!existing) {
+        existing = { recordIds: [], fieldIds: new Set<string>() }
+        affectedRelatedBySheet.set(mirrorSheetId, existing)
+      }
+      const seen = new Set(existing.recordIds)
+      for (const recordId of group.recordIds) {
+        if (seen.has(recordId)) continue
+        seen.add(recordId)
+        existing.recordIds.push(recordId)
+      }
+      for (const mirrorFieldId of group.mirrorFieldIds) existing.fieldIds.add(mirrorFieldId)
     }
 
     // FOL-1 (§2.1 decision 5): the helper just materialized fresh formula values onto the

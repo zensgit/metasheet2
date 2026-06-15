@@ -2055,6 +2055,7 @@ components:
         - email
         - phone
         - barcode
+        - qrcode
         - location
         - longText
         - autoNumber
@@ -2121,6 +2122,27 @@ components:
                 inert by construction. Default/absent = `false` = plain text (legacy behavior). Toggling
                 `rich` ON is rejected on a field that already holds data (historical plain values were
                 never sanitized). Omitted for plain longText and all non-longText fields.
+            twoWay:
+              type: boolean
+              description: >-
+                Bidirectional / mirror links MVP. When `true`, this `link` field participates in a paired
+                (two-way) relationship: the foreign sheet has a paired field that surfaces the reverse of
+                the SAME `meta_links` edge (a derived read-projection — no materialized mirror row, no
+                write-back). Same-base only in the MVP. Omitted for ordinary one-directional links.
+            mirrorFieldId:
+              type: string
+              description: >-
+                Bidirectional / mirror links MVP. Id of the paired `link` field on the foreign sheet. The
+                pairing is symmetric (each side's `mirrorFieldId` names the other) and validated at field
+                create/patch; the two sides must be same-base.
+            mirrorOf:
+              type: string
+              description: >-
+                Bidirectional / mirror links MVP — present ONLY on the DERIVED (mirror) side. Its value is
+                the paired FORWARD field's id. A field with `mirrorOf` set resolves the reverse projection
+                of the forward edge (`WHERE field_id=mirrorOf AND foreign_record_id=<record>`) and is forced
+                READ-ONLY (mirror-side editing is deferred), so the single canonical edge never gains a
+                second row.
         options:
           type: array
           items:

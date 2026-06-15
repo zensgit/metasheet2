@@ -12,6 +12,7 @@ export type MultitableProvisioningFieldType =
   | 'rollup'
   | 'attachment'
   | 'barcode'
+  | 'qrcode'
   | 'location'
   | 'longText'
 

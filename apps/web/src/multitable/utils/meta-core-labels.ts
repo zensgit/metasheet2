@@ -69,7 +69,7 @@ export type MetaCoreLabelKey =
   | 'grid.errorRecordVersionUnavailable' | 'grid.errorPatchFailed'
   // --- MetaCellEditor static (T3A2) ---
   | 'cell.editing'
-  | 'cell.barcodePlaceholder' | 'cell.locationPlaceholder'
+  | 'cell.barcodePlaceholder' | 'cell.qrcodePlaceholder' | 'cell.locationPlaceholder'
   | 'cell.yes' | 'cell.no' | 'cell.clear'
   | 'cell.noAttachments' | 'cell.clearAll'
   | 'cell.uploadFailed' | 'cell.removeFailed' | 'cell.clearFailed'
@@ -206,6 +206,7 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   // (those are queued for T3B).
   'cell.editing': { en: 'Editing', zh: '正在编辑' },
   'cell.barcodePlaceholder': { en: 'Scan or enter barcode', zh: '扫描或输入条码' },
+  'cell.qrcodePlaceholder': { en: 'Enter text or URL for QR code', zh: '输入二维码文本或网址' },
   'cell.locationPlaceholder': { en: 'Enter address', zh: '输入地址' },
   'cell.yes': { en: 'Yes', zh: '是' },
   'cell.no': { en: 'No', zh: '否' },
@@ -300,6 +301,7 @@ const FIELD_TYPE_LABELS: Record<string, { en: string; zh: string }> = {
   email: { en: 'email', zh: '邮箱' },
   phone: { en: 'phone', zh: '电话' },
   barcode: { en: 'barcode', zh: '条码' },
+  qrcode: { en: 'QR code', zh: '二维码' },
   location: { en: 'location', zh: '位置' },
   autoNumber: { en: 'auto number', zh: '自动编号' },
   createdTime: { en: 'created time', zh: '创建时间' },
