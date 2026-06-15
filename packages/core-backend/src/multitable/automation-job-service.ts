@@ -20,7 +20,7 @@ import { toJsonValue } from '../db/type-helpers'
 import { legacyAutomationStatusToJobStatus, normalizeWorkflowJobStatus, type WorkflowJobStatus, type WorkflowJobSuspendReason } from './workflow-job-contract'
 import type { ActionJobLifecycle, ActionJobLifecycleMeta } from './automation-executor'
 import type { AutomationAction } from './automation-actions'
-import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
+import { parseResumeCursor, type ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { redactString, redactValue } from './automation-log-redact'
 
 const JOB_SCHEMA_VERSION = 1
@@ -246,24 +246,43 @@ export class AutomationJobService {
 
     // B1: a `suspended` job MUST carry its C1 suspend descriptor — the contract enforces
     // `suspended ⇔ { reason, resumeToken }` (normalizeWorkflowJob throws otherwise). Hydrate it from
-    // the suspension table (single source of truth) by step — **regardless of suspension status**:
-    // resume claims the token (suspension `pending`→`resumed`) BEFORE it settles the wait job, so a
-    // still-`suspended` job can coexist with an already-`resumed` suspension — briefly (the post-claim
+    // the suspension table (single source of truth) — **regardless of suspension status**: resume
+    // claims the token (suspension `pending`→`resumed`) BEFORE it settles the wait job, so a still-
+    // `suspended` job can coexist with an already-`resumed` suspension — briefly (the post-claim
     // window) or durably (a wait-settle failure leaves job=suspended). A `pending`-only lookup would
-    // then return a descriptor-less suspended job again. Matching by step (any status) closes that.
+    // then return a descriptor-less suspended job again. Matching any status closes that.
     // (The token in this admin-gated read is also the v1 token surface — how an admin obtains it to
     // resume; there is no external emitter. Detail-only — the list route uses legacy steps.)
+    //
+    // A6-3-3 KEY-BY-STEP_KEY (not top-level step_index): a branch-local suspension stores
+    // `step_index = parentStepIndex` AND a non-null `resume_cursor` whose `stepKey` (e.g.
+    // `2.branch.high.1`) identifies the suspended BRANCH CHILD. The top-level `condition_branch`
+    // PARENT job shares that same `step_index` (its key is `String(parentStepIndex)`, e.g. `"2"`).
+    // Keying by `step_index` could therefore mis-attach the descriptor to the parent — or, with a
+    // sequential same-index double-suspend, give every suspended sibling the LAST token. We key the
+    // map by the job `step_key` string instead: top-level/start_approval suspensions store
+    // `String(step_index)`; branch-local suspensions store `cursor.stepKey`. A corrupt non-null
+    // cursor parses to `invalid` and falls to `String(step_index)` — the branch child then gets no
+    // descriptor (fail-closed), never the parent. The parent's `"2"` key is never a branch suspension
+    // key, so the descriptor can never land on the parent `condition_branch` job.
     const hasSuspended = rows.some((r) => r.status === 'suspended')
-    const suspendByStep = new Map<number, { reason: WorkflowJobSuspendReason; resumeToken: string }>()
+    const suspendByStepKey = new Map<string, { reason: WorkflowJobSuspendReason; resumeToken: string }>()
     if (hasSuspended) {
       const susps = await db
         .selectFrom('multitable_automation_suspensions')
-        .select(['step_index', 'reason', 'resume_token'])
+        .select(['step_index', 'reason', 'resume_token', 'resume_cursor'])
         .where('execution_id', '=', executionId)
-        .orderBy('created_at', 'asc') // latest suspension per step wins (defensive; v1 has one per step)
+        .orderBy('created_at', 'asc') // latest suspension per step_key wins (defensive; v1 has one per key)
         .execute()
       for (const s of susps) {
-        suspendByStep.set(Number(s.step_index), {
+        // NULL cursor → top_level (key by String(step_index)); a valid branch cursor → key by its
+        // stepKey; a corrupt non-null cursor → invalid → fall back to String(step_index) (the real
+        // suspended branch child stays descriptor-less = fail-closed, never mis-attached to the parent).
+        const parsed = parseResumeCursor(
+          typeof s.resume_cursor === 'string' ? s.resume_cursor : (s.resume_cursor ?? null),
+        )
+        const key = parsed.kind === 'condition_branch' ? parsed.cursor.stepKey : String(s.step_index)
+        suspendByStepKey.set(key, {
           reason: s.reason as WorkflowJobSuspendReason,
           resumeToken: s.resume_token as string,
         })
@@ -276,7 +295,8 @@ export class AutomationJobService {
         .orderBy('created_at', 'asc')
         .execute()
       for (const bridge of approvalBridges) {
-        suspendByStep.set(Number(bridge.step_index), {
+        // start_approval is always top-level → its suspended job's step_key is String(step_index).
+        suspendByStepKey.set(String(bridge.step_index), {
           reason: 'manual_task',
           resumeToken: bridge.approval_instance_id as string,
         })
@@ -288,7 +308,7 @@ export class AutomationJobService {
       // suspended via writeSuspendedJob) — normalize (fail-loud on a corrupt status) so the read
       // boundary stays enum-strict.
       const status = normalizeWorkflowJobStatus(row.status)
-      const descriptor = status === 'suspended' ? suspendByStep.get(Number(row.step_index)) : undefined
+      const descriptor = status === 'suspended' ? suspendByStepKey.get(row.step_key as string) : undefined
       return {
         id: row.id as string,
         executionId: row.execution_id as string,
