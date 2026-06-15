@@ -51,6 +51,10 @@ function fakePool(rows: unknown[] = [], rowsAffected: number[] = []) {
   return { pool, calls }
 }
 
+function normalizeSql(sql: string): string {
+  return sql.replace(/\s+/g, ' ').trim()
+}
+
 function adapterWithFakePool(fp: ReturnType<typeof fakePool>): MSSQLAdapter {
   const a = new MSSQLAdapter({
     id: 's', name: 's', type: 'sqlserver',
@@ -197,6 +201,61 @@ describe('MSSQLAdapter — SQL generation (fake driver)', () => {
     expect(sql).toContain('ORDER BY [id] ASC')
     expect(sql).toContain('OFFSET 20 ROWS')
     expect(sql).toContain('FETCH NEXT 10 ROWS ONLY')
+  })
+
+  it('select: structured OR groups support C3 composite keyset predicates', async () => {
+    const fp = fakePool()
+    await adapterWithFakePool(fp).select('dbo.orders', {
+      where: {
+        status: 'open',
+        $or: [
+          { updated_at: { $gt: '2026-06-01T00:00:00.000Z' } },
+          {
+            updated_at: '2026-06-01T00:00:00.000Z',
+            id: { $gt: 42 },
+          },
+        ],
+      },
+      orderBy: [
+        { column: 'updated_at', direction: 'asc' },
+        { column: 'id', direction: 'asc' },
+      ],
+      limit: 100,
+    })
+
+    const { sql, params } = fp.calls[0]
+    expect(normalizeSql(sql)).toBe(
+      'SELECT TOP (100) * FROM [dbo].[orders] WHERE status = @p0 AND ((updated_at > @p1) OR (updated_at = @p2 AND id > @p3)) ORDER BY [updated_at] ASC, [id] ASC'
+    )
+    expect(params).toEqual({
+      p0: 'open',
+      p1: '2026-06-01T00:00:00.000Z',
+      p2: '2026-06-01T00:00:00.000Z',
+      p3: 42,
+    })
+    expect(sql).not.toContain('2026-06-01')
+  })
+
+  it('select: rejects malformed structured groups before the driver query is issued', async () => {
+    const fp = fakePool()
+
+    await expect(adapterWithFakePool(fp).select('dbo.orders', {
+      where: { $or: [] },
+      limit: 1,
+    })).rejects.toThrow(/\$or must be a non-empty array/)
+
+    expect(fp.calls).toHaveLength(0)
+  })
+
+  it('select: rejects unsupported where operators before the driver query is issued', async () => {
+    const fp = fakePool()
+
+    await expect(adapterWithFakePool(fp).select('dbo.orders', {
+      where: { updated_at: { $after: '2026-06-01T00:00:00.000Z' } as never },
+      limit: 1,
+    })).rejects.toThrow(/Unsupported where operator/)
+
+    expect(fp.calls).toHaveLength(0)
   })
 
   it('insert: OUTPUT INSERTED.* + parameterized values (not concatenated)', async () => {

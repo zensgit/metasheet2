@@ -115,6 +115,34 @@ describe('PostgresAdapter - structured read SQL', () => {
     expect(fp.calls[0].sql).not.toContain('open')
   })
 
+  it('selects with structured OR groups for C3 composite keyset predicates', async () => {
+    const fp = fakePgPool()
+
+    await adapterWithFakePool(fp).select('public.orders', {
+      where: {
+        status: 'open',
+        $or: [
+          { updated_at: { $gt: '2026-06-01T00:00:00.000Z' } },
+          {
+            updated_at: '2026-06-01T00:00:00.000Z',
+            id: { $gt: 42 },
+          },
+        ],
+      },
+      orderBy: [
+        { column: 'updated_at', direction: 'asc' },
+        { column: 'id', direction: 'asc' },
+      ],
+      limit: 100,
+    })
+
+    expect(normalizeSql(fp.calls[0].sql)).toBe(
+      'SELECT * FROM public.orders WHERE status = $1 AND ((updated_at > $2) OR (updated_at = $3 AND id > $4)) ORDER BY updated_at ASC, id ASC LIMIT 100'
+    )
+    expect(fp.calls[0].params).toEqual(['open', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:00.000Z', 42])
+    expect(fp.calls[0].sql).not.toContain('2026-06-01')
+  })
+
   it('rejects invalid identifiers before the pool is queried', async () => {
     const badTable = fakePgPool()
     await expect(adapterWithFakePool(badTable).select('bad-table', { limit: 1 }))
@@ -125,6 +153,28 @@ describe('PostgresAdapter - structured read SQL', () => {
     await expect(adapterWithFakePool(badColumn).select('orders', { where: { 'bad-key': 'x' }, limit: 1 }))
       .rejects.toThrow(/Invalid identifier segment/)
     expect(badColumn.calls).toHaveLength(0)
+  })
+
+  it('rejects malformed structured groups before the pool is queried', async () => {
+    const fp = fakePgPool()
+
+    await expect(adapterWithFakePool(fp).select('orders', {
+      where: { $or: [] },
+      limit: 1,
+    })).rejects.toThrow(/\$or must be a non-empty array/)
+
+    expect(fp.calls).toHaveLength(0)
+  })
+
+  it('rejects unsupported where operators before the pool is queried', async () => {
+    const fp = fakePgPool()
+
+    await expect(adapterWithFakePool(fp).select('orders', {
+      where: { updated_at: { $after: '2026-06-01T00:00:00.000Z' } as never },
+      limit: 1,
+    })).rejects.toThrow(/Unsupported where operator/)
+
+    expect(fp.calls).toHaveLength(0)
   })
 })
 

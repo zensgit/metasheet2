@@ -9,6 +9,12 @@ const { createWatermarkStore } = require(path.join(__dirname, '..', 'lib', 'wate
 const { createRunLogger } = require(path.join(__dirname, '..', 'lib', 'run-log.cjs'))
 const { createDataSourceSqlReadonlySourceAdapterFactory } = require(path.join(__dirname, '..', 'lib', 'adapters', 'data-source-sql-readonly-source-adapter.cjs'))
 
+const WATERMARK_CURSOR_PREFIX = 'dswm1:'
+
+function encodeWatermarkCursor(payload) {
+  return `${WATERMARK_CURSOR_PREFIX}${Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')}`
+}
+
 function createMockDb() {
   const tables = new Map([
     ['integration_dead_letters', []],
@@ -1535,6 +1541,12 @@ async function main() {
       'maxPagesReached=true when source has more data and page cap is hit')
     assert.equal(cappedResult.run.details.pagesProcessed, 2,
       'pagesProcessed reflects the number of pages read')
+    assert.equal(cappedResult.run.status, 'partial',
+      'a capped source read is incomplete and must not be marked succeeded')
+    assert.equal(cappedResult.run.details.watermarkAdvanced, false,
+      'a capped source read must not advance the watermark and skip unread rows')
+    assert.equal(await cappedHarness.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null,
+      'maxPagesReached blocks watermark persistence')
     assert.equal(cappedPage, 2, 'source read called exactly maxPages times')
 
     // Source returns 1 page (done=true) → maxPagesReached=false, exited normally
@@ -1560,6 +1572,51 @@ async function main() {
       'maxPagesReached=false when source signals done before cap')
     assert.equal(normalResult.run.details.pagesProcessed, 1,
       'pagesProcessed=1 when single page completes the run')
+    assert.equal(normalResult.run.details.nextCursor, null,
+      'normal terminal reads do not persist a stale previous cursor')
+  }
+
+  // --- 20b. Watermark cursors are internal and values-free in persisted run details.
+  {
+    const secretTiebreaker = 'PART-SECRET-001'
+    const sensitiveCursor = encodeWatermarkCursor({
+      v: 1,
+      mode: 'wm-composite',
+      type: 'updated_at',
+      field: 'updatedAt',
+      value: '2026-04-24T01:00:00.000Z',
+      tiebreaker: 'code',
+      tiebreakerValue: secretTiebreaker,
+    })
+    let page = 0
+    const cursorHarness = createRunnerHarness({
+      sourceRecords: [],
+      pipelineOverrides: { options: { batchSize: 1, maxPages: 1 } },
+      sourceRead: async () => {
+        page += 1
+        return createReadResult({
+          records: [
+            { code: secretTiebreaker, revision: 'r1', qty: '1', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+          ],
+          nextCursor: sensitiveCursor,
+          done: false,
+        })
+      },
+    })
+    const result = await cursorHarness.runner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual',
+    })
+    assert.equal(page, 1)
+    assert.equal(result.run.status, 'partial')
+    assert.equal(result.run.details.nextCursor, null)
+    assert.equal(result.run.details.nextCursorRedacted, true)
+    assert.equal(result.run.details.nextCursorKind, 'watermark')
+    assert.equal(result.run.details.watermarkAdvanced, false)
+    assert.equal(await cursorHarness.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null,
+      'redacted incomplete watermark cursor does not advance the store')
+    const serializedDetails = JSON.stringify(result.run.details)
+    assert.ok(!serializedDetails.includes(secretTiebreaker), 'run details must not leak cursor tiebreaker source values')
+    assert.ok(!serializedDetails.includes(sensitiveCursor), 'run details must not persist the raw watermark cursor')
   }
 
   // --- 21. invalid source record (null/array/scalar) → dead letter, run continues

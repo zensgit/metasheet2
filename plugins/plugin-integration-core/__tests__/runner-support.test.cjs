@@ -7,6 +7,7 @@ const {
   computeRecordIdempotencyKey,
 } = require(path.join(__dirname, '..', 'lib', 'idempotency.cjs'))
 const {
+  compareWatermarkValues,
   createWatermarkStore,
   deriveNextWatermark,
   normalizeWatermarkConfig,
@@ -202,6 +203,19 @@ async function main() {
     deriveNextWatermark([{ id: 7 }, { id: '42' }, { id: 13 }], { type: 'monotonic_id' }),
     { type: 'monotonic_id', value: '42' },
   )
+  assert.equal(
+    compareWatermarkValues('monotonic_id', '9007199254740993', '9007199254740992'),
+    1,
+    'monotonic_id comparison preserves SQL BIGINT precision beyond JS safe integers',
+  )
+  assert.deepEqual(
+    deriveNextWatermark(
+      [{ id: '9007199254740992' }, { id: '9007199254740993' }],
+      { type: 'monotonic_id' },
+    ),
+    { type: 'monotonic_id', value: '9007199254740993' },
+    'deriveNextWatermark picks the later SQL BIGINT id without Number rounding',
+  )
   assert.deepEqual(
     normalizeWatermarkConfig(
       { type: 'updated_at', field: 'updatedAt', tiebreaker: 'id' },
@@ -261,6 +275,19 @@ async function main() {
   assert.equal(updatedWatermark.value, '42')
   const notRegressed = await watermarks.advanceWatermark({ pipelineId: 'pipe_1', type: 'monotonic_id', value: '7' })
   assert.equal(notRegressed.value, '42', 'advanceWatermark does not move monotonic watermarks backwards')
+  const bigIntWatermark = await watermarks.advanceWatermark({
+    pipelineId: 'pipe_bigint',
+    type: 'monotonic_id',
+    value: '9007199254740992',
+  })
+  assert.equal(bigIntWatermark.value, '9007199254740992')
+  const biggerBigIntWatermark = await watermarks.advanceWatermark({
+    pipelineId: 'pipe_bigint',
+    type: 'monotonic_id',
+    value: '9007199254740993',
+  })
+  assert.equal(biggerBigIntWatermark.value, '9007199254740993',
+    'advanceWatermark advances adjacent SQL BIGINT values without precision collapse')
   await assert.rejects(() => watermarks.setWatermark({
     pipelineId: 'pipe_bad_ts',
     type: 'updated_at',
@@ -275,6 +302,11 @@ async function main() {
     pipelineId: 'pipe_1',
     type: 'monotonic_id',
     value: Number.POSITIVE_INFINITY,
+  }), WatermarkError)
+  await assert.rejects(() => watermarks.advanceWatermark({
+    pipelineId: 'pipe_1',
+    type: 'monotonic_id',
+    value: Number.MAX_SAFE_INTEGER + 1,
   }), WatermarkError)
   assert.equal(
     await db.selectOne('integration_watermarks', { pipeline_id: 'pipe_bad_ts' }),
