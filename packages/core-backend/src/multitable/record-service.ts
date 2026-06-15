@@ -337,6 +337,9 @@ function buildCreateFieldGuardMap(rows: unknown[]): Map<string, CreateFieldGuard
       guards.set(fieldId, {
         type,
         link: parseLinkFieldConfig(row.property),
+        // Carry the raw property so isFieldAlwaysReadOnly can see `mirrorOf` and reject a write to the
+        // DERIVED (mirror) side on the single-record create/patch path (bidirectional links MVP).
+        property: normalizeJson(row.property),
       })
       continue
     }

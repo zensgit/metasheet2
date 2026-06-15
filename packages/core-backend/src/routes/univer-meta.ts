@@ -1144,6 +1144,13 @@ async function validateLinkFieldConfig(
   const actualForeignBaseId = foreignSheet.baseId ?? null
   const claimed = linkCfg.foreignBaseId ?? null
   if (baseIdsAreCrossBase(sourceBaseId, actualForeignBaseId)) {
+    // Bidirectional / mirror links MVP (design 2026-06-14 §7.2) — cross-base bidirectional is DEFERRED.
+    // A two-way link must be same-base, even if it carries a valid cross-base `foreignBaseId` opt-in
+    // (this fires BEFORE the ②b opt-in short-circuit so the opt-in cannot rescue a cross-base pairing).
+    // Uses only this field's own config, so create-order / paired-field existence is irrelevant.
+    if (linkCfg.twoWay === true) {
+      return `二维（双向）链接 MVP 不支持跨 base 配对：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} base=${actualForeignBaseId ?? 'null'}`
+    }
     // ②b opt-in short-circuit — a cross-base link is allowed IFF it carries an EXPLICIT foreignBaseId
     // EQUAL to the foreign sheet's real base (claim == truth; you can't declare a wrong base). A
     // degenerate null/legacy-base foreign sheet has no concrete base to claim, so it can never opt in
