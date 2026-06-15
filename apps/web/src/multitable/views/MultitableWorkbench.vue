@@ -375,6 +375,8 @@
       :ai-preview-busy="aiShortcutBusy"
       :ai-usage-summary-fn="aiUsageSummaryFn"
       :formula-suggest-fn="formulaSuggestFn"
+      :list-bases-fn="listBasesForFieldFn"
+      :list-foreign-sheets-fn="listForeignSheetsForFieldFn"
       @update:dirty="fieldManagerDirty = $event"
       @close="showFieldManager = false" @create-field="onCreateField" @update-field="onUpdateField" @delete-field="onDeleteField"
     />
@@ -1843,6 +1845,16 @@ const aggregateGroups = ref<import('../api/client').ViewAggregateGroup[]>([]) //
 // #5b: formula dry-run passthrough to the API client (MetaFieldManager is emit-based, so it takes a fn prop)
 const dryRunFormulaFn = (params: { sheetId: string; expression: string; sampleValues: Record<string, unknown>; recordId?: string }) =>
   workbench.client.dryRunFormula(params)
+// Cross-base link picker (design 2026-06-14). Both fns hit the BARE client —
+// NEVER workbench.switchBase / loadBaseContext, which run syncContextState and
+// would yank the user's active base/sheet out from under the field config.
+// Both endpoints are backend base-read-gated (the FE never recomputes
+// readability): listBases returns only bases with a readable sheet;
+// loadContext({baseId}).sheets is read-gated and resolves nothing about the
+// user's active base.
+const listBasesForFieldFn = async () => (await workbench.client.listBases()).bases
+const listForeignSheetsForFieldFn = async (baseId: string) =>
+  (await workbench.client.loadContext({ baseId })).sheets
 const activeAggregationConfig = computed<Record<string, string>>(() => {
   const raw = workbench.activeView.value?.config?.aggregations
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}

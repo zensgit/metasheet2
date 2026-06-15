@@ -23,6 +23,10 @@ export type MetaManagerLabelKey =
   | 'field.title' | 'field.empty' | 'field.options' | 'field.optionValue'
   | 'field.targetSheet' | 'field.selectSheet' | 'field.limitSingleLinkedRecord'
   | 'field.hierarchyParentLinkLocked'
+  // Cross-base link picker (design 2026-06-14)
+  | 'field.linkToAnotherBase' | 'field.targetBase' | 'field.selectBase'
+  | 'field.crossBaseLoadingSheets' | 'field.crossBaseNoSheets'
+  | 'field.crossBaseBaseLocked' | 'field.crossBaseUnreadable'
   | 'field.personHint' | 'field.limitSinglePerson'
   | 'field.linkField' | 'field.selectLinkField'
   | 'field.foreignSheetId' | 'field.targetFieldId'
@@ -49,6 +53,7 @@ export type MetaManagerLabelKey =
   | 'field.latestMetadataLoaded'
   | 'field.discardManagerConfirm'
   | 'field.error.linkNeedsTargetSheet'
+  | 'field.error.linkNeedsCrossBaseTarget'
   | 'field.error.lookupNeedsLinkAndTarget'
   | 'field.error.lookupNeedsValidTargetSheet'
   | 'field.error.rollupNeedsLinkAndTarget'
@@ -167,6 +172,19 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
     en: 'This field is used as a hierarchy parent field, so it must remain single-record.',
     zh: '此字段正在作为层级父字段使用，必须保持单条关联。',
   },
+  'field.linkToAnotherBase': { en: 'Link to another base', zh: '关联到其他多维表' },
+  'field.targetBase': { en: 'Target base', zh: '目标多维表' },
+  'field.selectBase': { en: 'Select base', zh: '选择多维表' },
+  'field.crossBaseLoadingSheets': { en: 'Loading tables…', zh: '正在加载数据表…' },
+  'field.crossBaseNoSheets': { en: 'No readable tables in this base', zh: '该多维表中没有可读取的数据表' },
+  'field.crossBaseBaseLocked': {
+    en: 'The linked base is fixed and cannot be changed after the field is created.',
+    zh: '关联的目标多维表在字段创建后即固定，无法更改。',
+  },
+  'field.crossBaseUnreadable': {
+    en: 'You no longer have access to the linked base, so its tables cannot be loaded.',
+    zh: '你已无权访问关联的目标多维表，无法加载其数据表。',
+  },
   'field.personHint': {
     en: 'People fields use the system people sheet preset and stay hidden from normal sheet navigation.',
     zh: '人员字段使用系统人员表预设，并在普通表导航中保持隐藏。',
@@ -240,6 +258,7 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.latestMetadataLoaded': { en: 'Latest field metadata loaded from the sheet context.', zh: '已从表上下文加载最新字段元数据。' },
   'field.discardManagerConfirm': { en: 'Discard unsaved field manager changes?', zh: '放弃未保存的字段管理更改吗？' },
   'field.error.linkNeedsTargetSheet': { en: 'Choose a target sheet for link fields', zh: '请为关联字段选择目标表' },
+  'field.error.linkNeedsCrossBaseTarget': { en: 'Choose a base and a readable table for the cross-base link', zh: '请为跨多维表关联选择目标多维表和可读取的数据表' },
   'field.error.lookupNeedsLinkAndTarget': { en: 'Lookup fields need a link field and a target field id', zh: '查找字段需要关联字段和目标字段 ID' },
   'field.error.lookupNeedsValidTargetSheet': { en: 'Lookup fields need a valid target sheet', zh: '查找字段需要有效的目标表' },
   'field.error.rollupNeedsLinkAndTarget': { en: 'Rollup fields need a link field and a target field id', zh: '汇总字段需要关联字段和目标字段 ID' },

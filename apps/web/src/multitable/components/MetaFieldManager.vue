@@ -85,7 +85,71 @@
         </template>
 
         <template v-else-if="configTargetType === 'link'">
-          <label class="meta-field-mgr__field">
+          <!-- Cross-base opt-in (design 2026-06-14). OFF (default) = unchanged
+               same-base path, no extra click. Disabled in edit mode because
+               foreignBaseId is immutable. -->
+          <label v-if="listBasesFn" class="meta-field-mgr__toggle">
+            <input
+              v-model="linkDraft.crossBase"
+              type="checkbox"
+              :disabled="linkCrossBaseToggleLocked"
+              data-test="link-cross-base-toggle"
+              @change="onCrossBaseToggle"
+            />
+            <span>{{ ml('field.linkToAnotherBase') }}</span>
+          </label>
+
+          <template v-if="linkDraft.crossBase">
+            <label class="meta-field-mgr__field">
+              <span>{{ ml('field.targetBase') }}</span>
+              <!-- Edit mode: base axis is locked → a single disabled option
+                   showing the stored base name (raw id fallback). -->
+              <select
+                v-if="linkBaseAxisLocked"
+                class="meta-field-mgr__select"
+                disabled
+                data-test="link-cross-base-select"
+              >
+                <option :value="linkDraft.foreignBaseId">{{ lockedForeignBaseLabel }}</option>
+              </select>
+              <select
+                v-else
+                v-model="linkDraft.foreignBaseId"
+                class="meta-field-mgr__select"
+                data-test="link-cross-base-select"
+                @change="onCrossBaseBasePick"
+              >
+                <option value="">{{ ml('field.selectBase') }}</option>
+                <option v-for="base in crossBaseBases" :key="base.id" :value="base.id">{{ base.name }}</option>
+              </select>
+            </label>
+            <div v-if="linkBaseAxisLocked" class="meta-field-mgr__hint" data-test="link-cross-base-locked">
+              {{ ml('field.crossBaseBaseLocked') }}
+            </div>
+
+            <!-- Foreign-sheet axis: loading / 403-gated / empty / list. The
+                 403-gated state fails closed (save blocked via the guard). -->
+            <div v-if="crossBaseSheetsLoading" class="meta-field-mgr__hint" data-test="link-cross-base-loading">
+              {{ ml('field.crossBaseLoadingSheets') }}
+            </div>
+            <div v-else-if="crossBaseSheetsError" class="meta-field-mgr__hint meta-field-mgr__hint--error" data-test="link-cross-base-unreadable">
+              {{ ml('field.crossBaseUnreadable') }}
+            </div>
+            <template v-else-if="linkDraft.foreignBaseId">
+              <label v-if="crossBaseSheetOptions.length" class="meta-field-mgr__field">
+                <span>{{ ml('field.targetSheet') }}</span>
+                <select v-model="linkDraft.foreignSheetId" class="meta-field-mgr__select" data-test="link-cross-base-sheet-select">
+                  <option value="">{{ ml('field.selectSheet') }}</option>
+                  <option v-for="sheet in crossBaseSheetOptions" :key="sheet.id" :value="sheet.id">{{ sheet.name }}</option>
+                </select>
+              </label>
+              <div v-else class="meta-field-mgr__hint" data-test="link-cross-base-empty">
+                {{ ml('field.crossBaseNoSheets') }}
+              </div>
+            </template>
+          </template>
+
+          <label v-else class="meta-field-mgr__field">
             <span>{{ ml('field.targetSheet') }}</span>
             <select v-model="linkDraft.foreignSheetId" class="meta-field-mgr__select">
               <option value="">{{ ml('field.selectSheet') }}</option>
@@ -605,7 +669,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
-import type { FieldValidationRule, MetaField, MetaFieldCreateType, MetaSheet } from '../types'
+import type { FieldValidationRule, MetaBase, MetaField, MetaFieldCreateType, MetaSheet } from '../types'
 import {
   buildFormulaFieldTokenInsertion,
   buildFormulaFunctionInsertion,
@@ -798,6 +862,16 @@ const props = defineProps<{
   // in-flight guard + countdown cover this entry point too. null outcome =
   // guarded no-op (another AI request is in flight / countdown active).
   formulaSuggestFn?: (params: { instruction: string }) => Promise<AiFormulaSuggestOutcome | null>
+  // Cross-base link picker (design 2026-06-14). The base-read gate is the FE's
+  // source of truth: these fns are the ONLY way the picker learns what bases /
+  // foreign sheets exist, and both are backend base-read-gated (listBases returns
+  // only bases with a readable sheet; loadContext({baseId}).sheets is read-gated).
+  // The picker NEVER computes its own readability. Optional so the panel degrades
+  // to same-base-only where no fn is wired. The workbench MUST resolve
+  // listForeignSheetsFn from the BARE client.loadContext, never the workbench's
+  // switchBase/loadBaseContext mutators (those would yank the user's active base).
+  listBasesFn?: () => Promise<MetaBase[]>
+  listForeignSheetsFn?: (baseId: string) => Promise<MetaSheet[]>
 }>()
 
 const emit = defineEmits<{
@@ -829,10 +903,28 @@ const aiSourceAllDeletedBlocked = ref(false)
 const selectDraft = reactive<{ options: Array<{ value: string; color: string }> }>({
   options: [{ value: '', color: '' }],
 })
-const linkDraft = reactive<{ foreignSheetId: string; limitSingleRecord: boolean }>({
+// `foreignBaseId`/`crossBase` are the cross-base opt-in (design 2026-06-14).
+// crossBase OFF = today's same-base path (foreignSheetId over same-base
+// targetSheets); ON = foreignBaseId + foreignSheetId picked from the gated
+// listBasesFn / listForeignSheetsFn. The two modes keep separate state so a
+// stale id never leaks across a toggle.
+const linkDraft = reactive<{ foreignSheetId: string; crossBase: boolean; foreignBaseId: string; limitSingleRecord: boolean }>({
   foreignSheetId: '',
+  crossBase: false,
+  foreignBaseId: '',
   limitSingleRecord: false,
 })
+// Cross-base picker fetched state. The base list + foreign-sheet list come ONLY
+// from the gated fns — never recomputed locally. `crossBaseSheetsError` true =>
+// the foreign-base read failed (403 or transport); fail-closed (the save is
+// blocked and a gated notice renders), never a silent same-base save.
+const crossBaseBases = ref<MetaBase[]>([])
+const crossBaseSheets = ref<MetaSheet[]>([])
+const crossBaseSheetsLoading = ref(false)
+const crossBaseSheetsError = ref(false)
+// Monotonic guard: a slow stale foreign-sheet response must not overwrite a
+// newer base pick (mirrors the dryRun/aggregate seq precedent).
+let crossBaseFetchSeq = 0
 const personDraft = reactive<{ limitSingleRecord: boolean }>({
   limitSingleRecord: true,
 })
@@ -915,6 +1007,115 @@ const linkSingleRecordLockedByHierarchy = computed(() => {
     && target.property?.limitSingleRecord === true
     && hierarchyParentFieldIdSet.value.has(target.id)
 })
+// --- Cross-base link picker (design 2026-06-14) ---
+// True when editing an EXISTING field that already stores a foreignBaseId:
+// foreignBaseId is immutable, so the base <select> is read-only (only the
+// foreign sheet within the locked base may change).
+const linkBaseAxisLocked = computed(() =>
+  Boolean(configTarget.value) && resolveLinkFieldProperty(configTarget.value?.property).foreignBaseId !== null,
+)
+// The cross-base TOGGLE is locked for ANY existing field — not just one that is
+// already cross-base. Same-base↔cross-base re-targeting after create is a
+// DEFERRED capability (design §7) AND unsafe: an existing same-base link's
+// values are record IDs in the CURRENT base, so flipping it to a foreign base
+// would silently break every linked value. So toggling is a create-only
+// affordance; existing fields keep their stored cross-base-ness, read-only.
+const linkCrossBaseToggleLocked = computed(() => Boolean(configTarget.value))
+// The active base id, inferred from the current sheet (props carries no baseId).
+// Used only to exclude the current sheet from the foreign-sheet list when the
+// picked foreign base IS the active base (you can't link a sheet to itself).
+const activeBaseId = computed(() =>
+  props.sheets.find((sheet) => sheet.id === props.sheetId)?.baseId ?? null,
+)
+const crossBaseSheetOptions = computed(() => {
+  const sameAsActive = !!linkDraft.foreignBaseId && linkDraft.foreignBaseId === activeBaseId.value
+  return sameAsActive
+    ? crossBaseSheets.value.filter((sheet) => sheet.id !== props.sheetId)
+    : crossBaseSheets.value
+})
+// Resolve the stored foreign-base display name in edit mode (single locked
+// option). Falls back to the raw id if listBasesFn hasn't resolved it — the
+// locked select never depends on the full base list loading.
+const lockedForeignBaseLabel = computed(() => {
+  const id = linkDraft.foreignBaseId
+  if (!id) return ''
+  return crossBaseBases.value.find((base) => base.id === id)?.name ?? id
+})
+
+async function loadCrossBaseBases() {
+  const fn = props.listBasesFn
+  if (!fn) return
+  try {
+    crossBaseBases.value = await fn()
+  } catch {
+    // Read failure on the base list is non-fatal: the user simply has no bases
+    // to pick (the gated save still blocks). Never throw out of config load.
+    crossBaseBases.value = []
+  }
+}
+
+// Fetch the foreign base's readable sheets via the gated fn. Fail-closed: any
+// rejection (403 / transport) sets crossBaseSheetsError so the UI renders the
+// gated notice and the save is blocked — it must NEVER fall through to a
+// same-base property.
+async function fetchCrossBaseSheets(baseId: string) {
+  const fn = props.listForeignSheetsFn
+  const seq = ++crossBaseFetchSeq
+  crossBaseSheetsError.value = false
+  if (!fn || !baseId) {
+    crossBaseSheets.value = []
+    crossBaseSheetsLoading.value = false
+    return
+  }
+  crossBaseSheetsLoading.value = true
+  try {
+    const sheets = await fn(baseId)
+    if (seq !== crossBaseFetchSeq) return
+    crossBaseSheets.value = sheets
+  } catch {
+    if (seq !== crossBaseFetchSeq) return
+    crossBaseSheets.value = []
+    crossBaseSheetsError.value = true
+  } finally {
+    if (seq === crossBaseFetchSeq) crossBaseSheetsLoading.value = false
+  }
+}
+
+function resetCrossBaseState() {
+  crossBaseFetchSeq++
+  crossBaseBases.value = []
+  crossBaseSheets.value = []
+  crossBaseSheetsLoading.value = false
+  crossBaseSheetsError.value = false
+}
+
+// Toggle handler — clears the OTHER mode's selection so a stale sheet id can
+// never leak into an emit. Off->on loads the base list; on->off restores the
+// same-base path. The handler guard (not just `:disabled`) is the real
+// enforcement: jsdom can dispatch `change` on a disabled checkbox, so a
+// synthetic event must not be able to flip an existing field's cross-base-ness
+// (mirrors the hierarchy single-record lock's defense-in-depth).
+function onCrossBaseToggle() {
+  if (configTarget.value) {
+    // Existing field: re-targeting is forbidden. Snap the toggle back to the
+    // stored cross-base-ness regardless of the synthetic event.
+    linkDraft.crossBase = resolveLinkFieldProperty(configTarget.value.property).foreignBaseId !== null
+    return
+  }
+  linkDraft.foreignSheetId = ''
+  linkDraft.foreignBaseId = ''
+  resetCrossBaseState()
+  if (linkDraft.crossBase) void loadCrossBaseBases()
+}
+
+// Base pick — clears the prior foreign sheet (it belonged to the old base) and
+// fetches the new base's sheets. Disabled in edit mode.
+function onCrossBaseBasePick() {
+  if (linkBaseAxisLocked.value) return
+  linkDraft.foreignSheetId = ''
+  void fetchCrossBaseSheets(linkDraft.foreignBaseId)
+}
+
 const formulaSourceFields = computed(() =>
   props.fields.filter((field) => field.id !== configTarget.value?.id && field.type !== 'formula'),
 )
@@ -1210,7 +1411,10 @@ function resetDrafts() {
   resetAiDraft()
   selectDraft.options = [{ value: '', color: '' }]
   linkDraft.foreignSheetId = ''
+  linkDraft.crossBase = false
+  linkDraft.foreignBaseId = ''
   linkDraft.limitSingleRecord = false
+  resetCrossBaseState()
   personDraft.limitSingleRecord = true
   lookupDraft.linkFieldId = ''
   lookupDraft.targetFieldId = ''
@@ -1258,6 +1462,9 @@ function serializeFieldDraft(type: string | null): string {
   if (type === 'link') {
     return JSON.stringify({
       foreignSheetId: linkDraft.foreignSheetId,
+      // Cross-base keys only when toggled on, so a same-base field's signature
+      // is byte-for-byte what it was before this feature (no spurious dirty).
+      ...(linkDraft.crossBase ? { crossBase: true, foreignBaseId: linkDraft.foreignBaseId } : {}),
       limitSingleRecord: linkSingleRecordLockedByHierarchy.value || linkDraft.limitSingleRecord,
     })
   }
@@ -1375,6 +1582,15 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
     const property = resolveLinkFieldProperty(field.property)
     linkDraft.foreignSheetId = property.foreignSheetId ?? ''
     linkDraft.limitSingleRecord = property.limitSingleRecord
+    // Cross-base existing field: reflect the stored base (axis locked), resolve
+    // its name for the locked select, and fetch its sheets so the foreign sheet
+    // shows selected. A foreign-base 403 surfaces as the gated state (not blank).
+    if (property.foreignBaseId) {
+      linkDraft.crossBase = true
+      linkDraft.foreignBaseId = property.foreignBaseId
+      void loadCrossBaseBases()
+      void fetchCrossBaseSheets(property.foreignBaseId)
+    }
   } else if (fieldType === 'person') {
     const property = resolveLinkFieldProperty(field.property)
     personDraft.limitSingleRecord = property.limitSingleRecord || property.limitSingleRecord !== false
@@ -1744,10 +1960,42 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     return { options, ...validationProperty }
   }
   if (normalizedType === 'link') {
+    // Defense-in-depth (mirrors the hierarchy single-record lock): cross-base-ness
+    // is immutable after create. When editing a field whose STORED foreignBaseId
+    // was null, never emit a cross-base property even if the toggle was somehow
+    // flipped — same-base↔cross-base re-targeting is deferred + unsafe (existing
+    // values are IDs in the current base). The toggle :disabled + handler guard
+    // already prevent this in the UI; this guarantees the emit too.
+    const editingSameBaseLink = Boolean(configTarget.value)
+      && resolveLinkFieldProperty(configTarget.value?.property).foreignBaseId === null
+    if (linkDraft.crossBase && !editingSameBaseLink) {
+      // Cross-base: validate the foreign sheet against the FETCHED foreign-base
+      // list (not same-base targetSheets), and require a foreignBaseId. A 403 /
+      // transport error on the foreign base blocks the save (fail-closed) — it
+      // must NEVER fall through to a same-base property.
+      if (
+        crossBaseSheetsError.value
+        || !linkDraft.foreignBaseId
+        || !linkDraft.foreignSheetId
+        || !crossBaseSheetOptions.value.some((sheet) => sheet.id === linkDraft.foreignSheetId)
+      ) {
+        fieldConfigError.value = ml('field.error.linkNeedsCrossBaseTarget')
+        return undefined
+      }
+      // foreignBaseId emitted ONLY when cross-base AND both ids present —
+      // mirrors the codec's both-present rule (field-codecs.ts:235).
+      return {
+        foreignSheetId: linkDraft.foreignSheetId,
+        foreignDatasheetId: linkDraft.foreignSheetId,
+        foreignBaseId: linkDraft.foreignBaseId,
+        limitSingleRecord: linkSingleRecordLockedByHierarchy.value || linkDraft.limitSingleRecord,
+      }
+    }
     if (!linkDraft.foreignSheetId || !targetSheets.value.some((sheet) => sheet.id === linkDraft.foreignSheetId)) {
       fieldConfigError.value = ml('field.error.linkNeedsTargetSheet')
       return undefined
     }
+    // Same-base: unchanged, no foreignBaseId key (backward compatible).
     return {
       foreignSheetId: linkDraft.foreignSheetId,
       foreignDatasheetId: linkDraft.foreignSheetId,
@@ -2099,6 +2347,7 @@ onBeforeUnmount(() => {
 .meta-field-mgr__field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #666; }
 .meta-field-mgr__toggle { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #444; }
 .meta-field-mgr__hint { padding: 8px 10px; border: 1px solid #d9ecff; border-radius: 6px; background: #ecf5ff; color: #4a6785; font-size: 12px; }
+.meta-field-mgr__hint--error { border-color: #fbc4c4; background: #fef0f0; color: #a8323f; }
 .meta-field-mgr__warning { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid #f3d19e; border-radius: 6px; background: #fff7e6; color: #8a5a00; font-size: 12px; }
 .meta-field-mgr__refresh { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid #bfd6ff; border-radius: 6px; background: #eef5ff; color: #1d4ed8; font-size: 12px; }
 .meta-field-mgr__chips { display: flex; flex-wrap: wrap; gap: 6px; }
