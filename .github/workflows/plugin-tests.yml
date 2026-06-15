@@ -230,6 +230,7 @@ jobs:
             tests/integration/multitable-ai-shortcut-run.test.ts \
             tests/integration/multitable-ai-ledger-retention.test.ts \
             tests/integration/multitable-ai-suggest-formula.test.ts \
+            tests/integration/data-source-c3-keyset-realdb.test.ts \
             --reporter=dot
 
       - name: Start core backend (background)
