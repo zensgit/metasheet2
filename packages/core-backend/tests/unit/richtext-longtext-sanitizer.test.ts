@@ -4,6 +4,7 @@ import {
   sanitizeRichLongText,
   richLongTextToPlainText,
   isRichLongTextProperty,
+  isRichLongTextTurningOn,
   sanitizeFieldProperty,
 } from '../../src/multitable/field-codecs'
 import {
@@ -17,6 +18,11 @@ import {
   type AutomationRule,
   type AutomationDeps,
 } from '../../src/multitable/automation-executor'
+import {
+  createRecord as createRecordViaPluginSdk,
+  patchRecord as patchRecordViaPluginSdk,
+} from '../../src/multitable/records'
+import { patchObjectFieldProperty } from '../../src/multitable/provisioning'
 import { EventBus } from '../../src/integration/events/event-bus'
 
 // ---------------------------------------------------------------------------
@@ -202,6 +208,26 @@ describe('sanitizeFieldProperty longText rich flag', () => {
     expect(isRichLongTextProperty({})).toBe(false)
     expect(isRichLongTextProperty(undefined)).toBe(false)
     expect(isRichLongTextProperty(null)).toBe(false)
+  })
+})
+
+// PART 4b — shared OFF→ON rich-toggle predicate (used by both the HTTP field-PATCH route
+// and the plugin-SDK provisioning property write so the backward-compat gate fires identically).
+describe('isRichLongTextTurningOn (shared toggle-gate predicate)', () => {
+  it('is TRUE only on an OFF→ON transition (plain longText → rich longText)', () => {
+    expect(isRichLongTextTurningOn('longText', {}, 'longText', { rich: true })).toBe(true)
+    expect(isRichLongTextTurningOn('longText', { rich: false }, 'longText', { rich: true })).toBe(true)
+  })
+
+  it('is FALSE when already rich (rename / no-op PATCH must never trip the gate)', () => {
+    expect(isRichLongTextTurningOn('longText', { rich: true }, 'longText', { rich: true })).toBe(false)
+  })
+
+  it('is FALSE when the result is not a rich longText field', () => {
+    // turning rich OFF, or non-longText next type, or non-strict rich value.
+    expect(isRichLongTextTurningOn('longText', { rich: true }, 'longText', {})).toBe(false)
+    expect(isRichLongTextTurningOn('string', {}, 'string', { rich: true })).toBe(false)
+    expect(isRichLongTextTurningOn('longText', {}, 'longText', { rich: 'true' })).toBe(false)
   })
 })
 
@@ -439,5 +465,173 @@ describe('automation update_record / create_record sanitize rich longText', () =
     expect(value.toLowerCase()).not.toContain('onerror')
     expect(value).not.toContain('evil()')
     expect(value).toContain('<b>ok</b>')
+  })
+})
+
+// ===========================================================================
+// PART 8 — plugin-SDK record write-path coverage (the REQUEST-CHANGES blocker)
+//
+// `multitable.records.createRecord` / `patchRecord` (records.ts, wired into EVERY
+// plugin via plugin-scope.ts) normalize values through `normalizeFieldValue`, which
+// had NO `longText` case → a `{rich:true}` value was stored RAW (a stored-XSS bypass
+// of the sanitizer chokepoint). These canaries drive the REAL functions and capture
+// the persisted `data` JSON to assert the stored byte sequence is inert.
+// ===========================================================================
+
+describe('plugin-SDK records.ts createRecord/patchRecord sanitize rich longText', () => {
+  const MALICIOUS =
+    '<script>steal()</script><img src=x onerror=alert(1)>' +
+    '<a href="javascript:evil()">x</a><p onclick="boom()">text</p><b>ok</b>'
+
+  // Mock query: serves the loaders (meta_sheets / meta_fields), the auto-number advisory
+  // lock, the patchRecord prerequisites (getRecord + lock guard), and CAPTURES the
+  // INSERT/UPDATE meta_records write params. `fld_rich` is reported as a RICH longText field.
+  function createCapturingQuery(captured: { writes: unknown[][] }) {
+    return vi.fn(async (sql: string, params?: unknown[]) => {
+      const s = String(sql)
+      if (/FROM meta_sheets/i.test(s)) {
+        return { rows: [{ id: 'sheet1', base_id: 'base1', name: 'S', description: null }], rowCount: 1 }
+      }
+      if (/FROM meta_fields/i.test(s)) {
+        return {
+          rows: [{ id: 'fld_rich', name: 'Notes', type: 'longText', property: { rich: true }, order: 0 }],
+          rowCount: 1,
+        }
+      }
+      if (/pg_advisory_xact_lock/i.test(s)) return { rows: [{}], rowCount: 1 }
+      // getRecord (patch path) — full record row.
+      if (/SELECT id, sheet_id, version, data, locked, locked_by, locked_at FROM meta_records/i.test(s)) {
+        return {
+          rows: [{ id: 'rec1', sheet_id: 'sheet1', version: 1, data: { fld_rich: 'Before' }, locked: false, locked_by: null, locked_at: null }],
+          rowCount: 1,
+        }
+      }
+      // guardRecordNotLockedForPlugin (patch path).
+      if (/SELECT locked, locked_by, created_by FROM meta_records/i.test(s)) {
+        return { rows: [{ locked: false, locked_by: null, created_by: null }], rowCount: 1 }
+      }
+      if (/INSERT INTO meta_records|UPDATE meta_records/i.test(s)) {
+        captured.writes.push(params ?? [])
+        return { rows: [{ version: 2 }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+  }
+
+  function assertInert(value: string) {
+    expect(value.toLowerCase()).not.toContain('<script')
+    expect(value.toLowerCase()).not.toContain('javascript:')
+    expect(value.toLowerCase()).not.toContain('onerror')
+    expect(value.toLowerCase()).not.toContain('onclick')
+    expect(value).not.toContain('steal()')
+    expect(value).not.toContain('evil()')
+    expect(value).not.toContain('boom()')
+    expect(value).not.toMatch(/<img/i)
+    expect(value).toContain('<b>ok</b>')
+    expect(value).toContain('text')
+  }
+
+  it('createRecord persists a malicious rich value INERT (no script/handler/js-protocol)', async () => {
+    const captured = { writes: [] as unknown[][] }
+    const query = createCapturingQuery(captured)
+    await createRecordViaPluginSdk({ query, sheetId: 'sheet1', data: { fld_rich: MALICIOUS } })
+    expect(captured.writes.length).toBeGreaterThan(0)
+    // createRecord INSERT params = [recordId, sheetId, JSON.stringify(patch)] → data is param[2].
+    const stored = JSON.parse(String(captured.writes[0][2])) as Record<string, unknown>
+    assertInert(String(stored.fld_rich ?? ''))
+  })
+
+  it('patchRecord persists a malicious rich value INERT (no script/handler/js-protocol)', async () => {
+    const captured = { writes: [] as unknown[][] }
+    const query = createCapturingQuery(captured)
+    await patchRecordViaPluginSdk({ query, sheetId: 'sheet1', recordId: 'rec1', changes: { fld_rich: MALICIOUS } })
+    expect(captured.writes.length).toBeGreaterThan(0)
+    // patchRecord UPDATE params = [JSON.stringify(nextData), recordId, sheetId] → data is param[0].
+    const stored = JSON.parse(String(captured.writes[0][0])) as Record<string, unknown>
+    assertInert(String(stored.fld_rich ?? ''))
+  })
+
+  it('createRecord persists a plain (non-rich) value verbatim through the same path (regression)', async () => {
+    const captured = { writes: [] as unknown[][] }
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const s = String(sql)
+      if (/FROM meta_sheets/i.test(s)) {
+        return { rows: [{ id: 'sheet1', base_id: 'base1', name: 'S', description: null }], rowCount: 1 }
+      }
+      if (/FROM meta_fields/i.test(s)) {
+        // PLAIN longText (no rich flag) → must NOT be sanitized.
+        return { rows: [{ id: 'fld_plain', name: 'Notes', type: 'longText', property: {}, order: 0 }], rowCount: 1 }
+      }
+      if (/pg_advisory_xact_lock/i.test(s)) return { rows: [{}], rowCount: 1 }
+      if (/INSERT INTO meta_records/i.test(s)) {
+        captured.writes.push(params ?? [])
+        return { rows: [{ version: 1 }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const raw = '<b>not sanitized</b> a < b && c > d'
+    await createRecordViaPluginSdk({ query, sheetId: 'sheet1', data: { fld_plain: raw } })
+    const stored = JSON.parse(String(captured.writes[0][2])) as Record<string, unknown>
+    expect(stored.fld_plain).toBe(raw)
+  })
+})
+
+// ===========================================================================
+// PART 9 — plugin-SDK field-property toggle gate (the SECONDARY finding)
+//
+// `provisioning.patchObjectFieldProperty` (wired to plugins via plugin-scope.ts) wrote
+// `meta_fields.property` with NO sanitization and NO populated-field gate → a plugin
+// could flip `rich` ON an already-populated longText field, retroactively reinterpreting
+// never-sanitized plain text as HTML (bypassing the HTTP field-PATCH toggle gate). The fix
+// routes the property write through `sanitizeFieldProperty` + the SHARED toggle gate.
+// ===========================================================================
+
+describe('plugin-SDK provisioning.patchObjectFieldProperty rich toggle gate', () => {
+  // existing longText field row, currently PLAIN; `data ? fld` populated-check is configurable.
+  function createQuery(opts: { populated: boolean; captured?: { writes: unknown[][] } }) {
+    return vi.fn(async (sql: string, params?: unknown[]) => {
+      const s = String(sql)
+      if (/SELECT id, sheet_id, name, type, property, "order"\s+FROM meta_fields/i.test(s)) {
+        // current stored state: plain longText.
+        return { rows: [{ id: params?.[1], sheet_id: params?.[0], name: 'Notes', type: 'longText', property: {}, order: 0 }], rowCount: 1 }
+      }
+      // the populated-field gate query.
+      if (/SELECT 1 FROM meta_records/i.test(s)) {
+        return { rows: opts.populated ? [{ '?column?': 1 }] : [], rowCount: opts.populated ? 1 : 0 }
+      }
+      if (/UPDATE meta_fields/i.test(s)) {
+        opts.captured?.writes.push(params ?? [])
+        return { rows: [{ id: params?.[1], sheet_id: params?.[0], name: 'Notes', type: 'longText', property: { rich: true }, order: 0 }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+  }
+
+  it('REJECTS flipping rich ON a POPULATED longText field (matches the HTTP toggle gate)', async () => {
+    const query = createQuery({ populated: true })
+    await expect(
+      patchObjectFieldProperty({ query, projectId: 'p', objectId: 'o', fieldId: 'f', propertyPatch: { rich: true } }),
+    ).rejects.toThrow(/富文本|已有数据/)
+  })
+
+  it('ALLOWS flipping rich ON an EMPTY longText field (no populated values)', async () => {
+    const captured = { writes: [] as unknown[][] }
+    const query = createQuery({ populated: false, captured })
+    await expect(
+      patchObjectFieldProperty({ query, projectId: 'p', objectId: 'o', fieldId: 'f', propertyPatch: { rich: true } }),
+    ).resolves.toBeDefined()
+    // property persisted with the sanitized rich flag.
+    expect(captured.writes.length).toBeGreaterThan(0)
+    const persisted = JSON.parse(String(captured.writes[0][2])) as Record<string, unknown>
+    expect(persisted.rich).toBe(true)
+  })
+
+  it('SANITIZES the property write — junk rich values are dropped (strict === true)', async () => {
+    const captured = { writes: [] as unknown[][] }
+    const query = createQuery({ populated: false, captured })
+    // `rich: 'true'` (string) is NOT strict true → toggle gate no-ops AND the stored flag is dropped.
+    await patchObjectFieldProperty({ query, projectId: 'p', objectId: 'o', fieldId: 'f', propertyPatch: { rich: 'true' } })
+    const persisted = JSON.parse(String(captured.writes[0][2])) as Record<string, unknown>
+    expect(persisted.rich).toBeUndefined()
   })
 })

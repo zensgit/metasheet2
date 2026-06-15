@@ -1,4 +1,5 @@
 import { createHash } from 'crypto'
+import { assertRichLongTextToggleAllowed, mapFieldType, sanitizeFieldProperty } from './field-codecs'
 import type {
   MultitableProvisioningFieldDescriptor,
   MultitableProvisioningFieldType,
@@ -365,7 +366,24 @@ export async function patchObjectFieldProperty(
     throw new Error(`Provisioned field not found: ${input.objectId}.${input.fieldId}`)
   }
 
-  const property = mergeJsonObject(normalizeJson(row.property), normalizeJson(input.propertyPatch))
+  const mergedProperty = mergeJsonObject(normalizeJson(row.property), normalizeJson(input.propertyPatch))
+  // Mirror the HTTP field-PATCH write: normalize the property through the same sanitizer (so
+  // `rich` survives only as a strict `=== true`, junk is dropped) ...
+  const fieldType = mapFieldType(String(row.type))
+  const property = sanitizeFieldProperty(fieldType, mergedProperty)
+  // ... AND apply the SAME backward-compat gate — a plugin must NOT be able to flip `rich` ON an
+  // already-populated longText field (whose old plain values were never sanitized), which would
+  // bypass the HTTP toggle gate and retroactively reinterpret raw text as HTML.
+  await assertRichLongTextToggleAllowed({
+    query: input.query,
+    sheetId,
+    fieldId: physicalFieldId,
+    currentType: fieldType,
+    currentProperty: normalizeJson(row.property),
+    nextType: fieldType,
+    nextProperty: property,
+    makeError: (message) => new Error(message),
+  })
   const updated = await input.query(
     `UPDATE meta_fields
      SET property = $3::jsonb

@@ -600,6 +600,71 @@ export function isRichLongTextProperty(property: unknown): boolean {
 }
 
 /**
+ * True iff a field-property change is an OFF→ON rich-`longText` toggle, i.e. the NEXT
+ * state is a rich `longText` field and the CURRENT state was NOT already rich `longText`.
+ * Pure; the caller maps the raw stored type via `mapFieldType` before passing it in.
+ *
+ * Shared by the HTTP field-PATCH route and the plugin-SDK provisioning property write so
+ * the backward-compat gate (below) fires identically on both write boundaries.
+ */
+export function isRichLongTextTurningOn(
+  currentType: string,
+  currentProperty: unknown,
+  nextType: string,
+  nextProperty: unknown,
+): boolean {
+  return (
+    nextType === 'longText' &&
+    isRichLongTextProperty(nextProperty) &&
+    !(currentType === 'longText' && isRichLongTextProperty(currentProperty))
+  )
+}
+
+/** Minimal query surface for {@link assertRichLongTextToggleAllowed}. */
+export type RichLongTextToggleQueryFn = (
+  sql: string,
+  params?: unknown[],
+) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+
+/**
+ * Backward-compat gate (§4) shared by every write boundary that can flip a `longText`
+ * field to rich. Old plain `longText` values were stored NEVER-SANITIZED; flipping a
+ * POPULATED field to `rich` would retroactively reinterpret that raw text as HTML (a
+ * stored-XSS hole the write sanitizer never saw). Reject the rich toggle-ON unless the
+ * field is empty. No-op on any non-OFF→ON change (rename, already-rich, non-longText).
+ *
+ * Throws the supplied `makeError(message)` so each caller raises its own error type
+ * (HTTP `ValidationError` vs a provisioning `Error`).
+ */
+export async function assertRichLongTextToggleAllowed(args: {
+  query: RichLongTextToggleQueryFn
+  sheetId: string
+  fieldId: string
+  currentType: string
+  currentProperty: unknown
+  nextType: string
+  nextProperty: unknown
+  makeError: (message: string) => Error
+}): Promise<void> {
+  if (
+    !isRichLongTextTurningOn(args.currentType, args.currentProperty, args.nextType, args.nextProperty)
+  ) {
+    return
+  }
+  const populated = await args.query(
+    `SELECT 1 FROM meta_records
+     WHERE sheet_id = $1 AND data ? $2 AND NULLIF(data ->> $2, '') IS NOT NULL
+     LIMIT 1`,
+    [args.sheetId, args.fieldId],
+  )
+  if ((populated.rows?.length ?? 0) > 0) {
+    throw args.makeError(
+      '无法对已有数据的长文本字段开启富文本：历史纯文本值未经过净化。请先清空该字段或新建富文本字段。',
+    )
+  }
+}
+
+/**
  * Unified plain-text projection (§7). Strip tags from a (possibly rich) `longText`
  * value down to its text content, decoding entities. ONE helper, used by xlsx export
  * (so a cell is the text, not `<p>…</p>`) and anywhere search/display needs text not
