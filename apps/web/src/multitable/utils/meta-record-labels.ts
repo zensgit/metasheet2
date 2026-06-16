@@ -53,8 +53,19 @@ export type MetaRecordLabelKey =
   | 'form.loading' | 'form.readOnly'
   | 'form.discardConfirm'
   | 'form.save' | 'form.saving' | 'form.create' | 'form.reset'
+  // --- Notification Center S1 (watcher inbox bell) ---
+  | 'notification.bell' | 'notification.title' | 'notification.empty'
+  | 'notification.markAllRead' | 'notification.loadError'
+  | 'notification.eventRecordUpdated' | 'notification.eventCommentCreated'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
+  'notification.bell': { en: 'Notifications', zh: '通知' },
+  'notification.title': { en: 'Notifications', zh: '通知' },
+  'notification.empty': { en: 'No notifications', zh: '暂无通知' },
+  'notification.markAllRead': { en: 'Mark all read', zh: '全部标为已读' },
+  'notification.loadError': { en: 'Failed to load notifications', zh: '加载通知失败' },
+  'notification.eventRecordUpdated': { en: 'Record updated', zh: '记录有更新' },
+  'notification.eventCommentCreated': { en: 'New comment', zh: '新增评论' },
   'record.title': { en: 'Record Detail', zh: '记录详情' },
   'record.previous': { en: 'Previous record', zh: '上一条记录' },
   'record.next': { en: 'Next record', zh: '下一条记录' },

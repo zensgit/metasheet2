@@ -1,0 +1,85 @@
+// Notification Center S1 — watcher-notification inbox state for the workbench bell.
+// Mirrors useMultitableCommentInbox: a list + an unread badge count + self-scoped mark-read actions
+// over the existing meta_record_subscription_notifications rows (read-state only; no delivery/prefs).
+import { computed, ref } from 'vue'
+import { useLocale } from '../../composables/useLocale'
+import type { MetaRecordSubscriptionNotification, MetaRecordSubscriptionNotificationType } from '../types'
+import { MultitableApiClient, multitableClient } from '../api/client'
+import { recordLabel } from '../utils/meta-record-labels'
+
+export function useNotificationInbox(client?: MultitableApiClient) {
+  const api = client ?? multitableClient
+  const { isZh } = useLocale()
+  const notifications = ref<MetaRecordSubscriptionNotification[]>([])
+  const unreadCount = ref(0)
+  const loading = ref(false)
+  const error = ref<string | null>(null)
+  const busyIds = ref<string[]>([])
+
+  const hasUnread = computed(() => unreadCount.value > 0)
+
+  function eventLabel(eventType: MetaRecordSubscriptionNotificationType): string {
+    return eventType === 'comment.created'
+      ? recordLabel('notification.eventCommentCreated', isZh.value)
+      : recordLabel('notification.eventRecordUpdated', isZh.value)
+  }
+
+  async function loadInbox(params?: { limit?: number; offset?: number }): Promise<MetaRecordSubscriptionNotification[]> {
+    loading.value = true
+    error.value = null
+    try {
+      const items = await api.listRecordSubscriptionNotifications(params)
+      notifications.value = items
+      return items
+    } catch (e: any) {
+      error.value = e?.message ?? recordLabel('notification.loadError', isZh.value)
+      throw e
+    } finally {
+      loading.value = false
+    }
+  }
+
+  // Badge refresh is intentionally non-fatal: a transient failure keeps the prior count rather than
+  // flashing an error on the toolbar (the bell is ambient chrome, not a primary action).
+  async function refreshUnreadCount(): Promise<number> {
+    try {
+      unreadCount.value = await api.getRecordSubscriptionUnreadCount()
+    } catch {
+      /* keep prior count */
+    }
+    return unreadCount.value
+  }
+
+  async function markRead(ids: string[]): Promise<void> {
+    const targets = ids.filter((id) => id && !busyIds.value.includes(id))
+    if (targets.length === 0) return
+    busyIds.value = [...busyIds.value, ...targets]
+    try {
+      await api.markRecordSubscriptionNotificationsRead(targets)
+      const now = new Date().toISOString()
+      const set = new Set(targets)
+      notifications.value = notifications.value.map((n) => (set.has(n.id) && !n.readAt ? { ...n, readAt: now } : n))
+      await refreshUnreadCount()
+    } finally {
+      const done = new Set(targets)
+      busyIds.value = busyIds.value.filter((id) => !done.has(id))
+    }
+  }
+
+  async function markAllRead(): Promise<void> {
+    try {
+      await api.markAllRecordSubscriptionNotificationsRead()
+      const now = new Date().toISOString()
+      notifications.value = notifications.value.map((n) => (n.readAt ? n : { ...n, readAt: now }))
+      unreadCount.value = 0
+    } catch (e: any) {
+      error.value = e?.message ?? recordLabel('notification.loadError', isZh.value)
+    }
+  }
+
+  function isBusy(id: string): boolean {
+    return busyIds.value.includes(id)
+  }
+
+  return { notifications, unreadCount, loading, error, hasUnread, eventLabel, loadInbox, refreshUnreadCount, markRead, markAllRead, isBusy }
+}
