@@ -175,6 +175,15 @@ export type RecordChange = {
   fieldId: string
   value: unknown
   expectedVersion?: number
+  /**
+   * Mutation op. Default (undefined) = 'set'. 'unset' removes the field key from
+   * `meta_records.data` entirely (used by record-level version restore — Layer 1 —
+   * to reproduce a prior version that did not have the field). For 'unset', `value`
+   * is ignored. Removal is gated by the same writability rules as a set (not hidden,
+   * not readOnly, not computed) and additionally forbidden for link/attachment types,
+   * whose authoritative state lives outside `data`.
+   */
+  op?: 'set' | 'unset'
 }
 
 export type MultitableCapabilities = {
@@ -445,6 +454,17 @@ export class RecordWriteService {
           throw new RecordFieldForbiddenError(`Field is readonly: ${change.fieldId}`, change.fieldId)
         }
 
+        // Unset (key removal) is gated by the same writability rules above, but its
+        // value is ignored so it skips the per-type value-shape checks below. link /
+        // attachment are forbidden — their authoritative state lives outside `data`
+        // (meta_links / attachment store), so a bare `data` key removal would desync it.
+        if (change.op === 'unset') {
+          if (field.type === 'link' || field.type === 'attachment') {
+            throw new RecordFieldForbiddenError(`Field type cannot be unset: ${change.fieldId}`, change.fieldId)
+          }
+          continue
+        }
+
         if (field.type === 'select') {
           if (typeof change.value !== 'string') {
             throw new RecordValidationError(`Select value must be string: ${change.fieldId}`)
@@ -630,6 +650,7 @@ export class RecordWriteService {
         const previousData = h.normalizeJson(recordRow?.data)
 
         const patch: Record<string, unknown> = {}
+        const unsetIds: string[] = []
         const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
         let applied = 0
 
@@ -638,6 +659,14 @@ export class RecordWriteService {
           if (!field) continue
           // Note: formula/lookup/rollup are rejected up-front in validateChanges
           // (Step 0), so no computed-field change reaches this write loop.
+
+          // Unset (key removal) — validated in Step 0 (writability + not link/attachment).
+          // Collected separately so the UPDATE can subtract the keys; never added to `patch`.
+          if (change.op === 'unset') {
+            unsetIds.push(change.fieldId)
+            applied += 1
+            continue
+          }
 
           if (field.type === 'link' && field.link) {
             const ids = h.normalizeLinkIds(change.value)
@@ -723,18 +752,40 @@ export class RecordWriteService {
           }
         }
 
-        // lock-guarded: bulk/multi-record PATCH — ensureRecordNotLocked enforced per record above.
-        const updateRes = await query(
-          `UPDATE meta_records
-           SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
-           WHERE sheet_id = $2 AND id = $3
-           RETURNING version`,
-          [JSON.stringify(patch), sheetId, recordId, actorId],
-        )
+        // bulk/multi-record PATCH (+restore unset path): the lock rule is enforced per record above via
+        // ensureRecordNotLocked. When there are unset keys, subtract them first: `(data - keys) || patch`;
+        // the empty-array case is branched so existing set-only writes keep byte-identical SQL. Each UPDATE
+        // template below carries its own adjacent lock-guarded marker for the RANK-8 structural scanner.
+        const updateRes = unsetIds.length > 0
+          // lock-guarded: ensureRecordNotLocked enforced per record above (unset+set path)
+          ? await query(
+              `UPDATE meta_records
+               SET data = (data - $5::text[]) || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
+               WHERE sheet_id = $2 AND id = $3
+               RETURNING version`,
+              [JSON.stringify(patch), sheetId, recordId, actorId, unsetIds],
+            )
+          // lock-guarded: ensureRecordNotLocked enforced per record above (set-only path)
+          : await query(
+              `UPDATE meta_records
+               SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
+               WHERE sheet_id = $2 AND id = $3
+               RETURNING version`,
+              [JSON.stringify(patch), sheetId, recordId, actorId],
+            )
         if ((updateRes.rows as any[]).length === 0) {
           throw new RecordNotFoundError(`Record not found: ${recordId}`)
         }
         const nextVersion = Number((updateRes.rows[0] as any).version)
+        // After-image MUST drop the removed keys (not just the live row) so a later
+        // restore-of-this-revision reproduces the absence; `changedFieldIds` lists the
+        // removed ids and the revision `patch` marks each removal with the `null` sentinel.
+        const afterImage: Record<string, unknown> = { ...previousData, ...patch }
+        const revisionPatch: Record<string, unknown> = { ...patch }
+        for (const removedId of unsetIds) {
+          delete afterImage[removedId]
+          revisionPatch[removedId] = null
+        }
         const revisionId = await recordRecordRevision(query, {
           sheetId,
           recordId,
@@ -742,9 +793,9 @@ export class RecordWriteService {
           action: 'update',
           source: source ?? 'rest',
           actorId,
-          changedFieldIds: Object.keys(patch),
-          patch,
-          snapshot: { ...previousData, ...patch },
+          changedFieldIds: [...Object.keys(patch), ...unsetIds],
+          patch: revisionPatch,
+          snapshot: afterImage,
         })
         pendingSubscriberNotifications.push({
           sheetId,

@@ -1,4 +1,7 @@
-export type RecordWriteSource = 'rest' | 'yjs-bridge'
+// 'restore' is a record-level version restore (Layer 1). It is NOT bridge-origin,
+// so the invalidator below (skips only 'yjs-bridge') correctly fires for it — a
+// restore writes meta_records.data and any live Y.Doc must re-seed from the DB.
+export type RecordWriteSource = 'rest' | 'yjs-bridge' | 'restore'
 
 export type YjsInvalidator = (recordIds: string[]) => Promise<void> | void
 
