@@ -223,6 +223,7 @@ c6Sandbox:
   dryRun=pass|fail|not_run
   apply=pass|fail|not_run
   repullIdempotence=pass|fail|not_run
+  readOnlyUserExternalWriteDryRunAllowed=true|false
   readOnlyUserApplyBlocked=true|false
   controlledBadRow=pass|fail|not_run
   rollbackCleanup=pass|fail|not_run
@@ -247,6 +248,7 @@ Stop and report HOLD if any of these occur:
 - C5 touches K3 Save / Submit / Audit / BOM or external DB write;
 - C6 sandbox target/pipeline is missing;
 - C6 dry-run mutates the target;
+- C6 dedicated `/external-write/dry-run` rejects an `integration:read` user;
 - C6 apply can be sent by a read-only user;
 - C6 re-pull produces duplicate target rows or `add>0` after a successful
   apply;
@@ -322,6 +324,7 @@ c6Sandbox:
   dryRun=pass|fail|not_run
   apply=pass|fail|not_run
   repullIdempotence=pass|fail|not_run
+  readOnlyUserExternalWriteDryRunAllowed=true|false
   readOnlyUserApplyBlocked=true|false
   controlledBadRow=pass|fail|not_run
   rollbackCleanup=pass|fail|not_run

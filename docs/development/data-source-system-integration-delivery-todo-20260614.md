@@ -20,7 +20,9 @@
   C6-1 只落地 backend latent writer helper 和 write-gated target adapter 的关闭态合同；
   C6-2 只增加 read-only dry-run route + dry-run token，不授权 apply runtime 或 external write。
   C6-3 增加 token-bound apply route；C6-4 UI dry-run -> review -> apply 已合并并发出实体机
-  smoke 包；C6-5 仍需实体机 sandbox gate。
+  smoke 包；#2720 已完成 sandbox 配置和核心 dry-run/apply/re-pull/rollback smoke，
+  但 read-only 子门仍 HOLD，下一步需确认实体机 read-only 检查命中的是
+  C6 专用 `/external-write/dry-run` 路由，而不是普通 write-gated pipeline `/dry-run` 路由。
 
 ## 收口顺序
 
@@ -32,7 +34,7 @@
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 open | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
-| Release | 总包 + 实体机验收 | C6-5 smoke package published; #2720 preflight HOLD on sandbox target/pipeline config | 交付签收 | 包内容/部署/证据不完整 |
+| Release | 总包 + 实体机验收 | C6-5 smoke package published; #2720 core C6 sandbox smoke PASS, read-only subgate HOLD | 交付签收 | 包内容/部署/证据不完整 |
 
 ## P0 - ②b Arc 收口 Follow-Up
 
@@ -419,14 +421,15 @@ TODO:
   - package: `metasheet-multitable-onprem-v2.5.0-datasource-c6-ui-20260616-9fb34fd91`.
   - source commit: `9fb34fd91e4f3bdfa7827d57ca3b362abbcb05bd`.
   - package verify: `.tgz` / `.zip` verify reports published, `SHA256SUMS` present.
-  - #2720 deploy/preflight HOLD: package deploy and route presence PASS, but entity machine currently has
-    no active sandbox `data-source:sql-write-gated` target and no active C6 pipeline bound to it.
-  - next required operator-side setup: create a sandbox writable `/data-sources` target with
-    `options.readOnly=false`, `options.c6WriteTarget=true`, and
-    `options.genericQueryDisabled=true`; bind a
-    `data-source:sql-write-gated` target external system with `dataSourceId`, `object`,
-    `keyFields`, and `writableFields`; then bind one active pipeline using `sourceSystemId`
-    / `targetSystemId` and a `createdBy` owner that can see both source and target data-source rows.
+  - #2720 initial deploy/preflight HOLD resolved: sandbox write data source, `data-source:sql-write-gated`
+    target, and active C6 pipeline were created on the entity machine.
+  - #2720 core sandbox smoke PASS: C6 dry-run returned ready without mutating target; token-confirmed
+    apply wrote sandbox rows only; re-pull was idempotent (`add=0`, no duplicates); operator-local
+    cleanup restored baseline.
+  - remaining HOLD: read-only subgate reported `403` for dry-run and apply. Apply `403` is correct,
+    but dry-run must be rechecked against the dedicated C6 route
+    `POST /api/integration/pipelines/:id/external-write/dry-run`, not ordinary
+    `POST /api/integration/pipelines/:id/dry-run` (ordinary pipeline dry-run remains write-gated).
   - C6-5 remains sandbox/entity-machine validation only; no production/batch rollout.
 
 完成条件:
@@ -476,7 +479,7 @@ TODO:
 - [x] C6-5 smoke package deployed on entity machine for preflight; full smoke still HOLD.
 - [x] C6-5 package deploy preflight: #2720 reports `deploy.applyExit=0`, `health=200`, dry-run/apply
   route presence, token guard, and target-kind requirement present.
-- [ ] C6-5 sandbox write-gated target + active C6 pipeline configured on entity machine.
+- [x] C6-5 sandbox write-gated target + active C6 pipeline configured on entity machine.
 - [ ] 干净实体机 / 全新 DB smoke，用来暴露 migration 排序缺口。
 - [ ] 部署前跑 pending-migration diff + auth round-trip；静默 401 优先按 schema/migration 缺口排查，不先归咎 JWT secret。
 - [ ] C2 read-only smoke。
@@ -484,6 +487,8 @@ TODO:
 - [ ] C4 UI config smoke。
 - [x] C5 K3 seam smoke。
 - [ ] C6 dry-run/apply/re-pull/rollback smoke（#2720）。
+  - core sandbox smoke PASS; read-only dedicated dry-run subgate remains HOLD until endpoint-specific
+    rerun proves `integration:read` can call `/external-write/dry-run` while apply stays blocked.
 - [ ] issue 上贴 values-free 验收证据。
 
 交付判据:
