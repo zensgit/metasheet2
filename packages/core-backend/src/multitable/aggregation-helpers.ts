@@ -94,6 +94,10 @@ export function aggregateField(values: unknown[], fn: AggregationFn, fieldType: 
 export interface AggregateGroupBucket {
   key: string | number | boolean | null
   rows: Array<Record<string, unknown>>
+  // Nested grouping (multi-level, ordered fieldIds): present iff there is a deeper level. Each child
+  // partitions THIS bucket's rows by the next fieldId. `rows` here is always this node's FULL membership
+  // (never roll-up the children) so per-level avg/countDistinct stay correct — see groupRowsByFields.
+  children?: AggregateGroupBucket[]
 }
 
 const GROUP_NULL_SENTINEL = '__empty__' // internal map key for the empty-value group
@@ -110,13 +114,20 @@ function groupKeyOf(raw: unknown): { mapKey: string; emit: AggregateGroupBucket[
   return { mapKey: `j:${json}`, emit: json }
 }
 
+/** Stable order for a level's buckets: empty/null LAST; others by numeric-aware string compare. */
+function sortBucketsByKey(buckets: AggregateGroupBucket[]): AggregateGroupBucket[] {
+  return buckets.sort((a, b) => {
+    if (a.key === null) return b.key === null ? 0 : 1
+    if (b.key === null) return -1
+    return String(a.key).localeCompare(String(b.key), undefined, { numeric: true })
+  })
+}
+
 /**
- * Partition `rows` by `groupFieldId` into buckets, ordered by key (empty/null group LAST; others by
- * numeric-aware string compare). Pure + total-preserving: `Σ buckets[].rows.length === rows.length`.
- * The route computes per-bucket aggregates with `aggregateField` under the same omission rules as the
- * grand total. Single group field only (matches grid `view.groupInfo.fieldId`); no multi-level.
+ * Partition `rows` by ONE level's `groupFieldId`. Internal building block for groupRowsByField /
+ * groupRowsByFields. Pure + total-preserving: `Σ buckets[].rows.length === rows.length`.
  */
-export function groupRowsByField(
+function partitionByField(
   rows: Array<Record<string, unknown>>,
   groupFieldId: string,
 ): AggregateGroupBucket[] {
@@ -130,9 +141,45 @@ export function groupRowsByField(
     }
     bucket.rows.push(data)
   }
-  return [...buckets.values()].sort((a, b) => {
-    if (a.key === null) return b.key === null ? 0 : 1
-    if (b.key === null) return -1
-    return String(a.key).localeCompare(String(b.key), undefined, { numeric: true })
-  })
+  return sortBucketsByKey([...buckets.values()])
+}
+
+/**
+ * Partition `rows` by `groupFieldId` into buckets, ordered by key (empty/null group LAST; others by
+ * numeric-aware string compare). Pure + total-preserving: `Σ buckets[].rows.length === rows.length`.
+ * The route computes per-bucket aggregates with `aggregateField` under the same omission rules as the
+ * grand total. Single group field — kept as a thin one-level wrapper over groupRowsByFields so existing
+ * callers/tests are unchanged; multi-level grouping uses groupRowsByFields directly.
+ */
+export function groupRowsByField(
+  rows: Array<Record<string, unknown>>,
+  groupFieldId: string,
+): AggregateGroupBucket[] {
+  return groupRowsByFields(rows, [groupFieldId])
+}
+
+/**
+ * Nested / multi-level grouping. Partition `rows` by the ORDERED `groupFieldIds` into a bucket TREE:
+ * level 0 splits all rows by fieldIds[0]; each resulting bucket is further split by fieldIds[1] into
+ * `children`, and so on. Same per-level key/order contract as the single-field path (groupKeyOf;
+ * empty/null LAST). At every node `bucket.rows` holds that node's FULL membership (Σ children rows ===
+ * parent rows), so the route can call `aggregateField(node.rows, …)` independently per level — avg and
+ * countDistinct are NOT roll-up-able from children, so they MUST be recomputed over node.rows, never
+ * combined from the child buckets. `fieldIds = [single]` ⇒ flat list identical to groupRowsByField
+ * (no `children`). An empty list ⇒ no grouping (`[]`).
+ */
+export function groupRowsByFields(
+  rows: Array<Record<string, unknown>>,
+  groupFieldIds: string[],
+): AggregateGroupBucket[] {
+  if (groupFieldIds.length === 0) return []
+  const [head, ...rest] = groupFieldIds
+  const buckets = partitionByField(rows, head)
+  if (rest.length > 0) {
+    for (const bucket of buckets) {
+      // recurse over THIS bucket's own membership; node.rows stays the full set (no roll-up)
+      bucket.children = groupRowsByFields(bucket.rows, rest)
+    }
+  }
+  return buckets
 }

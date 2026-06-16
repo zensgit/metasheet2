@@ -152,7 +152,7 @@ describe('toolbar across view types', () => {
       'toggle-field', 'add-sort', 'remove-sort', 'update-sort',
       'add-filter', 'update-filter', 'remove-filter', 'clear-filters',
       'set-conjunction', 'apply-sort-filter', 'add-record', 'undo', 'redo',
-      'set-group-field', 'export-csv', 'import', 'update:search-text',
+      'set-group-fields', 'export-csv', 'import', 'update:search-text',
       'print', 'set-row-density', 'auto-fit-columns',
     ]
     expect(events).toContain('print')

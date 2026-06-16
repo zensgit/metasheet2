@@ -211,7 +211,8 @@ describe('grid groupBy', () => {
     expect(grid.groupFieldId.value).toBe('f1')
     expect(fetchFn).toHaveBeenCalled()
     const body = JSON.parse(fetchFn.mock.calls[0][1].body)
-    expect(body.groupInfo).toEqual({ fieldId: 'f1' })
+    // Nested grouping: persists ordered fieldIds[] + legacy fieldId (level-1) for back-compat.
+    expect(body.groupInfo).toEqual({ fieldIds: ['f1'], fieldId: 'f1' })
   })
 
   it('setGroupField(null) clears grouping', async () => {

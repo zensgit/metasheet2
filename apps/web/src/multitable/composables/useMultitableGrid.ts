@@ -408,11 +408,18 @@ export function useMultitableGrid(opts: {
   const filterConjunction = ref<FilterConjunction>('and')
   const sortFilterDirty = ref(false)
 
-  // GroupBy
-  const groupFieldId = ref<string | null>(null)
-  const groupField = computed(() =>
-    groupFieldId.value ? fields.value.find((f) => f.id === groupFieldId.value) ?? null : null,
+  // GroupBy — ordered 1..MAX_GROUP_LEVELS group fields (nested / multi-level grouping). The array is the
+  // source of truth; `groupFieldId` (level-1, legacy single-field reader) and `groupField` are derived.
+  const MAX_GROUP_LEVELS = 3
+  const groupFieldIds = ref<string[]>([])
+  const groupFieldId = computed<string | null>(() => groupFieldIds.value[0] ?? null)
+  // Ordered, de-referenced group fields (drops ids that no longer resolve to a loaded field).
+  const groupFields = computed(() =>
+    groupFieldIds.value
+      .map((id) => fields.value.find((f) => f.id === id))
+      .filter((f): f is MetaField => !!f),
   )
+  const groupField = computed(() => groupFields.value[0] ?? null)
 
   // Server-side search
   const searchQuery = ref('')
@@ -511,8 +518,15 @@ export function useMultitableGrid(opts: {
       })).filter((r) => r.fieldId)
     }
     if (view.hiddenFieldIds) hiddenFieldIds.value = [...view.hiddenFieldIds]
-    if ((view as any).groupInfo?.fieldId) groupFieldId.value = (view as any).groupInfo.fieldId
-    else groupFieldId.value = null
+    // Dual-read for back-compat: prefer the NEW ordered groupInfo.fieldIds; fall back to the legacy
+    // single groupInfo.fieldId so views persisted before nested grouping keep their (one) group level.
+    const gi = (view as any).groupInfo as { fieldId?: unknown; fieldIds?: unknown } | undefined
+    const rawIds: unknown[] = Array.isArray(gi?.fieldIds)
+      ? gi!.fieldIds
+      : typeof gi?.fieldId === 'string'
+        ? [gi.fieldId]
+        : []
+    groupFieldIds.value = normalizeGroupFieldIds(rawIds)
     sortFilterDirty.value = false
   }
 
@@ -552,13 +566,37 @@ export function useMultitableGrid(opts: {
     persistHiddenFields()
   }
 
-  async function setGroupField(fieldId: string | null) {
-    groupFieldId.value = fieldId
+  // Normalize a raw id list to ordered, blank-free, de-duped, capped at MAX_GROUP_LEVELS. Used by both
+  // syncFromView (parse) and setGroupFields (persist) so the in-memory + stored shapes can't diverge.
+  function normalizeGroupFieldIds(raw: unknown[]): string[] {
+    const out: string[] = []
+    for (const id of raw) {
+      if (typeof id !== 'string') continue
+      const trimmed = id.trim()
+      if (trimmed && !out.includes(trimmed)) out.push(trimmed)
+      if (out.length >= MAX_GROUP_LEVELS) break
+    }
+    return out
+  }
+
+  // Set the ordered group fields (1..MAX_GROUP_LEVELS). Persists groupInfo.fieldIds (NEW shape) and the
+  // legacy groupInfo.fieldId = level-1 so other views (Kanban/Gantt) reading the single-field shape and
+  // any older reader keep working. Empty list clears grouping (groupInfo: undefined).
+  async function setGroupFields(fieldIds: string[]) {
+    const next = normalizeGroupFieldIds(fieldIds)
+    groupFieldIds.value = next
     const vid = opts.viewId.value
     if (!vid) return
     try {
-      await client.updateView(vid, { groupInfo: fieldId ? { fieldId } as Record<string, unknown> : undefined })
+      await client.updateView(vid, {
+        groupInfo: next.length ? ({ fieldIds: next, fieldId: next[0] } as Record<string, unknown>) : undefined,
+      })
     } catch { /* silent */ }
+  }
+
+  // Back-compat single-field setter (level-1 only) kept for callers that still group by one field.
+  async function setGroupField(fieldId: string | null) {
+    await setGroupFields(fieldId ? [fieldId] : [])
   }
 
   async function persistHiddenFields() {
@@ -1019,7 +1057,7 @@ export function useMultitableGrid(opts: {
     // State
     fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
     sortRules, filterRules, filterConjunction, sortFilterDirty,
-    groupFieldId, groupField,
+    groupFieldId, groupFieldIds, groupField, groupFields,
     editHistory, historyIndex, canUndo, canRedo,
     searchQuery,
     // Computed
@@ -1036,7 +1074,7 @@ export function useMultitableGrid(opts: {
     applyPatchResult,
     mergeRemoteRecord, applyRemoteRecordPatch, removeRemoteRecord,
     undo, redo, clearEditHistory, dismissConflict, retryConflict,
-    setGroupField,
+    setGroupField, setGroupFields,
     setSearchQuery, resolveRowActions,
   }
 }

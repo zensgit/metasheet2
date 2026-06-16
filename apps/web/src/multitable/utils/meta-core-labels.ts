@@ -33,6 +33,8 @@ export type MetaCoreLabelKey =
   | 'toolbar.addFilter' | 'toolbar.clearAll'
   | 'toolbar.applyFilterChanges' | 'toolbar.applyFilters' | 'toolbar.stagedHint'
   | 'toolbar.group' | 'toolbar.none'
+  // Nested / multi-level grouping picker (ordered 1-3 levels)
+  | 'toolbar.groupThenBy' | 'toolbar.groupAddLevel' | 'toolbar.groupRemoveLevel'
   | 'toolbar.undo' | 'toolbar.undoTitle'          // F3: aria vs shortcut-bearing title
   | 'toolbar.redo' | 'toolbar.redoTitle'
   | 'toolbar.searchPlaceholder' | 'toolbar.searchAria' | 'toolbar.clearSearch'
@@ -126,6 +128,9 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   },
   'toolbar.group': { en: 'Group', zh: '分组' },
   'toolbar.none': { en: 'None', zh: '无' },
+  'toolbar.groupThenBy': { en: 'then by', zh: '然后按' },
+  'toolbar.groupAddLevel': { en: '+ Add grouping level', zh: '+ 添加分组层级' },
+  'toolbar.groupRemoveLevel': { en: 'Remove this level', zh: '移除此层级' },
   'toolbar.undo': { en: 'Undo', zh: '撤销' },
   // F3: keep the physical-key shortcut literal (workbench-labels.ts kbd.* convention).
   'toolbar.undoTitle': { en: 'Undo (Ctrl+Z)', zh: '撤销 (Ctrl+Z)' },
