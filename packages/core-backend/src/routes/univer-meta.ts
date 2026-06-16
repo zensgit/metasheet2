@@ -5650,12 +5650,15 @@ export function univerMetaRouter(): Router {
     const schema = z.object({
       targetVersion: z.number().int().positive(),
       expectedVersion: z.number().int().nonnegative(),
+      // Per-field (column-level) restore: optional subset of field ids. Omitted → restore the whole
+      // restorable diff (full-record). Present → restrict to those fields (still atomic over the subset).
+      fieldIds: z.array(z.string().min(1)).min(1).optional(),
     })
     const parsed = schema.safeParse(req.body)
     if (!parsed.success) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
-    const { targetVersion, expectedVersion } = parsed.data
+    const { targetVersion, expectedVersion, fieldIds } = parsed.data
 
     const asRecord = (value: unknown): Record<string, unknown> => {
       if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
@@ -5791,8 +5794,14 @@ export function univerMetaRouter(): Router {
         }
       }
 
-      // Lock B: gate every diff field on BOTH the static guard and restore's own layer-3 pre-check.
-      const hasForbidden = diff.some((ch) => {
+      // Per-field (column-level) restore: when the caller passes `fieldIds`, restrict the diff to that
+      // selection. The atomic gate below then runs over only the selected subset — so a user can restore
+      // the writable fields they picked even if another changed field in the revision is forbidden. A
+      // requested field that is unchanged / non-restorable / unknown simply isn't in the diff (no error).
+      const selectedDiff = fieldIds ? diff.filter((ch) => fieldIds.includes(ch.fieldId)) : diff
+
+      // Lock B: gate every (selected) diff field on BOTH the static guard and restore's own layer-3 pre-check.
+      const hasForbidden = selectedDiff.some((ch) => {
         const guard = fieldById.get(ch.fieldId)
         const perm = fieldPermissions[ch.fieldId]
         const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
@@ -5806,9 +5815,9 @@ export function univerMetaRouter(): Router {
         return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: 'Not permitted to restore one or more fields in this revision' } })
       }
 
-      const restoredFieldIds = diff.map((ch) => ch.fieldId)
+      const restoredFieldIds = selectedDiff.map((ch) => ch.fieldId)
       // No-op: nothing to restore (concurrency already verified above).
-      if (diff.length === 0) {
+      if (selectedDiff.length === 0) {
         return res.json({ ok: true, data: { recordId, newVersion: currentVersion, noop: true, restoredFieldIds: [], skippedFieldIds: [] } })
       }
 
@@ -5822,7 +5831,7 @@ export function univerMetaRouter(): Router {
       try {
         const result = await recordWriteService.patchRecords({
           sheetId,
-          changesByRecord: new Map([[recordId, diff]]),
+          changesByRecord: new Map([[recordId, selectedDiff]]),
           actorId: getRequestActorId(req),
           fields,
           visiblePropertyFields: readableEchoFields,
