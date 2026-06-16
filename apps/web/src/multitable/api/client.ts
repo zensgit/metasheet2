@@ -31,6 +31,7 @@ import type {
   PatchRecordsInput,
   FormSubmitInput,
   MultitableComment,
+  MultitableCommentReaction,
   MultitableCommentPresenceSummary,
   CommentMentionSummary,
   CommentMentionSummaryItem,
@@ -379,6 +380,31 @@ export function normalizeMultitableCommentMentions(payload: MultitableCommentMen
   return payload.mentions.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
 }
 
+/**
+ * Normalize the per-comment `reactions` aggregate (B6). The whitelist normalizer
+ * drops unknown raw fields, so reactions MUST be carried explicitly here or the
+ * backend's reactions array is silently lost on the wire (wire-vs-fixture drift).
+ * Returns undefined when absent (so a comment whose reactions weren't hydrated is
+ * distinguishable from one with zero reactions).
+ */
+export function normalizeMultitableCommentReactions(
+  payload: { reactions?: unknown } | null | undefined,
+): MultitableCommentReaction[] | undefined {
+  if (!Array.isArray(payload?.reactions)) return undefined
+  const out: MultitableCommentReaction[] = []
+  for (const raw of payload.reactions) {
+    if (!raw || typeof raw !== 'object') continue
+    const r = raw as Record<string, unknown>
+    if (typeof r.emoji !== 'string' || !r.emoji) continue
+    out.push({
+      emoji: r.emoji,
+      count: typeof r.count === 'number' && Number.isFinite(r.count) ? r.count : 0,
+      reactedByMe: r.reactedByMe === true,
+    })
+  }
+  return out
+}
+
 function normalizeCommentPresenceList(payload: { items?: MultitableCommentPresenceSummary[] } | null | undefined): {
   items: MultitableCommentPresenceSummary[]
 } {
@@ -405,6 +431,7 @@ export function normalizeMultitableComment(payload: RawComment | null | undefine
     resolved: payload?.resolved === true,
     createdAt: typeof payload?.createdAt === 'string' ? payload.createdAt : '',
     updatedAt: typeof payload?.updatedAt === 'string' ? payload.updatedAt : undefined,
+    reactions: normalizeMultitableCommentReactions(payload),
   }
 }
 
@@ -1550,6 +1577,26 @@ export class MultitableApiClient {
 
   async deleteComment(commentId: string): Promise<void> {
     const res = await this.fetch(`/api/comments/${commentId}`, { method: 'DELETE' })
+    return this.parseJson(res)
+  }
+
+  // B6: emoji reactions. The emoji travels in the BODY for both verbs (the
+  // backend rejects path-encoded multi-codepoint emoji drift; see B6-a §3.3).
+  async addReaction(commentId: string, emoji: string): Promise<void> {
+    const res = await this.fetch(`/api/comments/${commentId}/reactions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ emoji }),
+    })
+    return this.parseJson(res)
+  }
+
+  async removeReaction(commentId: string, emoji: string): Promise<void> {
+    const res = await this.fetch(`/api/comments/${commentId}/reactions`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ emoji }),
+    })
     return this.parseJson(res)
   }
 
