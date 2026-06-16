@@ -16,7 +16,13 @@ import type { Kysely } from 'kysely'
 import { z } from 'zod'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
-import { DataSourceManager, SUPPORTED_DATA_SOURCE_TYPES } from '../data-adapters/DataSourceManager'
+import {
+  c6WriteTargetQueryDisabledMessage,
+  DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE,
+  DataSourceManager,
+  isGenericQueryDisabledConfig,
+  SUPPORTED_DATA_SOURCE_TYPES
+} from '../data-adapters/DataSourceManager'
 import type { DataSourceConfig, QueryOptions } from '../data-adapters/BaseAdapter'
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
 
@@ -35,7 +41,10 @@ const DataSourceCreateSchema = z.object({
     timeout: z.number().optional(),
     retryAttempts: z.number().optional(),
     // Read-only is the default; set false to permit write SQL via /query.
-    readOnly: z.boolean().optional()
+    readOnly: z.boolean().optional(),
+    // C6 external-write target marker. When set, raw /query is disabled even if readOnly=false.
+    c6WriteTarget: z.boolean().optional(),
+    genericQueryDisabled: z.boolean().optional()
   }).optional(),
   credentials: z.object({
     username: z.string().optional(),
@@ -59,7 +68,10 @@ const DataSourceUpdateSchema = z.object({
     timeout: z.number().optional(),
     retryAttempts: z.number().optional(),
     // Read-only is the default; set false to permit write SQL via /query.
-    readOnly: z.boolean().optional()
+    readOnly: z.boolean().optional(),
+    // C6 external-write target marker. When set, raw /query is disabled even if readOnly=false.
+    c6WriteTarget: z.boolean().optional(),
+    genericQueryDisabled: z.boolean().optional()
   }).optional(),
   poolConfig: z.object({
     min: z.number().min(0).optional(),
@@ -693,6 +705,15 @@ export function dataSourcesRouter(): Router {
       // SELECT-only classifier; non-SQL sources have the raw path disabled
       // entirely when read-only (a SQL classifier doesn't apply to them).
       const adapter = manager.getDataSource(req.params.id)
+      if (isGenericQueryDisabledConfig(adapter.getConfig())) {
+        return res.status(403).json({
+          ok: false,
+          error: {
+            code: DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE,
+            message: c6WriteTargetQueryDisabledMessage(req.params.id)
+          }
+        })
+      }
       if (adapter.isReadOnly()) {
         if (!adapter.isSqlDialect()) {
           return res.status(403).json({

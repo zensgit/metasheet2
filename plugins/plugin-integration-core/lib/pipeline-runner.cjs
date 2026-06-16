@@ -322,7 +322,10 @@ function createPipelineRunner(deps = {}) {
       // adapters that don't need it (staging/k3/http) ignore the extra dep. A null createdBy stays
       // null here, so an owner-scoped source fails closed downstream — no fallback identity.
       sourceAdapter: adapterRegistry.createAdapter(sourceSystem, { role: 'source', principal: pipeline.createdBy }),
-      targetAdapter: adapterRegistry.createAdapter(targetSystem, { role: 'target' }),
+      // C6: write-gated data-source targets use the same owner-scoped boundary. Existing targets
+      // ignore this dep; the C6 target requires it and fails closed instead of inventing a service
+      // identity for legacy/null createdBy pipelines.
+      targetAdapter: adapterRegistry.createAdapter(targetSystem, { role: 'target', principal: pipeline.createdBy }),
     }
   }
 

@@ -19,6 +19,18 @@ function sqlConfig(id: string, readOnly?: boolean): DataSourceConfig {
   }
 }
 
+function c6WriteTargetConfig(id: string): DataSourceConfig {
+  return {
+    ...sqlConfig(id, false),
+    options: {
+      autoConnect: false,
+      readOnly: false,
+      c6WriteTarget: true,
+      genericQueryDisabled: true,
+    },
+  }
+}
+
 function httpConfig(id: string, readOnly?: boolean): DataSourceConfig {
   return {
     id,
@@ -78,6 +90,29 @@ describe('DataSourceManager mutation guard (A-RO)', () => {
     await expect(m.update('ro', 't', { a: 1 }, { id: 1 })).rejects.toThrow(/read-only/)
     await expect(m.delete('ro', 't', { id: 1 })).rejects.toThrow(/read-only/)
   })
+
+  it('rejects generic raw query and delete on a C6 write-gated target', async () => {
+    const m = new DataSourceManager()
+    await m.addDataSource(c6WriteTargetConfig('c6-target'), { ownerId: 'a' })
+    await expect(m.query('c6-target', 'DELETE FROM t')).rejects.toThrow(/generic raw query is disabled/)
+    await expect(m.delete('c6-target', 't', { id: 1 })).rejects.toThrow(/generic delete is unsupported/)
+  })
+
+  it('rejects generic copy/federated helper paths on a C6 write-gated target before connecting', async () => {
+    const m = new DataSourceManager()
+    await m.addDataSource(sqlConfig('rw-source', false), { ownerId: 'a' })
+    await m.addDataSource(sqlConfig('rw-target', false), { ownerId: 'a' })
+    await m.addDataSource(c6WriteTargetConfig('c6-target'), { ownerId: 'a' })
+    const connectSpy = vi.spyOn(m, 'connectDataSource')
+
+    await expect(m.copyData('rw-source', 'src', 'c6-target', 'dst')).rejects.toThrow(/generic copy is unsupported/)
+    await expect(m.copyData('c6-target', 'src', 'rw-target', 'dst')).rejects.toThrow(/generic raw query is disabled/)
+    await expect(m.federatedQuery([
+      { dataSourceId: 'c6-target', sql: 'SELECT * FROM target_table', alias: 'target' },
+    ])).rejects.toThrow(/generic raw query is disabled/)
+    expect(connectSpy).not.toHaveBeenCalled()
+    connectSpy.mockRestore()
+  })
 })
 
 describe('data-sources /query read-only gate (A-RO)', () => {
@@ -105,6 +140,19 @@ describe('data-sources /query read-only gate (A-RO)', () => {
     const res = await request(app).post('/api/data-sources/ro-http/query').send({ sql: 'GET /whatever' })
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('READ_ONLY')
+  })
+
+  it('disables raw /query for a C6 write-gated target before SQL execution', async () => {
+    currentUser = admin('alice')
+    await request(app).post('/api/data-sources').send(c6WriteTargetConfig('c6-route-target'))
+    const querySpy = vi.spyOn(DataSourceManager.prototype, 'query')
+    const res = await request(app)
+      .post('/api/data-sources/c6-route-target/query')
+      .send({ sql: 'DELETE FROM target_table WHERE id = 1' })
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED')
+    expect(querySpy).not.toHaveBeenCalled()
+    querySpy.mockRestore()
   })
 })
 

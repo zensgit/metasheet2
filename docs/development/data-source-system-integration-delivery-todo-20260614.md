@@ -16,8 +16,9 @@
   C5 K3/MSSQL smoke gate #2670 已在 `dea391a1` 包上通过并关闭：operator scope-adjusted rerun
   中 generic SQL Server smoke 和 K3 SQL Server executor smoke 均 PASS，且 evidence values-free、无 K3
   Save/Submit/Audit/BOM、无外部 DB 写、无 raw SQL。#2700 已补 C5 runbook 的 SQL auth/scope triage。
-- 下一门: C6-1 backend latent writer helper。C6 是最大风险刀；C6-0 只锁 design contract，
-  不授权任何 C6 runtime 或 external write；C6-1+ 仍需逐片 opt-in、复审、fresh CI 和实体机 gate。
+- 下一门: C6-2 dry-run route。C6 是最大风险刀；C6-0 只锁 design contract，
+  C6-1 只落地 backend latent writer helper 和 write-gated target adapter 的关闭态合同；
+  不授权 C6 apply runtime 或 external write。C6-2+ 仍需逐片 opt-in、复审、fresh CI 和实体机 gate。
 
 ## 收口顺序
 
@@ -28,7 +29,7 @@
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
-| C6 | external write | C6-0 design locked; C6-1+ gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
+| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2+ gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
 | Release | 总包 + 实体机验收 | gated | 交付签收 | 包内容/部署/证据不完整 |
 
 ## P0 - ②b Arc 收口 Follow-Up
@@ -343,6 +344,9 @@ TODO:
 - 设计结论: C6 写能力必须走显式 write-gated target contract；不能把既有
   `data-source:sql-readonly` source adapter 改成可写。
 - C6-0 只锁合同，不引入 runtime、route、UI、package 或 external write。
+- C6-1 只引入 backend latent writer helper、host write facade、`data-source:sql-write-gated`
+  target adapter metadata/test/schema 面，以及 raw query/delete 绕行封锁；`upsert` 仍不广告、不实现，
+  外部写必须等 C6-3 token-bound apply route。
 
 必须设计先行:
 
@@ -366,7 +370,15 @@ TODO:
 实现切片建议:
 
 - [x] C6-0 design: 写合同、权限、幂等、回滚、证据。
-- [ ] C6-1 backend latent writer helper: 不接 UI，不自动运行。
+- [x] C6-1 backend latent writer helper: 不接 UI，不自动运行。
+  - host `context.api.dataSourceWrites` facade 与 read facade 分离，只暴露 structured
+    test/schema/lookup/insert/update 方法；不暴露 raw query/delete/credentials/adapter/transaction。
+  - `data-source:sql-write-gated` 注册为 target-only metadata；只支持 test/listObjects/getSchema，
+    `upsert` 显式 unsupported，直到 C6-3 token-bound apply route。
+  - C6 writable target 必须同时是 `readOnly:false`、`c6WriteTarget:true`、`genericQueryDisabled:true`；
+    generic `/api/data-sources/:id/query` 和 `DataSourceManager.query/delete` 对该目标 fail-closed。
+  - pipeline target adapter creation 透传 `pipeline.createdBy` 给未来写 facade；缺 principal 不回退系统身份。
+  - 边界: 无 UI、无 dry-run/apply route、无 package、无真实 external write、无 K3。
 - [ ] C6-2 dry-run route: read-only，values-free evidence。
 - [ ] C6-3 apply route: token-bound，permission-bound，per-row result。
 - [ ] C6-4 UI: dry-run -> review -> apply。

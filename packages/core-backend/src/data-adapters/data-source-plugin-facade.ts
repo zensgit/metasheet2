@@ -1,4 +1,8 @@
 import type { DataSourceManager } from './DataSourceManager'
+import {
+  isC6WriteTargetConfig,
+  isGenericQueryDisabledConfig,
+} from './DataSourceManager'
 import type { DbValue, QueryOptions, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
 
 /**
@@ -37,14 +41,70 @@ export interface DataSourceReadOnlyFacade {
   ): Promise<QueryResult<Record<string, DbValue>>>
 }
 
+export interface DataSourceWriteFieldPolicy {
+  keyFields: string[]
+  writableFields: string[]
+}
+
+export interface DataSourceWriteFacadeTestResult {
+  success: boolean
+}
+
+export interface DataSourceWriteOperationResult {
+  rowCount: number
+  results: Array<QueryResult<Record<string, DbValue>>>
+}
+
+export interface DataSourceWriteFacade {
+  test(dataSourceId: string, principal: string | undefined): Promise<DataSourceWriteFacadeTestResult>
+  getSchema(dataSourceId: string, principal: string | undefined, schema?: string): Promise<SchemaInfo>
+  getTableInfo(
+    dataSourceId: string,
+    object: string,
+    principal: string | undefined,
+    schema?: string
+  ): Promise<TableInfo>
+  lookupByKey(
+    dataSourceId: string,
+    object: string,
+    key: Record<string, DbValue>,
+    policy: DataSourceWriteFieldPolicy,
+    principal: string | undefined
+  ): Promise<QueryResult<Record<string, DbValue>>>
+  insertRows(
+    dataSourceId: string,
+    object: string,
+    rows: Array<Record<string, DbValue>>,
+    policy: DataSourceWriteFieldPolicy,
+    principal: string | undefined
+  ): Promise<QueryResult<Record<string, DbValue>>>
+  updateRows(
+    dataSourceId: string,
+    object: string,
+    rows: Array<Record<string, DbValue>>,
+    policy: DataSourceWriteFieldPolicy,
+    principal: string | undefined
+  ): Promise<DataSourceWriteOperationResult>
+}
+
 export const MISSING_PRINCIPAL_MESSAGE = 'data source read requires an owner principal (none provided)'
 export const DATA_SOURCE_PRINCIPAL_REQUIRED_CODE = 'DATA_SOURCE_PRINCIPAL_REQUIRED'
 export const DATA_SOURCE_NOT_FOUND_CODE = 'DATA_SOURCE_NOT_FOUND'
 export const DATA_SOURCE_NOT_READ_ONLY_CODE = 'DATA_SOURCE_NOT_READ_ONLY'
+export const DATA_SOURCE_NOT_WRITABLE_CODE = 'DATA_SOURCE_NOT_WRITABLE'
+export const DATA_SOURCE_NOT_C6_WRITE_TARGET_CODE = 'DATA_SOURCE_NOT_C6_WRITE_TARGET'
 export const DATA_SOURCE_QUERY_INVALID_CODE = 'DATA_SOURCE_QUERY_INVALID'
 
 export function writableSourceMessage(dataSourceId: string): string {
   return `data source '${dataSourceId}' is writable; the read-only bridge refuses a writable binding`
+}
+
+export function writeTargetReadOnlyMessage(dataSourceId: string): string {
+  return `data source '${dataSourceId}' is read-only; the C6 write-gated target requires options.readOnly=false`
+}
+
+export function writeTargetNotC6Message(dataSourceId: string): string {
+  return `data source '${dataSourceId}' is not a C6 write-gated target; c6WriteTarget and genericQueryDisabled must both be true`
 }
 
 /**
@@ -134,6 +194,164 @@ function normalizeOrderBy(orderBy: QueryOptions['orderBy'] | undefined): QueryOp
   })
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function normalizeObjectName(value: string, field: string): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new DataSourceBridgeConfigError(
+      DATA_SOURCE_QUERY_INVALID_CODE,
+      `${field} must be a non-empty string`,
+      'DataSourceQueryInvalidError'
+    )
+  }
+  return value.trim()
+}
+
+function normalizeFieldList(fields: string[], field: string): string[] {
+  if (!Array.isArray(fields) || fields.length === 0) {
+    throw new DataSourceBridgeConfigError(
+      DATA_SOURCE_QUERY_INVALID_CODE,
+      `${field} must be a non-empty array`,
+      'DataSourceQueryInvalidError'
+    )
+  }
+  const seen = new Set<string>()
+  const normalized: string[] = []
+  fields.forEach((candidate, index) => {
+    if (typeof candidate !== 'string' || candidate.trim() === '') {
+      throw new DataSourceBridgeConfigError(
+        DATA_SOURCE_QUERY_INVALID_CODE,
+        `${field}[${index}] must be a non-empty string`,
+        'DataSourceQueryInvalidError'
+      )
+    }
+    const name = candidate.trim()
+    if (seen.has(name)) {
+      throw new DataSourceBridgeConfigError(
+        DATA_SOURCE_QUERY_INVALID_CODE,
+        `${field} must not contain duplicate fields`,
+        'DataSourceQueryInvalidError'
+      )
+    }
+    seen.add(name)
+    normalized.push(name)
+  })
+  return normalized
+}
+
+function normalizeWritePolicy(policy: DataSourceWriteFieldPolicy): { keyFields: string[]; writableFields: string[]; allowed: Set<string> } {
+  if (!isPlainObject(policy)) {
+    throw new DataSourceBridgeConfigError(
+      DATA_SOURCE_QUERY_INVALID_CODE,
+      'field policy must be an object',
+      'DataSourceQueryInvalidError'
+    )
+  }
+  const keyFields = normalizeFieldList(policy.keyFields, 'keyFields')
+  const writableFields = normalizeFieldList(policy.writableFields, 'writableFields')
+  const overlap = keyFields.find((field) => writableFields.includes(field))
+  if (overlap) {
+    throw new DataSourceBridgeConfigError(
+      DATA_SOURCE_QUERY_INVALID_CODE,
+      `keyFields and writableFields must not overlap (${overlap})`,
+      'DataSourceQueryInvalidError'
+    )
+  }
+  return { keyFields, writableFields, allowed: new Set([...keyFields, ...writableFields]) }
+}
+
+function normalizeKey(
+  key: Record<string, DbValue>,
+  policy: ReturnType<typeof normalizeWritePolicy>
+): Record<string, DbValue> {
+  if (!isPlainObject(key)) {
+    throw new DataSourceBridgeConfigError(
+      DATA_SOURCE_QUERY_INVALID_CODE,
+      'key must be an object',
+      'DataSourceQueryInvalidError'
+    )
+  }
+  const out: Record<string, DbValue> = {}
+  for (const field of policy.keyFields) {
+    if (!Object.prototype.hasOwnProperty.call(key, field)) {
+      throw new DataSourceBridgeConfigError(
+        DATA_SOURCE_QUERY_INVALID_CODE,
+        `key.${field} is required`,
+        'DataSourceQueryInvalidError'
+      )
+    }
+    out[field] = key[field]
+  }
+  for (const field of Object.keys(key)) {
+    if (!policy.keyFields.includes(field)) {
+      throw new DataSourceBridgeConfigError(
+        DATA_SOURCE_QUERY_INVALID_CODE,
+        `key.${field} is not allowed`,
+        'DataSourceQueryInvalidError'
+      )
+    }
+  }
+  return out
+}
+
+function normalizeWriteRows(
+  rows: Array<Record<string, DbValue>>,
+  policy: ReturnType<typeof normalizeWritePolicy>
+): Array<{ key: Record<string, DbValue>; row: Record<string, DbValue>; data: Record<string, DbValue> }> {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new DataSourceBridgeConfigError(
+      DATA_SOURCE_QUERY_INVALID_CODE,
+      'rows must be a non-empty array',
+      'DataSourceQueryInvalidError'
+    )
+  }
+  return rows.map((row, index) => {
+    if (!isPlainObject(row)) {
+      throw new DataSourceBridgeConfigError(
+        DATA_SOURCE_QUERY_INVALID_CODE,
+        `rows[${index}] must be an object`,
+        'DataSourceQueryInvalidError'
+      )
+    }
+    for (const field of Object.keys(row)) {
+      if (!policy.allowed.has(field)) {
+        throw new DataSourceBridgeConfigError(
+          DATA_SOURCE_QUERY_INVALID_CODE,
+          `rows[${index}].${field} is not in keyFields or writableFields`,
+          'DataSourceQueryInvalidError'
+        )
+      }
+    }
+    const key: Record<string, DbValue> = {}
+    for (const field of policy.keyFields) {
+      if (!Object.prototype.hasOwnProperty.call(row, field)) {
+        throw new DataSourceBridgeConfigError(
+          DATA_SOURCE_QUERY_INVALID_CODE,
+          `rows[${index}].${field} is required`,
+          'DataSourceQueryInvalidError'
+        )
+      }
+      key[field] = row[field] as DbValue
+    }
+    const data: Record<string, DbValue> = {}
+    for (const field of policy.writableFields) {
+      if (Object.prototype.hasOwnProperty.call(row, field)) {
+        data[field] = row[field] as DbValue
+      }
+    }
+    if (Object.keys(data).length === 0) {
+      throw new DataSourceBridgeConfigError(
+        DATA_SOURCE_QUERY_INVALID_CODE,
+        `rows[${index}] must include at least one writable field`,
+        'DataSourceQueryInvalidError'
+      )
+    }
+    return { key, row: { ...key, ...data }, data }
+  })
+}
+
 /**
  * Build the read-only facade over the shared DataSourceManager singleton. `getManager` is
  * resolved **lazily inside each call** — the plugin api surface is assembled early in startup,
@@ -205,6 +423,94 @@ export function createDataSourcePluginFacade(
         queryOptions.orderBy = orderBy
       }
       return manager.select<Record<string, DbValue>>(dataSourceId, table, queryOptions)
+    },
+  }
+}
+
+export function createDataSourceWritePluginFacade(
+  getManager: () => DataSourceManager
+): DataSourceWriteFacade {
+  async function authorize(dataSourceId: string, principal: string | undefined) {
+    const owner = requirePrincipal(principal)
+    const manager = getManager()
+    let adapter
+    try {
+      manager.assertAccess(dataSourceId, owner)
+      adapter = manager.getDataSource(dataSourceId)
+    } catch (err) {
+      throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+    }
+    if (adapter.isReadOnly()) {
+      throw new DataSourceBridgeConfigError(
+        DATA_SOURCE_NOT_WRITABLE_CODE,
+        writeTargetReadOnlyMessage(dataSourceId),
+        'DataSourceNotWritableError'
+      )
+    }
+    const config = adapter.getConfig()
+    if (!isC6WriteTargetConfig(config) || !isGenericQueryDisabledConfig(config)) {
+      throw new DataSourceBridgeConfigError(
+        DATA_SOURCE_NOT_C6_WRITE_TARGET_CODE,
+        writeTargetNotC6Message(dataSourceId),
+        'DataSourceNotC6WriteTargetError'
+      )
+    }
+    if (!adapter.isConnected()) {
+      await manager.connectDataSource(dataSourceId)
+    }
+    return { manager, adapter }
+  }
+
+  return {
+    async test(dataSourceId, principal) {
+      const { adapter } = await authorize(dataSourceId, principal)
+      const healthy = await adapter.testConnection()
+      return { success: healthy === true }
+    },
+    async getSchema(dataSourceId, principal, schema) {
+      const { adapter } = await authorize(dataSourceId, principal)
+      return adapter.getSchema(schema)
+    },
+    async getTableInfo(dataSourceId, object, principal, schema) {
+      const { adapter } = await authorize(dataSourceId, principal)
+      return adapter.getTableInfo(object, schema)
+    },
+    async lookupByKey(dataSourceId, object, key, policy, principal) {
+      const normalizedObject = normalizeObjectName(object, 'object')
+      const normalizedPolicy = normalizeWritePolicy(policy)
+      const where = normalizeKey(key, normalizedPolicy)
+      const { manager } = await authorize(dataSourceId, principal)
+      return manager.select<Record<string, DbValue>>(dataSourceId, normalizedObject, {
+        limit: 2,
+        where,
+      })
+    },
+    async insertRows(dataSourceId, object, rows, policy, principal) {
+      const normalizedObject = normalizeObjectName(object, 'object')
+      const normalizedPolicy = normalizeWritePolicy(policy)
+      const normalizedRows = normalizeWriteRows(rows, normalizedPolicy)
+      const { manager } = await authorize(dataSourceId, principal)
+      return manager.insert<Record<string, DbValue>>(
+        dataSourceId,
+        normalizedObject,
+        normalizedRows.map((entry) => entry.row)
+      )
+    },
+    async updateRows(dataSourceId, object, rows, policy, principal) {
+      const normalizedObject = normalizeObjectName(object, 'object')
+      const normalizedPolicy = normalizeWritePolicy(policy)
+      const normalizedRows = normalizeWriteRows(rows, normalizedPolicy)
+      const { manager } = await authorize(dataSourceId, principal)
+      const results: Array<QueryResult<Record<string, DbValue>>> = []
+      for (const entry of normalizedRows) {
+        results.push(await manager.update<Record<string, DbValue>>(
+          dataSourceId,
+          normalizedObject,
+          entry.data,
+          entry.key
+        ))
+      }
+      return { rowCount: normalizedRows.length, results }
     },
   }
 }
