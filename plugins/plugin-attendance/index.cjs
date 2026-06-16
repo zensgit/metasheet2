@@ -15775,7 +15775,10 @@ async function applyAnnualLeaveManualAdjustment(trx, { orgId, userId, deltaMinut
 // grant-time snapshot can't be recovered is skipped with a reason code and left NULL (grandfathered). dryRun previews.
 async function backfillAnnualLeaveAccrualExpiry(trx, { orgId, dryRun }) {
   const lots = await trx.query(
-    `SELECT b.id, b.source_id, b.source_type, ri.run_id, r.policy_version, r.period_key, r.timezone
+    `SELECT b.id, b.source_id, b.source_type,
+            ri.id AS ri_id, ri.org_id AS ri_org, ri.leave_type_code AS ri_ltc, ri.status AS ri_status, ri.run_id,
+            r.id AS r_id, r.org_id AS r_org, r.leave_type_code AS r_ltc, r.dry_run AS r_dry,
+            r.policy_version, r.period_key, r.timezone
        FROM attendance_leave_balances b
        LEFT JOIN attendance_leave_accrual_run_items ri ON ri.id::text = b.source_id
        LEFT JOIN attendance_leave_accrual_runs r ON r.id = ri.run_id
@@ -15787,24 +15790,32 @@ async function backfillAnnualLeaveAccrualExpiry(trx, { orgId, dryRun }) {
   const skip = (code) => { summary.skipped += 1; summary.reasons[code] = (summary.reasons[code] || 0) + 1 }
   for (const lot of lots) {
     if (lot.source_type !== 'annual_accrual') { skip('NON_ACCRUAL_SOURCE'); continue }
-    if (!lot.source_id || !lot.run_id) { skip('MISSING_RUN_ITEM'); continue }       // source_id didn't resolve to a run_item
-    if (!lot.period_key) { skip('MISSING_RUN'); continue }                          // run_item.run_id didn't resolve to a run
+    if (!lot.source_id || !lot.ri_id) { skip('MISSING_RUN_ITEM'); continue }        // source_id didn't resolve to a run_item
+    // the run_item must be THIS org's GRANTED ANNUAL item — a wrong-tenant / non-annual / non-granted (e.g. skipped)
+    // item is not valid grant provenance for this lot, so we never derive an expiry from it (grandfather, never guess).
+    if (lot.ri_org !== orgId || lot.ri_ltc !== 'annual' || lot.ri_status !== 'granted') { skip('INVALID_RUN_ITEM'); continue }
+    if (!lot.r_id) { skip('MISSING_RUN'); continue }                                // run_item.run_id didn't resolve to a run
+    // the run must be THIS org's REAL (non-dry-run) ANNUAL run — a dry-run created no real lots, a wrong-tenant /
+    // non-annual run is not this lot's grant snapshot.
+    if (lot.r_org !== orgId || lot.r_ltc !== 'annual' || lot.r_dry === true) { skip('INVALID_RUN'); continue }
     let carryoverEnabled
     try {
       const pv = JSON.parse(lot.policy_version)
       if (!pv || typeof pv !== 'object' || !pv.carryover || typeof pv.carryover.enabled !== 'boolean') { skip('UNPARSEABLE_POLICY_VERSION'); continue }
       carryoverEnabled = pv.carryover.enabled
     } catch { skip('UNPARSEABLE_POLICY_VERSION'); continue }
-    if (typeof lot.timezone !== 'string' || !lot.timezone) { skip('MISSING_TIMEZONE'); continue }
+    // a present-but-INVALID timezone would UTC-fall-back in zonedTimeToUtc → wrong instant; treat as unusable.
+    if (typeof lot.timezone !== 'string' || !isValidTimeZoneIdentifier(lot.timezone)) { skip('MISSING_TIMEZONE'); continue }
     const m = /^annual:(\d{4})$/.exec(String(lot.period_key))
     if (!m) { skip('UNPARSEABLE_PERIOD_KEY'); continue }
     const expiresAt = annualLeaveLotExpiryUtc(Number(m[1]), carryoverEnabled, lot.timezone)
     if (!expiresAt) { skip('MISSING_TIMEZONE'); continue }                          // helper guards; defensive
-    if (!dryRun) {
-      // expires_at IS NULL re-checked in the UPDATE → idempotent + safe against a concurrent set.
-      await trx.query(`UPDATE attendance_leave_balances SET expires_at = $1, updated_at = now() WHERE id = $2 AND expires_at IS NULL`, [expiresAt, lot.id])
-    }
-    summary.updated += 1
+    if (dryRun) { summary.updated += 1; continue }                                  // would-update (preview only)
+    // count ACTUAL writes via RETURNING: a concurrent runner that set expires_at between our SELECT and this UPDATE
+    // makes `WHERE expires_at IS NULL` match 0 rows — that must NOT inflate `updated` (auditable summary).
+    const updatedRows = await trx.query(`UPDATE attendance_leave_balances SET expires_at = $1, updated_at = now() WHERE id = $2 AND expires_at IS NULL RETURNING id`, [expiresAt, lot.id])
+    if (updatedRows[0]?.id) summary.updated += 1
+    else skip('ALREADY_SET')                                                        // concurrently set — not ours to count
   }
   return summary
 }
@@ -37841,7 +37852,10 @@ module.exports = {
       withPermission('attendance:admin', async (req, res) => {
         // 年假/法定假 L4b: idempotent backfill of expires_at for pre-L4a annual_accrual lots (NULL expiry), from each
         // lot's accrual-run provenance snapshot (not today's settings). dryRun previews; returns an auditable summary.
-        const schema = z.object({ dryRun: z.boolean().optional() })
+        // orgId is part of the contract (the target org of a mutating admin backfill) — declared explicitly rather
+        // than silently picked up from the raw body by getOrgId. getOrgId still resolves the effective org (body →
+        // query → header → user context → default); declaring it here makes the request shape honest + validated.
+        const schema = z.object({ dryRun: z.boolean().optional(), orgId: z.string().min(1).optional() })
         const parsed = schema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
