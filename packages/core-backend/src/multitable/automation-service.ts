@@ -266,7 +266,7 @@ function validateConditionBranchConfig(config: unknown, path: string): Automatio
       // A6-3-3: branch-local wait_for_callback is allowed — condition_branch already forces
       // workflow_job_v1 at the rule level, so the wait is only reachable in an opted-in rule.
       if (nested.type === 'start_approval') {
-        throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain start_approval until A6-3-3`)
+        throw new AutomationRuleValidationError(`${branchPath}.actions cannot contain start_approval (branch-local start_approval is not yet supported)`)
       }
     }
     nestedActions.push(...actions)
@@ -293,7 +293,7 @@ function validateConditionBranchConfig(config: unknown, path: string): Automatio
       }
       // A6-3-3: branch-local wait_for_callback is allowed (see branches loop above).
       if (nested.type === 'start_approval') {
-        throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain start_approval until A6-3-3`)
+        throw new AutomationRuleValidationError(`${defaultPath}.actions cannot contain start_approval (branch-local start_approval is not yet supported)`)
       }
     }
     nestedActions.push(...actions)

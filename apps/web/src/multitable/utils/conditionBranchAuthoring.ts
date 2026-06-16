@@ -4,10 +4,11 @@
 // UI can faithfully round-trip it — `buildConditionBranchConfig(parseConditionBranchDraft(config))`
 // is semantically equal to `config`. Anything the v1 UI cannot represent losslessly
 // (nested condition groups, non-string `update_record` values, comma/whitespace-bearing `userIds`,
-// branch action types outside the simple subset, `wait_for_callback`/nested `condition_branch`)
-// returns a non-null `conditionBranchUnsupportedReason` → the editor opens read-only and never
-// flattens. Mirrors the backend `validateConditionBranchConfig` boundaries (SAFE_BRANCH_KEY,
-// no wait/nesting in branches).
+// branch action types outside the simple subset, nested `condition_branch`/`parallel_branch`/
+// `start_approval`, or a `wait_for_callback` carrying any config keys) returns a non-null
+// `conditionBranchUnsupportedReason` → the editor opens read-only and never flattens. Mirrors the
+// backend `validateConditionBranchConfig` boundaries (SAFE_BRANCH_KEY; A6-3-3 allows ONLY a
+// branch-local zero-param `wait_for_callback`, still rejects nested branch/parallel/start_approval).
 import type {
   AutomationAction,
   AutomationActionType,
@@ -17,15 +18,29 @@ import type {
 // Mirror of backend automation-service.ts SAFE_BRANCH_KEY.
 export const SAFE_BRANCH_KEY = /^[A-Za-z0-9_-]{1,64}$/
 
-// The v1 subset of action types authorable INSIDE a branch (simple, round-trippable config).
+// The shared simple subset authorable inside ANY branch container (round-trippable config).
+// `parallel_branch` uses exactly this set — the backend still forbids a branch-local wait there.
 export const BRANCH_AUTHORABLE_ACTION_TYPES = ['update_record', 'send_notification'] as const
 export type BranchAuthorableActionType = (typeof BRANCH_AUTHORABLE_ACTION_TYPES)[number]
 
+// A6-3-3b: `condition_branch` ADDITIONALLY allows a branch-local `wait_for_callback` — the only
+// nested primitive A6-3-3a opened. Kept as a SEPARATE constant so `parallel_branch` never offers it.
+// condition_branch / parallel_branch / start_approval stay OUT of the menu — they remain
+// non-authorable inside a branch (the editor must not offer them; the backend rejects them).
+export const CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES = [
+  'update_record',
+  'send_notification',
+  'wait_for_callback',
+] as const
+export type ConditionBranchAuthorableActionType =
+  (typeof CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES)[number]
+
 export interface BranchActionDraft {
-  type: BranchAuthorableActionType
+  type: ConditionBranchAuthorableActionType
   fieldUpdates?: Array<{ fieldId: string; value: string }> // update_record
   userId?: string // send_notification (comma/space-joined)
   message?: string // send_notification
+  // wait_for_callback carries NO params (zero-param suspend point) — nothing to draft.
 }
 export interface BranchDraft {
   key: string
@@ -76,11 +91,22 @@ function sendNotificationRoundTrippable(config: unknown): boolean {
   return true
 }
 
+// A6-3-3b: a branch-local `wait_for_callback` is a ZERO-param suspend point. The v1 UI authors no
+// fields for it, so it round-trips ONLY when its config is empty/absent. A wait carrying ANY config
+// key (e.g. `{ reason }`) is something the UI can't represent → read-only (re-emit verbatim, never
+// flatten to `{}`). This asymmetry IS the never-flatten guard for the newly-authorable wait.
+function waitForCallbackRoundTrippable(config: unknown): boolean {
+  if (config === undefined) return true
+  if (!isPlainRecord(config)) return false
+  return Object.keys(config).length === 0
+}
+
 function branchActionRoundTrippable(action: unknown): boolean {
   if (!isPlainRecord(action)) return false
   if (action.type === 'update_record') return updateRecordRoundTrippable(action.config)
   if (action.type === 'send_notification') return sendNotificationRoundTrippable(action.config)
-  // outside the subset (incl. wait_for_callback / nested condition_branch) → read-only
+  if (action.type === 'wait_for_callback') return waitForCallbackRoundTrippable(action.config)
+  // outside the subset (nested condition_branch / parallel_branch / start_approval / …) → read-only
   return false
 }
 
@@ -131,6 +157,11 @@ function actionToDraft(action: AutomationAction): BranchActionDraft {
       fieldUpdates: Object.entries(fields).map(([fieldId, value]) => ({ fieldId, value: String(value ?? '') })),
     }
   }
+  // A6-3-3b: zero-param wait — preceded by the update_record check; must come BEFORE the
+  // send_notification fallthrough so a wait is not mis-parsed into a notification draft.
+  if (action.type === 'wait_for_callback') {
+    return { type: 'wait_for_callback' }
+  }
   const userIds = Array.isArray(action.config.userIds) ? action.config.userIds : []
   return {
     type: 'send_notification',
@@ -147,6 +178,11 @@ function draftToAction(action: BranchActionDraft): AutomationAction {
       if (fieldId) fields[fieldId] = pair.value
     }
     return { type: 'update_record', config: { fields } }
+  }
+  // A6-3-3b: emit exactly the backend-accepted zero-param wait shape. Empty config (no `reason`/etc.)
+  // mirrors the editor's `defaultConfigForActionType('wait_for_callback')` and the A6-2 suspend point.
+  if (action.type === 'wait_for_callback') {
+    return { type: 'wait_for_callback', config: {} }
   }
   return {
     type: 'send_notification',
@@ -224,4 +260,11 @@ export function validateConditionBranchKeys(draft: ConditionBranchDraft): string
 
 export function isBranchAuthorableActionType(type: AutomationActionType): type is BranchAuthorableActionType {
   return (BRANCH_AUTHORABLE_ACTION_TYPES as readonly string[]).includes(type)
+}
+
+// A6-3-3b: the condition_branch-only authorable set (adds branch-local `wait_for_callback`).
+export function isConditionBranchAuthorableActionType(
+  type: AutomationActionType,
+): type is ConditionBranchAuthorableActionType {
+  return (CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES as readonly string[]).includes(type)
 }

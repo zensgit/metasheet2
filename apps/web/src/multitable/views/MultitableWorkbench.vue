@@ -263,6 +263,7 @@
           :ai-run-enabled="effectiveRowActions.canEdit"
           :ai-run-pending="Boolean(aiShortcut.state.pending)"
           :ai-run-busy="aiShortcutBusy"
+          :button-run-pending="buttonRunPending"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
@@ -273,6 +274,7 @@
           @open-field-comments="onOpenGridFieldComments"
           @toggle-lock="onToggleRecordLock"
           @ai-run="onGridAiRun"
+          @run-button="onRunButton"
           @selection-change="onGridSelectionChange"
         />
       </div>
@@ -293,6 +295,7 @@
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker"
         @toggle-lock="onToggleRecordLock"
         @navigate="onDrawerNavigate"
+        @restore="onRestoreRecordVersion"
         @ai-preview="onAiPreviewField" @ai-run="onAiRunField"
       />
       <MetaCommentsDrawer
@@ -469,6 +472,7 @@ import {
   recordNotFound as fmtRecordNotFound,
 } from '../utils/workbench-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
+import { recordLabel } from '../utils/meta-record-labels'
 import {
   bulkFailure as fmtBulkFailure,
   bulkPartialSuccess as fmtBulkPartialSuccess,
@@ -626,6 +630,31 @@ function onAiRunField(field: MetaField) {
 
 function onGridAiRun(recordId: string, field: MetaField) {
   void aiShortcut.run(recordId, field.id)
+}
+
+// B1-b: run a button field's configured action against one record. Per-cell
+// in-flight keys disable just that button + guard double-fire. A FAILED action
+// returns HTTP 200 (resolves), so branch on result.status; reserve catch for
+// contract/permission/server errors (403/etc.).
+const buttonRunPending = ref<string[]>([])
+async function onRunButton({ recordId, field }: { recordId: string; field: MetaField }) {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return
+  const key = `${recordId}:${field.id}`
+  if (buttonRunPending.value.includes(key)) return
+  buttonRunPending.value = [...buttonRunPending.value, key]
+  try {
+    const result = await workbench.client.runButton(sheetId, recordId, field.id)
+    if (result.status === 'failed') {
+      showError(result.message || wb('toast.buttonRunFailed', isZh.value))
+    } else {
+      showSuccess(wb('toast.buttonRunSuccess', isZh.value))
+    }
+  } catch (e: any) {
+    showError(e?.message ?? wb('toast.buttonRunFailed', isZh.value))
+  } finally {
+    buttonRunPending.value = buttonRunPending.value.filter((k) => k !== key)
+  }
 }
 
 // MetaFieldManager is emit/fn-prop based (dryRunFn precedent): config-time
@@ -1558,6 +1587,29 @@ async function onToggleRecordLock(payload: { recordId: string; locked: boolean }
     await grid.loadViewData(grid.page.value.offset)
   } catch (error) {
     showError((error as Error)?.message ?? wb('toast.recordLockFailed', isZh.value))
+  }
+}
+
+// Slice 3: restore a record to a prior revision. The drawer emits 'restore'; the workbench owns the
+// confirm + API call + refresh (mirrors onToggleRecordLock). The backend error carries `.code`
+// (VERSION_CONFLICT / VERSION_EXPIRED / RESTORE_UNSUPPORTED / SNAPSHOT_UNAVAILABLE / SCHEMA_DRIFT /
+// RESTORE_FORBIDDEN); we surface error.message (already localized server-side) with a static fallback.
+async function onRestoreRecordVersion(payload: { recordId: string; targetVersion: number; expectedVersion: number }) {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return
+  if (!window.confirm(recordLabel('record.restoreConfirm', isZh.value))) return
+  try {
+    const result = await workbench.client.restoreRecordVersion(
+      sheetId,
+      payload.recordId,
+      payload.targetVersion,
+      payload.expectedVersion,
+    )
+    showSuccess(recordLabel(result.noop ? 'record.restoreNoop' : 'record.restoreSuccess', isZh.value))
+    await grid.loadViewData(grid.page.value.offset)
+    if (selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
+  } catch (error) {
+    showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
   }
 }
 

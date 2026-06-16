@@ -13,11 +13,13 @@
   read-only/source-only 边界提示、SQL bridge values-free 错误提示）。
   Large-BOM #2425 的 scoped C3/C4 实体机全链路验证已 PASS/CLOSED；Windows 短 TEMP zip 部署 caveat
   另由 #2642 跟踪，不阻塞 runtime gate。
-  C5 K3/MSSQL smoke harness 已发包并打开 #2670；#2675 / #2684 已修复两轮包内容与 deploy
-  entry blocker；`dea391a1` 包的实体机复测已把 generic smoke 推进到真实 SQL Server
-  connection 层，当前 HOLD 在 operator/runtime SQL 登录、数据库 scope、表权限确认。
-- 不建议: 现在直接开 C6。C6 是最大风险刀，必须等只读链路、增量链路、K3 generic seam 都稳定后再开；
-  当前 C6 仍以 #2670 通过为前置 gate。
+  C5 K3/MSSQL smoke gate #2670 已在 `dea391a1` 包上通过并关闭：operator scope-adjusted rerun
+  中 generic SQL Server smoke 和 K3 SQL Server executor smoke 均 PASS，且 evidence values-free、无 K3
+  Save/Submit/Audit/BOM、无外部 DB 写、无 raw SQL。#2700 已补 C5 runbook 的 SQL auth/scope triage。
+- 下一门: C6-3 apply route。C6 是最大风险刀；C6-0 只锁 design contract，
+  C6-1 只落地 backend latent writer helper 和 write-gated target adapter 的关闭态合同；
+  C6-2 只增加 read-only dry-run route + dry-run token，不授权 apply runtime 或 external write。
+  C6-3+ 仍需逐片 opt-in、复审、fresh CI 和实体机 gate。
 
 ## 收口顺序
 
@@ -27,8 +29,8 @@
 | C2-close | 只读数据库链路 smoke 收口 | done (issue #2600) | 证明当前 read-only bridge 可稳定测试 | 实体机配置漂移 |
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
-| C5 | K3 generic MSSQL seam | C5-0..C5-4a done; C5-4b package loop patched through #2684; #2670 active HOLD on SQL login/database/table scope | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
-| C6 | external write | gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
+| C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
+| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3+ gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
 | Release | 总包 + 实体机验收 | gated | 交付签收 | 包内容/部署/证据不完整 |
 
 ## P0 - ②b Arc 收口 Follow-Up
@@ -230,10 +232,11 @@ TODO:
 C5-1 latent helper contract 已落地为 `@metasheet/mssql-readonly-utils`；C5-2 已把 generic `MSSQLAdapter`
 的 endpoint/TLS/identifier 稳定面接到 helper；C5-3 已把 K3 default SQL Server executor 的 endpoint/timeout/limit/simple-select
 接到 helper，同时保留 K3 strict identifier/read/write guard。C5-4a smoke harness 已落地，#2669 修复了 helper-backed
-executor 的 on-prem package/verifier seam。C5-4b 实体机 smoke 已打开 #2670；#2675 修复包内容缺少 runbook /
+executor 的 on-prem package/verifier seam。C5-4b 实体机 smoke 已通过 #2670；#2675 修复包内容缺少 runbook /
 generic smoke script，#2684 修复 packaged generic smoke 的 deploy `dist` adapter entrypoint。`dea391a1`
-包的实体机 evidence 确认 generic smoke 不再在 SQL 前置 entrypoint 失败，已到达 compiled adapter +
-SQL Server connection 层；当前剩余 blocker 是 operator/runtime SQL 登录、数据库 scope、表权限确认。
+包的实体机 scope-adjusted rerun 已 PASS：generic SQL Server smoke 通过 connect/schema/tableInfo/select，
+K3 SQL Server executor smoke 通过 testConnection/read，issue #2670 已关闭。#2700 已把本次暴露出的
+SQL auth/scope triage 固化进 runbook，后续同类失败先按 operator-side scope 分类，不直接回到代码改动。
 
 边界:
 
@@ -291,7 +294,7 @@ TODO:
     helper `package.json` 的 `name/main`、helper bounded `SELECT TOP` builder、以及 K3
     `SQLSERVER_WRITE_EXECUTOR_DISABLED` marker。
   - 这是 C5-4b 发包前置修复；不改变 runtime 行为、不打开任何 K3 写能力。
-- [ ] C5-4b: 实体机 K3/MSSQL smoke。
+- [x] C5-4b: 实体机 K3/MSSQL smoke。
   - issue: #2670 `[Data Source] C5 K3/MSSQL entity-machine smoke gate`。
   - first package attempt: `multitable-onprem-datasource-c5-k3-mssql-smoke-20260615-8cd6ca7ef`
     (`metasheet-multitable-onprem-v2.5.0-datasource-c5-k3-mssql-smoke-20260615-8cd6ca7ef`)。
@@ -312,9 +315,15 @@ TODO:
     smoke；package fingerprint=`dea391a1`，deploy/health/package-content 均通过。
   - [x] generic smoke 不再以 `script_runtime_import_missing_source_asset` / `MODULE_NOT_FOUND`
     在 SQL connection 前失败；它已到达 compiled deployable `MSSQLAdapter` + SQL Server connection 层。
-  - [ ] operator-approved SQL 登录、数据库 scope、表权限确认后，重跑 generic SQL Server smoke；
-    当前结果为 `login_failed`，不是 package/entrypoint 问题。
-  - [ ] K3 SQL Server executor smoke 仍需 PASS；当前 public error 仍为 `SQLSERVER_TEST_FAILED`。
+  - [x] operator-approved SQL 登录、数据库 scope、表权限确认后，重跑 generic SQL Server smoke；
+    scope-adjusted entity-machine rerun PASS: `connected=pass`、`schemaIntrospection=pass`、
+    `tableInfo=pass`、`select=pass`。
+  - [x] K3 SQL Server executor smoke PASS: `testConnection=pass`、bounded read PASS、`rows=1`。
+  - [x] output boundary PASS: credentials / connection string / row values not printed；target object/table
+    redacted；values-free evidence preserved。
+  - [x] #2700 / squash `e1b010ca5`: C5 smoke runbook now includes SQL auth/scope triage for
+    `login_failed` / `SQLSERVER_TEST_FAILED`, with least-privilege read-only scope guidance and values-free
+    evidence fields.
   - saved MetaSheet SQL Server source `connected` 只是必要条件，不是 C5 PASS；official smoke 更严格，
     会携带明确 read target 并在实体机 runtime adapter path 下验证。
   - 只回传 package fingerprint、status、TLS knob 名称/布尔、operator-configured object/table 名、计数；
@@ -324,33 +333,60 @@ TODO:
 
 - K3 路径可复用 generic MSSQL 的稳定能力，但红线不变。
 - 任何 K3 写能力仍走自己的显式 gate。
+- C5 read-only smoke gate 已在 #2670 关闭；这不授权 C6 external write，也不授权 K3 Save/Submit/Audit/BOM。
 
 ## C6 - External Write
 
 目标: 最终交付门槛。外部系统写回能力必须设计优先、分阶段、实体机验证。
 
+设计锚点:
+
+- C6-0 design: `docs/development/data-source-system-integration-c6-external-write-design-20260616.md`。
+- 设计结论: C6 写能力必须走显式 write-gated target contract；不能把既有
+  `data-source:sql-readonly` source adapter 改成可写。
+- C6-0 只锁合同，不引入 runtime、route、UI、package 或 external write。
+- C6-1 只引入 backend latent writer helper、host write facade、`data-source:sql-write-gated`
+  target adapter metadata/test/schema 面，以及 raw query/delete 绕行封锁；`upsert` 仍不广告、不实现，
+  外部写必须等 C6-3 token-bound apply route。
+
 必须设计先行:
 
-- [ ] 写入对象和目标系统范围。
-- [ ] 权限模型: 谁可以 dry-run，谁可以 apply。
-- [ ] dry-run / apply 双阶段。
-- [ ] token/revision 绑定，防止“看的是 A，写的是 B”。
-- [ ] 幂等键和重复写保护。
-- [ ] 每行失败隔离。
-- [ ] dead-letter / provenance。
-- [ ] rollback / re-pull 验证。
-- [ ] owner-gated + sandbox-first；首次外部写不得直接生产。
-- [ ] max-in-flight / 熔断 / 外部系统保护。
-- [ ] values-free 审计轨: 记录谁、何时、用哪个 dry-run token apply；不记录外部系统值。
-- [ ] revision fencing 是硬围栏，不是提示；目标自 dry-run 后变化时必须拒绝 apply。
-- [ ] 禁止 batch-abort 后不可恢复的半写状态。
-- [ ] 禁止自动重试打爆外部系统。
+- [x] 写入对象和目标系统范围。
+- [x] 权限模型: 谁可以 dry-run，谁可以 apply。
+- [x] dry-run / apply 双阶段。
+- [x] token/revision 绑定，防止“看的是 A，写的是 B”。
+- [x] 幂等键和重复写保护。
+- [x] 每行失败隔离。
+- [x] dead-letter / provenance。
+- [x] rollback / re-pull 验证。
+- [x] owner-gated + sandbox-first；首次外部写不得直接生产。
+- [x] max-in-flight / 熔断 / 外部系统保护。
+- [x] values-free 审计轨: 记录谁、何时、用哪个 dry-run token apply；不记录外部系统值。
+- [x] revision fencing 是硬围栏，不是提示；目标自 dry-run 后变化时必须拒绝 apply。
+- [x] 禁止 batch-abort 后不可恢复的半写状态。
+- [x] 禁止自动重试打爆外部系统。
+- [x] C6 写目标必须关闭 generic raw query / execute / delete 绕行面；不能只引用普通
+  `readOnly:false` data source。
 
 实现切片建议:
 
-- [ ] C6-0 design: 写合同、权限、幂等、回滚、证据。
-- [ ] C6-1 backend latent writer helper: 不接 UI，不自动运行。
-- [ ] C6-2 dry-run route: read-only，values-free evidence。
+- [x] C6-0 design: 写合同、权限、幂等、回滚、证据。
+- [x] C6-1 backend latent writer helper: 不接 UI，不自动运行。
+  - host `context.api.dataSourceWrites` facade 与 read facade 分离，只暴露 structured
+    test/schema/lookup/insert/update 方法；不暴露 raw query/delete/credentials/adapter/transaction。
+  - `data-source:sql-write-gated` 注册为 target-only metadata；只支持 test/listObjects/getSchema，
+    `upsert` 显式 unsupported，直到 C6-3 token-bound apply route。
+  - C6 writable target 必须同时是 `readOnly:false`、`c6WriteTarget:true`、`genericQueryDisabled:true`；
+    generic `/api/data-sources/:id/query` 和 `DataSourceManager.query/delete` 对该目标 fail-closed。
+  - pipeline target adapter creation 透传 `pipeline.createdBy` 给未来写 facade；缺 principal 不回退系统身份。
+  - C6-1 边界: 无 UI、无 dry-run/apply route、无 package、无真实 external write、无 K3。
+- [x] C6-2 dry-run route: read-only，values-free evidence。
+  - route: `POST /api/integration/pipelines/:id/external-write/dry-run`。
+  - read-only user may dry-run; request body only accepts `tenantId` / `workspaceId` / `maxRows`。
+  - dry-run reads source rows, performs structured target key lookup, produces counts/evidence, and issues a
+    dry-run token only for apply-eligible plans.
+  - response/evidence are values-free; token is returned for future C6-3 apply but is not included in evidence.
+  - boundary: no apply route, no UI, no insert/update/upsert/delete, no package, no K3。
 - [ ] C6-3 apply route: token-bound，permission-bound，per-row result。
 - [ ] C6-4 UI: dry-run -> review -> apply。
 - [ ] C6-5 entity-machine smoke: apply、re-pull、rollback。
@@ -392,7 +428,7 @@ TODO:
 - [ ] C2 read-only smoke。
 - [ ] C3 incremental resume smoke。
 - [ ] C4 UI config smoke。
-- [ ] C5 K3 seam smoke。
+- [x] C5 K3 seam smoke。
 - [ ] C6 dry-run/apply/re-pull/rollback smoke。
 - [ ] issue 上贴 values-free 验收证据。
 

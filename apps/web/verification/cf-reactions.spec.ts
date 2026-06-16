@@ -51,6 +51,17 @@ test('multitable conditional-formatting + reactions render in a real browser', a
   await expect(page.locator('[data-test="reaction-chip-🚀"]')).toBeVisible()
   await page.screenshot({ path: `${OUT}/bv-reactions-after.png` })
 
+  // B1-b button field: a button cell renders per row; clicking it disables
+  // (in-flight) and the stubbed run resolves to an observable "ran" marker.
+  const buttons = page.locator('[data-test="cell-button"]')
+  expect(await buttons.count(), 'expected ≥1 button cell').toBeGreaterThan(0)
+  await buttons.first().click()
+  await expect(buttons.first(), 'button disables while running').toBeDisabled()
+  await page.screenshot({ path: `${OUT}/bv-button-running.png` })
+  await expect(page.locator('[data-test="button-last-run"]'), 'run resolves to a marker').toContainText('ran:r0')
+  await expect(buttons.first(), 'button re-enables after run').toBeEnabled()
+  await page.screenshot({ path: `${OUT}/bv-button-done.png` })
+
   // Fail loud on any console / page error captured from load through interaction.
   expect(errs, `console/page errors:\n${errs.join('\n')}`).toEqual([])
 })

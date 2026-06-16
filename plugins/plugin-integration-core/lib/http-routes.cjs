@@ -23,6 +23,7 @@ const ROUTES = [
   ['GET', '/api/integration/pipelines/:id', 'pipelinesGet'],
   ['POST', '/api/integration/pipelines/:id/run', 'pipelinesRun'],
   ['POST', '/api/integration/pipelines/:id/dry-run', 'pipelinesDryRun'],
+  ['POST', '/api/integration/pipelines/:id/external-write/dry-run', 'pipelinesExternalWriteDryRun'],
   ['GET', '/api/integration/table-actions', 'tableActionsList'],
   ['POST', '/api/integration/table-actions/:actionId/dry-run', 'tableActionDryRun'],
   ['POST', '/api/integration/table-actions/:actionId/apply', 'tableActionApply'],
@@ -67,6 +68,10 @@ const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-template
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
 const { deriveK3MaterialTemplateDraft, summarizeTemplateForEvidence, TemplateDeriveError } = require('./connector-template-derive.cjs')
 const { validateRecord } = require('./validator.cjs')
+const {
+  ExternalWriteDryRunError,
+  dryRunExternalWrite,
+} = require('./external-write-dry-run.cjs')
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
@@ -172,6 +177,7 @@ function inferErrorCode(error) {
 function inferHttpStatus(error) {
   const name = error && error.name ? String(error.name) : ''
   if (inferDataSourceBridgeErrorCode(error)) return 422
+  if (error instanceof ExternalWriteDryRunError) return error.status
   if (error instanceof StockPreparationTableActionError) return error.status
   if (error instanceof StockPreparationOptionSyncError) return error.status
   if (/NotFound/.test(name)) return 404
@@ -368,6 +374,7 @@ const VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS = new Set(['conflictPolicyReview'])
 const VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS = new Set(['confirm'])
 const VALID_EMPTY_REQUEST_KEYS = new Set()
+const VALID_C6_WRITE_DRY_RUN_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'maxRows'])
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
 const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
   'tenantId',
@@ -388,6 +395,22 @@ function normalizeTableActionBody(body = {}, allowedKeys = VALID_TABLE_ACTION_DR
     }
   }
   return body
+}
+
+function normalizeC6WriteDryRunBody(body = {}) {
+  if (!isPlainObject(body)) {
+    throw new HttpRouteError(400, 'C6_WRITE_DRY_RUN_REQUEST_INVALID', 'request body must be an object')
+  }
+  for (const key of Object.keys(body)) {
+    if (!VALID_C6_WRITE_DRY_RUN_BODY_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'C6_WRITE_DRY_RUN_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    tenantId: firstString(body.tenantId),
+    workspaceId: firstString(body.workspaceId),
+    maxRows: body.maxRows,
+  }
 }
 
 function normalizeStockPreparationTargetRequest(input = {}) {
@@ -642,6 +665,29 @@ const ADAPTER_METADATA = {
       },
       ui: {
         referencesDataSources: true,
+      },
+    },
+  },
+  'data-source:sql-write-gated': {
+    label: 'Write-gated SQL data source',
+    roles: ['target'],
+    supports: ['testConnection', 'listObjects', 'getSchema'],
+    advanced: true,
+    guardrails: {
+      read: {
+        supported: false,
+      },
+      write: {
+        c6TokenBoundApplyRequired: true,
+        requiresWritableDataSource: true,
+        requiresGenericQueryDisabled: true,
+        noRawSql: true,
+        deleteSupported: false,
+        upsertRuntimeAvailable: false,
+      },
+      ui: {
+        hiddenByDefault: true,
+        serverConfiguredOnly: true,
       },
     },
   },
@@ -1396,6 +1442,76 @@ function createHandlers(services, options = {}) {
         triggeredBy: 'api',
         dryRun: true,
       })), 200)
+    },
+
+    async pipelinesExternalWriteDryRun(req, res) {
+      requireAccess(req, 'read')
+      const body = normalizeC6WriteDryRunBody(requestBody(req))
+      const scope = scopedInput(req, {
+        id: requestParams(req).id,
+        tenantId: body.tenantId,
+        workspaceId: body.workspaceId,
+        includeFieldMappings: true,
+      })
+      const pipeline = await pipelineRegistry.getPipeline(scope)
+      if (pipeline.status && pipeline.status !== 'active') {
+        throw new HttpRouteError(422, 'PIPELINE_INACTIVE', 'pipeline must be active for C6 external-write dry-run', {
+          pipelineId: pipeline.id,
+          status: pipeline.status,
+        })
+      }
+      const ownerPrincipal = firstString(pipeline.createdBy)
+      if (!ownerPrincipal) {
+        throw new HttpRouteError(422, 'C6_WRITE_OWNER_PRINCIPAL_REQUIRED', 'pipeline.createdBy is required for C6 external-write dry-run', {
+          pipelineId: pipeline.id,
+        })
+      }
+      const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+        : externalSystems.getExternalSystem.bind(externalSystems)
+      const sourceSystem = await loadSourceSystem(scopedInput(req, {
+        id: pipeline.sourceSystemId,
+        tenantId: body.tenantId,
+        workspaceId: body.workspaceId,
+      }))
+      const targetSystem = await externalSystems.getExternalSystem(scopedInput(req, {
+        id: pipeline.targetSystemId,
+        tenantId: body.tenantId,
+        workspaceId: body.workspaceId,
+      }))
+      if (!sourceSystem) {
+        throw new HttpRouteError(404, 'SOURCE_SYSTEM_NOT_FOUND', 'source external system not found')
+      }
+      if (!targetSystem) {
+        throw new HttpRouteError(404, 'TARGET_SYSTEM_NOT_FOUND', 'target external system not found')
+      }
+      if (sourceSystem.status && sourceSystem.status !== 'active') {
+        throw new HttpRouteError(422, 'SOURCE_SYSTEM_INACTIVE', 'source external system must be active', {
+          sourceSystemId: sourceSystem.id,
+          status: sourceSystem.status,
+        })
+      }
+      if (targetSystem.status && targetSystem.status !== 'active') {
+        throw new HttpRouteError(422, 'TARGET_SYSTEM_INACTIVE', 'target external system must be active', {
+          targetSystemId: targetSystem.id,
+          status: targetSystem.status,
+        })
+      }
+      const sourceAdapter = adapterRegistry.createAdapter(sourceSystem, {
+        role: 'source',
+        principal: ownerPrincipal,
+      })
+      return sendOk(res, await dryRunExternalWrite({
+        pipeline,
+        sourceSystem,
+        targetSystem,
+        sourceAdapter,
+        dataSourceWrites: context && context.api && context.api.dataSourceWrites,
+        tokenStore: context.storage,
+        dryRunUser: requestPrincipal(req),
+        dataSourceOwnerPrincipal: ownerPrincipal,
+        maxRows: body.maxRows,
+      }))
     },
 
     async tableActionsList(req, res) {

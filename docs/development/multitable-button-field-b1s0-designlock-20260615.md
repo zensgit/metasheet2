@@ -61,6 +61,7 @@
 
 - **B1-a1 inert `record_click` 的审计 = `logger.info`(ephemeral),有意,不写持久行**。理由:inert action **零已提交状态**(不写记录/不外发/不起 job),没有"对数据发生的事"可追;为一个 no-op 写一条持久 `multitable_automation_executions` 行不是审计严谨而是 ceremony。**且会污染**该表所驱动的规则执行分析与 DF-N1 运行监控 UI(非-rule 的 `rule_id='btn_*'` 行会出现在 `getRecent`/`listExecutions`/监控列表等非 rule-scoped 面)。
 - **持久审计行 = 行为级硬前置,挂在"首个有副作用的 button action"那一刀上**(即 §3.3 中 `send_notification` 起):**该 slice 必须经 `AutomationLogService.record()` 写一条已脱敏的 `multitable_automation_executions` 执行行,并带一条断言该行落库的测试**。这样审计随"button 真正做事"同 PR 落地——正是"feature 一能用,审计最易丢"防线生效处。
+- **confirm-before-run 同此前置(AUDIT-1 的孪生)**:button property 的 `confirm:{enabled,message?}` 在 B1-b 仅**解析**(`resolveButtonFieldProperty`),**不强制**——理由对齐:confirm 只能在 B1-c 配置 UI 里**被设置**(B1-b 前无配置面),且当前唯一启用的 action 是 inert `record_click`(确认一个 no-op 无意义),confirm 本质是**破坏性 action 的安全闸**。故 **confirm 强制与首个有副作用 action 同 slice 落地 + 带测**——与持久审计行捆绑:"button 能做事"那一刀同时带上"做之前先确认 + 落审计"。
 - **覆盖既有 §run-API 第 2 步措辞**:那条"写执行记录行(走既有 log-service + redact)"针对**有副作用 action**;inert 首刀按本节用 `logger.info`。
 - 例外(会翻成"现在就建"):出现明确要求**连 inert 点击也须持久可查**的合规/安全诉求时再建,并须先确认所有会浮现的执行查询面(运行监控 + recent/list)都是 rule-scoped,否则即引入污染。
 
@@ -113,9 +114,10 @@ button 字段本身不存每行值;展示全来自此 property。
 | **B1-S0** | 本设计锁(排除矩阵 + inert-action 决策 + run API 契约 + 不变量) | docs | ✅ 现在 |
 | **B1-a0** | 后端字段契约:`MetaFieldType='button'` + property sanitizer + **§2 全排除 guard** | backend | ✅ 纯单测 + tsc |
 | **B1-a1** | 执行:`button/run` + executor-owned `record_click` inert action + 审计 + dispatch 授权 | backend | ✅ 单测(含 §4 闸 / §5 失败语义 fail-first) |
-| **B1-b** | grid/记录详情 render button(可见/禁用/执行中/错误态,不含配置 UI) | frontend | ⚠️ jsdom 验渲染/emit/禁用;真实 click→execute→state 需浏览器 |
-| **B1-c** | FieldManager 配置 UI(创建/编辑 button 字段、绑定动作、picker 可见性) | frontend | ⚠️ 最高回归面,需浏览器验 configure→save→render→click 真路径 |
+| **B1-b** | **grid** render button(可见/禁用/执行中/错误态,不含配置 UI)。**SHIPPED #2699(grid only)**;原 S0 文写"grid/记录详情"但实交付仅 grid(经 MetaCellRenderer);记录详情面是 MetaRecordDrawer 的并行 per-type 链,拆为 **B1-e**(见下) | frontend | ✅ jsdom 渲染/emit/禁用 + **真实 Chromium lane**(render→click→pending→done) |
+| **B1-c** | FieldManager 配置 UI(创建/编辑 button、label/variant/actionType/confirm authoring、actionConfig clobber-guard)。**SHIPPED #2703** | frontend | ✅ jsdom(create + keystone actionConfig 保留)+ lane 验 🔘 header icon |
 | **B1-d** | 验证 + tracker closeout(fail-first 证据、CI 锁、剩余项登记) | docs/test | ✅ |
+| **B1-e**(新,queued — owner 2026-06-16「可排队不急」) | **记录详情(MetaRecordDrawer)clickable button render** —— 其独立 per-type 链(非 MetaCellRenderer);今天 button 在记录详情走默认只读、不崩、但不可点。**form-view 保持出范围(§7);如启用须先定 hide / read-only 展示 / clickable 动作**。续做 button arc 时**优先 record drawer**,form-view 仅设计决定 | frontend | ⚠️ jsdom + lane(harness 需扩 MetaRecordDrawer) |
 
 ## 9. 验证计划(实现期)
 
