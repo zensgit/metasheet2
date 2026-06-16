@@ -328,6 +328,7 @@ const FIELD_TYPE_LABELS: Record<string, { en: string; zh: string }> = {
   modifiedTime: { en: 'modified time', zh: '修改时间' },
   createdBy: { en: 'created by', zh: '创建人' },
   modifiedBy: { en: 'modified by', zh: '修改人' },
+  button: { en: 'button', zh: '按钮' },
 }
 export function fieldTypeLabel(type: string, isZh: boolean): string {
   const entry = FIELD_TYPE_LABELS[type]
