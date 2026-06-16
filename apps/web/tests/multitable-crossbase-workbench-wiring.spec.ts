@@ -55,7 +55,11 @@ vi.mock('../src/multitable/composables/useMultitableComments', () => ({
   useMultitableComments: () => ({
     comments: ref([]), loading: ref(false), submitting: ref(false), resolvingIds: ref<string[]>([]),
     updatingIds: ref<string[]>([]), deletingIds: ref<string[]>([]), error: ref<string | null>(null),
+    // B6 (#2674) added these to the composable; the workbench reads reactingKeys.value at render time,
+    // so without them this mount throws and the spec only "passed" via suite module-ordering luck.
+    reactingKeys: ref<string[]>([]),
     loadComments: vi.fn(), addComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn(), resolveComment: vi.fn(),
+    addReaction: vi.fn(), removeReaction: vi.fn(),
   }),
 }))
 vi.mock('../src/multitable/composables/useMultitableCommentInbox', () => ({
