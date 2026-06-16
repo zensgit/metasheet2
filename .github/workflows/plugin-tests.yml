@@ -235,6 +235,25 @@ jobs:
             tests/integration/data-source-c3-keyset-realdb.test.ts \
             --reporter=dot
 
+      - name: Run comment-reaction keystone (real wire, real PG)
+        # B6 emoji-reaction keystone (#2673 follow-up). Wired as a WHOLE FILE (not a
+        # `-t` name filter) so the gate is robust: a name filter that matches zero
+        # tests exits 0/green and would silently reintroduce the invisible debt this
+        # exists to kill, whereas a whole-file run fails if the file is empty/broken.
+        # comment-reactions.api.test.ts covers add / aggregate / idempotent re-add /
+        # self-scoped DELETE / reader-deny 403 / cascade against real Postgres, with a
+        # fail-loud beforeAll (missing PG/port → RED, not skipped-green). The sibling
+        # comments.api.test.ts is intentionally NOT wired: 8 of its tests have a
+        # pre-existing real-wire failure (CommentService.mapRowToComment drops
+        # containerId/targetId/targetFieldId), tracked separately under its own opt-in.
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for comment-reaction keystone}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/comment-reactions.api.test.ts --reporter=dot
+
       - name: Start core backend (background)
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test

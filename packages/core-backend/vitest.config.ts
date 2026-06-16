@@ -29,6 +29,18 @@ export default defineConfig({
       'tests/integration/attendance-schedule-dispatch.test.ts',
       'tests/integration/attendance-shift-swap.test.ts',
       'tests/integration/attendance-unscheduled-reminder.test.ts',
+      // comment-reactions.api.test.ts needs setup.integration.ts + a live DB (real
+      // MetaSheetServer on an ephemeral port + rbacGuard). It is excluded from the
+      // default unit run HERE but wired as a WHOLE FILE into the dedicated
+      // `Run comment-reaction keystone` step in plugin-tests.yml, where it runs
+      // against real Postgres every PR — the B6 keystone (add/aggregate/idempotent
+      // re-add/self-scoped DELETE/reader-deny 403/cascade) is no longer invisible debt.
+      'tests/integration/comment-reactions.api.test.ts',
+      // comments.api.test.ts needs setup.integration.ts + a live DB. It stays
+      // CI-excluded (NOT wired) because 8 of its tests have a pre-existing real-wire
+      // failure (CommentService.mapRowToComment drops containerId/targetId/
+      // targetFieldId), tracked separately under its own opt-in fix. The reaction
+      // keystone that used to live here moved to comment-reactions.api.test.ts.
       'tests/integration/comments.api.test.ts',
       'tests/integration/events-api.test.ts',
       'tests/integration/multitable-attachments.api.test.ts',
