@@ -134,6 +134,39 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
     expect(got.body.data.options).toMatchObject({ autoConnect: true, readOnly: false, timeout: 5 })
   })
 
+  it('persists per-source tenant scope option keys through create and partial update', async () => {
+    currentUser = admin('alice')
+    const create = await request(app)
+      .post('/api/data-sources')
+      .send({
+        id: 'plm-scope',
+        name: 'PLM scoped',
+        type: 'http',
+        connection: { baseURL: 'http://plm.example.test' },
+        options: { autoConnect: false, readOnly: true, tenantId: 'tenant-a', orgId: 'org-a' },
+      })
+    expect(create.status).toBe(201)
+    expect(create.body.data.options).toMatchObject({ tenantId: 'tenant-a', orgId: 'org-a' })
+
+    // This route-level test only locks REST persistence of the option keys. PLM
+    // embed reachability is locked by the real PLMAdapter tests; an HTTP source
+    // is not a PLM BOM adapter.
+    const put = await request(app)
+      .put('/api/data-sources/plm-scope')
+      .send({ options: { timeout: 10 } })
+    expect(put.status).toBe(200)
+
+    const got = await request(app).get('/api/data-sources/plm-scope')
+    expect(got.status).toBe(200)
+    expect(got.body.data.options).toMatchObject({
+      autoConnect: false,
+      readOnly: true,
+      tenantId: 'tenant-a',
+      orgId: 'org-a',
+      timeout: 10,
+    })
+  })
+
   it('a partial connection update preserves hidden security keys (P1 regression)', async () => {
     currentUser = admin('alice')
     // A source whose connection carries security-sensitive keys an edit UI does NOT surface.

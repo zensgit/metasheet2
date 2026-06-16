@@ -258,6 +258,36 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     expect(jtiMocks.consume).not.toHaveBeenCalled()
   })
 
+  it('END-TO-END (real adapter): per-source options tenant/org serve the embed route when the token tenant matches', async () => {
+    for (const k of ['PLM_TENANT_ID', 'PLM_ORG_ID', 'PLM_BASE_URL', 'PLM_URL']) delete process.env[k]
+    const adapter = new PLMAdapter(
+      { get: async () => undefined } as never,
+      { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
+      {
+        id: DS_ID,
+        name: 'PLM',
+        type: 'plm',
+        connection: { url: '' },
+        options: { tenantId: 'tenant-a', orgId: 'org-a' },
+      } as never,
+    )
+    await adapter.connect() // no URL -> mock mode -> no network; options populate served tenant/org headers
+    const getBomMultitableContext = vi
+      .spyOn(adapter, 'getBomMultitableContext')
+      .mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
+    dsMocks.getDataSource.mockReturnValue(adapter)
+
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-a' }))
+
+    expect(res.status).toBe(200)
+    expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
+    expect(adapter.getEffectiveTenantId()).toBe('tenant-a')
+    expect(((adapter as unknown as { config: { connection: { headers?: Record<string, string> } } }).config.connection.headers)).toMatchObject({
+      'x-tenant-id': 'tenant-a',
+      'x-org-id': 'org-a',
+    })
+  })
+
   // --- single-use jti consume (slice B / B1): consume AFTER all checks, BEFORE the BOM query ---
 
   it('first use: consumes the (scoped) jti and serves -> 200', async () => {

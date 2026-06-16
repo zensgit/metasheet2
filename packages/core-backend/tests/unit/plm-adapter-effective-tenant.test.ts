@@ -15,10 +15,16 @@ const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
 
 function makeAdapter(opts: {
   globalTenant?: string
+  globalOrg?: string
   optionsTenant?: string
+  optionsOrg?: string
   connectionHeaders?: Record<string, string>
 }): PLMAdapter {
-  const get = vi.fn(async (key: string) => (key === 'plm.tenantId' ? opts.globalTenant : undefined))
+  const get = vi.fn(async (key: string) => {
+    if (key === 'plm.tenantId') return opts.globalTenant
+    if (key === 'plm.orgId') return opts.globalOrg
+    return undefined
+  })
   const configService = { get }
   const config = {
     id: 'plm-embed',
@@ -26,7 +32,10 @@ function makeAdapter(opts: {
     type: 'plm',
     // no URL -> mock mode -> connect() resolves the tenant + sets the x-tenant-id header then early-returns
     connection: { url: '', ...(opts.connectionHeaders ? { headers: opts.connectionHeaders } : {}) },
-    options: opts.optionsTenant ? { tenantId: opts.optionsTenant } : {},
+    options: {
+      ...(opts.optionsTenant ? { tenantId: opts.optionsTenant } : {}),
+      ...(opts.optionsOrg ? { orgId: opts.optionsOrg } : {}),
+    },
   }
   return new PLMAdapter(configService as never, logger as never, config as never)
 }
@@ -69,6 +78,16 @@ describe('PLMAdapter.getEffectiveTenantId (served tenant, full precedence)', () 
     const adapter = makeAdapter({ optionsTenant: 'tenant-a' })
     await adapter.connect()
     expect(adapter.getEffectiveTenantId()).toBe('tenant-a')
+  })
+
+  it('falls back to per-source options.tenantId/orgId and sends both PLM scope headers', async () => {
+    const adapter = makeAdapter({ optionsTenant: 'tenant-a', optionsOrg: 'org-a' })
+    await adapter.connect()
+    expect(adapter.getEffectiveTenantId()).toBe('tenant-a')
+    expect(((adapter as unknown as { config: { connection: { headers?: Record<string, string> } } }).config.connection.headers)).toMatchObject({
+      'x-tenant-id': 'tenant-a',
+      'x-org-id': 'org-a',
+    })
   })
 
   it('is undefined when no tenant is configured anywhere (the relay then fails closed)', async () => {
