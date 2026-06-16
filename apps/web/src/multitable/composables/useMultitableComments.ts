@@ -17,6 +17,8 @@ export function useMultitableComments(client?: MultitableApiClient) {
   const resolvingIds = ref<string[]>([])
   const updatingIds = ref<string[]>([])
   const deletingIds = ref<string[]>([])
+  // B6: in-flight reaction toggles keyed `${commentId}:${emoji}` (debounces double-clicks).
+  const reactingKeys = ref<string[]>([])
 
   async function loadComments(params: CommentsTarget) {
     loading.value = true
@@ -96,17 +98,84 @@ export function useMultitableComments(client?: MultitableApiClient) {
     }
   }
 
+  // B6: add/remove the caller's emoji reaction. Await-then-mutate (mirrors
+  // resolveComment): the endpoints return no reaction data, so on success we
+  // locally recompute the comment's reactions aggregate. A re-add of an emoji
+  // the user already reacted with (or a remove of one they didn't) is a no-op
+  // both server-side (idempotent) and locally.
+  async function addReaction(commentId: string, emoji: string) {
+    const key = `${commentId}:${emoji}`
+    error.value = null
+    if (reactingKeys.value.includes(key)) return
+    reactingKeys.value = [...reactingKeys.value, key]
+    try {
+      await api.addReaction(commentId, emoji)
+      applyReaction(commentId, emoji, 'add')
+    } catch (e: any) {
+      error.value = e.message ?? fallback('comment.errorAddReaction')
+      throw e
+    } finally {
+      reactingKeys.value = reactingKeys.value.filter((k) => k !== key)
+    }
+  }
+
+  async function removeReaction(commentId: string, emoji: string) {
+    const key = `${commentId}:${emoji}`
+    error.value = null
+    if (reactingKeys.value.includes(key)) return
+    reactingKeys.value = [...reactingKeys.value, key]
+    try {
+      await api.removeReaction(commentId, emoji)
+      applyReaction(commentId, emoji, 'remove')
+    } catch (e: any) {
+      error.value = e.message ?? fallback('comment.errorRemoveReaction')
+      throw e
+    } finally {
+      reactingKeys.value = reactingKeys.value.filter((k) => k !== key)
+    }
+  }
+
+  /** Local recompute of one comment's reactions aggregate after a successful toggle. */
+  function applyReaction(commentId: string, emoji: string, mode: 'add' | 'remove') {
+    const index = comments.value.findIndex((item) => item.id === commentId)
+    if (index < 0) return
+    const current = comments.value[index].reactions ?? []
+    const existing = current.find((r) => r.emoji === emoji)
+    let next = current
+    if (mode === 'add') {
+      if (!existing) {
+        next = [...current, { emoji, count: 1, reactedByMe: true }]
+      } else if (!existing.reactedByMe) {
+        next = current.map((r) => (r.emoji === emoji ? { ...r, count: r.count + 1, reactedByMe: true } : r))
+      } // already reactedByMe → no-op
+    } else {
+      if (existing?.reactedByMe) {
+        const count = Math.max(0, existing.count - 1)
+        next = count === 0
+          ? current.filter((r) => r.emoji !== emoji)
+          : current.map((r) => (r.emoji === emoji ? { ...r, count, reactedByMe: false } : r))
+      } // not reactedByMe → no-op
+    }
+    comments.value[index] = { ...comments.value[index], reactions: next }
+  }
+
   function clearComments() {
     comments.value = []
     error.value = null
     updatingIds.value = []
     deletingIds.value = []
+    reactingKeys.value = []
   }
 
   function upsertComment(comment: MultitableComment) {
     const index = comments.value.findIndex((item) => item.id === comment.id)
     if (index >= 0) {
-      comments.value[index] = { ...comments.value[index], ...comment }
+      const merged = { ...comments.value[index], ...comment }
+      // B6: edit/realtime comment payloads are NOT reaction-hydrated (only
+      // getComments hydrates reactions), so an incoming `undefined` must not
+      // wipe the reactions already shown — preserve the existing aggregate.
+      if (comment.reactions === undefined) merged.reactions = comments.value[index].reactions
+      comments.value[index] = merged
       return
     }
     comments.value = [comment, ...comments.value]
@@ -135,11 +204,15 @@ export function useMultitableComments(client?: MultitableApiClient) {
     resolvingIds,
     updatingIds,
     deletingIds,
+    reactingKeys,
     loadComments,
     addComment,
     updateComment,
     deleteComment,
     resolveComment,
+    addReaction,
+    removeReaction,
+    applyReaction,
     clearComments,
     upsertComment,
     applyResolvedComment,

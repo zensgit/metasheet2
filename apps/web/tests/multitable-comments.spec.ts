@@ -219,4 +219,94 @@ describe('useMultitableComments', () => {
 
     expect(state.error.value).toBe('backend raw')
   })
+
+  // ── B6 reactions ───────────────────────────────────────────────────────────
+
+  it('carries the reactions aggregate through the client normalizer (wire-drift guard)', async () => {
+    const comments = [{
+      id: 'c1', spreadsheetId: 's1', rowId: 'r1', fieldId: null, mentions: [], authorId: 'u1',
+      content: 'hi', resolved: false, createdAt: '2026-01-01',
+      reactions: [
+        { emoji: '👍', count: 2, reactedByMe: true },
+        { emoji: '❤️', count: 1, reactedByMe: false },
+        { bad: 'entry' }, // malformed → filtered out
+      ],
+    }]
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { comments } }), { status: 200 }))
+    ;(client as any).fetch = fetch
+    const state = useMultitableComments(client)
+    await state.loadComments({ containerId: 's1', targetId: 'r1' })
+    expect(state.comments.value[0].reactions).toEqual([
+      { emoji: '👍', count: 2, reactedByMe: true },
+      { emoji: '❤️', count: 1, reactedByMe: false },
+    ])
+  })
+
+  it('addReaction POSTs the emoji in the body and recomputes locally', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: {} }), { status: 201 }))
+    ;(client as any).fetch = fetch
+    const state = useMultitableComments(client)
+    state.comments.value = [{ id: 'c1', containerId: 's1', targetId: 'r1', fieldId: null, mentions: [], authorId: 'u1', content: 'x', resolved: false, createdAt: '2026-01-01', reactions: [] }]
+    await state.addReaction('c1', '👍')
+    expect(fetch).toHaveBeenCalledWith('/api/comments/c1/reactions', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ emoji: '👍' }),
+    }))
+    expect(state.comments.value[0].reactions).toEqual([{ emoji: '👍', count: 1, reactedByMe: true }])
+  })
+
+  it('addReaction increments an existing emoji once, and is a no-op if already reacted', async () => {
+    const fetch = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ ok: true, data: {} }), { status: 201 }))
+    ;(client as any).fetch = fetch
+    const state = useMultitableComments(client)
+    state.comments.value = [{ id: 'c1', containerId: 's1', targetId: 'r1', fieldId: null, mentions: [], authorId: 'u1', content: 'x', resolved: false, createdAt: '2026-01-01', reactions: [{ emoji: '👍', count: 1, reactedByMe: false }] }]
+    await state.addReaction('c1', '👍')
+    expect(state.comments.value[0].reactions).toEqual([{ emoji: '👍', count: 2, reactedByMe: true }])
+    // re-add (already reactedByMe) → server idempotent, local no-op
+    await state.addReaction('c1', '👍')
+    expect(state.comments.value[0].reactions).toEqual([{ emoji: '👍', count: 2, reactedByMe: true }])
+  })
+
+  it('removeReaction DELETEs the emoji in the body and drops the entry at zero', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    ;(client as any).fetch = fetch
+    const state = useMultitableComments(client)
+    state.comments.value = [{ id: 'c1', containerId: 's1', targetId: 'r1', fieldId: null, mentions: [], authorId: 'u1', content: 'x', resolved: false, createdAt: '2026-01-01', reactions: [{ emoji: '👍', count: 1, reactedByMe: true }] }]
+    await state.removeReaction('c1', '👍')
+    expect(fetch).toHaveBeenCalledWith('/api/comments/c1/reactions', expect.objectContaining({
+      method: 'DELETE',
+      body: JSON.stringify({ emoji: '👍' }),
+    }))
+    expect(state.comments.value[0].reactions).toEqual([]) // count hit 0 → entry removed
+  })
+
+  it('removeReaction decrements but keeps the entry when others still reacted', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    ;(client as any).fetch = fetch
+    const state = useMultitableComments(client)
+    state.comments.value = [{ id: 'c1', containerId: 's1', targetId: 'r1', fieldId: null, mentions: [], authorId: 'u1', content: 'x', resolved: false, createdAt: '2026-01-01', reactions: [{ emoji: '👍', count: 3, reactedByMe: true }] }]
+    await state.removeReaction('c1', '👍')
+    expect(state.comments.value[0].reactions).toEqual([{ emoji: '👍', count: 2, reactedByMe: false }])
+  })
+
+  it('upsertComment preserves an existing reactions aggregate when the incoming payload lacks one', () => {
+    const state = useMultitableComments(client)
+    state.comments.value = [{ id: 'c1', containerId: 's1', targetId: 'r1', fieldId: null, mentions: [], authorId: 'u1', content: 'old', resolved: false, createdAt: '2026-01-01', reactions: [{ emoji: '👍', count: 2, reactedByMe: true }] }]
+    // an edit/realtime payload (no reactions hydrated)
+    state.upsertComment({ id: 'c1', containerId: 's1', targetId: 'r1', fieldId: null, mentions: [], authorId: 'u1', content: 'edited', resolved: false, createdAt: '2026-01-01' } as any)
+    expect(state.comments.value[0].content).toBe('edited')
+    expect(state.comments.value[0].reactions).toEqual([{ emoji: '👍', count: 2, reactedByMe: true }])
+  })
+
+  it('surfaces a localized fallback when addReaction fails', async () => {
+    useLocale().setLocale('en')
+    const state = useMultitableComments({
+      addReaction: vi.fn().mockRejectedValue({}),
+    } as any)
+    state.comments.value = [{ id: 'c1', containerId: 's1', targetId: 'r1', fieldId: null, mentions: [], authorId: 'u1', content: 'x', resolved: false, createdAt: '2026-01-01', reactions: [] }]
+    await expect(state.addReaction('c1', '👍')).rejects.toBeTruthy()
+    expect(state.error.value).toBe('Failed to add reaction')
+    // failed call must NOT mutate local state
+    expect(state.comments.value[0].reactions).toEqual([])
+  })
 })

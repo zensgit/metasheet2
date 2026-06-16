@@ -308,10 +308,11 @@
         :resolving-ids="commentsState.resolvingIds.value"
         :updating-ids="commentsState.updatingIds.value"
         :deleting-ids="commentsState.deletingIds.value"
+        :reacting-keys="commentsState.reactingKeys.value"
         :current-user-id="currentUserId"
         :mention-suggestions="commentMentionSuggestions"
         :composer-initial-mentions="commentComposerInitialMentions"
-        @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @reply="onReplyToComment" @edit="onEditComment" @delete="onDeleteComment" @cancel-reply="onCancelCommentReply" @cancel-edit="onCancelCommentEdit" @update:draft="commentDraft = $event"
+        @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @reply="onReplyToComment" @edit="onEditComment" @delete="onDeleteComment" @cancel-reply="onCancelCommentReply" @cancel-edit="onCancelCommentEdit" @update:draft="commentDraft = $event" @react="onReactToComment" @unreact="onUnreactToComment"
       />
     </div>
     <div v-if="showShortcuts" class="mt-workbench__shortcuts-overlay" @click.self="showShortcuts = false">
@@ -1708,6 +1709,22 @@ async function onDeleteComment(commentId: string) {
     showSuccess(wb('toast.commentDeleted', isZh.value))
   } catch (e: any) {
     showError(commentsState.error.value ?? e.message ?? wb('toast.commentDeleteFailed', isZh.value))
+  }
+}
+
+async function onReactToComment(commentId: string, emoji: string) {
+  try {
+    await commentsState.addReaction(commentId, emoji)
+  } catch (e: any) {
+    showError(commentsState.error.value ?? e.message ?? wb('toast.commentReactFailed', isZh.value))
+  }
+}
+
+async function onUnreactToComment(commentId: string, emoji: string) {
+  try {
+    await commentsState.removeReaction(commentId, emoji)
+  } catch (e: any) {
+    showError(commentsState.error.value ?? e.message ?? wb('toast.commentReactFailed', isZh.value))
   }
 }
 

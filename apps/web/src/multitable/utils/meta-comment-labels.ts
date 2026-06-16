@@ -34,11 +34,14 @@ export type MetaCommentLabelKey =
   | 'comment.hintBase'
   | 'comment.hintWithMention'
   | 'comment.discardDraftConfirm'
+  | 'comment.addReaction'
   | 'comment.errorLoad'
   | 'comment.errorAdd'
   | 'comment.errorResolve'
   | 'comment.errorUpdate'
   | 'comment.errorDelete'
+  | 'comment.errorAddReaction'
+  | 'comment.errorRemoveReaction'
   | 'comment.errorLoadInbox'
   | 'comment.errorLoadUnreadCount'
   | 'comment.errorMarkRead'
@@ -79,11 +82,14 @@ const META_COMMENT_LABELS: Record<MetaCommentLabelKey, { en: string; zh: string 
     en: 'Discard unsaved comment draft?',
     zh: '放弃未保存的评论草稿吗？',
   },
+  'comment.addReaction': { en: 'Add reaction', zh: '添加表情' },
   'comment.errorLoad': { en: 'Failed to load comments', zh: '加载评论失败' },
   'comment.errorAdd': { en: 'Failed to add comment', zh: '添加评论失败' },
   'comment.errorResolve': { en: 'Failed to resolve comment', zh: '解决评论失败' },
   'comment.errorUpdate': { en: 'Failed to update comment', zh: '更新评论失败' },
   'comment.errorDelete': { en: 'Failed to delete comment', zh: '删除评论失败' },
+  'comment.errorAddReaction': { en: 'Failed to add reaction', zh: '添加表情失败' },
+  'comment.errorRemoveReaction': { en: 'Failed to remove reaction', zh: '移除表情失败' },
   'comment.errorLoadInbox': { en: 'Failed to load comment inbox', zh: '加载评论收件箱失败' },
   'comment.errorLoadUnreadCount': { en: 'Failed to load unread comment count', zh: '加载未读评论数失败' },
   'comment.errorMarkRead': { en: 'Failed to mark comment as read', zh: '标记评论已读失败' },
