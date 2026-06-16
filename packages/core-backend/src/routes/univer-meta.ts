@@ -17,6 +17,7 @@ import {
 } from '../multitable/permission-derivation'
 import { validateAiShortcutFieldProperty } from '../multitable/ai-shortcut-config'
 import { withFieldVisibilityRule } from '../multitable/field-visibility-rule'
+import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import {
   deriveCapabilities,
@@ -7174,6 +7175,13 @@ export function univerMetaRouter(): Router {
       accessMode: z.enum(['public', 'dingtalk', 'dingtalk_granted']).optional(),
       allowedUserIds: z.array(z.string().min(1)).optional(),
       allowedMemberGroupIds: z.array(z.string().min(1)).optional(),
+      // A4 form-logic config (multi-page/section · URL-prefill · post-submit
+      // redirect · thank-you). Freeform here — the canonical normalizer
+      // (sanitizeFormLayout) bounds/validates every field, including the
+      // open-redirect-safe URL check, before persisting under
+      // view.config.formLayout (SEPARATE from publicForm access-control).
+      // `null` clears it; omitted leaves it untouched.
+      formLayout: z.unknown().optional(),
     })
 
     const parsed = schema.safeParse(req.body)
@@ -7298,6 +7306,38 @@ export function univerMetaRouter(): Router {
         }
       }
       nextConfig.publicForm = nextPublicForm as Record<string, unknown>
+
+      // A4: persist the form-logic layout (pages/prefill/redirect/confirmation)
+      // under view.config.formLayout, SEPARATE from publicForm access-control.
+      // Only touched when the caller supplied `formLayout` (undefined = leave
+      // existing untouched). `null` clears it. The normalizer (withFormLayout)
+      // bounds every field; a redirect URL that is non-empty but FAILS the
+      // open-redirect-safe check is surfaced as a 400 rather than silently
+      // dropped, so the author gets feedback.
+      if (parsed.data.formLayout !== undefined) {
+        const layoutInput = parsed.data.formLayout
+        if (layoutInput !== null && typeof layoutInput === 'object' && !Array.isArray(layoutInput)) {
+          const redirectInput = (layoutInput as Record<string, unknown>).redirect
+          if (redirectInput && typeof redirectInput === 'object' && !Array.isArray(redirectInput)) {
+            const rawUrl = (redirectInput as Record<string, unknown>).url
+            if (typeof rawUrl === 'string' && rawUrl.trim() && sanitizeFormRedirectUrl(rawUrl) === null) {
+              return res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: 'Post-submit redirect must be a same-origin relative path (e.g. /thanks)',
+                },
+              })
+            }
+          }
+        }
+        const withLayout = withFormLayout(nextConfig, layoutInput === null ? undefined : layoutInput)
+        // Replace nextConfig in place so the persisted JSON + the cache reflect it.
+        for (const key of Object.keys(nextConfig)) {
+          if (!(key in withLayout)) delete nextConfig[key]
+        }
+        Object.assign(nextConfig, withLayout)
+      }
 
       await pool.query(
         `UPDATE meta_views
@@ -8714,11 +8754,15 @@ export function univerMetaRouter(): Router {
               : `/api/multitable/views/${resolved.view.id}/submit`)
             : '/api/multitable/records',
           sheet,
-          // #2052 (b): redact denied-field filter literals per the REQUESTER's allowed-field set (same
-          // field-permission-aware contract as the other readbacks). loadAllowedFieldIds fails CLOSED for an
-          // ANONYMOUS public-form caller (no access.userId → empty set → every literal redacted); an
-          // AUTHENTICATED caller keeps literals for fields they can read, redacts only the denied ones.
+          // Requester-aware view echo (unchanged from pre-A4): redactViewConfigFilterLiterals keeps
+          // filter literals the requester may read and redacts denied ones (#2052 / R5b). NOTE: this still
+          // echoes view.config.publicForm to anonymous callers — a PRE-EXISTING leak (NOT introduced by A4),
+          // tracked separately so it gets its own one-concern fix rather than riding this feature PR.
           ...(resolved.view ? { view: redactViewConfigFilterLiterals(resolved.view, await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)) } : {}),
+          // A4 SAFE form-logic projection: ONLY the presentational layout sub-objects (pages / prefill
+          // allowlist / validated redirect / confirmation text), normalized by sanitizeFormLayout. Built
+          // from view.config.formLayout via a whitelist — never carries publicForm or other config keys.
+          ...(resolved.view ? (() => { const layout = projectPublicFormLayout(resolved.view.config); return layout ? { formLayout: layout } : {} })() : {}),
           fields: visibleFields,
           capabilities: effectiveCapabilities,
           ...(effectiveCapabilityOrigin ? { capabilityOrigin: effectiveCapabilityOrigin } : {}),

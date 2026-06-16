@@ -57,6 +57,8 @@ export type MetaRecordLabelKey =
   | 'notification.bell' | 'notification.title' | 'notification.empty'
   | 'notification.markAllRead' | 'notification.loadError'
   | 'notification.eventRecordUpdated' | 'notification.eventCommentCreated'
+  // --- MetaFormView multi-page nav chrome (A4) ---
+  | 'form.previousPage' | 'form.nextPage'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -120,6 +122,8 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'form.saving': { en: 'Saving...', zh: '正在保存...' },
   'form.create': { en: 'Create', zh: '创建' },
   'form.reset': { en: 'Reset', zh: '重置' },
+  'form.previousPage': { en: 'Previous', zh: '上一页' },
+  'form.nextPage': { en: 'Next', zh: '下一页' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -148,4 +152,10 @@ export function historyActor(actorId: string, isZh: boolean): string {
 // in MetaFormView. Field name is user data and is interpolated raw.
 export function requiredField(fieldName: string, isZh: boolean): string {
   return isZh ? `${fieldName} 为必填项` : `${fieldName} is required`
+}
+
+// formPageIndicator: "Page X of Y" indicator for the multi-page form view
+// (A4). Numbers are not translated; the surrounding copy is.
+export function formPageIndicator(current: number, total: number, isZh: boolean): string {
+  return isZh ? `第 ${current} / ${total} 页` : `Page ${current} of ${total}`
 }

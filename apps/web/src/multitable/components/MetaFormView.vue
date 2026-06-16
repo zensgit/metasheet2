@@ -6,8 +6,19 @@
       <div v-if="successMessage" class="meta-form-view__success">{{ successMessage }}</div>
       <div v-if="errorMessage" class="meta-form-view__error">{{ errorMessage }}</div>
       <form class="meta-form-view__form" @submit.prevent="onSubmit">
+        <!-- A4: multi-page header (rendered only when the form has >1 page).
+             Pages are RENDER-only grouping; validate() still iterates ALL
+             visible fields regardless of which page is active. -->
+        <div v-if="isMultiPage" class="meta-form-view__page-header" data-form-page-header>
+          <span v-if="currentPage?.title" class="meta-form-view__page-title">{{ currentPage.title }}</span>
+          <span class="meta-form-view__page-indicator" data-form-page-indicator>{{ pageIndicatorLabel }}</span>
+        </div>
+        <p
+          v-if="isMultiPage && currentPage?.description"
+          class="meta-form-view__page-description"
+        >{{ currentPage.description }}</p>
         <div
-          v-for="field in editableFields"
+          v-for="field in currentPageFields"
           :key="field.id"
           class="meta-form-view__field"
         >
@@ -278,8 +289,32 @@
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-form-view__link-summary">{{ linkPreview(field.id) }}</div>
           <div v-if="fieldErrors?.[field.id] || validationErrors[field.id]" :id="`error_${field.id}`" class="meta-form-view__field-error">{{ fieldErrors?.[field.id] || validationErrors[field.id] }}</div>
         </div>
+        <!-- A4: page navigation. Prev/Next move between render pages; submit
+             only appears on the last page so the user reaches every page. On
+             a single-page form (no layout / one page) this collapses to today's
+             actions row with just submit/reset. -->
         <div v-if="!readOnly" class="meta-form-view__actions">
-          <button type="submit" class="meta-form-view__submit" :disabled="submitting || hasPendingAttachmentActions">
+          <button
+            v-if="isMultiPage && !isFirstPage"
+            type="button"
+            class="meta-form-view__nav"
+            data-form-prev
+            @click="goToPreviousPage"
+          >{{ l('form.previousPage') }}</button>
+          <button
+            v-if="isMultiPage && !isLastPage"
+            type="button"
+            class="meta-form-view__nav meta-form-view__nav--next"
+            data-form-next
+            @click="goToNextPage"
+          >{{ l('form.nextPage') }}</button>
+          <button
+            v-if="!isMultiPage || isLastPage"
+            type="submit"
+            class="meta-form-view__submit"
+            data-form-submit
+            :disabled="submitting || hasPendingAttachmentActions"
+          >
             {{ submitting ? l('form.saving') : (record ? l('form.save') : l('form.create')) }}
           </button>
           <button v-if="record" type="button" class="meta-form-view__reset" @click="resetForm">{{ l('form.reset') }}</button>
@@ -292,6 +327,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import type {
+  FormLayoutConfig,
   LinkedRecordSummary,
   MetaAttachment,
   MetaAttachmentDeleteFn,
@@ -321,6 +357,7 @@ import {
 import { linkActionLabel } from '../utils/link-fields'
 import { useLocale } from '../../composables/useLocale'
 import {
+  formPageIndicator,
   recordLabel,
   requiredField,
   type MetaRecordLabelKey,
@@ -341,6 +378,7 @@ import {
 } from '../utils/field-display'
 import { isSystemField } from '../utils/system-fields'
 import { isFieldVisible } from '../utils/field-visibility'
+import { resolveFormPages } from '../utils/form-layout'
 
 const props = defineProps<{
   fields: MetaField[]
@@ -360,6 +398,15 @@ const props = defineProps<{
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   canComment?: boolean
   commentPresence?: MultitableCommentPresenceSummary | null
+  // A4: optional public-form logic layout (pages / prefill / redirect /
+  // confirmation). Absent ⇒ today's flat single-page render (shared with the
+  // inline record editor, which never passes this).
+  formLayout?: FormLayoutConfig | null
+  // A4: create-mode prefill seed (fieldId → value). Merged into formData ONLY
+  // when there is no loaded record; it must never override an existing record's
+  // data, and the caller is responsible for excluding read-only / system /
+  // non-allowlisted fields before passing it.
+  initialValues?: Record<string, unknown> | null
 }>()
 
 const emit = defineEmits<{
@@ -400,6 +447,36 @@ const editableFields = computed(() => {
   )
 })
 
+// A4: render pages, derived from the layout + the FULL visible field list.
+// `editableFields` (above) stays the authoritative visible list that
+// `validate()` iterates — pages NEVER subset what is validated (that would be a
+// silent cross-page skip). `currentPageFields` only drives what is rendered.
+const formPages = computed(() => resolveFormPages(props.formLayout ?? null, editableFields.value))
+const isMultiPage = computed(() => formPages.value.length > 1)
+const currentPageIndex = ref(0)
+
+// Clamp the active page when the resolved page set shrinks (e.g. a conditional
+// page empties out as the user edits a dependency) so the index never dangles.
+watch(formPages, (pages) => {
+  if (currentPageIndex.value > pages.length - 1) {
+    currentPageIndex.value = Math.max(0, pages.length - 1)
+  }
+})
+
+const currentPage = computed(() => formPages.value[currentPageIndex.value] ?? formPages.value[0] ?? null)
+const currentPageFields = computed(() => currentPage.value?.fields ?? [])
+const isFirstPage = computed(() => currentPageIndex.value <= 0)
+const isLastPage = computed(() => currentPageIndex.value >= formPages.value.length - 1)
+const pageIndicatorLabel = computed(() => formPageIndicator(currentPageIndex.value + 1, formPages.value.length, isZh.value))
+
+function goToNextPage() {
+  if (!isLastPage.value) currentPageIndex.value += 1
+}
+
+function goToPreviousPage() {
+  if (!isFirstPage.value) currentPageIndex.value -= 1
+}
+
 function isFieldReadOnly(fieldId: string): boolean {
   const field = props.fields.find((item) => item.id === fieldId) ?? null
   return !!props.readOnly || props.fieldPermissions?.[fieldId]?.readOnly === true || props.rowActions?.canEdit === false || isSystemField(field)
@@ -437,18 +514,43 @@ function multiSelectEventValue(event: Event): string[] {
 
 function syncFromRecord(record: MetaRecord | null | undefined) {
   Object.keys(formData).forEach((k) => delete formData[k])
-  if (record) Object.assign(formData, { ...record.data })
+  if (record) {
+    // Existing record ⇒ load its data. Prefill NEVER applies over a loaded
+    // record (the public form is create-only today; this also keeps the shared
+    // inline-editor behavior intact).
+    Object.assign(formData, { ...record.data })
+    return
+  }
+  // CREATE mode ⇒ seed from prefill. The caller has already filtered the seed
+  // to allowlisted, non-read-only, non-system fields; we additionally drop any
+  // fieldId that is currently read-only as a last-line guard so prefill can
+  // never populate a control the user could not have set.
+  const seed = props.initialValues
+  if (!seed) return
+  for (const [fieldId, value] of Object.entries(seed)) {
+    if (value === undefined) continue
+    if (isFieldReadOnly(fieldId)) continue
+    formData[fieldId] = value
+  }
 }
 
-watch(() => props.record, (record, previousRecord) => {
-  syncFromRecord(record)
-  validationErrors.value = {}
-  attachmentOperationErrors.value = {}
-  if (record?.id !== previousRecord?.id) {
-    localAttachmentSummaries.value = {}
-    attachmentActivity.value = {}
-  }
-}, { immediate: true })
+watch(
+  // A4: also re-seed when `initialValues` (prefill) arrives or changes in
+  // create-mode — the public form loads the context (and thus the prefill seed)
+  // asynchronously, so the seed can land after the initial record watch fires.
+  () => [props.record, props.initialValues] as const,
+  ([record], previous) => {
+    const previousRecord = previous?.[0]
+    syncFromRecord(record)
+    validationErrors.value = {}
+    attachmentOperationErrors.value = {}
+    if (record?.id !== previousRecord?.id) {
+      localAttachmentSummaries.value = {}
+      attachmentActivity.value = {}
+    }
+  },
+  { immediate: true },
+)
 
 watch(
   formDirty,
@@ -464,6 +566,8 @@ onBeforeUnmount(() => {
 
 function validate(): boolean {
   const errs: Record<string, string> = {}
+  // Iterate the FULL visible field list (NOT the current page) so a required
+  // field on another page can never slip through unvalidated.
   for (const f of editableFields.value) {
     const v = formData[f.id]
     if (f.required && isEmptyFormValue(v)) {
@@ -474,8 +578,27 @@ function validate(): boolean {
   return Object.keys(errs).length === 0
 }
 
+// A4: index of the first page that contains a field with a validation error,
+// or -1 when none. Used to jump the user to the page where the error lives so a
+// cross-page required-field block is actually visible.
+function firstInvalidPageIndex(errs: Record<string, string>): number {
+  const invalid = new Set(Object.keys(errs))
+  if (invalid.size === 0) return -1
+  const pages = formPages.value
+  for (let i = 0; i < pages.length; i += 1) {
+    if (pages[i].fields.some((field) => invalid.has(field.id))) return i
+  }
+  return -1
+}
+
 function onSubmit() {
-  if (!validate()) return
+  if (!validate()) {
+    // Jump to the first page carrying an error (validationErrors persists across
+    // the switch, so the inline error is visible after the jump).
+    const target = firstInvalidPageIndex(validationErrors.value)
+    if (target >= 0) currentPageIndex.value = target
+    return
+  }
   emit('submit', buildSubmitPayload())
 }
 
@@ -770,7 +893,15 @@ function isSameFormValue(left: unknown, right: unknown): boolean {
 .meta-form-view__uploading { font-size: 12px; color: #409eff; }
 .meta-form-view__readonly-val { color: #999; font-size: 13px; }
 .meta-form-view__field-error { margin-top: 6px; color: #f56c6c; font-size: 12px; }
+.meta-form-view__page-header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.meta-form-view__page-title { font-size: 16px; font-weight: 600; color: #1f2937; }
+.meta-form-view__page-indicator { font-size: 12px; color: #94a3b8; white-space: nowrap; }
+.meta-form-view__page-description { margin: 0 0 16px; font-size: 13px; color: #64748b; }
 .meta-form-view__actions { display: flex; gap: 8px; margin-top: 16px; }
+.meta-form-view__nav { padding: 8px 18px; border: 1px solid #cbd5e1; border-radius: 4px; background: #fff; font-size: 13px; cursor: pointer; color: #334155; }
+.meta-form-view__nav:hover { background: #f1f5f9; }
+.meta-form-view__nav--next { border-color: #409eff; color: #409eff; background: #ecf5ff; }
+.meta-form-view__nav--next:hover { background: #d9ecff; }
 .meta-form-view__submit { padding: 8px 24px; background: #409eff; color: #fff; border: none; border-radius: 4px; font-size: 14px; cursor: pointer; }
 .meta-form-view__submit:hover:not(:disabled) { background: #66b1ff; }
 .meta-form-view__submit:disabled { opacity: 0.6; cursor: not-allowed; }

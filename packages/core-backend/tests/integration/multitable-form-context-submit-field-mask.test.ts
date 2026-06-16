@@ -60,10 +60,26 @@ describeIfDatabase('D1 form-context / form-submit echo field mask (real DB)', ()
 
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_ID, 'D1 Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_ID, BASE_ID, 'D1 Sheet'])
-    // a 'form' view with a public-form config (so the anonymous path C6 is reachable)
+    // a 'form' view with a public-form config (so the anonymous path C6 is reachable).
+    // A4: also seed an A4 formLayout + a (DingTalk) allowlist so the anonymous
+    // form-context projection assertion has both safe layout config to INCLUDE
+    // and access-control secrets (publicToken / allowedUserIds) to EXCLUDE.
     await q(
       'INSERT INTO meta_views (id, sheet_id, name, type, hidden_field_ids, config) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb)',
-      [VIEW_ID, SHEET_ID, 'D1 Form', 'form', '[]', JSON.stringify({ publicForm: { enabled: true, publicToken: PUBLIC_TOKEN, accessMode: 'public' } })],
+      [VIEW_ID, SHEET_ID, 'D1 Form', 'form', '[]', JSON.stringify({
+        publicForm: {
+          enabled: true,
+          publicToken: PUBLIC_TOKEN,
+          accessMode: 'public',
+          allowedUserIds: [`${USER_ID}_allow_canary`],
+        },
+        formLayout: {
+          pages: [{ id: 'p1', title: 'Step 1', fieldIds: [FLD_VISIBLE] }],
+          prefill: { prefillableFieldIds: [FLD_VISIBLE] },
+          redirect: { url: '/thanks' },
+          confirmation: { title: 'Thanks!', body: 'We got it.' },
+        },
+      })],
     )
     // all fields property '{}' → no layer-2 hidden; deny is solely layer-3
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_VISIBLE, SHEET_ID, 'Visible', 'string', '{}', 1])
@@ -131,6 +147,32 @@ describeIfDatabase('D1 form-context / form-submit echo field mask (real DB)', ()
     const res = await submit({ data: { [FLD_VISIBLE]: '42' } })
     expect(res.status).toBe(200)
     expect(res.body.data.record.data[FLD_FORMULA]).not.toBeUndefined() // proves C4's absence is a real mask, not an empty channel
+    testUserId = USER_ID
+  })
+
+  test('A4 (anonymous form-context projection): SAFE form-layout projected from view.config.formLayout', async () => {
+    // A4 feature scope ONLY: the anonymous form-context echo carries the A4
+    // presentational layout (pages/prefill/redirect/confirmation), projected via
+    // projectPublicFormLayout from view.config.formLayout.
+    // NOTE: the broader anonymous publicForm-secret leak (publicToken/allowedUserIds
+    // still echoed via the requester-aware view.config) is PRE-EXISTING (not an A4
+    // regression) and is intentionally OUT OF SCOPE here — tracked as its own
+    // one-concern fix so it doesn't ride this feature PR. Do NOT re-add the
+    // secret-exclusion assertions to this test; they belong with that fix.
+    testUserId = null
+    const res = await request(app)
+      .get('/api/multitable/form-context')
+      .query({ sheetId: SHEET_ID, viewId: VIEW_ID, publicToken: PUBLIC_TOKEN })
+    expect(res.status).toBe(200)
+
+    // SAFE layout present (the A4 feature).
+    expect(res.body.data.formLayout).toEqual({
+      pages: [{ id: 'p1', title: 'Step 1', fieldIds: [FLD_VISIBLE] }],
+      prefill: { prefillableFieldIds: [FLD_VISIBLE] },
+      redirect: { url: '/thanks' },
+      confirmation: { title: 'Thanks!', body: 'We got it.' },
+    })
+
     testUserId = USER_ID
   })
 

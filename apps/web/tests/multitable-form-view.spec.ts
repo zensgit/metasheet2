@@ -447,3 +447,220 @@ describe('MetaFormView attachment flow', () => {
     container.remove()
   })
 })
+
+// --- A4: multi-page / prefill / cross-page validation ---
+describe('MetaFormView A4 form logic', () => {
+  it('renders exactly the flat single-page form when no layout is provided (backward compat)', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFormView, {
+          fields: [
+            { id: 'fld_a', name: 'A', type: 'string' },
+            { id: 'fld_b', name: 'B', type: 'string' },
+          ],
+          record: null,
+          loading: false,
+          readOnly: false,
+          onSubmit: vi.fn(),
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    // Both fields visible at once; no page header / nav chrome.
+    expect(container.querySelector('#field_fld_a')).not.toBeNull()
+    expect(container.querySelector('#field_fld_b')).not.toBeNull()
+    expect(container.querySelector('[data-form-page-header]')).toBeNull()
+    expect(container.querySelector('[data-form-next]')).toBeNull()
+    expect(container.querySelector('[data-form-submit]')).not.toBeNull()
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('renders only the current page and navigates with Next/Prev', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFormView, {
+          fields: [
+            { id: 'fld_a', name: 'A', type: 'string' },
+            { id: 'fld_b', name: 'B', type: 'string' },
+          ],
+          record: null,
+          loading: false,
+          readOnly: false,
+          formLayout: {
+            pages: [
+              { id: 'p1', title: 'First', fieldIds: ['fld_a'] },
+              { id: 'p2', title: 'Second', fieldIds: ['fld_b'] },
+            ],
+          },
+          onSubmit: vi.fn(),
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    // Page 1: only fld_a, Next present, submit absent.
+    expect(container.querySelector('#field_fld_a')).not.toBeNull()
+    expect(container.querySelector('#field_fld_b')).toBeNull()
+    expect(container.querySelector('[data-form-page-indicator]')?.textContent).toContain('Page 1 of 2')
+    expect(container.querySelector('[data-form-submit]')).toBeNull()
+
+    container.querySelector<HTMLButtonElement>('[data-form-next]')?.click()
+    await flushUi()
+
+    // Page 2: only fld_b, Prev present, submit present, Next absent.
+    expect(container.querySelector('#field_fld_a')).toBeNull()
+    expect(container.querySelector('#field_fld_b')).not.toBeNull()
+    expect(container.querySelector('[data-form-page-indicator]')?.textContent).toContain('Page 2 of 2')
+    expect(container.querySelector('[data-form-prev]')).not.toBeNull()
+    expect(container.querySelector('[data-form-submit]')).not.toBeNull()
+    expect(container.querySelector('[data-form-next]')).toBeNull()
+
+    container.querySelector<HTMLButtonElement>('[data-form-prev]')?.click()
+    await flushUi()
+    expect(container.querySelector('#field_fld_a')).not.toBeNull()
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('blocks submit on a required field on ANOTHER page and jumps to it (no silent cross-page skip)', async () => {
+    const submitSpy = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFormView, {
+          fields: [
+            { id: 'fld_a', name: 'A', type: 'string' },
+            { id: 'fld_required', name: 'Required B', type: 'string', required: true },
+          ],
+          record: null,
+          loading: false,
+          readOnly: false,
+          formLayout: {
+            pages: [
+              { id: 'p1', title: 'First', fieldIds: ['fld_a'] },
+              { id: 'p2', title: 'Second', fieldIds: ['fld_required'] },
+            ],
+          },
+          onSubmit: submitSpy,
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    // On page 1; submit isn't even shown here, so navigate to page 2 to reach it,
+    // then clear the required value to force the cross-page block via the form.
+    container.querySelector<HTMLButtonElement>('[data-form-next]')?.click()
+    await flushUi()
+    expect(container.querySelector('[data-form-page-indicator]')?.textContent).toContain('Page 2 of 2')
+
+    // Go back to page 1, then submit the form directly (the required field on
+    // page 2 is empty). validate() must fail and jump back to page 2.
+    container.querySelector<HTMLButtonElement>('[data-form-prev]')?.click()
+    await flushUi()
+    expect(container.querySelector('[data-form-page-indicator]')?.textContent).toContain('Page 1 of 2')
+
+    container.querySelector('form')?.dispatchEvent(new Event('submit'))
+    await flushUi()
+
+    expect(submitSpy).not.toHaveBeenCalled()
+    // Jumped to the page carrying the error, and the inline error is visible there.
+    expect(container.querySelector('[data-form-page-indicator]')?.textContent).toContain('Page 2 of 2')
+    expect(container.querySelector('#error_fld_required')).not.toBeNull()
+    expect(container.textContent).toContain('Required B is required')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('seeds create-mode formData from initialValues but never seeds a read-only field', async () => {
+    const submitSpy = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFormView, {
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_locked', name: 'Locked', type: 'string' },
+          ],
+          record: null, // create mode
+          loading: false,
+          readOnly: false,
+          fieldPermissions: {
+            fld_name: { visible: true, readOnly: false },
+            fld_locked: { visible: true, readOnly: true },
+          },
+          initialValues: { fld_name: 'Seeded', fld_locked: 'should-be-ignored' },
+          onSubmit: submitSpy,
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    const nameInput = container.querySelector('#field_fld_name') as HTMLInputElement | null
+    expect(nameInput?.value).toBe('Seeded')
+    const lockedInput = container.querySelector('#field_fld_locked') as HTMLInputElement | null
+    expect(lockedInput?.value).toBe('') // read-only field NOT seeded
+
+    container.querySelector('form')?.dispatchEvent(new Event('submit'))
+    await flushUi()
+
+    expect(submitSpy).toHaveBeenCalledWith({ fld_name: 'Seeded' })
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('never lets initialValues override a loaded record (edit mode)', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFormView, {
+          fields: [{ id: 'fld_name', name: 'Name', type: 'string' }],
+          record: { id: 'rec_1', version: 1, data: { fld_name: 'FromRecord' } },
+          loading: false,
+          readOnly: false,
+          initialValues: { fld_name: 'FromPrefill' },
+          onSubmit: vi.fn(),
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    const nameInput = container.querySelector('#field_fld_name') as HTMLInputElement | null
+    expect(nameInput?.value).toBe('FromRecord')
+
+    app.unmount()
+    container.remove()
+  })
+})
