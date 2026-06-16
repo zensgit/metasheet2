@@ -1,6 +1,6 @@
 # Data Source System Integration C6 - External Write Design
 
-Status: C6-0 design + C6-1 latent target + C6-2 dry-run route + C6-3 token-bound apply route; C6-4 UI / C6-5 entity-machine validation still gated
+Status: C6-0 design + C6-1 latent target + C6-2 dry-run route + C6-3 token-bound apply route; C6-4 UI in review; C6-5 entity-machine validation still gated
 Date: 2026-06-16
 
 ## Purpose

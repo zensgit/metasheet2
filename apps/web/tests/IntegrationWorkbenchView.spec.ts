@@ -1190,6 +1190,240 @@ describe('IntegrationWorkbenchView', () => {
     expect(runSaveOnlyButton.disabled).toBe(true)
   })
 
+  it('C6-4: runs external-write dry-run then apply without exposing token or client-owned write scope', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    const dryRunBodies: Array<Record<string, unknown>> = []
+    const applyBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'SQL readonly', roles: ['source'], supports: ['read'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/pipelines/pipe_1/external-write/dry-run') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        dryRunBodies.push(body)
+        return jsonResponse({
+          pipelineId: 'pipe_1',
+          status: 'ready',
+          canApply: true,
+          dryRunToken: 'dry-token-secret',
+          revision: 'rev-c6',
+          counts: { sourceRows: 2, planned: 2, add: 1, update: 1, skip: 0, held: 0, failed: 0 },
+          evidence: {
+            rowErrorTypes: [],
+            errorTypes: [],
+            sourceRead: { complete: true, pagesRead: 1, truncated: false },
+            targetPayload: 'target-row-secret',
+          },
+        })
+      }
+      if (url === '/api/integration/pipelines/pipe_1/external-write/apply') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        applyBodies.push(body)
+        return jsonResponse({
+          pipelineId: 'pipe_1',
+          status: 'succeeded',
+          dryRunRevision: 'rev-c6',
+          counts: { add: 1, update: 1, skip: 0, held: 0, failed: 0, written: 2 },
+          deadLetters: { attempted: 0, persisted: 0, payload: 'dead-letter-secret' },
+          evidence: { rowErrorTypes: [], dryRunTokenConsumed: true },
+          run: { id: 'run_c6', status: 'succeeded', provenanceEventsPersisted: 2 },
+        })
+      }
+      if (url.startsWith('/api/integration/runs?')) return jsonResponse([])
+      if (url.startsWith('/api/integration/dead-letters?')) return jsonResponse([])
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_1'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="external-write-dry-run"]') as HTMLButtonElement).click()
+    await flushUi(10)
+    expect(dryRunBodies).toHaveLength(1)
+    expect(dryRunBodies[0]).toEqual({
+      tenantId: 'default',
+      workspaceId: null,
+    })
+    expect(dryRunBodies[0]).not.toHaveProperty('source')
+    expect(dryRunBodies[0]).not.toHaveProperty('target')
+    expect(dryRunBodies[0]).not.toHaveProperty('plan')
+    expect(dryRunBodies[0]).not.toHaveProperty('payload')
+    expect(container.querySelector('[data-testid="external-write-review"]')?.textContent).toContain('add 1')
+    expect(container.querySelector('[data-testid="external-write-review"]')?.textContent).toContain('update 1')
+    expect(container.querySelector('[data-testid="external-write-token-state"]')?.textContent).toContain('token 已签发')
+    expect(container.querySelector('[data-testid="external-write-panel"]')?.textContent).not.toContain('dry-token-secret')
+    expect(container.querySelector('[data-testid="pipeline-result"]')?.textContent).not.toContain('dry-token-secret')
+    expect(container.querySelector('[data-testid="external-write-panel"]')?.textContent).not.toContain('target-row-secret')
+    expect(container.querySelector('[data-testid="pipeline-result"]')?.textContent).not.toContain('target-row-secret')
+
+    const applyButton = container.querySelector('[data-testid="external-write-apply"]') as HTMLButtonElement
+    expect(applyButton.disabled).toBe(true)
+    ;(container.querySelector('[data-testid="external-write-accept-review"]') as HTMLInputElement).click()
+    await flushUi()
+    expect(applyButton.disabled).toBe(false)
+    applyButton.click()
+    await flushUi(10)
+
+    expect(applyBodies).toHaveLength(1)
+    expect(applyBodies[0]).toEqual({
+      tenantId: 'default',
+      workspaceId: null,
+      confirm: {
+        dryRunToken: 'dry-token-secret',
+      },
+    })
+    expect(applyBodies[0]).not.toHaveProperty('source')
+    expect(applyBodies[0]).not.toHaveProperty('target')
+    expect(applyBodies[0]).not.toHaveProperty('plan')
+    expect(applyBodies[0]).not.toHaveProperty('payload')
+    expect(container.querySelector('[data-testid="external-write-apply-result"]')?.textContent).toContain('apply succeeded')
+    expect(container.querySelector('[data-testid="external-write-apply-result"]')?.textContent).toContain('add 1')
+    expect(container.querySelector('[data-testid="external-write-apply-result"]')?.textContent).toContain('update 1')
+    expect(container.querySelector('[data-testid="external-write-apply-result"]')?.textContent).toContain('written 2')
+    expect(container.querySelector('[data-testid="external-write-apply-result"]')?.textContent).toContain('run run_c6')
+    expect(container.querySelector('[data-testid="external-write-panel"]')?.textContent).not.toContain('dry-token-secret')
+    expect(container.querySelector('[data-testid="pipeline-result"]')?.textContent).not.toContain('dry-token-secret')
+    expect(container.querySelector('[data-testid="external-write-panel"]')?.textContent).not.toContain('dead-letter-secret')
+    expect(container.querySelector('[data-testid="pipeline-result"]')?.textContent).not.toContain('dead-letter-secret')
+  })
+
+  it('C6-4: discards stale external-write dry-run results after pipeline id changes', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    let releaseDryRun: (() => void) | null = null
+    const dryRunGate = new Promise<void>((resolve) => {
+      releaseDryRun = resolve
+    })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/pipelines/pipe_1/external-write/dry-run') {
+        await dryRunGate
+        return jsonResponse({
+          pipelineId: 'pipe_1',
+          status: 'ready',
+          canApply: true,
+          dryRunToken: 'stale-token-secret',
+          revision: 'rev-stale',
+          counts: { add: 1, update: 0, failed: 0 },
+          evidence: { rowErrorTypes: [] },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_1'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="external-write-dry-run"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    pipelineIdInput.value = 'pipe_2'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    releaseDryRun?.()
+    await flushUi(10)
+
+    expect(container.querySelector('[data-testid="external-write-review"]')).toBeNull()
+    expect(container.querySelector('[data-testid="external-write-panel"]')?.textContent).not.toContain('stale-token-secret')
+    expect(container.querySelector('[data-testid="pipeline-result"]')?.textContent).not.toContain('stale-token-secret')
+    expect((container.querySelector('[data-testid="external-write-apply"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(container.textContent).toContain('结果已丢弃')
+  })
+
+  it('C6-4: keeps external-write apply disabled for read-only users after dry-run', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:read']))
+    const applyBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/pipelines/pipe_1/external-write/dry-run') {
+        return jsonResponse({
+          pipelineId: 'pipe_1',
+          status: 'ready',
+          canApply: true,
+          dryRunToken: 'read-only-token-secret',
+          revision: 'rev-read-only',
+          counts: { add: 1, update: 0, failed: 0 },
+          evidence: { rowErrorTypes: [] },
+        })
+      }
+      if (url === '/api/integration/pipelines/pipe_1/external-write/apply') {
+        applyBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({ status: 'succeeded' })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_1'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="external-write-dry-run"]') as HTMLButtonElement).click()
+    await flushUi(10)
+    expect(container.querySelector('[data-testid="external-write-review"]')?.textContent).toContain('add 1')
+    expect(container.querySelector('[data-testid="external-write-panel"]')?.textContent).not.toContain('read-only-token-secret')
+
+    ;(container.querySelector('[data-testid="external-write-accept-review"]') as HTMLInputElement).click()
+    await flushUi()
+    const applyButton = container.querySelector('[data-testid="external-write-apply"]') as HTMLButtonElement
+    expect(applyButton.disabled).toBe(true)
+    applyButton.click()
+    await flushUi()
+    expect(applyBodies).toHaveLength(0)
+  })
+
   it('marks SQL Server source option as disabled when queryExecutor is missing', async () => {
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') {

@@ -784,6 +784,60 @@
         {{ dryRunEmptyPreviewNotice }}
       </div>
 
+      <div class="integration-workbench__table-action" data-testid="external-write-panel">
+        <div class="integration-workbench__panel-head">
+          <div>
+            <h3>外部写入 C6</h3>
+            <p>先 dry-run 复核计数，再用一次性 token apply；浏览器不提供 source、target、plan、payload 或 sheet scope。</p>
+          </div>
+          <span class="integration-workbench__badge" data-testid="external-write-permission-note">dry-run=read · apply=write/admin</span>
+        </div>
+        <p class="integration-workbench__hint" data-testid="external-write-boundary">
+          仅展示 status/count/error token；dry-run token 只保存在内存中，不显示、不复制到证据。
+        </p>
+        <div class="integration-workbench__actions">
+          <button
+            type="button"
+            class="integration-workbench__button"
+            data-testid="external-write-dry-run"
+            :disabled="!externalWriteCanDryRun"
+            @click="dryRunExternalWrite"
+          >
+            {{ runningExternalWrite === 'dry-run' ? '外部写 dry-run 中' : '外部写 dry-run' }}
+          </button>
+          <button
+            type="button"
+            class="integration-workbench__button integration-workbench__button--danger"
+            data-testid="external-write-apply"
+            :disabled="!externalWriteCanApply"
+            @click="applyExternalWrite"
+          >
+            {{ runningExternalWrite === 'apply' ? '外部写 apply 中' : 'Apply external write' }}
+          </button>
+        </div>
+        <div v-if="externalWriteDryRunResult" class="integration-workbench__table-action-review" data-testid="external-write-review">
+          <strong>{{ externalWriteReviewSummary }}</strong>
+          <div class="integration-workbench__metric-row">
+            <span v-for="metric in externalWriteDryRunMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
+          </div>
+          <p class="integration-workbench__hint" data-testid="external-write-token-state">
+            {{ externalWriteDryRunToken ? 'token 已签发（隐藏）' : '未签发可 apply token' }}
+          </p>
+          <label class="integration-workbench__inline-check">
+            <input v-model="externalWriteAcceptReview" type="checkbox" data-testid="external-write-accept-review" />
+            <span>我已复核 dry-run counts / status / error token；apply 将使用本次 dry-run token，服务端会重新计算并校验 revision。</span>
+          </label>
+          <pre v-if="externalWriteEvidenceText" data-testid="external-write-evidence">{{ externalWriteEvidenceText }}</pre>
+        </div>
+        <div v-if="externalWriteApplyResult" class="integration-workbench__table-action-review" data-testid="external-write-apply-result">
+          <strong>apply {{ externalWriteApplyResult.status || 'unknown' }}</strong>
+          <div class="integration-workbench__metric-row">
+            <span v-for="metric in externalWriteApplyMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
+          </div>
+          <p v-if="externalWriteApplyRunId" class="integration-workbench__hint">run {{ externalWriteApplyRunId }}</p>
+        </div>
+      </div>
+
       <div class="integration-workbench__table-action" data-testid="table-action-panel">
         <div class="integration-workbench__panel-head">
           <div>
@@ -1265,9 +1319,11 @@ import type { DataSourceListItem, DataSourceTableInfo } from '../data-sources/ty
 import {
   canReadFromSystem,
   canWriteToSystem,
+  applyIntegrationExternalWrite,
   applyIntegrationTableAction,
   deleteIntegrationTableActionConflictPolicies,
   deleteWorkbenchExternalSystem,
+  dryRunIntegrationExternalWrite,
   dryRunIntegrationTableAction,
   getDefaultIntegrationScope,
   isIntegrationScopedProjectId,
@@ -1303,6 +1359,8 @@ import {
   type PlmIntegrationCapabilitiesResult,
   type PlmIntegrationCapabilityFeature,
   type IntegrationDeadLetter,
+  type IntegrationExternalWriteApplyResult,
+  type IntegrationExternalWriteDryRunResult,
   type IntegrationPipelineMode,
   type IntegrationPipelineRun,
   type IntegrationPipelineRunResult,
@@ -1531,6 +1589,10 @@ const previewText = ref('尚未生成预览')
 const previewProvenance = ref<ReturnType<typeof summarizeFieldProvenance>>(null)
 const pipelineResultText = ref('尚未执行')
 const lastDryRunResult = ref<IntegrationPipelineRunResult | null>(null)
+const runningExternalWrite = ref<'dry-run' | 'apply' | ''>('')
+const externalWriteDryRunResult = ref<IntegrationExternalWriteDryRunResult | null>(null)
+const externalWriteApplyResult = ref<IntegrationExternalWriteApplyResult | null>(null)
+const externalWriteAcceptReview = ref(false)
 const tableActions = ref<IntegrationTableActionMetadata[]>([])
 const selectedTableActionId = ref('')
 const tableActionProjectNo = ref('')
@@ -2204,6 +2266,71 @@ const dryRunReadinessItems = computed(() => [
 // decoupled from the full BUILD checklist (dryRunReadinessItems, kept as authoring guidance): an operator
 // re-running an existing pipeline by pasting its ID must not be blocked by an unfilled builder. See #2232.
 const canRunPipeline = computed(() => savedPipelineId.value.trim() !== '')
+const externalWriteDryRunToken = computed(() => externalWriteDryRunResult.value?.dryRunToken || '')
+const externalWriteCanDryRun = computed(() => Boolean(
+  savedPipelineId.value.trim()
+  && runningExternalWrite.value === ''
+  && runningPipeline.value === '',
+))
+const externalWriteCanApply = computed(() => Boolean(
+  savedPipelineId.value.trim()
+  && externalWriteDryRunResult.value?.canApply === true
+  && externalWriteDryRunToken.value
+  && externalWriteAcceptReview.value
+  && auth.hasPermission('integration:write')
+  && runningExternalWrite.value === ''
+  && runningPipeline.value === '',
+))
+const externalWriteDryRunMetrics = computed(() => metricRowsFromCounts(externalWriteDryRunResult.value?.counts, [
+  'sourceRows',
+  'planned',
+  'add',
+  'update',
+  'skip',
+  'held',
+  'failed',
+]))
+const externalWriteApplyMetrics = computed(() => metricRowsFromCounts(externalWriteApplyResult.value?.counts, [
+  'add',
+  'update',
+  'skip',
+  'held',
+  'failed',
+  'written',
+]))
+const externalWriteApplyRunId = computed(() => {
+  const id = externalWriteApplyResult.value?.run?.id
+  return typeof id === 'string' ? id : ''
+})
+const externalWriteReviewSummary = computed(() => {
+  const result = externalWriteDryRunResult.value
+  if (!result) return '先执行外部写 dry-run；apply 必须使用本次 dry-run token。'
+  const status = typeof result.status === 'string' ? result.status : 'unknown'
+  const counts = result.counts || {}
+  const add = counts.add ?? counts.created ?? 0
+  const update = counts.update ?? counts.updated ?? 0
+  const failed = counts.failed ?? 0
+  return `dry-run ${status} · add ${add} / update ${update} / failed ${failed} · ${result.canApply === true ? '可申请 apply' : 'Apply blocked'}`
+})
+const externalWriteEvidenceText = computed(() => {
+  const result = externalWriteDryRunResult.value
+  if (!result) return ''
+  const evidence = isRecord(result.evidence) ? result.evidence : {}
+  const sourceRead = isRecord(evidence.sourceRead) ? evidence.sourceRead : null
+  return JSON.stringify({
+    status: typeof result.status === 'string' ? result.status : 'unknown',
+    canApply: result.canApply === true,
+    dryRunTokenPresent: Boolean(result.dryRunToken),
+    revisionPresent: Boolean(result.revision),
+    rowErrorTypes: valuesFreeTokenList(evidence.rowErrorTypes),
+    errorTypes: valuesFreeTokenList(evidence.errorTypes),
+    sourceRead: sourceRead ? {
+      complete: sourceRead.complete === true,
+      truncated: sourceRead.truncated === true,
+      pagesRead: typeof sourceRead.pagesRead === 'number' ? sourceRead.pagesRead : undefined,
+    } : undefined,
+  }, null, 2)
+})
 const dryRunBlockedSummary = computed(() => {
   const missing = dryRunReadinessItems.value.filter((item) => !item.ready)
   if (missing.length === 0) return '已满足 dry-run 前置条件。Dry-run 只生成 preview，不写外部系统。'
@@ -2931,6 +3058,32 @@ function numberMetric(value: unknown): string {
 
 function safeEvidenceToken(value: unknown): value is string {
   return typeof value === 'string' && /^[a-z][a-z0-9_]{0,80}$/i.test(value)
+}
+
+function valuesFreeTokenList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter(safeEvidenceToken) : []
+}
+
+function metricRowsFromCounts(counts: Record<string, number> | undefined, keys: string[]): Array<{ id: string, label: string, value: string }> {
+  if (!counts) return []
+  return keys
+    .map((key) => {
+      const value = counts[key]
+      return typeof value === 'number' && Number.isFinite(value)
+        ? { id: key, label: key, value: String(value) }
+        : null
+    })
+    .filter((entry): entry is { id: string, label: string, value: string } => entry !== null)
+}
+
+function valuesFreeDeadLetterSummary(value: unknown): Record<string, number> {
+  if (!isRecord(value)) return {}
+  const out: Record<string, number> = {}
+  for (const key of ['attempted', 'persisted', 'failed']) {
+    const count = value[key]
+    if (typeof count === 'number' && Number.isFinite(count)) out[key] = count
+  }
+  return out
 }
 
 function isLargeBomBoundedTableActionResult(result: IntegrationTableActionDryRunResult | null): boolean {
@@ -3863,6 +4016,124 @@ async function executePipeline(dryRun: boolean): Promise<void> {
   }
 }
 
+function resetExternalWriteReview(): void {
+  externalWriteDryRunResult.value = null
+  externalWriteApplyResult.value = null
+  externalWriteAcceptReview.value = false
+}
+
+function externalWriteRequestSignature(pipelineId = savedPipelineId.value.trim()): string {
+  const resolvedScope = currentScope()
+  return JSON.stringify({
+    pipelineId,
+    tenantId: resolvedScope.tenantId,
+    workspaceId: resolvedScope.workspaceId,
+  })
+}
+
+async function dryRunExternalWrite(): Promise<void> {
+  const pipelineId = savedPipelineId.value.trim()
+  if (!pipelineId) {
+    setStatus('请先保存 Pipeline，或粘贴已有 Pipeline ID', 'error')
+    return
+  }
+  const requestSignature = externalWriteRequestSignature(pipelineId)
+  runningExternalWrite.value = 'dry-run'
+  externalWriteDryRunResult.value = null
+  externalWriteApplyResult.value = null
+  externalWriteAcceptReview.value = false
+  try {
+    const payload = currentScope()
+    const result = await dryRunIntegrationExternalWrite(pipelineId, payload)
+    if (externalWriteRequestSignature() !== requestSignature) {
+      setStatus('外部写 dry-run 结果已丢弃：Pipeline ID 或 scope 已变化。', 'idle')
+      return
+    }
+    externalWriteDryRunResult.value = result
+    pipelineResultText.value = JSON.stringify({
+      action: 'external-write-dry-run',
+      pipelineId,
+      payload,
+      result: {
+        status: result.status || 'unknown',
+        canApply: result.canApply === true,
+        dryRunTokenPresent: Boolean(result.dryRunToken),
+        revisionPresent: Boolean(result.revision),
+        counts: result.counts || {},
+      },
+    }, null, 2)
+    setStatus(result.canApply === true ? '外部写 dry-run 完成，可复核后 apply' : '外部写 dry-run 完成，但 apply 被阻塞', result.canApply === true ? 'success' : 'error')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    runningExternalWrite.value = ''
+  }
+}
+
+async function applyExternalWrite(): Promise<void> {
+  const pipelineId = savedPipelineId.value.trim()
+  if (!pipelineId) {
+    setStatus('请先保存 Pipeline，或粘贴已有 Pipeline ID', 'error')
+    return
+  }
+  if (!auth.hasPermission('integration:write')) {
+    setStatus('当前用户只有 dry-run 读取权限，不能执行外部写 apply。', 'error')
+    return
+  }
+  const dryRunToken = externalWriteDryRunToken.value
+  if (!dryRunToken) {
+    setStatus('请先执行外部写 dry-run；apply 必须使用服务端返回的一次性 dry-run token。', 'error')
+    return
+  }
+  if (!externalWriteAcceptReview.value) {
+    setStatus('Apply 前必须确认已复核 dry-run counts / status / error token。', 'error')
+    return
+  }
+  const requestSignature = externalWriteRequestSignature(pipelineId)
+  runningExternalWrite.value = 'apply'
+  externalWriteApplyResult.value = null
+  try {
+    const payload = {
+      ...currentScope(),
+      confirm: { dryRunToken },
+    }
+    const result = await applyIntegrationExternalWrite(pipelineId, payload)
+    if (externalWriteRequestSignature() !== requestSignature) {
+      setStatus('外部写 apply 结果未挂到当前视图：Pipeline ID 或 scope 已变化，请刷新运行记录确认。', 'idle')
+      return
+    }
+    externalWriteApplyResult.value = result
+    externalWriteDryRunResult.value = null
+    externalWriteAcceptReview.value = false
+    pipelineResultText.value = JSON.stringify({
+      action: 'external-write-apply',
+      pipelineId,
+      payload: {
+        tenantId: payload.tenantId,
+        workspaceId: payload.workspaceId,
+        confirm: { dryRunTokenPresent: true },
+      },
+      result: {
+        status: result.status || 'unknown',
+        dryRunRevision: result.dryRunRevision,
+        counts: result.counts || {},
+        deadLetters: valuesFreeDeadLetterSummary(result.deadLetters),
+        run: result.run ? {
+          id: result.run.id,
+          status: result.run.status,
+          provenanceEventsPersisted: result.run.provenanceEventsPersisted,
+        } : undefined,
+      },
+    }, null, 2)
+    await refreshPipelineObservation(true)
+    setStatus(`外部写 apply 完成：${result.status || 'unknown'}`, result.status === 'failed' ? 'error' : 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    runningExternalWrite.value = ''
+  }
+}
+
 function resetTableActionReview(): void {
   tableActionDryRunResult.value = null
   tableActionApplyResult.value = null
@@ -4226,6 +4497,14 @@ watch(showAdvancedConnectors, () => {
 
 watch(sourceSystemId, () => {
   void refreshPlmCapabilitiesForSystem(selectedSourceSystem.value)
+})
+
+watch(savedPipelineId, () => {
+  resetExternalWriteReview()
+})
+
+watch(() => [scope.tenantId, scope.workspaceId], () => {
+  resetExternalWriteReview()
 })
 
 watch(tableActionProjectNo, () => {
