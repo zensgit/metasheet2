@@ -17,6 +17,9 @@
  * so one pass drains a backlog over ticks rather than one long statement).
  */
 
+import { Logger } from '../core/logger'
+import { query as dbQuery } from '../db/pg'
+
 export type RetentionQueryFn = (
   sql: string,
   params?: unknown[],
@@ -125,4 +128,48 @@ export async function sweepMetaRevisionRetention(
     [keepN, batchSize],
   )
   return result.rowCount ?? 0
+}
+
+/** Default sweep cadence (24h), env-overridable, clamped to [1m, 24h]. */
+export const META_REVISION_RETENTION_DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1000
+
+function resolveIntervalMs(raw: string | undefined): number {
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return META_REVISION_RETENTION_DEFAULT_INTERVAL_MS
+  return Math.min(Math.max(Math.floor(parsed), 60_000), META_REVISION_RETENTION_DEFAULT_INTERVAL_MS)
+}
+
+export interface MetaRevisionRetentionSchedulerOptions {
+  logger?: Logger
+  query?: RetentionQueryFn
+  intervalMs?: number
+  env?: NodeJS.ProcessEnv
+}
+
+/**
+ * Runtime entry: start the periodic retention sweep. **No-op (returns immediately) when retention is
+ * disabled** — which is the default — so wiring this into bootstrap changes nothing until the owner
+ * sets `MULTITABLE_META_REVISION_RETENTION_ENABLED=1`. Mirrors `startMultitableAttachmentCleanup`
+ * (setInterval + returned stop fn; errors are logged, never crash the process). Returns a stop fn.
+ */
+export function startMetaRevisionRetention(options: MetaRevisionRetentionSchedulerOptions = {}): () => void {
+  const env = options.env ?? process.env
+  const config = resolveMetaRevisionRetentionConfig(env)
+  const logger = options.logger ?? new Logger('MetaRevisionRetention')
+  if (!config.enabled) {
+    logger.info('Meta-revision retention disabled (set MULTITABLE_META_REVISION_RETENTION_ENABLED=1 to enable)')
+    return () => {}
+  }
+  const queryFn = options.query ?? (dbQuery as unknown as RetentionQueryFn)
+  const intervalMs = options.intervalMs ?? resolveIntervalMs(env.MULTITABLE_META_REVISION_RETENTION_INTERVAL_MS)
+  const runSweep = () => {
+    void Promise.resolve()
+      .then(() => sweepMetaRevisionRetention(queryFn, config))
+      .then((deleted) => { if (deleted > 0) logger.info(`Meta-revision retention pruned ${deleted} revision(s)`) })
+      .catch((error) => logger.warn('Meta-revision retention sweep failed', error as Error))
+  }
+  const timer = setInterval(runSweep, intervalMs)
+  if (typeof timer === 'object' && 'unref' in timer) (timer as { unref: () => void }).unref()
+  logger.info(`Meta-revision retention started (policy=${config.policy}, keepN=${config.keepN}, days=${config.retentionDays}, intervalMs=${intervalMs})`)
+  return () => clearInterval(timer)
 }

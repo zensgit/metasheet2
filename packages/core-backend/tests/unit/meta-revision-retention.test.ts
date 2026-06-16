@@ -5,7 +5,10 @@ import {
   META_REVISION_RETENTION_MIN_DAYS,
   META_REVISION_RETENTION_MIN_KEEP_N,
   resolveMetaRevisionRetentionConfig,
+  startMetaRevisionRetention,
 } from '../../src/multitable/meta-revision-retention'
+
+const silentLogger = { info() {}, warn() {}, error() {}, debug() {} } as never
 
 describe('meta-revision retention config', () => {
   test('disabled by default (no env) — preserves the restore guarantee until opt-in', () => {
@@ -45,5 +48,26 @@ describe('meta-revision retention config', () => {
       MULTITABLE_META_REVISION_RETENTION_KEEP_N: '50',
     })
     expect(cfg.keepN).toBe(50)
+  })
+
+  test('scheduler: disabled (default) is a no-op — returns a stop fn, never touches the DB', () => {
+    let called = 0
+    const queryFn = (async () => { called++; return { rows: [], rowCount: 0 } }) as never
+    const stop = startMetaRevisionRetention({ env: {}, query: queryFn, logger: silentLogger, intervalMs: 60_000 })
+    expect(typeof stop).toBe('function')
+    expect(called).toBe(0)
+    stop()
+  })
+
+  test('scheduler: enabled returns a working stop fn (sweep runs on the interval, not synchronously)', () => {
+    const queryFn = (async () => ({ rows: [], rowCount: 0 })) as never
+    const stop = startMetaRevisionRetention({
+      env: { MULTITABLE_META_REVISION_RETENTION_ENABLED: '1' },
+      query: queryFn,
+      logger: silentLogger,
+      intervalMs: 3_600_000,
+    })
+    expect(typeof stop).toBe('function')
+    stop() // clears the interval without error
   })
 })

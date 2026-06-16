@@ -72,6 +72,7 @@ import { getBuildInfo } from './config/build-info'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
 import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan-retention'
+import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
@@ -228,6 +229,7 @@ export class MetaSheetServer {
   private observabilityEnabled = false
   private stopOperationAuditRetention?: () => void
   private stopMultitableAttachmentCleanup?: () => void
+  private stopMetaRevisionRetention?: () => void
   private automationService?: AutomationService
   private apiGateway?: APIGateway
   private yjsCleanupTimer?: NodeJS.Timeout
@@ -1771,6 +1773,7 @@ export class MetaSheetServer {
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
+        this.stopMetaRevisionRetention?.()
         this.stopMultitableAttachmentCleanup?.()
       } catch (err) {
         this.logger.warn(`Multitable attachment cleanup stop error: ${err instanceof Error ? err.message : String(err)}`)
@@ -2469,6 +2472,7 @@ export class MetaSheetServer {
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       this.stopOperationAuditRetention = startOperationAuditRetention({ logger: this.logger })
       this.stopMultitableAttachmentCleanup = startMultitableAttachmentCleanup({ logger: this.logger })
+      this.stopMetaRevisionRetention = startMetaRevisionRetention({ logger: this.logger })
     }
 
     // Register signal handlers only for real runtime, not test runners.

@@ -448,10 +448,11 @@ paths:
     post:
       summary: Restore a multitable record to a prior revision (Layer 1)
       description: >-
-        Restores a live record's scalar user-data fields to a prior revision's recorded values.
-        Forward-change semantics — a value-changing restore emits a new revision (source=restore)
-        and bumps version; an empty diff is a no-op. Computed/link/system-auto/attachment fields are
-        excluded by type. Atomically rejected if any restorable differing field is not writable.
+        Restores a live record's user-data fields to a prior revision's recorded values, including
+        link fields (re-synced through meta_links + the twoWay mirror). Forward-change semantics — a
+        value-changing restore emits a new revision (source=restore) and bumps version; an empty diff
+        is a no-op. Computed / system-auto / attachment fields are excluded by type. Atomically
+        rejected if any restorable differing field is not writable.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path

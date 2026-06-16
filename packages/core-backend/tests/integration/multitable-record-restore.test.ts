@@ -340,6 +340,25 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     expect(await linksOf(rid)).toEqual([FOREIGN_REC]) // atomic: unchanged
   })
 
+  test('T6g (Slice 2a): legacy-shaped link snapshot (JSON-array string) is parsed by the canonical normalizer, not mis-read as one id', async () => {
+    // The v1 snapshot stores the link as a legacy JSON-array STRING ('["frec2..."]') rather than an
+    // array; current stores it as an array. A naive parser would treat the whole string as one foreign
+    // id → spurious VALIDATION_ERROR. normalizeLinkIds parses it identically to the write path.
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC] },
+      2,
+      [
+        { version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_LK]: JSON.stringify([FOREIGN_REC2]) } },
+        { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC] } },
+      ],
+    )
+    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_${TS}_g_${recordSeq}`, FLD_LK, rid, FOREIGN_REC])
+    const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
+    expect(res.status).toBe(200)
+    expect(res.body.data.restoredFieldIds).toContain(FLD_LK)
+    expect(await linksOf(rid)).toEqual([FOREIGN_REC2]) // legacy string parsed → edge re-pointed
+  })
+
   test('T6b: snapshot field absent from current schema → SCHEMA_DRIFT', async () => {
     const rid = await seedRecord(
       { [FLD_A]: 'a2' },

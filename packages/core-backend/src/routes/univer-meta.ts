@@ -5761,7 +5761,6 @@ export function univerMetaRouter(): Router {
       }
 
       // Faithful set ∪ unset diff over restorable fields.
-      const asLinkIds = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : typeof v === 'string' && v ? [v] : [])
       const diff: RecordChange[] = []
       for (const [fid, guard] of fieldById.entries()) {
         if (rawTypeById.get(fid) === 'button') continue // no-value trigger (mapFieldType folds it to 'string')
@@ -5772,10 +5771,12 @@ export function univerMetaRouter(): Router {
         // NEVER a data-`unset` (that touches only the data mirror and would desync the join table).
         // Only emit when the id set actually differs (preserves no-op). The link config (guard.link)
         // drives the spine's meta_links sync; a snapshot referencing a now-deleted foreign record is
-        // rejected fail-closed by the spine's link-target validation (VALIDATION_ERROR).
+        // rejected fail-closed by the spine's link-target validation (VALIDATION_ERROR). Use the CANONICAL
+        // normalizeLinkIds (handles legacy `'["a","b"]'` / `'a,b'` / trim / dedup) so a legacy-shaped
+        // snapshot or current value is parsed identically to the write path, not mis-read as one id.
         if (guard.type === 'link') {
-          const target = inSnap ? asLinkIds(targetSnapshot[fid]) : []
-          if (!sameValue(asLinkIds(currentData[fid]), target)) {
+          const target = inSnap ? normalizeLinkIds(targetSnapshot[fid]) : []
+          if (!sameValue(normalizeLinkIds(currentData[fid]), target)) {
             diff.push({ recordId, fieldId: fid, value: target, expectedVersion: currentVersion, op: 'set' })
           }
           continue
