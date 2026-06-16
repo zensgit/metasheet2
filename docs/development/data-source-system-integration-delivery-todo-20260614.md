@@ -465,6 +465,7 @@ dead-letter/provenance/run evidence。
 
 TODO:
 
+- runbook: `docs/operations/data-source-system-integration-release-smoke-runbook-20260616.md`.
 - [x] `git rev-list --count main..origin/main == 0` 后再发 C6-5 smoke 包。
 - [x] 从已合并 main 构建 C6-5 on-prem package。
 - [x] 生成 `.tgz` / `.zip` / `.sha256` / `SHA256SUMS` / verify reports。
