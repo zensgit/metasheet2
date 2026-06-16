@@ -2442,7 +2442,7 @@ describe('AutomationService — Rule CRUD', () => {
       createdBy: 'user_1',
     })
 
-    await expect(promise).rejects.toThrow('cannot contain start_approval until A6-3-3')
+    await expect(promise).rejects.toThrow('cannot contain start_approval (branch-local start_approval is not yet supported)')
     expect(dbExecuteResults).toHaveLength(0)
   })
 
