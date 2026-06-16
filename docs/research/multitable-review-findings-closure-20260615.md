@@ -10,6 +10,15 @@ Date: 2026-06-15
 > #2676's (now-retired) approach and its adversarial verification — kept as the analysis record,
 > not the landed fix. §1.3 (comment-reactions CI wiring, PR #2679) is independent and stands.
 > The record-restore M1–M4 coverage tests were deferred to land on top of #2677 once it merges.
+>
+> **FINAL LANDING LEDGER (2026-06-16) — all merged to main:**
+> - **#2677** `73fd154c4` — canonical per-field oracle fix (200-noop + schema-drift + link-reorder). MERGED.
+> - **#2679** `cdab2cb2f` — comment-reactions keystone wired into CI + permission negatives. MERGED.
+> - **#2685** `2b5e6ea3` — `mapRowToComment` read field-drop fix (5 read/emit surfaces) + `makeCommentRow` fixture top-up. MERGED.
+> - **#2686** `788050554` — record-restore M1–M4 coverage (T22–T25, CI-executed via the real-DB step). MERGED.
+> - **#2676** — this session's superseded oracle fix (uniform 403). CLOSED (replaced by #2677).
+> - **#2693** (draft) — trailing polish: sweep remaining comment test helpers to carry canonical container/target ids (fully closes the fixture-vs-wire drift). Open for review.
+> - Production bug surfaced + fixed in #2685: `mapRowToComment` dropped `containerId`/`targetId`/`targetFieldId` across five comment read/emit surfaces.
 
 Scope: documents this session's closure work on confirmed findings from two review MDs against
 merged multitable code (#2672 per-field restore, #2673 comment emoji reactions).
