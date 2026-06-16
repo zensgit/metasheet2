@@ -1395,6 +1395,7 @@ function conditionOperatorsForField(fieldId: string): ConditionOperatorOption[] 
     case 'currency':
     case 'percent':
     case 'rating':
+    case 'duration':
     case 'date':
     case 'dateTime':
     case 'createdTime':
@@ -1508,6 +1509,7 @@ function isNumericConditionFieldType(fieldType: string | undefined): boolean {
     fieldType === 'currency' ||
     fieldType === 'percent' ||
     fieldType === 'rating' ||
+    fieldType === 'duration' ||
     fieldType === 'autoNumber'
 }
 

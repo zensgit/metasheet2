@@ -254,6 +254,10 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   if (normalized === 'currency') return 'currency'
   if (normalized === 'percent') return 'percent'
   if (normalized === 'rating') return 'rating'
+  // Native duration (时长, design 2026-06-16): seconds-backed number. This dup mapFieldType
+  // has NO registry fallback (returns 'string'), so duration needs an explicit branch here or
+  // the runtime read path would silently downgrade it to text. Mirrors the percent/rating lines.
+  if (normalized === 'duration') return 'duration'
   if (normalized === 'url') return 'url'
   if (normalized === 'email') return 'email'
   if (normalized === 'phone') return 'phone'

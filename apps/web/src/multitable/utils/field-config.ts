@@ -54,6 +54,17 @@ export type NormalizedRatingFieldProperty = {
   max: number
 }
 
+// Native duration (时长) — supported display formats. The stored value is always
+// seconds; the format only chooses presentation (h:mm vs mm:ss). Mirrors the
+// backend codec (`DURATION_FORMATS` in field-codecs.ts). h:mm:ss deferred (v1).
+export const DURATION_FORMATS = ['h:mm', 'mm:ss'] as const
+export type DurationFormat = (typeof DURATION_FORMATS)[number]
+export const DEFAULT_DURATION_FORMAT: DurationFormat = 'h:mm'
+
+export type NormalizedDurationFieldProperty = {
+  durationFormat: DurationFormat
+}
+
 export type NormalizedNumberFieldProperty = {
   decimals: number | null
   thousands: boolean
@@ -200,6 +211,16 @@ export function resolveRatingFieldProperty(value: unknown): NormalizedRatingFiel
   return { max }
 }
 
+export function resolveDurationFieldProperty(value: unknown): NormalizedDurationFieldProperty {
+  const property = asRecord(value)
+  const fmt = property.durationFormat
+  const durationFormat: DurationFormat =
+    typeof fmt === 'string' && (DURATION_FORMATS as readonly string[]).includes(fmt)
+      ? (fmt as DurationFormat)
+      : DEFAULT_DURATION_FORMAT
+  return { durationFormat }
+}
+
 export function resolveNumberFieldProperty(value: unknown): NormalizedNumberFieldProperty {
   const property = asRecord(value)
   const decimalsRaw = typeof property.decimals === 'number' ? property.decimals : Number(property.decimals)
@@ -288,6 +309,61 @@ export function formatPercentValue(value: number, decimals: number): string {
   } catch {
     return `${value.toFixed(decimals)}%`
   }
+}
+
+// ---------------------------------------------------------------------------
+// Duration (时长) format / parse pair — seconds-backed, format-aware.
+// The codec stores SECONDS; these convert between seconds and the displayed
+// "h:mm" / "mm:ss" text. Behaviour is defined explicitly (and locked by tests):
+//   - format truncates sub-unit seconds (h:mm drops leftover seconds; never rounds up)
+//   - the leading unit (hours for h:mm, minutes for mm:ss) is UNBOUNDED ("25:30", "90:00")
+//   - the trailing unit is zero-padded to 2 digits
+//   - parse accepts "H:MM" / "M:SS" (trailing part normalized: ≥60 carries over) and a
+//     bare number (interpreted as the LEADING unit, e.g. "2" in h:mm → 2h = 7200s)
+//   - parse returns null for empty/invalid input; negatives are rejected (null)
+// ---------------------------------------------------------------------------
+
+/** Format an integer number of seconds as "h:mm" or "mm:ss" (leading unit unbounded). */
+export function formatDurationValue(totalSeconds: number, format: DurationFormat): string {
+  if (!Number.isFinite(totalSeconds)) return ''
+  const sign = totalSeconds < 0 ? '-' : ''
+  const abs = Math.trunc(Math.abs(totalSeconds))
+  if (format === 'mm:ss') {
+    const minutes = Math.trunc(abs / 60)
+    const seconds = abs % 60
+    return `${sign}${minutes}:${String(seconds).padStart(2, '0')}`
+  }
+  // h:mm — drop leftover seconds (truncate to the whole minute).
+  const totalMinutes = Math.trunc(abs / 60)
+  const hours = Math.trunc(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return `${sign}${hours}:${String(minutes).padStart(2, '0')}`
+}
+
+/**
+ * Parse a "h:mm" / "mm:ss" (or bare-number) string into an integer number of
+ * seconds. Returns null on empty/invalid/negative input. The caller emits this
+ * number to the server (the server never parses formatted strings).
+ */
+export function durationSecondsFromInput(input: string, format: DurationFormat): number | null {
+  const trimmed = input.trim()
+  if (trimmed === '') return null
+  if (trimmed.startsWith('-')) return null
+  const secondsPerLeadingUnit = format === 'mm:ss' ? 60 : 3600
+  // Bare number → leading unit (hours for h:mm, minutes for mm:ss).
+  if (/^\d+$/.test(trimmed)) {
+    const lead = Number(trimmed)
+    return Number.isFinite(lead) ? lead * secondsPerLeadingUnit : null
+  }
+  const match = /^(\d+):(\d+)$/.exec(trimmed)
+  if (!match) return null
+  const lead = Number(match[1])
+  const trail = Number(match[2])
+  if (!Number.isFinite(lead) || !Number.isFinite(trail)) return null
+  // The trailing unit is sub-60 (minutes-in-hour, or seconds-in-minute); a value
+  // ≥60 carries over into the leading unit instead of being rejected (lenient).
+  const trailSeconds = format === 'mm:ss' ? trail : trail * 60
+  return lead * secondsPerLeadingUnit + trailSeconds
 }
 
 function splitFixedNumber(value: number, decimals: number | null): { sign: string; integer: string; fraction: string } {

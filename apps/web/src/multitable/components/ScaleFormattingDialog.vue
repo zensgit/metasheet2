@@ -301,7 +301,7 @@ const { isZh } = useLocale()
 const ml = (key: Parameters<typeof managerLabel>[0]) => managerLabel(key, isZh.value)
 const pickColorLabel = (color: string) => formattingPickColor(color, isZh.value)
 
-const NUMERIC_FIELD_TYPES: ReadonlySet<string> = new Set(['number', 'currency', 'percent', 'rating'])
+const NUMERIC_FIELD_TYPES: ReadonlySet<string> = new Set(['number', 'currency', 'percent', 'rating', 'duration'])
 
 const BAR_PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#0ea5e9', '#1f2937'] as const
 const STOP_PALETTE = ['#f8696b', '#ffeb84', '#63be7b', '#ffffff', '#3b82f6', '#fce4e4', '#e0f3d8'] as const

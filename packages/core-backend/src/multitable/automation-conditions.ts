@@ -265,6 +265,7 @@ function allowedOperatorsForFieldType(fieldType: string): ReadonlySet<ConditionO
     case 'currency':
     case 'percent':
     case 'rating':
+    case 'duration':
     case 'date':
     case 'dateTime':
     case 'createdTime':
@@ -296,6 +297,7 @@ function expectedValueKindForFieldType(fieldType: string): 'number' | 'boolean' 
     case 'currency':
     case 'percent':
     case 'rating':
+    case 'duration':
     case 'autoNumber':
       return 'number'
     case 'boolean':

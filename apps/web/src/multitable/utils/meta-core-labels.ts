@@ -335,6 +335,7 @@ const FIELD_TYPE_LABELS: Record<string, { en: string; zh: string }> = {
   currency: { en: 'currency', zh: '货币' },
   percent: { en: 'percent', zh: '百分比' },
   rating: { en: 'rating', zh: '评分' },
+  duration: { en: 'duration', zh: '时长' },
   url: { en: 'URL', zh: '网址' },
   email: { en: 'email', zh: '邮箱' },
   phone: { en: 'phone', zh: '电话' },

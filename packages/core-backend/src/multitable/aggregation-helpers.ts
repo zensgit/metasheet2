@@ -10,7 +10,8 @@ export type AggregationFn = 'sum' | 'avg' | 'min' | 'max' | 'count' | 'countNonE
 
 const FN_SET: ReadonlySet<string> = new Set<AggregationFn>(['sum', 'avg', 'min', 'max', 'count', 'countNonEmpty', 'countDistinct'])
 // Numeric field types (only these accept sum/avg/min/max).
-const NUMERIC_FIELD_TYPES: ReadonlySet<string> = new Set(['number', 'currency', 'percent', 'rating', 'autoNumber'])
+// `duration` is seconds-backed → numeric, so sum/avg over seconds works (raw-seconds result, v1).
+const NUMERIC_FIELD_TYPES: ReadonlySet<string> = new Set(['number', 'currency', 'percent', 'rating', 'duration', 'autoNumber'])
 const NUMERIC_ONLY_FNS: ReadonlySet<AggregationFn> = new Set<AggregationFn>(['sum', 'avg', 'min', 'max'])
 
 export function isNumericFieldType(type: string): boolean {

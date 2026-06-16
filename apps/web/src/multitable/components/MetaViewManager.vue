@@ -609,7 +609,7 @@ const configTargetFields = computed(() => props.fields)
 const attachmentFields = computed(() => props.fields.filter((field) => field.type === 'attachment'))
 const dateFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'dateTime'))
 const dateLikeFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'dateTime' || field.type === 'string' || field.type === 'number'))
-const numericFields = computed(() => props.fields.filter((field) => ['number', 'currency', 'percent', 'rating'].includes(field.type)))
+const numericFields = computed(() => props.fields.filter((field) => ['number', 'currency', 'percent', 'rating', 'duration'].includes(field.type)))
 const selectFields = computed(() => props.fields.filter((field) => field.type === 'select'))
 // S4 — hierarchy parent candidates only: reparent writes `[parentRecordId]` over this field,
 // so multi-value links are excluded here (and from validLinkFieldIds below, which makes a
@@ -1058,7 +1058,8 @@ function operatorsForField(fieldId: string) {
 
 function inputTypeForField(fieldId: string): string {
   const fieldType = props.fields.find((field) => field.id === fieldId)?.type ?? 'string'
-  if (fieldType === 'number' || fieldType === 'currency' || fieldType === 'percent' || fieldType === 'rating') return 'number'
+  // duration filters on raw seconds (v1) → a numeric input, like percent/rating.
+  if (fieldType === 'number' || fieldType === 'currency' || fieldType === 'percent' || fieldType === 'rating' || fieldType === 'duration') return 'number'
   if (fieldType === 'date') return 'date'
   return 'text'
 }
@@ -1095,7 +1096,7 @@ function updateFilterValue(index: number, value: string) {
   const fieldType = props.fields.find((field) => field.id === rule.fieldId)?.type ?? 'string'
   filterDraft.conditions[index] = {
     ...rule,
-    value: ['number', 'currency', 'percent', 'rating'].includes(fieldType) && value !== '' ? Number(value) : value,
+    value: ['number', 'currency', 'percent', 'rating', 'duration'].includes(fieldType) && value !== '' ? Number(value) : value,
   }
 }
 

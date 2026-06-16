@@ -20,6 +20,7 @@ export type MetaFieldType =
   | 'currency'
   | 'percent'
   | 'rating'
+  | 'duration'
   | 'url'
   | 'email'
   | 'phone'

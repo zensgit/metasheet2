@@ -544,6 +544,7 @@ const GROUPABLE_FIELD_TYPES = new Set<MetaFieldType>([
   'currency',
   'percent',
   'rating',
+  'duration',
   'boolean',
   'date',
   'dateTime',
@@ -552,7 +553,7 @@ const GROUPABLE_FIELD_TYPES = new Set<MetaFieldType>([
   'lookup',
   'rollup',
 ])
-const NUMERIC_FIELD_TYPES = new Set<MetaFieldType>(['number', 'currency', 'percent', 'rating', 'rollup'])
+const NUMERIC_FIELD_TYPES = new Set<MetaFieldType>(['number', 'currency', 'percent', 'rating', 'duration', 'rollup'])
 const AGGREGATIONS_REQUIRING_VALUE = new Set<AggregationFunction>(['sum', 'avg', 'min', 'max'])
 // v2-d: only additive aggregations make a stacked total meaningful (Σ segments == the single bar).
 const ADDITIVE_AGGREGATIONS = new Set<AggregationFunction>(['sum', 'count'])
