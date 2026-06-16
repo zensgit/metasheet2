@@ -1180,4 +1180,252 @@ describe('MetaDashboardView', () => {
     expect(container.querySelector('[data-chart-canvas]')).toBeTruthy()
     expect(container.querySelector('[data-legend]')).toBeTruthy()
   })
+
+  // ---- B4: dashboard non-chart widgets (metric / text / filter) ----
+
+  it('B4 backward-compat: a legacy panel with NO `type` renders as a chart', async () => {
+    // The fakeDashboard panel is {id,chartId,size,order} with no `type` — the canonical legacy row.
+    const { client } = mockClient([fakeDashboard()], [fakeChart()])
+    const { container } = mount({ sheetId: 'sheet_1', client })
+    await flushPromises()
+
+    const panel = container.querySelector('[data-panel-id="panel_1"]')
+    expect(panel).toBeTruthy()
+    expect(panel?.getAttribute('data-panel-type')).toBe('chart')
+    // The chart renderer (canvas) mounts for the legacy panel exactly as before.
+    expect(panel?.querySelector('[data-chart-canvas]')).toBeTruthy()
+    // Header still shows the chart name (not a raw chartId).
+    expect(panel?.querySelector('.meta-dashboard__panel-chart-name')?.textContent).toContain('Sales Chart')
+  })
+
+  it('B4 metric: renders a metric panel via the field-read-enforced preview-data path, keyed by panel.id', async () => {
+    const metricDashboard = fakeDashboard({
+      panels: [
+        { id: 'panel_metric', type: 'metric', title: 'Total revenue', size: 'small', order: 0, metricConfig: { aggregation: 'sum', valueFieldId: 'fld_amount' } },
+      ],
+    })
+    const { client, fetchFn } = mockClient([metricDashboard], [])
+    const previewSpy = vi.spyOn(client, 'previewChartData').mockResolvedValue({
+      chartType: 'number',
+      dataPoints: [{ label: 'Total revenue', value: 1234 }],
+      total: 1234,
+    })
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    const panel = container.querySelector('[data-panel-id="panel_metric"]')
+    expect(panel?.getAttribute('data-panel-type')).toBe('metric')
+    // Computes through previewChartData (NOT getChartData) with a synthesized number config.
+    expect(previewSpy).toHaveBeenCalledTimes(1)
+    expect(previewSpy).toHaveBeenCalledWith('sheet_1', expect.objectContaining({
+      chartType: 'number',
+      dataSource: expect.objectContaining({ aggregation: { function: 'sum', fieldId: 'fld_amount' } }),
+    }))
+    // No persisted chart fetch (no chartId on a metric panel).
+    const dataLoads = fetchFn.mock.calls.filter(([url]: [string]) => /\/charts\/[^/]+\/data/.test(url))
+    expect(dataLoads.length).toBe(0)
+    // The aggregated value renders through MetaChartRenderer's number branch.
+    const number = panel?.querySelector('[data-chart="number"]')
+    expect(number?.textContent).toContain('1234')
+  })
+
+  it('B4 metric: a restricted metric surfaces the restricted notice (no field-perm bypass)', async () => {
+    const metricDashboard = fakeDashboard({
+      panels: [
+        { id: 'panel_metric', type: 'metric', title: 'Restricted KPI', size: 'small', order: 0, metricConfig: { aggregation: 'sum', valueFieldId: 'fld_amount' } },
+      ],
+    })
+    const { client } = mockClient([metricDashboard], [])
+    // The server-side preview-data path returns a restricted ChartData when the user can't read the field.
+    vi.spyOn(client, 'previewChartData').mockResolvedValue({
+      chartType: 'number',
+      dataPoints: [],
+      total: 0,
+      metadata: { restricted: true, recordCount: 0 },
+    })
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    const panel = container.querySelector('[data-panel-id="panel_metric"]')
+    expect(panel?.querySelector('[data-chart-restricted]')).toBeTruthy()
+    expect(panel?.textContent).toContain('Chart data restricted')
+  })
+
+  it('B4 text: renders sanitized content through the rich-longtext chokepoint (strips XSS, keeps benign tags)', async () => {
+    const textDashboard = fakeDashboard({
+      panels: [
+        {
+          id: 'panel_text',
+          type: 'text',
+          title: 'Note',
+          size: 'medium',
+          order: 0,
+          textConfig: {
+            content: '<strong>Important</strong> <a href="https://ok.example">link</a><img src=x onerror="alert(1)"><script>alert(2)</script>',
+          },
+        },
+      ],
+    })
+    const { client } = mockClient([textDashboard], [])
+    const { container } = mount({ sheetId: 'sheet_1', client })
+    await flushPromises()
+
+    const panel = container.querySelector('[data-panel-id="panel_text"]')
+    expect(panel?.getAttribute('data-panel-type')).toBe('text')
+    const widget = panel?.querySelector('[data-widget="text"]') as HTMLElement
+    expect(widget).toBeTruthy()
+    // XSS canaries stripped.
+    expect(widget.innerHTML).not.toContain('onerror')
+    expect(widget.innerHTML.toLowerCase()).not.toContain('<script')
+    expect(widget.querySelector('img')).toBeNull()
+    expect(widget.querySelector('script')).toBeNull()
+    // Benign formatting survives; links are hardened with rel/target.
+    expect(widget.querySelector('strong')?.textContent).toBe('Important')
+    const link = widget.querySelector('a')
+    expect(link?.getAttribute('href')).toBe('https://ok.example')
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(link?.getAttribute('target')).toBe('_blank')
+  })
+
+  it('B4 filter: renders a PRESENTATIONAL control and updates local state only (no refetch / no cross-panel effect)', async () => {
+    const filterDashboard = fakeDashboard({
+      panels: [
+        { id: 'panel_chart', type: 'chart', chartId: 'chart_1', size: 'medium', order: 0 },
+        { id: 'panel_filter', type: 'filter', title: 'Status filter', size: 'small', order: 1, filterConfig: { fieldId: 'fld_status' } },
+      ],
+    })
+    const { client, fetchFn } = mockClient([filterDashboard], [fakeChart()])
+    const getDataSpy = vi.spyOn(client, 'getChartData')
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    const filterPanel = container.querySelector('[data-panel-id="panel_filter"]')
+    expect(filterPanel?.getAttribute('data-panel-type')).toBe('filter')
+    const control = filterPanel?.querySelector('[data-field="filter-control"]') as HTMLSelectElement
+    expect(control).toBeTruthy()
+    // Clearly labeled as presentational.
+    expect(filterPanel?.querySelector('[data-hint="filter-presentational"]')).toBeTruthy()
+
+    const dataCallsBefore = getDataSpy.mock.calls.length
+    const patchBefore = fetchFn.mock.calls.filter(([url, init]: [string, RequestInit?]) => url.includes('/dashboards/') && init?.method === 'PATCH').length
+
+    control.value = 'fld_status'
+    control.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    // Changing the control triggers NO data refetch and NO dashboard PATCH (local UI state only).
+    expect(getDataSpy.mock.calls.length).toBe(dataCallsBefore)
+    const patchAfter = fetchFn.mock.calls.filter(([url, init]: [string, RequestInit?]) => url.includes('/dashboards/') && init?.method === 'PATCH').length
+    expect(patchAfter).toBe(patchBefore)
+    // The chart panel still renders unchanged (filter does not drive it).
+    expect(container.querySelector('[data-panel-id="panel_chart"] [data-chart-canvas]')).toBeTruthy()
+  })
+
+  it('B4 mixed: a dashboard with [chart, metric, text] renders all three widget kinds in one grid', async () => {
+    const mixedDashboard = fakeDashboard({
+      panels: [
+        { id: 'panel_chart', type: 'chart', chartId: 'chart_1', size: 'medium', order: 0 },
+        { id: 'panel_metric', type: 'metric', title: 'KPI', size: 'small', order: 1, metricConfig: { aggregation: 'count' } },
+        { id: 'panel_text', type: 'text', title: 'Heading', size: 'medium', order: 2, textConfig: { content: '<h2>Section</h2>' } },
+      ],
+    })
+    const { client } = mockClient([mixedDashboard], [fakeChart()])
+    vi.spyOn(client, 'previewChartData').mockResolvedValue({ chartType: 'number', dataPoints: [{ label: 'KPI', value: 7 }], total: 7 })
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    expect(container.querySelector('[data-panel-id="panel_chart"] [data-chart-canvas]')).toBeTruthy()
+    expect(container.querySelector('[data-panel-id="panel_metric"] [data-chart="number"]')?.textContent).toContain('7')
+    expect(container.querySelector('[data-panel-id="panel_text"] [data-widget="text"] h2')?.textContent).toBe('Section')
+  })
+
+  it('B4 add-widget: adds a metric widget and PATCHes the tagged-union panel into the panel list', async () => {
+    const dashboard = fakeDashboard({ panels: [] })
+    const { client, fetchFn } = mockClient([dashboard], [])
+    vi.spyOn(client, 'previewChartData').mockResolvedValue({ chartType: 'number', dataPoints: [{ label: 'm', value: 3 }], total: 3 })
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="add-widget"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const kindSelect = container.querySelector('[data-field="widget-kind"]') as HTMLSelectElement
+    expect(kindSelect).toBeTruthy()
+    kindSelect.value = 'metric'
+    kindSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const titleInput = container.querySelector('[data-field="widget-title"]') as HTMLInputElement
+    titleInput.value = 'Order count'
+    titleInput.dispatchEvent(new Event('input'))
+    const aggSelect = container.querySelector('[data-field="widget-aggregation"]') as HTMLSelectElement
+    aggSelect.value = 'sum'
+    aggSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    const valueSelect = container.querySelector('[data-field="widget-value-field"]') as HTMLSelectElement
+    valueSelect.value = 'fld_amount'
+    valueSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="submit-add-widget"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const patchCalls = fetchFn.mock.calls.filter(([url, init]: [string, RequestInit?]) => url.includes('/dashboards/') && init?.method === 'PATCH')
+    expect(patchCalls.length).toBe(1)
+    const body = JSON.parse(patchCalls[0][1].body as string)
+    expect(body.panels).toEqual([
+      expect.objectContaining({
+        type: 'metric',
+        title: 'Order count',
+        size: 'medium',
+        order: 0,
+        metricConfig: { aggregation: 'sum', valueFieldId: 'fld_amount' },
+      }),
+    ])
+    // No persisted chart was created for the metric widget.
+    const chartPosts = fetchFn.mock.calls.filter(([url, init]: [string, RequestInit?]) => /\/charts(\?|$)/.test(url) && init?.method === 'POST')
+    expect(chartPosts.length).toBe(0)
+  })
+
+  it('B4 add-widget: adds a text widget carrying its content in the PATCH body', async () => {
+    const dashboard = fakeDashboard({ panels: [] })
+    const { client, fetchFn } = mockClient([dashboard], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="add-widget"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const kindSelect = container.querySelector('[data-field="widget-kind"]') as HTMLSelectElement
+    kindSelect.value = 'text'
+    kindSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    const textArea = container.querySelector('[data-field="widget-text-content"]') as HTMLTextAreaElement
+    textArea.value = '<strong>Hello</strong>'
+    textArea.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="submit-add-widget"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const patchCalls = fetchFn.mock.calls.filter(([url, init]: [string, RequestInit?]) => url.includes('/dashboards/') && init?.method === 'PATCH')
+    expect(patchCalls.length).toBe(1)
+    const body = JSON.parse(patchCalls[0][1].body as string)
+    expect(body.panels[0]).toMatchObject({ type: 'text', textConfig: { content: '<strong>Hello</strong>' } })
+  })
+
+  it('B4 i18n: the add-widget chrome localizes under zh-CN with no hardcoded strings', async () => {
+    useLocale().setLocale('zh-CN')
+    const { client } = mockClient([fakeDashboard({ panels: [] })], [])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    expect(container.textContent).toContain('+ 添加组件')
+    ;(container.querySelector('[data-action="add-widget"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(container.textContent).toContain('添加组件')
+    expect(container.textContent).toContain('组件类型')
+    expect(container.textContent).toContain('指标卡')
+    expect(container.textContent).toContain('文本说明')
+    expect(container.textContent).toContain('筛选器（预览）')
+  })
 })

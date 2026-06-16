@@ -46,6 +46,7 @@
           @click="openCreateChart"
         >{{ viewRenderLabel('dashboard.newChart', isZh) }}</button>
         <button class="meta-dashboard__btn" type="button" data-action="add-panel" @click="showAddPanel = true">{{ viewRenderLabel('dashboard.addPanel', isZh) }}</button>
+        <button class="meta-dashboard__btn" type="button" data-action="add-widget" :disabled="!activeDashboard" @click="openAddWidget">{{ viewRenderLabel('dashboard.addWidget', isZh) }}</button>
         <button class="meta-dashboard__btn meta-dashboard__btn--primary" type="button" data-action="create-dashboard" @click="onCreateDashboard">{{ viewRenderLabel('dashboard.newDashboard', isZh) }}</button>
       </div>
     </div>
@@ -63,9 +64,10 @@
         class="meta-dashboard__panel"
         :class="`meta-dashboard__panel--${panel.size}`"
         :data-panel-id="panel.id"
+        :data-panel-type="panelType(panel)"
       >
         <div class="meta-dashboard__panel-header">
-          <span class="meta-dashboard__panel-chart-name">{{ chartNameById(panel.chartId) }}</span>
+          <span class="meta-dashboard__panel-chart-name">{{ panelTitle(panel) }}</span>
           <div class="meta-dashboard__panel-controls">
             <select
               :value="panel.size"
@@ -86,13 +88,58 @@
           </div>
         </div>
         <div class="meta-dashboard__panel-body">
-          <MetaChartRenderer
-            v-if="chartDataMap[panel.chartId]"
-            :chart-data="chartDataMap[panel.chartId]"
-            :display-config="chartConfigMap[panel.chartId]?.displayConfig"
-            :aggregation="chartConfigMap[panel.chartId]?.dataSource?.aggregation?.function"
-          />
-          <div v-else class="meta-dashboard__panel-loading">{{ viewRenderLabel('dashboard.loadingChart', isZh) }}</div>
+          <!-- B4: branch the body on the widget kind. A legacy panel (no `type`) is a chart. -->
+          <!-- Chart widget (default / legacy). Data/config resolved via helpers (which narrow the
+               now-optional chartId inside a function body) so the bindings never depend on
+               cross-element template narrowing that vue-tsc may not perform. -->
+          <template v-if="panelType(panel) === 'chart'">
+            <MetaChartRenderer
+              v-if="panelChartData(panel)"
+              :chart-data="panelChartData(panel)!"
+              :display-config="panelChartConfig(panel)?.displayConfig"
+              :aggregation="panelChartConfig(panel)?.dataSource?.aggregation?.function"
+            />
+            <div v-else class="meta-dashboard__panel-loading">{{ viewRenderLabel('dashboard.loadingChart', isZh) }}</div>
+          </template>
+          <!-- Metric / number card: computed via the field-read-enforced preview-data path, keyed by panel.id. -->
+          <template v-else-if="panelType(panel) === 'metric'">
+            <MetaChartRenderer
+              v-if="metricDataMap[panel.id]"
+              :chart-data="metricDataMap[panel.id]"
+              :display-config="metricDisplayConfig(panel)"
+              :aggregation="panel.metricConfig?.aggregation"
+            />
+            <div v-else class="meta-dashboard__panel-loading" data-metric-loading="true">{{ viewRenderLabel('dashboard.loadingMetric', isZh) }}</div>
+          </template>
+          <!-- Text / markdown note: rendered through the SHARED rich-longtext DOMPurify chokepoint (never raw v-html). -->
+          <template v-else-if="panelType(panel) === 'text'">
+            <MetaRichLongTextRender
+              v-if="panel.textConfig?.content"
+              class="meta-dashboard__text-widget"
+              data-widget="text"
+              :html="panel.textConfig.content"
+            />
+            <div v-else class="meta-dashboard__panel-loading" data-widget="text-empty">{{ viewRenderLabel('dashboard.textEmpty', isZh) }}</div>
+          </template>
+          <!-- Filter / control: PRESENTATIONAL ONLY — local UI state, drives no other panel. -->
+          <template v-else-if="panelType(panel) === 'filter'">
+            <div class="meta-dashboard__filter-widget" data-widget="filter">
+              <select
+                :value="filterSelections[panel.id] ?? ''"
+                class="meta-dashboard__select meta-dashboard__select--sm"
+                data-field="filter-control"
+                @change="onFilterControlChange(panel.id, ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="">{{ viewRenderLabel('dashboard.filterAllOption', isZh) }}</option>
+                <option
+                  v-for="field in chartFields"
+                  :key="field.id"
+                  :value="field.id"
+                >{{ field.name }}</option>
+              </select>
+              <small class="meta-dashboard__hint" data-hint="filter-presentational">{{ viewRenderLabel('dashboard.filterPresentationalNote', isZh) }}</small>
+            </div>
+          </template>
         </div>
       </div>
     </div>
@@ -134,6 +181,114 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- B4: Add non-chart widget modal (metric / text / filter). Closed by default. -->
+    <div v-if="showAddWidget" class="meta-dashboard__modal-overlay" @click.self="showAddWidget = false">
+      <form class="meta-dashboard__modal" data-modal="add-widget" @submit.prevent="onSubmitWidget">
+        <div class="meta-dashboard__modal-header">
+          <h4>{{ viewRenderLabel('dashboard.addWidgetTitle', isZh) }}</h4>
+          <button class="meta-dashboard__btn meta-dashboard__btn--icon" type="button" @click="showAddWidget = false">&times;</button>
+        </div>
+        <div class="meta-dashboard__modal-body">
+          <label class="meta-dashboard__field">
+            <span>{{ viewRenderLabel('dashboard.widgetKind', isZh) }}</span>
+            <select v-model="widgetDraft.kind" class="meta-dashboard__select" data-field="widget-kind">
+              <option value="metric">{{ viewRenderLabel('dashboard.widgetKindMetric', isZh) }}</option>
+              <option value="text">{{ viewRenderLabel('dashboard.widgetKindText', isZh) }}</option>
+              <option value="filter">{{ viewRenderLabel('dashboard.widgetKindFilter', isZh) }}</option>
+            </select>
+          </label>
+          <label class="meta-dashboard__field">
+            <span>{{ viewRenderLabel('dashboard.widgetTitle', isZh) }}</span>
+            <input
+              v-model="widgetDraft.title"
+              class="meta-dashboard__input"
+              type="text"
+              data-field="widget-title"
+            />
+          </label>
+
+          <!-- Metric config -->
+          <template v-if="widgetDraft.kind === 'metric'">
+            <label class="meta-dashboard__field">
+              <span>{{ viewRenderLabel('dashboard.aggregation', isZh) }}</span>
+              <select v-model="widgetDraft.aggregation" class="meta-dashboard__select" data-field="widget-aggregation">
+                <option value="count">count</option>
+                <option value="sum">sum</option>
+                <option value="avg">avg</option>
+                <option value="min">min</option>
+                <option value="max">max</option>
+              </select>
+            </label>
+            <label v-if="widgetRequiresValueField" class="meta-dashboard__field">
+              <span>{{ viewRenderLabel('dashboard.valueField', isZh) }}</span>
+              <select v-model="widgetDraft.valueFieldId" class="meta-dashboard__select" data-field="widget-value-field">
+                <option value="">{{ viewRenderLabel('common.chooseField', isZh) }}</option>
+                <option v-for="field in numericFields" :key="field.id" :value="field.id">
+                  {{ field.name }} · {{ fieldTypeLabel(field.type, isZh) }}
+                </option>
+              </select>
+              <small v-if="!numericFields.length" class="meta-dashboard__hint">{{ viewRenderLabel('dashboard.noNumericFields', isZh) }}</small>
+            </label>
+            <label class="meta-dashboard__field">
+              <span>{{ viewRenderLabel('dashboard.metricPrefix', isZh) }}</span>
+              <input
+                v-model="widgetDraft.prefix"
+                class="meta-dashboard__input"
+                type="text"
+                data-field="widget-prefix"
+              />
+            </label>
+            <label class="meta-dashboard__field">
+              <span>{{ viewRenderLabel('dashboard.metricSuffix', isZh) }}</span>
+              <input
+                v-model="widgetDraft.suffix"
+                class="meta-dashboard__input"
+                type="text"
+                data-field="widget-suffix"
+              />
+            </label>
+          </template>
+
+          <!-- Text config (routes through the rich-longtext sanitizer on render) -->
+          <template v-else-if="widgetDraft.kind === 'text'">
+            <label class="meta-dashboard__field">
+              <span>{{ viewRenderLabel('dashboard.textContent', isZh) }}</span>
+              <textarea
+                v-model="widgetDraft.textContent"
+                class="meta-dashboard__input meta-dashboard__textarea"
+                data-field="widget-text-content"
+                :placeholder="viewRenderLabel('dashboard.textContentPlaceholder', isZh)"
+                rows="4"
+              ></textarea>
+            </label>
+          </template>
+
+          <!-- Filter config (presentational only) -->
+          <template v-else-if="widgetDraft.kind === 'filter'">
+            <label class="meta-dashboard__field">
+              <span>{{ viewRenderLabel('dashboard.filterField', isZh) }}</span>
+              <select v-model="widgetDraft.filterFieldId" class="meta-dashboard__select" data-field="widget-filter-field">
+                <option value="">{{ viewRenderLabel('common.chooseField', isZh) }}</option>
+                <option v-for="field in chartFields" :key="field.id" :value="field.id">
+                  {{ field.name }} · {{ fieldTypeLabel(field.type, isZh) }}
+                </option>
+              </select>
+              <small class="meta-dashboard__hint" data-hint="filter-presentational-config">{{ viewRenderLabel('dashboard.filterPresentationalNote', isZh) }}</small>
+            </label>
+          </template>
+        </div>
+        <div class="meta-dashboard__modal-footer">
+          <button class="meta-dashboard__btn" type="button" @click="showAddWidget = false">{{ viewRenderLabel('dashboard.cancel', isZh) }}</button>
+          <button
+            class="meta-dashboard__btn meta-dashboard__btn--primary"
+            type="submit"
+            data-action="submit-add-widget"
+            :disabled="addWidgetDisabled || addingWidget"
+          >{{ viewRenderLabel('dashboard.addWidgetAction', isZh) }}</button>
+        </div>
+      </form>
     </div>
 
     <!-- Create chart modal -->
@@ -341,12 +496,13 @@ const MetaChartRenderer = defineAsyncComponent({
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
-import type { AggregationFunction, ChartType, Dashboard, DashboardPanel, ChartConfig, ChartCreateInput, ChartData, ChartDataSource, MetaField, MetaFieldType } from '../types'
+import type { AggregationFunction, ChartDisplayConfig, ChartType, Dashboard, DashboardPanel, DashboardPanelType, ChartConfig, ChartCreateInput, ChartData, ChartDataSource, MetaField, MetaFieldType } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import { useLocale } from '../../composables/useLocale'
 import { dashboardDefaultName, viewRenderLabel, viewSizeLabel } from '../utils/meta-view-render-labels'
 import { fieldTypeLabel } from '../utils/meta-core-labels'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
+import MetaRichLongTextRender from './cells/MetaRichLongTextRender.vue'
 
 const props = defineProps<{
   sheetId: string
@@ -360,8 +516,16 @@ const dashboards = ref<Dashboard[]>([])
 const charts = ref<ChartConfig[]>([])
 const chartDataMap = ref<Record<string, ChartData>>({})
 const chartConfigMap = ref<Record<string, ChartConfig>>({})
+// B4: metric-card data is keyed by panel.id (a metric has no chartId) so it never
+// collides with the chartId-keyed chartDataMap.
+const metricDataMap = ref<Record<string, ChartData>>({})
+// B4: presentational filter selections — LOCAL UI state only, keyed by panel.id.
+// Deliberately not persisted and drives nothing else (scoped-out functional filter).
+const filterSelections = ref<Record<string, string>>({})
 const activeDashboardId = ref<string>(props.dashboardId ?? '')
 const showAddPanel = ref(false)
+const showAddWidget = ref(false)
+const addingWidget = ref(false)
 const showCreateChart = ref(false)
 const editingChartId = ref<string | null>(null)
 const creatingChart = ref(false)
@@ -411,6 +575,21 @@ const chartDraft = ref({
   yFieldId: '',
   colorFieldId: '',
   sizeFieldId: '',
+})
+
+// B4: the non-chart widget authoring draft (metric / text / filter).
+const widgetDraft = ref({
+  kind: 'metric' as Exclude<DashboardPanelType, 'chart'>,
+  title: '',
+  // metric
+  aggregation: 'count' as AggregationFunction,
+  valueFieldId: '',
+  prefix: '',
+  suffix: '',
+  // text
+  textContent: '',
+  // filter (presentational)
+  filterFieldId: '',
 })
 
 const activeDashboard = computed(() => dashboards.value.find((d) => d.id === activeDashboardId.value) ?? dashboards.value[0] ?? null)
@@ -473,6 +652,76 @@ const sortedPanels = computed(() => {
 
 function chartNameById(chartId: string): string {
   return chartConfigMap.value[chartId]?.name ?? chartId
+}
+
+// B4: a legacy panel (no `type`) is a chart — read the discriminator everywhere as `type ?? 'chart'`.
+function panelType(panel: DashboardPanel): DashboardPanelType {
+  return panel.type ?? 'chart'
+}
+
+// B4: resolve a chart panel's loaded data / config from its (now-optional) chartId. The narrowing
+// happens inside the function body, so the template bindings stay independent of cross-element
+// vue-tsc narrowing of `panel.chartId`.
+function panelChartData(panel: DashboardPanel): ChartData | undefined {
+  return panel.chartId ? chartDataMap.value[panel.chartId] : undefined
+}
+function panelChartConfig(panel: DashboardPanel): ChartConfig | undefined {
+  return panel.chartId ? chartConfigMap.value[panel.chartId] : undefined
+}
+
+// B4: header title. Chart panels use the chart name (legacy behavior); non-chart panels use
+// their own `title`, falling back to a localized "Untitled" — NEVER a raw chartId, which a
+// chartId-less widget does not have anyway.
+function panelTitle(panel: DashboardPanel): string {
+  if (panelType(panel) === 'chart') return chartNameById(panel.chartId ?? '')
+  return panel.title?.trim() || viewRenderLabel('dashboard.untitledWidget', isZh.value)
+}
+
+// B4: synthesize the metric card's display config (title + optional prefix/suffix) so the
+// reused MetaChartRenderer 'number' branch shows the KPI with the same chrome as a number chart.
+function metricDisplayConfig(panel: DashboardPanel): ChartDisplayConfig {
+  return {
+    prefix: panel.metricConfig?.prefix,
+    suffix: panel.metricConfig?.suffix,
+  }
+}
+
+// B4: presentational filter — update LOCAL state only. No data refetch, no cross-panel effect.
+function onFilterControlChange(panelId: string, value: string) {
+  filterSelections.value = { ...filterSelections.value, [panelId]: value }
+}
+
+// B4: metric needs a value field only for sum/avg/min/max (count aggregates row presence).
+const widgetRequiresValueField = computed(() =>
+  AGGREGATIONS_REQUIRING_VALUE.has(widgetDraft.value.aggregation),
+)
+const addWidgetDisabled = computed(() => {
+  if (!activeDashboard.value) return true
+  if (widgetDraft.value.kind === 'metric') {
+    return widgetRequiresValueField.value && !widgetDraft.value.valueFieldId
+  }
+  // text + filter have no required inputs (an empty text widget is allowed and editable later).
+  return false
+})
+
+// B4: build the synthesized number-chart input a metric card computes through preview-data.
+// Same field-read-enforced path a 'number' chart preview uses — NO field-perm bypass.
+function buildMetricChartInput(panel: DashboardPanel): ChartCreateInput {
+  const cfg = panel.metricConfig
+  const aggregation = cfg?.aggregation ?? 'count'
+  const needsField = AGGREGATIONS_REQUIRING_VALUE.has(aggregation)
+  const dataSource: ChartDataSource = {
+    sheetId: props.sheetId,
+    aggregation: {
+      function: aggregation,
+      ...(needsField && cfg?.valueFieldId ? { fieldId: cfg.valueFieldId } : {}),
+    },
+  }
+  return {
+    name: panel.title?.trim() || viewRenderLabel('dashboard.untitledWidget', isZh.value),
+    chartType: 'number',
+    dataSource,
+  }
 }
 
 function resetChartDraft() {
@@ -553,16 +802,46 @@ async function loadData() {
 async function loadPanelData() {
   if (!props.client || !activeDashboard.value) return
   const panels = activeDashboard.value.panels
+  // B4: iterate ALL panel kinds. Chart panels load via getChartData (chartId-keyed);
+  // metric panels compute via previewChartData (panel.id-keyed); text/filter need no data.
   const promises = panels.map(async (panel) => {
-    if (chartDataMap.value[panel.chartId]) return
-    try {
-      const data = await props.client!.getChartData(props.sheetId, panel.chartId)
-      chartDataMap.value[panel.chartId] = data
-    } catch {
-      // skip
+    const kind = panelType(panel)
+    if (kind === 'chart') {
+      if (!panel.chartId || chartDataMap.value[panel.chartId]) return
+      try {
+        const data = await props.client!.getChartData(props.sheetId, panel.chartId)
+        chartDataMap.value[panel.chartId] = data
+      } catch {
+        // skip
+      }
+      return
+    }
+    if (kind === 'metric') {
+      await loadMetricData(panel)
     }
   })
   await Promise.all(promises)
+}
+
+// B4: compute a metric card's single value through the NON-persisting, field-read-enforced
+// preview-data endpoint (isChartDataRestricted is applied server-side). Never bypasses
+// field permissions; a restricted result renders MetaChartRenderer's restricted notice.
+//
+// loadPanelData can fire twice in quick succession (the sheetId immediate watch + the
+// activeDashboard.id watch) before the first preview resolves, so an in-flight set
+// dedupes concurrent loads — the resolved-data guard only catches already-loaded panels.
+const metricInFlight = new Set<string>()
+async function loadMetricData(panel: DashboardPanel) {
+  if (!props.client || metricDataMap.value[panel.id] || metricInFlight.has(panel.id)) return
+  metricInFlight.add(panel.id)
+  try {
+    const data = await props.client.previewChartData(props.sheetId, buildMetricChartInput(panel))
+    metricDataMap.value[panel.id] = data
+  } catch {
+    // skip — panel keeps its loading state
+  } finally {
+    metricInFlight.delete(panel.id)
+  }
 }
 
 async function onCreateDashboard() {
@@ -584,28 +863,106 @@ async function onAddPanel(chartId: string) {
 
 async function addPanelForChart(chartId: string) {
   if (!props.client || !activeDashboard.value) return
-  const db = activeDashboard.value
   const newPanel: DashboardPanel = {
     id: `panel_${Date.now()}`,
+    type: 'chart',
     chartId,
     size: 'medium',
-    order: db.panels.length,
+    order: activeDashboard.value.panels.length,
   }
+  const appended = await appendPanel(newPanel)
+  if (!appended) return
+  // Load chart data
+  if (!chartDataMap.value[chartId]) {
+    try {
+      chartDataMap.value[chartId] = await props.client.getChartData(props.sheetId, chartId)
+    } catch {
+      // skip
+    }
+  }
+}
+
+// B4: shared panel-append (PATCH the full panels list, sync local state). Used by
+// chart panels and the metric/text/filter widget flow. Returns true on success.
+async function appendPanel(newPanel: DashboardPanel): Promise<boolean> {
+  if (!props.client || !activeDashboard.value) return false
+  const db = activeDashboard.value
   const updated = [...db.panels, newPanel]
   try {
     const result = await props.client.updateDashboard(props.sheetId, db.id, { panels: updated })
     const idx = dashboards.value.findIndex((d) => d.id === db.id)
     if (idx >= 0) dashboards.value[idx] = result
-    // Load chart data
-    if (!chartDataMap.value[chartId]) {
-      try {
-        chartDataMap.value[chartId] = await props.client.getChartData(props.sheetId, chartId)
-      } catch {
-        // skip
+    return true
+  } catch {
+    return false
+  }
+}
+
+function openAddWidget() {
+  if (!activeDashboard.value) return
+  widgetDraft.value = {
+    kind: 'metric',
+    title: '',
+    aggregation: 'count',
+    valueFieldId: '',
+    prefix: '',
+    suffix: '',
+    textContent: '',
+    filterFieldId: '',
+  }
+  showAddWidget.value = true
+}
+
+// B4: build the tagged-union panel for the chosen widget kind and append it. Only the
+// active kind's config sub-object is set, so a metric/text/filter panel round-trips
+// cleanly through the opaque-JSONB wire.
+async function onSubmitWidget() {
+  if (!props.client || !activeDashboard.value || addWidgetDisabled.value) return
+  addingWidget.value = true
+  try {
+    const kind = widgetDraft.value.kind
+    const title = widgetDraft.value.title.trim()
+    const base: Pick<DashboardPanel, 'id' | 'size' | 'order'> = {
+      id: `panel_${Date.now()}`,
+      size: 'medium',
+      order: activeDashboard.value.panels.length,
+    }
+    let newPanel: DashboardPanel
+    if (kind === 'metric') {
+      const needsField = AGGREGATIONS_REQUIRING_VALUE.has(widgetDraft.value.aggregation)
+      newPanel = {
+        ...base,
+        type: 'metric',
+        ...(title ? { title } : {}),
+        metricConfig: {
+          aggregation: widgetDraft.value.aggregation,
+          ...(needsField && widgetDraft.value.valueFieldId ? { valueFieldId: widgetDraft.value.valueFieldId } : {}),
+          ...(widgetDraft.value.prefix.trim() ? { prefix: widgetDraft.value.prefix.trim() } : {}),
+          ...(widgetDraft.value.suffix.trim() ? { suffix: widgetDraft.value.suffix.trim() } : {}),
+        },
+      }
+    } else if (kind === 'text') {
+      newPanel = {
+        ...base,
+        type: 'text',
+        ...(title ? { title } : {}),
+        textConfig: { content: widgetDraft.value.textContent },
+      }
+    } else {
+      newPanel = {
+        ...base,
+        type: 'filter',
+        ...(title ? { title } : {}),
+        filterConfig: { ...(widgetDraft.value.filterFieldId ? { fieldId: widgetDraft.value.filterFieldId } : {}) },
       }
     }
-  } catch {
-    // skip
+    const appended = await appendPanel(newPanel)
+    if (appended) {
+      showAddWidget.value = false
+      if (kind === 'metric') await loadMetricData(newPanel)
+    }
+  } finally {
+    addingWidget.value = false
   }
 }
 
@@ -975,6 +1332,21 @@ onBeforeUnmount(resetChartPreview)
 
 .meta-dashboard__panel-body { padding: 12px 14px; flex: 1; display: flex; align-items: center; justify-content: center; }
 .meta-dashboard__panel-loading { font-size: 12px; color: #94a3b8; }
+
+/* B4: non-chart widget bodies left-align their content (KPI / note / control). */
+.meta-dashboard__text-widget { align-self: stretch; width: 100%; }
+.meta-dashboard__filter-widget {
+  align-self: stretch;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.meta-dashboard__textarea {
+  resize: vertical;
+  min-height: 80px;
+  font-family: inherit;
+}
 
 .meta-dashboard__modal-overlay {
   position: fixed;
