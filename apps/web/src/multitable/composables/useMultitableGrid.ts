@@ -428,15 +428,9 @@ export function useMultitableGrid(opts: {
     }, SEARCH_DEBOUNCE_MS)
   }
 
-  // Column widths (with localStorage persistence)
-  const colWidthKey = computed(() => `mt_col_widths_${opts.sheetId.value}_${opts.viewId.value}`)
-  function loadColumnWidths(): Record<string, number> {
-    try {
-      const raw = localStorage.getItem(colWidthKey.value)
-      return raw ? JSON.parse(raw) : {}
-    } catch { return {} }
-  }
-  const columnWidths = ref<Record<string, number>>(loadColumnWidths())
+  // Column widths: now owned + persisted by the workbench in `view.config.columnWidths`
+  // (persist-display-prefs arc 2026-06-16). The composable no longer holds a localStorage-backed
+  // ref — the active widths flow down from the workbench as a prop, so this seam is gone here.
 
   // Undo/redo
   const editHistory = ref<CellEdit[]>([])
@@ -1008,13 +1002,6 @@ export function useMultitableGrid(opts: {
     return true
   }
 
-  // --- Column width ---
-
-  function setColumnWidth(fieldId: string, width: number) {
-    columnWidths.value = { ...columnWidths.value, [fieldId]: width }
-    try { localStorage.setItem(colWidthKey.value, JSON.stringify(columnWidths.value)) } catch { /* quota */ }
-  }
-
   // --- Watch sheet/view changes ---
 
   watch(
@@ -1032,7 +1019,7 @@ export function useMultitableGrid(opts: {
     // State
     fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
     sortRules, filterRules, filterConjunction, sortFilterDirty,
-    columnWidths, groupFieldId, groupField,
+    groupFieldId, groupField,
     editHistory, historyIndex, canUndo, canRedo,
     searchQuery,
     // Computed
@@ -1049,7 +1036,7 @@ export function useMultitableGrid(opts: {
     applyPatchResult,
     mergeRemoteRecord, applyRemoteRecordPatch, removeRemoteRecord,
     undo, redo, clearEditHistory, dismissConflict, retryConflict,
-    setColumnWidth, setGroupField,
+    setGroupField,
     setSearchQuery, resolveRowActions,
   }
 }

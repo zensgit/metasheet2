@@ -96,12 +96,15 @@ vi.mock('../src/multitable/composables/useMultitableComments', () => ({
     resolvingIds: ref<string[]>([]),
     updatingIds: ref<string[]>([]),
     deletingIds: ref<string[]>([]),
+    reactingKeys: ref<string[]>([]),
     error: ref<string | null>(null),
     loadComments: loadCommentsSpy,
     addComment: addCommentSpy,
     updateComment: vi.fn(),
     deleteComment: vi.fn(),
     resolveComment: resolveCommentSpy,
+    addReaction: vi.fn(),
+    removeReaction: vi.fn(),
   }),
 }))
 
@@ -218,8 +221,10 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
     name: 'MetaToolbar',
     props: {
       fields: { type: Array, default: () => [] },
+      // persist-display-prefs: expose the inbound row-density so the round-trip can be asserted.
+      rowDensity: { type: String, default: undefined },
     },
-    emits: ['add-record', 'import', 'export-csv'],
+    emits: ['add-record', 'import', 'export-csv', 'set-row-density'],
     render() {
       const fieldIds = (this.$props.fields as Array<{ id?: string }>)
         .map((field) => field.id ?? '')
@@ -227,7 +232,7 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
         .join(',')
       return h(
         'div',
-        { 'data-toolbar-field-ids': fieldIds },
+        { 'data-toolbar-field-ids': fieldIds, 'data-toolbar-row-density': this.$props.rowDensity ?? '' },
         [
           h(
             'button',
@@ -253,6 +258,14 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
             },
             'export-csv',
           ),
+          h(
+            'button',
+            {
+              'data-set-row-density': 'compact',
+              onClick: () => this.$emit('set-row-density', 'compact'),
+            },
+            'set-row-density-compact',
+          ),
         ],
       )
     },
@@ -261,9 +274,19 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
 vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
   default: defineComponent({
     name: 'MetaGridTable',
-    emits: ['select-record', 'open-comments', 'open-field-comments'],
+    props: {
+      // persist-display-prefs: expose the inbound display-pref props for round-trip assertions.
+      columnWidths: { type: Object, default: () => ({}) },
+      collapsedGroupKeys: { type: Array, default: () => [] },
+      rowDensity: { type: String, default: undefined },
+    },
+    emits: ['select-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group'],
     render() {
-      return h('div', [
+      return h('div', {
+        'data-grid-column-widths': JSON.stringify(this.$props.columnWidths ?? {}),
+        'data-grid-collapsed-keys': JSON.stringify(this.$props.collapsedGroupKeys ?? []),
+        'data-grid-row-density': this.$props.rowDensity ?? '',
+      }, [
         h(
           'button',
           {
@@ -295,6 +318,22 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
             onClick: () => this.$emit('open-field-comments', { recordId: 'rec_1', fieldId: 'fld_title' }),
           },
           'open-field-comments',
+        ),
+        h(
+          'button',
+          {
+            'data-resize-column': 'fld_title',
+            onClick: () => this.$emit('resize-column', 'fld_title', 222),
+          },
+          'resize-column',
+        ),
+        h(
+          'button',
+          {
+            'data-toggle-group': 'todo',
+            onClick: () => this.$emit('toggle-group', 'todo'),
+          },
+          'toggle-group',
         ),
       ])
     },
@@ -2584,5 +2623,126 @@ describe('MultitableWorkbench view wiring', () => {
       expect(text, `missing en string: ${s}`).toContain(s)
     }
     expect(text).not.toContain('评论收件箱')
+  })
+
+  // ----------------------------------------------------------------------------
+  // persist-display-prefs (2026-06-16): column width / row density / group
+  // collapse now persist into view.config via client.updateView. KEYSTONE: every
+  // write must spread the FULL existing config (backend whole-replaces config), so
+  // these tests seed sibling keys (frozen + aggregations) and assert they SURVIVE.
+  // ----------------------------------------------------------------------------
+  describe('display-prefs persistence (view.config)', () => {
+    function seedGridConfig(config: Record<string, unknown>) {
+      // view_grid is the default active view; give it a config with sibling keys.
+      workbenchMock.views.value = workbenchMock.views.value.map((v: { id: string }) =>
+        v.id === 'view_grid' ? { ...v, config } : v,
+      )
+    }
+    const SIBLINGS = { frozenLeftColumnIds: ['fld_title'], aggregations: { fld_qty: 'sum' } }
+
+    it('row density: persists rowDensity AND preserves sibling config keys', async () => {
+      seedGridConfig({ ...SIBLINGS })
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-set-row-density="compact"]')!.click()
+      await flushUi()
+
+      expect(workbenchMock.client.updateView).toHaveBeenCalledTimes(1)
+      const [viewId, body] = workbenchMock.client.updateView.mock.calls[0]
+      expect(viewId).toBe('view_grid')
+      expect(body.config).toEqual({ ...SIBLINGS, rowDensity: 'compact' })
+      // pure-display path: no row refetch
+      expect(gridMock.loadViewData).not.toHaveBeenCalled()
+      // background refresh so the next merge sees this write
+      expect(workbenchMock.loadSheetMeta).toHaveBeenCalled()
+      // optimistic-local: toolbar reflects the new density immediately
+      expect(container!.querySelector('[data-toolbar-row-density]')?.getAttribute('data-toolbar-row-density')).toBe('compact')
+    })
+
+    it('group collapse: persists scoped {fieldId, collapsedKeys} AND preserves siblings', async () => {
+      seedGridConfig({ ...SIBLINGS })
+      gridMock.groupFieldId.value = 'fld_status'
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-toggle-group="todo"]')!.click()
+      await flushUi()
+
+      expect(workbenchMock.client.updateView).toHaveBeenCalledTimes(1)
+      const body = workbenchMock.client.updateView.mock.calls[0][1]
+      expect(body.config).toEqual({ ...SIBLINGS, groupCollapse: { fieldId: 'fld_status', collapsedKeys: ['todo'] } })
+      // optimistic-local: the controlled prop fed back to the grid reflects the collapse
+      expect(container!.querySelector('[data-grid-collapsed-keys]')?.getAttribute('data-grid-collapsed-keys')).toBe('["todo"]')
+    })
+
+    it('column width: ONE debounced server write per drag, preserving siblings', async () => {
+      vi.useFakeTimers()
+      seedGridConfig({ ...SIBLINGS })
+      mountWorkbench()
+      await flushUi()
+      // Simulate a drag: three resize emits in quick succession.
+      const resizeBtn = container!.querySelector<HTMLButtonElement>('[data-resize-column="fld_title"]')!
+      resizeBtn.click(); resizeBtn.click(); resizeBtn.click()
+      await flushUi()
+      // Before the debounce elapses: no PATCH yet, but the grid prop already shows the width (instant).
+      expect(workbenchMock.client.updateView).not.toHaveBeenCalled()
+      expect(container!.querySelector('[data-grid-column-widths]')?.getAttribute('data-grid-column-widths')).toBe('{"fld_title":222}')
+      // Advance past the debounce → exactly one trailing write.
+      vi.advanceTimersByTime(500)
+      await flushUi()
+      expect(workbenchMock.client.updateView).toHaveBeenCalledTimes(1)
+      const body = workbenchMock.client.updateView.mock.calls[0][1]
+      expect(body.config).toEqual({ ...SIBLINGS, columnWidths: { fld_title: 222 } })
+      vi.useRealTimers()
+    })
+
+    it('column width: a pending drag does NOT persist after switching views (no cross-view write)', async () => {
+      vi.useFakeTimers()
+      seedGridConfig({ ...SIBLINGS })
+      mountWorkbench()
+      await flushUi()
+      // Arm the debounce on view_grid...
+      container!.querySelector<HTMLButtonElement>('[data-resize-column="fld_title"]')!.click()
+      await flushUi()
+      // ...then switch views BEFORE the debounce elapses.
+      workbenchMock.activeViewId.value = 'view_gallery'
+      await flushUi()
+      vi.advanceTimersByTime(500)
+      await flushUi()
+      // The armed timer must bail on the view change: neither view gets a width PATCH.
+      expect(workbenchMock.client.updateView).not.toHaveBeenCalled()
+      vi.useRealTimers()
+    })
+
+    it('survives reload: seeded config re-derives the display-pref props (no interaction)', async () => {
+      seedGridConfig({
+        ...SIBLINGS,
+        rowDensity: 'expanded',
+        columnWidths: { fld_title: 333 },
+        groupCollapse: { fieldId: 'fld_status', collapsedKeys: ['done'] },
+      })
+      gridMock.groupFieldId.value = 'fld_status'
+      mountWorkbench()
+      await flushUi()
+      expect(container!.querySelector('[data-toolbar-row-density]')?.getAttribute('data-toolbar-row-density')).toBe('expanded')
+      expect(container!.querySelector('[data-grid-column-widths]')?.getAttribute('data-grid-column-widths')).toBe('{"fld_title":333}')
+      expect(container!.querySelector('[data-grid-collapsed-keys]')?.getAttribute('data-grid-collapsed-keys')).toBe('["done"]')
+    })
+
+    it('stale-key guard: a collapse set authored on another field does NOT apply after regroup', async () => {
+      seedGridConfig({ groupCollapse: { fieldId: 'fld_other', collapsedKeys: ['x'] } })
+      gridMock.groupFieldId.value = 'fld_status' // grouped by a DIFFERENT field than the saved set
+      mountWorkbench()
+      await flushUi()
+      expect(container!.querySelector('[data-grid-collapsed-keys]')?.getAttribute('data-grid-collapsed-keys')).toBe('[]')
+    })
+
+    it('backward-compat: absent config yields current defaults (normal density, no widths, no collapse)', async () => {
+      seedGridConfig({}) // empty config — pre-arc state
+      mountWorkbench()
+      await flushUi()
+      expect(container!.querySelector('[data-toolbar-row-density]')?.getAttribute('data-toolbar-row-density')).toBe('normal')
+      expect(container!.querySelector('[data-grid-column-widths]')?.getAttribute('data-grid-column-widths')).toBe('{}')
+      expect(container!.querySelector('[data-grid-collapsed-keys]')?.getAttribute('data-grid-collapsed-keys')).toBe('[]')
+    })
   })
 })

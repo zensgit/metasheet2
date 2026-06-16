@@ -124,7 +124,7 @@
       :search-text="searchText" :total-rows="grid.page.value.total" :row-density="rowDensity"
       @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
       @set-group-field="grid.setGroupField" @export-csv="onExportCsv" @export-xlsx="onExportXlsx" @import="onOpenImportModal" @update:search-text="onSearchTextUpdate"
-      @print="onPrint" @set-row-density="rowDensity = $event" @auto-fit-columns="onAutoFitColumns"
+      @print="onPrint" @set-row-density="onSetRowDensity" @auto-fit-columns="onAutoFitColumns"
     />
     <div class="mt-workbench__content">
       <div class="mt-workbench__main">
@@ -250,7 +250,7 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
           :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :person-summaries="grid.personSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
@@ -269,12 +269,13 @@
           :fetch-record="fetchLinkedRecordFn"
           :mention-suggestions="commentMentionSuggestions"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
-          @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @open-person-picker="onGridPersonPicker" @resize-column="grid.setColumnWidth"
+          @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @open-person-picker="onGridPersonPicker" @resize-column="onSetColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
           @create-record="onAddRecord"
           @duplicate-record="onDuplicateRecord"
           @set-frozen="onSetFrozen"
           @set-aggregation="onSetAggregation"
+          @toggle-group="onToggleGroup"
           @open-comments="onOpenRecordComments"
           @open-field-comments="onOpenGridFieldComments"
           @toggle-lock="onToggleRecordLock"
@@ -573,6 +574,15 @@ import {
 } from '../utils/calendar-holiday-notice'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
 import { parseFrozenIds } from '../utils/frozen-columns'
+import {
+  parseColumnWidths,
+  parseRowDensity,
+  parseGroupCollapse,
+  resolveActiveCollapsedKeys,
+  mergeColumnWidths,
+  mergeRowDensity,
+  mergeGroupCollapse,
+} from '../utils/view-display-prefs'
 import { useAiShortcut } from '../composables/useAiShortcut'
 import type { AiShortcutConfigInput } from '../api/client'
 import { buildFieldScaleMap, buildRecordFormattingMap, extractRulesFromConfig, extractScaleRulesFromConfig } from '../utils/conditional-formatting'
@@ -778,7 +788,17 @@ type ImportResult = {
   failures: ImportFailure[]
 }
 const importResult = ref<ImportResult | null>(null)
+// --- Display prefs (column width / row density / group collapse): server-persisted in view.config
+// (persist-display-prefs arc 2026-06-16). Each is OPTIMISTIC-LOCAL: a writable ref updates the UI
+// instantly, then `persistDisplayPref` writes the merged config in the background (no row refetch).
+// The refs are SEEDED from the active view's config and RE-SEEDED on view switch (see the watch
+// below) so prefs survive reload + follow the view, but never bleed across views.
 const rowDensity = ref<RowDensity>('normal')
+// Live width overrides applied during/after a resize drag; merged OVER the persisted config so the
+// column doesn't "snap back" while the debounced PATCH is in flight. Reset on view switch.
+const columnWidthOverrides = ref<Record<string, number>>({})
+// Collapsed group keys for the ACTIVE groupField (controlled child state, persisted scoped to fieldId).
+const collapsedGroupKeys = ref<string[]>([])
 const peopleResolverCache = new Map<string, Promise<ImportValueResolver | null>>()
 const linkResolverCache = new Map<string, Map<string, Promise<string[] | null>>>()
 // Native person (人员) import: resolve tokens (userId / name / email) → USERIDs against the
@@ -842,6 +862,9 @@ function ensureCanDeleteRecord(recordId?: string | null): boolean {
 }
 
 const FORCED_VIEW_MODES = new Set(['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline', 'gantt', 'hierarchy'])
+// Column-resize fires `resize-column` per-mousemove (MetaFieldHeader has no resize-end), so the
+// view.config PATCH is debounced: one drag = one trailing server write. ~400ms covers a normal drag.
+const COLUMN_WIDTH_PERSIST_DEBOUNCE_MS = 400
 
 function normalizeForcedViewMode(mode?: string): string | null {
   const value = typeof mode === 'string' ? mode.trim() : ''
@@ -2112,6 +2135,86 @@ function onSetFrozen(frozenLeftColumnIds: string[]) {
   })
 }
 
+// --- Display prefs persistence (column width / row density / group collapse) ---
+// Lighter-weight persist path than updateViewInternal: width/density/collapse never change the row
+// SET, so we updateView + loadSheetMeta (refresh activeView.config so the NEXT frozen/agg/pref merge
+// sees this write) but NOT loadViewData (no flicker / no wasted page query). Best-effort + silent:
+// a non-canManageViews viewer's PATCH is rejected server-side; the optimistic local ref already gave
+// instant feedback, and a toast on every failed resize-drag would be noise (owner-deferred decision).
+async function persistDisplayPref(config: Record<string, unknown>) {
+  const viewId = workbench.activeViewId.value
+  if (!viewId) return
+  try {
+    await workbench.client.updateView(viewId, { config })
+    await workbench.loadSheetMeta(workbench.activeSheetId.value)
+  } catch { /* best-effort: local ref already reflects the change */ }
+}
+
+// Column widths: persisted set merged with the live in-drag overrides (overrides win so a column
+// doesn't snap back to the persisted width before the debounced PATCH round-trips).
+const activeColumnWidths = computed<Record<string, number>>(() => ({
+  ...parseColumnWidths(workbench.activeView.value?.config),
+  ...columnWidthOverrides.value,
+}))
+let columnWidthPersistTimer: ReturnType<typeof setTimeout> | null = null
+function onSetColumnWidth(fieldId: string, width: number) {
+  // Instant local feedback (fires per-mousemove during a drag — MetaFieldHeader has no resize-end).
+  columnWidthOverrides.value = { ...columnWidthOverrides.value, [fieldId]: width }
+  // Debounced trailing persist: one drag = one server write. Build the merge from the AUTHORITATIVE
+  // local widths (persisted ∪ overrides) so rapid writes are immune to a stale activeView.config.
+  if (columnWidthPersistTimer) clearTimeout(columnWidthPersistTimer)
+  // Capture the view the drag belongs to: if the user switches views before the debounce elapses,
+  // the reseed watch has already cleared the overrides for the OLD view — firing now would both drop
+  // the old view's resize AND wrongly PATCH the NEW view with its own widths. Bail on a view change.
+  const viewIdAtArm = workbench.activeViewId.value
+  columnWidthPersistTimer = setTimeout(() => {
+    columnWidthPersistTimer = null
+    if (workbench.activeViewId.value !== viewIdAtArm) return
+    void persistDisplayPref(mergeColumnWidths(workbench.activeView.value?.config, activeColumnWidths.value))
+  }, COLUMN_WIDTH_PERSIST_DEBOUNCE_MS)
+}
+
+// Row density: optimistic local ref (set instantly), persist in the background.
+function onSetRowDensity(next: RowDensity) {
+  rowDensity.value = next
+  void persistDisplayPref(mergeRowDensity(workbench.activeView.value?.config, next))
+}
+
+// Group collapse: collapsedGroupKeys is controlled child state; flipping a key persists the scoped
+// {fieldId, collapsedKeys} (scoped so a saved set never collapses unrelated groups after a regroup).
+const activeCollapsedGroupKeys = computed<string[]>(() => collapsedGroupKeys.value)
+function onToggleGroup(key: string) {
+  const set = new Set(collapsedGroupKeys.value)
+  if (set.has(key)) set.delete(key)
+  else set.add(key)
+  const nextKeys = [...set]
+  collapsedGroupKeys.value = nextKeys
+  void persistDisplayPref(
+    mergeGroupCollapse(workbench.activeView.value?.config, {
+      fieldId: grid.groupFieldId.value ?? undefined,
+      collapsedKeys: nextKeys,
+    }),
+  )
+}
+
+// Seed + re-seed local display-pref state from the active view's config. Watches config (not just
+// the view id) because config arrives async after loadSheetMeta — watching the id alone with
+// `immediate` would read an empty config on first mount and never re-seed. Re-seeding is a no-op
+// after our own round-trip (persisted === local). Density + collapse re-resolve whenever config or
+// the active groupField changes (collapse is scoped to the grouped field).
+watch(
+  [() => workbench.activeViewId.value, () => workbench.activeView.value?.config, () => grid.groupFieldId.value],
+  () => {
+    rowDensity.value = parseRowDensity(workbench.activeView.value?.config)
+    collapsedGroupKeys.value = resolveActiveCollapsedKeys(workbench.activeView.value?.config, grid.groupFieldId.value)
+  },
+  { immediate: true },
+)
+// Clear in-drag width overrides ONLY on a view switch (so view A's widths can't bleed into view B).
+// Deliberately NOT keyed on groupFieldId: a regroup mid-drag must not snap the column back — the
+// persisted widths still apply through `parseColumnWidths`, and the override stays live until release.
+watch(() => workbench.activeViewId.value, () => { columnWidthOverrides.value = {} })
+
 // aggregation footer (#4-3b-1): SERVER-RESPONSE ONLY — never compute aggregates from local rows
 const aggregateValues = ref<Record<string, { fn: string; value: number }>>({})
 const aggregateTooLarge = ref(false)
@@ -2683,18 +2786,24 @@ async function onInstallTemplate(template: MetaTemplate) {
 function onPrint() { window.print() }
 
 // --- Column auto-fit ---
+// Auto-fit computes every visible column's width, then persists ONE merged config write (not N) —
+// so a single button press is one PATCH, not one-per-column. Overrides update instantly for feedback.
 function onAutoFitColumns() {
   const fields = grid.visibleFields.value
   const rows = grid.rows.value
+  const fitted: Record<string, number> = {}
   for (const f of fields) {
     let maxLen = f.name.length
     for (const r of rows) {
       const v = r.data[f.id]
       if (v != null) maxLen = Math.max(maxLen, String(v).length)
     }
-    const width = Math.max(80, Math.min(400, maxLen * 8 + 24))
-    grid.setColumnWidth(f.id, width)
+    fitted[f.id] = Math.max(80, Math.min(400, maxLen * 8 + 24))
   }
+  // Cancel any pending per-drag debounce: this batch supersedes it.
+  if (columnWidthPersistTimer) { clearTimeout(columnWidthPersistTimer); columnWidthPersistTimer = null }
+  columnWidthOverrides.value = { ...columnWidthOverrides.value, ...fitted }
+  void persistDisplayPref(mergeColumnWidths(workbench.activeView.value?.config, activeColumnWidths.value))
 }
 
 // --- Field reorder ---
@@ -3525,6 +3634,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
   stopDialogMetaRefresh()
   unsubscribeMentionRealtime?.()
+  // Cancel a pending column-width persist so a late write can't fire after teardown.
+  if (columnWidthPersistTimer) { clearTimeout(columnWidthPersistTimer); columnWidthPersistTimer = null }
 })
 
 useMultitableCommentRealtime({
