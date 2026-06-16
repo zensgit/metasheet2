@@ -51,15 +51,16 @@ describe('Notification Center S1 — mark-read / unread-count routes', () => {
   afterEach(() => { vi.restoreAllMocks(); vi.resetModules() })
 
   test('unread-count COUNTs scoped to the authenticated user', async () => {
-    let params: unknown[] | undefined
-    const { app } = await createApp({ queryHandler: async (sql, p) => {
-      if (sql.includes('COUNT(*)') && sql.includes('meta_record_subscription_notifications')) { params = p; return { rows: [{ count: 3 }] } }
+    let params: unknown[] | undefined; let sql = ''
+    const { app } = await createApp({ queryHandler: async (s, p) => {
+      if (s.includes('COUNT(*)') && s.includes('meta_record_subscription_notifications')) { sql = s; params = p; return { rows: [{ count: 3 }] } }
       return { rows: [] }
     } })
     const res = await request(app).get(UNREAD)
     expect(res.status).toBe(200)
     expect(res.body.data.count).toBe(3)
     expect(params).toEqual(['user_a'])
+    expect(sql).toContain('read_at IS NULL') // "unread" = read_at IS NULL (mutation-proof, not just SQL-shape)
   })
 
   test('mark-read UPDATEs only the AUTH user rows — a userId in the body is ignored (cross-user write impossible)', async () => {
@@ -74,19 +75,21 @@ describe('Notification Center S1 — mark-read / unread-count routes', () => {
     expect(res.body.data.updated).toBe(2)
     expect(sql).toContain('user_id = $1')
     expect(sql).toContain('id::text = ANY($2)') // text compare → malformed ids harmlessly miss, no uuid-cast 500
+    expect(sql).toContain('read_at IS NULL') // idempotent: only flips still-unread rows (mutation-proof)
     expect(params).toEqual(['user_a', ['n1', 'n2']]) // auth user, NOT 'victim'
   })
 
   test('mark-all-read UPDATEs the user unread rows, self-scoped', async () => {
-    let params: unknown[] | undefined
+    let params: unknown[] | undefined; let sql = ''
     const { app } = await createApp({ queryHandler: async (s, p) => {
-      if (s.includes('UPDATE meta_record_subscription_notifications') && !s.includes('= ANY')) { params = p; return { rows: [], rowCount: 5 } }
+      if (s.includes('UPDATE meta_record_subscription_notifications') && !s.includes('= ANY')) { sql = s; params = p; return { rows: [], rowCount: 5 } }
       return { rows: [] }
     } })
     const res = await request(app).post(MARK_ALL).send({})
     expect(res.status).toBe(200)
     expect(res.body.data.updated).toBe(5)
     expect(params).toEqual(['user_a'])
+    expect(sql).toContain('read_at IS NULL') // idempotent: only flips still-unread rows (mutation-proof)
   })
 
   test('mark-read rejects a non-array ids body (400) before any query', async () => {
