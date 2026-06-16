@@ -430,10 +430,19 @@ TODO:
     `POST /api/integration/pipelines/:id/external-write/dry-run` (`200`) while
     `POST /api/integration/pipelines/:id/external-write/apply` remains blocked (`403`) with
     no target write request accepted.
-  - remaining HOLD: controlled bad-row smoke has not run yet; it must prove row-level failure
-    evidence is values-free and clean sibling rows are not silently swallowed. The bad row must be
-    a write-time target constraint failure; target lookup / plan-decision drift after dry-run is
-    a revision-fence check (`C6_WRITE_DRY_RUN_TOKEN_MISMATCH`), not this row-level failure gate.
+  - #2720 controlled bad-row attempt HOLD: fresh dedicated dry-run returned `HTTP 200`,
+    `canApply=true`, `add=2`, but the entity-machine target principal lacked PostgreSQL
+    DDL/TRIGGER privilege for the planned reversible one-shot write-time failure injection
+    (`42501` / `HOLD_TARGET_DDL_UNAVAILABLE`). Apply was not run, no target rows were written,
+    and cleanup was values-free.
+  - remaining HOLD: controlled bad-row still needs a true write-time target constraint failure that
+    proves row-level failure evidence is values-free and clean sibling rows are not silently
+    swallowed. Target lookup / plan-decision drift after dry-run is a revision-fence check
+    (`C6_WRITE_DRY_RUN_TOKEN_MISMATCH`), not this row-level failure gate.
+  - next options, in order: provide a DDL-capable sandbox/reset principal for this sandbox-only,
+    operator-local maintenance check; use a seeded naturally failing row that can be reset
+    values-free; only if neither exists, open a separate design-first test-only failure-injection
+    slice. Do not add a broad production runtime failure hook inside C6-5.
   - C6-5 remains sandbox/entity-machine validation only; no production/batch rollout.
 
 完成条件:
