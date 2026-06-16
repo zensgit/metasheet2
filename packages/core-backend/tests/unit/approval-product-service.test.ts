@@ -363,6 +363,74 @@ describe('ApprovalProductService', () => {
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
   })
 
+  it('locks the instance row with FOR UPDATE during dispatch (concurrency invariant)', async () => {
+    // Guards the dispatch serialization invariant: concurrent actions on one
+    // instance — including two approvers acting on two parallel branches at
+    // once — are serialized by a row lock on approval_instances, NOT by
+    // optimistic retry. A refactor that drops `FOR UPDATE` would silently
+    // reintroduce a lost-update on the JSONB parallelBranchStates
+    // read-modify-write. This pins the SELECT shape so that regression fails CI.
+    // (True two-session race coverage is an integration test requiring a real
+    // Postgres; tracked separately as a DB-harness follow-up.)
+    const runtimeGraph = buildRuntimeGraph()
+    const captured: string[] = []
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      captured.push(sql)
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return { rows: [buildInstanceRow()], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date('2026-04-11T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT COUNT(*)::text AS count')) {
+        return { rows: [{ count: '0' }], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith("UPDATE approval_instances SET status = 'revoked'")) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      status: 'revoked',
+      currentNodeKey: null,
+      assignments: [],
+    }))
+
+    await service.dispatchAction('apr-1', { action: 'revoke', comment: 'cancel' }, { userId: 'user-1' })
+
+    const instanceSelect = captured.find((sql) =>
+      /SELECT \* FROM approval_instances WHERE id = \$1/.test(sql))
+    expect(instanceSelect, 'dispatch must SELECT the instance row').toBeDefined()
+    expect(instanceSelect).toMatch(/FOR UPDATE/)
+  })
+
   it('emits a completion event when the requester revokes an approval', async () => {
     const runtimeGraph = buildRuntimeGraph()
 
