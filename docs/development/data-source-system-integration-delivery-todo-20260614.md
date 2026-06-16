@@ -16,8 +16,8 @@
   C5 K3/MSSQL smoke gate #2670 已在 `dea391a1` 包上通过并关闭：operator scope-adjusted rerun
   中 generic SQL Server smoke 和 K3 SQL Server executor smoke 均 PASS，且 evidence values-free、无 K3
   Save/Submit/Audit/BOM、无外部 DB 写、无 raw SQL。#2700 已补 C5 runbook 的 SQL auth/scope triage。
-- 下一门: C6-0 design-first。C6 是最大风险刀；#2670 通过只解除 read-only smoke 前置 gate，
-  不授权任何 C6 runtime 或 external write。
+- 下一门: C6-1 backend latent writer helper。C6 是最大风险刀；C6-0 只锁 design contract，
+  不授权任何 C6 runtime 或 external write；C6-1+ 仍需逐片 opt-in、复审、fresh CI 和实体机 gate。
 
 ## 收口顺序
 
@@ -28,7 +28,7 @@
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
-| C6 | external write | next gated design-first | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
+| C6 | external write | C6-0 design locked; C6-1+ gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
 | Release | 总包 + 实体机验收 | gated | 交付签收 | 包内容/部署/证据不完整 |
 
 ## P0 - ②b Arc 收口 Follow-Up
@@ -337,26 +337,35 @@ TODO:
 
 目标: 最终交付门槛。外部系统写回能力必须设计优先、分阶段、实体机验证。
 
+设计锚点:
+
+- C6-0 design: `docs/development/data-source-system-integration-c6-external-write-design-20260616.md`。
+- 设计结论: C6 写能力必须走显式 write-gated target contract；不能把既有
+  `data-source:sql-readonly` source adapter 改成可写。
+- C6-0 只锁合同，不引入 runtime、route、UI、package 或 external write。
+
 必须设计先行:
 
-- [ ] 写入对象和目标系统范围。
-- [ ] 权限模型: 谁可以 dry-run，谁可以 apply。
-- [ ] dry-run / apply 双阶段。
-- [ ] token/revision 绑定，防止“看的是 A，写的是 B”。
-- [ ] 幂等键和重复写保护。
-- [ ] 每行失败隔离。
-- [ ] dead-letter / provenance。
-- [ ] rollback / re-pull 验证。
-- [ ] owner-gated + sandbox-first；首次外部写不得直接生产。
-- [ ] max-in-flight / 熔断 / 外部系统保护。
-- [ ] values-free 审计轨: 记录谁、何时、用哪个 dry-run token apply；不记录外部系统值。
-- [ ] revision fencing 是硬围栏，不是提示；目标自 dry-run 后变化时必须拒绝 apply。
-- [ ] 禁止 batch-abort 后不可恢复的半写状态。
-- [ ] 禁止自动重试打爆外部系统。
+- [x] 写入对象和目标系统范围。
+- [x] 权限模型: 谁可以 dry-run，谁可以 apply。
+- [x] dry-run / apply 双阶段。
+- [x] token/revision 绑定，防止“看的是 A，写的是 B”。
+- [x] 幂等键和重复写保护。
+- [x] 每行失败隔离。
+- [x] dead-letter / provenance。
+- [x] rollback / re-pull 验证。
+- [x] owner-gated + sandbox-first；首次外部写不得直接生产。
+- [x] max-in-flight / 熔断 / 外部系统保护。
+- [x] values-free 审计轨: 记录谁、何时、用哪个 dry-run token apply；不记录外部系统值。
+- [x] revision fencing 是硬围栏，不是提示；目标自 dry-run 后变化时必须拒绝 apply。
+- [x] 禁止 batch-abort 后不可恢复的半写状态。
+- [x] 禁止自动重试打爆外部系统。
+- [x] C6 写目标必须关闭 generic raw query / execute / delete 绕行面；不能只引用普通
+  `readOnly:false` data source。
 
 实现切片建议:
 
-- [ ] C6-0 design: 写合同、权限、幂等、回滚、证据。
+- [x] C6-0 design: 写合同、权限、幂等、回滚、证据。
 - [ ] C6-1 backend latent writer helper: 不接 UI，不自动运行。
 - [ ] C6-2 dry-run route: read-only，values-free evidence。
 - [ ] C6-3 apply route: token-bound，permission-bound，per-row result。
