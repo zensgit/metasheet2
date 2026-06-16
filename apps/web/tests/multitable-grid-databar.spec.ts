@@ -166,4 +166,44 @@ describe('MetaGridTable — color scale (A5-2) + icon set (A5-3) render', () => 
     // cells[1] is r1.label (no scale rule) → no icon
     expect(cells[1].querySelector('[data-test="cell-scale-icon"]')).toBeNull()
   })
+
+  // Contrast fix (surfaced by the #2689 browser lane): cell-renderer number
+  // sign-colors go low-contrast over scale fills, so scale-fill cells get a
+  // luminance-picked readable text var + a class the :deep rule keys on.
+  it('sets a luminance-picked readable text var on color-scale cells (dark fill → white, light fill → dark)', () => {
+    const colorScale = buildFieldScaleMap([
+      sanitizeScaleRule({
+        id: 'cs1', fieldId: 'amount', kind: 'colorScale', order: 0, range: { mode: 'auto' },
+        colorScale: { stops: [{ at: 'min', color: '#000000' }, { at: 'max', color: '#ffffff' }] },
+      })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: colorScale })
+    const cells = dataCells(root)
+    // cells[0] = amount 0 → fill #000000 (dark) → white text var
+    expect(cells[0].classList.contains('meta-grid__cell--scale-fill')).toBe(true)
+    expect(cells[0].style.getPropertyValue('--meta-grid-scale-text-color')).toBe('#ffffff')
+    // cells[4] = amount 100 → fill #ffffff (light) → dark text var
+    expect(cells[4].style.getPropertyValue('--meta-grid-scale-text-color')).toBe('#111827')
+  })
+
+  it('sets a default dark text var + scale-fill class on data-bar cells', () => {
+    const dataBar = buildFieldScaleMap([
+      sanitizeScaleRule({ id: 'b1', fieldId: 'amount', kind: 'dataBar', order: 0, range: { mode: 'auto' }, dataBar: { color: '#2196f3' } })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: dataBar })
+    const cells = dataCells(root)
+    expect(cells[2].classList.contains('meta-grid__cell--scale-fill')).toBe(true)
+    expect(cells[2].style.getPropertyValue('--meta-grid-scale-text-color')).toBe('#111827')
+  })
+
+  it('does not set the scale-text var or class on a field with no scale rule', () => {
+    const dataBar = buildFieldScaleMap([
+      sanitizeScaleRule({ id: 'b1', fieldId: 'amount', kind: 'dataBar', order: 0, range: { mode: 'auto' }, dataBar: { color: '#2196f3' } })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: dataBar })
+    const cells = dataCells(root)
+    // cells[1] = r1.label (no rule) → no var, no class
+    expect(cells[1].classList.contains('meta-grid__cell--scale-fill')).toBe(false)
+    expect(cells[1].style.getPropertyValue('--meta-grid-scale-text-color')).toBe('')
+  })
 })
