@@ -390,9 +390,10 @@ export function evaluateConditionalFormattingRules(
 // same client-side discipline as the A2 export picker; a full-column server
 // aggregate is a separate gated follow-up). All three kinds are CONTRACT-level
 // here: `dataBar` (A5-1), `colorScale` (A5-2, by-name stop interpolation),
-// `iconSet` (A5-3, absolute-threshold bucketing). The data-bar GRADIENT render
-// shipped (#2640); the colorScale/iconSet RENDER is browser-gated future work —
-// builders produce scaleColor/iconKey but no cell drawing here.
+// `iconSet` (A5-3, absolute-threshold bucketing). All three render in the grid:
+// data-bar gradient (#2640), colorScale cell background + iconSet glyph (#2680).
+// The builders here only produce barPct/scaleColor/iconKey; the cell drawing
+// lives in MetaGridTable (cellStyle + cellScaleIcon), not in this service.
 // ===========================================================================
 
 export const CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT = 20
