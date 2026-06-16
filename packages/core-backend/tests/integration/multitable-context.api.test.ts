@@ -1124,9 +1124,12 @@ describe('Multitable context API', () => {
     })
   })
 
-  test('creates native person field requests as system people link fields', async () => {
-    let peopleSheetId = ''
-
+  // Native person field (人员, design 2026-06-16): `type:'person'` is now a FIRST-CLASS native
+  // field stored as `type='person'` (value = userId[]) — it is NO LONGER rewritten to a
+  // `link`+refKind:user against a system People sheet. (Legacy link-backed person fields stay
+  // `type='link'` and are untouched — coexistence; `ensurePeopleSheetPreset`/`/person-fields/prepare`
+  // remain for them + direct API callers.)
+  test('creates a native person field stored as type=person (no People-sheet rewrite)', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
@@ -1134,70 +1137,28 @@ describe('Multitable context API', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'sheet_ops' }] }
         }
-        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
-          // loadSheetRow is hit TWICE here: once for the source sheet (sheet_ops) and once by the §2a.2
-          // cross-base wall (`validateLinkFieldConfig`) for the FOREIGN sheet — which, for a native person
-          // field, is the freshly-provisioned people sheet (`peopleSheetId`), since the person
-          // normalization overwrites the spoofed foreignSheetId. Echo a SAME-BASE (base_ops) row keyed by
-          // the requested id so source-base == foreign-base → the wall sees a same-base link and passes.
-          // A fixed ['sheet_ops'] assertion mis-fires on the peopleSheetId lookup.
-          const requestedSheetId = String(params?.[0] ?? '')
-          expect([requestedSheetId === 'sheet_ops', requestedSheetId === peopleSheetId]).toContain(true)
-          return { rows: [{ id: requestedSheetId, base_id: 'base_ops', name: 'Orders', description: null }] }
-        }
-        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
-          expect(params).toEqual(['base_ops'])
-          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
-        }
-        if (sql.includes('INSERT INTO meta_sheets')) {
-          peopleSheetId = String(params?.[0] ?? '')
-          expect(params).toEqual([
-            expect.any(String),
-            'base_ops',
-            'People',
-            '__metasheet_system:people__',
-          ])
-          return { rows: [], rowCount: 1 }
-        }
-        if (sql.includes('SELECT id, name, type, "order" FROM meta_fields WHERE sheet_id = $1')) {
-          expect(params).toEqual([peopleSheetId])
-          return { rows: [] }
-        }
-        if (sql.includes('INSERT INTO meta_fields') && params?.[1] === peopleSheetId) {
-          return { rows: [], rowCount: 1 }
-        }
-        if (sql.includes('SELECT id, email, name, avatar_url') && sql.includes('FROM users')) {
-          return { rows: [] }
-        }
         if (sql.includes('SELECT COALESCE(MAX("order"), -1) AS max_order FROM meta_fields')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ max_order: 4 }] }
         }
         if (sql.includes('INSERT INTO meta_fields')) {
+          // Native person: persisted as type='person' with ONLY `limitSingleRecord` in property.
+          // The spoofed `foreignSheetId` is DROPPED (person sanitize keeps no foreign-sheet key),
+          // and NO People sheet is provisioned (no INSERT INTO meta_sheets handler is reachable).
           expect(params).toEqual([
             'fld_owner',
             'sheet_ops',
             'Owner',
-            'link',
-            JSON.stringify({
-              foreignSheetId: peopleSheetId,
-              limitSingleRecord: false,
-              refKind: 'user',
-              foreignDatasheetId: peopleSheetId,
-            }),
+            'person',
+            JSON.stringify({ limitSingleRecord: false }),
             5,
           ])
           return {
             rows: [{
               id: 'fld_owner',
               name: 'Owner',
-              type: 'link',
-              property: {
-                foreignSheetId: peopleSheetId,
-                limitSingleRecord: false,
-                refKind: 'user',
-                foreignDatasheetId: peopleSheetId,
-              },
+              type: 'person',
+              property: { limitSingleRecord: false },
               order: 5,
             }],
           }
@@ -1208,13 +1169,8 @@ describe('Multitable context API', () => {
             rows: [{
               id: 'fld_owner',
               name: 'Owner',
-              type: 'link',
-              property: {
-                foreignSheetId: peopleSheetId,
-                limitSingleRecord: false,
-                refKind: 'user',
-                foreignDatasheetId: peopleSheetId,
-              },
+              type: 'person',
+              property: { limitSingleRecord: false },
               order: 5,
             }],
           }
@@ -1232,6 +1188,7 @@ describe('Multitable context API', () => {
         type: 'person',
         property: {
           limitSingleRecord: false,
+          // A spoofed foreign-sheet key must NOT survive into a native person field's property.
           foreignSheetId: 'sheet_spoofed',
         },
       })
@@ -1240,20 +1197,19 @@ describe('Multitable context API', () => {
     expect(response.body.data.field).toMatchObject({
       id: 'fld_owner',
       name: 'Owner',
-      type: 'link',
+      type: 'person',
       order: 5,
-      property: {
-        foreignSheetId: peopleSheetId,
-        limitSingleRecord: false,
-        refKind: 'user',
-        foreignDatasheetId: peopleSheetId,
-      },
+      property: { limitSingleRecord: false },
     })
+    expect(response.body.data.field.property).not.toHaveProperty('refKind')
+    expect(response.body.data.field.property).not.toHaveProperty('foreignSheetId')
   })
 
-  test('updates native person field requests into system people link fields', async () => {
-    let peopleSheetId = ''
-
+  // PATCH `{type:'person'}` converts a field to a NATIVE person (type='person', userId[]) — no
+  // People-sheet rewrite. Coexistence note: a legacy person is `type='link'`; editing its config
+  // sends `{property}` only (no type), so `requestedType` falls back to 'link' and it can NEVER
+  // be silently flipped native (verified by the route's `requestedType ?? mapFieldType(stored)`).
+  test('updates a field into a native person field stored as type=person (no People-sheet rewrite)', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
@@ -1274,56 +1230,22 @@ describe('Multitable context API', () => {
             }],
           }
         }
-        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
-          // Same as the create-field test: loadSheetRow serves both the source sheet (sheet_ops) and the
-          // §2a.2 wall's FOREIGN-sheet lookup (the provisioned people sheet, peopleSheetId). Echo a
-          // SAME-BASE (base_ops) row keyed by the requested id so the wall sees a same-base link and passes.
-          const requestedSheetId = String(params?.[0] ?? '')
-          expect([requestedSheetId === 'sheet_ops', requestedSheetId === peopleSheetId]).toContain(true)
-          return { rows: [{ id: requestedSheetId, base_id: 'base_ops', name: 'Orders', description: null }] }
-        }
-        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
-          expect(params).toEqual(['base_ops'])
-          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
-        }
-        if (sql.includes('INSERT INTO meta_sheets')) {
-          peopleSheetId = String(params?.[0] ?? '')
-          return { rows: [], rowCount: 1 }
-        }
-        if (sql.includes('SELECT id, name, type, "order" FROM meta_fields WHERE sheet_id = $1')) {
-          expect(params).toEqual([peopleSheetId])
-          return { rows: [] }
-        }
-        if (sql.includes('INSERT INTO meta_fields') && params?.[1] === peopleSheetId) {
-          return { rows: [], rowCount: 1 }
-        }
-        if (sql.includes('SELECT id, email, name, avatar_url') && sql.includes('FROM users')) {
-          return { rows: [] }
-        }
         if (sql.includes('UPDATE meta_fields') && sql.includes('SET name = $2, type = $3, property = $4::jsonb, "order" = $5')) {
+          // Native person: type='person', property carries ONLY limitSingleRecord. The spoofed
+          // foreignSheetId is DROPPED and NO People sheet is provisioned (no meta_sheets handler hit).
           expect(params).toEqual([
             'fld_assignee',
             'Assignee',
-            'link',
-            JSON.stringify({
-              foreignSheetId: peopleSheetId,
-              limitSingleRecord: true,
-              refKind: 'user',
-              foreignDatasheetId: peopleSheetId,
-            }),
+            'person',
+            JSON.stringify({ limitSingleRecord: true }),
             2,
           ])
           return {
             rows: [{
               id: 'fld_assignee',
               name: 'Assignee',
-              type: 'link',
-              property: {
-                foreignSheetId: peopleSheetId,
-                limitSingleRecord: true,
-                refKind: 'user',
-                foreignDatasheetId: peopleSheetId,
-              },
+              type: 'person',
+              property: { limitSingleRecord: true },
               order: 2,
             }],
           }
@@ -1346,15 +1268,12 @@ describe('Multitable context API', () => {
     expect(response.body.data.field).toMatchObject({
       id: 'fld_assignee',
       name: 'Assignee',
-      type: 'link',
+      type: 'person',
       order: 2,
-      property: {
-        foreignSheetId: peopleSheetId,
-        limitSingleRecord: true,
-        refKind: 'user',
-        foreignDatasheetId: peopleSheetId,
-      },
+      property: { limitSingleRecord: true },
     })
+    expect(response.body.data.field.property).not.toHaveProperty('refKind')
+    expect(response.body.data.field.property).not.toHaveProperty('foreignSheetId')
   })
 
   test('accepts date fields in create and update multitable field contracts', async () => {

@@ -10,12 +10,15 @@ import {
   BATCH1_FIELD_TYPES,
   coerceBatch1Value,
   extractSelectOptions,
+  isPersonSingleRecord,
   normalizeMultiSelectValue,
   normalizeJson,
   normalizeJsonArray,
   validateLongTextValue,
+  validatePersonValue,
   type MultitableField,
 } from './field-codecs'
+import { loadSheetMemberUserIdSet } from './permission-service'
 import {
   HierarchyCycleError,
   assertNoHierarchyParentCycle,
@@ -242,6 +245,9 @@ function mapFieldType(type: string): UniverMetaField['type'] {
     return 'multiSelect'
   }
   if (normalized === 'link') return 'link'
+  // Native person field (人员, design 2026-06-16): first-class type='person' (userId[]),
+  // no longer aliased to 'link'. Legacy person stays type='link'+refKind:user (coexistence).
+  if (normalized === 'person') return 'person'
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
@@ -346,6 +352,12 @@ function buildCreateFieldGuardMap(rows: unknown[]): Map<string, CreateFieldGuard
         // DERIVED (mirror) side on the single-record create/patch path (bidirectional links MVP).
         property: normalizeJson(row.property),
       })
+      continue
+    }
+
+    // Native person (人员) — carry property so the write path reads `limitSingleRecord`.
+    if (type === 'person') {
+      guards.set(fieldId, { type, property: normalizeJson(row.property) })
       continue
     }
 
@@ -471,6 +483,16 @@ export class RecordService {
       const fieldById = buildCreateFieldGuardMap(fieldRes.rows)
       const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
 
+      // Native person (人员): resolve the sheet member set ONCE (lazily, only on the first person
+      // cell write) and reuse it for membership validation — parallel to the link-exists query.
+      let personMemberUserIds: Set<string> | null = null
+      const resolvePersonMemberUserIds = async (): Promise<Set<string>> => {
+        if (personMemberUserIds === null) {
+          personMemberUserIds = await loadSheetMemberUserIdSet(query, sheetId)
+        }
+        return personMemberUserIds
+      }
+
       for (const [fieldId, value] of Object.entries(data)) {
         const field = fieldById.get(fieldId)
         if (!field) {
@@ -479,6 +501,16 @@ export class RecordService {
 
         if (isFieldAlwaysReadOnly(field)) {
           throw new RecordFieldForbiddenError(`Field is readonly: ${fieldId}`, fieldId)
+        }
+
+        if (field.type === 'person') {
+          try {
+            const allowed = await resolvePersonMemberUserIds()
+            patch[fieldId] = validatePersonValue(value, fieldId, allowed, isPersonSingleRecord(field.property))
+          } catch (error) {
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+          }
+          continue
         }
 
         if (field.type === 'select') {
@@ -795,6 +827,16 @@ export class RecordService {
     const patch: Record<string, unknown> = {}
     const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
 
+    // Native person (人员): resolve the sheet member set ONCE (lazily on the first person cell)
+    // and reuse it for membership validation.
+    let personMemberUserIds: Set<string> | null = null
+    const resolvePersonMemberUserIds = async (): Promise<Set<string>> => {
+      if (personMemberUserIds === null) {
+        personMemberUserIds = await loadSheetMemberUserIdSet(this.pool.query.bind(this.pool), sheetId)
+      }
+      return personMemberUserIds
+    }
+
     for (const [fieldId, value] of Object.entries(data)) {
       const field = fieldById.get(fieldId)
       if (!field) {
@@ -807,6 +849,15 @@ export class RecordService {
       }
       if (field.readOnly === true || field.type === 'lookup' || field.type === 'rollup') {
         fieldErrors[fieldId] = 'Field is readonly'
+        continue
+      }
+      if (field.type === 'person') {
+        try {
+          const allowed = await resolvePersonMemberUserIds()
+          patch[fieldId] = validatePersonValue(value, fieldId, allowed, isPersonSingleRecord(field.property))
+        } catch (error) {
+          fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
+        }
         continue
       }
       if (field.type === 'select') {

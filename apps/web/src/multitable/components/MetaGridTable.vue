@@ -97,6 +97,7 @@
                     @confirm="confirmEdit(row)"
                     @cancel="cancelEdit"
                     @open-link-picker="openLinkPickerFromCell(row.id, field)"
+                    @open-person-picker="openPersonPickerFromCell(row.id, field)"
                     @ai-run="onAiRunFromCell(row.id, field)"
                   />
                   <MetaCellRenderer
@@ -104,6 +105,7 @@
                     :field="field"
                     :value="row.data[field.id]"
                     :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
+                    :person-summaries="props.personSummaries?.[row.id]?.[field.id]"
                     :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                     :button-pending="isButtonPending(row.id, field.id)"
                     :fetch-record="props.fetchRecord"
@@ -228,6 +230,7 @@
                   @yjs-commit="markYjsHandled(row.id, field.id)"
                   @cancel="cancelEdit"
                   @open-link-picker="openLinkPickerFromCell(row.id, field)"
+                  @open-person-picker="openPersonPickerFromCell(row.id, field)"
                   @ai-run="onAiRunFromCell(row.id, field)"
                 />
                 <MetaCellRenderer
@@ -235,6 +238,7 @@
                   :field="field"
                   :value="row.data[field.id]"
                   :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
+                  :person-summaries="props.personSummaries?.[row.id]?.[field.id]"
                   :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                   :button-pending="isButtonPending(row.id, field.id)"
                   :fetch-record="props.fetchRecord"
@@ -263,6 +267,7 @@
                         :field="field"
                         :value="row.data[field.id]"
                         :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
+                        :person-summaries="props.personSummaries?.[row.id]?.[field.id]"
                         :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                         :button-pending="isButtonPending(row.id, field.id)"
                         @run="emit('run-button', { recordId: row.id, field })"
@@ -403,6 +408,8 @@ const props = defineProps<{
   fieldReadOnlyIds?: string[]
   columnWidths?: Record<string, number>
   linkSummaries?: Record<string, Record<string, { id: string; display: string }[]>>
+  // Native person (人员) display source (userId → {id,display}), parallel to linkSummaries.
+  personSummaries?: Record<string, Record<string, { id: string; display: string }[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
   enableMultiSelect?: boolean
   groupField?: MetaField | null
@@ -448,6 +455,7 @@ const emit = defineEmits<{
   (e: 'patch-cell', recordId: string, fieldId: string, value: unknown, version: number): void
   (e: 'go-to-page', page: number): void
   (e: 'open-link-picker', ctx: { recordId: string; field: MetaField }): void
+  (e: 'open-person-picker', ctx: { recordId: string; field: MetaField }): void
   (e: 'resize-column', fieldId: string, width: number): void
   (e: 'selection-change', recordIds: string[]): void
   (e: 'bulk-delete', recordIds: string[]): void
@@ -825,6 +833,11 @@ function cancelEdit() { editCell.value = null; yjsHandledCellKey.value = null }
 function openLinkPickerFromCell(recordId: string, field: MetaField) {
   cancelEdit()
   emit('open-link-picker', { recordId, field })
+}
+
+function openPersonPickerFromCell(recordId: string, field: MetaField) {
+  cancelEdit()
+  emit('open-person-picker', { recordId, field })
 }
 
 // A3: cell-editor opt-in payload (null = host did not enable → no button).

@@ -53,7 +53,10 @@ const GOLDEN: Record<string, Partial<Record<(typeof EGRESS_HELPERS)[number], num
     loadRecordSummaries: 3,
     buildLinkSummaries: 4,
     serializeLinkSummaryMap: 1,
-    filterRecordFieldSummaryMap: 2,
+    // 3 = linkSummaries + attachmentSummaries + native person (人员) personSummaries (design
+    // 2026-06-16). The personSummaries egress is routed through the SAME layer-2 ∧ layer-3
+    // `allowedFieldIds` composite as linkSummaries — `filterRecordFieldSummaryMap(serializePersonSummaryMap(...), allowedFieldIds)`.
+    filterRecordFieldSummaryMap: 3,
     filterSingleRecordFieldSummaryMap: 5,
   },
 }

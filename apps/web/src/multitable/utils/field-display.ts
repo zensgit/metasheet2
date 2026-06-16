@@ -1,4 +1,4 @@
-import type { LinkedRecordSummary, MetaAttachment, MetaField } from '../types'
+import type { LinkedRecordSummary, MetaAttachment, MetaField, PersonSummary } from '../types'
 import {
   formatCurrencyValue,
   formatNumberValue,
@@ -105,11 +105,21 @@ export function formatFieldDisplay(params: {
   field: MetaField
   value: unknown
   linkSummaries?: LinkedRecordSummary[] | null
+  personSummaries?: PersonSummary[] | null
   attachmentSummaries?: MetaAttachment[] | null
   isZh?: boolean
 }): string {
-  const { field, value, linkSummaries, attachmentSummaries, isZh = false } = params
+  const { field, value, linkSummaries, personSummaries, attachmentSummaries, isZh = false } = params
   if (value === null || value === undefined || value === '') return '—'
+
+  // Native person (人员): value = userId[]; resolve display from personSummaries (userId →
+  // display), falling back to the raw userId. (Legacy link-backed person is type='link' below.)
+  if (field.type === 'person') {
+    const ids = Array.isArray(value) ? value.map(String).filter((id) => id.trim().length > 0) : value ? [String(value)] : []
+    if (ids.length === 0) return '—'
+    const byId = new Map((personSummaries ?? []).map((s) => [s.id, s.display]))
+    return ids.map((id) => byId.get(id) || id).join(', ')
+  }
 
   if (field.type === 'date') return formatDate(value)
   if (field.type === 'dateTime') return formatDateTime(value, resolveDateTimeTimezone(field.property))

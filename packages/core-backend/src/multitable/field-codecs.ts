@@ -13,6 +13,7 @@ export type MultitableFieldType =
   | 'select'
   | 'multiSelect'
   | 'link'
+  | 'person'
   | 'lookup'
   | 'rollup'
   | 'attachment'
@@ -106,7 +107,12 @@ export function mapFieldType(type: string): MultitableFieldType | string {
     return 'multiSelect'
   }
   if (normalized === 'link') return 'link'
-  if (normalized === 'person') return 'link'
+  // Native person field (人员 / member, design 2026-06-16). Stored as a first-class
+  // `type='person'` whose value is `userId[]` — NOT aliased to `link` anymore.
+  // COEXISTENCE: legacy person fields are persisted as `type='link'`+`refKind:'user'`
+  // (they were never stored as 'person'), so this flip only affects NEW person fields
+  // and never reinterprets a stored link-backed person. See `validatePersonValue`.
+  if (normalized === 'person') return 'person'
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
@@ -255,6 +261,24 @@ function sanitizeFieldPropertyByType(
       ...(obj.twoWay === true ? { twoWay: true } : {}),
       ...(mirrorFieldId ? { mirrorFieldId } : {}),
       ...(mirrorOf ? { mirrorOf, readOnly: true } : {}),
+    }
+  }
+
+  if (type === 'person') {
+    // Native person (人员) — value is `userId[]`. The ONLY user-controlled option is
+    // `limitSingleRecord` (single vs multi). CRITICAL default: `!== false` → undefined
+    // defaults to TRUE, matching the legacy person path (univer-meta normalizeFieldWriteInput
+    // + people-import) so single/multi behaviour never silently flips between a legacy
+    // link-backed person and a native person. NOT readOnly (person is user-editable).
+    //
+    // `restrictToMemberGroupIds` is an OPTIONAL future narrowing config (member-group scope);
+    // sanitized to a deduped string[] when present, omitted otherwise. It is config-shape only
+    // here — write-time membership is enforced by `validatePersonValue` against the resolved
+    // sheet member set.
+    const restrict = sanitizeStringArray(obj.restrictToMemberGroupIds)
+    return {
+      limitSingleRecord: obj.limitSingleRecord !== false,
+      ...(restrict.length > 0 ? { restrictToMemberGroupIds: Array.from(new Set(restrict)) } : {}),
     }
   }
 
@@ -905,6 +929,77 @@ export function normalizeMultiSelectValue(
     }
   }
   return normalized
+}
+
+/**
+ * Native person (人员 / member) value validator — design 2026-06-16.
+ *
+ * The stored value is a deduped `userId[]` (mirrors {@link normalizeMultiSelectValue}'s
+ * array normalization, NOT the recordId[] of a legacy link-backed person). It enforces
+ * the SECURITY membership boundary: every userId MUST be in `allowedUserIds` (the sheet/
+ * base member set), reusing the SAME member-set resolved once per request batch by the
+ * caller (parallel to the link-target-exists loop) so a record cell and a notify recipient
+ * share one membership control.
+ *
+ * - empty / null / '' → `[]`
+ * - non-array → throws (callers surface as RecordValidationError)
+ * - each id: string|number, trimmed, deduped (order-preserving)
+ * - non-member id → throws (the 403/validation reject)
+ * - `limitSingleRecord` true → reject more than one id
+ *
+ * `allowedUserIds === null` means "membership not resolvable for this sheet" — treated as
+ * a CLOSED set (reject any non-empty value) so a missing member set can never become an
+ * open egress. Callers pass a real Set when a person field is present.
+ */
+export function validatePersonValue(
+  value: unknown,
+  fieldId: string,
+  allowedUserIds: ReadonlySet<string> | null,
+  limitSingleRecord: boolean,
+): string[] {
+  if (value === null || value === undefined || value === '') return []
+  if (!Array.isArray(value)) {
+    throw new Error(`Person value must be an array for ${fieldId}`)
+  }
+
+  const seen = new Set<string>()
+  const normalized: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string' && typeof item !== 'number') {
+      throw new Error(`Person value must be an array of user ids for ${fieldId}`)
+    }
+    const userId = String(item).trim()
+    if (!userId) continue
+    if (userId.length > 50) {
+      throw new Error(`Person user id too long (>50) for ${fieldId}: ${userId}`)
+    }
+    if (!seen.has(userId)) {
+      seen.add(userId)
+      normalized.push(userId)
+    }
+  }
+
+  if (normalized.length === 0) return []
+
+  if (limitSingleRecord && normalized.length > 1) {
+    throw new Error(`Person field only allows a single user for ${fieldId}`)
+  }
+
+  // SECURITY: reject any userId outside the sheet member set. A null set is a closed set.
+  const allowed = allowedUserIds ?? new Set<string>()
+  const nonMembers = normalized.filter((userId) => !allowed.has(userId))
+  if (nonMembers.length > 0) {
+    throw new Error(
+      `Person user(s) not a member of this sheet for ${fieldId}: ${nonMembers.join(', ')}`,
+    )
+  }
+
+  return normalized
+}
+
+/** True iff `limitSingleRecord` is enabled on a person field property (default TRUE). */
+export function isPersonSingleRecord(property: Record<string, unknown> | undefined): boolean {
+  return property?.limitSingleRecord !== false
 }
 
 /**

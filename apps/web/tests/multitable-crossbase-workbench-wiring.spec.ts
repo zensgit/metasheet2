@@ -165,7 +165,7 @@ function createGridMock() {
     page: ref({ offset: 0, limit: 50, total: 0, hasMore: false }), visibleFields: ref([]), sortRules: ref([]),
     filterRules: ref([]), filterConjunction: ref('and'), canUndo: ref(false), canRedo: ref(false),
     groupFieldId: ref<string | null>(null), groupField: ref(null), hiddenFieldIds: ref<string[]>([]),
-    columnWidths: ref<Record<string, number>>({}), linkSummaries: ref({}), attachmentSummaries: ref({}),
+    columnWidths: ref<Record<string, number>>({}), linkSummaries: ref({}), personSummaries: ref({}), attachmentSummaries: ref({}),
     fieldPermissions: ref({}), viewPermission: ref(null), rowActions: ref(null), rowActionOverrides: ref({}),
     capabilityOrigin: ref(null), conflict: ref(null), error: ref<string | null>(null), sortFilterDirty: ref(false),
     toggleFieldVisibility: vi.fn(), addSortRule: vi.fn(), removeSortRule: vi.fn(), addFilterRule: vi.fn(),

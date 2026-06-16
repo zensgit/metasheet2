@@ -1,6 +1,6 @@
 import type { MetaField } from '../types'
 import { importResolverMissing, importValueResolveFailed } from '../utils/meta-import-labels'
-import { isLinkField, isPersonField } from '../utils/link-fields'
+import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
 
 export type DelimitedParseResult = {
   delimiter: ',' | '\t'
@@ -151,7 +151,11 @@ export async function buildImportedRecords(params: {
       else if (field?.type === 'date' && val !== '') {
         const d = new Date(val)
         data[fieldId] = !Number.isNaN(d.getTime()) ? d.toISOString().split('T')[0] : val
-      } else if (field && isLinkField(field)) {
+      } else if (field && (isLinkField(field) || isNativePersonField(field))) {
+        // Link, legacy link-backed person (isLinkField), OR native person (isNativePersonField).
+        // All three resolve a delimited token to an id[] via the injected resolver; the resolver
+        // itself is kind-aware (native person → userIds, legacy person → People recordIds, link →
+        // linked recordIds).
         const rawValue = val.trim()
         if (!rawValue) {
           data[fieldId] = []
