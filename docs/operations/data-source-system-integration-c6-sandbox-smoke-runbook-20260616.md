@@ -4,11 +4,12 @@ Purpose: run or continue #2720's sandbox-only C6 external-write smoke.
 
 Current #2720 status as of 2026-06-16: the sandbox write target, write-gated
 external system, active C6 pipeline, core dry-run/apply/re-pull/rollback path
-have already passed on the entity machine. The remaining HOLD is the read-only
-subgate: verify an `integration:read` user can call the dedicated C6
-`/external-write/dry-run` route while apply remains blocked. If continuing that
-run, do not recreate the sandbox or rerun Apply just to test the read-only
-endpoint.
+have already passed on the entity machine. After #2737, the read-only subgate
+also passed on the dedicated C6 route: an `integration:read` user can call
+`/external-write/dry-run`, while `/external-write/apply` remains blocked. The
+remaining HOLD is the controlled bad-row check. If continuing that run, do not
+recreate the sandbox or rerun write/admin Apply just to repeat already-passed
+checks.
 
 This runbook sets up the minimum sandbox-only shape needed to run the C6
 dry-run -> apply -> re-pull -> rollback/cleanup smoke. It does not authorize
@@ -329,6 +330,7 @@ Expected:
 
 - one controlled bad row creates row-level failure evidence;
 - clean sibling rows are not silently swallowed;
+- production/batch remain closed regardless of the result;
 - no credentials, raw SQL, row values, or payload JSON appear in evidence.
 
 Evidence:
@@ -514,7 +516,9 @@ Pass requires all of:
 - apply requires token + explicit confirmation + write permission;
 - re-pull shows `add=0` and no duplicate target rows;
 - read-only user cannot send apply;
-- controlled bad-row evidence, if run, is row-level and values-free;
+- controlled bad-row evidence is row-level and values-free;
+- if the sandbox cannot safely run the controlled bad-row check, keep C6-5 at
+  HOLD rather than marking this runbook PASS;
 - rollback/cleanup restores the sandbox target baseline without using a
   MetaSheet product delete/raw SQL path;
 - all forbidden boundaries remain false.
