@@ -11,7 +11,6 @@ export type MetaPersonPickerLabelKey =
   | 'personPicker.clear'
   | 'personPicker.loading'
   | 'personPicker.empty'
-  | 'personPicker.loadMore'
   | 'personPicker.cancel'
   | 'personPicker.confirm'
   | 'personPicker.close'
@@ -24,7 +23,6 @@ const META_PERSON_PICKER_LABELS: Record<MetaPersonPickerLabelKey, { en: string; 
   'personPicker.clear': { en: 'Clear', zh: '清除' },
   'personPicker.loading': { en: 'Loading...', zh: '正在加载...' },
   'personPicker.empty': { en: 'No members found', zh: '未找到成员' },
-  'personPicker.loadMore': { en: 'Load more', zh: '加载更多' },
   'personPicker.cancel': { en: 'Cancel', zh: '取消' },
   'personPicker.confirm': { en: 'Confirm', zh: '确认' },
   'personPicker.close': { en: 'Close people picker', zh: '关闭人员选择器' },

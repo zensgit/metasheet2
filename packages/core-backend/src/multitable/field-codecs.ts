@@ -272,9 +272,11 @@ function sanitizeFieldPropertyByType(
     // link-backed person and a native person. NOT readOnly (person is user-editable).
     //
     // `restrictToMemberGroupIds` is an OPTIONAL future narrowing config (member-group scope);
-    // sanitized to a deduped string[] when present, omitted otherwise. It is config-shape only
-    // here — write-time membership is enforced by `validatePersonValue` against the resolved
-    // sheet member set.
+    // sanitized to a deduped string[] when present, omitted otherwise. NOTE: it is config-shape
+    // ONLY and NOT YET ENFORCED — `validatePersonValue` checks SHEET membership, not the group
+    // subset, so a field carrying this still accepts any sheet member. Enforcement (intersect the
+    // member set with the configured groups) is a follow-up; until then this is a stored hint, not
+    // an active restriction. (Sanitizing the shape now keeps the contract stable for that follow-up.)
     const restrict = sanitizeStringArray(obj.restrictToMemberGroupIds)
     return {
       limitSingleRecord: obj.limitSingleRecord !== false,
