@@ -256,6 +256,54 @@ export async function listRecordSubscriptionNotifications(
   return (result.rows as Array<Record<string, unknown>>).map(serializeNotification)
 }
 
+// Notification Center S1 — mark-read / unread-count over the actor's OWN notifications.
+// SELF-SCOPED: every statement filters `user_id = $1`, so a caller can only ever touch their own
+// rows — passing another user's notification id is a silent no-op (0 rows), never a cross-user write.
+export async function markRecordSubscriptionNotificationsRead(
+  query: QueryFn,
+  input: { userId: string; ids: string[] },
+): Promise<number> {
+  const ids = input.ids.filter((id) => typeof id === 'string' && id.length > 0)
+  if (ids.length === 0) return 0
+  // Only flip still-unread rows so the returned count is the number actually transitioned (idempotent
+  // re-marks return 0). `user_id = $1` is the cross-user guard. Compare `id::text = ANY($2)` rather than
+  // casting the input to uuid[] — a malformed/non-uuid id then simply fails to match (0 rows) instead of
+  // throwing a Postgres invalid-uuid error that would surface as a 500.
+  const result = await query(
+    `UPDATE meta_record_subscription_notifications
+     SET read_at = now()
+     WHERE user_id = $1 AND id::text = ANY($2) AND read_at IS NULL`,
+    [input.userId, ids],
+  )
+  return Number(result.rowCount ?? 0)
+}
+
+export async function markAllRecordSubscriptionNotificationsRead(
+  query: QueryFn,
+  input: { userId: string },
+): Promise<number> {
+  const result = await query(
+    `UPDATE meta_record_subscription_notifications
+     SET read_at = now()
+     WHERE user_id = $1 AND read_at IS NULL`,
+    [input.userId],
+  )
+  return Number(result.rowCount ?? 0)
+}
+
+export async function countUnreadRecordSubscriptionNotifications(
+  query: QueryFn,
+  input: { userId: string },
+): Promise<number> {
+  const result = await query(
+    `SELECT COUNT(*)::int AS count
+     FROM meta_record_subscription_notifications
+     WHERE user_id = $1 AND read_at IS NULL`,
+    [input.userId],
+  )
+  return Number((result.rows[0] as { count: number } | undefined)?.count ?? 0)
+}
+
 function serializeSubscription(row: Record<string, unknown>): RecordSubscription {
   return {
     id: String(row.id),

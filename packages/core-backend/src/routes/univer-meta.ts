@@ -157,8 +157,11 @@ import {
 } from '../multitable/post-commit-hooks'
 import { listRecordRevisions, type RecordRevisionEntry } from '../multitable/record-history-service'
 import {
+  countUnreadRecordSubscriptionNotifications,
   getRecordSubscriptionStatus,
   listRecordSubscriptionNotifications,
+  markAllRecordSubscriptionNotificationsRead,
+  markRecordSubscriptionNotificationsRead,
   subscribeRecord,
   unsubscribeRecord,
 } from '../multitable/record-subscription-service'
@@ -6015,6 +6018,59 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list record subscription notifications failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record subscription notifications' } })
+    }
+  })
+
+  // Notification Center S1 — unread count for the bell badge (actor's own notifications).
+  router.get('/record-subscription-notifications/unread-count', async (req: Request, res: Response) => {
+    try {
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
+      const count = await countUnreadRecordSubscriptionNotifications(poolManager.get().query.bind(poolManager.get()), { userId: access.userId })
+      return res.json({ ok: true, data: { count } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_subscription_notifications')) return res.json({ ok: true, data: { count: 0 } })
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] unread notification count failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to count unread notifications' } })
+    }
+  })
+
+  // Notification Center S1 — mark a set of the actor's OWN notifications read (self-scoped in SQL).
+  router.post('/record-subscription-notifications/mark-read', async (req: Request, res: Response) => {
+    const rawIds = (req.body as { ids?: unknown } | null | undefined)?.ids
+    if (!Array.isArray(rawIds)) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'ids must be an array' } })
+    }
+    const ids = rawIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    try {
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
+      const updated = await markRecordSubscriptionNotificationsRead(poolManager.get().query.bind(poolManager.get()), { userId: access.userId, ids })
+      return res.json({ ok: true, data: { updated } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_subscription_notifications')) return res.json({ ok: true, data: { updated: 0 } })
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] mark notifications read failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to mark notifications read' } })
+    }
+  })
+
+  // Notification Center S1 — mark ALL of the actor's own notifications read.
+  router.post('/record-subscription-notifications/mark-all-read', async (req: Request, res: Response) => {
+    try {
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
+      const updated = await markAllRecordSubscriptionNotificationsRead(poolManager.get().query.bind(poolManager.get()), { userId: access.userId })
+      return res.json({ ok: true, data: { updated } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_subscription_notifications')) return res.json({ ok: true, data: { updated: 0 } })
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] mark all notifications read failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to mark all notifications read' } })
     }
   })
 
