@@ -24,6 +24,8 @@ export function useNotificationInbox(client?: MultitableApiClient) {
       : recordLabel('notification.eventRecordUpdated', isZh.value)
   }
 
+  // UI-facing actions NEVER throw — they surface failure via `error` and resolve. The bell is ambient
+  // toolbar chrome; a rejected click would leak as an unhandled rejection / Vue console error.
   async function loadInbox(params?: { limit?: number; offset?: number }): Promise<MetaRecordSubscriptionNotification[]> {
     loading.value = true
     error.value = null
@@ -33,7 +35,7 @@ export function useNotificationInbox(client?: MultitableApiClient) {
       return items
     } catch (e: any) {
       error.value = e?.message ?? recordLabel('notification.loadError', isZh.value)
-      throw e
+      return notifications.value
     } finally {
       loading.value = false
     }
@@ -60,6 +62,9 @@ export function useNotificationInbox(client?: MultitableApiClient) {
       const set = new Set(targets)
       notifications.value = notifications.value.map((n) => (set.has(n.id) && !n.readAt ? { ...n, readAt: now } : n))
       await refreshUnreadCount()
+    } catch (e: any) {
+      // swallow — never reject a click handler (would be an unhandled rejection / console error)
+      error.value = e?.message ?? recordLabel('notification.loadError', isZh.value)
     } finally {
       const done = new Set(targets)
       busyIds.value = busyIds.value.filter((id) => !done.has(id))

@@ -2118,17 +2118,23 @@ function rememberWorkbenchBaseOpen(baseId: string) {
   recentBaseOpens.value = rememberRecentBaseOpen(baseId)
 }
 
-function onSelectSheet(sheetId: string) {
-  if (sheetId === workbench.activeSheetId.value) return
-  if (!confirmDiscardContextChanges()) return
+// Returns whether the active sheet is now `sheetId`: true if already there or switched, false if the
+// user cancelled the discard-unsaved-changes confirm. Callers that depend on the switch (e.g. the
+// notification bell's click-to-locate) MUST honor a false return.
+function onSelectSheet(sheetId: string): boolean {
+  if (sheetId === workbench.activeSheetId.value) return true
+  if (!confirmDiscardContextChanges()) return false
   workbench.selectSheet(sheetId)
+  return true
 }
 
 // Notification Center S1 — click-to-locate from the bell. Switch to the notification's sheet first
-// (resolveDeepLink resolves against the active sheet); a same-sheet target skips the switch.
+// (resolveDeepLink resolves against the active sheet); a same-sheet target skips the switch. If the
+// switch is cancelled (unsaved-changes discard declined), do NOT locate — that would look the record
+// up in the wrong sheet and report not-found.
 async function onNotificationNavigate(payload: { sheetId: string; recordId: string }) {
   if (payload.sheetId && payload.sheetId !== workbench.activeSheetId.value) {
-    onSelectSheet(payload.sheetId)
+    if (!onSelectSheet(payload.sheetId)) return
   }
   await resolveDeepLink(payload.recordId)
 }
