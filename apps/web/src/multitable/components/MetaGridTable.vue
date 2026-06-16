@@ -105,6 +105,7 @@
                     :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
                     :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                     :button-pending="isButtonPending(row.id, field.id)"
+                    :fetch-record="props.fetchRecord"
                     @run="emit('run-button', { recordId: row.id, field })"
                   />
                   <button
