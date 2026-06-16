@@ -55,6 +55,7 @@ export function useNotificationInbox(client?: MultitableApiClient) {
   async function markRead(ids: string[]): Promise<void> {
     const targets = ids.filter((id) => id && !busyIds.value.includes(id))
     if (targets.length === 0) return
+    error.value = null // clear any prior failure so a successful action recovers the panel
     busyIds.value = [...busyIds.value, ...targets]
     try {
       await api.markRecordSubscriptionNotificationsRead(targets)
@@ -72,6 +73,7 @@ export function useNotificationInbox(client?: MultitableApiClient) {
   }
 
   async function markAllRead(): Promise<void> {
+    error.value = null // clear any prior failure so a successful action recovers the panel
     try {
       await api.markAllRecordSubscriptionNotificationsRead()
       const now = new Date().toISOString()

@@ -65,6 +65,19 @@ describe('useNotificationInbox (S1b)', () => {
     expect(inbox.unreadCount.value).toBe(0)
   })
 
+  it('markAllRead failure sets error but keeps the list; a later success clears error (no dead-state)', async () => {
+    const markAll = vi.fn().mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce(1)
+    const inbox = useNotificationInbox(fakeClient({ markAllRecordSubscriptionNotificationsRead: markAll }))
+    await inbox.loadInbox()
+    expect(inbox.notifications.value.length).toBe(2)
+    await inbox.markAllRead() // fails
+    expect(inbox.error.value).toBe('boom')
+    expect(inbox.notifications.value.length).toBe(2) // list NOT cleared
+    await inbox.markAllRead() // succeeds → error must clear (recovers the panel)
+    expect(inbox.error.value).toBeNull()
+    expect(inbox.notifications.value.every((n) => n.readAt)).toBe(true)
+  })
+
   it('refreshUnreadCount keeps the prior count on failure (non-fatal badge)', async () => {
     const get = vi.fn().mockResolvedValueOnce(5).mockRejectedValueOnce(new Error('x'))
     const inbox = useNotificationInbox(fakeClient({ getRecordSubscriptionUnreadCount: get }))

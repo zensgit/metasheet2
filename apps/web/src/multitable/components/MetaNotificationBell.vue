@@ -25,7 +25,9 @@
       <div v-if="loading" class="meta-notif-bell__state">…</div>
       <div v-else-if="error" class="meta-notif-bell__state meta-notif-bell__state--error">{{ error }}</div>
       <div v-else-if="notifications.length === 0" class="meta-notif-bell__state" data-test="notification-empty">{{ l('notification.empty') }}</div>
-      <ul v-else class="meta-notif-bell__list">
+      <!-- list renders independently of `error`: a transient mark-read/mark-all failure shows the error
+           banner above WITHOUT replacing the still-loaded list (the dead-state the review caught). -->
+      <ul v-if="!loading && notifications.length" class="meta-notif-bell__list">
         <li
           v-for="n in notifications"
           :key="n.id"

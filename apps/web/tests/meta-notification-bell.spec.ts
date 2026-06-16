@@ -68,6 +68,18 @@ describe('MetaNotificationBell (S1b)', () => {
     expect(m.apiClient.markAllRecordSubscriptionNotificationsRead).toHaveBeenCalled()
   })
 
+  it('a failed mark-all shows the error WITHOUT hiding the still-loaded list (no dead-state)', async () => {
+    const m = mount({ markAllRecordSubscriptionNotificationsRead: vi.fn(async () => { throw new Error('mark fail') }) }); mounted = m
+    await flush()
+    m.container.querySelector<HTMLButtonElement>('[data-test="notification-bell-btn"]')!.click()
+    await flush()
+    m.container.querySelector<HTMLButtonElement>('[data-test="notification-mark-all"]')!.click()
+    await flush()
+    expect(m.container.querySelector('.meta-notif-bell__state--error')?.textContent).toContain('mark fail')
+    // the list is NOT replaced by the error — both render
+    expect(m.container.querySelectorAll('[data-test="notification-item"]').length).toBe(2)
+  })
+
   it('does not crash when the client fails — renders the error state instead (P2-1)', async () => {
     const m = mount({ listRecordSubscriptionNotifications: vi.fn(async () => { throw new Error('netfail') }) }); mounted = m
     await flush()
