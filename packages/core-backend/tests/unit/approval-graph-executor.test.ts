@@ -651,6 +651,68 @@ describe('ApprovalGraphExecutor', () => {
       },
     ])
   })
+
+  it('throws instead of looping when the main path forms a pure cc cycle', () => {
+    // Two cc nodes pointing at each other with no approval/parallel/end node in
+    // the loop. Before the cycle guard this spun resolveFromNode forever and
+    // hung the worker at instance creation; it must now fail fast.
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'notify-a', type: 'cc', config: { targetType: 'role', targetIds: ['ops'] } },
+        { key: 'notify-b', type: 'cc', config: { targetType: 'role', targetIds: ['it'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-a', source: 'start', target: 'notify-a' },
+        { key: 'edge-a-b', source: 'notify-a', target: 'notify-b' },
+        { key: 'edge-b-a', source: 'notify-b', target: 'notify-a' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    const executor = new ApprovalGraphExecutor(runtimeGraph, {})
+    expect(() => executor.resolveInitialState()).toThrowError(/cycle near/)
+  })
+
+  it('throws instead of looping when a condition routes back into a cc cycle (latent trigger)', () => {
+    // The cycle hides behind a condition branch, so most submissions resolve
+    // normally and only a specific form value routes into the loop — the nasty
+    // case that survives casual review. The guard must catch it at runtime.
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [
+              { edgeKey: 'edge-loop', rules: [{ fieldId: 'kind', operator: 'eq', value: 'cyclic' }] },
+            ],
+            defaultEdgeKey: 'edge-normal',
+          },
+        },
+        { key: 'review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-1'] } },
+        { key: 'notify', type: 'cc', config: { targetType: 'role', targetIds: ['ops'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-normal', source: 'route', target: 'review' },
+        { key: 'edge-loop', source: 'route', target: 'notify' },
+        { key: 'edge-notify-route', source: 'notify', target: 'route' },
+        { key: 'edge-review-end', source: 'review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    // Normal form data resolves to the approval node as usual.
+    expect(new ApprovalGraphExecutor(runtimeGraph, { kind: 'normal' }).resolveInitialState().currentNodeKey)
+      .toBe('review')
+    // The cyclic branch fails fast rather than hanging.
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, { kind: 'cyclic' }).resolveInitialState())
+      .toThrowError(/cycle near/)
+  })
 })
 
 describe('validateApprovalFormData', () => {

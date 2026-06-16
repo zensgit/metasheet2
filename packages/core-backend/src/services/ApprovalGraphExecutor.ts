@@ -720,9 +720,23 @@ export class ApprovalGraphExecutor {
   ): ApprovalGraphResolution {
     const ccEvents: ApprovalCcEvent[] = []
     const autoApprovalEvents: ApprovalGraphAutoApprovalEvent[] = []
+    // Cycle guard: a main-path loop made purely of condition/cc nodes (with no
+    // approval/parallel/end node to return at) would otherwise spin this walker
+    // forever — hanging the worker thread at instance creation
+    // (`resolveInitialState`) or during dispatch while it holds the
+    // `approval_instances` row lock. Publish-time validation only checks
+    // parallel branches for cycles, so this runtime guard mirrors the other
+    // three walkers (`resolveBranchAdvance`, `listVisitedApprovalNodeKeysUntil`)
+    // and fails fast instead of looping.
+    const visited = new Set<string>()
     let currentKey: string | null = nodeKey
 
     while (currentKey) {
+      if (visited.has(currentKey)) {
+        throw new Error(`Runtime graph contains a cycle near ${currentKey}`)
+      }
+      visited.add(currentKey)
+
       const node = this.nodeMap.get(currentKey)
       if (!node) {
         throw new Error(`Runtime graph references unknown node ${currentKey}`)
