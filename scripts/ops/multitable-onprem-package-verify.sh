@@ -173,6 +173,8 @@ function verify_integration_plugin_runtime_dependencies() {
 
   search_fixed_string '"smoke:sqlserver": "tsx scripts/smoke-sqlserver.ts"' "$core_backend_package_json" || die "core-backend package.json must expose the generic SQL Server smoke command"
   search_fixed_string 'export function buildConfig' "$generic_sqlserver_smoke" || die "generic SQL Server smoke script must be packaged and export buildConfig for its test seam"
+  search_fixed_string '../dist/src/data-adapters/MSSQLAdapter.js' "$generic_sqlserver_smoke" || die "generic SQL Server smoke script must load the deployable compiled MSSQLAdapter path"
+  search_fixed_string '../src/data-adapters/MSSQLAdapter.ts' "$generic_sqlserver_smoke" || die "generic SQL Server smoke script must keep a local source fallback for development/tests"
   search_fixed_string 'MSSQL_LEGACY_TLS' "$generic_sqlserver_smoke" || die "generic SQL Server smoke script must expose legacy TLS knobs"
   search_fixed_string '"@metasheet/mssql-readonly-utils"' "$core_backend_package_json" || die "core-backend package.json must include the shared MSSQL read-only helper dependency"
   search_fixed_string '"mssql"' "$plugin_package_json" || die "plugin-integration-core package.json must include mssql for the built-in SQL Server read executor"
@@ -699,6 +701,7 @@ required=(
   "apps/web/dist/index.html"
   "apps/web/package.json"
   "packages/core-backend/dist/src/index.js"
+  "packages/core-backend/dist/src/data-adapters/MSSQLAdapter.js"
   "packages/core-backend/dist/src/db/migrate.js"
   "packages/core-backend/dist/src/db/migration-provider.js"
   "packages/core-backend/dist/src/db/migrations/zzzz20260512100000_add_users_must_change_password.js"

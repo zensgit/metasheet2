@@ -1,9 +1,97 @@
+import { createRequire } from 'node:module'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { MSSQLAdapter } from '../src/data-adapters/MSSQLAdapter'
 import type { ConfigValue, DataSourceConfig } from '../src/data-adapters/BaseAdapter'
 
 const env = process.env
+const requireFromScript = createRequire(import.meta.url)
+
+type MSSQLAdapterConstructor = new (config: DataSourceConfig) => {
+  connect(): Promise<void>
+  disconnect(): Promise<void>
+  testConnection(): Promise<boolean>
+  query<T>(sql: string, params?: unknown[]): Promise<{ data: T[]; error?: Error }>
+  getSchema(schema?: string): Promise<{ tables: unknown[]; views?: unknown[] }>
+  tableExists(tableName: string, schema?: string): Promise<boolean>
+  getTableInfo(tableName: string, schema?: string): Promise<{
+    columns: Array<{ name: string }>
+    primaryKey?: string[]
+  }>
+  select(
+    tableName: string,
+    options?: {
+      limit?: number
+      offset?: number
+      orderBy?: Array<{ column: string; direction: 'asc' | 'desc' }>
+    }
+  ): Promise<{ data: unknown[]; error?: Error }>
+}
+
+export const MSSQL_ADAPTER_CANDIDATES = [
+  // Deployable on-prem packages ship compiled backend dist, not the TS source tree.
+  '../dist/src/data-adapters/MSSQLAdapter.js',
+  // Local development / test fallback.
+  '../src/data-adapters/MSSQLAdapter.ts'
+] as const
+
+function moduleNotFoundForCandidate(
+  error: unknown,
+  candidate: string,
+  resolved?: string
+): boolean {
+  if (!error || typeof error !== 'object') return false
+  const maybeError = error as { code?: unknown; message?: unknown }
+  if (maybeError.code !== 'MODULE_NOT_FOUND' && maybeError.code !== 'ERR_MODULE_NOT_FOUND') {
+    return false
+  }
+  return (
+    typeof maybeError.message === 'string' &&
+    (maybeError.message.includes(candidate) ||
+      (resolved ? maybeError.message.includes(resolved) : false))
+  )
+}
+
+type MSSQLAdapterModule = {
+  MSSQLAdapter?: MSSQLAdapterConstructor
+  default?: MSSQLAdapterConstructor | { MSSQLAdapter?: MSSQLAdapterConstructor }
+}
+
+function getMSSQLAdapterExport(
+  loaded: MSSQLAdapterModule,
+  candidate: string
+): MSSQLAdapterConstructor {
+  const adapter =
+    loaded.MSSQLAdapter ??
+    (typeof loaded.default === 'function' ? loaded.default : loaded.default?.MSSQLAdapter)
+  if (!adapter) {
+    throw new Error(`MSSQLAdapter export missing from ${candidate}`)
+  }
+  return adapter
+}
+
+export async function loadMSSQLAdapter(): Promise<MSSQLAdapterConstructor> {
+  const missing: string[] = []
+  for (const candidate of MSSQL_ADAPTER_CANDIDATES) {
+    let resolved: string | undefined
+    try {
+      // Resolve first so an absent deploy artifact can fall back to source, but a present module with
+      // a broken dependency still fails loudly instead of masking a real deploy/runtime bug.
+      resolved = requireFromScript.resolve(candidate)
+      const loaded = (await import(pathToFileURL(resolved).href)) as MSSQLAdapterModule
+      return getMSSQLAdapterExport(loaded, candidate)
+    } catch (error) {
+      if (moduleNotFoundForCandidate(error, candidate, resolved)) {
+        missing.push(candidate)
+        continue
+      }
+      throw error
+    }
+  }
+
+  throw new Error(
+    `Unable to load MSSQLAdapter for SQL Server smoke. Tried: ${missing.join(', ')}`
+  )
+}
 
 function printHelp(): void {
   console.log(`Usage: pnpm --filter @metasheet/core-backend smoke:sqlserver
@@ -134,6 +222,7 @@ async function main(): Promise<void> {
   const table = env.MSSQL_TABLE
   const skipSchema = optionalBoolean('MSSQL_SKIP_SCHEMA') === true
 
+  const MSSQLAdapter = await loadMSSQLAdapter()
   const adapter = new MSSQLAdapter(config)
 
   console.log('[sqlserver-smoke] target', {
