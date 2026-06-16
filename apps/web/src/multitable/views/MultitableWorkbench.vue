@@ -291,12 +291,14 @@
         :upload-fn="uploadAttachmentFn"
         :delete-attachment-fn="deleteAttachmentFn"
         :ai-shortcut="aiShortcut.state"
+        :button-run-pending="buttonRunPending"
         @close="onCloseDrawer" @delete="onDeleteRecord" @patch="onDrawerPatch"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker"
         @toggle-lock="onToggleRecordLock"
         @navigate="onDrawerNavigate"
         @restore="onRestoreRecordVersion"
         @ai-preview="onAiPreviewField" @ai-run="onAiRunField"
+        @run-button="onRunButton"
       />
       <MetaCommentsDrawer
         :visible="showComments && !!selectedRecordId" :comments="commentsState.comments.value"

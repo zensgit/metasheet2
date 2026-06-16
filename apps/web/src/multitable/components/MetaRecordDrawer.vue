@@ -255,6 +255,24 @@
             v-else-if="field.type === 'longText' && isRichLongTextField(field)"
             :html="record.data[field.id]"
           />
+          <!-- button (B1-e): clickable action in the record-detail drawer, mirroring
+               the B1-b grid cell. It is an ACTION, not an editable value, so it is
+               NOT gated on canEditField — it renders whenever the field is visible
+               (the server gates execution). The run intent surfaces up to the
+               workbench (run-button), which owns the EXISTING onRunButton/runButton
+               path + status branching; the drawer never duplicates the run logic.
+               @click.stop so a parent click handler doesn't also fire. -->
+          <button
+            v-else-if="field.type === 'button'"
+            type="button"
+            class="meta-record-drawer__button"
+            :class="`meta-record-drawer__button--${buttonVariant(field)}`"
+            :disabled="buttonPendingFor(field.id)"
+            :aria-label="buttonLabel(field)"
+            :title="buttonLabel(field)"
+            data-test="drawer-button"
+            @click.stop="emit('run-button', { recordId: record.id, field })"
+          >{{ buttonLabel(field) }}</button>
           <span v-else class="meta-record-drawer__text">{{ formatValue(field, record.data[field.id]) }}</span>
           <div
             v-if="field.type === 'qrcode' && drawerQrSvg(record.data[field.id])"
@@ -375,7 +393,7 @@ import {
   resolveFieldCommentAffordance,
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
-import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../utils/field-config'
+import { attachmentAcceptAttr, resolveAttachmentFieldProperty, resolveButtonFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
 import { useLocale } from '../../composables/useLocale'
 import {
@@ -424,8 +442,13 @@ const props = withDefaults(defineProps<{
   apiClient?: MultitableApiClient
   /** A3: shared AI shortcut UI state from the workbench useAiShortcut instance. */
   aiShortcut?: AiShortcutState | null
+  /** B1-e: in-flight button runs keyed `${recordId}:${fieldId}` — the SAME ref
+   *  the grid (MetaGridTable) receives, so a run from either surface disables
+   *  the button on both. Matches the workbench `onRunButton` pending-key format. */
+  buttonRunPending?: string[]
 }>(), {
   recordIds: () => [],
+  buttonRunPending: () => [],
 })
 
 const emit = defineEmits<{
@@ -445,6 +468,11 @@ const emit = defineEmits<{
   /** A3: AI shortcut triggers (workbench resolves them through useAiShortcut). */
   (e: 'ai-preview', field: MetaField): void
   (e: 'ai-run', field: MetaField): void
+  /** B1-e: run a button field's configured action. Same shape the grid emits
+   * (`run-button { recordId, field }`) so the workbench's existing onRunButton
+   * handler — which owns the runButton call + result.status branching + the
+   * shared buttonRunPending key — handles both surfaces with no extra logic. */
+  (e: 'run-button', payload: { recordId: string; field: MetaField }): void
 }>()
 
 const { isZh } = useLocale()
@@ -796,6 +824,24 @@ function multiSelectEventValue(event: Event): string[] {
   return Array.from(select.selectedOptions).map((option) => option.value)
 }
 
+// B1-e button field: label + variant from the field property. The empty-label
+// fallback is the field name (user data, never a hardcoded literal — strict-zero
+// i18n, identical to the B1-b grid cell) so the accessible name is always
+// non-empty.
+function buttonLabel(field: MetaField): string {
+  return resolveButtonFieldProperty(field.property).label || field.name
+}
+
+function buttonVariant(field: MetaField): string {
+  return resolveButtonFieldProperty(field.property).variant
+}
+
+function buttonPendingFor(fieldId: string): boolean {
+  const recordId = props.record?.id
+  if (!recordId) return false
+  return props.buttonRunPending.includes(`${recordId}:${fieldId}`)
+}
+
 function linkButtonLabel(fieldId: string): string {
   const count = linkSummaryCount(fieldId)
   const field = props.fields.find((item) => item.id === fieldId) ?? null
@@ -1043,6 +1089,12 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 }
 .meta-record-drawer__check { cursor: pointer; }
 .meta-record-drawer__link-btn { padding: 4px 10px; border: 1px solid #409eff; border-radius: 3px; background: #ecf5ff; color: #409eff; cursor: pointer; font-size: 12px; }
+/* B1-e button field (record drawer); mirrors the B1-b grid cell variants. */
+.meta-record-drawer__button { display: inline-flex; align-items: center; max-width: 100%; padding: 4px 12px; font-size: 13px; line-height: 18px; border: 1px solid transparent; border-radius: 4px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-record-drawer__button:disabled { opacity: 0.6; cursor: default; }
+.meta-record-drawer__button--primary { background: #2563eb; color: #fff; }
+.meta-record-drawer__button--secondary { background: #f1f5f9; color: #1f2937; border-color: #cbd5e1; }
+.meta-record-drawer__button--danger { background: #ef4444; color: #fff; }
 .meta-record-drawer__link-summary { margin-top: 6px; font-size: 12px; color: #606266; }
 .meta-record-drawer__attachments { display: flex; flex-direction: column; gap: 6px; }
 .meta-record-drawer__attachment-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
