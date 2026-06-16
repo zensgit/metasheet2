@@ -28,7 +28,7 @@ function rev(version: number, action: MetaRecordRevision['action'], over: Partia
 
 const flush = async () => { await nextTick(); await Promise.resolve(); await Promise.resolve(); await nextTick() }
 
-function mountDrawer(revisions: MetaRecordRevision[]): { container: HTMLElement; app: App } {
+function mountDrawer(revisions: MetaRecordRevision[], onRestore?: (p: unknown) => void): { container: HTMLElement; app: App } {
   const apiClient = {
     listRecordHistory: vi.fn(async () => revisions),
     getRecordSubscriptionStatus: vi.fn(async () => ({ subscribed: false, subscription: null })),
@@ -40,6 +40,7 @@ function mountDrawer(revisions: MetaRecordRevision[]): { container: HTMLElement;
       return h(MetaRecordDrawer, {
         visible: true, record: RECORD, fields: FIELDS, canEdit: true, canComment: false,
         canDelete: false, sheetId: 'sheet_1', apiClient: apiClient as never,
+        ...(onRestore ? { onRestore } : {}),
       })
     },
   })
@@ -104,5 +105,53 @@ describe('MetaRecordDrawer history value-diff (Arc1·S1)', () => {
     // and only the changed field rendered a diff row
     const labels = [...mounted.container.querySelectorAll('.meta-record-drawer__history-diff-label')].map((e) => e.textContent)
     expect(labels.every((l) => l?.includes('Title'))).toBe(true)
+  })
+})
+
+describe('MetaRecordDrawer per-field restore selection (Arc1·S2)', () => {
+  let mounted: { container: HTMLElement; app: App } | null = null
+  afterEach(() => { if (mounted) { mounted.app.unmount(); mounted.container.remove(); mounted = null } })
+
+  // v2 < record v3 → restorable; changed TWO visible fields → two selectable checkboxes.
+  const TWO_FIELD_REVS = [
+    rev(2, 'update', { changedFieldIds: ['fld_t', 'fld_s'], snapshot: { fld_t: 'old title', fld_s: 'old status' }, patch: { fld_t: 'old title', fld_s: 'old status' } }),
+    rev(1, 'create', { changedFieldIds: ['fld_t', 'fld_s'], snapshot: { fld_t: 'init', fld_s: 'init' }, patch: {} }),
+  ]
+
+  it('emits a FULL restore (no fieldIds) when all changed fields stay checked', async () => {
+    const onRestore = vi.fn()
+    mounted = mountDrawer(TWO_FIELD_REVS, onRestore)
+    await openHistory(mounted.container)
+    const btn = mounted.container.querySelector<HTMLButtonElement>('[data-test="record-history-restore"]')!
+    expect(btn.disabled).toBe(false)
+    btn.click(); await flush()
+    expect(onRestore).toHaveBeenCalledTimes(1)
+    expect(onRestore.mock.calls[0][0]).toEqual({ recordId: 'rec_1', targetVersion: 2, expectedVersion: 3 })
+  })
+
+  it('emits fieldIds for the checked SUBSET after unchecking a field', async () => {
+    const onRestore = vi.fn()
+    mounted = mountDrawer(TWO_FIELD_REVS, onRestore)
+    await openHistory(mounted.container)
+    // checkboxes: [v2.fld_t, v2.fld_s, v1.fld_t, v1.fld_s] — uncheck v2.fld_s (index 1)
+    const checks = mounted.container.querySelectorAll<HTMLInputElement>('[data-test="history-field-select"]')
+    checks[1].click(); await flush()
+    const btn = mounted.container.querySelector<HTMLButtonElement>('[data-test="record-history-restore"]')!
+    btn.click(); await flush()
+    expect(onRestore).toHaveBeenCalledTimes(1)
+    expect(onRestore.mock.calls[0][0]).toEqual({ recordId: 'rec_1', targetVersion: 2, expectedVersion: 3, fieldIds: ['fld_t'] })
+  })
+
+  it('disables restore when ALL fields are unchecked (no all-fields ambiguity)', async () => {
+    const onRestore = vi.fn()
+    mounted = mountDrawer(TWO_FIELD_REVS, onRestore)
+    await openHistory(mounted.container)
+    const checks = mounted.container.querySelectorAll<HTMLInputElement>('[data-test="history-field-select"]')
+    checks[0].click(); await flush() // uncheck v2.fld_t
+    checks[1].click(); await flush() // uncheck v2.fld_s
+    const btn = mounted.container.querySelector<HTMLButtonElement>('[data-test="record-history-restore"]')!
+    expect(btn.disabled).toBe(true)
+    btn.click(); await flush()
+    expect(onRestore).not.toHaveBeenCalled()
   })
 })

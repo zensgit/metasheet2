@@ -1594,7 +1594,7 @@ async function onToggleRecordLock(payload: { recordId: string; locked: boolean }
 // confirm + API call + refresh (mirrors onToggleRecordLock). The backend error carries `.code`
 // (VERSION_CONFLICT / VERSION_EXPIRED / RESTORE_UNSUPPORTED / SNAPSHOT_UNAVAILABLE / SCHEMA_DRIFT /
 // RESTORE_FORBIDDEN); we surface error.message (already localized server-side) with a static fallback.
-async function onRestoreRecordVersion(payload: { recordId: string; targetVersion: number; expectedVersion: number }) {
+async function onRestoreRecordVersion(payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }) {
   const sheetId = workbench.activeSheetId.value
   if (!sheetId) return
   if (!window.confirm(recordLabel('record.restoreConfirm', isZh.value))) return
@@ -1604,6 +1604,7 @@ async function onRestoreRecordVersion(payload: { recordId: string; targetVersion
       payload.recordId,
       payload.targetVersion,
       payload.expectedVersion,
+      payload.fieldIds,
     )
     showSuccess(recordLabel(result.noop ? 'record.restoreNoop' : 'record.restoreSuccess', isZh.value))
     await grid.loadViewData(grid.page.value.offset)
