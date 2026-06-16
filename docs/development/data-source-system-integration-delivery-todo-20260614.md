@@ -444,6 +444,10 @@ TODO:
     operator-local maintenance check; use a seeded naturally failing row that can be reset
     values-free; only if neither exists, open a separate design-first test-only failure-injection
     slice. Do not add a broad production runtime failure hook inside C6-5.
+  - before opening a test-only failure-injection design slice, the entity-machine operator must
+    explicitly report whether the seeded naturally failing row is possible. If both sandbox-safe
+    failure shapes are unavailable, report `HOLD_NO_SAFE_FAILURE_SHAPE`; this is a routing signal,
+    not runtime authorization.
   - C6-5 remains sandbox/entity-machine validation only; no production/batch rollout.
 
 完成条件:

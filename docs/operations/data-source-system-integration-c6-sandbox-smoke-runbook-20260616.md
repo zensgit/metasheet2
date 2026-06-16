@@ -369,6 +369,13 @@ outside MetaSheet product/runtime paths. It must never run against production,
 must never become evidence-bearing, and does not relax the forbidden product
 raw SQL / query / stored procedure / trigger paths above.
 
+Before opening any test-only failure-injection design slice, the entity-machine
+operator must also explicitly confirm whether a seeded naturally failing
+sandbox row/constraint shape is possible. If neither the DDL-backed temporary
+failure nor the seeded naturally failing row can be run safely, report
+`HOLD_NO_SAFE_FAILURE_SHAPE` and keep C6-5 open. That report is a routing signal
+only; it does not authorize runtime failure-injection code by itself.
+
 Expected:
 
 - one controlled bad row creates row-level failure evidence;
@@ -382,8 +389,8 @@ Evidence:
 ```text
 badRow:
   status=<partial|failed|hold|not_run>
-  failureShape=write_time_constraint|ddl_unavailable|not_available
-  stopReason=none|target_ddl_unavailable|not_available
+  failureShape=write_time_constraint|ddl_unavailable|no_safe_failure_shape|not_available
+  stopReason=none|target_ddl_unavailable|seeded_row_unavailable|no_safe_failure_shape|not_available
   revisionMismatchObserved=false
   cleanSiblingWritten=true|false
   deadLetters.count=<count>
@@ -524,8 +531,8 @@ readOnlyUser:
 
 badRow:
   status=<partial|failed|hold|not_run>
-  failureShape=write_time_constraint|ddl_unavailable|not_available
-  stopReason=none|target_ddl_unavailable|not_available
+  failureShape=write_time_constraint|ddl_unavailable|no_safe_failure_shape|not_available
+  stopReason=none|target_ddl_unavailable|seeded_row_unavailable|no_safe_failure_shape|not_available
   revisionMismatchObserved=false
   cleanSiblingWritten=true|false
   deadLetters.count=<count>

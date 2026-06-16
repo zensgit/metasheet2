@@ -228,7 +228,7 @@ c6Sandbox:
   readOnlyUserExternalWriteDryRunAllowed=true|false
   readOnlyUserApplyBlocked=true|false
   controlledBadRow=pass|fail|hold|not_run
-  controlledBadRowStopReason=none|target_ddl_unavailable|not_available
+  controlledBadRowStopReason=none|target_ddl_unavailable|seeded_row_unavailable|no_safe_failure_shape|not_available
   rollbackCleanup=pass|fail|not_run
   productDeleteRouteUsed=false
   productRawSqlUsed=false
@@ -340,7 +340,7 @@ c6Sandbox:
   readOnlyUserExternalWriteDryRunAllowed=true|false
   readOnlyUserApplyBlocked=true|false
   controlledBadRow=pass|fail|hold|not_run
-  controlledBadRowStopReason=none|target_ddl_unavailable|not_available
+  controlledBadRowStopReason=none|target_ddl_unavailable|seeded_row_unavailable|no_safe_failure_shape|not_available
   rollbackCleanup=pass|fail|not_run
   productDeleteRouteUsed=false
   productRawSqlUsed=false
