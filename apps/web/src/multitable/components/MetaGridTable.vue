@@ -104,6 +104,8 @@
                     :value="row.data[field.id]"
                     :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
                     :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
+                    :button-pending="isButtonPending(row.id, field.id)"
+                    @run="emit('run-button', { recordId: row.id, field })"
                   />
                   <button
                     v-if="resolveRowActions(row.id).canComment && focusRow === flatIndex(group, ri) && focusCol === ci"
@@ -231,6 +233,8 @@
                   :value="row.data[field.id]"
                   :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
                   :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
+                  :button-pending="isButtonPending(row.id, field.id)"
+                  @run="emit('run-button', { recordId: row.id, field })"
                 />
                 <button
                   v-if="resolveRowActions(row.id).canComment && focusRow === ri && focusCol === ci"
@@ -256,6 +260,8 @@
                         :value="row.data[field.id]"
                         :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
                         :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
+                        :button-pending="isButtonPending(row.id, field.id)"
+                        @run="emit('run-button', { recordId: row.id, field })"
                       />
                     </span>
                   </div>
@@ -414,6 +420,9 @@ const props = defineProps<{
   aiRunEnabled?: boolean
   aiRunPending?: boolean
   aiRunBusy?: boolean
+  // B1-b: per-cell in-flight keys `${recordId}:${fieldId}` for button runs
+  // (keyed so one running button doesn't disable the others).
+  buttonRunPending?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -435,6 +444,8 @@ const emit = defineEmits<{
   (e: 'set-aggregation', payload: { fieldId: string; fn: string | null }): void
   // A3: AI shortcut run requested from a cell editor.
   (e: 'ai-run', recordId: string, field: MetaField): void
+  // B1-b: a button-field cell was clicked (run its configured action).
+  (e: 'run-button', payload: { recordId: string; field: MetaField }): void
 }>()
 
 const { isZh } = useLocale()
@@ -671,6 +682,11 @@ function readableTextOn(hex: string): string {
 function cellHasScaleFill(rid: string, fid: string): boolean {
   const e = props.conditionalFormattingScale?.byField[fid]?.byRecordId[rid]
   return !!e && (typeof e.barPct === 'number' || typeof e.scaleColor === 'string')
+}
+
+/** B1-b: is this button cell's run in flight? (disables the button, prevents double-fire) */
+function isButtonPending(rid: string, fid: string): boolean {
+  return (props.buttonRunPending ?? []).includes(`${rid}:${fid}`)
 }
 
 // A5-3 icon set render: map an `iconKey` (`${set}:${index}`) to a glyph + color.

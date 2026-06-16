@@ -888,6 +888,13 @@ export interface AiShortcutRunData {
   model: string | null
 }
 
+/** B1-b button run result. `failed` arrives at HTTP 200 (resolves, not throws). */
+export interface ButtonRunData {
+  status: 'succeeded' | 'failed'
+  executionId: string
+  message?: string
+}
+
 export interface AiSuggestFormulaData {
   status: 'succeeded'
   action: 'suggest'
@@ -1255,6 +1262,23 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ recordId: input.recordId, fieldId: input.fieldId }),
     })
+    return this.parseJson(res)
+  }
+
+  // --- Button field run (B1-b) ---
+  // Runs the button's configured (server-persisted) action against one record.
+  // IMPORTANT: an action that FAILS returns HTTP 200 with { status: 'failed' } —
+  // this resolves (does not throw); the caller MUST branch on `data.status`.
+  // Only contract/permission/server errors (400/403/404/500) throw MultitableApiError.
+  async runButton(sheetId: string, recordId: string, fieldId: string, requestId?: string): Promise<ButtonRunData> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/fields/${encodeURIComponent(fieldId)}/button/run`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestId ? { requestId } : {}),
+      },
+    )
     return this.parseJson(res)
   }
 

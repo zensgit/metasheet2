@@ -162,6 +162,21 @@
       <template v-else>{{ displayValue }}</template>
     </template>
 
+    <!-- button (B1-b): clickable cell action. @click.stop so the cell's own
+         select-record click doesn't fire; the grid supplies recordId on `run`. -->
+    <template v-else-if="field.type === 'button'">
+      <button
+        type="button"
+        class="meta-cell-renderer__button"
+        :class="`meta-cell-renderer__button--${buttonProp.variant}`"
+        :disabled="buttonPending"
+        :aria-label="buttonLabel"
+        :title="buttonLabel"
+        data-test="cell-button"
+        @click.stop="emit('run')"
+      >{{ buttonLabel }}</button>
+    </template>
+
     <!-- lookup / rollup -->
     <template v-else>{{ displayValue }}</template>
   </span>
@@ -175,13 +190,20 @@ import { useLocale } from '../../../composables/useLocale'
 import { isPersonField } from '../../utils/link-fields'
 import { formatFieldDisplay } from '../../utils/field-display'
 import { isSystemFieldType } from '../../utils/system-fields'
-import { resolveRatingFieldProperty } from '../../utils/field-config'
+import { resolveRatingFieldProperty, resolveButtonFieldProperty } from '../../utils/field-config'
 import { percentGaugeAria, ratingGaugeAria } from '../../utils/meta-core-labels'
 import { qrSvgFromText } from '../../utils/qr-code'
 import { isRichLongTextField, richLongTextToPlainTextFE } from '../../utils/rich-longtext'
 
-const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[]; attachmentSummaries?: MetaAttachment[] }>()
+const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[]; attachmentSummaries?: MetaAttachment[]; buttonPending?: boolean }>()
+const emit = defineEmits<{ (e: 'run'): void }>()
 const { isZh } = useLocale()
+
+// B1-b button field: label + variant from the field property; the empty-label
+// fallback is the field name (never a hardcoded literal — strict-zero i18n) so
+// the accessible name is always non-empty.
+const buttonProp = computed(() => resolveButtonFieldProperty(props.field.property))
+const buttonLabel = computed(() => buttonProp.value.label || props.field.name)
 
 const displayValue = computed(() => {
   return formatFieldDisplay({
@@ -505,4 +527,23 @@ const conditionalClass = computed(() => {
 .meta-cell-renderer__phone:hover {
   color: #1d4ed8;
 }
+/* B1-b button field cell */
+.meta-cell-renderer__button {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 10px;
+  font-size: 12px;
+  line-height: 18px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meta-cell-renderer__button:disabled { opacity: 0.6; cursor: default; }
+.meta-cell-renderer__button--primary { background: #2563eb; color: #fff; }
+.meta-cell-renderer__button--secondary { background: #f1f5f9; color: #1f2937; border-color: #cbd5e1; }
+.meta-cell-renderer__button--danger { background: #ef4444; color: #fff; }
 </style>

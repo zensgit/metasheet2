@@ -66,6 +66,19 @@ export type NormalizedAutoNumberFieldProperty = {
   start: number
 }
 
+export type ButtonFieldVariant = 'primary' | 'secondary' | 'danger'
+export type NormalizedButtonFieldProperty = {
+  label: string
+  variant: ButtonFieldVariant
+  actionType: string
+  /** Raw action config (opaque on the FE; authored/validated server-side). */
+  actionConfig: Record<string, unknown> | null
+  /** Confirm-before-run affordance. PARSED here but enforcement is deferred to
+   *  the first side-effecting-action slice (see B1-S0 design-lock §3.4); B1-b
+   *  renders + runs only the inert action, where confirming a no-op is pointless. */
+  confirm: { enabled: boolean; message: string }
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -211,6 +224,25 @@ export function resolveAutoNumberFieldProperty(value: unknown): NormalizedAutoNu
   const startRaw = typeof property.start === 'number' ? property.start : Number(property.start ?? property.startAt)
   const start = Number.isFinite(startRaw) && startRaw > 0 ? Math.floor(startRaw) : 1
   return { prefix, digits, start }
+}
+
+const BUTTON_VARIANTS: ReadonlySet<ButtonFieldVariant> = new Set(['primary', 'secondary', 'danger'])
+export function resolveButtonFieldProperty(value: unknown): NormalizedButtonFieldProperty {
+  const property = asRecord(value)
+  const label = typeof property.label === 'string' ? property.label.trim() : ''
+  const variant = typeof property.variant === 'string' && BUTTON_VARIANTS.has(property.variant as ButtonFieldVariant)
+    ? (property.variant as ButtonFieldVariant)
+    : 'secondary'
+  const actionType = typeof property.actionType === 'string' ? property.actionType.trim() : ''
+  const actionConfig = property.actionConfig && typeof property.actionConfig === 'object' && !Array.isArray(property.actionConfig)
+    ? (property.actionConfig as Record<string, unknown>)
+    : null
+  const confirmRaw = asRecord(property.confirm)
+  const confirm = {
+    enabled: confirmRaw.enabled === true,
+    message: typeof confirmRaw.message === 'string' ? confirmRaw.message.trim() : '',
+  }
+  return { label, variant, actionType, actionConfig, confirm }
 }
 
 const CURRENCY_SYMBOL_BY_CODE: Record<string, string> = {

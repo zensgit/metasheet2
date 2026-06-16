@@ -61,6 +61,7 @@
 
 - **B1-a1 inert `record_click` 的审计 = `logger.info`(ephemeral),有意,不写持久行**。理由:inert action **零已提交状态**(不写记录/不外发/不起 job),没有"对数据发生的事"可追;为一个 no-op 写一条持久 `multitable_automation_executions` 行不是审计严谨而是 ceremony。**且会污染**该表所驱动的规则执行分析与 DF-N1 运行监控 UI(非-rule 的 `rule_id='btn_*'` 行会出现在 `getRecent`/`listExecutions`/监控列表等非 rule-scoped 面)。
 - **持久审计行 = 行为级硬前置,挂在"首个有副作用的 button action"那一刀上**(即 §3.3 中 `send_notification` 起):**该 slice 必须经 `AutomationLogService.record()` 写一条已脱敏的 `multitable_automation_executions` 执行行,并带一条断言该行落库的测试**。这样审计随"button 真正做事"同 PR 落地——正是"feature 一能用,审计最易丢"防线生效处。
+- **confirm-before-run 同此前置(AUDIT-1 的孪生)**:button property 的 `confirm:{enabled,message?}` 在 B1-b 仅**解析**(`resolveButtonFieldProperty`),**不强制**——理由对齐:confirm 只能在 B1-c 配置 UI 里**被设置**(B1-b 前无配置面),且当前唯一启用的 action 是 inert `record_click`(确认一个 no-op 无意义),confirm 本质是**破坏性 action 的安全闸**。故 **confirm 强制与首个有副作用 action 同 slice 落地 + 带测**——与持久审计行捆绑:"button 能做事"那一刀同时带上"做之前先确认 + 落审计"。
 - **覆盖既有 §run-API 第 2 步措辞**:那条"写执行记录行(走既有 log-service + redact)"针对**有副作用 action**;inert 首刀按本节用 `logger.info`。
 - 例外(会翻成"现在就建"):出现明确要求**连 inert 点击也须持久可查**的合规/安全诉求时再建,并须先确认所有会浮现的执行查询面(运行监控 + recent/list)都是 rule-scoped,否则即引入污染。
 

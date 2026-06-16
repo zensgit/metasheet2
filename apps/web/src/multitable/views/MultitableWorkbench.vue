@@ -263,6 +263,7 @@
           :ai-run-enabled="effectiveRowActions.canEdit"
           :ai-run-pending="Boolean(aiShortcut.state.pending)"
           :ai-run-busy="aiShortcutBusy"
+          :button-run-pending="buttonRunPending"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
@@ -273,6 +274,7 @@
           @open-field-comments="onOpenGridFieldComments"
           @toggle-lock="onToggleRecordLock"
           @ai-run="onGridAiRun"
+          @run-button="onRunButton"
           @selection-change="onGridSelectionChange"
         />
       </div>
@@ -626,6 +628,31 @@ function onAiRunField(field: MetaField) {
 
 function onGridAiRun(recordId: string, field: MetaField) {
   void aiShortcut.run(recordId, field.id)
+}
+
+// B1-b: run a button field's configured action against one record. Per-cell
+// in-flight keys disable just that button + guard double-fire. A FAILED action
+// returns HTTP 200 (resolves), so branch on result.status; reserve catch for
+// contract/permission/server errors (403/etc.).
+const buttonRunPending = ref<string[]>([])
+async function onRunButton({ recordId, field }: { recordId: string; field: MetaField }) {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return
+  const key = `${recordId}:${field.id}`
+  if (buttonRunPending.value.includes(key)) return
+  buttonRunPending.value = [...buttonRunPending.value, key]
+  try {
+    const result = await workbench.client.runButton(sheetId, recordId, field.id)
+    if (result.status === 'failed') {
+      showError(result.message || wb('toast.buttonRunFailed', isZh.value))
+    } else {
+      showSuccess(wb('toast.buttonRunSuccess', isZh.value))
+    }
+  } catch (e: any) {
+    showError(e?.message ?? wb('toast.buttonRunFailed', isZh.value))
+  } finally {
+    buttonRunPending.value = buttonRunPending.value.filter((k) => k !== key)
+  }
 }
 
 // MetaFieldManager is emit/fn-prop based (dryRunFn precedent): config-time
