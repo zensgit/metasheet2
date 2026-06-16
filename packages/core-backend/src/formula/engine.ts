@@ -10,6 +10,10 @@ import { Logger } from '../core/logger'
 
 const logger = new Logger('FormulaEngine')
 
+// The string sentinels the engine emits for error results (returned, not thrown). IFERROR/ISERROR
+// test membership here so a downstream formula can trap an upstream error.
+const FORMULA_ERROR_SENTINELS = new Set(['#VALUE!', '#ERROR!', '#DIV/0!', '#N/A', '#NAME?', '#REF!', '#NUM!', '#NULL!'])
+
 export interface CellReference {
   sheet?: string
   row: number
@@ -228,6 +232,32 @@ export class FormulaEngine {
     this.functions.set('DATEDIF', this.datedif.bind(this))
     this.functions.set('DATEDIFF', this.datediff.bind(this))
     this.functions.set('COUNTA', this.counta.bind(this))
+
+    // Formula library expansion (Feishu parity): error-handling, multi-branch conditional,
+    // criteria-count, weekday, directional rounding, logical XOR, type predicates.
+    this.functions.set('IFERROR', (value: unknown, fallback: unknown) => this.isErrorValue(value) ? fallback : value)
+    this.functions.set('ISERROR', (value: unknown) => this.isErrorValue(value))
+    this.functions.set('ISBLANK', (value: unknown) => value === null || value === undefined || value === '')
+    this.functions.set('ISNUMBER', (value: unknown) => typeof value === 'number' && !Number.isNaN(value))
+    this.functions.set('IFS', (...args: unknown[]) => this.ifs(...args))
+    this.functions.set('XOR', (...args: unknown[]) => this.flattenValues(args).filter((v) => !!v).length % 2 === 1)
+    this.functions.set('COUNTIF', (range: unknown, criteria: unknown) => this.countif(range, criteria))
+    this.functions.set('WEEKDAY', (date: unknown, type: unknown = 1) => {
+      const d = date instanceof Date ? date : new Date(String(date))
+      if (Number.isNaN(d.getTime())) return '#VALUE!'
+      const dow = d.getDay() // 0=Sun..6=Sat
+      return Number(type) === 2 ? (dow === 0 ? 7 : dow) : dow + 1 // type 2: Mon=1..Sun=7; default: Sun=1..Sat=7
+    })
+    this.functions.set('ROUNDUP', (x: unknown, digits: unknown = 0) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      const f = Math.pow(10, Number(digits) || 0)
+      return (n >= 0 ? Math.ceil(n * f) : Math.floor(n * f)) / f
+    })
+    this.functions.set('ROUNDDOWN', (x: unknown, digits: unknown = 0) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      const f = Math.pow(10, Number(digits) || 0)
+      return (n >= 0 ? Math.floor(n * f) : Math.ceil(n * f)) / f
+    })
   }
 
   /**
@@ -851,6 +881,50 @@ export class FormulaEngine {
 
   private orFunction(...args: unknown[]): boolean {
     return this.flattenValues(args).some(val => !!val)
+  }
+
+  private isErrorValue(value: unknown): boolean {
+    return typeof value === 'string' && FORMULA_ERROR_SENTINELS.has(value)
+  }
+
+  // IFS(cond1, val1, cond2, val2, ...) — first truthy condition's value; #N/A if none match.
+  private ifs(...args: unknown[]): unknown {
+    for (let i = 0; i + 1 < args.length; i += 2) {
+      if (args[i]) return args[i + 1]
+    }
+    return '#N/A'
+  }
+
+  private countif(range: unknown, criteria: unknown): number {
+    return this.flattenValues([range]).filter((v) => this.matchesCriteria(v, criteria)).length
+  }
+
+  // criteria may be a comparator string (">5", "<>x"), a bare number, or text. CRITICAL: coerce with
+  // String(criteria) FIRST — a bare unquoted comparator like `>5` parses upstream to the boolean
+  // `false` (and a bare number to a number), so calling string methods on the raw value would throw or
+  // silently mis-count; stringifying makes both shapes behave predictably.
+  private matchesCriteria(value: unknown, criteria: unknown): boolean {
+    const c = String(criteria)
+    const m = c.match(/^(>=|<=|<>|>|<|=)(.*)$/)
+    if (m) {
+      const op = m[1]
+      const operand = m[2].trim()
+      const numV = Number(value)
+      const numO = Number(operand)
+      const bothNum = operand !== '' && !Number.isNaN(numV) && !Number.isNaN(numO)
+      switch (op) {
+        case '>': return bothNum && numV > numO
+        case '<': return bothNum && numV < numO
+        case '>=': return bothNum && numV >= numO
+        case '<=': return bothNum && numV <= numO
+        case '<>': return String(value) !== operand
+        case '=': return bothNum ? numV === numO : String(value) === operand
+      }
+    }
+    const numV = Number(value)
+    const numC = Number(c)
+    if (c.trim() !== '' && !Number.isNaN(numV) && !Number.isNaN(numC)) return numV === numC
+    return String(value) === c
   }
 
   private vlookup(lookupValue: unknown, range: unknown, colIndex: unknown, exactMatch: unknown = true): unknown {
