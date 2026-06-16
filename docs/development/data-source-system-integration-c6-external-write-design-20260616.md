@@ -1,6 +1,6 @@
 # Data Source System Integration C6 - External Write Design
 
-Status: C6-0 design + C6-1 latent target + C6-2 dry-run route + C6-3 token-bound apply route; C6-4 UI in review; C6-5 entity-machine validation still gated
+Status: C6-0 design + C6-1 latent target + C6-2 dry-run route + C6-3 token-bound apply route + C6-4 UI merged; C6-5 entity-machine validation still gated
 Date: 2026-06-16
 
 ## Purpose
@@ -297,6 +297,28 @@ C6 evidence must not include:
 - raw payload JSON;
 - target request bodies;
 - stack traces with values.
+
+## Release Observability Boundary
+
+Release for the database/system-connection track does not add a new read-side
+DF-N unification slice. The scoped v1 boundary is:
+
+- C2/C3 database reads executed through the existing pipeline runner may use the
+  existing `integration_runs` run ledger and run details, including C3
+  watermark/cursor details already designed for values-free evidence.
+- C2/C3 do not promise per-row DB-read provenance events in
+  `integration_provenance_by_row`, read-side dead-letters for successful reads,
+  or a new DF-N monitoring surface as part of this delivery.
+- C6 apply is different because it mutates an external target. C6 write
+  outcomes must remain visible through values-free run/dead-letter/provenance
+  evidence when attribution is available, as locked by the C6-3 apply route.
+- Release notes must describe the delivered read capability as database source
+  connectivity plus pipeline/run metrics, not as full per-row read lineage.
+
+A future DF-N/read-observability slice may add source-read provenance or a
+unified monitoring surface for database reads, but it is not a prerequisite for
+C6-5 sandbox smoke. That future slice must be a separate opt-in with its own
+tests and values-free evidence contract.
 
 ## Implementation Slices
 
