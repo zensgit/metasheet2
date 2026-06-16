@@ -864,6 +864,17 @@ export interface AiShortcutUsage {
   completionTokens: number
 }
 
+// Layer 1 record-level version restore (POST .../restore).
+export interface RestoreRecordResult {
+  recordId: string
+  newVersion: number
+  /** true when the restorable diff was empty — no write, no new revision. */
+  noop: boolean
+  restoredFieldIds: string[]
+  /** Always [] under atomic reject; reserved for a future partial-restore mode. */
+  skippedFieldIds: string[]
+}
+
 export interface AiShortcutPreviewData {
   status: 'succeeded'
   action: 'preview'
@@ -886,6 +897,13 @@ export interface AiShortcutRunData {
   estimatedCostUsd: number
   provider: string | null
   model: string | null
+}
+
+/** B1-b button run result. `failed` arrives at HTTP 200 (resolves, not throws). */
+export interface ButtonRunData {
+  status: 'succeeded' | 'failed'
+  executionId: string
+  message?: string
 }
 
 export interface AiSuggestFormulaData {
@@ -1258,6 +1276,23 @@ export class MultitableApiClient {
     return this.parseJson(res)
   }
 
+  // --- Button field run (B1-b) ---
+  // Runs the button's configured (server-persisted) action against one record.
+  // IMPORTANT: an action that FAILS returns HTTP 200 with { status: 'failed' } —
+  // this resolves (does not throw); the caller MUST branch on `data.status`.
+  // Only contract/permission/server errors (400/403/404/500) throw MultitableApiError.
+  async runButton(sheetId: string, recordId: string, fieldId: string, requestId?: string): Promise<ButtonRunData> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/fields/${encodeURIComponent(fieldId)}/button/run`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestId ? { requestId } : {}),
+      },
+    )
+    return this.parseJson(res)
+  }
+
   // NL→formula suggest (M4 / Lane B2). Field-authoring (canManageFields) gate;
   // the prompt context is the sheet field NAMES + TYPES only (no record values
   // server-side). Returns ONE candidate expression for the caller to validate
@@ -1369,6 +1404,29 @@ export class MultitableApiClient {
       body: JSON.stringify(input),
     })
     return this.parseJson(res)
+  }
+
+  /**
+   * Restore a record to a prior revision (Layer 1). On failure the thrown
+   * MultitableApiError carries `.code` — VERSION_CONFLICT (409) / VERSION_EXPIRED (410) /
+   * RESTORE_UNSUPPORTED · SNAPSHOT_UNAVAILABLE · SCHEMA_DRIFT (422) / RESTORE_FORBIDDEN (403) —
+   * so callers can branch on the documented contract without string-matching messages.
+   */
+  async restoreRecordVersion(
+    sheetId: string,
+    recordId: string,
+    targetVersion: number,
+    expectedVersion: number,
+  ): Promise<RestoreRecordResult> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/restore`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetVersion, expectedVersion }),
+      },
+    )
+    return this.parseJson<RestoreRecordResult>(res)
   }
 
   // --- Form submit ---

@@ -47,6 +47,8 @@ export type MetaManagerLabelKey =
   | 'field.decimals' | 'field.preserve' | 'field.unit'
   | 'field.useThousandsSeparators' | 'field.currencyCode'
   | 'field.maxRating' | 'field.prefix' | 'field.digits' | 'field.startAt'
+  | 'field.buttonLabelText' | 'field.buttonVariant' | 'field.buttonVariantPrimary' | 'field.buttonVariantSecondary' | 'field.buttonVariantDanger'
+  | 'field.buttonActionType' | 'field.buttonActionRecordClick' | 'field.buttonConfirmEnable' | 'field.buttonConfirmMessage' | 'field.buttonConfirmHint'
   | 'field.autoNumberHint' | 'field.saveSettings' | 'field.applyDefaults'
   | 'field.namePlaceholder' | 'field.addButton'
   | 'field.changedTypeBlocking' | 'field.changedWarning'
@@ -63,7 +65,7 @@ export type MetaManagerLabelKey =
   | 'field.error.numberDecimals'
   | 'field.error.numberUnit'
   | 'field.error.percentDecimals'
-  | 'field.error.ratingMax'
+  | 'field.error.ratingMax' | 'field.error.buttonActionType'
   | 'field.error.autoNumberPrefix'
   | 'field.error.autoNumberDigits'
   | 'field.error.autoNumberStart'
@@ -236,6 +238,16 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.useThousandsSeparators': { en: 'Use thousands separators', zh: '使用千位分隔符' },
   'field.currencyCode': { en: 'Currency code (ISO 4217)', zh: '货币代码（ISO 4217）' },
   'field.maxRating': { en: 'Maximum rating (1-10)', zh: '最高评分（1-10）' },
+  'field.buttonLabelText': { en: 'Button label', zh: '按钮文字' },
+  'field.buttonVariant': { en: 'Style', zh: '样式' },
+  'field.buttonVariantPrimary': { en: 'Primary', zh: '主要' },
+  'field.buttonVariantSecondary': { en: 'Secondary', zh: '次要' },
+  'field.buttonVariantDanger': { en: 'Danger', zh: '危险' },
+  'field.buttonActionType': { en: 'Action', zh: '动作' },
+  'field.buttonActionRecordClick': { en: 'Record click (audit only)', zh: '记录点击（仅审计）' },
+  'field.buttonConfirmEnable': { en: 'Confirm before running', zh: '运行前确认' },
+  'field.buttonConfirmMessage': { en: 'Confirm message', zh: '确认提示' },
+  'field.buttonConfirmHint': { en: 'Takes effect when the button runs a side-effecting action (coming later).', zh: '在按钮执行有副作用的动作时生效（后续上线）。' },
   'field.prefix': { en: 'Prefix', zh: '前缀' },
   'field.digits': { en: 'Digits', zh: '位数' },
   'field.startAt': { en: 'Start at', zh: '起始值' },
@@ -269,6 +281,7 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.error.numberUnit': { en: 'Number unit must be 24 characters or fewer', zh: '数字单位不能超过 24 个字符' },
   'field.error.percentDecimals': { en: 'Percent decimals must be between 0 and 6', zh: '百分比小数位必须在 0 到 6 之间' },
   'field.error.ratingMax': { en: 'Rating max must be between 1 and 10', zh: '评分上限必须在 1 到 10 之间' },
+  'field.error.buttonActionType': { en: 'Choose a button action', zh: '请选择按钮动作' },
   'field.error.autoNumberPrefix': { en: 'Auto number prefix must be 32 characters or fewer', zh: '自动编号前缀不能超过 32 个字符' },
   'field.error.autoNumberDigits': { en: 'Auto number digits must be between 0 and 12', zh: '自动编号位数必须在 0 到 12 之间' },
   'field.error.autoNumberStart': { en: 'Auto number start must be at least 1', zh: '自动编号起始值至少为 1' },

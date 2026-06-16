@@ -469,6 +469,36 @@
           </label>
         </template>
 
+        <template v-else-if="configTargetType === 'button'">
+          <label class="meta-field-mgr__field">
+            <span>{{ ml('field.buttonLabelText') }}</span>
+            <input v-model="buttonDraft.label" class="meta-field-mgr__input" type="text" :placeholder="configTarget?.name ?? newFieldName" />
+          </label>
+          <label class="meta-field-mgr__field">
+            <span>{{ ml('field.buttonVariant') }}</span>
+            <select v-model="buttonDraft.variant" class="meta-field-mgr__input">
+              <option value="primary">{{ ml('field.buttonVariantPrimary') }}</option>
+              <option value="secondary">{{ ml('field.buttonVariantSecondary') }}</option>
+              <option value="danger">{{ ml('field.buttonVariantDanger') }}</option>
+            </select>
+          </label>
+          <label class="meta-field-mgr__field">
+            <span>{{ ml('field.buttonActionType') }}</span>
+            <select v-model="buttonDraft.actionType" class="meta-field-mgr__input">
+              <option v-for="t in BUTTON_ACTION_TYPES" :key="t" :value="t">{{ ml('field.buttonActionRecordClick') }}</option>
+            </select>
+          </label>
+          <label class="meta-field-mgr__toggle">
+            <input v-model="buttonDraft.confirm.enabled" type="checkbox" />
+            <span>{{ ml('field.buttonConfirmEnable') }}</span>
+          </label>
+          <label v-if="buttonDraft.confirm.enabled" class="meta-field-mgr__field">
+            <span>{{ ml('field.buttonConfirmMessage') }}</span>
+            <input v-model="buttonDraft.confirm.message" class="meta-field-mgr__input" type="text" />
+          </label>
+          <p class="meta-field-mgr__hint">{{ ml('field.buttonConfirmHint') }}</p>
+        </template>
+
         <template v-else-if="configTargetType === 'autoNumber'">
           <div class="meta-field-mgr__grid">
             <label class="meta-field-mgr__field">
@@ -683,10 +713,12 @@ import {
 } from '../utils/formula-docs'
 import { localizeDryRunDiagnostic } from '../utils/meta-formula-labels'
 import type { DryRunResult, DryRunDiagnostic } from '../api/client'
+import type { ButtonFieldVariant } from '../utils/field-config'
 import {
   normalizeStringArray,
   resolveAutoNumberFieldProperty,
   resolveAttachmentFieldProperty,
+  resolveButtonFieldProperty,
   resolveCurrencyFieldProperty,
   resolveFormulaFieldProperty,
   resolveLinkFieldProperty,
@@ -821,14 +853,14 @@ function rulesToProperty(rules: FieldValidationRule[]): Array<Record<string, unk
 const FIELD_TYPES: MetaFieldCreateType[] = [
   'string', 'longText', 'number', 'boolean', 'date', 'dateTime', 'select', 'multiSelect', 'link', 'person',
   'formula', 'lookup', 'rollup', 'attachment',
-  'currency', 'percent', 'rating', 'url', 'email', 'phone', 'barcode', 'qrcode', 'location',
+  'currency', 'percent', 'rating', 'url', 'email', 'phone', 'barcode', 'qrcode', 'location', 'button',
   ...SYSTEM_FIELD_TYPES,
 ]
 const FIELD_ICONS: Record<string, string> = {
   string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', dateTime: '\u{1F552}', select: '\u25CF', multiSelect: '\u25C9',
   link: '\u21C4', person: '\u{1F464}', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
   currency: '\u00A4', percent: '%', rating: '\u2605', url: '\u{1F517}', email: '\u2709', phone: '\u260E', barcode: '\u25A5', qrcode: '\u25A6', location: '\u{1F4CD}',
-  autoNumber: '#+', createdTime: 'CT', modifiedTime: 'MT', createdBy: 'CB', modifiedBy: 'MB',
+  autoNumber: '#+', createdTime: 'CT', modifiedTime: 'MT', createdBy: 'CB', modifiedBy: 'MB', button: '\u{1F518}',
 }
 
 const props = defineProps<{
@@ -964,6 +996,26 @@ const percentDraft = reactive<{ decimals: number }>({
 const ratingDraft = reactive<{ max: number }>({
   max: 5,
 })
+// B1-c button field config draft. `actionConfig` is carried OPAQUELY (the form
+// doesn't edit it) so a label/variant edit re-emits it intact — update-field
+// replaces property wholesale, so dropping it here would clobber a server-
+// authored action config (the design-lock §3.4 "edit label keeps actionConfig").
+const buttonDraft = reactive<{
+  label: string
+  variant: ButtonFieldVariant
+  actionType: string
+  confirm: { enabled: boolean; message: string }
+  actionConfig: Record<string, unknown> | null
+}>({
+  label: '',
+  variant: 'secondary',
+  actionType: 'record_click',
+  confirm: { enabled: false, message: '' },
+  actionConfig: null,
+})
+// Only record_click is runnable today (run route ENABLED_BUTTON_ACTIONS); the
+// picker offers exactly it so an authored button can't 400 on run.
+const BUTTON_ACTION_TYPES = ['record_click'] as const
 const autoNumberDraft = reactive<{ prefix: string; digits: number; start: number }>({
   prefix: '',
   digits: 0,
@@ -1381,7 +1433,7 @@ function onNumberDecimalsInput(event: Event) {
 function requiresConfig(type: MetaFieldCreateType): boolean {
   return [
     'select', 'multiSelect', 'link', 'person', 'lookup', 'rollup', 'formula', 'attachment',
-    'number', 'currency', 'percent', 'rating', 'longText', 'autoNumber',
+    'number', 'currency', 'percent', 'rating', 'longText', 'autoNumber', 'button',
   ].includes(type)
 }
 
@@ -1440,6 +1492,11 @@ function resetDrafts() {
   autoNumberDraft.prefix = ''
   autoNumberDraft.digits = 0
   autoNumberDraft.start = 1
+  buttonDraft.label = ''
+  buttonDraft.variant = 'secondary'
+  buttonDraft.actionType = 'record_click'
+  buttonDraft.confirm = { enabled: false, message: '' }
+  buttonDraft.actionConfig = null
   validationDraft.value = []
   validationDraftTouched.value = false
   fieldConfigError.value = ''
@@ -1513,6 +1570,15 @@ function serializeFieldDraft(type: string | null): string {
   }
   if (type === 'rating') {
     return JSON.stringify({ max: ratingDraft.max })
+  }
+  if (type === 'button') {
+    return JSON.stringify({
+      label: buttonDraft.label.trim(),
+      variant: buttonDraft.variant,
+      actionType: buttonDraft.actionType.trim(),
+      confirm: { enabled: buttonDraft.confirm.enabled, message: buttonDraft.confirm.message.trim() },
+      actionConfig: buttonDraft.actionConfig,
+    })
   }
   if (type === 'autoNumber') {
     return JSON.stringify({
@@ -1631,6 +1697,17 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
     autoNumberDraft.prefix = property.prefix
     autoNumberDraft.digits = property.digits
     autoNumberDraft.start = property.start
+  } else if (fieldType === 'button') {
+    // B1-c CLOBBER GUARD (mirrors the A3 aiShortcut leg below): hydrate
+    // actionConfig into the draft so EVERY save re-emits it — a label/variant
+    // edit must not drop a server-authored actionConfig (update-field replaces
+    // property wholesale; design-lock §3.4).
+    const property = resolveButtonFieldProperty(field.property)
+    buttonDraft.label = property.label
+    buttonDraft.variant = property.variant
+    buttonDraft.actionType = property.actionType
+    buttonDraft.confirm = { enabled: property.confirm.enabled, message: property.confirm.message }
+    buttonDraft.actionConfig = property.actionConfig
   } else if (fieldType === 'string' || fieldType === 'longText') {
     // A3 CLOBBER GUARD leg 1 (LOCKED §2.1): hydrate the persisted aiShortcut
     // into the draft so EVERY subsequent save re-emits it (see
@@ -1940,7 +2017,7 @@ watch(aiShortcutSectionVisible, (visible) => {
 })
 
 function currentDraftProperty(type: MetaFieldCreateType | string): Record<string, unknown> | undefined {
-  const normalizedType = type === 'link' || type === 'select' || type === 'multiSelect' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person' || type === 'number' || type === 'currency' || type === 'percent' || type === 'rating' || type === 'autoNumber'
+  const normalizedType = type === 'link' || type === 'select' || type === 'multiSelect' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person' || type === 'number' || type === 'currency' || type === 'percent' || type === 'rating' || type === 'autoNumber' || type === 'button'
     ? type
     : null
   fieldConfigError.value = ''
@@ -2097,6 +2174,23 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
       return undefined
     }
     return { max: Math.round(max) }
+  }
+  if (normalizedType === 'button') {
+    const actionType = buttonDraft.actionType.trim()
+    if (!actionType) {
+      fieldConfigError.value = ml('field.error.buttonActionType')
+      return undefined
+    }
+    // KEYSTONE: re-emit actionConfig from the draft (hydrated on edit) so a
+    // label/variant change never drops a server-authored config — update-field
+    // replaces property wholesale (design-lock §3.4). actionConfig stays opaque.
+    return {
+      label: buttonDraft.label.trim(),
+      variant: buttonDraft.variant,
+      actionType,
+      confirm: { enabled: buttonDraft.confirm.enabled, message: buttonDraft.confirm.message.trim() },
+      ...(buttonDraft.actionConfig ? { actionConfig: buttonDraft.actionConfig } : {}),
+    }
   }
   if (normalizedType === 'autoNumber') {
     const prefix = autoNumberDraft.prefix.trim()
