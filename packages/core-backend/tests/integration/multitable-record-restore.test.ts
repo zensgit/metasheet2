@@ -644,6 +644,43 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     expect(visible.body.data.restoredFieldIds).toEqual([FLD_A])
   })
 
+  test('T21 (review hardening): deleted-in-snapshot, never-existed, and hidden-changed per-field probes return a BYTE-IDENTICAL 200 no-op body (full A≡B≡C lock)', async () => {
+    // One fixture, one actor (USER_RO). Under this actor the three per-field probes are:
+    //   A = ghost_gone_field : present in the v1 snapshot, DELETED from the schema since
+    //   B = never_<ts>       : NEVER existed
+    //   C = FLD_B            : exists, CHANGED v1→current, but INVISIBLE to USER_RO (visible=false)
+    // All three must be indistinguishable: identical status AND identical response body. Locking the
+    // FULL body (not just status+noop, as T18/T19 do) closes the regression where a dropped/unknown/
+    // hidden requested id is echoed back in restoredFieldIds or skippedFieldIds — which would reopen the
+    // field-existence probe without tripping the status/noop assertions.
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_B]: 'b2' },
+      2,
+      [
+        { version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_B]: 'b1', ghost_gone_field: 'x' } },
+        { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_B]: 'b2' } },
+      ],
+    )
+    testUserId = USER_RO
+    const a = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: ['ghost_gone_field'] }) // deleted-in-snapshot
+    const b = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [`never_${TS}`] })       // never-existed
+    const c = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_B] })               // hidden + changed
+    expect(a.status).toBe(200)
+    expect(b.status).toBe(200)
+    expect(c.status).toBe(200)
+    // FULL body equality across all three — the probe-closing invariant
+    expect(a.body.data).toEqual(b.body.data)
+    expect(b.body.data).toEqual(c.body.data)
+    // and the exact no-op shape: nothing restored, nothing echoed back, version unmoved
+    expect(a.body.data.noop).toBe(true)
+    expect(a.body.data.restoredFieldIds).toEqual([])
+    expect(a.body.data.skippedFieldIds).toEqual([])
+    // none of the probes mutated the record (still at version 2, original values intact)
+    const live = await liveData(rid)
+    expect(live[FLD_A]).toBe('a2')
+    expect(live[FLD_B]).toBe('b2')
+  })
+
   test('T20 (review fix): a pure link reorder is a no-op (no spurious version bump) — meta_links is an unordered set', async () => {
     const rid = await seedRecord(
       { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC, FOREIGN_REC2] },

@@ -5825,6 +5825,9 @@ export function univerMetaRouter(): Router {
         if (!g || g.hidden) return false
         return fieldPermissions[fid]?.visible !== false
       }
+      // INVARIANT (do not reorder): canSeeField is applied HERE, so invisible fields are dropped from
+      // selectedDiff BEFORE the hasForbidden gate below. Moving this visibility filter to after the gate
+      // would make an invisible-but-changed field 403 instead of no-op, reopening the hidden-field probe.
       const selectedDiff = fieldIds
         ? diff.filter((ch) => fieldIds.includes(ch.fieldId) && canSeeField(ch.fieldId))
         : diff
