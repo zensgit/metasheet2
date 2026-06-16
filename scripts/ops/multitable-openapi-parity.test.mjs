@@ -76,6 +76,40 @@ test('multitable openapi stays aligned with runtime contracts', () => {
     paths['/api/multitable/record-subscription-notifications']?.get,
     'missing record subscription notification list endpoint',
   )
+  // Notification Center S1 read-state routes — lock route shape + response shape so the SDK/contract
+  // guards against drift (these are the routes the FE bell binds to).
+  assert.ok(
+    paths['/api/multitable/record-subscription-notifications/unread-count']?.get,
+    'missing notification unread-count endpoint',
+  )
+  assert.equal(
+    paths['/api/multitable/record-subscription-notifications/unread-count']?.get?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.properties?.count?.type,
+    'integer',
+    'unread-count must return data.count: integer',
+  )
+  assert.ok(
+    paths['/api/multitable/record-subscription-notifications/mark-read']?.post,
+    'missing notification mark-read endpoint',
+  )
+  assert.equal(
+    paths['/api/multitable/record-subscription-notifications/mark-read']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.ids?.type,
+    'array',
+    'mark-read request body must accept ids: array',
+  )
+  assert.equal(
+    paths['/api/multitable/record-subscription-notifications/mark-read']?.post?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.properties?.updated?.type,
+    'integer',
+    'mark-read must return data.updated: integer',
+  )
+  assert.ok(
+    paths['/api/multitable/record-subscription-notifications/mark-all-read']?.post,
+    'missing notification mark-all-read endpoint',
+  )
+  assert.equal(
+    paths['/api/multitable/record-subscription-notifications/mark-all-read']?.post?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.properties?.updated?.type,
+    'integer',
+    'mark-all-read must return data.updated: integer',
+  )
 
   assert.deepEqual(schemas.MultitableFieldType?.enum, expectedFieldTypes)
   assert.deepEqual(schemas.MultitableViewType?.enum, expectedViewTypes)
