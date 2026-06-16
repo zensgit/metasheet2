@@ -1,6 +1,6 @@
 # 多维表 条件格式 + 评论反应 — 浏览器验证包(可转交) — 2026-06-15
 
-> Status: **PATH A EXECUTED — 2026-06-16**(见 §6)。一个能跑 Playwright Chrome 的 agent 环境完成了路径 A 组件 harness 验证:A5 渲染(data-bar / color-scale / icon-set)+ B6 反应 chips/picker/pick 往返,**0 console/pageerror**。**1 项发现**(color-scale/data-bar 列数值文字低对比度,见 §3 color-scale 勾项)+ **3 项 harness 未覆盖子项**(负值色 / frozen 滚动 / 只读反应视角)。结论:**浏览器 lane 已被证明可用**;余下子项见 §6。
+> Status: **PATH A EXECUTED — 2026-06-16**(见 §6)。一个能跑 Playwright Chrome 的 agent 环境完成了路径 A 组件 harness 验证:A5 渲染(data-bar / color-scale / icon-set)+ B6 反应 chips/picker/pick 往返,**0 console/pageerror**。初判的"数值文字低对比度"发现经**高 DPI 复检 + computed-style 实测已撤销**(文字按底色亮度取深/白,可读;详见 §6 更正)。余下 **3 项 harness 未覆盖子项**(负值色 / frozen 滚动 / 只读反应视角)留待扩 fixture。结论:**浏览器 lane 已被证明可用,A5/B6 渲染目检通过、无 open 发现**。
 >
 > 原始转交说明(保留备查):本包不新增功能、不改运行时;它把"看起来能渲染(jsdom 证 style/emit)"变成"真实浏览器确认能用"。撰写本包的 agent 沙箱会 `SIGKILL` Playwright 启动的 Chrome(`kill EPERM`),无法在本环境截图/交互,故转交;**执行方 = 一个未被沙箱封禁浏览器驱动的 agent 环境**(2026-06-16 跑通,见 §6)。
 
@@ -161,12 +161,12 @@ pnpm --filter @metasheet/web dev
 - ☑ 单元格内**左锚定渐变条**,长度随值递增(0%→100%):fixture 0/25/50/75/100 → 条长正确递增,`linear-gradient(to right, rgb(33,150,243) X%, transparent X%)` 实测对齐;
 - ☐ 负值用 negativeColor(若配置):**未覆盖** — fixture 无负值,留待 harness 扩展;
 - ☐ frozen 列滚动时条不丢:**未覆盖** — harness 无 frozen 列/滚动;
-- ⚠ **发现**:data-bar 列数值文字呈低对比度浅色(见 color-scale 勾项的对比度发现,同因)。
+- ☑ 数值文字可读:positive 值 computed color = `rgb(17,24,39)`(`#111827` 深),非"浅绿"(那是相邻 icon-set 列的 positive 渲染色,初判时在缩略全页图里看串了 —— 见 §6 更正)。
 
-### ☑ color-scale (A5-2) — 插值已目检 / ⚠ 对比度发现(2026-06-16)
+### ☑ color-scale (A5-2) — 插值 + 文字可读性已目检(2026-06-16)
 - ☑ 单元格**实底色**随值在 min/mid/max 间插值(fixture 红→橙→黄→黄绿→绿,平滑);
 - ☑ 中点值(50)底色 ≈ mid stop(黄),非端点;
-- ⚠ **底色上的数值文字可读性 = 发现项**:数值呈浅色,在浅/深底色上均偏低对比度("100"在深绿格、数值在黄绿格上偏淡)。**非阻断**(渲染正确),建议开 focused readability fix(深底加深文字/描边/自动反色),附 jsdom 对比度回归;
+- ☑ **底色上的数值文字可读**:`readableTextOn(fill)` 按 YIQ 亮度取深/白 —— 高 DPI 复检确认 25/50/75 在橙/黄/黄绿上为深字、**100 在深绿格上为白字**(`cellVar=#ffffff`),均可读。初判"低对比度"系缩略全页图里把相邻 icon-set 列的 positive 绿数值看串,已撤销(§6);
 - ☐ frozen 列底色不被 sticky #fff 盖掉:**未覆盖** — harness 无 frozen 列。
 
 ### ☑ icon-set (A5-3) — 已目检(2026-06-16)
@@ -200,9 +200,12 @@ pnpm --filter @metasheet/web dev
 **结果**:
 - 网格挂载成功(`.meta-grid__cell` 命中),**0 console error / 0 pageerror**;
 - 截图(已归档 `~/Downloads/Github/_bv-evidence-20260616/`):`bv-grid.png`(网格)、`bv-reactions-picker.png`(picker)、`bv-reactions-after.png`(pick 🚀 后);
-- A5-1 / A5-2 / A5-3 / B6 勾项见 §3(逐项标注 ☑ / 未覆盖 / ⚠)。
+- A5-1 / A5-2 / A5-3 / B6 勾项见 §3(逐项 ☑ / 未覆盖)。
 
-**发现(1)**:data-bar + color-scale 列**数值文字低对比度**(浅色,深底色行尤甚)。非阻断,建议 focused readability fix(深底自动反色/描边)+ jsdom 对比度回归。
+**发现:无 open 项。** 初判的"data-bar + color-scale 数值文字低对比度"经复检**撤销 / 误报**:
+- **复检手段**:(a) `deviceScaleFactor:2` 高 DPI 重截(`bv-grid-highdpi-readable.png`,已归档);(b) Playwright `getComputedStyle` 实测数值元素。
+- **实测**:数值元素 = `<span class="meta-cell-renderer--number ... --positive">`;在 scale-fill 上 computed `color` = `rgb(17,24,39)`(深),`100` 在深绿格上 = 白(cellVar `#ffffff`)。即 `MetaGridTable.cellStyle` 的 `readableTextOn`(YIQ 亮度取深/白)+ CSS `.meta-grid__cell--scale-fill :deep(.meta-cell-renderer--positive/negative){ color: var(--meta-grid-scale-text-color)!important }` **已正确生效**。
+- **误判根因**:首次用 `fullPage` 缩略全页图(deviceScaleFactor 1),把**相邻 icon-set 列**的 positive 绿数值(该列无 fill,故走默认 positive 绿渲染)看串成 data-bar/color-scale 列的文字。高 DPI 单列复检即澄清。**无需任何代码改动**。
 
 **harness 未覆盖(3,非缺陷,仅 fixture 局限)**:data-bar 负值色;frozen 列滚动;只读反应视角(`canReact=false`)。扩 fixture 即可补。
 
