@@ -414,6 +414,7 @@ TODO:
   - changing pipeline id or scope clears the pending dry-run token/review.
 - [ ] C6-5 entity-machine smoke: apply、re-pull、rollback。
   - issue: #2720 `[Data Source] C6 external-write entity-machine smoke gate`.
+  - runbook: `docs/operations/data-source-system-integration-c6-sandbox-smoke-runbook-20260616.md`.
   - release: `multitable-onprem-datasource-c6-ui-20260616-9fb34fd91`.
   - package: `metasheet-multitable-onprem-v2.5.0-datasource-c6-ui-20260616-9fb34fd91`.
   - source commit: `9fb34fd91e4f3bdfa7827d57ca3b362abbcb05bd`.
