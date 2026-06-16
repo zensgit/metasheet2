@@ -17,6 +17,13 @@ describe('meta-record-labels static keys', () => {
     expect(recordLabel('record.delete', true)).toBe('删除')
   })
 
+  it('duplicate button text is separate from its title key (button-suffix pattern)', () => {
+    expect(recordLabel('record.duplicate', true)).toBe('复制')
+    expect(recordLabel('record.duplicate', false)).toBe('Duplicate')
+    expect(recordLabel('record.duplicateTitle', true)).toBe('复制此记录')
+    expect(recordLabel('record.duplicateTitle', false)).toBe('Duplicate this record')
+  })
+
   it('distinguishes watch button text from watch/unwatch title (S1/T3A1 pattern)', () => {
     expect(recordLabel('record.watch', true)).toBe('关注')
     expect(recordLabel('record.watching', true)).toBe('已关注')

@@ -16,6 +16,7 @@ const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
 
 let capturedDrawerAttrs: Record<string, unknown> | null = null
+let capturedGridAttrs: Record<string, unknown> | null = null
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -60,7 +61,17 @@ vi.mock('../src/multitable/import/bulk-import', () => ({ bulkImportRecords: vi.f
 
 vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({ default: stubComponent('MetaViewTabBar') }))
 vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
-vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({ default: stubComponent('MetaGridTable') }))
+// Capturing stub for the grid — records the real listeners (for the duplicate-record wire-drift lock).
+vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
+  default: defineComponent({
+    name: 'MetaGridTable',
+    inheritAttrs: false,
+    setup(_props, { attrs }) {
+      capturedGridAttrs = attrs as Record<string, unknown>
+      return () => h('div', { 'data-stub-MetaGridTable': 'true' })
+    },
+  }),
+}))
 vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
 // Capturing stub for the component under wiring test — records the real listeners.
 vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
@@ -146,7 +157,7 @@ function createGridMock() {
     toggleFieldVisibility: vi.fn(), addSortRule: vi.fn(), removeSortRule: vi.fn(), addFilterRule: vi.fn(),
     updateFilterRule: vi.fn(), removeFilterRule: vi.fn(), clearFilters: vi.fn(), applySortFilter: vi.fn(),
     undo: vi.fn(), redo: vi.fn(), setGroupField: vi.fn(), goToPage: vi.fn(), patchCell: vi.fn(),
-    createRecord: vi.fn(), deleteRecord: vi.fn(), resolveRowActions: vi.fn(() => null),
+    createRecord: vi.fn(), deleteRecord: vi.fn(), duplicateRecord: vi.fn().mockResolvedValue('rec_clone'), resolveRowActions: vi.fn(() => null),
     loadViewData: vi.fn().mockResolvedValue(true), reloadCurrentPage: vi.fn(), dismissConflict: vi.fn(),
     retryConflict: vi.fn(), setColumnWidth: vi.fn(), setSearchQuery: vi.fn(),
   }
@@ -162,6 +173,7 @@ describe('MultitableWorkbench drawer run-button handler wiring (B1-e)', () => {
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
     capturedDrawerAttrs = null
+    capturedGridAttrs = null
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -221,5 +233,83 @@ describe('MultitableWorkbench drawer run-button handler wiring (B1-e)', () => {
     await onRunButton({ recordId: 'rec_42', field: { id: 'fld_btn' } })
     await flushUi()
     expect(workbenchMock.client.runButton).not.toHaveBeenCalled()
+  })
+})
+
+// Wire-drift lock for the duplicate / clone record affordance (design 2026-06-16). Both the drawer Duplicate
+// button (`@duplicate`) and the grid right-click (`@duplicate-record`) must be threaded by the workbench into
+// the SAME onDuplicateRecord handler → grid.duplicateRecord. A component-level test (drawer/grid emit) stays
+// green even if the workbench forgets the listener, shipping a dead feature — so capture the real listeners.
+describe('MultitableWorkbench duplicate-record handler wiring (2026-06-16)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    workbenchMock = createWorkbenchMock()
+    gridMock = createGridMock()
+    capturedDrawerAttrs = null
+    capturedGridAttrs = null
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null; container = null
+    showErrorSpy.mockReset(); showSuccessSpy.mockReset()
+    vi.unstubAllGlobals(); vi.clearAllMocks()
+  })
+
+  async function mountWorkbench(): Promise<void> {
+    const Host = defineComponent({ setup() { return () => h(MultitableWorkbench as Component) } })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  it('threads the grid @duplicate-record emit into grid.duplicateRecord and shows the success toast', async () => {
+    await mountWorkbench()
+    expect(capturedGridAttrs).not.toBeNull()
+    const onDuplicateRecord = capturedGridAttrs!.onDuplicateRecord as (recordId: string) => Promise<void>
+    expect(typeof onDuplicateRecord).toBe('function')
+
+    await onDuplicateRecord('rec_source')
+    await flushUi()
+
+    expect(gridMock.duplicateRecord).toHaveBeenCalledTimes(1)
+    expect(gridMock.duplicateRecord).toHaveBeenCalledWith('rec_source')
+    expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('threads the drawer @duplicate emit into grid.duplicateRecord with the selected record id', async () => {
+    await mountWorkbench()
+    expect(capturedDrawerAttrs).not.toBeNull()
+    // The workbench wires `@duplicate="onDuplicateRecord(selectedRecordId)"`. Drive a selection first so the
+    // handler has a source id to duplicate (mirrors a user opening a record then clicking Duplicate).
+    const onSelectRecord = capturedGridAttrs!.onSelectRecord as (id: string) => void
+    onSelectRecord('rec_open')
+    await flushUi()
+
+    const onDuplicate = capturedDrawerAttrs!.onDuplicate as () => Promise<void>
+    expect(typeof onDuplicate).toBe('function')
+    await onDuplicate()
+    await flushUi()
+
+    expect(gridMock.duplicateRecord).toHaveBeenCalledWith('rec_open')
+  })
+
+  it('surfaces grid.error on a failed duplicate (null id) instead of a success toast', async () => {
+    gridMock.duplicateRecord.mockResolvedValueOnce(null)
+    gridMock.error.value = 'Failed to duplicate record'
+    await mountWorkbench()
+    const onDuplicateRecord = capturedGridAttrs!.onDuplicateRecord as (recordId: string) => Promise<void>
+
+    await onDuplicateRecord('rec_source')
+    await flushUi()
+
+    expect(showSuccessSpy).not.toHaveBeenCalled()
+    expect(showErrorSpy).toHaveBeenCalledWith('Failed to duplicate record')
   })
 })

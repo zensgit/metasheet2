@@ -1409,6 +1409,18 @@ export class MultitableApiClient {
     return this.parseJson(res)
   }
 
+  // Duplicate / clone a record (design 2026-06-16): the server reads the source row, copies the field values
+  // the actor can both read AND write into a NEW row, and returns the masked echo of the clone. `sheetId` /
+  // `viewId` give the server the context to resolve the source sheet (parity with create/lock).
+  async duplicateRecord(recordId: string, params?: { sheetId?: string; viewId?: string }): Promise<{ record: MetaRecord }> {
+    const res = await this.fetch(`/api/multitable/records/${recordId}/duplicate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params ?? {}),
+    })
+    return this.parseJson(res)
+  }
+
   // Record locking (design #2278 follow-up): { locked: true } locks, { locked: false } unlocks.
   async setRecordLock(
     recordId: string,

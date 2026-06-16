@@ -33,6 +33,8 @@ export type MetaRecordLabelKey =
   // --- Record locking (design #2278 follow-up) ---
   | 'record.locked' | 'record.lockedBy' | 'record.lockedAt'
   | 'record.lock' | 'record.unlock'
+  // --- Duplicate / clone record (design 2026-06-16) ---
+  | 'record.duplicate' | 'record.duplicateTitle'
   | 'record.delete' | 'record.close'
   | 'record.tabsAria'
   | 'record.details' | 'record.history'
@@ -85,6 +87,8 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.lockedAt': { en: 'Locked at', zh: '锁定时间' },
   'record.lock': { en: 'Lock', zh: '锁定' },
   'record.unlock': { en: 'Unlock', zh: '解锁' },
+  'record.duplicate': { en: 'Duplicate', zh: '复制' },
+  'record.duplicateTitle': { en: 'Duplicate this record', zh: '复制此记录' },
   'record.delete': { en: 'Delete', zh: '删除' },
   'record.close': { en: 'Close record drawer', zh: '关闭记录抽屉' },
   'record.tabsAria': { en: 'Record drawer sections', zh: '记录抽屉分区' },

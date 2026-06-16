@@ -272,6 +272,7 @@
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @open-person-picker="onGridPersonPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
           @create-record="onAddRecord"
+          @duplicate-record="onDuplicateRecord"
           @set-frozen="onSetFrozen"
           @set-aggregation="onSetAggregation"
           @open-comments="onOpenRecordComments"
@@ -285,6 +286,7 @@
       <MetaRecordDrawer
         :visible="!!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
+        :can-create="caps.canCreateRecord.value"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="effectiveFieldPermissions"
         :row-actions="effectiveRowActions"
@@ -298,7 +300,7 @@
         :ai-shortcut="aiShortcut.state"
         :button-run-pending="buttonRunPending"
         :mention-suggestions="commentMentionSuggestions"
-        @close="onCloseDrawer" @delete="onDeleteRecord" @patch="onDrawerPatch"
+        @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
         @navigate="onDrawerNavigate"
@@ -1697,6 +1699,22 @@ async function onDeleteRecord() {
     showComments.value = false
     commentDraft.value = ''
     showSuccess(wb('toast.recordDeleted', isZh.value))
+    return
+  }
+  if (grid.error.value) showError(grid.error.value)
+}
+
+// Duplicate / clone record (design 2026-06-16). Both the drawer Duplicate button and the grid right-click
+// affordance route here. Gated on canCreateRecord (the server re-enforces it + the field-mask). On success
+// the new clone is opened in the drawer (Airtable/feishu staple) so the user lands on the copy to tweak it.
+async function onDuplicateRecord(recordId?: string | null) {
+  const sourceId = recordId ?? selectedRecordId.value
+  if (!sourceId) return
+  if (!ensureCanCreateRecord()) return
+  const newRecordId = await grid.duplicateRecord(sourceId)
+  if (newRecordId) {
+    showSuccess(wb('toast.recordDuplicated', isZh.value))
+    await selectRecord(newRecordId)
     return
   }
   if (grid.error.value) showError(grid.error.value)

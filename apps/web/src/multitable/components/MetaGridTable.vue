@@ -50,6 +50,7 @@
                 :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === flatIndex(group, ri) }"
                 :style="rowStyle(row.id)"
                 @click="emit('select-record', row.id)"
+                @contextmenu="onRowContextMenu($event, row.id)"
               >
                 <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
                   <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
@@ -162,6 +163,7 @@
               :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === ri }"
               :style="rowStyle(row.id)"
               @click="emit('select-record', row.id)"
+              @contextmenu="onRowContextMenu($event, row.id)"
             >
               <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
                 <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
@@ -460,6 +462,9 @@ const emit = defineEmits<{
   (e: 'selection-change', recordIds: string[]): void
   (e: 'bulk-delete', recordIds: string[]): void
   (e: 'bulk-edit', payload: { mode: 'set' | 'clear'; recordIds: string[] }): void
+  // Duplicate / clone record (design 2026-06-16): right-click a row → request a duplicate. The native
+  // context menu is suppressed so the row affordance is the menu; the workbench owns the create + clone-open.
+  (e: 'duplicate-record', recordId: string): void
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
   (e: 'create-record'): void
   (e: 'set-frozen', frozenLeftColumnIds: string[]): void
@@ -610,6 +615,16 @@ function resolveRowActions(recordId: string): MetaRowActions {
     canDelete: props.canDelete !== false,
     canComment: props.canComment !== false,
   }
+}
+
+// Duplicate / clone record (design 2026-06-16): right-click a row → emit a duplicate request. Net-new grid
+// context affordance — no floating menu component, just the native contextmenu suppressed when actionable.
+// Gated on `canCreate` (a duplicate is a create; the server re-enforces it). NOT active while a cell is being
+// edited, so the native menu (copy/paste) still works inside the cell editor.
+function onRowContextMenu(e: MouseEvent, recordId: string): void {
+  if (!props.canCreate || editCell.value) return
+  e.preventDefault()
+  emit('duplicate-record', recordId)
 }
 // Record-locking (design #2278 follow-up): index rows so the lock indicator + lock/unlock action +
 // read-only-while-locked visual can resolve a row's lock state by id without scanning.
