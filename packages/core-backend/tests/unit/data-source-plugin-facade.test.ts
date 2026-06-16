@@ -308,6 +308,19 @@ describe('createDataSourceWritePluginFacade', () => {
     expect(notC6.stub.connectDataSource).not.toHaveBeenCalled()
   })
 
+  it('write test returns the real C6 capability state used by dry-run revision fencing', async () => {
+    const m = managerStub({ adapter: adapterStub({ readOnly: false, c6WriteTarget: true, genericQueryDisabled: true }) })
+    const facade = createDataSourceWritePluginFacade(() => m.manager)
+    await expect(facade.test('pg', 'owner-1')).resolves.toEqual({
+      success: true,
+      capabilityState: {
+        readOnly: false,
+        c6WriteTarget: true,
+        genericQueryDisabled: true,
+      },
+    })
+  })
+
   it('lookupByKey forwards only structured equality where and limit=2', async () => {
     const m = managerStub({ adapter: adapterStub({ readOnly: false, c6WriteTarget: true, genericQueryDisabled: true }) })
     const facade = createDataSourceWritePluginFacade(() => m.manager)

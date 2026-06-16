@@ -139,6 +139,12 @@ function createMockContext(options = {}) {
           provisioning,
           records,
         },
+        dataSourceWrites: options.dataSourceWrites || {
+          async test() { throw new Error('dataSourceWrites.test not configured in test context') },
+          async lookupByKey() { throw new Error('dataSourceWrites.lookupByKey not configured in test context') },
+          async insertRows() { throw new Error('dataSourceWrites.insertRows not configured in test context') },
+          async updateRows() { throw new Error('dataSourceWrites.updateRows not configured in test context') },
+        },
       },
       storage: options.storage || createMemoryStorage(),
       config: options.config || {},
@@ -1416,6 +1422,242 @@ async function testPipelineRoutes() {
   })
   assert.equal(dryModeRes.statusCode, 400, "mode 'replay' must be rejected on dry-run too")
   assert.equal(dryModeRes.body.error.code, 'INVALID_RUN_MODE')
+}
+
+async function testPipelineExternalWriteDryRunRoute() {
+  const calls = []
+  const storage = createMemoryStorage()
+  const sourceSystem = {
+    id: 'source_c6',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    name: 'Readonly SQL source',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    config: { dataSourceId: 'readonly-ds', object: 'public.source_items' },
+  }
+  const targetSystem = {
+    id: 'target_c6',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    name: 'Gated SQL target',
+    kind: 'data-source:sql-write-gated',
+    role: 'target',
+    status: 'active',
+    config: {
+      dataSourceId: 'writable-ds',
+      object: 'public.target_items',
+      keyFields: ['externalId'],
+      writableFields: ['name'],
+    },
+  }
+  const pipeline = {
+    id: 'pipe_c6',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    name: 'C6 external write dry-run',
+    status: 'active',
+    sourceSystemId: sourceSystem.id,
+    sourceObject: 'public.source_items',
+    targetSystemId: targetSystem.id,
+    targetObject: 'public.target_items',
+    createdBy: 'owner-7',
+    fieldMappings: [
+      { sourceField: 'code', targetField: 'externalId' },
+      { sourceField: 'name', targetField: 'name' },
+    ],
+  }
+  const sourceReadCalls = []
+  const writeCalls = { test: [], lookupByKey: [], insertRows: [], updateRows: [] }
+  const { services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        if (input.id === sourceSystem.id) return { ...sourceSystem }
+        return null
+      },
+      async getExternalSystem(input) {
+        calls.push(['getExternalSystem', input])
+        if (input.id === targetSystem.id) return { ...targetSystem }
+        return null
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['createAdapter', { system, deps }])
+        assert.equal(system.id, sourceSystem.id, 'external-write dry-run creates only the source adapter')
+        assert.equal(deps.principal, 'owner-7', 'source adapter reads as pipeline.createdBy')
+        return {
+          async read(readInput) {
+            sourceReadCalls.push(readInput)
+            return {
+              records: [{ code: 'P-001', name: 'Widget' }],
+              done: true,
+              nextCursor: null,
+            }
+          },
+        }
+      },
+    },
+    pipelineRegistry: {
+      async getPipeline(input) {
+        calls.push(['getPipeline', input])
+        return { ...pipeline, id: input.id }
+      },
+    },
+  })
+  const dataSourceWrites = {
+    async test(dataSourceId, principal) {
+      writeCalls.test.push({ dataSourceId, principal })
+      return {
+        success: true,
+        capabilityState: {
+          readOnly: false,
+          c6WriteTarget: true,
+          genericQueryDisabled: true,
+        },
+      }
+    },
+    async lookupByKey(dataSourceId, object, key, policy, principal) {
+      writeCalls.lookupByKey.push({ dataSourceId, object, key, policy, principal })
+      return { data: [], metadata: {} }
+    },
+    async insertRows() {
+      writeCalls.insertRows.push([...arguments])
+      throw new Error('external-write dry-run must not insert target rows')
+    },
+    async updateRows() {
+      writeCalls.updateRows.push([...arguments])
+      throw new Error('external-write dry-run must not update target rows')
+    },
+  }
+  const { routes } = mountRoutes(services, { storage, dataSourceWrites })
+
+  let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+    user: READ_USER,
+    params: { id: pipeline.id },
+    body: { tenantId: 'tenant_1', workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.canApply, true)
+  assert.equal(res.body.data.status, 'ready')
+  assert.equal(typeof res.body.data.dryRunToken, 'string', 'ready dry-run returns a bearer token for the later apply slice')
+  assert.equal(res.body.data.counts.add, 1)
+  assert.equal(res.body.data.evidence.dryRunTokenPresent, true)
+  assert.equal(storage.map.size, 1, 'route persists the dry-run token through plugin storage')
+  assert.deepEqual(sourceReadCalls, [{ object: 'public.source_items', limit: 100, cursor: null }])
+  assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, 1, 'only the source system uses adapter-ready credential loading')
+  assert.equal(findCalls(calls, 'getExternalSystemForAdapter')[0][1].id, sourceSystem.id)
+  assert.equal(findCalls(calls, 'getExternalSystem').length, 1, 'target system is loaded as config only')
+  assert.equal(findCalls(calls, 'getExternalSystem')[0][1].id, targetSystem.id)
+  assert.deepEqual(writeCalls.test, [{ dataSourceId: 'writable-ds', principal: 'owner-7' }], 'dry-run checks the real target data-source capability state')
+  assert.equal(writeCalls.lookupByKey.length, 1)
+  assert.equal(writeCalls.lookupByKey[0].principal, 'owner-7', 'target lookup uses the data-source owner principal')
+  assert.deepEqual(writeCalls.lookupByKey[0].policy, {
+    keyFields: ['externalId'],
+    writableFields: ['name'],
+  })
+  assert.equal(writeCalls.insertRows.length, 0, 'dry-run does not insert external rows')
+  assert.equal(writeCalls.updateRows.length, 0, 'dry-run does not update external rows')
+  const responseText = JSON.stringify(res.body.data)
+  assert.equal(responseText.includes('P-001'), false, 'route response must not include source key values')
+  assert.equal(responseText.includes('Widget'), false, 'route response must not include source field values')
+  assert.equal(responseText.includes(res.body.data.dryRunToken), true, 'token is returned only in the token field')
+  assert.equal(JSON.stringify(res.body.data.evidence).includes(res.body.data.dryRunToken), false, 'evidence does not expose the token')
+
+  const callsBeforeInvalidBody = calls.length
+  res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+    user: READ_USER,
+    params: { id: pipeline.id },
+    body: {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      target: { dataSourceId: 'evil' },
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'C6_WRITE_DRY_RUN_REQUEST_INVALID')
+  assert.equal(calls.length, callsBeforeInvalidBody, 'client-supplied target scope is rejected before loading the pipeline')
+}
+
+async function testPipelineExternalWriteDryRunPreflightFailsClosed() {
+  const calls = []
+  const makeServices = (pipelineOverride) => createMockServices({
+    pipelineRegistry: {
+      async getPipeline(input) {
+        calls.push(['getPipeline', input])
+        return {
+          id: input.id,
+          tenantId: 'tenant_1',
+          workspaceId: 'workspace_1',
+          status: 'active',
+          sourceSystemId: 'source_c6',
+          sourceObject: 'public.source_items',
+          targetSystemId: 'target_c6',
+          targetObject: 'public.target_items',
+          createdBy: 'owner-7',
+          fieldMappings: [],
+          ...pipelineOverride,
+        }
+      },
+    },
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        throw new Error('system loading must not happen after C6 preflight failure')
+      },
+      async getExternalSystem(input) {
+        calls.push(['getExternalSystem', input])
+        throw new Error('target loading must not happen after C6 preflight failure')
+      },
+    },
+    adapterRegistry: {
+      createAdapter() {
+        calls.push(['createAdapter'])
+        throw new Error('adapter creation must not happen after C6 preflight failure')
+      },
+    },
+  })
+  const dataSourceWrites = {
+    async test() {
+      calls.push(['test'])
+      throw new Error('target capability test must not happen after C6 preflight failure')
+    },
+    async lookupByKey() {
+      calls.push(['lookupByKey'])
+      throw new Error('write facade lookup must not happen after C6 preflight failure')
+    },
+    async insertRows() {
+      calls.push(['insertRows'])
+      throw new Error('insertRows must not happen during C6 dry-run preflight failure')
+    },
+    async updateRows() {
+      calls.push(['updateRows'])
+      throw new Error('updateRows must not happen during C6 dry-run preflight failure')
+    },
+  }
+
+  let mount = mountRoutes(makeServices({ status: 'disabled' }).services, { dataSourceWrites })
+  let res = await invoke(mount.routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+    user: READ_USER,
+    params: { id: 'pipe_c6' },
+    body: { tenantId: 'tenant_1', workspaceId: 'workspace_1' },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'PIPELINE_INACTIVE')
+  assert.deepEqual(calls.map(([name]) => name), ['getPipeline'], 'inactive pipeline fails before system/adapter/write-facade calls')
+
+  calls.length = 0
+  mount = mountRoutes(makeServices({ createdBy: null }).services, { dataSourceWrites })
+  res = await invoke(mount.routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+    user: READ_USER,
+    params: { id: 'pipe_c6' },
+    body: { tenantId: 'tenant_1', workspaceId: 'workspace_1' },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'C6_WRITE_OWNER_PRINCIPAL_REQUIRED')
+  assert.deepEqual(calls.map(([name]) => name), ['getPipeline'], 'missing createdBy fails before credential/system/adapter/write-facade calls')
 }
 
 async function testTemplatePreviewRoute() {
@@ -3619,6 +3861,8 @@ async function main() {
   await testBridgeDanglingDataSourceMapsTo4xxNot500()
   await testDocumentTemplateValidation()
   await testPipelineRoutes()
+  await testPipelineExternalWriteDryRunRoute()
+  await testPipelineExternalWriteDryRunPreflightFailsClosed()
   await testTemplatePreviewRoute()
   await testTemplatesDeriveRoute()
   await testStagingRoutes()
