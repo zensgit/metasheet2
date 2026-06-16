@@ -42,6 +42,7 @@ export type WorkbenchLabelKey =
   | 'toast.formSubmitFailed'
   | 'toast.commentUpdateFailed' | 'toast.commentAddFailed'
   | 'toast.commentResolveFailed' | 'toast.commentDeleteFailed'
+  | 'toast.commentReactFailed'
   | 'toast.linkedRecordsUpdateFailed'
   | 'toast.fieldCreateFailed' | 'toast.fieldUpdateFailed' | 'toast.fieldDeleteFailed'
   | 'toast.viewCreateFailed' | 'toast.viewUpdateFailed' | 'toast.viewDeleteFailed'
@@ -154,6 +155,7 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.commentAddFailed': { en: 'Failed to add comment', zh: '添加评论失败' },
   'toast.commentResolveFailed': { en: 'Failed to resolve comment', zh: '解决评论失败' },
   'toast.commentDeleteFailed': { en: 'Failed to delete comment', zh: '删除评论失败' },
+  'toast.commentReactFailed': { en: 'Failed to update reaction', zh: '更新表情失败' },
   'toast.linkedRecordsUpdateFailed': { en: 'Failed to update linked records', zh: '更新关联记录失败' },
   'toast.fieldCreateFailed': { en: 'Failed to create field', zh: '创建字段失败' },
   'toast.fieldUpdateFailed': { en: 'Failed to update field', zh: '更新字段失败' },
