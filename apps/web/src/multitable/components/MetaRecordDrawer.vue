@@ -279,6 +279,10 @@
             class="meta-record-drawer__qrcode"
             v-html="drawerQrSvg(record.data[field.id])"
           />
+          <!-- A3 follow-up (#2708): this drawer link summary stays read-only
+               text for now. Making it a clickable foreign-record popover is the
+               record-drawer slice of A3, tracked separately so this slice ships
+               grid-only. -->
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-record-drawer__link-summary">{{ linkPreview(field.id) }}</div>
         </div>
         <!-- A3 §2.3/§2.4: per-field AI state — pending / error copy (by code) / per-run tokens. -->

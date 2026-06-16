@@ -234,6 +234,7 @@
                   :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
                   :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                   :button-pending="isButtonPending(row.id, field.id)"
+                  :fetch-record="props.fetchRecord"
                   @run="emit('run-button', { recordId: row.id, field })"
                 />
                 <button
@@ -341,6 +342,7 @@ import type {
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
   MetaField,
+  MetaRecordContext,
   MetaRowActions,
   MetaRecord,
   MultitableCommentPresenceSummary,
@@ -423,6 +425,10 @@ const props = defineProps<{
   // B1-b: per-cell in-flight keys `${recordId}:${fieldId}` for button runs
   // (keyed so one running button doesn't disable the others).
   buttonRunPending?: string[]
+  // A3: cross-sheet record fetcher (getRecord with NO sheetId) threaded down to
+  // the grid-cell renderer so a non-person link chip can peek the foreign
+  // record in a popover. Default undefined → chips stay non-clickable.
+  fetchRecord?: (recordId: string) => Promise<MetaRecordContext>
 }>()
 
 const emit = defineEmits<{
