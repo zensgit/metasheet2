@@ -15611,28 +15611,16 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
 // lot + grant event; negative → FIFO-deduct active annual lots + deduct event(s) (reusing deductLeaveBalance);
 // insufficient → HttpError(422) → the whole txn (incl. the registry row) rolls back. The registry row is the
 // who/why audit; it may reference the accrual run it corrects but never overwrites that run's run_item snapshot.
-async function applyAnnualLeaveManualAdjustment(trx, { orgId, actorId, userId, deltaMinutes, reason, createdBy, runId, sourceKey }) {
+async function applyAnnualLeaveManualAdjustment(trx, { orgId, userId, deltaMinutes, reason, createdBy, runId, sourceKey }) {
   const delta = Math.trunc(Number(deltaMinutes))
   if (!Number.isInteger(delta) || delta === 0) {
     throw new HttpError(400, 'ANNUAL_LEAVE_ADJUST_DELTA_INVALID', 'deltaMinutes must be a non-zero integer')
   }
-  // P1 actor-tenant guard: org is derived via getOrgId, which TRUSTS a caller-supplied orgId (body/query/header),
-  // and withPermission('attendance:admin') checks only the global permission code — not org scope. So we additionally
-  // require the ACTING admin to be an active member of the claimed org: an admin cannot claim a foreign org they
-  // don't belong to and mutate its balances. 403 → no registry row, no lot, no event.
-  if (!actorId) {
-    throw new HttpError(403, 'ANNUAL_LEAVE_ADJUST_ORG_FORBIDDEN', 'Cannot resolve the acting admin identity')
-  }
-  const actorMember = await trx.query(
-    `SELECT 1 FROM user_orgs uo JOIN users u ON u.id = uo.user_id
-      WHERE uo.user_id = $1 AND uo.org_id = $2 AND uo.is_active = true AND u.is_active = true
-      LIMIT 1`,
-    [actorId, orgId]
-  )
-  if (!actorMember[0]) {
-    throw new HttpError(403, 'ANNUAL_LEAVE_ADJUST_ORG_FORBIDDEN', 'Acting admin is not an active member of the claimed org')
-  }
-  // cross-tenant write guard: the TARGET user MUST be an active member of the (now actor-verified) org. We require
+  // Permission is enforced by the route's withPermission('attendance:admin'), whose current semantics are GLOBAL
+  // (role_id='admin' or exact attendance:admin permission). Do not treat user_orgs as an actor org-admin scope:
+  // staging/prod admins are not necessarily org members. Until a real per-org admin-scope model exists, the tenant
+  // boundary this endpoint can enforce is the target membership guard below.
+  // cross-tenant write guard: the TARGET user MUST be an active member of the claimed org. We require
   // BOTH uo.is_active AND u.is_active so manual adjustment shares the exact L2b accrual population — a globally-
   // deactivated (offboarded) user is out of scope here by design; final-settlement-for-terminated would be a
   // separate, deliberately gated path. 404 → no registry row, no lot.
@@ -37703,7 +37691,6 @@ module.exports = {
         try {
           const result = await db.transaction(async (trx) => applyAnnualLeaveManualAdjustment(trx, {
             orgId,
-            actorId,
             userId: parsed.data.userId,
             deltaMinutes: parsed.data.deltaMinutes,
             reason: parsed.data.reason,

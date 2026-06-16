@@ -5028,6 +5028,7 @@ attendanceIntegrationDescribe(
     const pool = new Pool({ connectionString: dbUrl })
     const runSuffix = Date.now().toString(36)
     const adminId = `al-l2c-admin-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
     const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -5070,11 +5071,12 @@ attendanceIntegrationDescribe(
       return id
     }
     try {
-      // the acting admin must itself be an active member of the org it operates in (P1 actor-tenant guard).
+      // The acting admin is intentionally NOT added to user_orgs. withPermission('attendance:admin') is a global
+      // RBAC gate in the current model; user_orgs is target membership, not an actor org-admin scope.
+      process.env.RBAC_BYPASS = 'false'
       await pool.query(`INSERT INTO users (id, email, password_hash, is_active) VALUES ($1, $2, 'no-login', true)
          ON CONFLICT (id) DO UPDATE SET is_active = true`, [adminId, `${adminId}@example.com`])
-      await pool.query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', true)
-         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`, [adminId])
+      await pool.query(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`, [adminId])
       const uPos = await seedUser('pos')
       const uOther = await seedUser('other', otherOrg)
       const uInactive = await seedInactive('inactive')
@@ -5100,14 +5102,17 @@ attendanceIntegrationDescribe(
       expect(await regFor('annual_manual_adjust:k-inactive')).toBeUndefined()
       expect((await lotsFor(uInactive)).length).toBe(0)
 
-      // (H) P1 actor-tenant: an admin who belongs to 'default' CLAIMS a foreign org (body.orgId) and targets a
-      // real member of THAT org → 403, with NO registry/lot anywhere (the actor guard fires before the target
-      // check). Without it, getOrgId's trust of body.orgId would let any attendance:admin mutate any org's balances.
+      // (H) staging-grounded RBAC shape: an attendance:admin actor does NOT need user_orgs membership. The route's
+      // permission guard is global today; the endpoint's tenant boundary is target-in-claimed-org. This locks the
+      // staging precondition that real admins without user_orgs membership are not accidentally 403'd.
       const foreignRes = await adjust({ userId: uOther, deltaMinutes: 1200, reason: 'escalate', idempotencyKey: 'k-foreign', orgId: otherOrg })
-      expect(foreignRes.status).toBe(403)
-      expect((foreignRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ANNUAL_LEAVE_ADJUST_ORG_FORBIDDEN')
-      expect((await pool.query(`SELECT id FROM attendance_leave_manual_adjustments WHERE source_key = $1`, ['annual_manual_adjust:k-foreign'])).rows.length).toBe(0)
-      expect((await lotsFor(uOther)).length).toBe(0)
+      expect(foreignRes.status, JSON.stringify(foreignRes.body)).toBe(200)
+      const foreignReg = (await pool.query(
+        `SELECT id, delta_minutes, org_id, user_id FROM attendance_leave_manual_adjustments WHERE source_key = $1`,
+        ['annual_manual_adjust:k-foreign'],
+      )).rows[0]
+      expect(foreignReg).toMatchObject({ org_id: otherOrg, user_id: uOther, delta_minutes: 1200 })
+      expect((await lotsFor(uOther)).length).toBe(1)
 
       // (A) positive → a new annual_manual_adjustment lot + grant event + registry row; lot back-links to the
       // registry id (source_id) and uses a derived source_key.
@@ -5209,8 +5214,11 @@ attendanceIntegrationDescribe(
       await pool.query(`DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])`, [ids]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])`, [ids]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_leave_accrual_runs WHERE period_key LIKE $1`, [`annual:l2c:${runSuffix}%`]).catch(() => undefined)
+      await pool.query(`DELETE FROM user_roles WHERE user_id = $1`, [adminId]).catch(() => undefined)
       await pool.query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [ids]).catch(() => undefined)
       await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [ids]).catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
     }
   })
