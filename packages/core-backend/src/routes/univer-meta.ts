@@ -10573,6 +10573,166 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  // Duplicate / clone a record (design 2026-06-16). A duplicate is a value-seeded CREATE: the source row's
+  // values are read SERVER-SIDE (so field-masked values the actor can't read are visible to the strip step,
+  // not silently dropped client-side) and a NEW row is created from the masked subset via the SAME
+  // RecordService.createRecord write chokepoint as POST /records. Capability gate = canCreateRecord (a
+  // duplicate is a create), read off the SAME capabilities object that authorizes reading the source row.
+  //
+  // Field-mask discipline (the security spine): a field is copied IFF the actor can BOTH read AND write it.
+  // `deriveFieldPermissions(..., { allowCreateOnly: true, fieldScopeMap })` folds all three exclusions into
+  // one decision —
+  //   - visible === false   → read-denied (field_permissions.visible / property.hidden)            ⇒ NOT copied
+  //   - readOnly === true    → write-denied (field_permissions.read_only) OR isFieldAlwaysReadOnly
+  //                            (formula/lookup/rollup/system/mirror) OR !canCreateRecord              ⇒ NOT copied
+  // createRecord consults NEITHER field_permissions case (only isFieldAlwaysReadOnly + canCreateRecord — see
+  // the F4 create-echo note above), so THIS route is the only thing stripping read/write-denied fields. Link
+  // ids are copied verbatim (createRecord re-validates foreign existence); attachment ids are copied verbatim
+  // (shared blob reference — the lightweight clone semantics, NOT a deep file copy). Auto-number / formula /
+  // mirror fields are stripped here and re-derived by the server, matching Airtable/feishu behavior.
+  router.post('/records/:recordId/duplicate', async (req: Request, res: Response) => {
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
+    }
+    const schema = z.object({
+      sheetId: z.string().min(1).optional(),
+      viewId: z.string().min(1).optional(),
+    })
+    const parsed = schema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      let sheetId = parsed.data.sheetId
+      if (parsed.data.sheetId || parsed.data.viewId) {
+        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+          sheetId: parsed.data.sheetId,
+          viewId: parsed.data.viewId,
+        })
+        sheetId = resolved.sheetId
+      }
+
+      // Source row, raw + UNMASKED. `data` may carry stale link ids (link state is authoritative in
+      // meta_links, not meta_records.data), so the forward-link values are overlaid below.
+      const sourceLookup = sheetId
+        ? await pool.query('SELECT id, sheet_id, data FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
+        : await pool.query('SELECT id, sheet_id, data FROM meta_records WHERE id = $1', [recordId])
+      const sourceRow: any = sourceLookup.rows[0]
+      if (!sourceRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
+      sheetId = String(sourceRow.sheet_id)
+
+      // Source-read authorization (canRead + record-level perms + 401/404). The returned `capabilities` is
+      // the SINGLE source for the create gate below — no second resolveSheetCapabilities call (which could
+      // diverge from the read gate).
+      const readable = await requireRecordReadable(req, pool.query.bind(pool), sheetId, recordId)
+      if ('status' in readable) return res.status(readable.status).json(readable.body)
+      const { access, capabilities } = readable
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+
+      const fields = await loadSheetFields(pool as unknown as { query: QueryFn }, sheetId)
+
+      // Overlay forward-link values from meta_links onto a working copy of the source data (mirror/derived
+      // link fields are isFieldAlwaysReadOnly → stripped below regardless, so only forward links matter).
+      const sourceData: Record<string, unknown> = { ...normalizeJson(sourceRow.data) }
+      const relationalLinkFields = fields
+        .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
+        .filter((value): value is RelationalLinkField => !!value && !!value.cfg)
+      if (relationalLinkFields.length > 0) {
+        const linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), [recordId], relationalLinkFields)
+        for (const { fieldId } of relationalLinkFields) {
+          sourceData[fieldId] = linkValuesByRecord.get(recordId)?.get(fieldId) ?? []
+        }
+      }
+
+      // Build the copy payload: copy a field IFF (readable ∧ writable) for THIS actor. The allowCreateOnly
+      // derive folds read-deny (visible=false), write-deny (read_only=true), isFieldAlwaysReadOnly, and
+      // !canCreateRecord. NB: this is intentionally a DIFFERENT derive than the create echo below (the echo
+      // omits allowCreateOnly and only reads `.visible`) — the echo decides what to RETURN, this decides what
+      // to COPY.
+      const visiblePropertyFields = filterVisiblePropertyFields(fields)
+      const copyFieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
+      const copyFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, {
+        allowCreateOnly: true,
+        fieldScopeMap: copyFieldScopeMap,
+      })
+      const copyData: Record<string, unknown> = {}
+      for (const field of visiblePropertyFields) {
+        const perm = copyFieldPermissions[field.id]
+        if (!perm || perm.visible === false || perm.readOnly === true) continue
+        if (!(field.id in sourceData)) continue
+        copyData[field.id] = sourceData[field.id]
+      }
+
+      const recordService = new RecordService(pool, eventBus)
+      // A-min-create (#2255): compute the new record's same-record formula-over-lookup on create (parity
+      // with POST /records).
+      recordService.setFormulaRecalcHook((q, sid, ids) => recalcNewRecordFormulas(req, q, sid, ids))
+      const result = await recordService.createRecord({
+        sheetId,
+        capabilities,
+        actorId: getRequestActorId(req),
+        data: copyData,
+      })
+
+      // Create-echo mask — identical to POST /records (F4): the echo applies the layer-2 ∧ layer-3 READ
+      // mask so a denied field (whether copied or server-assigned) is omitted from the response.
+      const echoFieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
+      const securityFieldPermissions = deriveFieldPermissions(visiblePropertyFields, capabilities, { hiddenFieldIds: [], fieldScopeMap: echoFieldScopeMap })
+      const allowedFieldIds = await maskStoredRecordFieldIds(
+        req,
+        pool.query.bind(pool),
+        sheetId,
+        visiblePropertyFields,
+        new Set(visiblePropertyFields.filter((field) => securityFieldPermissions[field.id]?.visible !== false).map((field) => field.id)),
+      )
+
+      return res.json({
+        ok: true,
+        data: {
+          record: {
+            id: result.recordId,
+            version: result.version,
+            data: filterRecordDataByFieldIds(result.data, allowedFieldIds),
+          },
+        },
+      })
+    } catch (err) {
+      if (isRecordCreateValidationError(err)) {
+        const fieldErrors = normalizeRecordCreateFieldErrors(err.fieldErrors)
+        return res.status(422).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: 'Record validation failed', fieldErrors },
+        })
+      }
+      if (err instanceof RecordServiceFieldForbiddenError) {
+        return res.status(403).json({ ok: false, error: { code: err.code, message: err.message } })
+      }
+      if (err instanceof RecordServiceValidationError || err instanceof ServiceValidationError) {
+        return res.status(400).json({ ok: false, error: { code: err.code || 'VALIDATION_ERROR', message: err.message } })
+      }
+      if (err instanceof ValidationError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      }
+      if (err instanceof RecordServiceNotFoundError || err instanceof ServiceNotFoundError) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      if (err instanceof RecordServicePermissionError) {
+        return sendForbidden(res, err.message)
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] duplicate record failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to duplicate meta record' } })
+    }
+  })
+
   router.delete('/records/:recordId', async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId : ''
     if (!recordId) {

@@ -31,6 +31,7 @@
         </button>
         <button v-if="canManageAutomation" class="meta-record-drawer__btn" :title="l('record.workflowTitle')" @click="emit('open-automation')">&#x2699; {{ l('record.workflow') }}</button>
         <button v-if="canManageRecordPermissions" class="meta-record-drawer__btn" :title="l('record.permissionsTitle')" @click="showRecordPermissions = true">&#x1F512; {{ l('record.permissions') }}</button>
+        <button v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" type="button" @click="emit('duplicate')">{{ l('record.duplicate') }}</button>
         <button v-if="resolvedCanDelete" class="meta-record-drawer__btn meta-record-drawer__btn--danger" @click="emit('delete')">{{ l('record.delete') }}</button>
         <button class="meta-record-drawer__close" :aria-label="l('record.close')" @click="emit('close')">&times;</button>
       </div>
@@ -441,6 +442,9 @@ const props = withDefaults(defineProps<{
   canEdit: boolean
   canComment: boolean
   canDelete: boolean
+  // Duplicate / clone record (design 2026-06-16): sheet-level canCreateRecord (a duplicate is a create).
+  // Gates the drawer's Duplicate button; the server re-enforces it (no FE permission mirror).
+  canCreate?: boolean
   canManageAutomation?: boolean
   fieldPermissions?: Record<string, MetaFieldPermission> | null
   rowActions?: MetaRowActions | null
@@ -471,6 +475,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'delete'): void
+  (e: 'duplicate'): void
   (e: 'patch', fieldId: string, value: unknown): void
   (e: 'toggle-lock', payload: { recordId: string; locked: boolean }): void
   (e: 'toggle-comments'): void

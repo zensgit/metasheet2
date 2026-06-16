@@ -28,7 +28,7 @@ export type WorkbenchLabelKey =
   | 'kbd.toggleHelp'
   // §3.5 static (non-interpolated) toast subset
   | 'toast.recordCreateBlocked' | 'toast.recordEditBlocked' | 'toast.recordDeleteBlocked'
-  | 'toast.datesUpdated' | 'toast.hierarchyUpdated' | 'toast.recordDeleted'
+  | 'toast.datesUpdated' | 'toast.hierarchyUpdated' | 'toast.recordDeleted' | 'toast.recordDuplicated'
   | 'toast.recordLocked' | 'toast.recordUnlocked' | 'toast.recordLockFailed'
   | 'toast.loadedLatest' | 'toast.changeReapplied' | 'toast.recordUpdated'
   | 'toast.commentUpdated' | 'toast.commentAdded'
@@ -125,6 +125,7 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.datesUpdated': { en: 'Dates updated', zh: '日期已更新' },
   'toast.hierarchyUpdated': { en: 'Hierarchy updated', zh: '层级已更新' },
   'toast.recordDeleted': { en: 'Record deleted', zh: '记录已删除' },
+  'toast.recordDuplicated': { en: 'Record duplicated', zh: '记录已复制' },
   'toast.recordLocked': { en: 'Record locked', zh: '记录已锁定' },
   'toast.recordUnlocked': { en: 'Record unlocked', zh: '记录已解锁' },
   'toast.recordLockFailed': { en: 'Failed to update record lock', zh: '更新锁定状态失败' },

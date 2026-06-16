@@ -49,7 +49,14 @@ const GOLDEN: Record<string, Partial<Record<(typeof EGRESS_HELPERS)[number], num
     filterRecordFieldSummaryMap: 2,
   },
   'routes/univer-meta.ts': {
-    filterRecordDataByFieldIds: 13,
+    // 14 = +1 for the duplicate / clone record create-echo (design 2026-06-16): POST
+    // /records/:recordId/duplicate. The echo is routed through the SAME layer-2 ∧ layer-3 `allowedFieldIds`
+    // composite as POST /records (securityFieldPermissions.visible ∧ maskStoredRecordFieldIds →
+    // filterRecordDataByFieldIds). The COPY decision additionally applies a write-mask
+    // (deriveFieldPermissions allowCreateOnly) so read/write-denied fields never reach storage; the real-DB
+    // locking test is tests/integration/multitable-record-duplicate.test.ts (denied-field canary absent from
+    // the NEW row's unmasked stored data).
+    filterRecordDataByFieldIds: 14,
     loadRecordSummaries: 3,
     buildLinkSummaries: 4,
     serializeLinkSummaryMap: 1,

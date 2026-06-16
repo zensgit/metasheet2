@@ -69,7 +69,7 @@ export type MetaCoreLabelKey =
   | 'grid.errorLoadViewData'
   | 'grid.errorEditRowBlocked' | 'grid.errorDeleteRowBlocked'
   | 'grid.errorContextRequired'
-  | 'grid.errorCreateRecord' | 'grid.errorDeleteRecord'
+  | 'grid.errorCreateRecord' | 'grid.errorDeleteRecord' | 'grid.errorDuplicateRecord'
   | 'grid.errorCellUpdatedElsewhere' | 'grid.errorPatchCell'
   | 'grid.errorRecordVersionUnavailable' | 'grid.errorPatchFailed'
   // --- MetaCellEditor static (T3A2) ---
@@ -212,6 +212,7 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'grid.errorContextRequired': { en: 'sheetId or viewId is required', zh: '需要 sheetId 或 viewId' },
   'grid.errorCreateRecord': { en: 'Failed to create record', zh: '创建记录失败' },
   'grid.errorDeleteRecord': { en: 'Failed to delete record', zh: '删除记录失败' },
+  'grid.errorDuplicateRecord': { en: 'Failed to duplicate record', zh: '复制记录失败' },
   'grid.errorCellUpdatedElsewhere': {
     en: 'This cell was updated elsewhere. Reload and retry.',
     zh: '该单元格已在别处更新。请重新加载后重试。',

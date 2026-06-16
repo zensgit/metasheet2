@@ -657,6 +657,29 @@ export function useMultitableGrid(opts: {
     }
   }
 
+  // Duplicate / clone a record (design 2026-06-16). The server owns the value-copy + field-mask (a field is
+  // copied iff the actor can read AND write it) — there is intentionally NO front-end permission mirror.
+  // Returns the NEW record id on success (so the caller can open/select the clone), or null on failure with
+  // `error` set; mirrors the create/delete catch shape.
+  async function duplicateRecord(recordId: string): Promise<string | null> {
+    error.value = null
+    const context = resolveCreateRecordContext({
+      sheetId: opts.sheetId.value,
+      viewId: opts.viewId.value,
+    })
+    try {
+      const { record } = await client.duplicateRecord(recordId, {
+        sheetId: context.sheetId,
+        viewId: context.viewId,
+      })
+      await loadViewData(page.value.offset)
+      return record?.id ?? null
+    } catch (e: any) {
+      error.value = e.message ?? fallback('grid.errorDuplicateRecord')
+      return null
+    }
+  }
+
   async function deleteRecord(recordId: string): Promise<boolean> {
     error.value = null
     if (resolveRowActions(recordId)?.canDelete === false) return rejectRowDelete()
@@ -1020,7 +1043,7 @@ export function useMultitableGrid(opts: {
     addSortRule, removeSortRule,
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
     applySortFilter,
-    createRecord, deleteRecord, patchCell, bulkPatch,
+    createRecord, duplicateRecord, deleteRecord, patchCell, bulkPatch,
     // A3: exposed as the single echo-application seam for the AI shortcut
     // run adapter (useAiShortcut synthesizes a PatchResult and feeds it here).
     applyPatchResult,
