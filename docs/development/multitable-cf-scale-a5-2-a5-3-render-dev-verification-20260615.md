@@ -1,6 +1,6 @@
 # 多维表条件格式 A5-2/A5-3 网格渲染 — 开发 & 校验 — 2026-06-15
 
-> Status: **DONE（jsdom 逻辑验证）+ 浏览器目检为残余**。补齐 A5 范围型条件格式弧的最后渲染半：色阶(A5-2) 单元格底色 + 图标集(A5-3) 字形。后端契约 + FE 镜像 + scale map 已于 #2664 落地；本 slice 仅补 `MetaGridTable` 的渲染消费（A5-1c data-bar 渲染的同款 jsdom-可验证先例）。
+> Status: **DONE + CI-BROWSER-VERIFIED**(jsdom 逻辑 + 真实 Chromium 截图确认)。补齐 A5 范围型条件格式弧的最后渲染半:色阶(A5-2) 单元格底色 + 图标集(A5-3) 字形。后端契约 + FE 镜像 + scale map 已于 #2664 落地;本 slice 仅补 `MetaGridTable` 的渲染消费。浏览器目检已由 CI lane(#2689)完成,截图确认色阶/图标渲染正确;首跑发现的数值低对比 bug 已修(#2694)并经 lane 复跑截图确认可读。
 
 ## 1. 开发（做了什么）
 
@@ -25,7 +25,7 @@
 ## 3. Goal 边界（诚实残余）
 
 - ✅ **A5-2/3 网格渲染逻辑 jsdom 验证到位**（cellStyle 输出 + 图标 DOM）。
-- ⏸ **浏览器目检 = 残余**（同 A5-1c / B6-b）：jsdom 证 style/DOM，证不了真实色阶对比度可读性、图标字形跨平台渲染、frozen 滚动观感。有浏览器/app 访问后做一次目检（本地 app + Playwright 或 owner staging）。
+- ✅ **浏览器目检 = 已由 CI lane 完成**（#2689 真实 Chromium 截图）：色阶红→黄→绿插值、图标 ↓/→/↑ 分桶、data-bar 缩放均渲染正确。**首跑捕获真实视觉 bug**(数值正负号绿/红色在 scale 底色上低对比)→ #2694 修(亮度选 dark/white 文本)→ lane 复跑截图确认数值在蓝/黄/绿底色上均可读。frozen 滚动观感未单独验,非本弧阻塞。
 - ⏸ **配置 UI 仍缺**：色阶/图标集规则需经条件格式配置对话框创建（browser-gated，未做）；本 slice 渲染**已配置**的规则。配置对话框 = 后续 browser-gated slice。
 
 ## 4. 落地
