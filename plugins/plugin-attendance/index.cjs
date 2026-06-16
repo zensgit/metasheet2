@@ -15558,6 +15558,18 @@ function annualLeavePolicyVersion(policy) {
 // user; for granted (non-dryRun) users, grants the annual lot idempotently (mirrors the C2 pattern). The
 // run + run_items are ALWAYS written (audit); dryRun writes NO lots/events and consumes NO source_key.
 // Caller supplies the transaction (`trx`).
+// 年假/法定假 L4a (owner design-lock 2026-06-16): the first-invalid instant for a period-Y annual_accrual lot.
+// carryover disabled → usable through end of Y → expires Jan 1 (Y+1) 00:00:00 org-tz; carryover enabled → carry
+// through Y+1 → expires Jan 1 (Y+2) 00:00:00 org-tz. Returned as a UTC instant; AttendanceExpiryService reaps via
+// expires_at <= now(), so the FIRST-INVALID instant (Jan 1 next, NOT Dec 31 23:59:59) is the clean boundary.
+// Returns a Date, or null if period/timezone is unusable (caller then leaves expires_at NULL = never-expire,
+// never guess). period + (carryover ? 2 : 1).
+function annualLeaveLotExpiryUtc(period, carryoverEnabled, timezone) {
+  if (!Number.isInteger(period) || typeof timezone !== 'string' || !timezone) return null
+  const year = period + (carryoverEnabled ? 2 : 1)
+  return new Date(zonedTimeToUtc({ year, month: 1, day: 1, hour: 0, minute: 0, second: 0 }, timezone))
+}
+
 async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
   const settings = await getSettings(trx)
   const policy = settings?.annualLeavePolicy
@@ -15591,6 +15603,9 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
     [orgId]
   )
   const summary = { runId, periodKey, asOf: asOfParts.str, dryRun: !!dryRun, granted: 0, skipped: 0, grantedMinutes: 0, lotsCreated: 0, alreadyGranted: 0, skipReasons: {} }
+  // 年假/法定假 L4a: every annual_accrual lot this run grants carries the same year-end expiry, computed ONCE from
+  // this run's policy snapshot (period + carryover, org-tz). The grant stamps it; the existing expiry scheduler reaps.
+  const lotExpiresAt = annualLeaveLotExpiryUtc(period, policy.carryover?.enabled === true, policy.timezone)
   for (const user of users) {
     const r = computeAnnualLeaveAccrualForUser(policy, user, period, asOfParts)
     const itemRows = await trx.query(
@@ -15605,15 +15620,17 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
       summary.granted += 1   // computed-grantable — the count a dry-run reports
       summary.grantedMinutes += r.entitlementMinutes
       if (!dryRun) {
-        // expires_at stays NULL here; L4 owns carryover/year-end expiry (and backfills these lots).
+        // L4a: stamp the year-end expiry (first-invalid instant, org-tz) computed above. annual_accrual lots
+        // granted by L2b BEFORE L4a keep expires_at NULL (never-expiring) until the L4b provenance-snapshot
+        // backfill sets them. annual_manual_adjust lots (L2c) are intentionally out of scope (stay NULL).
         const sourceKey = `annual_accrual:${user.id}:${periodKey}`
         const lotRows = await trx.query(
           `INSERT INTO attendance_leave_balances
-             (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status)
-           VALUES ($1, $2, 'annual', $3, $3, 'annual_accrual', $4, $5, 'active')
+             (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status, expires_at)
+           VALUES ($1, $2, 'annual', $3, $3, 'annual_accrual', $4, $5, 'active', $6)
            ON CONFLICT (org_id, source_key) DO NOTHING
            RETURNING id`,
-          [orgId, user.id, r.entitlementMinutes, runItemId, sourceKey]
+          [orgId, user.id, r.entitlementMinutes, runItemId, sourceKey, lotExpiresAt]
         )
         const newLotId = lotRows[0]?.id
         if (newLotId) {
