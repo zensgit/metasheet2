@@ -140,6 +140,72 @@ describe('rich-longText write-path sanitizer (validateLongTextValue, property.ri
     expect(rel).not.toContain('href="//evil.com"')
     expect(rel).toContain('p')
   })
+
+  // ===========================================================================
+  // B5 — people-mention chip allow-list (span + data-mention-id). The chip is the
+  // SOLE reason <span>/data-mention-id are allow-listed; these canaries are
+  // lock-step with the FE spec (apps/web/tests/multitable-richtext-mention.spec.ts).
+  // ===========================================================================
+
+  it('B5 #c1 keeps a real mention chip <span data-mention-id>…</span>', () => {
+    const out = sanitize('<span data-mention-id="user_42">@Jamie</span>')
+    expect(out).toContain('data-mention-id="user_42"')
+    expect(out).toContain('@Jamie')
+    expect(out).toMatch(/<span/i)
+  })
+
+  it('B5 #c2 strips a forged chip handler/style but keeps the inert id', () => {
+    const out = sanitize('<span data-mention-id="user_42" onclick="alert(1)" style="position:fixed">x</span>')
+    expect(out.toLowerCase()).not.toContain('onclick')
+    expect(out.toLowerCase()).not.toContain('style=')
+    expect(out).not.toContain('alert(1)')
+    expect(out).toContain('data-mention-id="user_42"')
+  })
+
+  it('B5 #c3 scopes data-mention-id to <span> only (stripped from a <b>)', () => {
+    const out = sanitize('<b data-mention-id="user_42">bold</b>')
+    expect(out).not.toContain('data-mention-id')
+    expect(out).toContain('<b>bold</b>')
+  })
+
+  it('B5 #c4 rejects every OTHER attribute on a chip span (only data-mention-id)', () => {
+    const out = sanitize('<span data-mention-id="user_42" id="x" class="y" data-evil="1">z</span>')
+    expect(out).not.toContain('id="x"')
+    expect(out).not.toContain('class="y"')
+    expect(out).not.toContain('data-evil')
+    expect(out).toContain('data-mention-id="user_42"')
+  })
+
+  // a→span FALLBACK REGRESSION (the map's silent-change trap): the transformTags.a
+  // callback maps an href-LESS / empty-href <a> to `{ tagName:'span', attribs:{} }`.
+  // Before B5 that span was DISCARDED (span not allow-listed); now it SURVIVES as
+  // `<span>text</span>`. Pin BOTH the new shape AND that the fallback span carries
+  // NO data-mention-id — so an href-less link can never masquerade as a chip.
+  it('B5 #c5 href-less <a> → surviving <span>text</span> with NO data-mention-id', () => {
+    const out = sanitize('<a>click</a>')
+    expect(out).toMatch(/<span[^>]*>click<\/span>/i)
+    expect(out).not.toMatch(/<span[^>]+data-mention-id/i)
+    expect(out).not.toContain('data-mention-id')
+  })
+
+  it('B5 #c5b empty-href <a> → surviving <span>text</span> with NO data-mention-id', () => {
+    const out = sanitize('<a href="">y</a>')
+    expect(out).toMatch(/<span[^>]*>y<\/span>/i)
+    expect(out).not.toContain('data-mention-id')
+  })
+
+  // A rejected-PROTOCOL <a> (javascript:/protocol-relative) keeps a BARE anchor
+  // (href stripped by the scheme filter, forced rel/target) — NOT a span — because
+  // the transform sees the (still-present) href and the scheme filter runs after it.
+  // Pin this so the two rejection shapes (href-less→span vs bad-scheme→bare-<a>)
+  // stay distinct and neither leaks an unsafe href.
+  it('B5 #c6 rejected-protocol <a> keeps a bare inert <a> (no href), no data-mention-id', () => {
+    const out = sanitize('<a href="javascript:alert(1)">click</a>')
+    expect(out).not.toMatch(/javascript:/i)
+    expect(out).not.toContain('href=')
+    expect(out).toContain('click')
+    expect(out).not.toContain('data-mention-id')
+  })
 })
 
 // ===========================================================================

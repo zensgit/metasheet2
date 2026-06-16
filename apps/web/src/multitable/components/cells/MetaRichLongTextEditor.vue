@@ -57,34 +57,81 @@
         @mousedown.prevent="exec('unlink')"
       >⛓</button>
     </div>
-    <div
-      ref="editableRef"
-      class="meta-rich-editor__content"
-      contenteditable="true"
-      role="textbox"
-      aria-multiline="true"
-      :aria-label="ariaContent"
-      data-test="rich-longtext-editor"
-      @focus="onFocus"
-      @input="onInput"
-      @blur="onBlur"
-      @paste="onPaste"
-      @drop="onDrop"
-      @keydown.meta.enter.prevent="onConfirm"
-      @keydown.ctrl.enter.prevent="onConfirm"
-      @keydown.escape.prevent="emit('cancel')"
-    />
+    <div class="meta-rich-editor__body">
+      <div
+        ref="editableRef"
+        class="meta-rich-editor__content"
+        contenteditable="true"
+        role="textbox"
+        aria-multiline="true"
+        :aria-label="ariaContent"
+        data-test="rich-longtext-editor"
+        @focus="onFocus"
+        @input="onInput"
+        @blur="onBlur"
+        @paste="onPaste"
+        @drop="onDrop"
+        @keydown.down="onMentionNavigate(1, $event)"
+        @keydown.up="onMentionNavigate(-1, $event)"
+        @keydown.enter="onMentionEnter($event)"
+        @keydown.tab="onMentionTab($event)"
+        @keydown.meta.enter.prevent="onConfirm"
+        @keydown.ctrl.enter.prevent="onConfirm"
+        @keydown.escape="onEscape($event)"
+      />
+      <!-- B5 people-mention popover. Renders ONLY when the host fed candidates
+           (authenticated hosts: cell editor + drawer). MetaFormView passes no
+           candidates → mentionEnabled is false → the popover never shows, gating
+           the member directory out of the anonymous public form. -->
+      <div
+        v-if="showMentionSuggestions"
+        class="meta-rich-editor__suggestions"
+        role="listbox"
+        :aria-label="l('mention.suggestionsAria')"
+        data-test="rich-longtext-mention-popover"
+      >
+        <button
+          v-for="suggestion in mentionSuggestionsFiltered"
+          :key="suggestion.id"
+          type="button"
+          class="meta-rich-editor__suggestion"
+          :class="{ 'meta-rich-editor__suggestion--active': activeMentionId === suggestion.id }"
+          :aria-selected="activeMentionId === suggestion.id"
+          data-test="rich-longtext-mention-option"
+          @mousedown.prevent="selectMention(suggestion)"
+        >
+          <strong>@{{ suggestion.label }}</strong>
+          <small v-if="suggestion.subtitle">{{ suggestion.subtitle }}</small>
+        </button>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { sanitizeRichLongTextHtml } from '../../utils/rich-longtext'
+import {
+  detectMentionQuery,
+  filterMentionSuggestions,
+  insertMentionChipAtRange,
+} from '../../utils/rich-longtext-mention'
+import type { MetaCommentMentionSuggestion } from '../../types'
+import { metaCoreLabel, type MetaCoreLabelKey } from '../../utils/meta-core-labels'
 
 const props = defineProps<{
   /** Current rich-`longText` HTML value (server-sanitized). */
   modelValue: unknown
   isZh?: boolean
+  /**
+   * People-mention candidates (B5). Fed ONLY by authenticated hosts (cell editor +
+   * record drawer) from the workbench's already-loaded `commentMentionSuggestions`
+   * — the editor never fetches them itself. MetaFormView (anonymous public) passes
+   * nothing, so the member directory is never exposed to anonymous submitters and
+   * the @-popover stays inert there. The same candidate shape comments use, so the
+   * persisted chip token reconstructs the EXACT comment token `@[label](id)`.
+   */
+  mentionSuggestions?: MetaCommentMentionSuggestion[]
 }>()
 
 const emit = defineEmits<{
@@ -107,9 +154,40 @@ const editableRef = ref<HTMLDivElement | null>(null)
 const focused = ref(false)
 
 const zh = () => props.isZh !== false
+// Reuse the cell-editor family's typed label module (B5 mention.* keys). The
+// existing toolbar ternaries stay as-is (out of B5 scope, per the map).
+const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, zh())
 
 const ariaToolbar = '富文本格式工具栏'
 const ariaContent = '富文本内容编辑区'
+
+// --- B5 people-mention popover state ---
+// True only when a host actually fed candidates → the popover is structurally
+// gated to authenticated hosts (the form view passes none). This is the host
+// gate: no FE permission mirror, just "render the affordance when candidates exist".
+const mentionEnabled = computed(() => (props.mentionSuggestions?.length ?? 0) > 0)
+/** The active "@query" the caret is typing (null when not in a mention). */
+const mentionQuery = ref<string | null>(null)
+/** Length of the typed `@query` run (chars to replace on select), e.g. `@ja` → 3. */
+const mentionQueryLength = ref(0)
+const activeMentionIndex = ref(0)
+
+const mentionSuggestionsFiltered = computed<MetaCommentMentionSuggestion[]>(() => {
+  if (!mentionEnabled.value || mentionQuery.value === null) return []
+  return filterMentionSuggestions(props.mentionSuggestions ?? [], mentionQuery.value)
+})
+
+const showMentionSuggestions = computed(
+  () => mentionEnabled.value && mentionQuery.value !== null && mentionSuggestionsFiltered.value.length > 0,
+)
+
+const activeMention = computed<MetaCommentMentionSuggestion | null>(() => {
+  const list = mentionSuggestionsFiltered.value
+  if (list.length === 0) return null
+  const idx = Math.min(activeMentionIndex.value, list.length - 1)
+  return list[idx] ?? null
+})
+const activeMentionId = computed(() => activeMention.value?.id ?? null)
 
 const inlineCommands = [
   { command: 'bold', icon: 'B', label: zh() ? '加粗' : 'Bold' },
@@ -142,6 +220,7 @@ function emitLive(): void {
 }
 
 function onInput(): void {
+  refreshMentionQuery()
   emitLive()
 }
 
@@ -149,9 +228,122 @@ function onFocus(): void {
   focused.value = true
 }
 
+// --- B5 mention detection + insertion ---
+
+/**
+ * Read the plain text from the start of the editable up to the collapsed caret, so
+ * `detectMentionQuery` can decide whether the caret is inside an "@query". Returns
+ * '' (→ no query) when there is no caret or it is non-collapsed. We walk the caret's
+ * own Text node back to its start; that is sufficient for the trigger rule
+ * (start-of-text or after whitespace) without flattening the whole DOM.
+ */
+function textBeforeCaret(): { text: string; range: Range } | null {
+  if (!mentionEnabled.value) return null
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return null
+  const range = sel.getRangeAt(0)
+  // Only detect when the caret sits inside the editable surface.
+  const root = editableRef.value
+  if (!root || !root.contains(range.startContainer)) return null
+  const node = range.startContainer
+  // For a Text node, the text up to the caret is the slice [0, startOffset).
+  if (node.nodeType === Node.TEXT_NODE) {
+    return { text: (node.textContent ?? '').slice(0, range.startOffset), range }
+  }
+  return null
+}
+
+function refreshMentionQuery(): void {
+  if (!mentionEnabled.value) {
+    mentionQuery.value = null
+    return
+  }
+  const ctx = textBeforeCaret()
+  if (!ctx) {
+    mentionQuery.value = null
+    return
+  }
+  const detected = detectMentionQuery(ctx.text)
+  if (!detected) {
+    mentionQuery.value = null
+    return
+  }
+  mentionQuery.value = detected.query
+  mentionQueryLength.value = detected.query.length + 1 // include the `@`
+  activeMentionIndex.value = 0
+}
+
+function dismissMention(): void {
+  mentionQuery.value = null
+}
+
+/**
+ * Replace the typed "@query" at the caret with a mention chip. Uses the live
+ * Selection's Range (the REAL caret) and the Range-based insert seam — NOT
+ * execCommand — so the selection→insert path is exercised for real. After insert we
+ * re-apply the modified Range to the live selection, emit the new (sanitized) value,
+ * and dismiss the popover.
+ */
+function selectMention(suggestion: MetaCommentMentionSuggestion): void {
+  const ctx = textBeforeCaret()
+  if (!ctx) {
+    dismissMention()
+    return
+  }
+  const doc = editableRef.value?.ownerDocument ?? document
+  insertMentionChipAtRange(doc, ctx.range, suggestion, mentionQueryLength.value)
+  // Re-apply the (now caret-after-chip) range to the live selection.
+  const sel = window.getSelection()
+  if (sel) {
+    sel.removeAllRanges()
+    sel.addRange(ctx.range)
+  }
+  dismissMention()
+  emitLive()
+}
+
+function onMentionNavigate(direction: 1 | -1, event: KeyboardEvent): void {
+  if (!showMentionSuggestions.value) return
+  event.preventDefault()
+  const len = mentionSuggestionsFiltered.value.length
+  activeMentionIndex.value = (activeMentionIndex.value + direction + len) % len
+}
+
+function onMentionEnter(event: KeyboardEvent): void {
+  // Plain Enter while the popover is open selects the active suggestion; otherwise
+  // Enter falls through to its normal newline behaviour. (Cmd/Ctrl+Enter commit is
+  // handled by its own dedicated listener and never reaches here.)
+  if (event.metaKey || event.ctrlKey) return
+  if (!showMentionSuggestions.value || !activeMention.value) return
+  event.preventDefault()
+  selectMention(activeMention.value)
+}
+
+function onMentionTab(event: KeyboardEvent): void {
+  if (!showMentionSuggestions.value || !activeMention.value) return
+  event.preventDefault()
+  selectMention(activeMention.value)
+}
+
+function onEscape(event: KeyboardEvent): void {
+  // Esc dismisses the popover first (one Esc closes the suggester); a second Esc (or
+  // Esc with no popover) cancels the edit, matching the textarea's Esc contract.
+  if (showMentionSuggestions.value) {
+    event.preventDefault()
+    dismissMention()
+    return
+  }
+  event.preventDefault()
+  emit('cancel')
+}
+
 /** Blur = commit. Emit BOTH the final live value and the `change` commit event. */
 function onBlur(): void {
   focused.value = false
+  // Dismiss the mention popover on blur. The suggestion buttons use
+  // `@mousedown.prevent` so clicking one does NOT blur the editable first — the
+  // chip is inserted before any blur fires.
+  dismissMention()
   const value = currentValue()
   emit('update:modelValue', value)
   emit('change', value)
@@ -292,6 +484,9 @@ watch(
   margin: 0 4px;
   background: #e4e7ed;
 }
+.meta-rich-editor__body {
+  position: relative;
+}
 .meta-rich-editor__content {
   min-height: 96px;
   max-height: 320px;
@@ -301,6 +496,49 @@ watch(
   line-height: 1.55;
   outline: none;
   word-break: break-word;
+}
+.meta-rich-editor__suggestions {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 100%;
+  margin-top: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+  padding: 6px;
+  z-index: 20;
+}
+.meta-rich-editor__suggestion {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+.meta-rich-editor__suggestion:hover { background: #f8fafc; }
+.meta-rich-editor__suggestion--active { background: #eff6ff; }
+.meta-rich-editor__suggestion small { color: #64748b; }
+.meta-rich-editor__content :deep(.meta-rich-editor__mention),
+.meta-rich-editor__content :deep(span[data-mention-id]) {
+  display: inline;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 500;
+  white-space: nowrap;
 }
 .meta-rich-editor__content:empty::before {
   content: attr(data-placeholder);

@@ -59,6 +59,7 @@
       v-else-if="field.type === 'longText' && isRichLongTextField(field)"
       :model-value="modelValue"
       :is-zh="isZh"
+      :mention-suggestions="mentionSuggestions"
       @update:model-value="emit('update:modelValue', $event)"
       @confirm="emit('confirm')"
       @cancel="emit('cancel')"
@@ -311,7 +312,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, toRef } from 'vue'
-import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaField } from '../../types'
+import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaCommentMentionSuggestion, MetaField } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
 import MetaYjsPresenceChip from '../MetaYjsPresenceChip.vue'
 import MetaRichLongTextEditor from './MetaRichLongTextEditor.vue'
@@ -364,6 +365,12 @@ const props = defineProps<{
    * as the drawer's aiBusy. See the RBAC invariant note in the template.
    */
   aiRunState?: { pending: boolean; busy: boolean } | null
+  /**
+   * B5 people-mention candidates for a rich-`longText` cell. Forwarded straight to
+   * MetaRichLongTextEditor; the workbench feeds its already-loaded
+   * `commentMentionSuggestions` (no fresh fetch). Absent on the anonymous form path.
+   */
+  mentionSuggestions?: MetaCommentMentionSuggestion[]
 }>()
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}/
