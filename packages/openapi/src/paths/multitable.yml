@@ -478,6 +478,14 @@ paths:
                   type: integer
                   minimum: 0
                   description: Optimistic-concurrency token; must equal the current server version.
+                fieldIds:
+                  type: array
+                  minItems: 1
+                  items: { type: string }
+                  description: >-
+                    Optional per-field (column-level) restore. When provided, only these fields are
+                    restored (still atomic over the subset); omitted = full-record restore. A requested
+                    field that is unchanged / non-restorable / unknown is simply not restored.
               required: [targetVersion, expectedVersion]
       responses:
         '200':

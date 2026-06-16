@@ -546,4 +546,51 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     const after = await q('SELECT count(*)::int AS n FROM meta_record_revisions WHERE record_id = $1', [rid])
     expect((after.rows[0] as { n: number }).n).toBe((before.rows[0] as { n: number }).n)
   })
+
+  // ---- Per-field (column-level) restore ----
+  test('T15: fieldIds restores ONLY the selected fields; unselected fields are untouched', async () => {
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_B]: 'b2' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_B]: 'b1' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_B]: 'b2' } }],
+    )
+    const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_A] })
+    expect(res.status).toBe(200)
+    expect(res.body.data.restoredFieldIds).toEqual([FLD_A])
+    const data = await liveData(rid)
+    expect(data[FLD_A]).toBe('a1') // restored
+    expect(data[FLD_B]).toBe('b2') // NOT selected → untouched
+  })
+
+  test('T16: per-field lets you restore the writable field you picked even when another diff field is forbidden', async () => {
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_SECRET]: 'sec_now' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_SECRET]: 'sec_old' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_SECRET]: 'sec_now' } }],
+    )
+    testUserId = USER_RO // read_only on SECRET
+    // full restore would be RESTORE_FORBIDDEN (SECRET differs + is forbidden)…
+    const full = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
+    expect(full.status).toBe(403)
+    // …but selecting only the writable field A succeeds (SECRET not in the gated subset)
+    const partial = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_A] })
+    expect(partial.status).toBe(200)
+    expect(partial.body.data.restoredFieldIds).toEqual([FLD_A])
+    const data = await liveData(rid)
+    expect(data[FLD_A]).toBe('a1') // restored
+    expect(data[FLD_SECRET]).toBe('sec_now') // forbidden field untouched
+  })
+
+  test('T17: fieldIds selecting an unchanged/unknown field is a no-op (nothing in the gated subset)', async () => {
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_B]: 'b2' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_B]: 'b2' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_B]: 'b2' } }],
+    )
+    // B is unchanged between v1 and current; selecting only B → empty diff → no-op
+    const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_B] })
+    expect(res.status).toBe(200)
+    expect(res.body.data.noop).toBe(true)
+    expect((await liveData(rid))[FLD_A]).toBe('a2') // A unchanged (not selected)
+  })
 })
