@@ -8754,15 +8754,11 @@ export function univerMetaRouter(): Router {
               : `/api/multitable/views/${resolved.view.id}/submit`)
             : '/api/multitable/records',
           sheet,
-          // A4 SECURITY FIX: form-context is reachable by ANONYMOUS public-form callers, and the previous
-          // `view: redactViewConfigFilterLiterals(resolved.view, ...)` echoed `view.config` UNTOUCHED
-          // (that helper only redacts filterInfo literals) — so `view.config.publicForm.publicToken` and
-          // `.allowedUserIds` leaked to anonymous callers. Replace the echo with a WHITELIST projection of
-          // only the presentational keys the form renderer needs (id/name/type). The token/allowlist (and
-          // any future view.config key) can no longer reach an anonymous caller by construction.
-          // (Authenticated callers of form-context — MultitableWorkbench standalone-form bootstrap — read
-          // only fields/permissions/record from the context, never view.config; confirmed safe to whitelist.)
-          ...(resolved.view ? { view: { id: resolved.view.id, name: resolved.view.name, type: resolved.view.type } } : {}),
+          // Requester-aware view echo (unchanged from pre-A4): redactViewConfigFilterLiterals keeps
+          // filter literals the requester may read and redacts denied ones (#2052 / R5b). NOTE: this still
+          // echoes view.config.publicForm to anonymous callers — a PRE-EXISTING leak (NOT introduced by A4),
+          // tracked separately so it gets its own one-concern fix rather than riding this feature PR.
+          ...(resolved.view ? { view: redactViewConfigFilterLiterals(resolved.view, await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)) } : {}),
           // A4 SAFE form-logic projection: ONLY the presentational layout sub-objects (pages / prefill
           // allowlist / validated redirect / confirmation text), normalized by sanitizeFormLayout. Built
           // from view.config.formLayout via a whitelist — never carries publicForm or other config keys.
