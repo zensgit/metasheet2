@@ -16,11 +16,11 @@
   C5 K3/MSSQL smoke gate #2670 已在 `dea391a1` 包上通过并关闭：operator scope-adjusted rerun
   中 generic SQL Server smoke 和 K3 SQL Server executor smoke 均 PASS，且 evidence values-free、无 K3
   Save/Submit/Audit/BOM、无外部 DB 写、无 raw SQL。#2700 已补 C5 runbook 的 SQL auth/scope triage。
-- 下一门: C6-4 UI review/merge / C6-5 entity-machine smoke。C6 是最大风险刀；C6-0 只锁 design contract，
+- 下一门: C6-5 entity-machine smoke。C6 是最大风险刀；C6-0 只锁 design contract，
   C6-1 只落地 backend latent writer helper 和 write-gated target adapter 的关闭态合同；
   C6-2 只增加 read-only dry-run route + dry-run token，不授权 apply runtime 或 external write。
-  C6-3 增加 token-bound apply route；C6-4 正在补 UI dry-run -> review -> apply；C6-5 仍需
-  单独 opt-in、复审、fresh CI 和实体机 gate。
+  C6-3 增加 token-bound apply route；C6-4 UI dry-run -> review -> apply 已合并并发出实体机
+  smoke 包；C6-5 仍需实体机 sandbox gate。
 
 ## 收口顺序
 
@@ -31,8 +31,8 @@
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
-| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI in review; C6-5 gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
-| Release | 总包 + 实体机验收 | gated | 交付签收 | 包内容/部署/证据不完整 |
+| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 open | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
+| Release | 总包 + 实体机验收 | C6-5 smoke package published; entity-machine gate pending | 交付签收 | 包内容/部署/证据不完整 |
 
 ## P0 - ②b Arc 收口 Follow-Up
 
@@ -403,7 +403,8 @@ TODO:
   - row write failures are isolated and returned as values-free counts/error codes; response/evidence never echoes
     the bearer token, row values, credentials, connection strings, raw SQL, target payloads, or dataSourceId secrets。
   - boundary: no UI, no package, no C6 entity-machine smoke yet, no delete/raw SQL/generic query, no K3。
-- [~] C6-4 UI: dry-run -> review -> apply。
+- [x] C6-4 UI: dry-run -> review -> apply。
+  - #2719 / squash `9fb34fd91`.
   - pipeline-level UI calls the C6 dry-run/apply routes separately from legacy Save-only and PLM table-action flows.
   - browser request shape remains scope-only for dry-run and scope + `confirm.dryRunToken` for apply;
     no client `source` / `target` / `plan` / `payload` / sheet scope is sent.
@@ -412,6 +413,12 @@ TODO:
   - apply is disabled for read-only users and requires an explicit review checkbox.
   - changing pipeline id or scope clears the pending dry-run token/review.
 - [ ] C6-5 entity-machine smoke: apply、re-pull、rollback。
+  - issue: #2720 `[Data Source] C6 external-write entity-machine smoke gate`.
+  - release: `multitable-onprem-datasource-c6-ui-20260616-9fb34fd91`.
+  - package: `metasheet-multitable-onprem-v2.5.0-datasource-c6-ui-20260616-9fb34fd91`.
+  - source commit: `9fb34fd91e4f3bdfa7827d57ca3b362abbcb05bd`.
+  - package verify: `.tgz` / `.zip` verify reports published, `SHA256SUMS` present.
+  - C6-5 remains sandbox/entity-machine validation only; no production/batch rollout.
 
 完成条件:
 
@@ -443,9 +450,13 @@ TODO:
 
 TODO:
 
-- [ ] `git rev-list --count main..origin/main == 0` 后再发包。
-- [ ] 从已合并 main 构建 on-prem package。
-- [ ] 生成 `.tgz` / `.zip` / `.sha256` / `SHA256SUMS` / verify reports。
+- [x] `git rev-list --count main..origin/main == 0` 后再发 C6-5 smoke 包。
+- [x] 从已合并 main 构建 C6-5 on-prem package。
+- [x] 生成 `.tgz` / `.zip` / `.sha256` / `SHA256SUMS` / verify reports。
+  - release: `multitable-onprem-datasource-c6-ui-20260616-9fb34fd91`.
+  - package: `metasheet-multitable-onprem-v2.5.0-datasource-c6-ui-20260616-9fb34fd91`.
+  - `.tgz` SHA256: `8659e9bfbad0c51efe55238108dc7b84a72a19478bf0f841cfa26d76e2cd784f`.
+  - `.zip` SHA256: `9b771902fca4c607422d6ac30e63bf3fe95b576537fc7b9f6c2f767a25d6ab3c`.
 - [ ] 实体机部署。
 - [ ] 干净实体机 / 全新 DB smoke，用来暴露 migration 排序缺口。
 - [ ] 部署前跑 pending-migration diff + auth round-trip；静默 401 优先按 schema/migration 缺口排查，不先归咎 JWT secret。
@@ -453,7 +464,7 @@ TODO:
 - [ ] C3 incremental resume smoke。
 - [ ] C4 UI config smoke。
 - [x] C5 K3 seam smoke。
-- [ ] C6 dry-run/apply/re-pull/rollback smoke。
+- [ ] C6 dry-run/apply/re-pull/rollback smoke（#2720）。
 - [ ] issue 上贴 values-free 验收证据。
 
 交付判据:
