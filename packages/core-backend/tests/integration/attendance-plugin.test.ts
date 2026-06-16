@@ -5071,6 +5071,15 @@ attendanceIntegrationDescribe(
 
       // (C) the no-carry lot from run A is idempotent under run B (ON CONFLICT) — its expiry is NOT retroactively changed.
       expect(new Date((await lotExpiry(uNoCarry))!).toISOString()).toBe('2026-12-31T16:00:00.000Z')
+
+      // (D) an enabled policy with an INVALID timezone is rejected at the settings gate (else zonedTimeToUtc would
+      // silently UTC-fall-back and stamp the wrong expiry). 422 ANNUAL_LEAVE_TIMEZONE_INVALID — never guess.
+      const badTz = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT', headers,
+        body: JSON.stringify({ annualLeavePolicy: { enabled: true, tenureMode: 'cumulative_service', standardDayMinutes: 480, tiers: [{ minYears: 1, maxYears: null, days: 5 }], carryover: { enabled: false }, timezone: 'Not/AZone' } }),
+      })
+      expect(badTz.status).toBe(422)
+      expect((badTz.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ANNUAL_LEAVE_TIMEZONE_INVALID')
     } finally {
       await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ annualLeavePolicy: origPolicy }) }).catch(() => undefined)
       const all = ids.concat([adminId])

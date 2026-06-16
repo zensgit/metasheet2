@@ -15579,6 +15579,12 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
   if (!policy.timezone) {
     throw new HttpError(422, 'ANNUAL_LEAVE_TIMEZONE_REQUIRED', 'annualLeavePolicy.timezone is required to run accrual')
   }
+  // L4a: the timezone is used for the year-end expiry boundary (zonedTimeToUtc). An INVALID identifier would
+  // silently fall back to UTC (getZonedParts), stamping the wrong expiry — reject it (org-tz boundary, no UTC
+  // fallback, never guess) rather than compute a wrong instant.
+  if (!isValidTimeZoneIdentifier(policy.timezone)) {
+    throw new HttpError(422, 'ANNUAL_LEAVE_TIMEZONE_INVALID', 'annualLeavePolicy.timezone must be a valid IANA timezone identifier')
+  }
   const asOfParts = annualLeaveDateParts(asOf)
   if (!asOfParts) throw new HttpError(400, 'ANNUAL_LEAVE_INVALID_ASOF', 'asOf must be a valid YYYY-MM-DD date')
   const periodKey = `annual:${period}`
@@ -37843,6 +37849,12 @@ module.exports = {
           // policy persists freely.
           if (merged.annualLeavePolicy?.enabled === true && !merged.annualLeavePolicy?.timezone) {
             res.status(422).json({ ok: false, error: { code: 'ANNUAL_LEAVE_TIMEZONE_REQUIRED', message: 'annualLeavePolicy.timezone is required when annualLeavePolicy.enabled is true' } })
+            return
+          }
+          // L4a: an enabled policy's timezone drives the year-end expiry boundary — it MUST be a real IANA zone,
+          // else zonedTimeToUtc silently falls back to UTC and stamps the wrong expiry. Reject typos at the gate.
+          if (merged.annualLeavePolicy?.enabled === true && !isValidTimeZoneIdentifier(merged.annualLeavePolicy.timezone)) {
+            res.status(422).json({ ok: false, error: { code: 'ANNUAL_LEAVE_TIMEZONE_INVALID', message: 'annualLeavePolicy.timezone must be a valid IANA timezone identifier' } })
             return
           }
           const saved = await saveSettings(db, merged)
