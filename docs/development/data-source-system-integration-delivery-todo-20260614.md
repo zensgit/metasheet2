@@ -431,7 +431,9 @@ TODO:
     `POST /api/integration/pipelines/:id/external-write/apply` remains blocked (`403`) with
     no target write request accepted.
   - remaining HOLD: controlled bad-row smoke has not run yet; it must prove row-level failure
-    evidence is values-free and clean sibling rows are not silently swallowed.
+    evidence is values-free and clean sibling rows are not silently swallowed. The bad row must be
+    a write-time target constraint failure; target lookup / plan-decision drift after dry-run is
+    a revision-fence check (`C6_WRITE_DRY_RUN_TOKEN_MISMATCH`), not this row-level failure gate.
   - C6-5 remains sandbox/entity-machine validation only; no production/batch rollout.
 
 完成条件:

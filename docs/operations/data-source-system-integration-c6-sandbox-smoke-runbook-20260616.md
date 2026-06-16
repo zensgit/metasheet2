@@ -326,10 +326,38 @@ Expected:
 
 Only run this if the sandbox target can be safely reset.
 
+The controlled bad row must be a write-time row failure, not target lookup or
+plan-decision drift between dry-run and apply. The dry-run revision is
+recomputed before apply and covers the reviewed plan decisions/counts plus
+target lookup shape. If the target state change flips add/update/skip/held
+decisions or target lookup counts, apply should fail as
+`C6_WRITE_DRY_RUN_TOKEN_MISMATCH`; that is a revision-fence check, not the
+row-level failure check this gate needs. The revision does not claim to hash
+every existing target-row value.
+
+Preferred sandbox shape:
+
+- use the same small source sample as the successful smoke, with at least two
+  planned rows;
+- make exactly one planned row violate a sandbox-only target constraint during
+  insert/update, for example a type/length/check/unique constraint on a
+  writable field;
+- leave at least one sibling row valid so the run can prove clean rows still
+  write while the bad row becomes a row-level failure;
+- do not make the target lookup result or plan decision drift after the dry-run
+  token is issued;
+- reset the sandbox target with operator-local maintenance controls after the
+  check.
+
+If the only available failure shape changes the target lookup result or plan
+decision after dry-run, skip this step and keep C6-5 at HOLD until a true
+write-time bad-row shape is available.
+
 Expected:
 
 - one controlled bad row creates row-level failure evidence;
 - clean sibling rows are not silently swallowed;
+- apply status is `partial` when at least one clean sibling writes;
 - production/batch remain closed regardless of the result;
 - no credentials, raw SQL, row values, or payload JSON appear in evidence.
 
@@ -338,6 +366,9 @@ Evidence:
 ```text
 badRow:
   status=<partial|failed|not_run>
+  failureShape=write_time_constraint|not_available
+  revisionMismatchObserved=false
+  cleanSiblingWritten=true|false
   deadLetters.count=<count>
   rowErrorTypes=<tokens only>
   valuesLeaked=false
@@ -476,6 +507,9 @@ readOnlyUser:
 
 badRow:
   status=<partial|failed|not_run>
+  failureShape=write_time_constraint|not_available
+  revisionMismatchObserved=false
+  cleanSiblingWritten=true|false
   deadLetters.count=<count>
   rowErrorTypes=<tokens only>
   valuesLeaked=false
