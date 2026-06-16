@@ -5667,10 +5667,10 @@ export function univerMetaRouter(): Router {
       }
       return {}
     }
-    // Lock D: only fields whose authoritative value is a scalar in meta_records.data. Everything the
-    // write spine refuses to write (computed, link, attachment, system-auto, and the no-value `button`
-    // trigger) is excluded here too — otherwise a legacy `button`/system key lingering in data would
-    // enter the diff and turn into a spine RESTORE_FORBIDDEN, blocking an otherwise-restorable record.
+    // Lock D: this set gates the SCALAR-data path. Computed/system-auto/attachment are non-data and
+    // excluded; `button` is the no-value trigger (also caught by raw type below). `link` is listed as a
+    // defensive backstop, but link fields never reach this check — they are handled by a dedicated SET
+    // path (Slice 2a) above the scalar branch, which re-syncs meta_links + the mirror through the spine.
     const NON_RESTORABLE_TYPES = new Set([
       'formula', 'lookup', 'rollup', 'link', 'attachment', 'button',
       'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy',
@@ -5712,6 +5712,18 @@ export function univerMetaRouter(): Router {
       )
       const revRows = revRes.rows as Array<{ action?: unknown; snapshot?: unknown }>
       if (revRows.length === 0) {
+        // Distinguish a PRUNED target (retention aged it out) from one that never existed: if the
+        // target is below the surviving floor (MIN retained version for this record), it was pruned
+        // → VERSION_EXPIRED. This is data-driven (true whether or not the retention sweep is enabled;
+        // with retention off, MIN is the create version so this never fires spuriously).
+        const floorRes = await pool.query(
+          'SELECT MIN(version) AS min_version FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2',
+          [sheetId, recordId],
+        )
+        const minVersion = Number((floorRes.rows[0] as { min_version?: unknown } | undefined)?.min_version ?? 0)
+        if (minVersion > 0 && targetVersion < minVersion) {
+          return res.status(410).json({ ok: false, error: { code: 'VERSION_EXPIRED', message: `Version ${targetVersion} is older than the retained floor (v${minVersion}) and has been pruned` } })
+        }
         return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: `No revision at version ${targetVersion}` } })
       }
       const targetRev = revRows.find((r) => r.action !== 'delete')
@@ -5748,13 +5760,28 @@ export function univerMetaRouter(): Router {
         }
       }
 
-      // Faithful set ∪ unset diff over restorable fields only.
+      // Faithful set ∪ unset diff over restorable fields.
       const diff: RecordChange[] = []
       for (const [fid, guard] of fieldById.entries()) {
-        if (!isRestorableType(guard.type)) continue
         if (rawTypeById.get(fid) === 'button') continue // no-value trigger (mapFieldType folds it to 'string')
         const inSnap = Object.prototype.hasOwnProperty.call(targetSnapshot, fid)
         const inCur = Object.prototype.hasOwnProperty.call(currentData, fid)
+        // Slice 2a — link fields: restore the snapshot's link id array (or [] when absent at version N)
+        // as a SET routed through patchRecords, which re-syncs meta_links + the twoWay mirror fan-out.
+        // NEVER a data-`unset` (that touches only the data mirror and would desync the join table).
+        // Only emit when the id set actually differs (preserves no-op). The link config (guard.link)
+        // drives the spine's meta_links sync; a snapshot referencing a now-deleted foreign record is
+        // rejected fail-closed by the spine's link-target validation (VALIDATION_ERROR). Use the CANONICAL
+        // normalizeLinkIds (handles legacy `'["a","b"]'` / `'a,b'` / trim / dedup) so a legacy-shaped
+        // snapshot or current value is parsed identically to the write path, not mis-read as one id.
+        if (guard.type === 'link') {
+          const target = inSnap ? normalizeLinkIds(targetSnapshot[fid]) : []
+          if (!sameValue(normalizeLinkIds(currentData[fid]), target)) {
+            diff.push({ recordId, fieldId: fid, value: target, expectedVersion: currentVersion, op: 'set' })
+          }
+          continue
+        }
+        if (!isRestorableType(guard.type)) continue
         if (inSnap) {
           if (!sameValue(currentData[fid], targetSnapshot[fid])) {
             diff.push({ recordId, fieldId: fid, value: targetSnapshot[fid], expectedVersion: currentVersion, op: 'set' })

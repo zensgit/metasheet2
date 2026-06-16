@@ -26,6 +26,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { sweepMetaRevisionRetention } from '../../src/multitable/meta-revision-retention'
 import { setYjsInvalidatorForRoutes, univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -35,6 +36,7 @@ const BASE_ID = `base_rstr_${TS}`
 const SHEET_ID = `sheet_rstr_${TS}`
 const FSHEET_ID = `fsheet_rstr_${TS}`
 const FOREIGN_REC = `frec_rstr_${TS}`
+const FOREIGN_REC2 = `frec2_rstr_${TS}`
 const FLD_A = `fld_rstr_a_${TS}`
 const FLD_B = `fld_rstr_b_${TS}`
 const FLD_SECRET = `fld_rstr_secret_${TS}`
@@ -43,6 +45,8 @@ const FLD_AUN = `fld_rstr_aun_${TS}`
 const FLD_LK = `fld_rstr_lk_${TS}`
 const FLD_BTN = `fld_rstr_btn_${TS}`
 const FLD_SEL = `fld_rstr_sel_${TS}`
+const FLD_LK_TW = `fld_rstr_lktw_${TS}` // twoWay link → FSHEET, mirrorFieldId = FLD_MIRROR
+const FLD_MIRROR = `fld_rstr_mirror_${TS}` // mirror side on FSHEET
 const USER_W = `u_rstr_writer_${TS}`
 const USER_RO = `u_rstr_ro_${TS}`
 
@@ -123,6 +127,7 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_ID, BASE_ID, 'Restore Sheet'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [FSHEET_ID, BASE_ID, 'Foreign Sheet'])
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [FOREIGN_REC, FSHEET_ID, '{}'])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [FOREIGN_REC2, FSHEET_ID, '{}'])
 
     const f = (id: string, name: string, type: string, property: string, order: number) =>
       q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [id, SHEET_ID, name, type, property, order])
@@ -131,9 +136,12 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     await f(FLD_SECRET, 'Secret', 'string', '{}', 3)
     await f(FLD_FX, 'Formula', 'formula', '{}', 4)
     await f(FLD_AUN, 'AutoNum', 'autoNumber', '{}', 5)
-    await f(FLD_LK, 'Link', 'link', '{}', 6)
+    await f(FLD_LK, 'Link', 'link', JSON.stringify({ foreignSheetId: FSHEET_ID }), 6)
     await f(FLD_BTN, 'Button', 'button', '{}', 7)
     await f(FLD_SEL, 'Select', 'select', JSON.stringify({ options: [{ value: 'x' }, { value: 'y' }] }), 8)
+    await f(FLD_LK_TW, 'LinkTwoWay', 'link', JSON.stringify({ foreignSheetId: FSHEET_ID, twoWay: true, mirrorFieldId: FLD_MIRROR }), 9)
+    // mirror side lives on the foreign sheet (derived single-edge projection — no materialized row)
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_MIRROR, FSHEET_ID, 'Mirror', 'link', JSON.stringify({ foreignSheetId: SHEET_ID, twoWay: true, mirrorFieldId: FLD_LK_TW, mirrorOf: FLD_LK_TW }), 1])
 
     // Layer-3: USER_RO is read_only on SECRET (and a separate visible=false would also gate).
     await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [SHEET_ID, FLD_SECRET, 'user', USER_RO, true, true])
@@ -269,18 +277,86 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     expect((await liveData(rid))[FLD_AUN]).toBe(2) // unchanged
   })
 
-  test('T6: link field excluded — not written, meta_links left untouched', async () => {
+  const linksOf = async (recordId: string): Promise<string[]> => {
+    const r = await q('SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2 ORDER BY foreign_record_id', [FLD_LK, recordId])
+    return (r.rows as Array<{ foreign_record_id: string }>).map((x) => x.foreign_record_id)
+  }
+
+  test('T6 (Slice 2a): link field restored — meta_links cleared when the target version had no link', async () => {
     const rid = await seedRecord(
       { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC] },
       2,
       [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_LK]: [] } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC] } }],
     )
-    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_${TS}_${recordSeq}`, FLD_LK, rid, FOREIGN_REC])
+    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_${TS}_a_${recordSeq}`, FLD_LK, rid, FOREIGN_REC])
     const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
     expect(res.status).toBe(200)
-    expect(res.body.data.restoredFieldIds).not.toContain(FLD_LK)
-    const links = await q('SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2', [FLD_LK, rid])
-    expect((links.rows as Array<{ foreign_record_id: string }>).map((r) => r.foreign_record_id)).toEqual([FOREIGN_REC])
+    expect(res.body.data.restoredFieldIds).toContain(FLD_LK)
+    expect(await linksOf(rid)).toEqual([]) // re-synced to version 1 (no link)
+  })
+
+  test('T6e (Slice 2a): link field restored — meta_links re-pointed to the target version edges', async () => {
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC] },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_LK]: [FOREIGN_REC2] } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC] } }],
+    )
+    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_${TS}_e_${recordSeq}`, FLD_LK, rid, FOREIGN_REC])
+    const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
+    expect(res.status).toBe(200)
+    expect(res.body.data.restoredFieldIds).toContain(FLD_LK)
+    expect(await linksOf(rid)).toEqual([FOREIGN_REC2]) // edge re-pointed
+  })
+
+  test('T6a (Slice 2a): a twoWay-configured link restores cleanly — the edge the mirror derives from is re-synced', async () => {
+    const linksOfField = async (fid: string, recordId: string): Promise<string[]> => {
+      const r = await q('SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2 ORDER BY foreign_record_id', [fid, recordId])
+      return (r.rows as Array<{ foreign_record_id: string }>).map((x) => x.foreign_record_id)
+    }
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_LK_TW]: [FOREIGN_REC] },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_LK_TW]: [FOREIGN_REC2] } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_LK_TW]: [FOREIGN_REC] } }],
+    )
+    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_${TS}_tw_${recordSeq}`, FLD_LK_TW, rid, FOREIGN_REC])
+    const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
+    expect(res.status).toBe(200)
+    expect(res.body.data.restoredFieldIds).toContain(FLD_LK_TW)
+    // The single edge (which BOTH the forward link and the foreign record's derived mirror resolve from)
+    // is re-pointed to the version-1 target; the mirror projection on FOREIGN_REC2 derives from this.
+    expect(await linksOfField(FLD_LK_TW, rid)).toEqual([FOREIGN_REC2])
+  })
+
+  test('T6f (Slice 2a): link to a now-deleted foreign record → VALIDATION_ERROR (fail-closed), nothing written', async () => {
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC] },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_LK]: [`frec_gone_${TS}`] } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC] } }],
+    )
+    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_${TS}_f_${recordSeq}`, FLD_LK, rid, FOREIGN_REC])
+    const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    expect(await linksOf(rid)).toEqual([FOREIGN_REC]) // atomic: unchanged
+  })
+
+  test('T6g (Slice 2a): legacy-shaped link snapshot (JSON-array string) is parsed by the canonical normalizer, not mis-read as one id', async () => {
+    // The v1 snapshot stores the link as a legacy JSON-array STRING ('["frec2..."]') rather than an
+    // array; current stores it as an array. A naive parser would treat the whole string as one foreign
+    // id → spurious VALIDATION_ERROR. normalizeLinkIds parses it identically to the write path.
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC] },
+      2,
+      [
+        { version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_LK]: JSON.stringify([FOREIGN_REC2]) } },
+        { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC] } },
+      ],
+    )
+    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_${TS}_g_${recordSeq}`, FLD_LK, rid, FOREIGN_REC])
+    const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
+    expect(res.status).toBe(200)
+    expect(res.body.data.restoredFieldIds).toContain(FLD_LK)
+    expect(await linksOf(rid)).toEqual([FOREIGN_REC2]) // legacy string parsed → edge re-pointed
   })
 
   test('T6b: snapshot field absent from current schema → SCHEMA_DRIFT', async () => {
@@ -429,5 +505,45 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
     expect(res.status).toBe(403)
     expect((await liveData(rid))[FLD_A]).toBe('a2') // untouched
+  })
+
+  // ---- Retention (prune + VERSION_EXPIRED) ----
+  const seedManyRevisions = async (count: number): Promise<string> => {
+    const revs: RevSeed[] = Array.from({ length: count }, (_, i) => ({
+      version: i + 1,
+      action: i === 0 ? 'create' : 'update',
+      snapshot: { [FLD_A]: `v${i + 1}` },
+    }))
+    return seedRecord({ [FLD_A]: `v${count}` }, count, revs)
+  }
+
+  test('T13: keep-last-N sweep prunes old versions (keeps the latest); restore to a pruned version → VERSION_EXPIRED', async () => {
+    const rid = await seedManyRevisions(13) // versions 1..13, current = 13
+    const deleted = await sweepMetaRevisionRetention(q, { enabled: true, policy: 'keep-last-n', keepN: 10, retentionDays: 365, batchSize: 5000 })
+    expect(deleted).toBeGreaterThanOrEqual(3) // versions 1,2,3 pruned (may include other suites' rows; bounded)
+
+    // this record retains exactly the latest 10 (versions 4..13); the latest (13) is always kept
+    const rows = await q('SELECT version FROM meta_record_revisions WHERE record_id = $1 ORDER BY version', [rid])
+    const versions = (rows.rows as Array<{ version: number }>).map((r) => Number(r.version))
+    expect(versions).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+
+    // restore to a pruned version → VERSION_EXPIRED (410), distinct from a never-existed VERSION_NOT_FOUND
+    const expired = await restoreReq(rid, { targetVersion: 2, expectedVersion: 13 })
+    expect(expired.status).toBe(410)
+    expect(expired.body.error.code).toBe('VERSION_EXPIRED')
+
+    // a surviving version still restores
+    const ok = await restoreReq(rid, { targetVersion: 5, expectedVersion: 13 })
+    expect(ok.status).toBe(200)
+    expect((await liveData(rid))[FLD_A]).toBe('v5')
+  })
+
+  test('T14: retention disabled (default) is a no-op — deletes nothing', async () => {
+    const rid = await seedManyRevisions(12)
+    const before = await q('SELECT count(*)::int AS n FROM meta_record_revisions WHERE record_id = $1', [rid])
+    const deleted = await sweepMetaRevisionRetention(q, { enabled: false, policy: 'keep-last-n', keepN: 10, retentionDays: 365, batchSize: 5000 })
+    expect(deleted).toBe(0)
+    const after = await q('SELECT count(*)::int AS n FROM meta_record_revisions WHERE record_id = $1', [rid])
+    expect((after.rows[0] as { n: number }).n).toBe((before.rows[0] as { n: number }).n)
   })
 })

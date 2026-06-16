@@ -13025,12 +13025,12 @@ paths:
     post:
       summary: Restore a multitable record to a prior revision (Layer 1)
       description: >-
-        Restores a live record's scalar user-data fields to a prior revision's
-        recorded values. Forward-change semantics — a value-changing restore
-        emits a new revision (source=restore) and bumps version; an empty diff
-        is a no-op. Computed/link/system-auto/attachment fields are excluded by
-        type. Atomically rejected if any restorable differing field is not
-        writable.
+        Restores a live record's user-data fields to a prior revision's recorded
+        values, including link fields (re-synced through meta_links + the twoWay
+        mirror). Forward-change semantics — a value-changing restore emits a new
+        revision (source=restore) and bumps version; an empty diff is a no-op.
+        Computed / system-auto / attachment fields are excluded by type.
+        Atomically rejected if any restorable differing field is not writable.
       security:
         - bearerAuth: []
       parameters:
@@ -13115,6 +13115,33 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '410':
+          description: >-
+            VERSION_EXPIRED — the target version is older than the retained
+            floor and has been pruned by the meta-revision retention policy
+            (distinct from VERSION_NOT_FOUND for a version that never existed).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - VERSION_EXPIRED
+                      message:
+                        type: string
+                    required:
+                      - code
+                      - message
+                required:
+                  - ok
+                  - error
         '422':
           description: >-
             Restore not possible — RESTORE_UNSUPPORTED (target is a delete
