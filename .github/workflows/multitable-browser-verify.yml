@@ -14,6 +14,8 @@ on:
   pull_request:
     paths:
       - 'apps/web/src/multitable/components/MetaGridTable.vue'
+      - 'apps/web/src/multitable/components/MetaFieldHeader.vue'
+      - 'apps/web/src/multitable/components/cells/MetaCellRenderer.vue'
       - 'apps/web/src/multitable/components/MetaCommentReactions.vue'
       - 'apps/web/src/multitable/components/MetaCommentsDrawer.vue'
       - 'apps/web/src/multitable/utils/conditional-formatting.ts'
