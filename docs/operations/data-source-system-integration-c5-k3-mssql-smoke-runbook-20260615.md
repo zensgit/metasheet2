@@ -28,6 +28,47 @@ Forbidden:
 - Pick one small approved table for the K3 SQL Server bounded read.
 - If testing a legacy SQL Server, decide the TLS knobs up front.
 
+## Auth / Scope Triage
+
+Use this section when the package is present and the smoke reaches SQL Server, but the result is still
+`login_failed`, `sqlserver_test_failed`, or `SQLSERVER_TEST_FAILED`.
+
+This is an operator-side SQL scope check, not a code/package check. Do not repeat the smoke under an unchanged SQL
+scope and treat the repeated failure as new evidence; it is expected to reproduce the same result.
+
+Confirm or adjust the approved read-only scope before the next PASS attempt:
+
+- The configured SQL login can authenticate to the intended SQL Server under the same legacy TLS settings used by the
+  smoke.
+- The configured database is the intended smoke database, not a default, empty, or no-permission database.
+- The configured object exists in that database. Include the schema when the object is not under the default schema.
+- The configured SQL login has read-only access to the configured object.
+- The K3 executor smoke uses an equivalent approved read-only database and object scope.
+
+Use least-privilege grants only. The exact SQL depends on the customer's SQL Server security model, but the shape should
+stay read-only:
+
+```sql
+-- Example shape only. Replace placeholders on the SQL Server side; do not paste real values into issues.
+GRANT CONNECT ON DATABASE::<database_name> TO <read_only_user>;
+GRANT SELECT ON OBJECT::<schema_name>.<object_name> TO <read_only_user>;
+```
+
+If schema or table metadata remains invisible after `SELECT` is granted, confirm metadata visibility for the same
+read-only object scope. Do not grant broad admin, owner, or write permissions just to satisfy the smoke.
+
+Values-free evidence to report after scope confirmation:
+
+- `sqlScopeConfirmed=true`;
+- `loginCanAuthenticate=true|false`;
+- `databaseScopeConfirmed=true|false`;
+- `objectExists=true|false`;
+- `objectReadPermission=true|false`;
+- `k3ReadScopeConfirmed=true|false`.
+
+Do not report usernames, passwords, hostnames, database names, connection strings, SQL text with real identifiers, row
+values, or stack traces.
+
 ## Generic SQL Server Smoke
 
 Run from the deploy root:
