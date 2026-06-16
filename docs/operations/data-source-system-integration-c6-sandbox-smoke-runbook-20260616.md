@@ -1,8 +1,14 @@
 # Data Source C6 External-Write Sandbox Smoke Runbook
 
-Purpose: continue #2720 after the package/route preflight has passed but the
-entity machine has no sandbox `data-source:sql-write-gated` target or active C6
-pipeline yet.
+Purpose: run or continue #2720's sandbox-only C6 external-write smoke.
+
+Current #2720 status as of 2026-06-16: the sandbox write target, write-gated
+external system, active C6 pipeline, core dry-run/apply/re-pull/rollback path
+have already passed on the entity machine. The remaining HOLD is the read-only
+subgate: verify an `integration:read` user can call the dedicated C6
+`/external-write/dry-run` route while apply remains blocked. If continuing that
+run, do not recreate the sandbox or rerun Apply just to test the read-only
+endpoint.
 
 This runbook sets up the minimum sandbox-only shape needed to run the C6
 dry-run -> apply -> re-pull -> rollback/cleanup smoke. It does not authorize
@@ -199,7 +205,18 @@ evidence.
 
 ### 1. Dry-run
 
-Run C6 dry-run from the UI or route.
+Run C6 dry-run from the UI or the dedicated C6 route:
+
+- `POST /api/integration/pipelines/:id/external-write/dry-run`
+
+Do not use the ordinary pipeline dry-run route for this smoke:
+
+- `POST /api/integration/pipelines/:id/dry-run`
+
+The ordinary route is still a write-level integration action. A read-only user
+receiving `403` from the ordinary route does not prove the C6 read-only dry-run
+gate failed; the read-only gate must be checked against the dedicated
+`/external-write/dry-run` route.
 
 Expected:
 
@@ -289,10 +306,20 @@ Using a read-only integration user:
 
 ```text
 readOnlyUser:
+  dryRunEndpoint=/api/integration/pipelines/:id/external-write/dry-run
   dryRunAllowed=true|false
+  ordinaryPipelineDryRunStatus=<403|not_run>
   applyButtonEnabled=false
   applyRequestSent=false
 ```
+
+Expected:
+
+- dedicated C6 dry-run route accepts `integration:read`;
+- ordinary pipeline dry-run may remain write-gated and should not be used as the
+  C6 subgate;
+- C6 apply remains blocked for read-only users and does not consume a token or
+  write rows.
 
 ### 5. Controlled bad-row check
 
@@ -403,6 +430,7 @@ c6Pipeline:
   mappingCoversWritableFields=true|false
 
 dryRun:
+  endpoint=/api/integration/pipelines/:id/external-write/dry-run
   status=<ready|not_ready|failed|not_run>
   httpStatus=<code>
   canApply=true|false
@@ -438,7 +466,9 @@ repull:
   duplicateRowsCreated=false
 
 readOnlyUser:
+  dryRunEndpoint=/api/integration/pipelines/:id/external-write/dry-run
   dryRunAllowed=true|false
+  ordinaryPipelineDryRunStatus=<403|not_run>
   applyButtonEnabled=false
   applyRequestSent=false
 
@@ -480,6 +510,7 @@ Pass requires all of:
 
 - sandbox write target and C6 pipeline are configured and active;
 - dry-run is values-free and mutates nothing;
+- read-only user can call the dedicated C6 dry-run route;
 - apply requires token + explicit confirmation + write permission;
 - re-pull shows `add=0` and no duplicate target rows;
 - read-only user cannot send apply;
