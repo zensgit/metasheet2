@@ -90,3 +90,53 @@ describe('MetaRecordDrawer — button field (B1-e)', () => {
     expect(btn().disabled).toBe(false)
   })
 })
+
+// Native person (人员, design 2026-06-16): the drawer renders person display from
+// personSummariesByField (userId → name) and edits via an open-person-picker emit (NOT the
+// link picker). The drawer uses its OWN render chain (formatFieldDisplay), not MetaCellRenderer.
+describe('MetaRecordDrawer — native person field', () => {
+  const personField: MetaField = { id: 'fld_owner', name: 'Owner', type: 'person', property: { limitSingleRecord: false } } as unknown as MetaField
+
+  it('resolves person display from personSummariesByField (userId → name)', async () => {
+    container = document.createElement('div'); document.body.appendChild(container)
+    app = createApp({
+      setup: () => () => h(MetaRecordDrawer, {
+        visible: true,
+        record: { id: 'rec_1', version: 1, data: { fld_owner: ['u1', 'u2'] } },
+        fields: [personField],
+        canEdit: false, canComment: false, canDelete: false,
+        personSummariesByField: { fld_owner: [{ id: 'u1', display: 'Alice' }, { id: 'u2', display: 'Bob' }] },
+      }),
+    })
+    app.mount(container)
+    await flushUi()
+    expect(container.textContent).toContain('Alice')
+    expect(container.textContent).toContain('Bob')
+    // raw userId is NOT shown when a summary resolves
+    expect(container.textContent).not.toContain('u1')
+  })
+
+  it('emits open-person-picker (NOT open-link-picker) when the editable person field is clicked', async () => {
+    const personEmits: MetaField[] = []
+    const linkEmits: MetaField[] = []
+    container = document.createElement('div'); document.body.appendChild(container)
+    app = createApp({
+      setup: () => () => h(MetaRecordDrawer, {
+        visible: true,
+        record: { id: 'rec_1', version: 1, data: { fld_owner: [] } },
+        fields: [personField],
+        canEdit: true, canComment: false, canDelete: false,
+        onOpenPersonPicker: (f: MetaField) => personEmits.push(f),
+        onOpenLinkPicker: (f: MetaField) => linkEmits.push(f),
+      }),
+    })
+    app.mount(container)
+    await flushUi()
+    const openBtn = container.querySelector<HTMLButtonElement>('[data-test="drawer-person-picker-open"]')
+    expect(openBtn).not.toBeNull()
+    openBtn!.click()
+    await flushUi()
+    expect(personEmits.map((f) => f.id)).toEqual(['fld_owner'])
+    expect(linkEmits).toHaveLength(0)
+  })
+})

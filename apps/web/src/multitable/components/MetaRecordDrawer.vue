@@ -220,6 +220,12 @@
             class="meta-record-drawer__link-btn"
             @click="emit('open-link-picker', field)"
           >{{ linkButtonLabel(field.id) }}</button>
+          <button
+            v-else-if="canEditField(field.id) && field.type === 'person'"
+            class="meta-record-drawer__link-btn"
+            data-test="drawer-person-picker-open"
+            @click="emit('open-person-picker', field)"
+          >{{ linkButtonLabel(field.id) }}</button>
           <div v-else-if="field.type === 'attachment'" class="meta-record-drawer__attachments">
             <MetaAttachmentList
               :attachments="attachmentItems(field.id)"
@@ -374,6 +380,7 @@
 import { computed, ref, watch } from 'vue'
 import type {
   LinkedRecordSummary,
+  PersonSummary,
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
@@ -439,6 +446,7 @@ const props = withDefaults(defineProps<{
   rowActions?: MetaRowActions | null
   commentPresence?: MultitableCommentPresenceSummary | null
   linkSummariesByField?: Record<string, LinkedRecordSummary[]>
+  personSummariesByField?: Record<string, PersonSummary[]>
   attachmentSummariesByField?: Record<string, MetaAttachment[]>
   recordIds?: string[]
   uploadFn?: MetaAttachmentUploadFn
@@ -469,6 +477,7 @@ const emit = defineEmits<{
   (e: 'comment-field', field: MetaField): void
   (e: 'open-automation'): void
   (e: 'open-link-picker', field: MetaField): void
+  (e: 'open-person-picker', field: MetaField): void
   (e: 'navigate', recordId: string): void
   /** Slice 3: request restore of this record to a prior revision. The parent (workbench) owns
    * the apiClient.restoreRecordVersion call + confirm + record refresh — consistent with how the
@@ -803,6 +812,7 @@ function formatValue(field: MetaField, v: unknown): string {
     field,
     value: v,
     linkSummaries: props.linkSummariesByField?.[field.id],
+    personSummaries: props.personSummariesByField?.[field.id],
     attachmentSummaries: props.attachmentSummariesByField?.[field.id],
     isZh: isZh.value,
   })

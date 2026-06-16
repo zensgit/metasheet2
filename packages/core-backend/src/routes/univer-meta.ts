@@ -9902,6 +9902,17 @@ export function univerMetaRouter(): Router {
             allowedFieldIds,
           )
         : undefined
+      // Native person (人员) display for the single-record drawer/form — same users-table join as the
+      // grid view, masked through the SAME single-record layer-2∧3 composite as linkSummaries.
+      const personFieldsSingle = visiblePropertyFields.filter((field) => field.type === 'person')
+      const personSummaries = personFieldsSingle.length > 0
+        ? filterSingleRecordFieldSummaryMap(
+            serializePersonSummaryMap(
+              await buildPersonSummaries(pool.query.bind(pool), [record], personFieldsSingle),
+            )[record.id] ?? {},
+            allowedFieldIds,
+          )
+        : undefined
 
       const viewScopeMap = (access.userId && viewConfig) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [viewConfig.id], access.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
@@ -9943,6 +9954,7 @@ export function univerMetaRouter(): Router {
             containerId: sheet.id,
           },
           linkSummaries,
+          ...(personSummaries ? { personSummaries } : {}),
           ...(attachmentSummaries ? { attachmentSummaries } : {}),
         },
       })

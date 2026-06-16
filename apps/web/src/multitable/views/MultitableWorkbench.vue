@@ -146,6 +146,7 @@
           :error-message="formErrorMessage"
           :field-errors="formFieldErrors"
           :link-summaries-by-field="selectedRecordLinkSummaries"
+          :person-summaries-by-field="selectedRecordPersonSummaries"
           :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
           :upload-fn="uploadAttachmentFn"
           :delete-attachment-fn="deleteAttachmentFn"
@@ -289,6 +290,7 @@
         :row-actions="effectiveRowActions"
         :comment-presence="selectedRecordCommentPresence"
         :link-summaries-by-field="selectedRecordLinkSummaries"
+        :person-summaries-by-field="selectedRecordPersonSummaries"
         :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
         :record-ids="drawerRecordIds"
         :upload-fn="uploadAttachmentFn"
@@ -785,6 +787,7 @@ const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
 const formFieldErrors = ref<Record<string, string>>({})
 const deepLinkedRecordLinkSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
+const deepLinkedRecordPersonSummaries = ref<Record<string, PersonSummary[]>>({})
 const deepLinkedRecordAttachmentSummaries = ref<Record<string, MetaAttachment[]>>({})
 const deepLinkedRecordCommentsScope = ref<MetaCommentsScope | null>(null)
 const deepLinkedRecordFieldPermissions = ref<Record<string, MetaFieldPermission>>({})
@@ -1021,6 +1024,16 @@ const selectedRecordLinkSummaries = computed<Record<string, LinkedRecordSummary[
   return {}
 })
 
+// Native person (人员) display for the drawer/form — grid summaries first, deep-record fallback.
+const selectedRecordPersonSummaries = computed<Record<string, PersonSummary[]>>(() => {
+  const recordId = selectedRecordId.value
+  if (!recordId) return {}
+  const fromGrid = grid.personSummaries.value[recordId]
+  if (fromGrid) return fromGrid
+  if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecordPersonSummaries.value
+  return {}
+})
+
 const selectedRecordAttachmentSummaries = computed<Record<string, MetaAttachment[]>>(() => {
   const recordId = selectedRecordId.value
   if (!recordId) return {}
@@ -1150,6 +1163,24 @@ function applyLocalLinkSummaries(recordId: string, fieldId: string, summaries: L
   if (deepLinkedRecord.value?.id === recordId) {
     deepLinkedRecordLinkSummaries.value = {
       ...deepLinkedRecordLinkSummaries.value,
+      [fieldId]: summaries,
+    }
+  }
+}
+
+// Native person (人员): mirror applyLocalLinkSummaries so a just-picked person shows its display
+// name immediately (grid + drawer) instead of a raw userId until the next refetch.
+function applyLocalPersonSummaries(recordId: string, fieldId: string, summaries: PersonSummary[]) {
+  grid.personSummaries.value = {
+    ...grid.personSummaries.value,
+    [recordId]: {
+      ...(grid.personSummaries.value[recordId] ?? {}),
+      [fieldId]: summaries,
+    },
+  }
+  if (deepLinkedRecord.value?.id === recordId) {
+    deepLinkedRecordPersonSummaries.value = {
+      ...deepLinkedRecordPersonSummaries.value,
       [fieldId]: summaries,
     }
   }
@@ -1948,6 +1979,7 @@ async function onPersonPickerConfirm(payload: { userIds: string[]; summaries: Pe
       showError(grid.error.value)
       return
     }
+    applyLocalPersonSummaries(recordId, fieldId, payload.summaries)
   } else if (selectedRecordResolved.value?.id === recordId) {
     try {
       const result = await workbench.client.patchRecords({
@@ -1961,6 +1993,7 @@ async function onPersonPickerConfirm(payload: { userIds: string[]; summaries: Pe
         version: nextVersion,
         data: { ...selectedRecordResolved.value.data, [fieldId]: payload.userIds },
       }
+      applyLocalPersonSummaries(recordId, fieldId, payload.summaries)
     } catch (e: any) {
       showError(e.message ?? wb('toast.linkedRecordsUpdateFailed', isZh.value))
       return
@@ -2393,6 +2426,7 @@ function discardWorkbenchDraftsForExternalContextChange() {
   selectedRecordId.value = null
   deepLinkedRecord.value = null
   deepLinkedRecordLinkSummaries.value = {}
+  deepLinkedRecordPersonSummaries.value = {}
   deepLinkedRecordAttachmentSummaries.value = {}
   deepLinkedRecordCommentsScope.value = null
   showImportModal.value = false
@@ -3063,6 +3097,7 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     })
     deepLinkedRecord.value = ctx.record
     deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
+    deepLinkedRecordPersonSummaries.value = ctx.personSummaries ?? {}
     deepLinkedRecordAttachmentSummaries.value = ctx.attachmentSummaries ?? {}
     deepLinkedRecordCommentsScope.value = ctx.commentsScope
     deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
@@ -3077,6 +3112,7 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
 function clearDeepLinkedRecordState() {
   deepLinkedRecord.value = null
   deepLinkedRecordLinkSummaries.value = {}
+  deepLinkedRecordPersonSummaries.value = {}
   deepLinkedRecordAttachmentSummaries.value = {}
   deepLinkedRecordCommentsScope.value = null
   deepLinkedRecordFieldPermissions.value = {}
@@ -3106,6 +3142,7 @@ async function mergeRemoteRecordContext(recordId: string): Promise<boolean> {
     if (selectedRecordId.value === recordId) {
       deepLinkedRecord.value = ctx.record
       deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
+      deepLinkedRecordPersonSummaries.value = ctx.personSummaries ?? {}
       deepLinkedRecordAttachmentSummaries.value = ctx.attachmentSummaries ?? {}
       deepLinkedRecordCommentsScope.value = ctx.commentsScope
       deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
@@ -3172,6 +3209,7 @@ async function refreshSelectedRecordContext(recordId: string) {
     if (selectedRecordId.value !== recordId) return
     deepLinkedRecord.value = ctx.record
     deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
+    deepLinkedRecordPersonSummaries.value = ctx.personSummaries ?? {}
     deepLinkedRecordAttachmentSummaries.value = ctx.attachmentSummaries ?? {}
     deepLinkedRecordCommentsScope.value = ctx.commentsScope
     deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
