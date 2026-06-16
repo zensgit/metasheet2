@@ -300,6 +300,15 @@
                 class="meta-record-drawer__history-diff"
                 data-test="history-field-diff"
               >
+                <input
+                  v-if="canRestoreTo(item)"
+                  type="checkbox"
+                  class="meta-record-drawer__history-diff-select"
+                  data-test="history-field-select"
+                  :checked="isRestoreFieldSelected(item, d.fieldId)"
+                  :aria-label="d.label"
+                  @change="toggleRestoreField(item, d.fieldId)"
+                />
                 <span class="meta-record-drawer__history-diff-label">{{ d.label }}</span>
                 <span class="meta-record-drawer__history-diff-values">
                   <span
@@ -318,6 +327,7 @@
               class="meta-record-drawer__history-restore"
               data-test="record-history-restore"
               :title="l('record.restoreTitle')"
+              :disabled="selectedRestoreFields(item).length === 0"
               @click="requestRestore(item)"
             >{{ l('record.restore') }}</button>
           </li>
@@ -431,7 +441,7 @@ const emit = defineEmits<{
   /** Slice 3: request restore of this record to a prior revision. The parent (workbench) owns
    * the apiClient.restoreRecordVersion call + confirm + record refresh — consistent with how the
    * drawer emits 'patch' / 'delete' / 'toggle-lock' rather than mutating directly. */
-  (e: 'restore', payload: { recordId: string; targetVersion: number; expectedVersion: number }): void
+  (e: 'restore', payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }): void
   /** A3: AI shortcut triggers (workbench resolves them through useAiShortcut). */
   (e: 'ai-preview', field: MetaField): void
   (e: 'ai-run', field: MetaField): void
@@ -686,10 +696,33 @@ function canRestoreTo(item: MetaRecordRevision): boolean {
   )
 }
 
+// Per-field restore selection, keyed by revision id. Default (no entry) = ALL changed fields selected
+// (full restore, the prior behavior). Unchecking narrows to a subset → emits fieldIds; re-checking all
+// → omits fieldIds (canonical full restore). Only the actor-visible changedFieldIds are selectable
+// (they are already permission-masked server-side), so a hidden field can never be targeted.
+const restoreFieldSelection = ref<Record<string, Set<string>>>({})
+function isRestoreFieldSelected(item: MetaRecordRevision, fieldId: string): boolean {
+  const sel = restoreFieldSelection.value[item.id]
+  return sel ? sel.has(fieldId) : true
+}
+function toggleRestoreField(item: MetaRecordRevision, fieldId: string): void {
+  const next = new Set(restoreFieldSelection.value[item.id] ?? item.changedFieldIds)
+  if (next.has(fieldId)) next.delete(fieldId)
+  else next.add(fieldId)
+  restoreFieldSelection.value = { ...restoreFieldSelection.value, [item.id]: next }
+}
+function selectedRestoreFields(item: MetaRecordRevision): string[] {
+  return item.changedFieldIds.filter((fieldId) => isRestoreFieldSelected(item, fieldId))
+}
+
 function requestRestore(item: MetaRecordRevision): void {
   const record = props.record
   if (!record || !canRestoreTo(item)) return
-  emit('restore', { recordId: record.id, targetVersion: item.version, expectedVersion: record.version })
+  const selected = selectedRestoreFields(item)
+  if (selected.length === 0) return // nothing selected → no-op (button is also disabled)
+  // All changed fields selected → full restore (omit fieldIds); a proper subset → per-field restore.
+  const fieldIds = selected.length === item.changedFieldIds.length ? undefined : selected
+  emit('restore', { recordId: record.id, targetVersion: item.version, expectedVersion: record.version, ...(fieldIds ? { fieldIds } : {}) })
 }
 
 // Per-field before→after diff for a revision. LEAK-SAFE BY CONSTRUCTION: the backend
@@ -1037,4 +1070,6 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__history-diff-before { color: #94a3b8; text-decoration: line-through; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
 .meta-record-drawer__history-diff-arrow { flex: 0 0 auto; color: #cbd5e1; }
 .meta-record-drawer__history-diff-after { color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.meta-record-drawer__history-diff-select { flex: 0 0 auto; margin: 0 2px 0 0; cursor: pointer; }
+.meta-record-drawer__history-restore:disabled { opacity: 0.45; cursor: not-allowed; }
 </style>

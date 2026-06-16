@@ -1417,13 +1417,18 @@ export class MultitableApiClient {
     recordId: string,
     targetVersion: number,
     expectedVersion: number,
+    fieldIds?: string[],
   ): Promise<RestoreRecordResult> {
+    // Per-field (column-level) restore: when fieldIds is a non-empty list, the backend (#2672)
+    // restricts the restore to that selection; omit it for a full-record restore.
+    const body: { targetVersion: number; expectedVersion: number; fieldIds?: string[] } = { targetVersion, expectedVersion }
+    if (fieldIds && fieldIds.length > 0) body.fieldIds = fieldIds
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/restore`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targetVersion, expectedVersion }),
+        body: JSON.stringify(body),
       },
     )
     return this.parseJson<RestoreRecordResult>(res)

@@ -186,19 +186,27 @@ describe('MultitableWorkbench record-restore handler wiring (#2662)', () => {
     return onRestore
   }
 
-  it('threads the emitted payload into client.restoreRecordVersion(sheetId, recordId, targetVersion, expectedVersion) — exact positions (wire-drift lock)', async () => {
+  it('threads the emitted payload into client.restoreRecordVersion(sheetId, recordId, targetVersion, expectedVersion, fieldIds) — exact positions (wire-drift lock)', async () => {
     const onRestore = await mountAndGetRestore()
     await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5 })
     await flushUi()
     expect(workbenchMock.client.restoreRecordVersion).toHaveBeenCalledTimes(1)
-    // Active sheet from the workbench + the three payload fields, in order. A reorder
-    // (e.g. target/expected swapped) would silently corrupt restore — this catches it.
-    expect(workbenchMock.client.restoreRecordVersion).toHaveBeenCalledWith('sheet_orders', 'rec_42', 2, 5)
+    // Active sheet from the workbench + the three payload fields, in order, + fieldIds (undefined for
+    // a full restore). A reorder (e.g. target/expected swapped) would silently corrupt restore — caught.
+    expect(workbenchMock.client.restoreRecordVersion).toHaveBeenCalledWith('sheet_orders', 'rec_42', 2, 5, undefined)
     // success branch: toast + grid refresh
     expect(showSuccessSpy).toHaveBeenCalledTimes(1)
     expect(showSuccessSpy.mock.calls[0][0]).toMatch(/Restored|已恢复/)
     expect(gridMock.loadViewData).toHaveBeenCalledWith(0)
     expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('threads a per-field selection (fieldIds) through to the client (Arc1·S2)', async () => {
+    const onRestore = await mountAndGetRestore()
+    await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5, fieldIds: ['fld_a', 'fld_b'] })
+    await flushUi()
+    expect(workbenchMock.client.restoreRecordVersion).toHaveBeenCalledWith('sheet_orders', 'rec_42', 2, 5, ['fld_a', 'fld_b'])
+    expect(showSuccessSpy).toHaveBeenCalledTimes(1)
   })
 
   it('does nothing when the user cancels the confirm', async () => {
