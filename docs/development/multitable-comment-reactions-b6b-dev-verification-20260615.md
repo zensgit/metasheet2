@@ -1,6 +1,6 @@
 # 多维表评论 Emoji 反应 B6-b — 开发 & 校验 — 2026-06-15
 
-> Status: **DONE（逻辑层 jsdom/单测验证）+ 浏览器目检为残余**。B6 弧的 UI 半 = 评论反应展示 + 选择器 + 组合式/客户端接线。延续 B6-a（存储 + API，已合并 #2673）。realtime 广播仍推迟（见 §4）。
+> Status: **DONE + CI-BROWSER-VERIFIED**(jsdom/单测 + 真实 Chromium 截图确认)。B6 弧的 UI 半 = 评论反应展示 + 选择器 + 组合式/客户端接线。延续 B6-a(存储 + API,已合并 #2673)。浏览器目检已由 CI lane(#2689)完成:chips(含 reactedByMe 高亮)、picker popover、点选 🚀 → 新 chip 出现的交互均截图确认。realtime 广播仍推迟(见 §4)。
 >
 > 设计延续 B6-S0 设计锁；FE 接面经 dynamic workflow `wf_55831f49-88b`(3 路) + 逐文件独立核验 grounded。A5-1c 先例：FE 渲染可凭 jsdom 逻辑测落地，视觉/交互为浏览器残余。
 
@@ -41,7 +41,7 @@
 ## 4. Goal 边界（诚实残余）
 
 - ✅ **逻辑层（client/composable/component emit + render 状态）jsdom/单测验证到位。**
-- ⏸ **浏览器目检 = 残余**（同 A5-1c）：jsdom 证 emit/state/class，证不了 popover 定位、对齐、对比度、真实点击手感、frozen/滚动观感。有浏览器/app 访问后做一次目检（可经本地 app + playwright，或 owner staging）。
+- ✅ **浏览器目检 = 已由 CI lane 完成**（#2689 真实 Chromium 截图）：reaction chips（含 reactedByMe 高亮）、picker popover 定位、点选 🚀 → 新 chip 即时出现的交互均确认。frozen/滚动观感与全栈 realtime 仍未单独验，非本弧阻塞（realtime 见 §4，仍为具名 opt-in）。
 - ⏸ **realtime 广播仍推迟**：他人反应不会实时推达本端（反应非 comment 事件；本端反应即时本地重算）。后端先把持久化/聚合/读做正确；realtime 作为后续具名 opt-in。upsert 保留修复已确保既有 comment realtime 更新不抹除本端 reactions。
 - ⏸ **palette 漂移**：FE 调色板硬编码镜像后端白名单；漂移时后端 400 兜底（失败安全，不损数据）。理想为共享常量，YAGNI 暂缓。
 
