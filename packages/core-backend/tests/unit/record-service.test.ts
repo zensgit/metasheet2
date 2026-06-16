@@ -58,6 +58,22 @@ function createMockPool(
     if (sql.includes('SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])')) {
       return responses.SELECT_LINK_TARGETS ?? { rows: [] }
     }
+    // Native person (人员) member-set resolution — listSheetPermissionCandidates + eligibility.
+    if (sql.includes('WITH user_candidates AS')) {
+      return responses.SELECT_PERSON_CANDIDATES ?? { rows: [] }
+    }
+    if (sql.includes('SELECT user_id, permission_code') && sql.includes('user_permissions')) {
+      return responses.SELECT_PERSON_USER_ELIGIBILITY ?? { rows: [] }
+    }
+    if (sql.includes('SELECT user_id') && sql.includes("role_id = $2")) {
+      return responses.SELECT_PERSON_ADMIN_ELIGIBILITY ?? { rows: [] }
+    }
+    if (sql.includes('SELECT id, permissions') && sql.includes('FROM users')) {
+      return responses.SELECT_PERSON_LEGACY_ELIGIBILITY ?? { rows: [] }
+    }
+    if (sql.includes('SELECT role_id, permission_code FROM role_permissions')) {
+      return responses.SELECT_PERSON_ROLE_PERMISSIONS ?? { rows: [] }
+    }
     if (sql.includes('INSERT INTO meta_records') && sql.includes('RETURNING version')) {
       return responses.INSERT_RECORD ?? { rows: [{ version: 1 }] }
     }
@@ -253,6 +269,66 @@ describe('RecordService', () => {
       expect.stringContaining('INSERT INTO meta_records'),
       [expect.any(String), 'sheet_ops', JSON.stringify({ fld_tags: ['Urgent', 'VIP'] }), 'user_1'],
     )
+  })
+
+  // --- Native person (人员, design 2026-06-16) single-record create/patch -----
+  const personCandidateRows = [
+    { subject_type: 'user', subject_id: 'u1', user_name: 'U1', user_email: 'u1@x.test', user_is_active: true, permission_codes: [] },
+    { subject_type: 'user', subject_id: 'u2', user_name: 'U2', user_email: 'u2@x.test', user_is_active: true, permission_codes: [] },
+  ]
+  const personEligibility = {
+    SELECT_PERSON_CANDIDATES: { rows: personCandidateRows },
+    SELECT_PERSON_USER_ELIGIBILITY: { rows: [
+      { user_id: 'u1', permission_code: 'multitable:read' },
+      { user_id: 'u2', permission_code: 'multitable:read' },
+    ] },
+  }
+
+  it('creates a record with a native person userId[] (member ids accepted, deduped)', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: { rows: [{ id: 'fld_owner', name: 'Owner', type: 'person', property: { limitSingleRecord: false } }] },
+      ...personEligibility,
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    const result = await service.createRecord({
+      sheetId: 'sheet_ops',
+      data: { fld_owner: ['u1', 'u2', 'u1'] },
+      actorId: 'user_1',
+      capabilities: fullCapabilities,
+    })
+
+    expect(result.data).toEqual({ fld_owner: ['u1', 'u2'] })
+  })
+
+  it('rejects creating a record with a non-member userId in a native person field (SECURITY)', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: { rows: [{ id: 'fld_owner', name: 'Owner', type: 'person', property: { limitSingleRecord: false } }] },
+      ...personEligibility,
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    await expect(service.createRecord({
+      sheetId: 'sheet_ops',
+      data: { fld_owner: ['u1', 'intruder'] },
+      actorId: 'user_1',
+      capabilities: fullCapabilities,
+    })).rejects.toThrow(RecordValidationError)
+  })
+
+  it('rejects creating a record with 2 users in a single-record native person field', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: { rows: [{ id: 'fld_owner', name: 'Owner', type: 'person', property: { limitSingleRecord: true } }] },
+      ...personEligibility,
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    await expect(service.createRecord({
+      sheetId: 'sheet_ops',
+      data: { fld_owner: ['u1', 'u2'] },
+      actorId: 'user_1',
+      capabilities: fullCapabilities,
+    })).rejects.toThrow(RecordValidationError)
   })
 
   it('allocates readonly autoNumber values during create', async () => {

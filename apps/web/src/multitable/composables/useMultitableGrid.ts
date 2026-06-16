@@ -11,6 +11,7 @@ import type {
   MetaRowActions,
   MetaViewPermission,
   PatchResult,
+  PersonSummary,
 } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 import { isPropertyHiddenField } from '../utils/field-permissions'
@@ -365,6 +366,9 @@ export function useMultitableGrid(opts: {
   const fields = ref<MetaField[]>([])
   const rows = ref<MetaRecord[]>([])
   const linkSummaries = ref<Record<string, Record<string, LinkedRecordSummary[]>>>({})
+  // Native person (人员) display source (userId → {id,display}). Read-only here: refreshed on
+  // each loadViewData (a person write echoes the userId[] value; display re-hydrates on refetch).
+  const personSummaries = ref<Record<string, Record<string, PersonSummary[]>>>({})
   const attachmentSummaries = ref<Record<string, Record<string, MetaAttachment[]>>>({})
   const fieldPermissions = ref<Record<string, MetaFieldPermission>>({})
   const viewPermission = ref<MetaViewPermission | null>(null)
@@ -475,6 +479,7 @@ export function useMultitableGrid(opts: {
       fields.value = data.fields ?? []
       rows.value = serverRows
       linkSummaries.value = data.linkSummaries ?? {}
+      personSummaries.value = data.personSummaries ?? {}
       attachmentSummaries.value = data.attachmentSummaries ?? {}
       fieldPermissions.value = data.meta?.permissions?.fieldPermissions ?? {}
       const nextViewPermission = data.view?.id
@@ -1002,7 +1007,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
+    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
     sortRules, filterRules, filterConjunction, sortFilterDirty,
     columnWidths, groupFieldId, groupField,
     editHistory, historyIndex, canUndo, canRedo,

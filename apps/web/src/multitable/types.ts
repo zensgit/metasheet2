@@ -224,6 +224,7 @@ export interface MetaViewData {
   fields: MetaField[]
   rows: MetaRecord[]
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
+  personSummaries?: Record<string, Record<string, PersonSummary[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
   view?: MetaView | null
   meta?: MetaViewMeta
@@ -288,6 +289,7 @@ export interface MetaRecordContext {
   rowActions?: MetaRowActions
   commentsScope: MetaCommentsScope
   linkSummaries?: Record<string, LinkedRecordSummary[]>
+  personSummaries?: Record<string, PersonSummary[]>
   attachmentSummaries?: Record<string, MetaAttachment[]>
 }
 
@@ -545,6 +547,15 @@ export interface MultitableSheetPresence {
 
 // --- Link records ---
 export interface LinkedRecordSummary {
+  id: string
+  display: string
+}
+
+// --- Native person (人员, design 2026-06-16) display source ---
+// Parallel to LinkedRecordSummary but keyed by `userId` (NOT a recordId): the native person
+// value is just `userId[]`, so the renderer hydrates display from `personSummaries` rather than
+// `linkSummaries`. Server-assembled from the users table at view-assembly time.
+export interface PersonSummary {
   id: string
   display: string
 }

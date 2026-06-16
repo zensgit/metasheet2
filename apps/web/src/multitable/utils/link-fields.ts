@@ -1,11 +1,24 @@
 import type { MetaField } from '../types'
 
+// isLinkField — TRUE for a relational link field. NOTE (design 2026-06-16): a NATIVE person
+// (`type === 'person'`, value = userId[]) is NO LONGER a link — it has its own picker / import
+// resolver / personSummaries display source. A LEGACY person field is stored as `type === 'link'`
+// + refKind:'user', so it still matches here (and keeps its link-backed recordId behaviour). This
+// decoupling is load-bearing for coexistence: native person must not route through link summaries.
 export function isLinkField(field?: MetaField | null): boolean {
-  return field?.type === 'link' || field?.type === 'person'
+  return field?.type === 'link'
 }
 
+// isNativePersonField — TRUE only for the native userId[]-backed person (`type === 'person'`).
+export function isNativePersonField(field?: MetaField | null): boolean {
+  return field?.type === 'person'
+}
+
+// isPersonField — TRUE for EITHER representation (coexistence): the native `type === 'person'`
+// OR a legacy link-backed person (`type === 'link'` + refKind:'user'). Every person-aware copy /
+// chip / picker gate uses this so both kinds render as people.
 export function isPersonField(field?: MetaField | null): boolean {
-  return field?.type === 'person' || (isLinkField(field) && field?.property?.refKind === 'user')
+  return isNativePersonField(field) || (isLinkField(field) && field?.property?.refKind === 'user')
 }
 
 function linkEntityLabel(field?: MetaField | null, count?: number): string {

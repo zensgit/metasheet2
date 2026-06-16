@@ -98,10 +98,12 @@ describe('MetaCellRenderer rating segments', () => {
 
 describe('MetaCellRenderer person avatar chip', () => {
   it('renders an avatar chip with an initial and name for a person-type field', async () => {
+    // Native person (人员, design 2026-06-16): the value is a userId[] and display resolves from
+    // personSummaries (NOT linkSummaries — a native person has none). userId 'user_1' → 'Jamie Park'.
     const { container, app } = mount({
       field: { id: 'fld_assignee', name: 'Assignee', type: 'person' },
       value: ['user_1'],
-      linkSummaries: [{ id: 'user_1', display: 'Jamie Park' }],
+      personSummaries: [{ id: 'user_1', display: 'Jamie Park' }],
     })
     await nextTick()
 

@@ -205,11 +205,11 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { MetaAttachment, MetaField, LinkedRecordSummary, MetaRecordContext } from '../../types'
+import type { MetaAttachment, MetaField, LinkedRecordSummary, PersonSummary, MetaRecordContext } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
 import MetaLinkedRecordPopover from '../MetaLinkedRecordPopover.vue'
 import { useLocale } from '../../../composables/useLocale'
-import { isPersonField } from '../../utils/link-fields'
+import { isNativePersonField, isPersonField } from '../../utils/link-fields'
 import { formatFieldDisplay } from '../../utils/field-display'
 import { isSystemFieldType } from '../../utils/system-fields'
 import { resolveRatingFieldProperty, resolveButtonFieldProperty } from '../../utils/field-config'
@@ -221,6 +221,9 @@ const props = defineProps<{
   field: MetaField
   value: unknown
   linkSummaries?: LinkedRecordSummary[]
+  // Native person (人员) display source — userId → {id,display}. A native person has NO
+  // linkSummaries, so the chip reads this; legacy link-backed person still uses linkSummaries.
+  personSummaries?: PersonSummary[]
   attachmentSummaries?: MetaAttachment[]
   buttonPending?: boolean
   // A3: when the host supplies a cross-sheet record fetcher (getRecord with NO
@@ -262,6 +265,7 @@ const displayValue = computed(() => {
     field: props.field,
     value: props.value,
     linkSummaries: props.linkSummaries,
+    personSummaries: props.personSummaries,
     attachmentSummaries: props.attachmentSummaries,
     isZh: isZh.value,
   })
@@ -344,13 +348,32 @@ function personInitial(display: string): string {
   return [...trimmed][0]!.toUpperCase()
 }
 
-const personItems = computed(() =>
-  linkItems.value.map((item) => ({
+// Native person value = userId[]. Resolve display from personSummaries (userId → display);
+// fall back to the raw userId when a summary is missing (e.g. a removed/unknown user).
+const nativePersonIds = computed(() => {
+  const v = props.value
+  if (Array.isArray(v)) return v.map(String).filter((id) => id.length > 0)
+  if (v) return [String(v)]
+  return []
+})
+
+const personItems = computed(() => {
+  // NATIVE person (type='person', userId[]) → personSummaries. It has NO linkSummaries, so this
+  // is the load-bearing display source (an advisor-flagged hidden dependency).
+  if (isNativePersonField(props.field)) {
+    const summaryById = new Map((props.personSummaries ?? []).map((s) => [s.id, s.display]))
+    return nativePersonIds.value.map((id) => {
+      const display = summaryById.get(id) || id
+      return { id, display, initial: personInitial(display) }
+    })
+  }
+  // LEGACY link-backed person (type='link'+refKind:user, recordId[]) → linkSummaries (unchanged).
+  return linkItems.value.map((item) => ({
     id: item.id,
     display: item.display,
     initial: personInitial(item.display),
-  })),
-)
+  }))
+})
 
 // percentGauge: bar fill width 0..100 for the read-only progress gauge.
 // Percent values are stored as the percent number itself (e.g. 65 → "65%"),

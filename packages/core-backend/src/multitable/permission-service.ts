@@ -575,6 +575,36 @@ export async function listSheetPermissionCandidates(
   return candidates.filter((_candidate, index) => eligibility[index])
 }
 
+/**
+ * Native person field (design 2026-06-16) member boundary.
+ *
+ * Returns the flat set of `userId`s that are valid members of `sheetId` — i.e. EXACTLY
+ * the active users {@link listSheetPermissionCandidates} offers as selectable people
+ * (the same eligibility filter: active + multitable read/write or admin). Reusing the
+ * candidate resolver here is load-bearing: the person PICKER and the person write-time
+ * VALIDATOR must accept/reject the identical set, or a user could pick someone the
+ * validator rejects (advisor §4 — single resolver, no drift).
+ *
+ * Resolved ONCE per request batch by record writers (parallel to the link-target-exists
+ * loop). The same boundary control is what the notify recipient dispatch reuses, so a
+ * person cell and a notify recipient share one membership set.
+ */
+export async function loadSheetMemberUserIdSet(
+  query: QueryFn,
+  sheetId: string,
+): Promise<Set<string>> {
+  // Bounded but generous; person fields validate against the full eligible-member roster.
+  const candidates = await listSheetPermissionCandidates(query, sheetId, { limit: 10000 })
+  const members = new Set<string>()
+  for (const candidate of candidates) {
+    if (candidate.subjectType !== 'user') continue
+    if (!candidate.isActive) continue
+    const id = candidate.subjectId.trim()
+    if (id) members.add(id)
+  }
+  return members
+}
+
 export async function enrichFormShareCandidatesWithDingTalkStatus(
   query: QueryFn,
   candidates: MultitableSheetPermissionCandidate[],

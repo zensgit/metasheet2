@@ -180,6 +180,14 @@
       @click="emit('open-link-picker')"
     >{{ linkButtonLabel }}</button>
 
+    <!-- native person (人员): member-scoped picker (userId[]) — distinct from the link picker -->
+    <button
+      v-else-if="field.type === 'person'"
+      class="meta-cell-editor__link-btn"
+      data-test="person-picker-open"
+      @click="emit('open-person-picker')"
+    >{{ personButtonLabel }}</button>
+
     <!-- currency / percent: numeric input with field-specific step -->
     <input
       v-else-if="field.type === 'currency' || field.type === 'percent'"
@@ -387,6 +395,8 @@ const emit = defineEmits<{
   (e: 'confirm'): void
   (e: 'cancel'): void
   (e: 'open-link-picker'): void
+  /** Native person (人员): open the member-scoped person picker (emits userId[]). */
+  (e: 'open-person-picker'): void
   /**
    * Emitted *before* `confirm` when the user's edit was carried by the
    * Yjs opt-in path. Parents listening for this should suppress the
@@ -495,6 +505,13 @@ const linkButtonLabel = computed(() => {
   // If a future refactor exposes this branch to the DOM, localize it together with
   // a real render assertion; the reachable link branch below now receives locale.
   if (props.field.type !== 'link') return 'Choose linked records...'
+  const count = Array.isArray(props.modelValue) ? props.modelValue.length : props.modelValue ? 1 : 0
+  return formatLinkActionLabel(props.field, count, isZh.value)
+})
+
+// Native person button copy reuses linkActionLabel (it returns the people copy via isPersonField).
+const personButtonLabel = computed(() => {
+  if (props.field.type !== 'person') return ''
   const count = Array.isArray(props.modelValue) ? props.modelValue.length : props.modelValue ? 1 : 0
   return formatLinkActionLabel(props.field, count, isZh.value)
 })

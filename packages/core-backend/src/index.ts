@@ -2197,6 +2197,7 @@ export class MetaSheetServer {
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
       const { RecordWriteService } = await import('./multitable/record-write-service')
+      const { loadSheetMemberUserIdSet } = await import('./multitable/permission-service')
       const { createYjsInvalidationPostCommitHook } = await import('./multitable/post-commit-hooks')
       const { db: kyselyDbYjs } = await import('./db/db')
       const collabIO = this.injector.get(ICollabService).getIO()
@@ -2291,6 +2292,10 @@ export class MetaSheetServer {
           buildLinkSummaries: async () => new Map(),
           buildAttachmentSummaries: async () => new Map(),
           ensureAttachmentIdsExist: async () => null,
+          // Native person (人员): enforce the member boundary on the Yjs collab write path too —
+          // a real resolver (pure query) so a collaboratively-edited person cell can't store a
+          // non-member userId. (Unlike link validation, which is stubbed on this bridge path.)
+          loadSheetMemberUserIds: (q, sid) => loadSheetMemberUserIdSet(q, sid),
         })
 
         const yjsBridge = new YjsRecordBridge(

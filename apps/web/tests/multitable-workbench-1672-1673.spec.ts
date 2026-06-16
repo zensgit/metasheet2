@@ -140,7 +140,7 @@ function createGridMock() {
     filterConjunction: ref('and'), canUndo: ref(false), canRedo: ref(false),
     groupFieldId: ref(null), groupField: ref(null),
     hiddenFieldIds: ref([]), columnWidths: ref({}),
-    linkSummaries: ref({}), attachmentSummaries: ref({}),
+    linkSummaries: ref({}), personSummaries: ref({}), attachmentSummaries: ref({}),
     fieldPermissions: ref({}), viewPermission: ref(null),
     rowActions: ref(null), rowActionOverrides: ref({}),
     capabilityOrigin: ref(null), conflict: ref(null),

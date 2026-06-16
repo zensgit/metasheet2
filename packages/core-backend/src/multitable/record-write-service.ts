@@ -22,7 +22,7 @@ import {
   type RecordPostCommitHook,
   type YjsInvalidator,
 } from './post-commit-hooks'
-import { BATCH1_FIELD_TYPES, coerceBatch1Value, normalizeMultiSelectValue, validateLongTextValue } from './field-codecs'
+import { BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateLongTextValue, validatePersonValue } from './field-codecs'
 import {
   HierarchyCycleError,
   assertNoHierarchyParentCycle,
@@ -64,6 +64,7 @@ export type UniverMetaField = {
     | 'select'
     | 'multiSelect'
     | 'link'
+    | 'person'
     | 'lookup'
     | 'rollup'
     | 'attachment'
@@ -363,6 +364,13 @@ export interface RecordWriteHelpers {
     fieldId: string,
     ids: string[],
   ) => Promise<string | null>
+  /**
+   * Native person (人员, design 2026-06-16) membership boundary. Returns the flat set of
+   * valid member `userId`s for a sheet (the same set the person picker offers) so person
+   * cell writes reject non-member userIds. Resolved ONCE per patch op (only when a person
+   * field is written), parallel to the link-target-exists hot-path.
+   */
+  loadSheetMemberUserIds: (query: QueryFn, sheetId: string) => Promise<Set<string>>
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +488,31 @@ export class RecordWriteService {
             normalizeMultiSelectValue(change.value, change.fieldId, field.options ?? [])
           } catch (error) {
             throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+          }
+        }
+
+        if (field.type === 'person') {
+          // Step-0 SHAPE-only pre-check (array / single-record cap / id length). The authoritative
+          // MEMBERSHIP rejection runs in the txn loop with the once-resolved member set (no member-set
+          // query in this pre-pass). Passing the empty set here would false-reject valid ids, so use a
+          // null set = closed only against itself: validatePersonValue with `null` would reject ALL ids,
+          // so instead we validate shape by checking the non-membership invariants directly.
+          if (change.value !== null && change.value !== undefined && change.value !== '') {
+            if (!Array.isArray(change.value)) {
+              throw new RecordValidationError(`Person value must be an array for ${change.fieldId}`)
+            }
+            const ids = change.value.map((v) => (typeof v === 'string' || typeof v === 'number' ? String(v).trim() : null))
+            if (ids.some((v) => v === null)) {
+              throw new RecordValidationError(`Person value must be an array of user ids for ${change.fieldId}`)
+            }
+            const nonEmpty = ids.filter((v): v is string => !!v)
+            const tooLong = nonEmpty.find((id) => id.length > 50)
+            if (tooLong) {
+              throw new RecordValidationError(`Person user id too long (>50) for ${change.fieldId}: ${tooLong}`)
+            }
+            if (isPersonSingleRecord(field.property) && new Set(nonEmpty).size > 1) {
+              throw new RecordValidationError(`Person field only allows a single user for ${change.fieldId}`)
+            }
           }
         }
 
@@ -606,6 +639,17 @@ export class RecordWriteService {
     const updates = await this.pool.transaction(async ({ query }) => {
       const updated: Array<{ recordId: string; version: number }> = []
 
+      // Native person (人员): resolve the sheet member set ONCE per patch op (lazily, only when a
+      // person field value is actually written), then reuse it for every person cell's write-time
+      // membership validation (SECURITY boundary) — parallel to the link-target-exists hot-path.
+      let personMemberUserIds: Set<string> | null = null
+      const resolvePersonMemberUserIds = async (): Promise<Set<string>> => {
+        if (personMemberUserIds === null) {
+          personMemberUserIds = await h.loadSheetMemberUserIds(query, sheetId)
+        }
+        return personMemberUserIds
+      }
+
       for (const [recordId, changes] of changesByRecord.entries()) {
         const expectedVersion = Array.from(
           new Set(changes.map((c) => c.expectedVersion).filter((v): v is number => typeof v === 'number')),
@@ -685,6 +729,17 @@ export class RecordWriteService {
           if (field.type === 'multiSelect') {
             try {
               patch[change.fieldId] = normalizeMultiSelectValue(change.value, change.fieldId, field.options ?? [])
+            } catch (error) {
+              throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+            }
+            applied += 1
+            continue
+          }
+
+          if (field.type === 'person') {
+            try {
+              const allowed = await resolvePersonMemberUserIds()
+              patch[change.fieldId] = validatePersonValue(change.value, change.fieldId, allowed, isPersonSingleRecord(field.property))
             } catch (error) {
               throw new RecordValidationError(error instanceof Error ? error.message : String(error))
             }

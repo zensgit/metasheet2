@@ -54,6 +54,8 @@ function createMockHelpers(overrides: Partial<RecordWriteHelpers> = {}): RecordW
     buildLinkSummaries: vi.fn().mockResolvedValue(new Map()),
     buildAttachmentSummaries: vi.fn().mockResolvedValue(new Map()),
     ensureAttachmentIdsExist: vi.fn().mockResolvedValue(null),
+    // Native person (人员): default member set used by the person write-time validator.
+    loadSheetMemberUserIds: vi.fn().mockResolvedValue(new Set(['u1', 'u2', 'u3'])),
     ...overrides,
   }
 }
@@ -403,6 +405,81 @@ describe('RecordWriteService', () => {
     })
 
     await expect(service.patchRecords(input)).rejects.toThrow(RecordValidationError)
+  })
+
+  // --- Native person (人员, design 2026-06-16) write path -------------------
+  function buildPersonInput(value: unknown, opts: { limitSingleRecord?: boolean } = {}) {
+    const property = opts.limitSingleRecord === false ? { limitSingleRecord: false } : { limitSingleRecord: true }
+    const fields: UniverMetaField[] = [{ id: 'fld_owner', name: 'Owner', type: 'person', property, order: 0 }]
+    return buildTestInput({
+      fields,
+      visiblePropertyFields: fields,
+      visiblePropertyFieldIds: new Set(['fld_owner']),
+      fieldById: new Map([
+        ['fld_owner', { type: 'person' as const, readOnly: false, hidden: false, property }],
+      ]) as any,
+      changesByRecord: new Map([['rec1', [{ fieldId: 'fld_owner', value }]]]),
+    })
+  }
+
+  it('persists a member userId[] for a native person field (multi)', async () => {
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+    await service.patchRecords(buildPersonInput(['u1', 'u2'], { limitSingleRecord: false }))
+    const updateCall = (pool.query as any).mock.calls.find((call: unknown[]) =>
+      typeof call[0] === 'string' && call[0].includes('UPDATE meta_records'),
+    )
+    expect(JSON.parse(updateCall[1][0])).toEqual({ fld_owner: ['u1', 'u2'] })
+  })
+
+  it('rejects a non-member userId at write time (SECURITY)', async () => {
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+    await expect(
+      service.patchRecords(buildPersonInput(['u1', 'intruder'], { limitSingleRecord: false })),
+    ).rejects.toThrow(RecordValidationError)
+  })
+
+  it('rejects more than one userId when limitSingleRecord is true (single person)', async () => {
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+    await expect(service.patchRecords(buildPersonInput(['u1', 'u2']))).rejects.toThrow(RecordValidationError)
+    // single value accepted
+    await service.patchRecords(buildPersonInput(['u1']))
+    const updateCall = (pool.query as any).mock.calls.find((call: unknown[]) =>
+      typeof call[0] === 'string' && call[0].includes('UPDATE meta_records'),
+    )
+    expect(JSON.parse(updateCall[1][0])).toEqual({ fld_owner: ['u1'] })
+  })
+
+  it('resolves the sheet member set ONCE per patch (hot-path) even across multiple person cells', async () => {
+    const loadSheetMemberUserIds = vi.fn().mockResolvedValue(new Set(['u1', 'u2', 'u3']))
+    helpers = createMockHelpers({ loadSheetMemberUserIds })
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+    const fields: UniverMetaField[] = [
+      { id: 'fld_a', name: 'A', type: 'person', property: { limitSingleRecord: true }, order: 0 },
+      { id: 'fld_b', name: 'B', type: 'person', property: { limitSingleRecord: true }, order: 1 },
+    ]
+    const input = buildTestInput({
+      fields,
+      visiblePropertyFields: fields,
+      visiblePropertyFieldIds: new Set(['fld_a', 'fld_b']),
+      fieldById: new Map([
+        ['fld_a', { type: 'person' as const, readOnly: false, hidden: false, property: { limitSingleRecord: true } }],
+        ['fld_b', { type: 'person' as const, readOnly: false, hidden: false, property: { limitSingleRecord: true } }],
+      ]) as any,
+      changesByRecord: new Map([
+        ['rec1', [{ fieldId: 'fld_a', value: ['u1'] }, { fieldId: 'fld_b', value: ['u2'] }]],
+      ]),
+    })
+    await service.patchRecords(input)
+    expect(loadSheetMemberUserIds).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears a native person field to [] on empty value', async () => {
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+    await service.patchRecords(buildPersonInput([], { limitSingleRecord: false }))
+    const updateCall = (pool.query as any).mock.calls.find((call: unknown[]) =>
+      typeof call[0] === 'string' && call[0].includes('UPDATE meta_records'),
+    )
+    expect(JSON.parse(updateCall[1][0])).toEqual({ fld_owner: [] })
   })
 
   it('should throw VersionConflictError when expectedVersion does not match', async () => {

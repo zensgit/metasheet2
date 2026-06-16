@@ -198,6 +198,14 @@
             :disabled="isFieldReadOnly(field.id)"
             @click="emit('open-link-picker', field)"
           >{{ linkButtonLabel(field.id) }}</button>
+          <button
+            v-else-if="field.type === 'person'"
+            type="button"
+            class="meta-form-view__link-btn"
+            data-test="form-person-picker-open"
+            :disabled="isFieldReadOnly(field.id)"
+            @click="emit('open-person-picker', field)"
+          >{{ linkButtonLabel(field.id) }}</button>
           <div v-else-if="field.type === 'attachment'" class="meta-form-view__attachment-field">
             <div v-if="!isFieldReadOnly(field.id)" class="meta-form-view__attachment-controls">
               <input
@@ -329,6 +337,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import type {
   FormLayoutConfig,
   LinkedRecordSummary,
+  PersonSummary,
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
@@ -393,6 +402,7 @@ const props = defineProps<{
   fieldPermissions?: Record<string, MetaFieldPermission> | null
   rowActions?: MetaRowActions | null
   linkSummariesByField?: Record<string, LinkedRecordSummary[]> | null
+  personSummariesByField?: Record<string, PersonSummary[]> | null
   attachmentSummariesByField?: Record<string, MetaAttachment[]> | null
   uploadFn?: MetaAttachmentUploadFn
   deleteAttachmentFn?: MetaAttachmentDeleteFn
@@ -412,6 +422,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'submit', data: Record<string, unknown>): void
   (e: 'open-link-picker', field: MetaField): void
+  (e: 'open-person-picker', field: MetaField): void
   (e: 'update:dirty', dirty: boolean): void
   (e: 'comment-field', field: MetaField): void
 }>()
@@ -649,6 +660,7 @@ function readonlyFieldDisplay(field: MetaField): string {
     field,
     value: formData[field.id] ?? props.record?.data[field.id],
     linkSummaries: props.linkSummariesByField?.[field.id],
+    personSummaries: props.personSummariesByField?.[field.id],
     attachmentSummaries: props.attachmentSummariesByField?.[field.id],
     isZh: isZh.value,
   })
