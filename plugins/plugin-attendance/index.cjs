@@ -15415,7 +15415,12 @@ function annualLeaveDateParts(value) {
   if (!s || typeof s !== 'string') return null
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s)
   if (!m) return null
-  return { y: Number(m[1]), m: Number(m[2]), d: Number(m[3]), str: s }
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3])
+  // reject non-real calendar dates (2026-02-31, 2026-13-99): a format/regex pass is not enough — Date.UTC
+  // silently overflows them into another day, corrupting eligibility/tier/proration. Round-trip check.
+  const dt = new Date(Date.UTC(y, mo - 1, d))
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() + 1 !== mo || dt.getUTCDate() !== d) return null
+  return { y, m: mo, d, str: s }
 }
 
 // Completed whole calendar years from `start` to `asOf` (累计满N年, anniversary count).
@@ -15474,9 +15479,13 @@ function computeAnnualLeaveAccrualForUser(policy, user, period, asOfParts) {
   // tenure anchor (eligibility + tier) by mode; proration always uses hire_date (本单位).
   const tenureAnchor = policy.tenureMode === 'company_tenure' ? hireParts : cumulativeParts
   if (!tenureAnchor) return { ...blank, skipReason: 'MISSING_SERVICE_START_DATE' }
+  // hire_date (本单位入职日) is required in ALL modes: it is the employment fact AND the §5 proration
+  // anchor. Missing it must SKIP visibly — never silently full-grant a user whose 本单位 fact is unknown
+  // (a cumulative anchor alone is not enough; that would be a silent wrong-grant).
+  if (!hireParts) return { ...blank, skipReason: 'MISSING_HIRE_DATE' }
   // not yet employed at 本单位 as-of asOf (a pre-boarded user whose hire_date is in the future relative
   // to the run) → no entitlement here, even if the cumulative anchor would pass eligibility.
-  if (hireParts && annualLeaveDateAfter(hireParts, asOfParts)) {
+  if (annualLeaveDateAfter(hireParts, asOfParts)) {
     return { ...blank, skipReason: 'NOT_YET_HIRED' }
   }
   // eligibility: 连续工作满12个月 as-of asOf — the gate, BEFORE any tier/proration.
@@ -15537,7 +15546,18 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
     [orgId, periodKey, annualLeavePolicyVersion(policy), policy.tenureMode, policy.timezone, policy.standardDayMinutes, JSON.stringify(policy.tiers ?? []), !!dryRun, asOfParts.str]
   )
   const runId = runRows[0].id
-  const users = await trx.query(`SELECT id, hire_date, cumulative_service_start_date FROM users WHERE is_active = true ORDER BY id`, [])
+  // Org-scoped (via user_orgs) — only THIS org's active members. NOT the global users table, else an
+  // accrual triggered for one org would write run_items + create org-scoped lots for OTHER orgs' users
+  // (cross-tenant bleed). Mirrors loadAttendanceReportRecordsSyncUserPage. v1 scans all org members in one
+  // transaction (fine for typical orgs); very large orgs may need batch/chunking — a documented follow-up.
+  const users = await trx.query(
+    `SELECT u.id, u.hire_date, u.cumulative_service_start_date
+       FROM user_orgs uo
+       JOIN users u ON u.id = uo.user_id
+      WHERE uo.org_id = $1 AND uo.is_active = true AND u.is_active = true
+      ORDER BY u.id ASC`,
+    [orgId]
+  )
   const summary = { runId, periodKey, asOf: asOfParts.str, dryRun: !!dryRun, granted: 0, skipped: 0, grantedMinutes: 0, lotsCreated: 0, alreadyGranted: 0, skipReasons: {} }
   for (const user of users) {
     const r = computeAnnualLeaveAccrualForUser(policy, user, period, asOfParts)

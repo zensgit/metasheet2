@@ -4908,13 +4908,19 @@ attendanceIntegrationDescribe(
     if (!token) { await pool.end().catch(() => undefined); return }
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
     const U = (tag: string) => `al-l2b-${runSuffix}-${tag}`
-    const seedUser = async (tag: string, hireDate: string | null, cumulative: string | null) => {
+    const seedUser = async (tag: string, hireDate: string | null, cumulative: string | null, org = 'default') => {
       const id = U(tag)
       await pool.query(
         `INSERT INTO users (id, email, password_hash, is_active, hire_date, cumulative_service_start_date)
          VALUES ($1, $2, 'no-login', true, $3, $4)
          ON CONFLICT (id) DO UPDATE SET is_active = true, hire_date = EXCLUDED.hire_date, cumulative_service_start_date = EXCLUDED.cumulative_service_start_date`,
         [id, `${id}@example.com`, hireDate, cumulative],
+      )
+      // org membership — accrual is scoped via user_orgs, so a seeded user only participates in `org`.
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [id, org],
       )
       return id
     }
@@ -4946,6 +4952,12 @@ attendanceIntegrationDescribe(
       const uBound = await seedUser('bound', '2016-12-31', '2016-12-31')  // exactly 10yr as-of 12-31 → tier 10 (not 5) → 4800
       const uMay27 = await seedUser('may27', '2026-05-27', '2020-01-01')  // tier 5, hired 5-27 → 219 days → 219×5/365 = 3.0 → floor 3 → 1440 (float-floor bug would give 2/960)
       const uFuture = await seedUser('future', '2027-01-01', '2010-01-01') // hire_date after asOf 12-31 → NOT_YET_HIRED
+      const uOther = await seedUser('other', '2010-01-01', '2010-01-01', `al-l2b-otherorg-${runSuffix}`) // active in ANOTHER org → must NOT appear in this org's run
+      const uMissHire = await seedUser('misshire', null, '2010-01-01') // cumulative present, hire_date null → MISSING_HIRE_DATE (never a silent full-grant)
+
+      // P2: a calendar-invalid asOf is rejected (not silently overflowed by Date.UTC).
+      const badAsOfRes = await requestJson(`${baseUrl}/api/attendance/annual-leave-accrual/run`, { method: 'POST', headers, body: JSON.stringify({ period, asOf: '2026-02-31', dryRun: true }) })
+      expect(badAsOfRes.status).toBe(400)
 
       // (A) DRY-RUN → run + run_items persisted, NO lots; consumes no source_key.
       const dryRes = await runAccrual(true)
@@ -4970,6 +4982,12 @@ attendanceIntegrationDescribe(
       expect(await itemFor(realRunId, uMay27)).toMatchObject({ status: 'granted', tier_days: 5, entitlement_minutes: 1440 })
       // P3: hire_date after asOf → not yet employed at 本单位.
       expect(await itemFor(realRunId, uFuture)).toMatchObject({ status: 'skipped', skip_reason: 'NOT_YET_HIRED' })
+      // P1 (cross-tenant isolation): another org's active user gets NO run_item and NO lot in this org's run.
+      expect(await itemFor(realRunId, uOther)).toBeUndefined()
+      expect((await lotsFor(uOther)).length).toBe(0)
+      // P1 (missing hire_date in cumulative mode → visible skip, never a silent full-grant).
+      expect(await itemFor(realRunId, uMissHire)).toMatchObject({ status: 'skipped', skip_reason: 'MISSING_HIRE_DATE' })
+      expect((await lotsFor(uMissHire)).length).toBe(0)
 
       // lots + provenance back-link (lot.source_id → run_item.id).
       const fullLots = await lotsFor(uFull)
@@ -4993,7 +5011,8 @@ attendanceIntegrationDescribe(
       expect((reRes.body as { data?: { lotsCreated?: number } } | undefined)?.data?.lotsCreated).toBe(0)
     } finally {
       await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ annualLeavePolicy: origPolicy }) }).catch(() => undefined)
-      const ids = ['full', 'pror', 'ineli', 'miss', 'tiny', 'bound', 'may27', 'future'].map(t => U(t)).concat([adminId])
+      const ids = ['full', 'pror', 'ineli', 'miss', 'tiny', 'bound', 'may27', 'future', 'other', 'misshire'].map(t => U(t)).concat([adminId])
+      await pool.query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [ids]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])`, [ids]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])`, [ids]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_leave_accrual_runs WHERE period_key = $1`, [`annual:${period}`]).catch(() => undefined)
