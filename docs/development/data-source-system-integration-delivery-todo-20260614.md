@@ -16,10 +16,10 @@
   C5 K3/MSSQL smoke gate #2670 已在 `dea391a1` 包上通过并关闭：operator scope-adjusted rerun
   中 generic SQL Server smoke 和 K3 SQL Server executor smoke 均 PASS，且 evidence values-free、无 K3
   Save/Submit/Audit/BOM、无外部 DB 写、无 raw SQL。#2700 已补 C5 runbook 的 SQL auth/scope triage。
-- 下一门: C6-3 apply route。C6 是最大风险刀；C6-0 只锁 design contract，
+- 下一门: C6-4 UI / C6-5 entity-machine smoke。C6 是最大风险刀；C6-0 只锁 design contract，
   C6-1 只落地 backend latent writer helper 和 write-gated target adapter 的关闭态合同；
   C6-2 只增加 read-only dry-run route + dry-run token，不授权 apply runtime 或 external write。
-  C6-3+ 仍需逐片 opt-in、复审、fresh CI 和实体机 gate。
+  C6-3 增加 token-bound apply route；C6-4/C6-5 仍需逐片 opt-in、复审、fresh CI 和实体机 gate。
 
 ## 收口顺序
 
@@ -30,7 +30,7 @@
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
-| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3+ gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
+| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4/C6-5 gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
 | Release | 总包 + 实体机验收 | gated | 交付签收 | 包内容/部署/证据不完整 |
 
 ## P0 - ②b Arc 收口 Follow-Up
@@ -387,7 +387,21 @@ TODO:
     dry-run token only for apply-eligible plans.
   - response/evidence are values-free; token is returned for future C6-3 apply but is not included in evidence.
   - boundary: no apply route, no UI, no insert/update/upsert/delete, no package, no K3。
-- [ ] C6-3 apply route: token-bound，permission-bound，per-row result。
+- [x] C6-3 apply route: token-bound，permission-bound，per-row result。
+  - route: `POST /api/integration/pipelines/:id/external-write/apply`。
+  - request body only accepts `tenantId` / `workspaceId` / `confirm.dryRunToken`；client-supplied
+    `source` / `target` / `plan` / `payload` 等 scope/payload 字段在 pipeline load 前拒绝。
+  - apply requires integration write/admin and the same authenticated principal that produced the dry-run token.
+  - token is single-use and revision-bound；apply consumes the token, recomputes the same server-side plan,
+    and rejects before any write if source/target/capability/mapping/lookup/decision drifted。
+  - host durable plugin storage provides atomic token consume (`DELETE ... RETURNING`)；non-durable local/test
+    storage is additionally guarded by an in-process per-token lock。
+  - writes only apply-eligible `add`/`update` rows through `context.api.dataSourceWrites` structured
+    `insertRows` / `updateRows`; `skip` rows are no-write, conflicted/held rows remain blocked by the
+    apply-eligible dry-run requirement。
+  - row write failures are isolated and returned as values-free counts/error codes; response/evidence never echoes
+    the bearer token, row values, credentials, connection strings, raw SQL, target payloads, or dataSourceId secrets。
+  - boundary: no UI, no package, no C6 entity-machine smoke yet, no delete/raw SQL/generic query, no K3。
 - [ ] C6-4 UI: dry-run -> review -> apply。
 - [ ] C6-5 entity-machine smoke: apply、re-pull、rollback。
 
@@ -406,12 +420,14 @@ TODO:
 
 - [ ] `data-source:sql-readonly` 读是否必须进入同一运行账本。
 - [ ] DB source run 是否产出 provenance。
-- [ ] per-row failure 是否进入 dead-letter。
+- [x] C6 apply per-row failure 进入 values-free dead-letter / provenance（C6-3 route 已接线；C2/C3 read/run
+  观测层是否统一纳入仍待 Release 前定清）。
 - [ ] 是否接入既有 run-record / DF-N 监控面。
 
 完成条件:
 
-- 如果要求纳入统一 Data Factory 运行账本，C3/C6 必须补 provenance/dead-letter/run-record 接线和测试。
+- 如果要求纳入统一 Data Factory 运行账本，C3/C2 read/run 侧仍需补 provenance/dead-letter/run-record
+  接线和测试；C6 apply 侧已由 C6-3 route 写入 run/provenance/dead-letter。
 - 如果暂不纳入，Release 文档必须明确这是另一条 track，不得把“可读”误描述为“已接入完整 DF 观测层”。
 - C6 per-row result 字段必须有 wire-vs-fixture 集成测试，断言真实 route body/response，不只测 helper fixture。
 

@@ -169,6 +169,7 @@ export interface PluginStorage {
   durable?: boolean
   get: (key: string) => Promise<unknown>
   set: (key: string, value: unknown) => Promise<void>
+  consume?: (key: string) => Promise<unknown>
   delete: (key: string) => Promise<void>
   list: () => Promise<string[]>
 }

@@ -1,6 +1,6 @@
 # Data Source System Integration C6 - External Write Design
 
-Status: C6-0 design + C6-1 latent target + C6-2 dry-run route; no apply runtime / no external write
+Status: C6-0 design + C6-1 latent target + C6-2 dry-run route + C6-3 token-bound apply route; C6-4 UI / C6-5 entity-machine validation still gated
 Date: 2026-06-16
 
 ## Purpose
@@ -370,6 +370,29 @@ Required locks:
 - no automatic retry;
 - target writes stay within configured object and writable fields.
 
+Implemented shape:
+
+- route: `POST /api/integration/pipelines/:id/external-write/apply`;
+- request body accepts only `tenantId`, `workspaceId`, and
+  `confirm.dryRunToken`;
+- route requires integration write/admin permission;
+- apply consumes the token once, recomputes the same server-side dry-run plan,
+  and rejects revision drift before any insert/update;
+- host durable plugin storage exposes atomic token `consume()` (`DELETE ...
+  RETURNING`) and the apply helper falls back to an in-process per-token lock
+  only for non-durable test/local storage;
+- source reads and target writes use `pipeline.createdBy` as the data-source
+  owner principal; the authenticated user only authorizes apply;
+- per-row write failures emit values-free row error summaries, values-free
+  provenance events, and values-free dead-letter entries when the host
+  `deadLetterStore.createDeadLetter` capability is present;
+- when the route creates a pipeline run, dead-letter and provenance entries use
+  that real `run.id` so existing run/provenance/dead-letter lookup surfaces can
+  find the C6 row results;
+- response is values-free and does not echo the bearer token, row values,
+  credentials, connection strings, raw SQL, target payloads, or client-provided
+  scope.
+
 ### C6-4 - UI
 
 Add a review surface:
@@ -410,11 +433,11 @@ Only after C6-5 passes can the Release gate discuss production/batch.
 - [x] C6-1 target adapter is latent: metadata/test/schema only; `upsert` stays
   unsupported until C6-3 token-bound apply.
 - [x] Dry-run is read-only and token-producing.
-- [ ] Apply requires write/admin permission plus fresh single-use token.
-- [ ] Revision fencing is hard; mismatch blocks before write.
-- [ ] Per-row failures are isolated and observable.
-- [ ] Dead-letter/provenance are values-free.
-- [ ] No raw SQL, delete, stored procedure, CTE, trigger, or user SQL path.
+- [x] Apply requires write/admin permission plus fresh single-use token.
+- [x] Revision fencing is hard; mismatch blocks before write.
+- [x] Per-row failures are isolated and observable.
+- [x] Dead-letter/provenance are values-free.
+- [x] No raw SQL, delete, stored procedure, CTE, trigger, or user SQL path.
 - [ ] Max-in-flight/circuit-breaker/batch limits protect the external target.
 - [ ] Entity-machine smoke proves apply, re-pull idempotence, and rollback
   posture before production.
