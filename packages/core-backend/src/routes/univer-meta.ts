@@ -5680,6 +5680,15 @@ export function univerMetaRouter(): Router {
     ])
     const isRestorableType = (t: string): boolean => !NON_RESTORABLE_TYPES.has(t)
     const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+    // Link state is authoritative in meta_links, which is an unordered SET — so a pure reorder of the
+    // data-mirror id array is NOT a meaningful change and must not emit a spurious SET (version bump +
+    // data reorder while meta_links is unchanged). Compare link ids order-insensitively.
+    const sameLinkSet = (a: string[], b: string[]): boolean => {
+      if (a.length !== b.length) return false
+      const sa = [...a].sort()
+      const sb = [...b].sort()
+      return sa.every((v, i) => v === sb[i])
+    }
 
     try {
       const pool = poolManager.get()
@@ -5754,12 +5763,19 @@ export function univerMetaRouter(): Router {
         (rawTypeRes.rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]),
       )
 
-      // Schema drift: a snapshot field id absent from the current schema cannot be restored.
-      // (A type-change since capture is not detectable without a stored schema snapshot; the value
-      //  validators in the spine act as the backstop, rejecting an incompatible old value.)
-      for (const fid of Object.keys(targetSnapshot)) {
-        if (!fieldById.has(fid)) {
-          return res.status(422).json({ ok: false, error: { code: 'SCHEMA_DRIFT', message: `Field ${fid} in revision ${targetVersion} no longer exists in the current schema` } })
+      // Schema drift: a snapshot field id absent from the current schema means version N cannot be
+      // faithfully reproduced. This is checked ONLY for FULL-record restore. For per-field (`fieldIds`)
+      // a requested field missing from the schema — whether deleted-since (and still in the snapshot) or
+      // never-existed — simply falls through to the empty selected diff (200 no-op), matching the
+      // contract. Critically it must NOT 422 on a per-field request: a 422-vs-200 split would let an
+      // actor probe `fieldIds` to learn whether a now-deleted field existed in this revision's snapshot
+      // (the same probe class as the hidden-field leak closed below). (A type-change since capture is not
+      // detectable without a stored schema snapshot; the spine value validators backstop bad values.)
+      if (!fieldIds) {
+        for (const fid of Object.keys(targetSnapshot)) {
+          if (!fieldById.has(fid)) {
+            return res.status(422).json({ ok: false, error: { code: 'SCHEMA_DRIFT', message: `Field ${fid} in revision ${targetVersion} no longer exists in the current schema` } })
+          }
         }
       }
 
@@ -5779,7 +5795,7 @@ export function univerMetaRouter(): Router {
         // snapshot or current value is parsed identically to the write path, not mis-read as one id.
         if (guard.type === 'link') {
           const target = inSnap ? normalizeLinkIds(targetSnapshot[fid]) : []
-          if (!sameValue(normalizeLinkIds(currentData[fid]), target)) {
+          if (!sameLinkSet(normalizeLinkIds(currentData[fid]), target)) {
             diff.push({ recordId, fieldId: fid, value: target, expectedVersion: currentVersion, op: 'set' })
           }
           continue
@@ -5798,7 +5814,23 @@ export function univerMetaRouter(): Router {
       // selection. The atomic gate below then runs over only the selected subset — so a user can restore
       // the writable fields they picked even if another changed field in the revision is forbidden. A
       // requested field that is unchanged / non-restorable / unknown simply isn't in the diff (no error).
-      const selectedDiff = fieldIds ? diff.filter((ch) => fieldIds.includes(ch.fieldId)) : diff
+      //
+      // Security: a requested field the actor cannot SEE (statically hidden, or layer-3 visible=false) is
+      // treated as unknown — dropped here rather than reaching the gate. Otherwise a 403 (the field
+      // changed) vs 200 no-op (it didn't, or doesn't exist) would let an actor probe `fieldIds` to learn
+      // a hidden field exists AND changed in this revision. Visible-but-read-only fields stay (their 403
+      // leaks nothing the actor cannot already see).
+      const canSeeField = (fid: string): boolean => {
+        const g = fieldById.get(fid)
+        if (!g || g.hidden) return false
+        return fieldPermissions[fid]?.visible !== false
+      }
+      // INVARIANT (do not reorder): canSeeField is applied HERE, so invisible fields are dropped from
+      // selectedDiff BEFORE the hasForbidden gate below. Moving this visibility filter to after the gate
+      // would make an invisible-but-changed field 403 instead of no-op, reopening the hidden-field probe.
+      const selectedDiff = fieldIds
+        ? diff.filter((ch) => fieldIds.includes(ch.fieldId) && canSeeField(ch.fieldId))
+        : diff
 
       // Lock B: gate every (selected) diff field on BOTH the static guard and restore's own layer-3 pre-check.
       const hasForbidden = selectedDiff.some((ch) => {

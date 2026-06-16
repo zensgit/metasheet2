@@ -145,6 +145,8 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
 
     // Layer-3: USER_RO is read_only on SECRET (and a separate visible=false would also gate).
     await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [SHEET_ID, FLD_SECRET, 'user', USER_RO, true, true])
+    // USER_RO cannot SEE FLD_B (visible=false) — used by the per-field response-code-leak test.
+    await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [SHEET_ID, FLD_B, 'user', USER_RO, false, false])
   })
 
   beforeEach(() => {
@@ -592,5 +594,108 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     expect(res.status).toBe(200)
     expect(res.body.data.noop).toBe(true)
     expect((await liveData(rid))[FLD_A]).toBe('a2') // A unchanged (not selected)
+  })
+
+  // ---- Adversarial-review fixes ----
+  test('T18 (review fix): per-field restore of an available field is NOT blocked by a non-requested drifted field; full restore still SCHEMA_DRIFTs', async () => {
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', ghost_gone_field: 'x' } }, { version: 2, snapshot: { [FLD_A]: 'a2' } }],
+    )
+    // full restore → still rejects (the ghost field can't be reproduced). No mutation.
+    const full = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
+    expect(full.status).toBe(422)
+    expect(full.body.error.code).toBe('SCHEMA_DRIFT')
+    // probe closed (run BEFORE the mutating restore — these are no-ops at version 2): requesting the
+    // DELETED field that IS in the snapshot must give the SAME 200 no-op as a never-existed field — no
+    // 422-vs-200 split that would reveal it existed here.
+    const probeDeleted = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: ['ghost_gone_field'] })
+    expect(probeDeleted.status).toBe(200)
+    expect(probeDeleted.body.data.noop).toBe(true)
+    const probeNever = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [`never_${TS}`] })
+    expect(probeNever.status).toBe(200)
+    expect(probeNever.body.data.noop).toBe(true)
+    // per-field [A] → succeeds; the non-requested ghost field is not checked (mutates to version 3)
+    const partial = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_A] })
+    expect(partial.status).toBe(200)
+    expect((await liveData(rid))[FLD_A]).toBe('a1')
+  })
+
+  test('T19 (review fix): requesting an invisible field gives the SAME 200 no-op as requesting an unknown field (no 403 existence/change leak)', async () => {
+    // current B='b2' differs from v1 B='b1'; USER_RO cannot SEE FLD_B (visible=false).
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_B]: 'b2' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_B]: 'b1' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_B]: 'b2' } }],
+    )
+    testUserId = USER_RO
+    // probe the invisible-but-CHANGED field → must be a 200 no-op, not 403 (leak closed)
+    const hidden = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_B] })
+    expect(hidden.status).toBe(200)
+    expect(hidden.body.data.noop).toBe(true)
+    // an unknown field → also 200 no-op → indistinguishable from the hidden-field probe
+    const unknown = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [`ghost_${TS}`] })
+    expect(unknown.status).toBe(200)
+    expect(unknown.body.data.noop).toBe(true)
+    // a visible+writable field still restores normally for the same actor
+    const visible = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_A] })
+    expect(visible.status).toBe(200)
+    expect(visible.body.data.restoredFieldIds).toEqual([FLD_A])
+  })
+
+  test('T21 (review hardening): deleted-in-snapshot, never-existed, and hidden-changed per-field probes return a BYTE-IDENTICAL 200 no-op body (full A≡B≡C lock)', async () => {
+    // One fixture, one actor (USER_RO). Under this actor the three per-field probes are:
+    //   A = ghost_gone_field : present in the v1 snapshot, DELETED from the schema since
+    //   B = never_<ts>       : NEVER existed
+    //   C = FLD_B            : exists, CHANGED v1→current, but INVISIBLE to USER_RO (visible=false)
+    // All three must be indistinguishable: identical status AND identical response body. Locking the
+    // FULL body (not just status+noop, as T18/T19 do) closes the regression where a dropped/unknown/
+    // hidden requested id is echoed back in restoredFieldIds or skippedFieldIds — which would reopen the
+    // field-existence probe without tripping the status/noop assertions.
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_B]: 'b2' },
+      2,
+      [
+        { version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_B]: 'b1', ghost_gone_field: 'x' } },
+        { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_B]: 'b2' } },
+      ],
+    )
+    testUserId = USER_RO
+    const a = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: ['ghost_gone_field'] }) // deleted-in-snapshot
+    const b = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [`never_${TS}`] })       // never-existed
+    const c = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_B] })               // hidden + changed
+    expect(a.status).toBe(200)
+    expect(b.status).toBe(200)
+    expect(c.status).toBe(200)
+    // FULL body equality across all three — the probe-closing invariant
+    expect(a.body.data).toEqual(b.body.data)
+    expect(b.body.data).toEqual(c.body.data)
+    // and the exact no-op shape: nothing restored, nothing echoed back, version unmoved
+    expect(a.body.data.noop).toBe(true)
+    expect(a.body.data.restoredFieldIds).toEqual([])
+    expect(a.body.data.skippedFieldIds).toEqual([])
+    // none of the probes mutated the record (still at version 2, original values intact)
+    const live = await liveData(rid)
+    expect(live[FLD_A]).toBe('a2')
+    expect(live[FLD_B]).toBe('b2')
+  })
+
+  test('T20 (review fix): a pure link reorder is a no-op (no spurious version bump) — meta_links is an unordered set', async () => {
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC, FOREIGN_REC2] },
+      2,
+      [
+        { version: 1, action: 'create', snapshot: { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC2, FOREIGN_REC] } }, // same set, reordered
+        { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_LK]: [FOREIGN_REC, FOREIGN_REC2] } },
+      ],
+    )
+    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_${TS}_r1_${recordSeq}`, FLD_LK, rid, FOREIGN_REC])
+    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_${TS}_r2_${recordSeq}`, FLD_LK, rid, FOREIGN_REC2])
+    const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
+    expect(res.status).toBe(200)
+    expect(res.body.data.noop).toBe(true) // reorder-only → no diff → no version bump
+    const ver = await q('SELECT version FROM meta_records WHERE id = $1', [rid])
+    expect(Number((ver.rows[0] as { version: number }).version)).toBe(2) // unchanged
   })
 })
