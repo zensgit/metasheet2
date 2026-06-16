@@ -264,6 +264,7 @@
           :ai-run-pending="Boolean(aiShortcut.state.pending)"
           :ai-run-busy="aiShortcutBusy"
           :button-run-pending="buttonRunPending"
+          :fetch-record="fetchLinkedRecordFn"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
@@ -665,6 +666,11 @@ async function onRunButton({ recordId, field }: { recordId: string; field: MetaF
 const aiPreviewFn = (params: { recordId: string; config: AiShortcutConfigInput }) =>
   aiShortcut.previewWithConfig(params.recordId, params.config)
 const aiUsageSummaryFn = () => workbench.client.aiUsageSummary()
+// A3: cross-sheet linked-record fetcher for the clickable link-chip popover.
+// NO sheetId/viewId — the foreign record may live in another sheet and resolves
+// by its global id under the backend field mask (the current sheetId would
+// mis-scope and 404). Threaded into MetaGridTable → MetaCellRenderer.
+const fetchLinkedRecordFn = (recordId: string) => workbench.client.getRecord(recordId)
 // M4 / Lane B2: NL→formula suggest routes through the SAME composable guard
 // (sheet-scoped; the unified pending/countdown covers this entry point too).
 const formulaSuggestFn = (params: { instruction: string }) =>

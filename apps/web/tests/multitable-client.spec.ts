@@ -966,4 +966,20 @@ describe('MultitableApiClient', () => {
     expect(parseRetryAfterMs('')).toBeUndefined()
     expect(parseRetryAfterMs('not-a-delay')).toBeUndefined()
   })
+
+  // A3: the clickable-link-chip popover fetches the foreign record by global id
+  // with NO sheetId/viewId (cross-sheet records resolve under the backend mask;
+  // a host sheetId would mis-scope and 404). Lock the URL has no query string.
+  it('getRecord without params requests the record endpoint with no query string', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { record: { id: 'rec_1', data: {} }, fields: [] },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.getRecord('rec_1')
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/records/rec_1')
+  })
 })
