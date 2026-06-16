@@ -5051,8 +5051,11 @@ attendanceIntegrationDescribe(
     const adjust = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/annual-leave-manual-adjustment`, { method: 'POST', headers, body: JSON.stringify(body) })
     const lotsFor = async (userId: string) => (await pool.query(
       `SELECT id, amount_minutes, remaining_minutes, source_type, source_id, source_key, status FROM attendance_leave_balances WHERE user_id = $1 AND leave_type_code = 'annual' ORDER BY created_at`, [userId])).rows
+    // NOTE: id is a random uuid (gen_random_uuid) → ORDER BY id is NOT insertion order. Order deterministically
+    // by occurred_at, and (decisively) assert events by event_type below, never by array position.
     const eventsFor = async (userId: string) => (await pool.query(
-      `SELECT event_type, delta_minutes, source_type, source_id FROM attendance_leave_balance_events WHERE user_id = $1 ORDER BY id`, [userId])).rows
+      `SELECT event_type, delta_minutes, source_type, source_id FROM attendance_leave_balance_events WHERE user_id = $1 ORDER BY occurred_at, event_type`, [userId])).rows
+    const eventsOfType = (rows: Array<{ event_type?: string }>, type: string) => rows.filter((e) => e.event_type === type)
     const regFor = async (sourceKey: string) => (await pool.query(
       `SELECT id, delta_minutes, reason, created_by, run_id, source_key FROM attendance_leave_manual_adjustments WHERE org_id = 'default' AND source_key = $1`, [sourceKey])).rows[0]
     const otherOrg = `al-l2c-otherorg-${runSuffix}`
@@ -5122,8 +5125,10 @@ attendanceIntegrationDescribe(
       expect(lots1[0].source_key).toBe(`annual_manual_adjust:${reg.id}`)
       const ev1 = await eventsFor(uPos)
       expect(ev1.length).toBe(1)
-      expect(ev1[0]).toMatchObject({ event_type: 'grant', source_type: 'annual_manual_adjust' })
-      expect(Number(ev1[0].delta_minutes)).toBe(2400)
+      const grants1 = eventsOfType(ev1, 'grant')
+      expect(grants1.length).toBe(1)
+      expect(grants1[0]).toMatchObject({ source_type: 'annual_manual_adjust' })
+      expect(Number((grants1[0] as { delta_minutes: number }).delta_minutes)).toBe(2400)
 
       // (B) idempotency: replay the SAME idempotencyKey → no-op (applied:false / alreadyApplied:true); still
       // exactly one lot, one grant event, one registry row.
@@ -5151,8 +5156,15 @@ attendanceIntegrationDescribe(
       expect(Number(lots2[0].remaining_minutes)).toBe(1400)
       const ev2 = await eventsFor(uPos)
       expect(ev2.length).toBe(2)
-      expect(ev2[1]).toMatchObject({ event_type: 'deduct', source_type: 'annual_manual_adjust' })
-      expect(Number(ev2[1].delta_minutes)).toBe(-1000)
+      // assert by type, NOT array position (event id is a random uuid → order is not insertion order).
+      const deducts2 = eventsOfType(ev2, 'deduct')
+      expect(deducts2.length).toBe(1)
+      expect(deducts2[0]).toMatchObject({ source_type: 'annual_manual_adjust' })
+      expect(Number((deducts2[0] as { delta_minutes: number }).delta_minutes)).toBe(-1000)
+      // the original grant is still present and unchanged.
+      const grants2 = eventsOfType(ev2, 'grant')
+      expect(grants2.length).toBe(1)
+      expect(Number((grants2[0] as { delta_minutes: number }).delta_minutes)).toBe(2400)
       expect(await regFor('annual_manual_adjust:k-neg')).toMatchObject({ delta_minutes: -1000 })
 
       // (D) negative insufficient → 422 + the WHOLE txn rolls back: no registry row, remaining unchanged, no new event.
