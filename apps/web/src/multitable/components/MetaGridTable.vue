@@ -351,6 +351,7 @@ import type {
 } from '../types'
 import type { SortRule } from '../composables/useMultitableGrid'
 import { composeStyleObject, type EvaluatedFormatting, type FieldScaleMap } from '../utils/conditional-formatting'
+import { glyphForIconKey, type ScaleIconGlyph } from '../utils/scale-icons'
 
 interface ConditionalFormattingByRecord {
   byRecordId: Map<string, EvaluatedFormatting>
@@ -697,23 +698,12 @@ function isButtonPending(rid: string, fid: string): boolean {
 }
 
 // A5-3 icon set render: map an `iconKey` (`${set}:${index}`) to a glyph + color.
-// The backend (conditional-formatting-service) only emits index ∈ {0,1,2}; an
-// out-of-range or unknown set yields no icon (fail-safe).
-const SCALE_ICON_GLYPHS: Record<string, ReadonlyArray<{ glyph: string; color: string }>> = {
-  arrows3: [{ glyph: '↓', color: '#e53935' }, { glyph: '→', color: '#fb8c00' }, { glyph: '↑', color: '#43a047' }],
-  traffic3: [{ glyph: '●', color: '#e53935' }, { glyph: '●', color: '#fbc02d' }, { glyph: '●', color: '#43a047' }],
-  signs3: [{ glyph: '✕', color: '#e53935' }, { glyph: '!', color: '#fb8c00' }, { glyph: '✓', color: '#43a047' }],
-}
-function cellScaleIcon(rid: string, fid: string): { glyph: string; color: string } | null {
+// The glyph table is shared with the authoring dialog (utils/scale-icons) so the
+// in-dialog preview matches the grid render exactly.
+function cellScaleIcon(rid: string, fid: string): ScaleIconGlyph | null {
   const entry = props.conditionalFormattingScale?.byField[fid]?.byRecordId[rid]
   if (!entry || typeof entry.iconKey !== 'string') return null
-  const sep = entry.iconKey.lastIndexOf(':')
-  if (sep < 0) return null
-  const set = entry.iconKey.slice(0, sep)
-  const idx = Number(entry.iconKey.slice(sep + 1))
-  const glyphs = SCALE_ICON_GLYPHS[set]
-  if (!glyphs || !Number.isInteger(idx) || idx < 0 || idx >= glyphs.length) return null
-  return glyphs[idx]
+  return glyphForIconKey(entry.iconKey)
 }
 
 // ── frozen columns (left-prefix) ──────────────────────────────────────────
