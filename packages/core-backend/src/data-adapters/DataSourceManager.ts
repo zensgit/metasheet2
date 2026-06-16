@@ -12,8 +12,34 @@ import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretVa
 // convention).
 const SENSITIVE_CREDENTIAL_KEYS = ['password', 'apiKey', 'token']
 export const SUPPORTED_DATA_SOURCE_TYPES = ['postgresql', 'postgres', 'http', 'sqlserver', 'mysql'] as const
+export const DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED'
+export const DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED'
 
 type AdapterConstructor = new (config: DataSourceConfig) => BaseDataAdapter
+
+function optionIsTrue(options: AdapterOptions | undefined, key: string): boolean {
+  return options?.[key] === true
+}
+
+export function isC6WriteTargetConfig(config: Pick<DataSourceConfig, 'options'>): boolean {
+  return optionIsTrue(config.options, 'c6WriteTarget') && optionIsTrue(config.options, 'genericQueryDisabled')
+}
+
+export function isGenericQueryDisabledConfig(config: Pick<DataSourceConfig, 'options'>): boolean {
+  return optionIsTrue(config.options, 'c6WriteTarget') || optionIsTrue(config.options, 'genericQueryDisabled')
+}
+
+export function c6WriteTargetQueryDisabledMessage(dataSourceId: string): string {
+  return `data source '${dataSourceId}' is reserved for C6 write-gated targets; generic raw query is disabled`
+}
+
+export function c6WriteTargetDeleteUnsupportedMessage(dataSourceId: string): string {
+  return `data source '${dataSourceId}' is reserved for C6 write-gated targets; generic delete is unsupported`
+}
+
+export function c6WriteTargetCopyUnsupportedMessage(dataSourceId: string): string {
+  return `data source '${dataSourceId}' is reserved for C6 write-gated targets; generic copy is unsupported`
+}
 
 // Database record types
 interface DataSourceRecord {
@@ -521,6 +547,9 @@ export class DataSourceManager extends EventEmitter {
     params?: DbValue[]
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
+    if (isGenericQueryDisabledConfig(adapter.getConfig())) {
+      throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
+    }
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -581,6 +610,9 @@ export class DataSourceManager extends EventEmitter {
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
+    if (isC6WriteTargetConfig(adapter.getConfig())) {
+      throw new Error(c6WriteTargetDeleteUnsupportedMessage(dataSourceId))
+    }
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -604,6 +636,12 @@ export class DataSourceManager extends EventEmitter {
     const startTime = Date.now()
     const sourceAdapter = this.getDataSource(sourceId)
     const targetAdapter = this.getDataSource(targetId)
+    if (isGenericQueryDisabledConfig(sourceAdapter.getConfig())) {
+      throw new Error(c6WriteTargetQueryDisabledMessage(sourceId))
+    }
+    if (isGenericQueryDisabledConfig(targetAdapter.getConfig())) {
+      throw new Error(c6WriteTargetCopyUnsupportedMessage(targetId))
+    }
 
     if (!sourceAdapter.isConnected()) {
       await this.connectDataSource(sourceId)
@@ -664,6 +702,9 @@ export class DataSourceManager extends EventEmitter {
     // Execute queries in parallel
     const promises = queries.map(async ({ dataSourceId, sql, params, alias }) => {
       const adapter = this.getDataSource(dataSourceId)
+      if (isGenericQueryDisabledConfig(adapter.getConfig())) {
+        throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
+      }
 
       if (!adapter.isConnected()) {
         await this.connectDataSource(dataSourceId)

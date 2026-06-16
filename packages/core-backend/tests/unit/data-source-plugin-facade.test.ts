@@ -2,12 +2,17 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   createDataSourcePluginFacade,
+  createDataSourceWritePluginFacade,
   DATA_SOURCE_NOT_FOUND_CODE,
   DATA_SOURCE_NOT_READ_ONLY_CODE,
+  DATA_SOURCE_NOT_C6_WRITE_TARGET_CODE,
+  DATA_SOURCE_NOT_WRITABLE_CODE,
   DATA_SOURCE_PRINCIPAL_REQUIRED_CODE,
   DATA_SOURCE_QUERY_INVALID_CODE,
   DataSourceUnavailableError,
   MISSING_PRINCIPAL_MESSAGE,
+  writeTargetNotC6Message,
+  writeTargetReadOnlyMessage,
   writableSourceMessage,
 } from '../../src/data-adapters/data-source-plugin-facade'
 import type { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
@@ -16,6 +21,8 @@ interface AdapterStubOptions {
   connected?: boolean
   healthy?: boolean
   readOnly?: boolean
+  c6WriteTarget?: boolean
+  genericQueryDisabled?: boolean
 }
 
 function adapterStub(opts: AdapterStubOptions = {}) {
@@ -23,6 +30,17 @@ function adapterStub(opts: AdapterStubOptions = {}) {
     isConnected: () => opts.connected ?? true,
     testConnection: vi.fn(async () => opts.healthy ?? true),
     isReadOnly: () => opts.readOnly ?? true,
+    getConfig: () => ({
+      id: 'pg',
+      name: 'pg',
+      type: 'postgres',
+      connection: {},
+      options: {
+        ...(opts.readOnly === undefined ? {} : { readOnly: opts.readOnly }),
+        ...(opts.c6WriteTarget === undefined ? {} : { c6WriteTarget: opts.c6WriteTarget }),
+        ...(opts.genericQueryDisabled === undefined ? {} : { genericQueryDisabled: opts.genericQueryDisabled }),
+      },
+    }),
     getSchema: vi.fn(async (_schema?: string) => ({ tables: [], views: [] })),
     getTableInfo: vi.fn(async (table: string, _schema?: string) => ({ name: table, columns: [] })),
   }
@@ -44,6 +62,8 @@ function managerStub(opts: ManagerStubOptions = {}) {
     getDataSource: vi.fn(() => adapter),
     connectDataSource: vi.fn(async () => undefined),
     select: vi.fn(async () => ({ data: [{ id: 1 }], metadata: {} })),
+    insert: vi.fn(async (_id: string, _table: string, rows: unknown[]) => ({ data: rows, metadata: {} })),
+    update: vi.fn(async (_id: string, _table: string, data: unknown, where: unknown) => ({ data: [{ data, where }], metadata: {} })),
   }
   return { stub, adapter, manager: stub as unknown as DataSourceManager }
 }
@@ -229,5 +249,100 @@ describe('createDataSourcePluginFacade', () => {
     expect(m.adapter.getTableInfo).not.toHaveBeenCalled()
     expect(m.adapter.testConnection).not.toHaveBeenCalled()
     expect(m.stub.connectDataSource).not.toHaveBeenCalled()
+  })
+})
+
+describe('createDataSourceWritePluginFacade', () => {
+  it('is write-gated by construction — exposes structured methods only, no raw query/delete/credential surface', () => {
+    const facade = createDataSourceWritePluginFacade(() => managerStub().manager)
+    expect(Object.keys(facade).sort()).toEqual([
+      'getSchema',
+      'getTableInfo',
+      'insertRows',
+      'lookupByKey',
+      'test',
+      'updateRows',
+    ])
+    const surface = facade as unknown as Record<string, unknown>
+    for (const forbidden of [
+      'query', 'delete', 'remove', 'credentials', 'connect', 'disconnect',
+      'addDataSource', 'updateDataSource', 'removeDataSource', 'adapter',
+    ]) {
+      expect(surface).not.toHaveProperty(forbidden)
+    }
+  })
+
+  it('fails closed on a missing principal before resolving the manager', async () => {
+    const getManager = vi.fn(() => managerStub().manager)
+    const facade = createDataSourceWritePluginFacade(getManager)
+    await expect(facade.lookupByKey(
+      'pg',
+      'public.items',
+      { id: 1 },
+      { keyFields: ['id'], writableFields: ['name'] },
+      undefined
+    )).rejects.toMatchObject({
+      status: 422,
+      code: DATA_SOURCE_PRINCIPAL_REQUIRED_CODE,
+      message: MISSING_PRINCIPAL_MESSAGE,
+    })
+    expect(getManager).not.toHaveBeenCalled()
+  })
+
+  it('requires an explicitly writable C6 target with generic query disabled', async () => {
+    const readOnly = managerStub({ adapter: adapterStub({ readOnly: true, c6WriteTarget: true, genericQueryDisabled: true }) })
+    const readOnlyFacade = createDataSourceWritePluginFacade(() => readOnly.manager)
+    await expect(readOnlyFacade.test('pg', 'owner-1')).rejects.toMatchObject({
+      status: 422,
+      code: DATA_SOURCE_NOT_WRITABLE_CODE,
+      message: writeTargetReadOnlyMessage('pg'),
+    })
+
+    const notC6 = managerStub({ adapter: adapterStub({ readOnly: false, c6WriteTarget: true, genericQueryDisabled: false }) })
+    const notC6Facade = createDataSourceWritePluginFacade(() => notC6.manager)
+    await expect(notC6Facade.getSchema('pg', 'owner-1')).rejects.toMatchObject({
+      status: 422,
+      code: DATA_SOURCE_NOT_C6_WRITE_TARGET_CODE,
+      message: writeTargetNotC6Message('pg'),
+    })
+    expect(notC6.stub.connectDataSource).not.toHaveBeenCalled()
+  })
+
+  it('lookupByKey forwards only structured equality where and limit=2', async () => {
+    const m = managerStub({ adapter: adapterStub({ readOnly: false, c6WriteTarget: true, genericQueryDisabled: true }) })
+    const facade = createDataSourceWritePluginFacade(() => m.manager)
+    await facade.lookupByKey(
+      'pg',
+      'public.items',
+      { externalId: 'A-1' },
+      { keyFields: ['externalId'], writableFields: ['name', 'status'] },
+      'owner-1'
+    )
+    expect(m.stub.assertAccess).toHaveBeenCalledWith('pg', 'owner-1')
+    expect(m.stub.select).toHaveBeenCalledWith('pg', 'public.items', {
+      limit: 2,
+      where: { externalId: 'A-1' },
+    })
+  })
+
+  it('insertRows and updateRows enforce key/writable field allowlists before writing', async () => {
+    const m = managerStub({ adapter: adapterStub({ readOnly: false, c6WriteTarget: true, genericQueryDisabled: true }) })
+    const facade = createDataSourceWritePluginFacade(() => m.manager)
+    const policy = { keyFields: ['externalId'], writableFields: ['name', 'status'] }
+
+    await facade.insertRows('pg', 'public.items', [{ externalId: 'A-1', name: 'Widget', status: 'new' }], policy, 'owner-1')
+    expect(m.stub.insert).toHaveBeenCalledWith('pg', 'public.items', [{ externalId: 'A-1', name: 'Widget', status: 'new' }])
+
+    await facade.updateRows('pg', 'public.items', [{ externalId: 'A-1', status: 'done' }], policy, 'owner-1')
+    expect(m.stub.update).toHaveBeenCalledWith('pg', 'public.items', { status: 'done' }, { externalId: 'A-1' })
+
+    await expect(
+      facade.insertRows('pg', 'public.items', [{ externalId: 'A-2', name: 'Widget', password: 'secret' }], policy, 'owner-1')
+    ).rejects.toMatchObject({
+      status: 422,
+      code: DATA_SOURCE_QUERY_INVALID_CODE,
+      message: 'rows[0].password is not in keyFields or writableFields',
+    })
+    expect(m.stub.insert).toHaveBeenCalledTimes(1)
   })
 })

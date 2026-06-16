@@ -875,7 +875,7 @@ async function testDiscoveryRoutes() {
     adapterRegistry: {
       listAdapterKinds() {
         calls.push(['listAdapterKinds'])
-        return ['http', 'erp:k3-wise-sqlserver', 'bridge:legacy-sql-readonly', 'metasheet:staging', 'metasheet:multitable', 'data-source:sql-readonly', 'custom:unknown']
+        return ['http', 'erp:k3-wise-sqlserver', 'bridge:legacy-sql-readonly', 'metasheet:staging', 'metasheet:multitable', 'data-source:sql-readonly', 'data-source:sql-write-gated', 'custom:unknown']
       },
       createAdapter(input, deps) {
         calls.push(['createAdapter', input, deps])
@@ -989,6 +989,25 @@ async function testDiscoveryRoutes() {
   assert.deepEqual(dataSourceMetadata.supports, ['testConnection', 'listObjects', 'getSchema', 'read'], 'data-source:sql-readonly supports has no upsert')
   assert.equal(dataSourceMetadata.supports.includes('upsert'), false, 'data-source:sql-readonly never advertises upsert')
   assert.deepEqual(dataSourceMetadata.guardrails.write, { supported: false }, 'data-source:sql-readonly write is unsupported')
+  const writeGatedMetadata = res.body.data.find((adapter) => adapter.kind === 'data-source:sql-write-gated')
+  assert.equal(writeGatedMetadata.label, 'Write-gated SQL data source')
+  assert.equal(writeGatedMetadata.advanced, true)
+  assert.deepEqual(writeGatedMetadata.roles, ['target'], 'write-gated SQL data source is target-only')
+  assert.deepEqual(writeGatedMetadata.supports, ['testConnection', 'listObjects', 'getSchema'], 'C6-1 is latent: no upsert is advertised before token-bound apply')
+  assert.equal(writeGatedMetadata.supports.includes('upsert'), false, 'C6 target must not advertise pipeline upsert in C6-1')
+  assert.deepEqual(writeGatedMetadata.guardrails.read, { supported: false })
+  assert.deepEqual(writeGatedMetadata.guardrails.write, {
+    c6TokenBoundApplyRequired: true,
+    requiresWritableDataSource: true,
+    requiresGenericQueryDisabled: true,
+    noRawSql: true,
+    deleteSupported: false,
+    upsertRuntimeAvailable: false,
+  })
+  assert.deepEqual(writeGatedMetadata.guardrails.ui, {
+    hiddenByDefault: true,
+    serverConfiguredOnly: true,
+  })
   const unknownMetadata = res.body.data.find((adapter) => adapter.kind === 'custom:unknown')
   assert.equal(unknownMetadata.label, 'custom:unknown')
   assert.equal(unknownMetadata.advanced, false)

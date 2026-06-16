@@ -129,7 +129,7 @@ import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
 import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
-import { createDataSourcePluginFacade } from './data-adapters/data-source-plugin-facade'
+import { createDataSourcePluginFacade, createDataSourceWritePluginFacade } from './data-adapters/data-source-plugin-facade'
 import { federationRouter } from './routes/federation'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
@@ -1606,7 +1606,11 @@ export class MetaSheetServer {
     // unknown plugin gets the unchanged api. (A drifted allowlist key fails LOUD in the adapter's
     // context.api.dataSources guard, not silently.)
     const pluginApiSurface = manifest.name === 'plugin-integration-core'
-      ? { ...pluginCoreApi, dataSources: createDataSourcePluginFacade(getDataSourceManager) }
+      ? {
+          ...pluginCoreApi,
+          dataSources: createDataSourcePluginFacade(getDataSourceManager),
+          dataSourceWrites: createDataSourceWritePluginFacade(getDataSourceManager)
+        }
       : pluginCoreApi
 
     return {

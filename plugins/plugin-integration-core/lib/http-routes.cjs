@@ -645,6 +645,29 @@ const ADAPTER_METADATA = {
       },
     },
   },
+  'data-source:sql-write-gated': {
+    label: 'Write-gated SQL data source',
+    roles: ['target'],
+    supports: ['testConnection', 'listObjects', 'getSchema'],
+    advanced: true,
+    guardrails: {
+      read: {
+        supported: false,
+      },
+      write: {
+        c6TokenBoundApplyRequired: true,
+        requiresWritableDataSource: true,
+        requiresGenericQueryDisabled: true,
+        noRawSql: true,
+        deleteSupported: false,
+        upsertRuntimeAvailable: false,
+      },
+      ui: {
+        hiddenByDefault: true,
+        serverConfiguredOnly: true,
+      },
+    },
+  },
 }
 
 // Route-level secret-text redaction delegates to the shared scrubber

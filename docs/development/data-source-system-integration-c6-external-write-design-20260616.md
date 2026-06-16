@@ -313,6 +313,9 @@ example `lookupByKey`, `insertRows`, and `updateRows`. It must not expose raw
 `query`, credentials, adapter instances, transactions, or delete.
 
 Add a latent `data-source:sql-write-gated` target adapter using the facade.
+C6-1 exposes only target metadata plus test/listObjects/getSchema. It must not
+advertise or implement pipeline `upsert`; the first real write entry point is
+C6-3's token-bound apply route after C6-2 proves dry-run/revision behavior.
 
 Required locks:
 
@@ -329,6 +332,10 @@ Required locks:
 - raw SQL is impossible by type/shape;
 - delete is unsupported;
 - adapter metadata advertises target-only write guardrails;
+- adapter metadata does not advertise `upsert` or any runtime write operation
+  until C6-3;
+- a pipeline configured with this target before C6-3 must fail closed rather
+  than write externally;
 - existing `data-source:sql-readonly` source adapter remains source-only and
   still rejects writable bindings.
 
@@ -392,14 +399,16 @@ Only after C6-5 passes can the Release gate discuss production/batch.
 
 ## Acceptance Checklist
 
-- [ ] C6-0 design merged before runtime.
-- [ ] New write target is a separate explicit target contract, not
+- [x] C6-0 design merged before runtime.
+- [x] New write target is a separate explicit target contract, not
   `data-source:sql-readonly`.
-- [ ] Existing read-only bridge facade remains read-only by construction.
+- [x] Existing read-only bridge facade remains read-only by construction.
 - [ ] Target config is server-owned/admin-reviewed.
-- [ ] Credentials stay only in `/data-sources`.
-- [ ] C6 write target is not reachable through generic raw
+- [x] Credentials stay only in `/data-sources`.
+- [x] C6 write target is not reachable through generic raw
   `/data-sources/:id/query`, execute, or delete paths.
+- [x] C6-1 target adapter is latent: metadata/test/schema only; `upsert` stays
+  unsupported until C6-3 token-bound apply.
 - [ ] Dry-run is read-only and token-producing.
 - [ ] Apply requires write/admin permission plus fresh single-use token.
 - [ ] Revision fencing is hard; mismatch blocks before write.

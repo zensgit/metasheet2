@@ -8,6 +8,7 @@ const { createDeadLetterStore } = require(path.join(__dirname, '..', 'lib', 'dea
 const { createWatermarkStore } = require(path.join(__dirname, '..', 'lib', 'watermark.cjs'))
 const { createRunLogger } = require(path.join(__dirname, '..', 'lib', 'run-log.cjs'))
 const { createDataSourceSqlReadonlySourceAdapterFactory } = require(path.join(__dirname, '..', 'lib', 'adapters', 'data-source-sql-readonly-source-adapter.cjs'))
+const { createDataSourceSqlWriteGatedTargetAdapterFactory } = require(path.join(__dirname, '..', 'lib', 'adapters', 'data-source-sql-write-gated-target-adapter.cjs'))
 
 const WATERMARK_CURSOR_PREFIX = 'dswm1:'
 
@@ -152,6 +153,7 @@ function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead
   const db = createMockDb()
   const targetRows = new Map()
   const adapterSystems = []
+  const targetAdapterDeps = []
   const defaultOptions = {
     batchSize: 100,
     watermark: { type: 'updated_at', field: 'updatedAt', tiebreaker: 'code' },
@@ -198,8 +200,9 @@ function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead
         throw new Error('source upsert should not be called')
       },
     }))
-    .registerAdapter('mock-target', ({ system }) => {
+    .registerAdapter('mock-target', ({ system, principal }) => {
       adapterSystems.push(system)
+      targetAdapterDeps.push({ principal })
       return {
       async testConnection() { return { ok: true } },
       async listObjects() { return [{ name: 'BD_MATERIAL' }] },
@@ -240,7 +243,7 @@ function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead
     })(),
   })
 
-  return { adapterSystems, db, pipeline, runner, sourceRecords, targetRows }
+  return { adapterSystems, db, pipeline, runner, sourceRecords, targetRows, targetAdapterDeps }
 }
 
 // C2a harness: runs a pipeline whose SOURCE is the real `data-source:sql-readonly` bridge adapter,
@@ -321,6 +324,90 @@ function createDataSourceBridgeHarness({ rows, createdBy }) {
   return { db, pipeline, runner, facadeCalls, targetRows }
 }
 
+function createDataSourceWriteGatedTargetHarness({ createdBy = 'owner-7' } = {}) {
+  const db = createMockDb()
+  const facadeCalls = { test: [], getSchema: [], getTableInfo: [], lookupByKey: [], insertRows: [], updateRows: [] }
+  const dataSourceWrites = {
+    async test(id, principal) { facadeCalls.test.push({ id, principal }); return { success: true } },
+    async getSchema(id, principal, schema) { facadeCalls.getSchema.push({ id, principal, schema }); return { tables: [], views: [] } },
+    async getTableInfo(id, object, principal, schema) {
+      facadeCalls.getTableInfo.push({ id, object, principal, schema })
+      return { columns: [{ name: 'externalId', type: 'text' }, { name: 'name', type: 'text' }] }
+    },
+    async lookupByKey(id, object, key, policy, principal) {
+      facadeCalls.lookupByKey.push({ id, object, key, policy, principal })
+      return { data: [], metadata: {} }
+    },
+    async insertRows(id, object, rows, policy, principal) {
+      facadeCalls.insertRows.push({ id, object, rows, policy, principal })
+      return { data: [], metadata: {} }
+    },
+    async updateRows(id, object, rows, policy, principal) {
+      facadeCalls.updateRows.push({ id, object, rows, policy, principal })
+      return { rowCount: 0, results: [] }
+    },
+  }
+  const pipeline = {
+    id: 'pipe_c6',
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    projectId: 'project_1',
+    createdBy,
+    sourceSystemId: 'source_1',
+    sourceObject: 'materials',
+    targetSystemId: 'target_c6',
+    targetObject: 'public.target_items',
+    mode: 'full',
+    status: 'active',
+    idempotencyKeyFields: ['code'],
+    options: { batchSize: 100 },
+    fieldMappings: [
+      { sourceField: 'code', targetField: 'externalId', validation: [{ type: 'required' }] },
+      { sourceField: 'name', targetField: 'name', validation: [{ type: 'required' }] },
+    ],
+  }
+  const systems = new Map([
+    ['source_1', { id: 'source_1', name: 'PLM mock', kind: 'mock-source', role: 'source', config: {} }],
+    ['target_c6', {
+      id: 'target_c6',
+      name: 'C6 write target',
+      kind: 'data-source:sql-write-gated',
+      role: 'target',
+      config: {
+        dataSourceId: 'writable-ds',
+        object: 'public.target_items',
+        keyFields: ['externalId'],
+        writableFields: ['name'],
+      },
+    }],
+  ])
+  const externalSystemRegistry = {
+    async getExternalSystem(input) { return systems.get(input.id) },
+    async getExternalSystemForAdapter(input) { const s = systems.get(input.id); return s ? { ...s } : null },
+  }
+  const adapterRegistry = createAdapterRegistry()
+    .registerAdapter('mock-source', ({ system }) => ({
+      system,
+      async testConnection() { return { ok: true } },
+      async listObjects() { return [{ name: 'materials' }] },
+      async getSchema() { return { fields: [] } },
+      async read() { return createReadResult({ records: [{ code: 'a-01', name: 'Bolt' }] }) },
+      async upsert() { throw new Error('source upsert should not be called') },
+    }))
+    .registerAdapter('data-source:sql-write-gated', createDataSourceSqlWriteGatedTargetAdapterFactory({ context: { api: { dataSourceWrites } } }))
+  const pipelineRegistry = createPipelineRegistry(pipeline, db)
+  const runner = createPipelineRunner({
+    pipelineRegistry,
+    externalSystemRegistry,
+    adapterRegistry,
+    deadLetterStore: createDeadLetterStore({ db, idGenerator: () => `dl_${db.tables.get('integration_dead_letters').length + 1}` }),
+    watermarkStore: createWatermarkStore({ db }),
+    runLogger: createRunLogger({ pipelineRegistry }),
+    clock: (() => { let tick = 0; return () => tick++ * 25 })(),
+  })
+  return { db, facadeCalls, runner }
+}
+
 async function main() {
   // --- 1. Cleanse + validation failure goes to dead letter --------------
   const cleanse = createRunnerHarness({
@@ -342,10 +429,55 @@ async function main() {
   assert.equal(first.metrics.rowsWritten, 1)
   assert.equal(first.metrics.rowsFailed, 1)
   assert.deepEqual(cleanse.adapterSystems[0].credentials, { bearerToken: 'target_1-token' }, 'runner passes decrypted target credentials to adapter')
+  assert.equal(cleanse.targetAdapterDeps[0].principal, undefined, 'legacy/missing createdBy is passed through to target adapter with no fallback identity')
   assert.equal(cleanse.targetRows.size, 1)
   assert.equal(Array.from(cleanse.targetRows.values())[0].FNumber, 'A-01')
   assert.equal(cleanse.db.tables.get('integration_dead_letters').length, 1)
   assert.equal(await cleanse.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null, 'failed batch does not advance watermark')
+
+  // --- 1a. C6 target seam: runner threads pipeline.createdBy to target adapters too --------------
+  {
+    const h = createRunnerHarness({
+      pipelineOverrides: { createdBy: 'owner-7' },
+      sourceRecords: [
+        { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+      ],
+    })
+    await h.runner.runPipeline({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      pipelineId: 'pipe_1',
+      mode: 'incremental',
+      triggeredBy: 'manual',
+      dryRun: true,
+    })
+    assert.equal(h.targetAdapterDeps[0].principal, 'owner-7', 'C6: target adapter receives pipeline.createdBy as the data-source owner principal')
+    assert.equal(h.targetRows.size, 0, 'dry-run still does not write the target')
+  }
+
+  // --- 1b. C6 write-gated target stays latent: live pipeline upsert fails closed before C6-3 ----
+  {
+    const h = createDataSourceWriteGatedTargetHarness()
+    await assert.rejects(
+      () => h.runner.runPipeline({
+        tenantId: 'tenant_1',
+        workspaceId: null,
+        pipelineId: 'pipe_c6',
+        mode: 'full',
+        triggeredBy: 'manual',
+      }),
+      (error) => {
+        assert.equal(error.name, 'PipelineRunnerError')
+        assert.match(error.details && error.details.cause, /does not support upsert until C6 token-bound apply is implemented/)
+        return true
+      }
+    )
+    assert.equal(h.facadeCalls.lookupByKey.length, 0, 'normal pipeline upsert must not use the C6 write facade before C6-3')
+    assert.equal(h.facadeCalls.insertRows.length, 0, 'normal pipeline upsert must not insert through the C6 write facade before C6-3')
+    assert.equal(h.facadeCalls.updateRows.length, 0, 'normal pipeline upsert must not update through the C6 write facade before C6-3')
+    const failedRun = h.db.tables.get('integration_runs')[0]
+    assert.equal(failedRun.status, 'failed', 'runner records the unsupported C6 target as a failed run, not a partial write')
+  }
 
   // --- 1b. Target runtime options are passed through to the adapter ----
   let observedTargetOptions = null
