@@ -147,11 +147,15 @@ export const ICommentService = createIdentifier<ICommentService>('comment-servic
  * `spreadsheetId` as `containerId` and `rowId` as `targetId` -- both refer to
  * the same underlying identifiers.
  *
- * Deprecated DB columns (exist in schema but unused in code):
- *   - target_type, target_id, target_field_id, container_type, container_id
- *   These were added by migration zzzz20260318123000_formalize_meta_comments
- *   but are NOT read or written anywhere. They are kept for migration safety
- *   and should NOT be used in new code.
+ * Canonical container/target columns (migration zzzz20260318123000_formalize_meta_comments):
+ *   - container_id  → API `containerId` (mirrors spreadsheet_id)
+ *   - target_id     → API `targetId`    (mirrors row_id)
+ *   - target_field_id → API `targetFieldId` (mirrors field_id; null when record-level)
+ *   `createComment` writes these alongside the legacy spreadsheet_id/row_id/field_id
+ *   columns, and the read paths (`mapRowToComment`, presence/mention summaries) plus
+ *   the realtime payloads carry them back so the canonical aliases stay in sync.
+ *   The `container_type`/`target_type` discriminator columns are not surfaced on the
+ *   API and should not be relied on in new code.
  *
  * Mention parsing precedence:
  *   When creating or updating a comment, mentions can be supplied two ways:
@@ -259,6 +263,12 @@ export interface CommentRecord {
     rowId: string;
     /** Optional cell-level field scope. */
     fieldId?: string;
+    /** Canonical container alias for `spreadsheetId` (DB column `container_id`). */
+    containerId: string;
+    /** Canonical target alias for `rowId` (DB column `target_id`). */
+    targetId: string;
+    /** Canonical field-scope alias for `fieldId` (DB column `target_field_id`); null when record-level. */
+    targetFieldId: string | null;
     /** Comment body text. */
     content: string;
     /** Author user ID. */
@@ -299,8 +309,12 @@ export interface CommentInboxItem extends CommentRecord {
 
 /** Per-row comment presence summary used by the sheet grid indicator. */
 export interface CommentPresenceSummaryRecord {
+    /** Canonical container alias for `spreadsheetId`. */
+    containerId: string;
     spreadsheetId: string;
     rowId: string;
+    /** Canonical target alias for `rowId`. */
+    targetId: string;
     unresolvedCount: number;
     fieldCounts: Record<string, number>;
     mentionedCount: number;
@@ -309,7 +323,11 @@ export interface CommentPresenceSummaryRecord {
 
 /** Per-row mention summary item. */
 export interface CommentMentionSummaryItem {
+    /** Canonical container alias for `spreadsheetId`. */
+    containerId: string;
     rowId: string;
+    /** Canonical target alias for `rowId`. */
+    targetId: string;
     mentionedCount: number;
     unreadCount: number;
     mentionedFieldIds: string[];
@@ -317,6 +335,8 @@ export interface CommentMentionSummaryItem {
 
 /** Aggregated mention summary for a spreadsheet scoped to a single user. */
 export interface CommentMentionSummary {
+    /** Canonical container alias for `spreadsheetId`. */
+    containerId: string;
     spreadsheetId: string;
     unresolvedMentionCount: number;
     unreadMentionCount: number;

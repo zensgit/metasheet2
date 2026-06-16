@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { buildConfig } from './smoke-sqlserver'
+import { buildConfig, loadMSSQLAdapter, MSSQL_ADAPTER_CANDIDATES } from './smoke-sqlserver'
 
 // Verifies the smoke harness EXPOSES the B3 legacy-TLS lever via env — i.e. MSSQL_LEGACY_TLS /
 // MSSQL_TLS_MIN_VERSION / MSSQL_TLS_CIPHERS actually reach connection.{legacyTls,tlsMinVersion,tlsCiphers},
@@ -61,5 +61,14 @@ describe('smoke-sqlserver buildConfig — B3 legacy-TLS env exposure', () => {
     setRequired()
     process.env.MSSQL_LEGACY_TLS = 'maybe'
     expect(() => buildConfig()).toThrow(/boolean-like/)
+  })
+
+  it('loads the deployable compiled adapter path before the local source fallback', () => {
+    expect(MSSQL_ADAPTER_CANDIDATES[0]).toBe('../dist/src/data-adapters/MSSQLAdapter.js')
+    expect(MSSQL_ADAPTER_CANDIDATES).toContain('../src/data-adapters/MSSQLAdapter.ts')
+  })
+
+  it('loads an MSSQLAdapter constructor without opening a connection', async () => {
+    expect(typeof (await loadMSSQLAdapter())).toBe('function')
   })
 })
