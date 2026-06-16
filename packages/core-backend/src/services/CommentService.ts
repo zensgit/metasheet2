@@ -79,6 +79,12 @@ export interface Comment {
   spreadsheetId: string
   rowId: string
   fieldId?: string
+  /** Canonical container alias for `spreadsheetId` (DB column `container_id`). */
+  containerId: string
+  /** Canonical target alias for `rowId` (DB column `target_id`). */
+  targetId: string
+  /** Canonical field-scope alias for `fieldId` (DB column `target_field_id`); null when record-level. */
+  targetFieldId: string | null
   content: string
   authorId: string
   parentId?: string
@@ -91,8 +97,12 @@ export interface Comment {
 }
 
 export interface CommentPresenceSummary {
+  /** Canonical container alias for `spreadsheetId`. */
+  containerId: string
   spreadsheetId: string
   rowId: string
+  /** Canonical target alias for `rowId`. */
+  targetId: string
   unresolvedCount: number
   fieldCounts: Record<string, number>
   mentionedCount: number
@@ -104,6 +114,9 @@ type CommentRow = {
   spreadsheet_id: string
   row_id: string
   field_id: string | null
+  target_id: string
+  target_field_id: string | null
+  container_id: string
   content: string
   author_id: string
   parent_id: string | null
@@ -137,6 +150,12 @@ type MentionGroupedCountRow = {
 
 type CommentActivityPayload = {
   kind: 'created' | 'updated' | 'resolved' | 'deleted'
+  /** Canonical container alias for `spreadsheetId`. */
+  containerId: string
+  /** Canonical target alias for `rowId`. */
+  targetId: string
+  /** Canonical field-scope alias for `fieldId`; null when record-level. */
+  targetFieldId: string | null
   spreadsheetId: string
   rowId: string
   fieldId?: string
@@ -193,6 +212,9 @@ export class CommentService {
     for (const mentionUserId of mentions) {
       if (!mentionUserId || mentionUserId === normalizedUserId || previousMentions.includes(mentionUserId)) continue
       this.collabService.sendTo(mentionUserId, 'comment:mention', {
+        containerId: comment.containerId,
+        targetId: comment.targetId,
+        targetFieldId: comment.targetFieldId,
         spreadsheetId: comment.spreadsheetId,
         rowId: comment.rowId,
         fieldId: comment.fieldId,
@@ -305,6 +327,9 @@ export class CommentService {
     await this.markCommentRead(id, data.authorId)
 
     const createdPayload = {
+      containerId: data.spreadsheetId,
+      targetId: data.rowId,
+      targetFieldId: effectiveFieldId ?? null,
       spreadsheetId: data.spreadsheetId,
       rowId: data.rowId,
       fieldId: effectiveFieldId,
@@ -325,6 +350,9 @@ export class CommentService {
       'comment:activity',
       {
         kind: 'created',
+        containerId: data.spreadsheetId,
+        targetId: data.rowId,
+        targetFieldId: effectiveFieldId ?? null,
         spreadsheetId: data.spreadsheetId,
         rowId: data.rowId,
         fieldId: effectiveFieldId,
@@ -482,6 +510,13 @@ export class CommentService {
         'c.spreadsheet_id',
         'c.row_id',
         'c.field_id',
+        // Carry the canonical container/target columns so inbox items expose the
+        // same containerId/targetId/targetFieldId linkage that mapRowToComment
+        // maps — this is an explicit projection, not selectAll(), so they must
+        // be listed or they'd round-trip as undefined.
+        'c.container_id',
+        'c.target_id',
+        'c.target_field_id',
         'c.content',
         'c.author_id',
         'c.parent_id',
@@ -721,8 +756,10 @@ export class CommentService {
     const items = orderedRowIds.map((rowId) => {
       const summary = summaryByRow.get(rowId)!
       return {
+        containerId: spreadsheetId,
         spreadsheetId,
         rowId,
+        targetId: rowId,
         unresolvedCount: summary.unresolvedCount,
         fieldCounts: summary.fieldCounts,
         mentionedCount: summary.mentionedCount,
@@ -737,13 +774,19 @@ export class CommentService {
     spreadsheetId: string,
     mentionUserId: string,
   ): Promise<{
+    /** Canonical container alias for `spreadsheetId`. */
+    containerId: string
     spreadsheetId: string
     unresolvedMentionCount: number
     unreadMentionCount: number
     mentionedRecordCount: number
     unreadRecordCount: number
     items: Array<{
+      /** Canonical container alias for `spreadsheetId`. */
+      containerId: string
       rowId: string
+      /** Canonical target alias for `rowId`. */
+      targetId: string
       mentionedCount: number
       unreadCount: number
       mentionedFieldIds: string[]
@@ -752,6 +795,7 @@ export class CommentService {
     const normalizedUserId = mentionUserId.trim()
     if (!normalizedUserId) {
       return {
+        containerId: spreadsheetId,
         spreadsheetId,
         unresolvedMentionCount: 0,
         unreadMentionCount: 0,
@@ -789,13 +833,16 @@ export class CommentService {
     const items = [...byRow.entries()]
       .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
       .map(([rowId, data]) => ({
+        containerId: spreadsheetId,
         rowId,
+        targetId: rowId,
         mentionedCount: data.count,
         unreadCount: data.unread,
         mentionedFieldIds: [...data.fieldIds].sort(),
       }))
 
     return {
+      containerId: spreadsheetId,
       spreadsheetId,
       unresolvedMentionCount: items.reduce((sum, item) => sum + item.mentionedCount, 0),
       unreadMentionCount: items.reduce((sum, item) => sum + item.unreadCount, 0),
@@ -901,6 +948,9 @@ export class CommentService {
 
     if (result) {
       const resolvedPayload = {
+        containerId: result.container_id,
+        targetId: result.target_id,
+        targetFieldId: result.target_field_id ?? null,
         spreadsheetId: result.spreadsheet_id,
         rowId: result.row_id,
         fieldId: result.field_id ?? undefined,
@@ -921,6 +971,9 @@ export class CommentService {
         'comment:activity',
         {
           kind: 'resolved',
+          containerId: result.container_id,
+          targetId: result.target_id,
+          targetFieldId: result.target_field_id ?? null,
           spreadsheetId: result.spreadsheet_id,
           rowId: result.row_id,
           fieldId: result.field_id ?? undefined,
@@ -960,6 +1013,9 @@ export class CommentService {
 
   private publishCommentUpdated(comment: Comment, authorId: string): void {
     const payload = {
+      containerId: comment.containerId,
+      targetId: comment.targetId,
+      targetFieldId: comment.targetFieldId,
       spreadsheetId: comment.spreadsheetId,
       rowId: comment.rowId,
       fieldId: comment.fieldId,
@@ -980,6 +1036,9 @@ export class CommentService {
       'comment:activity',
       {
         kind: 'updated',
+        containerId: comment.containerId,
+        targetId: comment.targetId,
+        targetFieldId: comment.targetFieldId,
         spreadsheetId: comment.spreadsheetId,
         rowId: comment.rowId,
         fieldId: comment.fieldId,
@@ -991,6 +1050,9 @@ export class CommentService {
 
   private publishCommentDeleted(row: CommentRow, authorId: string): void {
     const payload = {
+      containerId: row.container_id,
+      targetId: row.target_id,
+      targetFieldId: row.target_field_id ?? null,
       spreadsheetId: row.spreadsheet_id,
       rowId: row.row_id,
       fieldId: row.field_id ?? undefined,
@@ -1011,6 +1073,9 @@ export class CommentService {
       'comment:activity',
       {
         kind: 'deleted',
+        containerId: row.container_id,
+        targetId: row.target_id,
+        targetFieldId: row.target_field_id ?? null,
         spreadsheetId: row.spreadsheet_id,
         rowId: row.row_id,
         fieldId: row.field_id ?? undefined,
@@ -1033,6 +1098,13 @@ export class CommentService {
       spreadsheetId: row.spreadsheet_id,
       rowId: row.row_id,
       fieldId: row.field_id || undefined,
+      // Canonical container/target aliases carried from their own DB columns so
+      // read paths (getComment/getComments) expose the same target linkage that
+      // createComment writes. targetFieldId stays `null` (not coerced to
+      // undefined) to match the API contract for record-level comments.
+      containerId: row.container_id,
+      targetId: row.target_id,
+      targetFieldId: row.target_field_id ?? null,
       content: row.content,
       authorId: row.author_id,
       parentId: row.parent_id || undefined,
