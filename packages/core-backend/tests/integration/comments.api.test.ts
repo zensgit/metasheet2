@@ -300,6 +300,11 @@ describe('Comments API', () => {
     expect(inboxItem.sheetId).toBe(spreadsheetId)
     expect(inboxItem.viewId).toBe(viewId)
     expect(inboxItem.recordId).toBe(rowId)
+    // Inbox uses an explicit column projection (not selectAll); assert the
+    // canonical container/target linkage round-trips through that projection.
+    expect(inboxItem.containerId).toBe(spreadsheetId)
+    expect(inboxItem.targetId).toBe(rowId)
+    expect(inboxItem.targetFieldId).toBeNull()
     expect(plainInboxItem).toBeTruthy()
     expect(plainInboxItem.unread).toBe(true)
     expect(plainInboxItem.mentioned).toBe(false)
@@ -918,7 +923,12 @@ describe('Comments API', () => {
     createdSheetIds.push(spreadsheetId)
 
     const authorToken = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_ws_author`)).json()).token as string
-    const socket = ioClient(`${baseUrl}?userId=user_ws_target`, { transports: ['websocket'] })
+    // Authenticate the socket with a real token so the server joins the trusted
+    // per-user room. Personal `comment:mention` deliveries go through
+    // sendTo(userId) → the authenticated-user room, which is only joined after
+    // token verification (the spoofable query `userId` is intentionally ignored).
+    const targetToken = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_ws_target`)).json()).token as string
+    const socket = ioClient(`${baseUrl}?userId=user_ws_target`, { transports: ['websocket'], auth: { token: targetToken } })
 
     await new Promise<void>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('socket connect timeout')), 3000)
