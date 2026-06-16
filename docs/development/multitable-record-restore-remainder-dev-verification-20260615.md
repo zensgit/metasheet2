@@ -59,3 +59,20 @@ Drawer history timeline → per-revision "Restore" button (prior non-delete vers
 ## 6. Landing
 
 Three stacked PRs on #2654: **#2660** (backend remainder — ready), **#2662** (frontend — ready pending manual/e2e QA). Merge order: #2654 → #2660 → #2662 (each retargets to `main` as its base merges). The frontend should get a real-app QA pass (open a record drawer → History → Restore → confirm the DB + drawer update) before merge.
+
+> Update 2026-06-16: #2654/#2660 merged to `main` (plus per-field backend + review-hardening #2672/#2677). #2662 reconciled to main (behind 0→merge-time) and given the render-check below.
+
+## 7. Browser render-check (Path A component harness, 2026-06-16)
+
+Closes the **render + interaction** half of the §6 QA item in a real browser (Chromium via Playwright). The **live round-trip** half stays open (below).
+
+Harness: mounted `MetaRecordDrawer` (visible, canEdit) with a fake `apiClient.listRecordHistory` returning 3 canned revisions (v3 current / v2 / v1) — no backend. Drove the History tab + a restore click.
+
+Verified (**0 console / pageerror**):
+- History list renders all 3 revisions with action label (Updated/Created), `v{n}` badge, timestamp, actor, source, and changed-field list.
+- `canRestoreTo` correct **visually**: Restore shows on v2 and v1 only — **not** on current v3 (`version === record.version`), not on delete revisions.
+- Clicking Restore on v2 emits `restore { recordId:'rec1', targetVersion:2, expectedVersion:3 }` — drawer emits, parent owns the call (no direct mutation), exact payload.
+
+Evidence: `~/Downloads/Github/_bv-evidence-20260616/bv-drawer-history.png`.
+
+**STILL OPEN — not covered by Path A (needs real-app QA or Path B full-stack):** the live wire `workbench onRestore → apiClient.restoreRecordVersion → backend → DB revert → drawer/grid refresh + confirm dialog`. Backend side is covered by the restore integration matrix (now **30/30**) + the jsdom client test (POST body + all error codes); the end-to-end browser wire is not. **Real-app QA still recommended before merge.**
