@@ -49,7 +49,28 @@ export function resolvePublicMultitableFormRouteProps(route: MultitableRouteSour
     sheetId: typeof route.params.sheetId === 'string' ? route.params.sheetId : undefined,
     viewId: typeof route.params.viewId === 'string' ? route.params.viewId : undefined,
     publicToken: firstQueryValue(route.query.publicToken),
+    // A4: surface the raw query so the public form can read `?prefill_<fieldId>=`
+    // params. The component applies the author `prefillableFieldIds` allowlist
+    // (carried in the loaded form-context) + read-only/system filtering — the
+    // router only forwards; it deliberately does NOT decide what is prefillable
+    // (the allowlist arrives with the context, not the route).
+    prefillQuery: collectPrefillQuery(route.query),
   }
+}
+
+// Forward only `prefill_*` query params as a flat string map (first value per
+// key). Non-prefill query params (publicToken, etc.) are excluded so the prop
+// stays a focused, serializable seed source.
+function collectPrefillQuery(
+  query: Record<string, LocationQueryValue | LocationQueryValue[] | undefined>,
+): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(query)) {
+    if (!key.startsWith('prefill_')) continue
+    const first = firstQueryValue(value)
+    if (typeof first === 'string') out[key] = first
+  }
+  return out
 }
 
 export function buildMultitableRoute(component: NonNullable<RouteRecordRaw['component']>): RouteRecordRaw {

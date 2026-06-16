@@ -24,8 +24,12 @@
         </button>
       </div>
       <div v-else-if="submitted && submissionResult" class="public-multitable-form__state public-multitable-form__state--success">
-        <h2>Submission received</h2>
-        <p>{{ submissionMessage }}</p>
+        <!-- A4: author-customizable thank-you. Title/body are author DATA and
+             are rendered as PLAIN TEXT interpolation (never v-html) — this page
+             is public + unauthenticated, so author content must not execute.
+             Falls back to the default English copy when unset. -->
+        <h2>{{ confirmationTitle }}</h2>
+        <p>{{ confirmationBody }}</p>
         <p v-if="submissionResult.record?.id" class="public-multitable-form__record-id">
           Record ID: <code>{{ submissionResult.record.id }}</code>
         </p>
@@ -46,6 +50,8 @@
         :field-permissions="context.fieldPermissions ?? null"
         :row-actions="context.rowActions ?? null"
         :attachment-summaries-by-field="context.attachmentSummaries ?? null"
+        :form-layout="context.formLayout ?? null"
+        :initial-values="prefillValues"
         @submit="onSubmit"
       />
     </section>
@@ -58,11 +64,17 @@ import type { FormSubmitResult, MetaFormContext } from '../multitable/types'
 import { multitableClient } from '../multitable/api/client'
 import MetaFormView from '../multitable/components/MetaFormView.vue'
 import { apiFetch } from '../utils/api'
+import { parsePrefillQuery, safeRedirectPath } from '../multitable/utils/form-layout'
+import { isSystemField } from '../multitable/utils/system-fields'
 
 const props = defineProps<{
   sheetId?: string
   viewId?: string
   publicToken?: string
+  // A4: raw `prefill_*` query params forwarded by the route. The allowlist
+  // (prefillableFieldIds) lives in the loaded form-context, so the filtering
+  // happens HERE, not in the router.
+  prefillQuery?: Record<string, string>
 }>()
 
 const context = ref<MetaFormContext | null>(null)
@@ -94,6 +106,39 @@ const redirectingMessage = computed(() => (
   bindingToDingTalk.value ? 'Redirecting to DingTalk binding…' : 'Redirecting to DingTalk sign-in…'
 ))
 const canLaunchDingTalkBinding = computed(() => loadErrorCode.value === 'DINGTALK_BIND_REQUIRED')
+
+// A4: author thank-you copy. Author DATA — rendered as plain text. Default
+// English copy when unset (preserves today's behavior).
+const confirmationTitle = computed(() => {
+  const title = context.value?.formLayout?.confirmation?.title
+  return typeof title === 'string' && title.trim() ? title : 'Submission received'
+})
+const confirmationBody = computed(() => {
+  const body = context.value?.formLayout?.confirmation?.body
+  return typeof body === 'string' && body.trim() ? body : submissionMessage.value
+})
+
+// A4: create-mode prefill seed. Parse `?prefill_<fieldId>=` against the author
+// allowlist (carried in context.formLayout.prefill.prefillableFieldIds), then
+// drop any read-only / system field so prefill can never seed a control the
+// submitter could not have set. Empty when there is no layout/allowlist.
+const prefillValues = computed<Record<string, unknown>>(() => {
+  const ctx = context.value
+  if (!ctx) return {}
+  const parsed = parsePrefillQuery(props.prefillQuery ?? null, ctx.formLayout ?? null)
+  if (Object.keys(parsed).length === 0) return {}
+  const fieldById = new Map((ctx.fields ?? []).map((field) => [field.id, field]))
+  const out: Record<string, unknown> = {}
+  for (const [fieldId, value] of Object.entries(parsed)) {
+    const field = fieldById.get(fieldId)
+    if (!field) continue // unknown / deleted field
+    if (isSystemField(field)) continue // never seed a system field
+    if (ctx.fieldPermissions?.[fieldId]?.readOnly === true) continue // never seed a read-only field
+    if (ctx.fieldPermissions?.[fieldId]?.visible === false) continue // never seed a hidden field
+    out[fieldId] = value
+  }
+  return out
+})
 
 async function loadForm(): Promise<void> {
   loading.value = true
@@ -153,6 +198,13 @@ async function onSubmit(data: Record<string, unknown>): Promise<void> {
     })
     submissionResult.value = result
     submitted.value = true
+    // A4: post-submit redirect. The URL was already validated at persist time;
+    // re-validate before navigating (defense-in-depth on a public page) and
+    // accept ONLY a same-origin relative path — javascript:/data:/cross-origin
+    // are rejected (open-redirect defense). If unsafe/absent, fall through to
+    // the thank-you state. Navigation replaces the page, so the thank-you state
+    // only shows when there is no redirect.
+    maybeRedirectAfterSubmit()
   } catch (error) {
     if (isDingTalkAuthRequired(error)) {
       const launched = await launchDingTalkSignIn()
@@ -171,6 +223,21 @@ function resetForm(): void {
   submitError.value = null
   fieldErrors.value = null
   formKey.value += 1
+}
+
+// A4: navigate to the author-configured post-submit redirect, if it passes the
+// same-origin-relative safety check. Returns true when navigation was issued.
+function maybeRedirectAfterSubmit(): boolean {
+  const configured = context.value?.formLayout?.redirect?.url
+  const safe = safeRedirectPath(configured)
+  if (!safe) return false
+  if (typeof window === 'undefined') return false
+  if (typeof window.location?.assign === 'function') {
+    window.location.assign(safe)
+    return true
+  }
+  window.location.href = safe
+  return true
 }
 
 function readErrorMessage(error: unknown, fallback: string): string {

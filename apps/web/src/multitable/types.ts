@@ -162,6 +162,42 @@ export interface FieldVisibilityRule {
   value?: unknown
 }
 
+// --- Public-form LOGIC layer (A4: multi-page/section · URL-prefill ·
+// post-submit redirect · thank-you customization). Mirrors backend
+// `form-layout.ts`. Stored under `view.config.formLayout` (SEPARATE from
+// publicForm access-control) and surfaced to the public renderer as the SAFE
+// `MetaFormContext.formLayout` projection. Backend is canonical — keep shapes
+// in sync. SECURITY: pages = render-only grouping (never gate validation);
+// prefill = client-seeding allowlist (never authorization); redirect = a
+// validated same-origin relative path (open-redirect defense); confirmation =
+// author data rendered as plain text (never v-html). ---
+export interface FormPage {
+  id: string
+  title?: string
+  description?: string
+  fieldIds: string[]
+}
+
+export interface FormPrefillConfig {
+  prefillableFieldIds: string[]
+}
+
+export interface FormRedirectConfig {
+  url: string
+}
+
+export interface FormConfirmationConfig {
+  title?: string
+  body?: string
+}
+
+export interface FormLayoutConfig {
+  pages?: FormPage[]
+  prefill?: FormPrefillConfig
+  redirect?: FormRedirectConfig
+  confirmation?: FormConfirmationConfig
+}
+
 export interface MetaRecord {
   id: string
   version: number
@@ -317,6 +353,10 @@ export interface MetaFormContext {
   record?: MetaRecord | null
   commentsScope?: MetaCommentsScope | null
   attachmentSummaries?: Record<string, MetaAttachment[]>
+  // A4: SAFE projection of the public-form logic config (pages / prefill
+  // allowlist / validated redirect / confirmation). Absent ⇒ the form renders
+  // exactly today's flat single-page form (backward-compatible).
+  formLayout?: FormLayoutConfig | null
 }
 
 // --- Capabilities ---
@@ -1196,6 +1236,9 @@ export interface FormShareConfigUpdate {
   accessMode?: 'public' | 'dingtalk' | 'dingtalk_granted'
   allowedUserIds?: string[]
   allowedMemberGroupIds?: string[]
+  // A4 form-logic layout. `null` clears it; omitted leaves it untouched. The
+  // backend normalizer bounds/validates every field (incl. the redirect URL).
+  formLayout?: FormLayoutConfig | null
 }
 
 // --- API Tokens ---

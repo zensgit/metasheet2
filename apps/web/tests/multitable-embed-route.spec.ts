@@ -117,6 +117,25 @@ describe('public multitable form route wiring', () => {
       sheetId: 'sheet_orders',
       viewId: 'view_form',
       publicToken: 'pub_123',
+      prefillQuery: {},
+    })
+  })
+
+  it('surfaces only prefill_* query params (first value) and excludes other query', async () => {
+    const PublicFormStub = defineComponent({ name: 'PublicFormStub', template: '<div />' })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [buildPublicMultitableFormRoute(PublicFormStub)],
+    })
+
+    await router.push('/multitable/public-form/sheet_orders/view_form?publicToken=pub_123&prefill_fld_a=Alpha&prefill_fld_b=Bravo&prefill_fld_b=Second&other=x')
+    await router.isReady()
+
+    expect(resolvePublicMultitableFormRouteProps(router.currentRoute.value as any)).toEqual({
+      sheetId: 'sheet_orders',
+      viewId: 'view_form',
+      publicToken: 'pub_123',
+      prefillQuery: { prefill_fld_a: 'Alpha', prefill_fld_b: 'Bravo' },
     })
   })
 })

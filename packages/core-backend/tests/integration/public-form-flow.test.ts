@@ -531,6 +531,118 @@ describe('Public form flow', () => {
     expect(storedConfig.publicForm.allowedMemberGroupIds).toEqual(['group_2'])
   })
 
+  test('A4: form share PATCH persists a sanitized formLayout under view.config.formLayout', async () => {
+    // Exercises the PATCH write path's bespoke logic (the inline redirect 400
+    // guard + the withFormLayout merge + the nextConfig delete/assign mutation),
+    // which the sanitizer unit tests and the (DB-gated) form-context projection
+    // test do not cover. CI-real via the mock pool.
+    let storedConfig: Record<string, unknown> = {
+      publicForm: {
+        enabled: true,
+        publicToken: VALID_TOKEN,
+        accessMode: 'public',
+      },
+    }
+    const { app } = await createApp({
+      user: { id: 'admin_1', perms: ['multitable:write', 'multitable:share'] },
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          return {
+            rows: [{
+              id: TEST_VIEW_ID,
+              sheet_id: TEST_SHEET_ID,
+              name: 'Public Form View',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: storedConfig,
+            }],
+          }
+        }
+        if (sql.includes('UPDATE meta_views') && sql.includes('SET config = $2::jsonb')) {
+          storedConfig = JSON.parse(String(params?.[1] ?? '{}'))
+          return { rows: [], rowCount: 1 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    await request(app)
+      .patch(`/api/multitable/sheets/${TEST_SHEET_ID}/views/${TEST_VIEW_ID}/form-share`)
+      .send({
+        formLayout: {
+          pages: [{ id: '  p1  ', title: 'Step 1', fieldIds: ['fld_1', 'fld_1', 'fld_2'] }],
+          prefill: { prefillableFieldIds: ['fld_1', 'fld_1'] },
+          redirect: { url: '/thanks' },
+          confirmation: { title: '  Thanks!  ', body: 'We got it.' },
+        },
+      })
+      .expect(200)
+
+    // Persisted under formLayout (SEPARATE from publicForm), normalized
+    // (trimmed/deduped) by the canonical sanitizer.
+    expect(storedConfig.formLayout).toEqual({
+      pages: [{ id: 'p1', title: 'Step 1', fieldIds: ['fld_1', 'fld_2'] }],
+      prefill: { prefillableFieldIds: ['fld_1'] },
+      redirect: { url: '/thanks' },
+      confirmation: { title: 'Thanks!', body: 'We got it.' },
+    })
+    // publicForm access-control is untouched by the formLayout write.
+    expect(storedConfig.publicForm).toMatchObject({ publicToken: VALID_TOKEN, accessMode: 'public' })
+
+    // A subsequent PATCH with formLayout:null clears the key (and leaves
+    // publicForm intact).
+    await request(app)
+      .patch(`/api/multitable/sheets/${TEST_SHEET_ID}/views/${TEST_VIEW_ID}/form-share`)
+      .send({ formLayout: null })
+      .expect(200)
+    expect('formLayout' in storedConfig).toBe(false)
+    expect('publicForm' in storedConfig).toBe(true)
+  })
+
+  test('A4: form share PATCH rejects an unsafe (open-redirect) post-submit URL with 400', async () => {
+    let storedConfig: Record<string, unknown> = {
+      publicForm: { enabled: true, publicToken: VALID_TOKEN, accessMode: 'public' },
+    }
+    const { app } = await createApp({
+      user: { id: 'admin_1', perms: ['multitable:write', 'multitable:share'] },
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          return {
+            rows: [{
+              id: TEST_VIEW_ID,
+              sheet_id: TEST_SHEET_ID,
+              name: 'Public Form View',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: storedConfig,
+            }],
+          }
+        }
+        if (sql.includes('UPDATE meta_views') && sql.includes('SET config = $2::jsonb')) {
+          storedConfig = JSON.parse(String(params?.[1] ?? '{}'))
+          return { rows: [], rowCount: 1 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const patchResponse = await request(app)
+      .patch(`/api/multitable/sheets/${TEST_SHEET_ID}/views/${TEST_VIEW_ID}/form-share`)
+      .send({ formLayout: { redirect: { url: 'https://evil.com/steal' } } })
+      .expect(400)
+
+    expect(patchResponse.body.error?.code).toBe('VALIDATION_ERROR')
+    expect(patchResponse.body.error?.message).toMatch(/same-origin relative path/i)
+    // Rejected: nothing persisted, no formLayout leaked into the stored config.
+    expect('formLayout' in storedConfig).toBe(false)
+  })
+
   test('form share config rejects allowlists on fully public mode', async () => {
     const storedConfig = {
       publicForm: {

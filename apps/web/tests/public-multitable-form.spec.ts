@@ -32,6 +32,8 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
       readOnly: { type: Boolean, default: false },
       submitting: { type: Boolean, default: false },
       errorMessage: { type: String, default: null },
+      formLayout: { type: Object, default: null },
+      initialValues: { type: Object, default: null },
     },
     emits: ['submit'],
     template: `
@@ -40,6 +42,8 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
         <span data-loading>{{ loading }}</span>
         <span data-read-only>{{ readOnly }}</span>
         <span data-error>{{ errorMessage || '' }}</span>
+        <span data-prefill>{{ JSON.stringify(initialValues || {}) }}</span>
+        <span data-has-layout>{{ formLayout ? 'yes' : 'no' }}</span>
         <button data-submit type="button" @click="$emit('submit', { fld_title: 'Alpha' })">Submit</button>
       </div>
     `,
@@ -241,5 +245,149 @@ describe('PublicMultitableFormView', () => {
     await flushUi()
 
     expect(container.textContent).toContain('This form only accepts selected system users or member groups.')
+  })
+
+  // --- A4: thank-you customization, post-submit redirect, prefill plumbing ---
+
+  function baseFormContext(extra: Record<string, unknown> = {}) {
+    return {
+      mode: 'form',
+      readOnly: false,
+      submitPath: '/api/multitable/views/view_form/submit',
+      sheet: { id: 'sheet_orders', name: 'Orders' },
+      view: { id: 'view_form', sheetId: 'sheet_orders', name: 'Request form', type: 'form' },
+      fields: [{ id: 'fld_title', name: 'Title', type: 'string' }],
+      capabilities: {
+        canRead: true,
+        canCreateRecord: true,
+        canEditRecord: false,
+        canDeleteRecord: false,
+        canManageFields: false,
+        canManageSheetAccess: false,
+        canManageViews: false,
+        canComment: false,
+        canManageAutomation: false,
+        canExport: false,
+      },
+      ...extra,
+    }
+  }
+
+  function mountPublicForm(PublicMultitableFormView: any, props: Record<string, unknown>) {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    const Root = defineComponent({
+      render() {
+        return h(PublicMultitableFormView, {
+          sheetId: 'sheet_orders',
+          viewId: 'view_form',
+          publicToken: 'pub_123',
+          ...props,
+        })
+      },
+    })
+    app = createApp(Root)
+    app.mount(container)
+  }
+
+  it('renders the author-customized thank-you title/body after submit', async () => {
+    loadFormContextSpy.mockResolvedValue(baseFormContext({
+      formLayout: { confirmation: { title: 'All done!', body: 'We received your request.' } },
+    }))
+    submitFormSpy.mockResolvedValue({ mode: 'create', record: { id: 'rec_1', version: 1, data: {} } })
+
+    const { default: PublicMultitableFormView } = await import('../src/views/PublicMultitableFormView.vue')
+    mountPublicForm(PublicMultitableFormView, {})
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-submit]')?.click()
+    await flushUi()
+
+    expect(container!.textContent).toContain('All done!')
+    expect(container!.textContent).toContain('We received your request.')
+    expect(container!.textContent).not.toContain('Submission received')
+  })
+
+  it('falls back to the default English thank-you copy when unset', async () => {
+    loadFormContextSpy.mockResolvedValue(baseFormContext())
+    submitFormSpy.mockResolvedValue({ mode: 'create', record: { id: 'rec_1', version: 1, data: {} } })
+
+    const { default: PublicMultitableFormView } = await import('../src/views/PublicMultitableFormView.vue')
+    mountPublicForm(PublicMultitableFormView, {})
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-submit]')?.click()
+    await flushUi()
+
+    expect(container!.textContent).toContain('Submission received')
+    expect(container!.textContent).toContain('Your response has been submitted successfully.')
+  })
+
+  it('redirects to a same-origin relative URL after submit (window.location.assign)', async () => {
+    const assignSpy = vi.fn()
+    const originalLocation = window.location
+    // jsdom's location.assign is non-configurable; replace the whole location.
+    Object.defineProperty(window, 'location', { value: { assign: assignSpy }, configurable: true })
+
+    loadFormContextSpy.mockResolvedValue(baseFormContext({
+      formLayout: { redirect: { url: '/thanks' } },
+    }))
+    submitFormSpy.mockResolvedValue({ mode: 'create', record: { id: 'rec_1', version: 1, data: {} } })
+
+    const { default: PublicMultitableFormView } = await import('../src/views/PublicMultitableFormView.vue')
+    mountPublicForm(PublicMultitableFormView, {})
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-submit]')?.click()
+    await flushUi()
+
+    expect(assignSpy).toHaveBeenCalledWith('/thanks')
+
+    Object.defineProperty(window, 'location', { value: originalLocation, configurable: true })
+  })
+
+  it('does NOT redirect to a javascript:/cross-origin URL — shows the normal success state', async () => {
+    const assignSpy = vi.fn()
+    const originalLocation = window.location
+    Object.defineProperty(window, 'location', { value: { assign: assignSpy }, configurable: true })
+
+    // A projection should already have stripped this, but assert the client
+    // re-validates: an unsafe URL that slipped through must not navigate.
+    loadFormContextSpy.mockResolvedValue(baseFormContext({
+      formLayout: { redirect: { url: 'https://evil.com/steal' } },
+    }))
+    submitFormSpy.mockResolvedValue({ mode: 'create', record: { id: 'rec_1', version: 1, data: {} } })
+
+    const { default: PublicMultitableFormView } = await import('../src/views/PublicMultitableFormView.vue')
+    mountPublicForm(PublicMultitableFormView, {})
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-submit]')?.click()
+    await flushUi()
+
+    expect(assignSpy).not.toHaveBeenCalled()
+    expect(container!.textContent).toContain('Submission received')
+
+    Object.defineProperty(window, 'location', { value: originalLocation, configurable: true })
+  })
+
+  it('plumbs allowlisted prefill query into MetaFormView, filtering non-allowlisted fields', async () => {
+    loadFormContextSpy.mockResolvedValue(baseFormContext({
+      fields: [
+        { id: 'fld_title', name: 'Title', type: 'string' },
+        { id: 'fld_secret', name: 'Secret', type: 'string' },
+      ],
+      formLayout: { prefill: { prefillableFieldIds: ['fld_title'] } },
+    }))
+
+    const { default: PublicMultitableFormView } = await import('../src/views/PublicMultitableFormView.vue')
+    mountPublicForm(PublicMultitableFormView, {
+      prefillQuery: { prefill_fld_title: 'Hello', prefill_fld_secret: 'leak' },
+    })
+    await flushUi()
+
+    const prefill = JSON.parse(container!.querySelector('[data-prefill]')?.textContent || '{}')
+    expect(prefill).toEqual({ fld_title: 'Hello' })
+    expect(container!.querySelector('[data-has-layout]')?.textContent).toBe('yes')
   })
 })
