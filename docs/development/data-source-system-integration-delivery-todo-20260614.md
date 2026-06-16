@@ -422,10 +422,11 @@ TODO:
   - #2720 deploy/preflight HOLD: package deploy and route presence PASS, but entity machine currently has
     no active sandbox `data-source:sql-write-gated` target and no active C6 pipeline bound to it.
   - next required operator-side setup: create a sandbox writable `/data-sources` target with
-    `readOnly=false`, `c6WriteTarget=true`, `genericQueryDisabled=true`; bind a
+    `options.readOnly=false`, `options.c6WriteTarget=true`, and
+    `options.genericQueryDisabled=true`; bind a
     `data-source:sql-write-gated` target external system with `dataSourceId`, `object`,
-    `keyFields`, and `writableFields`; then bind one active pipeline from the read-only source
-    to that sandbox target.
+    `keyFields`, and `writableFields`; then bind one active pipeline using `sourceSystemId`
+    / `targetSystemId` and a `createdBy` owner that can see both source and target data-source rows.
   - C6-5 remains sandbox/entity-machine validation only; no production/batch rollout.
 
 完成条件:
@@ -471,7 +472,7 @@ TODO:
   - package: `metasheet-multitable-onprem-v2.5.0-datasource-c6-ui-20260616-9fb34fd91`.
   - `.tgz` SHA256: `8659e9bfbad0c51efe55238108dc7b84a72a19478bf0f841cfa26d76e2cd784f`.
   - `.zip` SHA256: `9b771902fca4c607422d6ac30e63bf3fe95b576537fc7b9f6c2f767a25d6ab3c`.
-- [ ] 实体机部署。
+- [x] C6-5 smoke package deployed on entity machine for preflight; full smoke still HOLD.
 - [x] C6-5 package deploy preflight: #2720 reports `deploy.applyExit=0`, `health=200`, dry-run/apply
   route presence, token guard, and target-kind requirement present.
 - [ ] C6-5 sandbox write-gated target + active C6 pipeline configured on entity machine.
