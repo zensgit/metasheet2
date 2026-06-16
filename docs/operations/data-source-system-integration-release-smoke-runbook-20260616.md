@@ -33,6 +33,21 @@ Forbidden:
   target request bodies, dry-run token, private ids, or value-bearing stack
   traces in issue comments.
 
+## Evidence Reuse Ledger
+
+Use this ledger to avoid rerunning already-closed gates blindly. It is an index,
+not a release pass by itself: if the current release package changed the relevant
+surface, or if the owner wants evidence against the exact release artifact, rerun
+the corresponding section below and post fresh values-free evidence.
+
+| Gate | Current anchor | Reuse rule for release signoff |
+| --- | --- | --- |
+| C2 read-only SQL source | issue #2600 closed PASS on package `f483bfdac`: PostgreSQL, MySQL/MariaDB, and SQL Server read-only paths all passed with `rowsWritten=0`, credentials stayed in `/data-sources`, and C3/C6/K3 writes were not run. | May be cited as prior entity-machine coverage for the read-only bridge. Rerun section 3 on the release package if C2 source/adapter/package surfaces changed or if exact-package evidence is required. |
+| C3 incremental/watermark | Runtime and CI real-DB wire locks are landed on main, but no release-package entity-machine incremental/resume smoke is recorded in this runbook. Large-BOM #2425 is related Data Factory C3/C4 evidence, not the SQL watermark/resume release gate. | Section 4 remains required for complete delivery unless an owner explicitly narrows the release scope and uses downgraded wording. Do not cite #2425 as C3 watermark/resume PASS. |
+| C4 UI configuration | Source/object/schema picker, source-field picker, watermark UI, and read-only/source-only boundary UX have landed, but this runbook has no final release-package UI smoke evidence yet. | Section 5 remains required for complete delivery unless exact UI smoke is explicitly deferred with downgraded wording. |
+| C5 K3/MSSQL read-only seam | issue #2670 closed PASS on package `dea391a1`: generic SQL Server smoke and K3 SQL Server executor smoke both passed after operator SQL scope adjustment; no K3 Save/Submit/Audit/BOM, external DB write, raw SQL, credentials, or row values were printed. | May be cited when no C5-relevant package/runtime surface changed after `dea391a1`; otherwise rerun the C5 runbook on the release package. |
+| C6 external write | issue #2720 core sandbox dry-run/apply/re-pull/rollback PASS and read-only dedicated-route PASS; controlled bad-row remains HOLD on `HOLD_TARGET_DDL_UNAVAILABLE` until a safe seeded-row/DDL-backed write-time failure shape is available. | C6-5 is not closed. Release signoff cannot claim complete database/source-system delivery until controlled bad-row row-level failure/dead-letter/provenance evidence passes values-free. |
+
 ## Required Inputs
 
 Capture only values-free identifiers:
@@ -375,6 +390,10 @@ Release signoff requires all of:
 - C6 sandbox smoke passes through the dedicated C6 runbook;
 - issue evidence is values-free;
 - no forbidden boundary is opened.
+
+The Evidence Reuse Ledger above may justify citing prior gates where explicitly
+allowed, but it does not change these pass criteria and does not turn a HOLD into
+PASS.
 
 Before C6 sandbox smoke passes, describe the product as "read-only database
 source integration available with external-write still gated". Only after C2,
