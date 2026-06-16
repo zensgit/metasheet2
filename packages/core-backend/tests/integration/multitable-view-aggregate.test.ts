@@ -35,6 +35,9 @@ const V_GROUP_SECRET = `v_group_secret_${TS}` // groups by cat, aggregates a hid
 const V_GROUP_NOTE = `v_group_note_${TS}` // groups by note (has empty '' → null-key group)
 const V_GROUP_DENIED = `v_group_denied_${TS}` // groups by a hidden field → 422
 const V_GROUP_COMPUTED = `v_group_computed_${TS}` // groups by a computed (formula) field → 422
+const V_GROUP_NESTED = `v_group_nested_${TS}` // groups by [cat, note] → 2-level subtotal tree
+const V_GROUP_DENIED_L2 = `v_group_denied_l2_${TS}` // groups by [cat, hiddenField] → 422 at level 2
+const V_GROUP_COMPUTED_L2 = `v_group_computed_l2_${TS}` // groups by [cat, formula] → 422 at level 2
 const N = 60 // > default page size (50) → proves full-set, not page
 
 let app: Express
@@ -96,6 +99,14 @@ describeIfDatabase('multitable view-aggregate (real DB)', () => {
     await groupedView(V_GROUP_NOTE, { [FLD_QTY]: 'sum' }, FLD_NOTE) // '' → null-key group
     await groupedView(V_GROUP_DENIED, { [FLD_QTY]: 'sum' }, FLD_SECRET) // hidden group field → 422
     await groupedView(V_GROUP_COMPUTED, { [FLD_QTY]: 'sum' }, FLD_FORMULA) // computed group field → 422
+    // nested grouping (multi-level): groupInfo.fieldIds = ordered levels
+    const nestedView = (id: string, aggregations: Record<string, string>, groupFieldIds: string[]) =>
+      q('INSERT INTO meta_views (id, sheet_id, name, type, hidden_field_ids, filter_info, config, group_info) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb)',
+        [id, SHEET_ID, id, 'grid', '[]', JSON.stringify({ conjunction: 'and', conditions: [] }),
+          JSON.stringify({ aggregations }), JSON.stringify({ fieldIds: groupFieldIds, fieldId: groupFieldIds[0] })])
+    await nestedView(V_GROUP_NESTED, { [FLD_QTY]: 'sum' }, [FLD_CAT, FLD_NOTE]) // cat(A/B) → note(x/'')
+    await nestedView(V_GROUP_DENIED_L2, { [FLD_QTY]: 'sum' }, [FLD_CAT, FLD_SECRET]) // hidden at level 2 → 422
+    await nestedView(V_GROUP_COMPUTED_L2, { [FLD_QTY]: 'sum' }, [FLD_CAT, FLD_FORMULA]) // computed at level 2 → 422
     // hide fld_secret from this user (subject-scoped) — its aggregate must be OMITTED
     await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [SHEET_ID, FLD_SECRET, 'user', USER, false, false])
   })
@@ -228,5 +239,60 @@ describeIfDatabase('multitable view-aggregate (real DB)', () => {
     const res = await aggregate(V_GROUP_COMPUTED)
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('AGGREGATE_COMPUTED_GROUP_UNSUPPORTED')
+  })
+
+  // ---- nested / multi-level grouping ----
+
+  test('NESTED GROUP: 2-level tree partitions at every level (Σ leaf counts === N) + grand total present', async () => {
+    const res = await aggregate(V_GROUP_NESTED) // group by [cat, note]
+    expect(res.status).toBe(200)
+    expect(res.body.data.total).toBe(N)
+    expect(res.body.data.groupFieldIds).toEqual([FLD_CAT, FLD_NOTE]) // ordered levels echoed
+    expect(res.body.data.groupFieldId).toBe(FLD_CAT) // legacy level-1 echo for back-compat readers
+    const groups = res.body.data.groups as Array<{ key: unknown; count: number; aggregates: Record<string, { fn: string; value: number }>; children?: Array<{ key: unknown; count: number; aggregates: Record<string, { fn: string; value: number }> }> }>
+    expect(groups.map((g) => g.key)).toEqual(['A', 'B'])
+    // partition at level 1
+    expect(groups.reduce((s, g) => s + g.count, 0)).toBe(N)
+    // partition at level 2 (Σ children === parent) AND Σ all leaf counts === N
+    let leafSum = 0
+    for (const g of groups) {
+      expect(g.children).toBeDefined()
+      expect(g.children!.reduce((s, c) => s + c.count, 0)).toBe(g.count)
+      // each cat: note 'x' (20) + null (10) = 30
+      const byKey = Object.fromEntries(g.children!.map((c) => [String(c.key), c]))
+      expect(byKey['x'].count).toBe(20)
+      const nullChild = g.children!.find((c) => c.key === null)!
+      expect(nullChild.count).toBe(10)
+      leafSum += g.children!.reduce((s, c) => s + c.count, 0)
+    }
+    expect(leafSum).toBe(N)
+    // per-level INDEPENDENT aggregation: level-1 A sum (odd i 1..59) = 900; its 'x' child sum = the
+    // odd-i rows with note≠'' = i where i odd AND i%3≠0 → recomputed over node.rows, not a child roll-up.
+    const a = groups.find((g) => g.key === 'A')!
+    expect(a.aggregates[FLD_QTY]).toEqual({ fn: 'sum', value: 900 })
+    const aChildSum = a.children!.reduce((s, c) => s + (c.aggregates[FLD_QTY]?.value ?? 0), 0)
+    expect(aChildSum).toBe(a.aggregates[FLD_QTY]!.value) // children sums DO add up for `sum` (invariant)
+    // grand total still present alongside the tree
+    expect(res.body.data.aggregates[FLD_QTY]).toEqual({ fn: 'sum', value: 1830 })
+  })
+
+  test('NESTED DENY at level 2: a hidden field at the 2nd level HARD-FAILS 422 (same as level 1)', async () => {
+    const res = await aggregate(V_GROUP_DENIED_L2) // group by [cat, secret(hidden)]
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('AGGREGATE_GROUP_FIELD_DENIED')
+  })
+
+  test('NESTED COMPUTED at level 2: a formula field at the 2nd level HARD-FAILS 422', async () => {
+    const res = await aggregate(V_GROUP_COMPUTED_L2) // group by [cat, formula]
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('AGGREGATE_COMPUTED_GROUP_UNSUPPORTED')
+  })
+
+  test('BACK-COMPAT: a view persisted with legacy groupInfo.fieldId still groups (single level, no children)', async () => {
+    const res = await aggregate(V_GROUP) // V_GROUP uses { fieldId } (legacy single-field shape)
+    expect(res.status).toBe(200)
+    expect(res.body.data.groupFieldIds).toEqual([FLD_CAT]) // dual-read promotes fieldId → fieldIds[0]
+    const groups = res.body.data.groups as Array<{ children?: unknown }>
+    expect(groups.every((g) => g.children === undefined)).toBe(true) // single level → no nesting
   })
 })

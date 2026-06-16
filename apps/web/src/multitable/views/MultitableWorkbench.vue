@@ -120,10 +120,10 @@
       @toggle-field="grid.toggleFieldVisibility" @add-sort="grid.addSortRule" @remove-sort="grid.removeSortRule"
       @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
       @remove-filter="grid.removeFilterRule" @clear-filters="onClearFilters" @set-conjunction="onSetConjunction"
-      :group-field-id="grid.groupFieldId.value"
+      :group-field-ids="grid.groupFieldIds.value"
       :search-text="searchText" :total-rows="grid.page.value.total" :row-density="rowDensity"
       @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
-      @set-group-field="grid.setGroupField" @export-csv="onExportCsv" @export-xlsx="onExportXlsx" @import="onOpenImportModal" @update:search-text="onSearchTextUpdate"
+      @set-group-fields="onSetGroupFields" @export-csv="onExportCsv" @export-xlsx="onExportXlsx" @import="onOpenImportModal" @update:search-text="onSearchTextUpdate"
       @print="onPrint" @set-row-density="onSetRowDensity" @auto-fit-columns="onAutoFitColumns"
     />
     <div class="mt-workbench__content">
@@ -254,7 +254,7 @@
           :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :person-summaries="grid.personSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
-          :group-field="grid.groupField.value"
+          :group-fields="grid.groupFields.value"
           :search-text="searchText" :row-density="rowDensity"
           :upload-fn="uploadAttachmentFn"
           :delete-attachment-fn="deleteAttachmentFn"
@@ -577,8 +577,7 @@ import { parseFrozenIds } from '../utils/frozen-columns'
 import {
   parseColumnWidths,
   parseRowDensity,
-  parseGroupCollapse,
-  resolveActiveCollapsedKeys,
+  resolveActiveCollapsedKeysForFields,
   mergeColumnWidths,
   mergeRowDensity,
   mergeGroupCollapse,
@@ -1082,7 +1081,7 @@ const structuralRealtimeFieldIds = computed(() => {
   for (const rule of grid.filterRules.value) {
     if (rule.fieldId) next.add(rule.fieldId)
   }
-  if (grid.groupFieldId.value) next.add(grid.groupFieldId.value)
+  for (const fieldId of grid.groupFieldIds.value) next.add(fieldId)
   return [...next]
 })
 
@@ -2180,8 +2179,10 @@ function onSetRowDensity(next: RowDensity) {
   void persistDisplayPref(mergeRowDensity(workbench.activeView.value?.config, next))
 }
 
-// Group collapse: collapsedGroupKeys is controlled child state; flipping a key persists the scoped
-// {fieldId, collapsedKeys} (scoped so a saved set never collapses unrelated groups after a regroup).
+// Group collapse: collapsedGroupKeys is controlled child state; flipping a COMPOSITE path key persists
+// the scoped {fieldId, fieldIds, collapsedKeys}. Scoped to the ORDERED group field ids (nested grouping)
+// so a saved set never collapses unrelated groups after a regroup OR a reorder; `fieldId` = level-1 is
+// also written so a legacy single-field reader keeps working.
 const activeCollapsedGroupKeys = computed<string[]>(() => collapsedGroupKeys.value)
 function onToggleGroup(key: string) {
   const set = new Set(collapsedGroupKeys.value)
@@ -2189,9 +2190,11 @@ function onToggleGroup(key: string) {
   else set.add(key)
   const nextKeys = [...set]
   collapsedGroupKeys.value = nextKeys
+  const fieldIds = grid.groupFieldIds.value
   void persistDisplayPref(
     mergeGroupCollapse(workbench.activeView.value?.config, {
-      fieldId: grid.groupFieldId.value ?? undefined,
+      fieldId: fieldIds[0] ?? undefined,
+      fieldIds: fieldIds.length ? [...fieldIds] : undefined,
       collapsedKeys: nextKeys,
     }),
   )
@@ -2203,10 +2206,10 @@ function onToggleGroup(key: string) {
 // after our own round-trip (persisted === local). Density + collapse re-resolve whenever config or
 // the active groupField changes (collapse is scoped to the grouped field).
 watch(
-  [() => workbench.activeViewId.value, () => workbench.activeView.value?.config, () => grid.groupFieldId.value],
+  [() => workbench.activeViewId.value, () => workbench.activeView.value?.config, () => grid.groupFieldIds.value],
   () => {
     rowDensity.value = parseRowDensity(workbench.activeView.value?.config)
-    collapsedGroupKeys.value = resolveActiveCollapsedKeys(workbench.activeView.value?.config, grid.groupFieldId.value)
+    collapsedGroupKeys.value = resolveActiveCollapsedKeysForFields(workbench.activeView.value?.config, grid.groupFieldIds.value)
   },
   { immediate: true },
 )
@@ -2268,6 +2271,14 @@ watch(
   () => { void loadAggregates() },
   { immediate: true },
 )
+// Nested grouping: setGroupFields PERSISTS groupInfo (server reads it to compute per-level subtotals),
+// so re-aggregate only AFTER the persist resolves — otherwise the request would read the stale
+// groupInfo and the new level's subtotals would never appear. Local display-grouping updates instantly
+// from grid.groupFields (reactive) regardless.
+async function onSetGroupFields(fieldIds: string[]) {
+  await grid.setGroupFields(fieldIds)
+  await loadAggregates()
+}
 function onSetAggregation(payload: { fieldId: string; fn: string | null }) {
   const next = { ...activeAggregationConfig.value }
   if (payload.fn) next[payload.fieldId] = payload.fn

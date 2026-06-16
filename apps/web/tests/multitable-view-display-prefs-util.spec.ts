@@ -4,11 +4,15 @@ import {
   parseRowDensity,
   parseGroupCollapse,
   resolveActiveCollapsedKeys,
+  resolveActiveCollapsedKeysForFields,
   mergeColumnWidths,
   mergeRowDensity,
   mergeGroupCollapse,
   DEFAULT_ROW_DENSITY,
 } from '../src/multitable/utils/view-display-prefs'
+
+// The grid joins nested composite collapse keys with U+001F (see MetaGridTable GROUP_KEY_SEP).
+const SEP = '\u001f'
 
 describe('parseColumnWidths (narrow helper — dirty config never reaches layout math)', () => {
   it('passes a valid record of positive finite numbers', () => {
@@ -103,5 +107,66 @@ describe('merge builders (whole-replace-safe: preserve every sibling key)', () =
   it('merge builders tolerate null/undefined existing config', () => {
     expect(mergeColumnWidths(null, { f1: 1 })).toEqual({ columnWidths: { f1: 1 } })
     expect(mergeRowDensity(undefined, 'expanded')).toEqual({ rowDensity: 'expanded' })
+  })
+})
+
+describe('parseGroupCollapse (nested: fieldIds[])', () => {
+  it('carries a non-empty string[] fieldIds', () => {
+    expect(parseGroupCollapse({ groupCollapse: { fieldId: 'fA', fieldIds: ['fA', 'fB'], collapsedKeys: [`x${SEP}y`] } }))
+      .toEqual({ fieldId: 'fA', fieldIds: ['fA', 'fB'], collapsedKeys: [`x${SEP}y`] })
+  })
+  it('omits fieldIds when empty / non-array / non-string element (never returns [])', () => {
+    expect(parseGroupCollapse({ groupCollapse: { fieldIds: [], collapsedKeys: ['x'] } }).fieldIds).toBeUndefined()
+    expect(parseGroupCollapse({ groupCollapse: { fieldIds: 'fA', collapsedKeys: ['x'] } }).fieldIds).toBeUndefined()
+    expect(parseGroupCollapse({ groupCollapse: { fieldIds: ['fA', 2], collapsedKeys: ['x'] } }).fieldIds).toBeUndefined()
+    expect(parseGroupCollapse({ groupCollapse: { fieldIds: ['fA', ''], collapsedKeys: ['x'] } }).fieldIds).toBeUndefined()
+  })
+})
+
+describe('resolveActiveCollapsedKeysForFields (nested ordered-list stale-key guard)', () => {
+  const nested = { groupCollapse: { fieldId: 'fA', fieldIds: ['fA', 'fB'], collapsedKeys: [`x${SEP}y`] } }
+  it('applies a composite set only on the EXACT same ordered field list', () => {
+    expect(resolveActiveCollapsedKeysForFields(nested, ['fA', 'fB'])).toEqual([`x${SEP}y`])
+  })
+  it('ignores it after a REORDER (same fields, different order)', () => {
+    expect(resolveActiveCollapsedKeysForFields(nested, ['fB', 'fA'])).toEqual([])
+  })
+  it('ignores it when a level changes (different 2nd field)', () => {
+    expect(resolveActiveCollapsedKeysForFields(nested, ['fA', 'fC'])).toEqual([])
+  })
+  it('returns [] when no group fields are active', () => {
+    expect(resolveActiveCollapsedKeysForFields(nested, [])).toEqual([])
+    expect(resolveActiveCollapsedKeysForFields(nested, null)).toEqual([])
+    expect(resolveActiveCollapsedKeysForFields(nested, undefined)).toEqual([])
+  })
+  it('legacy single-fieldId config applies ONLY to a single-level grouping by that same field', () => {
+    const legacy = { groupCollapse: { fieldId: 'fA', collapsedKeys: ['x'] } } // no fieldIds (pre-nested)
+    expect(resolveActiveCollapsedKeysForFields(legacy, ['fA'])).toEqual(['x']) // single-level by fA → applies
+    expect(resolveActiveCollapsedKeysForFields(legacy, ['fA', 'fB'])).toEqual([]) // now nested → legacy can't apply
+    expect(resolveActiveCollapsedKeysForFields(legacy, ['fB'])).toEqual([]) // different field → no
+  })
+})
+
+describe('composite collapse keys are jsonb-storable (regression: NUL would break the PATCH)', () => {
+  // Postgres jsonb REJECTS U+0000 in string values; the grid separator must NOT be NUL. These keys are
+  // persisted into view.config.groupCollapse.collapsedKeys (jsonb), so a NUL separator would 500 every
+  // nested-collapse write. JSON round-trip is the proxy for storability (only U+0000 is jsonb-forbidden).
+  it('the U+001F separator is NOT U+0000', () => {
+    expect(SEP).not.toBe('\u0000')
+    expect(SEP).toBe('\u001f')
+  })
+  it('a merged config with a composite key contains NO U+0000 and round-trips through JSON', () => {
+    const compositeKey = `todo${SEP}east` // a real 2-level path
+    const merged = mergeGroupCollapse({ frozenLeftColumnIds: ['f1'] }, {
+      fieldId: 'fld_status',
+      fieldIds: ['fld_status', 'fld_region'],
+      collapsedKeys: [compositeKey],
+    })
+    const serialized = JSON.stringify(merged)
+    expect(serialized).not.toContain('\u0000') // would make Postgres jsonb throw
+    // parse-back fidelity: the composite key survives the wire intact
+    const round = JSON.parse(serialized)
+    expect(round.groupCollapse.collapsedKeys[0]).toBe(compositeKey)
+    expect(round.frozenLeftColumnIds).toEqual(['f1']) // siblings preserved
   })
 })

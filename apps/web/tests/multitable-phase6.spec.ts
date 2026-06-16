@@ -42,7 +42,9 @@ describe('group-by from toolbar', () => {
     await grid.setGroupField('f1')
     expect(grid.groupFieldId.value).toBe('f1')
     const body = JSON.parse(fetchFn.mock.calls[0][1].body)
-    expect(body.groupInfo).toEqual({ fieldId: 'f1' })
+    // Nested grouping: persists the NEW ordered fieldIds[] AND the legacy fieldId (= level-1) for
+    // back-compat with single-field readers (Kanban/Gantt + older clients).
+    expect(body.groupInfo).toEqual({ fieldIds: ['f1'], fieldId: 'f1' })
   })
 
   it('setGroupField(null) sends undefined groupInfo', async () => {

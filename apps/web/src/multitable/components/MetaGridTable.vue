@@ -32,112 +32,115 @@
           </tr>
         </thead>
         <tbody v-if="groupedRows">
-          <template v-for="group in groupedRows" :key="group.key">
-            <tr class="meta-grid__group-header" @click="toggleGroup(group.key)">
+          <template v-for="item in groupRenderItems" :key="item.kind + ':' + (item.kind === 'data' ? item.row.id : item.path + ':' + item.kind)">
+            <!-- Nested group header: one per level, indented by depth, per-level collapse toggle -->
+            <tr v-if="item.kind === 'header'" class="meta-grid__group-header" :class="`meta-grid__group-header--l${item.level}`" data-test="group-header" :data-group-path="item.path" :data-group-level="item.level" @click="toggleGroup(item.path)">
               <td :colspan="colSpan">
-                <span class="meta-grid__group-toggle">{{ collapsedGroups.has(group.key) ? '&#x25B6;' : '&#x25BC;' }}</span>
-                <span class="meta-grid__group-label">{{ group.label }}</span>
-                <span class="meta-grid__group-count">({{ group.count }})</span>
+                <span class="meta-grid__group-indent" :style="{ paddingLeft: `${item.level * 18}px` }">
+                  <span class="meta-grid__group-toggle">{{ item.collapsed ? '&#x25B6;' : '&#x25BC;' }}</span>
+                  <span class="meta-grid__group-label">{{ item.label }}</span>
+                  <span class="meta-grid__group-count">({{ item.count }})</span>
+                </span>
               </td>
             </tr>
-            <template v-if="!collapsedGroups.has(group.key)">
-              <tr
-                v-for="(row, ri) in group.rows"
-                :key="row.id"
-                role="row"
-                :aria-selected="row.id === selectedRecordId || undefined"
-                class="meta-grid__row"
-                :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === flatIndex(group, ri) }"
-                :style="rowStyle(row.id)"
-                @click="emit('select-record', row.id)"
-                @contextmenu="onRowContextMenu($event, row.id)"
+            <!-- Leaf-level data row -->
+            <tr
+              v-else-if="item.kind === 'data'"
+              :key="item.row.id"
+              role="row"
+              :aria-selected="item.row.id === selectedRecordId || undefined"
+              class="meta-grid__row"
+              :class="{ 'meta-grid__row--selected': item.row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === item.navIndex }"
+              :style="rowStyle(item.row.id)"
+              @click="emit('select-record', item.row.id)"
+              @contextmenu="onRowContextMenu($event, item.row.id)"
+            >
+              <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
+                <input type="checkbox" :checked="selectedIds.has(item.row.id)" :disabled="!rowAllowsAnyBulkAction(item.row.id)" @change="toggleSelectRow(item.row.id)" />
+              </td>
+              <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
+                <span>{{ startIndex + item.navIndex + 1 }}</span>
+                <button
+                  v-if="resolveRowActions(item.row.id).canComment"
+                  type="button"
+                  class="meta-grid__comment-action"
+                  :class="rowCommentActionClass(item.row.id)"
+                  :aria-label="commentForRow(startIndex + item.navIndex + 1, isZh)"
+                  @click.stop="emit('open-comments', item.row.id)"
+                  @keydown="onRowCommentKeydown($event, item.row.id)"
+                >
+                  <MetaCommentAffordance :state="rowCommentAffordance(item.row.id)" />
+                </button>
+              </td>
+              <td
+                v-for="(field, ci) in visibleFields"
+                :key="field.id"
+                class="meta-grid__cell"
+                :class="{ 'meta-grid__cell--editing': isEditing(item.row.id, field.id), 'meta-grid__cell--readonly': !isEditable(item.row.id, field), 'meta-grid__cell--focused': focusRow === item.navIndex && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(item.row.id, field.id) }"
+                :style="cellStyle(item.row.id, field.id, ci)"
+                @dblclick="startEdit(item.row, field)"
+                @click.stop="onCellClick(item.navIndex, ci, item.row.id)"
               >
-                <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
-                  <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
-                </td>
-                <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
-                  <span>{{ startIndex + flatIndex(group, ri) + 1 }}</span>
-                  <button
-                    v-if="resolveRowActions(row.id).canComment"
-                    type="button"
-                    class="meta-grid__comment-action"
-                    :class="rowCommentActionClass(row.id)"
-                    :aria-label="commentForRow(startIndex + flatIndex(group, ri) + 1, isZh)"
-                    @click.stop="emit('open-comments', row.id)"
-                    @keydown="onRowCommentKeydown($event, row.id)"
-                  >
-                    <MetaCommentAffordance :state="rowCommentAffordance(row.id)" />
-                  </button>
-                </td>
-                <td
-                  v-for="(field, ci) in visibleFields"
-                  :key="field.id"
-                  class="meta-grid__cell"
-                  :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === flatIndex(group, ri) && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(row.id, field.id) }"
-                  :style="cellStyle(row.id, field.id, ci)"
-                  @dblclick="startEdit(row, field)"
-                  @click.stop="onCellClick(flatIndex(group, ri), ci, row.id)"
+                <span
+                  v-if="!isEditing(item.row.id, field.id) && cellScaleIcon(item.row.id, field.id)"
+                  class="meta-grid__cell-scale-icon"
+                  data-test="cell-scale-icon"
+                  :style="{ color: cellScaleIcon(item.row.id, field.id)!.color }"
+                >{{ cellScaleIcon(item.row.id, field.id)!.glyph }}</span>
+                <MetaCellEditor
+                  v-if="isEditing(item.row.id, field.id)"
+                  :field="field"
+                  :model-value="editCell!.value"
+                  :upload-fn="props.uploadFn"
+                  :delete-attachment-fn="props.deleteAttachmentFn"
+                  :attachment-summaries="props.attachmentSummaries?.[item.row.id]?.[field.id]"
+                  :upload-context="{ recordId: item.row.id, fieldId: field.id }"
+                  :ai-run-state="aiRunState"
+                  :mention-suggestions="props.mentionSuggestions"
+                  @update:model-value="editCell!.value = $event"
+                  @confirm="confirmEdit(item.row)"
+                  @cancel="cancelEdit"
+                  @open-link-picker="openLinkPickerFromCell(item.row.id, field)"
+                  @open-person-picker="openPersonPickerFromCell(item.row.id, field)"
+                  @ai-run="onAiRunFromCell(item.row.id, field)"
+                />
+                <MetaCellRenderer
+                  v-else
+                  :field="field"
+                  :value="item.row.data[field.id]"
+                  :link-summaries="props.linkSummaries?.[item.row.id]?.[field.id]"
+                  :person-summaries="props.personSummaries?.[item.row.id]?.[field.id]"
+                  :attachment-summaries="props.attachmentSummaries?.[item.row.id]?.[field.id]"
+                  :button-pending="isButtonPending(item.row.id, field.id)"
+                  :fetch-record="props.fetchRecord"
+                  @run="emit('run-button', { recordId: item.row.id, field })"
+                />
+                <button
+                  v-if="resolveRowActions(item.row.id).canComment && focusRow === item.navIndex && focusCol === ci"
+                  type="button"
+                  class="meta-grid__field-comment-action"
+                  :class="fieldCommentActionClass(item.row.id, field.id)"
+                  :aria-label="commentForField(field.name, isZh)"
+                  @click.stop="emit('open-field-comments', { recordId: item.row.id, fieldId: field.id })"
+                  @keydown="onFieldCommentKeydown($event, item.row.id, field.id)"
                 >
-                  <span
-                    v-if="!isEditing(row.id, field.id) && cellScaleIcon(row.id, field.id)"
-                    class="meta-grid__cell-scale-icon"
-                    data-test="cell-scale-icon"
-                    :style="{ color: cellScaleIcon(row.id, field.id)!.color }"
-                  >{{ cellScaleIcon(row.id, field.id)!.glyph }}</span>
-                  <MetaCellEditor
-                    v-if="isEditing(row.id, field.id)"
-                    :field="field"
-                    :model-value="editCell!.value"
-                    :upload-fn="props.uploadFn"
-                    :delete-attachment-fn="props.deleteAttachmentFn"
-                    :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
-                    :upload-context="{ recordId: row.id, fieldId: field.id }"
-                    :ai-run-state="aiRunState"
-                    :mention-suggestions="props.mentionSuggestions"
-                    @update:model-value="editCell!.value = $event"
-                    @confirm="confirmEdit(row)"
-                    @cancel="cancelEdit"
-                    @open-link-picker="openLinkPickerFromCell(row.id, field)"
-                    @open-person-picker="openPersonPickerFromCell(row.id, field)"
-                    @ai-run="onAiRunFromCell(row.id, field)"
-                  />
-                  <MetaCellRenderer
-                    v-else
-                    :field="field"
-                    :value="row.data[field.id]"
-                    :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
-                    :person-summaries="props.personSummaries?.[row.id]?.[field.id]"
-                    :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
-                    :button-pending="isButtonPending(row.id, field.id)"
-                    :fetch-record="props.fetchRecord"
-                    @run="emit('run-button', { recordId: row.id, field })"
-                  />
-                  <button
-                    v-if="resolveRowActions(row.id).canComment && focusRow === flatIndex(group, ri) && focusCol === ci"
-                    type="button"
-                    class="meta-grid__field-comment-action"
-                    :class="fieldCommentActionClass(row.id, field.id)"
-                    :aria-label="commentForField(field.name, isZh)"
-                    @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: field.id })"
-                    @keydown="onFieldCommentKeydown($event, row.id, field.id)"
-                  >
-                    <MetaCommentAffordance :state="fieldCommentAffordance(row.id, field.id)" />
-                  </button>
-                </td>
-              </tr>
-              <tr v-if="hasGroupSubtotals" class="meta-grid__group-subtotal">
-                <td v-if="enableMultiSelect" class="meta-grid__check-col" :style="{ left: '0px' }"></td>
-                <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">Σ</td>
-                <td
-                  v-for="(field, fi) in visibleFields"
-                  :key="field.id"
-                  class="meta-grid__foot-cell meta-grid__group-subtotal-cell"
-                  :style="isFrozen(fi) ? { position: 'sticky', left: `${frozenLeft(fi)}px`, zIndex: '1', background: '#fcfcfd' } : undefined"
-                >
-                  <span class="meta-grid__foot-value">{{ groupAggValueDisplay(group.key, field.id) }}</span>
-                </td>
-              </tr>
-            </template>
+                  <MetaCommentAffordance :state="fieldCommentAffordance(item.row.id, field.id)" />
+                </button>
+              </td>
+            </tr>
+            <!-- Per-level subtotal row (leaf + each ancestor); value from server tree by composite path -->
+            <tr v-else-if="item.kind === 'subtotal' && hasGroupSubtotals" class="meta-grid__group-subtotal" :class="`meta-grid__group-subtotal--l${item.level}`" data-test="group-subtotal" :data-group-path="item.path" :data-group-level="item.level">
+              <td v-if="enableMultiSelect" class="meta-grid__check-col" :style="{ left: '0px' }"></td>
+              <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">Σ</td>
+              <td
+                v-for="(field, fi) in visibleFields"
+                :key="field.id"
+                class="meta-grid__foot-cell meta-grid__group-subtotal-cell"
+                :style="isFrozen(fi) ? { position: 'sticky', left: `${frozenLeft(fi)}px`, zIndex: '1', background: '#fcfcfd' } : undefined"
+              >
+                <span class="meta-grid__foot-value">{{ groupAggValueDisplay(item.path, field.id) }}</span>
+              </td>
+            </tr>
           </template>
           <tr v-if="!rows.length && !loading">
             <td :colspan="colSpan" class="meta-grid__empty">
@@ -392,6 +395,14 @@ const EDITABLE = new Set(['string', 'number', 'boolean', 'date', 'select', 'link
 
 interface EditingCell { recordId: string; fieldId: string; value: unknown }
 
+// Server per-group subtotal node (mirrors api/client ViewAggregateGroup). Recursive for nested grouping.
+interface ServerAggregateGroup {
+  key: string | number | boolean | null
+  count: number
+  aggregates: Record<string, { fn: string; value: number }>
+  children?: ServerAggregateGroup[]
+}
+
 const props = defineProps<{
   rows: MetaRecord[]
   visibleFields: MetaField[]
@@ -414,10 +425,16 @@ const props = defineProps<{
   personSummaries?: Record<string, Record<string, { id: string; display: string }[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
   enableMultiSelect?: boolean
+  // Nested / multi-level grouping: ordered 1..3 group fields (level 0 = outermost). Empty/undefined →
+  // no grouping. `groupField` (singular) is the legacy single-field prop, kept as a BACKWARD-COMPAT
+  // alias: when `groupFields` is empty/absent, a present `groupField` renders as `[groupField]` (one
+  // header + one subtotal level, byte-identical to today). `groupFields` takes precedence when both set.
   groupField?: MetaField | null
-  // Group-collapse is CONTROLLED by the parent (persist-display-prefs arc): the set of collapsed
-  // group keys comes in as a prop and the component only emits `toggle-group`. This keeps a single
-  // source of truth (the persisted `view.config.groupCollapse`) — no internal collapse ref.
+  groupFields?: MetaField[]
+  // Group-collapse is CONTROLLED by the parent (persist-display-prefs arc): the set of collapsed group
+  // keys comes in as a prop and the component only emits `toggle-group`. Keys are COMPOSITE path keys
+  // (per-level values joined by the NUL separator) for nested grouping; a single-level group's path is
+  // just its own key (unchanged). Single source of truth = persisted `view.config.groupCollapse`.
   collapsedGroupKeys?: string[]
   searchText?: string
   rowDensity?: RowDensity
@@ -430,9 +447,10 @@ const props = defineProps<{
   aggregationConfig?: Record<string, string>
   aggregates?: Record<string, { fn: string; value: number }>
   aggregateTooLarge?: boolean
-  // #4-3b-2a: server-computed per-group subtotals (full filtered set, NOT page). Matched to the
-  // client's rendered groups by key. Value rendered from this prop only — no local group aggregation.
-  aggregateGroups?: Array<{ key: string | number | boolean | null; count: number; aggregates: Record<string, { fn: string; value: number }> }>
+  // #4-3b-2a + nested grouping: server-computed per-group subtotals (full filtered set, NOT page).
+  // Matched to the client's rendered groups by a per-level composite key. Value rendered from this prop
+  // only — no local group aggregation. `children` carries deeper-level subtotals (nested grouping).
+  aggregateGroups?: ServerAggregateGroup[]
   // A3: AI shortcut run opt-in for the cell editor. `aiRunEnabled` gates the
   // button; `aiRunPending` is the UNIFIED in-flight state from useAiShortcut;
   // `aiRunBusy` (review F3) additionally covers the RATE_LIMITED countdown —
@@ -529,41 +547,126 @@ const allSelected = computed(() =>
 // filteredRows now passes through rows directly (search is handled by the API).
 const filteredRows = computed(() => props.rows)
 
-// --- GroupBy ---
-// Collapse state is controlled by the parent (persisted in view.config). Derive a Set from the
-// prop for O(1) lookups; flipping a key is delegated upward via `toggle-group`.
+// --- GroupBy (nested / multi-level) ---
+// Collapse state is CONTROLLED by the parent (persisted in view.config). collapsedGroups derives a Set
+// from the prop for O(1) lookups; flipping a key is delegated upward via `toggle-group`. The keys are
+// COMPOSITE path keys (per-level keys joined by GROUP_KEY_SEP) so a level-2 "A" can't collide with a
+// level-1 "A"; collapsing a parent path hides every descendant.
+// GROUP_KEY_SEP is U+001F (ASCII Unit Separator) — a non-printable control char that satisfies TWO
+// constraints at once: (1) collision-safe — real group values (select/string/number/date display text)
+// never contain it, so paths ["a b","c"] and ["a","b c"] stay DISTINCT where a printable separator (a
+// space) would silently MERGE them, corrupting subtotal lookup and parent/child collapse; (2) PERSISTABLE
+// — the composite path is stored in the view.config.groupCollapse.collapsedKeys jsonb column, and
+// Postgres jsonb REJECTS U+0000 (NUL cannot be converted to text), so NUL — though impossible in PG text
+// — cannot be the separator. U+001F stores fine in jsonb and is realistically never typed by users.
 const collapsedGroups = computed<Set<string>>(() => new Set(props.collapsedGroupKeys ?? []))
+const GROUP_KEY_SEP = '\u001f'
+const GROUP_UNGROUPED = '__ungrouped__'
 
-interface RowGroup { key: string; label: string; rows: MetaRecord[]; count: number }
+// ONE per-level normalizer used on BOTH the client page-row bucketing side AND the server-tree lookup
+// side, so per-level key agreement holds by construction (the highest-risk silent-wrong bug otherwise).
+// Empty cell / server null → the synthetic ungrouped key; everything else → String(val). Valid only
+// because GROUPABLE_TYPES keeps group fields primitive (select/string/boolean/number/date).
+function levelKey(val: unknown): string {
+  return val == null || val === '' ? GROUP_UNGROUPED : String(val)
+}
+function groupLabel(key: string): string {
+  return key === GROUP_UNGROUPED ? groupNoValue(isZh.value) : key
+}
 
-const groupedRows = computed<RowGroup[] | null>(() => {
-  if (!props.groupField) return null
-  const fid = props.groupField.id
+// Nested group node over the current page rows. `path` is the composite key (ancestor keys + own key).
+interface RowGroup { key: string; path: string; label: string; level: number; rows: MetaRecord[]; count: number; children: RowGroup[] }
+
+// Resolve the ordered group fields. `groupFields` (array) takes precedence; a present singular
+// `groupField` is the BACKWARD-COMPAT one-level alias when the array is empty/absent.
+const effectiveGroupFields = computed<MetaField[]>(() => {
+  if (props.groupFields && props.groupFields.length > 0) return props.groupFields
+  return props.groupField ? [props.groupField] : []
+})
+
+// Build the nested group tree by recursively bucketing `rows` over groupFields[level..].
+function buildGroupTree(rows: MetaRecord[], level: number, parentPath: string): RowGroup[] {
+  const field = effectiveGroupFields.value[level]
+  if (!field) return []
   const map = new Map<string, MetaRecord[]>()
-  for (const row of filteredRows.value) {
-    const val = row.data[fid]
-    const key = val == null || val === '' ? '__ungrouped__' : String(val)
+  for (const row of rows) {
+    const key = levelKey(row.data[field.id])
     if (!map.has(key)) map.set(key, [])
     map.get(key)!.push(row)
   }
+  // Insertion order = first-seen on this page (mirrors the prior single-level client behavior).
   const groups: RowGroup[] = []
-  for (const [key, rows] of map) {
-    groups.push({ key, label: key === '__ungrouped__' ? groupNoValue(isZh.value) : key, rows, count: rows.length })
+  for (const [key, groupRows] of map) {
+    const path = parentPath ? parentPath + GROUP_KEY_SEP + key : key
+    groups.push({
+      key,
+      path,
+      label: groupLabel(key),
+      level,
+      rows: groupRows,
+      count: groupRows.length,
+      children: buildGroupTree(groupRows, level + 1, path),
+    })
   }
   return groups
-})
-
-function toggleGroup(key: string) {
-  emit('toggle-group', key)
 }
 
-// Flat list for keyboard nav (respects collapsed groups)
+const groupedRows = computed<RowGroup[] | null>(() => {
+  if (effectiveGroupFields.value.length === 0) return null
+  return buildGroupTree(filteredRows.value, 0, '')
+})
+
+// Controlled: flipping a collapse key is delegated upward — the parent owns + persists the Set.
+function toggleGroup(path: string) {
+  emit('toggle-group', path)
+}
+
+// Flat, ordered render-list driving the template (you cannot nest <tr>). Each item is tagged. Leaf-level
+// data rows + a per-level subtotal item at every node boundary (deepest first). Collapsed subtrees are
+// omitted entirely. `navIndex` is the data-only index (into displayRows) for keyboard-focus matching.
+type GroupRenderItem =
+  | { kind: 'header'; path: string; label: string; level: number; count: number; collapsed: boolean }
+  | { kind: 'data'; row: MetaRecord; navIndex: number }
+  | { kind: 'subtotal'; path: string; level: number }
+
+const groupRenderItems = computed<GroupRenderItem[]>(() => {
+  if (!groupedRows.value) return []
+  const items: GroupRenderItem[] = []
+  let navIndex = 0
+  const walk = (nodes: RowGroup[]) => {
+    for (const node of nodes) {
+      const collapsed = collapsedGroups.value.has(node.path)
+      items.push({ kind: 'header', path: node.path, label: node.label, level: node.level, count: node.count, collapsed })
+      if (collapsed) continue
+      if (node.children.length > 0) {
+        walk(node.children)
+      } else {
+        for (const row of node.rows) {
+          items.push({ kind: 'data', row, navIndex })
+          navIndex += 1
+        }
+      }
+      // subtotal AFTER the node's body (leaf rows or nested children) — one per level, ancestors last.
+      items.push({ kind: 'subtotal', path: node.path, level: node.level })
+    }
+  }
+  walk(groupedRows.value)
+  return items
+})
+
+// Flat list for keyboard nav (data rows only, respecting collapsed groups). Built from the same tree so
+// it matches groupRenderItems' navIndex ordering exactly.
 const displayRows = computed(() => {
   if (!groupedRows.value) return filteredRows.value
   const result: MetaRecord[] = []
-  for (const g of groupedRows.value) {
-    if (!collapsedGroups.value.has(g.key)) result.push(...g.rows)
+  const walk = (nodes: RowGroup[]) => {
+    for (const node of nodes) {
+      if (collapsedGroups.value.has(node.path)) continue
+      if (node.children.length > 0) walk(node.children)
+      else result.push(...node.rows)
+    }
   }
+  walk(groupedRows.value)
   return result
 })
 
@@ -601,16 +704,6 @@ function onBulkEdit(mode: 'set' | 'clear') {
 watch(() => props.rows, () => { selectedIds.value = new Set() })
 
 const colSpan = computed(() => props.visibleFields.length + 1 + (props.enableMultiSelect ? 1 : 0))
-
-function flatIndex(group: RowGroup, localIdx: number): number {
-  if (!groupedRows.value) return localIdx
-  let offset = 0
-  for (const g of groupedRows.value) {
-    if (g.key === group.key) return offset + localIdx
-    if (!collapsedGroups.value.has(g.key)) offset += g.rows.length
-  }
-  return offset + localIdx
-}
 
 const getSortDir = (fid: string) => props.sortRules.find((r) => r.fieldId === fid)?.direction ?? null
 const isSortable = (f: MetaField) => !['link', 'lookup', 'rollup'].includes(f.type)
@@ -776,17 +869,27 @@ function aggValueDisplay(fieldId: string): string {
   const a = props.aggregates?.[fieldId]
   return a ? formatAggValue(a.value) : ''
 }
-// #4-3b-2a: server per-group subtotals, keyed by the client group-key form ('__ungrouped__' for null)
+// #4-3b-2a + nested grouping: server per-group subtotals, keyed by the COMPOSITE path key. The server
+// tree is flattened with the SAME per-level normalizer (levelKey) + separator the client render tree
+// uses, so a level-N subtotal looks up by the exact composite path of its render node — agreement holds
+// by construction (the null-key group maps to GROUP_UNGROUPED on both sides).
 const serverGroupAggByKey = computed(() => {
   const m = new Map<string, Record<string, { fn: string; value: number }>>()
-  for (const g of props.aggregateGroups ?? []) {
-    m.set(g.key === null ? '__ungrouped__' : String(g.key), g.aggregates)
+  const walk = (nodes: ServerAggregateGroup[], parentPath: string) => {
+    for (const node of nodes) {
+      const key = levelKey(node.key)
+      const path = parentPath ? parentPath + GROUP_KEY_SEP + key : key
+      m.set(path, node.aggregates)
+      if (node.children?.length) walk(node.children, path)
+    }
   }
+  walk(props.aggregateGroups ?? [], '')
   return m
 })
+// Has subtotals at all (at least the level-1 groups arrived from the server).
 const hasGroupSubtotals = computed(() => hasAnyAggregation.value && !props.aggregateTooLarge && (props.aggregateGroups?.length ?? 0) > 0)
-function groupAggValueDisplay(groupKey: string, fieldId: string): string {
-  const a = serverGroupAggByKey.value.get(groupKey)?.[fieldId]
+function groupAggValueDisplay(groupPath: string, fieldId: string): string {
+  const a = serverGroupAggByKey.value.get(groupPath)?.[fieldId]
   return a ? formatAggValue(a.value) : ''
 }
 function onAggChange(fieldId: string, e: Event) {
@@ -1026,6 +1129,10 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__group-header { cursor: pointer; }
 .meta-grid__group-header td { padding: 6px 12px; background: #f0f4f8; font-size: 13px; font-weight: 600; color: #333; border-bottom: 1px solid #dde3ea; }
 .meta-grid__group-header:hover td { background: #e6ecf2; }
+/* Nested levels: lighter background + thinner text as depth increases (visual hierarchy). */
+.meta-grid__group-header--l1 td { background: #f5f8fb; font-weight: 500; }
+.meta-grid__group-header--l2 td { background: #fafcfe; font-weight: 500; }
+.meta-grid__group-indent { display: inline-flex; align-items: center; }
 .meta-grid__group-toggle { display: inline-block; width: 16px; font-size: 10px; color: #999; }
 .meta-grid__group-label { margin-right: 6px; }
 .meta-grid__group-count { font-weight: 400; color: #999; font-size: 12px; }

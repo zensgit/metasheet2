@@ -1032,8 +1032,8 @@ function createGridMock() {
     filterConjunction: ref('and'),
     canUndo: ref(false),
     canRedo: ref(false),
-    groupFieldId: ref<string | null>(null),
-    groupField: ref(null),
+    groupFieldId: ref<string | null>(null), groupFieldIds: ref([]),
+    groupField: ref(null), groupFields: ref([]),
     hiddenFieldIds: ref<string[]>([]),
     columnWidths: ref<Record<string, number>>({}),
     linkSummaries: ref<Record<string, Record<string, unknown[]>>>({}),
@@ -1057,7 +1057,7 @@ function createGridMock() {
     applySortFilter: vi.fn(),
     undo: vi.fn(),
     redo: vi.fn(),
-    setGroupField: vi.fn(),
+    setGroupField: vi.fn(), setGroupFields: vi.fn(),
     goToPage: vi.fn(),
     patchCell: vi.fn(),
     createRecord: vi.fn(),
@@ -2659,9 +2659,11 @@ describe('MultitableWorkbench view wiring', () => {
       expect(container!.querySelector('[data-toolbar-row-density]')?.getAttribute('data-toolbar-row-density')).toBe('compact')
     })
 
-    it('group collapse: persists scoped {fieldId, collapsedKeys} AND preserves siblings', async () => {
+    it('group collapse: persists scoped {fieldId, fieldIds, collapsedKeys} AND preserves siblings', async () => {
       seedGridConfig({ ...SIBLINGS })
+      // nested grouping: collapse is scoped to the ORDERED group field ids (single-level here)
       gridMock.groupFieldId.value = 'fld_status'
+      gridMock.groupFieldIds.value = ['fld_status']
       mountWorkbench()
       await flushUi()
       container!.querySelector<HTMLButtonElement>('[data-toggle-group="todo"]')!.click()
@@ -2669,7 +2671,8 @@ describe('MultitableWorkbench view wiring', () => {
 
       expect(workbenchMock.client.updateView).toHaveBeenCalledTimes(1)
       const body = workbenchMock.client.updateView.mock.calls[0][1]
-      expect(body.config).toEqual({ ...SIBLINGS, groupCollapse: { fieldId: 'fld_status', collapsedKeys: ['todo'] } })
+      // persists the ordered fieldIds[] (new, scope guard) + legacy fieldId (level-1, back-compat)
+      expect(body.config).toEqual({ ...SIBLINGS, groupCollapse: { fieldId: 'fld_status', fieldIds: ['fld_status'], collapsedKeys: ['todo'] } })
       // optimistic-local: the controlled prop fed back to the grid reflects the collapse
       expect(container!.querySelector('[data-grid-collapsed-keys]')?.getAttribute('data-grid-collapsed-keys')).toBe('["todo"]')
     })
@@ -2714,6 +2717,7 @@ describe('MultitableWorkbench view wiring', () => {
     })
 
     it('survives reload: seeded config re-derives the display-pref props (no interaction)', async () => {
+      // legacy single-field groupCollapse (no fieldIds) still applies when grouping by that one field
       seedGridConfig({
         ...SIBLINGS,
         rowDensity: 'expanded',
@@ -2721,6 +2725,7 @@ describe('MultitableWorkbench view wiring', () => {
         groupCollapse: { fieldId: 'fld_status', collapsedKeys: ['done'] },
       })
       gridMock.groupFieldId.value = 'fld_status'
+      gridMock.groupFieldIds.value = ['fld_status']
       mountWorkbench()
       await flushUi()
       expect(container!.querySelector('[data-toolbar-row-density]')?.getAttribute('data-toolbar-row-density')).toBe('expanded')
@@ -2731,9 +2736,30 @@ describe('MultitableWorkbench view wiring', () => {
     it('stale-key guard: a collapse set authored on another field does NOT apply after regroup', async () => {
       seedGridConfig({ groupCollapse: { fieldId: 'fld_other', collapsedKeys: ['x'] } })
       gridMock.groupFieldId.value = 'fld_status' // grouped by a DIFFERENT field than the saved set
+      gridMock.groupFieldIds.value = ['fld_status']
       mountWorkbench()
       await flushUi()
       expect(container!.querySelector('[data-grid-collapsed-keys]')?.getAttribute('data-grid-collapsed-keys')).toBe('[]')
+    })
+
+    it('stale-key guard (nested): a collapse set authored on a DIFFERENT ordered field list does NOT apply', async () => {
+      // composite keys are only valid under the exact ordered fieldIds they were authored on; a reorder
+      // (or different second level) must invalidate them so the wrong groups never collapse.
+      seedGridConfig({ groupCollapse: { fieldId: 'fld_status', fieldIds: ['fld_status', 'fld_region'], collapsedKeys: ['todo\u001feast'] } })
+      gridMock.groupFieldId.value = 'fld_status'
+      gridMock.groupFieldIds.value = ['fld_status', 'fld_city'] // same level-0, DIFFERENT level-1
+      mountWorkbench()
+      await flushUi()
+      expect(container!.querySelector('[data-grid-collapsed-keys]')?.getAttribute('data-grid-collapsed-keys')).toBe('[]')
+    })
+
+    it('nested collapse: a composite-key set authored on the SAME ordered field list DOES apply', async () => {
+      seedGridConfig({ groupCollapse: { fieldId: 'fld_status', fieldIds: ['fld_status', 'fld_region'], collapsedKeys: ['todo\u001feast'] } })
+      gridMock.groupFieldId.value = 'fld_status'
+      gridMock.groupFieldIds.value = ['fld_status', 'fld_region'] // exact same ordered list
+      mountWorkbench()
+      await flushUi()
+      expect(container!.querySelector('[data-grid-collapsed-keys]')?.getAttribute('data-grid-collapsed-keys')).toBe('["todo\\u001feast"]')
     })
 
     it('backward-compat: absent config yields current defaults (normal density, no widths, no collapse)', async () => {

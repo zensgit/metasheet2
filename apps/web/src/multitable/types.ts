@@ -74,6 +74,9 @@ export interface MetaView {
   type: string
   filterInfo?: Record<string, unknown>
   sortInfo?: Record<string, unknown>
+  // groupInfo shape (grid nested grouping): `{ fieldIds: string[] }` = ordered 1..3 group levels (NEW),
+  // with `{ fieldId: string }` = the legacy single-field shape still WRITTEN as level-1 and READ as a
+  // fallback (dual-read) for back-compat. Kanban/Gantt keep using `{ fieldId }` on their own views.
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
   config?: Record<string, unknown>

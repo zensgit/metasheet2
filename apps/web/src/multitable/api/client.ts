@@ -816,13 +816,20 @@ export interface ViewAggregateGroup {
   key: string | number | boolean | null
   count: number
   aggregates: Record<string, { fn: string; value: number }>
+  // Nested grouping: per-level subtotals form a tree. `children` is present iff the view groups by a
+  // deeper level (view.groupInfo.fieldIds[i+1]). Each node's `aggregates` are computed INDEPENDENTLY
+  // over that node's full membership (avg/countDistinct are NOT roll-up-able from children).
+  children?: ViewAggregateGroup[]
 }
 export interface ViewAggregateResult {
   total: number
   aggregates: Record<string, { fn: string; value: number }>
-  // #4-3b-2a: present only when the view groups (view.groupInfo.fieldId resolves to an allowed,
-  // non-computed field); otherwise absent (response is byte-identical to the grand-total-only shape).
+  // #4-3b-2a: present only when the view groups (view.groupInfo resolves to ≥1 allowed, non-computed
+  // field); otherwise absent (response is byte-identical to the grand-total-only shape).
+  // `groupFieldId` = the level-1 field (legacy single-field reader back-compat); `groupFieldIds` = the
+  // ordered 1-3 level fields (nested grouping). `groups` is the per-level subtotal tree.
   groupFieldId?: string
+  groupFieldIds?: string[]
   groups?: ViewAggregateGroup[]
 }
 

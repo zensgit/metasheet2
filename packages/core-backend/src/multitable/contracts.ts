@@ -39,6 +39,8 @@ export interface MultitableProvisioningViewDescriptor {
   type: string
   filterInfo?: Record<string, unknown>
   sortInfo?: Record<string, unknown>
+  // groupInfo (grid nested grouping): NEW `{ fieldIds: string[] }` ordered 1..3 levels, with legacy
+  // `{ fieldId }` still written as level-1 + dual-read for back-compat. Parity with frontend types.ts.
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
   config?: Record<string, unknown>

@@ -70,7 +70,7 @@ import {
   tryResolveView as tryResolveViewShared,
   type MultitableViewConfig as SharedMultitableViewConfig,
 } from '../multitable/loaders'
-import { parseAggregations, aggregateField, groupRowsByField, type AggregationFn } from '../multitable/aggregation-helpers'
+import { parseAggregations, aggregateField, groupRowsByFields, type AggregateGroupBucket, type AggregationFn } from '../multitable/aggregation-helpers'
 import { ensureLegacyBase as ensureLegacyBaseShared } from '../multitable/provisioning'
 import {
   MultitableTemplateConflictError,
@@ -8148,36 +8148,57 @@ export function univerMetaRouter(): Router {
         }
         return out
       }
-      // group subtotals (#4-3b-2a): grid group field is view.groupInfo.fieldId (NOT view.config.groupFieldId).
-      // Resolve + run the 422 gates BEFORE the grand total → no wasted aggregation on a refused request.
-      const groupFieldId =
-        typeof (view?.groupInfo as { fieldId?: unknown } | undefined)?.fieldId === 'string'
-          ? ((view!.groupInfo as { fieldId?: string }).fieldId as string).trim()
-          : ''
-      if (groupFieldId) {
+      // group subtotals (#4-3b-2a / nested grouping): grid group fields are view.groupInfo.fieldIds
+      // (ordered list, NEW multi-level shape) with dual-read of the legacy single view.groupInfo.fieldId
+      // for back-compat (NOT view.config.groupFieldId). Resolve + run the 422 gates BEFORE the grand
+      // total → no wasted aggregation on a refused request. Cap at MAX_GROUP_LEVELS; drop blanks/dups.
+      const MAX_GROUP_LEVELS = 3
+      const groupInfo = view?.groupInfo as { fieldId?: unknown; fieldIds?: unknown } | undefined
+      const rawGroupFieldIds: string[] = Array.isArray(groupInfo?.fieldIds)
+        ? (groupInfo!.fieldIds as unknown[]).filter((id): id is string => typeof id === 'string')
+        : typeof groupInfo?.fieldId === 'string'
+          ? [groupInfo.fieldId]
+          : []
+      const groupFieldIds: string[] = []
+      for (const id of rawGroupFieldIds) {
+        const trimmed = id.trim()
+        if (trimmed && !groupFieldIds.includes(trimmed)) groupFieldIds.push(trimmed)
+        if (groupFieldIds.length >= MAX_GROUP_LEVELS) break
+      }
+      // Per-level 422 gates: a computed/hidden/denied field at ANY level must hard-fail identically to
+      // level 1 — its distinct values become group keys, so a deeper unreadable field would leak data.
+      for (const fieldId of groupFieldIds) {
         // group field computed → can't materialize here (same posture as computed filter)
-        const groupFieldType = filterFieldTypeById.get(groupFieldId)
+        const groupFieldType = filterFieldTypeById.get(fieldId)
         if (groupFieldType && COMPUTED_FILTER_TYPES.has(groupFieldType)) {
           return res.status(422).json({ ok: false, error: { code: 'AGGREGATE_COMPUTED_GROUP_UNSUPPORTED', message: 'Grouping a view by a computed (lookup/rollup/formula) field is not yet supported' } })
         }
         // group field hidden/denied (or not a visible property field) → REFUSE: the group keys are that
         // field's distinct values, so emitting them would leak data the user can't see.
-        if (!aggregateFieldTypeById.has(groupFieldId)) {
+        if (!aggregateFieldTypeById.has(fieldId)) {
           return res.status(422).json({ ok: false, error: { code: 'AGGREGATE_GROUP_FIELD_DENIED', message: 'Cannot group by a field that is not visible to this user' } })
         }
       }
 
       const aggregates = computeAggregates(rows.map((rec) => rec.data))
-      if (!groupFieldId) {
+      if (groupFieldIds.length === 0) {
         // not grouped → response byte-identical to #4-3b-1
         return res.json({ ok: true, data: { total: rows.length, aggregates } })
       }
-      const groups = groupRowsByField(rows.map((rec) => rec.data), groupFieldId).map((bucket) => ({
-        key: bucket.key,
-        count: bucket.rows.length,
-        aggregates: computeAggregates(bucket.rows),
-      }))
-      return res.json({ ok: true, data: { total: rows.length, aggregates, groupFieldId, groups } })
+      // Recurse the bucket tree → response tree. Each node aggregates over its OWN full membership
+      // (node.rows); children are NEVER summed for avg/countDistinct (groupRowsByFields keeps node.rows
+      // intact at every level). A single-level grouping emits no `children` (byte-compatible with #4-3b-2a).
+      const serializeBuckets = (buckets: AggregateGroupBucket[]): unknown[] =>
+        buckets.map((bucket) => ({
+          key: bucket.key,
+          count: bucket.rows.length,
+          aggregates: computeAggregates(bucket.rows),
+          ...(bucket.children ? { children: serializeBuckets(bucket.children) } : {}),
+        }))
+      const groups = serializeBuckets(groupRowsByFields(rows.map((rec) => rec.data), groupFieldIds))
+      // Emit the ordered fieldIds[] (NEW) plus the legacy single groupFieldId = level-1 (back-compat for
+      // any reader still on the single-field shape).
+      return res.json({ ok: true, data: { total: rows.length, aggregates, groupFieldId: groupFieldIds[0], groupFieldIds, groups } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })

@@ -101,22 +101,39 @@
         </div>
       </div>
 
-      <!-- Group By -->
+      <!-- Group By (nested / multi-level: ordered 1-3 levels) -->
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" @click="showGroupPanel = !showGroupPanel">
           <span class="meta-toolbar__btn-icon">&#x229E;</span> {{ l('toolbar.group') }}
-          <span v-if="groupFieldId" class="meta-toolbar__badge">1</span>
+          <span v-if="activeGroupFieldIds.length" class="meta-toolbar__badge">{{ activeGroupFieldIds.length }}</span>
         </button>
-        <div v-if="showGroupPanel" class="meta-toolbar__panel" @keydown.escape="showGroupPanel = false">
-          <label class="meta-toolbar__field-toggle">
-            <input type="radio" name="groupBy" :checked="!groupFieldId" @change="emit('set-group-field', null)" />
-            <span class="meta-toolbar__group-none">{{ l('toolbar.none') }}</span>
-          </label>
-          <label v-for="f in groupableFields" :key="f.id" class="meta-toolbar__field-toggle">
-            <input type="radio" name="groupBy" :checked="groupFieldId === f.id" @change="emit('set-group-field', f.id)" />
-            <span>{{ f.name }}</span>
-            <span class="meta-toolbar__field-type">{{ fieldTypeLabel(f.type, isZh) }}</span>
-          </label>
+        <div v-if="showGroupPanel" class="meta-toolbar__panel meta-toolbar__panel--group" @keydown.escape="showGroupPanel = false">
+          <div v-for="(levelId, levelIndex) in groupLevels" :key="levelIndex" class="meta-toolbar__group-level">
+            <span class="meta-toolbar__group-level-prefix">{{ levelIndex === 0 ? l('toolbar.group') : l('toolbar.groupThenBy') }}</span>
+            <select
+              class="meta-toolbar__group-select"
+              :aria-label="levelIndex === 0 ? l('toolbar.group') : l('toolbar.groupThenBy')"
+              :value="levelId ?? ''"
+              @change="onSetGroupLevel(levelIndex, ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">{{ l('toolbar.none') }}</option>
+              <option v-for="f in groupOptionsForLevel(levelIndex)" :key="f.id" :value="f.id">{{ f.name }}</option>
+            </select>
+            <button
+              v-if="levelId"
+              type="button"
+              class="meta-toolbar__group-remove"
+              :aria-label="l('toolbar.groupRemoveLevel')"
+              :title="l('toolbar.groupRemoveLevel')"
+              @click="onRemoveGroupLevel(levelIndex)"
+            >&times;</button>
+          </div>
+          <button
+            v-if="canAddGroupLevel"
+            type="button"
+            class="meta-toolbar__group-add"
+            @click="onAddGroupLevel"
+          >{{ l('toolbar.groupAddLevel') }}</button>
         </div>
       </div>
 
@@ -175,7 +192,8 @@ const props = defineProps<{
   canExport?: boolean
   canUndo: boolean
   canRedo: boolean
-  groupFieldId?: string | null
+  // Nested / multi-level grouping: ordered group field ids (level 0 = outermost), 1..MAX_GROUP_LEVELS.
+  groupFieldIds?: string[]
   searchText?: string
   totalRows?: number
   rowDensity?: RowDensity
@@ -196,7 +214,7 @@ const emit = defineEmits<{
   (e: 'add-record'): void
   (e: 'undo'): void
   (e: 'redo'): void
-  (e: 'set-group-field', fieldId: string | null): void
+  (e: 'set-group-fields', fieldIds: string[]): void
   (e: 'export-csv'): void
   (e: 'export-xlsx'): void
   (e: 'import'): void
@@ -220,7 +238,65 @@ const DENSITIES: Array<{ value: RowDensity; labelKey: MetaCoreLabelKey }> = [
   { value: 'expanded', labelKey: 'density.expanded' },
 ]
 const GROUPABLE_TYPES = new Set(['select', 'string', 'boolean', 'number', 'date'])
+const MAX_GROUP_LEVELS = 3
 const groupableFields = computed(() => props.fields.filter((f) => GROUPABLE_TYPES.has(f.type)))
+
+// Active (resolved, in-order) group field ids — drops any id that no longer maps to a groupable field
+// (e.g. field deleted/type-changed). This is the source the badge + level rows read.
+const activeGroupFieldIds = computed(() =>
+  (props.groupFieldIds ?? []).filter((id) => groupableFields.value.some((f) => f.id === id)),
+)
+// Level rows to render: every active level. When NOTHING is grouped yet, render ONE empty slot (value
+// '') so the picker is usable from a blank state; deeper levels are added via the explicit "Add level"
+// button. A level slot holds either a fieldId or '' (the empty/None level-0 starter).
+const groupLevels = computed<string[]>(() =>
+  activeGroupFieldIds.value.length > 0 ? activeGroupFieldIds.value : [''],
+)
+// A new level can be added when ≥1 level is filled, there's room, and an unused groupable field exists.
+const canAddGroupLevel = computed(() =>
+  activeGroupFieldIds.value.length > 0
+  && activeGroupFieldIds.value.length < MAX_GROUP_LEVELS
+  && activeGroupFieldIds.value.length < groupableFields.value.length,
+)
+// Options for a given level: groupable fields NOT already chosen at another level (so a field can't be
+// used twice), but always include the field currently selected at THIS level.
+function groupOptionsForLevel(levelIndex: number): MetaField[] {
+  const usedElsewhere = new Set(activeGroupFieldIds.value.filter((_, i) => i !== levelIndex))
+  return groupableFields.value.filter((f) => !usedElsewhere.has(f.id))
+}
+// Set/clear the field at a level. Empty value removes this level AND every deeper level (a parent can't
+// be undefined while a child remains). Emits the full ordered, deduped array.
+function onSetGroupLevel(levelIndex: number, fieldId: string) {
+  const next = activeGroupFieldIds.value.slice()
+  if (!fieldId) {
+    next.splice(levelIndex) // drop this level and all below it
+  } else {
+    next[levelIndex] = fieldId
+    // de-dup: if this field was used at a deeper level, that deeper slot is now invalid → truncate there
+    for (let i = levelIndex + 1; i < next.length; i += 1) {
+      if (next[i] === fieldId) { next.splice(i); break }
+    }
+  }
+  emit('set-group-fields', dedupeGroupIds(next))
+}
+function onRemoveGroupLevel(levelIndex: number) {
+  const next = activeGroupFieldIds.value.slice()
+  next.splice(levelIndex, 1) // remove just this level; deeper levels shift up
+  emit('set-group-fields', dedupeGroupIds(next))
+}
+function onAddGroupLevel() {
+  const next = groupOptionsForLevel(activeGroupFieldIds.value.length)
+  const first = next[0]
+  if (first) emit('set-group-fields', dedupeGroupIds([...activeGroupFieldIds.value, first.id]))
+}
+function dedupeGroupIds(ids: string[]): string[] {
+  const out: string[] = []
+  for (const id of ids) {
+    if (id && !out.includes(id)) out.push(id)
+    if (out.length >= MAX_GROUP_LEVELS) break
+  }
+  return out
+}
 const hiddenCount = computed(() => props.hiddenFieldIds.length)
 const UNARY = new Set(['isEmpty', 'isNotEmpty'])
 const isUnaryOp = (op: string) => UNARY.has(op)
@@ -328,6 +404,14 @@ function onFilterValueChange(idx: number, value: string) {
 .meta-toolbar__apply-hint { margin: 6px 0 0; color: #777; font-size: 11px; }
 .meta-toolbar__group-none { color: #999; }
 .meta-toolbar__field-type { font-size: 10px; color: #aaa; margin-left: auto; }
+.meta-toolbar__panel--group { min-width: 260px; }
+.meta-toolbar__group-level { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.meta-toolbar__group-level-prefix { font-size: 12px; color: #666; min-width: 56px; }
+.meta-toolbar__group-select { flex: 1; padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
+.meta-toolbar__group-remove { border: none; background: none; color: #999; cursor: pointer; font-size: 16px; line-height: 1; }
+.meta-toolbar__group-remove:hover { color: #f56c6c; }
+.meta-toolbar__group-add { border: none; background: none; color: #409eff; cursor: pointer; font-size: 12px; padding: 4px 0; }
+.meta-toolbar__group-add:hover { text-decoration: underline; }
 .meta-toolbar__search { display: flex; align-items: center; gap: 4px; border: 1px solid #ddd; border-radius: 4px; padding: 2px 8px; background: #fafafa; transition: border-color 0.2s, background 0.2s; }
 .meta-toolbar__search:focus-within { border-color: #409eff; background: #fff; }
 .meta-toolbar__search--active { border-color: #409eff; background: #ecf5ff; }
