@@ -128,6 +128,24 @@ export type MetaViewRenderLabelKey =
   | 'dashboard.deleteChart'
   | 'dashboard.deleteChartConfirm'
   | 'dashboard.editChartError'
+  | 'dashboard.addWidget'
+  | 'dashboard.addWidgetTitle'
+  | 'dashboard.widgetKind'
+  | 'dashboard.widgetKindMetric'
+  | 'dashboard.widgetKindText'
+  | 'dashboard.widgetKindFilter'
+  | 'dashboard.widgetTitle'
+  | 'dashboard.untitledWidget'
+  | 'dashboard.metricPrefix'
+  | 'dashboard.metricSuffix'
+  | 'dashboard.textContent'
+  | 'dashboard.textContentPlaceholder'
+  | 'dashboard.textEmpty'
+  | 'dashboard.filterField'
+  | 'dashboard.filterPresentationalNote'
+  | 'dashboard.filterAllOption'
+  | 'dashboard.addWidgetAction'
+  | 'dashboard.loadingMetric'
   | 'chart.label'
   | 'chart.value'
   | 'chart.restrictedTitle'
@@ -254,6 +272,24 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'dashboard.deleteChart',
   'dashboard.deleteChartConfirm',
   'dashboard.editChartError',
+  'dashboard.addWidget',
+  'dashboard.addWidgetTitle',
+  'dashboard.widgetKind',
+  'dashboard.widgetKindMetric',
+  'dashboard.widgetKindText',
+  'dashboard.widgetKindFilter',
+  'dashboard.widgetTitle',
+  'dashboard.untitledWidget',
+  'dashboard.metricPrefix',
+  'dashboard.metricSuffix',
+  'dashboard.textContent',
+  'dashboard.textContentPlaceholder',
+  'dashboard.textEmpty',
+  'dashboard.filterField',
+  'dashboard.filterPresentationalNote',
+  'dashboard.filterAllOption',
+  'dashboard.addWidgetAction',
+  'dashboard.loadingMetric',
   'chart.label',
   'chart.value',
   'chart.restrictedTitle',
@@ -387,6 +423,27 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'dashboard.deleteChart': { en: 'Delete', zh: '删除' },
   'dashboard.deleteChartConfirm': { en: 'Delete this chart? Panels showing it will be removed.', zh: '删除此图表？引用它的面板将被移除。' },
   'dashboard.editChartError': { en: 'Failed to save chart.', zh: '保存图表失败。' },
+  'dashboard.addWidget': { en: '+ Add Widget', zh: '+ 添加组件' },
+  'dashboard.addWidgetTitle': { en: 'Add widget', zh: '添加组件' },
+  'dashboard.widgetKind': { en: 'Widget type', zh: '组件类型' },
+  'dashboard.widgetKindMetric': { en: 'Metric card', zh: '指标卡' },
+  'dashboard.widgetKindText': { en: 'Text note', zh: '文本说明' },
+  'dashboard.widgetKindFilter': { en: 'Filter (preview)', zh: '筛选器（预览）' },
+  'dashboard.widgetTitle': { en: 'Title', zh: '标题' },
+  'dashboard.untitledWidget': { en: 'Untitled', zh: '未命名' },
+  'dashboard.metricPrefix': { en: 'Prefix (optional)', zh: '前缀（可选）' },
+  'dashboard.metricSuffix': { en: 'Suffix (optional)', zh: '后缀（可选）' },
+  'dashboard.textContent': { en: 'Content', zh: '内容' },
+  'dashboard.textContentPlaceholder': { en: 'Write a note (basic formatting allowed)…', zh: '撰写说明（支持基础格式）…' },
+  'dashboard.textEmpty': { en: 'Empty text widget. Edit it to add content.', zh: '空文本组件。编辑以添加内容。' },
+  'dashboard.filterField': { en: 'Field', zh: '字段' },
+  'dashboard.filterPresentationalNote': {
+    en: 'Preview only — this control does not filter other panels yet.',
+    zh: '仅供预览——此控件暂不会筛选其他面板。',
+  },
+  'dashboard.filterAllOption': { en: 'All', zh: '全部' },
+  'dashboard.addWidgetAction': { en: 'Add', zh: '添加' },
+  'dashboard.loadingMetric': { en: 'Loading metric...', zh: '正在加载指标...' },
   'chart.label': { en: 'Label', zh: '标签' },
   'chart.value': { en: 'Value', zh: '值' },
   'chart.restrictedTitle': { en: 'Chart data restricted', zh: '图表数据受限' },

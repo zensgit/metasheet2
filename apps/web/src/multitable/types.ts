@@ -1113,9 +1113,52 @@ export interface ChartData {
 }
 
 // --- Dashboard ---
+// B4: a panel is no longer chart-only. `type` is the widget discriminator and is
+// OPTIONAL — a legacy panel (no `type`) is a chart, so every consumer MUST read
+// `panel.type ?? 'chart'`. This keeps existing DB rows (opaque JSONB, no `type`)
+// rendering unchanged and needs no migration. Per-widget config lives in optional
+// sub-objects; only the active widget's sub-object is meaningful.
+export type DashboardPanelType = 'chart' | 'metric' | 'text' | 'filter'
+
+// B4 metric/number card: a standalone KPI computed via the non-persisting,
+// field-read-enforced preview-data endpoint (NOT a saved ChartConfig row). The
+// metric never persists a chart; it stores only its data source + label here.
+export interface DashboardMetricConfig {
+  /** Aggregation function for the single value (count needs no field). */
+  aggregation: AggregationFunction
+  /** Value field for sum/avg/min/max (ignored by count). */
+  valueFieldId?: string
+  /** Optional display affixes around the number (e.g. ¥ / %). */
+  prefix?: string
+  suffix?: string
+}
+
+// B4 text/markdown note: rich HTML routed through the SHARED rich-longtext
+// DOMPurify chokepoint (RICH_LONGTEXT_SANITIZE_CONFIG) on every render — never raw.
+export interface DashboardTextConfig {
+  /** Raw (re-sanitized on render) rich-text HTML content. */
+  content: string
+}
+
+// B4 filter/control: PRESENTATIONAL-ONLY in this arc — it renders a control whose
+// value lives in local UI state and drives NOTHING else. A functional cross-panel
+// filter is a separate, design-locked slice (see designDecisions in the arc map).
+export interface DashboardFilterConfig {
+  /** Field the (presentational) control is labeled against. */
+  fieldId?: string
+}
+
 export interface DashboardPanel {
   id: string
-  chartId: string
+  /** Widget kind. Absent → 'chart' (legacy panels). Read as `type ?? 'chart'`. */
+  type?: DashboardPanelType
+  /** Required for a chart panel; absent for metric/text/filter widgets. */
+  chartId?: string
+  /** Optional widget title for non-chart panels (chart panels use the chart name). */
+  title?: string
+  metricConfig?: DashboardMetricConfig
+  textConfig?: DashboardTextConfig
+  filterConfig?: DashboardFilterConfig
   size: 'small' | 'medium' | 'large'
   order: number
 }
