@@ -5021,6 +5021,135 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④/年假 L2c — manual adjustment: positive lot+grant / negative FIFO-deduct / insufficient-422-rollback / idempotency / delta-0 / org-scoping', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const adminId = `al-l2c-admin-${runSuffix}`
+    const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) { await pool.end().catch(() => undefined); return }
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+    const U = (tag: string) => `al-l2c-${runSuffix}-${tag}`
+    const seedUser = async (tag: string, org = 'default') => {
+      const id = U(tag)
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, is_active) VALUES ($1, $2, 'no-login', true)
+         ON CONFLICT (id) DO UPDATE SET is_active = true`,
+        [id, `${id}@example.com`],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [id, org],
+      )
+      return id
+    }
+    const adjust = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/annual-leave-manual-adjustment`, { method: 'POST', headers, body: JSON.stringify(body) })
+    const lotsFor = async (userId: string) => (await pool.query(
+      `SELECT id, amount_minutes, remaining_minutes, source_type, source_id, source_key, status FROM attendance_leave_balances WHERE user_id = $1 AND leave_type_code = 'annual' ORDER BY created_at`, [userId])).rows
+    const eventsFor = async (userId: string) => (await pool.query(
+      `SELECT event_type, delta_minutes, source_type, source_id FROM attendance_leave_balance_events WHERE user_id = $1 ORDER BY id`, [userId])).rows
+    const regFor = async (sourceKey: string) => (await pool.query(
+      `SELECT id, delta_minutes, reason, created_by, run_id, source_key FROM attendance_leave_manual_adjustments WHERE org_id = 'default' AND source_key = $1`, [sourceKey])).rows[0]
+    const otherOrg = `al-l2c-otherorg-${runSuffix}`
+    // a user that IS an active member of the caller's org but is globally is_active=false (offboarded):
+    // manual adjustment must share the L2b accrual population, so this is out of scope (404), not adjustable.
+    const seedInactive = async (tag: string) => {
+      const id = U(tag)
+      await pool.query(`INSERT INTO users (id, email, password_hash, is_active) VALUES ($1, $2, 'no-login', false)
+         ON CONFLICT (id) DO UPDATE SET is_active = false`, [id, `${id}@example.com`])
+      await pool.query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`, [id])
+      return id
+    }
+    try {
+      const uPos = await seedUser('pos')
+      const uOther = await seedUser('other', otherOrg)
+      const uInactive = await seedInactive('inactive')
+
+      // (E) delta = 0 → 400, before any side effect.
+      const zeroRes = await adjust({ userId: uPos, deltaMinutes: 0, reason: 'noop' })
+      expect(zeroRes.status).toBe(400)
+      expect((zeroRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ANNUAL_LEAVE_ADJUST_DELTA_INVALID')
+
+      // (F) org-scoping: a user that is only in ANOTHER org → 404, with NO registry row and NO lot. Without the
+      // membership guard an org-default admin could mint annual-leave lots against a foreign-tenant user id.
+      const crossRes = await adjust({ userId: uOther, deltaMinutes: 1200, reason: 'cross', idempotencyKey: 'k-cross' })
+      expect(crossRes.status).toBe(404)
+      expect((crossRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('USER_NOT_IN_ORG')
+      expect(await regFor('annual_manual_adjust:k-cross')).toBeUndefined()
+      expect((await lotsFor(uOther)).length).toBe(0)
+
+      // (G) globally-inactive (offboarded) user, even though still an active org member → 404, no row/lot.
+      // Locks the choice that manual-adjust shares the L2b accrual population (u.is_active required).
+      const inactiveRes = await adjust({ userId: uInactive, deltaMinutes: 1200, reason: 'gone', idempotencyKey: 'k-inactive' })
+      expect(inactiveRes.status).toBe(404)
+      expect((inactiveRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('USER_NOT_IN_ORG')
+      expect(await regFor('annual_manual_adjust:k-inactive')).toBeUndefined()
+      expect((await lotsFor(uInactive)).length).toBe(0)
+
+      // (A) positive → a new annual_manual_adjustment lot + grant event + registry row; lot back-links to the
+      // registry id (source_id) and uses a derived source_key.
+      const posRes = await adjust({ userId: uPos, deltaMinutes: 2400, reason: 'bonus grant', idempotencyKey: 'k-pos' })
+      expect(posRes.status, JSON.stringify(posRes.body)).toBe(200)
+      expect((posRes.body as { data?: { applied?: boolean } } | undefined)?.data?.applied).toBe(true)
+      const reg = await regFor('annual_manual_adjust:k-pos')
+      expect(reg).toMatchObject({ delta_minutes: 2400, reason: 'bonus grant', created_by: adminId })
+      const lots1 = await lotsFor(uPos)
+      expect(lots1.length).toBe(1)
+      expect(lots1[0]).toMatchObject({ source_type: 'annual_manual_adjust', status: 'active' })
+      expect(Number(lots1[0].amount_minutes)).toBe(2400)
+      expect(Number(lots1[0].remaining_minutes)).toBe(2400)
+      expect(lots1[0].source_id).toBe(reg.id)
+      expect(lots1[0].source_key).toBe(`annual_manual_adjust:${reg.id}`)
+      const ev1 = await eventsFor(uPos)
+      expect(ev1.length).toBe(1)
+      expect(ev1[0]).toMatchObject({ event_type: 'grant', source_type: 'annual_manual_adjust' })
+      expect(Number(ev1[0].delta_minutes)).toBe(2400)
+
+      // (B) idempotency: replay the SAME idempotencyKey → no-op (applied:false / alreadyApplied:true); still
+      // exactly one lot, one grant event, one registry row.
+      const replayRes = await adjust({ userId: uPos, deltaMinutes: 2400, reason: 'bonus grant', idempotencyKey: 'k-pos' })
+      expect(replayRes.status).toBe(200)
+      expect((replayRes.body as { data?: { applied?: boolean; alreadyApplied?: boolean } } | undefined)?.data).toMatchObject({ applied: false, alreadyApplied: true })
+      expect((await lotsFor(uPos)).length).toBe(1)
+      expect((await eventsFor(uPos)).length).toBe(1)
+
+      // (C) negative (sufficient) → FIFO-deduct the active lot + a deduct event (delta_minutes negative); remaining drops.
+      const negRes = await adjust({ userId: uPos, deltaMinutes: -1000, reason: 'correction', idempotencyKey: 'k-neg' })
+      expect(negRes.status, JSON.stringify(negRes.body)).toBe(200)
+      expect((negRes.body as { data?: { applied?: boolean } } | undefined)?.data?.applied).toBe(true)
+      const lots2 = await lotsFor(uPos)
+      expect(lots2.length).toBe(1)
+      expect(Number(lots2[0].remaining_minutes)).toBe(1400)
+      const ev2 = await eventsFor(uPos)
+      expect(ev2.length).toBe(2)
+      expect(ev2[1]).toMatchObject({ event_type: 'deduct', source_type: 'annual_manual_adjust' })
+      expect(Number(ev2[1].delta_minutes)).toBe(-1000)
+      expect(await regFor('annual_manual_adjust:k-neg')).toMatchObject({ delta_minutes: -1000 })
+
+      // (D) negative insufficient → 422 + the WHOLE txn rolls back: no registry row, remaining unchanged, no new event.
+      const overRes = await adjust({ userId: uPos, deltaMinutes: -99999, reason: 'too much', idempotencyKey: 'k-over' })
+      expect(overRes.status).toBe(422)
+      expect((overRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ANNUAL_LEAVE_BALANCE_INSUFFICIENT')
+      expect(await regFor('annual_manual_adjust:k-over')).toBeUndefined()
+      expect(Number((await lotsFor(uPos))[0].remaining_minutes)).toBe(1400)
+      expect((await eventsFor(uPos)).length).toBe(2)
+    } finally {
+      const ids = ['pos', 'other', 'inactive'].map(t => U(t)).concat([adminId])
+      await pool.query(`DELETE FROM attendance_leave_manual_adjustments WHERE user_id = ANY($1::text[])`, [ids]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])`, [ids]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])`, [ids]).catch(() => undefined)
+      await pool.query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [ids]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [ids]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('A2 auto-shift auto-write ledger — active-run claim and item invariants are DB-enforced (latent schema)', async () => {
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
     if (!dbUrl) return
