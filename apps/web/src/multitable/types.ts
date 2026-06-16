@@ -32,6 +32,7 @@ export type MetaFieldType =
   | 'modifiedTime'
   | 'createdBy'
   | 'modifiedBy'
+  | 'button'
 
 export type MetaFieldCreateType = MetaFieldType
 
