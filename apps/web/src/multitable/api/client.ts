@@ -1368,6 +1368,32 @@ export class MultitableApiClient {
     return normalizeRecordSubscriptionNotifications(data)
   }
 
+  // Notification Center S1 — self-scoped read-state (the bell binds to these).
+  async getRecordSubscriptionUnreadCount(): Promise<number> {
+    const res = await this.fetch('/api/multitable/record-subscription-notifications/unread-count')
+    const data = await this.parseJson<{ count?: number }>(res)
+    return typeof data?.count === 'number' ? data.count : 0
+  }
+
+  async markRecordSubscriptionNotificationsRead(ids: string[]): Promise<number> {
+    const res = await this.fetch('/api/multitable/record-subscription-notifications/mark-read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    })
+    const data = await this.parseJson<{ updated?: number }>(res)
+    return typeof data?.updated === 'number' ? data.updated : 0
+  }
+
+  async markAllRecordSubscriptionNotificationsRead(): Promise<number> {
+    const res = await this.fetch('/api/multitable/record-subscription-notifications/mark-all-read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    const data = await this.parseJson<{ updated?: number }>(res)
+    return typeof data?.updated === 'number' ? data.updated : 0
+  }
+
   async createRecord(input: CreateRecordInput, opts?: { signal?: AbortSignal }): Promise<{ record: MetaRecord }> {
     const res = await this.fetch('/api/multitable/records', {
       method: 'POST',

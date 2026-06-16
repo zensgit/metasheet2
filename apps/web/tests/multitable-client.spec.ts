@@ -889,6 +889,34 @@ describe('MultitableApiClient', () => {
     expect(fetchFn).toHaveBeenCalledWith('/api/multitable/record-subscription-notifications?sheetId=sheet_1&recordId=rec_1&limit=10')
   })
 
+  // Notification Center S1b — real-wire coverage for the 3 read-state methods (#1779/#1781 forward
+  // rule: every contract-consuming method must round-trip URL/method/envelope, not be mocked away).
+  it('getRecordSubscriptionUnreadCount GETs the unread-count route and unwraps data.count', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ ok: true, data: { count: 4 } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+    await expect(client.getRecordSubscriptionUnreadCount()).resolves.toBe(4)
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/record-subscription-notifications/unread-count')
+  })
+
+  it('markRecordSubscriptionNotificationsRead POSTs ids to /mark-read and unwraps data.updated', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ ok: true, data: { updated: 2 } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+    await expect(client.markRecordSubscriptionNotificationsRead(['n1', 'n2'])).resolves.toBe(2)
+    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/multitable/record-subscription-notifications/mark-read')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ ids: ['n1', 'n2'] })
+  })
+
+  it('markAllRecordSubscriptionNotificationsRead POSTs to /mark-all-read and unwraps data.updated', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ ok: true, data: { updated: 9 } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+    await expect(client.markAllRecordSubscriptionNotificationsRead()).resolves.toBe(9)
+    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/multitable/record-subscription-notifications/mark-all-read')
+    expect(init.method).toBe('POST')
+  })
+
   it('parses Retry-After seconds and http-date values', () => {
     expect(parseRetryAfterMs('2')).toBe(2000)
     expect(parseRetryAfterMs('Wed, 25 Mar 2026 12:00:05 GMT')).toBe(5000)

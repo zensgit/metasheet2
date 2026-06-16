@@ -51,6 +51,7 @@
         &#x1F4AC; {{ wb('toolbar.commentInbox', isZh) }}
         <span v-if="commentInboxBadgeCount > 0" class="mt-workbench__mgr-badge">{{ commentInboxBadgeCount }}</span>
       </button>
+      <MetaNotificationBell :api-client="workbench.client" @navigate="onNotificationNavigate" />
       <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; {{ wb('toolbar.fields', isZh) }}</button>
       <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()">&#x1F512; {{ wb('toolbar.access', isZh) }}</button>
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; {{ wb('toolbar.views', isZh) }}</button>
@@ -522,6 +523,7 @@ import MetaGridTable from '../components/MetaGridTable.vue'
 import MetaExportDialog, { type ExportConfirmPayload } from '../components/MetaExportDialog.vue'
 import MetaFormView from '../components/MetaFormView.vue'
 import MetaRecordDrawer from '../components/MetaRecordDrawer.vue'
+import MetaNotificationBell from '../components/MetaNotificationBell.vue'
 import MetaCommentsDrawer from '../components/MetaCommentsDrawer.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
 import MetaTemplateCard from '../components/MetaTemplateCard.vue'
@@ -2124,10 +2126,25 @@ function rememberWorkbenchBaseOpen(baseId: string) {
   recentBaseOpens.value = rememberRecentBaseOpen(baseId)
 }
 
-function onSelectSheet(sheetId: string) {
-  if (sheetId === workbench.activeSheetId.value) return
-  if (!confirmDiscardContextChanges()) return
+// Returns whether the active sheet is now `sheetId`: true if already there or switched, false if the
+// user cancelled the discard-unsaved-changes confirm. Callers that depend on the switch (e.g. the
+// notification bell's click-to-locate) MUST honor a false return.
+function onSelectSheet(sheetId: string): boolean {
+  if (sheetId === workbench.activeSheetId.value) return true
+  if (!confirmDiscardContextChanges()) return false
   workbench.selectSheet(sheetId)
+  return true
+}
+
+// Notification Center S1 — click-to-locate from the bell. Switch to the notification's sheet first
+// (resolveDeepLink resolves against the active sheet); a same-sheet target skips the switch. If the
+// switch is cancelled (unsaved-changes discard declined), do NOT locate — that would look the record
+// up in the wrong sheet and report not-found.
+async function onNotificationNavigate(payload: { sheetId: string; recordId: string }) {
+  if (payload.sheetId && payload.sheetId !== workbench.activeSheetId.value) {
+    if (!onSelectSheet(payload.sheetId)) return
+  }
+  await resolveDeepLink(payload.recordId)
 }
 
 function onSelectView(viewId: string) {
