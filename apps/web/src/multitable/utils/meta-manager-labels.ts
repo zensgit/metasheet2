@@ -20,6 +20,25 @@ export type MetaManagerLabelKey =
   | 'formatting.color' | 'formatting.applyToRow' | 'formatting.enabled'
   | 'formatting.up' | 'formatting.down' | 'formatting.addRule'
   | 'formatting.noFieldsHint' | 'formatting.saveRules'
+  // Range-based SCALE formatting authoring (A5: data bar / color scale / icon set)
+  | 'formatting.scaleTitle' | 'formatting.scaleAriaTitle'
+  | 'formatting.scaleEmpty' | 'formatting.scaleAction'
+  | 'formatting.scaleAddRule' | 'formatting.scaleNoFieldsHint'
+  | 'formatting.scaleAllFieldsUsedHint' | 'formatting.scaleAutoRangeHint'
+  | 'formatting.scaleKind' | 'formatting.scaleKindDataBar'
+  | 'formatting.scaleKindColorScale' | 'formatting.scaleKindIconSet'
+  | 'formatting.scaleField' | 'formatting.scaleRangeMode'
+  | 'formatting.scaleRangeAuto' | 'formatting.scaleRangeFixed'
+  | 'formatting.scaleRangeMin' | 'formatting.scaleRangeMax'
+  | 'formatting.scaleRangeSameError' | 'formatting.scaleBarColor'
+  | 'formatting.scaleBarNegativeColor' | 'formatting.scaleBarShowValue'
+  | 'formatting.scaleStopMin' | 'formatting.scaleStopMid'
+  | 'formatting.scaleStopMax' | 'formatting.scaleAddMidStop'
+  | 'formatting.scaleDropMidStop' | 'formatting.scaleIconSet'
+  | 'formatting.scaleIconSetArrows' | 'formatting.scaleIconSetTraffic'
+  | 'formatting.scaleIconSetSigns' | 'formatting.scaleThresholdLower'
+  | 'formatting.scaleThresholdUpper' | 'formatting.scaleThresholdError'
+  | 'formatting.scalePreview'
   | 'field.title' | 'field.empty' | 'field.options' | 'field.optionValue'
   | 'field.targetSheet' | 'field.selectSheet' | 'field.limitSingleLinkedRecord'
   | 'field.hierarchyParentLinkLocked'
@@ -162,6 +181,60 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'formatting.addRule': { en: '+ Add rule', zh: '+ 添加规则' },
   'formatting.noFieldsHint': { en: 'Add fields to the sheet to create formatting rules.', zh: '请先向 Sheet 添加字段，再创建格式规则。' },
   'formatting.saveRules': { en: 'Save rules', zh: '保存规则' },
+
+  'formatting.scaleTitle': { en: 'Scale formatting', zh: '色阶格式' },
+  'formatting.scaleAriaTitle': { en: 'Scale formatting rules', zh: '色阶格式规则' },
+  'formatting.scaleEmpty': {
+    en: 'No scale rules yet. Add a rule to show a data bar, color scale, or icon set across a numeric field.',
+    zh: '暂无色阶规则。添加规则后，可为数值字段显示数据条、色阶或图标集。',
+  },
+  'formatting.scaleAction': { en: 'Scale formatting', zh: '色阶格式' },
+  'formatting.scaleAddRule': { en: '+ Add scale rule', zh: '+ 添加色阶规则' },
+  'formatting.scaleNoFieldsHint': {
+    en: 'Add a numeric field (number, currency, percent, or rating) to create scale rules.',
+    zh: '请先添加数值字段（数字、货币、百分比或评分），再创建色阶规则。',
+  },
+  'formatting.scaleAllFieldsUsedHint': {
+    en: 'Every numeric field already has a scale rule. Each field supports one scale rule.',
+    zh: '每个数值字段都已有色阶规则。每个字段仅支持一条色阶规则。',
+  },
+  'formatting.scaleAutoRangeHint': {
+    en: 'Auto range is computed over the loaded rows, so the scale may shift as more rows load.',
+    zh: '自动范围基于已加载的行计算，加载更多行时范围可能变化。',
+  },
+  'formatting.scaleKind': { en: 'Style', zh: '样式' },
+  'formatting.scaleKindDataBar': { en: 'Data bar', zh: '数据条' },
+  'formatting.scaleKindColorScale': { en: 'Color scale', zh: '色阶' },
+  'formatting.scaleKindIconSet': { en: 'Icon set', zh: '图标集' },
+  'formatting.scaleField': { en: 'Field', zh: '字段' },
+  'formatting.scaleRangeMode': { en: 'Range', zh: '范围' },
+  'formatting.scaleRangeAuto': { en: 'Auto', zh: '自动' },
+  'formatting.scaleRangeFixed': { en: 'Fixed', zh: '固定' },
+  'formatting.scaleRangeMin': { en: 'Min', zh: '最小值' },
+  'formatting.scaleRangeMax': { en: 'Max', zh: '最大值' },
+  'formatting.scaleRangeSameError': {
+    en: 'Min and max must differ.',
+    zh: '最小值与最大值必须不同。',
+  },
+  'formatting.scaleBarColor': { en: 'Bar color', zh: '数据条颜色' },
+  'formatting.scaleBarNegativeColor': { en: 'Negative color', zh: '负值颜色' },
+  'formatting.scaleBarShowValue': { en: 'Show value', zh: '显示数值' },
+  'formatting.scaleStopMin': { en: 'Low', zh: '低' },
+  'formatting.scaleStopMid': { en: 'Mid', zh: '中' },
+  'formatting.scaleStopMax': { en: 'High', zh: '高' },
+  'formatting.scaleAddMidStop': { en: '+ Add midpoint', zh: '+ 添加中间点' },
+  'formatting.scaleDropMidStop': { en: 'Remove midpoint', zh: '移除中间点' },
+  'formatting.scaleIconSet': { en: 'Icon set', zh: '图标集' },
+  'formatting.scaleIconSetArrows': { en: 'Arrows', zh: '箭头' },
+  'formatting.scaleIconSetTraffic': { en: 'Traffic lights', zh: '交通灯' },
+  'formatting.scaleIconSetSigns': { en: 'Signs', zh: '标记' },
+  'formatting.scaleThresholdLower': { en: 'Lower threshold', zh: '下阈值' },
+  'formatting.scaleThresholdUpper': { en: 'Upper threshold', zh: '上阈值' },
+  'formatting.scaleThresholdError': {
+    en: 'Lower threshold must be less than the upper threshold.',
+    zh: '下阈值必须小于上阈值。',
+  },
+  'formatting.scalePreview': { en: 'Preview', zh: '预览' },
 
   'field.title': { en: 'Manage Fields', zh: '管理字段' },
   'field.empty': { en: 'No fields defined', zh: '暂无字段' },

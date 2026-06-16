@@ -20,7 +20,9 @@ import type {
 } from '../types'
 import { CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT } from '../types'
 
-const HEX_COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
+// Single hex-validation surface, shared with the scale-rule authoring dialog
+// (ScaleFormattingDialog.vue) so editor-side validation matches the sanitizer.
+export const HEX_COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
 
 const KNOWN_OPERATORS: ReadonlySet<ConditionalFormattingOperator> = new Set([
   'gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'between',

@@ -31,6 +31,7 @@
             <span class="meta-view-mgr__type">{{ viewTypeLabel(view.type, isZh) }}</span>
             <button class="meta-view-mgr__action" :title="ml('action.configure')" @click="openConfig(view)">&#x2699;</button>
             <button class="meta-view-mgr__action" :title="ml('action.conditionalFormatting')" @click="openConditionalFormatting(view)">&#x1F3A8;</button>
+            <button class="meta-view-mgr__action" :title="ml('formatting.scaleAction')" @click="openScaleFormatting(view)">&#x1F4CA;</button>
             <button class="meta-view-mgr__action" :title="ml('action.rename')" @click="startRename(view)">&#x270E;</button>
             <button
               class="meta-view-mgr__action meta-view-mgr__action--danger"
@@ -431,6 +432,14 @@
       @close="closeConditionalFormatting"
       @save="onSaveConditionalFormatting"
     />
+    <ScaleFormattingDialog
+      :visible="scaleFormattingTargetId !== null"
+      :fields="fields"
+      :view-config="scaleFormattingTargetView?.config"
+      @update:dirty="scaleFormattingDirty = $event"
+      @close="closeScaleFormatting"
+      @save="onSaveScaleFormatting"
+    />
   </div>
 </template>
 
@@ -439,6 +448,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type {
   ConditionalFormattingRule,
+  ConditionalFormattingScaleRule,
   MetaCalendarViewConfig,
   MetaField,
   MetaFieldPermission,
@@ -480,6 +490,7 @@ import {
   zoomLabel,
 } from '../utils/meta-manager-labels'
 import ConditionalFormattingDialog from './ConditionalFormattingDialog.vue'
+import ScaleFormattingDialog from './ScaleFormattingDialog.vue'
 
 const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline', 'gantt', 'hierarchy'] as const
 const VIEW_ICONS: Record<string, string> = {
@@ -583,10 +594,15 @@ const viewConfigLiveRefreshText = ref('')
 const viewConfigSourceSignature = ref('')
 const conditionalFormattingTargetId = ref<string | null>(null)
 const conditionalFormattingDirty = ref(false)
+const scaleFormattingTargetId = ref<string | null>(null)
+const scaleFormattingDirty = ref(false)
 
 const configTarget = computed(() => props.views.find((view) => view.id === configTargetId.value) ?? null)
 const conditionalFormattingTargetView = computed(() =>
   props.views.find((view) => view.id === conditionalFormattingTargetId.value) ?? null,
+)
+const scaleFormattingTargetView = computed(() =>
+  props.views.find((view) => view.id === scaleFormattingTargetId.value) ?? null,
 )
 const deleteTarget = computed(() => props.views.find((view) => view.id === deleteTargetId.value) ?? null)
 const configTargetFields = computed(() => props.fields)
@@ -772,6 +788,8 @@ function resetTransientState() {
   viewConfigSourceSignature.value = ''
   conditionalFormattingTargetId.value = null
   conditionalFormattingDirty.value = false
+  scaleFormattingTargetId.value = null
+  scaleFormattingDirty.value = false
   resetConfigDrafts()
 }
 
@@ -1003,15 +1021,22 @@ function toggleFieldSelection(values: string[], fieldId: string) {
   values.splice(0, values.length, ...next)
 }
 
+// The per-type config builders below pass a FRESH config object (no spread of the
+// existing config), so any config key the builder doesn't know about would be
+// dropped on save. Re-inject BOTH conditional-formatting families. NOTE: each key
+// is checked independently — a view that has scale rules but NO operator rules
+// (or vice-versa) must not lose the family it does have. (Bug A5: the prior
+// early-return on the operator key alone silently dropped scale rules.)
 function preserveConditionalFormattingRules(target: MetaView, config: Record<string, unknown>): Record<string, unknown> {
   const existingConfig = target.config ?? {}
-  if (!Object.prototype.hasOwnProperty.call(existingConfig, 'conditionalFormattingRules')) {
-    return config
+  const next = { ...config }
+  if (Object.prototype.hasOwnProperty.call(existingConfig, 'conditionalFormattingRules')) {
+    next.conditionalFormattingRules = existingConfig.conditionalFormattingRules
   }
-  return {
-    ...config,
-    conditionalFormattingRules: existingConfig.conditionalFormattingRules,
+  if (Object.prototype.hasOwnProperty.call(existingConfig, 'conditionalFormattingScaleRules')) {
+    next.conditionalFormattingScaleRules = existingConfig.conditionalFormattingScaleRules
   }
+  return next
 }
 
 const UNARY_FILTER_OPERATORS = new Set(['isEmpty', 'isNotEmpty'])
@@ -1237,7 +1262,7 @@ const renameDirty = computed(() => {
   return editingName.value.trim() !== (props.views.find((view) => view.id === editingId.value)?.name ?? '')
 })
 
-const hasPendingDrafts = computed(() => viewConfigDirty.value || newViewDraftDirty.value || renameDirty.value || conditionalFormattingDirty.value)
+const hasPendingDrafts = computed(() => viewConfigDirty.value || newViewDraftDirty.value || renameDirty.value || conditionalFormattingDirty.value || scaleFormattingDirty.value)
 const managerDirty = computed(() => props.visible && hasPendingDrafts.value)
 
 function confirmDiscardViewManagerChanges() {
@@ -1268,6 +1293,29 @@ function onSaveConditionalFormatting(rules: ConditionalFormattingRule[]) {
   nextConfig.conditionalFormattingRules = rules
   emit('update-view', target.id, { config: nextConfig })
   closeConditionalFormatting()
+}
+
+function openScaleFormatting(view: MetaView) {
+  if (scaleFormattingTargetId.value && scaleFormattingTargetId.value !== view.id) {
+    if (scaleFormattingDirty.value && !window.confirm(ml('view.discardFormattingConfirm'))) return
+  }
+  scaleFormattingTargetId.value = view.id
+}
+
+function closeScaleFormatting() {
+  scaleFormattingTargetId.value = null
+  scaleFormattingDirty.value = false
+}
+
+function onSaveScaleFormatting(rules: ConditionalFormattingScaleRule[]) {
+  const target = scaleFormattingTargetView.value
+  if (!target) return
+  // Start from the existing config so a scale save preserves operator rules
+  // (conditionalFormattingRules) and any other config keys.
+  const nextConfig: Record<string, unknown> = { ...(target.config ?? {}) }
+  nextConfig.conditionalFormattingScaleRules = rules
+  emit('update-view', target.id, { config: nextConfig })
+  closeScaleFormatting()
 }
 
 watch(
