@@ -8,7 +8,7 @@
  * handler (onRestoreRecordVersion) + the backend real-DB suite, and needs manual/e2e QA.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App } from 'vue'
+import { createApp, h, nextTick, ref, type App } from 'vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import type { MetaField, MetaRecord, MetaRecordRevision } from '../src/multitable/types'
 
@@ -94,6 +94,30 @@ describe('MetaRecordDrawer restore affordance (Slice 3)', () => {
     const { container, app } = mountDrawer({ canEdit: false })
     await openHistory(container)
     expect(container.querySelectorAll('[data-test="record-history-restore"]').length).toBe(0)
+    app.unmount()
+  })
+
+  it('reloads the History timeline when record.version changes (post-restore refresh)', async () => {
+    const recordRef = ref({ id: 'rec_1', version: 3, data: { fld_t: 'now' } } as unknown as MetaRecord)
+    const listRecordHistory = vi.fn(async () => [rev(3, 'update'), rev(2, 'update')])
+    const apiClient = { listRecordHistory, getRecordSubscriptionStatus: vi.fn(async () => ({ subscribed: false, subscription: null })) }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({
+      render() {
+        return h(MetaRecordDrawer, {
+          visible: true, record: recordRef.value, fields: FIELDS, canEdit: true,
+          canComment: false, canDelete: false, sheetId: 'sheet_1', apiClient: apiClient as never,
+        })
+      },
+    })
+    app.mount(container)
+    await openHistory(container)
+    expect(listRecordHistory).toHaveBeenCalledTimes(1)
+    // simulate the workbench's post-restore refreshSelectedRecordContext bumping the version
+    recordRef.value = { id: 'rec_1', version: 4, data: { fld_t: 'restored' } } as unknown as MetaRecord
+    await flush()
+    expect(listRecordHistory).toHaveBeenCalledTimes(2) // timeline reloaded for the new version
     app.unmount()
   })
 })

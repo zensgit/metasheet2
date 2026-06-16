@@ -459,7 +459,10 @@ watch(
 )
 
 watch(
-  [() => activeTab.value, () => props.visible, () => props.record?.id, () => props.sheetId, () => props.apiClient],
+  // `record.version` is in the deps so a restore (which bumps the version via the workbench's
+  // refreshSelectedRecordContext) reloads the timeline while the user is still on the History tab —
+  // otherwise the new restore revision wouldn't appear and the list could read stale/empty.
+  [() => activeTab.value, () => props.visible, () => props.record?.id, () => props.record?.version, () => props.sheetId, () => props.apiClient],
   () => {
     if (activeTab.value === 'history') void loadRecordHistory()
   },
