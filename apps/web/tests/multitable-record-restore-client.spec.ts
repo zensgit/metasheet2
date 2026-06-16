@@ -36,6 +36,18 @@ describe('MultitableApiClient.restoreRecordVersion (Slice 3)', () => {
     expect(result).toEqual(OK_WIRE.data)
   })
 
+  it('includes fieldIds in the body for a per-field restore, omits it when empty (Arc1·S2)', async () => {
+    const fetchFn = vi.fn(async () => jsonResponse(OK_WIRE))
+    const client = new MultitableApiClient({ fetchFn })
+    await client.restoreRecordVersion('sheet_1', 'rec_1', 2, 3, ['fld_a', 'fld_b'])
+    expect(JSON.parse(String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body)))
+      .toEqual({ targetVersion: 2, expectedVersion: 3, fieldIds: ['fld_a', 'fld_b'] })
+    // empty selection must NOT send a fieldIds key (would be an all-fields 422/no-op ambiguity)
+    await client.restoreRecordVersion('sheet_1', 'rec_1', 2, 3, [])
+    expect(JSON.parse(String((fetchFn.mock.calls[1] as [string, RequestInit])[1].body)))
+      .toEqual({ targetVersion: 2, expectedVersion: 3 })
+  })
+
   it('encodes path segments', async () => {
     const fetchFn = vi.fn(async () => jsonResponse(OK_WIRE))
     const client = new MultitableApiClient({ fetchFn })
