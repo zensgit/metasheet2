@@ -72,7 +72,7 @@
                   v-for="(field, ci) in visibleFields"
                   :key="field.id"
                   class="meta-grid__cell"
-                  :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === flatIndex(group, ri) && focusCol === ci }"
+                  :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === flatIndex(group, ri) && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(row.id, field.id) }"
                   :style="cellStyle(row.id, field.id, ci)"
                   @dblclick="startEdit(row, field)"
                   @click.stop="onCellClick(flatIndex(group, ri), ci, row.id)"
@@ -197,7 +197,7 @@
                 role="gridcell"
                 :aria-label="field.name"
                 class="meta-grid__cell"
-                :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci }"
+                :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(row.id, field.id) }"
                 :style="cellStyle(row.id, field.id, ci)"
                 @dblclick="startEdit(row, field)"
                 @click.stop="onCellClick(ri, ci, row.id)"
@@ -637,8 +637,40 @@ function cellStyle(rid: string, fid: string, ci?: number) {
   const frozenStyle: Record<string, string> | undefined = frozen
     ? { position: 'sticky', left: `${frozenLeft(ci!)}px`, zIndex: '2', backgroundColor: colorScaleFill ?? effectiveFormat?.backgroundColor ?? '#fff' }
     : undefined
-  if (!widthStyle && !effectiveFormat && !scaleStyle && !frozenStyle) return undefined
-  return { ...(widthStyle ?? {}), ...(effectiveFormat ?? {}), ...(scaleStyle ?? {}), ...(frozenStyle ?? {}) }
+  // Over a scale fill, force a readable text color via a CSS var the cell-renderer
+  // sign-colors inherit (see the `.meta-grid__cell--scale-fill` :deep rule). A
+  // single neutral color can't be readable on every fill (color-scale spans
+  // black→white), so pick dark/white by the fill's luminance. dataBar uses a
+  // default dark (the bar is left-anchored; over-engineering per-bar isn't worth it).
+  const scaleTextColor = colorScaleFill
+    ? readableTextOn(colorScaleFill)
+    : barEntry
+      ? '#111827'
+      : undefined
+  const scaleTextVar: Record<string, string> | undefined = scaleTextColor
+    ? { '--meta-grid-scale-text-color': scaleTextColor }
+    : undefined
+  if (!widthStyle && !effectiveFormat && !scaleStyle && !frozenStyle && !scaleTextVar) return undefined
+  return { ...(widthStyle ?? {}), ...(effectiveFormat ?? {}), ...(scaleStyle ?? {}), ...(frozenStyle ?? {}), ...(scaleTextVar ?? {}) }
+}
+
+// Pick a readable text color (#111827 dark / #ffffff white) for a given fill hex,
+// by perceived luminance (YIQ). Used so cell-renderer sign-colors don't go
+// low-contrast over a color-scale fill (which can be any color incl. black/white).
+function readableTextOn(hex: string): string {
+  const h = hex.trim().replace(/^#/, '')
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h.slice(0, 6)
+  const n = parseInt(full, 16)
+  if (!Number.isFinite(n)) return '#111827'
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255
+  const yiq = (r * 299 + g * 587 + b * 114) / 1000
+  return yiq >= 140 ? '#111827' : '#ffffff'
+}
+
+/** True when a cell carries a data-bar or color-scale fill (drives the scale-fill class). */
+function cellHasScaleFill(rid: string, fid: string): boolean {
+  const e = props.conditionalFormattingScale?.byField[fid]?.byRecordId[rid]
+  return !!e && (typeof e.barPct === 'number' || typeof e.scaleColor === 'string')
 }
 
 // A5-3 icon set render: map an `iconKey` (`${set}:${index}`) to a glyph + color.
@@ -860,6 +892,13 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__cell--readonly { color: #666; }
 .meta-grid__cell--focused { outline: 2px solid #409eff; outline-offset: -2px; }
 .meta-grid__cell-scale-icon { display: inline-block; margin-right: 4px; font-weight: 700; vertical-align: middle; }
+/* Over a data-bar / color-scale fill, force the cell-renderer's number sign-colors
+   (green/red, set on an inner span that out-specifies the cell) to a luminance-
+   picked readable color so values stay legible on saturated fills. */
+.meta-grid__cell--scale-fill :deep(.meta-cell-renderer--positive),
+.meta-grid__cell--scale-fill :deep(.meta-cell-renderer--negative) {
+  color: var(--meta-grid-scale-text-color, inherit) !important;
+}
 .meta-grid__comment-action,
 .meta-grid__field-comment-action {
   display: inline-flex;
