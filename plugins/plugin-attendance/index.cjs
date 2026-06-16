@@ -15415,6 +15415,12 @@ function computeAnnualLeaveStandardDayMinutes({ requestMinutes, defaultMinutesPe
   if (!Number.isInteger(m) || m <= 0 || !Number.isInteger(d) || d <= 0 || !Number.isInteger(s) || s <= 0) {
     throw new HttpError(422, 'ANNUAL_LEAVE_DEDUCTION_AMOUNT_INVALID', 'Cannot derive a standard-day annual-leave deduction from this request')
   }
+  // v1 is SINGLE-DAY only: an annual leave request is one workDate, so its minutes cannot exceed one standard
+  // work day (defaultMinutesPerDay). minutes > defaultMinutesPerDay would deduct >1 standard day from a single
+  // date — that's a multi-day request, explicitly out of scope for v1 → reject (don't silently over-deduct).
+  if (m > d) {
+    throw new HttpError(422, 'ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED', 'Annual leave is single-day in v1: requested minutes exceed one standard work day')
+  }
   const numerator = m * s
   if (numerator % d !== 0) {
     throw new HttpError(422, 'ANNUAL_LEAVE_DEDUCTION_NOT_WHOLE', 'Annual-leave deduction does not resolve to a whole number of minutes')

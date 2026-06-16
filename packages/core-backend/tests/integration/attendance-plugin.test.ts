@@ -5897,7 +5897,8 @@ attendanceIntegrationDescribe(
     const uShort = `al-l3-short-${runSuffix}`
     const uOdd = `al-l3-odd-${runSuffix}`
     const uOff = `al-l3-off-${runSuffix}`
-    const allUsers = [uFull, uHalf, uShort, uOdd, uOff]
+    const uMulti = `al-l3-multi-${runSuffix}`
+    const allUsers = [uFull, uHalf, uShort, uOdd, uOff, uMulti]
     const previousRbacBypass = process.env.RBAC_BYPASS
     const pool = new Pool({ connectionString: dbUrl })
     const createdRequestIds: string[] = []
@@ -6004,6 +6005,18 @@ attendanceIntegrationDescribe(
       expect(await reqStatus(reqOdd)).toBe('pending')
       expect(await lotRemaining(lotOdd)).toBe(480)
       expect(await annualDeducts(reqOdd)).toHaveLength(0)
+
+      // (D2) single-day v1 enforced: 1200 scheduled minutes > 600 defaultMinutesPerDay (a multi-day request on one
+      // workDate) → 422 MULTI_DAY_UNSUPPORTED, request stays pending, NO over-deduction.
+      const lotMulti = await grantLot(uMulti, 4800, 'multi')
+      const tokMulti = await tokenFor(uMulti)
+      const reqMulti = await createLeave(tokMulti!, '2026-09-10', 1200)
+      const multiRes = await approve(tokMulti!, reqMulti)
+      expect(multiRes.status).toBe(422)
+      expect((multiRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED')
+      expect(await reqStatus(reqMulti)).toBe('pending')
+      expect(await lotRemaining(lotMulti)).toBe(4800)
+      expect(await annualDeducts(reqMulti)).toHaveLength(0)
 
       // (E) replay: re-approve the resolved full-day request → 400; no double-deduct.
       expect((await approve(tokFull!, reqFull)).status).toBe(400)
