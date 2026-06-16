@@ -5887,6 +5887,161 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④/年假 L3 — annual leave approval deducts STANDARD-DAY minutes; gated on annualLeavePolicy.enabled; insufficient/non-whole → 422 + pending; replay no double-deduct', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const uFull = `al-l3-full-${runSuffix}`
+    const uHalf = `al-l3-half-${runSuffix}`
+    const uShort = `al-l3-short-${runSuffix}`
+    const uOdd = `al-l3-odd-${runSuffix}`
+    const uOff = `al-l3-off-${runSuffix}`
+    const allUsers = [uFull, uHalf, uShort, uOdd, uOff]
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdRequestIds: string[] = []
+    const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
+    const tokenFor = async (uid: string) => {
+      const r = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      return (r.body as { token?: string } | undefined)?.token
+    }
+    let adminTok: string | undefined
+    let origPolicy: Record<string, unknown> = { enabled: false }
+    let leaveTypeId: string | undefined
+    let createdLeaveType = false
+    let origDefaultMinutesPerDay: number | undefined
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      adminTok = await tokenFor(`al-l3-admin-${runSuffix}`)
+      if (!adminTok) return
+
+      // policy standardDayMinutes=480, deliberately DISTINCT from the leave type's defaultMinutesPerDay=600 below,
+      // so a full (600-min) day deducts the 8h STANDARD day (480), proving the entitlement basis ≠ scheduled minutes.
+      const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminTok}` } })
+      origPolicy = ((origRes.body as { data?: { annualLeavePolicy?: Record<string, unknown> } } | undefined)?.data?.annualLeavePolicy) ?? { enabled: false }
+      const setEngine = (enabled: boolean) => requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT', headers: hdr(adminTok!),
+        body: JSON.stringify({ annualLeavePolicy: {
+          enabled, tenureMode: 'cumulative_service', standardDayMinutes: 480,
+          tiers: [{ minYears: 1, maxYears: null, days: 5 }], carryover: { enabled: false }, timezone: 'Asia/Shanghai',
+        } }),
+      })
+
+      // annual leave type — code MUST be 'annual' (the hook's discriminator). Pin defaultMinutesPerDay=600 regardless
+      // of any pre-existing 'annual' type (request metadata snapshots it at creation time, so set it BEFORE creating).
+      const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr(adminTok), body: JSON.stringify({ code: 'annual', name: `Annual ${runSuffix}`, paid: true, requiresApproval: true, defaultMinutesPerDay: 600 }) })
+      expect([201, 409]).toContain(ltRes.status)
+      createdLeaveType = ltRes.status === 201
+      leaveTypeId = (ltRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!leaveTypeId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers: { Authorization: `Bearer ${adminTok}` } })
+        const items = (list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []
+        leaveTypeId = items.find(i => i.code === 'annual')?.id
+      }
+      expect(leaveTypeId).toBeTruthy()
+      // Capture the original default_minutes_per_day BEFORE mutating it. finally restores a REUSED type to this
+      // value (and DELETEs a type this test created) so the global 'annual' leave type is never left polluted for
+      // later cases in the same process/DB — the exact "local dirty-DB pollution" hazard we've hit before.
+      origDefaultMinutesPerDay = (await pool.query(`SELECT default_minutes_per_day FROM attendance_leave_types WHERE id = $1`, [leaveTypeId])).rows[0]?.default_minutes_per_day
+      await pool.query(`UPDATE attendance_leave_types SET default_minutes_per_day = 600 WHERE id = $1`, [leaveTypeId])
+
+      const grantLot = async (userId: string, remaining: number, tag: string) => (await pool.query(
+        `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at)
+         VALUES ('default', $1, 'annual', $2, $2, 'annual_accrual', $3, 'active', '2026-01-01') RETURNING id`,
+        [userId, remaining, `l3:${runSuffix}:${tag}`])).rows[0].id as string
+      const createLeave = async (token: string, workDate: string, minutes: number) => {
+        const r = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr(token), body: JSON.stringify({ workDate, requestType: 'leave', leaveTypeId, minutes }) })
+        expect(r.status, JSON.stringify(r.body)).toBe(201)
+        const id = (r.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+        expect(id).toBeTruthy()
+        createdRequestIds.push(id as string)
+        return id as string
+      }
+      const approve = (token: string, id: string) => requestJson(`${baseUrl}/api/attendance/requests/${id}/approve`, { method: 'POST', headers: hdr(token), body: JSON.stringify({ comment: 'ok' }) })
+      const lotRemaining = async (id: string) => Number((await pool.query('SELECT remaining_minutes FROM attendance_leave_balances WHERE id = $1', [id])).rows[0].remaining_minutes)
+      const reqStatus = async (id: string) => (await pool.query('SELECT status FROM attendance_requests WHERE id = $1', [id])).rows[0]?.status as string | undefined
+      const annualDeducts = async (reqId: string) => (await pool.query(
+        `SELECT delta_minutes FROM attendance_leave_balance_events WHERE source_type = 'annual_leave' AND source_id = $1`, [reqId])).rows.map(r => Number(r.delta_minutes))
+
+      // ── ENGINE ON ──
+      expect((await setEngine(true)).status).toBe(200)
+
+      // (A) full day: 600 scheduled minutes → 480 STANDARD-day minutes deducted (basis ≠ raw minutes).
+      const lotFull = await grantLot(uFull, 480, 'full')
+      const tokFull = await tokenFor(uFull)
+      const reqFull = await createLeave(tokFull!, '2026-09-10', 600)
+      expect((await approve(tokFull!, reqFull)).status).toBe(200)
+      expect(await lotRemaining(lotFull)).toBe(0)
+      expect(await annualDeducts(reqFull)).toEqual([-480])
+
+      // (B) half day: 300 scheduled → 240 standard-day deducted.
+      const lotHalf = await grantLot(uHalf, 480, 'half')
+      const tokHalf = await tokenFor(uHalf)
+      const reqHalf = await createLeave(tokHalf!, '2026-09-10', 300)
+      expect((await approve(tokHalf!, reqHalf)).status).toBe(200)
+      expect(await lotRemaining(lotHalf)).toBe(240)
+      expect(await annualDeducts(reqHalf)).toEqual([-240])
+
+      // (C) insufficient: lot 240 < 480 needed → 422, request stays PENDING, lot untouched, no event.
+      const lotShort = await grantLot(uShort, 240, 'short')
+      const tokShort = await tokenFor(uShort)
+      const reqShort = await createLeave(tokShort!, '2026-09-10', 600)
+      const shortRes = await approve(tokShort!, reqShort)
+      expect(shortRes.status).toBe(422)
+      expect((shortRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ANNUAL_LEAVE_BALANCE_INSUFFICIENT')
+      expect(await reqStatus(reqShort)).toBe('pending')
+      expect(await lotRemaining(lotShort)).toBe(240)
+      expect(await annualDeducts(reqShort)).toHaveLength(0)
+
+      // (D) non-whole standard-day: 7 scheduled → (7×480)/600 = 5.6 → 422 NOT_WHOLE, pending, no deduction.
+      const lotOdd = await grantLot(uOdd, 480, 'odd')
+      const tokOdd = await tokenFor(uOdd)
+      const reqOdd = await createLeave(tokOdd!, '2026-09-10', 7)
+      const oddRes = await approve(tokOdd!, reqOdd)
+      expect(oddRes.status).toBe(422)
+      expect((oddRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ANNUAL_LEAVE_DEDUCTION_NOT_WHOLE')
+      expect(await reqStatus(reqOdd)).toBe('pending')
+      expect(await lotRemaining(lotOdd)).toBe(480)
+      expect(await annualDeducts(reqOdd)).toHaveLength(0)
+
+      // (E) replay: re-approve the resolved full-day request → 400; no double-deduct.
+      expect((await approve(tokFull!, reqFull)).status).toBe(400)
+      expect(await lotRemaining(lotFull)).toBe(0)
+      expect(await annualDeducts(reqFull)).toHaveLength(1)
+
+      // ── ENGINE OFF → zero regression: approval succeeds, balance NEVER touched ──
+      expect((await setEngine(false)).status).toBe(200)
+      const lotOff = await grantLot(uOff, 480, 'off')
+      const tokOff = await tokenFor(uOff)
+      const reqOff = await createLeave(tokOff!, '2026-09-10', 600)
+      expect((await approve(tokOff!, reqOff)).status).toBe(200)
+      expect(await lotRemaining(lotOff)).toBe(480)
+      expect(await annualDeducts(reqOff)).toHaveLength(0)
+    } finally {
+      if (adminTok) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: hdr(adminTok), body: JSON.stringify({ annualLeavePolicy: origPolicy }) }).catch(() => undefined)
+      }
+      await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])', [allUsers]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])', [allUsers]).catch(() => undefined)
+      if (createdRequestIds.length > 0) {
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      }
+      // restore the global 'annual' leave type (requests already deleted, so a created type is FK-free to drop):
+      // DELETE if this test created it, else restore its original default_minutes_per_day — no cross-test pollution.
+      if (leaveTypeId) {
+        if (createdLeaveType) {
+          await pool.query('DELETE FROM attendance_leave_types WHERE id = $1', [leaveTypeId]).catch(() => undefined)
+        } else if (origDefaultMinutesPerDay !== undefined && origDefaultMinutesPerDay !== null) {
+          await pool.query('UPDATE attendance_leave_types SET default_minutes_per_day = $2 WHERE id = $1', [leaveTypeId, origDefaultMinutesPerDay]).catch(() => undefined)
+        }
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('④ C4 — grant stamps expires_at iff expiresInDays set; scheduler tick expires aged lots once (NULL/future survive)', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
