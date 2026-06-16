@@ -5794,24 +5794,38 @@ export function univerMetaRouter(): Router {
         }
       }
 
-      // Per-field (column-level) restore: when the caller passes `fieldIds`, restrict the diff to that
-      // selection. The atomic gate below then runs over only the selected subset — so a user can restore
-      // the writable fields they picked even if another changed field in the revision is forbidden. A
-      // requested field that is unchanged / non-restorable / unknown simply isn't in the diff (no error).
+      // Per-field (column-level) restore: when the caller passes `fieldIds`, restrict the applied diff to
+      // that selection. A selected field that is unchanged / non-restorable simply isn't in the diff and is
+      // a clean no-op for that field — it is NOT silently treated as writable below (see the forbidden gate).
       const selectedDiff = fieldIds ? diff.filter((ch) => fieldIds.includes(ch.fieldId)) : diff
 
-      // Lock B: gate every (selected) diff field on BOTH the static guard and restore's own layer-3 pre-check.
-      const hasForbidden = selectedDiff.some((ch) => {
-        const guard = fieldById.get(ch.fieldId)
-        const perm = fieldPermissions[ch.fieldId]
+      // Lock B (the forbidden gate). The permission predicate (static guard ∧ restore's layer-3 pre-check)
+      // is the SAME in both modes; only the SET it runs over differs:
+      //
+      //  • FULL restore (no `fieldIds`): gate the changed diff — an atomic reject when any CHANGED field is
+      //    forbidden. Unchanged forbidden fields are not in the diff and don't block (existing behavior,
+      //    constraint (1) — kept verbatim). This carries no per-field bit (the caller named no field).
+      //
+      //  • PER-FIELD (`fieldIds` present): gate the caller-SELECTED ids INDEPENDENT of whether they changed.
+      //    #2672 follow-up — gating per-field over `selectedDiff` (= selection ∩ changed) made a forbidden
+      //    field's response depend on whether it changed between the target and current version (403 when it
+      //    changed vs. 200 no-op when it didn't) = a CHANGE-TIMELINE ORACLE for visible=false / read-only
+      //    columns, defeating the #2144 record-history redaction mask. Gating over the SELECTED ids makes the
+      //    response constant (403) regardless of diff → the oracle is closed, and selecting a field you cannot
+      //    write can never silently fall through to a no-op bypass (M2). Unknown / non-restorable selected ids
+      //    fail the predicate too, so a forbidden id is indistinguishable from a non-field — no metadata leak.
+      const gatedFieldIds = fieldIds ?? selectedDiff.map((ch) => ch.fieldId)
+      const hasForbidden = gatedFieldIds.some((fid) => {
+        const guard = fieldById.get(fid)
+        const perm = fieldPermissions[fid]
         const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
         const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
         return !staticOk || !layer3Ok
       })
       if (hasForbidden) {
-        // Generalized message — the forbidden ids are DERIVED server-side from the unmasked snapshot
-        // (not caller-submitted like /patch), so echoing them would leak hidden-field metadata to an
-        // actor denied visibility. The diff is atomic: nothing is written.
+        // Generalized message — the forbidden ids are DERIVED server-side from the unmasked snapshot /
+        // schema (not caller-trusted like /patch), so echoing them (here or via skippedFieldIds) would leak
+        // hidden-field metadata to an actor denied visibility. The diff is atomic: nothing is written.
         return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: 'Not permitted to restore one or more fields in this revision' } })
       }
 

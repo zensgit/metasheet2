@@ -40,6 +40,9 @@ const FOREIGN_REC2 = `frec2_rstr_${TS}`
 const FLD_A = `fld_rstr_a_${TS}`
 const FLD_B = `fld_rstr_b_${TS}`
 const FLD_SECRET = `fld_rstr_secret_${TS}`
+// #2672: a field USER_RO cannot SEE (layer-3 visible=false, NOT read_only). #2144's history mask redacts
+// THIS field's change-timeline from USER_RO — so the per-field-restore oracle is the only recovery channel.
+const FLD_HIDDEN = `fld_rstr_hidden_${TS}`
 const FLD_FX = `fld_rstr_fx_${TS}`
 const FLD_AUN = `fld_rstr_aun_${TS}`
 const FLD_LK = `fld_rstr_lk_${TS}`
@@ -134,6 +137,7 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     await f(FLD_A, 'A', 'string', '{}', 1)
     await f(FLD_B, 'B', 'string', '{}', 2)
     await f(FLD_SECRET, 'Secret', 'string', '{}', 3)
+    await f(FLD_HIDDEN, 'Hidden', 'string', '{}', 10)
     await f(FLD_FX, 'Formula', 'formula', '{}', 4)
     await f(FLD_AUN, 'AutoNum', 'autoNumber', '{}', 5)
     await f(FLD_LK, 'Link', 'link', JSON.stringify({ foreignSheetId: FSHEET_ID }), 6)
@@ -145,6 +149,10 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
 
     // Layer-3: USER_RO is read_only on SECRET (and a separate visible=false would also gate).
     await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [SHEET_ID, FLD_SECRET, 'user', USER_RO, true, true])
+    // #2672: USER_RO is visible=false (but NOT read_only) on HIDDEN — i.e. CANNOT SEE it. This is the field
+    // #2144's record-history mask redacts from USER_RO, so the per-field-restore response is the only path
+    // by which its change-timeline could leak. read_only=false isolates the visible=false predicate branch.
+    await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [SHEET_ID, FLD_HIDDEN, 'user', USER_RO, false, false])
   })
 
   beforeEach(() => {
@@ -581,16 +589,126 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
     expect(data[FLD_SECRET]).toBe('sec_now') // forbidden field untouched
   })
 
-  test('T17: fieldIds selecting an unchanged/unknown field is a no-op (nothing in the gated subset)', async () => {
+  test('T17: fieldIds selecting an unchanged WRITABLE field is a no-op (nothing in the gated subset)', async () => {
     const rid = await seedRecord(
       { [FLD_A]: 'a2', [FLD_B]: 'b2' },
       2,
       [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_B]: 'b2' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_B]: 'b2' } }],
     )
-    // B is unchanged between v1 and current; selecting only B → empty diff → no-op
+    // B is a writable field, unchanged between v1 and current; selecting only B → empty diff → no-op.
+    // (B is writable, so it passes the forbidden gate; only its absence from the diff makes this a no-op.)
     const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_B] })
     expect(res.status).toBe(200)
     expect(res.body.data.noop).toBe(true)
     expect((await liveData(rid))[FLD_A]).toBe('a2') // A unchanged (not selected)
+  })
+
+  // ---- #2672 follow-up: per-field restore must NOT be a change-timeline oracle for hidden columns ----
+  //
+  // The original per-field gate ran the forbidden check over `selectedDiff` (= caller selection ∩
+  // fields-that-actually-changed). So selecting a forbidden field F returned 403 when F CHANGED between the
+  // target version and current, vs. a 200 no-op when F was UNCHANGED — an exact per-field oracle for "did
+  // this confidential column change at version N", defeating the #2144 record-history mask. T18 exercises a
+  // visible=false (FLD_HIDDEN) field specifically because that is the column whose change-timeline #2144
+  // actually redacts from USER_RO — so the per-field-restore response is the ONLY channel it could leak from
+  // (a read_only-but-visible field like FLD_SECRET is already unmasked in the history endpoint).
+  // Fix: the gate runs over the caller-SELECTED fieldIds, independent of the diff → constant 403.
+
+  test('T18 (#2672 oracle): selecting a visible=false field returns an IDENTICAL response whether or not it changed', async () => {
+    testUserId = USER_RO // visible=false (cannot see) on HIDDEN — #2144 masks its change-timeline in history
+
+    // Record 1 — HIDDEN DIFFERS between v1 (h_old) and current (h_now).
+    const ridDiff = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_HIDDEN]: 'h_now' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_HIDDEN]: 'h_old' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_HIDDEN]: 'h_now' } }],
+    )
+    // Record 2 — HIDDEN is UNCHANGED between v1 and current (same 'h_same').
+    const ridSame = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_HIDDEN]: 'h_same' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_HIDDEN]: 'h_same' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_HIDDEN]: 'h_same' } }],
+    )
+
+    const resDiff = await restoreReq(ridDiff, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_HIDDEN] })
+    const resSame = await restoreReq(ridSame, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_HIDDEN] })
+
+    // KEYSTONE: the two responses must be IDENTICAL — same status AND same body. Under the old gate the
+    // CHANGED case was 403 while the UNCHANGED case was a 200 no-op (the timeline oracle). They are now a
+    // constant 403, so the response leaks nothing about whether HIDDEN changed at version 1 — restoring the
+    // #2144 mask property (which redacts HIDDEN's change-timeline from USER_RO in the history endpoint).
+    expect(resDiff.status).toBe(resSame.status)
+    expect(resDiff.body).toEqual(resSame.body)
+
+    // …and that constant is a generic 403 that names NO field id (neither in the message nor skippedFieldIds).
+    expect(resDiff.status).toBe(403)
+    expect(resDiff.body.error.code).toBe('RESTORE_FORBIDDEN')
+    expect(JSON.stringify(resDiff.body)).not.toContain(FLD_HIDDEN)
+    // No skippedFieldIds channel may re-leak the forbidden id (the 403 body carries no `data`).
+    expect(resDiff.body.data?.skippedFieldIds ?? []).not.toContain(FLD_HIDDEN)
+
+    // Atomic in BOTH cases: nothing written, no version bump.
+    for (const rid of [ridDiff, ridSame]) {
+      const data = await liveData(rid)
+      expect(data[FLD_A]).toBe('a2')
+      const ver = await q('SELECT version FROM meta_records WHERE id = $1', [rid])
+      expect(Number((ver.rows[0] as { version: number }).version)).toBe(2)
+    }
+  })
+
+  test('T19 (#2672 M2): selecting a field you cannot write is a clean 403, never a silent bypass', async () => {
+    const rid = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_SECRET]: 'sec_now' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_SECRET]: 'sec_old' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_SECRET]: 'sec_now' } }],
+    )
+    testUserId = USER_RO // read_only on SECRET → FLD_SECRET is forbidden
+    const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_SECRET] })
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('RESTORE_FORBIDDEN')
+    // M2: selection must not bypass the gate — the forbidden value is never written, and the body must not
+    // name the forbidden field anywhere (message or skippedFieldIds).
+    expect(JSON.stringify(res.body)).not.toContain(FLD_SECRET)
+    const data = await liveData(rid) // atomic: live data unchanged
+    expect(data[FLD_A]).toBe('a2')
+    expect(data[FLD_SECRET]).toBe('sec_now')
+    const ver = await q('SELECT version FROM meta_records WHERE id = $1', [rid])
+    expect(Number((ver.rows[0] as { version: number }).version)).toBe(2)
+  })
+
+  test('T20 (#2672 regression): a writable per-field restore still works; full-restore atomic-reject unchanged', async () => {
+    // (i) a normal per-field restore of a WRITABLE field still applies (the fix only changes the gate SET).
+    const ridW = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_B]: 'b2' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_B]: 'b1' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_B]: 'b2' } }],
+    )
+    const okRes = await restoreReq(ridW, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_A] })
+    expect(okRes.status).toBe(200)
+    expect(okRes.body.data.restoredFieldIds).toEqual([FLD_A])
+    const wData = await liveData(ridW)
+    expect(wData[FLD_A]).toBe('a1') // restored
+    expect(wData[FLD_B]).toBe('b2') // not selected → untouched
+
+    // (ii) FULL restore (no fieldIds) keeps its atomic-reject: a CHANGED forbidden field still 403s, and an
+    // UNCHANGED forbidden field still does NOT block (constraint (1) — full mode behavior is unchanged).
+    testUserId = USER_RO // read_only on SECRET
+    const ridFullForbidden = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_SECRET]: 'sec_now' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_SECRET]: 'sec_old' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_SECRET]: 'sec_now' } }],
+    )
+    const fullForbidden = await restoreReq(ridFullForbidden, { targetVersion: 1, expectedVersion: 2 })
+    expect(fullForbidden.status).toBe(403) // SECRET changed + forbidden → atomic reject
+    expect((await liveData(ridFullForbidden))[FLD_A]).toBe('a2') // nothing written
+
+    const ridFullOk = await seedRecord(
+      { [FLD_A]: 'a2', [FLD_SECRET]: 'sec_same' },
+      2,
+      [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', [FLD_SECRET]: 'sec_same' } }, { version: 2, snapshot: { [FLD_A]: 'a2', [FLD_SECRET]: 'sec_same' } }],
+    )
+    const fullOk = await restoreReq(ridFullOk, { targetVersion: 1, expectedVersion: 2 })
+    expect(fullOk.status).toBe(200) // SECRET unchanged → only writable A in the diff → restored
+    expect((await liveData(ridFullOk))[FLD_A]).toBe('a1')
   })
 })
