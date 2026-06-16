@@ -227,7 +227,8 @@ c6Sandbox:
   repullIdempotence=pass|fail|not_run
   readOnlyUserExternalWriteDryRunAllowed=true|false
   readOnlyUserApplyBlocked=true|false
-  controlledBadRow=pass|fail|not_run
+  controlledBadRow=pass|fail|hold|not_run
+  controlledBadRowStopReason=none|target_ddl_unavailable|not_available
   rollbackCleanup=pass|fail|not_run
   productDeleteRouteUsed=false
   productRawSqlUsed=false
@@ -243,7 +244,8 @@ Current #2720 checkpoint as of 2026-06-16:
 - dedicated read-only route subgate: passed
   (`/external-write/dry-run` allowed for `integration:read`; `/external-write/apply`
   blocked for the same read-only user);
-- controlled bad-row: pending.
+- controlled bad-row: attempted, HOLD on target DDL/TRIGGER privilege unavailable;
+  no Apply ran for that attempt, no target rows were written.
 
 ## Stop Rules
 
@@ -337,7 +339,8 @@ c6Sandbox:
   repullIdempotence=pass|fail|not_run
   readOnlyUserExternalWriteDryRunAllowed=true|false
   readOnlyUserApplyBlocked=true|false
-  controlledBadRow=pass|fail|not_run
+  controlledBadRow=pass|fail|hold|not_run
+  controlledBadRowStopReason=none|target_ddl_unavailable|not_available
   rollbackCleanup=pass|fail|not_run
   productDeleteRouteUsed=false
   productRawSqlUsed=false

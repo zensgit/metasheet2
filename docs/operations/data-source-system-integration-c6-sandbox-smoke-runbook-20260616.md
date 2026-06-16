@@ -353,6 +353,22 @@ If the only available failure shape changes the target lookup result or plan
 decision after dry-run, skip this step and keep C6-5 at HOLD until a true
 write-time bad-row shape is available.
 
+Current #2720 attempt note: the first entity-machine bad-row setup stopped
+before Apply because the sandbox target principal could connect but lacked the
+DDL/TRIGGER privilege needed to install a temporary one-shot failure trigger.
+That is `HOLD_TARGET_DDL_UNAVAILABLE`, not a C6 route/runtime defect. Do not
+rerun Apply until one of these safe write-time failure shapes is available:
+
+- a DDL-capable sandbox/reset principal for the sandbox-only temporary trigger;
+- a seeded naturally failing row that can be reset values-free;
+- a separately reviewed test-only failure-injection slice. This must be
+  design-first and must not become a broad production failure hook.
+
+Any DDL/trigger setup for this check is operator-local sandbox maintenance
+outside MetaSheet product/runtime paths. It must never run against production,
+must never become evidence-bearing, and does not relax the forbidden product
+raw SQL / query / stored procedure / trigger paths above.
+
 Expected:
 
 - one controlled bad row creates row-level failure evidence;
@@ -365,8 +381,9 @@ Evidence:
 
 ```text
 badRow:
-  status=<partial|failed|not_run>
-  failureShape=write_time_constraint|not_available
+  status=<partial|failed|hold|not_run>
+  failureShape=write_time_constraint|ddl_unavailable|not_available
+  stopReason=none|target_ddl_unavailable|not_available
   revisionMismatchObserved=false
   cleanSiblingWritten=true|false
   deadLetters.count=<count>
@@ -506,8 +523,9 @@ readOnlyUser:
   applyRequestSent=false
 
 badRow:
-  status=<partial|failed|not_run>
-  failureShape=write_time_constraint|not_available
+  status=<partial|failed|hold|not_run>
+  failureShape=write_time_constraint|ddl_unavailable|not_available
+  stopReason=none|target_ddl_unavailable|not_available
   revisionMismatchObserved=false
   cleanSiblingWritten=true|false
   deadLetters.count=<count>
