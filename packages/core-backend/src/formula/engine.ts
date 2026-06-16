@@ -10,6 +10,10 @@ import { Logger } from '../core/logger'
 
 const logger = new Logger('FormulaEngine')
 
+// The string sentinels the engine emits for error results (returned, not thrown). IFERROR/ISERROR
+// test membership here so a downstream formula can trap an upstream error.
+const FORMULA_ERROR_SENTINELS = new Set(['#VALUE!', '#ERROR!', '#DIV/0!', '#N/A', '#NAME?', '#REF!', '#NUM!', '#NULL!'])
+
 export interface CellReference {
   sheet?: string
   row: number
@@ -228,6 +232,45 @@ export class FormulaEngine {
     this.functions.set('DATEDIF', this.datedif.bind(this))
     this.functions.set('DATEDIFF', this.datediff.bind(this))
     this.functions.set('COUNTA', this.counta.bind(this))
+
+    // Formula library expansion (Feishu parity): error-handling, multi-branch conditional,
+    // criteria-count, weekday, directional rounding, logical XOR, type predicates.
+    this.functions.set('IFERROR', (value: unknown, fallback: unknown) => this.isErrorValue(value) ? fallback : value)
+    this.functions.set('ISERROR', (value: unknown) => this.isErrorValue(value))
+    this.functions.set('ISBLANK', (value: unknown) => value === null || value === undefined || value === '')
+    this.functions.set('ISNUMBER', (value: unknown) => typeof value === 'number' && !Number.isNaN(value))
+    this.functions.set('IFS', (...args: unknown[]) => this.ifs(...args))
+    this.functions.set('XOR', (...args: unknown[]) => this.flattenValues(args).filter((v) => !!v).length % 2 === 1)
+    this.functions.set('COUNTIF', (range: unknown, criteria: unknown) => this.countif(range, criteria))
+    this.functions.set('WEEKDAY', (date: unknown, type: unknown = 1) => {
+      // Parse a date-only 'YYYY-MM-DD' string as LOCAL midnight (matching DATE(), which builds local
+      // midnight) so getDay() is timezone-stable; `new Date('YYYY-MM-DD')` would parse as UTC midnight
+      // and getDay() (local) would shift the weekday back a day on negative-UTC-offset hosts.
+      let d: Date
+      if (date instanceof Date) d = date
+      else {
+        const s = String(date)
+        const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+        d = iso ? new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])) : new Date(s)
+      }
+      if (Number.isNaN(d.getTime())) return '#VALUE!'
+      const dow = d.getDay() // 0=Sun..6=Sat
+      return Number(type) === 2 ? (dow === 0 ? 7 : dow) : dow + 1 // type 2: Mon=1..Sun=7; default: Sun=1..Sat=7
+    })
+    // ROUNDUP/ROUNDDOWN: strip binary-float noise (0.29*100 === 28.999…996) via toPrecision(15) before
+    // floor/ceil, else everyday monetary values round the wrong way. Sign-aware (away-from / toward zero).
+    this.functions.set('ROUNDUP', (x: unknown, digits: unknown = 0) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      const f = Math.pow(10, Number(digits) || 0)
+      const scaled = Number((n * f).toPrecision(15))
+      return (n >= 0 ? Math.ceil(scaled) : Math.floor(scaled)) / f
+    })
+    this.functions.set('ROUNDDOWN', (x: unknown, digits: unknown = 0) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      const f = Math.pow(10, Number(digits) || 0)
+      const scaled = Number((n * f).toPrecision(15))
+      return (n >= 0 ? Math.floor(scaled) : Math.ceil(scaled)) / f
+    })
   }
 
   /**
@@ -851,6 +894,57 @@ export class FormulaEngine {
 
   private orFunction(...args: unknown[]): boolean {
     return this.flattenValues(args).some(val => !!val)
+  }
+
+  private isErrorValue(value: unknown): boolean {
+    // A NaN number is itself an error result (e.g. SQRT(-1)); trap it alongside the string sentinels.
+    if (typeof value === 'number') return Number.isNaN(value)
+    return typeof value === 'string' && FORMULA_ERROR_SENTINELS.has(value)
+  }
+
+  // IFS(cond1, val1, cond2, val2, ...) — first truthy condition's value; #N/A if none match.
+  private ifs(...args: unknown[]): unknown {
+    for (let i = 0; i + 1 < args.length; i += 2) {
+      if (args[i]) return args[i + 1]
+    }
+    return '#N/A'
+  }
+
+  private countif(range: unknown, criteria: unknown): number {
+    return this.flattenValues([range]).filter((v) => this.matchesCriteria(v, criteria)).length
+  }
+
+  // criteria may be a comparator string (">5", "<>x"), a bare number, or text. CRITICAL: coerce with
+  // String(criteria) FIRST — a bare unquoted comparator like `>5` parses upstream to the boolean
+  // `false` (and a bare number to a number), so calling string methods on the raw value would throw or
+  // silently mis-count; stringifying makes both shapes behave predictably.
+  private matchesCriteria(value: unknown, criteria: unknown): boolean {
+    const c = String(criteria)
+    const numV = Number(value)
+    // A value counts as numeric ONLY if it's a real number or a non-blank numeric string — never
+    // null/''/boolean (Number() coerces those to 0/1 and would over-count comparators like ">0").
+    const valIsNum = (typeof value === 'number' && !Number.isNaN(value))
+      || (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(numV))
+    // COUNTIF text equality is case-INSENSITIVE (Excel/Feishu parity).
+    const eqText = (a: unknown, b: string): boolean => String(a).toLowerCase() === b.toLowerCase()
+    const m = c.match(/^(>=|<=|<>|>|<|=)(.*)$/)
+    if (m) {
+      const op = m[1]
+      const operand = m[2].trim()
+      const numO = Number(operand)
+      const bothNum = valIsNum && operand !== '' && !Number.isNaN(numO)
+      switch (op) {
+        case '>': return bothNum && numV > numO
+        case '<': return bothNum && numV < numO
+        case '>=': return bothNum && numV >= numO
+        case '<=': return bothNum && numV <= numO
+        case '<>': return bothNum ? numV !== numO : !eqText(value, operand)
+        case '=': return bothNum ? numV === numO : eqText(value, operand)
+      }
+    }
+    const numC = Number(c)
+    if (valIsNum && c.trim() !== '' && !Number.isNaN(numC)) return numV === numC
+    return eqText(value, c)
   }
 
   private vlookup(lookupValue: unknown, range: unknown, colIndex: unknown, exactMatch: unknown = true): unknown {
