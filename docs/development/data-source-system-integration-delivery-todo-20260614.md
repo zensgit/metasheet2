@@ -429,21 +429,27 @@ TODO:
 
 ## Cross-Cutting - 运行账本 / 可观测层 Seam
 
-当前计划主要覆盖 connector/read/write 能力，但还必须在 Release 前定清它和既有 Data Factory 可观测层的关系。
+当前计划主要覆盖 connector/read/write 能力。Release 前的可观测层边界已按 C6 design 固化:
+本交付不新增 read-side DF-N 统一账本切片；C2/C3 读路径使用既有 pipeline run/run details 能力，
+不承诺 per-row DB-read provenance。C6 apply 因为会写外部目标，仍必须进入 values-free
+dead-letter/provenance/run evidence。
 
-待定问题:
+决策:
 
-- [ ] `data-source:sql-readonly` 读是否必须进入同一运行账本。
-- [ ] DB source run 是否产出 provenance。
+- [x] `data-source:sql-readonly` 读不新增单独 DF-N 统一账本要求；通过既有 pipeline runner 执行时保留
+  `integration_runs` run/run details。
+- [x] DB source read v1 不产出 per-row source-read provenance；这是后续 DF-N/read-observability track。
 - [x] C6 apply per-row failure 进入 values-free dead-letter / provenance（C6-3 route 已接线；C2/C3 read/run
-  观测层是否统一纳入仍待 Release 前定清）。
-- [ ] 是否接入既有 run-record / DF-N 监控面。
+  侧不扩大到 per-row source-read provenance）。
+- [x] Release 文档不得把“可读”误描述为“完整 DF-N per-row read lineage”；若后续要接入统一
+  run-record / DF-N 监控面，必须另开 opt-in。
 
 完成条件:
 
-- 如果要求纳入统一 Data Factory 运行账本，C3/C2 read/run 侧仍需补 provenance/dead-letter/run-record
-  接线和测试；C6 apply 侧已由 C6-3 route 写入 run/provenance/dead-letter。
-- 如果暂不纳入，Release 文档必须明确这是另一条 track，不得把“可读”误描述为“已接入完整 DF 观测层”。
+- 当前 Release scope 暂不纳入 read-side DF-N 统一账本；这是另一条 track。
+- 不得把“可读数据库源”误描述为“已接入完整 DF per-row read lineage”。
+- 若未来要求纳入统一 Data Factory 运行账本，C3/C2 read/run 侧仍需补 provenance/dead-letter/run-record
+  接线和测试。
 - C6 per-row result 字段必须有 wire-vs-fixture 集成测试，断言真实 route body/response，不只测 helper fixture。
 
 ## Release - 总包与实体机验收
