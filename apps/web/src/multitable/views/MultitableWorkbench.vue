@@ -295,6 +295,7 @@
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker"
         @toggle-lock="onToggleRecordLock"
         @navigate="onDrawerNavigate"
+        @restore="onRestoreRecordVersion"
         @ai-preview="onAiPreviewField" @ai-run="onAiRunField"
       />
       <MetaCommentsDrawer
@@ -471,6 +472,7 @@ import {
   recordNotFound as fmtRecordNotFound,
 } from '../utils/workbench-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
+import { recordLabel } from '../utils/meta-record-labels'
 import {
   bulkFailure as fmtBulkFailure,
   bulkPartialSuccess as fmtBulkPartialSuccess,
@@ -1585,6 +1587,29 @@ async function onToggleRecordLock(payload: { recordId: string; locked: boolean }
     await grid.loadViewData(grid.page.value.offset)
   } catch (error) {
     showError((error as Error)?.message ?? wb('toast.recordLockFailed', isZh.value))
+  }
+}
+
+// Slice 3: restore a record to a prior revision. The drawer emits 'restore'; the workbench owns the
+// confirm + API call + refresh (mirrors onToggleRecordLock). The backend error carries `.code`
+// (VERSION_CONFLICT / VERSION_EXPIRED / RESTORE_UNSUPPORTED / SNAPSHOT_UNAVAILABLE / SCHEMA_DRIFT /
+// RESTORE_FORBIDDEN); we surface error.message (already localized server-side) with a static fallback.
+async function onRestoreRecordVersion(payload: { recordId: string; targetVersion: number; expectedVersion: number }) {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return
+  if (!window.confirm(recordLabel('record.restoreConfirm', isZh.value))) return
+  try {
+    const result = await workbench.client.restoreRecordVersion(
+      sheetId,
+      payload.recordId,
+      payload.targetVersion,
+      payload.expectedVersion,
+    )
+    showSuccess(recordLabel(result.noop ? 'record.restoreNoop' : 'record.restoreSuccess', isZh.value))
+    await grid.loadViewData(grid.page.value.offset)
+    if (selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
+  } catch (error) {
+    showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
   }
 }
 
