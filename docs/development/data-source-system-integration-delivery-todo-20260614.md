@@ -21,8 +21,9 @@
   C6-2 只增加 read-only dry-run route + dry-run token，不授权 apply runtime 或 external write。
   C6-3 增加 token-bound apply route；C6-4 UI dry-run -> review -> apply 已合并并发出实体机
   smoke 包；#2720 已完成 sandbox 配置和核心 dry-run/apply/re-pull/rollback smoke，
-  且 #2737 后的 read-only dedicated-route 子门已 PASS。下一步是 controlled bad-row
-  row-level failure smoke；production/batch 仍关闭。
+  且 #2737 后的 read-only dedicated-route 子门已 PASS。controlled bad-row 已尝试但
+  HOLD 在 `HOLD_TARGET_DDL_UNAVAILABLE`；下一步需要 DDL-capable sandbox/reset principal
+  或 seeded naturally failing sandbox row。production/batch 仍关闭。
 
 ## 收口顺序
 
@@ -34,7 +35,7 @@
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 open | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
-| Release | 总包 + 实体机验收 | C6-5 smoke package published; #2720 core C6 sandbox smoke PASS, read-only subgate PASS, controlled bad-row pending | 交付签收 | 包内容/部署/证据不完整 |
+| Release | 总包 + 实体机验收 | C6-5 smoke package published; #2720 core C6 sandbox smoke PASS, read-only subgate PASS, controlled bad-row HOLD_TARGET_DDL_UNAVAILABLE | 交付签收 | 包内容/部署/证据不完整 |
 
 ## P0 - ②b Arc 收口 Follow-Up
 
@@ -499,9 +500,13 @@ TODO:
 - [ ] C3 incremental resume smoke。
 - [ ] C4 UI config smoke。
 - [x] C5 K3 seam smoke。
-- [ ] C6 dry-run/apply/re-pull/rollback smoke（#2720）。
-  - core sandbox smoke PASS; read-only dedicated dry-run subgate PASS; controlled bad-row remains
-    pending before C6-5 can close.
+- [x] C6 core dry-run/apply/re-pull/rollback smoke（#2720）。
+  - core sandbox smoke PASS; read-only dedicated dry-run subgate PASS.
+- [ ] C6 controlled bad-row row-level failure smoke（#2720）。
+  - attempted but HOLD on `HOLD_TARGET_DDL_UNAVAILABLE`; Apply was not run for that attempt and
+    no target rows were written.
+  - C6-5 cannot close until true row-level write-time failure / dead-letter / provenance evidence
+    is produced values-free.
 - [ ] issue 上贴 values-free 验收证据。
 
 交付判据:
