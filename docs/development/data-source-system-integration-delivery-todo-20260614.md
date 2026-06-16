@@ -21,8 +21,8 @@
   C6-2 只增加 read-only dry-run route + dry-run token，不授权 apply runtime 或 external write。
   C6-3 增加 token-bound apply route；C6-4 UI dry-run -> review -> apply 已合并并发出实体机
   smoke 包；#2720 已完成 sandbox 配置和核心 dry-run/apply/re-pull/rollback smoke，
-  但 read-only 子门仍 HOLD，下一步需确认实体机 read-only 检查命中的是
-  C6 专用 `/external-write/dry-run` 路由，而不是普通 write-gated pipeline `/dry-run` 路由。
+  且 #2737 后的 read-only dedicated-route 子门已 PASS。下一步是 controlled bad-row
+  row-level failure smoke；production/batch 仍关闭。
 
 ## 收口顺序
 
@@ -34,7 +34,7 @@
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 open | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
-| Release | 总包 + 实体机验收 | C6-5 smoke package published; #2720 core C6 sandbox smoke PASS, read-only subgate HOLD | 交付签收 | 包内容/部署/证据不完整 |
+| Release | 总包 + 实体机验收 | C6-5 smoke package published; #2720 core C6 sandbox smoke PASS, read-only subgate PASS, controlled bad-row pending | 交付签收 | 包内容/部署/证据不完整 |
 
 ## P0 - ②b Arc 收口 Follow-Up
 
@@ -426,10 +426,12 @@ TODO:
   - #2720 core sandbox smoke PASS: C6 dry-run returned ready without mutating target; token-confirmed
     apply wrote sandbox rows only; re-pull was idempotent (`add=0`, no duplicates); operator-local
     cleanup restored baseline.
-  - remaining HOLD: read-only subgate reported `403` for dry-run and apply. Apply `403` is correct,
-    but dry-run must be rechecked against the dedicated C6 route
-    `POST /api/integration/pipelines/:id/external-write/dry-run`, not ordinary
-    `POST /api/integration/pipelines/:id/dry-run` (ordinary pipeline dry-run remains write-gated).
+  - #2720 read-only dedicated-route subgate PASS after #2737: `integration:read` can call
+    `POST /api/integration/pipelines/:id/external-write/dry-run` (`200`) while
+    `POST /api/integration/pipelines/:id/external-write/apply` remains blocked (`403`) with
+    no target write request accepted.
+  - remaining HOLD: controlled bad-row smoke has not run yet; it must prove row-level failure
+    evidence is values-free and clean sibling rows are not silently swallowed.
   - C6-5 remains sandbox/entity-machine validation only; no production/batch rollout.
 
 完成条件:
@@ -487,8 +489,8 @@ TODO:
 - [ ] C4 UI config smoke。
 - [x] C5 K3 seam smoke。
 - [ ] C6 dry-run/apply/re-pull/rollback smoke（#2720）。
-  - core sandbox smoke PASS; read-only dedicated dry-run subgate remains HOLD until endpoint-specific
-    rerun proves `integration:read` can call `/external-write/dry-run` while apply stays blocked.
+  - core sandbox smoke PASS; read-only dedicated dry-run subgate PASS; controlled bad-row remains
+    pending before C6-5 can close.
 - [ ] issue 上贴 values-free 验收证据。
 
 交付判据:

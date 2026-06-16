@@ -207,8 +207,10 @@ c5K3Mssql:
 
 ## 7. C6 Sandbox External-Write Smoke
 
-Run the dedicated C6 sandbox runbook. Do not compress or skip its ordered
-sequence.
+Run or continue the dedicated C6 sandbox runbook. For a fresh run, do not
+compress or skip its ordered sequence. If issue evidence already proves earlier
+steps, continue from the next pending step and cite those passed checkpoints
+instead of rerunning write/admin Apply solely to repeat evidence.
 
 Reference runbook:
 
@@ -235,6 +237,14 @@ c6Sandbox:
   valuesFreeEvidence=true
 ```
 
+Current #2720 checkpoint as of 2026-06-16:
+
+- core sandbox dry-run/apply/re-pull/rollback: passed;
+- dedicated read-only route subgate: passed
+  (`/external-write/dry-run` allowed for `integration:read`; `/external-write/apply`
+  blocked for the same read-only user);
+- controlled bad-row: pending.
+
 ## Stop Rules
 
 Stop and report HOLD if any of these occur:
@@ -248,7 +258,8 @@ Stop and report HOLD if any of these occur:
 - C5 touches K3 Save / Submit / Audit / BOM or external DB write;
 - C6 sandbox target/pipeline is missing;
 - C6 dry-run mutates the target;
-- C6 dedicated `/external-write/dry-run` rejects an `integration:read` user;
+- C6 dedicated `/external-write/dry-run` rejects an `integration:read` user
+  in a fresh rerun;
 - C6 apply can be sent by a read-only user;
 - C6 re-pull produces duplicate target rows or `add>0` after a successful
   apply;
