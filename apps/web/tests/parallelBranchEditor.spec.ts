@@ -158,6 +158,31 @@ describe('A6-3-4/W3-2a parallel_branch editor', () => {
     expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(true)
   })
 
+  // A6-3-3b parity guard — the mirror of conditionBranchEditor.spec.ts's "menu OFFERS wait_for_callback".
+  // condition_branch split into a SEPARATE constant (CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES adds
+  // wait_for_callback) so parallel_branch keeps BRANCH_AUTHORABLE_ACTION_TYPES (no wait). The backend
+  // rejects a branch-local wait inside a parallel branch, so the parallel authoring MENU must EXCLUDE it.
+  // This goes red if line :1010 is ever "simplified" to share the condition constant.
+  it('the parallel branch action menu EXCLUDES wait_for_callback (and the other nested primitives)', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flush()
+
+    setInput(container, '[data-field="name"]', 'Parallel menu')
+    selectAction0(container, 'parallel_branch')
+    await flush()
+
+    const branchActionSelect = container.querySelector(
+      '[data-action-config="parallel_branch"] [data-parallel-branch-action-index="0"] select',
+    ) as HTMLSelectElement
+    const options = Array.from(branchActionSelect.options).map((o) => o.value)
+    expect(options).toContain('update_record')
+    expect(options).toContain('send_notification')
+    expect(options).not.toContain('wait_for_callback')
+    expect(options).not.toContain('condition_branch')
+    expect(options).not.toContain('parallel_branch')
+    expect(options).not.toContain('start_approval')
+  })
+
   it('blocks saving when the component draft exceeds the branch cap', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flush()
