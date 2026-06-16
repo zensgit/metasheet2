@@ -233,7 +233,7 @@ watch(
 
 const dateFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'dateTime'))
 const titleFields = computed(() => props.fields)
-const numericFields = computed(() => props.fields.filter((field) => ['number', 'percent', 'currency', 'rating'].includes(field.type)))
+const numericFields = computed(() => props.fields.filter((field) => ['number', 'percent', 'currency', 'rating', 'duration'].includes(field.type)))
 const groupableFields = computed(() => props.fields.filter((field) => ['select', 'string', 'boolean', 'date', 'dateTime'].includes(field.type)))
 const dependencyFields = computed(() => props.fields.filter((field) => isSelfTableLinkField(field, props.sheetId)))
 const canResizeTasks = computed(() => Boolean(props.canEdit && startFieldId.value && endFieldId.value && startFieldId.value !== endFieldId.value))

@@ -260,6 +260,22 @@
               @click="onRatingPick(field.id, n)"
             >★</button>
           </div>
+          <!-- duration: format-aware text (h:mm / mm:ss) that parses to seconds.
+               Parses on `change` (blur/enter), not `input`, so the displayed value
+               is not reformatted under the typist's cursor on every keystroke. -->
+          <input
+            v-else-if="field.type === 'duration'"
+            :id="`field_${field.id}`"
+            class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+            type="text"
+            inputmode="numeric"
+            :placeholder="durationPlaceholderFor(field)"
+            :disabled="isFieldReadOnly(field.id)"
+            :aria-required="field.required ? 'true' : undefined"
+            :value="durationDisplayFor(field)"
+            @change="onDurationChange(field, ($event.target as HTMLInputElement).value)"
+          />
           <input
             v-else-if="field.type === 'url'"
             :id="`field_${field.id}`"
@@ -358,7 +374,10 @@ import {
 } from '../utils/comment-affordance'
 import {
   attachmentAcceptAttr,
+  durationSecondsFromInput,
+  formatDurationValue,
   resolveAttachmentFieldProperty,
+  resolveDurationFieldProperty,
   resolveRatingFieldProperty,
   shouldReplaceAttachmentSelection,
   validateAttachmentSelection,
@@ -638,6 +657,22 @@ function ratingValueFor(fieldId: string): number {
 
 function onRatingPick(fieldId: string, value: number) {
   formData[fieldId] = value === ratingValueFor(fieldId) ? null : value
+}
+
+// --- duration (seconds-backed) form helpers ---
+function durationPlaceholderFor(field: MetaField): string {
+  return resolveDurationFieldProperty(field.property).durationFormat
+}
+
+function durationDisplayFor(field: MetaField): string {
+  const v = formData[field.id]
+  const num = typeof v === 'number' ? v : Number(v)
+  if (v === null || v === undefined || v === '' || !Number.isFinite(num)) return ''
+  return formatDurationValue(num, resolveDurationFieldProperty(field.property).durationFormat)
+}
+
+function onDurationChange(field: MetaField, raw: string) {
+  formData[field.id] = durationSecondsFromInput(raw, resolveDurationFieldProperty(field.property).durationFormat)
 }
 
 function linkPreview(fieldId: string): string {

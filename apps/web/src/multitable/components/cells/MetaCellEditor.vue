@@ -201,6 +201,24 @@
       @keydown.escape="emit('cancel')"
     />
 
+    <!-- duration: format-aware text (h:mm / mm:ss) parsed to seconds. A LOCAL
+         buffer (durationText), seeded once from modelValue, drives the input so
+         the displayed value is never reformatted under the cursor while typing.
+         @input parses the buffer → emits seconds; the buffer itself is the
+         source of the visible text. -->
+    <input
+      v-else-if="field.type === 'duration'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="text"
+      inputmode="numeric"
+      :placeholder="durationFormat"
+      :value="durationText"
+      @input="onDurationInput"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
+
     <!-- rating: click-to-set stars -->
     <div v-else-if="field.type === 'rating'" class="meta-cell-editor__rating">
       <button
@@ -327,8 +345,11 @@ import MetaRichLongTextEditor from './MetaRichLongTextEditor.vue'
 import { isRichLongTextField } from '../../utils/rich-longtext'
 import {
   attachmentAcceptAttr,
+  durationSecondsFromInput,
+  formatDurationValue,
   resolveAttachmentFieldProperty,
   resolveCurrencyFieldProperty,
+  resolveDurationFieldProperty,
   resolveNumberFieldProperty,
   resolvePercentFieldProperty,
   resolveRatingFieldProperty,
@@ -630,6 +651,24 @@ const numericStep = computed(() => {
   }
   return 'any'
 })
+
+// --- duration (seconds-backed, format-aware) ---
+const durationFormat = computed(() => resolveDurationFieldProperty(props.field.property).durationFormat)
+// LOCAL buffer seeded ONCE at setup from modelValue. Bound to the input and
+// updated only by the user's keystrokes — never re-derived from modelValue —
+// so reformatting can't fight the typist (advisor B). The parsed seconds are
+// emitted via update:modelValue; the buffer stays the literal typed text.
+const durationText = ref(
+  props.field.type === 'duration' && props.modelValue !== null && props.modelValue !== undefined && props.modelValue !== ''
+    && Number.isFinite(Number(props.modelValue))
+    ? formatDurationValue(Number(props.modelValue), resolveDurationFieldProperty(props.field.property).durationFormat)
+    : '',
+)
+function onDurationInput(event: Event) {
+  const text = (event.target as HTMLInputElement).value
+  durationText.value = text
+  emit('update:modelValue', durationSecondsFromInput(text, durationFormat.value))
+}
 
 const ratingMax = computed(() => {
   if (props.field.type !== 'rating') return 5

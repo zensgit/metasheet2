@@ -469,6 +469,16 @@
           </label>
         </template>
 
+        <template v-else-if="configTargetType === 'duration'">
+          <label class="meta-field-mgr__field">
+            <span>{{ ml('field.durationFormat') }}</span>
+            <select v-model="durationDraft.durationFormat" class="meta-field-mgr__select">
+              <option value="h:mm">{{ ml('field.durationFormatHmm') }}</option>
+              <option value="mm:ss">{{ ml('field.durationFormatMmss') }}</option>
+            </select>
+          </label>
+        </template>
+
         <template v-else-if="configTargetType === 'button'">
           <label class="meta-field-mgr__field">
             <span>{{ ml('field.buttonLabelText') }}</span>
@@ -713,13 +723,14 @@ import {
 } from '../utils/formula-docs'
 import { localizeDryRunDiagnostic } from '../utils/meta-formula-labels'
 import type { DryRunResult, DryRunDiagnostic } from '../api/client'
-import type { ButtonFieldVariant } from '../utils/field-config'
+import type { ButtonFieldVariant, DurationFormat } from '../utils/field-config'
 import {
   normalizeStringArray,
   resolveAutoNumberFieldProperty,
   resolveAttachmentFieldProperty,
   resolveButtonFieldProperty,
   resolveCurrencyFieldProperty,
+  resolveDurationFieldProperty,
   resolveFormulaFieldProperty,
   resolveLinkFieldProperty,
   resolveLookupFieldProperty,
@@ -853,13 +864,13 @@ function rulesToProperty(rules: FieldValidationRule[]): Array<Record<string, unk
 const FIELD_TYPES: MetaFieldCreateType[] = [
   'string', 'longText', 'number', 'boolean', 'date', 'dateTime', 'select', 'multiSelect', 'link', 'person',
   'formula', 'lookup', 'rollup', 'attachment',
-  'currency', 'percent', 'rating', 'url', 'email', 'phone', 'barcode', 'qrcode', 'location', 'button',
+  'currency', 'percent', 'rating', 'duration', 'url', 'email', 'phone', 'barcode', 'qrcode', 'location', 'button',
   ...SYSTEM_FIELD_TYPES,
 ]
 const FIELD_ICONS: Record<string, string> = {
   string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', dateTime: '\u{1F552}', select: '\u25CF', multiSelect: '\u25C9',
   link: '\u21C4', person: '\u{1F464}', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
-  currency: '\u00A4', percent: '%', rating: '\u2605', url: '\u{1F517}', email: '\u2709', phone: '\u260E', barcode: '\u25A5', qrcode: '\u25A6', location: '\u{1F4CD}',
+  currency: '\u00A4', percent: '%', rating: '\u2605', duration: '\u23F1', url: '\u{1F517}', email: '\u2709', phone: '\u260E', barcode: '\u25A5', qrcode: '\u25A6', location: '\u{1F4CD}',
   autoNumber: '#+', createdTime: 'CT', modifiedTime: 'MT', createdBy: 'CB', modifiedBy: 'MB', button: '\u{1F518}',
 }
 
@@ -995,6 +1006,9 @@ const percentDraft = reactive<{ decimals: number }>({
 })
 const ratingDraft = reactive<{ max: number }>({
   max: 5,
+})
+const durationDraft = reactive<{ durationFormat: DurationFormat }>({
+  durationFormat: 'h:mm',
 })
 // B1-c button field config draft. `actionConfig` is carried OPAQUELY (the form
 // doesn't edit it) so a label/variant edit re-emits it intact — update-field
@@ -1186,7 +1200,7 @@ const configTargetType = computed(() => {
 })
 
 // ---- #5b formula dry-run (C1–C4 per design #1869) ----
-const DRY_RUN_NUMERIC_TYPES = new Set(['number', 'currency', 'percent', 'rating', 'autoNumber'])
+const DRY_RUN_NUMERIC_TYPES = new Set(['number', 'currency', 'percent', 'rating', 'duration', 'autoNumber'])
 const dryRunSamples = reactive<Record<string, string>>({})
 const dryRunResult = ref<DryRunResult | null>(null)
 const dryRunRunning = ref(false)
@@ -1433,7 +1447,7 @@ function onNumberDecimalsInput(event: Event) {
 function requiresConfig(type: MetaFieldCreateType): boolean {
   return [
     'select', 'multiSelect', 'link', 'person', 'lookup', 'rollup', 'formula', 'attachment',
-    'number', 'currency', 'percent', 'rating', 'longText', 'autoNumber', 'button',
+    'number', 'currency', 'percent', 'rating', 'duration', 'longText', 'autoNumber', 'button',
   ].includes(type)
 }
 
@@ -1489,6 +1503,7 @@ function resetDrafts() {
   numberDraft.unit = ''
   percentDraft.decimals = 1
   ratingDraft.max = 5
+  durationDraft.durationFormat = 'h:mm'
   autoNumberDraft.prefix = ''
   autoNumberDraft.digits = 0
   autoNumberDraft.start = 1
@@ -1570,6 +1585,9 @@ function serializeFieldDraft(type: string | null): string {
   }
   if (type === 'rating') {
     return JSON.stringify({ max: ratingDraft.max })
+  }
+  if (type === 'duration') {
+    return JSON.stringify({ durationFormat: durationDraft.durationFormat })
   }
   if (type === 'button') {
     return JSON.stringify({
@@ -1692,6 +1710,8 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
   } else if (fieldType === 'rating') {
     const property = resolveRatingFieldProperty(field.property)
     ratingDraft.max = property.max
+  } else if (fieldType === 'duration') {
+    durationDraft.durationFormat = resolveDurationFieldProperty(field.property).durationFormat
   } else if (fieldType === 'autoNumber') {
     const property = resolveAutoNumberFieldProperty(field.property)
     autoNumberDraft.prefix = property.prefix
@@ -2017,7 +2037,7 @@ watch(aiShortcutSectionVisible, (visible) => {
 })
 
 function currentDraftProperty(type: MetaFieldCreateType | string): Record<string, unknown> | undefined {
-  const normalizedType = type === 'link' || type === 'select' || type === 'multiSelect' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person' || type === 'number' || type === 'currency' || type === 'percent' || type === 'rating' || type === 'autoNumber' || type === 'button'
+  const normalizedType = type === 'link' || type === 'select' || type === 'multiSelect' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person' || type === 'number' || type === 'currency' || type === 'percent' || type === 'rating' || type === 'duration' || type === 'autoNumber' || type === 'button'
     ? type
     : null
   fieldConfigError.value = ''
@@ -2174,6 +2194,10 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
       return undefined
     }
     return { max: Math.round(max) }
+  }
+  if (normalizedType === 'duration') {
+    // durationFormat is a constrained <select> (h:mm | mm:ss); no error path needed.
+    return { durationFormat: durationDraft.durationFormat }
   }
   if (normalizedType === 'button') {
     const actionType = buttonDraft.actionType.trim()

@@ -66,6 +66,7 @@ export type MetaManagerLabelKey =
   | 'field.decimals' | 'field.preserve' | 'field.unit'
   | 'field.useThousandsSeparators' | 'field.currencyCode'
   | 'field.maxRating' | 'field.prefix' | 'field.digits' | 'field.startAt'
+  | 'field.durationFormat' | 'field.durationFormatHmm' | 'field.durationFormatMmss'
   | 'field.buttonLabelText' | 'field.buttonVariant' | 'field.buttonVariantPrimary' | 'field.buttonVariantSecondary' | 'field.buttonVariantDanger'
   | 'field.buttonActionType' | 'field.buttonActionRecordClick' | 'field.buttonConfirmEnable' | 'field.buttonConfirmMessage' | 'field.buttonConfirmHint'
   | 'field.autoNumberHint' | 'field.saveSettings' | 'field.applyDefaults'
@@ -311,6 +312,9 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.useThousandsSeparators': { en: 'Use thousands separators', zh: '使用千位分隔符' },
   'field.currencyCode': { en: 'Currency code (ISO 4217)', zh: '货币代码（ISO 4217）' },
   'field.maxRating': { en: 'Maximum rating (1-10)', zh: '最高评分（1-10）' },
+  'field.durationFormat': { en: 'Display format', zh: '显示格式' },
+  'field.durationFormatHmm': { en: 'Hours:minutes (h:mm)', zh: '时:分（h:mm）' },
+  'field.durationFormatMmss': { en: 'Minutes:seconds (mm:ss)', zh: '分:秒（mm:ss）' },
   'field.buttonLabelText': { en: 'Button label', zh: '按钮文字' },
   'field.buttonVariant': { en: 'Style', zh: '样式' },
   'field.buttonVariantPrimary': { en: 'Primary', zh: '主要' },

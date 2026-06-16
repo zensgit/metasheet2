@@ -17,6 +17,11 @@ describe('aggregateField (locked fns)', () => {
   it('sum on a non-numeric field type is not applicable → null (caller omits)', () => {
     expect(aggregateField(['a', 'b'], 'sum', 'string')).toBeNull()
   })
+  it('duration sum/avg aggregate over raw seconds (scatter guard — v1 shows seconds)', () => {
+    // 1h(3600) + 30m(1800) + 10m(600) = 6000s total; avg 2000s.
+    expect(aggregateField([3600, 1800, 600], 'sum', 'duration')).toBe(6000)
+    expect(aggregateField([3600, 1800, 600], 'avg', 'duration')).toBe(2000)
+  })
   it('countNonEmpty treats null/undefined/""/[] as empty', () => {
     expect(aggregateField(['x', '', null, undefined, [], 'y'], 'countNonEmpty', 'string')).toBe(2)
   })
@@ -63,5 +68,7 @@ describe('button field — aggregation exclusion (B1-a0)', () => {
     // sanity: the numeric allowlist still includes the real numeric types
     expect(isNumericFieldType('number')).toBe(true)
     expect(isNumericFieldType('currency')).toBe(true)
+    // duration is seconds-backed → numeric (scatter guard for aggregation-helpers set)
+    expect(isNumericFieldType('duration')).toBe(true)
   })
 })

@@ -71,6 +71,7 @@ export type UniverMetaField = {
     | 'currency'
     | 'percent'
     | 'rating'
+    | 'duration'
     | 'url'
     | 'email'
     | 'phone'

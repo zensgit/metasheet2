@@ -39,7 +39,8 @@ const EXCEL_ERROR_SENTINELS: ReadonlySet<string> = new Set([
   '#ERROR!', '#DIV/0!', '#N/A', '#VALUE!', '#NAME?', '#NUM!', '#REF!', '#NULL!',
 ])
 // Field types that hold numeric values (for the type-mismatch warning).
-const NUMERIC_FIELD_TYPES: ReadonlySet<string> = new Set(['number', 'currency', 'percent', 'rating', 'autoNumber'])
+// `duration` is seconds-backed → numeric, same as percent/rating.
+const NUMERIC_FIELD_TYPES: ReadonlySet<string> = new Set(['number', 'currency', 'percent', 'rating', 'duration', 'autoNumber'])
 
 /**
  * Best-effort detector for spreadsheet A1/cell and A1:B3 range references, which dry-run does NOT

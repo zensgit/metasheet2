@@ -1,10 +1,12 @@
 import type { LinkedRecordSummary, MetaAttachment, MetaField, PersonSummary } from '../types'
 import {
   formatCurrencyValue,
+  formatDurationValue,
   formatNumberValue,
   formatPercentValue,
   resolveAutoNumberFieldProperty,
   resolveCurrencyFieldProperty,
+  resolveDurationFieldProperty,
   resolvePercentFieldProperty,
   resolveRatingFieldProperty,
 } from './field-config'
@@ -154,6 +156,13 @@ export function formatFieldDisplay(params: {
     const { max } = resolveRatingFieldProperty(field.property)
     const filled = Math.max(0, Math.min(max, Math.round(num)))
     return `${'★'.repeat(filled)}${'☆'.repeat(max - filled)}`
+  }
+
+  if (field.type === 'duration') {
+    const num = typeof value === 'number' ? value : Number(value)
+    if (!Number.isFinite(num)) return String(value)
+    const { durationFormat } = resolveDurationFieldProperty(field.property)
+    return formatDurationValue(num, durationFormat)
   }
 
   if (field.type === 'location') {

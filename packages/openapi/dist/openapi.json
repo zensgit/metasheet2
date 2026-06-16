@@ -3119,6 +3119,7 @@
           "currency",
           "percent",
           "rating",
+          "duration",
           "url",
           "email",
           "phone",

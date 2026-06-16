@@ -741,7 +741,7 @@ function onToggleFreeze(i: number) {
 }
 
 // ── aggregation footer (#4-3b-1): SERVER-RESPONSE ONLY, no local fallback ──
-const AGG_NUMERIC_TYPES = new Set(['number', 'currency', 'percent', 'rating', 'autoNumber'])
+const AGG_NUMERIC_TYPES = new Set(['number', 'currency', 'percent', 'rating', 'duration', 'autoNumber'])
 const AGG_FNS_NUMERIC = ['sum', 'avg', 'min', 'max', 'count', 'countNonEmpty', 'countDistinct']
 const AGG_FNS_OTHER = ['count', 'countNonEmpty', 'countDistinct']
 function aggFnOptions(field: MetaField): string[] {

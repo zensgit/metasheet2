@@ -246,6 +246,7 @@ const MULTITABLE_FIELD_TYPES = [
   'currency',
   'percent',
   'rating',
+  'duration',
   'url',
   'email',
   'phone',
@@ -287,6 +288,7 @@ type UniverMetaField = {
     | 'currency'
     | 'percent'
     | 'rating'
+    | 'duration'
     | 'url'
     | 'email'
     | 'phone'
@@ -1803,7 +1805,8 @@ function parseMetaSortRules(sortInfo: unknown): MetaSortRule[] {
  * See docs/development/multitable-typed-query-polish-design-20260603.md.
  */
 export function isNumericQueryFieldType(type: string): boolean {
-  return type === 'number' || type === 'currency' || type === 'percent' || type === 'rating'
+  // `duration` is a seconds-backed number → sorts/range-filters as a JS number, same as percent/rating.
+  return type === 'number' || type === 'currency' || type === 'percent' || type === 'rating' || type === 'duration'
 }
 
 export function compareMetaSortValue(type: UniverMetaField['type'], valueA: unknown, valueB: unknown, desc: boolean): number {

@@ -18,8 +18,12 @@ import {
   URL_REGEX,
   coerceBatch1Value,
   coerceCurrencyValue,
+  coerceDurationValue,
   coercePercentValue,
   coerceRatingValue,
+  DEFAULT_DURATION_FORMAT,
+  DURATION_FORMATS,
+  normalizeDurationFormat,
   mapFieldType,
   normalizeMultiSelectValue,
   sanitizeFieldProperty,
@@ -39,6 +43,7 @@ describe('mapFieldType — MF2 batch-1', () => {
     expect(mapFieldType('currency')).toBe('currency')
     expect(mapFieldType('percent')).toBe('percent')
     expect(mapFieldType('rating')).toBe('rating')
+    expect(mapFieldType('duration')).toBe('duration')
     expect(mapFieldType('url')).toBe('url')
     expect(mapFieldType('email')).toBe('email')
     expect(mapFieldType('phone')).toBe('phone')
@@ -99,7 +104,7 @@ describe('mapFieldType — MF2 batch-1', () => {
 
   it('exposes BATCH1_FIELD_TYPES set with normalized runtime types', () => {
     expect(Array.from(BATCH1_FIELD_TYPES).sort()).toEqual([
-      'barcode', 'currency', 'dateTime', 'email', 'location', 'percent', 'phone', 'qrcode', 'rating', 'url',
+      'barcode', 'currency', 'dateTime', 'duration', 'email', 'location', 'percent', 'phone', 'qrcode', 'rating', 'url',
     ])
   })
 })
@@ -189,6 +194,64 @@ describe('sanitizeFieldProperty — rating', () => {
     expect(sanitizeFieldProperty('rating', { max: 0 })).toEqual({ max: 5 })
     expect(sanitizeFieldProperty('rating', { max: 99 })).toEqual({ max: 5 })
     expect(sanitizeFieldProperty('rating', { max: 'bad' })).toEqual({ max: 5 })
+  })
+})
+
+describe('sanitizeFieldProperty — duration', () => {
+  it('round-trips the two supported formats', () => {
+    expect(sanitizeFieldProperty('duration', { durationFormat: 'h:mm' })).toEqual({ durationFormat: 'h:mm' })
+    expect(sanitizeFieldProperty('duration', { durationFormat: 'mm:ss' })).toEqual({ durationFormat: 'mm:ss' })
+  })
+
+  it('defaults to h:mm on missing or invalid format', () => {
+    expect(sanitizeFieldProperty('duration', {})).toEqual({ durationFormat: 'h:mm' })
+    expect(sanitizeFieldProperty('duration', { durationFormat: 'h:mm:ss' })).toEqual({ durationFormat: 'h:mm' })
+    expect(sanitizeFieldProperty('duration', { durationFormat: 42 })).toEqual({ durationFormat: 'h:mm' })
+  })
+
+  it('normalizeDurationFormat clamps junk to the default', () => {
+    expect(normalizeDurationFormat('mm:ss')).toBe('mm:ss')
+    expect(normalizeDurationFormat('bogus')).toBe(DEFAULT_DURATION_FORMAT)
+    expect(normalizeDurationFormat(undefined)).toBe('h:mm')
+    expect(DURATION_FORMATS).toEqual(['h:mm', 'mm:ss'])
+  })
+
+  it('serializeFieldRow keeps type + format through a round-trip', () => {
+    const row = serializeFieldRow({ id: 'f1', name: 'Spent', type: 'duration', property: { durationFormat: 'mm:ss' }, order: 3 })
+    expect(row.type).toBe('duration')
+    expect(row.property).toEqual({ durationFormat: 'mm:ss' })
+    expect(row.order).toBe(3)
+  })
+})
+
+describe('coerceDurationValue — seconds-backed, reject formatted strings', () => {
+  it('accepts a non-negative integer number of seconds', () => {
+    expect(coerceDurationValue(5400, 'f1')).toBe(5400)
+    expect(coerceDurationValue(0, 'f1')).toBe(0)
+  })
+
+  it('accepts a NUMERIC string (server never parses h:mm, but "5400" is a number)', () => {
+    expect(coerceDurationValue('5400', 'f1')).toBe(5400)
+  })
+
+  it('returns null for empty input', () => {
+    expect(coerceDurationValue('', 'f1')).toBeNull()
+    expect(coerceDurationValue(null, 'f1')).toBeNull()
+    expect(coerceDurationValue(undefined, 'f1')).toBeNull()
+  })
+
+  it('rejects a FORMATTED "h:mm" string (the server must receive seconds)', () => {
+    expect(() => coerceDurationValue('1:30', 'f1')).toThrow()
+  })
+
+  it('rejects negative and non-integer seconds', () => {
+    expect(() => coerceDurationValue(-1, 'f1')).toThrow()
+    expect(() => coerceDurationValue(1.5, 'f1')).toThrow()
+  })
+
+  it('coerceBatch1Value dispatches duration to the seconds coercer', () => {
+    expect(coerceBatch1Value('duration', { durationFormat: 'h:mm' }, 'f1', 5400)).toBe(5400)
+    expect(() => coerceBatch1Value('duration', { durationFormat: 'h:mm' }, 'f1', '1:30')).toThrow()
   })
 })
 

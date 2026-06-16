@@ -19,8 +19,8 @@ const cond = (operator: string, value?: unknown) => ({ fieldId: 'f', operator, v
 const sortAsc = (type: any, arr: unknown[]) => [...arr].sort((a, b) => compareMetaSortValue(type, a, b, false))
 
 describe('isNumericQueryFieldType', () => {
-  it('is true for number/currency/percent/rating', () => {
-    for (const t of ['number', 'currency', 'percent', 'rating']) {
+  it('is true for number/currency/percent/rating/duration', () => {
+    for (const t of ['number', 'currency', 'percent', 'rating', 'duration']) {
       expect(isNumericQueryFieldType(t)).toBe(true)
     }
   })
@@ -49,6 +49,10 @@ describe('compareMetaSortValue — numeric reclassification', () => {
   })
   it('rating sorts numerically (was already fine for integers; still correct)', () => {
     expect(sortAsc('rating', [3, 1, 5, 2])).toEqual([1, 2, 3, 5])
+  })
+  it('duration sorts by its seconds value (scatter guard — numeric, not lexicographic)', () => {
+    // 600s(10m) < 5400s(1h30) < 90000s(25h) — lexicographic would give 5400, 600, 90000.
+    expect(sortAsc('duration', [5400, 600, 90000])).toEqual([600, 5400, 90000])
   })
   it('currency tolerates string-stored numbers (legacy/mixed storage)', () => {
     expect(compareMetaSortValue('currency', '12.5', 2, false)).toBeGreaterThan(0) // 12.5 after 2
@@ -89,6 +93,11 @@ describe('evaluateMetaFilterCondition — numeric reclassification', () => {
   it('percent range ops compare numerically', () => {
     expect(evaluateMetaFilterCondition('percent', 0.5, cond('greater', 0.25))).toBe(true)
     expect(evaluateMetaFilterCondition('percent', 0.05, cond('greater', 0.25))).toBe(false)
+  })
+  it('duration range ops compare on raw seconds (scatter guard)', () => {
+    expect(evaluateMetaFilterCondition('duration', 5400, cond('greaterEqual', 3600))).toBe(true)
+    expect(evaluateMetaFilterCondition('duration', 600, cond('greaterEqual', 3600))).toBe(false)
+    expect(evaluateMetaFilterCondition('duration', 3600, cond('less', 3600))).toBe(false)
   })
   it('isEmpty/isNotEmpty unchanged for numeric types', () => {
     expect(evaluateMetaFilterCondition('currency', null, cond('isEmpty'))).toBe(true)

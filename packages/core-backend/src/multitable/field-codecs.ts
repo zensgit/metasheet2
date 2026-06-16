@@ -20,6 +20,7 @@ export type MultitableFieldType =
   | 'currency'
   | 'percent'
   | 'rating'
+  | 'duration'
   | 'url'
   | 'email'
   | 'phone'
@@ -119,6 +120,9 @@ export function mapFieldType(type: string): MultitableFieldType | string {
   if (normalized === 'currency') return 'currency'
   if (normalized === 'percent') return 'percent'
   if (normalized === 'rating') return 'rating'
+  // Native duration field (时长, design 2026-06-16): seconds-backed number, rendered as
+  // h:mm or mm:ss (durationFormat property). First-class union member like percent/rating.
+  if (normalized === 'duration') return 'duration'
   if (normalized === 'url') return 'url'
   if (normalized === 'email') return 'email'
   if (normalized === 'phone') return 'phone'
@@ -415,6 +419,13 @@ function sanitizeFieldPropertyByType(
     return { ...obj, max }
   }
 
+  if (type === 'duration') {
+    // `durationFormat` chooses how the seconds-backed value renders. Enum-strict
+    // (clamp junk → default 'h:mm'), mirroring the rating `max` clamp. The stored
+    // VALUE is always seconds (a number); the format is presentation-only.
+    return { ...obj, durationFormat: normalizeDurationFormat(obj.durationFormat) }
+  }
+
   if (type === 'dateTime') {
     const rawTimezone = typeof obj.timezone === 'string' ? obj.timezone.trim() : ''
     let timezone = rawTimezone || 'UTC'
@@ -556,6 +567,39 @@ export function coerceRatingValue(
   }
   if (num < 0 || num > max) {
     throw new Error(`Rating value must be between 0 and ${max} for ${fieldId}`)
+  }
+  return num
+}
+
+// Native duration (时长) — supported display formats. The VALUE is always seconds;
+// these only pick how it renders (h:mm vs mm:ss). h:mm:ss is intentionally deferred (v1).
+export const DURATION_FORMATS = ['h:mm', 'mm:ss'] as const
+export type DurationFormat = (typeof DURATION_FORMATS)[number]
+export const DEFAULT_DURATION_FORMAT: DurationFormat = 'h:mm'
+
+/** Clamp an arbitrary `durationFormat` to the enum, defaulting to 'h:mm'. */
+export function normalizeDurationFormat(value: unknown): DurationFormat {
+  return typeof value === 'string' && (DURATION_FORMATS as readonly string[]).includes(value)
+    ? (value as DurationFormat)
+    : DEFAULT_DURATION_FORMAT
+}
+
+/**
+ * Coerce / validate a duration value. The stored value is an INTEGER number of
+ * SECONDS (matching Feishu/Airtable). The server NEVER parses a formatted "h:mm"
+ * string — the FE editor parses to seconds before sending — so a non-numeric
+ * string (e.g. "1:30") is rejected, while a numeric string ("5400") is accepted
+ * (consistent with every other numeric coerce). Negative / non-integer rejected.
+ */
+export function coerceDurationValue(value: unknown, fieldId: string): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const num = coerceNumericValue(value, fieldId, 'Duration')
+  if (num === null) return null
+  if (!Number.isInteger(num)) {
+    throw new Error(`Duration value must be an integer number of seconds for ${fieldId}`)
+  }
+  if (num < 0) {
+    throw new Error(`Duration value must not be negative for ${fieldId}`)
   }
   return num
 }
@@ -1022,6 +1066,7 @@ export function coerceBatch1Value(
     const max = Number(sanitized.max)
     return coerceRatingValue(value, fieldId, Number.isFinite(max) && max > 0 ? max : 5)
   }
+  if (fieldType === 'duration') return coerceDurationValue(value, fieldId)
   if (fieldType === 'url') return validateUrlValue(value, fieldId)
   if (fieldType === 'email') return validateEmailValue(value, fieldId)
   if (fieldType === 'phone') return validatePhoneValue(value, fieldId)
@@ -1036,6 +1081,7 @@ export const BATCH1_FIELD_TYPES: ReadonlySet<string> = new Set([
   'currency',
   'percent',
   'rating',
+  'duration',
   'url',
   'email',
   'phone',
