@@ -605,11 +605,12 @@ const EMPTY_SCALE_MAP: FieldScaleMap = Object.freeze({
 }) as FieldScaleMap
 
 /**
- * Pre-compute data-bar presentation per (fieldId, recordId). For each enabled
- * scale rule, compute the field's [min,max] over `records` (auto) or use the
- * rule's fixed range, then map each finite value to a fill percent. Records
- * whose value is non-numeric are skipped (no bar). A degenerate range
- * (min === max) renders a full bar for every present value.
+ * Pre-compute scale presentation (data-bar / color-scale / icon-set) per
+ * (fieldId, recordId). For each enabled scale rule, compute the field's
+ * [min,max] over `records` (auto) or use the rule's fixed range, then per kind:
+ * dataBar → fill percent (degenerate range → full bar); colorScale →
+ * interpolated scaleColor; iconSet → iconKey bucket. Records whose value is
+ * non-numeric are skipped. The grid renders all three (MetaGridTable, #2640/#2680).
  */
 export function buildFieldScaleMap(
   rules: ConditionalFormattingScaleRule[],
