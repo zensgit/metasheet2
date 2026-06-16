@@ -47,18 +47,35 @@ function walkTsFiles(dir: string): string[] {
   return out
 }
 
-/** A file "depends on" the BPMN engine when it imports from the engine module path. */
+/**
+ * A file "depends on" the BPMN engine when it imports from the engine module
+ * path — STATIC (`import … from '…/BPMNWorkflowEngine'`, side-effect
+ * `import '…/BPMNWorkflowEngine'`) OR DYNAMIC (`import('…/BPMNWorkflowEngine')`,
+ * `await import("…/BPMNWorkflowEngine")`). Dynamic imports already exist in this
+ * backend and are a realistic bypass of a static-only fence, so both are caught.
+ */
 function importsBpmnEngine(src: string): boolean {
   return /(?:from|import)\s+['"][^'"]*\/BPMNWorkflowEngine['"]/.test(src)
+    || /import\s*\(\s*['"][^'"]*\/BPMNWorkflowEngine['"]/.test(src)
 }
 
-/** SQL write statements (skipping comment lines) against tables matching `pattern`. */
-function tableWriteSites(src: string, pattern: RegExp): string[] {
+/**
+ * Write statements (skipping comment lines) against tables whose name matches
+ * the `tablePattern` regex fragment — covering BOTH styles this codebase uses:
+ * raw SQL (`INSERT INTO approval_…`, used by the approval runtime via
+ * client.query) AND the Kysely query builder (`.insertInto('automation_…')`,
+ * `.updateTable`, `.deleteFrom`, used by the automation runtime). A
+ * raw-SQL-only check would miss every Kysely write and leave the boundary
+ * unguarded for exactly the files that use it.
+ */
+function tableWriteSites(src: string, tablePattern: string): string[] {
+  const rawSql = new RegExp(`(?:INSERT INTO|UPDATE|DELETE FROM)\\s+${tablePattern}`)
+  const kysely = new RegExp(`\\.(?:insertInto|updateTable|deleteFrom)\\(\\s*['"]${tablePattern}`)
   const hits: string[] = []
   for (const raw of src.split('\n')) {
     const trimmed = raw.trimStart()
     if (trimmed.startsWith('//') || trimmed.startsWith('*')) continue
-    if (pattern.test(raw)) hits.push(raw.trim())
+    if (rawSql.test(raw) || kysely.test(raw)) hits.push(raw.trim())
   }
   return hits
 }
@@ -124,8 +141,9 @@ const APPROVAL_RUNTIME_FILES = [
   'routes/approvals.ts',
 ]
 
-const APPROVAL_TABLE_WRITE = /(INSERT INTO|UPDATE|DELETE FROM)\s+approval_/
-const AUTOMATION_TABLE_WRITE = /(INSERT INTO|UPDATE|DELETE FROM)\s+(automation_|multitable_automation_jobs)/
+/** Table-name regex fragments fed to tableWriteSites (matched in both raw SQL and Kysely forms). */
+const APPROVAL_TABLE_PREFIX = 'approval_'
+const AUTOMATION_TABLE_PREFIX = '(?:automation_|multitable_automation_jobs)'
 
 describe('engine convergence doctrine — durable structural guard', () => {
   test('§5: only the frozen allowlist imports BPMNWorkflowEngine (legacy fence)', () => {
@@ -163,7 +181,7 @@ describe('engine convergence doctrine — durable structural guard', () => {
 
   test('§3: automation runtime code does not write approval tables', () => {
     const offenders = AUTOMATION_RUNTIME_FILES.flatMap((f) =>
-      tableWriteSites(read(f), APPROVAL_TABLE_WRITE).map((sql) => `${f} → ${sql.slice(0, 90)}`))
+      tableWriteSites(read(f), APPROVAL_TABLE_PREFIX).map((sql) => `${f} → ${sql.slice(0, 90)}`))
     expect(
       offenders,
       'CONVERGENCE GUARD §3: automation runtime code writes an approval_* table directly. Automation must ' +
@@ -174,7 +192,7 @@ describe('engine convergence doctrine — durable structural guard', () => {
 
   test('§3: approval runtime code does not write automation tables', () => {
     const offenders = APPROVAL_RUNTIME_FILES.flatMap((f) =>
-      tableWriteSites(read(f), AUTOMATION_TABLE_WRITE).map((sql) => `${f} → ${sql.slice(0, 90)}`))
+      tableWriteSites(read(f), AUTOMATION_TABLE_PREFIX).map((sql) => `${f} → ${sql.slice(0, 90)}`))
     expect(
       offenders,
       'CONVERGENCE GUARD §3: approval runtime code writes an automation_*/multitable_automation_jobs table ' +
