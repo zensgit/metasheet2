@@ -15400,6 +15400,212 @@ async function deductCompTimeBalance(trx, { orgId, userId, requestId, minutes })
   })
 }
 
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// 年假/法定假 accrual engine (L2b — design-lock #2622 + dev-verification report 2026-06-15). Annual
+// leave is a COMPUTED ENTITLEMENT (not comp_time's idempotent event-credit): eligibility (连续满12个月)
+// → tier (累计满N年 → ladder) → §5 first-year proration (本单位剩余日历天数÷365×tier天, 折算不足1整天不
+// 享受) → snapshot run + run_items provenance → idempotent annual lot grant. period+asOf model: `period`
+// = which year's entitlement; `asOf` = evaluation date (eligibility/tier judged as-of asOf). Calendar
+// month/year arithmetic for eligibility/tier; ÷365 day arithmetic for §5 proration.
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+
+// Parse a date-only value → { y, m, d, str } (UTC, tz-free). Reuses the plugin's date normalizer.
+function annualLeaveDateParts(value) {
+  const s = normalizeDateOnly(value)
+  if (!s || typeof s !== 'string') return null
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s)
+  if (!m) return null
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3])
+  // reject non-real calendar dates (2026-02-31, 2026-13-99): a format/regex pass is not enough — Date.UTC
+  // silently overflows them into another day, corrupting eligibility/tier/proration. Round-trip check.
+  const dt = new Date(Date.UTC(y, mo - 1, d))
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() + 1 !== mo || dt.getUTCDate() !== d) return null
+  return { y, m: mo, d, str: s }
+}
+
+// Completed whole calendar years from `start` to `asOf` (累计满N年, anniversary count).
+function annualLeaveCompletedYears(start, asOf) {
+  let years = asOf.y - start.y
+  if (asOf.m < start.m || (asOf.m === start.m && asOf.d < start.d)) years -= 1
+  return years
+}
+
+// Strict date comparison on parts: is `a` strictly after `b`?
+function annualLeaveDateAfter(a, b) {
+  if (a.y !== b.y) return a.y > b.y
+  if (a.m !== b.m) return a.m > b.m
+  return a.d > b.d
+}
+
+// Whole calendar months elapsed from `start` to `asOf` (连续满N个月).
+function annualLeaveElapsedMonths(start, asOf) {
+  let months = (asOf.y - start.y) * 12 + (asOf.m - start.m)
+  if (asOf.d < start.d) months -= 1
+  return months
+}
+
+// Inclusive calendar-day count from `from` (a parts obj) through Dec 31 of `periodYear` — the §5
+// "本单位当年剩余日历天数" (含 hire_date 当天).
+function annualLeaveRemainingDaysInYear(from, periodYear) {
+  const a = Date.UTC(from.y, from.m - 1, from.d)
+  const b = Date.UTC(periodYear, 11, 31)
+  return Math.round((b - a) / 86400000) + 1
+}
+
+// Match tenure-years to the ladder → tier_days, or null when no band covers it (a custom-ladder gap;
+// impossible for the statutory preset since an eligible user has years >= 1).
+function annualLeaveMatchTierDays(tiers, years) {
+  if (!Array.isArray(tiers)) return null
+  for (const tier of tiers) {
+    if (!tier || typeof tier !== 'object') continue
+    const min = Number(tier.minYears)
+    const max = tier.maxYears === null || tier.maxYears === undefined ? null : Number(tier.maxYears)
+    if (!Number.isFinite(min)) continue
+    if (years >= min && (max === null || years < max)) {
+      const days = Number(tier.days)
+      return Number.isFinite(days) && days >= 0 ? days : null
+    }
+  }
+  return null
+}
+
+// Pure per-user compute → a run_item shape. eligibility gate FIRST (an ineligible user never reaches
+// proration); proration keys off hire_date (本单位) even in cumulative mode.
+function computeAnnualLeaveAccrualForUser(policy, user, period, asOfParts) {
+  const standardDayMinutes = policy.standardDayMinutes
+  const blank = { status: 'skipped', skipReason: null, tenureYears: null, tierDays: null, prorationFactor: null, entitlementMinutes: 0 }
+  const hireParts = annualLeaveDateParts(user.hire_date)
+  const cumulativeParts = annualLeaveDateParts(user.cumulative_service_start_date)
+  // tenure anchor (eligibility + tier) by mode; proration always uses hire_date (本单位).
+  const tenureAnchor = policy.tenureMode === 'company_tenure' ? hireParts : cumulativeParts
+  if (!tenureAnchor) return { ...blank, skipReason: 'MISSING_SERVICE_START_DATE' }
+  // hire_date (本单位入职日) is required in ALL modes: it is the employment fact AND the §5 proration
+  // anchor. Missing it must SKIP visibly — never silently full-grant a user whose 本单位 fact is unknown
+  // (a cumulative anchor alone is not enough; that would be a silent wrong-grant).
+  if (!hireParts) return { ...blank, skipReason: 'MISSING_HIRE_DATE' }
+  // not yet employed at 本单位 as-of asOf (a pre-boarded user whose hire_date is in the future relative
+  // to the run) → no entitlement here, even if the cumulative anchor would pass eligibility.
+  if (annualLeaveDateAfter(hireParts, asOfParts)) {
+    return { ...blank, skipReason: 'NOT_YET_HIRED' }
+  }
+  // eligibility: 连续工作满12个月 as-of asOf — the gate, BEFORE any tier/proration.
+  if (annualLeaveElapsedMonths(tenureAnchor, asOfParts) < 12) {
+    return { ...blank, skipReason: 'NOT_ELIGIBLE_UNDER_ONE_YEAR' }
+  }
+  const tenureYears = annualLeaveCompletedYears(tenureAnchor, asOfParts)
+  const tierDays = annualLeaveMatchTierDays(policy.tiers, tenureYears)
+  if (!Number.isFinite(tierDays) || tierDays <= 0) {
+    return { ...blank, tenureYears, tierDays: Number.isFinite(tierDays) ? tierDays : 0, skipReason: 'NO_MATCHING_TIER' }
+  }
+  // §5 first-year proration: only when hire_date is WITHIN the period year (当年新进本单位).
+  let prorationFactor = null
+  let entitlementDays = tierDays
+  if (hireParts && hireParts.y === period) {
+    const remainingDays = annualLeaveRemainingDaysInYear(hireParts, period)
+    prorationFactor = remainingDays / 365
+    // integer-first (÷365 LAST): flooring a float product like (219/365)*5 lands at 2.9999… → wrongly 2,
+    // underpaying a statutorily-mandated day. (remainingDays*tierDays)/365 = 1095/365 = 3.0 → floor 3.
+    // prorationFactor (the float) is kept for the provenance column only; the entitlement uses integers.
+    entitlementDays = Math.floor((remainingDays * tierDays) / 365)
+  } else if (hireParts && hireParts.y > period) {
+    // hired AFTER the entitlement year (back-period run) → not employed that year.
+    return { ...blank, tenureYears, tierDays, skipReason: 'HIRED_AFTER_PERIOD' }
+  }
+  if (entitlementDays <= 0) {
+    return { ...blank, tenureYears, tierDays, prorationFactor, skipReason: 'PRORATION_BELOW_ONE_DAY' }
+  }
+  return { status: 'granted', skipReason: null, tenureYears, tierDays, prorationFactor, entitlementMinutes: entitlementDays * standardDayMinutes }
+}
+
+// Stable fingerprint of the policy inputs a run actually used (run-header snapshot for audit).
+function annualLeavePolicyVersion(policy) {
+  return JSON.stringify({ tenureMode: policy.tenureMode, standardDayMinutes: policy.standardDayMinutes, tiers: policy.tiers, timezone: policy.timezone, carryover: policy.carryover })
+}
+
+// Run an annual-leave accrual for an org + period as-of `asOf`. Writes one run + one run_item per active
+// user; for granted (non-dryRun) users, grants the annual lot idempotently (mirrors the C2 pattern). The
+// run + run_items are ALWAYS written (audit); dryRun writes NO lots/events and consumes NO source_key.
+// Caller supplies the transaction (`trx`).
+async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
+  const settings = await getSettings(trx)
+  const policy = settings?.annualLeavePolicy
+  if (!policy || policy.enabled !== true) {
+    throw new HttpError(422, 'ANNUAL_LEAVE_NOT_ENABLED', 'annualLeavePolicy.enabled must be true to run accrual')
+  }
+  if (!policy.timezone) {
+    throw new HttpError(422, 'ANNUAL_LEAVE_TIMEZONE_REQUIRED', 'annualLeavePolicy.timezone is required to run accrual')
+  }
+  const asOfParts = annualLeaveDateParts(asOf)
+  if (!asOfParts) throw new HttpError(400, 'ANNUAL_LEAVE_INVALID_ASOF', 'asOf must be a valid YYYY-MM-DD date')
+  const periodKey = `annual:${period}`
+  const runRows = await trx.query(
+    `INSERT INTO attendance_leave_accrual_runs
+       (org_id, period_key, leave_type_code, policy_version, tenure_mode, timezone, standard_day_minutes, tiers, triggered_by, dry_run, as_of)
+     VALUES ($1, $2, 'annual', $3, $4, $5, $6, $7::jsonb, 'manual', $8, $9)
+     RETURNING id`,
+    [orgId, periodKey, annualLeavePolicyVersion(policy), policy.tenureMode, policy.timezone, policy.standardDayMinutes, JSON.stringify(policy.tiers ?? []), !!dryRun, asOfParts.str]
+  )
+  const runId = runRows[0].id
+  // Org-scoped (via user_orgs) — only THIS org's active members. NOT the global users table, else an
+  // accrual triggered for one org would write run_items + create org-scoped lots for OTHER orgs' users
+  // (cross-tenant bleed). Mirrors loadAttendanceReportRecordsSyncUserPage. v1 scans all org members in one
+  // transaction (fine for typical orgs); very large orgs may need batch/chunking — a documented follow-up.
+  const users = await trx.query(
+    `SELECT u.id, u.hire_date, u.cumulative_service_start_date
+       FROM user_orgs uo
+       JOIN users u ON u.id = uo.user_id
+      WHERE uo.org_id = $1 AND uo.is_active = true AND u.is_active = true
+      ORDER BY u.id ASC`,
+    [orgId]
+  )
+  const summary = { runId, periodKey, asOf: asOfParts.str, dryRun: !!dryRun, granted: 0, skipped: 0, grantedMinutes: 0, lotsCreated: 0, alreadyGranted: 0, skipReasons: {} }
+  for (const user of users) {
+    const r = computeAnnualLeaveAccrualForUser(policy, user, period, asOfParts)
+    const itemRows = await trx.query(
+      `INSERT INTO attendance_leave_accrual_run_items
+         (run_id, org_id, user_id, leave_type_code, tenure_years, tier_days, proration_factor, entitlement_minutes, status, skip_reason)
+       VALUES ($1, $2, $3, 'annual', $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [runId, orgId, user.id, r.tenureYears, r.tierDays, r.prorationFactor, r.entitlementMinutes, r.status, r.skipReason]
+    )
+    const runItemId = itemRows[0].id
+    if (r.status === 'granted') {
+      summary.granted += 1   // computed-grantable — the count a dry-run reports
+      summary.grantedMinutes += r.entitlementMinutes
+      if (!dryRun) {
+        // expires_at stays NULL here; L4 owns carryover/year-end expiry (and backfills these lots).
+        const sourceKey = `annual_accrual:${user.id}:${periodKey}`
+        const lotRows = await trx.query(
+          `INSERT INTO attendance_leave_balances
+             (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status)
+           VALUES ($1, $2, 'annual', $3, $3, 'annual_accrual', $4, $5, 'active')
+           ON CONFLICT (org_id, source_key) DO NOTHING
+           RETURNING id`,
+          [orgId, user.id, r.entitlementMinutes, runItemId, sourceKey]
+        )
+        const newLotId = lotRows[0]?.id
+        if (newLotId) {
+          summary.lotsCreated += 1
+          await trx.query(
+            `INSERT INTO attendance_leave_balance_events
+               (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+             VALUES ($1, $2, $3, 'grant', $4, 'annual_accrual', $5)`,
+            [orgId, user.id, newLotId, r.entitlementMinutes, runItemId]
+          )
+        } else {
+          // source_key conflict — a prior real run already granted this user/period (idempotent no-op).
+          summary.alreadyGranted += 1
+        }
+      }
+    } else {
+      summary.skipped += 1
+      const reason = r.skipReason || 'UNKNOWN'
+      summary.skipReasons[reason] = (summary.skipReasons[reason] || 0) + 1
+    }
+  }
+  return summary
+}
+
 async function loadAttendanceComprehensiveActualMinutesByUser(db, orgId, userIds, period) {
   const actualMinutesByUser = new Map()
   const actualDetailsByUser = new Map()
@@ -37340,6 +37546,42 @@ module.exports = {
           }
           logger.error('Attendance settings lookup failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load settings' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/annual-leave-accrual/run',
+      withPermission('attendance:admin', async (req, res) => {
+        // 年假/法定假 L2b: admin-triggered accrual run (period + asOf + dryRun). dryRun previews (run +
+        // run_items persisted, NO lots/events, consumes no source_key). Mirrors the C2 idempotent grant.
+        const schema = z.object({
+          period: z.number().int().min(2000).max(2100),
+          asOf: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          dryRun: z.boolean().optional(),
+        })
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const asOf = parsed.data.asOf || new Date().toISOString().slice(0, 10)
+        const dryRun = parsed.data.dryRun ?? false
+        try {
+          const summary = await db.transaction(async (trx) => runAnnualLeaveAccrual(trx, { orgId, period: parsed.data.period, asOf, dryRun }))
+          emitEvent('attendance.annual_leave_accrual.run', { orgId, periodKey: summary.periodKey, asOf: summary.asOf, dryRun: summary.dryRun, granted: summary.granted, skipped: summary.skipped })
+          res.json({ ok: true, data: summary })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          const status = Number.isInteger(error?.status) ? error.status : 500
+          const code = error?.code || (status >= 500 ? 'INTERNAL_ERROR' : 'VALIDATION_ERROR')
+          if (status >= 500) logger.error('Annual leave accrual run failed', error)
+          res.status(status).json({ ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } })
         }
       })
     )
