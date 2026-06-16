@@ -53,11 +53,23 @@ describe('Formula library expansion', () => {
     expect(await calc('=COUNTIF([["a", "b", "a"]], "a")')).toBe(2)
   })
 
-  test('WEEKDAY returns 1..7 for a valid date, #VALUE! for garbage', async () => {
-    const r = await calc('=WEEKDAY(DATE(2026, 1, 4))')
-    expect(typeof r).toBe('number')
-    expect(r as number).toBeGreaterThanOrEqual(1)
-    expect(r as number).toBeLessThanOrEqual(7)
+  test('COUNTIF text matching is case-INSENSITIVE (Excel/Feishu parity)', async () => {
+    expect(await calc('=COUNTIF([["Apple", "APPLE", "apple"]], "apple")')).toBe(3)
+    expect(await calc('=COUNTIF([["Cat", "cat", "dog"]], "=CAT")')).toBe(2)
+  })
+
+  test('COUNTIF numeric comparators do NOT over-count blanks/booleans (Number() coercion guard)', async () => {
+    expect(await calc('=COUNTIF([[5, null]], ">-1")')).toBe(1)   // null is not 0
+    expect(await calc('=COUNTIF([[5, null, ""]], ">=0")')).toBe(1) // null/"" excluded
+    expect(await calc('=COUNTIF([[null]], "=0")')).toBe(0)
+  })
+
+  test('WEEKDAY is timezone-stable for date-only strings (parsed as local, matching DATE())', async () => {
+    // exact weekday, computed via the SAME local-midnight construction the fix uses → TZ-independent.
+    const dow = new Date(2026, 0, 4).getDay() // 2026-01-04
+    expect(await calc('=WEEKDAY("2026-01-04")')).toBe(dow + 1)              // type 1: Sun=1..Sat=7
+    expect(await calc('=WEEKDAY("2026-01-04", 2)')).toBe(dow === 0 ? 7 : dow) // type 2: Mon=1..Sun=7
+    expect(await calc('=WEEKDAY(DATE(2026, 1, 4))')).toBe(dow + 1)          // DATE() path agrees
     expect(await calc('=WEEKDAY("not-a-date")')).toBe('#VALUE!')
   })
 
@@ -68,5 +80,18 @@ describe('Formula library expansion', () => {
     expect(await calc('=ROUNDDOWN(2.166, 1)')).toBeCloseTo(2.1, 10)
     expect(await calc('=ROUNDUP(-2.1, 0)')).toBe(-3)
     expect(await calc('=ROUNDDOWN(-2.9, 0)')).toBe(-2)
+  })
+
+  test('ROUNDUP/ROUNDDOWN are float-precision-safe on everyday monetary values', async () => {
+    // 0.29*100 === 28.999…996 / 0.07*100 === 7.000…001 — naive floor/ceil rounds the wrong way.
+    expect(await calc('=ROUNDDOWN(0.29, 2)')).toBeCloseTo(0.29, 10)
+    expect(await calc('=ROUNDDOWN(0.58, 2)')).toBeCloseTo(0.58, 10)
+    expect(await calc('=ROUNDDOWN(1.16, 2)')).toBeCloseTo(1.16, 10)
+    expect(await calc('=ROUNDUP(0.07, 2)')).toBeCloseTo(0.07, 10)
+  })
+
+  test('ISERROR/IFERROR also trap a NaN numeric error (e.g. SQRT(-1))', async () => {
+    expect(await calc('=ISERROR(SQRT(-1))')).toBe(true)
+    expect(await calc('=IFERROR(SQRT(-1), "x")')).toBe('x')
   })
 })

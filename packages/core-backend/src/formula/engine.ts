@@ -243,20 +243,33 @@ export class FormulaEngine {
     this.functions.set('XOR', (...args: unknown[]) => this.flattenValues(args).filter((v) => !!v).length % 2 === 1)
     this.functions.set('COUNTIF', (range: unknown, criteria: unknown) => this.countif(range, criteria))
     this.functions.set('WEEKDAY', (date: unknown, type: unknown = 1) => {
-      const d = date instanceof Date ? date : new Date(String(date))
+      // Parse a date-only 'YYYY-MM-DD' string as LOCAL midnight (matching DATE(), which builds local
+      // midnight) so getDay() is timezone-stable; `new Date('YYYY-MM-DD')` would parse as UTC midnight
+      // and getDay() (local) would shift the weekday back a day on negative-UTC-offset hosts.
+      let d: Date
+      if (date instanceof Date) d = date
+      else {
+        const s = String(date)
+        const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+        d = iso ? new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])) : new Date(s)
+      }
       if (Number.isNaN(d.getTime())) return '#VALUE!'
       const dow = d.getDay() // 0=Sun..6=Sat
       return Number(type) === 2 ? (dow === 0 ? 7 : dow) : dow + 1 // type 2: Mon=1..Sun=7; default: Sun=1..Sat=7
     })
+    // ROUNDUP/ROUNDDOWN: strip binary-float noise (0.29*100 === 28.999…996) via toPrecision(15) before
+    // floor/ceil, else everyday monetary values round the wrong way. Sign-aware (away-from / toward zero).
     this.functions.set('ROUNDUP', (x: unknown, digits: unknown = 0) => {
       const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
       const f = Math.pow(10, Number(digits) || 0)
-      return (n >= 0 ? Math.ceil(n * f) : Math.floor(n * f)) / f
+      const scaled = Number((n * f).toPrecision(15))
+      return (n >= 0 ? Math.ceil(scaled) : Math.floor(scaled)) / f
     })
     this.functions.set('ROUNDDOWN', (x: unknown, digits: unknown = 0) => {
       const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
       const f = Math.pow(10, Number(digits) || 0)
-      return (n >= 0 ? Math.floor(n * f) : Math.ceil(n * f)) / f
+      const scaled = Number((n * f).toPrecision(15))
+      return (n >= 0 ? Math.floor(scaled) : Math.ceil(scaled)) / f
     })
   }
 
@@ -884,6 +897,8 @@ export class FormulaEngine {
   }
 
   private isErrorValue(value: unknown): boolean {
+    // A NaN number is itself an error result (e.g. SQRT(-1)); trap it alongside the string sentinels.
+    if (typeof value === 'number') return Number.isNaN(value)
     return typeof value === 'string' && FORMULA_ERROR_SENTINELS.has(value)
   }
 
@@ -905,26 +920,31 @@ export class FormulaEngine {
   // silently mis-count; stringifying makes both shapes behave predictably.
   private matchesCriteria(value: unknown, criteria: unknown): boolean {
     const c = String(criteria)
+    const numV = Number(value)
+    // A value counts as numeric ONLY if it's a real number or a non-blank numeric string — never
+    // null/''/boolean (Number() coerces those to 0/1 and would over-count comparators like ">0").
+    const valIsNum = (typeof value === 'number' && !Number.isNaN(value))
+      || (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(numV))
+    // COUNTIF text equality is case-INSENSITIVE (Excel/Feishu parity).
+    const eqText = (a: unknown, b: string): boolean => String(a).toLowerCase() === b.toLowerCase()
     const m = c.match(/^(>=|<=|<>|>|<|=)(.*)$/)
     if (m) {
       const op = m[1]
       const operand = m[2].trim()
-      const numV = Number(value)
       const numO = Number(operand)
-      const bothNum = operand !== '' && !Number.isNaN(numV) && !Number.isNaN(numO)
+      const bothNum = valIsNum && operand !== '' && !Number.isNaN(numO)
       switch (op) {
         case '>': return bothNum && numV > numO
         case '<': return bothNum && numV < numO
         case '>=': return bothNum && numV >= numO
         case '<=': return bothNum && numV <= numO
-        case '<>': return String(value) !== operand
-        case '=': return bothNum ? numV === numO : String(value) === operand
+        case '<>': return bothNum ? numV !== numO : !eqText(value, operand)
+        case '=': return bothNum ? numV === numO : eqText(value, operand)
       }
     }
-    const numV = Number(value)
     const numC = Number(c)
-    if (c.trim() !== '' && !Number.isNaN(numV) && !Number.isNaN(numC)) return numV === numC
-    return String(value) === c
+    if (valIsNum && c.trim() !== '' && !Number.isNaN(numC)) return numV === numC
+    return eqText(value, c)
   }
 
   private vlookup(lookupValue: unknown, range: unknown, colIndex: unknown, exactMatch: unknown = true): unknown {
