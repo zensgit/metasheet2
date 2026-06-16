@@ -48,6 +48,7 @@ import {
   loadFieldPermissionScopeMap,
   loadRecordCreatorMap,
   loadRecordPermissionScopeMap,
+  loadSheetMemberUserIdSet,
   loadSheetPermissionScopeMap,
   loadViewPermissionScopeMap,
   requiresOwnWriteRowPolicy,
@@ -107,7 +108,7 @@ import { MultitableFormulaEngine } from '../multitable/formula-engine'
 import { FormulaEngine } from '../formula/engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
-import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue } from '../multitable/field-codecs'
+import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import {
   AutomationRuleValidationError,
@@ -279,6 +280,7 @@ type UniverMetaField = {
     | 'select'
     | 'multiSelect'
     | 'link'
+    | 'person'
     | 'lookup'
     | 'rollup'
     | 'attachment'
@@ -323,6 +325,7 @@ type UniverMetaView = {
   fields: UniverMetaField[]
   rows: UniverMetaRecord[]
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
+  personSummaries?: Record<string, Record<string, PersonSummary[]>>
   attachmentSummaries?: Record<string, Record<string, MultitableAttachment[]>>
   view?: UniverMetaViewConfig
   meta?: {
@@ -398,6 +401,14 @@ type MultitableScopedPermissions = {
 }
 
 type LinkedRecordSummary = {
+  id: string
+  display: string
+}
+
+// Native person (人员, design 2026-06-16) display source. Parallel to LinkedRecordSummary
+// but keyed by `userId` (NOT a recordId) and resolved from the `users` table at view-assembly
+// time — the native person value carries no linkSummaries, so the renderer reads this instead.
+type PersonSummary = {
   id: string
   display: string
 }
@@ -1421,7 +1432,10 @@ function mapFieldType(type: string): UniverMetaField['type'] {
     return 'multiSelect'
   }
   if (normalized === 'link') return 'link'
-  if (normalized === 'person') return 'link'
+  // Native person field (人员, design 2026-06-16): stored as first-class `type='person'`
+  // (userId[]), no longer aliased to `link`. Legacy person fields are stored as
+  // `type='link'`+refKind:user, so this flip is coexistence-safe — see field-codecs.ts.
+  if (normalized === 'person') return 'person'
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
@@ -1634,6 +1648,20 @@ function sanitizeFieldPropertyByType(type: UniverMetaField['type'], property: un
       // services reject a PATCH on it (isFieldAlwaysReadOnly honors property.readOnly) — this is what
       // keeps the single canonical edge from gaining a second, materialized row.
       ...(mirrorOf ? { mirrorOf, readOnly: true } : {}),
+    }
+  }
+
+  if (type === 'person') {
+    // Native person (人员, design 2026-06-16) — value is `userId[]`. Mirrors the
+    // field-codecs.ts person branch: only `limitSingleRecord` is user-controlled and its
+    // default is TRUE (`!== false`), matching the legacy person path so single/multi never
+    // silently flips between a legacy link-backed person and a native person. NOT readOnly.
+    const restrict = Array.isArray(obj.restrictToMemberGroupIds)
+      ? Array.from(new Set(obj.restrictToMemberGroupIds.filter((v): v is string => typeof v === 'string' && v.trim().length > 0).map((v) => v.trim())))
+      : []
+    return {
+      limitSingleRecord: obj.limitSingleRecord !== false,
+      ...(restrict.length > 0 ? { restrictToMemberGroupIds: restrict } : {}),
     }
   }
 
@@ -3176,6 +3204,7 @@ export function createRecordWriteHelpers(req: Request, _pool?: { query: QueryFn 
     buildLinkSummaries: (q, sourceSheetId, rows, rl, lv) => buildLinkSummaries(req, q, sourceSheetId, rows, rl, lv),
     buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),
     ensureAttachmentIdsExist,
+    loadSheetMemberUserIds: (q, sid) => loadSheetMemberUserIdSet(q, sid),
   }
 }
 
@@ -3738,32 +3767,26 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
 
 async function normalizeFieldWriteInput(
   query: QueryFn,
-  sheetId: string,
+  _sheetId: string,
   requestedType: MultitableFieldInputType | UniverMetaField['type'],
   rawProperty: unknown,
 ): Promise<{ type: UniverMetaField['type']; property: Record<string, unknown> }> {
-  if (requestedType !== 'person') {
-    return {
-      type: requestedType as UniverMetaField['type'],
-      property: sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty),
-    }
-  }
-
-  const sourceSheet = await loadSheetRow(query, sheetId)
-  if (!sourceSheet) throw new NotFoundError(`Sheet not found: ${sheetId}`)
-
-  const baseId = sourceSheet.baseId ?? await ensureLegacyBase(query)
-  const preset = await ensurePeopleSheetPreset(query, baseId)
-  const obj = normalizeJson(rawProperty)
-  const limitSingleRecord = obj.limitSingleRecord !== false
-
+  // Native person (人员, design 2026-06-16): `type:'person'` is now a FIRST-CLASS native
+  // field stored as `type='person'` (userId[]) — it flows through the generic branch and is
+  // NO LONGER rewritten to a `link`+refKind:user against the system People sheet. This is the
+  // default for newly-created person fields.
+  //
+  // COEXISTENCE: existing legacy person fields are persisted as `type='link'`+refKind:user
+  // and are untouched — they keep rendering/behaving as people. `ensurePeopleSheetPreset` and
+  // the `/person-fields/prepare` route stay intact (now vestigial for the FE create path, but
+  // preserved for legacy fields + direct API callers who still want the link-backed shape).
+  //
+  // The `query`/`_sheetId` params are retained for signature stability with the route call
+  // sites and any future per-type async normalization.
+  void query
   return {
-    type: 'link',
-    property: sanitizeFieldProperty('link', {
-      ...preset.fieldProperty,
-      limitSingleRecord,
-      refKind: 'user',
-    }),
+    type: requestedType as UniverMetaField['type'],
+    property: sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty),
   }
 }
 
@@ -3919,6 +3942,118 @@ async function buildAttachmentSummaries(
   attachmentFields: UniverMetaField[],
 ): Promise<Map<string, Map<string, MultitableAttachment[]>>> {
   return buildAttachmentSummariesShared({ query, req, sheetId, rows, attachmentFields })
+}
+
+/**
+ * Native person (人员, design 2026-06-16) display assembly. For each person field's
+ * `userId[]` cell, resolve a `{ id: userId, display }` summary from the `users` table
+ * (name → email → id fallback) — ONE query for all userIds across all person fields,
+ * parallel to buildLinkSummaries (no FE per-userId fetch / N+1). The native person value
+ * carries no linkSummaries, so the renderer reads THIS to draw the people chips.
+ */
+async function buildPersonSummaries(
+  query: QueryFn,
+  rows: UniverMetaRecord[],
+  personFields: UniverMetaField[],
+): Promise<Map<string, Map<string, PersonSummary[]>>> {
+  const result = new Map<string, Map<string, PersonSummary[]>>()
+  if (personFields.length === 0 || rows.length === 0) return result
+
+  const personFieldIds = personFields.map((f) => f.id)
+  const userIds = new Set<string>()
+  for (const row of rows) {
+    for (const fieldId of personFieldIds) {
+      const value = row.data[fieldId]
+      if (!Array.isArray(value)) continue
+      for (const item of value) {
+        if (typeof item === 'string' && item.trim()) userIds.add(item.trim())
+      }
+    }
+  }
+  if (userIds.size === 0) return result
+
+  const displayByUserId = new Map<string, string>()
+  try {
+    const usersRes = await query(
+      'SELECT id, email, name FROM users WHERE id = ANY($1::text[])',
+      [Array.from(userIds)],
+    )
+    for (const u of usersRes.rows as Array<{ id?: unknown; email?: unknown; name?: unknown }>) {
+      const id = typeof u.id === 'string' ? u.id : String(u.id ?? '')
+      if (!id) continue
+      const name = typeof u.name === 'string' ? u.name.trim() : ''
+      const email = typeof u.email === 'string' ? u.email.trim() : ''
+      displayByUserId.set(id, name || email || id)
+    }
+  } catch (err) {
+    // users table absent (minimal test harness) — fall back to userId as display below.
+    if (!(typeof (err as any)?.code === 'string' && (err as any).code === '42P01')) throw err
+  }
+
+  for (const row of rows) {
+    const fieldMap = new Map<string, PersonSummary[]>()
+    for (const fieldId of personFieldIds) {
+      const value = row.data[fieldId]
+      if (!Array.isArray(value)) continue
+      const summaries: PersonSummary[] = []
+      for (const item of value) {
+        if (typeof item !== 'string' || !item.trim()) continue
+        const userId = item.trim()
+        summaries.push({ id: userId, display: displayByUserId.get(userId) ?? userId })
+      }
+      if (summaries.length > 0) fieldMap.set(fieldId, summaries)
+    }
+    if (fieldMap.size > 0) result.set(row.id, fieldMap)
+  }
+  return result
+}
+
+/**
+ * Resolve a `userId → display` map for sort-by-display over native person fields. Scans the
+ * given records' person-sort-field cells for userIds, then joins the `users` table ONCE.
+ * Missing/absent users fall back to the userId (handled by the caller).
+ */
+async function resolvePersonSortDisplayMap(
+  query: QueryFn,
+  records: Array<{ data: Record<string, unknown> }>,
+  personFieldIds: ReadonlySet<string>,
+): Promise<Map<string, string>> {
+  const displayByUserId = new Map<string, string>()
+  const userIds = new Set<string>()
+  for (const record of records) {
+    for (const fieldId of personFieldIds) {
+      const value = record.data[fieldId]
+      if (!Array.isArray(value)) continue
+      for (const item of value) {
+        if (typeof item === 'string' && item.trim()) userIds.add(item.trim())
+      }
+    }
+  }
+  if (userIds.size === 0) return displayByUserId
+  try {
+    const usersRes = await query('SELECT id, email, name FROM users WHERE id = ANY($1::text[])', [Array.from(userIds)])
+    for (const u of usersRes.rows as Array<{ id?: unknown; email?: unknown; name?: unknown }>) {
+      const id = typeof u.id === 'string' ? u.id : String(u.id ?? '')
+      if (!id) continue
+      const name = typeof u.name === 'string' ? u.name.trim() : ''
+      const email = typeof u.email === 'string' ? u.email.trim() : ''
+      displayByUserId.set(id, name || email || id)
+    }
+  } catch (err) {
+    if (!(typeof (err as any)?.code === 'string' && (err as any).code === '42P01')) throw err
+  }
+  return displayByUserId
+}
+
+function serializePersonSummaryMap(
+  personSummaries: Map<string, Map<string, PersonSummary[]>>,
+): Record<string, Record<string, PersonSummary[]>> {
+  return Object.fromEntries(
+    Array.from(personSummaries.entries()).map(([recordId, fieldMap]) => [
+      recordId,
+      Object.fromEntries(Array.from(fieldMap.entries()).map(([fieldId, summaries]) => [fieldId, summaries])),
+    ]),
+  )
 }
 
 const serializeAttachmentSummaryMap = serializeAttachmentSummaryMapShared
@@ -8269,6 +8404,10 @@ export function univerMetaRouter(): Router {
         .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
         .filter((v): v is { fieldId: string; cfg: LinkFieldConfig } => !!v && !!v.cfg)
       const attachmentFields = visiblePropertyFields.filter((field) => field.type === 'attachment')
+      // Native person (人员) fields — distinct from link fields (legacy link-backed person is
+      // `type='link'` and renders via linkSummaries; native person is `type='person'` and needs
+      // personSummaries). Coexistence: a sheet may have both.
+      const personFields = visiblePropertyFields.filter((field) => field.type === 'person')
       const computedFieldIdSet = new Set(
         visiblePropertyFields.filter((f) => f.type === 'lookup' || f.type === 'rollup').map((f) => f.id),
       )
@@ -8400,10 +8539,30 @@ export function univerMetaRouter(): Router {
           }
         }
 
+        // Native person (人员) sort-by-display: compareMetaSortValue's string fallback would order
+        // person cells by raw `String(userId[])`, not the visible name. Resolve a userId→display
+        // map once for the person fields that actually appear in the sort rules, then feed
+        // compareMetaSortValue the joined DISPLAY string instead of the raw userId array.
+        const personSortFieldIds = new Set(
+          sortRules.filter((rule) => fieldTypeById.get(rule.fieldId) === 'person').map((rule) => rule.fieldId),
+        )
+        const personSortDisplayByUserId = personSortFieldIds.size > 0
+          ? await resolvePersonSortDisplayMap(pool.query.bind(pool), all, personSortFieldIds)
+          : new Map<string, string>()
+        const personSortKey = (value: unknown): string => {
+          if (!Array.isArray(value) || value.length === 0) return ''
+          return value
+            .map((item) => (typeof item === 'string' && item.trim() ? (personSortDisplayByUserId.get(item.trim()) ?? item.trim()) : ''))
+            .filter(Boolean)
+            .join(', ')
+        }
+
         const sorted = sortRules.length > 0 ? [...all].sort((a, b) => {
           for (const rule of sortRules) {
             const fieldType = fieldTypeById.get(rule.fieldId) ?? 'string'
-            const cmp = compareMetaSortValue(fieldType, a.data[rule.fieldId], b.data[rule.fieldId], rule.desc)
+            const aValue = personSortFieldIds.has(rule.fieldId) ? personSortKey(a.data[rule.fieldId]) : a.data[rule.fieldId]
+            const bValue = personSortFieldIds.has(rule.fieldId) ? personSortKey(b.data[rule.fieldId]) : b.data[rule.fieldId]
+            const cmp = compareMetaSortValue(fieldType, aValue, bValue, rule.desc)
             if (cmp !== 0) return cmp
           }
 
@@ -8526,6 +8685,16 @@ export function univerMetaRouter(): Router {
             allowedFieldIds,
           )
         : undefined
+      // Native person (人员) display: ALWAYS assembled (not gated on includeLinkSummaries) because
+      // a native person chip has no other display source — the value is just userId[].
+      const personSummaries = personFields.length > 0
+        ? filterRecordFieldSummaryMap(
+            serializePersonSummaryMap(
+              await buildPersonSummaries(pool.query.bind(pool), rows, personFields),
+            ),
+            allowedFieldIds,
+          )
+        : undefined
       // Record-level permission filtering: remove records user cannot read (admin bypass)
       if (!access.isAdminRole && access.userId && rows.length > 0) {
         const hasRecordPerms = await hasRecordPermissionAssignments(pool.query.bind(pool), sheetId)
@@ -8600,6 +8769,7 @@ export function univerMetaRouter(): Router {
         fields: visiblePropertyFields,
         rows,
         ...(linkSummaries ? { linkSummaries } : {}),
+        ...(personSummaries ? { personSummaries } : {}),
         ...(attachmentSummaries ? { attachmentSummaries } : {}),
         ...(viewConfig ? { view: redactViewConfigFilterLiterals(viewConfig, allowedFieldIds) } : {}),
         ...(meta ? { meta } : {}),
@@ -8870,6 +9040,17 @@ export function univerMetaRouter(): Router {
       const patch: Record<string, unknown> = {}
       const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
 
+      // Native person (人员): resolve the sheet member set ONCE per request (lazily, only when a
+      // person field value is actually written) — parallel to the link-target-exists hot-path —
+      // and reuse it for every person cell's write-time membership validation (SECURITY boundary).
+      let personMemberUserIds: Set<string> | null = null
+      const resolvePersonMemberUserIds = async (): Promise<Set<string>> => {
+        if (personMemberUserIds === null) {
+          personMemberUserIds = await loadSheetMemberUserIdSet(pool.query.bind(pool), view.sheetId)
+        }
+        return personMemberUserIds
+      }
+
       for (const [fieldId, value] of Object.entries(data)) {
         const field = fieldById.get(fieldId)
         if (!field) {
@@ -8904,6 +9085,16 @@ export function univerMetaRouter(): Router {
         if (field.type === 'multiSelect') {
           try {
             patch[fieldId] = normalizeMultiSelectValue(value, fieldId, field.options ?? [])
+          } catch (error) {
+            fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
+          }
+          continue
+        }
+
+        if (field.type === 'person') {
+          try {
+            const allowed = await resolvePersonMemberUserIds()
+            patch[fieldId] = validatePersonValue(value, fieldId, allowed, isPersonSingleRecord(field.property))
           } catch (error) {
             fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
           }
@@ -9711,6 +9902,17 @@ export function univerMetaRouter(): Router {
             allowedFieldIds,
           )
         : undefined
+      // Native person (人员) display for the single-record drawer/form — same users-table join as the
+      // grid view, masked through the SAME single-record layer-2∧3 composite as linkSummaries.
+      const personFieldsSingle = visiblePropertyFields.filter((field) => field.type === 'person')
+      const personSummaries = personFieldsSingle.length > 0
+        ? filterSingleRecordFieldSummaryMap(
+            serializePersonSummaryMap(
+              await buildPersonSummaries(pool.query.bind(pool), [record], personFieldsSingle),
+            )[record.id] ?? {},
+            allowedFieldIds,
+          )
+        : undefined
 
       const viewScopeMap = (access.userId && viewConfig) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [viewConfig.id], access.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
@@ -9752,6 +9954,7 @@ export function univerMetaRouter(): Router {
             containerId: sheet.id,
           },
           linkSummaries,
+          ...(personSummaries ? { personSummaries } : {}),
           ...(attachmentSummaries ? { attachmentSummaries } : {}),
         },
       })

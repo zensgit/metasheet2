@@ -27,6 +27,7 @@ import {
   loadFieldPermissionScopeMap,
   loadRecordCreatorMap,
   loadRecordPermissionScopeMap,
+  loadSheetMemberUserIdSet,
   loadSheetPermissionScopeMap,
   loadViewPermissionScopeMap,
   requiresOwnWriteRowPolicy,
@@ -527,6 +528,41 @@ describe('permission-service: request-keyed resolvers', () => {
     expect(calls[2].params?.[0]).toEqual(['user_reader'])
     expect(listUserPermissions).not.toHaveBeenCalled()
     expect(isAdmin).not.toHaveBeenCalled()
+  })
+
+  it('loadSheetMemberUserIdSet returns the active eligible USER ids (the picker = validator set)', async () => {
+    // Native person (人员): the member boundary reuses listSheetPermissionCandidates and keeps ONLY
+    // the active `user` subjects — so the person picker and the person write-time validator share
+    // EXACTLY one set. An inactive user + a role/member-group subject are excluded.
+    const { query } = makeQuery([
+      () => ({
+        rows: [
+          { subject_type: 'user', subject_id: 'u_active', user_name: 'Active', user_email: 'a@x.test', user_is_active: true, permission_codes: [] },
+          { subject_type: 'user', subject_id: 'u_inactive', user_name: 'Inactive', user_email: 'i@x.test', user_is_active: false, permission_codes: [] },
+          { subject_type: 'role', subject_id: 'role_editor', role_name: 'Editor', user_is_active: true, permission_codes: [] },
+          { subject_type: 'member-group', subject_id: 'grp_1', group_name: 'Group', user_is_active: true, permission_codes: [] },
+        ],
+      }),
+      // role permission lookup
+      () => ({ rows: [{ role_id: 'role_editor', permission_code: 'multitable:write' }] }),
+      // user eligibility (user_permissions / roles)
+      () => ({ rows: [
+        { user_id: 'u_active', permission_code: 'multitable:read' },
+        { user_id: 'u_inactive', permission_code: 'multitable:read' },
+      ] }),
+      // admin role lookup
+      () => ({ rows: [] }),
+      // legacy users.permissions lookup
+      () => ({ rows: [] }),
+    ])
+
+    const members = await loadSheetMemberUserIdSet(query, 'sheet_1')
+
+    expect(members.has('u_active')).toBe(true)
+    expect(members.has('u_inactive')).toBe(false) // inactive excluded
+    expect(members.has('role_editor')).toBe(false) // non-user subject excluded
+    expect(members.has('grp_1')).toBe(false) // member-group subject excluded
+    expect(members.size).toBe(1)
   })
 
   it('resolveSheetCapabilities labels origin as sheet-grant when scope expands base', async () => {

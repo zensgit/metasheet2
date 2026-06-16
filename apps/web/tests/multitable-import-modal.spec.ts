@@ -807,7 +807,11 @@ describe('MetaImportModal', () => {
   it('re-enables zh people repair after reconciling a stale selected repair', async () => {
     useLocale().setLocale('zh')
     mockListLinkOptions.mockResolvedValue({
-      field: { id: 'fld_owner', name: '负责人', type: 'person', property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true } },
+      // LEGACY link-backed person (type='link' + refKind:user) — the picker-repair flow this test
+      // validates is a LINK-picker affordance (recordIds). A NATIVE type='person' field is no longer
+      // picker-repairable via the link record picker (design 2026-06-16), so this test uses the legacy
+      // storage shape it was always exercising.
+      field: { id: 'fld_owner', name: '负责人', type: 'link', property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true } },
       targetSheet: { id: 'sheet_people', baseId: 'base_1', name: '人员' },
       selected: [],
       records: [{ id: 'rec_owner_1', display: '张三' }],
@@ -825,7 +829,7 @@ describe('MetaImportModal', () => {
         const result = ref<any>(null)
         const fields = ref<any[]>([
           { id: 'fld_title', name: '标题', type: 'string' },
-          { id: 'fld_owner', name: '负责人', type: 'person', property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true } },
+          { id: 'fld_owner', name: '负责人', type: 'link', property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true } },
         ])
         const fieldResolvers = {
           fld_owner: async () => {

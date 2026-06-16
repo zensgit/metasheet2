@@ -72,6 +72,28 @@ describe('multitable import parsing', () => {
     expect(records.failures).toEqual([])
   })
 
+  it('resolves a NATIVE person field (type=person) to USERIDs via its kind-aware resolver', async () => {
+    // Native person is NO LONGER isLinkField, but delimited import must still route it through the
+    // injected resolver (which resolves to userIds, not People-sheet recordIds).
+    const resolver = vi.fn(async (rawValue: string) => {
+      expect(rawValue).toContain('alice@example.com')
+      return ['u_alice']
+    })
+    const records = await buildImportedRecords({
+      parsedRows: [['Alice <alice@example.com>']],
+      fieldMapping: { 0: 'fld_owner' },
+      fields: [
+        { id: 'fld_owner', name: 'Owner', type: 'person', property: { limitSingleRecord: false } },
+      ],
+      fieldResolvers: { fld_owner: resolver },
+    })
+
+    expect(resolver).toHaveBeenCalledTimes(1)
+    expect(records.records).toEqual([{ fld_owner: ['u_alice'] }])
+    expect(records.rowIndexes).toEqual([0])
+    expect(records.failures).toEqual([])
+  })
+
   it('reports unresolved people values as preflight failures', async () => {
     const records = await buildImportedRecords({
       parsedRows: [['Unknown Person']],

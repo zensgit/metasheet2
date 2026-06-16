@@ -228,6 +228,7 @@ function createGridMock(fields: Array<Record<string, unknown>>) {
     capabilityOrigin: ref('global-rbac'),
     columnWidths: ref<Record<string, number>>({}),
     linkSummaries: ref<Record<string, Record<string, unknown[]>>>({}),
+    personSummaries: ref<Record<string, Record<string, unknown[]>>>({}),
     attachmentSummaries: ref<Record<string, Record<string, unknown[]>>>({}),
     fieldPermissions: ref({}),
     viewPermission: ref(null),

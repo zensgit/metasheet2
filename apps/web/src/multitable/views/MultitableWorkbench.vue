@@ -146,12 +146,13 @@
           :error-message="formErrorMessage"
           :field-errors="formFieldErrors"
           :link-summaries-by-field="selectedRecordLinkSummaries"
+          :person-summaries-by-field="selectedRecordPersonSummaries"
           :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
           :upload-fn="uploadAttachmentFn"
           :delete-attachment-fn="deleteAttachmentFn"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="selectedRecordCommentPresence"
-          @submit="onFormSubmit" @open-link-picker="openLinkPicker" @update:dirty="formDirty = $event"
+          @submit="onFormSubmit" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker" @update:dirty="formDirty = $event"
           @comment-field="onToggleFieldComments"
         />
         <MetaKanbanView
@@ -251,7 +252,7 @@
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
           :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
           :row-action-overrides="grid.rowActionOverrides.value"
-          :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
+          :link-summaries="grid.linkSummaries.value" :person-summaries="grid.personSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
           :group-field="grid.groupField.value"
           :search-text="searchText" :row-density="rowDensity"
@@ -268,7 +269,7 @@
           :fetch-record="fetchLinkedRecordFn"
           :mention-suggestions="commentMentionSuggestions"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
-          @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
+          @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @open-person-picker="onGridPersonPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
           @create-record="onAddRecord"
           @set-frozen="onSetFrozen"
@@ -289,6 +290,7 @@
         :row-actions="effectiveRowActions"
         :comment-presence="selectedRecordCommentPresence"
         :link-summaries-by-field="selectedRecordLinkSummaries"
+        :person-summaries-by-field="selectedRecordPersonSummaries"
         :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
         :record-ids="drawerRecordIds"
         :upload-fn="uploadAttachmentFn"
@@ -297,7 +299,7 @@
         :button-run-pending="buttonRunPending"
         :mention-suggestions="commentMentionSuggestions"
         @close="onCloseDrawer" @delete="onDeleteRecord" @patch="onDrawerPatch"
-        @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker"
+        @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
         @navigate="onDrawerNavigate"
         @restore="onRestoreRecordVersion"
@@ -382,6 +384,14 @@
       :current-value="linkPickerCurrentValue"
       @close="linkPickerVisible = false"
       @confirm="onLinkPickerConfirm"
+    />
+    <MetaPersonPicker
+      :visible="personPickerVisible"
+      :field="personPickerField"
+      :sheet-id="workbench.activeSheetId.value"
+      :current-value="personPickerCurrentValue"
+      @close="personPickerVisible = false"
+      @confirm="onPersonPickerConfirm"
     />
     <MetaFieldManager
       :visible="showFieldManager"
@@ -504,6 +514,7 @@ import type {
   MetaFieldPermissionEntry,
   MetaViewPermissionEntry,
   MetaTemplate,
+  PersonSummary,
   RowDensity,
 } from '../types'
 import type { MultitableRole } from '../composables/useMultitableCapabilities'
@@ -528,6 +539,7 @@ import MetaRecordDrawer from '../components/MetaRecordDrawer.vue'
 import MetaNotificationBell from '../components/MetaNotificationBell.vue'
 import MetaCommentsDrawer from '../components/MetaCommentsDrawer.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
+import MetaPersonPicker from '../components/MetaPersonPicker.vue'
 import MetaTemplateCard from '../components/MetaTemplateCard.vue'
 import MetaFieldManager from '../components/MetaFieldManager.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
@@ -552,7 +564,7 @@ import { bulkImportRecords } from '../import/bulk-import'
 import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
 import { buildXlsxBuffer } from '../import/xlsx-mapping'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
-import { isLinkField, isPersonField } from '../utils/link-fields'
+import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
 import {
   calendarHolidaySyncNotice,
   type CalendarHolidayFetchState,
@@ -689,6 +701,11 @@ const linkPickerVisible = ref(false)
 const linkPickerField = ref<MetaField | null>(null)
 const linkPickerRecordId = ref<string | null>(null)
 const linkPickerCurrentValue = ref<unknown>(null)
+// Native person (人员) picker state — member-scoped userId[] selection (distinct from link picker).
+const personPickerVisible = ref(false)
+const personPickerField = ref<MetaField | null>(null)
+const personPickerRecordId = ref<string | null>(null)
+const personPickerCurrentValue = ref<unknown>(null)
 const showFieldManager = ref(false)
 const showPermissionManager = ref(false)
 const showAutomationManager = ref(false)
@@ -762,11 +779,15 @@ const importResult = ref<ImportResult | null>(null)
 const rowDensity = ref<RowDensity>('normal')
 const peopleResolverCache = new Map<string, Promise<ImportValueResolver | null>>()
 const linkResolverCache = new Map<string, Map<string, Promise<string[] | null>>>()
+// Native person (人员) import: resolve tokens (userId / name / email) → USERIDs against the
+// sheet member candidates (member-scoped, NOT the People-sheet recordIds). Keyed by sheetId.
+const nativePersonResolverCache = new Map<string, Promise<ImportValueResolver>>()
 const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
 const formFieldErrors = ref<Record<string, string>>({})
 const deepLinkedRecordLinkSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
+const deepLinkedRecordPersonSummaries = ref<Record<string, PersonSummary[]>>({})
 const deepLinkedRecordAttachmentSummaries = ref<Record<string, MetaAttachment[]>>({})
 const deepLinkedRecordCommentsScope = ref<MetaCommentsScope | null>(null)
 const deepLinkedRecordFieldPermissions = ref<Record<string, MetaFieldPermission>>({})
@@ -971,8 +992,16 @@ const importSurfaceFields = computed(() =>
 const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() => {
   const resolvers: Record<string, ImportValueResolver> = {}
   for (const field of importSurfaceFields.value) {
-    if (!isLinkField(field)) continue
+    // Native person (人员) OR link (incl. legacy link-backed person). isLinkField no longer
+    // matches native person, so include it explicitly.
+    if (!isLinkField(field) && !isNativePersonField(field)) continue
     resolvers[field.id] = async (rawValue, currentField) => {
+      // Kind-aware switch: native person → USERIDs (member candidates); legacy person → People-sheet
+      // recordIds (getPeopleResolver); plain link → linked recordIds.
+      if (isNativePersonField(currentField)) {
+        const resolver = await getNativePersonResolver()
+        return resolver(rawValue, currentField)
+      }
       if (isPersonField(currentField)) {
         const resolver = await getPeopleResolver(currentField)
         return resolver ? resolver(rawValue, currentField) : null
@@ -992,6 +1021,16 @@ const selectedRecordLinkSummaries = computed<Record<string, LinkedRecordSummary[
   const fromGrid = grid.linkSummaries.value[recordId]
   if (fromGrid) return fromGrid
   if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecordLinkSummaries.value
+  return {}
+})
+
+// Native person (人员) display for the drawer/form — grid summaries first, deep-record fallback.
+const selectedRecordPersonSummaries = computed<Record<string, PersonSummary[]>>(() => {
+  const recordId = selectedRecordId.value
+  if (!recordId) return {}
+  const fromGrid = grid.personSummaries.value[recordId]
+  if (fromGrid) return fromGrid
+  if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecordPersonSummaries.value
   return {}
 })
 
@@ -1124,6 +1163,24 @@ function applyLocalLinkSummaries(recordId: string, fieldId: string, summaries: L
   if (deepLinkedRecord.value?.id === recordId) {
     deepLinkedRecordLinkSummaries.value = {
       ...deepLinkedRecordLinkSummaries.value,
+      [fieldId]: summaries,
+    }
+  }
+}
+
+// Native person (人员): mirror applyLocalLinkSummaries so a just-picked person shows its display
+// name immediately (grid + drawer) instead of a raw userId until the next refetch.
+function applyLocalPersonSummaries(recordId: string, fieldId: string, summaries: PersonSummary[]) {
+  grid.personSummaries.value = {
+    ...grid.personSummaries.value,
+    [recordId]: {
+      ...(grid.personSummaries.value[recordId] ?? {}),
+      [fieldId]: summaries,
+    },
+  }
+  if (deepLinkedRecord.value?.id === recordId) {
+    deepLinkedRecordPersonSummaries.value = {
+      ...deepLinkedRecordPersonSummaries.value,
       [fieldId]: summaries,
     }
   }
@@ -1278,6 +1335,62 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
   })
 
   peopleResolverCache.set(targetSheetId, promise)
+  return promise
+}
+
+// Native person (人员) import resolver — kind-aware switch (NOT resolvePeopleImportValue, which
+// returns People-sheet recordIds). Resolves each token to a member USERID by matching the sheet's
+// permission-candidate users on userId / label (name) / subtitle (email). Member-scoped: only the
+// candidate set the picker offers is resolvable; an unknown token fails the row (no egress).
+async function getNativePersonResolver(): Promise<ImportValueResolver> {
+  const sheetId = workbench.activeSheetId.value
+  const cached = nativePersonResolverCache.get(sheetId)
+  if (cached) return cached
+
+  const promise = (async (): Promise<ImportValueResolver> => {
+    const { items } = await workbench.client.listSheetPermissionCandidates(sheetId, { limit: 10000 })
+    const userIdByToken = new Map<string, string | null>()
+    const register = (token: string | null | undefined, userId: string) => {
+      if (!token) return
+      const key = normalizeImportLookupKey(token)
+      if (!key) return
+      const current = userIdByToken.get(key)
+      if (current !== undefined && current !== userId) {
+        userIdByToken.set(key, null) // ambiguous
+        return
+      }
+      userIdByToken.set(key, userId)
+    }
+    for (const item of items) {
+      if (item.subjectType !== 'user' || !item.isActive) continue
+      register(item.subjectId, item.subjectId)
+      register(item.label, item.subjectId)
+      register(item.subtitle ?? undefined, item.subjectId)
+    }
+
+    return async (rawValue: string, currentField?: MetaField): Promise<string[] | null> => {
+      const tokens = extractImportTokens(rawValue)
+      if (!tokens.length) return null
+      const resolved: string[] = []
+      for (const token of tokens) {
+        const key = normalizeImportLookupKey(token)
+        if (!key) continue
+        const match = userIdByToken.get(key)
+        if (match === null) throw new Error(isZh.value ? `匹配到多个人员："${token}"` : `Multiple people match "${token}"`)
+        if (typeof match === 'string') pushUniqueIds(resolved, [match])
+      }
+      if (!resolved.length) return null
+      if (currentField?.property?.limitSingleRecord !== false && resolved.length > 1) {
+        throw new Error(isZh.value ? `人员字段只允许一个人员：${rawValue}` : `Person field only allows one person: ${rawValue}`)
+      }
+      return resolved
+    }
+  })().catch((error) => {
+    nativePersonResolverCache.delete(sheetId)
+    throw error
+  })
+
+  nativePersonResolverCache.set(sheetId, promise)
   return promise
 }
 
@@ -1839,28 +1952,72 @@ async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: Li
   showSuccess(wb('toast.linkedRecordsUpdated', isZh.value))
 }
 
+// --- Native person (人员) picker ---
+function openPersonPicker(field: MetaField) {
+  personPickerField.value = field
+  personPickerRecordId.value = selectedRecordId.value
+  personPickerCurrentValue.value = selectedRecordResolved.value?.data[field.id] ?? null
+  personPickerVisible.value = true
+}
+function onGridPersonPicker(ctx: { recordId: string; field: MetaField }) {
+  const row = grid.rows.value.find((r) => r.id === ctx.recordId)
+  personPickerField.value = ctx.field
+  personPickerRecordId.value = ctx.recordId
+  personPickerCurrentValue.value = row?.data[ctx.field.id] ?? null
+  personPickerVisible.value = true
+}
+async function onPersonPickerConfirm(payload: { userIds: string[]; summaries: PersonSummary[] }) {
+  personPickerVisible.value = false
+  if (!personPickerRecordId.value || !personPickerField.value) return
+  const recordId = personPickerRecordId.value
+  if (!ensureCanEditRecord(recordId)) return
+  const fieldId = personPickerField.value.id
+  const row = grid.rows.value.find((r) => r.id === recordId)
+  if (row) {
+    await grid.patchCell(row.id, fieldId, payload.userIds, row.version)
+    if (grid.error.value) {
+      showError(grid.error.value)
+      return
+    }
+    applyLocalPersonSummaries(recordId, fieldId, payload.summaries)
+  } else if (selectedRecordResolved.value?.id === recordId) {
+    try {
+      const result = await workbench.client.patchRecords({
+        sheetId: workbench.activeSheetId.value || undefined,
+        viewId: workbench.activeViewId.value || undefined,
+        changes: [{ recordId, fieldId, value: payload.userIds, expectedVersion: selectedRecordResolved.value.version }],
+      })
+      const nextVersion = result.updated?.find((item) => item.recordId === recordId)?.version ?? selectedRecordResolved.value.version + 1
+      deepLinkedRecord.value = {
+        ...selectedRecordResolved.value,
+        version: nextVersion,
+        data: { ...selectedRecordResolved.value.data, [fieldId]: payload.userIds },
+      }
+      applyLocalPersonSummaries(recordId, fieldId, payload.summaries)
+    } catch (e: any) {
+      showError(e.message ?? wb('toast.linkedRecordsUpdateFailed', isZh.value))
+      return
+    }
+  } else {
+    return
+  }
+  showSuccess(wb('toast.linkedRecordsUpdated', isZh.value))
+}
+
 // --- Field management ---
 async function onCreateField(input: { sheetId: string; name: string; type: MetaFieldCreateType | string; property?: Record<string, unknown> }) {
   try {
-    if (input.type === 'person') {
-      const preset = await workbench.client.preparePersonField(input.sheetId)
-      await workbench.client.createField({
-        sheetId: input.sheetId,
-        name: input.name,
-        type: 'link',
-        property: {
-          ...preset.fieldProperty,
-          ...(input.property ?? {}),
-        },
-      })
-    } else {
-      await workbench.client.createField({
-        sheetId: input.sheetId,
-        name: input.name,
-        type: input.type as MetaFieldType,
-        property: input.property,
-      })
-    }
+    // Native person (人员, design 2026-06-16): NEWLY-created person fields are now first-class
+    // native `type:'person'` (value = userId[]) — sent straight through `createField`, NOT rewritten
+    // to a `link`+refKind:user against the system People sheet. COEXISTENCE: this changes only the
+    // NEW-field default; `preparePersonField`/the People-sheet preset stay intact for existing legacy
+    // link-backed person fields + direct API callers (now vestigial on this create path).
+    await workbench.client.createField({
+      sheetId: input.sheetId,
+      name: input.name,
+      type: input.type as MetaFieldType,
+      property: input.property,
+    })
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
   } catch (e: any) { showError(e.message ?? wb('toast.fieldCreateFailed', isZh.value)) }
@@ -2269,6 +2426,7 @@ function discardWorkbenchDraftsForExternalContextChange() {
   selectedRecordId.value = null
   deepLinkedRecord.value = null
   deepLinkedRecordLinkSummaries.value = {}
+  deepLinkedRecordPersonSummaries.value = {}
   deepLinkedRecordAttachmentSummaries.value = {}
   deepLinkedRecordCommentsScope.value = null
   showImportModal.value = false
@@ -2939,6 +3097,7 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     })
     deepLinkedRecord.value = ctx.record
     deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
+    deepLinkedRecordPersonSummaries.value = ctx.personSummaries ?? {}
     deepLinkedRecordAttachmentSummaries.value = ctx.attachmentSummaries ?? {}
     deepLinkedRecordCommentsScope.value = ctx.commentsScope
     deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
@@ -2953,6 +3112,7 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
 function clearDeepLinkedRecordState() {
   deepLinkedRecord.value = null
   deepLinkedRecordLinkSummaries.value = {}
+  deepLinkedRecordPersonSummaries.value = {}
   deepLinkedRecordAttachmentSummaries.value = {}
   deepLinkedRecordCommentsScope.value = null
   deepLinkedRecordFieldPermissions.value = {}
@@ -2982,6 +3142,7 @@ async function mergeRemoteRecordContext(recordId: string): Promise<boolean> {
     if (selectedRecordId.value === recordId) {
       deepLinkedRecord.value = ctx.record
       deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
+      deepLinkedRecordPersonSummaries.value = ctx.personSummaries ?? {}
       deepLinkedRecordAttachmentSummaries.value = ctx.attachmentSummaries ?? {}
       deepLinkedRecordCommentsScope.value = ctx.commentsScope
       deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
@@ -3048,6 +3209,7 @@ async function refreshSelectedRecordContext(recordId: string) {
     if (selectedRecordId.value !== recordId) return
     deepLinkedRecord.value = ctx.record
     deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
+    deepLinkedRecordPersonSummaries.value = ctx.personSummaries ?? {}
     deepLinkedRecordAttachmentSummaries.value = ctx.attachmentSummaries ?? {}
     deepLinkedRecordCommentsScope.value = ctx.commentsScope
     deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
