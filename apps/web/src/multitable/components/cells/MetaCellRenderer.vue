@@ -72,13 +72,34 @@
       </span>
     </template>
 
-    <!-- link -->
+    <!-- link (non-person; isPersonLink branch above already caught user-refKind
+         links). A real linked-record chip is clickable to peek the foreign
+         record in a popover. @click.stop so it does NOT bubble to the cell's
+         own select-record click (MetaGridTable td @click.stop=onCellClick). The
+         __link_summary__ sentinel (no real id resolved) is NOT clickable — it
+         must never call getRecord (would 404). The affordance only appears when
+         the host supplied fetchRecord. -->
     <template v-else-if="field.type === 'link'">
-      <span
-        v-for="item in linkItems"
-        :key="item.id"
-        class="meta-cell-renderer__link"
-      >{{ item.display }}</span>
+      <template v-for="item in linkItems" :key="item.id">
+        <button
+          v-if="isClickableLinkChip(item.id)"
+          type="button"
+          class="meta-cell-renderer__link meta-cell-renderer__link--clickable"
+          data-test="link-chip"
+          @click.stop="openLinkedRecord(item.id)"
+        >{{ item.display }}</button>
+        <span
+          v-else
+          class="meta-cell-renderer__link"
+        >{{ item.display }}</span>
+      </template>
+      <MetaLinkedRecordPopover
+        v-if="props.fetchRecord"
+        :visible="openLinkRecordId !== null"
+        :record-id="openLinkRecordId"
+        :fetch-record="props.fetchRecord!"
+        @close="openLinkRecordId = null"
+      />
     </template>
 
     <!-- attachment -->
@@ -183,9 +204,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import type { MetaAttachment, MetaField, LinkedRecordSummary } from '../../types'
+import { computed, ref } from 'vue'
+import type { MetaAttachment, MetaField, LinkedRecordSummary, MetaRecordContext } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
+import MetaLinkedRecordPopover from '../MetaLinkedRecordPopover.vue'
 import { useLocale } from '../../../composables/useLocale'
 import { isPersonField } from '../../utils/link-fields'
 import { formatFieldDisplay } from '../../utils/field-display'
@@ -195,9 +217,39 @@ import { percentGaugeAria, ratingGaugeAria } from '../../utils/meta-core-labels'
 import { qrSvgFromText } from '../../utils/qr-code'
 import { isRichLongTextField, richLongTextToPlainTextFE } from '../../utils/rich-longtext'
 
-const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[]; attachmentSummaries?: MetaAttachment[]; buttonPending?: boolean }>()
+const props = defineProps<{
+  field: MetaField
+  value: unknown
+  linkSummaries?: LinkedRecordSummary[]
+  attachmentSummaries?: MetaAttachment[]
+  buttonPending?: boolean
+  // A3: when the host supplies a cross-sheet record fetcher (getRecord with NO
+  // sheetId), non-person link chips become clickable and peek the foreign
+  // record in a popover. Default undefined → no affordance (keeps the renderer
+  // pure for the ~6 reuse surfaces that do not opt in). Nesting is capped at 1
+  // because the popover renders its inner MetaCellRenderers WITHOUT this prop.
+  fetchRecord?: (recordId: string) => Promise<MetaRecordContext>
+}>()
 const emit = defineEmits<{ (e: 'run'): void }>()
 const { isZh } = useLocale()
+
+// Sentinel id produced by linkItems when no real linked-record id resolved
+// (summary fallback). Must never be passed to getRecord (would 404).
+const LINK_SUMMARY_SENTINEL = '__link_summary__'
+
+// A3 popover state: the foreign recordId currently expanded, or null.
+const openLinkRecordId = ref<string | null>(null)
+
+// A chip is clickable only when the host opted in (fetchRecord) AND the chip
+// carries a real linked-record id (not the summary sentinel).
+function isClickableLinkChip(id: string): boolean {
+  return Boolean(props.fetchRecord) && id !== LINK_SUMMARY_SENTINEL
+}
+
+function openLinkedRecord(id: string): void {
+  if (!isClickableLinkChip(id)) return
+  openLinkRecordId.value = id
+}
 
 // B1-b button field: label + variant from the field property; the empty-label
 // fallback is the field name (never a hardcoded literal — strict-zero i18n) so
@@ -282,7 +334,7 @@ const linkItems = computed(() => {
     isZh: isZh.value,
   })
   if (!linkIds.value.length) return []
-  return [{ id: '__link_summary__', display: fallbackLabel }]
+  return [{ id: LINK_SUMMARY_SENTINEL, display: fallbackLabel }]
 })
 const isPersonLink = computed(() => isPersonField(props.field))
 
@@ -396,6 +448,11 @@ const conditionalClass = computed(() => {
   display: inline-block; padding: 1px 6px; background: #ecf5ff;
   color: #409eff; border-radius: 3px; font-size: 11px; margin-right: 4px;
 }
+/* A3 clickable link chip: render as a button but keep the chip look. */
+button.meta-cell-renderer__link--clickable {
+  border: none; line-height: inherit; font-family: inherit; cursor: pointer;
+}
+button.meta-cell-renderer__link--clickable:hover { background: #d9ecff; }
 .meta-cell-renderer__date { color: #606266; }
 .meta-cell-renderer__date-time {
   color: #475569;

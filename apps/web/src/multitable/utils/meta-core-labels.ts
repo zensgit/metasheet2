@@ -80,6 +80,12 @@ export type MetaCoreLabelKey =
   | 'cell.uploadFailed' | 'cell.removeFailed' | 'cell.clearFailed'
   // --- MetaCellEditor AI shortcut run button (A3-T6) ---
   | 'cell.aiRun' | 'cell.aiRunning'
+  // --- Linked-record popover (A3): clickable link chip → foreign record peek ---
+  | 'linkedRecord.title'
+  | 'linkedRecord.loading'
+  | 'linkedRecord.error'
+  | 'linkedRecord.close'
+  | 'linkedRecord.empty'
   // --- Auth chrome (file-location closure tightening per #1803) ---
   | 'auth.notAuthenticated'
 
@@ -243,6 +249,15 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   // A3-T6: in-cell AI run trigger (host opt-in; RBAC rides the editor-open invariant).
   'cell.aiRun': { en: 'Run AI', zh: '运行 AI' },
   'cell.aiRunning': { en: 'Running AI...', zh: 'AI 处理中...' },
+
+  // A3 linked-record popover: a clickable link chip expands the foreign record
+  // read-only in a popover. Title is static chrome; `error` is a frontend
+  // fallback only — a backend error.message wins via `e.message ?? fallback`.
+  'linkedRecord.title': { en: 'Linked record', zh: '关联记录' },
+  'linkedRecord.loading': { en: 'Loading record...', zh: '正在加载记录...' },
+  'linkedRecord.error': { en: 'Failed to load linked record', zh: '加载关联记录失败' },
+  'linkedRecord.close': { en: 'Close', zh: '关闭' },
+  'linkedRecord.empty': { en: 'No fields to show', zh: '没有可显示的字段' },
 }
 
 export function metaCoreLabel(key: MetaCoreLabelKey, isZh: boolean): string {
