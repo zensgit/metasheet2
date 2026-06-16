@@ -92,6 +92,12 @@ Automation code owns:
 Approval code must not directly settle automation jobs except through the
 completion-event bridge path.
 
+Execution-style steps that perform side effects — e.g. a "handler" step that
+disburses payment, applies a seal, or archives a record — are automation work
+reached through the bridge, **not** a new approval node type. Putting such
+behavior inside the approval graph would move side-effect authority into the
+approval runtime and is out of bounds without an explicit owner decision.
+
 ### 3.3 Workflow Designer Owns
 
 Workflow Designer code owns:
@@ -112,7 +118,7 @@ Allowed bridge contracts:
 | Bridge | Direction | Status |
 |---|---|---|
 | `start_approval` action | Automation -> Approval | Landed runtime; deployed/operator smoke still gates operational sign-off. |
-| Approval completion event | Approval -> Automation | Landed typed/redacted/idempotent event path. |
+| Approval completion event | Approval -> Automation | Landed typed/redacted event with an idempotent durable claim; delivery itself is best-effort — see §4.1. |
 | Approval result backwrite | Approval/Automation -> Multitable record | Scope-gated only; runtime requires W6 smoke PASS or named owner unlock plus concrete field mapping. |
 | BPMN compile preview | BPMN draft -> preview of automation/approval shape | Landed as read-only preview; no live execution. |
 
@@ -127,6 +133,29 @@ Disallowed implicit bridges:
   mapping and idempotency.
 - Automation reading approval private form/comment/runtime graph data outside
   the approved event or bridge contract.
+
+### 4.1 Cross-runtime delivery semantics
+
+The completion-event bridge is **durable-claim + best-effort delivery**. The
+authoritative step is an idempotent compare-and-swap on a durable bridge row
+(`claimCompletion` flips `status='pending' -> 'resumed'` exactly once), which
+makes *double* delivery safe. The `eventBus` emit is fire-and-forget and is a
+**nudge, never the system of record** — a lost emit (e.g. a crash between the
+approval COMMIT and the emit) currently has **no reconciler backstop** and
+strands the bridge row. That is tolerable for a resumable workflow job; it is
+**not** tolerable for an irreversible side effect.
+
+Rules for any new cross-runtime side-effect bridge (notably W7 backwrite):
+
+- The side effect must be claimed idempotently from a durable row, never run
+  directly inside a best-effort event handler.
+- The event bus is an optimization; correctness must not depend on delivery.
+- The bridge must ship a reconciler/backstop that re-derives outcomes for lost
+  events (e.g. sweep stale `pending` rows against the approval terminal state).
+
+Known debt: the existing completion-event path has the durable idempotent claim
+but no lost-event reconciler. Close that gap before any irreversible side
+effect (W7) rides it.
 
 ## 5. Legacy BPMN Runtime Fence
 
@@ -167,6 +196,9 @@ Any PR touching workflow/approval/automation convergence should answer:
    and C1 `WorkflowJob` state?
 7. Is unsupported shape handled by read-only/gap-report/fail-closed behavior
    rather than silent flattening?
+8. If this is a side-effect bridge, does it claim from a durable row and ship a
+   lost-event reconciler, rather than executing inside a best-effort event
+   handler?
 
 If a PR cannot answer these, it should stop at a scope-gate.
 
