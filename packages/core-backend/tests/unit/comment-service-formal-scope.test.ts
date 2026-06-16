@@ -74,6 +74,13 @@ function makeCommentRow(overrides: Record<string, unknown> = {}) {
     spreadsheet_id: 'sheet_scope',
     row_id: 'rec_scope',
     field_id: 'fld_scope',
+    // Canonical container/target columns (mirror spreadsheet_id/row_id/field_id) so the
+    // createComment readback row matches the real DB shape mapRowToComment reads. This is a
+    // field-level fixture (target_field_id non-null), complementing the record-level coverage
+    // #2685 added in comment-service.test.ts — drift-prevention follow-up.
+    container_id: 'sheet_scope',
+    target_id: 'rec_scope',
+    target_field_id: 'fld_scope',
     content: 'Scope check',
     author_id: 'user_scope',
     parent_id: null,
@@ -100,7 +107,7 @@ describe('CommentService formalized scope writes', () => {
 
     const service = new CommentService(makeCollabService(), makeLogger())
 
-    await service.createComment({
+    const created = await service.createComment({
       spreadsheetId: 'sheet_scope',
       rowId: 'rec_scope',
       fieldId: 'fld_scope',
@@ -118,5 +125,12 @@ describe('CommentService formalized scope writes', () => {
       container_type: 'meta_sheet',
       container_id: 'sheet_scope',
     })
+
+    // Fixture-vs-wire read guard: the createComment readback runs mapRowToComment, which must
+    // surface the canonical container/target aliases. This locks the FIELD-LEVEL read surface
+    // (target_field_id non-null) — complementing #2685's record-level (null) assertion.
+    expect(created.containerId).toBe('sheet_scope')
+    expect(created.targetId).toBe('rec_scope')
+    expect(created.targetFieldId).toBe('fld_scope')
   })
 })

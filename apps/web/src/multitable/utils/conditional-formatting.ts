@@ -539,11 +539,13 @@ const EMPTY_SCALE_MAP: FieldScaleMap = Object.freeze({
 }) as FieldScaleMap
 
 /**
- * Pre-compute data-bar presentation per (fieldId, recordId). Mirrors the
- * backend `buildFieldScaleMap`: min/max over the passed records (auto) or the
- * rule's fixed range; each finite value → 0..100 fill; degenerate range → full
- * bar; negatives take negativeColor; non-numeric skipped; first rule per field
- * wins. Caller passes the already-loaded/masked rows (client-side discipline).
+ * Pre-compute scale presentation (data-bar / color-scale / icon-set) per
+ * (fieldId, recordId). Mirrors the backend `buildFieldScaleMap`: min/max over
+ * the passed records (auto) or the rule's fixed range; dataBar → 0..100 fill
+ * (degenerate range → full bar, negatives take negativeColor); colorScale →
+ * interpolated scaleColor; iconSet → iconKey bucket; non-numeric skipped; first
+ * rule per field wins. The grid renders all three (MetaGridTable, #2640/#2680).
+ * Caller passes the already-loaded/masked rows (client-side discipline).
  */
 export function buildFieldScaleMap(
   rules: ConditionalFormattingScaleRule[],

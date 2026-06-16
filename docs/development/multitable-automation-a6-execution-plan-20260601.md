@@ -197,8 +197,10 @@ Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
 > can run `parallel_branch` with `joinMode: 'all'`, persist C1 parent/branch-child fan-out/fan-in
 > lineage, and aggregate fail/skip semantics; the editor can author the constrained `parallel_branch`
 > shape with `workflow_job_v1` auto-lock; admin runs detail can explain branch labels and child
-> jobs. **Still deferred:** A6-3-3 backend/frontend runtime, A6-3-5 join-any/cancellation,
-> public webhook/token emitter, live BPMN runtime, and W7 result backwrite runtime. (A6-4c
+> jobs. **Still deferred:** A6-3-3b frontend authoring (A6-3-3a backend runtime LANDED #2626 `8b0468920`),
+> A6-3-5 join-any/cancellation, public webhook/token emitter, live BPMN runtime (note: the legacy
+> `BPMNWorkflowEngine` is still API-live at `/api/workflow` but outside the v1 convergence target —
+> owner decision needed), and W7 result backwrite (no runtime/implementation refs; owner-gated). (A6-4c
 > read-only compile-preview UI landed #2604.)
 > Design-lock detail below retained for the record.
 

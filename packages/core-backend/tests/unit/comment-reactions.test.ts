@@ -92,6 +92,10 @@ beforeEach(async () => {
 function makeCommentRow(overrides: Record<string, unknown> = {}) {
   return {
     id: 'cmt_test-1', spreadsheet_id: 'sheet-1', row_id: 'row-1', field_id: null,
+    // Canonical container/target columns (mirror spreadsheet_id/row_id/field_id) so
+    // the readback row matches the real DB shape mapRowToComment reads — drift-prevention
+    // follow-up to #2685.
+    container_id: 'sheet-1', target_id: 'row-1', target_field_id: null,
     content: 'Hello world', author_id: 'user-author', parent_id: null, resolved: false,
     created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-01T00:00:00.000Z',
     mentions: '[]', ...overrides,

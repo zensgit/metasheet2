@@ -120,3 +120,90 @@ describe('MetaGridTable — data-bar conditional formatting (A5-1c render)', () 
     }
   })
 })
+
+describe('MetaGridTable — color scale (A5-2) + icon set (A5-3) render', () => {
+  it('paints the cell background with the colorScale color (no gradient)', () => {
+    const colorScale = buildFieldScaleMap([
+      sanitizeScaleRule({
+        id: 'cs1', fieldId: 'amount', kind: 'colorScale', order: 0, range: { mode: 'auto' },
+        colorScale: { stops: [{ at: 'min', color: '#000000' }, { at: 'max', color: '#ffffff' }] },
+      })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: colorScale })
+    const cells = dataCells(root)
+    // amount 0 → min stop #000000, 100 → max stop #ffffff, 50 → #808080
+    expect(cells[0].style.backgroundColor).toBe('rgb(0, 0, 0)')
+    expect(cells[2].style.backgroundColor).toBe('rgb(128, 128, 128)')
+    expect(cells[4].style.backgroundColor).toBe('rgb(255, 255, 255)')
+    expect(cells[2].style.backgroundImage).toBe('') // colorScale is a solid fill, not a bar
+  })
+
+  it('renders an icon glyph for each bucket of an iconSet rule', () => {
+    const iconSet = buildFieldScaleMap([
+      sanitizeScaleRule({
+        id: 'is1', fieldId: 'amount', kind: 'iconSet', order: 0, range: { mode: 'auto' },
+        iconSet: { set: 'arrows3', thresholds: [10, 20] },
+      })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: iconSet })
+    const cells = dataCells(root)
+    // amount 0 (<10) → index 0 ↓ ; 50 (>=20) → index 2 ↑ ; 100 (>=20) → index 2 ↑
+    const icon = (cell: HTMLElement) => cell.querySelector('[data-test="cell-scale-icon"]')
+    expect(icon(cells[0])?.textContent).toBe('↓')
+    expect(icon(cells[2])?.textContent).toBe('↑')
+    expect(icon(cells[4])?.textContent).toBe('↑')
+  })
+
+  it('renders no icon on a field with no scale rule', () => {
+    const iconSet = buildFieldScaleMap([
+      sanitizeScaleRule({
+        id: 'is1', fieldId: 'amount', kind: 'iconSet', order: 0, range: { mode: 'auto' },
+        iconSet: { set: 'arrows3', thresholds: [10, 20] },
+      })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: iconSet })
+    const cells = dataCells(root)
+    // cells[1] is r1.label (no scale rule) → no icon
+    expect(cells[1].querySelector('[data-test="cell-scale-icon"]')).toBeNull()
+  })
+
+  // Contrast fix (surfaced by the #2689 browser lane): cell-renderer number
+  // sign-colors go low-contrast over scale fills, so scale-fill cells get a
+  // luminance-picked readable text var + a class the :deep rule keys on.
+  it('sets a luminance-picked readable text var on color-scale cells (dark fill → white, light fill → dark)', () => {
+    const colorScale = buildFieldScaleMap([
+      sanitizeScaleRule({
+        id: 'cs1', fieldId: 'amount', kind: 'colorScale', order: 0, range: { mode: 'auto' },
+        colorScale: { stops: [{ at: 'min', color: '#000000' }, { at: 'max', color: '#ffffff' }] },
+      })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: colorScale })
+    const cells = dataCells(root)
+    // cells[0] = amount 0 → fill #000000 (dark) → white text var
+    expect(cells[0].classList.contains('meta-grid__cell--scale-fill')).toBe(true)
+    expect(cells[0].style.getPropertyValue('--meta-grid-scale-text-color')).toBe('#ffffff')
+    // cells[4] = amount 100 → fill #ffffff (light) → dark text var
+    expect(cells[4].style.getPropertyValue('--meta-grid-scale-text-color')).toBe('#111827')
+  })
+
+  it('sets a default dark text var + scale-fill class on data-bar cells', () => {
+    const dataBar = buildFieldScaleMap([
+      sanitizeScaleRule({ id: 'b1', fieldId: 'amount', kind: 'dataBar', order: 0, range: { mode: 'auto' }, dataBar: { color: '#2196f3' } })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: dataBar })
+    const cells = dataCells(root)
+    expect(cells[2].classList.contains('meta-grid__cell--scale-fill')).toBe(true)
+    expect(cells[2].style.getPropertyValue('--meta-grid-scale-text-color')).toBe('#111827')
+  })
+
+  it('does not set the scale-text var or class on a field with no scale rule', () => {
+    const dataBar = buildFieldScaleMap([
+      sanitizeScaleRule({ id: 'b1', fieldId: 'amount', kind: 'dataBar', order: 0, range: { mode: 'auto' }, dataBar: { color: '#2196f3' } })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: dataBar })
+    const cells = dataCells(root)
+    // cells[1] = r1.label (no rule) → no var, no class
+    expect(cells[1].classList.contains('meta-grid__cell--scale-fill')).toBe(false)
+    expect(cells[1].style.getPropertyValue('--meta-grid-scale-text-color')).toBe('')
+  })
+})

@@ -390,9 +390,10 @@ export function evaluateConditionalFormattingRules(
 // same client-side discipline as the A2 export picker; a full-column server
 // aggregate is a separate gated follow-up). All three kinds are CONTRACT-level
 // here: `dataBar` (A5-1), `colorScale` (A5-2, by-name stop interpolation),
-// `iconSet` (A5-3, absolute-threshold bucketing). The data-bar GRADIENT render
-// shipped (#2640); the colorScale/iconSet RENDER is browser-gated future work —
-// builders produce scaleColor/iconKey but no cell drawing here.
+// `iconSet` (A5-3, absolute-threshold bucketing). All three render in the grid:
+// data-bar gradient (#2640), colorScale cell background + iconSet glyph (#2680).
+// The builders here only produce barPct/scaleColor/iconKey; the cell drawing
+// lives in MetaGridTable (cellStyle + cellScaleIcon), not in this service.
 // ===========================================================================
 
 export const CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT = 20
@@ -604,11 +605,12 @@ const EMPTY_SCALE_MAP: FieldScaleMap = Object.freeze({
 }) as FieldScaleMap
 
 /**
- * Pre-compute data-bar presentation per (fieldId, recordId). For each enabled
- * scale rule, compute the field's [min,max] over `records` (auto) or use the
- * rule's fixed range, then map each finite value to a fill percent. Records
- * whose value is non-numeric are skipped (no bar). A degenerate range
- * (min === max) renders a full bar for every present value.
+ * Pre-compute scale presentation (data-bar / color-scale / icon-set) per
+ * (fieldId, recordId). For each enabled scale rule, compute the field's
+ * [min,max] over `records` (auto) or use the rule's fixed range, then per kind:
+ * dataBar → fill percent (degenerate range → full bar); colorScale →
+ * interpolated scaleColor; iconSet → iconKey bucket. Records whose value is
+ * non-numeric are skipped. The grid renders all three (MetaGridTable, #2640/#2680).
  */
 export function buildFieldScaleMap(
   rules: ConditionalFormattingScaleRule[],

@@ -1,6 +1,6 @@
 # 数据库连接与系统对接交付收尾 TODO
 
-状态日期: 2026-06-15
+状态日期: 2026-06-16
 
 本文只跟踪“数据库连接能力接入系统并最终可交付”的剩余开发量。它不替代各功能线自己的设计文档/验证文档；每个 runtime 写能力仍然必须单独 opt-in、单独 PR、单独实体机验证。
 
@@ -13,7 +13,9 @@
   read-only/source-only 边界提示、SQL bridge values-free 错误提示）。
   Large-BOM #2425 的 scoped C3/C4 实体机全链路验证已 PASS/CLOSED；Windows 短 TEMP zip 部署 caveat
   另由 #2642 跟踪，不阻塞 runtime gate。
-  C5 K3/MSSQL smoke harness 已发包并打开 #2670，等待实体机 values-free smoke 证据。
+  C5 K3/MSSQL smoke harness 已发包并打开 #2670；#2675 / #2684 已修复两轮包内容与 deploy
+  entry blocker；`dea391a1` 包的实体机复测已把 generic smoke 推进到真实 SQL Server
+  connection 层，当前 HOLD 在 operator/runtime SQL 登录、数据库 scope、表权限确认。
 - 不建议: 现在直接开 C6。C6 是最大风险刀，必须等只读链路、增量链路、K3 generic seam 都稳定后再开；
   当前 C6 仍以 #2670 通过为前置 gate。
 
@@ -25,7 +27,7 @@
 | C2-close | 只读数据库链路 smoke 收口 | done (issue #2600) | 证明当前 read-only bridge 可稳定测试 | 实体机配置漂移 |
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
-| C5 | K3 generic MSSQL seam | C5-0..C5-4a done; C5-4b package published, issue #2670 pending | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
+| C5 | K3 generic MSSQL seam | C5-0..C5-4a done; C5-4b package loop patched through #2684; #2670 active HOLD on SQL login/database/table scope | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
 | Release | 总包 + 实体机验收 | gated | 交付签收 | 包内容/部署/证据不完整 |
 
@@ -228,7 +230,10 @@ TODO:
 C5-1 latent helper contract 已落地为 `@metasheet/mssql-readonly-utils`；C5-2 已把 generic `MSSQLAdapter`
 的 endpoint/TLS/identifier 稳定面接到 helper；C5-3 已把 K3 default SQL Server executor 的 endpoint/timeout/limit/simple-select
 接到 helper，同时保留 K3 strict identifier/read/write guard。C5-4a smoke harness 已落地，#2669 修复了 helper-backed
-executor 的 on-prem package/verifier seam。C5-4b 实体机 smoke 已发包并打开 #2670，等待实体机 evidence。
+executor 的 on-prem package/verifier seam。C5-4b 实体机 smoke 已打开 #2670；#2675 修复包内容缺少 runbook /
+generic smoke script，#2684 修复 packaged generic smoke 的 deploy `dist` adapter entrypoint。`dea391a1`
+包的实体机 evidence 确认 generic smoke 不再在 SQL 前置 entrypoint 失败，已到达 compiled adapter +
+SQL Server connection 层；当前剩余 blocker 是 operator/runtime SQL 登录、数据库 scope、表权限确认。
 
 边界:
 
@@ -288,11 +293,30 @@ TODO:
   - 这是 C5-4b 发包前置修复；不改变 runtime 行为、不打开任何 K3 写能力。
 - [ ] C5-4b: 实体机 K3/MSSQL smoke。
   - issue: #2670 `[Data Source] C5 K3/MSSQL entity-machine smoke gate`。
-  - release: `multitable-onprem-datasource-c5-k3-mssql-smoke-20260615-8cd6ca7ef`。
-  - package: `metasheet-multitable-onprem-v2.5.0-datasource-c5-k3-mssql-smoke-20260615-8cd6ca7ef`。
-  - package verify: assetCount=10；`SHA256SUMS` OK；tgz/zip verify `ok=true`
+  - first package attempt: `multitable-onprem-datasource-c5-k3-mssql-smoke-20260615-8cd6ca7ef`
+    (`metasheet-multitable-onprem-v2.5.0-datasource-c5-k3-mssql-smoke-20260615-8cd6ca7ef`)。
+    Entity-machine result: package deploy/health OK, but package omitted the generic SQL smoke script and C5 runbook。
+  - [x] #2675 / squash `3d789daef`: package now includes the generic SQL smoke script and C5 K3/MSSQL smoke
+    runbook; verifier hard-checks both smoke scripts, runbook commands, legacy TLS knobs, and no-write boundary。
+    Entity-machine result: package content fixed, but generic smoke failed before SQL connectivity because packaged
+    script imported TS source adapter path absent from deploy root。
+  - [x] #2684 / squash `dea391a1`: generic smoke loads the deployable compiled adapter
+    `packages/core-backend/dist/src/data-adapters/MSSQLAdapter.js` first; TS source adapter path is local/dev fallback
+    only; verifier requires the compiled deployable adapter and dist-first loader markers。
+  - active release: `multitable-onprem-datasource-c5-generic-smoke-entry-20260616-dea391a1`。
+  - active package: `metasheet-multitable-onprem-v2.5.0-datasource-c5-generic-smoke-entry-20260616-dea391a1`。
+  - active release workflow: `https://github.com/zensgit/metasheet2/actions/runs/27590977500`。
+  - package verify: assetCount=10；`SHA256SUMS` OK；tgz/zip verify reports published
     with `checksum,required-content,deployability-contract,no-github-links`。
-  - 同一批准环境中运行 generic SQL Server smoke + K3 SQL Server executor smoke。
+  - [x] 实体机部署 active package 后，在同一批准环境中运行 generic SQL Server smoke + K3 SQL Server executor
+    smoke；package fingerprint=`dea391a1`，deploy/health/package-content 均通过。
+  - [x] generic smoke 不再以 `script_runtime_import_missing_source_asset` / `MODULE_NOT_FOUND`
+    在 SQL connection 前失败；它已到达 compiled deployable `MSSQLAdapter` + SQL Server connection 层。
+  - [ ] operator-approved SQL 登录、数据库 scope、表权限确认后，重跑 generic SQL Server smoke；
+    当前结果为 `login_failed`，不是 package/entrypoint 问题。
+  - [ ] K3 SQL Server executor smoke 仍需 PASS；当前 public error 仍为 `SQLSERVER_TEST_FAILED`。
+  - saved MetaSheet SQL Server source `connected` 只是必要条件，不是 C5 PASS；official smoke 更严格，
+    会携带明确 read target 并在实体机 runtime adapter path 下验证。
   - 只回传 package fingerprint、status、TLS knob 名称/布尔、operator-configured object/table 名、计数；
     不回传 credentials、connection string、raw SQL、row values、K3 payload。
 

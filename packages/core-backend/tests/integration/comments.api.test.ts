@@ -12,11 +12,19 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
   })
 }
 
+// The CREATE TABLE IF NOT EXISTS string columns below mirror the REAL migration
+// shapes so a fresh DB (local run before db:migrate, or a brand-new CI database)
+// tests the same column types the app runs against — text + timestamptz for
+// users / meta_bases / meta_sheets / meta_views / meta_comment_reads /
+// meta_comment_reactions (their migrations are kysely text/timestamptz). The lone
+// exception is meta_comments, whose production shape is varchar(50) + plain
+// timestamp because its earliest-ordered `formalize` migration wins the
+// IF NOT EXISTS race (zzzz20260318 < zzzz20260326), so that block stays varchar(50).
 async function ensureCommentsTables() {
   const pool = poolManager.get()
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
-      id varchar(50) PRIMARY KEY,
+      id text PRIMARY KEY,
       email text NOT NULL,
       name text,
       password_hash text NOT NULL DEFAULT '',
@@ -25,39 +33,39 @@ async function ensureCommentsTables() {
       avatar_url text,
       is_active boolean NOT NULL DEFAULT true,
       is_admin boolean NOT NULL DEFAULT false,
-      last_login_at timestamp,
-      created_at timestamp DEFAULT now(),
-      updated_at timestamp DEFAULT now()
+      last_login_at timestamptz,
+      created_at timestamptz DEFAULT now(),
+      updated_at timestamptz DEFAULT now()
     );
   `)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS meta_bases (
-      id varchar(50) PRIMARY KEY,
+      id text PRIMARY KEY,
       name text NOT NULL,
       icon text,
       color text,
       owner_id text,
       workspace_id text,
-      created_at timestamp DEFAULT now(),
-      updated_at timestamp DEFAULT now(),
-      deleted_at timestamp
+      created_at timestamptz DEFAULT now(),
+      updated_at timestamptz DEFAULT now(),
+      deleted_at timestamptz
     );
   `)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS meta_sheets (
-      id varchar(50) PRIMARY KEY,
-      base_id varchar(50),
+      id text PRIMARY KEY,
+      base_id text,
       name text NOT NULL,
       description text,
-      created_at timestamp DEFAULT now(),
-      updated_at timestamp DEFAULT now(),
-      deleted_at timestamp
+      created_at timestamptz DEFAULT now(),
+      updated_at timestamptz DEFAULT now(),
+      deleted_at timestamptz
     );
   `)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS meta_views (
-      id varchar(50) PRIMARY KEY,
-      sheet_id varchar(50) NOT NULL,
+      id text PRIMARY KEY,
+      sheet_id text NOT NULL,
       name text NOT NULL,
       type text NOT NULL,
       filter_info jsonb DEFAULT '{}'::jsonb,
@@ -65,8 +73,8 @@ async function ensureCommentsTables() {
       group_info jsonb DEFAULT '{}'::jsonb,
       hidden_field_ids jsonb DEFAULT '[]'::jsonb,
       config jsonb DEFAULT '{}'::jsonb,
-      created_at timestamp DEFAULT now(),
-      updated_at timestamp DEFAULT now()
+      created_at timestamptz DEFAULT now(),
+      updated_at timestamptz DEFAULT now()
     );
   `)
   await pool.query(`
@@ -86,19 +94,19 @@ async function ensureCommentsTables() {
   `)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS meta_comment_reads (
-      comment_id varchar(50) NOT NULL,
-      user_id varchar(50) NOT NULL,
-      read_at timestamp DEFAULT now(),
-      created_at timestamp DEFAULT now(),
+      comment_id text NOT NULL,
+      user_id text NOT NULL,
+      read_at timestamptz DEFAULT now(),
+      created_at timestamptz DEFAULT now(),
       PRIMARY KEY (comment_id, user_id)
     );
   `)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS meta_comment_reactions (
-      comment_id varchar(50) NOT NULL,
-      user_id varchar(50) NOT NULL,
+      comment_id text NOT NULL,
+      user_id text NOT NULL,
       emoji text NOT NULL,
-      created_at timestamp DEFAULT now(),
+      created_at timestamptz DEFAULT now(),
       PRIMARY KEY (comment_id, user_id, emoji)
     );
   `)
@@ -118,8 +126,12 @@ describe('Comments API', () => {
 
   beforeAll(async () => {
     process.env.RBAC_BYPASS = 'true'
+    // FAIL-LOUD (skip-when-unreachable trap #1435/#1436): a missing PG / unbindable
+    // port must turn this keystone RED, not skipped-green. These were `if (!x) return`
+    // early-returns that silently disabled every test below; they are now hard
+    // assertions so an unreachable backend throws in beforeAll → the whole file fails.
     const canListen = await canListenOnEphemeralPort()
-    if (!canListen) return
+    expect(canListen).toBe(true)
 
     await ensureCommentsTables()
 
@@ -130,8 +142,9 @@ describe('Comments API', () => {
     })
     await server.start()
     const address = server.getAddress()
-    if (!address?.port) return
-    baseUrl = `http://127.0.0.1:${address.port}`
+    expect(address?.port).toBeTruthy()
+    baseUrl = `http://127.0.0.1:${address!.port}`
+    expect(baseUrl).toBeTruthy()
   })
 
   afterAll(async () => {
@@ -287,6 +300,11 @@ describe('Comments API', () => {
     expect(inboxItem.sheetId).toBe(spreadsheetId)
     expect(inboxItem.viewId).toBe(viewId)
     expect(inboxItem.recordId).toBe(rowId)
+    // Inbox uses an explicit column projection (not selectAll); assert the
+    // canonical container/target linkage round-trips through that projection.
+    expect(inboxItem.containerId).toBe(spreadsheetId)
+    expect(inboxItem.targetId).toBe(rowId)
+    expect(inboxItem.targetFieldId).toBeNull()
     expect(plainInboxItem).toBeTruthy()
     expect(plainInboxItem.unread).toBe(true)
     expect(plainInboxItem.mentioned).toBe(false)
@@ -905,7 +923,12 @@ describe('Comments API', () => {
     createdSheetIds.push(spreadsheetId)
 
     const authorToken = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_ws_author`)).json()).token as string
-    const socket = ioClient(`${baseUrl}?userId=user_ws_target`, { transports: ['websocket'] })
+    // Authenticate the socket with a real token so the server joins the trusted
+    // per-user room. Personal `comment:mention` deliveries go through
+    // sendTo(userId) → the authenticated-user room, which is only joined after
+    // token verification (the spoofable query `userId` is intentionally ignored).
+    const targetToken = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_ws_target`)).json()).token as string
+    const socket = ioClient(`${baseUrl}?userId=user_ws_target`, { transports: ['websocket'], auth: { token: targetToken } })
 
     await new Promise<void>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('socket connect timeout')), 3000)
@@ -1221,101 +1244,9 @@ describe('Comments API', () => {
     socket.close()
   })
 
-  // B6: emoji reactions through the REAL HTTP wire. The remove path is the
-  // anti-drift keystone — a multi-codepoint emoji (❤️ = ❤ + U+FE0F) must round
-  // trip add → aggregate → delete and actually remove the row, which an
-  // in-process service call could false-green (design-lock §3.3).
-  it('adds, aggregates, idempotently re-adds, and removes comment reactions (real wire, multi-codepoint emoji)', async () => {
-    if (!baseUrl) return
-
-    const ts = Date.now()
-    const baseId = `base_react_${ts}`.slice(0, 50)
-    const spreadsheetId = `sheet_react_${ts}`.slice(0, 50)
-    const rowId = `rec_react_${ts}`.slice(0, 50)
-    const pool = poolManager.get()
-
-    await pool.query('INSERT INTO meta_bases (id, name) VALUES ($1, $2)', [baseId, 'React Base'])
-    createdBaseIds.push(baseId)
-    await pool.query('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)', [spreadsheetId, baseId, 'React Sheet'])
-    createdSheetIds.push(spreadsheetId)
-
-    const userA = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_react_a`)).json()).token as string
-    const userB = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_react_b`)).json()).token as string
-
-    // Create a comment to react to.
-    const createRes = await fetch(`${baseUrl}/api/comments`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userA}` },
-      body: JSON.stringify({ spreadsheetId, rowId, content: 'react to me' }),
-    })
-    expect(createRes.status).toBe(201)
-    const comment = (await createRes.json()).data.comment
-    createdCommentIds.push(comment.id)
-
-    const EMOJI = '❤️' // U+2764 U+FE0F — the multi-codepoint case
-    const reactUrl = `${baseUrl}/api/comments/${comment.id}/reactions`
-    const listUrl = `${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}`
-
-    // userA adds ❤️
-    const addA = await fetch(reactUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userA}` },
-      body: JSON.stringify({ emoji: EMOJI }),
-    })
-    expect(addA.status).toBe(201)
-
-    // Idempotent: userA re-adds the same emoji → still one row for A.
-    const addAgain = await fetch(reactUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userA}` },
-      body: JSON.stringify({ emoji: EMOJI }),
-    })
-    expect(addAgain.status).toBe(201)
-
-    // userB also adds ❤️ → count becomes 2.
-    const addB = await fetch(reactUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userB}` },
-      body: JSON.stringify({ emoji: EMOJI }),
-    })
-    expect(addB.status).toBe(201)
-
-    // List as userA → aggregate count 2, reactedByMe true.
-    const listA = await (await fetch(listUrl, { headers: { Authorization: `Bearer ${userA}` } })).json()
-    const itemA = listA.data.items.find((c: { id: string }) => c.id === comment.id)
-    expect(itemA.reactions).toEqual([{ emoji: EMOJI, count: 2, reactedByMe: true }])
-
-    // List as a non-reactor (userB removed below; here a third viewer) → reactedByMe reflects viewer.
-    const listB = await (await fetch(listUrl, { headers: { Authorization: `Bearer ${userB}` } })).json()
-    const itemB = listB.data.items.find((c: { id: string }) => c.id === comment.id)
-    expect(itemB.reactions).toEqual([{ emoji: EMOJI, count: 2, reactedByMe: true }])
-
-    // Invalid emoji → 400 (allowlist).
-    const bad = await fetch(reactUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userA}` },
-      body: JSON.stringify({ emoji: '💩' }),
-    })
-    expect(bad.status).toBe(400)
-
-    // KEYSTONE: userA removes ❤️ through the real DELETE wire → row actually gone.
-    const del = await fetch(reactUrl, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userA}` },
-      body: JSON.stringify({ emoji: EMOJI }),
-    })
-    expect(del.status).toBe(204)
-
-    // Confirm in the DB the row is gone for A (count drops to 1, B remains).
-    const remaining = await pool.query(
-      'SELECT user_id FROM meta_comment_reactions WHERE comment_id = $1 AND emoji = $2 ORDER BY user_id',
-      [comment.id, EMOJI.normalize('NFC')],
-    )
-    expect(remaining.rows.map((r: { user_id: string }) => r.user_id)).toEqual(['user_react_b'])
-
-    // And the aggregate now shows count 1, reactedByMe false for A.
-    const listAfter = await (await fetch(listUrl, { headers: { Authorization: `Bearer ${userA}` } })).json()
-    const itemAfter = listAfter.data.items.find((c: { id: string }) => c.id === comment.id)
-    expect(itemAfter.reactions).toEqual([{ emoji: EMOJI, count: 1, reactedByMe: false }])
-  })
+  // NOTE: the B6 emoji-reaction keystone + permission negatives moved to the
+  // dedicated, CI-wired tests/integration/comment-reactions.api.test.ts. This file
+  // stays CI-excluded until its pre-existing container-model read-mapping failures
+  // (CommentService.mapRowToComment drops containerId/targetId/targetFieldId) are
+  // fixed under their own opt-in; wiring the whole file before that would be red.
 })

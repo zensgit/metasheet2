@@ -31,6 +31,11 @@ test('on-prem verifier follows the helper-backed K3 SQL Server executor seam', (
   )
   assert.match(
     verifyScript,
+    /packages\/core-backend\/dist\/src\/data-adapters\/MSSQLAdapter\.js/,
+    'the verifier must require the deployable compiled MSSQL adapter that the generic smoke loads',
+  )
+  assert.match(
+    verifyScript,
     /plugins\/plugin-integration-core\/scripts\/smoke-k3-sqlserver-executor\.cjs/,
     'the verifier must require the packaged K3 SQL Server smoke script',
   )
@@ -43,6 +48,16 @@ test('on-prem verifier follows the helper-backed K3 SQL Server executor seam', (
     verifyScript,
     /smoke:sqlserver": "tsx scripts\/smoke-sqlserver\.ts"/,
     'the verifier must lock the package.json smoke:sqlserver command to a packaged script',
+  )
+  assert.match(
+    verifyScript,
+    /\.\.\/dist\/src\/data-adapters\/MSSQLAdapter\.js/,
+    'the verifier must lock the generic smoke to the deployable compiled adapter path',
+  )
+  assert.match(
+    verifyScript,
+    /\.\.\/src\/data-adapters\/MSSQLAdapter\.ts/,
+    'the verifier must lock the generic smoke local source fallback',
   )
   assert.match(
     verifyScript,

@@ -1,6 +1,6 @@
 # Multitable Automation A6-3-3a Branch-Local Wait — Runtime + Verification (2026-06-15)
 
-Status: backend runtime COMPLETE; verified against real Postgres. PR #2626 (draft).
+Status: backend runtime COMPLETE; verified against real Postgres. PR #2626 (MERGED `8b0468920`).
 Branch: `runtime/a6-3-3a-runtime-20260615`.
 
 Scope gate (acceptance source):
