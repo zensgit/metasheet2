@@ -32,7 +32,7 @@
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 open | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
-| Release | 总包 + 实体机验收 | C6-5 smoke package published; entity-machine gate pending | 交付签收 | 包内容/部署/证据不完整 |
+| Release | 总包 + 实体机验收 | C6-5 smoke package published; #2720 preflight HOLD on sandbox target/pipeline config | 交付签收 | 包内容/部署/证据不完整 |
 
 ## P0 - ②b Arc 收口 Follow-Up
 
@@ -418,6 +418,13 @@ TODO:
   - package: `metasheet-multitable-onprem-v2.5.0-datasource-c6-ui-20260616-9fb34fd91`.
   - source commit: `9fb34fd91e4f3bdfa7827d57ca3b362abbcb05bd`.
   - package verify: `.tgz` / `.zip` verify reports published, `SHA256SUMS` present.
+  - #2720 deploy/preflight HOLD: package deploy and route presence PASS, but entity machine currently has
+    no active sandbox `data-source:sql-write-gated` target and no active C6 pipeline bound to it.
+  - next required operator-side setup: create a sandbox writable `/data-sources` target with
+    `readOnly=false`, `c6WriteTarget=true`, `genericQueryDisabled=true`; bind a
+    `data-source:sql-write-gated` target external system with `dataSourceId`, `object`,
+    `keyFields`, and `writableFields`; then bind one active pipeline from the read-only source
+    to that sandbox target.
   - C6-5 remains sandbox/entity-machine validation only; no production/batch rollout.
 
 完成条件:
@@ -464,6 +471,9 @@ TODO:
   - `.tgz` SHA256: `8659e9bfbad0c51efe55238108dc7b84a72a19478bf0f841cfa26d76e2cd784f`.
   - `.zip` SHA256: `9b771902fca4c607422d6ac30e63bf3fe95b576537fc7b9f6c2f767a25d6ab3c`.
 - [ ] 实体机部署。
+- [x] C6-5 package deploy preflight: #2720 reports `deploy.applyExit=0`, `health=200`, dry-run/apply
+  route presence, token guard, and target-kind requirement present.
+- [ ] C6-5 sandbox write-gated target + active C6 pipeline configured on entity machine.
 - [ ] 干净实体机 / 全新 DB smoke，用来暴露 migration 排序缺口。
 - [ ] 部署前跑 pending-migration diff + auth round-trip；静默 401 优先按 schema/migration 缺口排查，不先归咎 JWT secret。
 - [ ] C2 read-only smoke。
