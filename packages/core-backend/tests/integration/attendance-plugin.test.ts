@@ -4843,8 +4843,8 @@ attendanceIntegrationDescribe(
 
       // runs header CHECK invariants (enum + positive standard day).
       const runInsert = `INSERT INTO attendance_leave_accrual_runs
-        (org_id, period_key, leave_type_code, policy_version, tenure_mode, timezone, standard_day_minutes, tiers, triggered_by)
-        VALUES ($1, $2, 'annual', 'v1', $3, 'Asia/Shanghai', $4, '[]'::jsonb, $5)`
+        (org_id, period_key, leave_type_code, policy_version, tenure_mode, timezone, standard_day_minutes, tiers, triggered_by, as_of)
+        VALUES ($1, $2, 'annual', 'v1', $3, 'Asia/Shanghai', $4, '[]'::jsonb, $5, '2026-01-01')`
       await rejects(runInsert, [orgId, `annual:${runSuffix}:a`, 'bogus', 480, 'manual'], '23514', 'tenure_mode must be a valid enum')
       await rejects(runInsert, [orgId, `annual:${runSuffix}:b`, 'cumulative_service', 0, 'manual'], '23514', 'standard_day_minutes must be > 0')
       await rejects(runInsert, [orgId, `annual:${runSuffix}:c`, 'cumulative_service', 480, 'bogus'], '23514', 'triggered_by must be a valid enum')
@@ -4891,6 +4891,113 @@ attendanceIntegrationDescribe(
       expect(skipped.rowCount).toBe(1)
     } finally {
       await pool.query(`DELETE FROM attendance_leave_accrual_runs WHERE period_key LIKE $1`, [`annual:${runSuffix}%`]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
+  it('④/年假 L2b — accrual run: eligibility/tier/§5 proration + skip reasons + provenance + dry-run + idempotency', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const adminId = `al-l2b-admin-${runSuffix}`
+    const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) { await pool.end().catch(() => undefined); return }
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+    const U = (tag: string) => `al-l2b-${runSuffix}-${tag}`
+    const seedUser = async (tag: string, hireDate: string | null, cumulative: string | null) => {
+      const id = U(tag)
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, is_active, hire_date, cumulative_service_start_date)
+         VALUES ($1, $2, 'no-login', true, $3, $4)
+         ON CONFLICT (id) DO UPDATE SET is_active = true, hire_date = EXCLUDED.hire_date, cumulative_service_start_date = EXCLUDED.cumulative_service_start_date`,
+        [id, `${id}@example.com`, hireDate, cumulative],
+      )
+      return id
+    }
+    const asOf = '2026-12-31'
+    const period = 2026
+    const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
+    const origPolicy = ((origRes.body as { data?: { annualLeavePolicy?: Record<string, unknown> } } | undefined)?.data?.annualLeavePolicy) ?? { enabled: false }
+    const itemFor = async (runId: string, userId: string) => (await pool.query(
+      `SELECT id, status, skip_reason, tenure_years, tier_days, entitlement_minutes FROM attendance_leave_accrual_run_items WHERE run_id = $1 AND user_id = $2`, [runId, userId])).rows[0]
+    const lotsFor = async (userId: string) => (await pool.query(
+      `SELECT id, amount_minutes, source_id, source_key FROM attendance_leave_balances WHERE user_id = $1 AND leave_type_code = 'annual'`, [userId])).rows
+    const runAccrual = (dryRun: boolean) => requestJson(`${baseUrl}/api/attendance/annual-leave-accrual/run`, { method: 'POST', headers, body: JSON.stringify({ period, asOf, dryRun }) })
+    try {
+      const putRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT', headers,
+        body: JSON.stringify({ annualLeavePolicy: {
+          enabled: true, tenureMode: 'cumulative_service', standardDayMinutes: 480,
+          tiers: [{ minYears: 1, maxYears: 10, days: 5 }, { minYears: 10, maxYears: 20, days: 10 }, { minYears: 20, maxYears: null, days: 15 }],
+          carryover: { enabled: false }, timezone: 'Asia/Shanghai',
+        } }),
+      })
+      expect(putRes.status, JSON.stringify(putRes.body)).toBe(200)
+
+      const uFull = await seedUser('full', '2010-01-01', '2010-01-01')    // 16yr → tier 10, hired < period → full 10×480 = 4800
+      const uPror = await seedUser('pror', '2026-07-01', '2020-01-01')    // 6yr → tier 5, hired 7-1-2026 → 184/365×5 = floor 2 → 960
+      const uIneli = await seedUser('ineli', '2026-06-01', '2026-06-01')  // 连续 6mo < 12 as-of 12-31 → NOT_ELIGIBLE
+      const uMiss = await seedUser('miss', '2010-01-01', null)            // cumulative mode + null cumulative → MISSING (no hire_date fallback)
+      const uTiny = await seedUser('tiny', '2026-12-30', '2020-01-01')    // tier 5, hired 12-30 → 2/365×5 = floor 0 → PRORATION_BELOW_ONE_DAY
+      const uBound = await seedUser('bound', '2016-12-31', '2016-12-31')  // exactly 10yr as-of 12-31 → tier 10 (not 5) → 4800
+      const uMay27 = await seedUser('may27', '2026-05-27', '2020-01-01')  // tier 5, hired 5-27 → 219 days → 219×5/365 = 3.0 → floor 3 → 1440 (float-floor bug would give 2/960)
+      const uFuture = await seedUser('future', '2027-01-01', '2010-01-01') // hire_date after asOf 12-31 → NOT_YET_HIRED
+
+      // (A) DRY-RUN → run + run_items persisted, NO lots; consumes no source_key.
+      const dryRes = await runAccrual(true)
+      expect(dryRes.status, JSON.stringify(dryRes.body)).toBe(200)
+      const dryRunId = (dryRes.body as { data?: { runId?: string } } | undefined)?.data?.runId as string
+      expect(dryRunId).toBeTruthy()
+      expect((await itemFor(dryRunId, uFull))?.status).toBe('granted')
+      expect((await lotsFor(uFull)).length).toBe(0)
+
+      // (B) REAL run.
+      const realRes = await runAccrual(false)
+      expect(realRes.status, JSON.stringify(realRes.body)).toBe(200)
+      const realRunId = (realRes.body as { data?: { runId?: string } } | undefined)?.data?.runId as string
+
+      expect(await itemFor(realRunId, uFull)).toMatchObject({ status: 'granted', tier_days: 10, entitlement_minutes: 4800 })
+      expect(await itemFor(realRunId, uPror)).toMatchObject({ status: 'granted', tier_days: 5, entitlement_minutes: 960 })
+      expect(await itemFor(realRunId, uIneli)).toMatchObject({ status: 'skipped', skip_reason: 'NOT_ELIGIBLE_UNDER_ONE_YEAR' })
+      expect(await itemFor(realRunId, uMiss)).toMatchObject({ status: 'skipped', skip_reason: 'MISSING_SERVICE_START_DATE' })
+      expect(await itemFor(realRunId, uTiny)).toMatchObject({ status: 'skipped', skip_reason: 'PRORATION_BELOW_ONE_DAY' })
+      expect(await itemFor(realRunId, uBound)).toMatchObject({ status: 'granted', tier_days: 10, entitlement_minutes: 4800 })
+      // P1 regression: 219 days × tier 5 ÷ 365 = exactly 3.0 days — integer-first must NOT float-floor to 2.
+      expect(await itemFor(realRunId, uMay27)).toMatchObject({ status: 'granted', tier_days: 5, entitlement_minutes: 1440 })
+      // P3: hire_date after asOf → not yet employed at 本单位.
+      expect(await itemFor(realRunId, uFuture)).toMatchObject({ status: 'skipped', skip_reason: 'NOT_YET_HIRED' })
+
+      // lots + provenance back-link (lot.source_id → run_item.id).
+      const fullLots = await lotsFor(uFull)
+      expect(fullLots.length).toBe(1)
+      expect(Number(fullLots[0].amount_minutes)).toBe(4800)
+      expect(fullLots[0].source_key).toBe(`annual_accrual:${uFull}:annual:${period}`)
+      expect(fullLots[0].source_id).toBe((await itemFor(realRunId, uFull)).id)
+      expect((await lotsFor(uIneli)).length).toBe(0)
+      expect((await lotsFor(uTiny)).length).toBe(0)
+
+      // run header snapshot incl. the new as_of column (≠ occurred_at).
+      const hdr = (await pool.query(`SELECT tenure_mode, timezone, standard_day_minutes, dry_run, period_key, as_of::text AS as_of FROM attendance_leave_accrual_runs WHERE id = $1`, [realRunId])).rows[0]
+      expect(hdr).toMatchObject({ tenure_mode: 'cumulative_service', timezone: 'Asia/Shanghai', standard_day_minutes: 480, dry_run: false, period_key: `annual:${period}` })
+      expect(String(hdr.as_of).slice(0, 10)).toBe(asOf)
+
+      // (C) IDEMPOTENCY: re-run real → still exactly one lot for uFull, and the summary honestly reports
+      // ZERO new lots created (P2: granted-grantable is still counted, but lotsCreated reflects the no-op).
+      const reRes = await runAccrual(false)
+      expect(reRes.status).toBe(200)
+      expect((await lotsFor(uFull)).length).toBe(1)
+      expect((reRes.body as { data?: { lotsCreated?: number } } | undefined)?.data?.lotsCreated).toBe(0)
+    } finally {
+      await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ annualLeavePolicy: origPolicy }) }).catch(() => undefined)
+      const ids = ['full', 'pror', 'ineli', 'miss', 'tiny', 'bound', 'may27', 'future'].map(t => U(t)).concat([adminId])
+      await pool.query(`DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])`, [ids]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])`, [ids]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_leave_accrual_runs WHERE period_key = $1`, [`annual:${period}`]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [ids]).catch(() => undefined)
       await pool.end().catch(() => undefined)
     }
   })
