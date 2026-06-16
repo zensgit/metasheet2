@@ -1,8 +1,8 @@
 # 多维表 条件格式 + 评论反应 — 浏览器验证包(可转交) — 2026-06-15
 
-> Status: **HANDOFF PACKAGE**(docs-only)。把已 ship 的三项 UI 的**真实浏览器视觉/交互验证**转交给有浏览器环境的一侧执行。本包不新增功能、不改运行时;它把"看起来能渲染(jsdom 证 style/emit)"变成"真实浏览器确认能用"。
+> Status: **PATH A EXECUTED — 2026-06-16**(见 §6)。一个能跑 Playwright Chrome 的 agent 环境完成了路径 A 组件 harness 验证:A5 渲染(data-bar / color-scale / icon-set)+ B6 反应 chips/picker/pick 往返,**0 console/pageerror**。**1 项发现**(color-scale/data-bar 列数值文字低对比度,见 §3 color-scale 勾项)+ **3 项 harness 未覆盖子项**(负值色 / frozen 滚动 / 只读反应视角)。结论:**浏览器 lane 已被证明可用**;余下子项见 §6。
 >
-> **为何转交**:撰写本包的 agent 沙箱会 `SIGKILL` Playwright 启动的 Chrome(`kill EPERM`),无法在本环境截图/交互。基础设施本身已验证可启动(见 §2),仅浏览器驱动被沙箱封禁。请在**你本机 / staging / 另一个能跑 Playwright 的 agent**执行。
+> 原始转交说明(保留备查):本包不新增功能、不改运行时;它把"看起来能渲染(jsdom 证 style/emit)"变成"真实浏览器确认能用"。撰写本包的 agent 沙箱会 `SIGKILL` Playwright 启动的 Chrome(`kill EPERM`),无法在本环境截图/交互,故转交;**执行方 = 一个未被沙箱封禁浏览器驱动的 agent 环境**(2026-06-16 跑通,见 §6)。
 
 ## 0. 范围:已验证 vs 待验证
 
@@ -157,27 +157,28 @@ pnpm --filter @metasheet/web dev
 
 ## 3. 验证 checklist(逐项视觉/交互证据)
 
-### ☐ data-bar (A5-1)
-- 单元格内**左锚定渐变条**,长度随值递增(0%→100%);
-- 负值用 negativeColor(若配置);
-- frozen 列单元格滚动时条不丢、不透出底层。
+### ☑ data-bar (A5-1) — 渲染已目检(2026-06-16)
+- ☑ 单元格内**左锚定渐变条**,长度随值递增(0%→100%):fixture 0/25/50/75/100 → 条长正确递增,`linear-gradient(to right, rgb(33,150,243) X%, transparent X%)` 实测对齐;
+- ☐ 负值用 negativeColor(若配置):**未覆盖** — fixture 无负值,留待 harness 扩展;
+- ☐ frozen 列滚动时条不丢:**未覆盖** — harness 无 frozen 列/滚动;
+- ⚠ **发现**:data-bar 列数值文字呈低对比度浅色(见 color-scale 勾项的对比度发现,同因)。
 
-### ☐ color-scale (A5-2)
-- 单元格**实底色**随值在 min/mid/max 间插值(fixture:红→黄→绿);
-- 中点值底色 = mid stop 色(非端点);
-- **底色上的数值文字仍可读**(对比度 —— 重点看深底色行);
-- frozen 列底色不被 sticky 的 #fff 盖掉。
+### ☑ color-scale (A5-2) — 插值已目检 / ⚠ 对比度发现(2026-06-16)
+- ☑ 单元格**实底色**随值在 min/mid/max 间插值(fixture 红→橙→黄→黄绿→绿,平滑);
+- ☑ 中点值(50)底色 ≈ mid stop(黄),非端点;
+- ⚠ **底色上的数值文字可读性 = 发现项**:数值呈浅色,在浅/深底色上均偏低对比度("100"在深绿格、数值在黄绿格上偏淡)。**非阻断**(渲染正确),建议开 focused readability fix(深底加深文字/描边/自动反色),附 jsdom 对比度回归;
+- ☐ frozen 列底色不被 sticky #fff 盖掉:**未覆盖** — harness 无 frozen 列。
 
-### ☐ icon-set (A5-3)
-- 每单元格值前一个**字形**(arrows3: ↓/→/↑),按桶正确;
-- 字形颜色(红/琥珀/绿)正确、跨平台不变豆腐块;
-- 字形与数值并排不挤、不换行。
+### ☑ icon-set (A5-3) — 已目检(2026-06-16)
+- ☑ 每单元格值前一个**字形**(arrows3: ↓/→/↑),按桶正确:0/25→↓、50→→、75/100→↑(thresholds 33/66);
+- ☑ 字形颜色(红/琥珀/绿)正确、无豆腐块;
+- ☑ 字形与数值并排不挤、不换行。
 
-### ☐ B6 reactions
-- chips 显示 emoji + count;**reactedByMe 高亮**(边框/底色)区分明显;
-- 点 add 按钮 → **picker popover 定位正确**(不溢出、不被裁剪);
-- picker 内点 emoji → **chip 出现/计数变化可见**(路径 A harness 用本地重算驱动 onReact/onUnreact,故浏览器里真能看到 chip 变化;全栈路径 B 中为真实 API 写入);
-- 只读视角(`canReact=false`):见计数、无 picker、chip 不可点。
+### ☑ B6 reactions — 已目检(2026-06-16)
+- ☑ chips 显示 emoji + count;**reactedByMe 高亮**明显(👍3 蓝底高亮 vs ❤️1/🎉5 无高亮);
+- ☑ 点 add 按钮 → **picker popover 定位正确**(在 + 上方,8 个 emoji 全显,不溢出/不裁剪);
+- ☑ picker 内点 🚀 → **新 chip 🚀1 出现且高亮**(harness 本地重算驱动 onReact,浏览器内可见变化);
+- ☐ 只读视角(`canReact=false`):**未覆盖** — harness 用 `canReact=true`,留待补一个只读挂载。
 
 ## 4. 跑完之后
 
@@ -187,5 +188,22 @@ pnpm --filter @metasheet/web dev
 
 ## 5. 已知限制
 
-- 撰写方 agent 沙箱 `SIGKILL` Chrome(`kill EPERM`)→ 无法本地截图;故转交。
-- 路径 A 的 harness 文件为临时验证用,**勿提交**;路径 B 的 `metasheet_bv` 库验证后 `dropdb metasheet_bv`。
+- 撰写方 agent 沙箱 `SIGKILL` Chrome(`kill EPERM`)→ 无法本地截图;故转交。**更新**:执行方 agent 环境**不受此限**,Chrome 可正常启动截图(见 §6)。
+- 路径 A 的 harness 文件为临时验证用,**勿提交**;路径 B 的 `metasheet_bv` 库验证后 `dropdb metasheet_bv`。**确认**:§6 执行后两个临时文件(`apps/web/bv.html`、`apps/web/src/bv-main.ts`)已删除,`git status` 干净。
+
+## 6. 路径 A 执行结果(2026-06-16)
+
+**环境**:一个能启动 Playwright Chrome 的 agent 环境(本地缓存 `~/Library/Caches/ms-playwright/chromium-1208`,`@playwright/test` 1.57.0)。先以 `setContent` 冒烟确认 `chromium.launch()` 不被 `kill EPERM`,再跑全量路径 A。
+
+**步骤**:按 §1 落 `apps/web/bv.html` + `apps/web/src/bv-main.ts`(逐字同本包)→ `vite --port 5174 --strictPort`(`ready in 201ms`,`bv.html` HTTP 200)→ chromium 脚本(`@playwright/test` 的 `chromium`,因裸 `playwright` 未作直接依赖符号链接)挂 console/pageerror 监听后导航、截 3 图。**跑完即删 harness + 停 vite**。
+
+**结果**:
+- 网格挂载成功(`.meta-grid__cell` 命中),**0 console error / 0 pageerror**;
+- 截图(已归档 `~/Downloads/Github/_bv-evidence-20260616/`):`bv-grid.png`(网格)、`bv-reactions-picker.png`(picker)、`bv-reactions-after.png`(pick 🚀 后);
+- A5-1 / A5-2 / A5-3 / B6 勾项见 §3(逐项标注 ☑ / 未覆盖 / ⚠)。
+
+**发现(1)**:data-bar + color-scale 列**数值文字低对比度**(浅色,深底色行尤甚)。非阻断,建议 focused readability fix(深底自动反色/描边)+ jsdom 对比度回归。
+
+**harness 未覆盖(3,非缺陷,仅 fixture 局限)**:data-bar 负值色;frozen 列滚动;只读反应视角(`canReact=false`)。扩 fixture 即可补。
+
+**lane 结论**:路径 A 在 agent 环境**可重复执行、零基建**,是当前最快的浏览器 gate 开门方式。每个新 browser-gated UI(A5 config dialog / B1-b/c / 记录恢复前端 #2662 / per-field checkbox)在开发同一轮内配一个组件 harness + 本地跑即可产出 gate 证据。窄 CI Playwright lane 仍可作为"无 agent 在环"时的常备兜底(独立 PR、不接 branch protection),按需再建。
