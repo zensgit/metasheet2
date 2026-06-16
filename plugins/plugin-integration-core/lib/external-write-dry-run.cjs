@@ -1,10 +1,8 @@
 'use strict'
 
-// C6-2: values-free external-write dry-run for `data-source:sql-write-gated`.
-// This module reads source rows, transforms them with the existing pipeline
-// mapping, performs structured target key lookups through the host write facade,
-// and issues a dry-run token only for a complete, apply-eligible plan. It never
-// calls insert/update/upsert/delete.
+// C6 external-write helper for `data-source:sql-write-gated`.
+// C6-2 dry-run and C6-3 apply intentionally share one planner so the reviewed
+// revision is the same decision surface that apply recomputes before writing.
 
 const crypto = require('node:crypto')
 
@@ -18,6 +16,24 @@ const MAX_ROWS = 10000
 const DEFAULT_PAGE_SIZE = 100
 const MAX_PAGES = 100
 const TARGET_KIND = 'data-source:sql-write-gated'
+const CONSUMING_TOKEN_KEYS = new Set()
+const SAFE_WRITE_ERROR_CODES = new Set([
+  'AdapterValidationError',
+  'DATA_SOURCE_BRIDGE_CONFIG_ERROR',
+  'DATA_SOURCE_GENERIC_QUERY_DISABLED_REQUIRED',
+  'DATA_SOURCE_NOT_C6_WRITE_TARGET',
+  'DATA_SOURCE_NOT_FOUND',
+  'DATA_SOURCE_NOT_VISIBLE',
+  'DATA_SOURCE_NOT_WRITABLE',
+  'DATA_SOURCE_PRINCIPAL_REQUIRED',
+  'DATA_SOURCE_QUERY_INVALID',
+  'DataSourceBridgeConfigError',
+  'DataSourceNotC6WriteTargetError',
+  'DataSourceNotWritableError',
+  'DataSourceQueryDisabledError',
+  'DataSourceUnavailableError',
+  'DUPLICATE_KEY',
+])
 
 class ExternalWriteDryRunError extends Error {
   constructor(status, code, message, details = {}) {
@@ -81,6 +97,14 @@ function requireTokenStore(tokenStore) {
   return tokenStore
 }
 
+function requireConsumableTokenStore(tokenStore) {
+  const store = requireTokenStore(tokenStore)
+  if (typeof store.consume !== 'function' && typeof store.delete !== 'function') {
+    throw new ExternalWriteDryRunError(501, 'C6_WRITE_DRY_RUN_TOKEN_STORE_UNAVAILABLE', 'C6 write apply requires consumable plugin storage for tokens')
+  }
+  return store
+}
+
 async function createDryRunToken(tokenStore, record) {
   const store = requireTokenStore(tokenStore)
   const token = crypto.randomBytes(24).toString('base64url')
@@ -90,6 +114,49 @@ async function createDryRunToken(tokenStore, record) {
     expiresAt: new Date(Date.now() + DEFAULT_C6_DRY_RUN_TOKEN_TTL_MS).toISOString(),
   })
   return token
+}
+
+async function consumeDryRunToken(tokenStore, token, expected) {
+  const store = requireConsumableTokenStore(tokenStore)
+  const dryRunToken = optionalString(token)
+  if (!dryRunToken) {
+    throw new ExternalWriteDryRunError(400, 'C6_WRITE_DRY_RUN_TOKEN_REQUIRED', 'dryRunToken is required for apply', { field: 'confirm.dryRunToken' })
+  }
+  const key = tokenStoreKey(dryRunToken)
+  if (CONSUMING_TOKEN_KEYS.has(key)) {
+    throw new ExternalWriteDryRunError(409, 'C6_WRITE_DRY_RUN_TOKEN_INVALID', 'dryRunToken is missing, expired, or already used')
+  }
+  CONSUMING_TOKEN_KEYS.add(key)
+  try {
+    let stored
+    if (typeof store.consume === 'function') {
+      stored = await store.consume(key)
+    } else {
+      stored = await store.get(key)
+      await store.delete(key)
+    }
+    if (!isPlainObject(stored)) {
+      throw new ExternalWriteDryRunError(409, 'C6_WRITE_DRY_RUN_TOKEN_INVALID', 'dryRunToken is missing, expired, or already used')
+    }
+    const expiresAt = Date.parse(stored.expiresAt)
+    if (!Number.isNaN(expiresAt) && expiresAt < Date.now()) {
+      throw new ExternalWriteDryRunError(409, 'C6_WRITE_DRY_RUN_TOKEN_INVALID', 'dryRunToken is expired')
+    }
+    const storedWorkspaceId = stored.workspaceId || null
+    const expectedWorkspaceId = expected.workspaceId || null
+    if (
+      stored.pipelineId !== expected.pipelineId ||
+      stored.tenantId !== expected.tenantId ||
+      storedWorkspaceId !== expectedWorkspaceId ||
+      stored.dryRunUser !== expected.dryRunUser ||
+      stored.dataSourceOwnerPrincipal !== expected.dataSourceOwnerPrincipal
+    ) {
+      throw new ExternalWriteDryRunError(409, 'C6_WRITE_DRY_RUN_TOKEN_MISMATCH', 'dryRunToken does not match this pipeline/user scope')
+    }
+    return stored
+  } finally {
+    CONSUMING_TOKEN_KEYS.delete(key)
+  }
 }
 
 function normalizeFieldList(value, field) {
@@ -154,6 +221,12 @@ function normalizeTargetCapabilityState(result) {
   }
 }
 
+function assertSafeTargetCapabilityState(state) {
+  if (state.readOnly !== false || state.c6WriteTarget !== true || state.genericQueryDisabled !== true) {
+    throw new ExternalWriteDryRunError(422, 'C6_WRITE_TARGET_CAPABILITY_UNSAFE', 'C6 write target capability state is unsafe')
+  }
+}
+
 function statusCounts() {
   return { add: 0, update: 0, skip: 0, held: 0, failed: 0 }
 }
@@ -187,6 +260,14 @@ function writableDataFromRecord(record, writableFields) {
     if (value !== undefined) data[field] = value
   }
   return data
+}
+
+function writeRowFromRecord(record, targetConfig) {
+  const { key } = keyFromRecord(record, targetConfig.keyFields)
+  return {
+    ...key,
+    ...writableDataFromRecord(record, targetConfig.writableFields),
+  }
 }
 
 function classifyExisting({ existingRows, targetRecord, writableFields }) {
@@ -253,6 +334,17 @@ function buildRevision(input) {
   })
 }
 
+function valuesFreeErrorCode(error) {
+  if (!error) return 'UNKNOWN_ERROR'
+  const raw = error.code || error.name || 'WRITE_FAILED'
+  const normalized = String(raw).replace(/[^A-Za-z0-9_:-]/g, '_').slice(0, 80)
+  return SAFE_WRITE_ERROR_CODES.has(normalized) ? normalized : 'WRITE_FAILED'
+}
+
+function publicRowErrorTypes(rowErrors) {
+  return Array.from(new Set(rowErrors.map((entry) => entry.errorCode || entry.reason || 'write_failed'))).sort()
+}
+
 function publicEvidence({ pipeline, targetConfig, sourceKind, counts, revision, canApply, sourceRead, rowErrorTypes, dryRunToken }) {
   return {
     pipelineId: pipeline.id,
@@ -274,17 +366,49 @@ function publicEvidence({ pipeline, targetConfig, sourceKind, counts, revision, 
   }
 }
 
-async function dryRunExternalWrite(input = {}) {
+function publicApplyEvidence({ pipeline, targetConfig, sourceKind, status, counts, revision, sourceRead, rowErrors, provenanceEvents }) {
+  return {
+    pipelineId: pipeline.id,
+    targetKind: TARGET_KIND,
+    sourceKind: sourceKind || null,
+    operationMode: 'upsert',
+    keyFields: targetConfig.keyFields.slice(),
+    writableFields: targetConfig.writableFields.slice(),
+    status,
+    counts: cloneJson(counts),
+    rowErrorTypes: publicRowErrorTypes(rowErrors),
+    rowFailureCount: rowErrors.length,
+    sourceRead: {
+      complete: sourceRead.complete === true,
+      pagesRead: sourceRead.pagesRead,
+      truncated: sourceRead.truncated === true,
+    },
+    dryRunRevision: revision,
+    dryRunTokenConsumed: true,
+    provenanceEventCounts: provenanceEvents.reduce((acc, event) => {
+      acc[event.eventType] = (acc[event.eventType] || 0) + 1
+      return acc
+    }, {}),
+    deadLetterCount: rowErrors.length,
+  }
+}
+
+function validatePlannerInput(input = {}, phase = 'dry-run') {
   const pipeline = input.pipeline
   if (!pipeline || !pipeline.id) {
     throw new ExternalWriteDryRunError(422, 'C6_WRITE_DRY_RUN_CONFIG_INVALID', 'pipeline is required')
   }
   if (typeof input.dataSourceOwnerPrincipal !== 'string' || input.dataSourceOwnerPrincipal.trim() === '') {
-    throw new ExternalWriteDryRunError(422, 'C6_WRITE_OWNER_PRINCIPAL_REQUIRED', 'pipeline.createdBy is required for C6 write dry-run')
+    throw new ExternalWriteDryRunError(422, 'C6_WRITE_OWNER_PRINCIPAL_REQUIRED', `pipeline.createdBy is required for C6 write ${phase}`)
   }
   if (typeof input.dryRunUser !== 'string' || input.dryRunUser.trim() === '') {
-    throw new ExternalWriteDryRunError(401, 'C6_WRITE_DRY_RUN_USER_REQUIRED', 'authenticated dry-run user is required')
+    throw new ExternalWriteDryRunError(401, 'C6_WRITE_DRY_RUN_USER_REQUIRED', `authenticated dry-run user is required for C6 write ${phase}`)
   }
+  return pipeline
+}
+
+async function computeExternalWritePlan(input = {}) {
+  const pipeline = validatePlannerInput(input, input.phase || 'dry-run')
   const targetConfig = normalizeTargetConfig(input.targetSystem)
   const dataSourceWrites = requireDataSourceWritesApi(input.dataSourceWrites)
   const targetCapabilityState = normalizeTargetCapabilityState(
@@ -293,6 +417,7 @@ async function dryRunExternalWrite(input = {}) {
   if (targetCapabilityState.success !== true) {
     throw new ExternalWriteDryRunError(422, 'C6_WRITE_TARGET_TEST_FAILED', 'C6 write target test did not pass')
   }
+  assertSafeTargetCapabilityState(targetCapabilityState)
   if (!input.sourceAdapter || typeof input.sourceAdapter.read !== 'function') {
     throw new ExternalWriteDryRunError(501, 'C6_WRITE_SOURCE_ADAPTER_UNAVAILABLE', 'source adapter read is required')
   }
@@ -309,6 +434,7 @@ async function dryRunExternalWrite(input = {}) {
   }
   const rowErrorTypes = []
   const rowFingerprints = []
+  const planRows = []
   const policy = {
     keyFields: targetConfig.keyFields,
     writableFields: targetConfig.writableFields,
@@ -350,9 +476,16 @@ async function dryRunExternalWrite(input = {}) {
       targetRecord: transformed.value,
       writableFields: targetConfig.writableFields,
     })
+    const writeRow = writeRowFromRecord(transformed.value, targetConfig)
     counts[decision] += 1
     counts.planned += 1
     if (decision === 'held') rowErrorTypes.push('ambiguous_target_key')
+    planRows.push({
+      decision,
+      key,
+      keyFingerprint: hashJson(key),
+      row: writeRow,
+    })
     rowFingerprints.push({
       status: decision,
       key: hashJson(key),
@@ -379,46 +512,277 @@ async function dryRunExternalWrite(input = {}) {
     counts,
     completeSourceRead: sourceRead.complete === true,
   })
+  return {
+    pipeline,
+    targetConfig,
+    dataSourceWrites,
+    targetCapabilityState,
+    sourceKind: input.sourceSystem && input.sourceSystem.kind,
+    sourceRead,
+    counts,
+    rowErrorTypes,
+    rowFingerprints,
+    planRows,
+    policy,
+    canApply,
+    revision,
+    maxRows,
+  }
+}
+
+async function dryRunExternalWrite(input = {}) {
+  const plan = await computeExternalWritePlan(input)
   let dryRunToken = null
-  if (canApply) {
+  if (plan.canApply) {
     dryRunToken = await createDryRunToken(input.tokenStore, {
-      pipelineId: pipeline.id,
-      tenantId: pipeline.tenantId,
-      workspaceId: pipeline.workspaceId || null,
+      pipelineId: plan.pipeline.id,
+      tenantId: plan.pipeline.tenantId,
+      workspaceId: plan.pipeline.workspaceId || null,
       dryRunUser: input.dryRunUser,
       dataSourceOwnerPrincipal: input.dataSourceOwnerPrincipal,
-      revision,
-      counts: cloneJson(counts),
+      revision: plan.revision,
+      counts: cloneJson(plan.counts),
+      maxRows: plan.maxRows,
     })
   }
   return {
-    pipelineId: pipeline.id,
-    status: canApply ? 'ready' : 'not_applyable',
-    canApply,
+    pipelineId: plan.pipeline.id,
+    status: plan.canApply ? 'ready' : 'not_applyable',
+    canApply: plan.canApply,
     dryRunToken,
-    revision,
-    counts,
+    revision: plan.revision,
+    counts: plan.counts,
     evidence: publicEvidence({
-      pipeline,
-      targetConfig,
-      sourceKind: input.sourceSystem && input.sourceSystem.kind,
-      counts,
-      revision,
-      canApply,
-      sourceRead,
-      rowErrorTypes,
+      pipeline: plan.pipeline,
+      targetConfig: plan.targetConfig,
+      sourceKind: plan.sourceKind,
+      counts: plan.counts,
+      revision: plan.revision,
+      canApply: plan.canApply,
+      sourceRead: plan.sourceRead,
+      rowErrorTypes: plan.rowErrorTypes,
       dryRunToken,
+    }),
+  }
+}
+
+function applyStatus(counts) {
+  if (counts.failed === 0) return 'succeeded'
+  if (counts.add > 0 || counts.update > 0 || counts.skip > 0) return 'partial'
+  return 'failed'
+}
+
+function syntheticRunId(pipeline, revision) {
+  return `c6-external-write:${pipeline.id}:${revision}`
+}
+
+function provenanceEvent({ pipeline, revision, runId, row, eventType, attrs = {} }) {
+  return {
+    runId: runId || syntheticRunId(pipeline, revision),
+    rowId: row && row.keyFingerprint ? row.keyFingerprint : hashJson({ pipelineId: pipeline.id, eventType, attrs }),
+    eventType,
+    at: new Date().toISOString(),
+    attrs: {
+      targetKind: TARGET_KIND,
+      dryRunRevision: revision,
+      ...attrs,
+    },
+  }
+}
+
+function deadLetterForRowFailure({ pipeline, revision, runId, rowError }) {
+  return {
+    tenantId: pipeline.tenantId,
+    workspaceId: pipeline.workspaceId || null,
+    runId: runId || syntheticRunId(pipeline, revision),
+    pipelineId: pipeline.id,
+    idempotencyKey: rowError.keyFingerprint,
+    sourcePayload: {
+      c6ExternalWrite: true,
+      keyFingerprint: rowError.keyFingerprint,
+      decision: rowError.decision,
+    },
+    transformedPayload: null,
+    errorCode: rowError.errorCode || 'WRITE_FAILED',
+    errorMessage: rowError.errorCode || 'WRITE_FAILED',
+    status: 'open',
+  }
+}
+
+async function persistDeadLetters({ deadLetterStore, pipeline, revision, runId, rowErrors }) {
+  if (!deadLetterStore || typeof deadLetterStore.createDeadLetter !== 'function') return []
+  const persisted = []
+  for (const rowError of rowErrors) {
+    persisted.push(await deadLetterStore.createDeadLetter(deadLetterForRowFailure({
+      pipeline,
+      revision,
+      runId,
+      rowError,
+    })))
+  }
+  return persisted
+}
+
+async function applyExternalWrite(input = {}) {
+  const applyUser = optionalString(input.applyUser)
+  if (!applyUser) {
+    throw new ExternalWriteDryRunError(401, 'C6_WRITE_APPLY_USER_REQUIRED', 'authenticated apply user is required')
+  }
+  const pipeline = validatePlannerInput({
+    ...input,
+    dryRunUser: applyUser,
+  }, 'apply')
+  const tokenRecord = await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
+    pipelineId: pipeline.id,
+    tenantId: pipeline.tenantId,
+    workspaceId: pipeline.workspaceId || null,
+    dryRunUser: applyUser,
+    dataSourceOwnerPrincipal: input.dataSourceOwnerPrincipal,
+  })
+  const plan = await computeExternalWritePlan({
+    ...input,
+    dryRunUser: tokenRecord.dryRunUser,
+    maxRows: tokenRecord.maxRows || input.maxRows,
+    phase: 'apply',
+  })
+  if (tokenRecord.revision !== plan.revision) {
+    throw new ExternalWriteDryRunError(409, 'C6_WRITE_DRY_RUN_TOKEN_MISMATCH', 'dryRunToken does not match the current dry-run revision')
+  }
+  if (!plan.canApply) {
+    throw new ExternalWriteDryRunError(409, 'C6_WRITE_DRY_RUN_NOT_APPLYABLE', 'current dry-run is not applyable')
+  }
+
+  const counts = {
+    sourceRows: plan.counts.sourceRows,
+    planned: plan.counts.planned,
+    add: 0,
+    update: 0,
+    skip: 0,
+    held: 0,
+    failed: 0,
+    written: 0,
+  }
+  const rowErrors = []
+  const provenanceEvents = []
+  const runId = optionalString(input.runId) || syntheticRunId(plan.pipeline, plan.revision)
+  for (const row of plan.planRows) {
+    if (row.decision === 'skip') {
+      counts.skip += 1
+      provenanceEvents.push(provenanceEvent({
+        pipeline: plan.pipeline,
+        revision: plan.revision,
+        runId,
+        row,
+        eventType: 'target_write_succeeded',
+        attrs: { decision: 'skip', writePerformed: false },
+      }))
+      continue
+    }
+    if (row.decision === 'held') {
+      counts.held += 1
+      provenanceEvents.push(provenanceEvent({
+        pipeline: plan.pipeline,
+        revision: plan.revision,
+        runId,
+        row,
+        eventType: 'target_write_failed',
+        attrs: { decision: 'held', errorCode: 'C6_WRITE_ROW_HELD' },
+      }))
+      continue
+    }
+    try {
+      if (row.decision === 'add') {
+        await plan.dataSourceWrites.insertRows(
+          plan.targetConfig.dataSourceId,
+          plan.targetConfig.object,
+          [row.row],
+          plan.policy,
+          input.dataSourceOwnerPrincipal,
+        )
+        counts.add += 1
+      } else if (row.decision === 'update') {
+        await plan.dataSourceWrites.updateRows(
+          plan.targetConfig.dataSourceId,
+          plan.targetConfig.object,
+          [row.row],
+          plan.policy,
+          input.dataSourceOwnerPrincipal,
+        )
+        counts.update += 1
+      } else {
+        counts.held += 1
+        continue
+      }
+      counts.written += 1
+      provenanceEvents.push(provenanceEvent({
+        pipeline: plan.pipeline,
+        revision: plan.revision,
+        runId,
+        row,
+        eventType: 'target_write_succeeded',
+        attrs: { decision: row.decision, writePerformed: true },
+      }))
+    } catch (error) {
+      counts.failed += 1
+      const errorCode = valuesFreeErrorCode(error)
+      rowErrors.push({ decision: row.decision, errorCode, keyFingerprint: row.keyFingerprint })
+      provenanceEvents.push(provenanceEvent({
+        pipeline: plan.pipeline,
+        revision: plan.revision,
+        runId,
+        row,
+        eventType: 'target_write_failed',
+        attrs: { decision: row.decision, errorCode },
+      }))
+    }
+  }
+  const status = applyStatus(counts)
+  const persistedDeadLetters = await persistDeadLetters({
+    deadLetterStore: input.deadLetterStore,
+    pipeline: plan.pipeline,
+    revision: plan.revision,
+    runId,
+    rowErrors,
+  })
+  return {
+    pipelineId: plan.pipeline.id,
+    status,
+    dryRunRevision: plan.revision,
+    counts,
+    rowErrors: rowErrors.map((entry) => ({
+      decision: entry.decision,
+      errorCode: entry.errorCode,
+      keyFingerprint: entry.keyFingerprint,
+    })),
+    provenanceEvents,
+    deadLetters: {
+      attempted: rowErrors.length,
+      persisted: persistedDeadLetters.length,
+    },
+    evidence: publicApplyEvidence({
+      pipeline: plan.pipeline,
+      targetConfig: plan.targetConfig,
+      sourceKind: plan.sourceKind,
+      status,
+      counts,
+      revision: plan.revision,
+      sourceRead: plan.sourceRead,
+      rowErrors,
+      provenanceEvents,
     }),
   }
 }
 
 module.exports = {
   ExternalWriteDryRunError,
+  applyExternalWrite,
   dryRunExternalWrite,
   __internals: {
     C6_WRITE_DRY_RUN_TOKEN_PREFIX,
     TARGET_KIND,
     buildRevision,
+    computeExternalWritePlan,
+    consumeDryRunToken,
     normalizeTargetConfig,
     valuesEqual,
   },

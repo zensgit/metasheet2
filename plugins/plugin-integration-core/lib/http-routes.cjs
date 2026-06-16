@@ -24,6 +24,7 @@ const ROUTES = [
   ['POST', '/api/integration/pipelines/:id/run', 'pipelinesRun'],
   ['POST', '/api/integration/pipelines/:id/dry-run', 'pipelinesDryRun'],
   ['POST', '/api/integration/pipelines/:id/external-write/dry-run', 'pipelinesExternalWriteDryRun'],
+  ['POST', '/api/integration/pipelines/:id/external-write/apply', 'pipelinesExternalWriteApply'],
   ['GET', '/api/integration/table-actions', 'tableActionsList'],
   ['POST', '/api/integration/table-actions/:actionId/dry-run', 'tableActionDryRun'],
   ['POST', '/api/integration/table-actions/:actionId/apply', 'tableActionApply'],
@@ -52,6 +53,7 @@ const ROUTES = [
 ]
 const EXTERNAL_SYSTEM_OBJECTS_MAX_ITEMS = 1000
 const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
+const { createRunLogger } = require('./run-log.cjs')
 const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
 // DF-T1-0/DF-T1: compose the no-write preview through the SAME K3 Save-body composer the
 // adapter uses, so the preview is byte-identical to the real Save (single source of truth —
@@ -70,6 +72,7 @@ const { deriveK3MaterialTemplateDraft, summarizeTemplateForEvidence, TemplateDer
 const { validateRecord } = require('./validator.cjs')
 const {
   ExternalWriteDryRunError,
+  applyExternalWrite,
   dryRunExternalWrite,
 } = require('./external-write-dry-run.cjs')
 const {
@@ -375,6 +378,8 @@ const VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS = new Set(['conflictPolicyRevi
 const VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS = new Set(['confirm'])
 const VALID_EMPTY_REQUEST_KEYS = new Set()
 const VALID_C6_WRITE_DRY_RUN_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'maxRows'])
+const VALID_C6_WRITE_APPLY_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'confirm'])
+const VALID_C6_WRITE_APPLY_CONFIRM_KEYS = new Set(['dryRunToken'])
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
 const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
   'tenantId',
@@ -410,6 +415,37 @@ function normalizeC6WriteDryRunBody(body = {}) {
     tenantId: firstString(body.tenantId),
     workspaceId: firstString(body.workspaceId),
     maxRows: body.maxRows,
+  }
+}
+
+function normalizeC6WriteApplyBody(body = {}) {
+  if (!isPlainObject(body)) {
+    throw new HttpRouteError(400, 'C6_WRITE_APPLY_REQUEST_INVALID', 'request body must be an object')
+  }
+  for (const key of Object.keys(body)) {
+    if (!VALID_C6_WRITE_APPLY_BODY_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'C6_WRITE_APPLY_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  const confirm = body.confirm === undefined || body.confirm === null ? {} : body.confirm
+  if (!isPlainObject(confirm)) {
+    throw new HttpRouteError(400, 'C6_WRITE_APPLY_REQUEST_INVALID', 'confirm must be an object', { field: 'confirm' })
+  }
+  for (const key of Object.keys(confirm)) {
+    if (!VALID_C6_WRITE_APPLY_CONFIRM_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'C6_WRITE_APPLY_REQUEST_INVALID', `unsupported confirm field: ${key}`, { field: `confirm.${key}` })
+    }
+  }
+  const dryRunToken = firstString(confirm.dryRunToken)
+  if (!dryRunToken) {
+    throw new HttpRouteError(400, 'C6_WRITE_DRY_RUN_TOKEN_REQUIRED', 'dryRunToken is required for apply', { field: 'confirm.dryRunToken' })
+  }
+  return {
+    tenantId: firstString(body.tenantId),
+    workspaceId: firstString(body.workspaceId),
+    confirm: {
+      dryRunToken,
+    },
   }
 }
 
@@ -1286,6 +1322,44 @@ function createHandlers(services, options = {}) {
     return isAdmin(user) ? 'admin' : 'write'
   }
 
+  function getOptionalRunLogger() {
+    if (
+      typeof pipelineRegistry.createPipelineRun !== 'function' ||
+      typeof pipelineRegistry.updatePipelineRun !== 'function'
+    ) {
+      return null
+    }
+    return createRunLogger({ pipelineRegistry })
+  }
+
+  function externalWriteApplyMetrics(result = {}) {
+    const counts = result.counts || {}
+    return {
+      rowsRead: counts.sourceRows || 0,
+      rowsCleaned: counts.planned || 0,
+      rowsWritten: counts.written || 0,
+      rowsFailed: counts.failed || 0,
+    }
+  }
+
+  function externalWriteRunStatus(status) {
+    if (status === 'succeeded') return 'succeeded'
+    if (status === 'partial') return 'partial'
+    return 'failed'
+  }
+
+  function publicExternalWriteApplyResult(result, run) {
+    const { provenanceEvents: _provenanceEvents, ...safe } = result
+    if (run) {
+      safe.run = {
+        id: run.id,
+        status: run.status,
+        provenanceEventsPersisted: Array.isArray(run.provenanceEvents) ? run.provenanceEvents.length : null,
+      }
+    }
+    return safe
+  }
+
   const handlers = {
     async status(req, res) {
       requireAccess(req, 'read')
@@ -1512,6 +1586,119 @@ function createHandlers(services, options = {}) {
         dataSourceOwnerPrincipal: ownerPrincipal,
         maxRows: body.maxRows,
       }))
+    },
+
+    async pipelinesExternalWriteApply(req, res) {
+      requireAccess(req, 'write')
+      const body = normalizeC6WriteApplyBody(requestBody(req))
+      const scope = scopedInput(req, {
+        id: requestParams(req).id,
+        tenantId: body.tenantId,
+        workspaceId: body.workspaceId,
+        includeFieldMappings: true,
+      })
+      const pipeline = await pipelineRegistry.getPipeline(scope)
+      if (pipeline.status && pipeline.status !== 'active') {
+        throw new HttpRouteError(422, 'PIPELINE_INACTIVE', 'pipeline must be active for C6 external-write apply', {
+          pipelineId: pipeline.id,
+          status: pipeline.status,
+        })
+      }
+      const ownerPrincipal = firstString(pipeline.createdBy)
+      if (!ownerPrincipal) {
+        throw new HttpRouteError(422, 'C6_WRITE_OWNER_PRINCIPAL_REQUIRED', 'pipeline.createdBy is required for C6 external-write apply', {
+          pipelineId: pipeline.id,
+        })
+      }
+      const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+        : externalSystems.getExternalSystem.bind(externalSystems)
+      const sourceSystem = await loadSourceSystem(scopedInput(req, {
+        id: pipeline.sourceSystemId,
+        tenantId: body.tenantId,
+        workspaceId: body.workspaceId,
+      }))
+      const targetSystem = await externalSystems.getExternalSystem(scopedInput(req, {
+        id: pipeline.targetSystemId,
+        tenantId: body.tenantId,
+        workspaceId: body.workspaceId,
+      }))
+      if (!sourceSystem) {
+        throw new HttpRouteError(404, 'SOURCE_SYSTEM_NOT_FOUND', 'source external system not found')
+      }
+      if (!targetSystem) {
+        throw new HttpRouteError(404, 'TARGET_SYSTEM_NOT_FOUND', 'target external system not found')
+      }
+      if (sourceSystem.status && sourceSystem.status !== 'active') {
+        throw new HttpRouteError(422, 'SOURCE_SYSTEM_INACTIVE', 'source external system must be active', {
+          sourceSystemId: sourceSystem.id,
+          status: sourceSystem.status,
+        })
+      }
+      if (targetSystem.status && targetSystem.status !== 'active') {
+        throw new HttpRouteError(422, 'TARGET_SYSTEM_INACTIVE', 'target external system must be active', {
+          targetSystemId: targetSystem.id,
+          status: targetSystem.status,
+        })
+      }
+      const sourceAdapter = adapterRegistry.createAdapter(sourceSystem, {
+        role: 'source',
+        principal: ownerPrincipal,
+      })
+      const runLogger = getOptionalRunLogger()
+      let run = null
+      if (runLogger) {
+        run = await runLogger.startRun({
+          tenantId: pipeline.tenantId,
+          workspaceId: pipeline.workspaceId,
+          pipelineId: pipeline.id,
+          mode: 'manual',
+          triggeredBy: 'api',
+          details: {
+            c6ExternalWrite: true,
+            targetKind: targetSystem.kind,
+          },
+        })
+      }
+      try {
+        const result = await applyExternalWrite({
+          pipeline,
+          sourceSystem,
+          targetSystem,
+          sourceAdapter,
+          dataSourceWrites: context && context.api && context.api.dataSourceWrites,
+          tokenStore: context.storage,
+          deadLetterStore: deadLetters,
+          dryRunToken: body.confirm.dryRunToken,
+          applyUser: requestPrincipal(req),
+          dataSourceOwnerPrincipal: ownerPrincipal,
+          runId: run && run.id,
+        })
+        if (runLogger && run) {
+          run = await runLogger.finishRun(run, externalWriteApplyMetrics(result), externalWriteRunStatus(result.status), {
+            provenanceEvents: result.provenanceEvents,
+            details: {
+              c6ExternalWrite: true,
+              dryRunRevision: result.dryRunRevision,
+              status: result.status,
+              counts: result.counts,
+              deadLetters: result.deadLetters,
+            },
+          })
+        }
+        return sendOk(res, publicExternalWriteApplyResult(result, run))
+      } catch (error) {
+        if (runLogger && run) {
+          await runLogger.failRun(run, error, { rowsFailed: 1 }, {
+            details: {
+              c6ExternalWrite: true,
+              status: 'failed',
+              errorCode: error && (error.code || error.name) ? String(error.code || error.name) : 'C6_WRITE_APPLY_FAILED',
+            },
+          })
+        }
+        throw error
+      }
     },
 
     async tableActionsList(req, res) {

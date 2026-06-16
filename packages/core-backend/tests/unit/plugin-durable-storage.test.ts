@@ -29,6 +29,13 @@ function createFakeQuery(): { query: PluginStorageQuery; calls: Array<{ sql: str
         const found = rows.get(storageKey(pluginName, key))
         return { rows: found === undefined ? [] : [{ value: found }] }
       }
+      if (sql.includes('DELETE FROM plugin_kv') && sql.includes('RETURNING value')) {
+        const [pluginName, key] = params ?? []
+        const mapKey = storageKey(pluginName, key)
+        const found = rows.get(mapKey)
+        rows.delete(mapKey)
+        return { rows: found === undefined ? [] : [{ value: found }] }
+      }
       if (sql.includes('DELETE FROM plugin_kv')) {
         const [pluginName, key] = params ?? []
         rows.delete(storageKey(pluginName, key))
@@ -91,6 +98,18 @@ describe('plugin durable storage', () => {
 
     await storage.set(longKey, { status: 'queued' })
     await expect(storage.get(longKey)).resolves.toEqual({ status: 'queued' })
+  })
+
+  it('atomically consumes a stored value via delete returning', async () => {
+    const db = createFakeQuery()
+    const storage = createPluginDurableStorage({ pluginName: 'plugin-integration-core', query: db.query })
+
+    await storage.set('dry-run-token', { revision: 'rev_1' })
+
+    await expect(storage.consume?.('dry-run-token')).resolves.toEqual({ revision: 'rev_1' })
+    await expect(storage.consume?.('dry-run-token')).resolves.toBeNull()
+    await expect(storage.get('dry-run-token')).resolves.toBeNull()
+    expect(db.calls.some((call) => call.sql.includes('DELETE FROM plugin_kv') && call.sql.includes('RETURNING value'))).toBe(true)
   })
 
   it('scopes list/get/delete by plugin name', async () => {

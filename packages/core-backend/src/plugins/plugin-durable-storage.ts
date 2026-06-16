@@ -76,6 +76,13 @@ export function createMemoryPluginStorage(): MemoryPluginStorage {
     async set<T = unknown>(key: string, value: T): Promise<void> {
       storageCache.set(normalizeStorageKey(key), value)
     },
+    async consume<T = unknown>(key: string): Promise<T | null> {
+      const storageKey = normalizeStorageKey(key)
+      if (!storageCache.has(storageKey)) return null
+      const value = storageCache.get(storageKey) as T
+      storageCache.delete(storageKey)
+      return value
+    },
     async delete(key: string): Promise<void> {
       storageCache.delete(normalizeStorageKey(key))
     },
@@ -118,6 +125,19 @@ export function createPluginDurableStorage(options: DurableStorageOptions): Dura
          DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
         [pluginName, storageKey, serialized],
       )
+    },
+    async consume<T = unknown>(key: string): Promise<T | null> {
+      const result = await runStorageQuery(
+        pluginName,
+        'consume',
+        query,
+        `DELETE FROM plugin_kv
+          WHERE plugin = $1 AND key = $2
+          RETURNING value`,
+        [pluginName, normalizeStorageKey(key)],
+      )
+      if (result.rows.length === 0) return null
+      return (result.rows[0] as { value: T }).value
     },
     async delete(key: string): Promise<void> {
       await runStorageQuery(
