@@ -92,3 +92,6 @@ artifacts/integration-k3wise/internal-trial/
 # source manifests/runbooks in Git, not built archives and verification output.
 output/delivery/multitable-onprem/
 output/releases/
+
+# multitable browser-verification lane outputs (screenshots, traces)
+apps/web/verification-output/
