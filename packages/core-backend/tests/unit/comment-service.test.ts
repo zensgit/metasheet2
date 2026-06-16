@@ -121,6 +121,12 @@ function makeCommentRow(overrides: Record<string, unknown> = {}) {
     spreadsheet_id: 'sheet-1',
     row_id: 'row-1',
     field_id: null,
+    // Canonical container/target columns (mirror spreadsheet_id/row_id/field_id).
+    // The mapper must surface these as containerId/targetId/targetFieldId — keeping
+    // them on the fixture prevents the fixture-vs-wire drift that hid the read field-drop.
+    container_id: 'sheet-1',
+    target_id: 'row-1',
+    target_field_id: null,
     content: 'Hello world',
     author_id: 'user-author',
     parent_id: null,
@@ -185,6 +191,11 @@ describe('CommentService', () => {
       })
 
       expect(comment.mentions).toEqual(['user-123'])
+      // Fixture-vs-wire guard: the mapper must surface the canonical container/target
+      // columns (regression lock for the read field-drop fixed in this PR).
+      expect(comment.containerId).toBe('sheet-1')
+      expect(comment.targetId).toBe('row-1')
+      expect(comment.targetFieldId).toBeNull()
     })
 
     it('notifies record watchers for new comments and suppresses the author in the notifier', async () => {
