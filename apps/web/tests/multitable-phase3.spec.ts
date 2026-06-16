@@ -1,62 +1,18 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { ref } from 'vue'
-import { useMultitableGrid } from '../src/multitable/composables/useMultitableGrid'
 import { useMultitableWorkbench } from '../src/multitable/composables/useMultitableWorkbench'
 import { MultitableApiClient } from '../src/multitable/api/client'
-
-function mockClient(data: any = {}) {
-  return new MultitableApiClient({
-    fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data }), { status: 200 })),
-  })
-}
 
 function mockClientWithFn(fetchFn: ReturnType<typeof vi.fn>) {
   return new MultitableApiClient({ fetchFn })
 }
 
 // --- Column width persistence ---
-describe('column width persistence', () => {
-  const store: Record<string, string> = {}
-  const mockLocalStorage = {
-    getItem: (key: string) => store[key] ?? null,
-    setItem: (key: string, val: string) => { store[key] = val },
-    removeItem: (key: string) => { delete store[key] },
-    clear: () => { Object.keys(store).forEach((k) => delete store[k]) },
-    get length() { return Object.keys(store).length },
-    key: (i: number) => Object.keys(store)[i] ?? null,
-  }
-
-  beforeEach(() => {
-    mockLocalStorage.clear()
-    Object.defineProperty(globalThis, 'localStorage', { value: mockLocalStorage, writable: true, configurable: true })
-  })
-
-  it('persists column widths to localStorage', () => {
-    const client = mockClient()
-    const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
-    grid.setColumnWidth('f1', 200)
-    const key = 'mt_col_widths_s1_v1'
-    const stored = JSON.parse(store[key] ?? '{}')
-    expect(stored.f1).toBe(200)
-  })
-
-  it('loads column widths from localStorage', () => {
-    const key = 'mt_col_widths_s2_v2'
-    store[key] = JSON.stringify({ f1: 150, f2: 300 })
-    const client = mockClient()
-    const grid = useMultitableGrid({ sheetId: ref('s2'), viewId: ref('v2'), client })
-    expect(grid.columnWidths.value.f1).toBe(150)
-    expect(grid.columnWidths.value.f2).toBe(300)
-  })
-
-  it('handles corrupted localStorage gracefully', () => {
-    const key = 'mt_col_widths_s3_v3'
-    store[key] = 'NOT_JSON'
-    const client = mockClient()
-    const grid = useMultitableGrid({ sheetId: ref('s3'), viewId: ref('v3'), client })
-    expect(grid.columnWidths.value).toEqual({})
-  })
-})
+// REMOVED 2026-06-16 (persist-display-prefs arc): column width is no longer a localStorage-backed
+// composable ref. It is now workbench-owned local override state persisted into view.config (shared
+// across devices/users via updateView). Coverage moved to:
+//   - multitable-view-display-prefs-util.spec.ts (parseColumnWidths narrow parser + merge builders)
+//   - multitable-display-prefs-workbench.spec.ts (onSetColumnWidth debounce + config merge-preserve)
 
 // --- Workbench: field management ---
 describe('workbench field management', () => {

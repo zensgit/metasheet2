@@ -415,6 +415,10 @@ const props = defineProps<{
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
   enableMultiSelect?: boolean
   groupField?: MetaField | null
+  // Group-collapse is CONTROLLED by the parent (persist-display-prefs arc): the set of collapsed
+  // group keys comes in as a prop and the component only emits `toggle-group`. This keeps a single
+  // source of truth (the persisted `view.config.groupCollapse`) — no internal collapse ref.
+  collapsedGroupKeys?: string[]
   searchText?: string
   rowDensity?: RowDensity
   uploadFn?: MetaAttachmentUploadFn
@@ -469,6 +473,8 @@ const emit = defineEmits<{
   (e: 'create-record'): void
   (e: 'set-frozen', frozenLeftColumnIds: string[]): void
   (e: 'set-aggregation', payload: { fieldId: string; fn: string | null }): void
+  // Group-collapse toggle request (controlled-from-parent): parent flips the key in the persisted set.
+  (e: 'toggle-group', key: string): void
   // A3: AI shortcut run requested from a cell editor.
   (e: 'ai-run', recordId: string, field: MetaField): void
   // B1-b: a button-field cell was clicked (run its configured action).
@@ -524,7 +530,9 @@ const allSelected = computed(() =>
 const filteredRows = computed(() => props.rows)
 
 // --- GroupBy ---
-const collapsedGroups = ref<Set<string>>(new Set())
+// Collapse state is controlled by the parent (persisted in view.config). Derive a Set from the
+// prop for O(1) lookups; flipping a key is delegated upward via `toggle-group`.
+const collapsedGroups = computed<Set<string>>(() => new Set(props.collapsedGroupKeys ?? []))
 
 interface RowGroup { key: string; label: string; rows: MetaRecord[]; count: number }
 
@@ -546,10 +554,7 @@ const groupedRows = computed<RowGroup[] | null>(() => {
 })
 
 function toggleGroup(key: string) {
-  const s = new Set(collapsedGroups.value)
-  if (s.has(key)) s.delete(key)
-  else s.add(key)
-  collapsedGroups.value = s
+  emit('toggle-group', key)
 }
 
 // Flat list for keyboard nav (respects collapsed groups)

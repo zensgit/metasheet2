@@ -502,14 +502,9 @@ describe('useMultitableGrid', () => {
     expect(grid.sortFilterDirty.value).toBe(true)
   })
 
-  it('sets column width', () => {
-    const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
-    grid.setColumnWidth('f1', 200)
-    expect(grid.columnWidths.value.f1).toBe(200)
-    grid.setColumnWidth('f2', 150)
-    expect(grid.columnWidths.value.f2).toBe(150)
-    expect(grid.columnWidths.value.f1).toBe(200)
-  })
+  // Column width is no longer composable state (persist-display-prefs arc 2026-06-16): it moved to
+  // workbench-owned local override + view.config persistence. See onSetColumnWidth assertions in
+  // multitable-display-prefs-workbench.spec.ts.
 
   it('tracks undo/redo availability', () => {
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
