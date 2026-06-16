@@ -16,10 +16,11 @@
   C5 K3/MSSQL smoke gate #2670 已在 `dea391a1` 包上通过并关闭：operator scope-adjusted rerun
   中 generic SQL Server smoke 和 K3 SQL Server executor smoke 均 PASS，且 evidence values-free、无 K3
   Save/Submit/Audit/BOM、无外部 DB 写、无 raw SQL。#2700 已补 C5 runbook 的 SQL auth/scope triage。
-- 下一门: C6-4 UI / C6-5 entity-machine smoke。C6 是最大风险刀；C6-0 只锁 design contract，
+- 下一门: C6-4 UI review/merge / C6-5 entity-machine smoke。C6 是最大风险刀；C6-0 只锁 design contract，
   C6-1 只落地 backend latent writer helper 和 write-gated target adapter 的关闭态合同；
   C6-2 只增加 read-only dry-run route + dry-run token，不授权 apply runtime 或 external write。
-  C6-3 增加 token-bound apply route；C6-4/C6-5 仍需逐片 opt-in、复审、fresh CI 和实体机 gate。
+  C6-3 增加 token-bound apply route；C6-4 正在补 UI dry-run -> review -> apply；C6-5 仍需
+  单独 opt-in、复审、fresh CI 和实体机 gate。
 
 ## 收口顺序
 
@@ -30,7 +31,7 @@
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
-| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4/C6-5 gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
+| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI in review; C6-5 gated | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
 | Release | 总包 + 实体机验收 | gated | 交付签收 | 包内容/部署/证据不完整 |
 
 ## P0 - ②b Arc 收口 Follow-Up
@@ -402,7 +403,14 @@ TODO:
   - row write failures are isolated and returned as values-free counts/error codes; response/evidence never echoes
     the bearer token, row values, credentials, connection strings, raw SQL, target payloads, or dataSourceId secrets。
   - boundary: no UI, no package, no C6 entity-machine smoke yet, no delete/raw SQL/generic query, no K3。
-- [ ] C6-4 UI: dry-run -> review -> apply。
+- [~] C6-4 UI: dry-run -> review -> apply。
+  - pipeline-level UI calls the C6 dry-run/apply routes separately from legacy Save-only and PLM table-action flows.
+  - browser request shape remains scope-only for dry-run and scope + `confirm.dryRunToken` for apply;
+    no client `source` / `target` / `plan` / `payload` / sheet scope is sent.
+  - review renders counts/status/error tokens only; dry-run token is held in memory and never displayed or copied
+    into the values-free evidence panel.
+  - apply is disabled for read-only users and requires an explicit review checkbox.
+  - changing pipeline id or scope clears the pending dry-run token/review.
 - [ ] C6-5 entity-machine smoke: apply、re-pull、rollback。
 
 完成条件:

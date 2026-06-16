@@ -250,6 +250,44 @@ export interface IntegrationPipelineRunResult {
   [key: string]: unknown
 }
 
+export interface IntegrationExternalWriteDryRunPayload extends IntegrationScope {
+  maxRows?: number
+}
+
+export interface IntegrationExternalWriteDryRunResult {
+  pipelineId?: string
+  status?: string
+  canApply?: boolean
+  dryRunToken?: string | null
+  revision?: string
+  counts?: Record<string, number>
+  evidence?: Record<string, unknown>
+  [key: string]: unknown
+}
+
+export interface IntegrationExternalWriteApplyPayload extends IntegrationScope {
+  confirm: {
+    dryRunToken: string
+  }
+}
+
+export interface IntegrationExternalWriteApplyResult {
+  pipelineId?: string
+  status?: string
+  dryRunRevision?: string
+  counts?: Record<string, number>
+  rowErrors?: unknown[]
+  deadLetters?: Record<string, unknown>
+  evidence?: Record<string, unknown>
+  run?: {
+    id?: string
+    status?: string
+    provenanceEventsPersisted?: number
+    [key: string]: unknown
+  }
+  [key: string]: unknown
+}
+
 export interface IntegrationPipelineObservationQuery extends IntegrationScope {
   pipelineId: string
   status?: string
@@ -897,6 +935,28 @@ export async function runIntegrationPipeline(
     body: JSON.stringify(payload),
   })
   return parseIntegrationResponse<IntegrationPipelineRunResult>(response)
+}
+
+export async function dryRunIntegrationExternalWrite(
+  pipelineId: string,
+  payload: IntegrationExternalWriteDryRunPayload,
+): Promise<IntegrationExternalWriteDryRunResult> {
+  const response = await apiFetch(`/api/integration/pipelines/${encodeURIComponent(pipelineId)}/external-write/dry-run`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return parseIntegrationResponse<IntegrationExternalWriteDryRunResult>(response)
+}
+
+export async function applyIntegrationExternalWrite(
+  pipelineId: string,
+  payload: IntegrationExternalWriteApplyPayload,
+): Promise<IntegrationExternalWriteApplyResult> {
+  const response = await apiFetch(`/api/integration/pipelines/${encodeURIComponent(pipelineId)}/external-write/apply`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return parseIntegrationResponse<IntegrationExternalWriteApplyResult>(response)
 }
 
 export async function listIntegrationPipelineRuns(
