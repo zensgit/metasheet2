@@ -15611,16 +15611,31 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
 // lot + grant event; negative → FIFO-deduct active annual lots + deduct event(s) (reusing deductLeaveBalance);
 // insufficient → HttpError(422) → the whole txn (incl. the registry row) rolls back. The registry row is the
 // who/why audit; it may reference the accrual run it corrects but never overwrites that run's run_item snapshot.
-async function applyAnnualLeaveManualAdjustment(trx, { orgId, userId, deltaMinutes, reason, createdBy, runId, sourceKey }) {
+async function applyAnnualLeaveManualAdjustment(trx, { orgId, actorId, userId, deltaMinutes, reason, createdBy, runId, sourceKey }) {
   const delta = Math.trunc(Number(deltaMinutes))
   if (!Number.isInteger(delta) || delta === 0) {
     throw new HttpError(400, 'ANNUAL_LEAVE_ADJUST_DELTA_INVALID', 'deltaMinutes must be a non-zero integer')
   }
-  // cross-tenant write guard: the target user MUST be an active member of the caller's org. Without this an
-  // org-A admin could mint/deduct annual-leave lots against an org-B user id (lots/registry are written under
-  // the caller's org_id). 404 → no registry row, no lot. We require BOTH uo.is_active AND u.is_active so manual
-  // adjustment shares the exact L2b accrual population — a globally-deactivated (offboarded) user is out of
-  // scope here by design; final-settlement-for-terminated would be a separate, deliberately gated path.
+  // P1 actor-tenant guard: org is derived via getOrgId, which TRUSTS a caller-supplied orgId (body/query/header),
+  // and withPermission('attendance:admin') checks only the global permission code — not org scope. So we additionally
+  // require the ACTING admin to be an active member of the claimed org: an admin cannot claim a foreign org they
+  // don't belong to and mutate its balances. 403 → no registry row, no lot, no event.
+  if (!actorId) {
+    throw new HttpError(403, 'ANNUAL_LEAVE_ADJUST_ORG_FORBIDDEN', 'Cannot resolve the acting admin identity')
+  }
+  const actorMember = await trx.query(
+    `SELECT 1 FROM user_orgs uo JOIN users u ON u.id = uo.user_id
+      WHERE uo.user_id = $1 AND uo.org_id = $2 AND uo.is_active = true AND u.is_active = true
+      LIMIT 1`,
+    [actorId, orgId]
+  )
+  if (!actorMember[0]) {
+    throw new HttpError(403, 'ANNUAL_LEAVE_ADJUST_ORG_FORBIDDEN', 'Acting admin is not an active member of the claimed org')
+  }
+  // cross-tenant write guard: the TARGET user MUST be an active member of the (now actor-verified) org. We require
+  // BOTH uo.is_active AND u.is_active so manual adjustment shares the exact L2b accrual population — a globally-
+  // deactivated (offboarded) user is out of scope here by design; final-settlement-for-terminated would be a
+  // separate, deliberately gated path. 404 → no registry row, no lot.
   const member = await trx.query(
     `SELECT 1 FROM user_orgs uo JOIN users u ON u.id = uo.user_id
       WHERE uo.user_id = $1 AND uo.org_id = $2 AND uo.is_active = true AND u.is_active = true
@@ -15629,6 +15644,20 @@ async function applyAnnualLeaveManualAdjustment(trx, { orgId, userId, deltaMinut
   )
   if (!member[0]) {
     throw new HttpError(404, 'USER_NOT_IN_ORG', 'Target user is not an active member of this org')
+  }
+  // P2b runId guard: if a correction links to an accrual run, that run MUST be a real, non-dry-run annual run in
+  // THIS org — else a typo / cross-org / dry-run id would pollute the L2b provenance back-link. (A nullable FK
+  // backs existence; this guard adds the org + annual + non-dry-run scoping an FK cannot express.)
+  if (runId) {
+    const run = await trx.query(
+      `SELECT 1 FROM attendance_leave_accrual_runs
+        WHERE id = $1 AND org_id = $2 AND leave_type_code = 'annual' AND dry_run = false
+        LIMIT 1`,
+      [runId, orgId]
+    )
+    if (!run[0]) {
+      throw new HttpError(422, 'ANNUAL_LEAVE_ADJUST_RUN_NOT_FOUND', 'runId must reference a real (non-dry-run) annual accrual run in this org')
+    }
   }
   const insertRows = await trx.query(
     `INSERT INTO attendance_leave_manual_adjustments
@@ -15640,12 +15669,24 @@ async function applyAnnualLeaveManualAdjustment(trx, { orgId, userId, deltaMinut
   )
   const adjustmentId = insertRows[0]?.id
   if (!adjustmentId) {
-    // idempotent replay — already applied; return the existing row without re-mutating the balance.
-    const existing = await trx.query(
-      `SELECT id, delta_minutes FROM attendance_leave_manual_adjustments WHERE org_id = $1 AND source_key = $2`,
+    // P2a idempotency-conflict guard: a replayed source_key MUST carry the IDENTICAL adjustment. If the same key
+    // is reused for a different user / amount / reason / run, that's an accident — fail loudly with 409 rather than
+    // returning a misleading 200 success that mutates nothing. On a true replay, return the EXISTING delta.
+    const existing = (await trx.query(
+      `SELECT id, user_id, leave_type_code, delta_minutes, reason, run_id
+         FROM attendance_leave_manual_adjustments WHERE org_id = $1 AND source_key = $2`,
       [orgId, sourceKey]
-    )
-    return { id: existing[0]?.id ?? null, delta, applied: false, alreadyApplied: true }
+    ))[0]
+    const matches = existing
+      && existing.user_id === userId
+      && existing.leave_type_code === 'annual'
+      && Number(existing.delta_minutes) === delta
+      && existing.reason === reason
+      && (existing.run_id ?? null) === (runId ?? null)
+    if (!matches) {
+      throw new HttpError(409, 'ANNUAL_LEAVE_ADJUST_IDEMPOTENCY_CONFLICT', 'idempotencyKey already used for a different adjustment')
+    }
+    return { id: existing.id, delta: Number(existing.delta_minutes), applied: false, alreadyApplied: true }
   }
   if (delta > 0) {
     // positive → a new annual_manual_adjustment lot + grant event (expires_at NULL; L4 owns expiry).
@@ -37634,11 +37675,14 @@ module.exports = {
         // 年假/法定假 L2c: admin manual ± to a user's annual balance via lot mutation (positive → new lot +
         // grant event; negative → FIFO-deduct + deduct event). The registry row is the who/why audit;
         // idempotencyKey makes a retry a no-op. Negative-insufficient → 422 → the txn (incl. registry) rolls back.
+        // deltaMinutes is bounded to int32 (the DB column is `integer`) so an out-of-range value returns a clean
+        // 400 instead of a DB overflow 500; reason / idempotencyKey are length-capped (idempotencyKey feeds an
+        // indexed source_key).
         const schema = z.object({
-          userId: z.string().min(1),
-          deltaMinutes: z.number().int(),
-          reason: z.string().min(1),
-          idempotencyKey: z.string().min(1).optional(),
+          userId: z.string().min(1).max(255),
+          deltaMinutes: z.number().int().min(-2147483648).max(2147483647),
+          reason: z.string().min(1).max(500),
+          idempotencyKey: z.string().min(1).max(200).optional(),
           runId: z.string().uuid().optional(),
         })
         const parsed = schema.safeParse(req.body ?? {})
@@ -37651,13 +37695,15 @@ module.exports = {
           return
         }
         const orgId = getOrgId(req)
-        const createdBy = getUserId(req)
+        const actorId = getUserId(req)
+        const createdBy = actorId
         const sourceKey = parsed.data.idempotencyKey
           ? `annual_manual_adjust:${parsed.data.idempotencyKey}`
           : `annual_manual_adjust:${randomUUID()}`
         try {
           const result = await db.transaction(async (trx) => applyAnnualLeaveManualAdjustment(trx, {
             orgId,
+            actorId,
             userId: parsed.data.userId,
             deltaMinutes: parsed.data.deltaMinutes,
             reason: parsed.data.reason,

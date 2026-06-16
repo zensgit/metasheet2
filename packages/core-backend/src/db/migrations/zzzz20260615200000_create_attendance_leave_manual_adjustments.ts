@@ -28,7 +28,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       .addColumn('delta_minutes', 'integer', col => col.notNull())
       .addColumn('reason', 'text', col => col.notNull())
       .addColumn('created_by', 'text')
-      .addColumn('run_id', 'uuid')
+      // run_id optionally links a correction to the accrual run it fixes. Defense-in-depth FK for existence
+      // integrity (ON DELETE SET NULL — keep the audit row, drop a now-dangling link if a run is ever deleted);
+      // the endpoint additionally guards org + leave_type='annual' + non-dry-run, which an FK cannot express.
+      .addColumn('run_id', 'uuid', col => col.references('attendance_leave_accrual_runs.id').onDelete('set null'))
       .addColumn('source_key', 'text', col => col.notNull())
       .addColumn('created_at', 'timestamptz', col => col.notNull().defaultTo(sql`now()`))
       // a manual adjustment is a non-zero signed delta (positive = grant, negative = deduct); 0 is a no-op
