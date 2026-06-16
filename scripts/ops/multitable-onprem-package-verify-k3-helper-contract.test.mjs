@@ -15,6 +15,46 @@ test('on-prem verifier follows the helper-backed K3 SQL Server executor seam', (
     'the deploy package must include the shared helper package that plugin workspace symlinks resolve to',
   )
   assert.match(
+    buildScript,
+    /"packages\/core-backend\/scripts\/smoke-sqlserver\.ts"/,
+    'the deploy package must include the generic SQL Server smoke script referenced by core-backend package.json',
+  )
+  assert.match(
+    buildScript,
+    /"docs\/operations\/data-source-system-integration-c5-k3-mssql-smoke-runbook-20260615\.md"/,
+    'the deploy package must include the C5 generic/K3 SQL Server smoke runbook',
+  )
+  assert.match(
+    verifyScript,
+    /packages\/core-backend\/scripts\/smoke-sqlserver\.ts/,
+    'the verifier must require the packaged generic SQL Server smoke script',
+  )
+  assert.match(
+    verifyScript,
+    /plugins\/plugin-integration-core\/scripts\/smoke-k3-sqlserver-executor\.cjs/,
+    'the verifier must require the packaged K3 SQL Server smoke script',
+  )
+  assert.match(
+    verifyScript,
+    /data-source-system-integration-c5-k3-mssql-smoke-runbook-20260615\.md/,
+    'the verifier must require and inspect the C5 smoke runbook',
+  )
+  assert.match(
+    verifyScript,
+    /smoke:sqlserver": "tsx scripts\/smoke-sqlserver\.ts"/,
+    'the verifier must lock the package.json smoke:sqlserver command to a packaged script',
+  )
+  assert.match(
+    verifyScript,
+    /pnpm --filter @metasheet\/core-backend smoke:sqlserver/,
+    'the verifier must lock the runbook generic SQL Server smoke command',
+  )
+  assert.match(
+    verifyScript,
+    /pnpm --filter plugin-integration-core smoke:k3-sqlserver-executor/,
+    'the verifier must lock the runbook K3 SQL Server smoke command',
+  )
+  assert.match(
     verifyScript,
     /pnpm-workspace\.yaml.*packages\/\*/s,
     'the verifier must lock the workspace package glob used during deploy dependency refresh',
