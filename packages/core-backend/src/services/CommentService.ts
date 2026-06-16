@@ -7,6 +7,7 @@ import {
   type CommentMentionCandidate,
   type CommentPresenceViewer,
   type CommentQueryOptions,
+  type CommentReactionSummary,
   type CommentUnreadSummary,
 } from '../di/identifiers'
 import type { CollabService } from './CollabService'
@@ -14,6 +15,36 @@ import { db } from '../db/db'
 import { nowTimestamp } from '../db/type-helpers'
 import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
 import { notifyRecordSubscribersWithKysely } from '../multitable/record-subscription-service'
+
+/**
+ * Server-side emoji allowlist for comment reactions (B6, design-lock §3.2).
+ * An emoji is a display token, not a protocol enum, so the palette is validated
+ * here in code (reject unknown → 400) rather than via a DB CHECK constraint —
+ * extending it is a one-line change, no migration. Authored in NFC so the
+ * membership check (which NFC-normalizes input) is consistent.
+ */
+export const COMMENT_REACTION_EMOJIS = [
+  '👍', '👎', '❤️', '😄', '🎉', '😮', '😢', '🚀',
+] as const
+
+const COMMENT_REACTION_EMOJI_SET: ReadonlySet<string> = new Set(
+  COMMENT_REACTION_EMOJIS.map((e) => e.normalize('NFC')),
+)
+
+/**
+ * Validate + NFC-normalize a reaction emoji (B6, design-lock §3.3). NFC makes
+ * storage canonical so a later remove (which normalizes too) always matches the
+ * stored bytes — this is the structural guard against the multi-codepoint trap
+ * (e.g. `❤️` = ❤ + U+FE0F). Throws CommentValidationError on an emoji outside
+ * the server allowlist. Exported for direct unit testing of the guard.
+ */
+export function normalizeCommentReactionEmoji(emoji: string): string {
+  const normalized = (typeof emoji === 'string' ? emoji : '').normalize('NFC').trim()
+  if (!normalized || !COMMENT_REACTION_EMOJI_SET.has(normalized)) {
+    throw new CommentValidationError('Unsupported reaction emoji')
+  }
+  return normalized
+}
 
 export class CommentValidationError extends Error {
   constructor(message: string) {
@@ -55,6 +86,8 @@ export interface Comment {
   createdAt: string
   updatedAt: string
   mentions: string[]
+  /** Aggregated emoji reactions (B6); populated by getComments, else undefined. */
+  reactions?: CommentReactionSummary[]
 }
 
 export interface CommentPresenceSummary {
@@ -187,6 +220,8 @@ export class CommentService {
 
     await db.transaction().execute(async (trx) => {
       await trx.deleteFrom('meta_comment_reads').where('comment_id', '=', commentId).execute()
+      // B6: app-level cascade (no DB FK in the comments sub-domain).
+      await trx.deleteFrom('meta_comment_reactions').where('comment_id', '=', commentId).execute()
       await trx.deleteFrom('meta_comments').where('id', '=', commentId).execute()
     })
 
@@ -343,7 +378,18 @@ export class CommentService {
 
     const rows = await query.selectAll().orderBy('created_at', 'asc').limit(limit).offset(offset).execute()
 
-    return { items: rows.map((row) => this.mapRowToComment(row)), total }
+    const items = rows.map((row) => this.mapRowToComment(row))
+    // Hydrate emoji reactions (B6). Single grouped query over the page's ids;
+    // reactedByMe uses the optional viewer. Empty page → no query (guarded).
+    const reactionsByComment = await this.listReactionsForComments(
+      items.map((c) => c.id),
+      options?.viewerId,
+    )
+    for (const item of items) {
+      item.reactions = reactionsByComment.get(item.id) ?? []
+    }
+
+    return { items, total }
   }
 
   async listMentionCandidates(
@@ -526,6 +572,84 @@ export class CommentService {
         }),
       )
       .execute()
+  }
+
+  /**
+   * Add an emoji reaction (B6). Idempotent via the (comment_id,user_id,emoji)
+   * primary key + ON CONFLICT DO NOTHING. Mirrors markCommentRead's upsert shape.
+   */
+  async addReaction(commentId: string, userId: string, emoji: string): Promise<void> {
+    const normalizedUserId = this.normalizeUserId(userId)
+    const normalizedEmoji = normalizeCommentReactionEmoji(emoji)
+    // 404 a missing comment (same guard updateComment/deleteComment use).
+    await this.getRequiredCommentRow(commentId)
+
+    await db
+      .insertInto('meta_comment_reactions')
+      .values({
+        comment_id: commentId,
+        user_id: normalizedUserId,
+        emoji: normalizedEmoji,
+        created_at: new Date().toISOString(),
+      })
+      .onConflict((oc) => oc.columns(['comment_id', 'user_id', 'emoji']).doNothing())
+      .execute()
+  }
+
+  /**
+   * Remove the caller's emoji reaction (B6). Idempotent: removing a reaction
+   * that does not exist is a no-op. Self-scoped: filters on user_id so a user
+   * can only remove their own reaction.
+   */
+  async removeReaction(commentId: string, userId: string, emoji: string): Promise<void> {
+    const normalizedUserId = this.normalizeUserId(userId)
+    const normalizedEmoji = normalizeCommentReactionEmoji(emoji)
+
+    await db
+      .deleteFrom('meta_comment_reactions')
+      .where('comment_id', '=', commentId)
+      .where('user_id', '=', normalizedUserId)
+      .where('emoji', '=', normalizedEmoji)
+      .execute()
+  }
+
+  /**
+   * Aggregate reactions for a set of comments into per-comment summaries
+   * ({ emoji, count, reactedByMe }). Empty input → empty map (guards the
+   * `IN ()` SQL error on an empty comment list). Ordered by emoji for stable
+   * output. `reactedByMe` is false when no viewer is supplied.
+   */
+  async listReactionsForComments(
+    commentIds: string[],
+    viewerId?: string,
+  ): Promise<Map<string, CommentReactionSummary[]>> {
+    const result = new Map<string, CommentReactionSummary[]>()
+    if (!commentIds.length) return result
+
+    const viewer = viewerId?.trim() || ''
+    const rows = await db
+      .selectFrom('meta_comment_reactions')
+      .select(({ fn }) => [
+        'comment_id',
+        'emoji',
+        fn.countAll<number>().as('count'),
+        fn.max(sql<number>`CASE WHEN user_id = ${viewer} THEN 1 ELSE 0 END`).as('reacted_by_me'),
+      ])
+      .where('comment_id', 'in', commentIds)
+      .groupBy(['comment_id', 'emoji'])
+      .orderBy('emoji', 'asc')
+      .execute()
+
+    for (const row of rows) {
+      const list = result.get(row.comment_id) ?? []
+      list.push({
+        emoji: row.emoji,
+        count: Number(row.count),
+        reactedByMe: Number(row.reacted_by_me) > 0,
+      })
+      result.set(row.comment_id, list)
+    }
+    return result
   }
 
   async getCommentPresenceSummary(

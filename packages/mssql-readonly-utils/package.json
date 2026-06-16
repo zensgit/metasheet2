@@ -1,0 +1,15 @@
+{
+  "name": "@metasheet/mssql-readonly-utils",
+  "version": "0.1.0",
+  "description": "Read-only SQL Server helper contracts shared by MetaSheet data-source and integration paths.",
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "private": true,
+  "scripts": {
+    "build": "node -c index.cjs",
+    "test": "node __tests__/helper-contract.test.cjs && tsc --noEmit --module commonjs --target ES2022 --moduleResolution node --skipLibCheck __tests__/ts-consumer.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}

@@ -57,6 +57,16 @@
             <span v-if="thread.resolved" class="meta-comments-drawer__badge">{{ l('comment.resolved') }}</span>
           </div>
           <p class="meta-comments-drawer__content">{{ formatContent(thread.content) }}</p>
+          <MetaCommentReactions
+            v-if="canComment || (thread.reactions && thread.reactions.length > 0)"
+            :comment-id="thread.id"
+            :reactions="thread.reactions"
+            :can-react="canComment"
+            :pending-keys="reactingKeys"
+            :add-label="l('comment.addReaction')"
+            @react="(id, emoji) => emit('react', id, emoji)"
+            @unreact="(id, emoji) => emit('unreact', id, emoji)"
+          />
         </div>
         <div
           v-for="reply in repliesByParentId[thread.id] ?? []"
@@ -84,6 +94,16 @@
             >{{ deletingIds.includes(reply.id) ? l('comment.deleting') : l('comment.delete') }}</button>
           </div>
           <p class="meta-comments-drawer__content">{{ formatContent(reply.content) }}</p>
+          <MetaCommentReactions
+            v-if="canComment || (reply.reactions && reply.reactions.length > 0)"
+            :comment-id="reply.id"
+            :reactions="reply.reactions"
+            :can-react="canComment"
+            :pending-keys="reactingKeys"
+            :add-label="l('comment.addReaction')"
+            @react="(id, emoji) => emit('react', id, emoji)"
+            @unreact="(id, emoji) => emit('unreact', id, emoji)"
+          />
         </div>
       </div>
     </div>
@@ -136,6 +156,7 @@ import {
   type MetaCommentLabelKey,
 } from '../utils/meta-comment-labels'
 import MetaCommentComposer from './MetaCommentComposer.vue'
+import MetaCommentReactions from './MetaCommentReactions.vue'
 
 export type MentionCandidateInput = {
   userId: string
@@ -161,6 +182,7 @@ const props = withDefaults(defineProps<{
   resolvingIds?: string[]
   updatingIds?: string[]
   deletingIds?: string[]
+  reactingKeys?: string[]
   currentUserId?: string | null
   mentionSuggestions?: MetaCommentMentionSuggestion[]
   composerInitialMentions?: MetaCommentMentionSuggestion[]
@@ -178,6 +200,7 @@ const props = withDefaults(defineProps<{
   resolvingIds: () => [],
   updatingIds: () => [],
   deletingIds: () => [],
+  reactingKeys: () => [],
   currentUserId: null,
   mentionSuggestions: () => [],
   composerInitialMentions: () => [],
@@ -195,6 +218,8 @@ const emit = defineEmits<{
   (e: 'cancel-edit'): void
   (e: 'update:draft', value: string): void
   (e: 'retry'): void
+  (e: 'react', commentId: string, emoji: string): void
+  (e: 'unreact', commentId: string, emoji: string): void
 }>()
 
 const draftModel = computed({

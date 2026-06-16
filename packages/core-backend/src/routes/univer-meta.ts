@@ -132,6 +132,7 @@ import {
   RecordValidationError as ServiceValidationError,
   RecordFieldForbiddenError as ServiceFieldForbiddenError,
   type RecordWriteHelpers,
+  type RecordChange,
 } from '../multitable/record-write-service'
 import {
   RecordService,
@@ -5623,6 +5624,247 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list record history failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record history' } })
+    }
+  })
+
+  // ---------------------------------------------------------------------------
+  // Layer 1 — record-level version restore.
+  // Design-lock: docs/development/multitable-record-restore-layer1-design-20260615.md
+  //
+  // Restore a single LIVE record's scalar user-data fields back to a prior
+  // revision's recorded values. Properties locked in the design:
+  //  - forward-change: a value-changing restore emits a NEW 'restore' revision
+  //    (action='update') and bumps version; an empty diff is a no-op.
+  //  - Lock A faithful set∪unset diff vs the unmasked stored snapshot (never patch replay).
+  //  - Lock B write-gated: BOTH the static FieldMutationGuard AND restore's own
+  //    layer-3 pre-check (the spine does not enforce layer-3 — see #2106 / multitable-ai.ts).
+  //  - Lock C update-restore only: hard-deleted record → 404; delete-target → RESTORE_UNSUPPORTED.
+  //  - Lock D scalar-only: computed/link/system-auto/attachment excluded by type.
+  // ---------------------------------------------------------------------------
+  router.post('/sheets/:sheetId/records/:recordId/restore', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!sheetId || !recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    }
+    const schema = z.object({
+      targetVersion: z.number().int().positive(),
+      expectedVersion: z.number().int().nonnegative(),
+      // Per-field (column-level) restore: optional subset of field ids. Omitted → restore the whole
+      // restorable diff (full-record). Present → restrict to those fields (still atomic over the subset).
+      fieldIds: z.array(z.string().min(1)).min(1).optional(),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+    const { targetVersion, expectedVersion, fieldIds } = parsed.data
+
+    const asRecord = (value: unknown): Record<string, unknown> => {
+      if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+      if (typeof value === 'string') {
+        try {
+          const p = JSON.parse(value)
+          if (p && typeof p === 'object' && !Array.isArray(p)) return p as Record<string, unknown>
+        } catch { /* fall through */ }
+      }
+      return {}
+    }
+    // Lock D: this set gates the SCALAR-data path. Computed/system-auto/attachment are non-data and
+    // excluded; `button` is the no-value trigger (also caught by raw type below). `link` is listed as a
+    // defensive backstop, but link fields never reach this check — they are handled by a dedicated SET
+    // path (Slice 2a) above the scalar branch, which re-syncs meta_links + the mirror through the spine.
+    const NON_RESTORABLE_TYPES = new Set([
+      'formula', 'lookup', 'rollup', 'link', 'attachment', 'button',
+      'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy',
+    ])
+    const isRestorableType = (t: string): boolean => !NON_RESTORABLE_TYPES.has(t)
+    const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canEditRecord) return sendForbidden(res)
+
+      // Live record only — undelete (resurrect + meta_links rebuild) is Slice 2.
+      const currentRes = await pool.query(
+        'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [recordId, sheetId],
+      )
+      if (currentRes.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
+      const currentRow = currentRes.rows[0] as { version?: unknown; data?: unknown }
+      const currentVersion = Number(currentRow.version ?? 0)
+      // Concurrency pre-check BEFORE the no-op branch: a stale caller must get a conflict, never noop.
+      if (expectedVersion !== currentVersion) {
+        return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: `Record is at version ${currentVersion}, expected ${expectedVersion}` } })
+      }
+      const currentData = asRecord(currentRow.data)
+
+      // Resolve the target revision: non-delete wins; delete-only at that version → unsupported.
+      // (meta_record_revisions has no (sheet,record,version) uniqueness; delete reuses the version.)
+      const revRes = await pool.query(
+        `SELECT action, snapshot FROM meta_record_revisions
+         WHERE sheet_id = $1 AND record_id = $2 AND version = $3
+         ORDER BY created_at DESC`,
+        [sheetId, recordId, targetVersion],
+      )
+      const revRows = revRes.rows as Array<{ action?: unknown; snapshot?: unknown }>
+      if (revRows.length === 0) {
+        // Distinguish a PRUNED target (retention aged it out) from one that never existed: if the
+        // target is below the surviving floor (MIN retained version for this record), it was pruned
+        // → VERSION_EXPIRED. This is data-driven (true whether or not the retention sweep is enabled;
+        // with retention off, MIN is the create version so this never fires spuriously).
+        const floorRes = await pool.query(
+          'SELECT MIN(version) AS min_version FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2',
+          [sheetId, recordId],
+        )
+        const minVersion = Number((floorRes.rows[0] as { min_version?: unknown } | undefined)?.min_version ?? 0)
+        if (minVersion > 0 && targetVersion < minVersion) {
+          return res.status(410).json({ ok: false, error: { code: 'VERSION_EXPIRED', message: `Version ${targetVersion} is older than the retained floor (v${minVersion}) and has been pruned` } })
+        }
+        return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: `No revision at version ${targetVersion}` } })
+      }
+      const targetRev = revRows.find((r) => r.action !== 'delete')
+      if (!targetRev) {
+        return res.status(422).json({ ok: false, error: { code: 'RESTORE_UNSUPPORTED', message: `Version ${targetVersion} is a delete revision; undelete is not supported in this slice` } })
+      }
+      if (targetRev.snapshot === null || targetRev.snapshot === undefined) {
+        return res.status(422).json({ ok: false, error: { code: 'SNAPSHOT_UNAVAILABLE', message: `Revision ${targetVersion} has no stored snapshot to restore from` } })
+      }
+      const targetSnapshot = asRecord(targetRev.snapshot)
+
+      // Field + permission context — single source of truth shared with /patch and the AI shortcut.
+      const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
+      if (!patchContext) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
+
+      // Raw DB field types — `mapFieldType` currently folds the no-value `button` trigger into
+      // `string`, so guard.type never reports 'button'. Restore excludes the no-value `button` by its
+      // RAW type so it is skipped regardless of that mapping (otherwise a legacy button key in data
+      // would enter the diff and the spine would refuse it, blocking an otherwise-restorable record).
+      const rawTypeRes = await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])
+      const rawTypeById = new Map<string, string>(
+        (rawTypeRes.rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]),
+      )
+
+      // Schema drift: a snapshot field id absent from the current schema cannot be restored.
+      // (A type-change since capture is not detectable without a stored schema snapshot; the value
+      //  validators in the spine act as the backstop, rejecting an incompatible old value.)
+      for (const fid of Object.keys(targetSnapshot)) {
+        if (!fieldById.has(fid)) {
+          return res.status(422).json({ ok: false, error: { code: 'SCHEMA_DRIFT', message: `Field ${fid} in revision ${targetVersion} no longer exists in the current schema` } })
+        }
+      }
+
+      // Faithful set ∪ unset diff over restorable fields.
+      const diff: RecordChange[] = []
+      for (const [fid, guard] of fieldById.entries()) {
+        if (rawTypeById.get(fid) === 'button') continue // no-value trigger (mapFieldType folds it to 'string')
+        const inSnap = Object.prototype.hasOwnProperty.call(targetSnapshot, fid)
+        const inCur = Object.prototype.hasOwnProperty.call(currentData, fid)
+        // Slice 2a — link fields: restore the snapshot's link id array (or [] when absent at version N)
+        // as a SET routed through patchRecords, which re-syncs meta_links + the twoWay mirror fan-out.
+        // NEVER a data-`unset` (that touches only the data mirror and would desync the join table).
+        // Only emit when the id set actually differs (preserves no-op). The link config (guard.link)
+        // drives the spine's meta_links sync; a snapshot referencing a now-deleted foreign record is
+        // rejected fail-closed by the spine's link-target validation (VALIDATION_ERROR). Use the CANONICAL
+        // normalizeLinkIds (handles legacy `'["a","b"]'` / `'a,b'` / trim / dedup) so a legacy-shaped
+        // snapshot or current value is parsed identically to the write path, not mis-read as one id.
+        if (guard.type === 'link') {
+          const target = inSnap ? normalizeLinkIds(targetSnapshot[fid]) : []
+          if (!sameValue(normalizeLinkIds(currentData[fid]), target)) {
+            diff.push({ recordId, fieldId: fid, value: target, expectedVersion: currentVersion, op: 'set' })
+          }
+          continue
+        }
+        if (!isRestorableType(guard.type)) continue
+        if (inSnap) {
+          if (!sameValue(currentData[fid], targetSnapshot[fid])) {
+            diff.push({ recordId, fieldId: fid, value: targetSnapshot[fid], expectedVersion: currentVersion, op: 'set' })
+          }
+        } else if (inCur) {
+          diff.push({ recordId, fieldId: fid, value: null, expectedVersion: currentVersion, op: 'unset' })
+        }
+      }
+
+      // Per-field (column-level) restore: when the caller passes `fieldIds`, restrict the diff to that
+      // selection. The atomic gate below then runs over only the selected subset — so a user can restore
+      // the writable fields they picked even if another changed field in the revision is forbidden. A
+      // requested field that is unchanged / non-restorable / unknown simply isn't in the diff (no error).
+      const selectedDiff = fieldIds ? diff.filter((ch) => fieldIds.includes(ch.fieldId)) : diff
+
+      // Lock B: gate every (selected) diff field on BOTH the static guard and restore's own layer-3 pre-check.
+      const hasForbidden = selectedDiff.some((ch) => {
+        const guard = fieldById.get(ch.fieldId)
+        const perm = fieldPermissions[ch.fieldId]
+        const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
+        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        return !staticOk || !layer3Ok
+      })
+      if (hasForbidden) {
+        // Generalized message — the forbidden ids are DERIVED server-side from the unmasked snapshot
+        // (not caller-submitted like /patch), so echoing them would leak hidden-field metadata to an
+        // actor denied visibility. The diff is atomic: nothing is written.
+        return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: 'Not permitted to restore one or more fields in this revision' } })
+      }
+
+      const restoredFieldIds = selectedDiff.map((ch) => ch.fieldId)
+      // No-op: nothing to restore (concurrency already verified above).
+      if (selectedDiff.length === 0) {
+        return res.json({ ok: true, data: { recordId, newVersion: currentVersion, noop: true, restoredFieldIds: [], skippedFieldIds: [] } })
+      }
+
+      // Apply through the canonical spine: atomic txn + version re-check + 'restore' revision
+      // (faithful unset after-image) + Yjs invalidation + formula recompute.
+      const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
+      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
+      if (yjsInvalidator) {
+        recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
+      }
+      try {
+        const result = await recordWriteService.patchRecords({
+          sheetId,
+          changesByRecord: new Map([[recordId, selectedDiff]]),
+          actorId: getRequestActorId(req),
+          fields,
+          visiblePropertyFields: readableEchoFields,
+          visiblePropertyFieldIds: readableEchoFieldIds,
+          attachmentFields,
+          fieldById,
+          capabilities,
+          sheetScope,
+          access,
+          source: 'restore',
+        })
+        const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
+        return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds, skippedFieldIds: [] } })
+      } catch (err) {
+        if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) {
+          return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: (err as Error).message } })
+        }
+        if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) {
+          return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: (err as Error).message } })
+        }
+        if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: (err as Error).message } })
+        }
+        throw err
+      }
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_revisions')) {
+        return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] record restore failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to restore record' } })
     }
   })
 

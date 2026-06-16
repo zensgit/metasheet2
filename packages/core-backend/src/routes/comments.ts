@@ -151,6 +151,8 @@ export function commentsRouter(injector?: Injector): Router {
         resolved: parsed.data.resolved,
         limit,
         offset,
+        // B6: lets getComments compute reactedByMe on each comment's reactions.
+        viewerId: getUserId(req),
       }
       const result = await commentService.getComments(spreadsheetId, options)
       return res.json({ ok: true, data: { items: result.items, total: result.total, limit, offset } })
@@ -388,6 +390,48 @@ export function commentsRouter(injector?: Injector): Router {
     } catch (error) {
       logger.error('Failed to mark comment as read', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to mark comment as read' } })
+    }
+  })
+
+  // B6 reactions. Gate = comments:write (a reaction is an attributed, persistent,
+  // visible artifact = create-bucket, like createComment — NOT a read-receipt).
+  // The emoji travels in the BODY for both add and remove (Express allows a
+  // DELETE body) to sidestep multi-codepoint path-encoding drift (e.g. `❤️`).
+  router.post('/api/comments/:commentId/reactions', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
+    const commentId = req.params.commentId
+    if (!commentId || commentId.trim().length === 0) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'commentId required' } })
+    }
+    const parsed = z.object({ emoji: z.string().min(1) }).safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      await commentService.addReaction(commentId, getUserId(req), parsed.data.emoji)
+      return res.status(201).json({ ok: true, data: {} })
+    } catch (error) {
+      logger.error('Failed to add comment reaction', error as Error)
+      return respondCommentError(res, error, 'Failed to add comment reaction')
+    }
+  })
+
+  router.delete('/api/comments/:commentId/reactions', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
+    const commentId = req.params.commentId
+    if (!commentId || commentId.trim().length === 0) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'commentId required' } })
+    }
+    const parsed = z.object({ emoji: z.string().min(1) }).safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      await commentService.removeReaction(commentId, getUserId(req), parsed.data.emoji)
+      return res.status(204).end()
+    } catch (error) {
+      logger.error('Failed to remove comment reaction', error as Error)
+      return respondCommentError(res, error, 'Failed to remove comment reaction')
     }
   })
 

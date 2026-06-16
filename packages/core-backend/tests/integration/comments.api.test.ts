@@ -93,9 +93,19 @@ async function ensureCommentsTables() {
       PRIMARY KEY (comment_id, user_id)
     );
   `)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meta_comment_reactions (
+      comment_id varchar(50) NOT NULL,
+      user_id varchar(50) NOT NULL,
+      emoji text NOT NULL,
+      created_at timestamp DEFAULT now(),
+      PRIMARY KEY (comment_id, user_id, emoji)
+    );
+  `)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_comments_sheet ON meta_comments(spreadsheet_id);')
   await pool.query('CREATE INDEX IF NOT EXISTS idx_comments_row ON meta_comments(row_id);')
   await pool.query('CREATE INDEX IF NOT EXISTS idx_comment_reads_user ON meta_comment_reads(user_id, read_at DESC);')
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_comment_reactions_comment ON meta_comment_reactions(comment_id);')
 }
 
 describe('Comments API', () => {
@@ -129,6 +139,7 @@ describe('Comments API', () => {
     try {
       const pool = poolManager.get()
       if (createdCommentIds.length > 0) {
+        await pool.query('DELETE FROM meta_comment_reactions WHERE comment_id = ANY($1::text[])', [createdCommentIds])
         await pool.query('DELETE FROM meta_comment_reads WHERE comment_id = ANY($1::text[])', [createdCommentIds])
         await pool.query('DELETE FROM meta_comments WHERE id = ANY($1::text[])', [createdCommentIds])
       }
@@ -1208,5 +1219,103 @@ describe('Comments API', () => {
     })
 
     socket.close()
+  })
+
+  // B6: emoji reactions through the REAL HTTP wire. The remove path is the
+  // anti-drift keystone — a multi-codepoint emoji (❤️ = ❤ + U+FE0F) must round
+  // trip add → aggregate → delete and actually remove the row, which an
+  // in-process service call could false-green (design-lock §3.3).
+  it('adds, aggregates, idempotently re-adds, and removes comment reactions (real wire, multi-codepoint emoji)', async () => {
+    if (!baseUrl) return
+
+    const ts = Date.now()
+    const baseId = `base_react_${ts}`.slice(0, 50)
+    const spreadsheetId = `sheet_react_${ts}`.slice(0, 50)
+    const rowId = `rec_react_${ts}`.slice(0, 50)
+    const pool = poolManager.get()
+
+    await pool.query('INSERT INTO meta_bases (id, name) VALUES ($1, $2)', [baseId, 'React Base'])
+    createdBaseIds.push(baseId)
+    await pool.query('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)', [spreadsheetId, baseId, 'React Sheet'])
+    createdSheetIds.push(spreadsheetId)
+
+    const userA = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_react_a`)).json()).token as string
+    const userB = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_react_b`)).json()).token as string
+
+    // Create a comment to react to.
+    const createRes = await fetch(`${baseUrl}/api/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userA}` },
+      body: JSON.stringify({ spreadsheetId, rowId, content: 'react to me' }),
+    })
+    expect(createRes.status).toBe(201)
+    const comment = (await createRes.json()).data.comment
+    createdCommentIds.push(comment.id)
+
+    const EMOJI = '❤️' // U+2764 U+FE0F — the multi-codepoint case
+    const reactUrl = `${baseUrl}/api/comments/${comment.id}/reactions`
+    const listUrl = `${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}`
+
+    // userA adds ❤️
+    const addA = await fetch(reactUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userA}` },
+      body: JSON.stringify({ emoji: EMOJI }),
+    })
+    expect(addA.status).toBe(201)
+
+    // Idempotent: userA re-adds the same emoji → still one row for A.
+    const addAgain = await fetch(reactUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userA}` },
+      body: JSON.stringify({ emoji: EMOJI }),
+    })
+    expect(addAgain.status).toBe(201)
+
+    // userB also adds ❤️ → count becomes 2.
+    const addB = await fetch(reactUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userB}` },
+      body: JSON.stringify({ emoji: EMOJI }),
+    })
+    expect(addB.status).toBe(201)
+
+    // List as userA → aggregate count 2, reactedByMe true.
+    const listA = await (await fetch(listUrl, { headers: { Authorization: `Bearer ${userA}` } })).json()
+    const itemA = listA.data.items.find((c: { id: string }) => c.id === comment.id)
+    expect(itemA.reactions).toEqual([{ emoji: EMOJI, count: 2, reactedByMe: true }])
+
+    // List as a non-reactor (userB removed below; here a third viewer) → reactedByMe reflects viewer.
+    const listB = await (await fetch(listUrl, { headers: { Authorization: `Bearer ${userB}` } })).json()
+    const itemB = listB.data.items.find((c: { id: string }) => c.id === comment.id)
+    expect(itemB.reactions).toEqual([{ emoji: EMOJI, count: 2, reactedByMe: true }])
+
+    // Invalid emoji → 400 (allowlist).
+    const bad = await fetch(reactUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userA}` },
+      body: JSON.stringify({ emoji: '💩' }),
+    })
+    expect(bad.status).toBe(400)
+
+    // KEYSTONE: userA removes ❤️ through the real DELETE wire → row actually gone.
+    const del = await fetch(reactUrl, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userA}` },
+      body: JSON.stringify({ emoji: EMOJI }),
+    })
+    expect(del.status).toBe(204)
+
+    // Confirm in the DB the row is gone for A (count drops to 1, B remains).
+    const remaining = await pool.query(
+      'SELECT user_id FROM meta_comment_reactions WHERE comment_id = $1 AND emoji = $2 ORDER BY user_id',
+      [comment.id, EMOJI.normalize('NFC')],
+    )
+    expect(remaining.rows.map((r: { user_id: string }) => r.user_id)).toEqual(['user_react_b'])
+
+    // And the aggregate now shows count 1, reactedByMe false for A.
+    const listAfter = await (await fetch(listUrl, { headers: { Authorization: `Bearer ${userA}` } })).json()
+    const itemAfter = listAfter.data.items.find((c: { id: string }) => c.id === comment.id)
+    expect(itemAfter.reactions).toEqual([{ emoji: EMOJI, count: 1, reactedByMe: false }])
   })
 })

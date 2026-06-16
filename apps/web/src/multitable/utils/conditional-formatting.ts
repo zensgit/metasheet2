@@ -5,7 +5,11 @@
 // when extending the rule schema.
 
 import type {
+  ConditionalFormattingColorScaleConfig,
+  ConditionalFormattingColorScaleStop,
   ConditionalFormattingDataBarConfig,
+  ConditionalFormattingIconSetConfig,
+  ConditionalFormattingIconSetName,
   ConditionalFormattingOperator,
   ConditionalFormattingRule,
   ConditionalFormattingScaleRange,
@@ -389,12 +393,33 @@ function toFiniteNumber(value: unknown): number | null {
   return null
 }
 
+const ICON_SET_NAMES: ReadonlySet<string> = new Set(['arrows3', 'traffic3', 'signs3'])
+
+/** Linear-interpolate two #rgb / #rrggbb / #rrggbbaa hex colors (alpha stripped). Mirror of backend. */
+export function lerpHexColor(a: string, b: string, t: number): string {
+  const parse = (hex: string): [number, number, number] => {
+    let h = hex.trim().replace(/^#/, '')
+    if (h.length === 3) h = h.split('').map((c) => c + c).join('')
+    if (h.length === 8) h = h.slice(0, 6)
+    const n = parseInt(h.slice(0, 6), 16)
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+  }
+  const clampT = Math.max(0, Math.min(1, t))
+  const [ar, ag, ab] = parse(a)
+  const [br, bg, bb] = parse(b)
+  const mix = (x: number, y: number) => Math.round(x + (y - x) * clampT)
+  const hx = (n: number) => n.toString(16).padStart(2, '0')
+  return `#${hx(mix(ar, br))}${hx(mix(ag, bg))}${hx(mix(ab, bb))}`
+}
+
 export function sanitizeScaleRule(input: unknown): ConditionalFormattingScaleRule | null {
   if (!isPlainObject(input)) return null
   const id = typeof input.id === 'string' && input.id.trim() ? input.id.trim() : null
   const fieldId = typeof input.fieldId === 'string' && input.fieldId.trim() ? input.fieldId.trim() : null
   if (!id || !fieldId) return null
-  if (input.kind !== 'dataBar') return null // A5-1: dataBar only (colorScale/iconSet = A5-2/A5-3)
+
+  const kind = input.kind
+  if (kind !== 'dataBar' && kind !== 'colorScale' && kind !== 'iconSet') return null
 
   const orderRaw = typeof input.order === 'number' && Number.isFinite(input.order) ? input.order : 0
   const enabled = input.enabled !== false
@@ -410,15 +435,46 @@ export function sanitizeScaleRule(input: unknown): ConditionalFormattingScaleRul
     range = { mode: 'auto' }
   }
 
-  const barRaw = isPlainObject(input.dataBar) ? input.dataBar : {}
-  const color = sanitizeHex(barRaw.color)
-  if (!color) return null
-  const dataBar: ConditionalFormattingDataBarConfig = { color }
-  const negativeColor = sanitizeHex(barRaw.negativeColor)
-  if (negativeColor) dataBar.negativeColor = negativeColor
-  if (barRaw.showValue === true) dataBar.showValue = true
+  const base = { id, order: Math.floor(orderRaw), fieldId, enabled, range }
 
-  return { id, order: Math.floor(orderRaw), fieldId, kind: 'dataBar', enabled, range, dataBar }
+  if (kind === 'dataBar') {
+    const barRaw = isPlainObject(input.dataBar) ? input.dataBar : {}
+    const color = sanitizeHex(barRaw.color)
+    if (!color) return null
+    const dataBar: ConditionalFormattingDataBarConfig = { color }
+    const negativeColor = sanitizeHex(barRaw.negativeColor)
+    if (negativeColor) dataBar.negativeColor = negativeColor
+    if (barRaw.showValue === true) dataBar.showValue = true
+    return { ...base, kind: 'dataBar', dataBar }
+  }
+
+  if (kind === 'colorScale') {
+    const csRaw = isPlainObject(input.colorScale) ? input.colorScale : {}
+    if (!Array.isArray(csRaw.stops)) return null
+    const stops: ConditionalFormattingColorScaleStop[] = []
+    const seen = new Set<string>()
+    for (const s of csRaw.stops) {
+      if (!isPlainObject(s)) return null
+      const at = s.at
+      if (at !== 'min' && at !== 'mid' && at !== 'max') return null
+      if (seen.has(at)) return null
+      const color = sanitizeHex(s.color)
+      if (!color) return null
+      seen.add(at)
+      stops.push({ at, color })
+    }
+    if ((stops.length !== 2 && stops.length !== 3) || !seen.has('min') || !seen.has('max')) return null
+    if (stops.length === 3 && !seen.has('mid')) return null
+    return { ...base, kind: 'colorScale', colorScale: { stops } }
+  }
+
+  const isRaw = isPlainObject(input.iconSet) ? input.iconSet : {}
+  if (!ICON_SET_NAMES.has(isRaw.set as string)) return null
+  if (!Array.isArray(isRaw.thresholds) || isRaw.thresholds.length !== 2) return null
+  const t0 = toFiniteNumber(isRaw.thresholds[0])
+  const t1 = toFiniteNumber(isRaw.thresholds[1])
+  if (t0 === null || t1 === null || t0 >= t1) return null
+  return { ...base, kind: 'iconSet', iconSet: { set: isRaw.set as ConditionalFormattingIconSetName, thresholds: [t0, t1] } }
 }
 
 export function sanitizeScaleRules(input: unknown): ConditionalFormattingScaleRule[] {
@@ -440,10 +496,33 @@ export function extractScaleRulesFromConfig(config: unknown): ConditionalFormatt
   return sanitizeScaleRules(config.conditionalFormattingScaleRules)
 }
 
+// ADDITIVE by kind (not a discriminated union — mirror of backend; a `kind:`
+// field would break the shipped data-bar renderer/tests).
 export interface FieldScalePresentation {
-  barPct: number
-  barColor: string
-  negative: boolean
+  barPct?: number
+  barColor?: string
+  negative?: boolean
+  scaleColor?: string
+  iconKey?: string
+}
+
+/** A5-2: interpolate a value's color from the by-name stops. Mirror of backend. */
+function colorScaleColor(cfg: ConditionalFormattingColorScaleConfig, v: number, min: number, max: number): string {
+  const at = (name: 'min' | 'mid' | 'max') => cfg.stops.find((s) => s.at === name)?.color
+  const minC = at('min') ?? '#000000'
+  const maxC = at('max') ?? '#ffffff'
+  const midC = at('mid')
+  const span = max - min
+  const t = span <= 0 ? 1 : Math.max(0, Math.min(1, (v - min) / span))
+  if (!midC) return lerpHexColor(minC, maxC, t)
+  return t <= 0.5 ? lerpHexColor(minC, midC, t * 2) : lerpHexColor(midC, maxC, (t - 0.5) * 2)
+}
+
+/** A5-3: bucket a value into an icon index via the two absolute thresholds. Mirror of backend. */
+function iconSetKey(cfg: ConditionalFormattingIconSetConfig, v: number): string {
+  const [t0, t1] = cfg.thresholds
+  const index = v < t0 ? 0 : v < t1 ? 1 : 2
+  return `${cfg.set}:${index}`
 }
 export interface FieldScaleResult {
   rule: ConditionalFormattingScaleRule
@@ -460,11 +539,13 @@ const EMPTY_SCALE_MAP: FieldScaleMap = Object.freeze({
 }) as FieldScaleMap
 
 /**
- * Pre-compute data-bar presentation per (fieldId, recordId). Mirrors the
- * backend `buildFieldScaleMap`: min/max over the passed records (auto) or the
- * rule's fixed range; each finite value → 0..100 fill; degenerate range → full
- * bar; negatives take negativeColor; non-numeric skipped; first rule per field
- * wins. Caller passes the already-loaded/masked rows (client-side discipline).
+ * Pre-compute scale presentation (data-bar / color-scale / icon-set) per
+ * (fieldId, recordId). Mirrors the backend `buildFieldScaleMap`: min/max over
+ * the passed records (auto) or the rule's fixed range; dataBar → 0..100 fill
+ * (degenerate range → full bar, negatives take negativeColor); colorScale →
+ * interpolated scaleColor; iconSet → iconKey bucket; non-numeric skipped; first
+ * rule per field wins. The grid renders all three (MetaGridTable, #2640/#2680).
+ * Caller passes the already-loaded/masked rows (client-side discipline).
  */
 export function buildFieldScaleMap(
   rules: ConditionalFormattingScaleRule[],
@@ -474,7 +555,10 @@ export function buildFieldScaleMap(
   const byField: Record<string, FieldScaleResult> = {}
 
   for (const rule of rules) {
-    if (!rule.enabled || rule.kind !== 'dataBar' || !rule.dataBar) continue
+    if (!rule.enabled) continue
+    if (rule.kind === 'dataBar' && !rule.dataBar) continue
+    if (rule.kind === 'colorScale' && !rule.colorScale) continue
+    if (rule.kind === 'iconSet' && !rule.iconSet) continue
     if (byField[rule.fieldId]) continue
 
     let min: number
@@ -502,10 +586,16 @@ export function buildFieldScaleMap(
       if (!record?.id) continue
       const v = toComparableNumber(record.data?.[rule.fieldId])
       if (v === null) continue
-      const pct = span <= 0 ? 100 : Math.max(0, Math.min(100, ((v - min) / span) * 100))
-      const negative = v < 0
-      const barColor = negative && rule.dataBar.negativeColor ? rule.dataBar.negativeColor : rule.dataBar.color
-      byRecordId[record.id] = { barPct: pct, barColor, negative }
+      if (rule.kind === 'dataBar' && rule.dataBar) {
+        const pct = span <= 0 ? 100 : Math.max(0, Math.min(100, ((v - min) / span) * 100))
+        const negative = v < 0
+        const barColor = negative && rule.dataBar.negativeColor ? rule.dataBar.negativeColor : rule.dataBar.color
+        byRecordId[record.id] = { barPct: pct, barColor, negative }
+      } else if (rule.kind === 'colorScale' && rule.colorScale) {
+        byRecordId[record.id] = { scaleColor: colorScaleColor(rule.colorScale, v, min, max) }
+      } else if (rule.kind === 'iconSet' && rule.iconSet) {
+        byRecordId[record.id] = { iconKey: iconSetKey(rule.iconSet, v) }
+      }
     }
     byField[rule.fieldId] = { rule, min, max, byRecordId }
   }

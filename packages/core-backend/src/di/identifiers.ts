@@ -178,6 +178,21 @@ export interface CommentQueryOptions {
     limit?: number;
     /** Pagination offset (default 0). */
     offset?: number;
+    /**
+     * The viewing user, used only to compute `reactedByMe` on each comment's
+     * reaction summary. Omitted → `reactedByMe` is false for all reactions.
+     */
+    viewerId?: string;
+}
+
+/** Aggregated emoji-reaction summary attached to a comment (B6). */
+export interface CommentReactionSummary {
+    /** The reaction emoji (NFC-normalized). */
+    emoji: string;
+    /** How many distinct users reacted with this emoji. */
+    count: number;
+    /** Whether the requesting viewer is one of them. */
+    reactedByMe: boolean;
 }
 
 /**
@@ -258,6 +273,12 @@ export interface CommentRecord {
     updatedAt: string;
     /** User IDs mentioned in this comment. */
     mentions: string[];
+    /**
+     * Aggregated emoji reactions on this comment (B6). Present on list responses
+     * (`getComments`); each entry is one emoji with its total count and whether
+     * the viewer reacted. Undefined when reactions were not hydrated.
+     */
+    reactions?: CommentReactionSummary[];
 }
 
 /** An inbox entry extends CommentRecord with read/mention state and navigation context. */
@@ -365,6 +386,19 @@ export interface ICommentService {
      */
     getUnreadSummary(userId: string): Promise<CommentUnreadSummary>;
     markCommentRead(commentId: string, userId: string): Promise<void>;
+    /**
+     * Add an emoji reaction by `userId` to a comment (B6). Idempotent: re-adding
+     * the same (comment, user, emoji) is a no-op. Rejects emojis outside the
+     * server allowlist (CommentValidationError) and missing comments
+     * (CommentNotFoundError).
+     */
+    addReaction(commentId: string, userId: string, emoji: string): Promise<void>;
+    /**
+     * Remove `userId`'s emoji reaction from a comment (B6). Idempotent: removing
+     * a reaction that does not exist is a no-op. A user can only remove their
+     * own reaction (the row is keyed by user_id).
+     */
+    removeReaction(commentId: string, userId: string, emoji: string): Promise<void>;
     getCommentPresenceSummary(
       spreadsheetId: string,
       rowIds?: string[],

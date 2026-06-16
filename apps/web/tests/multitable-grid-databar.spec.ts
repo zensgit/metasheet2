@@ -86,4 +86,84 @@ describe('MetaGridTable — data-bar conditional formatting (A5-1c render)', () 
     expect(cells[2].style.backgroundColor).toBe('') // operator bg dropped under the bar
     expect(cells[2].style.color).toBe('rgb(17, 17, 17)') // textColor preserved
   })
+
+  // Trap E regression: a colorScale / iconSet presentation has no barPct, so the
+  // grid's data-bar render must NOT build a `linear-gradient(… undefined% …)`.
+  // (A5-2/A5-3 have their own browser-gated render; the grid only draws bars.)
+  it('does NOT render a data-bar gradient for a colorScale presentation', () => {
+    const colorScale = buildFieldScaleMap([
+      sanitizeScaleRule({
+        id: 'cs1', fieldId: 'amount', kind: 'colorScale', order: 0, range: { mode: 'auto' },
+        colorScale: { stops: [{ at: 'min', color: '#000000' }, { at: 'max', color: '#ffffff' }] },
+      })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: colorScale })
+    const cells = dataCells(root)
+    for (const idx of [0, 2, 4]) {
+      expect(cells[idx].style.backgroundImage).toBe('')
+      expect(cells[idx].style.backgroundImage).not.toContain('undefined')
+    }
+  })
+
+  it('does NOT render a data-bar gradient for an iconSet presentation', () => {
+    const iconSet = buildFieldScaleMap([
+      sanitizeScaleRule({
+        id: 'is1', fieldId: 'amount', kind: 'iconSet', order: 0, range: { mode: 'auto' },
+        iconSet: { set: 'arrows3', thresholds: [10, 20] },
+      })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: iconSet })
+    const cells = dataCells(root)
+    for (const idx of [0, 2, 4]) {
+      expect(cells[idx].style.backgroundImage).toBe('')
+      expect(cells[idx].style.backgroundImage).not.toContain('undefined')
+    }
+  })
+})
+
+describe('MetaGridTable — color scale (A5-2) + icon set (A5-3) render', () => {
+  it('paints the cell background with the colorScale color (no gradient)', () => {
+    const colorScale = buildFieldScaleMap([
+      sanitizeScaleRule({
+        id: 'cs1', fieldId: 'amount', kind: 'colorScale', order: 0, range: { mode: 'auto' },
+        colorScale: { stops: [{ at: 'min', color: '#000000' }, { at: 'max', color: '#ffffff' }] },
+      })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: colorScale })
+    const cells = dataCells(root)
+    // amount 0 → min stop #000000, 100 → max stop #ffffff, 50 → #808080
+    expect(cells[0].style.backgroundColor).toBe('rgb(0, 0, 0)')
+    expect(cells[2].style.backgroundColor).toBe('rgb(128, 128, 128)')
+    expect(cells[4].style.backgroundColor).toBe('rgb(255, 255, 255)')
+    expect(cells[2].style.backgroundImage).toBe('') // colorScale is a solid fill, not a bar
+  })
+
+  it('renders an icon glyph for each bucket of an iconSet rule', () => {
+    const iconSet = buildFieldScaleMap([
+      sanitizeScaleRule({
+        id: 'is1', fieldId: 'amount', kind: 'iconSet', order: 0, range: { mode: 'auto' },
+        iconSet: { set: 'arrows3', thresholds: [10, 20] },
+      })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: iconSet })
+    const cells = dataCells(root)
+    // amount 0 (<10) → index 0 ↓ ; 50 (>=20) → index 2 ↑ ; 100 (>=20) → index 2 ↑
+    const icon = (cell: HTMLElement) => cell.querySelector('[data-test="cell-scale-icon"]')
+    expect(icon(cells[0])?.textContent).toBe('↓')
+    expect(icon(cells[2])?.textContent).toBe('↑')
+    expect(icon(cells[4])?.textContent).toBe('↑')
+  })
+
+  it('renders no icon on a field with no scale rule', () => {
+    const iconSet = buildFieldScaleMap([
+      sanitizeScaleRule({
+        id: 'is1', fieldId: 'amount', kind: 'iconSet', order: 0, range: { mode: 'auto' },
+        iconSet: { set: 'arrows3', thresholds: [10, 20] },
+      })!,
+    ], ROWS)
+    const root = mountGrid({ conditionalFormattingScale: iconSet })
+    const cells = dataCells(root)
+    // cells[1] is r1.label (no scale rule) → no icon
+    expect(cells[1].querySelector('[data-test="cell-scale-icon"]')).toBeNull()
+  })
 })

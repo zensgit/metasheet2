@@ -132,6 +132,10 @@ export interface ConditionalFormattingDataBarConfig {
   negativeColor?: string
   showValue?: boolean
 }
+export interface ConditionalFormattingColorScaleStop { at: 'min' | 'mid' | 'max'; color: string }
+export interface ConditionalFormattingColorScaleConfig { stops: ConditionalFormattingColorScaleStop[] }
+export type ConditionalFormattingIconSetName = 'arrows3' | 'traffic3' | 'signs3'
+export interface ConditionalFormattingIconSetConfig { set: ConditionalFormattingIconSetName; thresholds: [number, number] }
 export interface ConditionalFormattingScaleRule {
   id: string
   order: number
@@ -140,6 +144,8 @@ export interface ConditionalFormattingScaleRule {
   enabled: boolean
   range: ConditionalFormattingScaleRange
   dataBar?: ConditionalFormattingDataBarConfig
+  colorScale?: ConditionalFormattingColorScaleConfig
+  iconSet?: ConditionalFormattingIconSetConfig
 }
 export const CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT = 20
 
@@ -407,6 +413,20 @@ export interface MetaCommentMentionSuggestion {
   subtitle?: string
 }
 
+/** Aggregated emoji reaction on a comment (B6). Mirrors the backend CommentReactionSummary. */
+export interface MultitableCommentReaction {
+  emoji: string
+  count: number
+  reactedByMe: boolean
+}
+
+/**
+ * Reaction picker palette. Mirrors the backend allowlist
+ * (CommentService.COMMENT_REACTION_EMOJIS); the backend rejects anything
+ * off-list (400), so a drifted entry fails safe rather than corrupting data.
+ */
+export const COMMENT_REACTION_PALETTE = ['👍', '👎', '❤️', '😄', '🎉', '😮', '😢', '🚀']
+
 export interface MultitableComment {
   id: string
   containerId: string
@@ -423,6 +443,8 @@ export interface MultitableComment {
   resolved: boolean
   createdAt: string
   updatedAt?: string
+  /** Aggregated emoji reactions (B6); from GET /api/comments. Absent until hydrated. */
+  reactions?: MultitableCommentReaction[]
 }
 
 export interface MultitableCommentPresenceSummary {

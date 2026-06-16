@@ -30,6 +30,8 @@ REQUIRED_PATHS=(
   "apps/web/package.json"
   "packages/core-backend/dist"
   "packages/core-backend/package.json"
+  "packages/core-backend/scripts/smoke-sqlserver.ts"
+  "packages/mssql-readonly-utils"
   # The packaged migration runner loads SQL migrations from
   # packages/core-backend/migrations via migration-provider.ts. Keep this
   # source directory in the package so Windows/on-prem installs apply
@@ -88,6 +90,7 @@ REQUIRED_PATHS=(
   "docs/operations/integration-k3wise-live-gate-execution-package.md"
   "docs/operations/integration-k3wise-material-only-process-control-plane-20260527.md"
   "docs/operations/integration-k3wise-sql-executor-bridge-handoff.md"
+  "docs/operations/data-source-system-integration-c5-k3-mssql-smoke-runbook-20260615.md"
   "docs/operations/bridge-agent-driver-smoke-runbook-20260520.md"
   "docs/operations/bridge-agent-readonly-runbook-20260521.md"
   "docs/operations/integration-k3wise-webapi-read-list-customer-sample-manifest.md"
@@ -355,6 +358,7 @@ EOF
     "apps/web/dist",
     "packages/core-backend/dist",
     "packages/core-backend/migrations",
+    "packages/mssql-readonly-utils",
     "plugins",
     "scripts/ops",
     "docker",
@@ -539,6 +543,7 @@ K3 WISE PoC operator tools (Node only; no Docker needed to run these):
     docs/operations/integration-k3wise-onprem-operator-handoff-checklist.md (deploy-to-live handoff checklist)
     docs/operations/integration-k3wise-internal-trial-runbook.md  (post-deploy auth smoke)
     docs/operations/integration-k3wise-live-gate-execution-package.md (C0-C10 sequence + customer GATE fields)
+    docs/operations/data-source-system-integration-c5-k3-mssql-smoke-runbook-20260615.md (C5 generic/K3 SQL Server smoke)
 
 Legacy SQL readonly Bridge Agent tools (Windows bridge host only):
   powershell -ExecutionPolicy Bypass -File scripts\ops\bridge-agent-driver-smoke.ps1 ...
