@@ -17,7 +17,7 @@ Date: 2026-06-15
 > - **#2685** `2b5e6ea3` — `mapRowToComment` read field-drop fix (5 read/emit surfaces) + `makeCommentRow` fixture top-up. MERGED.
 > - **#2686** `788050554` — record-restore M1–M4 coverage (T22–T25, CI-executed via the real-DB step). MERGED.
 > - **#2676** — this session's superseded oracle fix (uniform 403). CLOSED (replaced by #2677).
-> - **#2693** (draft) — trailing polish: sweep remaining comment test helpers to carry canonical container/target ids (fully closes the fixture-vs-wire drift). Open for review.
+> - **#2693** `8f7ac052c` — trailing polish: swept remaining comment test helpers to carry canonical container/target ids (fully closes the fixture-vs-wire drift). MERGED.
 > - Production bug surfaced + fixed in #2685: `mapRowToComment` dropped `containerId`/`targetId`/`targetFieldId` across five comment read/emit surfaces.
 
 Scope: documents this session's closure work on confirmed findings from two review MDs against
