@@ -15606,6 +15606,112 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
   return summary
 }
 
+// 年假/法定假 L2c: apply an admin manual ± to a user's annual balance via LOT mutation (never event-only).
+// Idempotent on (org_id, source_key) — a replay re-applies nothing. positive → a new annual_manual_adjustment
+// lot + grant event; negative → FIFO-deduct active annual lots + deduct event(s) (reusing deductLeaveBalance);
+// insufficient → HttpError(422) → the whole txn (incl. the registry row) rolls back. The registry row is the
+// who/why audit; it may reference the accrual run it corrects but never overwrites that run's run_item snapshot.
+async function applyAnnualLeaveManualAdjustment(trx, { orgId, userId, deltaMinutes, reason, createdBy, runId, sourceKey }) {
+  const delta = Math.trunc(Number(deltaMinutes))
+  if (!Number.isInteger(delta) || delta === 0) {
+    throw new HttpError(400, 'ANNUAL_LEAVE_ADJUST_DELTA_INVALID', 'deltaMinutes must be a non-zero integer')
+  }
+  // Permission is enforced by the route's withPermission('attendance:admin'), whose current semantics are GLOBAL
+  // (role_id='admin' or exact attendance:admin permission). Do not treat user_orgs as an actor org-admin scope:
+  // staging/prod admins are not necessarily org members. Until a real per-org admin-scope model exists, the tenant
+  // boundary this endpoint can enforce is the target membership guard below.
+  // cross-tenant write guard: the TARGET user MUST be an active member of the claimed org. We require
+  // BOTH uo.is_active AND u.is_active so manual adjustment shares the exact L2b accrual population — a globally-
+  // deactivated (offboarded) user is out of scope here by design; final-settlement-for-terminated would be a
+  // separate, deliberately gated path. 404 → no registry row, no lot.
+  const member = await trx.query(
+    `SELECT 1 FROM user_orgs uo JOIN users u ON u.id = uo.user_id
+      WHERE uo.user_id = $1 AND uo.org_id = $2 AND uo.is_active = true AND u.is_active = true
+      LIMIT 1`,
+    [userId, orgId]
+  )
+  if (!member[0]) {
+    throw new HttpError(404, 'USER_NOT_IN_ORG', 'Target user is not an active member of this org')
+  }
+  // P2b runId guard: if a correction links to an accrual run, that run MUST be a real, non-dry-run annual run in
+  // THIS org — else a typo / cross-org / dry-run id would pollute the L2b provenance back-link. (A nullable FK
+  // backs existence; this guard adds the org + annual + non-dry-run scoping an FK cannot express.)
+  if (runId) {
+    const run = await trx.query(
+      `SELECT 1 FROM attendance_leave_accrual_runs
+        WHERE id = $1 AND org_id = $2 AND leave_type_code = 'annual' AND dry_run = false
+        LIMIT 1`,
+      [runId, orgId]
+    )
+    if (!run[0]) {
+      throw new HttpError(422, 'ANNUAL_LEAVE_ADJUST_RUN_NOT_FOUND', 'runId must reference a real (non-dry-run) annual accrual run in this org')
+    }
+  }
+  const insertRows = await trx.query(
+    `INSERT INTO attendance_leave_manual_adjustments
+       (org_id, user_id, leave_type_code, delta_minutes, reason, created_by, run_id, source_key)
+     VALUES ($1, $2, 'annual', $3, $4, $5, $6, $7)
+     ON CONFLICT (org_id, source_key) DO NOTHING
+     RETURNING id`,
+    [orgId, userId, delta, reason, createdBy ?? null, runId ?? null, sourceKey]
+  )
+  const adjustmentId = insertRows[0]?.id
+  if (!adjustmentId) {
+    // P2a idempotency-conflict guard: a replayed source_key MUST carry the IDENTICAL adjustment. If the same key
+    // is reused for a different user / amount / reason / run, that's an accident — fail loudly with 409 rather than
+    // returning a misleading 200 success that mutates nothing. On a true replay, return the EXISTING delta.
+    const existing = (await trx.query(
+      `SELECT id, user_id, leave_type_code, delta_minutes, reason, run_id
+         FROM attendance_leave_manual_adjustments WHERE org_id = $1 AND source_key = $2`,
+      [orgId, sourceKey]
+    ))[0]
+    const matches = existing
+      && existing.user_id === userId
+      && existing.leave_type_code === 'annual'
+      && Number(existing.delta_minutes) === delta
+      && existing.reason === reason
+      && (existing.run_id ?? null) === (runId ?? null)
+    if (!matches) {
+      throw new HttpError(409, 'ANNUAL_LEAVE_ADJUST_IDEMPOTENCY_CONFLICT', 'idempotencyKey already used for a different adjustment')
+    }
+    return { id: existing.id, delta: Number(existing.delta_minutes), applied: false, alreadyApplied: true }
+  }
+  if (delta > 0) {
+    // positive → a new annual_manual_adjustment lot + grant event (expires_at NULL; L4 owns expiry).
+    const lotRows = await trx.query(
+      `INSERT INTO attendance_leave_balances
+         (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status)
+       VALUES ($1, $2, 'annual', $3, $3, 'annual_manual_adjust', $4, $5, 'active')
+       ON CONFLICT (org_id, source_key) DO NOTHING
+       RETURNING id`,
+      [orgId, userId, delta, adjustmentId, `annual_manual_adjust:${adjustmentId}`]
+    )
+    const newLotId = lotRows[0]?.id
+    if (newLotId) {
+      await trx.query(
+        `INSERT INTO attendance_leave_balance_events
+           (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+         VALUES ($1, $2, $3, 'grant', $4, 'annual_manual_adjust', $5)`,
+        [orgId, userId, newLotId, delta, adjustmentId]
+      )
+    }
+  } else {
+    // negative → FIFO-deduct active annual lots + deduct event(s) (oldest-expiring first); insufficient →
+    // HttpError(422) → the whole txn rolls back, so a failed adjustment leaves NO registry row.
+    await deductLeaveBalance(trx, {
+      orgId,
+      userId,
+      leaveTypeCode: 'annual',
+      amountMinutes: -delta,
+      sourceType: 'annual_manual_adjust',
+      insufficientCode: 'ANNUAL_LEAVE_BALANCE_INSUFFICIENT',
+      insufficientLabel: 'Annual leave',
+      sourceId: adjustmentId,
+    })
+  }
+  return { id: adjustmentId, delta, applied: true, alreadyApplied: false }
+}
+
 async function loadAttendanceComprehensiveActualMinutesByUser(db, orgId, userIds, period) {
   const actualMinutesByUser = new Map()
   const actualDetailsByUser = new Map()
@@ -37546,6 +37652,62 @@ module.exports = {
           }
           logger.error('Attendance settings lookup failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load settings' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/annual-leave-manual-adjustment',
+      withPermission('attendance:admin', async (req, res) => {
+        // 年假/法定假 L2c: admin manual ± to a user's annual balance via lot mutation (positive → new lot +
+        // grant event; negative → FIFO-deduct + deduct event). The registry row is the who/why audit;
+        // idempotencyKey makes a retry a no-op. Negative-insufficient → 422 → the txn (incl. registry) rolls back.
+        // deltaMinutes is bounded to int32 (the DB column is `integer`) so an out-of-range value returns a clean
+        // 400 instead of a DB overflow 500; reason / idempotencyKey are length-capped (idempotencyKey feeds an
+        // indexed source_key).
+        const schema = z.object({
+          userId: z.string().min(1).max(255),
+          deltaMinutes: z.number().int().min(-2147483648).max(2147483647),
+          reason: z.string().min(1).max(500),
+          idempotencyKey: z.string().min(1).max(200).optional(),
+          runId: z.string().uuid().optional(),
+        })
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        if (parsed.data.deltaMinutes === 0) {
+          res.status(400).json({ ok: false, error: { code: 'ANNUAL_LEAVE_ADJUST_DELTA_INVALID', message: 'deltaMinutes must be non-zero' } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const actorId = getUserId(req)
+        const createdBy = actorId
+        const sourceKey = parsed.data.idempotencyKey
+          ? `annual_manual_adjust:${parsed.data.idempotencyKey}`
+          : `annual_manual_adjust:${randomUUID()}`
+        try {
+          const result = await db.transaction(async (trx) => applyAnnualLeaveManualAdjustment(trx, {
+            orgId,
+            userId: parsed.data.userId,
+            deltaMinutes: parsed.data.deltaMinutes,
+            reason: parsed.data.reason,
+            createdBy,
+            runId: parsed.data.runId ?? null,
+            sourceKey,
+          }))
+          res.json({ ok: true, data: result })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          const status = Number.isInteger(error?.status) ? error.status : 500
+          const code = error?.code || (status >= 500 ? 'INTERNAL_ERROR' : 'VALIDATION_ERROR')
+          if (status >= 500) logger.error('Annual leave manual adjustment failed', error)
+          res.status(status).json({ ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } })
         }
       })
     )
