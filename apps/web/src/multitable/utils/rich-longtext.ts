@@ -15,27 +15,46 @@
 // The allow-list here MUST stay in lock-step with the server's
 // `RICH_LONGTEXT_SANITIZE_OPTIONS` (packages/core-backend/.../field-codecs.ts).
 
-import DOMPurify, { type Config as DOMPurifyConfig } from 'dompurify'
+import DOMPurify, {
+  type Config as DOMPurifyConfig,
+  type UponSanitizeAttributeHookEvent,
+} from 'dompurify'
 import type { MetaField } from '../types'
 
 /**
- * Allowed tags (§5) — inline marks, links, lists, headings, block text.
- * Identical set to the server allow-list.
+ * Allowed tags (§5) — inline marks, links, lists, headings, block text, plus the
+ * B5 people-mention chip wrapper `<span>`. Identical set to the server allow-list.
+ *
+ * `span` is allow-listed SOLELY to carry an in-cell mention chip
+ * (`<span data-mention-id="…">@Label</span>`). It bears NO other meaning; only the
+ * narrow `data-mention-id` attribute survives on it (see below + the hook). Keeping
+ * span/data-mention-id IDENTICAL to the server allow-list is load-bearing for
+ * lock-step (a looser client = wire-vs-fixture drift; a looser server = chips
+ * stripped on write).
  */
 export const RICH_LONGTEXT_ALLOWED_TAGS = [
   'b', 'strong', 'i', 'em', 'u', 's',
   'a',
+  'span',
   'ul', 'ol', 'li',
   'h1', 'h2', 'h3',
   'p', 'br', 'blockquote', 'code', 'pre',
 ] as const
 
 /**
- * Allowed attributes (§5): `href` on `<a>` only. `rel`/`target` are FORCED by the
- * post-sanitize hook below (never user-controlled) but must be allow-listed or
- * DOMPurify would strip them right after the hook adds them.
+ * Allowed attributes (§5): `href` on `<a>`, `data-mention-id` on the B5 mention
+ * `<span>` chip. `rel`/`target` are FORCED by the post-sanitize hook below (never
+ * user-controlled) but must be allow-listed or DOMPurify would strip them right
+ * after the hook adds them.
+ *
+ * NOTE the asymmetry vs the server: DOMPurify's ALLOWED_ATTR is GLOBAL (allows the
+ * attr on ANY surviving tag), whereas sanitize-html scopes `data-mention-id` to
+ * `span` only. To honor "data-mention-id ONLY on span" (matching the server and
+ * never widening the chip surface), the `uponSanitizeAttribute` hook affirmatively
+ * DROPS `data-mention-id` (sets `keepAttr=false`) on every non-`<span>` node and on
+ * a `<span>` with a malformed id — see `ensureLinkHardeningHook`.
  */
-export const RICH_LONGTEXT_ALLOWED_ATTR = ['href', 'rel', 'target'] as const
+export const RICH_LONGTEXT_ALLOWED_ATTR = ['href', 'rel', 'target', 'data-mention-id'] as const
 
 /**
  * Tags dropped WITH their contents (no inner-text leak). DOMPurify already drops
@@ -54,6 +73,14 @@ export const RICH_LONGTEXT_FORBID_TAGS = [
  * the three schemes at the very start.
  */
 export const RICH_LONGTEXT_ALLOWED_URI_REGEXP = /^(?:https?|mailto):/i
+
+/**
+ * Strict format of a mention chip id (`data-mention-id` value). Conservative:
+ * letters / digits / `_` / `-`, 1-128 chars — the comment-suggestion id shape. Any
+ * value failing this is NOT a real id and the chip attr is dropped, so a crafted
+ * `data-mention-id="javascript:…"` can never ride through the keep-hook.
+ */
+export const RICH_LONGTEXT_MENTION_ID_REGEXP = /^[A-Za-z0-9_-]{1,128}$/
 
 /**
  * The DOMPurify config object passed on EVERY sanitize. Frozen so a consumer
@@ -84,14 +111,47 @@ export const RICH_LONGTEXT_SANITIZE_CONFIG: Readonly<DOMPurifyConfig> = Object.f
 let linkHookInstalled = false
 
 /**
- * Install (once) the post-sanitize hook that FORCES `rel="noopener noreferrer"`
- * and `target="_blank"` on every surviving `<a>`. This runs after DOMPurify has
- * already stripped any unsafe href (protocol not in the allow-list), so the
- * forced attributes only ever land on links DOMPurify kept. Anchors whose href
- * was rejected are left without href — harmless, inert text-bearing anchors.
+ * Install (once) the sanitize hooks:
+ *
+ *  1. `uponSanitizeAttribute` — per-attribute, DURING filtering. For
+ *     `data-mention-id`: FORCE-KEEP it ONLY when it is on a `<span>` AND its value
+ *     passes `RICH_LONGTEXT_MENTION_ID_REGEXP`; in EVERY other case affirmatively
+ *     DROP it (`keepAttr=false`). The force-keep is required because DOMPurify, when
+ *     a custom `ALLOWED_URI_REGEXP` is set, runs even an explicitly-allow-listed
+ *     `data-*` value through its URI check and drops it when it doesn't match the
+ *     scheme regexp (our chip id `user_123` never would); `forceKeepAttr` bypasses
+ *     that drop. The explicit `keepAttr=false` on the else branch is what SCOPES the
+ *     chip attr to `<span>` (and to a strict id format), behaving IDENTICALLY to the
+ *     server's per-tag `allowedAttributes.span` WITHOUT leaning on the URI-regexp
+ *     side effect — a `<b data-mention-id>` or a `data-mention-id="javascript:…"` is
+ *     dropped by this hook directly, and `data-evil` (any other data-*) stays
+ *     rejected (ALLOW_DATA_ATTR:false).
+ *
+ *  2. `afterSanitizeAttributes` — per-node, AFTER filtering. FORCE
+ *     `rel="noopener noreferrer"` + `target="_blank"` on every surviving `<a>`
+ *     (runs after DOMPurify already stripped any unsafe href).
  */
 function ensureLinkHardeningHook(): void {
   if (linkHookInstalled) return
+  DOMPurify.addHook('uponSanitizeAttribute', (node: Element, data: UponSanitizeAttributeHookEvent) => {
+    if (data.attrName !== 'data-mention-id') return
+    // EXPLICIT scoping (do NOT lean on a URI-regexp side effect): the chip id is
+    // kept ONLY on a `<span>` whose value is a strict id; in every other case we
+    // affirmatively DROP it. Without this `else`, scoping would depend on DOMPurify
+    // happening to reject a non-URI `data-mention-id` on a `<b>` via the custom
+    // `ALLOWED_URI_REGEXP` — a fragile coupling that would silently break if the URI
+    // allow-list were ever broadened. This mirrors the server's per-tag
+    // `allowedAttributes.span` scope and is pinned by the non-span / bad-id canaries.
+    if (
+      node.nodeName === 'SPAN' &&
+      typeof data.attrValue === 'string' &&
+      RICH_LONGTEXT_MENTION_ID_REGEXP.test(data.attrValue)
+    ) {
+      data.forceKeepAttr = true
+    } else {
+      data.keepAttr = false
+    }
+  })
   // `afterSanitizeAttributes` fires per-node after attribute filtering.
   DOMPurify.addHook('afterSanitizeAttributes', (node: Element) => {
     if (node.nodeName === 'A' && node.hasAttribute('href')) {

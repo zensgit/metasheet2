@@ -92,6 +92,7 @@
                     :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                     :upload-context="{ recordId: row.id, fieldId: field.id }"
                     :ai-run-state="aiRunState"
+                    :mention-suggestions="props.mentionSuggestions"
                     @update:model-value="editCell!.value = $event"
                     @confirm="confirmEdit(row)"
                     @cancel="cancelEdit"
@@ -221,6 +222,7 @@
                   :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                   :upload-context="{ recordId: row.id, fieldId: field.id }"
                   :ai-run-state="aiRunState"
+                  :mention-suggestions="props.mentionSuggestions"
                   @update:model-value="editCell!.value = $event"
                   @confirm="confirmEdit(row)"
                   @yjs-commit="markYjsHandled(row.id, field.id)"
@@ -342,6 +344,7 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSuggestion,
   MetaField,
   MetaRecordContext,
   MetaRowActions,
@@ -431,6 +434,9 @@ const props = defineProps<{
   // the grid-cell renderer so a non-person link chip can peek the foreign
   // record in a popover. Default undefined → chips stay non-clickable.
   fetchRecord?: (recordId: string) => Promise<MetaRecordContext>
+  // B5: people-mention candidates for rich-`longText` in-cell editing. Forwarded to
+  // MetaCellEditor; the workbench feeds its already-loaded commentMentionSuggestions.
+  mentionSuggestions?: MetaCommentMentionSuggestion[]
 }>()
 
 const emit = defineEmits<{

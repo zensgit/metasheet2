@@ -127,6 +127,7 @@
             v-else-if="canEditField(field.id) && field.type === 'longText' && isRichLongTextField(field)"
             :model-value="record.data[field.id]"
             :is-zh="isZh"
+            :mention-suggestions="mentionSuggestions"
             @change="emit('patch', field.id, $event)"
           />
           <!-- plain longText: unchanged textarea -->
@@ -376,6 +377,7 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSuggestion,
   MultitableCommentPresenceSummary,
   MetaFieldPermission,
   MetaField,
@@ -450,6 +452,9 @@ const props = withDefaults(defineProps<{
    *  the grid (MetaGridTable) receives, so a run from either surface disables
    *  the button on both. Matches the workbench `onRunButton` pending-key format. */
   buttonRunPending?: string[]
+  /** B5: people-mention candidates for rich-`longText` field editing in the drawer.
+   *  Fed by the workbench's already-loaded commentMentionSuggestions (no re-fetch). */
+  mentionSuggestions?: MetaCommentMentionSuggestion[]
 }>(), {
   recordIds: () => [],
   buttonRunPending: () => [],

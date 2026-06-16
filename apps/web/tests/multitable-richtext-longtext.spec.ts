@@ -138,6 +138,32 @@ describe('rich-longText FE sanitizer — benign formatting preserved (§8.9)', (
     const out = sanitizeRichLongTextHtml('<a href="mailto:a@b.com">mail</a>')
     expect(out).toContain('href="mailto:a@b.com"')
   })
+
+  // B5: the people-mention chip is the ONLY reason <span>/data-mention-id are
+  // allow-listed. A real chip must survive; a forged one must be defanged. These
+  // canaries pin the §5 allow-list extension on the FE side, lock-step with the
+  // server spec (richtext-longtext-sanitizer.test.ts).
+  it('B5: keeps a real mention chip <span data-mention-id> unchanged', () => {
+    const out = sanitizeRichLongTextHtml('<span data-mention-id="user_42">@Jamie</span>')
+    expect(out).toContain('data-mention-id="user_42"')
+    expect(out).toContain('@Jamie')
+    expect(hasExecutableResidue(out)).toBe(false)
+  })
+
+  it('B5: strips a forged chip handler/style but keeps the inert id', () => {
+    const out = sanitizeRichLongTextHtml(
+      '<span data-mention-id="user_42" onclick="alert(1)" style="position:fixed">x</span>',
+    )
+    expect(hasExecutableResidue(out)).toBe(false)
+    expect(out.toLowerCase()).not.toContain('onclick')
+    expect(out).toContain('data-mention-id="user_42"')
+  })
+
+  it('B5: scopes data-mention-id to <span> only (stripped from a <b>)', () => {
+    const out = sanitizeRichLongTextHtml('<b data-mention-id="user_42">bold</b>')
+    expect(out).not.toContain('data-mention-id')
+    expect(out).toContain('<b>bold</b>')
+  })
 })
 
 describe('rich-longText FE plain-text projection (§7, grid-cell consumer)', () => {

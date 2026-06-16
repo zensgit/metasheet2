@@ -86,6 +86,8 @@ export type MetaCoreLabelKey =
   | 'linkedRecord.error'
   | 'linkedRecord.close'
   | 'linkedRecord.empty'
+  // --- Rich-longText in-cell @mention (B5) ---
+  | 'mention.suggestionsAria'
   // --- Auth chrome (file-location closure tightening per #1803) ---
   | 'auth.notAuthenticated'
 
@@ -258,6 +260,7 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'linkedRecord.error': { en: 'Failed to load linked record', zh: '加载关联记录失败' },
   'linkedRecord.close': { en: 'Close', zh: '关闭' },
   'linkedRecord.empty': { en: 'No fields to show', zh: '没有可显示的字段' },
+  'mention.suggestionsAria': { en: 'Mention people', zh: '提及成员' },
 }
 
 export function metaCoreLabel(key: MetaCoreLabelKey, isZh: boolean): string {

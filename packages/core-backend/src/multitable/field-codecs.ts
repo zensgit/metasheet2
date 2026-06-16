@@ -593,14 +593,23 @@ const RICH_LONGTEXT_SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
   allowedTags: [
     'b', 'strong', 'i', 'em', 'u', 's',
     'a',
+    'span',
     'ul', 'ol', 'li',
     'h1', 'h2', 'h3',
     'p', 'br', 'blockquote', 'code', 'pre',
   ],
   // `rel`/`target` are FORCED by transformTags below (never user-controlled), but must
   // be allow-listed or sanitize-html would strip them after the transform adds them.
+  // `data-mention-id` on `<span>` ONLY carries the B5 people-mention chip
+  // (`<span data-mention-id="…">@Label</span>`); the chip survives storage inert.
+  // This must stay IDENTICAL to the client allow-list (rich-longtext.ts) — see the
+  // module header lock-step note. NO other attribute is permitted on a <span>, so a
+  // forged `<span data-mention-id onclick=…>` keeps only the inert id, never the
+  // handler. The a→span fallback below emits a span with NO attributes (the {} on the
+  // transform result), so a rejected link can never masquerade as a chip.
   allowedAttributes: {
     a: ['href', 'rel', 'target'],
+    span: ['data-mention-id'],
   },
   // Decode-then-check protocol allow-list; rejects `javascript:` and `&#106;avascript:`
   // (entity-encoded) alike. `allowProtocolRelative:false` blocks `//evil.com`.
@@ -617,7 +626,16 @@ const RICH_LONGTEXT_SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
     a: (tagName, attribs) => {
       const href = typeof attribs.href === 'string' ? attribs.href : ''
       if (!href) {
-        // href was rejected by the scheme allow-list → keep the text, drop the anchor.
+        // An href-LESS / empty-href anchor → keep the text, drop the anchor. (A
+        // rejected-PROTOCOL anchor still has its href HERE — the scheme filter runs
+        // AFTER this transform — so it stays a bare <a>, not a span; see the #c5/#c6
+        // canaries that pin both shapes.)
+        // NOTE (B5): now that `<span>` is allow-listed for the mention chip, this
+        // fallback span SURVIVES as `<span>text</span>` (previously it was discarded
+        // because span was not allow-listed). The `attribs: {}` here is load-bearing:
+        // the fallback span carries NO `data-mention-id`, so an href-less link can
+        // NEVER masquerade as a mention chip. The B5 #c5 regression canary pins this
+        // exact shape so the behaviour change is intentional, not silent.
         return { tagName: 'span', attribs: {} }
       }
       return {
