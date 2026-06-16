@@ -48,6 +48,11 @@ export interface DataSourceWriteFieldPolicy {
 
 export interface DataSourceWriteFacadeTestResult {
   success: boolean
+  capabilityState: {
+    readOnly: boolean
+    c6WriteTarget: boolean
+    genericQueryDisabled: boolean
+  }
 }
 
 export interface DataSourceWriteOperationResult {
@@ -458,14 +463,22 @@ export function createDataSourceWritePluginFacade(
     if (!adapter.isConnected()) {
       await manager.connectDataSource(dataSourceId)
     }
-    return { manager, adapter }
+    return {
+      manager,
+      adapter,
+      capabilityState: {
+        readOnly: adapter.isReadOnly(),
+        c6WriteTarget: isC6WriteTargetConfig(config),
+        genericQueryDisabled: isGenericQueryDisabledConfig(config),
+      },
+    }
   }
 
   return {
     async test(dataSourceId, principal) {
-      const { adapter } = await authorize(dataSourceId, principal)
+      const { adapter, capabilityState } = await authorize(dataSourceId, principal)
       const healthy = await adapter.testConnection()
-      return { success: healthy === true }
+      return { success: healthy === true, capabilityState }
     },
     async getSchema(dataSourceId, principal, schema) {
       const { adapter } = await authorize(dataSourceId, principal)

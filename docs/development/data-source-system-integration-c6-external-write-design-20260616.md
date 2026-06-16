@@ -1,6 +1,6 @@
 # Data Source System Integration C6 - External Write Design
 
-Status: design-first / no runtime
+Status: C6-0 design + C6-1 latent target + C6-2 dry-run route; no apply runtime / no external write
 Date: 2026-06-16
 
 ## Purpose
@@ -409,7 +409,7 @@ Only after C6-5 passes can the Release gate discuss production/batch.
   `/data-sources/:id/query`, execute, or delete paths.
 - [x] C6-1 target adapter is latent: metadata/test/schema only; `upsert` stays
   unsupported until C6-3 token-bound apply.
-- [ ] Dry-run is read-only and token-producing.
+- [x] Dry-run is read-only and token-producing.
 - [ ] Apply requires write/admin permission plus fresh single-use token.
 - [ ] Revision fencing is hard; mismatch blocks before write.
 - [ ] Per-row failures are isolated and observable.
