@@ -928,7 +928,7 @@
                   <button class="meta-rule-editor__btn" type="button" data-action="add-branch-condition" @click="addBranchCondition(branch)">{{ automationLabel('condition.addCondition', isZh) }}</button>
                   <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-branch-action-index="aIdx">
                     <select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t">{{ automationActionTypeLabel(t, isZh) }}</option>
+                      <option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t">{{ automationActionTypeLabel(t, isZh) }}</option>
                     </select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -945,6 +945,10 @@
                       <input v-model="bAct.userId" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" />
                       <input v-model="bAct.message" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.message', isZh)" />
                     </template>
+                    <!-- A6-3-3b branch-local wait_for_callback: zero-param suspend point (no fields to author) -->
+                    <template v-else-if="bAct.type === 'wait_for_callback'">
+                      <span class="meta-rule-editor__hint" data-field="branch-wait-for-callback-hint">{{ automationLabel('actionConfig.waitForCallbackHint', isZh) }}</span>
+                    </template>
                     <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchAction(branch, aIdx)">&times;</button>
                   </div>
                   <button class="meta-rule-editor__btn" type="button" data-action="add-branch-action" @click="addBranchAction(branch)">{{ automationLabel('conditionBranch.addAction', isZh) }}</button>
@@ -956,9 +960,9 @@
                     <input v-model="action.config.defaultBranch.key" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.key', isZh)" data-field="default-branch-key" />
                     <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" data-action="remove-default-branch" @click="removeDefaultBranch(action)">&times;</button>
                   </div>
-                  <div v-for="(bAct, aIdx) in action.config.defaultBranch.actions" :key="aIdx" class="meta-rule-editor__branch-action">
+                  <div v-for="(bAct, aIdx) in action.config.defaultBranch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-default-branch-action-index="aIdx">
                     <select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t">{{ automationActionTypeLabel(t, isZh) }}</option>
+                      <option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t">{{ automationActionTypeLabel(t, isZh) }}</option>
                     </select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -974,6 +978,10 @@
                     <template v-else-if="bAct.type === 'send_notification'">
                       <input v-model="bAct.userId" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" />
                       <input v-model="bAct.message" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.message', isZh)" />
+                    </template>
+                    <!-- A6-3-3b branch-local wait_for_callback (default branch): zero-param suspend point -->
+                    <template v-else-if="bAct.type === 'wait_for_callback'">
+                      <span class="meta-rule-editor__hint" data-field="branch-wait-for-callback-hint">{{ automationLabel('actionConfig.waitForCallbackHint', isZh) }}</span>
                     </template>
                     <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchAction(action.config.defaultBranch, aIdx)">&times;</button>
                   </div>
@@ -1133,6 +1141,7 @@ import {
   type BranchDraft,
   type DefaultBranchDraft,
   BRANCH_AUTHORABLE_ACTION_TYPES,
+  CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES,
   buildConditionBranchConfig,
   conditionBranchUnsupportedReason,
   parseConditionBranchDraft,
@@ -1904,6 +1913,11 @@ function removeBranchAction(branch: BranchDraft | DefaultBranchDraft | ParallelB
 function onBranchActionTypeChange(action: BranchActionDraft): void {
   if (action.type === 'update_record') {
     action.fieldUpdates = action.fieldUpdates ?? []
+    delete action.userId
+    delete action.message
+  } else if (action.type === 'wait_for_callback') {
+    // A6-3-3b: zero-param suspend point — clear every field so the draft round-trips to `config: {}`.
+    delete action.fieldUpdates
     delete action.userId
     delete action.message
   } else {
