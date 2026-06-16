@@ -5763,17 +5763,19 @@ export function univerMetaRouter(): Router {
         (rawTypeRes.rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]),
       )
 
-      // Schema drift: a snapshot field id being restored that is absent from the current schema cannot
-      // be restored. Scope the check to the fields ACTUALLY being restored — for per-field (`fieldIds`)
-      // only the requested fields; a non-requested drifted field must not block restoring the fields the
-      // caller asked for (that would contradict the per-field contract). (A type-change since capture is
-      // not detectable without a stored schema snapshot; the spine value validators backstop bad values.)
-      const driftScope = fieldIds
-        ? Object.keys(targetSnapshot).filter((fid) => fieldIds.includes(fid))
-        : Object.keys(targetSnapshot)
-      for (const fid of driftScope) {
-        if (!fieldById.has(fid)) {
-          return res.status(422).json({ ok: false, error: { code: 'SCHEMA_DRIFT', message: `Field ${fid} in revision ${targetVersion} no longer exists in the current schema` } })
+      // Schema drift: a snapshot field id absent from the current schema means version N cannot be
+      // faithfully reproduced. This is checked ONLY for FULL-record restore. For per-field (`fieldIds`)
+      // a requested field missing from the schema — whether deleted-since (and still in the snapshot) or
+      // never-existed — simply falls through to the empty selected diff (200 no-op), matching the
+      // contract. Critically it must NOT 422 on a per-field request: a 422-vs-200 split would let an
+      // actor probe `fieldIds` to learn whether a now-deleted field existed in this revision's snapshot
+      // (the same probe class as the hidden-field leak closed below). (A type-change since capture is not
+      // detectable without a stored schema snapshot; the spine value validators backstop bad values.)
+      if (!fieldIds) {
+        for (const fid of Object.keys(targetSnapshot)) {
+          if (!fieldById.has(fid)) {
+            return res.status(422).json({ ok: false, error: { code: 'SCHEMA_DRIFT', message: `Field ${fid} in revision ${targetVersion} no longer exists in the current schema` } })
+          }
         }
       }
 

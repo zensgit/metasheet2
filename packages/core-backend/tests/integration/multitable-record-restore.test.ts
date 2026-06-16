@@ -603,11 +603,20 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
       2,
       [{ version: 1, action: 'create', snapshot: { [FLD_A]: 'a1', ghost_gone_field: 'x' } }, { version: 2, snapshot: { [FLD_A]: 'a2' } }],
     )
-    // full restore → still rejects (the ghost field can't be reproduced)
+    // full restore → still rejects (the ghost field can't be reproduced). No mutation.
     const full = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
     expect(full.status).toBe(422)
     expect(full.body.error.code).toBe('SCHEMA_DRIFT')
-    // per-field [A] → succeeds; the non-requested ghost field is not checked
+    // probe closed (run BEFORE the mutating restore — these are no-ops at version 2): requesting the
+    // DELETED field that IS in the snapshot must give the SAME 200 no-op as a never-existed field — no
+    // 422-vs-200 split that would reveal it existed here.
+    const probeDeleted = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: ['ghost_gone_field'] })
+    expect(probeDeleted.status).toBe(200)
+    expect(probeDeleted.body.data.noop).toBe(true)
+    const probeNever = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [`never_${TS}`] })
+    expect(probeNever.status).toBe(200)
+    expect(probeNever.body.data.noop).toBe(true)
+    // per-field [A] → succeeds; the non-requested ghost field is not checked (mutates to version 3)
     const partial = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2, fieldIds: [FLD_A] })
     expect(partial.status).toBe(200)
     expect((await liveData(rid))[FLD_A]).toBe('a1')
