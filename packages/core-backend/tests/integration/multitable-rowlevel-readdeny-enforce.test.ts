@@ -12,7 +12,7 @@
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
@@ -30,6 +30,9 @@ const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, param
 let app: Express
 let testUserId = USER_ID
 let testPerms: string[] = ['multitable:read']
+// isAdminRole derives from req.user.roles (access.ts: roles.includes('admin')), NOT from perms — so an
+// admin actor must set testRoles=['admin'], not perms=['multitable:admin'].
+let testRoles: string[] = []
 
 const getRecord = (recordId: string) => request(app).get(`/api/multitable/records/${recordId}`)
 const setFlag = (on: boolean) =>
@@ -40,7 +43,7 @@ describeIfDatabase('#18 row-level read-deny core enforcement (real DB)', () => {
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => {
-      ;(req as any).user = testUserId ? { id: testUserId, roles: [], perms: testPerms } : undefined
+      ;(req as any).user = testUserId ? { id: testUserId, roles: testRoles, perms: testPerms } : undefined
       next()
     })
     app.use('/api/multitable', univerMetaRouter())
@@ -60,6 +63,14 @@ describeIfDatabase('#18 row-level read-deny core enforcement (real DB)', () => {
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
+  })
+
+  // Reset the actor to the default reader BEFORE each test, so a test that throws mid-body (skipping its
+  // own trailing reset) can't pollute the next test's perms/roles — the original cause of the cascade.
+  beforeEach(() => {
+    testUserId = USER_ID
+    testPerms = ['multitable:read']
+    testRoles = []
   })
 
   test('sentinel: DATABASE_URL set', () => {
@@ -94,7 +105,7 @@ describeIfDatabase('#18 row-level read-deny core enforcement (real DB)', () => {
   test('flag ON: an admin bypasses the deny (200)', async () => {
     await setFlag(true)
     testUserId = USER_ID
-    testPerms = ['multitable:admin']
+    testRoles = ['admin'] // isAdminRole=true → bypasses the deny on every read surface
     const res = await getRecord(REC_DENIED)
     expect(res.status).toBe(200)
     testPerms = ['multitable:read']
@@ -127,7 +138,7 @@ describeIfDatabase('#18 row-level read-deny core enforcement (real DB)', () => {
   test('GET /records flag ON: an admin lists everything (deny bypassed)', async () => {
     await setFlag(true)
     testUserId = USER_ID
-    testPerms = ['multitable:admin']
+    testRoles = ['admin'] // isAdminRole=true → bypasses the deny on every read surface
     const ids = await listRecordIds()
     expect(ids).toContain(REC_DENIED)
     testPerms = ['multitable:read']
