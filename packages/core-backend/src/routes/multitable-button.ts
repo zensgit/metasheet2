@@ -58,7 +58,7 @@ const logger = new Logger('MultitableButton')
 
 // B1-S1 D0-A enabled actions. `record_click` = executor-owned INERT (read-gated,
 // requestId-optional, NO confirm). `send_notification` = first side-effecting
-// action (edit-gated proxy, durable + deduped + audited in one route transaction).
+// action (notify-gated via canSendNotification, durable + deduped + audited in one route transaction).
 // Every new action must declare its actor gate AND whether it is side-effecting —
 // a single `sideEffecting` flag drives BOTH the requestId requirement (§6 dedup)
 // AND the server-side confirm requirement (§4): a side-effecting action whose
