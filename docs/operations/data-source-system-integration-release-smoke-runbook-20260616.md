@@ -18,9 +18,15 @@ Current release package anchor:
 - package preflight: asset set complete, `SHA256SUMS` verified, local package
   verifier passed for both `.tgz` and `.zip`, published verifier JSON reports
   `ok: true`, and direct archive scan found no `node_modules` entries.
+- entity-machine deploy/auth checkpoint: default Windows temp deploy attempt hit
+  `missing_staged_path_under_default_temp`, then short-temp rerun passed with
+  `deployApplyExit=0`, API/root health `200`, pending migration diff clean,
+  `migrationPendingCount=0`, auth login/me `200`, backend online, and
+  integration plugin present.
 
-This package anchor does not close the release gate by itself. Entity-machine
-deploy/run evidence for this exact package still has to be posted to #2769.
+This package/deploy/auth checkpoint does not close the release gate by itself.
+C3 incremental/resume and C4 UI exact-package evidence are still HOLD unless
+the owner explicitly narrows or defers those gates with downgraded wording.
 
 This runbook does not authorize production rollout, batch writes, K3 Save /
 Submit / Audit / BOM, raw SQL, or broad writable database grants. C6 external
@@ -108,6 +114,15 @@ packagePreflight:
   packageFingerprint=<git short sha>
 ```
 
+Current #2769 checkpoint:
+
+- package preflight: passed for release package `79ab455e`;
+- deploy: default Windows temp attempt failed before healthy app start; rerun
+  with a short operator temp path passed with `deployApplyExit=0` and health
+  `200`;
+- boundary: the default-temp failure is an operational deploy caveat, not a
+  runtime release PASS blocker once the short-temp rerun succeeds.
+
 ## 2. Migration / Auth Preflight
 
 Run before interpreting any UI/API failure as an application bug.
@@ -129,6 +144,15 @@ migrationAuth:
   silent401Observed=true|false
   triagePath=schema_migration_first|not_needed|other
 ```
+
+Current #2769 checkpoint:
+
+- pending migration diff clean;
+- migration pending count `0`;
+- migrations applied by deploy;
+- auth login/me returned `200`;
+- silent 401 not observed;
+- backend online and `plugin-integration-core` present.
 
 ## 3. C2 Read-Only Source Smoke
 

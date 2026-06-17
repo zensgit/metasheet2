@@ -44,7 +44,7 @@
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 CLOSED as sandbox smoke PASS; C6-5a design done; C6-5b seam done (#2756); first C6-5c package `642560126` deploy blocked; package prune fix #2761 done; recut package `d8244ee13` entity-machine controlled bad-row PASS | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
-| Release | 总包 + 实体机验收 | #2769 opened for final release evidence package; release package `79ab455e` is published and package-preflight verified; #2720 C6 sandbox smoke PASS can be cited; entity-machine deploy/migration/auth and C2/C3/C4 exact-release evidence still need owner decision/rerun | 交付签收 | 不得把 package preflight 或 sandbox C6 PASS 误写成 production/batch authorization |
+| Release | 总包 + 实体机验收 | #2769 opened for final release evidence package; release package `79ab455e` is published, package-preflight verified, and deployed healthy after short-temp rerun; migration/auth/startup PASS; #2720 C6 sandbox smoke PASS can be cited; C3/C4 exact-release evidence still HOLD unless owner explicitly narrows or defers those gates with downgraded wording | 交付签收 | 不得把 package preflight、deploy/auth PASS 或 sandbox C6 PASS 误写成 production/batch authorization |
 
 ## P0 - ②b Arc 收口 Follow-Up
 
@@ -587,10 +587,25 @@ TODO:
     `sha256sum -c SHA256SUMS` passed; local package verifier passed for both
     archives; published verifier JSON reports `ok: true`; direct archive scan
     found no `node_modules` entries.
-  - boundary: this is package readiness only. Entity-machine deploy/run evidence
-    for this exact package has not started, and production/batch writes remain closed.
+  - boundary: this item is package readiness only. It does not close the release
+    gate and does not authorize production/batch writes.
+- [x] `79ab455e` release package deployed on entity machine and migration/auth
+  preflight passed for #2769.
+  - first Windows deploy attempt using the default temp path failed before a
+    healthy app start with `missing_staged_path_under_default_temp`.
+  - rerun with a short operator temp path passed: `deployApplyExit=0`,
+    dependency refresh reached, migrations step reached, PM2 restart reached,
+    healthcheck reached, post-deploy API health `200`, and root health `200`.
+  - migration/auth/startup evidence: app env loaded, DB access available,
+    pending migration diff clean, `migrationPendingCount=0`, deploy applied
+    migrations, auth login/me returned `200`, silent 401 was not observed,
+    backend online, plugins endpoint `200`, plugin list non-empty, and
+    integration plugin present.
+  - boundary: evidence remained values-free; auth token was present but not
+    printed; temporary auth user cleanup passed; production/batch writes remain
+    closed.
 - [ ] 干净实体机 / 全新 DB smoke，用来暴露 migration 排序缺口。
-- [ ] 部署前跑 pending-migration diff + auth round-trip；静默 401 优先按 schema/migration 缺口排查，不先归咎 JWT secret。
+- [x] 部署前/后 pending-migration diff + auth round-trip；静默 401 优先按 schema/migration 缺口排查，不先归咎 JWT secret。
 - [ ] C2 read-only smoke。
 - [ ] C3 incremental resume smoke。
 - [ ] C4 UI config smoke。
