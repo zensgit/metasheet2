@@ -1045,3 +1045,51 @@ describe('MetaFieldManager', () => {
     app.unmount()
   })
 })
+
+describe('MetaFieldManager — foreign-field picker (3c)', () => {
+  const foreignFields = [
+    { id: 'fld_status', name: 'Status', type: 'select', property: {} },
+    { id: 'fld_amount', name: 'Amount', type: 'number', property: {} },
+  ]
+  // Rollup field FIRST so the first .meta-field-mgr__action[title="Configure"] opens ITS config; the link
+  // field is present so linkFieldForeignSheetId resolves the foreign sheet from property.foreignSheetId.
+  function rollupProps(extra: Record<string, unknown> = {}) {
+    return {
+      visible: true,
+      sheetId: 'sheet_1',
+      sheets: [],
+      fields: [
+        { id: 'fld_rollup', name: 'Roll', type: 'rollup', property: { linkFieldId: 'fld_link', targetFieldId: 'fld_status', aggregation: 'concatenate' } },
+        { id: 'fld_link', name: 'Link', type: 'link', property: { foreignSheetId: 'sheet_foreign' } },
+      ],
+      ...extra,
+    }
+  }
+  async function settle() { await nextTick(); await new Promise((r) => setTimeout(r)); await nextTick() }
+
+  it('renders the rollup target as a PICKER populated from listForeignFieldsFn (resolved foreign sheet)', async () => {
+    const container = document.createElement('div'); document.body.appendChild(container)
+    const listForeignFieldsFn = vi.fn(async () => foreignFields)
+    const app = createApp({ render() { return h(MetaFieldManager, rollupProps({ listForeignFieldsFn })) } })
+    app.mount(container); await nextTick()
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await settle()
+    expect(listForeignFieldsFn).toHaveBeenCalledWith('sheet_foreign')
+    const optionText = (Array.from(container.querySelectorAll('.meta-field-mgr__config select')) as HTMLSelectElement[])
+      .flatMap((s) => Array.from(s.options).map((o) => o.textContent))
+    expect(optionText).toContain('Status')
+    expect(optionText).toContain('Amount')
+    app.unmount(); container.remove()
+  })
+
+  it('falls back to a typed-id input when no listForeignFieldsFn is wired', async () => {
+    const container = document.createElement('div'); document.body.appendChild(container)
+    const app = createApp({ render() { return h(MetaFieldManager, rollupProps()) } })
+    app.mount(container); await nextTick()
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await settle()
+    const inputs = Array.from(container.querySelectorAll('.meta-field-mgr__config .meta-field-mgr__input')) as HTMLInputElement[]
+    expect(inputs.some((i) => i.getAttribute('placeholder') === 'fld_target')).toBe(true)
+    app.unmount(); container.remove()
+  })
+})

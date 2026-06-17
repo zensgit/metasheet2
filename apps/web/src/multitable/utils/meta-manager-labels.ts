@@ -48,7 +48,7 @@ export type MetaManagerLabelKey =
   | 'field.crossBaseBaseLocked' | 'field.crossBaseUnreadable'
   | 'field.personHint' | 'field.limitSinglePerson'
   | 'field.linkField' | 'field.selectLinkField'
-  | 'field.foreignSheetId' | 'field.targetFieldId'
+  | 'field.foreignSheetId' | 'field.targetFieldId' | 'field.selectTargetField'
   | 'field.optionalOverride' | 'field.aggregation'
   | 'field.rollupFilters' | 'field.rollupFilterAll' | 'field.rollupFilterAny'
   | 'field.rollupFilterFieldPlaceholder' | 'field.rollupFilterValuePlaceholder' | 'field.rollupFilterAdd'
@@ -277,6 +277,7 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.selectLinkField': { en: 'Select link field', zh: '选择关联字段' },
   'field.foreignSheetId': { en: 'Foreign sheet id', zh: '外部表 ID' },
   'field.targetFieldId': { en: 'Target field id', zh: '目标字段 ID' },
+  'field.selectTargetField': { en: 'Select field', zh: '选择字段' },
   'field.optionalOverride': { en: 'Optional override', zh: '可选覆盖' },
   'field.aggregation': { en: 'Aggregation', zh: '聚合' },
   'field.rollupFilters': { en: 'Filter conditions', zh: '筛选条件' },
