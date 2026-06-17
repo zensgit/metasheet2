@@ -32,7 +32,7 @@ The `#2754` summary canary — an unmapped record (`REC_B`, with no `record_perm
 A "private records" / row-level read-deny model is its own **demand-gated security arc**, requiring:
 - new semantics (deny / whitelist: *a record carrying permissions is readable only by its granted subjects*);
 - a new migration / contract (a deny `access_level`, or a separate visibility column/table);
-- coverage of **every** read surface: `/view`, single-record `GET`, summaries (`linkSummaries` / `attachmentSummaries` / `personSummaries`), export, aggregate/dashboard, search/filter;
+- coverage of **every** read surface: `/view`, single-record `GET`, summaries (`linkSummaries` / `attachmentSummaries` / `personSummaries`), export, aggregate/dashboard, search/filter, **and the recycle-bin trash paths `GET /sheets/:sheetId/trash` + `POST /records/:recordId/restore`** (added by the #15 recycle-bin arc *after* this doc's first cut — they gate on sheet-level + write-own + field-mask today but deliberately do **not** yet call the `requireRecordReadable` seam, so B **must** include them or they become a silent read-deny hole: restore can call `requireRecordReadable` directly; the trash list needs batched `loadRecordPermissionScopeMap` over the page, not a per-record query);
 - real-DB golden tests (flip the `#2754` canary + add a deny golden);
 - explicit owner opt-in — it must **not** ride in as a small patch.
 
