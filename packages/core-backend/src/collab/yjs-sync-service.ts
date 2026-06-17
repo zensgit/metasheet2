@@ -61,15 +61,26 @@ export class YjsSyncService {
     // to the DB on every fresh doc, bloating meta_record_yjs_updates.
     doc.transact(() => {
       for (const [fieldId, value] of Object.entries(data!)) {
-        if (typeof value !== 'string') continue
         // Don't overwrite anything that already exists in fields (defense
         // in depth — persistence.loadDoc returning null SHOULD mean an
         // empty Y.Doc, but if future refactors change that, we'd rather
         // no-op than clobber).
         if (fields.has(fieldId)) continue
-        const yText = new Y.Text()
-        yText.insert(0, value)
-        fields.set(fieldId, yText)
+        if (typeof value === 'string') {
+          // Free-text / atomic-string: Y.Text gives char-level collaborative merge.
+          const yText = new Y.Text()
+          yText.insert(0, value)
+          fields.set(fieldId, yText)
+        } else if (value !== null && value !== undefined) {
+          // Non-string ATOMIC fields (number/currency/percent/rating/duration/boolean,
+          // multiSelect arrays, etc.): seed as a PLAIN value so they sync LWW per key
+          // via the Y.Map (char-merge is meaningless for atomic values). The bridge
+          // persists whatever's here through the validated patchRecords path, so the
+          // stored shape is unchanged. (string-stored atomics like select/date stay
+          // Y.Text for now — flipping their representation is a separate, gated decision.)
+          fields.set(fieldId, value as never)
+        }
+        // null/undefined: leave absent (a delete; nothing to seed).
       }
     }, 'seed')
   }
