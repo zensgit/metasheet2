@@ -70,6 +70,7 @@ import type {
   DingTalkGroupDelivery,
   DingTalkPersonDelivery,
   DingTalkGroupDestinationInput,
+  MetaDeletedRecord,
 } from '../types'
 import { apiFetch } from '../../utils/api'
 import { apiDefaultErrorMessage, apiFieldValidationFallback } from '../utils/meta-api-error-labels'
@@ -1026,6 +1027,29 @@ export class MultitableApiClient {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permissions`)
     const data = await this.parseJson<{ items?: Array<Partial<MetaSheetPermissionEntry>> }>(res)
     return normalizeSheetPermissionEntries(data)
+  }
+
+  // #15 recycle bin — list a sheet's deleted records (newest first) and restore one.
+  async listDeletedRecords(sheetId: string, params?: { limit?: number; offset?: number }): Promise<{ records: MetaDeletedRecord[]; total: number }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/trash${qs(params ?? {})}`)
+    const data = await this.parseJson<{ records?: MetaDeletedRecord[]; total?: number }>(res)
+    return {
+      records: Array.isArray(data?.records) ? data.records : [],
+      total: typeof data?.total === 'number' ? data.total : 0,
+    }
+  }
+
+  async restoreDeletedRecord(recordId: string): Promise<{ restored: string; sheetId: string }> {
+    const res = await this.fetch(`/api/multitable/records/${encodeURIComponent(recordId)}/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    const data = await this.parseJson<{ restored?: string; sheetId?: string }>(res)
+    return {
+      restored: typeof data?.restored === 'string' ? data.restored : recordId,
+      sheetId: typeof data?.sheetId === 'string' ? data.sheetId : '',
+    }
   }
 
   async listSheetPermissionCandidates(

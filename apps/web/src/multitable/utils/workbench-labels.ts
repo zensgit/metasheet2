@@ -18,7 +18,7 @@ export type WorkbenchLabelKey =
   // §3.2 toolbar
   | 'toolbar.commentInbox' | 'toolbar.fields' | 'toolbar.access' | 'toolbar.views'
   | 'toolbar.workflow' | 'toolbar.automations' | 'toolbar.templates'
-  | 'toolbar.dashboard' | 'toolbar.shareForm' | 'toolbar.apiWebhooks'
+  | 'toolbar.dashboard' | 'toolbar.shareForm' | 'toolbar.apiWebhooks' | 'toolbar.trash'
   | 'toolbar.mentions'
   // §3.3 template library modal
   | 'tpl.title' | 'tpl.subtitle' | 'tpl.loading' | 'tpl.more' | 'tpl.errorLoad'
@@ -91,6 +91,7 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toolbar.dashboard': { en: 'Dashboard', zh: '仪表盘' },
   'toolbar.shareForm': { en: 'Share Form', zh: '分享表单' },
   'toolbar.apiWebhooks': { en: 'API & Webhooks', zh: 'API 与 Webhook' },
+  'toolbar.trash': { en: 'Trash', zh: '回收站' },
   'toolbar.mentions': { en: 'Mentions', zh: '提及' },
 
   'tpl.title': { en: 'Template Library', zh: '模板库' },
