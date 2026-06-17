@@ -4,7 +4,7 @@ export { MultitableApiClient, multitableClient } from './api/client'
 
 // Composables
 export { useMultitableWorkbench } from './composables/useMultitableWorkbench'
-export { useMultitableGrid, buildSortInfo, buildFilterInfo, FILTER_OPERATORS_BY_TYPE } from './composables/useMultitableGrid'
+export { useMultitableGrid, buildSortInfo, buildFilterInfo, FILTER_OPERATORS_BY_TYPE, effectiveFilterTypeKey } from './composables/useMultitableGrid'
 export type { SortRule, FilterRule, FilterOperator, FilterConjunction, CellEdit } from './composables/useMultitableGrid'
 export { useMultitableCapabilities } from './composables/useMultitableCapabilities'
 export type { MultitableCapabilities, MultitableRole } from './composables/useMultitableCapabilities'

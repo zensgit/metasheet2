@@ -19,6 +19,7 @@ on:
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
+      - 'apps/web/src/multitable/composables/useMultitableGrid.ts'
       - 'apps/web/tests/multitable-rollup-aggregation-fe.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
   push:
@@ -27,6 +28,7 @@ on:
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
+      - 'apps/web/src/multitable/composables/useMultitableGrid.ts'
       - 'apps/web/tests/multitable-rollup-aggregation-fe.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
 

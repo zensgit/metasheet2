@@ -502,6 +502,7 @@ import { useLocale } from '../../composables/useLocale'
 import { dashboardDefaultName, viewRenderLabel, viewSizeLabel } from '../utils/meta-view-render-labels'
 import { fieldTypeLabel } from '../utils/meta-core-labels'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
+import { resolveRollupFieldProperty, rollupResultType } from '../utils/field-config'
 import MetaRichLongTextRender from './cells/MetaRichLongTextRender.vue'
 
 const props = defineProps<{
@@ -553,7 +554,15 @@ const GROUPABLE_FIELD_TYPES = new Set<MetaFieldType>([
   'lookup',
   'rollup',
 ])
-const NUMERIC_FIELD_TYPES = new Set<MetaFieldType>(['number', 'currency', 'percent', 'rating', 'duration', 'rollup'])
+// 'rollup' is NOT blanket-numeric (slice 2b): a rollup qualifies as a sum/avg value field only when its
+// aggregation yields a number — see isNumericMetricField. Mirrors the backend DASHBOARD_NUMERIC_FIELD_TYPES.
+const NUMERIC_FIELD_TYPES = new Set<MetaFieldType>(['number', 'currency', 'percent', 'rating', 'duration'])
+function isNumericMetricField(field: MetaField): boolean {
+  if (field.type === 'rollup') {
+    return rollupResultType(resolveRollupFieldProperty(field.property).aggregation) === 'number'
+  }
+  return NUMERIC_FIELD_TYPES.has(field.type)
+}
 const AGGREGATIONS_REQUIRING_VALUE = new Set<AggregationFunction>(['sum', 'avg', 'min', 'max'])
 // v2-d: only additive aggregations make a stacked total meaningful (Σ segments == the single bar).
 const ADDITIVE_AGGREGATIONS = new Set<AggregationFunction>(['sum', 'count'])
@@ -599,7 +608,7 @@ const editingDateGrouped = computed(() => Boolean(editingChart.value?.dataSource
 
 const chartFields = computed(() => filterPropertyVisibleFields(props.fields ?? []))
 const groupableFields = computed(() => chartFields.value.filter((field) => GROUPABLE_FIELD_TYPES.has(field.type)))
-const numericFields = computed(() => chartFields.value.filter((field) => NUMERIC_FIELD_TYPES.has(field.type)))
+const numericFields = computed(() => chartFields.value.filter((field) => isNumericMetricField(field)))
 // r12: scatter is the one non-grouped chart type — it hides groupBy/aggregation/value/series/bar-mode
 // and shows x/y/color/size pickers instead.
 const isScatter = computed(() => chartDraft.value.chartType === 'scatter')

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeRollupAggregation, resolveRollupFieldProperty } from '../src/multitable/utils/field-config'
+import { normalizeRollupAggregation, resolveRollupFieldProperty, rollupResultType } from '../src/multitable/utils/field-config'
 import { aggregationLabel } from '../src/multitable/utils/meta-manager-labels'
+import { FILTER_OPERATORS_BY_TYPE, effectiveFilterTypeKey } from '../src/multitable/composables/useMultitableGrid'
 
 // Rollup aggregation expansion (slice 2a) — FE round-trip lock.
 //
@@ -26,7 +27,6 @@ describe('rollup aggregation — FE normalizer round-trip', () => {
   })
 
   it('unknown / empty aggregation falls back to count', () => {
-    expect(normalizeRollupAggregation('concatenate')).toBe('count') // deferred to slice 2b — not yet valid
     expect(normalizeRollupAggregation('bogus')).toBe('count')
     expect(normalizeRollupAggregation('')).toBe('count')
     expect(normalizeRollupAggregation(null)).toBe('count')
@@ -96,5 +96,52 @@ describe('rollup filter condition — opaque FE preservation (slice 3)', () => {
       filters: [{ fieldId: 'f', operator: 'is', value: 'x' }], filterConjunction: 'OR',
     })
     expect(upper.filterConjunction).toBe('or')
+  })
+})
+
+// Slice 2b — string/boolean reducers on the FE: enum/alias parity, result-type, labels, and the
+// operator map keyed by a rollup's result kind (so a concatenate rollup offers text ops, an and/or/xor
+// rollup equality-only) — matching the backend resolveEffectiveFieldType.
+describe('rollup string/boolean reducers (slice 2b) — FE', () => {
+  it('normalizeRollupAggregation preserves concatenate/and/or/xor + concat alias', () => {
+    for (const a of ['concatenate', 'and', 'or', 'xor'] as const) {
+      expect(normalizeRollupAggregation(a)).toBe(a)
+    }
+    expect(normalizeRollupAggregation('concat')).toBe('concatenate')
+  })
+
+  it('rollupResultType: concatenate→string, and/or/xor→boolean, numeric→number', () => {
+    expect(rollupResultType('concatenate')).toBe('string')
+    expect(rollupResultType('and')).toBe('boolean')
+    expect(rollupResultType('or')).toBe('boolean')
+    expect(rollupResultType('xor')).toBe('boolean')
+    expect(rollupResultType('sum')).toBe('number')
+    expect(rollupResultType('countall')).toBe('number')
+  })
+
+  it('aggregationLabel covers the 4 new reducers (zh + en)', () => {
+    expect(aggregationLabel('concatenate', true)).toBe('拼接')
+    expect(aggregationLabel('concatenate', false)).toBe('Concatenate')
+    expect(aggregationLabel('and', false)).toBe('All true (AND)')
+    expect(aggregationLabel('xor', true)).toBe('奇数为真')
+  })
+
+  it('effectiveFilterTypeKey resolves a rollup field by its aggregation result kind', () => {
+    const mk = (aggregation: string) => ({ type: 'rollup', property: { linkFieldId: 'l', targetFieldId: 't', aggregation } })
+    expect(effectiveFilterTypeKey(mk('concatenate'))).toBe('string')
+    expect(effectiveFilterTypeKey(mk('and'))).toBe('boolean')
+    expect(effectiveFilterTypeKey(mk('sum'))).toBe('number')
+    expect(effectiveFilterTypeKey({ type: 'string' })).toBe('string')
+  })
+
+  it('operator map: concatenate rollup offers TEXT ops; and/or/xor rollup offers equality only', () => {
+    const concatKey = effectiveFilterTypeKey({ type: 'rollup', property: { linkFieldId: 'l', targetFieldId: 't', aggregation: 'concatenate' } })
+    const concatOps = (FILTER_OPERATORS_BY_TYPE[concatKey] ?? []).map((o) => o.value)
+    expect(concatOps).toContain('contains')
+
+    const boolKey = effectiveFilterTypeKey({ type: 'rollup', property: { linkFieldId: 'l', targetFieldId: 't', aggregation: 'and' } })
+    const boolOps = (FILTER_OPERATORS_BY_TYPE[boolKey] ?? []).map((o) => o.value)
+    expect(boolOps).toContain('is')
+    expect(boolOps).not.toContain('greater')
   })
 })

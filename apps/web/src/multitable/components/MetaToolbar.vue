@@ -172,7 +172,7 @@
 import { ref, computed } from 'vue'
 import type { MetaField, RowDensity } from '../types'
 import type { SortRule, FilterRule, FilterConjunction } from '../composables/useMultitableGrid'
-import { FILTER_OPERATORS_BY_TYPE } from '../composables/useMultitableGrid'
+import { FILTER_OPERATORS_BY_TYPE, effectiveFilterTypeKey } from '../composables/useMultitableGrid'
 import { useLocale } from '../../composables/useLocale'
 import {
   metaCoreLabel,
@@ -311,7 +311,8 @@ const getOperatorsForField = (id: string) => {
   if (type === 'multiSelect') {
     return FILTER_OPERATORS_BY_TYPE.multiSelect ?? FILTER_OPERATORS_BY_TYPE.select
   }
-  return FILTER_OPERATORS_BY_TYPE[type] ?? FILTER_OPERATORS_BY_TYPE.string
+  // Slice 2b: rollup operators follow the aggregation's result kind (string/boolean/number).
+  return FILTER_OPERATORS_BY_TYPE[effectiveFilterTypeKey(getField(id))] ?? FILTER_OPERATORS_BY_TYPE.string
 }
 const applyButtonLabel = computed(() => props.sortFilterDirty
   ? metaCoreLabel('toolbar.applyFilterChanges', isZh.value)

@@ -195,13 +195,17 @@ function sanitizeStringArray(value: unknown): string[] {
 
 // Keep this enum in lockstep with parseRollupAggregation in routes/univer-meta.ts — this codec runs on the
 // provisioning / template-install / SDK-fixture write paths, and a value it rejects gets silently
-// corrupted to 'count' by the caller's `?? 'count'` fallback. Slice 2a added countall + unique (numeric).
-type RollupAggregationCodec = 'count' | 'sum' | 'avg' | 'min' | 'max' | 'countall' | 'unique'
+// corrupted to 'count' by the caller's `?? 'count'` fallback. Slice 2a added countall + unique (numeric);
+// slice 2b added the non-numeric reducers concatenate / and / or / xor.
+type RollupAggregationCodec =
+  | 'count' | 'sum' | 'avg' | 'min' | 'max' | 'countall' | 'unique'
+  | 'concatenate' | 'and' | 'or' | 'xor'
 function parseRollupAggregation(value: unknown): RollupAggregationCodec | null {
   if (typeof value !== 'string') return null
   const normalized = value.trim().toLowerCase()
   if (normalized === 'counta') return 'count'
   if (normalized === 'distinct' || normalized === 'uniquecount') return 'unique'
+  if (normalized === 'concat') return 'concatenate'
   if (
     normalized === 'count' ||
     normalized === 'sum' ||
@@ -209,7 +213,11 @@ function parseRollupAggregation(value: unknown): RollupAggregationCodec | null {
     normalized === 'min' ||
     normalized === 'max' ||
     normalized === 'countall' ||
-    normalized === 'unique'
+    normalized === 'unique' ||
+    normalized === 'concatenate' ||
+    normalized === 'and' ||
+    normalized === 'or' ||
+    normalized === 'xor'
   ) {
     return normalized as RollupAggregationCodec
   }
