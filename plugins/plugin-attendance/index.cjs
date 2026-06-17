@@ -15558,6 +15558,18 @@ function annualLeavePolicyVersion(policy) {
 // user; for granted (non-dryRun) users, grants the annual lot idempotently (mirrors the C2 pattern). The
 // run + run_items are ALWAYS written (audit); dryRun writes NO lots/events and consumes NO source_key.
 // Caller supplies the transaction (`trx`).
+// 年假/法定假 L4a (owner design-lock 2026-06-16): the first-invalid instant for a period-Y annual_accrual lot.
+// carryover disabled → usable through end of Y → expires Jan 1 (Y+1) 00:00:00 org-tz; carryover enabled → carry
+// through Y+1 → expires Jan 1 (Y+2) 00:00:00 org-tz. Returned as a UTC instant; AttendanceExpiryService reaps via
+// expires_at <= now(), so the FIRST-INVALID instant (Jan 1 next, NOT Dec 31 23:59:59) is the clean boundary.
+// Returns a Date, or null if period/timezone is unusable (caller then leaves expires_at NULL = never-expire,
+// never guess). period + (carryover ? 2 : 1).
+function annualLeaveLotExpiryUtc(period, carryoverEnabled, timezone) {
+  if (!Number.isInteger(period) || typeof timezone !== 'string' || !timezone) return null
+  const year = period + (carryoverEnabled ? 2 : 1)
+  return new Date(zonedTimeToUtc({ year, month: 1, day: 1, hour: 0, minute: 0, second: 0 }, timezone))
+}
+
 async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
   const settings = await getSettings(trx)
   const policy = settings?.annualLeavePolicy
@@ -15566,6 +15578,12 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
   }
   if (!policy.timezone) {
     throw new HttpError(422, 'ANNUAL_LEAVE_TIMEZONE_REQUIRED', 'annualLeavePolicy.timezone is required to run accrual')
+  }
+  // L4a: the timezone is used for the year-end expiry boundary (zonedTimeToUtc). An INVALID identifier would
+  // silently fall back to UTC (getZonedParts), stamping the wrong expiry — reject it (org-tz boundary, no UTC
+  // fallback, never guess) rather than compute a wrong instant.
+  if (!isValidTimeZoneIdentifier(policy.timezone)) {
+    throw new HttpError(422, 'ANNUAL_LEAVE_TIMEZONE_INVALID', 'annualLeavePolicy.timezone must be a valid IANA timezone identifier')
   }
   const asOfParts = annualLeaveDateParts(asOf)
   if (!asOfParts) throw new HttpError(400, 'ANNUAL_LEAVE_INVALID_ASOF', 'asOf must be a valid YYYY-MM-DD date')
@@ -15591,6 +15609,9 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
     [orgId]
   )
   const summary = { runId, periodKey, asOf: asOfParts.str, dryRun: !!dryRun, granted: 0, skipped: 0, grantedMinutes: 0, lotsCreated: 0, alreadyGranted: 0, skipReasons: {} }
+  // 年假/法定假 L4a: every annual_accrual lot this run grants carries the same year-end expiry, computed ONCE from
+  // this run's policy snapshot (period + carryover, org-tz). The grant stamps it; the existing expiry scheduler reaps.
+  const lotExpiresAt = annualLeaveLotExpiryUtc(period, policy.carryover?.enabled === true, policy.timezone)
   for (const user of users) {
     const r = computeAnnualLeaveAccrualForUser(policy, user, period, asOfParts)
     const itemRows = await trx.query(
@@ -15605,15 +15626,17 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
       summary.granted += 1   // computed-grantable — the count a dry-run reports
       summary.grantedMinutes += r.entitlementMinutes
       if (!dryRun) {
-        // expires_at stays NULL here; L4 owns carryover/year-end expiry (and backfills these lots).
+        // L4a: stamp the year-end expiry (first-invalid instant, org-tz) computed above. annual_accrual lots
+        // granted by L2b BEFORE L4a keep expires_at NULL (never-expiring) until the L4b provenance-snapshot
+        // backfill sets them. annual_manual_adjust lots (L2c) are intentionally out of scope (stay NULL).
         const sourceKey = `annual_accrual:${user.id}:${periodKey}`
         const lotRows = await trx.query(
           `INSERT INTO attendance_leave_balances
-             (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status)
-           VALUES ($1, $2, 'annual', $3, $3, 'annual_accrual', $4, $5, 'active')
+             (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status, expires_at)
+           VALUES ($1, $2, 'annual', $3, $3, 'annual_accrual', $4, $5, 'active', $6)
            ON CONFLICT (org_id, source_key) DO NOTHING
            RETURNING id`,
-          [orgId, user.id, r.entitlementMinutes, runItemId, sourceKey]
+          [orgId, user.id, r.entitlementMinutes, runItemId, sourceKey, lotExpiresAt]
         )
         const newLotId = lotRows[0]?.id
         if (newLotId) {
@@ -37826,6 +37849,12 @@ module.exports = {
           // policy persists freely.
           if (merged.annualLeavePolicy?.enabled === true && !merged.annualLeavePolicy?.timezone) {
             res.status(422).json({ ok: false, error: { code: 'ANNUAL_LEAVE_TIMEZONE_REQUIRED', message: 'annualLeavePolicy.timezone is required when annualLeavePolicy.enabled is true' } })
+            return
+          }
+          // L4a: an enabled policy's timezone drives the year-end expiry boundary — it MUST be a real IANA zone,
+          // else zonedTimeToUtc silently falls back to UTC and stamps the wrong expiry. Reject typos at the gate.
+          if (merged.annualLeavePolicy?.enabled === true && !isValidTimeZoneIdentifier(merged.annualLeavePolicy.timezone)) {
+            res.status(422).json({ ok: false, error: { code: 'ANNUAL_LEAVE_TIMEZONE_INVALID', message: 'annualLeavePolicy.timezone must be a valid IANA timezone identifier' } })
             return
           }
           const saved = await saveSettings(db, merged)

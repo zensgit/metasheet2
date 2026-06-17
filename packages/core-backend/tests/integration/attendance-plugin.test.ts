@@ -5021,6 +5021,77 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④/年假 L4a — accrual lot carries year-end expires_at (first-invalid instant, org-tz); carryover shifts +1yr', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const adminId = `al-l4a-admin-${runSuffix}`
+    const org = `al-l4a-org-${runSuffix}` // unique org → accrual enumerates ONLY my seeded users (no cross-test pollution)
+    const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) { await pool.end().catch(() => undefined); return }
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+    const period = 2026
+    const U = (t: string) => `al-l4a-${runSuffix}-${t}`
+    const seedUser = async (tag: string) => {
+      const id = U(tag)
+      await pool.query(`INSERT INTO users (id, email, password_hash, is_active, hire_date, cumulative_service_start_date)
+         VALUES ($1,$2,'no-login',true,'2010-01-01','2010-01-01')
+         ON CONFLICT (id) DO UPDATE SET is_active=true, hire_date=EXCLUDED.hire_date, cumulative_service_start_date=EXCLUDED.cumulative_service_start_date`, [id, `${id}@example.com`])
+      await pool.query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1,$2,true) ON CONFLICT (user_id, org_id) DO UPDATE SET is_active=true`, [id, org])
+      return id
+    }
+    const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
+    const origPolicy = ((origRes.body as { data?: { annualLeavePolicy?: Record<string, unknown> } } | undefined)?.data?.annualLeavePolicy) ?? { enabled: false }
+    const setPolicy = (carryover: boolean) => requestJson(`${baseUrl}/api/attendance/settings`, {
+      method: 'PUT', headers,
+      body: JSON.stringify({ annualLeavePolicy: { enabled: true, tenureMode: 'cumulative_service', standardDayMinutes: 480, tiers: [{ minYears: 1, maxYears: null, days: 5 }], carryover: { enabled: carryover }, timezone: 'Asia/Shanghai' } }),
+    })
+    const runAccrual = () => requestJson(`${baseUrl}/api/attendance/annual-leave-accrual/run`, { method: 'POST', headers, body: JSON.stringify({ period, asOf: '2026-12-31', dryRun: false, orgId: org }) })
+    const lotExpiry = async (userId: string) => (await pool.query(`SELECT expires_at FROM attendance_leave_balances WHERE user_id=$1 AND leave_type_code='annual' AND source_type='annual_accrual'`, [userId])).rows[0]?.expires_at as Date | null
+    const ids: string[] = []
+    try {
+      // (A) carryover=false → period 2026 usable through end of 2026 → expires Jan 1 2027 00:00 Asia/Shanghai (UTC+8) = 2026-12-31T16:00:00Z.
+      const uNoCarry = await seedUser('nocarry'); ids.push(uNoCarry)
+      expect((await setPolicy(false)).status).toBe(200)
+      expect((await runAccrual()).status, 'accrual A').toBe(200)
+      const exp1 = await lotExpiry(uNoCarry)
+      expect(exp1, 'no-carry lot exists').toBeTruthy()
+      expect(new Date(exp1!).toISOString()).toBe('2026-12-31T16:00:00.000Z')
+
+      // (B) carryover=true → carry through 2027 → expires Jan 1 2028 00:00 Asia/Shanghai = 2027-12-31T16:00:00Z.
+      const uCarry = await seedUser('carry'); ids.push(uCarry)
+      expect((await setPolicy(true)).status).toBe(200)
+      expect((await runAccrual()).status, 'accrual B').toBe(200)
+      const exp2 = await lotExpiry(uCarry)
+      expect(exp2, 'carry lot exists').toBeTruthy()
+      expect(new Date(exp2!).toISOString()).toBe('2027-12-31T16:00:00.000Z')
+
+      // (C) the no-carry lot from run A is idempotent under run B (ON CONFLICT) — its expiry is NOT retroactively changed.
+      expect(new Date((await lotExpiry(uNoCarry))!).toISOString()).toBe('2026-12-31T16:00:00.000Z')
+
+      // (D) an enabled policy with an INVALID timezone is rejected at the settings gate (else zonedTimeToUtc would
+      // silently UTC-fall-back and stamp the wrong expiry). 422 ANNUAL_LEAVE_TIMEZONE_INVALID — never guess.
+      const badTz = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT', headers,
+        body: JSON.stringify({ annualLeavePolicy: { enabled: true, tenureMode: 'cumulative_service', standardDayMinutes: 480, tiers: [{ minYears: 1, maxYears: null, days: 5 }], carryover: { enabled: false }, timezone: 'Not/AZone' } }),
+      })
+      expect(badTz.status).toBe(422)
+      expect((badTz.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ANNUAL_LEAVE_TIMEZONE_INVALID')
+    } finally {
+      await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ annualLeavePolicy: origPolicy }) }).catch(() => undefined)
+      const all = ids.concat([adminId])
+      await pool.query(`DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])`, [all]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])`, [all]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_leave_accrual_runs WHERE org_id = $1`, [org]).catch(() => undefined)
+      await pool.query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [all]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [all]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('④/年假 L2c — manual adjustment: positive lot+grant / negative FIFO-deduct / insufficient-422-rollback / idempotency / delta-0 / org-scoping', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
