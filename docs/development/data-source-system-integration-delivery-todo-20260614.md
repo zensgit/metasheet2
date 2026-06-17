@@ -7,7 +7,9 @@
 ## 当前结论
 
 - 只读数据库接入 Data Factory 源系统: 已经基本可用。
-- 可交付定义: C6 外部写能力完成并通过实体机验收后，才称为完整交付。
+- 可交付定义: C6 sandbox 外部写能力通过实体机验收后，才称为 sandbox
+  交付链路闭合；完整 release 签收仍要按 release runbook 汇总最终 values-free
+  evidence package。production/batch 写入始终是独立显式 gate。
 - 下一步建议: C2-close 已通过实体机 smoke；C3 core runtime + CI real-DB wire lock 已落地；
   C4 配置体验和已知 polish 已落地（source/object/schema picker、source-field picker、watermark config、
   read-only/source-only 边界提示、SQL bridge values-free 错误提示）。
@@ -16,7 +18,7 @@
   C5 K3/MSSQL smoke gate #2670 已在 `dea391a1` 包上通过并关闭：operator scope-adjusted rerun
   中 generic SQL Server smoke 和 K3 SQL Server executor smoke 均 PASS，且 evidence values-free、无 K3
   Save/Submit/Audit/BOM、无外部 DB 写、无 raw SQL。#2700 已补 C5 runbook 的 SQL auth/scope triage。
-- 下一门: C6-5 entity-machine smoke。C6 是最大风险刀；C6-0 只锁 design contract，
+- 下一门: release evidence package 收口。C6 是最大风险刀；C6-0 只锁 design contract，
   C6-1 只落地 backend latent writer helper 和 write-gated target adapter 的关闭态合同；
   C6-2 只增加 read-only dry-run route + dry-run token，不授权 apply runtime 或 external write。
   C6-3 增加 token-bound apply route；C6-4 UI dry-run -> review -> apply 已合并并发出实体机
@@ -25,9 +27,12 @@
   HOLD 在 `HOLD_TARGET_DDL_UNAVAILABLE`，随后 seeded naturally failing row 也被实体机
   回复确认为无安全 reset/cleanup 形态，路由为 `HOLD_NO_SAFE_FAILURE_SHAPE`。C6-5a
   design 和 C6-5b sandbox-only failure-injection seam 已合并；首个 C6-5c sandbox 包
-  `642560126` 在实体机 package/apply 阶段 BLOCKED，尚未进入 controlled bad-row 复验。
+  `642560126` 在实体机 package/apply 阶段 BLOCKED，未进入 controlled bad-row 复验。
   #2761 已修复 on-prem package 不应携带 `node_modules` 的打包/校验缺口，并已重发
-  `d8244ee13` sandbox 包；下一步是实体机部署新包并重跑 C6-5c。production/batch 仍关闭。
+  `d8244ee13` sandbox 包；实体机已部署该包并完成 C6-5c controlled bad-row PASS：
+  one synthetic row-level failure `C6_TEST_INJECTED_ROW_FAILURE` + one clean sibling write，
+  dead-letter/provenance evidence values-free，注入配置已恢复关闭。production/batch 仍关闭；
+  Release 还需按 release runbook 汇总最终 values-free evidence package。
 
 ## 收口顺序
 
@@ -38,8 +43,8 @@
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
-| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 open; C6-5a design done; C6-5b seam done (#2756); first C6-5c package `642560126` deploy blocked; package prune fix #2761 done; recut package `d8244ee13` ready for entity-machine retry | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
-| Release | 总包 + 实体机验收 | #2720 core C6 sandbox smoke PASS, read-only subgate PASS, controlled bad-row HOLD_NO_SAFE_FAILURE_SHAPE; old C6-5c deploy blocked, fixed package `d8244ee13` published and ready for rerun | 交付签收 | C6-5c controlled bad-row 证据未闭合 |
+| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 sandbox smoke PASS; C6-5a design done; C6-5b seam done (#2756); first C6-5c package `642560126` deploy blocked; package prune fix #2761 done; recut package `d8244ee13` entity-machine controlled bad-row PASS | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
+| Release | 总包 + 实体机验收 | #2720 core C6 sandbox smoke PASS, read-only subgate PASS, controlled bad-row PASS on package `d8244ee13`; final release evidence package still pending | 交付签收 | C2/C3/C4 exact-release evidence and clean-machine/migration/auth gate still need owner decision/rerun |
 
 ## P0 - ②b Arc 收口 Follow-Up
 
@@ -419,7 +424,7 @@ TODO:
     into the values-free evidence panel.
   - apply is disabled for read-only users and requires an explicit review checkbox.
   - changing pipeline id or scope clears the pending dry-run token/review.
-- [ ] C6-5 entity-machine smoke: apply、re-pull、rollback。
+- [x] C6-5 entity-machine smoke: apply、re-pull、rollback、controlled bad-row。
   - issue: #2720 `[Data Source] C6 external-write entity-machine smoke gate`.
   - runbook: `docs/operations/data-source-system-integration-c6-sandbox-smoke-runbook-20260616.md`.
   - release: `multitable-onprem-datasource-c6-ui-20260616-9fb34fd91`.
@@ -445,10 +450,11 @@ TODO:
     naturally failing row/constraint shape is therefore unavailable; no fresh Apply was run and no
     target rows were written. Routing tokens: `controlledBadRow=hold`,
     `controlledBadRowStopReason=no_safe_failure_shape`, `failureShape=no_safe_failure_shape`.
-  - remaining HOLD: controlled bad-row still needs a true write-time row failure that proves
-    row-level failure evidence is values-free and clean sibling rows are not silently swallowed.
-    Target lookup / plan-decision drift after dry-run is a revision-fence check
-    (`C6_WRITE_DRY_RUN_TOKEN_MISMATCH`), not this row-level failure gate.
+  - that HOLD is superseded by the C6-5a/C6-5b/C6-5c test-only path below. The
+    row-level failure gate still required a write-time failure proving values-free
+    dead-letter/provenance and a clean sibling write. Target lookup / plan-decision
+    drift after dry-run is a revision-fence check (`C6_WRITE_DRY_RUN_TOKEN_MISMATCH`),
+    not this row-level failure gate.
   - [x] C6-5a test-only failure-injection design:
     `docs/development/data-source-system-integration-c6-test-failure-injection-design-20260617.md`.
     This is design-only and exists only because both real sandbox failure shapes are unavailable.
@@ -482,11 +488,19 @@ TODO:
     the `.tgz` path failed before dependency refresh with a missing staged path under
     `packages/mssql-readonly-utils/node_modules/typescript`. Installed runtime did not contain the
     failure-injection marker, so no C6-5c rerun was attempted.
-  - [ ] C6-5c entity-machine rerun: deploy package `d8244ee13`, confirm the
+  - [x] C6-5c entity-machine rerun: deploy package `d8244ee13`, confirm the
     failure-injection marker is installed, enable the server-owned test-injection double gate,
     rerun controlled bad-row with one synthetic row failure plus at least one clean sibling write,
-    prove values-free dead-letter/provenance and re-pull idempotence, then disable the
+    prove values-free dead-letter/provenance for the row-level failure, then disable the
     test-injection gate.
+    - entity-machine PASS evidence: `releaseAssetCheck=pass`, `archiveNodeModulesEntries=0`,
+      `deploy.applyExit=0`, `healthAfterDeploy=200`, `failureInjectionMarkerFound=true`,
+      `freshDryRun.status=ready`, `freshDryRun.canApply=true`, `apply.status=partial`,
+      `apply.counts.written=1`, `apply.counts.failed=1`,
+      `apply.rowErrorCodes=C6_TEST_INJECTED_ROW_FAILURE`,
+      `deadLetters.persisted=1`, `provenance.target_write_succeeded=1`,
+      `provenance.target_write_failed=1`, request-body injection fields absent, and
+      injection env/runtime config restored after the check.
   - C6-5 remains sandbox/entity-machine validation only; no production/batch rollout.
 
 完成条件:
@@ -535,7 +549,8 @@ TODO:
   - package: `metasheet-multitable-onprem-v2.5.0-datasource-c6-ui-20260616-9fb34fd91`.
   - `.tgz` SHA256: `8659e9bfbad0c51efe55238108dc7b84a72a19478bf0f841cfa26d76e2cd784f`.
   - `.zip` SHA256: `9b771902fca4c607422d6ac30e63bf3fe95b576537fc7b9f6c2f767a25d6ab3c`.
-- [x] C6-5 smoke package deployed on entity machine for preflight; full smoke still HOLD.
+- [x] C6-5 smoke package deployed on entity machine for preflight; initial full smoke was
+  HOLD until sandbox target setup, read-only subgate, and controlled bad-row follow-up closed.
 - [x] C6-5 package deploy preflight: #2720 reports `deploy.applyExit=0`, `health=200`, dry-run/apply
   route presence, token guard, and target-kind requirement present.
 - [x] C6-5 sandbox write-gated target + active C6 pipeline configured on entity machine.
@@ -552,9 +567,15 @@ TODO:
   - fixed release: `multitable-onprem-datasource-c6-package-prune-20260617-d8244ee13`.
   - fixed package: `metasheet-multitable-onprem-v2.5.0-datasource-c6-package-prune-d8244ee13`.
   - workflow: `https://github.com/zensgit/metasheet2/actions/runs/27661650691`.
-  - current routing: old package `642560126` -> `c6_5c_deploy=blocked`; new package
+  - previous routing: old package `642560126` -> `c6_5c_deploy=blocked`; new package
     `d8244ee13` -> `c6_5c_deploy=ready_for_retry`; `c6_5c_rerun=not_started`.
-- [ ] C6-5c test-injection sandbox package deployed on entity machine and rerun.
+- [x] C6-5c test-injection sandbox package deployed on entity machine and rerun.
+  - package: `metasheet-multitable-onprem-v2.5.0-datasource-c6-package-prune-d8244ee13`.
+  - result: `c6_5c_deploy=pass`, `controlledBadRow=pass`.
+  - controlled row-level failure evidence: `apply.status=partial`, one clean sibling write,
+    one synthetic row failure `C6_TEST_INJECTED_ROW_FAILURE`, dead-letter persisted,
+    target-write provenance success/failure counters both present, request-body injection absent,
+    and test injection disabled/restored after the check.
 - [ ] 干净实体机 / 全新 DB smoke，用来暴露 migration 排序缺口。
 - [ ] 部署前跑 pending-migration diff + auth round-trip；静默 401 优先按 schema/migration 缺口排查，不先归咎 JWT secret。
 - [ ] C2 read-only smoke。
@@ -563,18 +584,20 @@ TODO:
 - [x] C5 K3 seam smoke。
 - [x] C6 core dry-run/apply/re-pull/rollback smoke（#2720）。
   - core sandbox smoke PASS; read-only dedicated dry-run subgate PASS.
-- [ ] C6 controlled bad-row row-level failure smoke（#2720）。
-  - attempted but HOLD on `HOLD_TARGET_DDL_UNAVAILABLE`; seeded naturally failing row also
-    HOLD on `HOLD_NO_SAFE_FAILURE_SHAPE`. Apply was not run for either failed controlled
-    bad-row setup and no target rows were written.
-  - C6-5 cannot close until true row-level write-time failure / dead-letter / provenance evidence
-    is produced values-free.
-- [ ] issue 上贴 values-free 验收证据。
+- [x] C6 controlled bad-row row-level failure smoke（#2720）。
+  - earlier real failure shapes HOLD on `HOLD_TARGET_DDL_UNAVAILABLE` and
+    `HOLD_NO_SAFE_FAILURE_SHAPE`; the final accepted path uses the reviewed C6-5b
+    sandbox-only, server-owned failure-injection seam.
+  - C6-5c entity-machine rerun on package `d8244ee13` produced one synthetic row-level
+    failure plus one clean sibling write, dead-letter/provenance evidence values-free,
+    and restored the injection config after the check.
+- [x] issue 上贴 values-free 验收证据（#2720 entity-machine evidence + acceptance reply）。
 
 交付判据:
 
-- C6 未完成前: 只能称为“只读数据库接入可用”。
-- C6 完成并通过实体机验收后: 才称为“数据库及系统连接能力可交付”。
+- C6 sandbox smoke 完成前: 只能称为“只读数据库接入可用”。
+- C6 sandbox smoke 已完成并通过实体机验收；现在可以称为“数据库及系统连接能力的 sandbox 交付链路已闭合”。
+- 完整 release 签收仍需 release runbook 的最终 values-free evidence package；production/batch 写入仍是独立显式 gate。
 
 ## 并行策略
 
