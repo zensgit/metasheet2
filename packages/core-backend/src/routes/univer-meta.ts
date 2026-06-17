@@ -920,7 +920,13 @@ type LookupFieldConfig = {
   skipForeignFieldMasking?: boolean
 }
 
-type RollupAggregation = 'count' | 'sum' | 'avg' | 'min' | 'max'
+type RollupAggregation =
+  | 'count' | 'sum' | 'avg' | 'min' | 'max'
+  // Expansion slice 2a — both NUMERIC, so a rollup's value stays number|null and the `rollup → number`
+  // assumption baked into filter/sort/dashboard stays correct. countall = resolved linked records incl.
+  // empty target; unique = distinct-value count. The string/boolean reducers (concatenate/and/or/xor) are
+  // deferred to slice 2b, which must first teach those consumers the rollup's non-numeric result type.
+  | 'countall' | 'unique'
 
 type RollupFieldConfig = {
   linkFieldId: string
@@ -1012,10 +1018,65 @@ function parseLookupFieldConfig(property: unknown): LookupFieldConfig | null {
 function parseRollupAggregation(value: unknown): RollupAggregation | null {
   if (typeof value !== 'string') return null
   const normalized = value.trim().toLowerCase()
+  // counta ≡ count here: resolveLookupValues already drops null/empty targets, so `count` (values.length)
+  // is the count of non-empty values. Use `countall` for the all-records-incl-empty count.
   if (normalized === 'counta') return 'count'
-  if (normalized === 'count' || normalized === 'sum' || normalized === 'avg' || normalized === 'min' || normalized === 'max') {
+  if (normalized === 'distinct' || normalized === 'uniquecount') return 'unique'
+  if (
+    normalized === 'count' || normalized === 'sum' || normalized === 'avg' || normalized === 'min' || normalized === 'max'
+    || normalized === 'countall' || normalized === 'unique'
+  ) {
     return normalized as RollupAggregation
   }
+  return null
+}
+
+/**
+ * A target value that contributes NOTHING to a rollup: null/undefined, an empty/whitespace-only string,
+ * or an empty array. This is the boundary that makes `count` (≡ COUNTA, non-empty) genuinely differ from
+ * `countall` (every resolved linked record): a linked row whose target is blank counts toward countall but
+ * NOT count/unique. Falsy-but-present scalars (0, false) are NOT blank — they are real values.
+ */
+function isBlankRollupValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true
+  if (typeof value === 'string') return value.trim().length === 0
+  if (Array.isArray(value)) return value.length === 0
+  return false
+}
+
+/**
+ * Pure rollup reducer (exported for unit tests). Every reducer here returns number|null, so a rollup's
+ * computed value stays NUMERIC — keeping the `rollup → number` assumption in filter/sort/dashboard correct.
+ * (The string/boolean reducers concatenate/and/or/xor are deferred to slice 2b, which must also teach those
+ * consumers the rollup's non-numeric result type before they can ship.)
+ * - `values`: target values of foreign records the actor may read (post sheet-read + field-mask). null/
+ *   undefined are dropped upstream; count/unique additionally drop blank values (see isBlankRollupValue).
+ * - `count`: resolved linked records incl. empty/blank target — the only signal `countall` needs.
+ * Numeric reducers (sum/avg/min/max) return null when no numeric values exist. Record-level read is
+ * NON-GATING here by design (record_permissions is write/admin elevation, not read-deny) — see #20 contract.
+ */
+export function aggregateRollup(
+  values: unknown[],
+  count: number,
+  aggregation: RollupAggregation,
+): number | null {
+  if (aggregation === 'count') return values.filter((v) => !isBlankRollupValue(v)).length // ≡ COUNTA
+  if (aggregation === 'countall') return count // all resolved linked records, incl. blank/empty target
+  if (aggregation === 'unique') {
+    return new Set(
+      values
+        .filter((v) => !isBlankRollupValue(v))
+        .map((v) => (typeof v === 'object' ? JSON.stringify(v) : v)),
+    ).size
+  }
+  const nums = values
+    .map((v) => toComparableNumber(v))
+    .filter((v): v is number => v !== null && Number.isFinite(v))
+  if (nums.length === 0) return null
+  if (aggregation === 'sum') return nums.reduce((sum, v) => sum + v, 0)
+  if (aggregation === 'avg') return nums.reduce((sum, v) => sum + v, 0) / nums.length
+  if (aggregation === 'min') return Math.min(...nums)
+  if (aggregation === 'max') return Math.max(...nums)
   return null
 }
 
@@ -2546,43 +2607,35 @@ async function applyLookupRollup(
   const resolveLookupValues = (
     record: UniverMetaRecord,
     cfg: LookupFieldConfig | RollupFieldConfig,
-  ): { values: unknown[]; masked: boolean } => {
+  ): { values: unknown[]; count: number; masked: boolean } => {
     const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
-    if (!foreignSheetId) return { values: [], masked: false }
+    if (!foreignSheetId) return { values: [], count: 0, masked: false }
     const linkIds = getLinkIds(record, cfg.linkFieldId)
-    if (linkIds.length === 0) return { values: [], masked: false }
-    if (!readableForeignSheetIds.has(foreignSheetId)) return { values: [], masked: true }
+    if (linkIds.length === 0) return { values: [], count: 0, masked: false }
+    if (!readableForeignSheetIds.has(foreignSheetId)) return { values: [], count: 0, masked: true }
     // §2a.3: fail-closed foreign-FIELD mask — if the actor can't read the foreign target field,
     // mask it (cross-base unconditional / same-base default unless opt-out). Same gate for
-    // lookup AND rollup (both read data[targetFieldId]).
+    // lookup AND rollup (both read data[targetFieldId]). Applied uniformly incl. countall — a record
+    // count over a field the actor can't read stays masked, no COUNTALL bypass of the field gate.
     if (shouldMaskForeignField(foreignFieldReadability, foreignSheetId, cfg.targetFieldId, cfg.skipForeignFieldMasking)) {
-      return { values: [], masked: true }
+      return { values: [], count: 0, masked: true }
     }
     const foreignMap = foreignRecordsBySheet.get(foreignSheetId)
-    if (!foreignMap) return { values: [], masked: true }
+    if (!foreignMap) return { values: [], count: 0, masked: true }
     const values: unknown[] = []
+    let count = 0
     for (const id of linkIds) {
       const data = foreignMap.get(id)
       if (!data) continue
+      count += 1 // a RESOLVED linked record, regardless of whether its target value is empty
       const value = data[cfg.targetFieldId]
       if (value === null || value === undefined) continue
       values.push(value)
     }
-    return { values, masked: false }
+    return { values, count, masked: false }
   }
 
-  const aggregateRollup = (values: unknown[], aggregation: RollupAggregation): number | null => {
-    if (aggregation === 'count') return values.length
-    const nums = values
-      .map((v) => toComparableNumber(v))
-      .filter((v): v is number => v !== null && Number.isFinite(v))
-    if (nums.length === 0) return null
-    if (aggregation === 'sum') return nums.reduce((sum, v) => sum + v, 0)
-    if (aggregation === 'avg') return nums.reduce((sum, v) => sum + v, 0) / nums.length
-    if (aggregation === 'min') return Math.min(...nums)
-    if (aggregation === 'max') return Math.max(...nums)
-    return null
-  }
+  // aggregateRollup is module-level + exported (unit-tested) — defined near parseRollupAggregation.
 
   for (const row of rows) {
     for (const [fieldId, cfg] of lookupConfigs.entries()) {
@@ -2598,8 +2651,8 @@ async function applyLookupRollup(
         row.data[fieldId] = null
         continue
       }
-      const { values, masked } = resolveLookupValues(row, cfg)
-      row.data[fieldId] = masked ? null : aggregateRollup(values, cfg.aggregation)
+      const { values, count, masked } = resolveLookupValues(row, cfg)
+      row.data[fieldId] = masked ? null : aggregateRollup(values, count, cfg.aggregation)
     }
   }
 }

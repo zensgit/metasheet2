@@ -585,12 +585,18 @@ export function autoLinkFieldLabel(isZh: boolean): string {
 }
 
 export function aggregationLabel(value: string, isZh: boolean): string {
-  if (!isZh) return value
-  if (value === 'count') return '计数'
-  if (value === 'sum') return '求和'
-  if (value === 'avg') return '平均值'
-  if (value === 'min') return '最小值'
-  if (value === 'max') return '最大值'
+  if (isZh) {
+    if (value === 'count') return '计数'
+    if (value === 'sum') return '求和'
+    if (value === 'avg') return '平均值'
+    if (value === 'min') return '最小值'
+    if (value === 'max') return '最大值'
+    if (value === 'countall') return '记录数'
+    if (value === 'unique') return '去重计数'
+    return value
+  }
+  if (value === 'countall') return 'Count all'
+  if (value === 'unique') return 'Unique'
   return value
 }
 

@@ -193,18 +193,25 @@ function sanitizeStringArray(value: unknown): string[] {
     .filter((item) => item.length > 0)
 }
 
-function parseRollupAggregation(value: unknown): 'count' | 'sum' | 'avg' | 'min' | 'max' | null {
+// Keep this enum in lockstep with parseRollupAggregation in routes/univer-meta.ts — this codec runs on the
+// provisioning / template-install / SDK-fixture write paths, and a value it rejects gets silently
+// corrupted to 'count' by the caller's `?? 'count'` fallback. Slice 2a added countall + unique (numeric).
+type RollupAggregationCodec = 'count' | 'sum' | 'avg' | 'min' | 'max' | 'countall' | 'unique'
+function parseRollupAggregation(value: unknown): RollupAggregationCodec | null {
   if (typeof value !== 'string') return null
   const normalized = value.trim().toLowerCase()
   if (normalized === 'counta') return 'count'
+  if (normalized === 'distinct' || normalized === 'uniquecount') return 'unique'
   if (
     normalized === 'count' ||
     normalized === 'sum' ||
     normalized === 'avg' ||
     normalized === 'min' ||
-    normalized === 'max'
+    normalized === 'max' ||
+    normalized === 'countall' ||
+    normalized === 'unique'
   ) {
-    return normalized as 'count' | 'sum' | 'avg' | 'min' | 'max'
+    return normalized as RollupAggregationCodec
   }
   return null
 }

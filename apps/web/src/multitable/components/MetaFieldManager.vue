@@ -230,6 +230,8 @@
             <span>{{ ml('field.aggregation') }}</span>
             <select v-model="rollupDraft.aggregation" class="meta-field-mgr__select">
               <option value="count">{{ aggregationLabel('count', isZh) }}</option>
+              <option value="countall">{{ aggregationLabel('countall', isZh) }}</option>
+              <option value="unique">{{ aggregationLabel('unique', isZh) }}</option>
               <option value="sum">{{ aggregationLabel('sum', isZh) }}</option>
               <option value="avg">{{ aggregationLabel('avg', isZh) }}</option>
               <option value="min">{{ aggregationLabel('min', isZh) }}</option>
@@ -739,6 +741,7 @@ import {
   resolveRatingFieldProperty,
   resolveRollupFieldProperty,
   resolveSelectFieldOptions,
+  type RollupAggregation,
 } from '../utils/field-config'
 import {
   SYSTEM_FIELD_TYPES,
@@ -976,7 +979,7 @@ const lookupDraft = reactive<{ linkFieldId: string; targetFieldId: string; forei
   targetFieldId: '',
   foreignSheetId: '',
 })
-const rollupDraft = reactive<{ linkFieldId: string; targetFieldId: string; foreignSheetId: string; aggregation: 'count' | 'sum' | 'avg' | 'min' | 'max' }>({
+const rollupDraft = reactive<{ linkFieldId: string; targetFieldId: string; foreignSheetId: string; aggregation: RollupAggregation }>({
   linkFieldId: '',
   targetFieldId: '',
   foreignSheetId: '',
