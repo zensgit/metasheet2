@@ -26,6 +26,7 @@
           <select v-model="draft.triggerType" class="meta-automation__select" data-automation-field="triggerType">
             <option value="record.created">{{ automationTriggerTypeLabel('record.created', isZh) }}</option>
             <option value="record.updated">{{ automationTriggerTypeLabel('record.updated', isZh) }}</option>
+            <option value="form.submitted">{{ automationTriggerTypeLabel('form.submitted', isZh) }}</option>
             <option value="field.changed">{{ automationTriggerTypeLabel('field.changed', isZh) }}</option>
           </select>
 

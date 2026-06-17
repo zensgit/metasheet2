@@ -9727,6 +9727,20 @@ export function univerMetaRouter(): Router {
         }],
       })
 
+      // #22 form.submitted automation trigger: a public/shared form submission emits this distinct,
+      // targetable event so automations can fire on form submits specifically. (Note: this raw-INSERT
+      // form-submit path does NOT emit multitable.record.created — form submits historically fired no
+      // automation event at all; this only adds the form.submitted event, leaving record.* behavior
+      // unchanged.) Payload is sheetId/recordId only (matchesTrigger + handleEvent key off those, and
+      // actions re-read the record) — no raw record.data egress. `mode` distinguishes a new submission
+      // ('create') from a form-link edit ('update').
+      eventBus.emit('multitable.form.submitted', {
+        sheetId: view.sheetId,
+        recordId: record.id,
+        actorId: getRequestActorId(req),
+        mode: recordId ? 'update' : 'create',
+      })
+
       return res.json({
         ok: true,
         data: {

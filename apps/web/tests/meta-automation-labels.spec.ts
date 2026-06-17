@@ -82,6 +82,8 @@ describe('meta-automation-labels', () => {
   it('localizes trigger types, trigger conditions, and cron presets with raw fallbacks', () => {
     expect(automationTriggerTypeLabel('record.created', false)).toBe('When record created')
     expect(automationTriggerTypeLabel('record.created', true)).toBe('当记录创建时')
+    expect(automationTriggerTypeLabel('form.submitted', false)).toBe('When form submitted')
+    expect(automationTriggerTypeLabel('form.submitted', true)).toBe('当表单提交时')
     expect(automationTriggerTypeLabel('field.changed', true)).toBe('当字段变化时')
     expect(automationTriggerTypeLabel('future.trigger', true)).toBe('future.trigger')
 

@@ -11,6 +11,7 @@ export type AutomationTriggerType =
   | 'schedule.cron'
   | 'schedule.interval'
   | 'webhook.received'
+  | 'form.submitted'
 
 export const ALL_TRIGGER_TYPES: AutomationTriggerType[] = [
   'record.created',
@@ -20,6 +21,7 @@ export const ALL_TRIGGER_TYPES: AutomationTriggerType[] = [
   'schedule.cron',
   'schedule.interval',
   'webhook.received',
+  'form.submitted',
 ]
 
 /** Config shape for field.value_changed */
@@ -58,6 +60,7 @@ export const TRIGGER_TYPE_BY_EVENT: Record<string, AutomationTriggerType> = {
   'multitable.record.created': 'record.created',
   'multitable.record.updated': 'record.updated',
   'multitable.record.deleted': 'record.deleted',
+  'multitable.form.submitted': 'form.submitted',
 }
 
 /**
