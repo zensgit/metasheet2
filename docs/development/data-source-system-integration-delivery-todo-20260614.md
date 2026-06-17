@@ -1,6 +1,6 @@
 # 数据库连接与系统对接交付收尾 TODO
 
-状态日期: 2026-06-16
+状态日期: 2026-06-17
 
 本文只跟踪“数据库连接能力接入系统并最终可交付”的剩余开发量。它不替代各功能线自己的设计文档/验证文档；每个 runtime 写能力仍然必须单独 opt-in、单独 PR、单独实体机验证。
 
@@ -22,8 +22,9 @@
   C6-3 增加 token-bound apply route；C6-4 UI dry-run -> review -> apply 已合并并发出实体机
   smoke 包；#2720 已完成 sandbox 配置和核心 dry-run/apply/re-pull/rollback smoke，
   且 #2737 后的 read-only dedicated-route 子门已 PASS。controlled bad-row 已尝试但
-  HOLD 在 `HOLD_TARGET_DDL_UNAVAILABLE`；下一步需要 DDL-capable sandbox/reset principal
-  或 seeded naturally failing sandbox row。production/batch 仍关闭。
+  HOLD 在 `HOLD_TARGET_DDL_UNAVAILABLE`，随后 seeded naturally failing row 也被实体机
+  回复确认为无安全 reset/cleanup 形态，路由为 `HOLD_NO_SAFE_FAILURE_SHAPE`。下一步只能
+  是独立的 C6-5a test-only failure-injection 设计/实现/复验链；production/batch 仍关闭。
 
 ## 收口顺序
 
@@ -34,8 +35,8 @@
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
-| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 open | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
-| Release | 总包 + 实体机验收 | C6-5 smoke package published; #2720 core C6 sandbox smoke PASS, read-only subgate PASS, controlled bad-row HOLD_TARGET_DDL_UNAVAILABLE | 交付签收 | 包内容/部署/证据不完整 |
+| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 open; C6-5a test-only injection design queued | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
+| Release | 总包 + 实体机验收 | C6-5 smoke package published; #2720 core C6 sandbox smoke PASS, read-only subgate PASS, controlled bad-row HOLD_NO_SAFE_FAILURE_SHAPE | 交付签收 | 包内容/部署/证据不完整 |
 
 ## P0 - ②b Arc 收口 Follow-Up
 
@@ -436,18 +437,23 @@ TODO:
     DDL/TRIGGER privilege for the planned reversible one-shot write-time failure injection
     (`42501` / `HOLD_TARGET_DDL_UNAVAILABLE`). Apply was not run, no target rows were written,
     and cleanup was values-free.
-  - remaining HOLD: controlled bad-row still needs a true write-time target constraint failure that
-    proves row-level failure evidence is values-free and clean sibling rows are not silently
-    swallowed. Target lookup / plan-decision drift after dry-run is a revision-fence check
+  - #2720 follow-up HOLD: the target data source connects and can be inspected, but the same
+    principal cannot perform the values-free reset/cleanup needed after a sandbox Apply. A seeded
+    naturally failing row/constraint shape is therefore unavailable; no fresh Apply was run and no
+    target rows were written. Routing tokens: `controlledBadRow=hold`,
+    `controlledBadRowStopReason=no_safe_failure_shape`, `failureShape=no_safe_failure_shape`.
+  - remaining HOLD: controlled bad-row still needs a true write-time row failure that proves
+    row-level failure evidence is values-free and clean sibling rows are not silently swallowed.
+    Target lookup / plan-decision drift after dry-run is a revision-fence check
     (`C6_WRITE_DRY_RUN_TOKEN_MISMATCH`), not this row-level failure gate.
-  - next options, in order: provide a DDL-capable sandbox/reset principal for this sandbox-only,
-    operator-local maintenance check; use a seeded naturally failing row that can be reset
-    values-free; only if neither exists, open a separate design-first test-only failure-injection
-    slice. Do not add a broad production runtime failure hook inside C6-5.
-  - before opening a test-only failure-injection design slice, the entity-machine operator must
-    explicitly report whether the seeded naturally failing row is possible. If both sandbox-safe
-    failure shapes are unavailable, report `HOLD_NO_SAFE_FAILURE_SHAPE`; this is a routing signal,
-    not runtime authorization.
+  - [x] C6-5a test-only failure-injection design:
+    `docs/development/data-source-system-integration-c6-test-failure-injection-design-20260617.md`.
+    This is design-only and exists only because both real sandbox failure shapes are unavailable.
+  - [ ] C6-5b test-only failure-injection implementation: default-off, sandbox-only, server-owned
+    double gate; no client-controlled injection, no production hook, no raw SQL/DDL/trigger path.
+  - [ ] C6-5c package + entity-machine rerun: publish a sandbox package, rerun controlled bad-row
+    with one synthetic row failure plus at least one clean sibling write, prove values-free
+    dead-letter/provenance and re-pull idempotence, then disable the test-injection gate.
   - C6-5 remains sandbox/entity-machine validation only; no production/batch rollout.
 
 完成条件:
@@ -509,8 +515,9 @@ TODO:
 - [x] C6 core dry-run/apply/re-pull/rollback smoke（#2720）。
   - core sandbox smoke PASS; read-only dedicated dry-run subgate PASS.
 - [ ] C6 controlled bad-row row-level failure smoke（#2720）。
-  - attempted but HOLD on `HOLD_TARGET_DDL_UNAVAILABLE`; Apply was not run for that attempt and
-    no target rows were written.
+  - attempted but HOLD on `HOLD_TARGET_DDL_UNAVAILABLE`; seeded naturally failing row also
+    HOLD on `HOLD_NO_SAFE_FAILURE_SHAPE`. Apply was not run for either failed controlled
+    bad-row setup and no target rows were written.
   - C6-5 cannot close until true row-level write-time failure / dead-letter / provenance evidence
     is produced values-free.
 - [ ] issue 上贴 values-free 验收证据。

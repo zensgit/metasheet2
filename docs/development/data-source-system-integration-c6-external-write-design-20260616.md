@@ -442,6 +442,20 @@ Run sandbox-first validation:
 
 Only after C6-5 passes can the Release gate discuss production/batch.
 
+### C6-5a - test-only failure-injection design
+
+If the entity-machine sandbox cannot provide either a reversible DDL/trigger
+failure shape or a seeded naturally failing row that can be reset values-free,
+the controlled bad-row check remains HOLD and must route through a separate
+test-only design slice:
+
+- `docs/development/data-source-system-integration-c6-test-failure-injection-design-20260617.md`
+
+That design is docs-only. It does not add runtime, routes, UI, package, raw SQL,
+production write, batch write, K3 write, or a broad failure hook. C6-5 remains
+open until a later C6-5b implementation and C6-5c entity-machine rerun produce
+values-free row-level failure / dead-letter / provenance evidence.
+
 ## Acceptance Checklist
 
 - [x] C6-0 design merged before runtime.
