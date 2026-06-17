@@ -555,7 +555,9 @@ const GROUPABLE_FIELD_TYPES = new Set<MetaFieldType>([
   'rollup',
 ])
 // 'rollup' is NOT blanket-numeric (slice 2b): a rollup qualifies as a sum/avg value field only when its
-// aggregation yields a number — see isNumericMetricField. Mirrors the backend DASHBOARD_NUMERIC_FIELD_TYPES.
+// aggregation yields a number — see isNumericMetricField. This set is the SAME as the backend's
+// isNumericQueryFieldType (number/currency/percent/rating/duration), which /dashboard/query enforces, so a
+// metric offered here is never rejected there.
 const NUMERIC_FIELD_TYPES = new Set<MetaFieldType>(['number', 'currency', 'percent', 'rating', 'duration'])
 function isNumericMetricField(field: MetaField): boolean {
   if (field.type === 'rollup') {
