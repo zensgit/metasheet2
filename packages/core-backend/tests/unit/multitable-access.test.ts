@@ -94,6 +94,7 @@ describe('multitable access helper', () => {
       canComment: false,
       canManageAutomation: false,
       canExport: true,
+      canSendNotification: true,
     })
   })
 
@@ -115,6 +116,7 @@ describe('multitable access helper', () => {
       canComment: true,
       canManageAutomation: true,
       canExport: true,
+      canSendNotification: true,
     })
   })
 

@@ -58,12 +58,12 @@ const logger = new Logger('MultitableButton')
 
 // B1-S1 D0-A enabled actions. `record_click` = executor-owned INERT (read-gated,
 // requestId-optional, NO confirm). `send_notification` = first side-effecting
-// action (edit-gated proxy, durable + deduped + audited in one route transaction).
+// action (notify-gated via canSendNotification, durable + deduped + audited in one route transaction).
 // Every new action must declare its actor gate AND whether it is side-effecting —
 // a single `sideEffecting` flag drives BOTH the requestId requirement (§6 dedup)
 // AND the server-side confirm requirement (§4): a side-effecting action whose
 // button declares confirm.enabled MUST be confirmed by the server, not just the FE.
-type ButtonActorGate = 'read' | 'edit'
+type ButtonActorGate = 'read' | 'edit' | 'notify'
 interface ButtonActionPolicy {
   /** Actor permission required to RUN this action (server-evaluated at dispatch). */
   gate: ButtonActorGate
@@ -80,7 +80,7 @@ interface ButtonActionPolicy {
 
 const BUTTON_ACTION_POLICIES: Record<string, ButtonActionPolicy> = {
   record_click: { gate: 'read', sideEffecting: false, dispatchType: 'record_click' },
-  send_notification: { gate: 'edit', sideEffecting: true, dispatchType: 'send_notification' },
+  send_notification: { gate: 'notify', sideEffecting: true, dispatchType: 'send_notification' },
 }
 
 export function createMultitableButtonRoutes(): Router {
@@ -159,10 +159,14 @@ export function createMultitableButtonRoutes(): Router {
       }
 
       // §3 ACTOR GATE (per-action). record_click = read (already passed above).
-      // send_notification = canEditRecord (PROVISIONAL proxy — a side-effecting
-      // button delivering a notification is gated as a record-edit-class action
-      // until a dedicated per-action permission exists; see design-lock §3).
+      // send_notification = canSendNotification — a DEDICATED sheet-level notify
+      // capability (full sheet write/admin, NOT write-own: notify is a fan-out to the
+      // sheet's configured members, not a record-scoped action). Replaces the earlier
+      // canEditRecord proxy. The 'edit' branch is retained for any future edit-gated action.
       if (policy.gate === 'edit' && !capabilities.canEditRecord) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      if (policy.gate === 'notify' && !capabilities.canSendNotification) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
       }
 

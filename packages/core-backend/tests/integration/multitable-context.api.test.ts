@@ -171,6 +171,7 @@ describe('Multitable context API', () => {
       canComment: true,
       canManageAutomation: true,
       canExport: true,
+      canSendNotification: false,
     })
     expect(response.body.data.capabilityOrigin).toEqual({
       source: 'global-rbac',
@@ -353,6 +354,7 @@ describe('Multitable context API', () => {
       canComment: true,
       canManageAutomation: true,
       canExport: true,
+      canSendNotification: true,
     })
     expect(response.body.data.viewPermissions).toEqual({
       view_grid: {
