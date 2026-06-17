@@ -37821,7 +37821,7 @@ module.exports = {
                COALESCE(SUM(CASE WHEN e.event_type = 'deduct' THEN -e.delta_minutes ELSE 0 END), 0) AS exhausted,
                COALESCE(SUM(CASE WHEN e.event_type = 'expire' THEN -e.delta_minutes ELSE 0 END), 0) AS expired
              FROM attendance_leave_balance_events e
-             JOIN attendance_leave_balances b ON b.id = e.balance_id
+             JOIN attendance_leave_balances b ON b.id = e.balance_id AND b.org_id = e.org_id AND b.user_id = e.user_id
              WHERE e.org_id = $1 AND e.user_id = $2 AND b.leave_type_code = $3`,
             [orgId, userId, leaveTypeCode]
           )
@@ -37841,7 +37841,7 @@ module.exports = {
           const recentEvents = await db.query(
             `SELECT e.event_type, e.delta_minutes, e.source_type, e.source_id, e.balance_id, e.occurred_at
              FROM attendance_leave_balance_events e
-             JOIN attendance_leave_balances b ON b.id = e.balance_id
+             JOIN attendance_leave_balances b ON b.id = e.balance_id AND b.org_id = e.org_id AND b.user_id = e.user_id
              WHERE e.org_id = $1 AND e.user_id = $2 AND b.leave_type_code = $3
              ORDER BY e.occurred_at DESC, e.id DESC
              LIMIT $4`,
