@@ -44,11 +44,13 @@ describe('approval admin jump migration and bootstrap sync', () => {
     expect(roleDeleteIndex).toBeLessThan(permissionDeleteIndex)
   })
 
-  it('T-bootstrap keeps approval_schema_bootstrap action check aligned with jump', async () => {
+  it('T-bootstrap keeps approval_schema_bootstrap action check aligned with add_sign/reduce_sign (P1-B)', async () => {
     const source = await fs.readFile(BOOTSTRAP_PATH, 'utf8')
 
-    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260515-pr3-admin-jump-action'")
-    expect(source).toContain("'remind', 'jump'")
+    // Lane D (P1-B 加签/减签) bumped the bootstrap: the action CHECK now also
+    // permits add_sign/reduce_sign, mirroring migration zzzz20260616130000.
+    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260616-p1b-add-reduce-sign-action'")
+    expect(source).toContain("'remind', 'jump', 'add_sign', 'reduce_sign'")
   })
 
   it('does not mutate immutable historical approval action migrations', async () => {

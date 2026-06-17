@@ -235,6 +235,29 @@
             >
               转交
             </el-button>
+            <!-- P1-B 加签: pull additional co-signer(s) into the current node. -->
+            <el-button
+              v-if="canAct"
+              type="primary"
+              plain
+              :loading="store.loading"
+              data-testid="approval-add-sign-button"
+              @click="openAddSignDialog"
+            >
+              加签
+            </el-button>
+            <!-- P1-B 减签: remove a previously add-signed co-signer at the
+                 current node. Only shown when at least one such row exists. -->
+            <el-button
+              v-if="canAct && reducibleAssignees.length > 0"
+              type="primary"
+              plain
+              :loading="store.loading"
+              data-testid="approval-reduce-sign-button"
+              @click="openReduceSignDialog"
+            >
+              减签
+            </el-button>
             <!-- Wave 2 WP3 slice 1: 催办. Visible only for the requester on
                  a pending instance; server-side rate-limits to once per hour
                  per user per instance (429 → surfaced as a friendly toast). -->
@@ -335,6 +358,102 @@
       </template>
     </el-dialog>
 
+    <!-- P1-B 加签 dialog -->
+    <el-dialog
+      v-model="addSignDialogVisible"
+      title="加签"
+      width="480px"
+    >
+      <el-form>
+        <el-form-item label="加签人">
+          <el-select
+            v-model="addSignUserIds"
+            multiple
+            filterable
+            placeholder="选择加签审批人"
+            style="width: 100%"
+            data-testid="approval-add-sign-users"
+          >
+            <el-option label="李四 (部门经理)" value="user_2" />
+            <el-option label="王五 (总监)" value="user_3" />
+            <el-option label="赵六 (VP)" value="user_4" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="加签方式">
+          <el-radio-group v-model="addSignMode" data-testid="approval-add-sign-mode">
+            <el-radio value="parallel">并加签</el-radio>
+            <el-radio value="before">前加签</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="加签说明">
+          <el-input
+            v-model="actionComment"
+            type="textarea"
+            :rows="2"
+            placeholder="请输入加签说明"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="addSignDialogVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="store.loading"
+          :disabled="addSignUserIds.length === 0"
+          data-testid="approval-add-sign-submit"
+          @click="submitAddSign"
+        >
+          确认加签
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- P1-B 减签 dialog -->
+    <el-dialog
+      v-model="reduceSignDialogVisible"
+      title="减签"
+      width="480px"
+    >
+      <el-form>
+        <el-form-item label="减签人">
+          <el-select
+            v-model="reduceSignUserId"
+            filterable
+            placeholder="选择要移除的加签人"
+            style="width: 100%"
+            data-testid="approval-reduce-sign-user"
+          >
+            <el-option
+              v-for="assignee in reducibleAssignees"
+              :key="assignee.assigneeId"
+              :label="assignee.label"
+              :value="assignee.assigneeId"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="减签说明">
+          <el-input
+            v-model="actionComment"
+            type="textarea"
+            :rows="2"
+            placeholder="请输入减签说明"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="reduceSignDialogVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="store.loading"
+          :disabled="!reduceSignUserId"
+          data-testid="approval-reduce-sign-submit"
+          @click="submitReduceSign"
+        >
+          确认减签
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- Comment dialog -->
     <el-dialog
       v-model="commentDialogVisible"
@@ -408,6 +527,8 @@ import {
   ChatDotSquare,
   Bell,
   RefreshLeft,
+  CirclePlus,
+  Remove,
 } from '@element-plus/icons-vue'
 import type { ApprovalActionType } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
@@ -478,6 +599,34 @@ const currentAction = ref<ApprovalActionType>('approve')
 const actionComment = ref('')
 const transferUserId = ref('')
 const returnTargetNodeKey = ref('')
+// P1-B 加签/减签 dialog state.
+const addSignDialogVisible = ref(false)
+const addSignUserIds = ref<string[]>([])
+const addSignMode = ref<'before' | 'parallel'>('parallel')
+const reduceSignDialogVisible = ref(false)
+const reduceSignUserId = ref('')
+
+// P1-B 减签 picker — only previously add-signed (`metadata.addSign === true`),
+// still-active, user-typed assignments at the CURRENT node are reducible.
+// Requester-original / template-resolved / role rows are never listed (mirrors
+// the backend `reduce_sign` `removable` predicate — INV-2).
+const reducibleAssignees = computed<Array<{ assigneeId: string; label: string }>>(() => {
+  if (!approval.value || approval.value.status !== 'pending') return []
+  const currentNodeKey = approval.value.currentNodeKey
+  if (!currentNodeKey) return []
+  const seen = new Set<string>()
+  const result: Array<{ assigneeId: string; label: string }> = []
+  for (const assignment of approval.value.assignments) {
+    if (!assignment.isActive) continue
+    if (assignment.type !== 'user') continue
+    if (assignment.nodeKey !== currentNodeKey) continue
+    if (assignment.metadata?.addSign !== true) continue
+    if (seen.has(assignment.assigneeId)) continue
+    seen.add(assignment.assigneeId)
+    result.push({ assigneeId: assignment.assigneeId, label: assignment.assigneeId })
+  }
+  return result
+})
 
 const returnableNodes = computed(() => {
   if (!approval.value || approval.value.status !== 'pending') return []
@@ -536,6 +685,8 @@ function actionLabel(action: string, metadata?: Record<string, unknown>) {
     comment: '评论',
     return: '退回',
     sign: '签字',
+    add_sign: '加签',
+    reduce_sign: '减签',
   }
   return map[action] ?? action
 }
@@ -566,6 +717,8 @@ function timelineIcon(action: string, metadata?: Record<string, unknown>) {
     comment: ChatDotSquare,
     cc: Bell,
     revoke: RefreshLeft,
+    add_sign: CirclePlus,
+    reduce_sign: Remove,
   }
   return map[action] ?? undefined
 }
@@ -684,6 +837,54 @@ async function submitTransfer() {
     await store.loadHistory(id)
   } catch {
     ElMessage.error('转交失败，请重试')
+  }
+}
+
+function openAddSignDialog() {
+  addSignUserIds.value = []
+  addSignMode.value = 'parallel'
+  actionComment.value = ''
+  addSignDialogVisible.value = true
+}
+
+async function submitAddSign() {
+  if (addSignUserIds.value.length === 0) return
+  const id = route.params.id as string
+  try {
+    await store.executeAction(id, {
+      action: 'add_sign',
+      comment: actionComment.value || undefined,
+      targetUserIds: addSignUserIds.value,
+      addSignMode: addSignMode.value,
+    })
+    ElMessage.success('已成功加签')
+    addSignDialogVisible.value = false
+    await store.loadHistory(id)
+  } catch {
+    ElMessage.error('加签失败，请重试')
+  }
+}
+
+function openReduceSignDialog() {
+  reduceSignUserId.value = ''
+  actionComment.value = ''
+  reduceSignDialogVisible.value = true
+}
+
+async function submitReduceSign() {
+  if (!reduceSignUserId.value) return
+  const id = route.params.id as string
+  try {
+    await store.executeAction(id, {
+      action: 'reduce_sign',
+      comment: actionComment.value || undefined,
+      targetAssignmentUserId: reduceSignUserId.value,
+    })
+    ElMessage.success('已成功减签')
+    reduceSignDialogVisible.value = false
+    await store.loadHistory(id)
+  } catch {
+    ElMessage.error('减签失败，请重试')
   }
 }
 

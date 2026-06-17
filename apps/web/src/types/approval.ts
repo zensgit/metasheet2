@@ -13,7 +13,15 @@ export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'reques
 export type ApprovalMode = 'single' | 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
-export type ApprovalActionType = 'approve' | 'reject' | 'transfer' | 'revoke' | 'comment' | 'return'
+export type ApprovalActionType =
+  | 'approve'
+  | 'reject'
+  | 'transfer'
+  | 'revoke'
+  | 'comment'
+  | 'return'
+  | 'add_sign'
+  | 'reduce_sign'
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export type ApprovalTemplateStatus = 'draft' | 'published' | 'archived'
 export type ApprovalTemplateVisibilityType = 'all' | 'dept' | 'role' | 'user'
@@ -223,6 +231,12 @@ export interface ApprovalActionRequest {
   comment?: string
   targetUserId?: string
   targetNodeKey?: string
+  /** P1-B add_sign — approver user IDs to pull into the current node as co-signers. */
+  targetUserIds?: string[]
+  /** P1-B add_sign — `parallel` (default) or `before`. */
+  addSignMode?: 'before' | 'parallel'
+  /** P1-B reduce_sign — assignee_id of the add-signed row to remove. */
+  targetAssignmentUserId?: string
 }
 
 export interface ApprovalTemplateListItemDTO {

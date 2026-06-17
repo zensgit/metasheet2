@@ -3082,6 +3082,125 @@ export class ApprovalProductService {
         return (await this.getApproval(id))!
       }
 
+      if (request.action === 'add_sign') {
+        // P1-B 加签 — pull additional active co-signer(s) into the actor's
+        // current approval node. Completion auto-extends from the LIVE
+        // active-assignment count (no shadow counter — see all-mode branch).
+        if (!currentNodeKey) {
+          throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
+        }
+        const addSignMode: 'before' | 'parallel' = request.addSignMode === 'before' ? 'before' : 'parallel'
+        const targetUserIds = (request.targetUserIds ?? [])
+          .filter((value): value is string => typeof value === 'string')
+          .map((value) => value.trim())
+          .filter(Boolean)
+        if (targetUserIds.length === 0) {
+          throw new ServiceError('targetUserIds is required for add_sign', 400, 'VALIDATION_ERROR')
+        }
+        // INV-6 (parallel-region safety): `before`-mode add_sign has no
+        // node-internal ordered queue in v1, so refuse it inside a parallel
+        // region rather than silently misrouting the new approver to the wrong
+        // branch frontier. `parallel`-mode is scoped to the actor's resolved
+        // branch node (`currentNodeKey`) and is allowed.
+        if (isInParallelRegion && addSignMode === 'before') {
+          throw new ServiceError(
+            'before-mode add_sign is not supported inside a parallel branch',
+            409,
+            'APPROVAL_ADD_SIGN_IN_PARALLEL_UNSUPPORTED',
+          )
+        }
+        await this.insertAssignments(
+          client,
+          id,
+          executor.buildAddSignAssignments(currentNodeKey, targetUserIds, actor.userId),
+        )
+        await client.query(
+          `UPDATE approval_instances SET version = $2, updated_at = now() WHERE id = $1`,
+          [id, nextVersion],
+        )
+        await this.insertApprovalRecord(client, id, {
+          action: 'add_sign',
+          actorId: actor.userId,
+          actorName,
+          comment: request.comment || null,
+          fromStatus: instance.status,
+          toStatus: instance.status,
+          fromVersion: instance.version,
+          toVersion: nextVersion,
+          metadata: { nodeKey: currentNodeKey, addSignMode, addedUserIds: targetUserIds },
+          targetUserId: targetUserIds[0],
+        }, actor)
+        await client.query('COMMIT')
+        return (await this.getApproval(id))!
+      }
+
+      if (request.action === 'reduce_sign') {
+        // P1-B 减签 — deactivate a single previously add-signed co-signer row at
+        // the actor's current node. Removal is `is_active=FALSE` (audit
+        // preserved), and the node auto-shrinks on the next approve because
+        // completion is derived, not counted.
+        if (!currentNodeKey) {
+          throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
+        }
+        const targetAssignmentUserId = request.targetAssignmentUserId?.trim()
+        if (!targetAssignmentUserId) {
+          throw new ServiceError('targetAssignmentUserId is required for reduce_sign', 400, 'VALIDATION_ERROR')
+        }
+        // INV-2: only rows stamped `metadata.addSign === true` (and of type
+        // 'user') are removable. Requester-original / template-resolved / role
+        // assignments never carry that stamp, so they can never be reduced.
+        const removable = currentNodeAssignments.find((assignment) =>
+          assignment.is_active
+          && assignment.assignment_type === 'user'
+          && assignment.assignee_id === targetAssignmentUserId
+          && isRecord(assignment.metadata)
+          && assignment.metadata.addSign === true)
+        if (!removable) {
+          throw new ServiceError(
+            'Assignment was not added by add_sign and cannot be reduced',
+            409,
+            'APPROVAL_ASSIGNMENT_NOT_ADD_SIGNED',
+          )
+        }
+        // INV-3: never strip the last active approver at the node (would orphan
+        // the node / make 会签 permanently unsatisfiable).
+        const activeUserRows = currentNodeAssignments.filter((assignment) =>
+          assignment.is_active && assignment.assignment_type === 'user')
+        if (activeUserRows.length <= 1) {
+          throw new ServiceError(
+            'Cannot reduce the last active approver at this node',
+            409,
+            'APPROVAL_REDUCE_LAST_ASSIGNEE',
+          )
+        }
+        await client.query(
+          `UPDATE approval_assignments SET is_active = FALSE, updated_at = now() WHERE id = $1`,
+          [removable.id],
+        )
+        await client.query(
+          `UPDATE approval_instances SET version = $2, updated_at = now() WHERE id = $1`,
+          [id, nextVersion],
+        )
+        await this.insertApprovalRecord(client, id, {
+          action: 'reduce_sign',
+          actorId: actor.userId,
+          actorName,
+          comment: request.comment || null,
+          fromStatus: instance.status,
+          toStatus: instance.status,
+          fromVersion: instance.version,
+          toVersion: nextVersion,
+          metadata: {
+            nodeKey: currentNodeKey,
+            removedUserId: targetAssignmentUserId,
+            removedAssignmentId: removable.id,
+          },
+          targetUserId: targetAssignmentUserId,
+        }, actor)
+        await client.query('COMMIT')
+        return (await this.getApproval(id))!
+      }
+
       if (request.action === 'revoke') {
         if (!runtimeGraph.policy.allowRevoke) {
           throw new ServiceError('Approval cannot be revoked for this template', 409, 'APPROVAL_REVOKE_DISABLED')

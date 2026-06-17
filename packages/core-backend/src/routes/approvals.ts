@@ -1257,11 +1257,11 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       const action = req.body?.action
-      if (!['approve', 'reject', 'transfer', 'revoke', 'comment', 'return'].includes(String(action))) {
+      if (!['approve', 'reject', 'transfer', 'revoke', 'comment', 'return', 'add_sign', 'reduce_sign'].includes(String(action))) {
         return res.status(400).json({
           error: {
             code: 'VALIDATION_ERROR',
-            message: 'action must be approve, reject, transfer, revoke, comment, or return',
+            message: 'action must be approve, reject, transfer, revoke, comment, return, add_sign, or reduce_sign',
           },
         })
       }
@@ -1269,6 +1269,23 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const comment = typeof req.body?.comment === 'string' ? req.body.comment : undefined
       const targetUserId = typeof req.body?.targetUserId === 'string' ? req.body.targetUserId.trim() : undefined
       const targetNodeKey = typeof req.body?.targetNodeKey === 'string' ? req.body.targetNodeKey.trim() : undefined
+      // P1-B add_sign: approver user IDs to pull into the current node.
+      const targetUserIds = Array.isArray(req.body?.targetUserIds)
+        ? req.body.targetUserIds
+            .filter((value: unknown): value is string => typeof value === 'string')
+            .map((value: string) => value.trim())
+            .filter(Boolean)
+        : undefined
+      // INV-9 (no silent flatten): unknown addSignMode is normalized to the
+      // explicit default 'parallel' (the service applies that default), not
+      // accepted as an arbitrary string.
+      const addSignMode = req.body?.addSignMode === 'before' || req.body?.addSignMode === 'parallel'
+        ? req.body.addSignMode
+        : undefined
+      // P1-B reduce_sign: assignee_id of the add-signed row to remove.
+      const targetAssignmentUserId = typeof req.body?.targetAssignmentUserId === 'string'
+        ? req.body.targetAssignmentUserId.trim()
+        : undefined
       const actor = {
         userId,
         userName: resolveApprovalActorName(req, userId),
@@ -1321,6 +1338,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
               comment,
               targetUserId,
               targetNodeKey,
+              targetUserIds,
+              addSignMode,
+              targetAssignmentUserId,
             },
             actor,
           )

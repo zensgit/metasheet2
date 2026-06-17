@@ -13,7 +13,15 @@ export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'reques
 export type ApprovalMode = 'single' | 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
-export type ApprovalActionType = 'approve' | 'reject' | 'transfer' | 'revoke' | 'comment' | 'return'
+export type ApprovalActionType =
+  | 'approve'
+  | 'reject'
+  | 'transfer'
+  | 'revoke'
+  | 'comment'
+  | 'return'
+  | 'add_sign'
+  | 'reduce_sign'
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export const APPROVAL_TERMINAL_STATUSES = ['approved', 'rejected', 'revoked', 'cancelled'] as const
 export type ApprovalTerminalStatus = typeof APPROVAL_TERMINAL_STATUSES[number]
@@ -274,6 +282,22 @@ export interface ApprovalActionRequest {
   comment?: string
   targetUserId?: string
   targetNodeKey?: string
+  /**
+   * P1-B add_sign — approver user IDs to pull into the current approval node
+   * as co-signers (`assignment_type='user'`). Required (non-empty) for add_sign.
+   */
+  targetUserIds?: string[]
+  /**
+   * P1-B add_sign — `parallel` (并加签, default) adds co-signers at the current
+   * node; `before` (前加签) is rejected inside a parallel region in v1
+   * (no node-internal ordered queue yet — see design §7).
+   */
+  addSignMode?: 'before' | 'parallel'
+  /**
+   * P1-B reduce_sign — assignee_id of the previously add-signed row to remove.
+   * Only rows stamped `metadata.addSign === true` are removable.
+   */
+  targetAssignmentUserId?: string
 }
 
 export interface ApprovalTemplateListItemDTO {

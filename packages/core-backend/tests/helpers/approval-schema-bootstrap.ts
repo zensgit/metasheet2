@@ -1,7 +1,11 @@
 import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260515-pr3-admin-jump-action'
+// Bumped for P1-B 加签/减签: the action CHECK constraint now also permits
+// 'add_sign' / 'reduce_sign' (mirrors migration
+// zzzz20260616130000_add_add_reduce_sign_actions_to_approval_records.ts). The
+// version marker re-runs the DDL on an already-bootstrapped test DB.
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260616-p1b-add-reduce-sign-action'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -177,7 +181,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`
       ALTER TABLE approval_records
       ADD CONSTRAINT approval_records_action_check
-      CHECK (action IN ('created', 'approve', 'reject', 'return', 'revoke', 'transfer', 'sign', 'comment', 'cc', 'remind', 'jump'))
+      CHECK (action IN ('created', 'approve', 'reject', 'return', 'revoke', 'transfer', 'sign', 'comment', 'cc', 'remind', 'jump', 'add_sign', 'reduce_sign'))
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_records_instance ON approval_records(instance_id)`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_records_instance_action_time ON approval_records(instance_id, action, occurred_at DESC)`)
