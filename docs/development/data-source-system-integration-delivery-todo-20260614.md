@@ -44,7 +44,7 @@
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 CLOSED as sandbox smoke PASS; C6-5a design done; C6-5b seam done (#2756); first C6-5c package `642560126` deploy blocked; package prune fix #2761 done; recut package `d8244ee13` entity-machine controlled bad-row PASS | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
-| Release | 总包 + 实体机验收 | #2769 opened for final release evidence package; #2720 C6 sandbox smoke PASS can be cited; C2/C3/C4 exact-release evidence and clean-machine/migration/auth gate still need owner decision/rerun | 交付签收 | 不得把 sandbox C6 PASS 误写成 production/batch authorization |
+| Release | 总包 + 实体机验收 | #2769 opened for final release evidence package; release package `79ab455e` is published and package-preflight verified; #2720 C6 sandbox smoke PASS can be cited; entity-machine deploy/migration/auth and C2/C3/C4 exact-release evidence still need owner decision/rerun | 交付签收 | 不得把 package preflight 或 sandbox C6 PASS 误写成 production/batch authorization |
 
 ## P0 - ②b Arc 收口 Follow-Up
 
@@ -577,6 +577,18 @@ TODO:
     one synthetic row failure `C6_TEST_INJECTED_ROW_FAILURE`, dead-letter persisted,
     target-write provenance success/failure counters both present, request-body injection absent,
     and test injection disabled/restored after the check.
+- [x] Final release evidence package published and package-preflight verified for #2769.
+  - release: `multitable-onprem-datasource-release-evidence-20260617-79ab455e`.
+  - package: `metasheet-multitable-onprem-v2.5.0-datasource-release-evidence-20260617-79ab455e`.
+  - source commit: `79ab455ebdda1c25d5848446633d1ce38a5d3d99` (`origin/main`, #2770).
+  - workflow: `https://github.com/zensgit/metasheet2/actions/runs/27667857440`.
+  - evidence: full asset set published (`.tgz`, `.zip`, both `.sha256`,
+    `SHA256SUMS`, metadata JSON, tgz/zip verify JSON+MD reports);
+    `sha256sum -c SHA256SUMS` passed; local package verifier passed for both
+    archives; published verifier JSON reports `ok: true`; direct archive scan
+    found no `node_modules` entries.
+  - boundary: this is package readiness only. Entity-machine deploy/run evidence
+    for this exact package has not started, and production/batch writes remain closed.
 - [ ] 干净实体机 / 全新 DB smoke，用来暴露 migration 排序缺口。
 - [ ] 部署前跑 pending-migration diff + auth round-trip；静默 401 优先按 schema/migration 缺口排查，不先归咎 JWT secret。
 - [ ] C2 read-only smoke。
