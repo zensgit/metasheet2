@@ -156,3 +156,78 @@ describeIfDatabase('multitable recycle bin — delete/trash/restore (real DB)', 
     }
   })
 })
+
+// P1 authz: trash list/restore must honor the same write-own row policy as deleteRecord (a write-own user
+// sees/restores only OWN trash) and the same field-read mask as live read (field_permissions.visible=false
+// must not leak through the trash API).
+describeIfDatabase('multitable recycle bin — authz: write-own row policy + field-read mask (real DB)', () => {
+  const A_BASE = `base_rba_${TS}`
+  const A_SHEET = `sheet_rba_${TS}`
+  const A_FLD = `fld_rba_${TS}`
+  const A_SECRET = `fld_rbas_${TS}`
+  const A_FULL = `u_rba_full_${TS}` // global multitable:write (does setup deletes; field-mask subject)
+  const OWNER = `u_rba_own_${TS}` // sheet-scoped write-own, NO global write
+  const OTHER = `u_rba_oth_${TS}`
+  const REC_OWN = `rec_rba_own_${TS}`
+  const REC_OTHER = `rec_rba_oth_${TS}`
+  const fullApp = () => buildApp(A_FULL, ['multitable:read', 'multitable:write'])
+  const ownApp = () => buildApp(OWNER, ['multitable:read'])
+
+  beforeAll(async () => {
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [A_BASE, 'RBA Base'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [A_SHEET, A_BASE, 'RBA Sheet'])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [A_FLD, A_SHEET, 'Name', 'string', '{}', 1])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [A_SECRET, A_SHEET, 'Secret', 'string', '{}', 2])
+    // OWNER: sheet-scoped write-own grant with no global write → requiresOwnWriteRowPolicy true.
+    await q('INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code) VALUES ($1,$2,$3,$4)', [A_SHEET, 'user', OWNER, 'spreadsheet:write-own'])
+  })
+  beforeEach(async () => {
+    await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [A_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [A_SHEET])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [REC_OWN, A_SHEET, JSON.stringify({ [A_FLD]: 'mine', [A_SECRET]: 'shh' }), OWNER])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [REC_OTHER, A_SHEET, JSON.stringify({ [A_FLD]: 'theirs', [A_SECRET]: 'shh' }), OTHER])
+  })
+  afterAll(async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [A_SHEET]).catch(() => {})
+    await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1', [A_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [A_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [A_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [A_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [A_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [A_BASE]).catch(() => {})
+  })
+
+  test('write-own: trash list shows only the actor\'s own deletions; full writer sees both', async () => {
+    expect((await request(fullApp()).delete(`/api/multitable/records/${REC_OWN}`)).status).toBe(200)
+    expect((await request(fullApp()).delete(`/api/multitable/records/${REC_OTHER}`)).status).toBe(200)
+    const own = await request(ownApp()).get(`/api/multitable/sheets/${A_SHEET}/trash`)
+    expect(own.status).toBe(200)
+    expect(trashIds(own)).toEqual([REC_OWN]) // NOT REC_OTHER
+    const full = await request(fullApp()).get(`/api/multitable/sheets/${A_SHEET}/trash`)
+    expect(trashIds(full).slice().sort()).toEqual([REC_OTHER, REC_OWN].slice().sort())
+    expect(full.body.data.total).toBe(2)
+    expect(own.body.data.total).toBe(1) // own filter applies to total too
+  })
+
+  test('write-own: cannot restore another user\'s trashed record (403), but can restore own', async () => {
+    expect((await request(fullApp()).delete(`/api/multitable/records/${REC_OTHER}`)).status).toBe(200)
+    expect((await request(ownApp()).post(`/api/multitable/records/${REC_OTHER}/restore`)).status).toBe(403)
+    expect((await request(fullApp()).delete(`/api/multitable/records/${REC_OWN}`)).status).toBe(200)
+    expect((await request(ownApp()).post(`/api/multitable/records/${REC_OWN}/restore`)).status).toBe(200)
+  })
+
+  test('field mask: a field_permissions.visible=false field is redacted from the trash list data', async () => {
+    await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [A_SHEET, A_SECRET, 'user', A_FULL, false, false])
+    try {
+      expect((await request(fullApp()).delete(`/api/multitable/records/${REC_OWN}`)).status).toBe(200)
+      const res = await request(fullApp()).get(`/api/multitable/sheets/${A_SHEET}/trash`)
+      expect(res.status).toBe(200)
+      const rec = (res.body?.data?.records ?? []).find((r: { recordId: string }) => r.recordId === REC_OWN) as { data: Record<string, unknown> } | undefined
+      expect(rec).toBeTruthy()
+      expect(rec?.data[A_FLD]).toBe('mine') // visible field still present
+      expect(A_SECRET in (rec?.data ?? {})).toBe(false) // hidden field redacted, not leaked
+    } finally {
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2', [A_SHEET, A_SECRET]).catch(() => {})
+    }
+  })
+})

@@ -46,7 +46,7 @@ import {
   notifyRecordSubscribersBestEffort,
   type NotifyRecordSubscribersInput,
 } from './record-subscription-service'
-import { ensureRecordWriteAllowed, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
+import { ensureRecordWriteAllowed, requiresOwnWriteRowPolicy, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
 import { ensureRecordNotLocked } from './record-lock'
 
 export type QueryFn = (
@@ -863,20 +863,29 @@ export class RecordService {
     records: Array<{ recordId: string; sheetId: string; data: Record<string, unknown>; originalVersion: number; createdBy: string | null; deletedBy: string | null; deletedAt: string }>
     total: number
   }> {
-    const { sheetId, resolveSheetAccess } = input
-    const { capabilities } = await resolveSheetAccess(sheetId)
+    const { sheetId, access, resolveSheetAccess } = input
+    const { capabilities, sheetScope } = await resolveSheetAccess(sheetId)
     if (!capabilities.canDeleteRecord) {
       throw new RecordPermissionError('Insufficient permissions to view deleted records')
     }
     const limit = Math.min(Math.max(input.limit ?? 50, 1), 200)
     const offset = Math.max(input.offset ?? 0, 0)
+    // Row policy: under sheet write-own (may delete only own rows) the trash must likewise expose only the
+    // actor's OWN deletions — canDeleteRecord alone is true for write-own and would otherwise leak (and
+    // allow restore of) rows created by other users. Apply the own-only filter in SQL so total+pagination
+    // stay exact. Full-write / admin scopes see all trash for the sheet (no extra filter).
+    const ownOnly = requiresOwnWriteRowPolicy(sheetScope, access.isAdminRole)
+    const ownSql = ownOnly ? ' AND created_by = $OWN' : ''
     try {
-      const totalRes = await this.pool.query('SELECT COUNT(*)::int AS n FROM meta_records_trash WHERE sheet_id = $1', [sheetId])
+      const totalRes = await this.pool.query(
+        `SELECT COUNT(*)::int AS n FROM meta_records_trash WHERE sheet_id = $1${ownSql.replace('$OWN', '$2')}`,
+        ownOnly ? [sheetId, access.userId] : [sheetId],
+      )
       const total = Number((totalRes.rows[0] as { n?: number } | undefined)?.n ?? 0)
       const rowsRes = await this.pool.query(
         `SELECT record_id, sheet_id, data, original_version, created_by, deleted_by, deleted_at
-         FROM meta_records_trash WHERE sheet_id = $1 ORDER BY deleted_at DESC LIMIT $2 OFFSET $3`,
-        [sheetId, limit, offset],
+         FROM meta_records_trash WHERE sheet_id = $1${ownSql.replace('$OWN', '$4')} ORDER BY deleted_at DESC LIMIT $2 OFFSET $3`,
+        ownOnly ? [sheetId, limit, offset, access.userId] : [sheetId, limit, offset],
       )
       const records = (rowsRes.rows as Array<Record<string, unknown>>).map((r) => ({
         recordId: String(r.record_id),
@@ -902,7 +911,7 @@ export class RecordService {
     access: AccessInfo
     resolveSheetAccess: RecordDeleteInput['resolveSheetAccess']
   }): Promise<{ recordId: string; sheetId: string }> {
-    const { recordId, actorId, resolveSheetAccess } = input
+    const { recordId, actorId, access, resolveSheetAccess } = input
     const trashRes = await this.pool
       .query(
         `SELECT id, record_id, sheet_id, data, created_by, original_created_at, original_updated_at
@@ -918,13 +927,18 @@ export class RecordService {
     }
     const trashRow = trashRes.rows[0] as Record<string, unknown>
     const sheetId = String(trashRow.sheet_id)
-    const { capabilities } = await resolveSheetAccess(sheetId)
+    const { capabilities, sheetScope } = await resolveSheetAccess(sheetId)
     if (!capabilities.canDeleteRecord) {
       throw new RecordPermissionError('Insufficient permissions to restore records')
     }
     const trashPk = String(trashRow.id)
     const snapshot = normalizeJson(trashRow.data)
     const createdBy = typeof trashRow.created_by === 'string' ? trashRow.created_by : null
+    // Row policy: under write-own, deleteRecord only allowed deleting own rows, so restore must match —
+    // a write-own user must not resurrect another user's trash row (canDeleteRecord alone is true for them).
+    if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, createdBy, 'delete')) {
+      throw new RecordPermissionError('Insufficient permissions to restore this record')
+    }
     const originalCreatedAt = (trashRow.original_created_at as Date | string | null) ?? null
     const originalUpdatedAt = (trashRow.original_updated_at as Date | string | null) ?? null
 
