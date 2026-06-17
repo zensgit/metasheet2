@@ -2,14 +2,16 @@
 
 Purpose: run or continue #2720's sandbox-only C6 external-write smoke.
 
-Current #2720 status as of 2026-06-16: the sandbox write target, write-gated
+Current #2720 status as of 2026-06-17: the sandbox write target, write-gated
 external system, active C6 pipeline, core dry-run/apply/re-pull/rollback path
 have already passed on the entity machine. After #2737, the read-only subgate
 also passed on the dedicated C6 route: an `integration:read` user can call
 `/external-write/dry-run`, while `/external-write/apply` remains blocked. The
-remaining HOLD is the controlled bad-row check. If continuing that run, do not
-recreate the sandbox or rerun write/admin Apply just to repeat already-passed
-checks.
+remaining HOLD is the controlled bad-row check. The DDL-backed failure shape is
+unavailable, and the seeded naturally failing row/constraint shape is also
+unavailable because the target principal cannot safely reset/cleanup values-free
+after sandbox Apply. If continuing that run, do not recreate the sandbox or rerun
+write/admin Apply just to repeat already-passed checks.
 
 This runbook sets up the minimum sandbox-only shape needed to run the C6
 dry-run -> apply -> re-pull -> rollback/cleanup smoke. It does not authorize
@@ -356,8 +358,11 @@ write-time bad-row shape is available.
 Current #2720 attempt note: the first entity-machine bad-row setup stopped
 before Apply because the sandbox target principal could connect but lacked the
 DDL/TRIGGER privilege needed to install a temporary one-shot failure trigger.
-That is `HOLD_TARGET_DDL_UNAVAILABLE`, not a C6 route/runtime defect. Do not
-rerun Apply until one of these safe write-time failure shapes is available:
+That is `HOLD_TARGET_DDL_UNAVAILABLE`, not a C6 route/runtime defect. The
+operator then checked the seeded naturally failing row path and reported
+`HOLD_NO_SAFE_FAILURE_SHAPE`: the target principal can inspect/connect but cannot
+perform the values-free reset/cleanup required after sandbox Apply. Do not rerun
+Apply until one of these safe write-time failure paths is available:
 
 - a DDL-capable sandbox/reset principal for the sandbox-only temporary trigger;
 - a seeded naturally failing row that can be reset values-free;
@@ -369,12 +374,14 @@ outside MetaSheet product/runtime paths. It must never run against production,
 must never become evidence-bearing, and does not relax the forbidden product
 raw SQL / query / stored procedure / trigger paths above.
 
-Before opening any test-only failure-injection design slice, the entity-machine
-operator must also explicitly confirm whether a seeded naturally failing
-sandbox row/constraint shape is possible. If neither the DDL-backed temporary
-failure nor the seeded naturally failing row can be run safely, report
-`HOLD_NO_SAFE_FAILURE_SHAPE` and keep C6-5 open. That report is a routing signal
-only; it does not authorize runtime failure-injection code by itself.
+The entity-machine operator has now reported `HOLD_NO_SAFE_FAILURE_SHAPE`; that
+is a routing signal only, not runtime authorization. The next path is:
+
+1. C6-5a test-only failure-injection design;
+2. C6-5b default-off sandbox-only implementation;
+3. C6-5c new package + entity-machine rerun.
+
+Until C6-5b/C6-5c exist, leave this controlled bad-row step at HOLD.
 
 Expected:
 

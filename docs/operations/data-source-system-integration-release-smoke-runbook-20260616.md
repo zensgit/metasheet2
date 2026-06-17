@@ -46,7 +46,7 @@ the corresponding section below and post fresh values-free evidence.
 | C3 incremental/watermark | Runtime and CI real-DB wire locks are landed on main, but no release-package entity-machine incremental/resume smoke is recorded in this runbook. Large-BOM #2425 is related Data Factory C3/C4 evidence, not the SQL watermark/resume release gate. | Section 4 remains required for complete delivery unless an owner explicitly narrows the release scope and uses downgraded wording. Do not cite #2425 as C3 watermark/resume PASS. |
 | C4 UI configuration | Source/object/schema picker, source-field picker, watermark UI, and read-only/source-only boundary UX have landed, but this runbook has no final release-package UI smoke evidence yet. | Section 5 remains required for complete delivery unless exact UI smoke is explicitly deferred with downgraded wording. |
 | C5 K3/MSSQL read-only seam | issue #2670 closed PASS on package `dea391a1`: generic SQL Server smoke and K3 SQL Server executor smoke both passed after operator SQL scope adjustment; no K3 Save/Submit/Audit/BOM, external DB write, raw SQL, credentials, or row values were printed. | May be cited when no C5-relevant package/runtime surface changed after `dea391a1`; otherwise rerun the C5 runbook on the release package. |
-| C6 external write | issue #2720 core sandbox dry-run/apply/re-pull/rollback PASS and read-only dedicated-route PASS; controlled bad-row remains HOLD on `HOLD_TARGET_DDL_UNAVAILABLE` until a safe seeded-row/DDL-backed write-time failure shape is available. | C6-5 is not closed. Release signoff cannot claim complete database/source-system delivery until controlled bad-row row-level failure/dead-letter/provenance evidence passes values-free. |
+| C6 external write | issue #2720 core sandbox dry-run/apply/re-pull/rollback PASS and read-only dedicated-route PASS; controlled bad-row remains HOLD after both `HOLD_TARGET_DDL_UNAVAILABLE` and `HOLD_NO_SAFE_FAILURE_SHAPE`. C6-5a now routes this to a separate test-only failure-injection design path. | C6-5 is not closed. Release signoff cannot claim complete database/source-system delivery until controlled bad-row row-level failure/dead-letter/provenance evidence passes values-free on a later sandbox package. |
 
 ## Required Inputs
 
@@ -243,6 +243,7 @@ c6Sandbox:
   readOnlyUserExternalWriteDryRunAllowed=true|false
   readOnlyUserApplyBlocked=true|false
   controlledBadRow=pass|fail|hold|not_run
+  failureShape=write_time_constraint|ddl_unavailable|no_safe_failure_shape|not_available
   controlledBadRowStopReason=none|target_ddl_unavailable|seeded_row_unavailable|no_safe_failure_shape|not_available
   rollbackCleanup=pass|fail|not_run
   productDeleteRouteUsed=false
@@ -253,14 +254,23 @@ c6Sandbox:
   valuesFreeEvidence=true
 ```
 
-Current #2720 checkpoint as of 2026-06-16:
+Current #2720 checkpoint as of 2026-06-17:
 
 - core sandbox dry-run/apply/re-pull/rollback: passed;
 - dedicated read-only route subgate: passed
   (`/external-write/dry-run` allowed for `integration:read`; `/external-write/apply`
   blocked for the same read-only user);
 - controlled bad-row: attempted, HOLD on target DDL/TRIGGER privilege unavailable;
-  no Apply ran for that attempt, no target rows were written.
+  no Apply ran for that attempt, no target rows were written;
+- seeded naturally failing row: also HOLD because the target principal cannot
+  perform the values-free reset/cleanup needed after sandbox Apply;
+- current controlled bad-row routing:
+  `controlledBadRow=hold`,
+  `controlledBadRowStopReason=no_safe_failure_shape`,
+  `failureShape=no_safe_failure_shape`;
+- next eligible step is the separate C6-5a/C6-5b/C6-5c test-only
+  failure-injection path. This runbook still does not authorize production,
+  batch, raw SQL, DDL, trigger, or broad runtime failure hooks.
 
 ## Stop Rules
 
@@ -355,6 +365,7 @@ c6Sandbox:
   readOnlyUserExternalWriteDryRunAllowed=true|false
   readOnlyUserApplyBlocked=true|false
   controlledBadRow=pass|fail|hold|not_run
+  failureShape=write_time_constraint|ddl_unavailable|no_safe_failure_shape|not_available
   controlledBadRowStopReason=none|target_ddl_unavailable|seeded_row_unavailable|no_safe_failure_shape|not_available
   rollbackCleanup=pass|fail|not_run
   productDeleteRouteUsed=false
