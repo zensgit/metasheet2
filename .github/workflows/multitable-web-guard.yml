@@ -24,6 +24,11 @@ on:
       - 'apps/web/src/multitable/components/TrashModal.vue'
       - 'apps/web/tests/multitable-rollup-aggregation-fe.spec.ts'
       - 'apps/web/tests/multitable-trash-fe.spec.ts'
+      - 'apps/web/src/multitable/components/MetaKanbanView.vue'
+      - 'apps/web/src/multitable/components/MetaViewManager.vue'
+      - 'apps/web/src/multitable/utils/view-config.ts'
+      - 'apps/web/src/multitable/utils/meta-view-render-labels.ts'
+      - 'apps/web/tests/multitable-kanban-view.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
   push:
     branches: [main]
@@ -36,6 +41,11 @@ on:
       - 'apps/web/src/multitable/components/TrashModal.vue'
       - 'apps/web/tests/multitable-rollup-aggregation-fe.spec.ts'
       - 'apps/web/tests/multitable-trash-fe.spec.ts'
+      - 'apps/web/src/multitable/components/MetaKanbanView.vue'
+      - 'apps/web/src/multitable/components/MetaViewManager.vue'
+      - 'apps/web/src/multitable/utils/view-config.ts'
+      - 'apps/web/src/multitable/utils/meta-view-render-labels.ts'
+      - 'apps/web/tests/multitable-kanban-view.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
 
 jobs:
@@ -78,4 +88,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run multitable web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-kanban-view --reporter=dot

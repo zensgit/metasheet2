@@ -556,6 +556,7 @@ const calendarDraft = reactive<Required<MetaCalendarViewConfig>>({
 })
 const kanbanDraft = reactive<Required<MetaKanbanViewConfig>>({
   groupFieldId: null,
+  swimlaneFieldId: null,
   cardFieldIds: [],
 })
 const timelineDraft = reactive<Required<MetaTimelineViewConfig>>({
@@ -747,6 +748,7 @@ function resetConfigDrafts() {
   } satisfies Required<MetaCalendarViewConfig>)
   Object.assign(kanbanDraft, {
     groupFieldId: null,
+    swimlaneFieldId: null,
     cardFieldIds: [],
   } satisfies Required<MetaKanbanViewConfig>)
   Object.assign(timelineDraft, {
@@ -944,11 +946,16 @@ function serializeViewDraft(type: MetaView['type'] | null): string {
     })
   }
   if (type === 'kanban') {
-    return JSON.stringify({
+    const kanbanConfig: Record<string, unknown> = {
       groupFieldId: kanbanDraft.groupFieldId,
       cardFieldIds: [...kanbanDraft.cardFieldIds],
       ...serializeCommonViewDraft(type),
-    })
+    }
+    // Preserve the swimlane (row) dimension set on the board — the manager has no swimlane picker, so
+    // omitting it would silently strip a configured swimlane when other kanban settings are saved. Only
+    // when set, for byte-identical wire on legacy no-swimlane views.
+    if (kanbanDraft.swimlaneFieldId) kanbanConfig.swimlaneFieldId = kanbanDraft.swimlaneFieldId
+    return JSON.stringify(kanbanConfig)
   }
   if (type === 'hierarchy') {
     return JSON.stringify({

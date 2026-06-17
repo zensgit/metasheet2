@@ -20,6 +20,13 @@
             <option v-for="field in selectFields" :key="field.id" :value="field.id">{{ field.name }}</option>
           </select>
         </label>
+        <label v-if="swimlaneFieldCandidates.length" class="meta-kanban__header-field">
+          <span>{{ viewRenderLabel('kanban.swimlane', isZh) }}</span>
+          <select class="meta-kanban__field-select" :value="kanbanDraft.swimlaneFieldId ?? ''" @change="onPickSwimlaneField($event)">
+            <option value="">{{ viewRenderLabel('common.none', isZh) }}</option>
+            <option v-for="field in swimlaneFieldCandidates" :key="field.id" :value="field.id">{{ field.name }}</option>
+          </select>
+        </label>
         <span class="meta-kanban__group-label">{{ viewRenderLabel('kanban.groupedBy', isZh) }} <strong>{{ groupField.name }}</strong></span>
         <details class="meta-kanban__field-picker">
           <summary>{{ cardFieldsSummary(previewFields.length, isZh) }}</summary>
@@ -38,123 +45,82 @@
         <button class="meta-kanban__change-btn" @click="onClearGroupField">{{ viewRenderLabel('kanban.clear', isZh) }}</button>
       </div>
 
-      <div class="meta-kanban__board">
-        <div class="meta-kanban__column">
-          <div class="meta-kanban__column-header meta-kanban__column-header--uncategorized">
-            <span>{{ viewRenderLabel('kanban.uncategorized', isZh) }}</span>
-            <span class="meta-kanban__count">{{ uncategorized.length }}</span>
+      <div class="meta-kanban__board" :class="{ 'meta-kanban__board--swimlaned': !!swimlaneField }">
+        <div v-for="lane in swimlaneRows" :key="lane.key ?? '__lane__'" class="meta-kanban__swimlane">
+          <div v-if="lane.label !== null" class="meta-kanban__swimlane-header" :style="lane.color ? { borderLeftColor: lane.color } : {}">
+            <span class="meta-kanban__swimlane-label">{{ lane.label }}</span>
+            <span class="meta-kanban__count">{{ lane.count }}</span>
           </div>
-          <div class="meta-kanban__cards" :class="{ 'meta-kanban__cards--drag-over': dragOverColumn === '__uncategorized__' }" @dragover.prevent="dragOverColumn = '__uncategorized__'" @dragleave="dragOverColumn = null" @drop="dragOverColumn = null; onDrop(null, $event)">
-            <div
-              v-for="row in uncategorized"
-              :key="row.id"
-              class="meta-kanban__card"
-              role="article"
-              tabindex="0"
-              :aria-label="cardTitle(row)"
-              draggable="true"
-              @dragstart="onDragStart(row, $event)"
-              @click="emit('select-record', row.id)"
-              @keydown="onCardKeydown($event, row.id)"
-            >
-              <div class="meta-kanban__card-header">
-                <div class="meta-kanban__card-title">{{ cardTitle(row) }}</div>
-                <button
-                  v-if="canComment"
-                  class="meta-kanban__comment-btn"
-                  :class="rowCommentButtonClass(row.id)"
-                  type="button"
-                  :aria-label="openRecordCommentsAria(cardTitle(row), isZh)"
-                  @click.stop="emit('open-comments', row.id)"
-                  @keydown="onRowCommentKeydown($event, row.id)"
-                >
-                  <MetaCommentActionChip :label="commentsChipLabel" :state="rowCommentAffordance(row.id)" />
-                </button>
+          <div class="meta-kanban__swimlane-columns">
+            <div v-for="col in lane.columns" :key="dropKey(lane.key, col.value)" class="meta-kanban__column">
+              <div
+                class="meta-kanban__column-header"
+                :class="{ 'meta-kanban__column-header--uncategorized': col.isUncategorized }"
+                :style="!col.isUncategorized ? { borderTopColor: col.color ?? '#409eff' } : {}"
+              >
+                <span>{{ col.label }}</span>
+                <span class="meta-kanban__count">{{ col.rows.length }}</span>
               </div>
-              <div class="meta-kanban__card-fields">
-                <div v-for="f in previewFields" :key="f.id" class="meta-kanban__card-field">
-                  <span class="meta-kanban__card-field-copy">
-                    <span class="meta-kanban__card-field-label">{{ f.name }}:</span>
-                    {{ formatValue(row, f) }}
-                  </span>
-                  <button
-                    v-if="canComment"
-                    type="button"
-                    class="meta-kanban__field-comment-btn"
-                    :class="fieldCommentButtonClass(row.id, f.id)"
-                    :aria-label="openFieldCommentsForRecordAria(f.name, cardTitle(row), isZh)"
-                    @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: f.id })"
-                    @keydown="onFieldCommentKeydown($event, row.id, f.id)"
-                  >
-                    <MetaCommentAffordance :state="fieldCommentAffordance(row.id, f.id)" />
-                  </button>
+              <div
+                class="meta-kanban__cards"
+                :class="{ 'meta-kanban__cards--drag-over': dragOverColumn === dropKey(lane.key, col.value) }"
+                @dragover.prevent="dragOverColumn = dropKey(lane.key, col.value)"
+                @dragleave="dragOverColumn = null"
+                @drop="dragOverColumn = null; onDrop(col.value, $event)"
+              >
+                <div
+                  v-for="row in col.rows"
+                  :key="row.id"
+                  class="meta-kanban__card"
+                  role="article"
+                  tabindex="0"
+                  :aria-label="cardTitle(row)"
+                  draggable="true"
+                  @dragstart="onDragStart(row, $event)"
+                  @click="emit('select-record', row.id)"
+                  @keydown="onCardKeydown($event, row.id)"
+                >
+                  <div class="meta-kanban__card-header">
+                    <div class="meta-kanban__card-title">{{ cardTitle(row) }}</div>
+                    <button
+                      v-if="canComment"
+                      class="meta-kanban__comment-btn"
+                      :class="rowCommentButtonClass(row.id)"
+                      type="button"
+                      :aria-label="openRecordCommentsAria(cardTitle(row), isZh)"
+                      @click.stop="emit('open-comments', row.id)"
+                      @keydown="onRowCommentKeydown($event, row.id)"
+                    >
+                      <MetaCommentActionChip :label="commentsChipLabel" :state="rowCommentAffordance(row.id)" />
+                    </button>
+                  </div>
+                  <div class="meta-kanban__card-fields">
+                    <div v-for="f in previewFields" :key="f.id" class="meta-kanban__card-field">
+                      <span class="meta-kanban__card-field-copy">
+                        <span class="meta-kanban__card-field-label">{{ f.name }}:</span>
+                        {{ formatValue(row, f) }}
+                      </span>
+                      <button
+                        v-if="canComment"
+                        type="button"
+                        class="meta-kanban__field-comment-btn"
+                        :class="fieldCommentButtonClass(row.id, f.id)"
+                        :aria-label="openFieldCommentsForRecordAria(f.name, cardTitle(row), isZh)"
+                        @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: f.id })"
+                        @keydown="onFieldCommentKeydown($event, row.id, f.id)"
+                      >
+                        <MetaCommentAffordance :state="fieldCommentAffordance(row.id, f.id)" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="!col.rows.length" class="meta-kanban__drop-hint">
+                  {{ canEdit ? (col.isUncategorized ? viewRenderLabel('kanban.dropOrAdd', isZh) : viewRenderLabel('kanban.dropToUpdate', isZh)) : viewRenderLabel('kanban.noCards', isZh) }}
                 </div>
               </div>
-            </div>
-            <div v-if="!uncategorized.length" class="meta-kanban__drop-hint">
-              {{ canEdit ? viewRenderLabel('kanban.dropOrAdd', isZh) : viewRenderLabel('kanban.noCards', isZh) }}
+              <button v-if="canCreate" class="meta-kanban__add-btn" @click="onCreateInCell(lane.key, col.value)">{{ viewRenderLabel('common.add', isZh) }}</button>
             </div>
           </div>
-          <button v-if="canCreate" class="meta-kanban__add-btn" @click="emit('create-record', {})">{{ viewRenderLabel('common.add', isZh) }}</button>
-        </div>
-
-        <div v-for="opt in groupOptions" :key="opt.value" class="meta-kanban__column">
-          <div class="meta-kanban__column-header" :style="{ borderTopColor: opt.color ?? '#409eff' }">
-            <span>{{ opt.value }}</span>
-            <span class="meta-kanban__count">{{ columnRows(opt.value).length }}</span>
-          </div>
-          <div class="meta-kanban__cards" :class="{ 'meta-kanban__cards--drag-over': dragOverColumn === opt.value }" @dragover.prevent="dragOverColumn = opt.value" @dragleave="dragOverColumn = null" @drop="dragOverColumn = null; onDrop(opt.value, $event)">
-            <div
-              v-for="row in columnRows(opt.value)"
-              :key="row.id"
-              class="meta-kanban__card"
-              role="article"
-              tabindex="0"
-              :aria-label="cardTitle(row)"
-              draggable="true"
-              @dragstart="onDragStart(row, $event)"
-              @click="emit('select-record', row.id)"
-              @keydown="onCardKeydown($event, row.id)"
-            >
-              <div class="meta-kanban__card-header">
-                <div class="meta-kanban__card-title">{{ cardTitle(row) }}</div>
-                <button
-                  v-if="canComment"
-                  class="meta-kanban__comment-btn"
-                  :class="rowCommentButtonClass(row.id)"
-                  type="button"
-                  :aria-label="openRecordCommentsAria(cardTitle(row), isZh)"
-                  @click.stop="emit('open-comments', row.id)"
-                  @keydown="onRowCommentKeydown($event, row.id)"
-                >
-                  <MetaCommentActionChip :label="commentsChipLabel" :state="rowCommentAffordance(row.id)" />
-                </button>
-              </div>
-              <div class="meta-kanban__card-fields">
-                <div v-for="f in previewFields" :key="f.id" class="meta-kanban__card-field">
-                  <span class="meta-kanban__card-field-copy">
-                    <span class="meta-kanban__card-field-label">{{ f.name }}:</span>
-                    {{ formatValue(row, f) }}
-                  </span>
-                  <button
-                    v-if="canComment"
-                    type="button"
-                    class="meta-kanban__field-comment-btn"
-                    :class="fieldCommentButtonClass(row.id, f.id)"
-                    :aria-label="openFieldCommentsForRecordAria(f.name, cardTitle(row), isZh)"
-                    @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: f.id })"
-                    @keydown="onFieldCommentKeydown($event, row.id, f.id)"
-                  >
-                    <MetaCommentAffordance :state="fieldCommentAffordance(row.id, f.id)" />
-                  </button>
-                </div>
-              </div>
-            </div>
-            <div v-if="!columnRows(opt.value).length" class="meta-kanban__drop-hint">
-              {{ canEdit ? viewRenderLabel('kanban.dropToUpdate', isZh) : viewRenderLabel('kanban.noCards', isZh) }}
-            </div>
-          </div>
-          <button v-if="canCreate" class="meta-kanban__add-btn" @click="emit('create-record', { [groupField!.id]: opt.value })">{{ viewRenderLabel('common.add', isZh) }}</button>
         </div>
       </div>
     </template>
@@ -212,6 +178,7 @@ const emit = defineEmits<{
 const pendingConfigKey = ref<string | null>(null)
 const kanbanDraft = reactive<Required<MetaKanbanViewConfig>>({
   groupFieldId: null,
+  swimlaneFieldId: null,
   cardFieldIds: [],
 })
 let dragRecordId: string | null = null
@@ -225,8 +192,12 @@ const kanbanConfig = computed<Required<MetaKanbanViewConfig>>(() =>
 )
 
 function normalizeKanbanConfig(config?: Partial<Required<MetaKanbanViewConfig>>) {
+  const groupFieldId = config?.groupFieldId ?? null
+  // A field can't be both axes: drop the swimlane if it equals the column group field.
+  const rawSwimlane = config?.swimlaneFieldId ?? null
   return {
-    groupFieldId: config?.groupFieldId ?? null,
+    groupFieldId,
+    swimlaneFieldId: rawSwimlane && rawSwimlane !== groupFieldId ? rawSwimlane : null,
     cardFieldIds: [...(config?.cardFieldIds ?? [])],
   }
 }
@@ -238,6 +209,7 @@ watch(
     const configKey = JSON.stringify(normalized)
     if (pendingConfigKey.value && pendingConfigKey.value !== configKey) return
     kanbanDraft.groupFieldId = normalized.groupFieldId
+    kanbanDraft.swimlaneFieldId = normalized.swimlaneFieldId
     kanbanDraft.cardFieldIds = normalized.cardFieldIds
     if (pendingConfigKey.value === configKey) pendingConfigKey.value = null
   },
@@ -252,6 +224,18 @@ const groupField = computed(() =>
 
 const groupOptions = computed<Array<{ value: string; color?: string }>>(() =>
   groupField.value?.options ?? [],
+)
+
+// Swimlanes (optional row dimension). Unset → single implicit headerless lane = legacy 1D board.
+const swimlaneField = computed(() =>
+  kanbanDraft.swimlaneFieldId ? props.fields.find((f) => f.id === kanbanDraft.swimlaneFieldId) ?? null : null,
+)
+const swimlaneOptions = computed<Array<{ value: string; color?: string }>>(() =>
+  swimlaneField.value?.options ?? [],
+)
+// Candidates for the swimlane picker: select fields except the column group field (no field on both axes).
+const swimlaneFieldCandidates = computed(() =>
+  selectFields.value.filter((f) => f.id !== kanbanDraft.groupFieldId),
 )
 
 const titleField = computed(() =>
@@ -271,18 +255,65 @@ const previewFieldCandidates = computed(() =>
   props.fields.filter((field) => field.id !== kanbanDraft.groupFieldId && field.id !== titleField.value?.id),
 )
 
-const uncategorized = computed(() => {
+type KanbanColumn = { value: string | null; label: string; color?: string; isUncategorized: boolean; rows: MetaRecord[] }
+type KanbanSwimlane = { key: string | null; label: string | null; color?: string; count: number; columns: KanbanColumn[] }
+
+// Bucket a row set into [uncategorized, ...one per group option]. Shared by 1D + every swimlane row.
+function bucketColumns(rows: MetaRecord[]): KanbanColumn[] {
   if (!groupField.value) return []
+  const gid = groupField.value.id
   const optValues = new Set(groupOptions.value.map((o) => o.value))
-  return props.rows.filter((r) => {
-    const v = r.data[groupField.value!.id]
-    return !v || !optValues.has(String(v))
+  const uncategorized: KanbanColumn = {
+    value: null,
+    label: viewRenderLabel('kanban.uncategorized', isZh.value),
+    isUncategorized: true,
+    rows: rows.filter((r) => { const v = r.data[gid]; return !v || !optValues.has(String(v)) }),
+  }
+  const columns = groupOptions.value.map((opt): KanbanColumn => ({
+    value: opt.value,
+    label: opt.value,
+    color: opt.color,
+    isUncategorized: false,
+    rows: rows.filter((r) => String(r.data[gid] ?? '') === opt.value),
+  }))
+  return [uncategorized, ...columns]
+}
+
+// Unified board model: 1D = one headerless lane over all rows; 2D = one lane per swimlane option (+ an
+// uncategorized lane when needed), each lane bucketed into columns. Card template renders once over this.
+const swimlaneRows = computed<KanbanSwimlane[]>(() => {
+  if (!groupField.value) return []
+  if (!swimlaneField.value) {
+    return [{ key: null, label: null, count: props.rows.length, columns: bucketColumns(props.rows) }]
+  }
+  const sid = swimlaneField.value.id
+  const laneValues = new Set(swimlaneOptions.value.map((o) => o.value))
+  const lanes: KanbanSwimlane[] = swimlaneOptions.value.map((opt): KanbanSwimlane => {
+    const laneRows = props.rows.filter((r) => String(r.data[sid] ?? '') === opt.value)
+    return { key: opt.value, label: opt.value, color: opt.color, count: laneRows.length, columns: bucketColumns(laneRows) }
   })
+  const uncatLaneRows = props.rows.filter((r) => { const v = r.data[sid]; return !v || !laneValues.has(String(v)) })
+  if (uncatLaneRows.length) {
+    lanes.push({ key: null, label: viewRenderLabel('kanban.uncategorized', isZh.value), count: uncatLaneRows.length, columns: bucketColumns(uncatLaneRows) })
+  }
+  return lanes
 })
 
-function columnRows(optionValue: string): MetaRecord[] {
-  if (!groupField.value) return []
-  return props.rows.filter((r) => String(r.data[groupField.value!.id] ?? '') === optionValue)
+// Per-cell drag-over key (swimlane × column) so highlighting is scoped to one cell, not a whole column.
+function dropKey(laneKey: string | null, columnValue: string | null): string {
+  return (laneKey ?? '__lane__') + '::' + (columnValue ?? '__uncat__')
+}
+
+// Create in a cell: prefill the column (status) field AND, in swimlane mode, the swimlane field.
+function onCreateInCell(laneKey: string | null, columnValue: string | null) {
+  const data: Record<string, unknown> = {}
+  if (groupField.value && columnValue !== null) data[groupField.value.id] = columnValue
+  if (swimlaneField.value && laneKey !== null) data[swimlaneField.value.id] = laneKey
+  emit('create-record', data)
+}
+
+function onPickSwimlaneField(e: Event) {
+  emitConfigUpdate({ swimlaneFieldId: (e.target as HTMLSelectElement).value || null })
 }
 
 function cardTitle(row: MetaRecord): string {
@@ -338,14 +369,23 @@ function onClearGroupField() {
 function emitConfigUpdate(next: Partial<Required<MetaKanbanViewConfig>>) {
   const normalized = normalizeKanbanConfig({
     groupFieldId: kanbanDraft.groupFieldId,
+    swimlaneFieldId: kanbanDraft.swimlaneFieldId,
     cardFieldIds: kanbanDraft.cardFieldIds,
     ...next,
   })
   kanbanDraft.groupFieldId = normalized.groupFieldId
+  kanbanDraft.swimlaneFieldId = normalized.swimlaneFieldId
   kanbanDraft.cardFieldIds = normalized.cardFieldIds
   pendingConfigKey.value = JSON.stringify(normalized)
+  // Byte-identical wire for legacy (no-swimlane) configs: only persist the swimlane key when it's set, so
+  // existing kanban views serialize exactly as before and don't churn.
+  const config: Record<string, unknown> = {
+    groupFieldId: normalized.groupFieldId,
+    cardFieldIds: normalized.cardFieldIds,
+  }
+  if (normalized.swimlaneFieldId) config.swimlaneFieldId = normalized.swimlaneFieldId
   emit('update-view-config', {
-    config: normalized,
+    config,
     groupInfo: normalized.groupFieldId ? { fieldId: normalized.groupFieldId } : {},
   })
 }
@@ -373,9 +413,9 @@ function onDrop(targetValue: string | null, _e: DragEvent) {
 const focusedCardId = ref<string | null>(null)
 
 function allCards(): string[] {
-  const ids: string[] = uncategorized.value.map((r) => r.id)
-  for (const opt of groupOptions.value) {
-    ids.push(...columnRows(opt.value).map((r) => r.id))
+  const ids: string[] = []
+  for (const lane of swimlaneRows.value) {
+    for (const col of lane.columns) ids.push(...col.rows.map((r) => r.id))
   }
   return ids
 }
@@ -422,7 +462,15 @@ function onCardKeydown(e: KeyboardEvent, cardId: string) {
 .meta-kanban__field-picker summary::-webkit-details-marker { display: none; }
 .meta-kanban__field-picker-list { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-top: 8px; padding: 10px 12px; border: 1px solid #d8e1ee; border-radius: 8px; background: #fff; box-shadow: 0 8px 20px rgba(15,23,42,.08); max-width: 360px; }
 .meta-kanban__field-picker-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #475569; }
-.meta-kanban__board { display: flex; flex: 1; overflow-x: auto; padding: 12px 8px; gap: 12px; }
+.meta-kanban__board { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; padding: 12px 8px; gap: 14px; }
+/* 1D (no swimlane): single lane fills height so columns scroll internally — identical to the legacy board. */
+.meta-kanban__board:not(.meta-kanban__board--swimlaned) .meta-kanban__swimlane { flex: 1; }
+.meta-kanban__swimlane { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.meta-kanban__swimlane-header { display: flex; align-items: center; gap: 8px; padding: 5px 12px; font-size: 13px; font-weight: 600; color: #334155; background: #eef2f7; border-left: 3px solid #409eff; border-radius: 4px; position: sticky; left: 0; }
+.meta-kanban__swimlane-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The horizontal column strip (the legacy board's role). 2D caps each lane's height so the board scrolls vertically. */
+.meta-kanban__swimlane-columns { display: flex; flex: 1; min-height: 0; gap: 12px; overflow-x: auto; align-items: flex-start; padding-bottom: 4px; }
+.meta-kanban__board--swimlaned .meta-kanban__swimlane-columns { max-height: 440px; align-items: stretch; }
 .meta-kanban__column { min-width: 240px; width: 280px; flex-shrink: 0; background: #f5f7fa; border-radius: 8px; display: flex; flex-direction: column; max-height: 100%; }
 .meta-kanban__column-header { padding: 10px 12px; font-size: 13px; font-weight: 600; color: #333; display: flex; justify-content: space-between; align-items: center; border-top: 3px solid #409eff; border-radius: 8px 8px 0 0; }
 .meta-kanban__column-header--uncategorized { border-top-color: #999; color: #999; }

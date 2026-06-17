@@ -180,4 +180,70 @@ describe('MetaKanbanView', () => {
 
     app.unmount()
   })
+
+  const swimlaneFields = [
+    { id: 'fld_title', name: 'Title', type: 'string' },
+    { id: 'fld_status', name: 'Status', type: 'select', options: [{ value: 'Todo', color: '#aaa' }, { value: 'Doing', color: '#409eff' }] },
+    { id: 'fld_priority', name: 'Priority', type: 'select', options: [{ value: 'P1', color: '#f56c6c' }, { value: 'P2', color: '#67c23a' }] },
+  ]
+  const swimlaneRows = [
+    { id: 'rec_1', version: 1, data: { fld_title: 'A', fld_status: 'Doing', fld_priority: 'P1' } },
+    { id: 'rec_2', version: 1, data: { fld_title: 'B', fld_status: 'Todo', fld_priority: 'P2' } },
+  ]
+
+  function mountKanban(props: Record<string, unknown>) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({ render() { return h(MetaKanbanView, props) } })
+    app.mount(container)
+    return { container, app }
+  }
+
+  it('backward-compat: no swimlaneFieldId renders a single-dimension board (no swimlane headers)', async () => {
+    const { container, app } = mountKanban({
+      rows: swimlaneRows, fields: swimlaneFields, loading: false,
+      viewConfig: { groupFieldId: 'fld_status', cardFieldIds: [] },
+    })
+    await nextTick()
+    expect(container.querySelector('.meta-kanban__board--swimlaned')).toBeNull()
+    expect(container.querySelectorAll('.meta-kanban__swimlane-header')).toHaveLength(0)
+    // one implicit lane → one strip of columns (uncategorized + Todo + Doing)
+    expect(container.querySelectorAll('.meta-kanban__swimlane')).toHaveLength(1)
+    expect(container.querySelectorAll('.meta-kanban__column')).toHaveLength(3)
+    app.unmount(); container.remove()
+  })
+
+  it('swimlane mode renders a row per swimlane option, each with the column layout', async () => {
+    const { container, app } = mountKanban({
+      rows: swimlaneRows, fields: swimlaneFields, loading: false,
+      viewConfig: { groupFieldId: 'fld_status', swimlaneFieldId: 'fld_priority', cardFieldIds: [] },
+    })
+    await nextTick()
+    expect(container.querySelector('.meta-kanban__board--swimlaned')).not.toBeNull()
+    const headers = Array.from(container.querySelectorAll('.meta-kanban__swimlane-label')).map((el) => el.textContent)
+    expect(headers).toEqual(['P1', 'P2'])
+    // 2 swimlanes × 3 columns (uncategorized + Todo + Doing) each
+    expect(container.querySelectorAll('.meta-kanban__swimlane')).toHaveLength(2)
+    expect(container.querySelectorAll('.meta-kanban__column')).toHaveLength(6)
+    expect(container.textContent).toContain('A')
+    expect(container.textContent).toContain('B')
+    app.unmount(); container.remove()
+  })
+
+  it('create-in-cell prefills BOTH the column field and the swimlane field', async () => {
+    const createSpy = vi.fn()
+    const { container, app } = mountKanban({
+      rows: swimlaneRows, fields: swimlaneFields, loading: false, canCreate: true,
+      viewConfig: { groupFieldId: 'fld_status', swimlaneFieldId: 'fld_priority', cardFieldIds: [] },
+      onCreateRecord: createSpy,
+    })
+    await nextTick()
+    // swimlane[0] = P1; its columns = [uncategorized, Todo, Doing]; the last add button = the Doing cell.
+    const lane0 = container.querySelectorAll('.meta-kanban__swimlane')[0]
+    const addButtons = lane0.querySelectorAll('.meta-kanban__add-btn')
+    ;(addButtons[addButtons.length - 1] as HTMLButtonElement).click()
+    await nextTick()
+    expect(createSpy).toHaveBeenCalledWith({ fld_status: 'Doing', fld_priority: 'P1' })
+    app.unmount(); container.remove()
+  })
 })
