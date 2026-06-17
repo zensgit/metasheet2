@@ -3,15 +3,13 @@
 Purpose: run or continue #2720's sandbox-only C6 external-write smoke.
 
 Current #2720 status as of 2026-06-17: the sandbox write target, write-gated
-external system, active C6 pipeline, core dry-run/apply/re-pull/rollback path
-have already passed on the entity machine. After #2737, the read-only subgate
-also passed on the dedicated C6 route: an `integration:read` user can call
-`/external-write/dry-run`, while `/external-write/apply` remains blocked. The
-remaining HOLD is the controlled bad-row check. The DDL-backed failure shape is
-unavailable, and the seeded naturally failing row/constraint shape is also
-unavailable because the target principal cannot safely reset/cleanup values-free
-after sandbox Apply. If continuing that run, do not recreate the sandbox or rerun
-write/admin Apply just to repeat already-passed checks.
+external system, active C6 pipeline, core dry-run/apply/re-pull/rollback path,
+read-only dedicated-route subgate, and C6-5c controlled bad-row check have
+passed on the entity machine. The accepted C6-5c path used the reviewed,
+default-off, sandbox-only, server-owned failure-injection seam after both real
+sandbox failure shapes were unavailable (`HOLD_TARGET_DDL_UNAVAILABLE` and
+`HOLD_NO_SAFE_FAILURE_SHAPE`). If continuing that run, do not recreate the
+sandbox or rerun write/admin Apply just to repeat already-passed checks.
 
 This runbook sets up the minimum sandbox-only shape needed to run the C6
 dry-run -> apply -> re-pull -> rollback/cleanup smoke. It does not authorize
@@ -49,7 +47,8 @@ Forbidden:
   was sufficient.
 - For the C6-5c controlled bad-row rerun, deploy package
   `metasheet-multitable-onprem-v2.5.0-datasource-c6-package-prune-d8244ee13`
-  or a later package that includes #2756 and #2761.
+  or a later package that includes #2756 and #2761. This package has already
+  passed the C6-5c entity-machine rerun for #2720.
 - Confirm health is `200`.
 - Confirm #2720 preflight already sees:
   - `dryRunRoutePresent=true`;
@@ -330,7 +329,13 @@ Expected:
 
 ### 5. Controlled bad-row check
 
-Only run this if the sandbox target can be safely reset.
+The #2720 controlled bad-row gate is now passed for package `d8244ee13`. Rerun
+this section if an owner explicitly asks for fresh evidence, if the relevant
+C6 package/runtime surface changes, if exact-artifact release evidence is
+required, or if the sandbox target/config has materially changed.
+
+Only run this if the sandbox target can be safely reset, or if the reviewed
+C6-5b test-only failure-injection seam is enabled for the sandbox package.
 
 The controlled bad row must be a write-time row failure, not target lookup or
 plan-decision drift between dry-run and apply. The dry-run revision is
@@ -378,8 +383,8 @@ outside MetaSheet product/runtime paths. It must never run against production,
 must never become evidence-bearing, and does not relax the forbidden product
 raw SQL / query / stored procedure / trigger paths above.
 
-The entity-machine operator has now reported `HOLD_NO_SAFE_FAILURE_SHAPE`; that
-is a routing signal only, not runtime authorization. The next path is:
+The entity-machine operator reported `HOLD_NO_SAFE_FAILURE_SHAPE`; that was a
+routing signal only, not runtime authorization. The accepted path was:
 
 1. C6-5a test-only failure-injection design;
 2. C6-5b default-off sandbox-only implementation;
@@ -422,9 +427,14 @@ Current entity-machine result for that package:
   passed before publish, and downloaded archive-list checks found no
   `node_modules` entries.
 
-Do not enable the failure-injection env until this fixed package deploys
-cleanly and the installed runtime contains the C6 failure-injection marker.
-The next step is to deploy the fixed package, then rerun this section.
+The fixed package deployed successfully on the entity machine and the installed
+runtime contained the C6 failure-injection marker:
+
+- `releaseAssetCheck=pass`;
+- `archiveNodeModulesEntries=0`;
+- `deploy.applyExit=0`;
+- `healthAfterDeploy=200`;
+- `failureInjectionMarkerFound=true`.
 
 The C6-5b implementation is server-owned and deploy-gated. For the C6-5c
 sandbox package only, the deploy config must include both gates:
@@ -448,7 +458,19 @@ If any pinned server value does not match the loaded target, the route must fail
 closed before target capability checks or writes. Disable the deploy flag after
 the C6-5c controlled bad-row rerun.
 
-Until C6-5c passes, leave this controlled bad-row step at HOLD.
+The accepted #2720 C6-5c evidence:
+
+- `freshDryRun.httpStatus=200`, `freshDryRun.status=ready`, `freshDryRun.canApply=true`;
+- token was present but not printed;
+- apply returned `HTTP 200` with `status=partial`;
+- one clean sibling row wrote successfully;
+- one row failed with `C6_TEST_INJECTED_ROW_FAILURE`;
+- one dead-letter was persisted;
+- provenance included one target-write success and one target-write failure;
+- request bodies contained no failure-injection fields;
+- injection env/runtime config was restored/disabled after the check.
+
+C6-5c is therefore PASS for #2720. Production and batch remain closed.
 
 Expected:
 
@@ -463,7 +485,7 @@ Evidence:
 ```text
 badRow:
   status=<partial|failed|hold|not_run>
-  failureShape=write_time_constraint|ddl_unavailable|no_safe_failure_shape|not_available
+  failureShape=test_failure_injection|write_time_constraint|ddl_unavailable|no_safe_failure_shape|not_available
   stopReason=none|target_ddl_unavailable|seeded_row_unavailable|no_safe_failure_shape|not_available
   revisionMismatchObserved=false
   cleanSiblingWritten=true|false
@@ -605,12 +627,14 @@ readOnlyUser:
 
 badRow:
   status=<partial|failed|hold|not_run>
-  failureShape=write_time_constraint|ddl_unavailable|no_safe_failure_shape|not_available
+  failureShape=test_failure_injection|write_time_constraint|ddl_unavailable|no_safe_failure_shape|not_available
   stopReason=none|target_ddl_unavailable|seeded_row_unavailable|no_safe_failure_shape|not_available
   revisionMismatchObserved=false
   cleanSiblingWritten=true|false
   deadLetters.count=<count>
   rowErrorTypes=<tokens only>
+  requestBodyFailureInjectionFields=false
+  injectionEnvRestored=true|false|not_applicable
   valuesLeaked=false
 
 rollback:

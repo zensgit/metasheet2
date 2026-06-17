@@ -46,7 +46,7 @@ the corresponding section below and post fresh values-free evidence.
 | C3 incremental/watermark | Runtime and CI real-DB wire locks are landed on main, but no release-package entity-machine incremental/resume smoke is recorded in this runbook. Large-BOM #2425 is related Data Factory C3/C4 evidence, not the SQL watermark/resume release gate. | Section 4 remains required for complete delivery unless an owner explicitly narrows the release scope and uses downgraded wording. Do not cite #2425 as C3 watermark/resume PASS. |
 | C4 UI configuration | Source/object/schema picker, source-field picker, watermark UI, and read-only/source-only boundary UX have landed, but this runbook has no final release-package UI smoke evidence yet. | Section 5 remains required for complete delivery unless exact UI smoke is explicitly deferred with downgraded wording. |
 | C5 K3/MSSQL read-only seam | issue #2670 closed PASS on package `dea391a1`: generic SQL Server smoke and K3 SQL Server executor smoke both passed after operator SQL scope adjustment; no K3 Save/Submit/Audit/BOM, external DB write, raw SQL, credentials, or row values were printed. | May be cited when no C5-relevant package/runtime surface changed after `dea391a1`; otherwise rerun the C5 runbook on the release package. |
-| C6 external write | issue #2720 core sandbox dry-run/apply/re-pull/rollback PASS and read-only dedicated-route PASS; controlled bad-row remains HOLD after both `HOLD_TARGET_DDL_UNAVAILABLE` and `HOLD_NO_SAFE_FAILURE_SHAPE`. C6-5a design and C6-5b seam are on main; first C6-5c package `642560126` was blocked during deploy, #2761 fixed package-contained `node_modules` handling, and recut package `d8244ee13` is published for entity-machine retry. | C6-5 is not closed. Release signoff cannot claim complete database/source-system delivery until package `d8244ee13` deploys and controlled bad-row row-level failure/dead-letter/provenance evidence passes values-free. |
+| C6 external write | issue #2720 core sandbox dry-run/apply/re-pull/rollback PASS, read-only dedicated-route PASS, and C6-5c controlled bad-row PASS on package `d8244ee13`. The final pass used the reviewed C6-5b default-off, sandbox-only, server-owned failure-injection seam after real sandbox failure shapes were unavailable. Evidence showed one clean sibling write, one synthetic row-level failure `C6_TEST_INJECTED_ROW_FAILURE`, dead-letter/provenance counters, no request-body injection, and injection config restored/disabled after the check. | May be cited as C6 sandbox external-write smoke PASS for release evidence. Production/batch writes remain closed unless a separate production rollout gate is explicitly opened. |
 
 ## Required Inputs
 
@@ -243,7 +243,7 @@ c6Sandbox:
   readOnlyUserExternalWriteDryRunAllowed=true|false
   readOnlyUserApplyBlocked=true|false
   controlledBadRow=pass|fail|hold|not_run
-  failureShape=write_time_constraint|ddl_unavailable|no_safe_failure_shape|not_available
+  failureShape=test_failure_injection|write_time_constraint|ddl_unavailable|no_safe_failure_shape|not_available
   controlledBadRowStopReason=none|target_ddl_unavailable|seeded_row_unavailable|no_safe_failure_shape|not_available
   rollbackCleanup=pass|fail|not_run
   productDeleteRouteUsed=false
@@ -265,11 +265,11 @@ Current #2720 checkpoint as of 2026-06-17:
 - seeded naturally failing row: also HOLD because the target principal cannot
   perform the values-free reset/cleanup needed after sandbox Apply;
 - current controlled bad-row routing:
-  `controlledBadRow=hold`,
-  `controlledBadRowStopReason=no_safe_failure_shape`,
-  `failureShape=no_safe_failure_shape`;
-- next eligible step is the separate C6-5a/C6-5b/C6-5c test-only
-  failure-injection path. C6-5b uses two server-owned gates:
+  `controlledBadRow=pass`,
+  `controlledBadRowStopReason=none`,
+  `failureShape=test_failure_injection`;
+- C6-5a/C6-5b/C6-5c test-only failure-injection path is complete for #2720.
+  C6-5b uses two server-owned gates:
   `METASHEET_C6_TEST_FAILURE_INJECTION_ENABLED=true` plus
   `INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON` pinning the sandbox
   `pipelineId`, `targetSystemId`, `targetDataSourceId`, `targetObject`, and
@@ -291,10 +291,16 @@ Current #2720 checkpoint as of 2026-06-17:
   / `metasheet-multitable-onprem-v2.5.0-datasource-c6-package-prune-d8244ee13`.
   Workflow `https://github.com/zensgit/metasheet2/actions/runs/27661650691`
   passed; both verifier reports passed before publish, and downloaded
-  archive-list checks found no `node_modules` entries. Current routing is
-  `c6_5c_deploy=ready_for_retry`, `c6_5c_rerun=not_started`. This package
-  identity is not a C6 PASS claim; `controlledBadRow` remains `hold` until the
-  C6-5c entity-machine rerun proves the row-level failure evidence values-free.
+  archive-list checks found no `node_modules` entries.
+- The `d8244ee13` package then passed the C6-5c entity-machine rerun:
+  `releaseAssetCheck=pass`, `archiveNodeModulesEntries=0`, `deploy.applyExit=0`,
+  `healthAfterDeploy=200`, `failureInjectionMarkerFound=true`,
+  `freshDryRun.status=ready`, `freshDryRun.canApply=true`, `apply.status=partial`,
+  `apply.counts.written=1`, `apply.counts.failed=1`,
+  `apply.rowErrorCodes=C6_TEST_INJECTED_ROW_FAILURE`,
+  `apply.deadLetters.persisted=1`, `provenance.target_write_succeeded=1`,
+  `provenance.target_write_failed=1`, request-body failure-injection fields
+  absent, and injection env/runtime config restored/disabled after the check.
 
 ## Stop Rules
 
@@ -389,8 +395,10 @@ c6Sandbox:
   readOnlyUserExternalWriteDryRunAllowed=true|false
   readOnlyUserApplyBlocked=true|false
   controlledBadRow=pass|fail|hold|not_run
-  failureShape=write_time_constraint|ddl_unavailable|no_safe_failure_shape|not_available
+  failureShape=test_failure_injection|write_time_constraint|ddl_unavailable|no_safe_failure_shape|not_available
   controlledBadRowStopReason=none|target_ddl_unavailable|seeded_row_unavailable|no_safe_failure_shape|not_available
+  requestBodyFailureInjectionFields=false
+  injectionEnvRestored=true|false|not_applicable
   rollbackCleanup=pass|fail|not_run
   productDeleteRouteUsed=false
   productRawSqlUsed=false
