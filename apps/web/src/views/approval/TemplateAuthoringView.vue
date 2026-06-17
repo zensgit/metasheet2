@@ -182,6 +182,62 @@
                 placeholder="每行一个选项，格式：显示名:值"
               />
             </el-form-item>
+            <el-form-item label="显隐规则" class="template-authoring__wide">
+              <div class="template-authoring__visibility">
+                <el-select
+                  v-model="field.visibility.dependsOnFieldId"
+                  :disabled="readOnly"
+                  style="width: 200px"
+                  data-testid="approval-field-visibility-depends"
+                >
+                  <el-option label="无（始终显示）" value="" />
+                  <el-option
+                    v-for="dep in visibilityFieldOptions(field)"
+                    :key="dep.localId"
+                    :label="dep.label"
+                    :value="dep.id"
+                  />
+                </el-select>
+                <template v-if="field.visibility.dependsOnFieldId">
+                  <el-select
+                    v-model="field.visibility.operator"
+                    :disabled="readOnly"
+                    style="width: 130px"
+                    data-testid="approval-field-visibility-operator"
+                  >
+                    <el-option label="等于" value="eq" />
+                    <el-option label="不等于" value="neq" />
+                    <el-option label="包含" value="in" />
+                    <el-option label="为空" value="isEmpty" />
+                    <el-option label="不为空" value="notEmpty" />
+                  </el-select>
+                  <el-input
+                    v-if="field.visibility.operator === 'in'"
+                    v-model="field.visibility.valueText"
+                    :disabled="readOnly"
+                    type="textarea"
+                    :rows="2"
+                    placeholder="每行一个值"
+                    style="width: 240px"
+                    data-testid="approval-field-visibility-values"
+                  />
+                  <el-input
+                    v-else-if="field.visibility.operator === 'eq' || field.visibility.operator === 'neq'"
+                    v-model="field.visibility.valueText"
+                    :disabled="readOnly"
+                    placeholder="比较值"
+                    style="width: 240px"
+                    data-testid="approval-field-visibility-value"
+                  />
+                </template>
+              </div>
+              <div v-if="field.visibility.dependsOnFieldId" class="template-authoring__hint">
+                仅当依赖字段满足条件时才显示本字段。
+                <template v-if="field.visibility.operator === 'eq' || field.visibility.operator === 'neq'">
+                  比较值留空表示「{{ field.visibility.operator === 'eq' ? '等于' : '不等于' }}空值」；要取消规则请把依赖字段设为「无」。
+                </template>
+              </div>
+            </el-form-item>
           </div>
         </div>
       </el-card>
@@ -298,6 +354,7 @@ import {
   draftFromTemplate,
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
+  type FieldAuthoringDraft,
   type TemplateAuthoringDraft,
 } from '../../approvals/templateAuthoring'
 
@@ -351,6 +408,13 @@ function removeField(index: number) {
 
 function moveField(index: number, delta: -1 | 1) {
   draft.value.fields = swap(draft.value.fields, index, delta) ?? draft.value.fields
+}
+
+// Visibility-rule depends-on options: other fields that have an id (excludes self).
+function visibilityFieldOptions(current: FieldAuthoringDraft) {
+  return draft.value.fields
+    .filter((field) => field.localId !== current.localId && field.id.trim().length > 0)
+    .map((field) => ({ localId: field.localId, id: field.id.trim(), label: field.label.trim() || field.id.trim() }))
 }
 
 function addStep() {
@@ -522,6 +586,20 @@ onMounted(() => {
 
 .template-authoring__wide {
   grid-column: 1 / -1;
+}
+
+.template-authoring__visibility {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.template-authoring__hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary, #909399);
 }
 
 .template-authoring__inline > .el-input {
