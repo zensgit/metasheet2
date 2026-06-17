@@ -46,3 +46,31 @@ describe('rollup aggregation — FE normalizer round-trip', () => {
     expect(aggregationLabel('unique', false)).toBe('Unique')
   })
 })
+
+// Slice 3 — the rollup filter condition has no builder UI yet, so the field manager carries it OPAQUELY.
+// resolveRollupFieldProperty is the load side of that round-trip; if it dropped filters, an unrelated edit
+// would clobber an API/template-authored filter on save (the same silent-data-loss class as #1781).
+describe('rollup filter condition — opaque FE preservation (slice 3)', () => {
+  it('preserves filters + filterConjunction so an edit does not silently drop them', () => {
+    const p = resolveRollupFieldProperty({
+      linkFieldId: 'l', targetFieldId: 't', foreignSheetId: 's', aggregation: 'countall',
+      filters: [{ fieldId: 'f1', operator: 'is', value: 'paid' }], filterConjunction: 'or',
+    })
+    expect(p.filters).toEqual([{ fieldId: 'f1', operator: 'is', value: 'paid' }])
+    expect(p.filterConjunction).toBe('or')
+  })
+
+  it('no filters → filters/filterConjunction stay absent (clean config, no spurious dirty)', () => {
+    const p = resolveRollupFieldProperty({ linkFieldId: 'l', targetFieldId: 't', aggregation: 'count' })
+    expect(p.filters).toBeUndefined()
+    expect(p.filterConjunction).toBeUndefined()
+  })
+
+  it('filters present without explicit conjunction defaults to and', () => {
+    const p = resolveRollupFieldProperty({
+      linkFieldId: 'l', targetFieldId: 't', aggregation: 'count',
+      filters: [{ fieldId: 'f', operator: 'is', value: 'x' }],
+    })
+    expect(p.filterConjunction).toBe('and')
+  })
+})

@@ -979,11 +979,15 @@ const lookupDraft = reactive<{ linkFieldId: string; targetFieldId: string; forei
   targetFieldId: '',
   foreignSheetId: '',
 })
-const rollupDraft = reactive<{ linkFieldId: string; targetFieldId: string; foreignSheetId: string; aggregation: RollupAggregation }>({
+// filters/filterConjunction are carried OPAQUELY (no builder UI yet) so an API/template-authored rollup
+// filter survives an unrelated edit instead of being silently dropped on save.
+const rollupDraft = reactive<{ linkFieldId: string; targetFieldId: string; foreignSheetId: string; aggregation: RollupAggregation; filters?: unknown[]; filterConjunction?: string }>({
   linkFieldId: '',
   targetFieldId: '',
   foreignSheetId: '',
   aggregation: 'count',
+  filters: undefined,
+  filterConjunction: undefined,
 })
 const formulaDraft = reactive<{ expression: string }>({
   expression: '',
@@ -1492,6 +1496,8 @@ function resetDrafts() {
   rollupDraft.targetFieldId = ''
   rollupDraft.foreignSheetId = ''
   rollupDraft.aggregation = 'count'
+  rollupDraft.filters = undefined
+  rollupDraft.filterConjunction = undefined
   formulaDraft.expression = ''
   formulaFunctionSearch.value = ''
   formulaFunctionCategory.value = 'all'
@@ -1561,6 +1567,10 @@ function serializeFieldDraft(type: string | null): string {
       targetFieldId: rollupDraft.targetFieldId,
       foreignSheetId: rollupDraft.foreignSheetId,
       aggregation: rollupDraft.aggregation,
+      // Opaque filter carry — part of the signature so editing a filtered rollup isn't seen as "clean".
+      ...(rollupDraft.filters && rollupDraft.filters.length > 0
+        ? { filters: rollupDraft.filters, filterConjunction: rollupDraft.filterConjunction ?? 'and' }
+        : {}),
     })
   }
   if (type === 'formula') {
@@ -1692,6 +1702,8 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
     rollupDraft.targetFieldId = property.targetFieldId ?? ''
     rollupDraft.foreignSheetId = property.foreignSheetId ?? ''
     rollupDraft.aggregation = property.aggregation
+    rollupDraft.filters = property.filters
+    rollupDraft.filterConjunction = property.filterConjunction
   } else if (fieldType === 'formula') {
     formulaDraft.expression = resolveFormulaFieldProperty(field.property).expression
   } else if (fieldType === 'attachment') {
@@ -2134,6 +2146,10 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
       targetFieldId: rollupDraft.targetFieldId,
       aggregation: rollupDraft.aggregation,
       ...(rollupDraft.foreignSheetId ? { foreignSheetId: rollupDraft.foreignSheetId } : {}),
+      // Opaque filter carry (no builder UI yet) — re-emit a stored filter so it isn't dropped on save.
+      ...(rollupDraft.filters && rollupDraft.filters.length > 0
+        ? { filters: rollupDraft.filters, filterConjunction: rollupDraft.filterConjunction ?? 'and' }
+        : {}),
     }
   }
   if (normalizedType === 'formula') {

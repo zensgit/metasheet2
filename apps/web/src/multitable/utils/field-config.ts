@@ -31,6 +31,10 @@ export type NormalizedRollupFieldProperty = {
   targetFieldId: string | null
   foreignSheetId: string | null
   aggregation: RollupAggregation
+  // Slice 3 rollup filter condition. The field manager has no builder UI yet, so these are carried
+  // OPAQUELY (load → re-save unchanged) to avoid clobbering an API/template-authored filter on edit.
+  filters?: unknown[]
+  filterConjunction?: string
 }
 
 // Keep in lockstep with parseRollupAggregation in core-backend (routes/univer-meta.ts + field-codecs.ts):
@@ -156,11 +160,19 @@ export function resolveLookupFieldProperty(value: unknown): NormalizedLookupFiel
 export function resolveRollupFieldProperty(value: unknown): NormalizedRollupFieldProperty {
   const property = asRecord(value)
   const aggregation = stringOrNull(property.aggregation ?? property.agg ?? property.function ?? property.rollupFunction)
+  const rawFilters = Array.isArray(property.filters)
+    ? property.filters
+    : Array.isArray(property.conditions)
+      ? property.conditions
+      : null
   return {
     linkFieldId: stringOrNull(property.linkFieldId ?? property.linkedFieldId ?? property.relatedLinkFieldId ?? property.sourceFieldId),
     targetFieldId: stringOrNull(property.targetFieldId ?? property.lookUpTargetFieldId ?? property.lookupTargetFieldId ?? property.lookupFieldId),
     foreignSheetId: stringOrNull(property.foreignSheetId ?? property.foreignDatasheetId ?? property.datasheetId),
     aggregation: normalizeRollupAggregation(aggregation),
+    ...(rawFilters && rawFilters.length > 0
+      ? { filters: rawFilters, filterConjunction: property.filterConjunction === 'or' ? 'or' : 'and' }
+      : {}),
   }
 }
 
