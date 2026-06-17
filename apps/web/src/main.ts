@@ -14,6 +14,7 @@ import App from './App.vue'
 import { useAuth } from './composables/useAuth'
 import { resolveAdminRouteRedirect } from './router/adminAccess'
 import { appRoutes } from './router/appRoutes'
+import { isRoutePermitted } from './router/routeAccess'
 import { ROUTE_PATHS } from './router/types'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
@@ -127,8 +128,7 @@ router.beforeEach(async (to, _from, next) => {
       return next(flags.resolveHomePath())
     }
 
-    const requiredPermissions = Array.isArray(to.meta?.permissions) ? to.meta.permissions : []
-    if (requiredPermissions.length > 0 && !requiredPermissions.every((permission) => auth.hasPermission(permission))) {
+    if (!isRoutePermitted(to.meta, (permission) => auth.hasPermission(permission))) {
       return next(flags.resolveHomePath())
     }
 
