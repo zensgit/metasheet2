@@ -195,6 +195,7 @@ jobs:
             tests/integration/multitable-records-summary-field-mask.test.ts \
             tests/integration/multitable-summary-display-field-mask.test.ts \
             tests/integration/multitable-link-summary-display-field-mask.test.ts \
+            tests/integration/multitable-view-summary-recordperm-leak.test.ts \
             tests/integration/multitable-form-context-submit-field-mask.test.ts \
             tests/integration/multitable-dashboard-chart-authz.test.ts \
             tests/integration/multitable-dashboard-preview-data.test.ts \
