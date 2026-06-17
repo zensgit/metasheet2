@@ -9,6 +9,19 @@ Current evidence issue:
 
 - #2769 `[Data Source] Release evidence package gate`
 
+Current release package anchor:
+
+- release: `multitable-onprem-datasource-release-evidence-20260617-79ab455e`
+- package: `metasheet-multitable-onprem-v2.5.0-datasource-release-evidence-20260617-79ab455e`
+- source commit: `79ab455ebdda1c25d5848446633d1ce38a5d3d99` (`origin/main`, #2770)
+- workflow: `https://github.com/zensgit/metasheet2/actions/runs/27667857440`
+- package preflight: asset set complete, `SHA256SUMS` verified, local package
+  verifier passed for both `.tgz` and `.zip`, published verifier JSON reports
+  `ok: true`, and direct archive scan found no `node_modules` entries.
+
+This package anchor does not close the release gate by itself. Entity-machine
+deploy/run evidence for this exact package still has to be posted to #2769.
+
 This runbook does not authorize production rollout, batch writes, K3 Save /
 Submit / Audit / BOM, raw SQL, or broad writable database grants. C6 external
 write remains sandbox-only until the C6 smoke gate passes and a separate
