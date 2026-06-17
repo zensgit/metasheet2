@@ -18,6 +18,7 @@ import {
 import { validateAiShortcutFieldProperty } from '../multitable/ai-shortcut-config'
 import { withFieldVisibilityRule } from '../multitable/field-visibility-rule'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
+import { projectFormContextView } from '../multitable/form-context-view-projection'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import {
   deriveCapabilities,
@@ -9217,11 +9218,13 @@ export function univerMetaRouter(): Router {
               : `/api/multitable/views/${resolved.view.id}/submit`)
             : '/api/multitable/records',
           sheet,
-          // Requester-aware view echo (unchanged from pre-A4): redactViewConfigFilterLiterals keeps
-          // filter literals the requester may read and redacts denied ones (#2052 / R5b). NOTE: this still
-          // echoes view.config.publicForm to anonymous callers — a PRE-EXISTING leak (NOT introduced by A4),
-          // tracked separately so it gets its own one-concern fix rather than riding this feature PR.
-          ...(resolved.view ? { view: redactViewConfigFilterLiterals(resolved.view, await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)) } : {}),
+          // Requester-aware view echo: redactViewConfigFilterLiterals keeps filter literals the requester
+          // may read and redacts denied ones (#2052 / R5b). #2730: projectFormContextView DROPS view.config
+          // entirely first — view.config carries publicForm secrets (publicToken / allowedUserIds /
+          // allowedMemberGroupIds) and is freeform, so echoing it leaked those to anonymous callers. No
+          // form-context consumer reads view.config (A4 presentational features come via the SAFE top-level
+          // formLayout below; the public form reads only view.name/id); admins read publicForm from /views.
+          ...(resolved.view ? { view: redactViewConfigFilterLiterals(projectFormContextView(resolved.view), await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)) } : {}),
           // A4 SAFE form-logic projection: ONLY the presentational layout sub-objects (pages / prefill
           // allowlist / validated redirect / confirmation text), normalized by sanitizeFormLayout. Built
           // from view.config.formLayout via a whitelist — never carries publicForm or other config keys.

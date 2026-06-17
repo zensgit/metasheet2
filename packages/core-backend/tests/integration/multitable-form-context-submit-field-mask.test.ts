@@ -154,11 +154,9 @@ describeIfDatabase('D1 form-context / form-submit echo field mask (real DB)', ()
     // A4 feature scope ONLY: the anonymous form-context echo carries the A4
     // presentational layout (pages/prefill/redirect/confirmation), projected via
     // projectPublicFormLayout from view.config.formLayout.
-    // NOTE: the broader anonymous publicForm-secret leak (publicToken/allowedUserIds
-    // still echoed via the requester-aware view.config) is PRE-EXISTING (not an A4
-    // regression) and is intentionally OUT OF SCOPE here — tracked as its own
-    // one-concern fix so it doesn't ride this feature PR. Do NOT re-add the
-    // secret-exclusion assertions to this test; they belong with that fix.
+    // NOTE: this test is A4-feature-scoped (formLayout only). The anonymous publicForm-secret
+    // exclusion (publicToken / allowedUserIds via the dropped view.config) is asserted by the
+    // dedicated '#2730' test below.
     testUserId = null
     const res = await request(app)
       .get('/api/multitable/form-context')
@@ -172,6 +170,31 @@ describeIfDatabase('D1 form-context / form-submit echo field mask (real DB)', ()
       redirect: { url: '/thanks' },
       confirmation: { title: 'Thanks!', body: 'We got it.' },
     })
+
+    testUserId = USER_ID
+  })
+
+  test('#2730 (anonymous form-context): view.config secrets are NOT echoed (config dropped, allowlist absent everywhere)', async () => {
+    // Pre-existing leak: the requester-aware view echo serialized the WHOLE view.config to
+    // anonymous callers, exposing publicForm.publicToken / .allowedUserIds / .allowedMemberGroupIds.
+    // projectFormContextView now drops view.config from the form-context echo.
+    testUserId = null
+    const res = await request(app)
+      .get('/api/multitable/form-context')
+      .query({ sheetId: SHEET_ID, viewId: VIEW_ID, publicToken: PUBLIC_TOKEN })
+    expect(res.status).toBe(200)
+
+    // The echoed VIEW carries no config (and thus no publicForm token/allowlist).
+    expect(res.body.data.view).toBeDefined()
+    expect(res.body.data.view.config).toBeUndefined()
+    const viewJson = JSON.stringify(res.body.data.view)
+    expect(viewJson).not.toContain(PUBLIC_TOKEN) // token scoped to the view echo (submitPath legitimately carries the caller's OWN token)
+    expect(viewJson).not.toContain('publicForm')
+    // The allowlist is purely secret — it must not appear ANYWHERE in the response (submitPath carries only the token, never the allowlist).
+    expect(JSON.stringify(res.body)).not.toContain('_allow_canary')
+    // Positive controls: presentational view metadata kept; the SAFE A4 formLayout (separate top-level projection) unaffected.
+    expect(res.body.data.view.name).toBe('D1 Form')
+    expect(res.body.data.formLayout?.pages?.length).toBe(1)
 
     testUserId = USER_ID
   })
