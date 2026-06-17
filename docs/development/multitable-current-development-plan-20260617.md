@@ -95,3 +95,4 @@ These items appeared as open or partial in older ledgers, but are closed on curr
 - Every runtime slice: design-lock where semantics change, fail-first test, implementation, adversarial review, CI, verification note.
 - Every browser-visible slice: use the existing Chromium browser verification lane when visual/interaction behavior matters.
 - Keep old plans historical. Do not edit them to make them "current"; update this current plan/TODO instead.
+- After each completed arc, replace this current plan/TODO via a fresh code-verified pass; do not append drift-prone deltas until it becomes another stale ledger.
