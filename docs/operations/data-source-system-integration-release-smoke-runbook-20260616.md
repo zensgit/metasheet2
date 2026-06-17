@@ -368,6 +368,17 @@ Current #2720 checkpoint as of 2026-06-17:
   `apply.deadLetters.persisted=1`, `provenance.target_write_succeeded=1`,
   `provenance.target_write_failed=1`, request-body failure-injection fields
   absent, and injection env/runtime config restored/disabled after the check.
+- Post-C6 package rerolls must also prove PM2 runtime env hygiene before any
+  further Apply/write validation. The C6 test-only keys are retired when they
+  are absent from `app.env`; the PM2 helper recreates the app if a previous PM2
+  definition still contains those keys. Required values-free evidence:
+  `appEnvFailureInjectionMarkersPresent=false`,
+  `pm2RuntimeFailureInjectionMarkersPresent=false`,
+  `pm2StaleDefinitionFound=true|false`,
+  `pm2RecreatedFromCleanEnv=true|not_needed`, `health=200`. Do not print env
+  values. Collect and post only these booleans plus the helper log marker; do
+  not paste raw `app.env` contents or raw `pm2 jlist` JSON, because both can
+  include sensitive runtime values.
 
 ## Stop Rules
 
@@ -388,6 +399,8 @@ Stop and report HOLD if any of these occur:
 - C6 re-pull produces duplicate target rows or `add>0` after a successful
   apply;
 - C6 rollback/cleanup requires a MetaSheet product delete/raw SQL path;
+- C6 test-only failure-injection keys remain present in the running PM2 runtime
+  after they have been removed from `app.env`;
 - any evidence contains credentials, connection strings, raw SQL, row values,
   payload JSON, private ids, dry-run tokens, or value-bearing stack traces.
 
@@ -473,6 +486,13 @@ c6Sandbox:
   productionWrite=false
   batchWrite=false
 
+pm2EnvHygiene:
+  appEnvFailureInjectionMarkersPresent=false
+  pm2RuntimeFailureInjectionMarkersPresent=false
+  pm2StaleDefinitionFound=true|false
+  pm2RecreatedFromCleanEnv=true|not_needed
+  health=200|...
+
 boundaries:
   credentialsPrinted=false
   connectionStringPrinted=false
@@ -498,6 +518,8 @@ Release signoff requires all of:
 - C5 K3/MSSQL gate is either cited from #2670 or rerun cleanly on the current
   package;
 - C6 sandbox smoke passes through the dedicated C6 runbook;
+- post-C6 package rerolls prove PM2 runtime env hygiene with boolean-only
+  evidence and no raw `app.env` / PM2 JSON;
 - issue evidence is values-free;
 - no forbidden boundary is opened.
 
