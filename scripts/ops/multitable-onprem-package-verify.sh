@@ -643,6 +643,19 @@ function verify_sha() {
   fi
 }
 
+function verify_no_bundled_node_modules() {
+  local archive_list_file="$1"
+  local matches
+  matches="$(mktemp)"
+  if grep -E '(^|/)node_modules(/|$)' "$archive_list_file" > "$matches"; then
+    local sample
+    sample="$(head -n 5 "$matches" | tr '\n' '; ')"
+    rm -f "$matches"
+    die "Package must not contain node_modules entries; deploy refreshes dependencies during apply. First entries: ${sample}"
+  fi
+  rm -f "$matches"
+}
+
 # When sourced (e.g. by the focused test), define functions only — do not run the
 # package verification main flow. Direct execution (BASH_SOURCE[0] == $0) runs normally.
 if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
@@ -683,7 +696,7 @@ case "$PACKAGE_FILE" in
     if command -v zipinfo >/dev/null 2>&1; then
       zipinfo -1 "$PACKAGE_FILE" > "$list_file"
     else
-      find "$EXTRACT_ROOT" -mindepth 1 -maxdepth 3 -print | sed "s#^${EXTRACT_ROOT}/##" > "$list_file"
+      find "$EXTRACT_ROOT" -mindepth 1 -print | sed "s#^${EXTRACT_ROOT}/##" > "$list_file"
     fi
     ;;
   *)
@@ -693,6 +706,7 @@ esac
 
 pkg_name="$(head -n 1 "$list_file" | cut -d/ -f1)"
 pkg_root="${EXTRACT_ROOT}/${pkg_name}"
+verify_no_bundled_node_modules "$list_file"
 
 required=(
   "DEPLOYMENT.txt"
