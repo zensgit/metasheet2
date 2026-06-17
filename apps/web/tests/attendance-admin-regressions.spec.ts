@@ -988,7 +988,7 @@ describe('Attendance admin regressions', () => {
     expect(section!.querySelector('.attendance__annual-balance')).toBeNull()
   })
 
-  it('loads the annual-leave policy, blocks save when enabled without a timezone, then saves', async () => {
+  it('annual-leave policy: hydrates from first-screen settings; first save (no Reload) keeps the real policy; blocks malformed ladder', async () => {
     let savedPayload: any = null
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = String(input)
@@ -1007,37 +1007,78 @@ describe('Attendance admin regressions', () => {
 
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
-    await flushUi(8)
+    await flushUi(8) // loadSettings() on admin init must hydrate the policy form (no manual Reload)
 
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-policy"]')!.click()
     await flushUi(4)
     const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-policy')
     expect(section).toBeTruthy()
-
-    // load → form populates from settings.
-    section!.querySelector<HTMLButtonElement>('.attendance__admin-section-header button')!.click()
-    await flushUi(4)
-    const tzInput = section!.querySelector<HTMLInputElement>('#attendance-annual-policy-tz')
-    expect(tzInput?.value).toBe('Asia/Shanghai')
+    const tzInput = section!.querySelector<HTMLInputElement>('#attendance-annual-policy-tz')!
+    expect(tzInput.value).toBe('Asia/Shanghai') // hydrated on first screen via loadSettings, NOT a Reload click
     const saveBtn = Array.from(section!.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Save policy'))!
 
-    // enabled + empty timezone → blocked client-side (no PUT).
-    tzInput!.value = ''
-    tzInput!.dispatchEvent(new Event('input'))
-    await flushUi(2)
-    saveBtn.click()
-    await flushUi(4)
-    expect(savedPayload).toBeNull()
-
-    // restore a timezone → save PUTs the policy.
-    tzInput!.value = 'Asia/Shanghai'
-    tzInput!.dispatchEvent(new Event('input'))
-    await flushUi(2)
+    // FIRST save WITHOUT ever clicking Reload → must PUT the real (hydrated) policy, never the local defaults.
     saveBtn.click()
     await flushUi(4)
     expect(savedPayload?.annualLeavePolicy?.enabled).toBe(true)
     expect(savedPayload?.annualLeavePolicy?.timezone).toBe('Asia/Shanghai')
     expect(savedPayload?.annualLeavePolicy?.carryover?.enabled).toBe(true)
+    expect(savedPayload?.annualLeavePolicy?.tiers).toEqual([{ minYears: 1, maxYears: null, days: 5 }])
+
+    // enabled + empty timezone → blocked client-side (no PUT).
+    savedPayload = null
+    tzInput.value = ''
+    tzInput.dispatchEvent(new Event('input'))
+    await flushUi(2)
+    saveBtn.click()
+    await flushUi(4)
+    expect(savedPayload).toBeNull()
+
+    // restore timezone but make the ladder malformed (a closed last band) → blocked client-side, surfacing what the
+    // backend would otherwise silently revert to the statutory preset with a 200 "saved".
+    tzInput.value = 'Asia/Shanghai'
+    tzInput.dispatchEvent(new Event('input'))
+    const maxYearsInput = section!.querySelector<HTMLInputElement>('tbody tr td:nth-child(2) input')!
+    maxYearsInput.value = '10'
+    maxYearsInput.dispatchEvent(new Event('input'))
+    await flushUi(2)
+    saveBtn.click()
+    await flushUi(4)
+    expect(savedPayload).toBeNull()
+  })
+
+  it('annual-leave policy: an explicit empty tier ladder round-trips (not reverted to the default ladder)', async () => {
+    let savedPayload: any = null
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/settings') && (init?.method ?? 'GET') === 'PUT') {
+        savedPayload = JSON.parse(String(init!.body))
+        return jsonResponse(200, { ok: true, data: {} })
+      }
+      if (url.includes('/api/attendance/settings')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: { annualLeavePolicy: { enabled: false, tenureMode: 'cumulative_service', standardDayMinutes: 480, tiers: [], carryover: { enabled: false }, timezone: null } },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-policy"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-policy')!
+    // the explicit empty ladder must hydrate as [] (no tier rows), NOT fall back to the 3-band default.
+    expect(section.querySelectorAll('tbody tr').length).toBe(0)
+    const saveBtn = Array.from(section.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Save policy'))!
+
+    // save (disabled engine, no edits) → PUT must keep tiers: [], not re-inject defaults.
+    saveBtn.click()
+    await flushUi(4)
+    expect(savedPayload?.annualLeavePolicy?.tiers).toEqual([])
   })
 
   it('warns when the attendance-group picker source is capped (no silent caps)', async () => {

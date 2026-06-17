@@ -6223,10 +6223,11 @@
                 </table>
               </div>
               <div class="attendance__admin-actions">
-                <button class="attendance__btn" @click="() => addAnnualPolicyTier()">{{ tr('Add tier', '新增阶梯') }}</button>
-                <button class="attendance__btn attendance__btn--primary" :disabled="annualPolicySaving" @click="() => saveAnnualPolicy()">
+                <button class="attendance__btn" :disabled="!annualPolicyLoaded" @click="() => addAnnualPolicyTier()">{{ tr('Add tier', '新增阶梯') }}</button>
+                <button class="attendance__btn attendance__btn--primary" :disabled="annualPolicySaving || !annualPolicyLoaded" @click="() => saveAnnualPolicy()">
                   {{ annualPolicySaving ? tr('Saving...', '保存中...') : tr('Save policy', '保存策略') }}
                 </button>
+                <span v-if="!annualPolicyLoaded" class="attendance__hint">{{ tr('Load the current policy before editing', '编辑前请先加载当前策略') }}</span>
               </div>
             </div>
 
@@ -8739,6 +8740,16 @@ interface AttendanceSettings {
       internalWinsOnIn?: boolean
       externalWinsOnOut?: boolean
     }
+  }
+  // 年假/法定假 L5b — the annual-leave engine policy (backend L0-L4). The admin card reads/writes it via
+  // PUT { annualLeavePolicy: ... } (per-key merge leaves sibling settings intact).
+  annualLeavePolicy?: {
+    enabled?: boolean
+    tenureMode?: string
+    standardDayMinutes?: number
+    tiers?: Array<{ minYears?: number; maxYears?: number | null; days?: number }>
+    carryover?: { enabled?: boolean }
+    timezone?: string | null
   }
 }
 
@@ -18640,6 +18651,7 @@ async function loadSettings() {
     applyInOutMergeToForm(data.data || {})
     applyAutoShiftMatchingToForm(data.data || {})
     applyAutoShiftAutoWriteToForm(data.data || {})
+    applyAnnualPolicyToForm(data.data || {})
   } catch (error: any) {
     attendanceSettings.value = null
     setStatusFromError(error, tr('Failed to load settings', '加载设置失败'), 'admin')
@@ -19762,6 +19774,7 @@ async function loadAnnualLeaveBalance() {
 interface AnnualLeaveTierRow { minYears: number; maxYears: number | null; days: number }
 const annualPolicyLoading = ref(false)
 const annualPolicySaving = ref(false)
+const annualPolicyLoaded = ref(false)
 const annualPolicyForm = reactive<{
   enabled: boolean
   tenureMode: string
@@ -19782,6 +19795,29 @@ const annualPolicyForm = reactive<{
   timezone: '',
 })
 
+// Hydrate the policy form from a settings object — the idiomatic apply…ToForm pattern, called from loadSettings()
+// on admin init AND after a successful save, so the form ALWAYS reflects the persisted policy, never the
+// clobber-able local defaults. tiers is hydrated whenever it is an array — INCLUDING an explicit empty ladder
+// (the backend allows [] = org disables tiers); only a MISSING tiers key keeps the current/default ladder.
+function applyAnnualPolicyToForm(settings: AttendanceSettings): void {
+  const p = settings.annualLeavePolicy
+  if (p) {
+    annualPolicyForm.enabled = !!p.enabled
+    annualPolicyForm.tenureMode = p.tenureMode || 'cumulative_service'
+    annualPolicyForm.standardDayMinutes = Number(p.standardDayMinutes) || 480
+    if (Array.isArray(p.tiers)) {
+      annualPolicyForm.tiers = p.tiers.map(t => ({
+        minYears: Number(t.minYears) || 0,
+        maxYears: t.maxYears === null || t.maxYears === undefined ? null : Number(t.maxYears),
+        days: Number(t.days) || 0,
+      }))
+    }
+    annualPolicyForm.carryoverEnabled = !!p.carryover?.enabled
+    annualPolicyForm.timezone = p.timezone || ''
+  }
+  annualPolicyLoaded.value = true
+}
+
 async function loadAnnualPolicy() {
   annualPolicyLoading.value = true
   try {
@@ -19795,21 +19831,7 @@ async function loadAnnualPolicy() {
       throw new Error(readErrorMessage(data, tr('Failed to load annual leave policy', '加载年假策略失败')))
     }
     adminForbidden.value = false
-    const p = data.data?.annualLeavePolicy
-    if (p) {
-      annualPolicyForm.enabled = !!p.enabled
-      annualPolicyForm.tenureMode = p.tenureMode || 'cumulative_service'
-      annualPolicyForm.standardDayMinutes = Number(p.standardDayMinutes) || 480
-      annualPolicyForm.tiers = Array.isArray(p.tiers) && p.tiers.length > 0
-        ? p.tiers.map((t: any) => ({
-            minYears: Number(t.minYears) || 0,
-            maxYears: t.maxYears === null || t.maxYears === undefined ? null : Number(t.maxYears),
-            days: Number(t.days) || 0,
-          }))
-        : annualPolicyForm.tiers
-      annualPolicyForm.carryoverEnabled = !!p.carryover?.enabled
-      annualPolicyForm.timezone = p.timezone || ''
-    }
+    applyAnnualPolicyToForm((data.data || {}) as AttendanceSettings)
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load annual leave policy', '加载年假策略失败')), 'error')
   } finally {
@@ -19827,10 +19849,40 @@ function onAnnualPolicyTierMaxInput(tier: AnnualLeaveTierRow, value: string): vo
   // maxYears is nullable ("and above"); an empty field means null, not 0 (v-model.number can't express this).
   tier.maxYears = value.trim() === '' ? null : Number(value)
 }
+// Mirror the backend ladder rules (normalizeAnnualLeaveTiers) so a malformed ladder is rejected here with a clear
+// message — otherwise the backend silently reverts the WHOLE list to the statutory preset and still returns 200,
+// discarding the admin's intent. An empty list is allowed (org disables tiers).
+function annualPolicyTierError(): string | null {
+  const tiers = annualPolicyForm.tiers
+  if (tiers.length === 0) return null
+  for (const t of tiers) {
+    if (!Number.isFinite(t.minYears) || t.minYears < 0) return tr('Each tier needs min years ≥ 0', '每个阶梯的起始年须 ≥ 0')
+    if (!Number.isFinite(t.days) || t.days < 0) return tr('Each tier needs days ≥ 0', '每个阶梯的天数须 ≥ 0')
+    if (t.maxYears !== null && (!Number.isFinite(t.maxYears) || t.maxYears <= t.minYears)) {
+      return tr('Tier max years must exceed min years, or be blank for open-ended', '阶梯截止年须大于起始年，或留空表示开放上限')
+    }
+  }
+  for (let i = 1; i < tiers.length; i++) {
+    if (tiers[i - 1].maxYears === null) return tr('Only the last tier may be open-ended (blank max years)', '仅最后一个阶梯可为开放上限(截止年留空)')
+    if (tiers[i].minYears !== tiers[i - 1].maxYears) return tr('Tiers must be contiguous — each starts where the previous ends', '阶梯须连续——每段起始年等于上一段截止年')
+  }
+  if (tiers[tiers.length - 1].maxYears !== null) return tr('The last tier must be open-ended (leave max years blank)', '最后一个阶梯须为开放上限(截止年留空)')
+  return null
+}
 
 async function saveAnnualPolicy() {
+  // Never let the hardcoded form defaults be PUT over a real policy the admin hasn't loaded yet.
+  if (!annualPolicyLoaded.value) {
+    setStatus(tr('Load the current policy before saving', '请先加载当前策略再保存'), 'error')
+    return
+  }
   if (annualPolicyForm.enabled && !annualPolicyForm.timezone.trim()) {
     setStatus(tr('Timezone is required when the annual leave engine is enabled', '启用年假引擎时必须填写时区'), 'error')
+    return
+  }
+  const tierError = annualPolicyTierError()
+  if (tierError) {
+    setStatus(tierError, 'error')
     return
   }
   annualPolicySaving.value = true
@@ -19855,8 +19907,10 @@ async function saveAnnualPolicy() {
       throw new Error(readErrorMessage(data, tr('Failed to save annual leave policy', '保存年假策略失败')))
     }
     adminForbidden.value = false
+    // Backfill from the server's normalized response (falling back to the payload), mirroring the other policy
+    // cards — so the form reflects exactly what persisted (e.g. a malformed ladder the backend reverted).
+    applyAnnualPolicyToForm((data.data || payload) as AttendanceSettings)
     setStatus(tr('Annual leave policy saved', '年假策略已保存'), 'info')
-    await loadAnnualPolicy()
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save annual leave policy', '保存年假策略失败')), 'error')
   } finally {
