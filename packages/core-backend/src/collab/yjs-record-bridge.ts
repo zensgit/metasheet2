@@ -25,7 +25,7 @@ export interface YjsRecordBridgeConfig {
 export type ActorResolver = (socketId: string) => string | undefined
 
 interface PendingWrite {
-  fields: Record<string, string>
+  fields: Record<string, unknown>
   actorIds: Set<string>
   timer: NodeJS.Timeout
   firstSeen: number
@@ -99,8 +99,10 @@ export class YjsRecordBridge {
       const originSocketId = typeof transaction.origin === 'string' ? transaction.origin : undefined
       const actorId = originSocketId ? (this.actorResolver(originSocketId) ?? 'unknown') : 'unknown'
 
-      // Collect changed text field values
-      const changedFields: Record<string, string> = {}
+      // Collect changed field values: Y.Text (string fields, char-level merged) AND
+      // plain values (scalar fields — number/currency/select/boolean/date/etc. — synced
+      // last-write-wins via the Y.Map). Both flush through the same validated patch path.
+      const changedFields: Record<string, unknown> = {}
 
       for (const event of events) {
         if (event.target === fields && event instanceof Y.YMapEvent) {
@@ -108,6 +110,11 @@ export class YjsRecordBridge {
             const value = fields.get(key)
             if (value instanceof Y.Text) {
               changedFields[key] = value.toString()
+            } else if (value !== undefined && !(value instanceof Y.AbstractType)) {
+              // Scalar field: a plain value set under the Y.Map key (LWW). Skip Yjs
+              // shared types (Y.Text handled above; Y.Map/Y.Array out of scope) and
+              // deletes (undefined key). patchRecords validates the value downstream.
+              changedFields[key] = value
             }
           }
         }
@@ -151,7 +158,7 @@ export class YjsRecordBridge {
     this.flushNow(recordId)
   }
 
-  private scheduleFlush(recordId: string, changedFields: Record<string, string>, actorId: string): void {
+  private scheduleFlush(recordId: string, changedFields: Record<string, unknown>, actorId: string): void {
     const existing = this.pendingWrites.get(recordId)
 
     if (existing) {
