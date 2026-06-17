@@ -36,15 +36,35 @@ export function rollupResultType(aggregation: RollupAggregation): 'number' | 'st
   return 'number'
 }
 
+// Slice 3b — a single rollup filter condition (field on the FOREIGN sheet, operator, optional value).
+// Matches the backend MetaFilterCondition shape; value is omitted for isEmpty/isNotEmpty.
+export type RollupFilterCondition = { fieldId: string; operator: string; value?: unknown }
+
 export type NormalizedRollupFieldProperty = {
   linkFieldId: string | null
   targetFieldId: string | null
   foreignSheetId: string | null
   aggregation: RollupAggregation
-  // Slice 3 rollup filter condition. The field manager has no builder UI yet, so these are carried
-  // OPAQUELY (load → re-save unchanged) to avoid clobbering an API/template-authored filter on edit.
-  filters?: unknown[]
-  filterConjunction?: string
+  // Slice 3b rollup filter condition — now editable via the builder UI (no longer opaque). Normalized to
+  // typed conditions so the field manager can hydrate/round-trip them; absent when no filter is set.
+  filters?: RollupFilterCondition[]
+  filterConjunction?: 'and' | 'or'
+}
+
+// Normalize raw stored filters (any of the backend aliases) into typed conditions, dropping malformed
+// entries (need a non-empty string fieldId + operator). `value` preserved only when present.
+export function normalizeRollupFilters(raw: unknown): RollupFilterCondition[] {
+  if (!Array.isArray(raw)) return []
+  const out: RollupFilterCondition[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const fieldId = typeof o.fieldId === 'string' ? o.fieldId.trim() : ''
+    const operator = typeof o.operator === 'string' ? o.operator.trim() : ''
+    if (!fieldId || !operator) continue
+    out.push('value' in o ? { fieldId, operator, value: o.value } : { fieldId, operator })
+  }
+  return out
 }
 
 // Keep in lockstep with parseRollupAggregation in core-backend (routes/univer-meta.ts + field-codecs.ts):
@@ -178,21 +198,15 @@ export function resolveRollupFieldProperty(value: unknown): NormalizedRollupFiel
   // filterConditions aliases and a case-insensitive filterConjunction / conjunction. If the FE only
   // recognized a subset, an alias-authored rollup would lose its filter — or flip OR→AND — after an
   // unrelated Field Manager edit re-saved it in the FE's canonical shape.
-  const rawFilters = Array.isArray(property.filters)
-    ? property.filters
-    : Array.isArray(property.conditions)
-      ? property.conditions
-      : Array.isArray(property.filterConditions)
-        ? property.filterConditions
-        : null
+  const filters = normalizeRollupFilters(property.filters ?? property.conditions ?? property.filterConditions)
   const conjunction = String(property.filterConjunction ?? property.conjunction ?? '').trim().toLowerCase()
   return {
     linkFieldId: stringOrNull(property.linkFieldId ?? property.linkedFieldId ?? property.relatedLinkFieldId ?? property.sourceFieldId),
     targetFieldId: stringOrNull(property.targetFieldId ?? property.lookUpTargetFieldId ?? property.lookupTargetFieldId ?? property.lookupFieldId),
     foreignSheetId: stringOrNull(property.foreignSheetId ?? property.foreignDatasheetId ?? property.datasheetId),
     aggregation: normalizeRollupAggregation(aggregation),
-    ...(rawFilters && rawFilters.length > 0
-      ? { filters: rawFilters, filterConjunction: conjunction === 'or' ? 'or' : 'and' }
+    ...(filters.length > 0
+      ? { filters, filterConjunction: conjunction === 'or' ? 'or' : 'and' }
       : {}),
   }
 }

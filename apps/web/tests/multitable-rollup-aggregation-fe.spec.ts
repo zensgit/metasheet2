@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeRollupAggregation, resolveRollupFieldProperty, rollupResultType } from '../src/multitable/utils/field-config'
+import { normalizeRollupAggregation, normalizeRollupFilters, resolveRollupFieldProperty, rollupResultType } from '../src/multitable/utils/field-config'
 import { aggregationLabel } from '../src/multitable/utils/meta-manager-labels'
 import { FILTER_OPERATORS_BY_TYPE, effectiveFilterTypeKey } from '../src/multitable/composables/useMultitableGrid'
 
@@ -143,5 +143,49 @@ describe('rollup string/boolean reducers (slice 2b) — FE', () => {
     const boolOps = (FILTER_OPERATORS_BY_TYPE[boolKey] ?? []).map((o) => o.value)
     expect(boolOps).toContain('is')
     expect(boolOps).not.toContain('greater')
+  })
+})
+
+// Slice 3b — rollup filter builder: normalization + round-trip. The builder edits string-valued rows;
+// these lock the field-config side (typed normalize + resolver round-trip) the field manager relies on.
+describe('rollup filter conditions — builder normalization + round-trip (slice 3b)', () => {
+  it('normalizeRollupFilters keeps well-formed, drops malformed, preserves value presence', () => {
+    expect(normalizeRollupFilters([
+      { fieldId: 'f1', operator: 'is', value: 'x' },
+      { fieldId: ' f2 ', operator: 'isEmpty' },   // trimmed; no value key
+      { fieldId: '', operator: 'is' },             // dropped — no fieldId
+      { fieldId: 'f3', operator: '' },             // dropped — no operator
+      { fieldId: '   ', operator: 'is', value: 1 },// dropped — whitespace fieldId
+      'nope', null, 42,                            // dropped — non-object
+    ])).toEqual([
+      { fieldId: 'f1', operator: 'is', value: 'x' },
+      { fieldId: 'f2', operator: 'isEmpty' },
+    ])
+    expect(normalizeRollupFilters(undefined)).toEqual([])
+    expect(normalizeRollupFilters('x')).toEqual([])
+  })
+
+  it('resolveRollupFieldProperty round-trips typed filters + conjunction (filters alias, case-insensitive OR)', () => {
+    const p = resolveRollupFieldProperty({
+      linkFieldId: 'l', targetFieldId: 't', aggregation: 'sum',
+      filters: [{ fieldId: 'f', operator: 'greater', value: 5 }], filterConjunction: 'OR',
+    })
+    expect(p.filters).toEqual([{ fieldId: 'f', operator: 'greater', value: 5 }])
+    expect(p.filterConjunction).toBe('or')
+  })
+
+  it('resolveRollupFieldProperty honors the filterConditions + conjunction aliases (backend parity)', () => {
+    const p = resolveRollupFieldProperty({
+      linkFieldId: 'l', targetFieldId: 't', aggregation: 'count',
+      filterConditions: [{ fieldId: 'f', operator: 'is', value: 'a' }], conjunction: 'and',
+    })
+    expect(p.filters).toEqual([{ fieldId: 'f', operator: 'is', value: 'a' }])
+    expect(p.filterConjunction).toBe('and')
+  })
+
+  it('no filters → filters/filterConjunction absent (unfiltered rollup property unchanged)', () => {
+    const p = resolveRollupFieldProperty({ linkFieldId: 'l', targetFieldId: 't', aggregation: 'count' })
+    expect(p.filters).toBeUndefined()
+    expect(p.filterConjunction).toBeUndefined()
   })
 })

@@ -50,6 +50,8 @@ export type MetaManagerLabelKey =
   | 'field.linkField' | 'field.selectLinkField'
   | 'field.foreignSheetId' | 'field.targetFieldId'
   | 'field.optionalOverride' | 'field.aggregation'
+  | 'field.rollupFilters' | 'field.rollupFilterAll' | 'field.rollupFilterAny'
+  | 'field.rollupFilterFieldPlaceholder' | 'field.rollupFilterValuePlaceholder' | 'field.rollupFilterAdd'
   | 'field.expression' | 'field.insertFieldToken'
   | 'field.formulaReference' | 'field.formulaSearchPlaceholder'
   | 'field.formulaDryRun.test' | 'field.formulaDryRun.testWithRecord' | 'field.formulaDryRun.recordHint' | 'field.formulaDryRun.sampleHeading' | 'field.formulaDryRun.evaluating'
@@ -277,6 +279,12 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.targetFieldId': { en: 'Target field id', zh: '目标字段 ID' },
   'field.optionalOverride': { en: 'Optional override', zh: '可选覆盖' },
   'field.aggregation': { en: 'Aggregation', zh: '聚合' },
+  'field.rollupFilters': { en: 'Filter conditions', zh: '筛选条件' },
+  'field.rollupFilterAll': { en: 'Match all', zh: '满足全部' },
+  'field.rollupFilterAny': { en: 'Match any', zh: '满足任一' },
+  'field.rollupFilterFieldPlaceholder': { en: 'foreign field id', zh: '外表字段 ID' },
+  'field.rollupFilterValuePlaceholder': { en: 'value', zh: '值' },
+  'field.rollupFilterAdd': { en: '+ Add condition', zh: '+ 添加条件' },
   'field.expression': { en: 'Expression', zh: '表达式' },
   'field.insertFieldToken': { en: 'Insert field token', zh: '插入字段令牌' },
   'field.formulaReference': { en: 'Formula reference', zh: '公式参考' },
