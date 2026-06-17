@@ -6090,6 +6090,81 @@
             </div>
 
             <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveBalance)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveBalance)"
+            >
+              <div class="attendance__admin-section-header">
+                <h4>{{ tr('Annual leave balance', '年假余额') }}</h4>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-annual-balance-user">
+                  <span>{{ tr('User ID', '用户 ID') }}</span>
+                  <input id="attendance-annual-balance-user" v-model="annualBalanceUserId" type="text" />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn attendance__btn--primary" :disabled="annualBalanceLoading" @click="() => loadAnnualLeaveBalance()">
+                  {{ annualBalanceLoading ? tr('Loading...', '加载中...') : tr('Load balance', '查询余额') }}
+                </button>
+              </div>
+              <div v-if="annualBalanceData" class="attendance__annual-balance">
+                <div class="attendance__annual-balance-summary">
+                  <span>{{ tr('Granted', '已发放') }}: {{ annualBalanceData.summary.grantedMinutes }} {{ tr('min', '分钟') }}</span>
+                  <span>{{ tr('Remaining', '剩余') }}: {{ annualBalanceData.summary.remainingMinutes }} {{ tr('min', '分钟') }}</span>
+                  <span>{{ tr('Used', '已用') }}: {{ annualBalanceData.summary.exhaustedMinutes }} {{ tr('min', '分钟') }}</span>
+                  <span>{{ tr('Expired', '已过期') }}: {{ annualBalanceData.summary.expiredMinutes }} {{ tr('min', '分钟') }}</span>
+                </div>
+                <h5>{{ tr('Active lots', '有效额度') }}</h5>
+                <div v-if="annualBalanceData.activeLots.length === 0" class="attendance__empty">{{ tr('No active lots.', '无有效额度。') }}</div>
+                <div v-else class="attendance__table-wrapper">
+                  <table class="attendance__table">
+                    <thead>
+                      <tr>
+                        <th>{{ tr('Source', '来源') }}</th>
+                        <th>{{ tr('Amount', '额度') }}</th>
+                        <th>{{ tr('Remaining', '剩余') }}</th>
+                        <th>{{ tr('Granted at', '发放日') }}</th>
+                        <th>{{ tr('Expires at', '过期时间') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="lot in annualBalanceData.activeLots" :key="lot.id">
+                        <td>{{ lot.source_type }}</td>
+                        <td>{{ lot.amount_minutes }}</td>
+                        <td>{{ lot.remaining_minutes }}</td>
+                        <td>{{ lot.granted_at }}</td>
+                        <td>{{ lot.expires_at ?? tr('Never', '永不') }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <h5>{{ tr('Recent events', '近期记录') }}</h5>
+                <div v-if="annualBalanceData.recentEvents.length === 0" class="attendance__empty">{{ tr('No events.', '无记录。') }}</div>
+                <div v-else class="attendance__table-wrapper">
+                  <table class="attendance__table">
+                    <thead>
+                      <tr>
+                        <th>{{ tr('Type', '类型') }}</th>
+                        <th>{{ tr('Delta', '变动') }}</th>
+                        <th>{{ tr('Source', '来源') }}</th>
+                        <th>{{ tr('Time', '时间') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(ev, i) in annualBalanceData.recentEvents" :key="i">
+                        <td>{{ ev.event_type }}</td>
+                        <td>{{ ev.delta_minutes }}</td>
+                        <td>{{ ev.source_type }}</td>
+                        <td>{{ ev.occurred_at }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)"
               class="attendance__admin-section"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)"
@@ -19550,6 +19625,65 @@ async function loadLeaveTypes(options: { activeOnly?: boolean } = {}) {
     setStatus(readErrorMessage(error, tr('Failed to load leave types', '加载请假类型失败')), 'error')
   } finally {
     leaveTypeLoading.value = false
+  }
+}
+
+// 年假/法定假 L5a: read-only annual-leave balance/ledger for one user (admin console). Calls the L5a read endpoint
+// and renders summary + active lots + recent events so a balance is explainable. Read-only; no mutation here.
+interface AnnualLeaveBalanceLot {
+  id: string
+  leave_type_code: string
+  amount_minutes: number
+  remaining_minutes: number
+  source_type: string
+  source_id: string | null
+  status: string
+  granted_at: string | null
+  expires_at: string | null
+}
+interface AnnualLeaveBalanceEvent {
+  event_type: string
+  delta_minutes: number
+  source_type: string
+  source_id: string | null
+  balance_id: string
+  occurred_at: string
+}
+interface AnnualLeaveBalanceData {
+  userId: string
+  summary: { leaveTypeCode: string; grantedMinutes: number; remainingMinutes: number; exhaustedMinutes: number; expiredMinutes: number }
+  activeLots: AnnualLeaveBalanceLot[]
+  recentEvents: AnnualLeaveBalanceEvent[]
+  eventLimit: number
+}
+const annualBalanceUserId = ref('')
+const annualBalanceLoading = ref(false)
+const annualBalanceData = ref<AnnualLeaveBalanceData | null>(null)
+
+async function loadAnnualLeaveBalance() {
+  const targetUser = annualBalanceUserId.value.trim()
+  if (!targetUser) {
+    setStatus(tr('Enter a user ID to view the annual leave balance', '请输入用户 ID 查询年假余额'), 'error')
+    return
+  }
+  annualBalanceLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId(), userId: targetUser, leaveTypeCode: 'annual' })
+    const response = await apiFetch(`/api/attendance/leave-balances?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load annual leave balance', '加载年假余额失败')))
+    }
+    adminForbidden.value = false
+    annualBalanceData.value = data.data as AnnualLeaveBalanceData
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to load annual leave balance', '加载年假余额失败')), 'error')
+  } finally {
+    annualBalanceLoading.value = false
   }
 }
 
