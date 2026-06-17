@@ -2731,6 +2731,14 @@ async function applyLookupRollup(
     Array.from(foreignIdsBySheet.keys()).filter((id) => readableForeignSheetIds.has(id)),
   )
 
+  // #18 row-level read-deny (cross-record): when a FOREIGN sheet opts in (its
+  // row_level_read_permissions_enabled flag) and the actor is denied ('none') read on some foreign
+  // records, those records must be ABSENT from foreignRecordsBySheet. Because resolveLookupValues skips
+  // ids missing from the map (`if (!data) continue`) before counting, an excluded record is omitted from
+  // lookup values AND never counted by rollup — so a rollup count equals the count of READABLE foreign
+  // records, never the true total (no cardinality leak). Resolved once per read; flag-OFF on the foreign
+  // sheet → no exclusion → byte-identical; admins bypass.
+  const access = await resolveRequestAccess(req)
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [foreignSheetId, ids] of foreignIdsBySheet.entries()) {
     if (!readableForeignSheetIds.has(foreignSheetId)) continue
@@ -2740,9 +2748,15 @@ async function applyLookupRollup(
       'SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
       [foreignSheetId, idList],
     )
+    let deniedForeign: Set<string> | null = null
+    if (!access.isAdminRole && access.userId && (await loadRowLevelReadDenyEnabled(query, foreignSheetId))) {
+      deniedForeign = await loadDeniedRecordIds(query, foreignSheetId, access.userId)
+    }
     const recordMap = new Map<string, Record<string, unknown>>()
     for (const raw of foreignRes.rows as any[]) {
-      recordMap.set(String(raw.id), normalizeJson(raw.data))
+      const fid = String(raw.id)
+      if (deniedForeign?.has(fid)) continue // denied foreign record → treated as absent (no value, no count)
+      recordMap.set(fid, normalizeJson(raw.data))
     }
     foreignRecordsBySheet.set(foreignSheetId, recordMap)
   }
@@ -4150,6 +4164,12 @@ async function buildLinkSummaries(
     displayFieldBySheet.set(sheetId, stringField?.id ?? allowedFields[0]?.id ?? null)
   }
 
+  // #18 row-level read-deny (cross-record): foreign records the actor is denied ('none') on an opted-in
+  // foreign sheet must not surface in a link summary (their id + display would leak). Build the denied set
+  // per foreign sheet; the summary loop below FILTERS those ids out entirely (omitted, not shown blank).
+  // flag-OFF on the foreign sheet → no denial → byte-identical; admins bypass.
+  const summaryAccess = await resolveRequestAccess(req)
+  const deniedForeignBySheet = new Map<string, Set<string>>()
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [sheetId, ids] of idsBySheet.entries()) {
     if (!readableSheetIds.has(sheetId)) continue
@@ -4159,6 +4179,9 @@ async function buildLinkSummaries(
       'SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
       [sheetId, idList],
     )
+    if (!summaryAccess.isAdminRole && summaryAccess.userId && (await loadRowLevelReadDenyEnabled(query, sheetId))) {
+      deniedForeignBySheet.set(sheetId, await loadDeniedRecordIds(query, sheetId, summaryAccess.userId))
+    }
     const recordMap = new Map<string, Record<string, unknown>>()
     for (const row of recordRes.rows as any[]) {
       recordMap.set(String(row.id), normalizeJson(row.data))
@@ -4177,14 +4200,17 @@ async function buildLinkSummaries(
       }
       const foreignMap = foreignRecordsBySheet.get(cfg.foreignSheetId)
       const displayFieldId = displayFieldBySheet.get(cfg.foreignSheetId) ?? null
-      const summaries: LinkedRecordSummary[] = ids.map((id) => {
-        const data = foreignMap?.get(id) ?? {}
-        const displayValue = displayFieldId ? data[displayFieldId] : undefined
-        return {
-          id,
-          display: toSummaryDisplay(displayValue),
-        }
-      })
+      const denied = deniedForeignBySheet.get(cfg.foreignSheetId) // #18 cross-record: omit denied foreign ids
+      const summaries: LinkedRecordSummary[] = ids
+        .filter((id) => !denied?.has(id))
+        .map((id) => {
+          const data = foreignMap?.get(id) ?? {}
+          const displayValue = displayFieldId ? data[displayFieldId] : undefined
+          return {
+            id,
+            display: toSummaryDisplay(displayValue),
+          }
+        })
       byField.set(fieldId, summaries)
     }
     result.set(row.id, byField)
