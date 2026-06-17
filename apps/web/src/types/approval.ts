@@ -47,7 +47,20 @@ export interface ApprovalNodeConfig {
   assigneeSources?: ApprovalAssigneeSource[]
   approvalMode?: ApprovalMode
   emptyAssigneePolicy?: EmptyAssigneePolicy
+  autoApprovalPolicy?: AutoApprovalPolicy
 }
+
+// Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:121-128.
+// The authoring UI only owns `mergeWithRequester` (self-approver / merge-with-requester);
+// the other three fields are carried for round-trip preservation (no silent flatten).
+export interface AutoApprovalPolicy {
+  mergeWithRequester?: boolean
+  mergeAdjacentApprover?: boolean
+  dedupeHistoricalApprover?: boolean
+  actorMode?: AutoApprovalActorMode
+}
+
+export type AutoApprovalActorMode = 'system' | 'original_approver'
 
 export type ApprovalAssigneeSource =
   | { kind: 'static_user'; userIds: string[] }

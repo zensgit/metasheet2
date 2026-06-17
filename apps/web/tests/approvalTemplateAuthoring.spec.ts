@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
-import type { ApprovalTemplateDetailDTO } from '../src/types/approval'
+import type { ApprovalNodeConfig, ApprovalTemplateDetailDTO, AutoApprovalPolicy } from '../src/types/approval'
 import {
+  buildApprovalGraph,
   buildCreateTemplatePayload,
   buildFormSchema,
   createEmptyTemplateDraft,
@@ -122,6 +123,7 @@ const ElOption = defineComponent({
 
 const ElCheckbox = defineComponent({
   name: 'ElCheckbox',
+  inheritAttrs: false,
   props: { modelValue: Boolean, disabled: Boolean },
   emits: ['update:modelValue'],
   render() {
@@ -130,6 +132,7 @@ const ElCheckbox = defineComponent({
         type: 'checkbox',
         checked: this.modelValue,
         disabled: this.disabled,
+        'data-testid': (this.$attrs as any)?.['data-testid'],
         onChange: (event: Event) => this.$emit('update:modelValue', (event.target as HTMLInputElement).checked),
       }),
       this.$slots.default?.(),
@@ -387,6 +390,90 @@ describe('approval template authoring helpers', () => {
       { kind: 'form_field_user', fieldId: 'reviewer' },
     ])
   })
+
+  // Lane E — self-approver authoring (autoApprovalPolicy.mergeWithRequester).
+  function buildAutoApprovalTemplate(
+    policy: AutoApprovalPolicy,
+    extraConfig: Record<string, unknown> = {},
+  ): ApprovalTemplateDetailDTO {
+    return buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: '审批人 1',
+            config: {
+              assigneeSources: [{ kind: 'requester' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+              autoApprovalPolicy: policy,
+              ...extraConfig,
+            },
+          },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    })
+  }
+
+  it('T1: hydrates mergeWithRequester and captures the full policy carrier', () => {
+    const draft = draftFromTemplate(buildAutoApprovalTemplate({ mergeWithRequester: true }))
+    expect(draft.steps[0].mergeWithRequester).toBe(true)
+    expect(draft.steps[0].originalAutoApprovalPolicy).toEqual({ mergeWithRequester: true })
+  })
+
+  it('T2: round-trips merge-on through buildApprovalGraph', () => {
+    const draft = draftFromTemplate(buildAutoApprovalTemplate({ mergeWithRequester: true }))
+    const graph = buildApprovalGraph(draft)
+    const config = graph.nodes[1]?.config as ApprovalNodeConfig
+    expect(config.autoApprovalPolicy).toEqual({ mergeWithRequester: true })
+  })
+
+  it('T3: a node carrying only allowed keys + autoApprovalPolicy is editable (not read-only)', () => {
+    const reason = unsupportedTemplateAuthoringReason(buildAutoApprovalTemplate({ mergeWithRequester: true }))
+    expect(reason).toBeNull()
+  })
+
+  it('T4: omits autoApprovalPolicy entirely when off with no preserved policy (not {})', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.steps[0].mergeWithRequester = false
+    const config = buildApprovalGraph(draft).nodes[1]?.config as ApprovalNodeConfig
+    expect('autoApprovalPolicy' in config).toBe(false)
+  })
+
+  it('T5: preserves non-merge policy siblings across a toggle off-then-on', () => {
+    const draft = draftFromTemplate(buildAutoApprovalTemplate({
+      mergeWithRequester: true,
+      mergeAdjacentApprover: true,
+      actorMode: 'system',
+    }))
+    // toggle off: siblings survive, merge flag dropped
+    draft.steps[0].mergeWithRequester = false
+    const offConfig = buildApprovalGraph(draft).nodes[1]?.config as ApprovalNodeConfig
+    expect(offConfig.autoApprovalPolicy).toEqual({ mergeAdjacentApprover: true, actorMode: 'system' })
+    // toggle back on: merge flag returns, siblings still present
+    draft.steps[0].mergeWithRequester = true
+    const onConfig = buildApprovalGraph(draft).nodes[1]?.config as ApprovalNodeConfig
+    expect(onConfig.autoApprovalPolicy).toEqual({
+      mergeWithRequester: true,
+      mergeAdjacentApprover: true,
+      actorMode: 'system',
+    })
+  })
+
+  it('T6: keeps fail-closed read-only for any OTHER unsupported config key', () => {
+    const reason = unsupportedTemplateAuthoringReason(
+      buildAutoApprovalTemplate({ mergeWithRequester: true }, { bogusKey: 'x' }),
+    )
+    expect(reason).not.toBeNull()
+    expect(reason).toContain('暂不支持')
+  })
 })
 
 describe('TemplateAuthoringView', () => {
@@ -516,6 +603,24 @@ describe('TemplateAuthoringView', () => {
     expect(pushSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_created' })
   })
 
+  it('T7: wires the self-approver toggle through the mounted view into the saved payload', async () => {
+    await mountView()
+
+    setInput('approval-template-key', 'leave')
+    setInput('approval-template-name', '请假审批')
+    const mergeToggle = container!.querySelector('[data-testid="approval-step-merge-with-requester"]') as HTMLInputElement
+    mergeToggle.checked = true
+    mergeToggle.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = createTemplateSpy.mock.calls[0]?.[0] as any
+    expect(payload.approvalGraph.nodes[1].config.autoApprovalPolicy).toEqual({ mergeWithRequester: true })
+  })
+
   it('opens unsupported existing graphs read-only and refuses to save them', async () => {
     routeParams = { id: 'tpl_parallel' }
     getTemplateSpy.mockResolvedValue(buildTemplate({
@@ -543,5 +648,41 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
 
     expect(updateTemplateSpy).not.toHaveBeenCalled()
+  })
+
+  it('T8: disables the self-approver toggle when the template opens read-only', async () => {
+    routeParams = { id: 'tpl_locked' }
+    // A bogus config key forces fail-closed read-only while the approval step row
+    // (and its merge checkbox) still renders.
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      id: 'tpl_locked',
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: '审批人 1',
+            config: {
+              assigneeSources: [{ kind: 'requester' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+              bogusKey: 'x',
+            },
+          },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    }))
+
+    await mountView()
+
+    const mergeToggle = container!.querySelector('[data-testid="approval-step-merge-with-requester"]') as HTMLInputElement
+    expect(mergeToggle).not.toBeNull()
+    expect(mergeToggle.disabled).toBe(true)
   })
 })
