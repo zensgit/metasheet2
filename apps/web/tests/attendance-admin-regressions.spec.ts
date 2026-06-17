@@ -934,6 +934,60 @@ describe('Attendance admin regressions', () => {
     expect(hint?.textContent || '').toContain('250')
   })
 
+  it('clears a prior annual-leave balance when a new query fails (no stale balance from another user)', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/leave-balances')) {
+        if (url.includes('userId=userA')) {
+          return jsonResponse(200, {
+            ok: true,
+            data: {
+              userId: 'userA',
+              summary: { leaveTypeCode: 'annual', grantedMinutes: 4800, remainingMinutes: 3000, exhaustedMinutes: 1800, expiredMinutes: 0 },
+              activeLots: [],
+              recentEvents: [],
+              eventLimit: 50,
+            },
+          })
+        }
+        // userB → failure
+        return jsonResponse(500, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'boom' } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')
+    expect(section).toBeTruthy()
+    const input = section!.querySelector<HTMLInputElement>('#attendance-annual-balance-user')
+    const loadBtn = section!.querySelector<HTMLButtonElement>('.attendance__admin-actions button')
+    expect(input).toBeTruthy()
+    expect(loadBtn).toBeTruthy()
+
+    // (A) query userA → success → A's balance renders, tied to userA.
+    input!.value = 'userA'
+    input!.dispatchEvent(new Event('input'))
+    await flushUi(2)
+    loadBtn!.click()
+    await flushUi(4)
+    const shown = section!.querySelector('.attendance__annual-balance')
+    expect(shown).toBeTruthy()
+    expect(shown?.textContent || '').toContain('userA')
+
+    // (B) query userB → failure → A's balance MUST disappear (cleared up front; the view renders on v-if).
+    input!.value = 'userB'
+    input!.dispatchEvent(new Event('input'))
+    await flushUi(2)
+    loadBtn!.click()
+    await flushUi(4)
+    expect(section!.querySelector('.attendance__annual-balance')).toBeNull()
+  })
+
   it('warns when the attendance-group picker source is capped (no silent caps)', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)

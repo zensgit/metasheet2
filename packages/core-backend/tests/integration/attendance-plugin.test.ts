@@ -5363,6 +5363,72 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④/年假 L5a — admin balance/ledger read: summary (granted/remaining/exhausted/expired) + active lots + recent events', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const adminId = `al-l5a-admin-${runSuffix}`
+    const uid = `al-l5a-user-${runSuffix}`
+    const uOther = `al-l5a-other-${runSuffix}`
+    const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) { await pool.end().catch(() => undefined); return }
+    const headers = { Authorization: `Bearer ${token}` }
+    // Build a known annual balance directly: an ACTIVE lot (4800 granted, 1800 deducted → 3000 remaining) + an
+    // EXPIRED lot (480 granted, 480 expired). So granted=5280, remaining=3000, exhausted=1800, expired=480
+    // (conservation: granted = remaining + exhausted + expired).
+    const mkLot = async (amount: number, remaining: number, status: string, expiresAt: string | null, tag: string) => (await pool.query<{ id: string }>(
+      `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, expires_at)
+       VALUES ('default',$1,'annual',$2,$3,'annual_accrual',$4,$5,'2026-01-01',$6) RETURNING id`,
+      [uid, amount, remaining, `l5a:${runSuffix}:${tag}`, status, expiresAt])).rows[0].id
+    const mkEvent = async (balanceId: string, type: string, delta: number) => { await pool.query(
+      `INSERT INTO attendance_leave_balance_events (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+       VALUES ('default',$1,$2,$3,$4,'annual_accrual',$5)`, [uid, balanceId, type, delta, balanceId]) }
+    try {
+      const lotActive = await mkLot(4800, 3000, 'active', '2026-12-31T16:00:00Z', 'active')
+      await mkEvent(lotActive, 'grant', 4800); await mkEvent(lotActive, 'deduct', -1800)
+      const lotExpired = await mkLot(480, 0, 'expired', '2025-12-31T16:00:00Z', 'expired')
+      await mkEvent(lotExpired, 'grant', 480); await mkEvent(lotExpired, 'expire', -480)
+
+      const res = await requestJson(`${baseUrl}/api/attendance/leave-balances?userId=${encodeURIComponent(uid)}`, { headers })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      const data = (res.body as { data?: { summary?: Record<string, unknown>; activeLots?: Array<Record<string, unknown>>; recentEvents?: Array<Record<string, unknown>> } } | undefined)?.data
+      expect(data?.summary).toMatchObject({ leaveTypeCode: 'annual', grantedMinutes: 5280, remainingMinutes: 3000, exhaustedMinutes: 1800, expiredMinutes: 480 })
+      // only the ACTIVE lot is returned in activeLots
+      expect(data?.activeLots?.length).toBe(1)
+      expect(Number((data!.activeLots![0] as { remaining_minutes: number }).remaining_minutes)).toBe(3000)
+      expect(data!.activeLots![0].status).toBe('active')
+      // all 4 ledger events are present (explains the balance), asserted by SET not order (occurred_at ties → uuid id).
+      expect(data?.recentEvents?.length).toBe(4)
+      expect((data!.recentEvents! as Array<{ event_type: string }>).map(e => e.event_type).sort()).toEqual(['deduct', 'expire', 'grant', 'grant'])
+      // eventLimit caps the ledger.
+      const limited = await requestJson(`${baseUrl}/api/attendance/leave-balances?userId=${encodeURIComponent(uid)}&eventLimit=2`, { headers })
+      expect((limited.body as { data?: { recentEvents?: unknown[] } } | undefined)?.data?.recentEvents?.length).toBe(2)
+      // missing userId → 400.
+      const bad = await requestJson(`${baseUrl}/api/attendance/leave-balances`, { headers })
+      expect(bad.status).toBe(400)
+
+      // (reverse) an event whose org/user match the query but whose LOT belongs to a DIFFERENT user must be IGNORED —
+      // the read is org/user-consistent by construction (the FK only ties balance_id), not just by writer discipline.
+      // Without the `b.org_id=e.org_id AND b.user_id=e.user_id` join predicate this +9999 grant would inflate granted.
+      const otherLot = (await pool.query<{ id: string }>(
+        `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at)
+         VALUES ('default',$1,'annual',9999,9999,'annual_accrual',$2,'active','2026-01-01') RETURNING id`, [uOther, `l5a:${runSuffix}:other`])).rows[0].id
+      await pool.query(
+        `INSERT INTO attendance_leave_balance_events (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+         VALUES ('default',$1,$2,'grant',9999,'annual_accrual',$3)`, [uid, otherLot, otherLot])
+      const after = await requestJson(`${baseUrl}/api/attendance/leave-balances?userId=${encodeURIComponent(uid)}`, { headers })
+      expect((after.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data?.summary?.grantedMinutes).toBe(5280) // mismatched +9999 excluded
+      expect((after.body as { data?: { recentEvents?: unknown[] } } | undefined)?.data?.recentEvents?.length).toBe(4)
+    } finally {
+      await pool.query(`DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])`, [[uid, uOther]]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])`, [[uid, uOther]]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('A2 auto-shift auto-write ledger — active-run claim and item invariants are DB-enforced (latent schema)', async () => {
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
     if (!dbUrl) return
