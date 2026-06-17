@@ -30,7 +30,10 @@ describe('YjsSyncService fresh-doc seed', () => {
     const recordSeed = vi.fn().mockResolvedValue({
       fld_title: 'existing value',
       fld_name: 'alice',
-      fld_count: 42, // non-string, must NOT be seeded
+      fld_count: 42, // number → plain LWW value
+      fld_done: true, // boolean → plain LWW value
+      fld_tags: ['a', 'b'], // multiSelect array → plain LWW value
+      fld_empty: null, // null → not seeded
     })
     const svc = new YjsSyncService(persistence as any, recordSeed)
 
@@ -41,15 +44,20 @@ describe('YjsSyncService fresh-doc seed', () => {
     const fields = doc.getMap('fields')
     const title = fields.get('fld_title')
     const name = fields.get('fld_name')
-    const count = fields.get('fld_count')
 
+    // Strings → Y.Text (char-level collaborative merge).
     expect(title).toBeInstanceOf(Y.Text)
     expect((title as Y.Text).toString()).toBe('existing value')
     expect(name).toBeInstanceOf(Y.Text)
     expect((name as Y.Text).toString()).toBe('alice')
-    // Non-string left out of fields map on purpose — frontend only
-    // binds Y.Text entries; other field types continue using REST.
-    expect(count).toBeUndefined()
+    // Non-string ATOMIC fields → seeded as PLAIN values (LWW per key via the Y.Map);
+    // NOT Y.Text. The native type is preserved so the bridge persists the stored shape.
+    expect(fields.get('fld_count')).toBe(42)
+    expect(fields.get('fld_count')).not.toBeInstanceOf(Y.Text)
+    expect(fields.get('fld_done')).toBe(true)
+    expect(fields.get('fld_tags')).toEqual(['a', 'b'])
+    // null/undefined → left absent (a delete; nothing to seed).
+    expect(fields.has('fld_empty')).toBe(false)
 
     await svc.destroy()
   })
