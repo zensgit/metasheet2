@@ -449,8 +449,13 @@ TODO:
   - [x] C6-5a test-only failure-injection design:
     `docs/development/data-source-system-integration-c6-test-failure-injection-design-20260617.md`.
     This is design-only and exists only because both real sandbox failure shapes are unavailable.
-  - [ ] C6-5b test-only failure-injection implementation: default-off, sandbox-only, server-owned
+  - [x] C6-5b test-only failure-injection implementation: default-off, sandbox-only, server-owned
     double gate; no client-controlled injection, no production hook, no raw SQL/DDL/trigger path.
+    The implementation is deploy-gated by `METASHEET_C6_TEST_FAILURE_INJECTION_ENABLED=true`
+    plus server runtime config `INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON`; server config
+    pins `pipelineId`, `targetSystemId`, `targetDataSourceId`, `targetObject`, and
+    `environment=sandbox`, so mutable external-system config cannot relabel a production target
+    as sandbox.
   - [ ] C6-5c package + entity-machine rerun: publish a sandbox package, rerun controlled bad-row
     with one synthetic row failure plus at least one clean sibling write, prove values-free
     dead-letter/provenance and re-pull idempotence, then disable the test-injection gate.

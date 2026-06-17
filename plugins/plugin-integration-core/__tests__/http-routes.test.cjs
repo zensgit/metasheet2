@@ -1579,6 +1579,20 @@ async function testPipelineExternalWriteDryRunRoute() {
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'C6_WRITE_DRY_RUN_REQUEST_INVALID')
   assert.equal(calls.length, callsBeforeInvalidBody, 'client-supplied target scope is rejected before loading the pipeline')
+
+  const callsBeforeClientInjection = calls.length
+  res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+    user: READ_USER,
+    params: { id: pipeline.id },
+    body: {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      failureInjection: { enabled: true, failWriteOrdinal: 1 },
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'C6_WRITE_DRY_RUN_REQUEST_INVALID')
+  assert.equal(calls.length, callsBeforeClientInjection, 'client-supplied dry-run injection control is rejected before loading the pipeline')
 }
 
 async function testPipelineExternalWriteApplyRoute() {
@@ -1757,7 +1771,7 @@ async function testPipelineExternalWriteApplyRoute() {
   assert.equal(res.body.error.code, 'C6_WRITE_DRY_RUN_TOKEN_INVALID')
   assert.equal(writeCalls.insertRows.length + writeCalls.updateRows.length, writesAfterSuccess, 'used token cannot trigger another write')
 
-  for (const key of ['target', 'source', 'plan', 'payload']) {
+  for (const key of ['target', 'source', 'plan', 'payload', 'failureInjection']) {
     const callsBeforeInvalidBody = calls.length
     res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
       user: WRITE_USER,
@@ -1787,6 +1801,243 @@ async function testPipelineExternalWriteApplyRoute() {
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'C6_WRITE_APPLY_REQUEST_INVALID')
   assert.equal(calls.length, callsBeforeNestedConfirm, 'nested confirm scope is rejected before loading the pipeline')
+
+  const callsBeforeNestedInject = calls.length
+  res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+    user: WRITE_USER,
+    params: { id: pipeline.id },
+    body: {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      confirm: { dryRunToken: 'ignored', injectFailure: true },
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'C6_WRITE_APPLY_REQUEST_INVALID')
+  assert.equal(calls.length, callsBeforeNestedInject, 'client-supplied injection control is rejected before loading the pipeline')
+}
+
+async function testPipelineExternalWriteApplyTestFailureInjectionRoute() {
+  const storage = createMemoryStorage()
+  const runWrites = []
+  const deadLetterWrites = []
+  const sourceSystem = {
+    id: 'source_c6',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    config: { dataSourceId: 'readonly-ds', object: 'public.source_items' },
+  }
+  const targetSystem = {
+    id: 'target_c6',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    kind: 'data-source:sql-write-gated',
+    role: 'target',
+    status: 'active',
+    config: {
+      dataSourceId: 'writable-ds',
+      object: 'public.target_items',
+      keyFields: ['externalId'],
+      writableFields: ['name'],
+    },
+  }
+  const pipeline = {
+    id: 'pipe_c6',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    name: 'C6 test failure injection',
+    status: 'active',
+    sourceSystemId: sourceSystem.id,
+    sourceObject: 'public.source_items',
+    targetSystemId: targetSystem.id,
+    targetObject: 'public.target_items',
+    createdBy: 'owner-7',
+    fieldMappings: [
+      { sourceField: 'code', targetField: 'externalId' },
+      { sourceField: 'name', targetField: 'name' },
+    ],
+  }
+  const { services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        if (input.id === sourceSystem.id) return { ...sourceSystem }
+        return null
+      },
+      async getExternalSystem(input) {
+        if (input.id === targetSystem.id) return { ...targetSystem }
+        return null
+      },
+    },
+    adapterRegistry: {
+      createAdapter() {
+        return {
+          async read() {
+            return {
+              records: [
+                { code: 'P-001', name: 'Widget' },
+                { code: 'P-002', name: 'Gadget' },
+              ],
+              done: true,
+              nextCursor: null,
+            }
+          },
+        }
+      },
+    },
+    pipelineRegistry: {
+      async getPipeline(input) {
+        return { ...pipeline, id: input.id }
+      },
+      async createPipelineRun(input) {
+        runWrites.push(['create', input])
+        return {
+          id: 'run_c6_test_injection',
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId || null,
+          pipelineId: input.pipelineId,
+          status: input.status,
+          mode: input.mode,
+          startedAt: input.startedAt,
+          details: input.details || {},
+        }
+      },
+      async updatePipelineRun(input) {
+        runWrites.push(['update', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId || null,
+          pipelineId: pipeline.id,
+          status: input.status,
+          provenanceEvents: input.provenanceEvents || [],
+          details: input.details || {},
+        }
+      },
+    },
+    deadLetterStore: {
+      async listDeadLetters() {
+        return []
+      },
+      async createDeadLetter(input) {
+        deadLetterWrites.push(input)
+        return { ...input, id: `dl_${deadLetterWrites.length}` }
+      },
+    },
+  })
+  const writeCalls = { insertRows: [], updateRows: [] }
+  const dataSourceWrites = {
+    async test() {
+      return {
+        success: true,
+        capabilityState: {
+          readOnly: false,
+          c6WriteTarget: true,
+          genericQueryDisabled: true,
+        },
+      }
+    },
+    async lookupByKey() {
+      return { data: [], metadata: {} }
+    },
+    async insertRows(dataSourceId, object, rows, policy, principal) {
+      writeCalls.insertRows.push({ dataSourceId, object, rows, policy, principal })
+      return { data: rows, metadata: {} }
+    },
+    async updateRows(dataSourceId, object, rows, policy, principal) {
+      writeCalls.updateRows.push({ dataSourceId, object, rows, policy, principal })
+      return { rowCount: rows.length, results: [] }
+    },
+  }
+  const { routes } = mountRoutes(services, {
+    storage,
+    dataSourceWrites,
+    config: {
+      c6TestFailureInjection: {
+        deployEnabled: true,
+        enabled: true,
+        pipelineId: pipeline.id,
+        targetSystemId: targetSystem.id,
+        targetDataSourceId: 'writable-ds',
+        targetObject: 'public.target_items',
+        environment: 'sandbox',
+        failWriteOrdinal: 2,
+      },
+    },
+  })
+
+  let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+    user: WRITE_USER,
+    params: { id: pipeline.id },
+    body: { tenantId: 'tenant_1', workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.canApply, true)
+  assert.deepEqual(res.body.data.evidence.testFailureInjection, {
+    deployEnabled: true,
+    serverConfigEnabled: true,
+    active: true,
+    reason: 'active',
+  })
+  const dryRunToken = res.body.data.dryRunToken
+
+  res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+    user: WRITE_USER,
+    params: { id: pipeline.id },
+    body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: { dryRunToken } },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'partial')
+  assert.equal(res.body.data.counts.add, 1)
+  assert.equal(res.body.data.counts.failed, 1)
+  assert.equal(res.body.data.counts.written, 1)
+  assert.deepEqual(res.body.data.evidence.rowErrorTypes, ['C6_TEST_INJECTED_ROW_FAILURE'])
+  assert.deepEqual(res.body.data.evidence.testFailureInjection, {
+    deployEnabled: true,
+    serverConfigEnabled: true,
+    active: true,
+    reason: 'active',
+  })
+  assert.equal(writeCalls.insertRows.length, 1, 'the clean sibling writes through the real route')
+  assert.deepEqual(
+    writeCalls.insertRows[0].rows,
+    [{ externalId: 'P-001', name: 'Widget' }],
+    'route-level failWriteOrdinal=2 leaves the first writable row as the clean sibling',
+  )
+  assert.equal(writeCalls.updateRows.length, 0)
+  assert.deepEqual(res.body.data.deadLetters, { attempted: 1, persisted: 1 })
+  assert.equal(deadLetterWrites.length, 1)
+  assert.equal(deadLetterWrites[0].errorCode, 'C6_TEST_INJECTED_ROW_FAILURE')
+  const update = runWrites.find(([kind]) => kind === 'update')[1]
+  assert.equal(update.status, 'partial')
+  assert.equal(update.rowsWritten, 1)
+  assert.equal(update.rowsFailed, 1)
+  assert.equal(update.provenanceEvents.length, 2)
+  assert.equal(update.provenanceEvents.find((event) => event.eventType === 'target_write_failed').attrs.errorCode, 'C6_TEST_INJECTED_ROW_FAILURE')
+  const publicText = JSON.stringify(res.body.data)
+  assert.equal(publicText.includes('P-001'), false, 'route response does not leak clean sibling key values')
+  assert.equal(publicText.includes('P-002'), false, 'route response does not leak source key values')
+  assert.equal(publicText.includes('Widget'), false, 'route response does not leak clean sibling row values')
+  assert.equal(publicText.includes('Gadget'), false, 'route response does not leak row values')
+  const persistedText = JSON.stringify({ runWrites, deadLetterWrites })
+  assert.equal(persistedText.includes('P-001'), false, 'persisted test-injection evidence does not leak clean sibling key values')
+  assert.equal(persistedText.includes('P-002'), false, 'persisted test-injection evidence does not leak source key values')
+  assert.equal(persistedText.includes('Widget'), false, 'persisted test-injection evidence does not leak clean sibling row values')
+  assert.equal(persistedText.includes('Gadget'), false, 'persisted test-injection evidence does not leak row values')
+
+  const writesAfterPartial = writeCalls.insertRows.length + writeCalls.updateRows.length
+  const deadLettersAfterPartial = deadLetterWrites.length
+  res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+    user: WRITE_USER,
+    params: { id: pipeline.id },
+    body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: { dryRunToken } },
+  })
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.body.error.code, 'C6_WRITE_DRY_RUN_TOKEN_INVALID')
+  assert.equal(writeCalls.insertRows.length + writeCalls.updateRows.length, writesAfterPartial, 'partial test-injection token reuse cannot write again')
+  assert.equal(deadLetterWrites.length, deadLettersAfterPartial, 'partial test-injection token reuse cannot create another dead letter')
 }
 
 async function testPipelineExternalWriteApplyPersistsDeadLetterAndProvenance() {
@@ -4400,6 +4651,7 @@ async function main() {
   await testPipelineRoutes()
   await testPipelineExternalWriteDryRunRoute()
   await testPipelineExternalWriteApplyRoute()
+  await testPipelineExternalWriteApplyTestFailureInjectionRoute()
   await testPipelineExternalWriteApplyPersistsDeadLetterAndProvenance()
   await testPipelineExternalWriteApplyDoesNotOverstateProvenancePersistence()
   await testPipelineExternalWriteDryRunPreflightFailsClosed()

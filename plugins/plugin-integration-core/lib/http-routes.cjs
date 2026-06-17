@@ -1585,6 +1585,7 @@ function createHandlers(services, options = {}) {
         dryRunUser: requestPrincipal(req),
         dataSourceOwnerPrincipal: ownerPrincipal,
         maxRows: body.maxRows,
+        testFailureInjection: context && context.config && context.config.c6TestFailureInjection,
       }))
     },
 
@@ -1673,6 +1674,7 @@ function createHandlers(services, options = {}) {
           applyUser: requestPrincipal(req),
           dataSourceOwnerPrincipal: ownerPrincipal,
           runId: run && run.id,
+          testFailureInjection: context && context.config && context.config.c6TestFailureInjection,
         })
         if (runLogger && run) {
           run = await runLogger.finishRun(run, externalWriteApplyMetrics(result), externalWriteRunStatus(result.status), {

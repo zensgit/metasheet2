@@ -269,8 +269,13 @@ Current #2720 checkpoint as of 2026-06-17:
   `controlledBadRowStopReason=no_safe_failure_shape`,
   `failureShape=no_safe_failure_shape`;
 - next eligible step is the separate C6-5a/C6-5b/C6-5c test-only
-  failure-injection path. This runbook still does not authorize production,
-  batch, raw SQL, DDL, trigger, or broad runtime failure hooks.
+  failure-injection path. C6-5b uses two server-owned gates:
+  `METASHEET_C6_TEST_FAILURE_INJECTION_ENABLED=true` plus
+  `INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON` pinning the sandbox
+  `pipelineId`, `targetSystemId`, `targetDataSourceId`, `targetObject`, and
+  `environment=sandbox`. Mutable external-system config is not a sandbox proof.
+  This runbook still does not authorize production, batch, raw SQL, DDL,
+  trigger, or broad runtime failure hooks.
 
 ## Stop Rules
 
