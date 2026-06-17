@@ -51,6 +51,8 @@ import { AutomationLogService } from '../multitable/automation-log-service'
 import { loadSheetMemberUserIdSet } from '../multitable/permission-service'
 import { insertRecordSubscriptionNotifications } from '../multitable/record-subscription-service'
 import { normalizeJson } from '../multitable/field-codecs'
+import { ensureRecordWriteAllowed } from '../multitable/sheet-capabilities'
+import { ensureRecordNotLocked } from '../multitable/record-lock'
 import { Logger } from '../core/logger'
 
 type PoolLike = ConnectionPool & { query: QueryFn }
@@ -81,6 +83,10 @@ interface ButtonActionPolicy {
 const BUTTON_ACTION_POLICIES: Record<string, ButtonActionPolicy> = {
   record_click: { gate: 'read', sideEffecting: false, dispatchType: 'record_click' },
   send_notification: { gate: 'notify', sideEffecting: true, dispatchType: 'send_notification' },
+  // B1-S1 D0-B: first RECORD-MUTATING button action. `edit` gate is the sheet-level
+  // pre-filter; the dispatch branch re-gates the SPECIFIC row (write-own + lock) so a
+  // button can never mutate a row the clicker could not edit directly (no elevation).
+  update_record: { gate: 'edit', sideEffecting: true, dispatchType: 'update_record' },
 }
 
 export function createMultitableButtonRoutes(): Router {
@@ -117,7 +123,7 @@ export function createMultitableButtonRoutes(): Router {
       if ('status' in readable) {
         return res.status(readable.status).json(readable.body)
       }
-      const { access, capabilities } = readable
+      const { access, capabilities, sheetScope } = readable
 
       // 2) Load the field + its derived permissions for THIS actor.
       const ctx = await buildRecordPatchContext(req, query, sheetId, access, capabilities)
@@ -277,6 +283,88 @@ export function createMultitableButtonRoutes(): Router {
           executionId, sheetId, recordId, fieldId, actionType,
           actorId, status: 'success', requestId: requestIdValue,
           recipients: requestedUserIds.length, deduplicated: txResult.deduplicated,
+        })
+        return res.json({ ok: true, data: { status: 'succeeded', executionId: txResult.executionId, ...(txResult.deduplicated ? { deduplicated: true } : {}) } })
+      }
+
+      // ── update_record dispatch (B1-S1 D0-B) ─────────────────────────────────
+      // First RECORD-MUTATING button action. NO ELEVATION: the click performs the
+      // update as the CLICKING ACTOR through the SAME per-row gates a normal edit
+      // uses, so a button can never mutate a row the clicker could not edit directly.
+      if (actionType === 'update_record') {
+        const actorId = access.userId
+        const requestIdValue = requestId as string // §6 requestId already required (side-effecting).
+
+        // §3.1 PER-ROW WRITE GATE (no-elevation). The sheet-level `edit` policy gate
+        // (canEditRecord) above is NOT sufficient — under write-own it is true for
+        // EVERY row. Re-gate THIS record by created_by (write-own honored) + the lock
+        // guard, identically to the normal record-edit path. Either failure → 403,
+        // no write, no dedup consumed.
+        const recRes = await query(
+          'SELECT created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
+          [recordId, sheetId],
+        )
+        if (recRes.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+        }
+        const recRow = recRes.rows[0] as { created_by?: string | null; locked?: boolean | null; locked_by?: string | null }
+        const createdBy = typeof recRow.created_by === 'string' ? recRow.created_by : null
+        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, createdBy, 'edit')) {
+          return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions to edit this record' } })
+        }
+        try {
+          ensureRecordNotLocked(actorId, { locked: recRow.locked === true, locked_by: recRow.locked_by ?? null }, () => new Error('locked'))
+        } catch {
+          return res.status(403).json({ ok: false, error: { code: 'RECORD_LOCKED', message: 'Record is locked' } })
+        }
+
+        // §3.2 CONFIG: same-base update of THE CLICKED record (fields only — a button
+        // does NOT do cross-base targeting). Empty → nothing to write.
+        const actionConfig = normalizeJson(property.actionConfig)
+        const fields = (actionConfig.fields && typeof actionConfig.fields === 'object' && !Array.isArray(actionConfig.fields))
+          ? (actionConfig.fields as Record<string, unknown>)
+          : null
+        if (!fields || Object.keys(fields).length === 0) {
+          return res.status(400).json({ ok: false, error: { code: 'NO_FIELDS', message: 'Button update_record has no fields configured' } })
+        }
+
+        // §6 + §2: dedup → executor write (SAME tx client) → audit, all-or-nothing.
+        // Mirrors the send_notification transaction; the executor performs the real
+        // versioned write via the SAME path automations use (no parallel write path).
+        const dedupKey = JSON.stringify([actorId, sheetId, recordId, fieldId, requestIdValue])
+        const context: ExecutionContext = {
+          executionId, ruleId: `btn_${fieldId}`, sheetId, recordId,
+          recordData: {}, ruleCreatedBy: '', actorId,
+          triggerEvent: { _trigger: 'button', fieldId, requestId: requestIdValue },
+        }
+        const txResult = await pool.transaction<{ deduplicated: boolean; executionId: string }>(async ({ query: txq }) => {
+          const dedup = await txq(
+            `INSERT INTO multitable_button_run_dedup
+               (id, dedup_key, actor_id, sheet_id, record_id, field_id, request_id, execution_id)
+             VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (dedup_key) DO NOTHING`,
+            [randomUUID(), dedupKey, actorId, sheetId, recordId, fieldId, requestIdValue, executionId],
+          )
+          if (Number(dedup.rowCount ?? 0) === 0) {
+            const existing = await txq(`SELECT execution_id FROM multitable_button_run_dedup WHERE dedup_key = $1`, [dedupKey])
+            const originalExecutionId = (existing.rows[0] as { execution_id?: string } | undefined)?.execution_id ?? executionId
+            return { deduplicated: true, executionId: originalExecutionId }
+          }
+          // Same-base update of the clicked record (fields only). The executor write
+          // runs on the tx client, so a failed audit rolls the write back (fail-closed).
+          const executor = new AutomationExecutor({ eventBus, queryFn: txq })
+          const step = await executor.runSingleAction({ type: 'update_record', config: { fields } }, context)
+          if (step.status !== 'success') {
+            // Roll back the dedup + any partial write so a transient failure is retryable.
+            throw new Error(step.error ?? 'update_record failed')
+          }
+          await writeButtonAudit(logService, txq, { executionId, sheetId, fieldId, actorId, requestId: requestIdValue, step })
+          return { deduplicated: false, executionId }
+        })
+
+        logger.info('[multitable.button.run]', {
+          executionId, sheetId, recordId, fieldId, actionType,
+          actorId, status: 'success', requestId: requestIdValue, deduplicated: txResult.deduplicated,
         })
         return res.json({ ok: true, data: { status: 'succeeded', executionId: txResult.executionId, ...(txResult.deduplicated ? { deduplicated: true } : {}) } })
       }
