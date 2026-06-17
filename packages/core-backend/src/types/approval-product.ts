@@ -91,8 +91,9 @@ export interface CcNodeConfig {
 /**
  * Parallel gateway (并行分支) — fans into N branches from `branches` (edgeKeys)
  * and re-joins at `joinNodeKey`. `joinMode === 'all'` ("和") waits for every
- * branch to reach the join node before advancing. `'any'` is reserved for
- * a future wave and is not wired into the executor in v1.
+ * branch to reach the join node before advancing. `'any'` advances as soon as
+ * the first branch reaches the join node — wired in the executor
+ * (`resolveFromNode` fan-out + `resolveAfterApproveInParallel`).
  */
 export interface ParallelNodeConfig {
   branches: string[]
