@@ -168,4 +168,30 @@ describeIfDatabase('#18 row-level read-deny core enforcement (real DB)', () => {
     expect(ids).not.toContain(REC_DENIED)
     expect(ids).toContain(REC_OK)
   })
+
+  // view-aggregate — returned total is the filtered rows.length; denied records are dropped before
+  // aggregation, so the count excludes them (no count leak). (export / form-context / trash use the SAME
+  // loadDeniedRecordIds exclusion but need extra fixtures to assert here — final golden suite.)
+  const aggTotal = async (): Promise<number> => {
+    const res = await request(app).get(`/api/multitable/sheets/${SHEET_ID}/view-aggregate`)
+    return Number((res.body?.data?.total ?? -1))
+  }
+  test('view-aggregate flag OFF: the none-scoped record is counted (grant-additive)', async () => {
+    await setFlag(false)
+    testUserId = USER_ID
+    testPerms = ['multitable:read']
+    expect(await aggTotal()).toBe(2)
+  })
+  test('view-aggregate flag ON: the none-scoped record is EXCLUDED from the total', async () => {
+    await setFlag(true)
+    testUserId = USER_ID
+    testPerms = ['multitable:read']
+    expect(await aggTotal()).toBe(1)
+  })
+  test('view-aggregate flag ON: an admin counts everything (deny bypassed)', async () => {
+    await setFlag(true)
+    testUserId = USER_ID
+    testRoles = ['admin'] // isAdminRole derives from roles, not perms — bypasses the deny
+    expect(await aggTotal()).toBe(2)
+  })
 })

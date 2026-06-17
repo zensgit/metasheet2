@@ -2731,6 +2731,14 @@ async function applyLookupRollup(
     Array.from(foreignIdsBySheet.keys()).filter((id) => readableForeignSheetIds.has(id)),
   )
 
+  // #18 row-level read-deny (cross-record): when a FOREIGN sheet opts in (its
+  // row_level_read_permissions_enabled flag) and the actor is denied ('none') read on some foreign
+  // records, those records must be ABSENT from foreignRecordsBySheet. Because resolveLookupValues skips
+  // ids missing from the map (`if (!data) continue`) before counting, an excluded record is omitted from
+  // lookup values AND never counted by rollup — so a rollup count equals the count of READABLE foreign
+  // records, never the true total (no cardinality leak). Resolved once per read; flag-OFF on the foreign
+  // sheet → no exclusion → byte-identical; admins bypass.
+  const access = await resolveRequestAccess(req)
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [foreignSheetId, ids] of foreignIdsBySheet.entries()) {
     if (!readableForeignSheetIds.has(foreignSheetId)) continue
@@ -2740,9 +2748,15 @@ async function applyLookupRollup(
       'SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
       [foreignSheetId, idList],
     )
+    let deniedForeign: Set<string> | null = null
+    if (!access.isAdminRole && access.userId && (await loadRowLevelReadDenyEnabled(query, foreignSheetId))) {
+      deniedForeign = await loadDeniedRecordIds(query, foreignSheetId, access.userId)
+    }
     const recordMap = new Map<string, Record<string, unknown>>()
     for (const raw of foreignRes.rows as any[]) {
-      recordMap.set(String(raw.id), normalizeJson(raw.data))
+      const fid = String(raw.id)
+      if (deniedForeign?.has(fid)) continue // denied foreign record → treated as absent (no value, no count)
+      recordMap.set(fid, normalizeJson(raw.data))
     }
     foreignRecordsBySheet.set(foreignSheetId, recordMap)
   }
@@ -4150,6 +4164,12 @@ async function buildLinkSummaries(
     displayFieldBySheet.set(sheetId, stringField?.id ?? allowedFields[0]?.id ?? null)
   }
 
+  // #18 row-level read-deny (cross-record): foreign records the actor is denied ('none') on an opted-in
+  // foreign sheet must not surface in a link summary (their id + display would leak). Build the denied set
+  // per foreign sheet; the summary loop below FILTERS those ids out entirely (omitted, not shown blank).
+  // flag-OFF on the foreign sheet → no denial → byte-identical; admins bypass.
+  const summaryAccess = await resolveRequestAccess(req)
+  const deniedForeignBySheet = new Map<string, Set<string>>()
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [sheetId, ids] of idsBySheet.entries()) {
     if (!readableSheetIds.has(sheetId)) continue
@@ -4159,6 +4179,9 @@ async function buildLinkSummaries(
       'SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
       [sheetId, idList],
     )
+    if (!summaryAccess.isAdminRole && summaryAccess.userId && (await loadRowLevelReadDenyEnabled(query, sheetId))) {
+      deniedForeignBySheet.set(sheetId, await loadDeniedRecordIds(query, sheetId, summaryAccess.userId))
+    }
     const recordMap = new Map<string, Record<string, unknown>>()
     for (const row of recordRes.rows as any[]) {
       recordMap.set(String(row.id), normalizeJson(row.data))
@@ -4177,14 +4200,17 @@ async function buildLinkSummaries(
       }
       const foreignMap = foreignRecordsBySheet.get(cfg.foreignSheetId)
       const displayFieldId = displayFieldBySheet.get(cfg.foreignSheetId) ?? null
-      const summaries: LinkedRecordSummary[] = ids.map((id) => {
-        const data = foreignMap?.get(id) ?? {}
-        const displayValue = displayFieldId ? data[displayFieldId] : undefined
-        return {
-          id,
-          display: toSummaryDisplay(displayValue),
-        }
-      })
+      const denied = deniedForeignBySheet.get(cfg.foreignSheetId) // #18 cross-record: omit denied foreign ids
+      const summaries: LinkedRecordSummary[] = ids
+        .filter((id) => !denied?.has(id))
+        .map((id) => {
+          const data = foreignMap?.get(id) ?? {}
+          const displayValue = displayFieldId ? data[displayFieldId] : undefined
+          return {
+            id,
+            display: toSummaryDisplay(displayValue),
+          }
+        })
       byField.set(fieldId, summaries)
     }
     result.set(row.id, byField)
@@ -6884,9 +6910,16 @@ export function univerMetaRouter(): Router {
         capabilities,
       })
 
+      // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): drop denied records so widget
+      // counts/aggregates/group-buckets exclude them (no count leak). Inert until the per-sheet flag is on.
+      let dashboardRows = rows
+      if (!access.isAdminRole && access.userId && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+        const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        if (deniedIds.size > 0) dashboardRows = rows.filter((r) => !deniedIds.has(r.id))
+      }
       const results = widgets.map((widget) => buildDashboardWidgetResult({
         widget,
-        rows,
+        rows: dashboardRows,
         fields: visibleFields,
       }))
 
@@ -8324,6 +8357,10 @@ export function univerMetaRouter(): Router {
       }
 
       const rows: Array<Array<string | number | boolean | null | undefined>> = []
+      // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): skip records the actor is denied.
+      const exportDeniedIds = (!access.isAdminRole && access.userId && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))
+        ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        : null
       let cursor: string | undefined
       let truncated = false
       do {
@@ -8334,6 +8371,7 @@ export function univerMetaRouter(): Router {
           limit: Math.min(5000, XLSX_MAX_ROWS - rows.length),
         })
         for (const record of result.items) {
+          if (exportDeniedIds && exportDeniedIds.has(record.id)) continue
           const data = filterRecordDataByFieldIds(record.data, fieldIds)
           rows.push(fields.map((field) => {
             const cell = data[field.id]
@@ -8467,6 +8505,13 @@ export function univerMetaRouter(): Router {
         version: Number(r.version ?? 1),
         data: normalizeJson(r.data),
       }))
+      // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): drop records the actor is
+      // denied BEFORE search/filter/aggregate, so the returned total (rows.length), aggregate values, and
+      // group buckets all exclude them (no count leak). Inert until the per-sheet flag is enabled.
+      if (!access.isAdminRole && access.userId && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+        const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        if (deniedIds.size > 0) rows = rows.filter((rec) => !deniedIds.has(rec.id))
+      }
       if (search) rows = rows.filter((rec) => recordMatchesSearch(rec, selectableFields, search))
       if (filterInfo) {
         const conditions = filterInfo.conditions.filter((c) => filterFieldTypeById.has(c.fieldId) && selectableFieldIds.has(c.fieldId))
@@ -9227,6 +9272,15 @@ export function univerMetaRouter(): Router {
         const row: any = recordRes.rows[0]
         if (!row) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordIdParam}` } })
+        }
+        // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): a denied record reads as
+        // not-found in the form prefill (404, NOT 403 — no existence oracle). Anonymous public forms have
+        // no subject, so the deny never applies to them (only the authenticated actor is gated).
+        if (access.userId && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+          const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+          if (deniedIds.has(recordIdParam)) {
+            return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordIdParam}` } })
+          }
         }
         record = {
           id: String(row.id),
@@ -11225,7 +11279,15 @@ export function univerMetaRouter(): Router {
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
       const allowedFieldIds = computeAllowedFieldIds(visibleFields, capabilities, fieldScopeMap)
       const visibleFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, visibleFields, allowedFieldIds)
-      const maskedRecords = result.records.map((rec) => ({ ...rec, data: filterRecordDataByFieldIds(rec.data, visibleFieldIds) }))
+      // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): drop trashed records the actor
+      // is denied so a denied record's data never surfaces via trash. (total left as-is — the
+      // canDeleteRecord-gated trash count may include a denied row; exact-count exclusion is a minor follow-up.)
+      let trashRecords = result.records
+      if (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+        const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        if (deniedIds.size > 0) trashRecords = result.records.filter((rec) => !deniedIds.has(rec.recordId))
+      }
+      const maskedRecords = trashRecords.map((rec) => ({ ...rec, data: filterRecordDataByFieldIds(rec.data, visibleFieldIds) }))
       return res.json({ ok: true, data: { records: maskedRecords, total: result.total } })
     } catch (err) {
       if (err instanceof RecordServicePermissionError) {
