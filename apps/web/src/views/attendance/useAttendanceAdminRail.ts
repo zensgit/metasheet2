@@ -38,6 +38,7 @@ export const ATTENDANCE_ADMIN_SECTION_IDS = {
   schedulerScopes: 'attendance-admin-scheduler-scopes',
   holidays: 'attendance-admin-holidays',
   annualLeaveBalance: 'attendance-admin-annual-leave-balance',
+  annualLeavePolicy: 'attendance-admin-annual-leave-policy',
 } as const
 
 export type AdminSectionNavItem = {
@@ -189,6 +190,7 @@ export function useAttendanceAdminRail({
     { id: ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes, label: tr('Scheduler scope mgmt', '排班管理范围') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.holidays, label: tr('Holidays', '节假日') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveBalance, label: tr('Annual leave balance', '年假余额') },
+    { id: ATTENDANCE_ADMIN_SECTION_IDS.annualLeavePolicy, label: tr('Annual leave policy', '年假策略') },
   ])
   const adminSectionItemMap = computed(() => new Map(adminSectionNavItems.value.map(item => [item.id, item])))
   const adminSectionNavGroups = computed<AdminSectionNavGroupDefinition[]>(() => [
@@ -243,6 +245,7 @@ export function useAttendanceAdminRail({
       label: tr('Annual leave', '年假/法定假'),
       itemIds: [
         ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveBalance,
+        ATTENDANCE_ADMIN_SECTION_IDS.annualLeavePolicy,
       ],
     },
     {

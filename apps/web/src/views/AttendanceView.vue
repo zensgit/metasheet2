@@ -6166,6 +6166,71 @@
             </div>
 
             <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.annualLeavePolicy)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.annualLeavePolicy)"
+            >
+              <div class="attendance__admin-section-header">
+                <h4>{{ tr('Annual leave policy', '年假策略') }}</h4>
+                <button class="attendance__btn" :disabled="annualPolicyLoading" @click="() => loadAnnualPolicy()">
+                  {{ annualPolicyLoading ? tr('Loading...', '加载中...') : tr('Reload policy', '重载策略') }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field">
+                  <span>{{ tr('Enabled', '启用') }}</span>
+                  <input type="checkbox" v-model="annualPolicyForm.enabled" />
+                </label>
+                <label class="attendance__field" for="attendance-annual-policy-tenure">
+                  <span>{{ tr('Tenure mode', '工龄口径') }}</span>
+                  <select id="attendance-annual-policy-tenure" v-model="annualPolicyForm.tenureMode">
+                    <option value="cumulative_service">{{ tr('Cumulative service', '累计工龄') }}</option>
+                    <option value="company_tenure">{{ tr('Company tenure', '本单位工龄') }}</option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-annual-policy-stdday">
+                  <span>{{ tr('Standard day (min)', '标准工作日(分钟)') }}</span>
+                  <input id="attendance-annual-policy-stdday" type="number" v-model.number="annualPolicyForm.standardDayMinutes" />
+                </label>
+                <label class="attendance__field" for="attendance-annual-policy-tz">
+                  <span>{{ tr('Timezone (IANA)', '时区 (IANA)') }}</span>
+                  <input id="attendance-annual-policy-tz" type="text" v-model="annualPolicyForm.timezone" placeholder="Asia/Shanghai" />
+                </label>
+                <label class="attendance__field">
+                  <span>{{ tr('Carryover', '跨年结转') }}</span>
+                  <input type="checkbox" v-model="annualPolicyForm.carryoverEnabled" />
+                </label>
+              </div>
+              <h5>{{ tr('Tier ladder (cumulative years → days)', '工龄阶梯 (累计工龄 → 天数)') }}</h5>
+              <div class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>{{ tr('Min years', '起始年') }}</th>
+                      <th>{{ tr('Max years (blank = and above)', '截止年(空=及以上)') }}</th>
+                      <th>{{ tr('Days', '天数') }}</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(tier, index) in annualPolicyForm.tiers" :key="`annual-tier-${index}`">
+                      <td><input type="number" v-model.number="tier.minYears" /></td>
+                      <td><input type="number" :value="tier.maxYears ?? ''" @input="onAnnualPolicyTierMaxInput(tier, ($event.target as HTMLInputElement).value)" /></td>
+                      <td><input type="number" v-model.number="tier.days" /></td>
+                      <td><button class="attendance__btn" @click="() => removeAnnualPolicyTier(index)">{{ tr('Remove', '删除') }}</button></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn" @click="() => addAnnualPolicyTier()">{{ tr('Add tier', '新增阶梯') }}</button>
+                <button class="attendance__btn attendance__btn--primary" :disabled="annualPolicySaving" @click="() => saveAnnualPolicy()">
+                  {{ annualPolicySaving ? tr('Saving...', '保存中...') : tr('Save policy', '保存策略') }}
+                </button>
+              </div>
+            </div>
+
+            <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)"
               class="attendance__admin-section"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)"
@@ -19688,6 +19753,114 @@ async function loadAnnualLeaveBalance() {
     setStatus(readErrorMessage(error, tr('Failed to load annual leave balance', '加载年假余额失败')), 'error')
   } finally {
     annualBalanceLoading.value = false
+  }
+}
+
+// 年假/法定假 L5b: annualLeavePolicy config (admin console). Loads the policy from settings, edits it, and PUTs it
+// back. Client guards mirror the backend (an enabled policy needs a timezone; the backend additionally validates
+// IANA validity + the tier ladder and returns a clear error we surface).
+interface AnnualLeaveTierRow { minYears: number; maxYears: number | null; days: number }
+const annualPolicyLoading = ref(false)
+const annualPolicySaving = ref(false)
+const annualPolicyForm = reactive<{
+  enabled: boolean
+  tenureMode: string
+  standardDayMinutes: number
+  tiers: AnnualLeaveTierRow[]
+  carryoverEnabled: boolean
+  timezone: string
+}>({
+  enabled: false,
+  tenureMode: 'cumulative_service',
+  standardDayMinutes: 480,
+  tiers: [
+    { minYears: 1, maxYears: 10, days: 5 },
+    { minYears: 10, maxYears: 20, days: 10 },
+    { minYears: 20, maxYears: null, days: 15 },
+  ],
+  carryoverEnabled: false,
+  timezone: '',
+})
+
+async function loadAnnualPolicy() {
+  annualPolicyLoading.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/settings?${buildQuery({ orgId: normalizedOrgId() }).toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load annual leave policy', '加载年假策略失败')))
+    }
+    adminForbidden.value = false
+    const p = data.data?.annualLeavePolicy
+    if (p) {
+      annualPolicyForm.enabled = !!p.enabled
+      annualPolicyForm.tenureMode = p.tenureMode || 'cumulative_service'
+      annualPolicyForm.standardDayMinutes = Number(p.standardDayMinutes) || 480
+      annualPolicyForm.tiers = Array.isArray(p.tiers) && p.tiers.length > 0
+        ? p.tiers.map((t: any) => ({
+            minYears: Number(t.minYears) || 0,
+            maxYears: t.maxYears === null || t.maxYears === undefined ? null : Number(t.maxYears),
+            days: Number(t.days) || 0,
+          }))
+        : annualPolicyForm.tiers
+      annualPolicyForm.carryoverEnabled = !!p.carryover?.enabled
+      annualPolicyForm.timezone = p.timezone || ''
+    }
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to load annual leave policy', '加载年假策略失败')), 'error')
+  } finally {
+    annualPolicyLoading.value = false
+  }
+}
+
+function addAnnualPolicyTier(): void {
+  annualPolicyForm.tiers.push({ minYears: 0, maxYears: null, days: 0 })
+}
+function removeAnnualPolicyTier(index: number): void {
+  annualPolicyForm.tiers.splice(index, 1)
+}
+function onAnnualPolicyTierMaxInput(tier: AnnualLeaveTierRow, value: string): void {
+  // maxYears is nullable ("and above"); an empty field means null, not 0 (v-model.number can't express this).
+  tier.maxYears = value.trim() === '' ? null : Number(value)
+}
+
+async function saveAnnualPolicy() {
+  if (annualPolicyForm.enabled && !annualPolicyForm.timezone.trim()) {
+    setStatus(tr('Timezone is required when the annual leave engine is enabled', '启用年假引擎时必须填写时区'), 'error')
+    return
+  }
+  annualPolicySaving.value = true
+  try {
+    const payload = {
+      annualLeavePolicy: {
+        enabled: annualPolicyForm.enabled,
+        tenureMode: annualPolicyForm.tenureMode,
+        standardDayMinutes: annualPolicyForm.standardDayMinutes,
+        tiers: annualPolicyForm.tiers.map(t => ({ minYears: t.minYears, maxYears: t.maxYears, days: t.days })),
+        carryover: { enabled: annualPolicyForm.carryoverEnabled },
+        timezone: annualPolicyForm.timezone.trim() || null,
+      },
+    }
+    const response = await apiFetch('/api/attendance/settings', { method: 'PUT', body: JSON.stringify(payload) })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to save annual leave policy', '保存年假策略失败')))
+    }
+    adminForbidden.value = false
+    setStatus(tr('Annual leave policy saved', '年假策略已保存'), 'info')
+    await loadAnnualPolicy()
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to save annual leave policy', '保存年假策略失败')), 'error')
+  } finally {
+    annualPolicySaving.value = false
   }
 }
 
