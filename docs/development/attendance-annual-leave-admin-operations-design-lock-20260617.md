@@ -63,7 +63,7 @@ Render the literal code from `error.code`; map each to a human line. Codes below
 
 On success the body is `{ id, delta, applied, alreadyApplied }`. `applied:true` = committed; `alreadyApplied:true` (with `applied:false`) = an idempotent replay that re-applied nothing — the card states "already applied (no change)."
 
-**Expiry backfill** (`POST /api/attendance/annual-leave-expiry-backfill`, body `{ dryRun?:bool }`):
+**Expiry backfill** (`POST /api/attendance/annual-leave-expiry-backfill`, body `{ dryRun?:bool, orgId?:string }` — backfill is the one of the three whose schema explicitly accepts an optional `orgId`; `getOrgId` resolves the effective org regardless, and the card sends only `dryRun`):
 - `400 VALIDATION_ERROR`, `503 DB_NOT_READY`, `500 INTERNAL_ERROR`.
 - Success → `{ scanned, updated, skipped, dryRun, reasons }`, where `reasons` is an **object/map** (`reasonCode → count`), not an array. Render as a code → count table. Known reason codes: `NON_ACCRUAL_SOURCE`, `MISSING_RUN_ITEM`, `INVALID_RUN_ITEM`, `MISSING_RUN`, `INVALID_RUN`, `UNPARSEABLE_POLICY_VERSION`, `MISSING_TIMEZONE`, `UNPARSEABLE_PERIOD_KEY`, `ALREADY_SET` (skipped because concurrently set — explicitly an idempotency no-op, not a failure).
 
