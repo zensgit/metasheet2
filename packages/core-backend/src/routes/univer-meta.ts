@@ -49,6 +49,7 @@ import {
   loadFieldPermissionScopeMap,
   loadRecordCreatorMap,
   loadRecordPermissionScopeMap,
+  loadRowLevelReadDenyEnabled,
   loadSheetMemberUserIdSet,
   loadSheetPermissionScopeMap,
   loadViewPermissionScopeMap,
@@ -3363,7 +3364,9 @@ export async function requireRecordReadable(
     const hasRecordPerms = await hasRecordPermissionAssignments(query, sheetId)
     if (hasRecordPerms) {
       const recordScopeMap = await loadRecordPermissionScopeMap(query, sheetId, [recordId], access.userId)
-      if (recordScopeMap.size > 0 && !deriveRecordPermissions(recordId, capabilities, recordScopeMap).canRead) {
+      // #18 read-deny: pass the per-sheet flag so a 'none' scope denies read when the sheet opted in.
+      const rowLevelDeny = await loadRowLevelReadDenyEnabled(query, sheetId)
+      if (recordScopeMap.size > 0 && !deriveRecordPermissions(recordId, capabilities, recordScopeMap, rowLevelDeny).canRead) {
         return {
           status: 403,
           body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
@@ -3728,7 +3731,10 @@ async function loadDashboardSourceRows(args: {
         access.userId,
       )
       if (recordScopeMap.size > 0) {
-        rows = rows.filter((row) => deriveRecordPermissions(row.id, capabilities, recordScopeMap).canRead)
+        // #18 read-deny: pass the per-sheet flag so 'none' scopes drop rows when the sheet opted in.
+        // /view loads-all + filters in-app, so the returned set (and any in-app total) stays exact.
+        const rowLevelDeny = await loadRowLevelReadDenyEnabled(query, sheetId)
+        rows = rows.filter((row) => deriveRecordPermissions(row.id, capabilities, recordScopeMap, rowLevelDeny).canRead)
       }
     }
   }
@@ -6000,7 +6006,9 @@ export function univerMetaRouter(): Router {
             [recordId],
             access.userId,
           )
-          if (recordScopeMap.size > 0 && !deriveRecordPermissions(recordId, capabilities, recordScopeMap).canRead) {
+          // #18 read-deny: pass the per-sheet flag so a 'none' scope denies history read when opted in.
+          const rowLevelDeny = await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)
+          if (recordScopeMap.size > 0 && !deriveRecordPermissions(recordId, capabilities, recordScopeMap, rowLevelDeny).canRead) {
             return sendForbidden(res)
           }
         }
@@ -6483,7 +6491,9 @@ export function univerMetaRouter(): Router {
     const schema = z.object({
       subjectType: z.enum(['user', 'role', 'member-group']),
       subjectId: z.string().min(1),
-      accessLevel: z.enum(['read', 'write', 'admin']),
+      // #18 read-deny: 'none' is a read-deny grant (DB CHECK allows it). It only DENIES read when the
+      // sheet's row_level_read_permissions_enabled flag is on; otherwise it is inert (#2787).
+      accessLevel: z.enum(['read', 'write', 'admin', 'none']),
     })
     const parsed = schema.safeParse(req.body)
     if (!parsed.success) {
