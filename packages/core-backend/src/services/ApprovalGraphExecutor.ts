@@ -714,6 +714,44 @@ export class ApprovalGraphExecutor {
     }]
   }
 
+  /**
+   * P1-B add_sign (加签) — build active co-signer rows at the actor's current
+   * approval node. The returned rows are stamped `{ addedBy, addSign: true }`
+   * (and deliberately carry NO `resolvedFrom`), so:
+   *   - 会签/all-mode completion auto-extends from the LIVE active-assignment
+   *     count (no shadow counter; see `ApprovalProductService.dispatchAction`).
+   *   - `reduce_sign` can later identify exactly these rows for removal.
+   *   - `assertNoActiveAssignmentConflicts` treats them as static (no resolver
+   *     fan-out), skipping the dynamic-conflict SELECT — correct, since
+   *     targets are explicit user IDs.
+   *
+   * The metadata shape differs from `ApprovalAssigneeResolutionMetadata`, so the
+   * return type is a LOCAL shape (not `ApprovalGraphAssignment`) passed straight
+   * to `insertAssignments` (whose `metadata?: unknown` param accepts it). This
+   * keeps `ApprovalGraphAssignment.metadata` typed as resolution-only and the
+   * `isDynamicallyResolvedAssignment` guard intact.
+   */
+  buildAddSignAssignments(
+    currentNodeKey: string,
+    targetUserIds: string[],
+    addedBy: string,
+  ): Array<{
+    assignmentType: 'user'
+    assigneeId: string
+    nodeKey: string
+    sourceStep: number
+    metadata: { addedBy: string; addSign: true }
+  }> {
+    const currentStep = this.stepIndexForNode(currentNodeKey)
+    return targetUserIds.map((assigneeId) => ({
+      assignmentType: 'user' as const,
+      assigneeId,
+      nodeKey: currentNodeKey,
+      sourceStep: currentStep,
+      metadata: { addedBy, addSign: true as const },
+    }))
+  }
+
   private resolveFromNode(
     nodeKey: string,
     context: { aggregateMode: 'single' | 'all' | 'any' | null; aggregateComplete: boolean },

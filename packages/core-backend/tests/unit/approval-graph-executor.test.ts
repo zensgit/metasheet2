@@ -876,4 +876,66 @@ describe('validateApprovalFormData', () => {
       'requestedAt must be on or after 2026-04-10',
     ])
   })
+
+  // P1-B 加签 — buildAddSignAssignments returns one active user row per target
+  // id at the current node, stamped {addedBy, addSign:true} and deliberately
+  // carrying NO resolvedFrom (so it reads as a static, non-resolver assignment).
+  it('buildAddSignAssignments stamps add-signed co-signers at the current node', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_1', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-1'] } },
+        { key: 'approval_2', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-2'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-1', source: 'start', target: 'approval_1' },
+        { key: 'edge-1-2', source: 'approval_1', target: 'approval_2' },
+        { key: 'edge-2-end', source: 'approval_2', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    const executor = new ApprovalGraphExecutor(runtimeGraph, {})
+    const rows = executor.buildAddSignAssignments('approval_2', ['user-9', 'user-10'], 'user-2')
+
+    // approval_2 is the 2nd approval node → stepIndexForNode = index(1) + 1 = 2.
+    expect(rows).toEqual([
+      {
+        assignmentType: 'user',
+        assigneeId: 'user-9',
+        nodeKey: 'approval_2',
+        sourceStep: 2,
+        metadata: { addedBy: 'user-2', addSign: true },
+      },
+      {
+        assignmentType: 'user',
+        assigneeId: 'user-10',
+        nodeKey: 'approval_2',
+        sourceStep: 2,
+        metadata: { addedBy: 'user-2', addSign: true },
+      },
+    ])
+    // No resolvedFrom — the dynamic-resolution discriminator stays absent.
+    for (const row of rows) {
+      expect('resolvedFrom' in row.metadata).toBe(false)
+    }
+  })
+
+  it('buildAddSignAssignments returns an empty array for no targets', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_1', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-1'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-1', source: 'start', target: 'approval_1' },
+        { key: 'edge-1-end', source: 'approval_1', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+    const executor = new ApprovalGraphExecutor(runtimeGraph, {})
+    expect(executor.buildAddSignAssignments('approval_1', [], 'user-1')).toEqual([])
+  })
 })

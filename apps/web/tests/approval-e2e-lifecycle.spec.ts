@@ -218,8 +218,22 @@ const ElSelect = defineComponent({
   render() {
     return h('select', {
       'data-el-select': 'true',
+      'data-el-select-multiple': this.multiple ? 'true' : 'false',
+      // Intentionally NOT a native `multiple` <select>: a real multi-select
+      // ignores `.value` assignment, which tests rely on. We keep a single-value
+      // DOM node and reconstruct the array in the change handler below.
       value: Array.isArray(this.modelValue) ? '' : this.modelValue ?? '',
       onChange: (e: Event) => {
+        // For a multiple select, the v-model is an array. The change event
+        // carries a comma-separated list of selected values (tests set
+        // `select.value`), so split it into the array shape the component binds.
+        if (this.multiple) {
+          const raw = (e.target as HTMLSelectElement).value
+          const val = raw ? raw.split(',').map((s) => s.trim()).filter(Boolean) : []
+          this.$emit('update:modelValue', val)
+          this.$emit('change', val)
+          return
+        }
         const val = (e.target as HTMLSelectElement).value
         this.$emit('update:modelValue', val)
         this.$emit('change', val)
@@ -232,6 +246,36 @@ const ElOption = defineComponent({
   name: 'ElOption',
   props: { label: String, value: String },
   render() { return h('option', { value: this.value }, this.label) },
+})
+
+// Minimal radio-group stub: each child <el-radio> renders a clickable element
+// that emits the group's update with its own value (mirrors Element Plus's
+// value-based radio group). Used by the P1-B 加签 mode picker.
+const ElRadioGroup = defineComponent({
+  name: 'ElRadioGroup',
+  props: { modelValue: String },
+  emits: ['update:modelValue'],
+  provide() {
+    return {
+      radioGroupSelect: (value: string) => this.$emit('update:modelValue', value),
+      radioGroupValue: () => this.modelValue,
+    }
+  },
+  render() { return h('div', { 'data-el-radio-group': this.modelValue ?? '' }, this.$slots.default?.()) },
+})
+
+const ElRadio = defineComponent({
+  name: 'ElRadio',
+  props: { value: String, label: String },
+  inject: { radioGroupSelect: { default: null } } as any,
+  render() {
+    const self = this as any
+    return h('button', {
+      type: 'button',
+      'data-el-radio-value': this.value,
+      onClick: () => self.radioGroupSelect?.(this.value),
+    }, this.$slots.default?.())
+  },
 })
 
 const ElButton = defineComponent({
@@ -409,6 +453,8 @@ function registerAllStubs(app: VueApp<Element>) {
   app.component('ElInputNumber', ElInputNumber)
   app.component('ElSelect', ElSelect)
   app.component('ElOption', ElOption)
+  app.component('ElRadioGroup', ElRadioGroup)
+  app.component('ElRadio', ElRadio)
   app.component('ElButton', ElButton)
   app.component('ElIcon', ElIcon)
   app.component('ElTooltip', ElTooltip)
@@ -1025,6 +1071,136 @@ describe('Approval E2E Lifecycle', () => {
       await flushUi()
 
       expect(loadHistorySpy).toHaveBeenCalledWith('apv_pending_1')
+    })
+  })
+
+  // =========================================================================
+  // 5b. P1-B 加签 / 减签 (add_sign / reduce_sign)
+  // =========================================================================
+  describe('Add-sign / reduce-sign flow', () => {
+    // An active assignment stamped addSign:true at the current node — the only
+    // shape the 减签 picker should ever surface (INV-2 mirror).
+    function addSignedAssignment() {
+      return {
+        id: 'asgn_added_1',
+        type: 'user',
+        assigneeId: 'manager-9',
+        sourceStep: 1,
+        nodeKey: 'approval_1',
+        isActive: true,
+        metadata: { addSign: true, addedBy: 'user_current' },
+      }
+    }
+
+    it('clicking "加签" opens the add-sign dialog with a mode radio', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const addBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '加签')
+      expect(addBtn).toBeTruthy()
+      addBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')
+      expect(dialog).toBeTruthy()
+      // parallel + before mode radios present.
+      const radios = dialog!.querySelectorAll('[data-el-radio-value]')
+      expect(radios.length).toBe(2)
+    })
+
+    it('confirming 加签 calls executeAction with action=add_sign, targetUserIds (array) and addSignMode', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      executeActionSpy.mockResolvedValue(mockPendingApproval())
+      await mountDetailView()
+
+      const addBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '加签')
+      addBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')!
+      // Multiple-select: selecting an option emits the array shape the v-model
+      // binds (the stub wraps the chosen value into a string[]). A single
+      // <select> can only hold one option value, so we pick one — enough to
+      // assert the array contract reaches the action.
+      const select = dialog.querySelector('[data-el-select-multiple="true"]') as HTMLSelectElement
+      select.value = 'user_2'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+
+      // Pick the 前加签 (before) mode radio to assert it round-trips.
+      const beforeRadio = Array.from(dialog.querySelectorAll('[data-el-radio-value]'))
+        .find((r) => r.getAttribute('data-el-radio-value') === 'before') as HTMLButtonElement
+      beforeRadio.click()
+      await flushUi()
+
+      const confirmBtn = Array.from(dialog.querySelectorAll('button'))
+        .find((b) => b.textContent?.includes('确认加签'))
+      confirmBtn!.click()
+      await flushUi()
+
+      expect(executeActionSpy).toHaveBeenCalledWith('apv_pending_1', expect.objectContaining({
+        action: 'add_sign',
+        targetUserIds: ['user_2'],
+        addSignMode: 'before',
+      }))
+    })
+
+    it('hides "减签" when no add-signed rows exist at the current node', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval() // only a plain active assignment, no addSign
+      await mountDetailView()
+
+      const reduceBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '减签')
+      expect(reduceBtn).toBeUndefined()
+    })
+
+    it('减签 picker lists only add-signed active rows at the current node and emits reduce_sign', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({
+        assignments: [
+          // requester-original (no addSign) — must NOT be listed.
+          { id: 'asgn_orig', type: 'user', assigneeId: 'user_current', sourceStep: 1, nodeKey: 'approval_1', isActive: true, metadata: {} },
+          // add-signed at the current node — IS listed.
+          addSignedAssignment(),
+          // add-signed but at a DIFFERENT node — must NOT be listed.
+          { id: 'asgn_other_node', type: 'user', assigneeId: 'manager-8', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: { addSign: true } },
+          // add-signed but inactive — must NOT be listed.
+          { id: 'asgn_inactive', type: 'user', assigneeId: 'manager-7', sourceStep: 1, nodeKey: 'approval_1', isActive: false, metadata: { addSign: true } },
+        ],
+      } as any)
+      executeActionSpy.mockResolvedValue(mockPendingApproval())
+      await mountDetailView()
+
+      const reduceBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '减签')
+      expect(reduceBtn).toBeTruthy()
+      reduceBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="减签"]')!
+      const options = Array.from(dialog.querySelectorAll('option'))
+      // Exactly one reducible assignee: manager-9.
+      expect(options.map((o) => o.getAttribute('value'))).toEqual(['manager-9'])
+
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+      select.value = 'manager-9'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+
+      const confirmBtn = Array.from(dialog.querySelectorAll('button'))
+        .find((b) => b.textContent?.includes('确认减签'))
+      confirmBtn!.click()
+      await flushUi()
+
+      expect(executeActionSpy).toHaveBeenCalledWith('apv_pending_1', expect.objectContaining({
+        action: 'reduce_sign',
+        targetAssignmentUserId: 'manager-9',
+      }))
     })
   })
 
