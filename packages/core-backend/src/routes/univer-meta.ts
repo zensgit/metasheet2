@@ -3469,8 +3469,19 @@ async function loadDashboardSourceRows(args: {
   )
   const fieldTypeById = new Map(visibleFields.map((field) => [field.id, field.type] as const))
   const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
+  // §2a.3 ANTI-ORACLE: prune saved filterInfo.conditions by the SAME post-chokepoint allow-set
+  // (visibleFieldIds, masked by maskStoredRecordFieldIds above) that masks the per-row output at
+  // filterRecordDataByFieldIds below — NOT the pre-chokepoint fieldTypeById. A condition over a
+  // denied/tainted field (e.g. a formula-over-denied-foreign-lookup that survives field_permissions
+  // visibility but is dropped by the taint chokepoint) would otherwise be applied to RAW row.data
+  // here and turn the surviving row set / aggregate into an oracle for the masked value. Mirrors the
+  // records-list authz path (filteredConditions: fieldTypeById.has && allowedFieldIds.has) so a
+  // denied filter field is SILENTLY dropped — behaving identically to a non-existent field (no
+  // distinguishable warning/error, which would itself be an existence oracle).
   const filteredConditions = rawFilterInfo
-    ? rawFilterInfo.conditions.filter((condition) => fieldTypeById.has(condition.fieldId))
+    ? rawFilterInfo.conditions.filter(
+        (condition) => fieldTypeById.has(condition.fieldId) && visibleFieldIds.has(condition.fieldId),
+      )
     : []
   const filterInfo = filteredConditions.length > 0 && rawFilterInfo
     ? { ...rawFilterInfo, conditions: filteredConditions }
