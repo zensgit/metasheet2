@@ -190,6 +190,7 @@ jobs:
             tests/integration/multitable-viewconfig-filter-literal-redaction.test.ts \
             tests/integration/multitable-viewconfig-resave-guard.test.ts \
             tests/integration/multitable-records-list-authz.test.ts \
+            tests/integration/multitable-rowlevel-readdeny-enforce.test.ts \
             tests/integration/multitable-record-history-field-mask.test.ts \
             tests/integration/multitable-record-restore.test.ts \
             tests/integration/multitable-record-recycle-bin.test.ts \

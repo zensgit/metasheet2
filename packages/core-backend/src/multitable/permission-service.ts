@@ -892,6 +892,20 @@ export async function loadFieldPermissionScopeMap(
   }
 }
 
+/**
+ * #18 read-deny: the per-sheet opt-in flag. When true, a 'none' record_permission DENIES read on its
+ * record. Default-off → the deny is inert and the read model stays grant-additive (#2787).
+ */
+export async function loadRowLevelReadDenyEnabled(query: QueryFn, sheetId: string): Promise<boolean> {
+  if (!sheetId) return false
+  try {
+    const r = await query('SELECT row_level_read_permissions_enabled AS enabled FROM meta_sheets WHERE id = $1', [sheetId])
+    return (r.rows[0] as { enabled?: boolean } | undefined)?.enabled === true
+  } catch {
+    return false
+  }
+}
+
 export async function loadRecordPermissionScopeMap(
   query: QueryFn,
   sheetId: string,
@@ -951,6 +965,56 @@ export async function loadRecordPermissionScopeMap(
       || isUndefinedTableError(err, 'user_roles')
       || isUndefinedTableError(err, 'platform_member_group_members')
     ) return new Map()
+    throw err
+  }
+}
+
+/**
+ * #18 read-deny: the set of record ids in `sheetId` the actor is DENIED read on — i.e. a `'none'`
+ * record_permission via any of the actor's subjects (user/member-group/role). Deny-wins: a `'none'`
+ * for the actor denies the record regardless of any grant via another subject. The shared exclusion
+ * primitive for list/count read surfaces. Caller MUST first gate on `loadRowLevelReadDenyEnabled(sheetId)`
+ * AND skip for admins (admins bypass record-level read, mirroring requireRecordReadable) — this returns
+ * the raw denied set unconditionally.
+ */
+export async function loadDeniedRecordIds(query: QueryFn, sheetId: string, userId: string): Promise<Set<string>> {
+  if (!userId || !sheetId) return new Set<string>()
+  try {
+    const result = await query(
+      `SELECT DISTINCT rp.record_id
+       FROM record_permissions rp
+       WHERE rp.sheet_id = $2
+         AND rp.access_level = 'none'
+         AND (
+           (rp.subject_type = 'user' AND rp.subject_id = $1)
+           OR (
+             rp.subject_type = 'member-group'
+             AND EXISTS (
+               SELECT 1 FROM platform_member_group_members pgm
+               WHERE pgm.user_id = $1 AND pgm.group_id::text = rp.subject_id
+             )
+           )
+           OR (
+             rp.subject_type = 'role'
+             AND EXISTS (
+               SELECT 1 FROM user_roles ur
+               WHERE ur.user_id = $1 AND ur.role_id = rp.subject_id
+             )
+           )
+         )`,
+      [userId, sheetId],
+    )
+    const denied = new Set<string>()
+    for (const row of result.rows as Array<{ record_id?: unknown }>) {
+      if (typeof row.record_id === 'string' && row.record_id) denied.add(row.record_id)
+    }
+    return denied
+  } catch (err) {
+    if (
+      isUndefinedTableError(err, 'record_permissions')
+      || isUndefinedTableError(err, 'user_roles')
+      || isUndefinedTableError(err, 'platform_member_group_members')
+    ) return new Set<string>()
     throw err
   }
 }

@@ -49,6 +49,8 @@ import {
   loadFieldPermissionScopeMap,
   loadRecordCreatorMap,
   loadRecordPermissionScopeMap,
+  loadRowLevelReadDenyEnabled,
+  loadDeniedRecordIds,
   loadSheetMemberUserIdSet,
   loadSheetPermissionScopeMap,
   loadViewPermissionScopeMap,
@@ -3363,7 +3365,9 @@ export async function requireRecordReadable(
     const hasRecordPerms = await hasRecordPermissionAssignments(query, sheetId)
     if (hasRecordPerms) {
       const recordScopeMap = await loadRecordPermissionScopeMap(query, sheetId, [recordId], access.userId)
-      if (recordScopeMap.size > 0 && !deriveRecordPermissions(recordId, capabilities, recordScopeMap).canRead) {
+      // #18 read-deny: pass the per-sheet flag so a 'none' scope denies read when the sheet opted in.
+      const rowLevelDeny = await loadRowLevelReadDenyEnabled(query, sheetId)
+      if (recordScopeMap.size > 0 && !deriveRecordPermissions(recordId, capabilities, recordScopeMap, rowLevelDeny).canRead) {
         return {
           status: 403,
           body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
@@ -3728,7 +3732,10 @@ async function loadDashboardSourceRows(args: {
         access.userId,
       )
       if (recordScopeMap.size > 0) {
-        rows = rows.filter((row) => deriveRecordPermissions(row.id, capabilities, recordScopeMap).canRead)
+        // #18 read-deny: pass the per-sheet flag so 'none' scopes drop rows when the sheet opted in.
+        // /view loads-all + filters in-app, so the returned set (and any in-app total) stays exact.
+        const rowLevelDeny = await loadRowLevelReadDenyEnabled(query, sheetId)
+        rows = rows.filter((row) => deriveRecordPermissions(row.id, capabilities, recordScopeMap, rowLevelDeny).canRead)
       }
     }
   }
@@ -4330,6 +4337,10 @@ async function loadRecordSummaries(
     search?: string
     limit?: number
     offset?: number
+    // #18 read-deny: record ids to drop before search/total/slice (loads-all then slices in-app, so
+    // excluding here keeps pagination + total EXACT). Caller resolves these via loadDeniedRecordIds,
+    // gated by the sheet flag + non-admin. Empty/undefined → byte-identical to before.
+    excludeRecordIds?: ReadonlySet<string>
   },
 ): Promise<RecordSummaryPage> {
   const search = typeof args.search === 'string' ? args.search.trim().toLowerCase() : ''
@@ -4364,6 +4375,13 @@ async function loadRecordSummaries(
       display: toSummaryDisplay(displayValue),
     }
   })
+
+  // #18 read-deny: drop records the actor is denied (a 'none' scope on this sheet) BEFORE search/total/
+  // slice, so the picker never offers them and the total/pagination stay exact. Inert unless the caller
+  // passed a non-empty set (which it does only when the sheet flag is on + the actor is not an admin).
+  if (args.excludeRecordIds && args.excludeRecordIds.size > 0) {
+    summaries = summaries.filter((summary) => !args.excludeRecordIds!.has(summary.id))
+  }
 
   if (search) {
     summaries = summaries.filter((summary) => summary.display.toLowerCase().includes(search))
@@ -6000,7 +6018,9 @@ export function univerMetaRouter(): Router {
             [recordId],
             access.userId,
           )
-          if (recordScopeMap.size > 0 && !deriveRecordPermissions(recordId, capabilities, recordScopeMap).canRead) {
+          // #18 read-deny: pass the per-sheet flag so a 'none' scope denies history read when opted in.
+          const rowLevelDeny = await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)
+          if (recordScopeMap.size > 0 && !deriveRecordPermissions(recordId, capabilities, recordScopeMap, rowLevelDeny).canRead) {
             return sendForbidden(res)
           }
         }
@@ -6483,7 +6503,9 @@ export function univerMetaRouter(): Router {
     const schema = z.object({
       subjectType: z.enum(['user', 'role', 'member-group']),
       subjectId: z.string().min(1),
-      accessLevel: z.enum(['read', 'write', 'admin']),
+      // #18 read-deny: 'none' is a read-deny grant (DB CHECK allows it). It only DENIES read when the
+      // sheet's row_level_read_permissions_enabled flag is on; otherwise it is inert (#2787).
+      accessLevel: z.enum(['read', 'write', 'admin', 'none']),
     })
     const parsed = schema.safeParse(req.body)
     if (!parsed.success) {
@@ -8962,8 +8984,11 @@ export function univerMetaRouter(): Router {
             access.userId,
           )
           if (recordScopeMap.size > 0) {
+            // #18 read-deny: pass the per-sheet flag so a 'none' scope drops the record when the sheet
+            // opted in (this /view canRead filter loads-all + filters in-app, so the set stays exact).
+            const rowLevelDeny = await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)
             rows = rows.filter((row) => {
-              const perms = deriveRecordPermissions(row.id, capabilities, recordScopeMap)
+              const perms = deriveRecordPermissions(row.id, capabilities, recordScopeMap, rowLevelDeny)
               return perms.canRead
             })
           }
@@ -10070,7 +10095,11 @@ export function univerMetaRouter(): Router {
             access.userId,
           )
           if (recordScopeMap.size > 0) {
-            items = items.filter((r) => deriveRecordPermissions(r.id, capabilities, recordScopeMap).canRead)
+            // #18 read-deny: pass the per-sheet flag so a 'none' scope drops the record when the sheet
+            // opted in. Cursor pagination has no total, so post-filtering the page just yields shorter
+            // pages the client continues via nextCursor — exact + safe (mirrors GET /view's in-app filter).
+            const rowLevelDeny = await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)
+            items = items.filter((r) => deriveRecordPermissions(r.id, capabilities, recordScopeMap, rowLevelDeny).canRead)
           }
         }
       }
@@ -10342,12 +10371,19 @@ export function univerMetaRouter(): Router {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid displayFieldId' } })
       }
 
+      // #18 read-deny: drop records the actor is denied on this sheet before the summary total/slice
+      // (gated by the sheet flag + non-admin; inert when off).
+      const summaryDeniedIds = !access.isAdminRole
+        && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))
+        ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        : undefined
       const summary = await loadRecordSummaries(pool.query.bind(pool), sheetId, {
         displayFieldId,
         allowedFieldIds,
         search,
         limit,
         offset,
+        ...(summaryDeniedIds && summaryDeniedIds.size > 0 ? { excludeRecordIds: summaryDeniedIds } : {}),
       })
 
       return res.json({
@@ -10473,11 +10509,19 @@ export function univerMetaRouter(): Router {
         foreignBaseAllowedFieldIds,
         null,
       )
+      // #18 read-deny: a record DENIED to the actor on the FOREIGN sheet must never be offered as a link
+      // candidate. Gated by the foreign sheet's flag + non-admin; excluded inside loadRecordSummaries
+      // before its total/slice so pagination stays exact. Inert when the flag is off.
+      const foreignDeniedIds = !foreignAccess.isAdminRole
+        && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), linkConfig.foreignSheetId))
+        ? await loadDeniedRecordIds(pool.query.bind(pool), linkConfig.foreignSheetId, foreignAccess.userId)
+        : undefined
       const summary = await loadRecordSummaries(pool.query.bind(pool), linkConfig.foreignSheetId, {
         search,
         limit,
         offset,
         allowedFieldIds: foreignAllowedFieldIds,
+        ...(foreignDeniedIds && foreignDeniedIds.size > 0 ? { excludeRecordIds: foreignDeniedIds } : {}),
       })
 
       return res.json({
