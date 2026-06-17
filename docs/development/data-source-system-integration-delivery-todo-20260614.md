@@ -23,8 +23,11 @@
   smoke 包；#2720 已完成 sandbox 配置和核心 dry-run/apply/re-pull/rollback smoke，
   且 #2737 后的 read-only dedicated-route 子门已 PASS。controlled bad-row 已尝试但
   HOLD 在 `HOLD_TARGET_DDL_UNAVAILABLE`，随后 seeded naturally failing row 也被实体机
-  回复确认为无安全 reset/cleanup 形态，路由为 `HOLD_NO_SAFE_FAILURE_SHAPE`。下一步只能
-  是独立的 C6-5a test-only failure-injection 设计/实现/复验链；production/batch 仍关闭。
+  回复确认为无安全 reset/cleanup 形态，路由为 `HOLD_NO_SAFE_FAILURE_SHAPE`。C6-5a
+  design 和 C6-5b sandbox-only failure-injection seam 已合并；首个 C6-5c sandbox 包
+  `642560126` 在实体机 package/apply 阶段 BLOCKED，尚未进入 controlled bad-row 复验。
+  #2761 已修复 on-prem package 不应携带 `node_modules` 的打包/校验缺口，并已重发
+  `d8244ee13` sandbox 包；下一步是实体机部署新包并重跑 C6-5c。production/batch 仍关闭。
 
 ## 收口顺序
 
@@ -35,8 +38,8 @@
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
-| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 open; C6-5a test-only injection design queued | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
-| Release | 总包 + 实体机验收 | C6-5 smoke package published; #2720 core C6 sandbox smoke PASS, read-only subgate PASS, controlled bad-row HOLD_NO_SAFE_FAILURE_SHAPE | 交付签收 | 包内容/部署/证据不完整 |
+| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 open; C6-5a design done; C6-5b seam done (#2756); first C6-5c package `642560126` deploy blocked; package prune fix #2761 done; recut package `d8244ee13` ready for entity-machine retry | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
+| Release | 总包 + 实体机验收 | #2720 core C6 sandbox smoke PASS, read-only subgate PASS, controlled bad-row HOLD_NO_SAFE_FAILURE_SHAPE; old C6-5c deploy blocked, fixed package `d8244ee13` published and ready for rerun | 交付签收 | C6-5c controlled bad-row 证据未闭合 |
 
 ## P0 - ②b Arc 收口 Follow-Up
 
@@ -456,9 +459,34 @@ TODO:
     pins `pipelineId`, `targetSystemId`, `targetDataSourceId`, `targetObject`, and
     `environment=sandbox`, so mutable external-system config cannot relabel a production target
     as sandbox.
-  - [ ] C6-5c package + entity-machine rerun: publish a sandbox package, rerun controlled bad-row
-    with one synthetic row failure plus at least one clean sibling write, prove values-free
-    dead-letter/provenance and re-pull idempotence, then disable the test-injection gate.
+  - [x] C6-5c package published:
+    `multitable-onprem-datasource-c6-failure-injection-20260617-642560126`
+    (`metasheet-multitable-onprem-v2.5.0-datasource-c6-failure-injection-20260617-642560126`).
+    Workflow `https://github.com/zensgit/metasheet2/actions/runs/27659564604`
+    passed; release asset set includes `.tgz`, `.zip`, both `.sha256`, `SHA256SUMS`,
+    metadata JSON, and tgz/zip verify JSON+MD reports.
+  - [x] C6-5c deploy blocker diagnosed and package fix merged:
+    #2761 / squash `d8244ee13`.
+    The build now prunes copied `node_modules` entries, sweeps the final package root,
+    and the verifier rejects any `.tgz` / `.zip` archive list containing `node_modules`.
+  - [x] C6-5c fixed sandbox package published:
+    `multitable-onprem-datasource-c6-package-prune-20260617-d8244ee13`
+    (`metasheet-multitable-onprem-v2.5.0-datasource-c6-package-prune-d8244ee13`).
+    Workflow `https://github.com/zensgit/metasheet2/actions/runs/27661650691`
+    passed; both package verifiers passed before publish; local downloaded asset verification
+    also passed for `.tgz` and `.zip`, and direct archive-list checks found no `node_modules`
+    entries.
+  - [x] C6-5c old deploy blocker recorded: entity-machine attempt of package `642560126`
+    returned `apply exit=1` before dependency refresh / migrations / PM2 restart / healthcheck.
+    The `.zip` path failed during launcher staging extraction with a missing staged `pnpm-lock.yaml`;
+    the `.tgz` path failed before dependency refresh with a missing staged path under
+    `packages/mssql-readonly-utils/node_modules/typescript`. Installed runtime did not contain the
+    failure-injection marker, so no C6-5c rerun was attempted.
+  - [ ] C6-5c entity-machine rerun: deploy package `d8244ee13`, confirm the
+    failure-injection marker is installed, enable the server-owned test-injection double gate,
+    rerun controlled bad-row with one synthetic row failure plus at least one clean sibling write,
+    prove values-free dead-letter/provenance and re-pull idempotence, then disable the
+    test-injection gate.
   - C6-5 remains sandbox/entity-machine validation only; no production/batch rollout.
 
 完成条件:
@@ -511,6 +539,22 @@ TODO:
 - [x] C6-5 package deploy preflight: #2720 reports `deploy.applyExit=0`, `health=200`, dry-run/apply
   route presence, token guard, and target-kind requirement present.
 - [x] C6-5 sandbox write-gated target + active C6 pipeline configured on entity machine.
+- [x] C6-5c test-injection sandbox package published after #2756.
+  - release: `multitable-onprem-datasource-c6-failure-injection-20260617-642560126`.
+  - package: `metasheet-multitable-onprem-v2.5.0-datasource-c6-failure-injection-20260617-642560126`.
+  - workflow: `https://github.com/zensgit/metasheet2/actions/runs/27659564604`.
+  - asset set: `.tgz`, `.zip`, both `.sha256`, `SHA256SUMS`, metadata JSON,
+    and tgz/zip verify JSON+MD reports.
+- [x] C6-5c test-injection sandbox package deploy blocker fixed and recut.
+  - #2761 / `d8244ee13` makes `nodeModulesBundled=false` executable: build prunes
+    `node_modules`, verifier rejects package-contained `node_modules`, and the ZIP fallback scans
+    full extraction depth.
+  - fixed release: `multitable-onprem-datasource-c6-package-prune-20260617-d8244ee13`.
+  - fixed package: `metasheet-multitable-onprem-v2.5.0-datasource-c6-package-prune-d8244ee13`.
+  - workflow: `https://github.com/zensgit/metasheet2/actions/runs/27661650691`.
+  - current routing: old package `642560126` -> `c6_5c_deploy=blocked`; new package
+    `d8244ee13` -> `c6_5c_deploy=ready_for_retry`; `c6_5c_rerun=not_started`.
+- [ ] C6-5c test-injection sandbox package deployed on entity machine and rerun.
 - [ ] 干净实体机 / 全新 DB smoke，用来暴露 migration 排序缺口。
 - [ ] 部署前跑 pending-migration diff + auth round-trip；静默 401 优先按 schema/migration 缺口排查，不先归咎 JWT secret。
 - [ ] C2 read-only smoke。

@@ -44,8 +44,12 @@ Forbidden:
 
 ## Preconditions
 
-- Deploy package `metasheet-multitable-onprem-v2.5.0-datasource-c6-ui-20260616-9fb34fd91`
-  or newer.
+- For the already-passed core C6 smoke, package
+  `metasheet-multitable-onprem-v2.5.0-datasource-c6-ui-20260616-9fb34fd91`
+  was sufficient.
+- For the C6-5c controlled bad-row rerun, deploy package
+  `metasheet-multitable-onprem-v2.5.0-datasource-c6-package-prune-d8244ee13`
+  or a later package that includes #2756 and #2761.
 - Confirm health is `200`.
 - Confirm #2720 preflight already sees:
   - `dryRunRoutePresent=true`;
@@ -380,6 +384,47 @@ is a routing signal only, not runtime authorization. The next path is:
 1. C6-5a test-only failure-injection design;
 2. C6-5b default-off sandbox-only implementation;
 3. C6-5c new package + entity-machine rerun.
+
+C6-5a and C6-5b are now on `origin/main`. The first C6-5c sandbox package was
+published, but its entity-machine deploy attempt was blocked before rerun:
+
+- release tag:
+  `multitable-onprem-datasource-c6-failure-injection-20260617-642560126`;
+- package:
+  `metasheet-multitable-onprem-v2.5.0-datasource-c6-failure-injection-20260617-642560126`;
+- source commit: `6425601267264d256cbe0c2fa5e1f3c2fe5784a6`;
+- workflow:
+  `https://github.com/zensgit/metasheet2/actions/runs/27659564604`;
+- asset set: `.tgz`, `.zip`, both `.sha256`, `SHA256SUMS`, metadata JSON,
+  and tgz/zip verify JSON+MD reports.
+
+Current entity-machine result for that package:
+
+- `c6_5c_deploy=blocked`;
+- `c6_5c_rerun=not_started`;
+- `.zip` via `deploy.bat <zip>` failed during launcher staging extraction with
+  a missing staged `pnpm-lock.yaml`;
+- `.tgz` via `deploy.bat <tgz>` failed before dependency refresh / migrations /
+  PM2 restart / healthcheck with a missing staged path under
+  `packages/mssql-readonly-utils/node_modules/typescript`;
+- installed runtime did not contain the C6 failure-injection marker.
+
+#2761 is now merged and a fixed package is published:
+
+- release tag:
+  `multitable-onprem-datasource-c6-package-prune-20260617-d8244ee13`;
+- package:
+  `metasheet-multitable-onprem-v2.5.0-datasource-c6-package-prune-d8244ee13`;
+- source commit: `d8244ee13e01368627d3a3aef4a5394db25708e2`;
+- workflow:
+  `https://github.com/zensgit/metasheet2/actions/runs/27661650691`;
+- package verification: workflow passed, both `.tgz` and `.zip` verifier reports
+  passed before publish, and downloaded archive-list checks found no
+  `node_modules` entries.
+
+Do not enable the failure-injection env until this fixed package deploys
+cleanly and the installed runtime contains the C6 failure-injection marker.
+The next step is to deploy the fixed package, then rerun this section.
 
 The C6-5b implementation is server-owned and deploy-gated. For the C6-5c
 sandbox package only, the deploy config must include both gates:
