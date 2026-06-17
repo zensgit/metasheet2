@@ -55,6 +55,7 @@ const VALID_TRIGGER_TYPES = new Set([
   'schedule.cron',
   'schedule.interval',
   'webhook.received',
+  'form.submitted',
 ])
 
 const LEGACY_ACTION_TYPES = [
@@ -617,6 +618,7 @@ export class AutomationService {
       'multitable.record.created',
       'multitable.record.updated',
       'multitable.record.deleted',
+      'multitable.form.submitted',
     ]
 
     for (const eventType of events) {

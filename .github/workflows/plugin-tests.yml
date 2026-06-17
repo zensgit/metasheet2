@@ -235,6 +235,7 @@ jobs:
             tests/integration/multitable-automation-jobs.test.ts \
             tests/integration/multitable-automation-suspend-resume.test.ts \
             tests/integration/multitable-automation-start-approval.test.ts \
+            tests/integration/multitable-form-submit-trigger.test.ts \
             tests/integration/multitable-webhook-event-bridge.test.ts \
             tests/integration/multitable-webhook-retry-tick.test.ts \
             tests/integration/multitable-ai-shortcut-run.test.ts \

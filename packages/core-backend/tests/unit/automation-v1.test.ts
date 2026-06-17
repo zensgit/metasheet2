@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { evaluateCondition, evaluateConditions, type AutomationCondition, type ConditionGroup } from '../../src/multitable/automation-conditions'
 import { AutomationExecutor, type AutomationRule, type AutomationDeps, type AutomationExecution } from '../../src/multitable/automation-executor'
 import { AutomationScheduler, parseCronToIntervalMs } from '../../src/multitable/automation-scheduler'
-import { matchesTrigger } from '../../src/multitable/automation-triggers'
+import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, ALL_TRIGGER_TYPES } from '../../src/multitable/automation-triggers'
 import type { AutomationTrigger, AutomationTriggerType } from '../../src/multitable/automation-triggers'
 import { EventBus } from '../../src/integration/events/event-bus'
 import { ALL_ACTION_TYPES, type AutomationAction } from '../../src/multitable/automation-actions'
@@ -277,6 +277,17 @@ describe('Trigger Matching', () => {
   it('matches record.deleted trigger', () => {
     const trigger: AutomationTrigger = { type: 'record.deleted', config: {} }
     expect(matchesTrigger(trigger, 'record.deleted', {})).toBe(true)
+  })
+
+  it('matches form.submitted trigger, and does not fire on record.created', () => {
+    const trigger: AutomationTrigger = { type: 'form.submitted', config: {} }
+    expect(matchesTrigger(trigger, 'form.submitted', {})).toBe(true)
+    expect(matchesTrigger(trigger, 'record.created', {})).toBe(false)
+  })
+
+  it('maps the multitable.form.submitted event to the form.submitted trigger', () => {
+    expect(TRIGGER_TYPE_BY_EVENT['multitable.form.submitted']).toBe('form.submitted')
+    expect(ALL_TRIGGER_TYPES).toContain('form.submitted')
   })
 
   it('field.value_changed fires only on record.updated', () => {
