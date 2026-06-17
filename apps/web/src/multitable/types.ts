@@ -891,7 +891,9 @@ export interface MetaHierarchyViewConfig {
 }
 
 // --- Record-level permissions ---
-export type RecordPermissionAccessLevel = 'read' | 'write' | 'admin'
+// 'none' = a row-level read-deny grant (#18); only effective when the sheet's
+// row_level_read_permissions_enabled flag is on, otherwise inert (#2787 contract).
+export type RecordPermissionAccessLevel = 'read' | 'write' | 'admin' | 'none'
 export type RecordPermissionSubjectType = 'user' | 'role' | 'member-group'
 
 export interface RecordPermissionEntry {

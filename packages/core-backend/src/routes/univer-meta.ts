@@ -5522,6 +5522,61 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  // ── #18 row-level read-deny: per-sheet flag (default-off) ──
+  // GET reports the flag (any sheet reader, so the authoring UI can show state); PUT sets it
+  // (manage-gated). When ON, record_permissions access_level='none' denies read across every
+  // read surface; OFF → inert (#2787 contract). The 'none' grant is set via the record-permission
+  // write API (PUT /sheets/:sheetId/records/:recordId/permissions).
+  router.get('/sheets/:sheetId/row-level-read-deny', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
+      const r = await pool.query('SELECT row_level_read_permissions_enabled AS enabled FROM meta_sheets WHERE id = $1', [sheetId])
+      return res.json({ ok: true, data: { enabled: (r.rows[0] as { enabled?: boolean } | undefined)?.enabled === true } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] read row-level-read-deny flag failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to read row-level read-deny flag' } })
+    }
+  })
+
+  router.put('/sheets/:sheetId/row-level-read-deny', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    const parsed = z.object({ enabled: z.boolean() }).safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      await pool.query('UPDATE meta_sheets SET row_level_read_permissions_enabled = $1 WHERE id = $2', [parsed.data.enabled, sheetId])
+      return res.json({ ok: true, data: { enabled: parsed.data.enabled } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] set row-level-read-deny flag failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to set row-level read-deny flag' } })
+    }
+  })
+
   // ── View permission authoring ──
 
   router.get('/views/:viewId/permissions', async (req: Request, res: Response) => {

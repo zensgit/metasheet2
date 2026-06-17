@@ -5,6 +5,7 @@
         <div>
           <h4 class="meta-record-perm__title">{{ p('record.title') }}</h4>
           <p class="meta-record-perm__subtitle">{{ p('record.subtitle') }}</p>
+          <p class="meta-record-perm__hint">{{ p('rowDeny.noneHint') }}</p>
         </div>
         <button class="meta-record-perm__close" type="button" @click="requestClose">&times;</button>
       </div>
@@ -266,7 +267,7 @@ const candidateDrafts = ref<Record<string, RecordPermissionAccessLevel>>({})
 let candidateLoadVersion = 0
 
 const { isZh } = useLocale()
-const recordAccessLevels: RecordPermissionAccessLevel[] = ['read', 'write', 'admin']
+const recordAccessLevels: RecordPermissionAccessLevel[] = ['read', 'write', 'admin', 'none']
 const recordAccessOptions = computed(() =>
   recordAccessLevels.map((value) => ({
     value,

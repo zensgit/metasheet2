@@ -668,7 +668,7 @@ function normalizeRecordPermissionEntry(
   const recordId = typeof payload?.recordId === 'string' ? payload.recordId : ''
   const subjectId = typeof payload?.subjectId === 'string' ? payload.subjectId : ''
   const accessLevel =
-    payload?.accessLevel === 'read' || payload?.accessLevel === 'write' || payload?.accessLevel === 'admin'
+    payload?.accessLevel === 'read' || payload?.accessLevel === 'write' || payload?.accessLevel === 'admin' || payload?.accessLevel === 'none'
       ? payload.accessLevel
       : null
   if (!id || !sheetId || !recordId || !subjectType || !subjectId || !accessLevel) return null
@@ -1601,6 +1601,27 @@ export class MultitableApiClient {
       { method: 'DELETE' },
     )
     await this.parseJson(res)
+  }
+
+  // #18 row-level read-deny: per-sheet flag (default-off). When ON, record_permissions access_level='none'
+  // denies read across every read surface; OFF → inert.
+  async getRowLevelReadDeny(sheetId: string): Promise<boolean> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/row-level-read-deny`)
+    const data = await this.parseJson<{ enabled?: boolean }>(res)
+    return data?.enabled === true
+  }
+
+  async setRowLevelReadDeny(sheetId: string, enabled: boolean): Promise<boolean> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/row-level-read-deny`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      },
+    )
+    const data = await this.parseJson<{ enabled?: boolean }>(res)
+    return data?.enabled === true
   }
 
   // --- Automation rules ---

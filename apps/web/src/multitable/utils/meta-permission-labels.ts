@@ -10,9 +10,15 @@ export type MetaPermissionLabelKey =
   | 'action.copyFieldViewAcl'
   | 'action.grant'
   | 'access.admin'
+  | 'access.none'
   | 'access.read'
   | 'access.write'
   | 'access.writeOwn'
+  | 'rowDeny.title'
+  | 'rowDeny.toggle'
+  | 'rowDeny.warning'
+  | 'rowDeny.noneHint'
+  | 'rowDeny.enabledNote'
   | 'field.applyAll'
   | 'field.bulkApply'
   | 'field.error.applyTemplate'
@@ -111,9 +117,15 @@ const LABELS: Record<MetaPermissionLabelKey, { en: string; zh: string }> = {
   'action.copyFieldViewAcl': { en: 'Copy field+view ACL', zh: '复制字段+视图 ACL' },
   'action.grant': { en: 'Grant', zh: '授权' },
   'access.admin': { en: 'Admin', zh: '管理员' },
+  'access.none': { en: 'No access (deny read)', zh: '无权限（拒绝读取）' },
   'access.read': { en: 'Read', zh: '读取' },
   'access.write': { en: 'Write', zh: '写入' },
   'access.writeOwn': { en: 'Write own', zh: '仅写入自己' },
+  'rowDeny.title': { en: 'Row-level read permissions', zh: '行级读取权限' },
+  'rowDeny.toggle': { en: 'Enable per-record read-deny for this sheet', zh: '为此表启用按记录的读取拒绝' },
+  'rowDeny.warning': { en: 'When enabled, records with a “No access” grant become invisible to non-granted readers across every view, list, summary, aggregate, and export — a real visibility change.', zh: '启用后，带有“无权限”授权的记录将对未被授权的读者在所有视图、列表、汇总、聚合和导出中不可见——这是真实的可见性变更。' },
+  'rowDeny.noneHint': { en: 'Only effective when row-level read permissions are enabled for this sheet.', zh: '仅当此表启用了行级读取权限时生效。' },
+  'rowDeny.enabledNote': { en: 'Row-level read-deny is ON for this sheet.', zh: '此表已开启行级读取拒绝。' },
   'field.applyAll': { en: 'Apply to all fields', zh: '应用到所有字段' },
   'field.bulkApply': { en: 'Bulk apply to all fields', zh: '批量应用到所有字段' },
   'field.error.applyTemplate': { en: 'Failed to apply field permission template', zh: '应用字段权限模板失败' },
@@ -225,6 +237,7 @@ export function recordAccessText(level: string, isZh: boolean): string {
   if (level === 'read') return permissionLabel('access.read', isZh)
   if (level === 'write') return permissionLabel('access.write', isZh)
   if (level === 'admin') return permissionLabel('access.admin', isZh)
+  if (level === 'none') return permissionLabel('access.none', isZh)
   return level
 }
 
