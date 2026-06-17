@@ -125,9 +125,9 @@
       class="meta-cell-editor__input"
       type="number"
       :step="numericStep"
-      :value="modelValue ?? ''"
+      :value="scalarActive ? (scalarValue ?? '') : (modelValue ?? '')"
       @input="onNumberInput"
-      @keydown.enter="emit('confirm')"
+      @keydown.enter="scalarConfirm()"
       @keydown.escape="emit('cancel')"
     />
 
@@ -135,10 +135,10 @@
     <label v-else-if="field.type === 'boolean'" class="meta-cell-editor__check">
       <input
         type="checkbox"
-        :checked="!!modelValue"
-        @change="emit('update:modelValue', ($event.target as HTMLInputElement).checked); emit('confirm')"
+        :checked="scalarActive ? !!scalarValue : !!modelValue"
+        @change="onBooleanChange($event)"
       />
-      <span>{{ modelValue ? l('cell.yes') : l('cell.no') }}</span>
+      <span>{{ (scalarActive ? scalarValue : modelValue) ? l('cell.yes') : l('cell.no') }}</span>
     </label>
 
     <!-- select -->
@@ -195,9 +195,9 @@
       class="meta-cell-editor__input"
       type="number"
       :step="numericStep"
-      :value="modelValue ?? ''"
+      :value="scalarActive ? (scalarValue ?? '') : (modelValue ?? '')"
       @input="onNumberInput"
-      @keydown.enter="emit('confirm')"
+      @keydown.enter="scalarConfirm()"
       @keydown.escape="emit('cancel')"
     />
 
@@ -365,6 +365,7 @@ import {
   locationValueFromAddress,
 } from '../../utils/field-display'
 import { useYjsCellBinding, type YjsCellBinding } from '../../composables/useYjsCellBinding'
+import { useYjsScalarCell, type YjsScalarCellBinding } from '../../composables/useYjsScalarCell'
 import { useLocale } from '../../../composables/useLocale'
 import {
   metaCoreLabel,
@@ -490,6 +491,59 @@ const yjsBinding = yjsEligibleAtSetup
 const yjsActive = computed(() => yjsBinding.active.value)
 const yjsText = computed(() => yjsBinding.text.value)
 const yjsCollaborators = computed(() => yjsBinding.collaborators.value)
+
+// --- Yjs opt-in binding for ATOMIC (non-text) scalar cells (LWW via the
+// `fields` Y.Map). Same gating/fallback discipline as the text binding:
+// `scalarActive` flips true only once a live Y.Doc is attached AND the field
+// key exists in the Y.Map (the backend seeds atomic fields). Wired here only
+// for the unambiguous numeric/boolean types — select/date (string-stored
+// atomics) + multiSelect/rating/duration are deferred to a focused pass.
+// Inactive → byte-identical REST path (setValue is a no-op; nothing changes).
+const SCALAR_YJS_TYPES = ['number', 'currency', 'percent', 'boolean']
+const scalarFieldIdRef = computed<string | null>(() => {
+  if (!props.field || !SCALAR_YJS_TYPES.includes(props.field.type)) return null
+  if (!props.recordId) return null
+  return props.field.id
+})
+const inertScalarBinding: YjsScalarCellBinding = {
+  active: ref(false),
+  value: ref(undefined),
+  setValue: () => { /* inactive: caller keeps using REST */ },
+  release: () => { /* nothing to release */ },
+}
+const scalarEligibleAtSetup = !!props.field && SCALAR_YJS_TYPES.includes(props.field.type) && !!props.recordId
+const scalarBinding = scalarEligibleAtSetup
+  ? useYjsScalarCell({
+      recordId: computed<string | null>(() => recordIdRef.value ?? null),
+      fieldId: scalarFieldIdRef,
+      onFallback: (reason) => {
+        if (reason === 'disabled') return
+        // eslint-disable-next-line no-console
+        console.warn(`[multitable] Yjs scalar cell binding fell back to REST (${reason})`)
+      },
+    })
+  : inertScalarBinding
+const scalarActive = computed(() => scalarBinding.active.value)
+const scalarValue = computed(() => scalarBinding.value.value)
+
+// Mirror onTextInput: when the scalar Yjs path is live, drive the Y.Map (LWW)
+// AND emit update:modelValue so the parent's edit buffer/preview stays in sync.
+// Inactive → only the emit fires (REST path, byte-identical to before).
+function commitScalar(next: unknown) {
+  if (scalarActive.value) scalarBinding.setValue(next)
+  emit('update:modelValue', next)
+}
+// Mirror onTextConfirm: signal yjs-commit so the host skips the redundant REST
+// patch (the server bridge persists the Y.Map change), then confirm.
+function scalarConfirm() {
+  if (scalarActive.value) emit('yjs-commit')
+  emit('confirm')
+}
+function onBooleanChange(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked
+  commitScalar(checked)
+  scalarConfirm()
+}
 
 function onTextInput(event: Event) {
   const next = (event.target as HTMLInputElement).value
@@ -633,7 +687,7 @@ function onFileDrop(e: DragEvent) {
 
 function onNumberInput(e: Event) {
   const v = (e.target as HTMLInputElement).value
-  emit('update:modelValue', v === '' ? null : Number(v))
+  commitScalar(v === '' ? null : Number(v))
 }
 
 const numericStep = computed(() => {

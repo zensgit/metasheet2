@@ -11,6 +11,9 @@ const useYjsCellBindingMock = vi.fn(() => ({
 
 vi.mock('../src/multitable/composables/useYjsCellBinding', () => ({
   useYjsCellBinding: (...args: unknown[]) => useYjsCellBindingMock(...args),
+  // useYjsScalarCell (now constructed for number cells) imports this from here;
+  // the mock must re-export it or the real scalar binding crashes on setup.
+  isYjsCollabEnabled: () => false,
 }))
 
 async function loadEditor() {
