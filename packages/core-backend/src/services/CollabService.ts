@@ -147,6 +147,31 @@ export class CollabService {
     return `sheet:${sheetId}`
   }
 
+  // Live cell-cursor payload: {sheetId, recordId, fieldId}; recordId/fieldId null = cleared (blur).
+  private normalizeCursorPayload(
+    payload: unknown,
+  ): { sheetId: string; recordId: string | null; fieldId: string | null } | null {
+    if (!payload || typeof payload !== 'object') return null
+    const p = payload as Record<string, unknown>
+    const sheetId = typeof p.sheetId === 'string' ? p.sheetId.trim() : ''
+    if (!sheetId) return null
+    const recordId = typeof p.recordId === 'string' && p.recordId.trim() ? p.recordId.trim() : null
+    const fieldId = typeof p.fieldId === 'string' && p.fieldId.trim() ? p.fieldId.trim() : null
+    return { sheetId, recordId, fieldId }
+  }
+
+  // Broadcast a user's active cell to the rest of the sheet room (sender excluded via socket.to). The
+  // userId is the trusted server-side identity; recordId/fieldId null clears that user's remote cursor.
+  private broadcastCursor(
+    socket: Socket,
+    sheetId: string,
+    userId: string,
+    recordId: string | null,
+    fieldId: string | null,
+  ): void {
+    socket.to(this.buildSheetRoom(sheetId)).emit('sheet:cursor', { sheetId, userId, recordId, fieldId })
+  }
+
   private trackSocketSheetMembership(socketId: string, sheetId: string) {
     const current = this.sheetMembershipBySocket.get(socketId) ?? new Set<string>()
     current.add(sheetId)
@@ -259,6 +284,8 @@ export class CollabService {
         const userId = this.getTrustedUserId(socket)
         const sheetIds = [...(this.sheetMembershipBySocket.get(socket.id) ?? [])]
         for (const sheetId of sheetIds) {
+          // Clear this socket's live cell-cursor for the rest of the room before dropping presence.
+          if (userId) this.broadcastCursor(socket, sheetId, userId, null, null)
           if (userId) this.removeSheetPresence(sheetId, userId, socket.id)
           this.untrackSocketSheetMembership(socket.id, sheetId)
           this.emitSheetPresence(sheetId)
@@ -275,11 +302,23 @@ export class CollabService {
         if (!sheetId) return
         const room = this.buildSheetRoom(sheetId)
         const userId = this.getTrustedUserId(socket)
+        if (userId) this.broadcastCursor(socket, sheetId, userId, null, null)
         socket.leave(room)
         if (userId) this.removeSheetPresence(sheetId, userId, socket.id)
         this.untrackSocketSheetMembership(socket.id, sheetId)
         this.logger.info(`Client ${socket.id} left ${room}`)
         this.emitSheetPresence(sheetId)
+      })
+
+      // Live cell-cursor relay (presentational, no persistence): a sheet member broadcasts its active
+      // cell to the rest of the room (sender excluded). Membership-gated; userId is the trusted identity.
+      socket.on('sheet:cursor', (payload: unknown) => {
+        const data = this.normalizeCursorPayload(payload)
+        if (!data) return
+        if (!this.sheetMembershipBySocket.get(socket.id)?.has(data.sheetId)) return
+        const userId = this.getTrustedUserId(socket)
+        if (!userId) return
+        this.broadcastCursor(socket, data.sheetId, userId, data.recordId, data.fieldId)
       })
 
       socket.on('join-comment-record', (payload: unknown) => {

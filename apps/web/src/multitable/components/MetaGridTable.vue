@@ -76,7 +76,7 @@
                 v-for="(field, ci) in visibleFields"
                 :key="field.id"
                 class="meta-grid__cell"
-                :class="{ 'meta-grid__cell--editing': isEditing(item.row.id, field.id), 'meta-grid__cell--readonly': !isEditable(item.row.id, field), 'meta-grid__cell--focused': focusRow === item.navIndex && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(item.row.id, field.id) }"
+                :class="{ 'meta-grid__cell--editing': isEditing(item.row.id, field.id), 'meta-grid__cell--readonly': !isEditable(item.row.id, field), 'meta-grid__cell--focused': focusRow === item.navIndex && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(item.row.id, field.id), 'meta-grid__cell--remote-cursor': hasRemoteCursor(item.row.id, field.id) }"
                 :style="cellStyle(item.row.id, field.id, ci)"
                 @dblclick="startEdit(item.row, field)"
                 @click.stop="onCellClick(item.navIndex, ci, item.row.id)"
@@ -208,7 +208,7 @@
                 role="gridcell"
                 :aria-label="field.name"
                 class="meta-grid__cell"
-                :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(row.id, field.id) }"
+                :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(row.id, field.id), 'meta-grid__cell--remote-cursor': hasRemoteCursor(row.id, field.id) }"
                 :style="cellStyle(row.id, field.id, ci)"
                 @dblclick="startEdit(row, field)"
                 @click.stop="onCellClick(ri, ci, row.id)"
@@ -468,6 +468,9 @@ const props = defineProps<{
   // B5: people-mention candidates for rich-`longText` in-cell editing. Forwarded to
   // MetaCellEditor; the workbench feeds its already-loaded commentMentionSuggestions.
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  // Live cell-cursors: cellKey (`${recordId}:${fieldId}`) → remote collaborator userIds on that cell.
+  // Presentational highlight only; absent/empty → no cursors rendered.
+  remoteCursorsByCell?: Map<string, string[]>
 }>()
 
 const emit = defineEmits<{
@@ -497,6 +500,8 @@ const emit = defineEmits<{
   (e: 'ai-run', recordId: string, field: MetaField): void
   // B1-b: a button-field cell was clicked (run its configured action).
   (e: 'run-button', payload: { recordId: string; field: MetaField }): void
+  // Live cell-cursors: the local user focused a cell → parent broadcasts it as the active cursor.
+  (e: 'cursor-focus', payload: { recordId: string; fieldId: string }): void
 }>()
 
 const { isZh } = useLocale()
@@ -929,6 +934,13 @@ function onFieldCommentKeydown(event: KeyboardEvent, recordId: string, fieldId: 
 
 function onCellClick(ri: number, ci: number, rid: string) {
   focusRow.value = ri; focusCol.value = ci; emit('select-record', rid)
+  const fieldId = props.visibleFields[ci]?.id
+  if (fieldId) emit('cursor-focus', { recordId: rid, fieldId })
+}
+
+// Live cell-cursors: remote collaborators currently occupying a given cell (presentational highlight).
+function hasRemoteCursor(recordId: string, fieldId: string): boolean {
+  return (props.remoteCursorsByCell?.get(`${recordId}:${fieldId}`)?.length ?? 0) > 0
 }
 
 function startEdit(row: MetaRecord, field: MetaField) {
@@ -1046,6 +1058,8 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__cell--editing { padding: 2px 4px; background: #fff; }
 .meta-grid__cell--readonly { color: #666; }
 .meta-grid__cell--focused { outline: 2px solid #409eff; outline-offset: -2px; }
+/* Live cell-cursor: a remote collaborator is on this cell (presentational, no interaction change). */
+.meta-grid__cell--remote-cursor { outline: 2px dashed #e6a23c; outline-offset: -2px; position: relative; }
 .meta-grid__cell-scale-icon { display: inline-block; margin-right: 4px; font-weight: 700; vertical-align: middle; }
 /* Over a data-bar / color-scale fill, force the cell-renderer's number sign-colors
    (green/red, set on an inner span that out-specifies the cell) to a luminance-
