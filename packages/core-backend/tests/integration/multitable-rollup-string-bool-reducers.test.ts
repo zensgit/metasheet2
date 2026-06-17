@@ -38,6 +38,13 @@ const FLD_OR = `fld_sb_or_${TS}` // or(flag) -> true
 const FLD_XOR = `fld_sb_xor_${TS}` // xor(flag) -> 2 truthy -> false
 const FLD_SUM = `fld_sb_sum_${TS}` // sum(num) -> 35 (numeric rollup control)
 
+// Views that FILTER source records by a rollup CONDITION field — these lock the consumer threading: the
+// filter path must resolve the rollup to its effective kind (string/boolean), not the blind 'number'.
+const VIEW_CONCAT_HIT = `view_sb_chit_${TS}` // concat contains 'a' → REC present (positive control)
+const VIEW_CONCAT_MISS = `view_sb_cmiss_${TS}` // concat contains 'zzz' → REC ABSENT (a numeric coercion would match-all → present)
+const VIEW_OR_TRUE = `view_sb_or_${TS}` // OR rollup is true → REC present (a numeric coercion of the bool → excluded)
+const VIEW_AND_TRUE = `view_sb_and_${TS}` // AND rollup is true → REC absent (and=false)
+
 const FR1 = `rec_sb_f1_${TS}` // tag a, flag true,  num 10
 const FR2 = `rec_sb_f2_${TS}` // tag b, flag true,  num 20
 const FR3 = `rec_sb_f3_${TS}` // tag c, flag false, num 5
@@ -64,6 +71,12 @@ async function readRollup(fieldId: string): Promise<unknown> {
 
 function rollup(aggregation: string, targetFieldId: string): string {
   return JSON.stringify({ linkFieldId: FLD_LINK, targetFieldId, foreignSheetId: FS, aggregation })
+}
+
+async function viewRowIds(viewId: string): Promise<string[]> {
+  const res = await request(buildApp(USER)).get('/api/multitable/view').query({ sheetId: MS, viewId })
+  expect(res.status).toBe(200)
+  return (res.body?.data?.rows ?? []).map((r: { id: string }) => r.id)
 }
 
 async function dashboardSum(valueFieldId: string, metric: 'sum' | 'avg' = 'sum') {
@@ -115,9 +128,20 @@ describeIfDatabase('multitable rollup string/boolean reducers (slice 2b, real DB
       await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)',
         [`lnk_sb_${fr}`, FLD_LINK, REC, fr])
     }
+
+    // Views whose filter CONDITION is a rollup field — a filter on a computed field triggers
+    // applyLookupRollup, then the filter resolves the rollup's effective kind via resolveEffectiveFieldType.
+    const view = (id: string, conditions: unknown[]) =>
+      q('INSERT INTO meta_views (id, sheet_id, name, type, hidden_field_ids, filter_info, config) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb)',
+        [id, MS, id, 'grid', '[]', JSON.stringify({ conjunction: 'and', conditions }), '{}'])
+    await view(VIEW_CONCAT_HIT, [{ fieldId: FLD_CONCAT, operator: 'contains', value: 'a' }])
+    await view(VIEW_CONCAT_MISS, [{ fieldId: FLD_CONCAT, operator: 'contains', value: 'zzz' }])
+    await view(VIEW_OR_TRUE, [{ fieldId: FLD_OR, operator: 'is', value: true }])
+    await view(VIEW_AND_TRUE, [{ fieldId: FLD_AND, operator: 'is', value: true }])
   })
 
   afterAll(async () => {
+    await q('DELETE FROM meta_views WHERE sheet_id = $1', [MS]).catch(() => {})
     await q('DELETE FROM meta_links WHERE field_id = $1', [FLD_LINK]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[MS, FS]]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[MS, FS]]).catch(() => {})
@@ -136,6 +160,19 @@ describeIfDatabase('multitable rollup string/boolean reducers (slice 2b, real DB
     expect(await readRollup(FLD_OR)).toBe(true)
     expect(await readRollup(FLD_XOR)).toBe(false) // 2 truthy (FR1,FR2) → even
     expect(await readRollup(FLD_SUM)).toBe(35) // numeric control unaffected
+  })
+
+  test('view FILTER on a STRING (concatenate) rollup uses string semantics, not numeric match-all', async () => {
+    expect(await viewRowIds(VIEW_CONCAT_HIT)).toEqual([REC]) // 'a, b, c' contains 'a' → present
+    // THE threading lock: if the rollup were coerced to number, `contains` hits the numeric catch-all
+    // (match-all) and REC would wrongly appear. Resolved-as-string → genuine no-match → empty.
+    expect(await viewRowIds(VIEW_CONCAT_MISS)).toEqual([])
+  })
+
+  test('view FILTER on a BOOLEAN (and/or/xor) rollup uses boolean semantics', async () => {
+    // OR rollup = true → present. A numeric coercion of the boolean would fail the equality and exclude it.
+    expect(await viewRowIds(VIEW_OR_TRUE)).toEqual([REC])
+    expect(await viewRowIds(VIEW_AND_TRUE)).toEqual([]) // AND rollup = false → excluded
   })
 
   test('dashboard REJECTS sum/avg over a concatenate (string) rollup', async () => {
