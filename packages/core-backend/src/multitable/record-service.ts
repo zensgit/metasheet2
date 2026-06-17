@@ -153,6 +153,18 @@ export class RecordValidationFailedError extends Error {
   }
 }
 
+// #15 recycle bin: undelete attempted on a record id that is currently occupied (id was reused by a new
+// CREATE after the delete). Maps to 409 at the route. Conservative default: reject rather than overwrite.
+export class RecordRestoreConflictError extends Error {
+  public readonly code = 'CONFLICT'
+  public readonly statusCode = 409
+
+  constructor(message: string) {
+    super(message)
+    this.name = 'RecordRestoreConflictError'
+  }
+}
+
 export class RecordPatchFieldValidationError extends Error {
   public readonly code: string
   public readonly statusCode: number
@@ -789,6 +801,23 @@ export class RecordService {
         snapshot,
       })
 
+      // #15 recycle bin: copy the row into the trash table in the SAME txn before the hard delete, so it
+      // can be listed + restored. base_id is best-effort. Guarded by isUndefinedTableError so a DB that
+      // predates the migration still deletes cleanly (degrades to no-trash, the revision snapshot remains).
+      try {
+        const baseRow = (await query('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])).rows[0] as
+          | Record<string, unknown>
+          | undefined
+        const baseId = baseRow && typeof baseRow.base_id === 'string' ? baseRow.base_id : null
+        await query(
+          `INSERT INTO meta_records_trash (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by)
+           VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)`,
+          [recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId],
+        )
+      } catch (err) {
+        if (!isUndefinedTableError(err, 'meta_records_trash')) throw err
+      }
+
       // lock-guarded: single DELETE — ensureRecordNotLocked enforced above (rejects before this txn).
       await query('DELETE FROM meta_records WHERE id = $1', [recordId])
     })
@@ -811,6 +840,120 @@ export class RecordService {
       recordId,
       sheetId,
     }
+  }
+
+  // #15 recycle bin — list the records deleted from a sheet (newest first). Gated on canDeleteRecord
+  // (whoever may delete may view/restore the trash). Returns empty if the trash table predates migration.
+  async listDeletedRecords(input: {
+    sheetId: string
+    access: AccessInfo
+    resolveSheetAccess: RecordDeleteInput['resolveSheetAccess']
+    limit?: number
+    offset?: number
+  }): Promise<{
+    records: Array<{ recordId: string; sheetId: string; data: Record<string, unknown>; originalVersion: number; createdBy: string | null; deletedBy: string | null; deletedAt: string }>
+    total: number
+  }> {
+    const { sheetId, resolveSheetAccess } = input
+    const { capabilities } = await resolveSheetAccess(sheetId)
+    if (!capabilities.canDeleteRecord) {
+      throw new RecordPermissionError('Insufficient permissions to view deleted records')
+    }
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200)
+    const offset = Math.max(input.offset ?? 0, 0)
+    try {
+      const totalRes = await this.pool.query('SELECT COUNT(*)::int AS n FROM meta_records_trash WHERE sheet_id = $1', [sheetId])
+      const total = Number((totalRes.rows[0] as { n?: number } | undefined)?.n ?? 0)
+      const rowsRes = await this.pool.query(
+        `SELECT record_id, sheet_id, data, original_version, created_by, deleted_by, deleted_at
+         FROM meta_records_trash WHERE sheet_id = $1 ORDER BY deleted_at DESC LIMIT $2 OFFSET $3`,
+        [sheetId, limit, offset],
+      )
+      const records = (rowsRes.rows as Array<Record<string, unknown>>).map((r) => ({
+        recordId: String(r.record_id),
+        sheetId: String(r.sheet_id),
+        data: normalizeJson(r.data),
+        originalVersion: Number(r.original_version ?? 1),
+        createdBy: typeof r.created_by === 'string' ? r.created_by : null,
+        deletedBy: typeof r.deleted_by === 'string' ? r.deleted_by : null,
+        deletedAt: r.deleted_at instanceof Date ? r.deleted_at.toISOString() : String(r.deleted_at ?? ''),
+      }))
+      return { records, total }
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_records_trash')) return { records: [], total: 0 }
+      throw err
+    }
+  }
+
+  // #15 recycle bin — restore the most-recently-deleted trash row for a record id back into meta_records.
+  // Rejects (409) if the id is currently occupied (conservative default: never overwrite a live record).
+  async restoreRecord(input: {
+    recordId: string
+    actorId: string | null
+    access: AccessInfo
+    resolveSheetAccess: RecordDeleteInput['resolveSheetAccess']
+  }): Promise<{ recordId: string; sheetId: string }> {
+    const { recordId, actorId, resolveSheetAccess } = input
+    const trashRes = await this.pool
+      .query(
+        `SELECT id, record_id, sheet_id, data, created_by
+         FROM meta_records_trash WHERE record_id = $1 ORDER BY deleted_at DESC LIMIT 1`,
+        [recordId],
+      )
+      .catch((err: unknown) => {
+        if (isUndefinedTableError(err, 'meta_records_trash')) return { rows: [] as Array<Record<string, unknown>> }
+        throw err
+      })
+    if (trashRes.rows.length === 0) {
+      throw new RecordNotFoundError(`No deleted record to restore: ${recordId}`)
+    }
+    const trashRow = trashRes.rows[0] as Record<string, unknown>
+    const sheetId = String(trashRow.sheet_id)
+    const { capabilities } = await resolveSheetAccess(sheetId)
+    if (!capabilities.canDeleteRecord) {
+      throw new RecordPermissionError('Insufficient permissions to restore records')
+    }
+    const trashPk = String(trashRow.id)
+    const snapshot = normalizeJson(trashRow.data)
+    const createdBy = typeof trashRow.created_by === 'string' ? trashRow.created_by : null
+
+    await this.pool.transaction(async ({ query }) => {
+      const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
+      if (occupied.rows.length > 0) {
+        throw new RecordRestoreConflictError(`Record id is occupied, cannot restore: ${recordId}`)
+      }
+      const inserted = await query(
+        `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
+         VALUES ($1, $2, $3::jsonb, 1, $4, $5)
+         RETURNING version`,
+        [recordId, sheetId, JSON.stringify(snapshot), createdBy, actorId],
+      )
+      const restoredVersion = Number((inserted.rows[0] as { version?: number } | undefined)?.version ?? 1)
+      await recordRecordRevision(query, {
+        sheetId,
+        recordId,
+        version: restoredVersion,
+        action: 'create',
+        source: 'rest',
+        actorId,
+        changedFieldIds: Object.keys(snapshot),
+        patch: snapshot,
+        snapshot,
+      })
+      await query('DELETE FROM meta_records_trash WHERE id = $1', [trashPk])
+    })
+
+    publishMultitableSheetRealtime({
+      spreadsheetId: sheetId,
+      actorId,
+      source: 'multitable',
+      kind: 'record-created',
+      recordId,
+      recordIds: [recordId],
+    })
+    this.eventBus.emit('multitable.record.created', { sheetId, recordId, actorId })
+
+    return { recordId, sheetId }
   }
 
   async patchRecord(input: RecordPatchInput): Promise<RecordPatchResult> {

@@ -299,6 +299,17 @@ export interface MetaRecordContext {
 
 export type MetaRecordRevisionAction = 'create' | 'update' | 'delete'
 
+// #15 recycle bin — a deleted record sitting in the trash, restorable.
+export interface MetaDeletedRecord {
+  recordId: string
+  sheetId: string
+  data: Record<string, unknown>
+  originalVersion: number
+  createdBy: string | null
+  deletedBy: string | null
+  deletedAt: string
+}
+
 export interface MetaRecordRevision {
   id: string
   sheetId: string

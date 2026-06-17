@@ -143,6 +143,7 @@ import {
   RecordValidationError as RecordServiceValidationError,
   RecordFieldForbiddenError as RecordServiceFieldForbiddenError,
   RecordPermissionError as RecordServicePermissionError,
+  RecordRestoreConflictError as RecordServiceRestoreConflictError,
   RecordValidationFailedError as RecordCreateValidationFailedError,
   RecordPatchFieldValidationError as RecordServicePatchFieldValidationError,
 } from '../multitable/record-service'
@@ -11071,6 +11072,86 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete record failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete record' } })
+    }
+  })
+
+  // #15 recycle bin — list records deleted from a sheet (newest first). Gated on canDeleteRecord (whoever
+  // may delete may view + restore the trash).
+  router.get('/sheets/:sheetId/trash', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    const limitRaw = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : Number.NaN
+    const offsetRaw = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : Number.NaN
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      const recordService = new RecordService(pool, eventBus)
+      const result = await recordService.listDeletedRecords({
+        sheetId,
+        access,
+        ...(Number.isFinite(limitRaw) ? { limit: limitRaw } : {}),
+        ...(Number.isFinite(offsetRaw) ? { offset: offsetRaw } : {}),
+        resolveSheetAccess: async (sid) => {
+          const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sid)
+          return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
+        },
+      })
+      return res.json({ ok: true, data: result })
+    } catch (err) {
+      if (err instanceof RecordServicePermissionError) {
+        return sendForbidden(res, err.message)
+      }
+      if (err instanceof RecordServiceNotFoundError || err instanceof ServiceNotFoundError) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      throw err
+    }
+  })
+
+  // #15 recycle bin — restore a deleted record. 409 if the id is now occupied (conservative default:
+  // never overwrite a live record).
+  router.post('/records/:recordId/restore', async (req: Request, res: Response) => {
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      const recordService = new RecordService(pool, eventBus)
+      const result = await recordService.restoreRecord({
+        recordId,
+        actorId: getRequestActorId(req),
+        access,
+        resolveSheetAccess: async (sid) => {
+          const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sid)
+          return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
+        },
+      })
+      return res.json({ ok: true, data: { restored: result.recordId, sheetId: result.sheetId } })
+    } catch (err) {
+      if (err instanceof RecordServicePermissionError) {
+        return sendForbidden(res, err.message)
+      }
+      if (err instanceof RecordServiceNotFoundError || err instanceof ServiceNotFoundError) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      if (err instanceof RecordServiceRestoreConflictError) {
+        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      throw err
     }
   })
 
