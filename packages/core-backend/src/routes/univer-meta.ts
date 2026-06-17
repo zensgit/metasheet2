@@ -935,6 +935,11 @@ type RollupFieldConfig = {
   foreignSheetId?: string
   // §2a.3: see LookupFieldConfig.skipForeignFieldMasking — same semantics for rollup configs.
   skipForeignFieldMasking?: boolean
+  // Slice 3 — optional condition: aggregate ONLY the linked foreign records that match. Each condition
+  // reads a foreign field; if the actor can't read that field it is a side-channel, so resolveLookupValues
+  // fails CLOSED (masks the whole rollup) rather than evaluating it. Empty/absent = aggregate all linked.
+  filters?: MetaFilterCondition[]
+  filterConjunction?: MetaFilterConjunction
 }
 
 function parseLinkFieldConfig(property: unknown): LinkFieldConfig | null {
@@ -1080,6 +1085,22 @@ export function aggregateRollup(
   return null
 }
 
+// Slice 3 — parse a rollup's optional filter conditions from stored property JSON. Each well-formed entry
+// needs a string fieldId + operator; `value` is preserved only when present (operators like isEmpty omit it).
+function parseRollupFilterConditions(raw: unknown): MetaFilterCondition[] {
+  if (!Array.isArray(raw)) return []
+  const out: MetaFilterCondition[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const fieldId = typeof o.fieldId === 'string' ? o.fieldId.trim() : ''
+    const operator = typeof o.operator === 'string' ? o.operator.trim() : ''
+    if (!fieldId || !operator) continue
+    out.push('value' in o ? { fieldId, operator, value: o.value } : { fieldId, operator })
+  }
+  return out
+}
+
 function parseRollupFieldConfig(property: unknown): RollupFieldConfig | null {
   const obj = normalizeJson(property)
   const linkFieldId = obj.linkedFieldId ?? obj.linkFieldId ?? obj.relatedLinkFieldId ?? obj.sourceFieldId
@@ -1093,12 +1114,17 @@ function parseRollupFieldConfig(property: unknown): RollupFieldConfig | null {
   const foreign = obj.datasheetId ?? obj.foreignDatasheetId ?? obj.foreignSheetId
   const foreignSheetId = typeof foreign === 'string' && foreign.trim().length > 0 ? foreign.trim() : undefined
 
+  const filters = parseRollupFilterConditions(obj.filters ?? obj.conditions ?? obj.filterConditions)
+  const filterConjunction: MetaFilterConjunction =
+    obj.filterConjunction === 'or' || obj.conjunction === 'or' ? 'or' : 'and'
+
   return {
     linkFieldId: linkFieldId.trim(),
     targetFieldId: targetFieldId.trim(),
     aggregation,
     ...(foreignSheetId ? { foreignSheetId } : {}),
     ...(obj.skipForeignFieldMasking === true ? { skipForeignFieldMasking: true } : {}),
+    ...(filters.length > 0 ? { filters, filterConjunction } : {}),
   }
 }
 
@@ -1146,6 +1172,23 @@ async function validateLookupRollupConfig(
   )
   if ((targetRes as any).rows.length === 0) {
     return `外表字段不存在：${config.targetFieldId}（sheetId=${linkCfg.foreignSheetId}）`
+  }
+
+  // Slice 3 — rollup filter conditions must reference real foreign fields (a typo'd condition would
+  // otherwise silently never-match at read time). Field-READABILITY is a per-actor read-time gate
+  // (fail-closed in resolveLookupValues), not a save-time check, so it's deliberately not enforced here.
+  const rollupConfig = type === 'rollup' ? (config as RollupFieldConfig) : null
+  if (rollupConfig?.filters && rollupConfig.filters.length > 0) {
+    const foreignFieldRes = await query(
+      'SELECT id FROM meta_fields WHERE sheet_id = $1',
+      [linkCfg.foreignSheetId],
+    )
+    const foreignFieldIds = new Set((foreignFieldRes as any).rows.map((r: any) => String(r.id)))
+    for (const cond of rollupConfig.filters) {
+      if (!foreignFieldIds.has(cond.fieldId)) {
+        return `Rollup 过滤条件引用了不存在的外表字段：${cond.fieldId}（sheetId=${linkCfg.foreignSheetId}）`
+      }
+    }
   }
 
   const { capabilities } = await resolveSheetCapabilities(req, query, linkCfg.foreignSheetId)
@@ -2604,6 +2647,20 @@ async function applyLookupRollup(
     foreignRecordsBySheet.set(foreignSheetId, recordMap)
   }
 
+  // Slice 3 — foreign field TYPES, loaded ONLY for sheets a FILTERED rollup targets (keeps the extra
+  // read off the common unfiltered path). Needed so each filter condition compares with the right type.
+  const filteredRollupForeignSheetIds = new Set<string>()
+  for (const cfg of rollupConfigs.values()) {
+    if (!cfg?.filters || cfg.filters.length === 0) continue
+    const fsid = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
+    if (fsid && readableForeignSheetIds.has(fsid)) filteredRollupForeignSheetIds.add(fsid)
+  }
+  const foreignFieldTypesBySheet = new Map<string, Map<string, string>>()
+  for (const fsid of filteredRollupForeignSheetIds) {
+    const ffields = (await loadFieldsForSheetShared(query, fsid)) as Array<{ id: string; type: string }>
+    foreignFieldTypesBySheet.set(fsid, new Map(ffields.map((f) => [f.id, f.type])))
+  }
+
   const resolveLookupValues = (
     record: UniverMetaRecord,
     cfg: LookupFieldConfig | RollupFieldConfig,
@@ -2622,12 +2679,38 @@ async function applyLookupRollup(
     }
     const foreignMap = foreignRecordsBySheet.get(foreignSheetId)
     if (!foreignMap) return { values: [], count: 0, masked: true }
+
+    // Slice 3 — rollup filter (lookup configs carry no filters, so this is a no-op for them).
+    // SECURITY (fail-closed): a condition that reads a foreign field the actor can't see is a
+    // side-channel — the resulting match-count would leak the masked field's values — so mask the
+    // WHOLE rollup rather than evaluate it. Honors the same skipForeignFieldMasking opt-out as the target.
+    const rollupCfg = 'aggregation' in cfg ? cfg : null
+    const filters = rollupCfg?.filters ?? []
+    for (const cond of filters) {
+      if (shouldMaskForeignField(foreignFieldReadability, foreignSheetId, cond.fieldId, cfg.skipForeignFieldMasking)) {
+        return { values: [], count: 0, masked: true }
+      }
+    }
+    const filterTypes = filters.length > 0 ? foreignFieldTypesBySheet.get(foreignSheetId) : undefined
+    const filterConjunction = rollupCfg?.filterConjunction ?? 'and'
+    const matchesFilters = (data: Record<string, unknown>): boolean => {
+      if (filters.length === 0) return true
+      const test = (cond: MetaFilterCondition) =>
+        evaluateMetaFilterCondition(
+          (filterTypes?.get(cond.fieldId) ?? 'string') as UniverMetaField['type'],
+          data[cond.fieldId],
+          cond,
+        )
+      return filterConjunction === 'or' ? filters.some(test) : filters.every(test)
+    }
+
     const values: unknown[] = []
     let count = 0
     for (const id of linkIds) {
       const data = foreignMap.get(id)
       if (!data) continue
-      count += 1 // a RESOLVED linked record, regardless of whether its target value is empty
+      if (!matchesFilters(data)) continue // slice 3: only linked records matching the condition participate
+      count += 1 // a RESOLVED, matched linked record, regardless of whether its target value is empty
       const value = data[cfg.targetFieldId]
       if (value === null || value === undefined) continue
       values.push(value)
