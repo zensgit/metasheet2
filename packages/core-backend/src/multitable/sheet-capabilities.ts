@@ -41,6 +41,9 @@ export type MultitableCapabilities = {
   canComment: boolean
   canManageAutomation: boolean
   canExport: boolean
+  // Sheet-level "send notification" capability (B1-S1 button send_notification gate).
+  // Full sheet write/admin only — NOT write-own (notify is member fan-out, not record-scoped).
+  canSendNotification: boolean
 }
 
 export type SheetPermissionScope = {
@@ -91,6 +94,7 @@ export function deriveCapabilities(permissions: string[], isAdminRole: boolean):
     canComment,
     canManageAutomation,
     canExport: canRead,
+    canSendNotification: canWrite,
   }
 }
 

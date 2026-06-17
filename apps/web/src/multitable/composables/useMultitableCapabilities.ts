@@ -14,16 +14,17 @@ export interface MultitableCapabilities {
   canComment: Ref<boolean>
   canManageAutomation: Ref<boolean>
   canExport: Ref<boolean>
+  canSendNotification: Ref<boolean>
 }
 
 const ROLE_CAPS: Record<MultitableRole, Record<string, boolean>> = {
   owner: {
     canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
-    canManageFields: true, canManageSheetAccess: true, canManageViews: true, canComment: true, canManageAutomation: true, canExport: true,
+    canManageFields: true, canManageSheetAccess: true, canManageViews: true, canComment: true, canManageAutomation: true, canExport: true, canSendNotification: true,
   },
   editor: {
     canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
-    canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: true, canManageAutomation: false, canExport: true,
+    canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: true, canManageAutomation: false, canExport: true, canSendNotification: true,
   },
   commenter: {
     canRead: true, canCreateRecord: false, canEditRecord: false, canDeleteRecord: false,
@@ -64,5 +65,8 @@ export function useMultitableCapabilities(
     canComment: caps('canComment'),
     canManageAutomation: caps('canManageAutomation'),
     canExport: caps('canExport', 'canRead'),
+    // Notify falls back to canEditRecord only for an OLD backend response that predates
+    // canSendNotification; current backends send it explicitly.
+    canSendNotification: caps('canSendNotification', 'canEditRecord'),
   }
 }

@@ -261,9 +261,19 @@ describe('B1-S1 D0-A send_notification button (mock pool)', () => {
     expect(state.dedupKeys.size).toBe(0)
   })
 
-  it('§3 actor gate: a non-editor (read-only) cannot run send_notification → 403 (no write)', async () => {
+  it('§3 actor gate: a read-only user lacks canSendNotification → 403, NOTHING written', async () => {
     notifyApp = await buildNotifyApp(reader)
     const res = await request(notifyApp).post(url).send({ requestId: 'req-1' })
+    expect(res.status).toBe(403)
+    expect(state.notificationInserts).toHaveLength(0)
+    expect(state.dedupKeys.size).toBe(0)
+  })
+
+  it('§3 actor gate: a WRITE-OWN user CANNOT send_notification → 403 (notify = full sheet write/admin, NOT record-scoped write-own)', async () => {
+    // canSendNotification derives from full multitable:write/admin only; write-own is
+    // record-scoped and must NOT imply notifying members from any row.
+    notifyApp = await buildNotifyApp({ id: 'u_writeown', roles: ['member'], perms: ['multitable:write-own'] })
+    const res = await request(notifyApp).post(url).send({ requestId: 'req-wo' })
     expect(res.status).toBe(403)
     expect(state.notificationInserts).toHaveLength(0)
     expect(state.dedupKeys.size).toBe(0)

@@ -381,6 +381,10 @@ export interface MetaCapabilities {
   canComment: boolean
   canManageAutomation: boolean
   canExport: boolean
+  // Sheet-level notify capability (B1-S1 send_notification button gate). Server-enforced
+  // (the route is authoritative); the FE mirror is OPTIONAL so existing capability fixtures
+  // need not set it — treat absent as false. Full sheet write/admin only (not write-own).
+  canSendNotification?: boolean
 }
 
 export interface YjsPresenceUser {

@@ -198,6 +198,8 @@ export const PUBLIC_FORM_CAPABILITIES: MultitableCapabilities = {
   canComment: false,
   canManageAutomation: false,
   canExport: false,
+  // Anonymous public-form submitter must NEVER be able to send notifications.
+  canSendNotification: false,
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
@@ -1017,6 +1019,9 @@ export function applySheetPermissionScope(
     canComment: capabilities.canComment && scope.canRead,
     canManageAutomation: capabilities.canManageAutomation && scope.canWrite,
     canExport: scopedCanRead,
+    // Notify = full sheet write/admin only (scope.canWrite), NOT write-own: a
+    // record-scoped write must not imply notifying members from any row.
+    canSendNotification: capabilities.canSendNotification && scope.canWrite,
   }
 }
 
