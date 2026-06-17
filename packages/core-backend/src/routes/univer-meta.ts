@@ -6913,7 +6913,7 @@ export function univerMetaRouter(): Router {
       // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): drop denied records so widget
       // counts/aggregates/group-buckets exclude them (no count leak). Inert until the per-sheet flag is on.
       let dashboardRows = rows
-      if (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+      if (!access.isAdminRole && access.userId && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
         const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
         if (deniedIds.size > 0) dashboardRows = rows.filter((r) => !deniedIds.has(r.id))
       }
@@ -8358,7 +8358,7 @@ export function univerMetaRouter(): Router {
 
       const rows: Array<Array<string | number | boolean | null | undefined>> = []
       // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): skip records the actor is denied.
-      const exportDeniedIds = (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))
+      const exportDeniedIds = (!access.isAdminRole && access.userId && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))
         ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
         : null
       let cursor: string | undefined
@@ -8508,7 +8508,7 @@ export function univerMetaRouter(): Router {
       // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): drop records the actor is
       // denied BEFORE search/filter/aggregate, so the returned total (rows.length), aggregate values, and
       // group buckets all exclude them (no count leak). Inert until the per-sheet flag is enabled.
-      if (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+      if (!access.isAdminRole && access.userId && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
         const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
         if (deniedIds.size > 0) rows = rows.filter((rec) => !deniedIds.has(rec.id))
       }
