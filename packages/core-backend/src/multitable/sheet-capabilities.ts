@@ -148,6 +148,10 @@ export function applyContextSheetSchemaWriteGrant(
     ...scoped,
     canManageFields: true,
     canManageViews: true,
+    // Sheet-scoped FULL write (scope.canRead && scope.canWrite — NOT write-own) also grants
+    // the sheet-level notify capability, so a user with a sheet full-write grant but no global
+    // multitable:write can still send_notification (parity with canEditRecord/canManageViews).
+    canSendNotification: true,
     ...(scope.canAdmin ? { canManageSheetAccess: true } : {}),
   }
 }

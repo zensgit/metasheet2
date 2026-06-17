@@ -162,6 +162,23 @@ describe('permission-service: capability composition', () => {
     expect(expanded.canManageSheetAccess).toBe(true)
   })
 
+  it('grants canSendNotification via a sheet-scoped FULL-write grant (no global multitable:write needed)', () => {
+    // The button route resolves caps via resolveSheetCapabilities → applyContextSheetSchemaWriteGrant.
+    // A user with only global read but a sheet FULL-write grant must keep send_notification (option a).
+    const readerBase = deriveCapabilities(['multitable:read'], false)
+    expect(applyContextSheetSchemaWriteGrant(readerBase, editorScope, false).canSendNotification).toBe(true)
+    expect(applySheetPermissionScope(base, editorScope, false).canSendNotification).toBe(true)
+  })
+
+  it('does NOT grant canSendNotification to a sheet-scoped WRITE-OWN user (notify is full-write only)', () => {
+    const readerBase = deriveCapabilities(['multitable:read'], false)
+    // write-own through BOTH the context-grant path and the scope path → no notify.
+    expect(applyContextSheetSchemaWriteGrant(readerBase, writeOwnScope, false).canSendNotification).toBe(false)
+    expect(applySheetPermissionScope(base, writeOwnScope, false).canSendNotification).toBe(false)
+    // ...but the write-own user CAN still edit records — the capability we deliberately do NOT conflate with notify.
+    expect(applyContextSheetRecordWriteGrant(readerBase, writeOwnScope, false).canEditRecord).toBe(true)
+  })
+
   it('applyContextSheetReadGrant forces canRead only when scope grants read but base does not', () => {
     const noneBase = deriveCapabilities([], false)
     const expanded = applyContextSheetReadGrant(noneBase, viewerScope, false)
