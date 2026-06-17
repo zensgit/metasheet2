@@ -203,7 +203,12 @@
             </label>
             <label class="meta-field-mgr__field">
               <span>{{ ml('field.targetFieldId') }}</span>
-              <input v-model="lookupDraft.targetFieldId" class="meta-field-mgr__input" placeholder="fld_target" />
+              <select v-if="foreignFieldsAvailable" v-model="lookupDraft.targetFieldId" class="meta-field-mgr__select">
+                <option value="">{{ ml('field.selectTargetField') }}</option>
+                <option v-if="lookupDraft.targetFieldId && !isForeignFieldKnown(lookupDraft.targetFieldId)" :value="lookupDraft.targetFieldId">{{ lookupDraft.targetFieldId }}</option>
+                <option v-for="f in foreignFields" :key="f.id" :value="f.id">{{ f.name }}</option>
+              </select>
+              <input v-else v-model="lookupDraft.targetFieldId" class="meta-field-mgr__input" placeholder="fld_target" />
             </label>
           </div>
         </template>
@@ -223,7 +228,12 @@
             </label>
             <label class="meta-field-mgr__field">
               <span>{{ ml('field.targetFieldId') }}</span>
-              <input v-model="rollupDraft.targetFieldId" class="meta-field-mgr__input" placeholder="fld_target" />
+              <select v-if="foreignFieldsAvailable" v-model="rollupDraft.targetFieldId" class="meta-field-mgr__select">
+                <option value="">{{ ml('field.selectTargetField') }}</option>
+                <option v-if="rollupDraft.targetFieldId && !isForeignFieldKnown(rollupDraft.targetFieldId)" :value="rollupDraft.targetFieldId">{{ rollupDraft.targetFieldId }}</option>
+                <option v-for="f in foreignFields" :key="f.id" :value="f.id">{{ f.name }}</option>
+              </select>
+              <input v-else v-model="rollupDraft.targetFieldId" class="meta-field-mgr__input" placeholder="fld_target" />
             </label>
           </div>
           <label class="meta-field-mgr__field">
@@ -253,9 +263,14 @@
               <label><input type="radio" value="or" v-model="rollupDraft.filterConjunction" /> {{ ml('field.rollupFilterAny') }}</label>
             </div>
             <div v-for="(cond, i) in rollupDraft.filters" :key="i" class="meta-field-mgr__rollup-cond">
-              <input v-model="cond.fieldId" class="meta-field-mgr__input" :placeholder="ml('field.rollupFilterFieldPlaceholder')" />
+              <select v-if="foreignFieldsAvailable" v-model="cond.fieldId" class="meta-field-mgr__select">
+                <option value="">{{ ml('field.selectTargetField') }}</option>
+                <option v-if="cond.fieldId && !isForeignFieldKnown(cond.fieldId)" :value="cond.fieldId">{{ cond.fieldId }}</option>
+                <option v-for="f in foreignFields" :key="f.id" :value="f.id">{{ f.name }}</option>
+              </select>
+              <input v-else v-model="cond.fieldId" class="meta-field-mgr__input" :placeholder="ml('field.rollupFilterFieldPlaceholder')" />
               <select v-model="cond.operator" class="meta-field-mgr__select">
-                <option v-for="op in ROLLUP_FILTER_OPERATOR_OPTIONS" :key="op.value" :value="op.value">{{ op.label }}</option>
+                <option v-for="op in operatorOptionsFor(cond.fieldId)" :key="op.value" :value="op.value">{{ op.label }}</option>
               </select>
               <input
                 v-if="!ROLLUP_FILTER_OPS_NO_VALUE.has(cond.operator)"
@@ -971,6 +986,12 @@ const props = defineProps<{
   // switchBase/loadBaseContext mutators (those would yank the user's active base).
   listBasesFn?: () => Promise<MetaBase[]>
   listForeignSheetsFn?: (baseId: string) => Promise<MetaSheet[]>
+  // 3c foreign-field picker: enumerate a sheet's fields so the lookup/rollup TARGET field and the
+  // rollup FILTER condition fields are PICKED (not hand-typed). The workbench wires this to
+  // client.listFields. Optional — absent / unresolvable foreign sheet / load failure → the inputs fall
+  // back to typed-id (cross-base + not-yet-loaded still work). NEVER computes its own readability; the
+  // callback (client.listFields) is the read-gated source of truth, mirroring listForeignSheetsFn.
+  listForeignFieldsFn?: (sheetId: string) => Promise<MetaField[]>
 }>()
 
 const emit = defineEmits<{
@@ -1308,6 +1329,50 @@ const configTargetType = computed(() => {
   if (configTarget.value) return configDraftType.value
   return newFieldConfigVisible.value && requiresConfig(newFieldType.value) ? newFieldType.value : null
 })
+
+// 3c foreign-field picker (defined AFTER configTargetType — activeForeignSheetId reads it, and watch
+// evaluates its source at registration). Foreign sheet = the active config's foreignSheetId override,
+// else the chosen link field's foreignSheetId (link fields live in props.fields). Loaded via
+// listForeignFieldsFn (workbench → client.listFields); empty when unavailable → target/filter inputs
+// fall back to typed-id (cross-base / not-yet-loaded still work).
+const foreignFields = ref<MetaField[]>([])
+function linkFieldForeignSheetId(linkFieldId: string): string {
+  const lf = props.fields.find((f) => f.id === linkFieldId)
+  const fsid = (lf?.property as Record<string, unknown> | undefined)?.foreignSheetId
+  return typeof fsid === 'string' ? fsid : ''
+}
+const activeForeignSheetId = computed<string>(() => {
+  if (configTargetType.value === 'lookup') return lookupDraft.foreignSheetId.trim() || linkFieldForeignSheetId(lookupDraft.linkFieldId)
+  if (configTargetType.value === 'rollup') return rollupDraft.foreignSheetId.trim() || linkFieldForeignSheetId(rollupDraft.linkFieldId)
+  return ''
+})
+watch(activeForeignSheetId, async (sheetId) => {
+  foreignFields.value = []
+  const fn = props.listForeignFieldsFn
+  if (!sheetId || !fn) return
+  try {
+    foreignFields.value = await fn(sheetId)
+  } catch {
+    foreignFields.value = [] // graceful: typed-id fallback
+  }
+}, { immediate: true })
+const foreignFieldsAvailable = computed(() => foreignFields.value.length > 0)
+function isForeignFieldKnown(fieldId: string): boolean {
+  return foreignFields.value.some((f) => f.id === fieldId)
+}
+// Operator options constrained by the picked field's type, mirroring backend isRollupFilterOperatorCompatible:
+// string → equality + contains; numeric/date → equality + comparison; boolean → equality only (+ universal
+// empty ops). Unknown / not-yet-loaded field → the full set (the backend still validates at save).
+const FOREIGN_NUMERIC_TYPES = new Set(['number', 'currency', 'percent', 'rating', 'duration', 'date'])
+const FILTER_OPS_STRING = new Set(['is', 'isNot', 'contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'])
+const FILTER_OPS_NUMERIC = new Set(['is', 'isNot', 'greater', 'greaterequal', 'less', 'lessequal', 'isEmpty', 'isNotEmpty'])
+const FILTER_OPS_BOOLEAN = new Set(['is', 'isNot', 'isEmpty', 'isNotEmpty'])
+function operatorOptionsFor(fieldId: string): Array<{ value: string; label: string }> {
+  const t = foreignFields.value.find((f) => f.id === fieldId)?.type
+  if (!t) return ROLLUP_FILTER_OPERATOR_OPTIONS
+  const allow = FOREIGN_NUMERIC_TYPES.has(t) ? FILTER_OPS_NUMERIC : t === 'boolean' ? FILTER_OPS_BOOLEAN : FILTER_OPS_STRING
+  return ROLLUP_FILTER_OPERATOR_OPTIONS.filter((o) => allow.has(o.value))
+}
 
 // ---- #5b formula dry-run (C1–C4 per design #1869) ----
 const DRY_RUN_NUMERIC_TYPES = new Set(['number', 'currency', 'percent', 'rating', 'duration', 'autoNumber'])

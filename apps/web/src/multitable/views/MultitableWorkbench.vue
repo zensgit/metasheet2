@@ -411,6 +411,7 @@
       :formula-suggest-fn="formulaSuggestFn"
       :list-bases-fn="listBasesForFieldFn"
       :list-foreign-sheets-fn="listForeignSheetsForFieldFn"
+      :list-foreign-fields-fn="listForeignFieldsForFieldFn"
       @update:dirty="fieldManagerDirty = $event"
       @close="showFieldManager = false" @create-field="onCreateField" @update-field="onUpdateField" @delete-field="onDeleteField"
     />
@@ -2265,6 +2266,9 @@ const dryRunFormulaFn = (params: { sheetId: string; expression: string; sampleVa
 const listBasesForFieldFn = async () => (await workbench.client.listBases()).bases
 const listForeignSheetsForFieldFn = async (baseId: string) =>
   (await workbench.client.loadContext({ baseId })).sheets
+// 3c foreign-field picker: read-gated source for the lookup/rollup target + filter field pickers.
+const listForeignFieldsForFieldFn = async (sheetId: string) =>
+  (await workbench.client.listFields(sheetId)).fields
 const activeAggregationConfig = computed<Record<string, string>>(() => {
   const raw = workbench.activeView.value?.config?.aggregations
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
