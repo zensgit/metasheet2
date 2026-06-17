@@ -4,6 +4,10 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 
+// Real-DB spec: runs only with a Postgres DATABASE_URL (DB-backed CI step in
+// plugin-tests.yml + local); excluded from the no-DB default test job, skipped here.
+const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+
 // P1-B 加签/减签 (add_sign / reduce_sign) — real-PG integration. The
 // wire-vs-fixture invariant (MEMORY: skip-when-unreachable blind spot) requires
 // asserting `approval_assignments.is_active` flips and the live-count derived
@@ -135,7 +139,7 @@ function buildParallelGraph() {
   }
 }
 
-describe('Approval P1-B add_sign / reduce_sign API', () => {
+describeIfDatabase('Approval P1-B add_sign / reduce_sign API', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   const createdTemplateIds = new Set<string>()
@@ -204,6 +208,10 @@ describe('Approval P1-B add_sign / reduce_sign API', () => {
       // ignore cleanup failures
     }
     if (server) await server.stop()
+  })
+
+  it('sentinel: DATABASE_URL is set (DB-backed lane must not silently skip)', () => {
+    expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
   // (1) 会签 add_sign extends — live-count derivation auto-extends the node.

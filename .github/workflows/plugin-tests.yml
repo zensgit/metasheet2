@@ -243,8 +243,8 @@ jobs:
             tests/integration/data-source-c3-keyset-realdb.test.ts \
             --reporter=dot
 
-      - name: Run approval real-DB integration (directory endpoints rbac/shape/limit + P1-C node field-permission HIDDEN redaction across viewers/detail/list)
-        # Lane A (directory endpoints) + Lane B (P1-C hidden field redaction). Wired as WHOLE FILE runs so the
+      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign 会签/或签/reduce/guards)
+        # Lane A (directory endpoints) + Lane B (P1-C hidden field redaction) + Lane D (add_sign/reduce_sign). Wired as WHOLE FILE runs so the
         # gate is robust (a name filter that matches zero tests would exit green and hide
         # regressions). The file is describeIfDatabase-guarded + excluded from the no-DB
         # default test job, so this is its real CI lane.
@@ -256,6 +256,7 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/approval-directory-endpoints.api.test.ts \
             tests/integration/approval-p1c-field-permissions.api.test.ts \
+            tests/integration/approval-wp-add-reduce-sign.api.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)

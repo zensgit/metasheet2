@@ -22,6 +22,7 @@ export default defineConfig({
       'tests/integration/after-sales-registry-backfill.test.ts',
       'tests/integration/approval-directory-endpoints.api.test.ts',
       'tests/integration/approval-p1c-field-permissions.api.test.ts',
+      'tests/integration/approval-wp-add-reduce-sign.api.test.ts',
       'tests/integration/approval-pack1a-lifecycle.api.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
