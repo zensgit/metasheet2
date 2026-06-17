@@ -41,8 +41,11 @@ describe('routeAccess gate (extracted from the router beforeEach)', () => {
 describe('approval-template authoring routes require approval-templates:manage (drift pin)', () => {
   const SRC = readFileSync(join(__dirname, '../src/router/appRoutes.ts'), 'utf8')
 
-  function routeBlock(name: string): string | null {
-    const i = SRC.indexOf(`name: '${name}'`)
+  // Find a route's source block by its PATH so the block includes — and the test
+  // asserts — the path value the title claims, plus the path→name binding (the
+  // earlier name-anchored slice started after the path line and never checked it).
+  function routeBlockByPath(path: string): string | null {
+    const i = SRC.indexOf(`path: '${path}'`)
     if (i === -1) return null
     const end = SRC.indexOf('\n  },', i)
     return end === -1 ? SRC.slice(i) : SRC.slice(i, end)
@@ -53,16 +56,19 @@ describe('approval-template authoring routes require approval-templates:manage (
     ['approval-template-edit', '/approval-templates/:id/edit'],
   ] as const) {
     it(`${name} (${path}) is auth-gated to exactly approval-templates:manage`, () => {
-      const block = routeBlock(name)
-      expect(block, `route ${name} must exist in appRoutes.ts`).toBeTruthy()
+      const block = routeBlockByPath(path)
+      expect(block, `route ${path} must exist in appRoutes.ts`).toBeTruthy()
+      // path → name → fence all asserted on the same route object
+      expect(block).toContain(`name: '${name}'`)
       expect(block).toMatch(/requiresAuth:\s*true/)
       expect(block).toMatch(/permissions:\s*\[\s*'approval-templates:manage'\s*\]/)
     })
   }
 
-  it('the public template-list route stays unguarded (no false-positive fence)', () => {
-    const block = routeBlock('approval-template-list')
+  it('the public template-list route (/approval-templates) stays unguarded (no false-positive fence)', () => {
+    const block = routeBlockByPath('/approval-templates')
     expect(block).toBeTruthy()
+    expect(block).toContain("name: 'approval-template-list'")
     expect(block).not.toMatch(/permissions:/)
   })
 })
