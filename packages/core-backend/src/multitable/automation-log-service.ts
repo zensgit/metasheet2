@@ -11,6 +11,12 @@ import { AUTOMATION_EXECUTION_SCHEMA_VERSION } from './automation-executor'
 import type { AutomationExecution, AutomationStepResult } from './automation-executor'
 import { redactString, redactValue } from './automation-log-redact'
 
+/** Minimal query surface a transaction client satisfies (pg `QueryResult` shape). */
+export type ExecutionLogQueryFn = (
+  sql: string,
+  params?: unknown[],
+) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+
 export interface AutomationStats {
   total: number
   success: number
@@ -46,6 +52,55 @@ export class AutomationLogService {
         initiated_by: execution.initiatedBy ?? null,
       })
       .execute()
+  }
+
+  /**
+   * Record an execution log on a CALLER-SUPPLIED query client (B1-S1 D0-A).
+   *
+   * Same redaction as `record()` — it scrubs the SAME four secret channels (steps /
+   * trigger_event / rule_snapshot / error) via the SAME `redactValue`/`redactString`
+   * helpers, so the redaction CANNOT drift from the kysely path. The difference is
+   * ONLY the execution channel: the INSERT runs on the passed client (a transaction
+   * client) so the audit row commits or rolls back atomically WITH the side effect
+   * it audits. The button route uses this to make the audit a HARD precondition (a
+   * failed audit rolls back the notification write — no "sent but unaudited" state).
+   *
+   * NOTE: it does NOT route through `toPersistedExecutionValues` because that wraps
+   * the jsonb values in kysely `RawBuilder`s (for `.values()` interpolation), which
+   * `JSON.stringify` cannot serialize — it would persist empty `{}` content. Here
+   * the jsonb columns are the redacted PLAIN values passed as `JSON.stringify(...)`
+   * text + `$n::jsonb` casts (node-postgres would otherwise coerce a JS array to a
+   * PostgreSQL array literal).
+   */
+  async recordWithQuery(query: ExecutionLogQueryFn, execution: AutomationExecution): Promise<void> {
+    await query(
+      `INSERT INTO multitable_automation_executions (
+         id, rule_id, triggered_by, triggered_at, status, steps, error, duration,
+         sheet_id, trigger_event, rule_snapshot, finished_at, schema_version,
+         rerun_of_execution_id, initiated_by
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6::jsonb, $7, $8,
+         $9, $10::jsonb, $11::jsonb, $12, $13,
+         $14, $15
+       )`,
+      [
+        execution.id,
+        execution.ruleId,
+        execution.triggeredBy,
+        execution.triggeredAt,
+        execution.status,
+        JSON.stringify(redactValue(execution.steps)),
+        execution.error != null ? redactString(execution.error) : null,
+        execution.duration ?? null,
+        execution.sheetId ?? null,
+        execution.triggerEvent == null ? null : JSON.stringify(redactValue(execution.triggerEvent)),
+        execution.ruleSnapshot == null ? null : JSON.stringify(redactValue(execution.ruleSnapshot)),
+        execution.finishedAt ?? null,
+        execution.schemaVersion ?? AUTOMATION_EXECUTION_SCHEMA_VERSION,
+        execution.rerunOfExecutionId ?? null,
+        execution.initiatedBy ?? null,
+      ],
+    )
   }
 
   /**
@@ -91,11 +146,16 @@ export class AutomationLogService {
 
   /**
    * Get recent executions across all rules, newest first.
+   *
+   * EXCLUDES triggered_by='button' rows (B1-S1 D0-A §6): a button run is a
+   * record-scoped side effect, NOT a rule execution, so it must not pollute the
+   * DF-N1 rule-monitoring stream. It remains retrievable by getById for audit.
    */
   async getRecent(limit = 50): Promise<AutomationExecution[]> {
     const rows = await db
       .selectFrom('multitable_automation_executions')
       .selectAll()
+      .where('triggered_by', '!=', 'button')
       .orderBy('created_at', 'desc')
       .limit(limit)
       .execute()
@@ -113,6 +173,10 @@ export class AutomationLogService {
   ): Promise<AutomationExecution[]> {
     const limit = Math.min(Math.max(filters.limit ?? 50, 1), 200)
     let q = db.selectFrom('multitable_automation_executions').selectAll()
+    // EXCLUDE triggered_by='button' (B1-S1 D0-A §6) — button runs are record-scoped
+    // side effects, not rule executions; they stay out of the rule-monitoring reads
+    // but remain retrievable by getById.
+    q = q.where('triggered_by', '!=', 'button')
     if (filters.sheetId) q = q.where('sheet_id', '=', filters.sheetId)
     if (filters.ruleId) q = q.where('rule_id', '=', filters.ruleId)
     if (filters.status) q = q.where('status', '=', filters.status)

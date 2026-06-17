@@ -328,7 +328,9 @@ export interface MetaRecordSubscriptionStatus {
   items?: MetaRecordSubscription[]
 }
 
-export type MetaRecordSubscriptionNotificationType = 'record.updated' | 'comment.created'
+// B1-S1 D0-A: `notification.sent` is the durable in-app notification from a
+// side-effecting send_notification button action (carries a custom `message`).
+export type MetaRecordSubscriptionNotificationType = 'record.updated' | 'comment.created' | 'notification.sent'
 
 export interface MetaRecordSubscriptionNotification {
   id: string
@@ -339,6 +341,8 @@ export interface MetaRecordSubscriptionNotification {
   actorId: string | null
   revisionId: string | null
   commentId: string | null
+  /** Custom message body — populated for `notification.sent`; null for watcher events. */
+  message: string | null
   createdAt: string
   readAt: string | null
 }

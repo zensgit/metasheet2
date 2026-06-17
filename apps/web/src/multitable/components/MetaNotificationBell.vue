@@ -37,7 +37,15 @@
           @click="onItemClick(n)"
         >
           <span v-if="!n.readAt" class="meta-notif-bell__dot" data-test="notification-unread-dot" aria-hidden="true"></span>
-          <span class="meta-notif-bell__event">{{ eventLabel(n.eventType) }}</span>
+          <span class="meta-notif-bell__body">
+            <span class="meta-notif-bell__event">{{ eventLabel(n.eventType) }}</span>
+            <!-- B1-S1 D0-A: a notification.sent row carries a custom message body. -->
+            <span
+              v-if="n.eventType === 'notification.sent' && n.message"
+              class="meta-notif-bell__message"
+              data-test="notification-message"
+            >{{ n.message }}</span>
+          </span>
           <span class="meta-notif-bell__time">{{ formatTime(n.createdAt) }}</span>
         </li>
       </ul>
@@ -100,6 +108,8 @@ void refreshUnreadCount()
 .meta-notif-bell__item:hover { background: #f8fafc; }
 .meta-notif-bell__item--unread { background: #eff6ff; }
 .meta-notif-bell__dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: #2563eb; align-self: center; }
-.meta-notif-bell__event { flex: 1 1 auto; color: #0f172a; font-size: 13px; }
+.meta-notif-bell__body { flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.meta-notif-bell__event { color: #0f172a; font-size: 13px; }
+.meta-notif-bell__message { color: #475569; font-size: 12px; white-space: normal; word-break: break-word; }
 .meta-notif-bell__time { flex: 0 0 auto; color: #94a3b8; font-size: 11px; }
 </style>

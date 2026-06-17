@@ -57,6 +57,9 @@ export type WorkbenchLabelKey =
   | 'toast.workbenchInitFailed'
   | 'confirm.discardContextChanges' | 'confirm.discardRecordChanges'
   | 'confirm.pageLeaveBusy' | 'confirm.pageLeaveDirty'
+  // B1-S1 D0-A: default confirm copy for a side-effecting button run (used when
+  // the button's own confirm.message is blank).
+  | 'confirm.buttonRun'
   // §3.6 MetaTemplateCard button (counts use the card* helpers below)
   | 'card.install' | 'card.installing'
   // S2 template detail + dry-run (design 20260611 §2.2)
@@ -205,6 +208,10 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'confirm.discardRecordChanges': {
     en: 'Discard unsaved record changes?',
     zh: '放弃未保存的记录更改吗？',
+  },
+  'confirm.buttonRun': {
+    en: 'Run this button action?',
+    zh: '确定执行此按钮操作吗？',
   },
   'confirm.pageLeaveBusy': {
     en: 'Leave the multitable while the current save or import is still running?',

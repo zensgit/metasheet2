@@ -69,6 +69,11 @@ export type MetaManagerLabelKey =
   | 'field.durationFormat' | 'field.durationFormatHmm' | 'field.durationFormatMmss'
   | 'field.buttonLabelText' | 'field.buttonVariant' | 'field.buttonVariantPrimary' | 'field.buttonVariantSecondary' | 'field.buttonVariantDanger'
   | 'field.buttonActionType' | 'field.buttonActionRecordClick' | 'field.buttonConfirmEnable' | 'field.buttonConfirmMessage' | 'field.buttonConfirmHint'
+  // B1-S1 D0-A: send_notification button action authoring.
+  | 'field.buttonActionSendNotification'
+  | 'field.buttonNotifyMessage' | 'field.buttonNotifyMessageHint'
+  | 'field.buttonNotifyRecipients' | 'field.buttonNotifyRecipientsHint'
+  | 'field.error.buttonNotifyConfig'
   | 'field.autoNumberHint' | 'field.saveSettings' | 'field.applyDefaults'
   | 'field.namePlaceholder' | 'field.addButton'
   | 'field.changedTypeBlocking' | 'field.changedWarning'
@@ -322,9 +327,21 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.buttonVariantDanger': { en: 'Danger', zh: '危险' },
   'field.buttonActionType': { en: 'Action', zh: '动作' },
   'field.buttonActionRecordClick': { en: 'Record click (audit only)', zh: '记录点击（仅审计）' },
+  'field.buttonActionSendNotification': { en: 'Send notification', zh: '发送通知' },
   'field.buttonConfirmEnable': { en: 'Confirm before running', zh: '运行前确认' },
   'field.buttonConfirmMessage': { en: 'Confirm message', zh: '确认提示' },
-  'field.buttonConfirmHint': { en: 'Takes effect when the button runs a side-effecting action (coming later).', zh: '在按钮执行有副作用的动作时生效（后续上线）。' },
+  'field.buttonConfirmHint': { en: 'Takes effect when the button runs a side-effecting action.', zh: '在按钮执行有副作用的动作时生效。' },
+  'field.buttonNotifyMessage': { en: 'Notification message', zh: '通知内容' },
+  'field.buttonNotifyMessageHint': { en: 'The message recipients see in their Notification Center.', zh: '收件人将在通知中心看到的内容。' },
+  'field.buttonNotifyRecipients': { en: 'Recipients (user IDs)', zh: '收件人（用户 ID）' },
+  'field.buttonNotifyRecipientsHint': {
+    en: 'Comma-separated user IDs. Non-members are dropped server-side at run time.',
+    zh: '逗号分隔的用户 ID。运行时服务端会剔除非成员。',
+  },
+  'field.error.buttonNotifyConfig': {
+    en: 'Send notification requires a message and at least one recipient.',
+    zh: '发送通知需要填写内容并至少一个收件人。',
+  },
   'field.prefix': { en: 'Prefix', zh: '前缀' },
   'field.digits': { en: 'Digits', zh: '位数' },
   'field.startAt': { en: 'Start at', zh: '起始值' },

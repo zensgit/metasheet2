@@ -771,7 +771,13 @@ function normalizeRecordSubscriptionNotification(
   const sheetId = typeof payload?.sheetId === 'string' ? payload.sheetId : ''
   const recordId = typeof payload?.recordId === 'string' ? payload.recordId : ''
   const userId = typeof payload?.userId === 'string' ? payload.userId : ''
-  const eventType = payload?.eventType === 'comment.created' ? 'comment.created' : payload?.eventType === 'record.updated' ? 'record.updated' : null
+  // Admit ALL three known types — a missing notification.sent branch here would
+  // silently DROP every button-delivered notification (returns null → filtered out).
+  const eventType =
+    payload?.eventType === 'comment.created' ? 'comment.created'
+      : payload?.eventType === 'notification.sent' ? 'notification.sent'
+        : payload?.eventType === 'record.updated' ? 'record.updated'
+          : null
   if (!id || !sheetId || !recordId || !userId || !eventType) return null
   return {
     id,
@@ -782,6 +788,7 @@ function normalizeRecordSubscriptionNotification(
     actorId: typeof payload?.actorId === 'string' ? payload.actorId : null,
     revisionId: typeof payload?.revisionId === 'string' ? payload.revisionId : null,
     commentId: typeof payload?.commentId === 'string' ? payload.commentId : null,
+    message: typeof payload?.message === 'string' ? payload.message : null,
     createdAt: typeof payload?.createdAt === 'string' ? payload.createdAt : '',
     readAt: typeof payload?.readAt === 'string' ? payload.readAt : null,
   }
@@ -1288,13 +1295,23 @@ export class MultitableApiClient {
   // IMPORTANT: an action that FAILS returns HTTP 200 with { status: 'failed' } —
   // this resolves (does not throw); the caller MUST branch on `data.status`.
   // Only contract/permission/server errors (400/403/404/500) throw MultitableApiError.
-  async runButton(sheetId: string, recordId: string, fieldId: string, requestId?: string): Promise<ButtonRunData> {
+  async runButton(
+    sheetId: string,
+    recordId: string,
+    fieldId: string,
+    options?: { requestId?: string; confirmed?: boolean },
+  ): Promise<ButtonRunData> {
+    // §4: `confirmed` is the server-confirm signal (the server is the gate; the FE
+    // confirm dialog sends confirmed:true). `requestId` scopes §6 at-most-once dedup.
+    const body: { requestId?: string; confirmed?: boolean } = {}
+    if (options?.requestId) body.requestId = options.requestId
+    if (options?.confirmed) body.confirmed = true
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/fields/${encodeURIComponent(fieldId)}/button/run`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestId ? { requestId } : {}),
+        body: JSON.stringify(body),
       },
     )
     return this.parseJson(res)

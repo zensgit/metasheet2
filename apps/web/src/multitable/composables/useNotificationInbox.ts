@@ -19,9 +19,9 @@ export function useNotificationInbox(client?: MultitableApiClient) {
   const hasUnread = computed(() => unreadCount.value > 0)
 
   function eventLabel(eventType: MetaRecordSubscriptionNotificationType): string {
-    return eventType === 'comment.created'
-      ? recordLabel('notification.eventCommentCreated', isZh.value)
-      : recordLabel('notification.eventRecordUpdated', isZh.value)
+    if (eventType === 'comment.created') return recordLabel('notification.eventCommentCreated', isZh.value)
+    if (eventType === 'notification.sent') return recordLabel('notification.eventNotificationSent', isZh.value)
+    return recordLabel('notification.eventRecordUpdated', isZh.value)
   }
 
   // UI-facing actions NEVER throw — they surface failure via `error` and resolve. The bell is ambient

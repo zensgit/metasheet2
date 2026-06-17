@@ -59,6 +59,8 @@ export type MetaRecordLabelKey =
   | 'notification.bell' | 'notification.title' | 'notification.empty'
   | 'notification.markAllRead' | 'notification.loadError'
   | 'notification.eventRecordUpdated' | 'notification.eventCommentCreated'
+  // B1-S1 D0-A: durable button-delivered notification (custom message render).
+  | 'notification.eventNotificationSent'
   // --- MetaFormView multi-page nav chrome (A4) ---
   | 'form.previousPage' | 'form.nextPage'
 
@@ -70,6 +72,7 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'notification.loadError': { en: 'Failed to load notifications', zh: '加载通知失败' },
   'notification.eventRecordUpdated': { en: 'Record updated', zh: '记录有更新' },
   'notification.eventCommentCreated': { en: 'New comment', zh: '新增评论' },
+  'notification.eventNotificationSent': { en: 'Notification', zh: '通知' },
   'record.title': { en: 'Record Detail', zh: '记录详情' },
   'record.previous': { en: 'Previous record', zh: '上一条记录' },
   'record.next': { en: 'Next record', zh: '下一条记录' },
