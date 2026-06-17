@@ -29,6 +29,11 @@ on:
       - 'apps/web/src/multitable/utils/view-config.ts'
       - 'apps/web/src/multitable/utils/meta-view-render-labels.ts'
       - 'apps/web/tests/multitable-kanban-view.spec.ts'
+      - 'apps/web/src/multitable/composables/useMultitableSheetPresence.ts'
+      - 'apps/web/src/multitable/utils/sheet-cursor-state.ts'
+      - 'apps/web/src/multitable/components/MetaGridTable.vue'
+      - 'apps/web/src/multitable/views/MultitableWorkbench.vue'
+      - 'apps/web/tests/multitable-sheet-cursor-state.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
   push:
     branches: [main]
@@ -46,6 +51,11 @@ on:
       - 'apps/web/src/multitable/utils/view-config.ts'
       - 'apps/web/src/multitable/utils/meta-view-render-labels.ts'
       - 'apps/web/tests/multitable-kanban-view.spec.ts'
+      - 'apps/web/src/multitable/composables/useMultitableSheetPresence.ts'
+      - 'apps/web/src/multitable/utils/sheet-cursor-state.ts'
+      - 'apps/web/src/multitable/components/MetaGridTable.vue'
+      - 'apps/web/src/multitable/views/MultitableWorkbench.vue'
+      - 'apps/web/tests/multitable-sheet-cursor-state.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
 
 jobs:
@@ -88,4 +98,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run multitable web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-kanban-view multitable-field-manager --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state --reporter=dot

@@ -3,6 +3,13 @@ import { io, type Socket } from 'socket.io-client'
 import { useAuth } from '../../composables/useAuth'
 import { getApiBase } from '../../utils/api'
 import type { MultitableSheetPresence } from '../types'
+import {
+  applyCursorEvent,
+  cursorsByCell,
+  pruneCursors,
+  type RemoteCellCursor,
+  type SheetCursorEvent,
+} from '../utils/sheet-cursor-state'
 
 type MaybeReactive<T> = T | { value: T } | (() => T)
 
@@ -52,6 +59,12 @@ export function useMultitableSheetPresence(options: UseMultitableSheetPresenceOp
   let disconnected = false
   let connectionPromise: Promise<Socket | null> | null = null
 
+  // Live cell-cursors: remote collaborators' active cells (keyed by userId, self excluded). `byCell`
+  // indexes them for O(1) per-cell lookup in the grid render.
+  const remoteCursors = ref<Map<string, RemoteCellCursor>>(new Map())
+  const remoteCursorsByCell = computed(() => cursorsByCell(remoteCursors.value))
+  let localCursorKey: string | null = null
+
   const activeUsers = computed(() => presence.value?.users ?? [])
   const activeCollaborators = computed(() => {
     const selfId = currentUserId.value
@@ -66,6 +79,22 @@ export function useMultitableSheetPresence(options: UseMultitableSheetPresenceOp
     }
   }
 
+  function clearRemoteCursors() {
+    if (remoteCursors.value.size > 0) remoteCursors.value = new Map()
+    localCursorKey = null
+  }
+
+  // Emit the local active cell to the sheet room (deduped — only on actual change). null/null clears it
+  // (blur). Presentational only: the server relays it; no data is mutated.
+  function setLocalCursor(recordId: string | null, fieldId: string | null) {
+    const key = recordId && fieldId ? `${recordId}:${fieldId}` : null
+    if (key === localCursorKey) return
+    localCursorKey = key
+    if (socket && activeSheetId) {
+      socket.emit('sheet:cursor', { sheetId: activeSheetId, recordId: recordId ?? null, fieldId: fieldId ?? null })
+    }
+  }
+
   function cleanupSocket() {
     if (socket) {
       if (activeSheetId) {
@@ -77,6 +106,7 @@ export function useMultitableSheetPresence(options: UseMultitableSheetPresenceOp
     activeSheetId = null
     connectionPromise = null
     clearPresence()
+    clearRemoteCursors()
   }
 
   async function ensureSocket(): Promise<Socket | null> {
@@ -100,6 +130,11 @@ export function useMultitableSheetPresence(options: UseMultitableSheetPresenceOp
           const nextPresence = normalizeSheetPresence(payload)
           if (!nextPresence || nextPresence.sheetId !== activeSheetId) return
           presence.value = nextPresence
+        })
+
+        nextSocket.on('sheet:cursor', (payload: SheetCursorEvent & { sheetId?: unknown }) => {
+          if (typeof payload?.sheetId === 'string' && payload.sheetId.trim() !== activeSheetId) return
+          remoteCursors.value = applyCursorEvent(remoteCursors.value, payload, currentUserId.value)
         })
 
         socket = nextSocket
@@ -126,6 +161,7 @@ export function useMultitableSheetPresence(options: UseMultitableSheetPresenceOp
     if (activeSheetId && activeSheetId !== nextSheetId) {
       currentSocket.emit('leave-sheet', activeSheetId)
       clearPresence(activeSheetId)
+      clearRemoteCursors()
     }
     if (activeSheetId !== nextSheetId) {
       currentSocket.emit('join-sheet', nextSheetId)
@@ -141,6 +177,16 @@ export function useMultitableSheetPresence(options: UseMultitableSheetPresenceOp
     { immediate: true },
   )
 
+  // Backstop prune: a collaborator who dropped out of presence can't keep a live cursor (the server also
+  // broadcasts a clear on disconnect/leave; this covers a missed clear). Safe because join-presence
+  // always precedes that user's first cursor event.
+  watch(
+    () => presence.value?.users?.map((user) => user.id).join(',') ?? '',
+    () => {
+      remoteCursors.value = pruneCursors(remoteCursors.value, presence.value?.users?.map((user) => user.id) ?? [])
+    },
+  )
+
   onBeforeUnmount(() => {
     disconnected = true
     cleanupSocket()
@@ -151,6 +197,9 @@ export function useMultitableSheetPresence(options: UseMultitableSheetPresenceOp
     activeUsers,
     activeCollaborators,
     activeCollaboratorCount,
+    remoteCursors,
+    remoteCursorsByCell,
+    setLocalCursor,
     reconnect: syncSheetRoom,
     disconnect: cleanupSocket,
   }

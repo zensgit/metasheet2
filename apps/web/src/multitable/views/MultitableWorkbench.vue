@@ -269,6 +269,8 @@
           :button-run-pending="buttonRunPending"
           :fetch-record="fetchLinkedRecordFn"
           :mention-suggestions="commentMentionSuggestions"
+          :remote-cursors-by-cell="sheetPresenceState.remoteCursorsByCell.value"
+          @cursor-focus="onCellCursorFocus"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @open-person-picker="onGridPersonPicker" @resize-column="onSetColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
@@ -1636,6 +1638,11 @@ async function selectRecord(recordId: string, opts?: { openComments?: boolean; h
 
 function onSelectRecord(recordId: string) {
   void selectRecord(recordId)
+}
+
+// Live cell-cursors: broadcast the local user's active cell to other collaborators on this sheet.
+function onCellCursorFocus(payload: { recordId: string; fieldId: string }) {
+  sheetPresenceState.setLocalCursor(payload.recordId, payload.fieldId)
 }
 
 function onMentionChipClick() {
