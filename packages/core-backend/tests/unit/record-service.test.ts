@@ -101,9 +101,9 @@ function createMockPool(
     if (sql.includes('INSERT INTO meta_links')) {
       return responses.INSERT_LINK ?? { rows: [], rowCount: 1 }
     }
-    if (sql.includes('SELECT id, sheet_id, created_by, locked, locked_by FROM meta_records WHERE id = $1')) {
+    if (sql.includes('SELECT id, sheet_id, created_by, locked, locked_by') && sql.includes('FROM meta_records WHERE id = $1')) {
       return responses.SELECT_DELETE_RECORD ?? {
-        rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops', created_by: 'user_1', locked: false, locked_by: null }],
+        rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops', created_by: 'user_1', locked: false, locked_by: null, created_at: null, updated_at: null }],
       }
     }
     if (sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 FOR UPDATE')) {
@@ -133,6 +133,14 @@ function createMockPool(
     }
     if (sql.includes('DELETE FROM meta_records WHERE id = $1')) {
       return responses.DELETE_RECORD ?? { rows: [], rowCount: 1 }
+    }
+    // #15 recycle bin: deleteRecord copies the row into meta_records_trash (base_id lookup + insert) in the
+    // delete txn before the hard delete; mock both so the delete-path unit tests don't hit Unhandled SQL.
+    if (sql.includes('SELECT base_id FROM meta_sheets WHERE id = $1')) {
+      return responses.SELECT_SHEET_BASE ?? { rows: [{ base_id: 'base_ops' }] }
+    }
+    if (sql.includes('INSERT INTO meta_records_trash')) {
+      return responses.INSERT_TRASH ?? { rows: [], rowCount: 1 }
     }
     throw new Error(`Unhandled SQL in test: ${sql}`)
   })
