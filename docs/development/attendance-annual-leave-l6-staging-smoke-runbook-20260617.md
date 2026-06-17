@@ -43,6 +43,14 @@ H=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H "x-o
 > staging **401s `Invalid token`**. So in this runbook a **401 is a wrong-realm / schema-gap signal, not a code bug** —
 > do not "debug the route", re-mint the token in the staging realm (or confirm staging is migrated) and retry.
 
+> **Why the token's org matters (write-routing).** The write endpoints resolve their org via
+> `getOrgId = body.orgId ?? query.orgId ?? token.org ?? x-org-id header` — the `x-org-id` header in `$H` is **last**.
+> The POSTs here carry no `body.orgId`/`query.orgId`, so **if `<TOKEN>` embeds an org (`orgId`/`workspaceId`), every
+> write lands in the token's org**, not `<ORG>` — while §1's gate and §8's teardown operate on `<ORG>` (and the
+> `?orgId=<ORG>` reads mask it). **HARD REQUIREMENT:** `<TOKEN>` must be **org-less**, or its embedded org must equal
+> `<ORG>`. The §3a dry-run org-match check fails fast on a mismatch **before** any real grant — but use a correct
+> token so it never fires.
+
 **Preflight — prove the token authenticates AND the org resolves on staging:**
 
 ```bash
@@ -93,9 +101,12 @@ psql "$PGURL" -v org="'$ORG'" -v emp="'$EMP'" -c "SELECT 1 FROM user_orgs uo JOI
 
 - **PASS:** `active_members == 1`, `with_tenure_anchor == 1`, and that one member is `<EMP>`. The count **must be
   exactly 1** (the §0 hard prerequisite): a disposable single-member org guarantees §3's accrual grants to `<EMP>`
-  **only**, so §8's teardown is precise and cannot touch any other user. If `active_members > 1`, **STOP** — either
-  the org is not disposable (do not run here), or every other member is also a throwaway smoke account you are
-  willing to fully delete in §8.
+  **only**, so §8's teardown is precise and cannot touch any other user.
+- **`active_members != 1` → STOP, no exception.** There is **no** "throwaway extra members" escape: §8's teardown
+  deletes lots/events/adjustments scoped to `<EMP>` only (while it deletes the org's `annual:<YEAR>` run audit
+  org-wide). So any **other** active member would be left a **real granted annual lot** (residue ≠ 0) **and** have
+  that lot's provenance orphaned when the run rows are deleted — the exact corruption §0 forbids. If the count is
+  not exactly 1, you do not have a disposable single-member org; provision one and re-run §1.
 - **FAIL → STOP (do not continue to §2):** if **`active_members = 0`** the accrual grants to **nobody**
   (every run-item would be skipped) and **every** manual-adjust **404s `USER_NOT_IN_ORG`** — the rest of the smoke
   cannot prove anything. A member with **no active `user_orgs` row is invisible** to accrual and 404s on adjust;
@@ -168,19 +179,27 @@ DRY_RUN_ID=$(echo "$DRY" | jq -r '.data.runId')
 
 ```bash
 psql "$PGURL" -v org="'$ORG'" -v emp="'$EMP'" -c "SELECT count(*) AS dry_lots FROM attendance_leave_balances WHERE org_id = :org AND user_id = :emp AND leave_type_code = 'annual' AND source_type = 'annual_accrual';"
-psql "$PGURL" -v rid="'$DRY_RUN_ID'" -c "SELECT dry_run, (SELECT count(*) FROM attendance_leave_accrual_run_items WHERE run_id = :rid) AS items FROM attendance_leave_accrual_runs WHERE id = :rid;"
+# org-match gate (P1: getOrgId precedence): the run row MUST be found UNDER :org. The write resolves its org via
+# getOrgId = body.orgId ?? query.orgId ?? token.org ?? x-org-id header — the header is LAST, so a token carrying a
+# different org would route this write elsewhere. Filtering `AND org_id = :org` makes a mismatch return 0 rows here,
+# on the DRY run, BEFORE §3b grants any real lot.
+psql "$PGURL" -v org="'$ORG'" -v rid="'$DRY_RUN_ID'" -c "SELECT dry_run, (SELECT count(*) FROM attendance_leave_accrual_run_items WHERE run_id = :rid) AS items FROM attendance_leave_accrual_runs WHERE id = :rid AND org_id = :org;"
 ```
 
 - **PASS (3a):** `data.dryRun = true`, `granted >= 1` (the computed-grantable count a preview reports),
-  `lotsCreated = 0`, `alreadyGranted = 0`; `dry_lots = 0` (NO real lot from the dry-run); the run row has
-  `dry_run = t` with `items >= 1`. Note `skipReasons` is an **object/map** (`reasonCode → count`), not an array.
+  `lotsCreated = 0`, `alreadyGranted = 0`; `dry_lots = 0` (NO real lot from the dry-run); the run row is **found
+  under `<ORG>`** (the `AND org_id = :org` query returns a row) with `dry_run = t` and `items >= 1`. Note
+  `skipReasons` is an **object/map** (`reasonCode → count`), not an array.
+- **FAIL → STOP before §3b:** the run-row query returns **no row** → the write landed in a **different org** than
+  `<ORG>` (the `<TOKEN>` carries an embedded org that overrides the `x-org-id` header via `getOrgId` precedence; §0).
+  Do **not** proceed to the real grant — re-mint an org-less token (or one whose org is `<ORG>`) and restart §3.
 
 ```bash
 # 3b — REAL RUN: grants the lots + grant events
 REAL=$(curl -s "${H[@]}" -X POST "$BASE/api/attendance/annual-leave-accrual/run" \
   -d "{\"period\":$PERIOD,\"dryRun\":false}")
 echo "$REAL" | jq '.data | {dryRun, granted, grantedMinutes, lotsCreated, alreadyGranted, skipReasons}'
-REAL_RUN_ID=$(echo "$REAL" | jq -r '.data.runId')   # capture for the precise §8 teardown
+REAL_RUN_ID=$(echo "$REAL" | jq -r '.data.runId')   # informational only — §8 teardown is period_key-scoped and intentionally catches the dry/real/re-run rows together
 ```
 
 ```bash
@@ -415,7 +434,8 @@ L6 is **PASS** only when **all** hold on a live staging run:
 
 1. **§0** preflight — staging-realm token authenticates (`200`), L5a read `ok:true`; no `401`/`503`.
 2. **§1 THE GATE** — `active_members == 1` (the disposable single-member org), `with_tenure_anchor == 1`, and that
-   member is `<EMP>`. (Zero → STOP; more than one → STOP unless every member is a throwaway smoke account.)
+   member is `<EMP>`. (Any count other than exactly 1 → **STOP, no exception** — the `<EMP>`-scoped teardown does not
+   clean other members, so >1 means residue + orphaned provenance.)
 3. **§2** policy enabled with a valid IANA timezone; the missing/invalid-timezone control `422`s.
 4. **§3** accrual dry-run persists run+run_items but **no lots/events** (`dry_lots = 0`); real run grants
    (`lotsCreated >= 1`); re-run is idempotent (`alreadyGranted >= 1`, no second lot).
