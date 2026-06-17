@@ -1,0 +1,73 @@
+# Multitable web guard (targeted gate).
+#
+# Why this exists: the main PR gate (plugin-tests.yml) runs core-backend tests and only
+# `pnpm --filter @metasheet/web build` for the web app — it does NOT run apps/web vitest
+# specs. So FE-only regressions on the multitable surface slip through green CI. The rollup
+# aggregation expansion (countall/unique) added a FE normalizer (resolveRollupFieldProperty /
+# normalizeRollupAggregation) whose whole job is to NOT silently collapse a stored countall/
+# unique back to 'count' on edit — exactly the kind of regression a build-only gate can't catch.
+#
+# Scope (deliberately TARGETED, like attendance-web-guard): run the green multitable FE
+# normalizer/round-trip specs. The full `@metasheet/web` vitest suite still has historical/flaky
+# failures, so wiring the whole suite as a required gate would be red on arrival. Expand the
+# `vitest run` filter as more multitable web specs are cleaned up.
+name: Multitable Web Guard
+
+on:
+  pull_request:
+    paths:
+      - 'apps/web/src/multitable/utils/field-config.ts'
+      - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
+      - 'apps/web/src/multitable/components/MetaFieldManager.vue'
+      - 'apps/web/tests/multitable-rollup-aggregation-fe.spec.ts'
+      - '.github/workflows/multitable-web-guard.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/src/multitable/utils/field-config.ts'
+      - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
+      - 'apps/web/src/multitable/components/MetaFieldManager.vue'
+      - 'apps/web/tests/multitable-rollup-aggregation-fe.spec.ts'
+      - '.github/workflows/multitable-web-guard.yml'
+
+jobs:
+  multitable-web-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run multitable web guard specs (targeted)
+        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe --reporter=dot
