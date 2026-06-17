@@ -5,6 +5,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$RetiredSensitiveEnvKeys = @(
+  'METASHEET_C6_TEST_FAILURE_INJECTION_ENABLED',
+  'INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON'
+)
 
 function Resolve-RootDirPath {
   param([string]$Candidate)
@@ -65,6 +69,43 @@ function Import-AppEnvFile {
     }
 
     Set-Item -Path ("Env:{0}" -f $name) -Value $value
+  }
+}
+
+function Get-AppEnvKeySet {
+  param([string]$EnvFile)
+
+  $keys = @{}
+  foreach ($rawLine in Get-Content -Path $EnvFile) {
+    $line = $rawLine.Trim()
+    if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#')) {
+      continue
+    }
+
+    $parts = $line -split '=', 2
+    if ($parts.Length -ne 2) {
+      continue
+    }
+
+    $name = $parts[0].Trim()
+    if (-not [string]::IsNullOrWhiteSpace($name)) {
+      $keys[$name] = $true
+    }
+  }
+
+  return $keys
+}
+
+function Clear-RetiredSensitiveEnvKeysAbsentFromFile {
+  param(
+    [string[]]$KeyNames,
+    [hashtable]$EnvFileKeys
+  )
+
+  foreach ($key in $KeyNames) {
+    if (-not $EnvFileKeys.ContainsKey($key)) {
+      Remove-Item -Path ("Env:{0}" -f $key) -ErrorAction SilentlyContinue
+    }
   }
 }
 
@@ -254,6 +295,29 @@ function Test-Pm2AppMatchesTarget {
   return $actualScriptPath -eq $expectedScript -and $actualCwd -eq $expectedRoot
 }
 
+function Test-Pm2AppHasRetiredSensitiveEnvKey {
+  param(
+    [object]$App,
+    [string[]]$KeyNames,
+    [hashtable]$EnvFileKeys
+  )
+
+  if ($null -eq $App -or $null -eq $App.pm2_env) {
+    return $false
+  }
+
+  foreach ($key in $KeyNames) {
+    if ($EnvFileKeys.ContainsKey($key)) {
+      continue
+    }
+    if ($null -ne $App.pm2_env.PSObject.Properties[$key]) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
 function Start-Pm2App {
   param(
     [string]$Pm2Command,
@@ -269,7 +333,9 @@ function Start-Pm2App {
 }
 
 $envFile = Resolve-AppEnvFile -BaseDir $resolvedRoot
+$envFileKeys = Get-AppEnvKeySet -EnvFile $envFile
 Import-AppEnvFile -EnvFile $envFile
+Clear-RetiredSensitiveEnvKeysAbsentFromFile -KeyNames $RetiredSensitiveEnvKeys -EnvFileKeys $envFileKeys
 Initialize-WindowsSystemToolPath
 Initialize-WindowsSystemProfileEnv
 
@@ -285,7 +351,15 @@ $expectedScriptPath = Join-Path $resolvedRoot 'packages\core-backend\dist\src\in
 $existingApp = Get-Pm2AppProcess -Pm2Command $pm2Command -AppName $Pm2AppName
 
 if ($null -ne $existingApp) {
-  if (Test-Pm2AppMatchesTarget -App $existingApp -ExpectedScriptPath $expectedScriptPath -ExpectedCwd $resolvedRoot) {
+  if (Test-Pm2AppHasRetiredSensitiveEnvKey -App $existingApp -KeyNames $RetiredSensitiveEnvKeys -EnvFileKeys $envFileKeys) {
+    Write-Host "[attendance-onprem-start-pm2] deleting pm2 app definition for $Pm2AppName to retire sensitive/test-only env keys"
+    & $pm2Command delete $Pm2AppName
+    if ($LASTEXITCODE -ne 0) {
+      throw "pm2 delete failed while retiring env keys for $Pm2AppName"
+    }
+    Start-Pm2App -Pm2Command $pm2Command -ConfigPath $ecosystemConfig -AppName $Pm2AppName -EnvName $Pm2Env
+  }
+  elseif (Test-Pm2AppMatchesTarget -App $existingApp -ExpectedScriptPath $expectedScriptPath -ExpectedCwd $resolvedRoot) {
     & $pm2Command restart $Pm2AppName --update-env
     if ($LASTEXITCODE -ne 0) {
       throw "pm2 restart failed for $Pm2AppName"

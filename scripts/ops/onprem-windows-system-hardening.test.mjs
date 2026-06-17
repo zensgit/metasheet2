@@ -50,3 +50,21 @@ test('PM2 startup helper replaces stale app definitions instead of restart-only 
   assert.match(script, /delete \$Pm2AppName/)
   assert.match(script, /--update-env/)
 })
+
+test('PM2 startup helper retires sensitive test-only env keys absent from app.env', () => {
+  const script = readScript('scripts/ops/attendance-onprem-start-pm2.ps1')
+
+  assert.match(script, /\$RetiredSensitiveEnvKeys = @\(/)
+  assert.match(script, /'METASHEET_C6_TEST_FAILURE_INJECTION_ENABLED'/)
+  assert.match(script, /'INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON'/)
+  assert.match(script, /function Get-AppEnvKeySet/)
+  assert.match(script, /function Clear-RetiredSensitiveEnvKeysAbsentFromFile/)
+  assert.match(script, /Remove-Item -Path \("Env:\{0\}" -f \$key\) -ErrorAction SilentlyContinue/)
+  assert.match(script, /function Test-Pm2AppHasRetiredSensitiveEnvKey/)
+  assert.match(script, /if \(\$EnvFileKeys\.ContainsKey\(\$key\)\)/)
+  assert.match(script, /if \(\$null -ne \$App\.pm2_env\.PSObject\.Properties\[\$key\]\)/)
+  assert.match(script, /\$envFileKeys = Get-AppEnvKeySet -EnvFile \$envFile/)
+  assert.match(script, /Clear-RetiredSensitiveEnvKeysAbsentFromFile -KeyNames \$RetiredSensitiveEnvKeys -EnvFileKeys \$envFileKeys/)
+  assert.match(script, /deleting pm2 app definition for \$Pm2AppName to retire sensitive\/test-only env keys/)
+  assert.match(script, /pm2 delete failed while retiring env keys/)
+})
