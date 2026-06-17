@@ -44,6 +44,9 @@ const FLD_AND_EMPTY = `fld_rf_and_${TS}` // countall where status=unpaid AND amo
 const FLD_AMT_GT8 = `fld_rf_gt8_${TS}` // countall where amount greater 8 -> FR1(10),FR2(20) = 2
 const FLD_NOTE_SET = `fld_rf_ns_${TS}` // countall where note isNotEmpty -> FR1 only = 1
 const FLD_NOTE_EMPTY = `fld_rf_ne_${TS}` // countall where note isEmpty -> FR2,FR3 = 2
+const FLD_BAD_OP = `fld_rf_badop_${TS}` // PERSISTED incompatible op (number `contains`) — runtime no-match -> 0
+const FLD_FOREIGN_ROLLUP = `fld_rf_fro_${TS}` // a FOREIGN field whose TYPE is rollup (used as a condition field)
+const FLD_BAD_ROLLUP_OP = `fld_rf_badro_${TS}` // countall where foreignRollup CONTAINS '1' — rollup→numeric guard -> 0
 
 const FR1 = `rec_rf_f1_${TS}` // amount 10, paid,   secret yes
 const FR2 = `rec_rf_f2_${TS}` // amount 20, paid,   secret no
@@ -88,6 +91,10 @@ describeIfDatabase('multitable rollup filter condition + fail-closed field-reada
       await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
         [fid, FS, name, type, '{}', order])
     }
+    // A foreign field whose TYPE is rollup — used below as a CONDITION field to prove the guard coerces
+    // rollup→numeric (matching the evaluator), so a text op on it is rejected rather than match-all.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_FOREIGN_ROLLUP, FS, 'ForeignRollup', 'rollup', '{}', 5])
 
     // FLD_NOTE is set on FR1 only (absent key on FR2/FR3) → isNotEmpty matches 1, isEmpty matches 2.
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
@@ -132,6 +139,14 @@ describeIfDatabase('multitable rollup filter condition + fail-closed field-reada
     // CONDITION read an unreadable field (side-channel). Same as FLD_BY_SECRET but with the opt-out set.
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_BY_SECRET_SKIP, MS, 'BySecretSkip', 'rollup', rollup('countall', { filters: [{ fieldId: FLD_SECRET, operator: 'is', value: 'yes' }], skipForeignFieldMasking: true }), 11])
+    // Persisted INCOMPATIBLE operator (number field + `contains`) inserted directly, bypassing save-time
+    // validation — simulates a provisioning/plugin write or a config saved before the validator existed.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_BAD_OP, MS, 'BadOp', 'rollup', rollup('countall', { filters: [{ fieldId: FLD_AMOUNT, operator: 'contains', value: '1' }] }), 12])
+    // Condition on a ROLLUP-typed foreign field with a text op — the evaluator coerces rollup→number, so
+    // the guard must too (else it passes and match-alls). Directly inserted (bypasses save validation).
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_BAD_ROLLUP_OP, MS, 'BadRollupOp', 'rollup', rollup('countall', { filters: [{ fieldId: FLD_FOREIGN_ROLLUP, operator: 'contains', value: '1' }] }), 13])
 
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
       [REC, MS, JSON.stringify({ [FLD_LINK]: [FR1, FR2, FR3] })])
@@ -188,6 +203,19 @@ describeIfDatabase('multitable rollup filter condition + fail-closed field-reada
 
   test('numeric operator: amount greater 8 matches FR1(10), FR2(20) but not FR3(5)', async () => {
     expect(await readRollup(ALLOW_USER, FLD_AMT_GT8)).toBe(2)
+  })
+
+  test('runtime guard: a PERSISTED operator incompatible with the field type fails closed (no-match), not match-all', async () => {
+    // `amount contains '1'` is incompatible (number + text op). Without the runtime guard,
+    // evaluateMetaFilterCondition's numeric catch-all returns match-all → 3. The guard treats the
+    // bad condition as no-match → 0. Locks defense for provisioning/plugin writes + pre-validator configs.
+    expect(await readRollup(ALLOW_USER, FLD_BAD_OP)).toBe(0)
+  })
+
+  test('runtime guard treats a ROLLUP-typed condition field as numeric (text op rejected, not match-all)', async () => {
+    // foreignRollup `contains` — the evaluator coerces rollup→number, so the guard must too. Without the
+    // rollup→number normalization the guard would pass it and the numeric catch-all would match-all (3).
+    expect(await readRollup(ALLOW_USER, FLD_BAD_ROLLUP_OP)).toBe(0)
   })
 
   test('isNotEmpty / isEmpty on a foreign field set on a subset of linked records', async () => {

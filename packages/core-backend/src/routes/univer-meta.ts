@@ -1100,8 +1100,12 @@ const ROLLUP_FILTER_OPS_STRING = new Set(['is', 'equal', 'isnot', 'notequal', 'c
 export function isRollupFilterOperatorCompatible(fieldType: string, operator: string): boolean {
   const op = operator.trim().toLowerCase()
   if (op === 'isempty' || op === 'isnotempty') return true
-  if (isNumericQueryFieldType(fieldType) || fieldType === 'date') return ROLLUP_FILTER_OPS_NUMERIC.has(op)
-  if (fieldType === 'boolean') return ROLLUP_FILTER_OPS_BOOLEAN.has(op)
+  // Mirror evaluateMetaFilterCondition's effectiveType EXACTLY: it coerces a rollup-typed field to
+  // 'number'. If this helper didn't, `rollupField contains x` would look string-compatible here, pass
+  // the guard, then hit the numeric catch-all (match-all) at eval — the same leak as `number contains`.
+  const effectiveType = fieldType === 'rollup' ? 'number' : fieldType
+  if (isNumericQueryFieldType(effectiveType) || effectiveType === 'date') return ROLLUP_FILTER_OPS_NUMERIC.has(op)
+  if (effectiveType === 'boolean') return ROLLUP_FILTER_OPS_BOOLEAN.has(op)
   return ROLLUP_FILTER_OPS_STRING.has(op)
 }
 
@@ -2733,12 +2737,16 @@ async function applyLookupRollup(
     const filterConjunction = rollupCfg?.filterConjunction ?? 'and'
     const matchesFilters = (data: Record<string, unknown>): boolean => {
       if (filters.length === 0) return true
-      const test = (cond: MetaFilterCondition) =>
-        evaluateMetaFilterCondition(
-          (filterTypes?.get(cond.fieldId) ?? 'string') as UniverMetaField['type'],
-          data[cond.fieldId],
-          cond,
-        )
+      const test = (cond: MetaFilterCondition) => {
+        const condFieldType = filterTypes?.get(cond.fieldId) ?? 'string'
+        // RUNTIME guard (defense-in-depth, complements the save-time per-type check): an operator
+        // incompatible with the field type hits evaluateMetaFilterCondition's per-type catch-all, which
+        // returns match-all — for a rollup filter that's an over-count. Treat it as NO match instead.
+        // Covers provisioning/plugin writes that bypass validateLookupRollupConfig AND any config
+        // persisted before that save-time check existed.
+        if (!isRollupFilterOperatorCompatible(condFieldType, cond.operator)) return false
+        return evaluateMetaFilterCondition(condFieldType as UniverMetaField['type'], data[cond.fieldId], cond)
+      }
       return filterConjunction === 'or' ? filters.some(test) : filters.every(test)
     }
 
