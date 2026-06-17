@@ -19,11 +19,19 @@ This is a **staging** runbook: a staging admin token is minted with the **stagin
 
 ## 0. Placeholders + preflight auth round-trip (do this FIRST)
 
+> **HARD PREREQUISITE — disposable, single-member smoke org.** `<ORG>` **MUST** be a throwaway org whose **only**
+> eligible member is `<EMP>` (exactly one active `user_orgs` row with a tenure anchor — §1 asserts this). This is
+> **not** a preference. `runAnnualLeaveAccrual` in §3 grants a lot + event to **every** active member of the org,
+> not just `<EMP>`; and the teardown in §8 deletes the org's `annual:<YEAR>` run audit. Running against a shared or
+> populated org would therefore (a) grant real annual-leave lots to other live users and (b) orphan their lots'
+> provenance when the run rows are deleted. **Do not run this smoke against a shared/production-adjacent org.** If
+> you have no disposable org, create one and seed `<EMP>` into it (§1) before proceeding.
+
 Set these once for the session. `<TOKEN>` MUST be an `attendance:admin` JWT **issued by the staging realm**.
 
 ```bash
 export BASE='<BASE>'            # staging root via your tunnel, e.g. http://127.0.0.1:8082 — NO real host IP in the doc
-export ORG='<ORG>'             # the smoke org id (see §8: prefer a DISPOSABLE smoke org)
+export ORG='<ORG>'             # the DISPOSABLE single-member smoke org id (HARD prereq above; never a shared org)
 export TOKEN='<TOKEN>'         # attendance:admin JWT minted with the STAGING JWT_SECRET
 export EMP='<EMP>'             # a seeded, active employee user id (the accrual/adjust subject)
 export PGURL='<PGURL>'         # staging postgres DSN reachable via the tunnel; psql "$PGURL" must connect
@@ -83,7 +91,11 @@ Also confirm `<EMP>` itself passes the guard (the §5 adjust/404 cases depend on
 psql "$PGURL" -v org="'$ORG'" -v emp="'$EMP'" -c "SELECT 1 FROM user_orgs uo JOIN users u ON u.id = uo.user_id WHERE uo.user_id = :emp AND uo.org_id = :org AND uo.is_active = true AND u.is_active = true LIMIT 1;"
 ```
 
-- **PASS:** `active_members >= 1`, `with_tenure_anchor >= 1`, and `<EMP>` returns one row.
+- **PASS:** `active_members == 1`, `with_tenure_anchor == 1`, and that one member is `<EMP>`. The count **must be
+  exactly 1** (the §0 hard prerequisite): a disposable single-member org guarantees §3's accrual grants to `<EMP>`
+  **only**, so §8's teardown is precise and cannot touch any other user. If `active_members > 1`, **STOP** — either
+  the org is not disposable (do not run here), or every other member is also a throwaway smoke account you are
+  willing to fully delete in §8.
 - **FAIL → STOP (do not continue to §2):** if **`active_members = 0`** the accrual grants to **nobody**
   (every run-item would be skipped) and **every** manual-adjust **404s `USER_NOT_IN_ORG`** — the rest of the smoke
   cannot prove anything. A member with **no active `user_orgs` row is invisible** to accrual and 404s on adjust;
@@ -168,6 +180,7 @@ psql "$PGURL" -v rid="'$DRY_RUN_ID'" -c "SELECT dry_run, (SELECT count(*) FROM a
 REAL=$(curl -s "${H[@]}" -X POST "$BASE/api/attendance/annual-leave-accrual/run" \
   -d "{\"period\":$PERIOD,\"dryRun\":false}")
 echo "$REAL" | jq '.data | {dryRun, granted, grantedMinutes, lotsCreated, alreadyGranted, skipReasons}'
+REAL_RUN_ID=$(echo "$REAL" | jq -r '.data.runId')   # capture for the precise §8 teardown
 ```
 
 ```bash
@@ -177,8 +190,9 @@ RERUN=$(curl -s "${H[@]}" -X POST "$BASE/api/attendance/annual-leave-accrual/run
 echo "$RERUN" | jq '.data | {lotsCreated, alreadyGranted}'
 ```
 
-- **PASS (3b):** `dryRun = false`, `lotsCreated >= 1`, `grantedMinutes > 0` (e.g. one 5-day employee →
-  `5 × 480 = 2400`).
+- **PASS (3b):** `dryRun = false`, `granted == 1` and `lotsCreated == 1` (the single-member org → **exactly** `<EMP>`
+  is granted; if `granted > 1` the org was not disposable-single-member — STOP per §0/§1), `grantedMinutes > 0`
+  (e.g. one 5-day employee → `5 × 480 = 2400`).
 - **PASS (3c):** the re-run reports `lotsCreated = 0` and `alreadyGranted >= 1` — the `annual_accrual:{user}:annual:2026`
   `source_key` (`ON CONFLICT (org_id, source_key) DO NOTHING`) makes it a **no-op**; **no second lot** is created.
 - **FAIL:** dry-run `lotsCreated > 0` or `dry_lots > 0`; real run `lotsCreated = 0` with `<EMP>` eligible
@@ -189,9 +203,10 @@ echo "$RERUN" | jq '.data | {lotsCreated, alreadyGranted}'
 ## 4. L5a — balance read confirms the granted lots + ledger
 
 ```bash
+# The response is { ok, data: { summary, activeLots, recentEvents } } — read everything under .data
+# (a top-level `.summary` is null and would silently NOT trip a fallback).
 curl -s "${H[@]}" "$BASE/api/attendance/leave-balances?orgId=$ORG&userId=$EMP&leaveTypeCode=annual" \
-  | jq '{summary, activeLotCount: (.data.activeLots|length), eventTypes: (.data.recentEvents|map(.event_type)|unique)}' 2>/dev/null \
-  || curl -s "${H[@]}" "$BASE/api/attendance/leave-balances?orgId=$ORG&userId=$EMP&leaveTypeCode=annual" | jq '.data | {summary, activeLots, recentEvents}'
+  | jq '.data | {summary, activeLotCount: (.activeLots|length), eventTypes: (.recentEvents|map(.event_type)|unique)}'
 ```
 
 - **PASS:** `summary.grantedMinutes == summary.remainingMinutes` and equals the §3b `grantedMinutes` for `<EMP>`
@@ -216,6 +231,10 @@ IDK="$SUF-adj1"
 A1=$(curl -s "${H[@]}" -X POST "$BASE/api/attendance/annual-leave-manual-adjustment" \
   -d "{\"userId\":\"$EMP\",\"deltaMinutes\":240,\"reason\":\"L6 smoke +240\",\"idempotencyKey\":\"$IDK\"}")
 echo "$A1" | jq '.data'
+# capture the ADJUSTMENT id: the positive lot's source_id = this id, and its source_key = annual_manual_adjust:<ADJ_ID>
+# (the REGISTRY row's source_key is annual_manual_adjust:<idempotencyKey> — a different key), so proving "no second
+# lot/event on replay" must key on ADJ_ID, not $IDK.
+ADJ_ID=$(echo "$A1" | jq -r '.data.id')
 
 # 5b — idempotency replay: SAME key + SAME payload → no-op (no second lot/event)
 A2=$(curl -s "${H[@]}" -X POST "$BASE/api/attendance/annual-leave-manual-adjustment" \
@@ -238,17 +257,26 @@ echo "5e body:"; curl -s "${H[@]}" -X POST "$BASE/api/attendance/annual-leave-ma
   | jq '{ok, code: .error.code}'
 ```
 
-Confirm the replay created no second registry row + no second lot:
+Confirm the replay created **no second lot and no second event** (keyed on the adjustment id, not `$IDK`):
 
 ```bash
+# the replay must return the SAME adjustment id with applied=false / alreadyApplied=true
+echo "$A2" | jq -e --arg id "$ADJ_ID" '.data.id == $id and .data.applied == false and .data.alreadyApplied == true' >/dev/null \
+  && echo "5b replay: same id, no-op" || echo "5b FAIL: replay id/flags mismatch"
+# exactly ONE registry row (keyed on idempotencyKey) ...
 psql "$PGURL" -v org="'$ORG'" -v key="'annual_manual_adjust:$IDK'" -c "SELECT count(*) AS adj_rows FROM attendance_leave_manual_adjustments WHERE org_id = :org AND source_key = :key;"
+# ... AND exactly ONE lot (source_id = the adjustment id) AND exactly ONE annual_manual_adjust grant event for <EMP>
+psql "$PGURL" -v org="'$ORG'" -v adjid="'$ADJ_ID'" -c "SELECT count(*) AS adj_lots FROM attendance_leave_balances WHERE org_id = :org AND source_type = 'annual_manual_adjust' AND source_id = :adjid;"
+psql "$PGURL" -v org="'$ORG'" -v emp="'$EMP'" -c "SELECT count(*) AS adj_events FROM attendance_leave_balance_events WHERE org_id = :org AND user_id = :emp AND source_type = 'annual_manual_adjust';"
 psql "$PGURL" -v org="'$ORG'" -v key="'annual_manual_adjust:$SUF-neg'" -c "SELECT count(*) AS rolled_back_rows FROM attendance_leave_manual_adjustments WHERE org_id = :org AND source_key = :key;"
 ```
 
 - **PASS (5a):** `data.applied = true`, `data.alreadyApplied = false`, `data.delta = 240`; a new
   `annual_manual_adjust` lot + grant event exist.
-- **PASS (5b):** `data.applied = false`, `data.alreadyApplied = true`, same `data.delta = 240`; `adj_rows = 1`
-  (exactly one registry row — the replay mutated nothing).
+- **PASS (5b):** the replay returns the **same** `data.id` with `data.applied = false`, `data.alreadyApplied = true`,
+  same `data.delta = 240`; and **`adj_rows = 1` AND `adj_lots = 1` AND `adj_events = 1`** — the replay created no
+  second registry row, **no second lot, and no second event**. (`adj_lots`/`adj_events` are the load-bearing checks;
+  `adj_rows` alone would not catch a duplicate lot, since the lot is keyed on the adjustment id, not the idempotency key.)
 - **PASS (5c):** HTTP **`409`** (`ANNUAL_LEAVE_ADJUST_IDEMPOTENCY_CONFLICT`) — same key, different payload is
   rejected loudly, not silently no-op'd.
 - **PASS (5d):** `ok=false`, `code = ANNUAL_LEAVE_BALANCE_INSUFFICIENT`, HTTP `422`; `rolled_back_rows = 0`
@@ -372,10 +400,12 @@ psql "$PGURL" -v org="'$ORG'" -v emp="'$EMP'" -c "SELECT
 
 - **PASS:** `lots = 0`, `events = 0`, `adjustments = 0`, `runs = 0`, and the policy is restored to `ORIG_POLICY`.
 
-> **Strongly prefer a DISPOSABLE smoke org** for `<ORG>` (seed it in §1 with one active member `<EMP>` + a tenure
-> anchor). Then teardown is a clean drop of that org's annual rows and there is **zero** chance of touching a real
-> tenant's balances. If you must run against a shared staging org, the scoped deletes above are written to remove
-> ONLY this smoke's `<EMP>`/`annual:2026` rows — but re-verify residue, and never widen the `DELETE` predicates.
+> **This teardown is correct ONLY because §0/§1 mandate a disposable single-member org.** Since `<ORG>` has exactly
+> one member (`<EMP>`), every annual lot, event, manual-adjustment, and `annual:<YEAR>` run in it belongs to this
+> smoke — so the `<EMP>`-scoped lot/event/adjustment deletes cover everything §3/§5 created, and the org-scoped run
+> deletion cannot orphan any other tenant's accrual provenance. **There is no shared-org fallback** (per §0): against
+> a populated org, §3's accrual would have granted real lots to other live users that this teardown never removes,
+> and deleting the org's `annual:<YEAR>` runs would strip *their* lots' provenance. Do not widen the org/member scope.
 
 ---
 
@@ -384,12 +414,14 @@ psql "$PGURL" -v org="'$ORG'" -v emp="'$EMP'" -c "SELECT
 L6 is **PASS** only when **all** hold on a live staging run:
 
 1. **§0** preflight — staging-realm token authenticates (`200`), L5a read `ok:true`; no `401`/`503`.
-2. **§1 THE GATE** — `active_members >= 1`, `with_tenure_anchor >= 1`, `<EMP>` is an active member. (Zero → STOP.)
+2. **§1 THE GATE** — `active_members == 1` (the disposable single-member org), `with_tenure_anchor == 1`, and that
+   member is `<EMP>`. (Zero → STOP; more than one → STOP unless every member is a throwaway smoke account.)
 3. **§2** policy enabled with a valid IANA timezone; the missing/invalid-timezone control `422`s.
 4. **§3** accrual dry-run persists run+run_items but **no lots/events** (`dry_lots = 0`); real run grants
    (`lotsCreated >= 1`); re-run is idempotent (`alreadyGranted >= 1`, no second lot).
 5. **§4** L5a read shows the granted lot(s) + a `grant` ledger event; `granted == remaining`.
-6. **§5** manual-adjust: write applies; same-key+same-payload replay is a no-op (`alreadyApplied:true`, one row);
+6. **§5** manual-adjust: write applies; same-key+same-payload replay is a no-op (same `id`, `alreadyApplied:true`)
+   proven to add **no second lot/event** (`adj_lots = 1`, `adj_events = 1`, not merely one registry row);
    same-key+different-payload → `409`; negative-insufficient → `422` with the whole txn (incl. registry) rolled back;
    non-member target → `404 USER_NOT_IN_ORG`.
 7. **§6** backfill dry-run returns an auditable `{scanned, updated, skipped, reasons}` with `reasons` an **object/map**
