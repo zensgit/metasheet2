@@ -44,6 +44,59 @@ describe('plugin runtime config resolution', () => {
     })
   })
 
+  it('injects C6 test failure injection config only when explicitly deploy-enabled', () => {
+    const config = resolvePluginRuntimeConfig('plugin-integration-core', {
+      METASHEET_C6_TEST_FAILURE_INJECTION_ENABLED: 'true',
+      INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON: JSON.stringify({
+        enabled: true,
+        pipelineId: 'pipe_c6',
+        targetSystemId: 'target_c6',
+        targetDataSourceId: 'writable-ds',
+        targetObject: 'public.target_items',
+        environment: 'sandbox',
+        failWriteOrdinal: 2,
+      }),
+    })
+
+    expect(config).toEqual({
+      c6TestFailureInjection: {
+        deployEnabled: true,
+        enabled: true,
+        pipelineId: 'pipe_c6',
+        targetSystemId: 'target_c6',
+        targetDataSourceId: 'writable-ds',
+        targetObject: 'public.target_items',
+        environment: 'sandbox',
+        failWriteOrdinal: 2,
+      },
+    })
+  })
+
+  it('keeps C6 test failure injection default-off without the deploy flag', () => {
+    const config = resolvePluginRuntimeConfig('plugin-integration-core', {
+      INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON: JSON.stringify({
+        enabled: true,
+        pipelineId: 'pipe_c6',
+        targetSystemId: 'target_c6',
+        targetDataSourceId: 'writable-ds',
+        targetObject: 'public.target_items',
+        environment: 'sandbox',
+      }),
+    })
+
+    expect(config).toEqual({
+      c6TestFailureInjection: {
+        deployEnabled: false,
+        enabled: true,
+        pipelineId: 'pipe_c6',
+        targetSystemId: 'target_c6',
+        targetDataSourceId: 'writable-ds',
+        targetObject: 'public.target_items',
+        environment: 'sandbox',
+      },
+    })
+  })
+
   it('fails closed on invalid JSON', () => {
     expect(() => resolvePluginRuntimeConfig('plugin-integration-core', {
       INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON: '{not-json',
@@ -54,5 +107,11 @@ describe('plugin runtime config resolution', () => {
     expect(() => resolvePluginRuntimeConfig('plugin-integration-core', {
       INTEGRATION_CORE_TABLE_ACTIONS_JSON: '"not-an-action-list"',
     })).toThrow('INTEGRATION_CORE_TABLE_ACTIONS_JSON must be a JSON array or object')
+  })
+
+  it('fails closed when C6 test failure injection config is not an object', () => {
+    expect(() => resolvePluginRuntimeConfig('plugin-integration-core', {
+      INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON: '["not-an-object"]',
+    })).toThrow('INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON must be a JSON object')
   })
 })

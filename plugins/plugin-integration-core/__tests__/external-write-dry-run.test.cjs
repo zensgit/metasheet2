@@ -3,7 +3,11 @@
 const assert = require('node:assert/strict')
 const path = require('node:path')
 
-const { applyExternalWrite, dryRunExternalWrite } = require(path.join(__dirname, '..', 'lib', 'external-write-dry-run.cjs'))
+const {
+  applyExternalWrite,
+  dryRunExternalWrite,
+  __internals,
+} = require(path.join(__dirname, '..', 'lib', 'external-write-dry-run.cjs'))
 
 function memoryStore() {
   const map = new Map()
@@ -23,6 +27,36 @@ function memoryStore() {
       return value
     },
     async delete(key) { map.delete(key) },
+  }
+}
+
+function sandboxTargetSystem(overrides = {}) {
+  const { config: configOverride, ...rest } = overrides
+  return {
+    id: 'target_1',
+    kind: 'data-source:sql-write-gated',
+    config: {
+      dataSourceId: 'writable-ds',
+      object: 'public.target_items',
+      keyFields: ['externalId'],
+      writableFields: ['name', 'status'],
+      ...(configOverride || {}),
+    },
+    ...rest,
+  }
+}
+
+function enabledTestFailureInjection(overrides = {}) {
+  return {
+    deployEnabled: true,
+    enabled: true,
+    pipelineId: 'pipe_c6',
+    targetSystemId: 'target_1',
+    targetDataSourceId: 'writable-ds',
+    targetObject: 'public.target_items',
+    environment: 'sandbox',
+    failWriteOrdinal: 2,
+    ...overrides,
   }
 }
 
@@ -289,6 +323,265 @@ async function testApplyIsolatesRowWriteFailuresAndStaysValuesFree() {
   assert.equal(responseText.includes('DUPLICATE_P-002_WIDGET'), false, 'unsafe error codes are not exposed')
 }
 
+async function testTestFailureInjectionStaysOffWithoutDeployGate() {
+  const { input, calls } = baseInput({
+    input: {
+      dryRunUser: 'user_write',
+      targetSystem: sandboxTargetSystem(),
+      testFailureInjection: enabledTestFailureInjection({ deployEnabled: false }),
+    },
+  })
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.canApply, true)
+  assert.deepEqual(dryRun.evidence.testFailureInjection, {
+    deployEnabled: false,
+    serverConfigEnabled: true,
+    active: false,
+    reason: 'deploy_disabled',
+  })
+  const apply = await applyExternalWrite({
+    ...input,
+    dryRunToken: dryRun.dryRunToken,
+    applyUser: 'user_write',
+  })
+  assert.equal(apply.status, 'succeeded')
+  assert.equal(apply.counts.failed, 0)
+  assert.equal(apply.counts.written, 2)
+  assert.deepEqual(apply.evidence.rowErrorTypes, [])
+  assert.equal(calls.insertRows.length, 1)
+  assert.equal(calls.updateRows.length, 1)
+}
+
+async function testTestFailureInjectionRequiresServerConfigTargetMatch() {
+  const { input, calls } = baseInput({
+    input: {
+      dryRunUser: 'user_write',
+      targetSystem: sandboxTargetSystem(),
+      testFailureInjection: enabledTestFailureInjection({ targetSystemId: 'other_target' }),
+    },
+  })
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.canApply, true)
+  assert.deepEqual(dryRun.evidence.testFailureInjection, {
+    deployEnabled: true,
+    serverConfigEnabled: true,
+    active: false,
+    reason: 'not_targeted',
+  })
+  const apply = await applyExternalWrite({
+    ...input,
+    dryRunToken: dryRun.dryRunToken,
+    applyUser: 'user_write',
+  })
+  assert.equal(apply.status, 'succeeded')
+  assert.equal(apply.counts.failed, 0)
+  assert.equal(apply.counts.written, 2)
+  assert.equal(calls.insertRows.length, 1)
+  assert.equal(calls.updateRows.length, 1)
+}
+
+async function testTestFailureInjectionRejectsNonSandboxServerConfigBeforeWrite() {
+  const { input, calls } = baseInput({
+    input: {
+      dryRunUser: 'user_write',
+      targetSystem: sandboxTargetSystem({
+        config: { environment: 'sandbox' },
+      }),
+      testFailureInjection: enabledTestFailureInjection({ environment: 'production' }),
+    },
+  })
+  await assert.rejects(
+    () => dryRunExternalWrite(input),
+    (error) => error && error.code === 'C6_TEST_FAILURE_INJECTION_UNSAFE_TARGET',
+  )
+  assert.equal(calls.test.length, 0, 'unsafe test injection target fails before capability check')
+  assert.equal(calls.lookupByKey.length, 0, 'unsafe test injection target fails before lookup')
+  assert.equal(calls.insertRows.length, 0)
+  assert.equal(calls.updateRows.length, 0)
+}
+
+async function testTestFailureInjectionRejectsMutableTargetDriftBeforeWrite() {
+  const { input, calls } = baseInput({
+    input: {
+      dryRunUser: 'user_write',
+      targetSystem: sandboxTargetSystem({
+        config: {
+          dataSourceId: 'prod-ds',
+          environment: 'sandbox',
+        },
+      }),
+      testFailureInjection: enabledTestFailureInjection({ targetDataSourceId: 'writable-ds' }),
+    },
+  })
+  await assert.rejects(
+    () => dryRunExternalWrite(input),
+    (error) => error && error.code === 'C6_TEST_FAILURE_INJECTION_UNSAFE_TARGET',
+  )
+  assert.equal(calls.test.length, 0, 'server target mismatch fails before capability check')
+  assert.equal(calls.lookupByKey.length, 0, 'server target mismatch fails before lookup')
+  assert.equal(calls.insertRows.length, 0)
+  assert.equal(calls.updateRows.length, 0)
+}
+
+async function testTestFailureInjectionRequiresWritableSiblingRows() {
+  const { input, calls } = baseInput({
+    sourceRows: [{ code: 'P-001', name: 'Widget', status: 'new' }],
+    input: {
+      dryRunUser: 'user_write',
+      targetSystem: sandboxTargetSystem(),
+      testFailureInjection: enabledTestFailureInjection(),
+    },
+    lookupByKey: () => ({ data: [], metadata: {} }),
+  })
+  await assert.rejects(
+    () => dryRunExternalWrite(input),
+    (error) => error && error.code === 'C6_TEST_FAILURE_INJECTION_CONFIG_INVALID',
+  )
+  assert.equal(calls.insertRows.length, 0)
+  assert.equal(calls.updateRows.length, 0)
+}
+
+async function testTestFailureInjectionRevisionBoundBeforeWrite() {
+  const { input, calls } = baseInput({
+    sourceRows: [
+      { code: 'P-001', name: 'Widget', status: 'new' },
+      { code: 'P-002', name: 'Gadget', status: 'new' },
+    ],
+    input: {
+      dryRunUser: 'user_write',
+      targetSystem: sandboxTargetSystem(),
+      testFailureInjection: enabledTestFailureInjection({ enabled: false }),
+    },
+    lookupByKey: () => ({ data: [], metadata: {} }),
+  })
+  const dryRun = await dryRunExternalWrite(input)
+  await assert.rejects(
+    () => applyExternalWrite({
+      ...input,
+      testFailureInjection: enabledTestFailureInjection({ failWriteOrdinal: 1 }),
+      dryRunToken: dryRun.dryRunToken,
+      applyUser: 'user_write',
+    }),
+    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_MISMATCH',
+  )
+  assert.equal(calls.insertRows.length, 0, 'injection config drift fails before insert')
+  assert.equal(calls.updateRows.length, 0, 'injection config drift fails before update')
+}
+
+async function testTestFailureInjectionOrdinalIsRevisionBoundBeforeWrite() {
+  const { input, calls } = baseInput({
+    sourceRows: [
+      { code: 'P-001', name: 'Widget', status: 'new' },
+      { code: 'P-002', name: 'Gadget', status: 'new' },
+    ],
+    input: {
+      dryRunUser: 'user_write',
+      targetSystem: sandboxTargetSystem(),
+      testFailureInjection: enabledTestFailureInjection({ failWriteOrdinal: 2 }),
+    },
+    lookupByKey: () => ({ data: [], metadata: {} }),
+  })
+  const dryRun = await dryRunExternalWrite(input)
+  await assert.rejects(
+    () => applyExternalWrite({
+      ...input,
+      testFailureInjection: enabledTestFailureInjection({ failWriteOrdinal: 1 }),
+      dryRunToken: dryRun.dryRunToken,
+      applyUser: 'user_write',
+    }),
+    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_MISMATCH',
+  )
+  assert.equal(calls.insertRows.length, 0, 'failWriteOrdinal drift fails before insert')
+  assert.equal(calls.updateRows.length, 0, 'failWriteOrdinal drift fails before update')
+}
+
+async function testTestFailureInjectionInjectsExactlyOneRowAndKeepsSibling() {
+  const { input, calls } = baseInput({
+    sourceRows: [
+      { code: 'P-001', name: 'Widget', status: 'new' },
+      { code: 'P-002', name: 'Gadget', status: 'new' },
+    ],
+    input: {
+      dryRunUser: 'user_write',
+      targetSystem: sandboxTargetSystem(),
+      testFailureInjection: enabledTestFailureInjection({ failWriteOrdinal: 2 }),
+    },
+    lookupByKey: () => ({ data: [], metadata: {} }),
+  })
+  const deadLetters = []
+  const dryRun = await dryRunExternalWrite(input)
+  const dryRunToken = dryRun.dryRunToken
+  assert.equal(dryRun.status, 'ready')
+  assert.deepEqual(dryRun.evidence.testFailureInjection, {
+    deployEnabled: true,
+    serverConfigEnabled: true,
+    active: true,
+    reason: 'active',
+  })
+  const apply = await applyExternalWrite({
+    ...input,
+    dryRunToken,
+    applyUser: 'user_write',
+    runId: 'run_c6_injected_failure',
+    deadLetterStore: {
+      async createDeadLetter(entry) {
+        deadLetters.push(entry)
+        return { ...entry, id: `dl_${deadLetters.length}` }
+      },
+    },
+  })
+  assert.equal(apply.status, 'partial')
+  assert.equal(apply.counts.add, 1)
+  assert.equal(apply.counts.update, 0)
+  assert.equal(apply.counts.failed, 1)
+  assert.equal(apply.counts.written, 1)
+  assert.equal(calls.insertRows.length, 1, 'only the clean sibling reaches insertRows')
+  assert.deepEqual(
+    calls.insertRows[0].rows,
+    [{ externalId: 'P-001', name: 'Widget', status: 'new' }],
+    'failWriteOrdinal=2 leaves the first writable row as the clean sibling',
+  )
+  assert.equal(calls.updateRows.length, 0)
+  assert.equal(input.tokenStore.map.size, 0, 'partial test-injection apply still consumes the dry-run token')
+  assert.deepEqual(apply.evidence.rowErrorTypes, [__internals.C6_TEST_INJECTED_ROW_FAILURE])
+  assert.deepEqual(apply.deadLetters, { attempted: 1, persisted: 1 })
+  assert.equal(deadLetters[0].errorCode, __internals.C6_TEST_INJECTED_ROW_FAILURE)
+  assert.equal(deadLetters[0].errorMessage, __internals.C6_TEST_INJECTED_ROW_FAILURE)
+  assert.deepEqual(apply.evidence.testFailureInjection, {
+    deployEnabled: true,
+    serverConfigEnabled: true,
+    active: true,
+    reason: 'active',
+  })
+  const responseText = JSON.stringify(apply)
+  assert.equal(responseText.includes('P-001'), false, 'injected failure response does not include clean sibling key values')
+  assert.equal(responseText.includes('P-002'), false, 'injected failure response does not include row key values')
+  assert.equal(responseText.includes('Widget'), false, 'injected failure response does not include clean sibling row values')
+  assert.equal(responseText.includes('Gadget'), false, 'injected failure response does not include row values')
+  assert.ok(apply.provenanceEvents.some((event) => event.eventType === 'target_write_failed'), 'injected failure produces failure provenance')
+  assert.ok(apply.provenanceEvents.some((event) => event.eventType === 'target_write_succeeded'), 'clean sibling produces success provenance')
+
+  const insertCountAfterPartial = calls.insertRows.length
+  const deadLetterCountAfterPartial = deadLetters.length
+  await assert.rejects(
+    () => applyExternalWrite({
+      ...input,
+      dryRunToken,
+      applyUser: 'user_write',
+      runId: 'run_c6_injected_failure_reuse',
+      deadLetterStore: {
+        async createDeadLetter(entry) {
+          deadLetters.push(entry)
+          return { ...entry, id: `dl_${deadLetters.length}` }
+        },
+      },
+    }),
+    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_INVALID',
+  )
+  assert.equal(calls.insertRows.length, insertCountAfterPartial, 'reusing a consumed partial token cannot write again')
+  assert.equal(deadLetters.length, deadLetterCountAfterPartial, 'reusing a consumed partial token cannot create another dead letter')
+}
+
 async function testApplyTokenIsSingleUseUnderConcurrency() {
   const { input, calls } = baseInput({
     input: {
@@ -412,6 +705,14 @@ async function main() {
   await testApplyRequiresAuthenticatedApplyUser()
   await testApplyRejectsRevisionMismatchBeforeWrite()
   await testApplyIsolatesRowWriteFailuresAndStaysValuesFree()
+  await testTestFailureInjectionStaysOffWithoutDeployGate()
+  await testTestFailureInjectionRequiresServerConfigTargetMatch()
+  await testTestFailureInjectionRejectsNonSandboxServerConfigBeforeWrite()
+  await testTestFailureInjectionRejectsMutableTargetDriftBeforeWrite()
+  await testTestFailureInjectionRequiresWritableSiblingRows()
+  await testTestFailureInjectionRevisionBoundBeforeWrite()
+  await testTestFailureInjectionOrdinalIsRevisionBoundBeforeWrite()
+  await testTestFailureInjectionInjectsExactlyOneRowAndKeepsSibling()
   console.log('external-write-dry-run.test.cjs OK')
 }
 

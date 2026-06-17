@@ -16,9 +16,13 @@ const MAX_ROWS = 10000
 const DEFAULT_PAGE_SIZE = 100
 const MAX_PAGES = 100
 const TARGET_KIND = 'data-source:sql-write-gated'
+const C6_TEST_INJECTED_ROW_FAILURE = 'C6_TEST_INJECTED_ROW_FAILURE'
+const C6_TEST_FAILURE_INJECTION_CONFIG_INVALID = 'C6_TEST_FAILURE_INJECTION_CONFIG_INVALID'
+const C6_TEST_FAILURE_INJECTION_UNSAFE_TARGET = 'C6_TEST_FAILURE_INJECTION_UNSAFE_TARGET'
 const CONSUMING_TOKEN_KEYS = new Set()
 const SAFE_WRITE_ERROR_CODES = new Set([
   'AdapterValidationError',
+  C6_TEST_INJECTED_ROW_FAILURE,
   'DATA_SOURCE_BRIDGE_CONFIG_ERROR',
   'DATA_SOURCE_GENERIC_QUERY_DISABLED_REQUIRED',
   'DATA_SOURCE_NOT_C6_WRITE_TARGET',
@@ -68,6 +72,23 @@ function positiveInteger(value, field, fallback) {
     throw new ExternalWriteDryRunError(400, 'C6_WRITE_DRY_RUN_REQUEST_INVALID', `${field} must be a positive integer`, { field })
   }
   return Math.min(numeric, MAX_ROWS)
+}
+
+function positiveConfigInteger(value, field, fallback) {
+  if (value === undefined || value === null || value === '') return fallback
+  const numeric = Number(value)
+  if (!Number.isInteger(numeric) || numeric <= 0) {
+    throw new ExternalWriteDryRunError(422, C6_TEST_FAILURE_INJECTION_CONFIG_INVALID, `${field} must be a positive integer`, { field })
+  }
+  return numeric
+}
+
+function requiredTestFailureString(value, field) {
+  const normalized = optionalString(value)
+  if (!normalized) {
+    throw new ExternalWriteDryRunError(422, C6_TEST_FAILURE_INJECTION_CONFIG_INVALID, `${field} is required`, { field })
+  }
+  return normalized
 }
 
 function cloneJson(value) {
@@ -188,6 +209,88 @@ function normalizeTargetConfig(system) {
     keyFields: normalizeFieldList(config.keyFields, 'target.config.keyFields'),
     writableFields: normalizeFieldList(config.writableFields, 'target.config.writableFields'),
   }
+}
+
+function normalizeTestFailureInjectionConfig(input, { pipeline, targetSystem, targetConfig }) {
+  const raw = isPlainObject(input) ? input : {}
+  const deployEnabled = raw.deployEnabled === true
+  const serverConfigEnabled = raw.enabled === true
+  const base = {
+    deployEnabled,
+    serverConfigEnabled,
+    active: false,
+    reason: !deployEnabled
+      ? 'deploy_disabled'
+      : (!serverConfigEnabled ? 'server_config_disabled' : 'not_targeted'),
+  }
+
+  if (!deployEnabled || !serverConfigEnabled) return base
+
+  const pipelineId = optionalString(raw.pipelineId)
+  const targetSystemId = optionalString(raw.targetSystemId)
+  if (!pipelineId || !targetSystemId) {
+    throw new ExternalWriteDryRunError(422, C6_TEST_FAILURE_INJECTION_CONFIG_INVALID, 'C6 test failure injection requires pipelineId and targetSystemId')
+  }
+  if (pipelineId !== pipeline.id || targetSystemId !== pipeline.targetSystemId) return base
+  if (!targetSystem || targetSystem.id !== targetSystemId) {
+    throw new ExternalWriteDryRunError(422, C6_TEST_FAILURE_INJECTION_CONFIG_INVALID, 'C6 test failure injection target does not match the loaded target system')
+  }
+  if (optionalString(raw.environment) !== 'sandbox') {
+    throw new ExternalWriteDryRunError(422, C6_TEST_FAILURE_INJECTION_UNSAFE_TARGET, 'C6 test failure injection requires server config environment=sandbox')
+  }
+  if (requiredTestFailureString(raw.targetDataSourceId, 'c6TestFailureInjection.targetDataSourceId') !== targetConfig.dataSourceId) {
+    throw new ExternalWriteDryRunError(422, C6_TEST_FAILURE_INJECTION_UNSAFE_TARGET, 'C6 test failure injection target data source does not match server config')
+  }
+  if (requiredTestFailureString(raw.targetObject, 'c6TestFailureInjection.targetObject') !== targetConfig.object) {
+    throw new ExternalWriteDryRunError(422, C6_TEST_FAILURE_INJECTION_UNSAFE_TARGET, 'C6 test failure injection target object does not match server config')
+  }
+  return {
+    deployEnabled,
+    serverConfigEnabled,
+    active: true,
+    reason: 'active',
+    failWriteOrdinal: positiveConfigInteger(raw.failWriteOrdinal, 'c6TestFailureInjection.failWriteOrdinal', 1),
+  }
+}
+
+function publicTestFailureInjectionEvidence(config) {
+  return {
+    deployEnabled: config && config.deployEnabled === true,
+    serverConfigEnabled: config && config.serverConfigEnabled === true,
+    active: config && config.active === true,
+    reason: config && config.reason ? config.reason : 'disabled',
+  }
+}
+
+function revisionTestFailureInjection(config) {
+  return {
+    deployEnabled: config && config.deployEnabled === true,
+    serverConfigEnabled: config && config.serverConfigEnabled === true,
+    active: config && config.active === true,
+    reason: config && config.reason ? config.reason : 'disabled',
+    failWriteOrdinal: config && config.active === true ? config.failWriteOrdinal : null,
+  }
+}
+
+function isWriteDecision(decision) {
+  return decision === 'add' || decision === 'update'
+}
+
+function assertTestFailureInjectionPlanReady(config, planRows) {
+  if (!config || config.active !== true) return
+  const writableRows = planRows.filter((row) => isWriteDecision(row.decision))
+  if (writableRows.length < 2) {
+    throw new ExternalWriteDryRunError(422, C6_TEST_FAILURE_INJECTION_CONFIG_INVALID, 'C6 test failure injection requires at least two writable plan rows')
+  }
+  if (config.failWriteOrdinal > writableRows.length) {
+    throw new ExternalWriteDryRunError(422, C6_TEST_FAILURE_INJECTION_CONFIG_INVALID, 'C6 test failure injection failWriteOrdinal is outside the writable plan')
+  }
+}
+
+function createInjectedRowFailure() {
+  const error = new Error('C6 test injected row failure')
+  error.code = C6_TEST_INJECTED_ROW_FAILURE
+  return error
 }
 
 function requireDataSourceWritesApi(api) {
@@ -327,6 +430,7 @@ function buildRevision(input) {
       writableFields: input.targetConfig.writableFields,
       capabilityState: input.targetCapabilityState,
     },
+    testFailureInjection: revisionTestFailureInjection(input.testFailureInjection),
     fieldMappings: input.pipeline.fieldMappings || [],
     rowFingerprints: input.rowFingerprints,
     counts: input.counts,
@@ -345,7 +449,7 @@ function publicRowErrorTypes(rowErrors) {
   return Array.from(new Set(rowErrors.map((entry) => entry.errorCode || entry.reason || 'write_failed'))).sort()
 }
 
-function publicEvidence({ pipeline, targetConfig, sourceKind, counts, revision, canApply, sourceRead, rowErrorTypes, dryRunToken }) {
+function publicEvidence({ pipeline, targetConfig, sourceKind, counts, revision, canApply, sourceRead, rowErrorTypes, dryRunToken, testFailureInjection }) {
   return {
     pipelineId: pipeline.id,
     targetKind: TARGET_KIND,
@@ -363,10 +467,11 @@ function publicEvidence({ pipeline, targetConfig, sourceKind, counts, revision, 
     dryRunRevision: revision,
     canApply: canApply === true,
     dryRunTokenPresent: typeof dryRunToken === 'string' && dryRunToken.length > 0,
+    testFailureInjection: publicTestFailureInjectionEvidence(testFailureInjection),
   }
 }
 
-function publicApplyEvidence({ pipeline, targetConfig, sourceKind, status, counts, revision, sourceRead, rowErrors, provenanceEvents }) {
+function publicApplyEvidence({ pipeline, targetConfig, sourceKind, status, counts, revision, sourceRead, rowErrors, provenanceEvents, testFailureInjection }) {
   return {
     pipelineId: pipeline.id,
     targetKind: TARGET_KIND,
@@ -385,6 +490,7 @@ function publicApplyEvidence({ pipeline, targetConfig, sourceKind, status, count
     },
     dryRunRevision: revision,
     dryRunTokenConsumed: true,
+    testFailureInjection: publicTestFailureInjectionEvidence(testFailureInjection),
     provenanceEventCounts: provenanceEvents.reduce((acc, event) => {
       acc[event.eventType] = (acc[event.eventType] || 0) + 1
       return acc
@@ -410,6 +516,11 @@ function validatePlannerInput(input = {}, phase = 'dry-run') {
 async function computeExternalWritePlan(input = {}) {
   const pipeline = validatePlannerInput(input, input.phase || 'dry-run')
   const targetConfig = normalizeTargetConfig(input.targetSystem)
+  const testFailureInjection = normalizeTestFailureInjectionConfig(input.testFailureInjection, {
+    pipeline,
+    targetSystem: input.targetSystem,
+    targetConfig,
+  })
   const dataSourceWrites = requireDataSourceWritesApi(input.dataSourceWrites)
   const targetCapabilityState = normalizeTargetCapabilityState(
     await dataSourceWrites.test(targetConfig.dataSourceId, input.dataSourceOwnerPrincipal),
@@ -501,11 +612,15 @@ async function computeExternalWritePlan(input = {}) {
     rowErrorTypes.push('source_read_truncated')
   }
   const canApply = sourceRead.complete === true && counts.failed === 0 && counts.held === 0
+  if (canApply) {
+    assertTestFailureInjectionPlanReady(testFailureInjection, planRows)
+  }
   const revision = buildRevision({
     pipeline,
     sourceKind: input.sourceSystem && input.sourceSystem.kind,
     targetConfig,
     targetCapabilityState,
+    testFailureInjection,
     dryRunUser: input.dryRunUser,
     dataSourceOwnerPrincipal: input.dataSourceOwnerPrincipal,
     rowFingerprints,
@@ -526,6 +641,7 @@ async function computeExternalWritePlan(input = {}) {
     policy,
     canApply,
     revision,
+    testFailureInjection,
     maxRows,
   }
 }
@@ -562,6 +678,7 @@ async function dryRunExternalWrite(input = {}) {
       sourceRead: plan.sourceRead,
       rowErrorTypes: plan.rowErrorTypes,
       dryRunToken,
+      testFailureInjection: plan.testFailureInjection,
     }),
   }
 }
@@ -665,6 +782,7 @@ async function applyExternalWrite(input = {}) {
   const rowErrors = []
   const provenanceEvents = []
   const runId = optionalString(input.runId) || syntheticRunId(plan.pipeline, plan.revision)
+  let writeOrdinal = 0
   for (const row of plan.planRows) {
     if (row.decision === 'skip') {
       counts.skip += 1
@@ -691,6 +809,10 @@ async function applyExternalWrite(input = {}) {
       continue
     }
     try {
+      writeOrdinal += 1
+      if (plan.testFailureInjection && plan.testFailureInjection.active === true && writeOrdinal === plan.testFailureInjection.failWriteOrdinal) {
+        throw createInjectedRowFailure()
+      }
       if (row.decision === 'add') {
         await plan.dataSourceWrites.insertRows(
           plan.targetConfig.dataSourceId,
@@ -769,6 +891,7 @@ async function applyExternalWrite(input = {}) {
       sourceRead: plan.sourceRead,
       rowErrors,
       provenanceEvents,
+      testFailureInjection: plan.testFailureInjection,
     }),
   }
 }
@@ -779,11 +902,13 @@ module.exports = {
   dryRunExternalWrite,
   __internals: {
     C6_WRITE_DRY_RUN_TOKEN_PREFIX,
+    C6_TEST_INJECTED_ROW_FAILURE,
     TARGET_KIND,
     buildRevision,
     computeExternalWritePlan,
     consumeDryRunToken,
     normalizeTargetConfig,
+    normalizeTestFailureInjectionConfig,
     valuesEqual,
   },
 }

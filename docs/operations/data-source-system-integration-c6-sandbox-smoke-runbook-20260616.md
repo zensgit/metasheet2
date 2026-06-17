@@ -381,7 +381,29 @@ is a routing signal only, not runtime authorization. The next path is:
 2. C6-5b default-off sandbox-only implementation;
 3. C6-5c new package + entity-machine rerun.
 
-Until C6-5b/C6-5c exist, leave this controlled bad-row step at HOLD.
+The C6-5b implementation is server-owned and deploy-gated. For the C6-5c
+sandbox package only, the deploy config must include both gates:
+
+```text
+METASHEET_C6_TEST_FAILURE_INJECTION_ENABLED=true
+INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON={
+  "enabled": true,
+  "pipelineId": "<c6 sandbox pipeline id>",
+  "targetSystemId": "<c6 sandbox target external system id>",
+  "targetDataSourceId": "<sandbox write data-source id>",
+  "targetObject": "<sandbox target object>",
+  "environment": "sandbox",
+  "failWriteOrdinal": 2
+}
+```
+
+The `targetDataSourceId`, `targetObject`, and `environment=sandbox` proof must
+come from server runtime config, not from the mutable external-system config.
+If any pinned server value does not match the loaded target, the route must fail
+closed before target capability checks or writes. Disable the deploy flag after
+the C6-5c controlled bad-row rerun.
+
+Until C6-5c passes, leave this controlled bad-row step at HOLD.
 
 Expected:
 
