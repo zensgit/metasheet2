@@ -50,6 +50,7 @@ import {
   loadRecordCreatorMap,
   loadRecordPermissionScopeMap,
   loadRowLevelReadDenyEnabled,
+  loadDeniedRecordIds,
   loadSheetMemberUserIdSet,
   loadSheetPermissionScopeMap,
   loadViewPermissionScopeMap,
@@ -4336,6 +4337,10 @@ async function loadRecordSummaries(
     search?: string
     limit?: number
     offset?: number
+    // #18 read-deny: record ids to drop before search/total/slice (loads-all then slices in-app, so
+    // excluding here keeps pagination + total EXACT). Caller resolves these via loadDeniedRecordIds,
+    // gated by the sheet flag + non-admin. Empty/undefined → byte-identical to before.
+    excludeRecordIds?: ReadonlySet<string>
   },
 ): Promise<RecordSummaryPage> {
   const search = typeof args.search === 'string' ? args.search.trim().toLowerCase() : ''
@@ -4370,6 +4375,13 @@ async function loadRecordSummaries(
       display: toSummaryDisplay(displayValue),
     }
   })
+
+  // #18 read-deny: drop records the actor is denied (a 'none' scope on this sheet) BEFORE search/total/
+  // slice, so the picker never offers them and the total/pagination stay exact. Inert unless the caller
+  // passed a non-empty set (which it does only when the sheet flag is on + the actor is not an admin).
+  if (args.excludeRecordIds && args.excludeRecordIds.size > 0) {
+    summaries = summaries.filter((summary) => !args.excludeRecordIds!.has(summary.id))
+  }
 
   if (search) {
     summaries = summaries.filter((summary) => summary.display.toLowerCase().includes(search))
@@ -10359,12 +10371,19 @@ export function univerMetaRouter(): Router {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid displayFieldId' } })
       }
 
+      // #18 read-deny: drop records the actor is denied on this sheet before the summary total/slice
+      // (gated by the sheet flag + non-admin; inert when off).
+      const summaryDeniedIds = !access.isAdminRole
+        && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))
+        ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        : undefined
       const summary = await loadRecordSummaries(pool.query.bind(pool), sheetId, {
         displayFieldId,
         allowedFieldIds,
         search,
         limit,
         offset,
+        ...(summaryDeniedIds && summaryDeniedIds.size > 0 ? { excludeRecordIds: summaryDeniedIds } : {}),
       })
 
       return res.json({
@@ -10490,11 +10509,19 @@ export function univerMetaRouter(): Router {
         foreignBaseAllowedFieldIds,
         null,
       )
+      // #18 read-deny: a record DENIED to the actor on the FOREIGN sheet must never be offered as a link
+      // candidate. Gated by the foreign sheet's flag + non-admin; excluded inside loadRecordSummaries
+      // before its total/slice so pagination stays exact. Inert when the flag is off.
+      const foreignDeniedIds = !foreignAccess.isAdminRole
+        && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), linkConfig.foreignSheetId))
+        ? await loadDeniedRecordIds(pool.query.bind(pool), linkConfig.foreignSheetId, foreignAccess.userId)
+        : undefined
       const summary = await loadRecordSummaries(pool.query.bind(pool), linkConfig.foreignSheetId, {
         search,
         limit,
         offset,
         allowedFieldIds: foreignAllowedFieldIds,
+        ...(foreignDeniedIds && foreignDeniedIds.size > 0 ? { excludeRecordIds: foreignDeniedIds } : {}),
       })
 
       return res.json({

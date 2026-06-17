@@ -132,4 +132,29 @@ describeIfDatabase('#18 row-level read-deny core enforcement (real DB)', () => {
     expect(ids).toContain(REC_DENIED)
     testPerms = ['multitable:read']
   })
+
+  // /records-summary (the link-picker candidate list, shared loadRecordSummaries) — this slice excludes
+  // denied records before the in-app total/slice, so a denied record is never offered + pagination stays
+  // exact. link-options uses the same loadRecordSummaries path (excludeRecordIds on the foreign sheet).
+  const summaryIds = async (): Promise<string[]> => {
+    const res = await request(app).get('/api/multitable/records-summary').query({ sheetId: SHEET_ID, limit: 100 })
+    expect(res.status).toBe(200)
+    return (res.body?.data?.records ?? []).map((r: { id: string }) => r.id)
+  }
+
+  test('/records-summary flag OFF: the none-scoped record is offered (grant-additive)', async () => {
+    await setFlag(false)
+    testUserId = USER_ID
+    const ids = await summaryIds()
+    expect(ids).toContain(REC_DENIED)
+    expect(ids).toContain(REC_OK)
+  })
+
+  test('/records-summary flag ON: the none-scoped record is EXCLUDED from the picker', async () => {
+    await setFlag(true)
+    testUserId = USER_ID
+    const ids = await summaryIds()
+    expect(ids).not.toContain(REC_DENIED)
+    expect(ids).toContain(REC_OK)
+  })
 })
