@@ -10,8 +10,8 @@ Annual-leave entitlement is managed as a **lot-based balance ledger**. Entitleme
 
 Two tables, shared generically across leave types (annual reuses the same ledger as comp-time):
 
-- `attendance_leave_balances` — one row per **lot**: `amount_minutes`, `remaining_minutes`, `source_type`, `source_id` (provenance back-link), `source_key` (idempotency, unique per org), `expires_at`, `status` (`active`/`exhausted`/`expired`).
-- `attendance_leave_balance_events` — append-only audit: `grant` / `deduct` / `expire`, each with a signed `delta_minutes` and the same `source_type` / `source_id`.
+- `attendance_leave_balances` — one row per **lot**: `amount_minutes`, `remaining_minutes`, `source_type`, `source_id` (provenance back-link), `source_key` (idempotency, unique per org), `expires_at`, `status`. The generic ledger admits `active` / `exhausted` / `expired` / `revoked`; the annual L0–L4 chain uses only the first three (`revoked` is a ledger capability this chain does not exercise).
+- `attendance_leave_balance_events` — append-only audit, each with a signed `delta_minutes` (a sign check forbids zero) and the same `source_type` / `source_id`. The generic ledger admits `grant` (positive) / `deduct` / `expire` / `revoke` (negative); the annual L0–L4 chain emits only `grant` / `deduct` / `expire`.
 
 A balance is the sum of `remaining_minutes` over a user's `active`, non-expired annual lots. Deductions consume lots **oldest-expiring first**.
 
@@ -45,9 +45,10 @@ A balance is the sum of `remaining_minutes` over a user's `active`, non-expired 
 
 ## 5. Verification trail
 
-Each slice shipped with real-DB integration tests (booting the actual endpoints), an adversarial sub-agent review, and the CI matrix (`test (18.x)` + `test (20.x)` attendance integration). The honest part of the record is what **review caught** beyond the happy path:
+Each slice shipped with real-DB verification appropriate to its layer — schema/invariant checks (L2a), a service integration test (L1, the expiry scheduler), and booted-endpoint API tests (L2b, L2c, L3, L4a, L4b) — plus an adversarial sub-agent review and the CI matrix (`test (18.x)` + `test (20.x)` attendance integration). Only the endpoint-backed slices exercise the real API path. The honest part of the record is what **review caught** beyond the happy path:
 
-- **L2c** — actor/tenant scoping: the accrual enumerated globally (cross-tenant bleed) → scoped to org membership; a missing-hire cumulative user could be silently full-granted → explicit skip; calendar-invalid dates accepted → round-trip rejection. Post-merge, a **staging** check found the actor-must-be-`user_orgs`-member guard would 403 real admins (who are not org members) → reverted to the route-level global admin gate while keeping the target-membership guard; the test was corrected to walk the real RBAC path.
+- **L2b** — accrual correctness and scoping: the run enumerated users globally (cross-tenant bleed) → scoped to active organization membership; a cumulative-tenure user missing `hire_date` could be silently full-granted → explicit skip; calendar-invalid dates were accepted → round-trip rejection. (Earlier in the slice, an integer-first proration fix prevented a float-floor from underpaying a whole statutory day.)
+- **L2c** — manual-adjustment scoping and contract: the actor/tenant guard, idempotency-conflict handling (409 when a reused key carries a different payload), `runId` validation plus a defensive FK, and the target-must-be-an-active-org-member guard. During #2687 review a staging-grounded check found the actor-must-be-`user_orgs`-member guard would 403 real admins (who are not org members) → reverted to the route-level global admin gate while keeping the target-membership guard, with the test corrected to walk the real RBAC path; this fix is part of the #2687 squash, not a post-merge change.
 - **L3** — single-day scope was documented but not enforced → a multi-day-on-one-date request would over-deduct → rejected with 422.
 - **L4a** — timezone validated for presence but not validity → an invalid zone silently UTC-fell-back → IANA validity enforced at the PUT and the accrual run.
 - **L4b** — the provenance join was id-only → wrong-tenant / dry-run / skipped / non-annual provenance was treated as recoverable → validated with distinct reason codes; `updated` was unconditional → counted via `RETURNING` for concurrency-safe auditing; the target org was implicit → declared in the endpoint contract.
