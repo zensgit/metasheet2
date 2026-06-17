@@ -18,10 +18,19 @@ import { describe, test, expect } from 'vitest'
 import { aggregateRollup } from '../../src/routes/univer-meta'
 
 describe('aggregateRollup — rollup reducer expansion', () => {
-  describe('count (≡ COUNTA: non-empty target values)', () => {
-    test('returns values.length', () => {
+  describe('count (≡ COUNTA: non-blank target values)', () => {
+    test('counts present, non-blank values', () => {
       expect(aggregateRollup([1, 2, 3], 3, 'count')).toBe(3)
       expect(aggregateRollup(['a', 'b'], 5, 'count')).toBe(2)
+    })
+    test('drops blank targets — null/undefined/""/"   "/[] — THIS is the count-vs-countall boundary', () => {
+      expect(aggregateRollup(['x', '', '   ', [], 'y'], 5, 'count')).toBe(2) // only 'x','y'
+      expect(aggregateRollup([null, undefined, ''], 3, 'count')).toBe(0)
+      // countall over the SAME data counts every resolved row — the distinction the reviewer flagged:
+      expect(aggregateRollup(['x', '', '   ', [], 'y'], 5, 'countall')).toBe(5)
+    })
+    test('keeps falsy-but-present scalars 0 and false (NOT blank)', () => {
+      expect(aggregateRollup([0, false, 1], 3, 'count')).toBe(3)
     })
     test('empty values -> 0 (independent of count arg)', () => {
       expect(aggregateRollup([], 0, 'count')).toBe(0)
@@ -55,9 +64,10 @@ describe('aggregateRollup — rollup reducer expansion', () => {
     test('structurally-equal objects collapse via JSON.stringify', () => {
       expect(aggregateRollup([{ a: 1 }, { a: 1 }, { a: 2 }], 3, 'unique')).toBe(2)
     })
-    test('null is preserved as a single distinct bucket', () => {
-      expect(aggregateRollup([null, null], 2, 'unique')).toBe(1)
-      expect(aggregateRollup([null, 1, null], 3, 'unique')).toBe(2)
+    test('blank values (null / "" / "   " / []) are excluded, consistent with count', () => {
+      expect(aggregateRollup([null, null], 2, 'unique')).toBe(0)
+      expect(aggregateRollup([null, 1, null], 3, 'unique')).toBe(1) // just {1}
+      expect(aggregateRollup(['', '   ', 'a', 'a'], 4, 'unique')).toBe(1) // just {a}
     })
     test('empty values -> 0', () => {
       expect(aggregateRollup([], 0, 'unique')).toBe(0)

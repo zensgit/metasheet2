@@ -24,11 +24,23 @@ export type NormalizedLookupFieldProperty = {
   foreignSheetId: string | null
 }
 
+export type RollupAggregation = 'count' | 'sum' | 'avg' | 'min' | 'max' | 'countall' | 'unique'
+
 export type NormalizedRollupFieldProperty = {
   linkFieldId: string | null
   targetFieldId: string | null
   foreignSheetId: string | null
-  aggregation: 'count' | 'sum' | 'avg' | 'min' | 'max'
+  aggregation: RollupAggregation
+}
+
+// Keep in lockstep with parseRollupAggregation in core-backend (routes/univer-meta.ts + field-codecs.ts):
+// an aggregation this rejects gets silently shown/saved as 'count', corrupting a stored countall/unique.
+const ROLLUP_AGGREGATIONS: readonly RollupAggregation[] = ['count', 'sum', 'avg', 'min', 'max', 'countall', 'unique']
+export function normalizeRollupAggregation(value: string | null | undefined): RollupAggregation {
+  const a = (value ?? '').trim().toLowerCase()
+  if (a === 'counta') return 'count'
+  if (a === 'distinct' || a === 'uniquecount') return 'unique'
+  return (ROLLUP_AGGREGATIONS as readonly string[]).includes(a) ? (a as RollupAggregation) : 'count'
 }
 
 export type NormalizedFormulaFieldProperty = {
@@ -148,9 +160,7 @@ export function resolveRollupFieldProperty(value: unknown): NormalizedRollupFiel
     linkFieldId: stringOrNull(property.linkFieldId ?? property.linkedFieldId ?? property.relatedLinkFieldId ?? property.sourceFieldId),
     targetFieldId: stringOrNull(property.targetFieldId ?? property.lookUpTargetFieldId ?? property.lookupTargetFieldId ?? property.lookupFieldId),
     foreignSheetId: stringOrNull(property.foreignSheetId ?? property.foreignDatasheetId ?? property.datasheetId),
-    aggregation: aggregation === 'sum' || aggregation === 'avg' || aggregation === 'min' || aggregation === 'max'
-      ? aggregation
-      : 'count',
+    aggregation: normalizeRollupAggregation(aggregation),
   }
 }
 

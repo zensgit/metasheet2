@@ -1032,13 +1032,26 @@ function parseRollupAggregation(value: unknown): RollupAggregation | null {
 }
 
 /**
+ * A target value that contributes NOTHING to a rollup: null/undefined, an empty/whitespace-only string,
+ * or an empty array. This is the boundary that makes `count` (≡ COUNTA, non-empty) genuinely differ from
+ * `countall` (every resolved linked record): a linked row whose target is blank counts toward countall but
+ * NOT count/unique. Falsy-but-present scalars (0, false) are NOT blank — they are real values.
+ */
+function isBlankRollupValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true
+  if (typeof value === 'string') return value.trim().length === 0
+  if (Array.isArray(value)) return value.length === 0
+  return false
+}
+
+/**
  * Pure rollup reducer (exported for unit tests). Every reducer here returns number|null, so a rollup's
  * computed value stays NUMERIC — keeping the `rollup → number` assumption in filter/sort/dashboard correct.
  * (The string/boolean reducers concatenate/and/or/xor are deferred to slice 2b, which must also teach those
  * consumers the rollup's non-numeric result type before they can ship.)
- * - `values`: non-null/non-undefined target values of foreign records the actor may read (post sheet-read
- *   + field-mask). null/undefined are dropped upstream; other falsy scalars (0, "", false) are kept.
- * - `count`: resolved linked records incl. empty target — the only signal `countall` needs.
+ * - `values`: target values of foreign records the actor may read (post sheet-read + field-mask). null/
+ *   undefined are dropped upstream; count/unique additionally drop blank values (see isBlankRollupValue).
+ * - `count`: resolved linked records incl. empty/blank target — the only signal `countall` needs.
  * Numeric reducers (sum/avg/min/max) return null when no numeric values exist. Record-level read is
  * NON-GATING here by design (record_permissions is write/admin elevation, not read-deny) — see #20 contract.
  */
@@ -1047,10 +1060,14 @@ export function aggregateRollup(
   count: number,
   aggregation: RollupAggregation,
 ): number | null {
-  if (aggregation === 'count') return values.length // non-null target values (≡ COUNTA)
-  if (aggregation === 'countall') return count // all resolved linked records, incl. empty target
+  if (aggregation === 'count') return values.filter((v) => !isBlankRollupValue(v)).length // ≡ COUNTA
+  if (aggregation === 'countall') return count // all resolved linked records, incl. blank/empty target
   if (aggregation === 'unique') {
-    return new Set(values.map((v) => (v !== null && typeof v === 'object' ? JSON.stringify(v) : v))).size
+    return new Set(
+      values
+        .filter((v) => !isBlankRollupValue(v))
+        .map((v) => (typeof v === 'object' ? JSON.stringify(v) : v)),
+    ).size
   }
   const nums = values
     .map((v) => toComparableNumber(v))
