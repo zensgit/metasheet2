@@ -277,15 +277,57 @@
               <el-input v-model="step.name" :disabled="readOnly" />
             </el-form-item>
             <el-form-item label="审批人来源">
-              <el-select v-model="step.sourceKind" :disabled="readOnly" style="width: 100%">
-                <el-option label="指定用户 ID" value="static_user" />
-                <el-option label="指定角色 ID" value="static_role" />
+              <el-select v-model="step.sourceKind" :disabled="readOnly" style="width: 100%" @change="syncStepOptions(step)">
+                <el-option label="指定用户" value="static_user" />
+                <el-option label="指定角色" value="static_role" />
                 <el-option label="发起人" value="requester" />
                 <el-option label="表单用户字段" value="form_field_user" />
               </el-select>
             </el-form-item>
-            <el-form-item v-if="step.sourceKind === 'static_user' || step.sourceKind === 'static_role'" label="用户/角色 ID">
-              <el-input v-model="step.idsText" :disabled="readOnly" placeholder="逗号或换行分隔" />
+            <el-form-item v-if="step.sourceKind === 'static_user'" label="选择用户">
+              <el-select
+                :model-value="stepIds(step)"
+                multiple
+                filterable
+                remote
+                :remote-method="onUserSearch"
+                :loading="directory.usersLoading.value"
+                :disabled="readOnly"
+                style="width: 100%"
+                placeholder="搜索用户名 / 邮箱 / ID"
+                data-testid="approval-step-user-picker"
+                @update:model-value="(ids: string[]) => setStepIds(step, ids)"
+                @visible-change="(visible: boolean) => visible && onUserSearch('')"
+              >
+                <el-option
+                  v-for="user in directory.users.value"
+                  :key="user.id"
+                  :label="directory.formatUserLabel(user)"
+                  :value="user.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="step.sourceKind === 'static_role'" label="选择角色">
+              <el-select
+                :model-value="stepIds(step)"
+                multiple
+                filterable
+                :disabled="readOnly"
+                style="width: 100%"
+                placeholder="选择角色"
+                data-testid="approval-step-role-picker"
+                @update:model-value="(ids: string[]) => setStepIds(step, ids)"
+              >
+                <el-option
+                  v-for="role in directory.roles.value"
+                  :key="role.id"
+                  :label="directory.formatRoleLabel(role)"
+                  :value="role.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="step.sourceKind === 'static_user' || step.sourceKind === 'static_role'" label="手动输入 ID（高级）">
+              <el-input v-model="step.idsText" :disabled="readOnly" placeholder="逗号或换行分隔" data-testid="approval-step-ids-text" />
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'form_field_user'" label="表单用户字段">
               <el-select v-model="step.fieldId" :disabled="readOnly" style="width: 100%">
@@ -352,11 +394,14 @@ import {
   createEmptyStepDraft,
   createEmptyTemplateDraft,
   draftFromTemplate,
+  parseIdsText,
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
+  type ApprovalStepDraft,
   type FieldAuthoringDraft,
   type TemplateAuthoringDraft,
 } from '../../approvals/templateAuthoring'
+import { useApprovalDirectory } from '../../approvals/useApprovalDirectory'
 
 const route = useRoute()
 const router = useRouter()
@@ -377,6 +422,42 @@ const canSave = computed(() => canManageTemplates.value && !unsupportedReason.va
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
 const formSchemaPreview = computed(() => JSON.stringify(buildFormSchema(draft.value), null, 2))
 const approvalGraphPreview = computed(() => JSON.stringify(buildApprovalGraph(draft.value), null, 2))
+
+// Directory typeahead for static_user / static_role assignee sources. The picker is purely
+// additive: it reads/writes the SAME step.idsText carrier (parseIdsText in, ', ' join out, the
+// exact separator formatIds uses), so sourceFromStep / buildApprovalGraph consume it unchanged.
+const directory = useApprovalDirectory()
+
+function stepIds(step: ApprovalStepDraft): string[] {
+  return parseIdsText(step.idsText)
+}
+
+function setStepIds(step: ApprovalStepDraft, ids: string[]): void {
+  step.idsText = ids.join(', ')
+}
+
+async function onUserSearch(query: string): Promise<void> {
+  await directory.searchUsers(query)
+  // Keep already-selected ids visible as chips even if the new search page omits them.
+  for (const step of draft.value.steps) {
+    if (step.sourceKind !== 'static_user') continue
+    for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
+  }
+}
+
+// On sourceKind change (and on hydrate) make every already-selected id render as a chip,
+// even pre-existing / unknown ids absent from the fetched directory page — no silent drop.
+function syncStepOptions(step: ApprovalStepDraft): void {
+  if (step.sourceKind === 'static_user') {
+    for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
+  } else if (step.sourceKind === 'static_role') {
+    for (const id of parseIdsText(step.idsText)) directory.ensureRoleOptionVisible(id)
+  }
+}
+
+function syncAllStepOptions(): void {
+  for (const step of draft.value.steps) syncStepOptions(step)
+}
 
 function clearErrors() {
   loadError.value = null
@@ -442,6 +523,7 @@ async function loadTemplateForEdit() {
     const template = await getTemplate(templateId.value)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(template)
     draft.value = draftFromTemplate(template)
+    syncAllStepOptions()
   } catch (error: any) {
     loadError.value = error?.message ?? '加载审批模板失败'
   } finally {
@@ -516,6 +598,7 @@ async function handlePublish() {
 
 onMounted(() => {
   if (!canManageTemplates.value) return
+  void directory.loadRoles()
   void loadTemplateForEdit()
 })
 </script>

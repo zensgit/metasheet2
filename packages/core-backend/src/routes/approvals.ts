@@ -25,6 +25,7 @@ import {
   type ApprovalBridgePlmAdapter,
 } from '../services/approval-bridge-types'
 import { publishApprovalCountsUpdate } from '../services/approval-realtime'
+import { searchDirectoryUsers, listDirectoryRoles } from '../services/approval-directory'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
 const logger = new Logger('ApprovalsRouter')
@@ -329,6 +330,29 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         'APPROVAL_TEMPLATE_CATEGORY_LIST_FAILED',
         'Failed to list approval template categories',
       )
+    }
+  })
+
+  // Directory lookups for the authoring assignee picker. Registered BEFORE
+  // '/api/approval-templates/:id' so 'directory' is not matched as an :id.
+  // Gated by approval-templates:manage (same authoring permission as create/publish).
+  r.get('/api/approval-templates/directory/users', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+    try {
+      const q = String(req.query.q || '').trim()
+      const limit = Number.parseInt(String(req.query.limit ?? '20'), 10)
+      const users = await searchDirectoryUsers(q, Number.isFinite(limit) ? limit : 20)
+      res.json({ users })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DIRECTORY_USERS_FAILED', 'Failed to search directory users')
+    }
+  })
+
+  r.get('/api/approval-templates/directory/roles', authenticate, rbacGuard('approval-templates:manage'), async (_req: Request, res: Response) => {
+    try {
+      const roles = await listDirectoryRoles()
+      res.json({ roles })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DIRECTORY_ROLES_FAILED', 'Failed to list directory roles')
     }
   })
 

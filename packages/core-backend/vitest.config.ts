@@ -20,6 +20,7 @@ export default defineConfig({
       'tests/integration/admin-users.api.test.ts',
       'tests/integration/after-sales-plugin.install.test.ts',
       'tests/integration/after-sales-registry-backfill.test.ts',
+      'tests/integration/approval-directory-endpoints.api.test.ts',
       'tests/integration/approval-pack1a-lifecycle.api.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',

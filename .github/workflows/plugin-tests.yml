@@ -243,6 +243,20 @@ jobs:
             tests/integration/data-source-c3-keyset-realdb.test.ts \
             --reporter=dot
 
+      - name: Run approval real-DB integration (directory endpoints — rbac 403/200 + minimal-exposure shape + ?q + limit clamp + least-privilege source pin)
+        # Lane A (P1-static-picker) directory endpoints. Wired as a WHOLE FILE run so the
+        # gate is robust (a name filter that matches zero tests would exit green and hide
+        # regressions). The file is describeIfDatabase-guarded + excluded from the no-DB
+        # default test job, so this is its real CI lane.
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for approval real-DB integration}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/approval-directory-endpoints.api.test.ts \
+            --reporter=dot
+
       - name: Run comment-reaction keystone (real wire, real PG)
         # B6 emoji-reaction keystone (#2673 follow-up). Wired as a WHOLE FILE (not a
         # `-t` name filter) so the gate is robust: a name filter that matches zero
