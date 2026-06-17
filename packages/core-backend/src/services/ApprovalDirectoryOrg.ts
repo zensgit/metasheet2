@@ -1,0 +1,227 @@
+/**
+ * Approval ↔ Directory org-relation plumbing (READ-ONLY).
+ *
+ * Lane G (P1-A) prerequisite slice. The directory-sync subsystem already stores
+ * the full provider payload for every synced account/department in the `raw`
+ * JSONB column (`directory_accounts.raw`, `directory_departments.raw`), but the
+ * org-hierarchy signals inside it — the requester's direct manager and their
+ * department head — are NOT extracted into queryable columns. This module is the
+ * single read-only seam that lifts those two relations out of `raw` and maps
+ * them back to LOCAL user ids, so the approval bake step
+ * (`ApprovalProductService.createApproval`) can freeze `managerId` / `deptHeadId`
+ * into the requester snapshot.
+ *
+ * BOUNDARY / DOCTRINE (#2738/#2740, CI-enforced by #2742):
+ *   - This module ONLY issues SELECTs against `directory_*` + `directory_account_links`.
+ *     It writes nothing, and it touches no `approval_*` / `automation_*` table —
+ *     so it is outside the convergence guard's write-boundary entirely and never
+ *     crosses an automation boundary.
+ *   - It is NOT a resolver kind. The new `direct_manager` / `dept_head` /
+ *     `continuous_managers` assignee-source kinds (and their runtime in
+ *     `ApprovalAssigneeResolver`) are DESIGN-ONLY for this slice and are NOT wired
+ *     here. This module's sole job is to populate the snapshot fields those future
+ *     kinds will read.
+ *
+ * Provider shape (DingTalk, the only synced provider today):
+ *   - `directory_accounts.raw.leader_in_dept`: `Array<{ dept_id, leader: boolean }>`
+ *     — the account's manager flag *per department*. The manager USER is not on
+ *     this row; DingTalk models "leader of dept D" as a flag on the leader's own
+ *     account. So the direct manager of user U is the account in U's primary
+ *     department whose `leader_in_dept` marks it leader for that department.
+ *   - `directory_departments.raw.dept_manager_userid_list`: `string[]` of the
+ *     department's manager external user ids (dept head).
+ *
+ * Both lookups resolve a directory account → LOCAL user id via
+ * `directory_account_links` (link_status = 'linked'), mirroring the join already
+ * used by `AttendanceNotificationDeliveryWorker.resolveRecipient`. When a relation
+ * is absent (no manager, top-of-tree, unlinked, or pre-extraction legacy rows),
+ * the field is simply omitted — never throws — so the empty-assignee policy
+ * downstream stays in control.
+ */
+
+type QueryFn = <Row>(text: string, params?: unknown[]) => Promise<{ rows: Row[] }>
+
+export interface ApprovalRequesterOrgRelations {
+  /** Local user id of the requester's direct manager, if resolvable. */
+  managerId?: string
+  /** Local user id of the head of the requester's primary department, if resolvable. */
+  deptHeadId?: string
+}
+
+interface LeaderInDeptEntry {
+  dept_id?: unknown
+  deptId?: unknown
+  leader?: unknown
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function normalizeExternalId(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : null
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return null
+}
+
+function parseLeaderDeptIds(raw: Record<string, unknown> | null): string[] {
+  if (!raw) return []
+  const entries = raw.leader_in_dept ?? raw.leaderInDept
+  if (!Array.isArray(entries)) return []
+  const deptIds: string[] = []
+  for (const entry of entries as LeaderInDeptEntry[]) {
+    if (entry?.leader !== true) continue
+    const deptId = normalizeExternalId(entry.dept_id ?? entry.deptId)
+    if (deptId) deptIds.push(deptId)
+  }
+  return deptIds
+}
+
+function parseDeptManagerExternalIds(raw: Record<string, unknown> | null): string[] {
+  if (!raw) return []
+  const list = raw.dept_manager_userid_list ?? raw.deptManagerUseridList
+  if (!Array.isArray(list)) return []
+  const ids: string[] = []
+  for (const item of list) {
+    const id = normalizeExternalId(item)
+    if (id) ids.push(id)
+  }
+  return ids
+}
+
+interface RequesterDirectoryRow {
+  integration_id: string
+  account_id: string
+  external_user_id: string
+  raw: unknown
+  primary_external_department_id: string | null
+  primary_department_raw: unknown
+}
+
+/**
+ * Read-only resolution of the requester's direct manager + department head as
+ * LOCAL user ids. Returns `{}` when the requester has no linked directory account
+ * (e.g. a purely-local user) so callers can bake an unchanged snapshot.
+ *
+ * `query` is injected (defaults to the shared pool) so the unit path can drive it
+ * against an in-memory fixture without a database.
+ */
+export async function resolveApprovalRequesterOrgRelations(
+  localUserId: string,
+  query: QueryFn,
+): Promise<ApprovalRequesterOrgRelations> {
+  const userId = localUserId.trim()
+  if (!userId) return {}
+
+  // 1) Requester's linked directory account + its primary department's raw.
+  const requesterRows = await query<RequesterDirectoryRow>(
+    `SELECT a.integration_id::text       AS integration_id,
+            a.id::text                   AS account_id,
+            a.external_user_id           AS external_user_id,
+            a.raw                        AS raw,
+            d.external_department_id     AS primary_external_department_id,
+            d.raw                        AS primary_department_raw
+       FROM directory_account_links l
+       JOIN directory_accounts a
+         ON a.id = l.directory_account_id
+        AND a.is_active = true
+       LEFT JOIN directory_account_departments ad
+         ON ad.directory_account_id = a.id
+        AND ad.is_primary = true
+       LEFT JOIN directory_departments d
+         ON d.id = ad.directory_department_id
+      WHERE l.local_user_id = $1
+        AND l.link_status = 'linked'
+      ORDER BY a.updated_at DESC, a.id ASC
+      LIMIT 1`,
+    [userId],
+  )
+  const requester = requesterRows.rows[0]
+  if (!requester) return {}
+
+  const integrationId = requester.integration_id
+  const requesterDeptId = normalizeExternalId(requester.primary_external_department_id)
+
+  // 2) Direct manager: the account flagged leader for the requester's primary
+  //    department in its own `leader_in_dept`. Exclude the requester themselves.
+  let managerId: string | undefined
+  if (requesterDeptId) {
+    const candidateRows = await query<{ account_id: string; raw: unknown }>(
+      `SELECT a.id::text AS account_id, a.raw AS raw
+         FROM directory_accounts a
+         JOIN directory_account_departments ad
+           ON ad.directory_account_id = a.id
+         JOIN directory_departments d
+           ON d.id = ad.directory_department_id
+        WHERE a.integration_id = $1::uuid
+          AND a.is_active = true
+          AND d.external_department_id = $2
+          AND a.external_user_id <> $3`,
+      [integrationId, requesterDeptId, requester.external_user_id],
+    )
+    const managerAccountId = candidateRows.rows.find((row) =>
+      parseLeaderDeptIds(asRecord(row.raw)).includes(requesterDeptId))?.account_id
+    if (managerAccountId) {
+      managerId = await resolveLinkedLocalUserId(managerAccountId, query)
+    }
+  }
+
+  // 3) Department head: first manager external id on the primary department's raw
+  //    that resolves to a linked local user (and is not the requester).
+  let deptHeadId: string | undefined
+  const deptManagerExternalIds = parseDeptManagerExternalIds(asRecord(requester.primary_department_raw))
+    .filter((external) => external !== requester.external_user_id)
+  for (const external of deptManagerExternalIds) {
+    const localId = await resolveLinkedLocalUserIdByExternal(integrationId, external, query)
+    if (localId) {
+      deptHeadId = localId
+      break
+    }
+  }
+
+  const relations: ApprovalRequesterOrgRelations = {}
+  if (managerId) relations.managerId = managerId
+  if (deptHeadId) relations.deptHeadId = deptHeadId
+  return relations
+}
+
+async function resolveLinkedLocalUserId(accountId: string, query: QueryFn): Promise<string | undefined> {
+  const rows = await query<{ local_user_id: string | null }>(
+    `SELECT local_user_id
+       FROM directory_account_links
+      WHERE directory_account_id = $1::uuid
+        AND link_status = 'linked'
+        AND local_user_id IS NOT NULL
+      LIMIT 1`,
+    [accountId],
+  )
+  const localId = rows.rows[0]?.local_user_id
+  return localId ? localId : undefined
+}
+
+async function resolveLinkedLocalUserIdByExternal(
+  integrationId: string,
+  externalUserId: string,
+  query: QueryFn,
+): Promise<string | undefined> {
+  const rows = await query<{ local_user_id: string | null }>(
+    `SELECT l.local_user_id AS local_user_id
+       FROM directory_accounts a
+       JOIN directory_account_links l
+         ON l.directory_account_id = a.id
+        AND l.link_status = 'linked'
+        AND l.local_user_id IS NOT NULL
+      WHERE a.integration_id = $1::uuid
+        AND a.external_user_id = $2
+        AND a.is_active = true
+      LIMIT 1`,
+    [integrationId, externalUserId],
+  )
+  const localId = rows.rows[0]?.local_user_id
+  return localId ? localId : undefined
+}

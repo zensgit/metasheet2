@@ -14,6 +14,7 @@ import type {
   ApprovalTemplateVersionDetailDTO,
   ApprovalGraph,
   ApprovalMode,
+  ApprovalRequesterSnapshot,
   CreateApprovalRequest,
   CreateApprovalTemplateRequest,
   EmptyAssigneePolicy,
@@ -39,6 +40,7 @@ import {
   validateApprovalFormData,
 } from './ApprovalGraphExecutor'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
+import { resolveApprovalRequesterOrgRelations, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
 import type {
   ApprovalAssignmentDTO,
   ApprovalAssignmentRow,
@@ -2583,13 +2585,32 @@ export class ApprovalProductService {
       )
     }
 
-    const requesterSnapshot = {
+    // Lane G (P1-A) plumbing — freeze the requester's org relations (direct
+    // manager / dept head, as LOCAL user ids) from the directory `raw` payload.
+    // READ-ONLY (directory_* SELECTs only) and best-effort: a directory read
+    // failure must never block create, so an unresolved lookup just omits the
+    // fields. The future direct_manager / dept_head assignee-source kinds read
+    // these; absence falls through to the node's emptyAssigneePolicy.
+    let orgRelations: ApprovalRequesterOrgRelations = {}
+    try {
+      orgRelations = await resolveApprovalRequesterOrgRelations(actor.userId, pool.query.bind(pool))
+    } catch (error) {
+      metricsLogger.warn(
+        `Failed to resolve requester org relations for ${actor.userId}: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      )
+    }
+
+    const requesterSnapshot: ApprovalRequesterSnapshot = {
       id: actor.userId,
       name: actor.userName || actor.userId,
       email: actor.email,
       department: actor.department,
       roles: actor.roles || [],
       permissions: actor.permissions || [],
+      ...(orgRelations.managerId ? { managerId: orgRelations.managerId } : {}),
+      ...(orgRelations.deptHeadId ? { deptHeadId: orgRelations.deptHeadId } : {}),
     }
     const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
     const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData, {

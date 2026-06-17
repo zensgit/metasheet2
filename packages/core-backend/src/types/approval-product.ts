@@ -206,6 +206,20 @@ export interface ApprovalRequesterSnapshot {
   name?: string
   department?: string
   title?: string
+  /**
+   * Lane G (P1-A) org-relation plumbing — local user id of the requester's
+   * direct manager, frozen at create time from the directory `raw` payload.
+   * Absent when unresolvable (no linked directory account, top-of-tree, or
+   * pre-extraction legacy rows). The future `direct_manager` assignee-source
+   * kind reads this; it is purely additive and existing snapshots omit it.
+   */
+  managerId?: string
+  /**
+   * Lane G (P1-A) org-relation plumbing — local user id of the head of the
+   * requester's primary department, frozen at create time. Absent when
+   * unresolvable. Read by the future `dept_head` assignee-source kind.
+   */
+  deptHeadId?: string
   [key: string]: unknown
 }
 
