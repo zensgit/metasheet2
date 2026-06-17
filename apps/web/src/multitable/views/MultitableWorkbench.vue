@@ -61,6 +61,7 @@
       <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard">&#x1F4CA; {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true">&#x1F517; {{ wb('toolbar.shareForm', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true">&#x1F511; {{ wb('toolbar.apiWebhooks', isZh) }}</button>
+      <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" @click="showTrash = true">&#x1F5D1; {{ wb('toolbar.trash', isZh) }}</button>
     </div>
     <div v-if="showTemplateLibrary" class="mt-template-library" data-testid="multitable-template-library">
       <div class="mt-template-library__header">
@@ -456,6 +457,13 @@
       :can-manage-automation="caps.canManageAutomation.value"
       @close="showApiTokenManager = false"
     />
+
+    <TrashModal
+      :open="showTrash"
+      :sheet-id="workbench.activeSheetId.value"
+      @close="showTrash = false"
+      @restored="onTrashRestored"
+    />
   </div>
 </template>
 
@@ -547,6 +555,7 @@ import MetaPersonPicker from '../components/MetaPersonPicker.vue'
 import MetaTemplateCard from '../components/MetaTemplateCard.vue'
 import MetaFieldManager from '../components/MetaFieldManager.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
+import TrashModal from '../components/TrashModal.vue'
 import MetaSheetPermissionManager from '../components/MetaSheetPermissionManager.vue'
 import MetaAutomationManager from '../components/MetaAutomationManager.vue'
 import MetaFormShareManager from '../components/MetaFormShareManager.vue'
@@ -741,6 +750,11 @@ const showTemplateLibrary = ref(false)
 const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
+const showTrash = ref(false)
+// After an undelete, the restored record is back in the sheet → refresh the current page so it appears.
+function onTrashRestored(): void {
+  void grid.reloadCurrentPage()
+}
 const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])
 const viewPermissionEntries = ref<MetaViewPermissionEntry[]>([])
 const showViewManager = ref(false)

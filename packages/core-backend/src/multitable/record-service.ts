@@ -234,6 +234,11 @@ function isUndefinedTableError(err: unknown, tableName: string): boolean {
   return message.includes(`relation \"${tableName}\" does not exist`)
 }
 
+// Postgres unique_violation (e.g. a primary-key collision from a TOCTOU race on restore).
+function isUniqueViolation(err: unknown): boolean {
+  return typeof (err as { code?: unknown })?.code === 'string' && (err as { code: string }).code === '23505'
+}
+
 function mapFieldType(type: string): UniverMetaField['type'] {
   const normalized = type.trim().toLowerCase()
   if (normalized === 'number') return 'number'
@@ -739,7 +744,7 @@ export class RecordService {
     const { recordId, expectedVersion, actorId, access, resolveSheetAccess } = input
 
     const recordRes = await this.pool.query(
-      'SELECT id, sheet_id, created_by, locked, locked_by FROM meta_records WHERE id = $1',
+      'SELECT id, sheet_id, created_by, locked, locked_by, created_at, updated_at FROM meta_records WHERE id = $1',
       [recordId],
     )
     if (recordRes.rows.length === 0) {
@@ -749,6 +754,9 @@ export class RecordService {
     const recordRow = recordRes.rows[0] as Record<string, unknown>
     const sheetId = typeof recordRow.sheet_id === 'string' ? recordRow.sheet_id : ''
     const createdBy = typeof recordRow.created_by === 'string' ? recordRow.created_by : null
+    // Captured for the trash row so restore preserves original timestamps (pg returns Date|string).
+    const originalCreatedAt = (recordRow.created_at as Date | string | null) ?? null
+    const originalUpdatedAt = (recordRow.updated_at as Date | string | null) ?? null
     const { capabilities, sheetScope } = await resolveSheetAccess(sheetId)
 
     if (!capabilities.canDeleteRecord) {
@@ -810,9 +818,10 @@ export class RecordService {
           | undefined
         const baseId = baseRow && typeof baseRow.base_id === 'string' ? baseRow.base_id : null
         await query(
-          `INSERT INTO meta_records_trash (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by)
-           VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)`,
-          [recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId],
+          `INSERT INTO meta_records_trash
+             (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
+           VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
+          [recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, originalCreatedAt, originalUpdatedAt],
         )
       } catch (err) {
         if (!isUndefinedTableError(err, 'meta_records_trash')) throw err
@@ -896,7 +905,7 @@ export class RecordService {
     const { recordId, actorId, resolveSheetAccess } = input
     const trashRes = await this.pool
       .query(
-        `SELECT id, record_id, sheet_id, data, created_by
+        `SELECT id, record_id, sheet_id, data, created_by, original_created_at, original_updated_at
          FROM meta_records_trash WHERE record_id = $1 ORDER BY deleted_at DESC LIMIT 1`,
         [recordId],
       )
@@ -916,18 +925,53 @@ export class RecordService {
     const trashPk = String(trashRow.id)
     const snapshot = normalizeJson(trashRow.data)
     const createdBy = typeof trashRow.created_by === 'string' ? trashRow.created_by : null
+    const originalCreatedAt = (trashRow.original_created_at as Date | string | null) ?? null
+    const originalUpdatedAt = (trashRow.original_updated_at as Date | string | null) ?? null
+
+    // Orphan guard: refuse to resurrect into a sheet that no longer exists. Sheet delete is a hard delete
+    // and meta_records_trash has no FK to meta_sheets, so a trash row can outlive its sheet's cascade.
+    const sheetAlive = await this.pool.query('SELECT 1 FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+    if (sheetAlive.rows.length === 0) {
+      throw new RecordRestoreConflictError(`Cannot restore: sheet no longer exists: ${sheetId}`)
+    }
+
+    // Outbound links: deleteRecord dropped this record's meta_links rows, but the snapshot still carries the
+    // link-field arrays (createRecord writes them into data). Rebuild meta_links on restore so link values
+    // aren't silently empty on read (loadLinkValuesByRecord reads from meta_links, not data).
+    const sheetFields = await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId)
+    const linkFieldIds = sheetFields.filter((f) => f.type === 'link').map((f) => f.id)
 
     await this.pool.transaction(async ({ query }) => {
       const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
       if (occupied.rows.length > 0) {
         throw new RecordRestoreConflictError(`Record id is occupied, cannot restore: ${recordId}`)
       }
-      const inserted = await query(
-        `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
-         VALUES ($1, $2, $3::jsonb, 1, $4, $5)
-         RETURNING version`,
-        [recordId, sheetId, JSON.stringify(snapshot), createdBy, actorId],
-      )
+      let inserted: { rows: Array<{ version?: number }> }
+      try {
+        inserted = await query(
+          `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at, updated_at)
+           VALUES ($1, $2, $3::jsonb, 1, $4, $5, COALESCE($6, now()), COALESCE($7, now()))
+           RETURNING version`,
+          [recordId, sheetId, JSON.stringify(snapshot), createdBy, actorId, originalCreatedAt, originalUpdatedAt],
+        )
+      } catch (err) {
+        // TOCTOU: a concurrent create/restore can take the id between the FOR UPDATE check and this INSERT.
+        // The PK still blocks it; map unique_violation to a clean 409 instead of letting a raw 23505 → 500.
+        if (isUniqueViolation(err)) {
+          throw new RecordRestoreConflictError(`Record id is occupied, cannot restore: ${recordId}`)
+        }
+        throw err
+      }
+      // Rebuild outbound meta_links from the restored snapshot (same insert shape as create/patch).
+      for (const fieldId of linkFieldIds) {
+        for (const foreignId of normalizeLinkIds(snapshot[fieldId])) {
+          await query(
+            `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+            [`lnk_${randomUUID()}`.slice(0, 50), fieldId, recordId, foreignId],
+          )
+        }
+      }
       const restoredVersion = Number((inserted.rows[0] as { version?: number } | undefined)?.version ?? 1)
       await recordRecordRevision(query, {
         sheetId,

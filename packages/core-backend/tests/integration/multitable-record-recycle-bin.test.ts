@@ -98,4 +98,61 @@ describeIfDatabase('multitable recycle bin — delete/trash/restore (real DB)', 
     // the writer can still restore it afterward (denial didn't consume the trash row)
     expect((await request(writerApp()).post(`/api/multitable/records/${REC}/restore`)).status).toBe(200)
   })
+
+  test('restore REBUILDS outbound links — a link field is not silently emptied', async () => {
+    const fsheet = `sheet_rbl_${TS}`, ffld = `fld_rbl_t_${TS}`, frec = `rec_rbl_f_${TS}`
+    const lfld = `fld_rbl_link_${TS}`, srec = `rec_rbl_s_${TS}`
+    try {
+      await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [fsheet, BASE, 'RBL Foreign'])
+      await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [ffld, fsheet, 'T', 'string', '{}', 1])
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [frec, fsheet, JSON.stringify({ [ffld]: 'x' })])
+      await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [lfld, SHEET, 'Link', 'link', JSON.stringify({ foreignSheetId: fsheet }), 2])
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [srec, SHEET, JSON.stringify({ [FLD]: 'linked', [lfld]: [frec] })])
+      await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_rbl_${TS}`, lfld, srec, frec])
+      expect((await request(writerApp()).delete(`/api/multitable/records/${srec}`)).status).toBe(200)
+      expect((await request(writerApp()).post(`/api/multitable/records/${srec}/restore`)).status).toBe(200)
+      const back = await request(writerApp()).get(`/api/multitable/records/${srec}`)
+      expect(back.status).toBe(200)
+      // The restored link field must carry the foreign id again (meta_links rebuilt), not be empty.
+      expect(JSON.stringify(back.body?.data?.record?.data?.[lfld] ?? null)).toContain(frec)
+    } finally {
+      await q('DELETE FROM meta_links WHERE field_id = $1', [lfld]).catch(() => {})
+      await q('DELETE FROM meta_records_trash WHERE sheet_id = ANY($1::text[])', [[SHEET, fsheet]]).catch(() => {})
+      await q('DELETE FROM meta_records WHERE id = $1', [srec]).catch(() => {})
+      await q('DELETE FROM meta_records WHERE sheet_id = $1', [fsheet]).catch(() => {})
+      await q('DELETE FROM meta_fields WHERE id = $1', [lfld]).catch(() => {})
+      await q('DELETE FROM meta_fields WHERE sheet_id = $1', [fsheet]).catch(() => {})
+      await q('DELETE FROM meta_sheets WHERE id = $1', [fsheet]).catch(() => {})
+    }
+  })
+
+  test('restore into a DELETED sheet is rejected (orphan guard), not resurrected', async () => {
+    const tsheet = `sheet_rbo_${TS}`, trec = `rec_rbo_${TS}`
+    try {
+      await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [tsheet, BASE, 'RBO'])
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [trec, tsheet, JSON.stringify({})])
+      expect((await request(writerApp()).delete(`/api/multitable/records/${trec}`)).status).toBe(200)
+      await q('DELETE FROM meta_sheets WHERE id = $1', [tsheet]) // hard-delete the sheet; trash row survives
+      expect((await request(writerApp()).post(`/api/multitable/records/${trec}/restore`)).status).toBe(409)
+    } finally {
+      await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [tsheet]).catch(() => {})
+      await q('DELETE FROM meta_records WHERE sheet_id = $1', [tsheet]).catch(() => {})
+      await q('DELETE FROM meta_sheets WHERE id = $1', [tsheet]).catch(() => {})
+    }
+  })
+
+  test('restore PRESERVES the original created_at (not reset to restore-time)', async () => {
+    const crec = `rec_rbc_${TS}`
+    const old = '2020-01-02T03:04:05.000Z'
+    try {
+      await q('INSERT INTO meta_records (id, sheet_id, data, version, created_at) VALUES ($1,$2,$3::jsonb,1,$4)', [crec, SHEET, JSON.stringify({ [FLD]: 'old' }), old])
+      expect((await request(writerApp()).delete(`/api/multitable/records/${crec}`)).status).toBe(200)
+      expect((await request(writerApp()).post(`/api/multitable/records/${crec}/restore`)).status).toBe(200)
+      const row = await q('SELECT created_at FROM meta_records WHERE id = $1', [crec])
+      expect(new Date(row.rows[0].created_at as string).toISOString()).toBe(old)
+    } finally {
+      await q('DELETE FROM meta_records WHERE id = $1', [crec]).catch(() => {})
+      await q('DELETE FROM meta_records_trash WHERE record_id = $1', [crec]).catch(() => {})
+    }
+  })
 })

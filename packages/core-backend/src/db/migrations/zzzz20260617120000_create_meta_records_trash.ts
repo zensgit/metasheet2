@@ -25,6 +25,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       original_version integer NOT NULL DEFAULT 1,
       created_by text,
       deleted_by text,
+      -- Original meta_records timestamps, captured at delete so restore preserves them (NOT reset to
+      -- restore-time) — keeps sort-by-created/audit order stable across a delete→restore cycle.
+      original_created_at timestamptz,
+      original_updated_at timestamptz,
       deleted_at timestamptz NOT NULL DEFAULT now()
     )
   `.execute(db)
