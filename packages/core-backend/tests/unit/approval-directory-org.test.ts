@@ -20,7 +20,7 @@ interface FakeDb {
     primary_department_raw: unknown
   } | null
   // candidate accounts in the requester's primary department (for manager scan)
-  deptCandidates?: Array<{ account_id: string; raw: unknown }>
+  deptCandidates?: Array<{ account_id: string; raw: unknown; external_user_id?: string }>
   // directory_account_id -> linked local user id
   localByAccountId?: Record<string, string | null>
   // external_user_id -> linked local user id
@@ -33,7 +33,13 @@ function makeQuery(db: FakeDb) {
       return { rows: (db.requester ? [db.requester] : []) as Row[] }
     }
     if (text.includes('JOIN directory_account_departments ad') && text.includes('d.external_department_id = $2')) {
-      return { rows: (db.deptCandidates ?? []) as Row[] }
+      // Mirror the production self-exclusion `AND a.external_user_id <> $3` so a
+      // leader-requester is never a candidate for their own manager.
+      const selfExternal = params?.[2]
+      const candidates = (db.deptCandidates ?? []).filter(
+        (c) => c.external_user_id === undefined || c.external_user_id !== selfExternal,
+      )
+      return { rows: candidates as Row[] }
     }
     if (text.includes('FROM directory_account_links') && text.includes('WHERE directory_account_id = $1::uuid')) {
       const accountId = String(params?.[0])
@@ -69,6 +75,27 @@ describe('resolveApprovalRequesterOrgRelations', () => {
     }
     const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db))
     expect(result).toEqual({ managerId: 'local-mgr', deptHeadId: 'local-head' })
+  })
+
+  it('excludes the requester from their own dept leaders (self-exclusion <> $3): a leader requester is not their own manager', async () => {
+    const db: FakeDb = {
+      requester: {
+        integration_id: 'int-1',
+        account_id: 'acc-req',
+        external_user_id: 'ext-req',
+        raw: { leader_in_dept: [{ dept_id: 'D1', leader: true }] }, // the requester IS a leader of D1
+        primary_external_department_id: 'D1',
+        primary_department_raw: {},
+      },
+      // Production SQL excludes ext-req via $3; the fake mirrors it. The requester is the
+      // only leader, so after self-exclusion there is no other leader to resolve.
+      deptCandidates: [
+        { account_id: 'acc-req', external_user_id: 'ext-req', raw: { leader_in_dept: [{ dept_id: 'D1', leader: true }] } },
+      ],
+      localByAccountId: { 'acc-req': 'local-req' },
+    }
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db))
+    expect(result.managerId).toBeUndefined() // not 'local-req' — self is excluded
   })
 
   it('omits managerId when the dept leader is unlinked, but still resolves deptHead', async () => {
