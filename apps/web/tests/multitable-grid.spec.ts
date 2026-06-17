@@ -930,6 +930,28 @@ describe('useMultitableGrid', () => {
     expect(grid.conflict.value).toBeNull()
     expect(grid.rows.value[0]).toEqual({ id: 'r1', version: 9, data: { f1: 'patched again' } })
   })
+
+  it('mergeRemoteRecord preserves personSummaries from a realtime refetch', () => {
+    // Regression (#3): the realtime full-context refetch merge must carry
+    // personSummaries (alongside link/attachment) so native person fields keep
+    // showing the resolved display instead of dropping back to the raw userId.
+    const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
+    grid.rows.value = [{ id: 'r1', version: 1, data: { fld_owner: ['u1'] } }]
+
+    const merged = grid.mergeRemoteRecord(
+      { id: 'r1', version: 2, data: { fld_owner: ['u2'] } },
+      {
+        linkSummaries: {},
+        personSummaries: { fld_owner: [{ id: 'u2', display: 'Bob' }] },
+        attachmentSummaries: {},
+      },
+    )
+
+    expect(merged).toBe(true)
+    expect(grid.rows.value[0]).toEqual({ id: 'r1', version: 2, data: { fld_owner: ['u2'] } })
+    // The merged person summary is stored under the record, keyed by field id.
+    expect(grid.personSummaries.value.r1).toEqual({ fld_owner: [{ id: 'u2', display: 'Bob' }] })
+  })
 })
 
 describe('buildSortInfo', () => {

@@ -3275,6 +3275,7 @@ async function mergeRemoteRecordContext(recordId: string): Promise<boolean> {
     })
     const mergedInPage = grid.mergeRemoteRecord(ctx.record, {
       linkSummaries: ctx.linkSummaries,
+      personSummaries: ctx.personSummaries,
       attachmentSummaries: ctx.attachmentSummaries,
     })
     if (selectedRecordId.value === recordId) {

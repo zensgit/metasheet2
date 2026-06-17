@@ -141,6 +141,37 @@ describe('MetaLinkedRecordPopover (A3)', () => {
     container.remove()
   })
 
+  it('renders a native person chip from personSummaries (display, not raw userId)', async () => {
+    // Regression (#3): the popover must forward ctx.personSummaries to the inner
+    // renderer. A native person field (type='person', value=userId[]) has NO
+    // linkSummaries — personSummaries is its sole display source — so without the
+    // prop the chip would show the raw userId.
+    const fetchRecord = vi.fn(async () =>
+      baseContext({
+        fields: [{ id: 'fld_owner', name: 'Owner', type: 'person' }],
+        record: { id: 'vendor_1', data: { fld_owner: ['u1'] } } as MetaRecordContext['record'],
+        personSummaries: { fld_owner: [{ id: 'u1', display: 'Alice' }] },
+      }),
+    )
+    const { container, app } = mountPopover({
+      visible: true,
+      recordId: 'vendor_1',
+      fetchRecord,
+    })
+    await flushPromises()
+
+    const name = container.querySelector('.meta-cell-renderer__person-name')
+    expect(name).not.toBeNull()
+    // Resolved display is shown…
+    expect(name!.textContent).toContain('Alice')
+    // …and the raw userId never leaks into the rendered cell.
+    const value = container.querySelector('.meta-linked-record-popover__value')
+    expect(value!.textContent).not.toContain('u1')
+
+    app.unmount()
+    container.remove()
+  })
+
   it('does not fetch while hidden, and fetches once shown', async () => {
     const fetchRecord = vi.fn(async () => baseContext())
     const { container, app } = mountPopover({
