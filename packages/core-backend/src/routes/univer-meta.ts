@@ -6884,9 +6884,16 @@ export function univerMetaRouter(): Router {
         capabilities,
       })
 
+      // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): drop denied records so widget
+      // counts/aggregates/group-buckets exclude them (no count leak). Inert until the per-sheet flag is on.
+      let dashboardRows = rows
+      if (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+        const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        if (deniedIds.size > 0) dashboardRows = rows.filter((r) => !deniedIds.has(r.id))
+      }
       const results = widgets.map((widget) => buildDashboardWidgetResult({
         widget,
-        rows,
+        rows: dashboardRows,
         fields: visibleFields,
       }))
 
@@ -8324,6 +8331,10 @@ export function univerMetaRouter(): Router {
       }
 
       const rows: Array<Array<string | number | boolean | null | undefined>> = []
+      // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): skip records the actor is denied.
+      const exportDeniedIds = (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))
+        ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        : null
       let cursor: string | undefined
       let truncated = false
       do {
@@ -8334,6 +8345,7 @@ export function univerMetaRouter(): Router {
           limit: Math.min(5000, XLSX_MAX_ROWS - rows.length),
         })
         for (const record of result.items) {
+          if (exportDeniedIds && exportDeniedIds.has(record.id)) continue
           const data = filterRecordDataByFieldIds(record.data, fieldIds)
           rows.push(fields.map((field) => {
             const cell = data[field.id]
@@ -8467,6 +8479,13 @@ export function univerMetaRouter(): Router {
         version: Number(r.version ?? 1),
         data: normalizeJson(r.data),
       }))
+      // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): drop records the actor is
+      // denied BEFORE search/filter/aggregate, so the returned total (rows.length), aggregate values, and
+      // group buckets all exclude them (no count leak). Inert until the per-sheet flag is enabled.
+      if (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+        const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        if (deniedIds.size > 0) rows = rows.filter((rec) => !deniedIds.has(rec.id))
+      }
       if (search) rows = rows.filter((rec) => recordMatchesSearch(rec, selectableFields, search))
       if (filterInfo) {
         const conditions = filterInfo.conditions.filter((c) => filterFieldTypeById.has(c.fieldId) && selectableFieldIds.has(c.fieldId))
@@ -9227,6 +9246,15 @@ export function univerMetaRouter(): Router {
         const row: any = recordRes.rows[0]
         if (!row) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordIdParam}` } })
+        }
+        // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): a denied record reads as
+        // not-found in the form prefill (404, NOT 403 — no existence oracle). Anonymous public forms have
+        // no subject, so the deny never applies to them (only the authenticated actor is gated).
+        if (access.userId && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+          const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+          if (deniedIds.has(recordIdParam)) {
+            return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordIdParam}` } })
+          }
         }
         record = {
           id: String(row.id),
@@ -11225,7 +11253,15 @@ export function univerMetaRouter(): Router {
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
       const allowedFieldIds = computeAllowedFieldIds(visibleFields, capabilities, fieldScopeMap)
       const visibleFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, visibleFields, allowedFieldIds)
-      const maskedRecords = result.records.map((rec) => ({ ...rec, data: filterRecordDataByFieldIds(rec.data, visibleFieldIds) }))
+      // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): drop trashed records the actor
+      // is denied so a denied record's data never surfaces via trash. (total left as-is — the
+      // canDeleteRecord-gated trash count may include a denied row; exact-count exclusion is a minor follow-up.)
+      let trashRecords = result.records
+      if (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+        const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        if (deniedIds.size > 0) trashRecords = result.records.filter((rec) => !deniedIds.has(rec.recordId))
+      }
+      const maskedRecords = trashRecords.map((rec) => ({ ...rec, data: filterRecordDataByFieldIds(rec.data, visibleFieldIds) }))
       return res.json({ ok: true, data: { records: maskedRecords, total: result.total } })
     } catch (err) {
       if (err instanceof RecordServicePermissionError) {
