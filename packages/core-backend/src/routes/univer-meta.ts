@@ -922,9 +922,11 @@ type LookupFieldConfig = {
 
 type RollupAggregation =
   | 'count' | 'sum' | 'avg' | 'min' | 'max'
-  // Expansion: countall (resolved linked records incl. null-target), unique (distinct values), and the
-  // non-numeric reducers concatenate / and / or / xor.
-  | 'countall' | 'unique' | 'concatenate' | 'and' | 'or' | 'xor'
+  // Expansion slice 2a — both NUMERIC, so a rollup's value stays number|null and the `rollup → number`
+  // assumption baked into filter/sort/dashboard stays correct. countall = resolved linked records incl.
+  // empty target; unique = distinct-value count. The string/boolean reducers (concatenate/and/or/xor) are
+  // deferred to slice 2b, which must first teach those consumers the rollup's non-numeric result type.
+  | 'countall' | 'unique'
 
 type RollupFieldConfig = {
   linkFieldId: string
@@ -1019,12 +1021,10 @@ function parseRollupAggregation(value: unknown): RollupAggregation | null {
   // counta ≡ count here: resolveLookupValues already drops null/empty targets, so `count` (values.length)
   // is the count of non-empty values. Use `countall` for the all-records-incl-empty count.
   if (normalized === 'counta') return 'count'
-  if (normalized === 'concat') return 'concatenate'
   if (normalized === 'distinct' || normalized === 'uniquecount') return 'unique'
   if (
     normalized === 'count' || normalized === 'sum' || normalized === 'avg' || normalized === 'min' || normalized === 'max'
-    || normalized === 'countall' || normalized === 'unique' || normalized === 'concatenate'
-    || normalized === 'and' || normalized === 'or' || normalized === 'xor'
+    || normalized === 'countall' || normalized === 'unique'
   ) {
     return normalized as RollupAggregation
   }
@@ -1032,27 +1032,26 @@ function parseRollupAggregation(value: unknown): RollupAggregation | null {
 }
 
 /**
- * Pure rollup reducer (exported for unit tests).
- * - `values`: non-empty target values of foreign records the actor may read (post sheet-read + field-mask).
+ * Pure rollup reducer (exported for unit tests). Every reducer here returns number|null, so a rollup's
+ * computed value stays NUMERIC — keeping the `rollup → number` assumption in filter/sort/dashboard correct.
+ * (The string/boolean reducers concatenate/and/or/xor are deferred to slice 2b, which must also teach those
+ * consumers the rollup's non-numeric result type before they can ship.)
+ * - `values`: non-null/non-undefined target values of foreign records the actor may read (post sheet-read
+ *   + field-mask). null/undefined are dropped upstream; other falsy scalars (0, "", false) are kept.
  * - `count`: resolved linked records incl. empty target — the only signal `countall` needs.
- * Numeric reducers (sum/avg/min/max) return null when no numeric values exist; non-numeric reducers
- * (concatenate→string, and/or/xor→boolean) always return a concrete value. Record-level read is NON-GATING
- * here by design (record_permissions is write/admin elevation, not read-deny) — see #20 contract.
+ * Numeric reducers (sum/avg/min/max) return null when no numeric values exist. Record-level read is
+ * NON-GATING here by design (record_permissions is write/admin elevation, not read-deny) — see #20 contract.
  */
 export function aggregateRollup(
   values: unknown[],
   count: number,
   aggregation: RollupAggregation,
-): number | string | boolean | null {
-  if (aggregation === 'count') return values.length // non-empty target values (≡ COUNTA)
+): number | null {
+  if (aggregation === 'count') return values.length // non-null target values (≡ COUNTA)
   if (aggregation === 'countall') return count // all resolved linked records, incl. empty target
   if (aggregation === 'unique') {
     return new Set(values.map((v) => (v !== null && typeof v === 'object' ? JSON.stringify(v) : v))).size
   }
-  if (aggregation === 'concatenate') return values.map((v) => String(v)).join(', ')
-  if (aggregation === 'and') return values.length > 0 && values.every((v) => !!v)
-  if (aggregation === 'or') return values.some((v) => !!v)
-  if (aggregation === 'xor') return values.filter((v) => !!v).length % 2 === 1
   const nums = values
     .map((v) => toComparableNumber(v))
     .filter((v): v is number => v !== null && Number.isFinite(v))
