@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaKanbanView from '../src/multitable/components/MetaKanbanView.vue'
 import { useLocale } from '../src/composables/useLocale'
+import { resolveKanbanViewConfig } from '../src/multitable/utils/view-config'
 
 describe('MetaKanbanView', () => {
   afterEach(() => {
@@ -245,5 +246,29 @@ describe('MetaKanbanView', () => {
     await nextTick()
     expect(createSpy).toHaveBeenCalledWith({ fld_status: 'Doing', fld_priority: 'P1' })
     app.unmount(); container.remove()
+  })
+})
+
+// Wire-drift regression lock: swimlaneFieldId is added to the kanban view config and serialized
+// field-by-field in MetaViewManager (which has no swimlane picker). resolveKanbanViewConfig is the
+// load/resolve half of that round-trip; lock its preserve + drop rules so a refactor can't silently
+// strip a board-set swimlane or admit an invalid one.
+describe('resolveKanbanViewConfig — swimlaneFieldId resolve/drop', () => {
+  const fields = [
+    { id: 'fld_status', name: 'Status', type: 'select' },
+    { id: 'fld_priority', name: 'Priority', type: 'select' },
+  ] as any
+
+  it('preserves a valid swimlaneFieldId distinct from the column group field', () => {
+    expect(resolveKanbanViewConfig(fields, { groupFieldId: 'fld_status', swimlaneFieldId: 'fld_priority' }).swimlaneFieldId).toBe('fld_priority')
+  })
+  it('drops swimlaneFieldId equal to the group field (a field cannot be on both axes)', () => {
+    expect(resolveKanbanViewConfig(fields, { groupFieldId: 'fld_status', swimlaneFieldId: 'fld_status' }).swimlaneFieldId).toBeNull()
+  })
+  it('drops swimlaneFieldId whose field no longer exists', () => {
+    expect(resolveKanbanViewConfig(fields, { groupFieldId: 'fld_status', swimlaneFieldId: 'fld_gone' }).swimlaneFieldId).toBeNull()
+  })
+  it('is null when unset (legacy single-dimension board)', () => {
+    expect(resolveKanbanViewConfig(fields, { groupFieldId: 'fld_status' }).swimlaneFieldId).toBeNull()
   })
 })
