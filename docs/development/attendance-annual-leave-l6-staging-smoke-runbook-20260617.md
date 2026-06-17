@@ -110,8 +110,8 @@ psql "$PGURL" -v org="'$ORG'" -v emp="'$EMP'" -c "SELECT 1 FROM user_orgs uo JOI
 - **FAIL → STOP (do not continue to §2):** if **`active_members = 0`** the accrual grants to **nobody**
   (every run-item would be skipped) and **every** manual-adjust **404s `USER_NOT_IN_ORG`** — the rest of the smoke
   cannot prove anything. A member with **no active `user_orgs` row is invisible** to accrual and 404s on adjust;
-  seed an active membership (or pick the disposable smoke org of §8) and re-run §1. If `with_tenure_anchor = 0`
-  but `active_members >= 1`, accrual will run but every item skips `MISSING_SERVICE_START_DATE` — seed an anchor
+  seed an active membership (or provision the disposable single-member org of §0/§1) and re-run §1. If
+  `with_tenure_anchor = 0` but `active_members == 1`, accrual will run but the item skips `MISSING_SERVICE_START_DATE` — seed an anchor
   on `<EMP>` before §3 so you get a real granted lot.
 
 ---
@@ -412,7 +412,7 @@ curl -s "${H[@]}" -X PUT "$BASE/api/attendance/settings" \
 # final residue assertion — all four annual tables clean for this org/user
 psql "$PGURL" -v org="'$ORG'" -v emp="'$EMP'" -c "SELECT
    (SELECT count(*) FROM attendance_leave_balances WHERE org_id=:org AND user_id=:emp AND leave_type_code='annual') AS lots,
-   (SELECT count(*) FROM attendance_leave_balance_events e JOIN attendance_leave_balances b ON b.id=e.balance_id WHERE b.org_id=:org AND b.user_id=:emp AND b.leave_type_code='annual') AS events,
+   (SELECT count(*) FROM attendance_leave_balance_events WHERE org_id=:org AND user_id=:emp AND source_type IN ('annual_accrual','annual_manual_adjust')) AS events,
    (SELECT count(*) FROM attendance_leave_manual_adjustments WHERE org_id=:org AND user_id=:emp AND leave_type_code='annual') AS adjustments,
    (SELECT count(*) FROM attendance_leave_accrual_runs WHERE org_id=:org AND period_key='annual:2026') AS runs;"
 ```
