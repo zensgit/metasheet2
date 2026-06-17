@@ -352,6 +352,15 @@
                 <el-option label="自动通过" value="auto-approve" />
               </el-select>
             </el-form-item>
+            <el-form-item label="自审策略">
+              <el-checkbox
+                v-model="step.mergeWithRequester"
+                :disabled="readOnly"
+                data-testid="approval-step-merge-with-requester"
+              >
+                发起人自动通过（自审合并）
+              </el-checkbox>
+            </el-form-item>
           </div>
         </div>
       </el-card>

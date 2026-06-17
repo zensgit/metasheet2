@@ -2,8 +2,10 @@ import type {
   ApprovalAssigneeSource,
   ApprovalGraph,
   ApprovalMode,
+  ApprovalNodeConfig,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateVisibilityScope,
+  AutoApprovalPolicy,
   EmptyAssigneePolicy,
   FormField,
   FormFieldType,
@@ -60,6 +62,13 @@ export interface ApprovalStepDraft {
   fieldId: string
   approvalMode: ApprovalMode
   emptyAssigneePolicy: EmptyAssigneePolicy
+  // Self-approver authoring: the editable toggle (merge the requester in as an
+  // auto-approval). `originalAutoApprovalPolicy` preserves the three non-merge
+  // sub-fields (mergeAdjacentApprover / dedupeHistoricalApprover / actorMode),
+  // which are out of UI scope but must survive hydrate→rebuild (no silent flatten),
+  // mirroring `FieldAuthoringDraft.original`.
+  mergeWithRequester: boolean
+  originalAutoApprovalPolicy?: AutoApprovalPolicy
 }
 
 export interface TemplateAuthoringDraft {
@@ -135,6 +144,7 @@ export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
     fieldId: '',
     approvalMode: 'single',
     emptyAssigneePolicy: 'error',
+    mergeWithRequester: false,
   }
 }
 
@@ -246,6 +256,11 @@ function stepDraftFromApprovalNode(
     idsText = formatIds(legacyIds)
   }
 
+  // Hydrate the self-approver policy: surface `mergeWithRequester` as the editable
+  // toggle, and stash the full policy so non-merge sub-fields survive a rebuild.
+  const autoApprovalPolicy = config.autoApprovalPolicy as AutoApprovalPolicy | undefined
+  const mergeWithRequester = autoApprovalPolicy?.mergeWithRequester === true
+
   return {
     localId: nextLocalId('step'),
     name: node.name ?? `审批人 ${index}`,
@@ -254,6 +269,8 @@ function stepDraftFromApprovalNode(
     fieldId,
     approvalMode: config.approvalMode === 'all' || config.approvalMode === 'any' ? config.approvalMode : 'single',
     emptyAssigneePolicy: config.emptyAssigneePolicy === 'auto-approve' ? 'auto-approve' : 'error',
+    mergeWithRequester,
+    ...(autoApprovalPolicy ? { originalAutoApprovalPolicy: autoApprovalPolicy } : {}),
   }
 }
 
@@ -338,6 +355,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
       'assigneeSources',
       'approvalMode',
       'emptyAssigneePolicy',
+      'autoApprovalPolicy',
     ]
     if (Object.keys(config).some((key) => !allowedConfigKeys.includes(key))) return true
     const sources = config.assigneeSources
@@ -425,16 +443,38 @@ function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource {
   return { kind: 'requester' }
 }
 
+/**
+ * Build the approval-node config for a step. The `mergeWithRequester` toggle is the
+ * only authored sub-field of `autoApprovalPolicy`; the three non-merge sub-fields are
+ * preserved verbatim from `originalAutoApprovalPolicy` (no silent flatten). The
+ * `autoApprovalPolicy` key is OMITTED entirely when the effective policy is empty —
+ * mirroring `buildFormSchema`'s `delete next.visibilityRule` omit-empty discipline so a
+ * bare `{}` is never persisted.
+ */
+function buildStepConfig(step: ApprovalStepDraft): ApprovalNodeConfig {
+  const autoApprovalPolicy: AutoApprovalPolicy = {
+    ...step.originalAutoApprovalPolicy,
+    ...(step.mergeWithRequester ? { mergeWithRequester: true } : {}),
+  }
+  // The toggle owns `mergeWithRequester`: when OFF, drop the flag but keep preserved
+  // siblings. (Spread-only would resurrect a `mergeWithRequester:true` carrier.)
+  if (!step.mergeWithRequester) {
+    delete autoApprovalPolicy.mergeWithRequester
+  }
+  return {
+    assigneeSources: [sourceFromStep(step)],
+    approvalMode: step.approvalMode,
+    emptyAssigneePolicy: step.emptyAssigneePolicy,
+    ...(Object.keys(autoApprovalPolicy).length > 0 ? { autoApprovalPolicy } : {}),
+  }
+}
+
 export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph {
   const approvalNodes = draft.steps.map((step, index) => ({
     key: `approval_${index + 1}`,
     type: 'approval' as const,
     name: step.name.trim() || `审批人 ${index + 1}`,
-    config: {
-      assigneeSources: [sourceFromStep(step)],
-      approvalMode: step.approvalMode,
-      emptyAssigneePolicy: step.emptyAssigneePolicy,
-    },
+    config: buildStepConfig(step),
   }))
   const nodes: ApprovalGraph['nodes'] = [
     { key: 'start', type: 'start', name: '发起', config: {} },
