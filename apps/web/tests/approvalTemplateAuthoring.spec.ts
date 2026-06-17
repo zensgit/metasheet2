@@ -285,6 +285,38 @@ describe('approval template authoring helpers', () => {
     expect(reason).toContain('暂不支持编辑的审批节点')
   })
 
+  it('fails closed on a node carrying fieldPermissions (no node-field editor yet)', () => {
+    // P1-C: fieldPermissions is NOT in the FE allowlist until a node-field
+    // permission editor ships. A template carrying it must render read-only in
+    // the MVP editor (never silently flattened) so the hidden-field config is
+    // preserved on the round-trip.
+    const reason = unsupportedTemplateAuthoringReason(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: '审批人 1',
+            config: {
+              assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+              fieldPermissions: [{ fieldId: 'amount', access: 'hidden' }],
+            } as never,
+          },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    }))
+
+    expect(reason).toContain('暂不支持的配置')
+  })
+
   it('blocks existing attachment fields because the MVP has no upload runtime', () => {
     const reason = unsupportedTemplateAuthoringReason(buildTemplate({
       formSchema: {

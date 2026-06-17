@@ -23,6 +23,11 @@ import type {
   UnifiedApprovalHistoryDTO,
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
+import {
+  collectActiveNodeKeys,
+  redactHiddenFormFields,
+  type RedactableRuntimeGraph,
+} from './approval-form-redaction'
 
 const logger = new Logger('ApprovalBridgeService')
 const PLM_SYNC_CONCURRENCY = 5
@@ -124,7 +129,17 @@ function plmBridgeUnavailableError(): ServiceError {
 function toUnifiedDTO(
   row: ApprovalInstanceRow,
   assignments: ApprovalAssignmentRow[] = [],
+  runtimeGraph: RedactableRuntimeGraph | null = null,
 ): UnifiedApprovalDTO {
+  // P1-C: redact form fields the instance's currently-active node(s) mark
+  // `hidden`. Keyed on the instance-active node, NOT the viewer — so observers /
+  // admins / the requester are all redacted alike. `runtimeGraph` is null for
+  // bridged/external instances (no node config) → snapshot unchanged.
+  const formSnapshot = redactHiddenFormFields(
+    row.form_snapshot || null,
+    runtimeGraph,
+    collectActiveNodeKeys(row.current_node_key, row.metadata),
+  )
   return {
     id: row.id,
     sourceSystem: row.source_system,
@@ -142,7 +157,7 @@ function toUnifiedDTO(
     templateVersionId: row.template_version_id,
     publishedDefinitionId: row.published_definition_id,
     requestNo: row.request_no,
-    formSnapshot: row.form_snapshot || null,
+    formSnapshot,
     currentNodeKey: row.current_node_key,
     assignments: assignments.map((assignment) => ({
       id: assignment.id,
@@ -463,9 +478,16 @@ export class ApprovalBridgeService {
     )
 
     const assignmentsByInstance = await this.loadAssignments(instancesResult.rows.map((row) => row.id))
+    const runtimeGraphsByDefinition = await this.loadRuntimeGraphs(
+      instancesResult.rows.map((row) => row.published_definition_id),
+    )
 
     return {
-      data: instancesResult.rows.map((row) => toUnifiedDTO(row, assignmentsByInstance.get(row.id) || [])),
+      data: instancesResult.rows.map((row) => toUnifiedDTO(
+        row,
+        assignmentsByInstance.get(row.id) || [],
+        row.published_definition_id ? runtimeGraphsByDefinition.get(row.published_definition_id) ?? null : null,
+      )),
       total,
     }
   }
@@ -488,7 +510,12 @@ export class ApprovalBridgeService {
     if (!row) return null
 
     const assignmentsByInstance = await this.loadAssignments([id])
-    return toUnifiedDTO(row, assignmentsByInstance.get(id) || [])
+    const runtimeGraphsByDefinition = await this.loadRuntimeGraphs([row.published_definition_id])
+    return toUnifiedDTO(
+      row,
+      assignmentsByInstance.get(id) || [],
+      row.published_definition_id ? runtimeGraphsByDefinition.get(row.published_definition_id) ?? null : null,
+    )
   }
 
   async getApprovalHistory(id: string): Promise<UnifiedApprovalHistoryDTO[]> {
@@ -726,6 +753,36 @@ export class ApprovalBridgeService {
     )
 
     return result.rows[0] || null
+  }
+
+  /**
+   * P1-C: batch-load the stored `runtime_graph` for the given published
+   * definition ids so each row's `formSnapshot` can be redacted by its
+   * instance-active node. Returns a map keyed by `published_definition_id`.
+   * Bridged/external instances have a null `published_definition_id` and are
+   * absent from the map (no redaction — they carry no node config). The raw
+   * JSONB blob is returned as-is (no `asRuntimeGraph` re-validation needed on
+   * the read path: redaction only reads `nodes[].key` + `config.fieldPermissions`).
+   */
+  private async loadRuntimeGraphs(
+    publishedDefinitionIds: Array<string | null>,
+  ): Promise<Map<string, RedactableRuntimeGraph>> {
+    const byDefinitionId = new Map<string, RedactableRuntimeGraph>()
+    const distinctIds = [...new Set(publishedDefinitionIds.filter((id): id is string => typeof id === 'string'))]
+    if (!pool || distinctIds.length === 0) {
+      return byDefinitionId
+    }
+
+    const result = await pool.query<{ id: string; runtime_graph: RedactableRuntimeGraph | null }>(
+      `SELECT id, runtime_graph FROM approval_published_definitions WHERE id = ANY($1)`,
+      [distinctIds],
+    )
+    for (const row of result.rows) {
+      if (row.runtime_graph) {
+        byDefinitionId.set(row.id, row.runtime_graph)
+      }
+    }
+    return byDefinitionId
   }
 
   private async loadAssignments(instanceIds: string[]): Promise<Map<string, ApprovalAssignmentRow[]>> {

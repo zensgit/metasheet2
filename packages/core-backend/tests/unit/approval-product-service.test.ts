@@ -1333,6 +1333,180 @@ describe('ApprovalProductService', () => {
     expect(pgState.pool.connect).not.toHaveBeenCalled()
   })
 
+  describe('P1-C node field permissions (hidden subset)', () => {
+    function fieldPermRequest(fieldPermissions: unknown) {
+      return {
+        key: 'fieldperm-tpl',
+        name: 'Field Perm Template',
+        formSchema: {
+          fields: [
+            { id: 'amount', type: 'number', label: 'Amount' },
+            { id: 'secret', type: 'text', label: 'Secret' },
+          ],
+        },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            {
+              key: 'approval_1',
+              type: 'approval',
+              config: { assigneeType: 'user', assigneeIds: ['manager-1'], fieldPermissions },
+            },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+            { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+          ],
+        },
+      }
+    }
+
+    function mockTemplateInsert() {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('INSERT INTO approval_templates')) {
+          return {
+            rows: [{
+              id: 'tpl-fieldperm',
+              key: String(params?.[0]),
+              name: String(params?.[1]),
+              description: null,
+              category: null,
+              visibility_scope: JSON.parse(String(params?.[4])),
+              sla_hours: null,
+              status: 'draft',
+              active_version_id: null,
+              latest_version_id: null,
+              created_at: new Date('2026-06-17T00:00:00.000Z'),
+              updated_at: new Date('2026-06-17T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('INSERT INTO approval_template_versions')) {
+          return {
+            rows: [{
+              id: 'ver-fieldperm',
+              template_id: 'tpl-fieldperm',
+              version: 1,
+              status: 'draft',
+              form_schema: JSON.parse(String(params?.[1])),
+              approval_graph: JSON.parse(String(params?.[2])),
+              created_at: new Date('2026-06-17T00:00:00.000Z'),
+              updated_at: new Date('2026-06-17T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('UPDATE approval_templates')) {
+          return {
+            rows: [{
+              id: 'tpl-fieldperm',
+              key: 'fieldperm-tpl',
+              name: 'Field Perm Template',
+              description: null,
+              category: null,
+              visibility_scope: { type: 'all', ids: [] },
+              sla_hours: null,
+              status: 'draft',
+              active_version_id: null,
+              latest_version_id: 'ver-fieldperm',
+              created_at: new Date('2026-06-17T00:00:00.000Z'),
+              updated_at: new Date('2026-06-17T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        throw new Error(`Unhandled query: ${statement}`)
+      })
+    }
+
+    it('rejects an invalid access enum before hitting the database (no silent default)', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        fieldPermRequest([{ fieldId: 'secret', access: 'invisible' }]) as never,
+      )).rejects.toMatchObject({
+        message: 'approvalGraph.nodes[1].config.fieldPermissions[0].access must be editable, readonly, or hidden',
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('rejects a missing fieldId before hitting the database', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        fieldPermRequest([{ access: 'hidden' }]) as never,
+      )).rejects.toMatchObject({
+        message: 'approvalGraph.nodes[1].config.fieldPermissions[0].fieldId is required',
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('rejects a duplicate fieldId within one node', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        fieldPermRequest([
+          { fieldId: 'secret', access: 'hidden' },
+          { fieldId: 'secret', access: 'readonly' },
+        ]) as never,
+      )).rejects.toMatchObject({
+        message: 'approvalGraph.nodes[1].config.fieldPermissions[1].fieldId is duplicated',
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('rejects an unknown fieldId not present in the form schema', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        fieldPermRequest([{ fieldId: 'ghost', access: 'hidden' }]) as never,
+      )).rejects.toMatchObject({
+        message: 'approvalGraph node approval_1 fieldPermissions references unknown field ghost',
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('accepts a valid hidden permission, trims fieldId, and round-trips byte-stably', async () => {
+      mockTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const result = await service.createTemplate(
+        fieldPermRequest([
+          { fieldId: '  secret  ', access: 'hidden' },
+          { fieldId: 'amount', access: 'editable' },
+        ]) as never,
+      )
+      const node = result.approvalGraph.nodes.find((n) => n.key === 'approval_1')
+      expect((node?.config as Record<string, unknown>).fieldPermissions).toEqual([
+        { fieldId: 'secret', access: 'hidden' },
+        { fieldId: 'amount', access: 'editable' },
+      ])
+    })
+
+    it('omits an empty fieldPermissions array (does not emit [])', async () => {
+      mockTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const result = await service.createTemplate(fieldPermRequest([]) as never)
+      const node = result.approvalGraph.nodes.find((n) => n.key === 'approval_1')
+      expect((node?.config as Record<string, unknown>).fieldPermissions).toBeUndefined()
+    })
+  })
+
   it('rejects empty assigneeSources and invalid form field sources before hitting the database', async () => {
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
     const service = new ApprovalProductService()
