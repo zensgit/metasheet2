@@ -35,6 +35,7 @@ const {
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const TABLE_ACTION_KIND = 'parameterized_table_action'
+const GENERIC_TABLE_ACTION_KIND = 'apply_to_target_table'
 const DRY_RUN_TOKEN_PREFIX = 'integration:table-action:dry-run-token:'
 const DEFAULT_DRY_RUN_TOKEN_TTL_MS = 30 * 60 * 1000
 const DEFAULT_EXISTING_ROWS_PAGE_LIMIT = 1000
@@ -216,18 +217,25 @@ function publicActionMetadata(action) {
   return {
     actionId: PLM_STOCK_PREPARATION_ACTION_ID,
     kind: TABLE_ACTION_KIND,
-    label: configured && action.label ? action.label : 'PLM project BOM -> stock preparation',
+    label: 'Apply to target table',
     configured,
+    display: {
+      genericActionKind: GENERIC_TABLE_ACTION_KIND,
+      commandLabel: 'Apply to target table',
+      commandLabelZh: 'Apply 到目标表',
+      targetLabel: 'configured target table',
+      targetLabelZh: '已配置目标表',
+      presetLabel: 'PLM stock-preparation preset',
+      presetLabelZh: 'PLM 备料预设',
+      policyLabel: 'fresh dry-run token + server recompute',
+      policyLabelZh: 'fresh dry-run token + 服务端重新计算',
+    },
     parameters: [{
       id: 'projectNo',
       label: 'Project number',
       type: 'string',
       required: true,
       trim: true,
-      binding: {
-        type: 'equality_filter',
-        field: 'FileCode',
-      },
     }],
     permissions: {
       dryRun: 'read',
@@ -710,6 +718,7 @@ async function applyStockPreparationAction(input = {}) {
 
 module.exports = {
   DEFAULT_DRY_RUN_TOKEN_TTL_MS,
+  GENERIC_TABLE_ACTION_KIND,
   PLM_STOCK_PREPARATION_ACTION_ID,
   TABLE_ACTION_KIND,
   StockPreparationTableActionError,

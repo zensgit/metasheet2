@@ -181,12 +181,29 @@ function createRecordsApi({ existing = [], failCreateWith = null } = {}) {
 }
 
 async function testRegistryListsConfiguredMetadataWithoutTargetSecrets() {
-  const registry = createStockPreparationTableActionRegistry({ actions: [baseAction()] })
+  const registry = createStockPreparationTableActionRegistry({
+    actions: [baseAction({
+      label: 'sheet_stock private action label',
+      template: {
+        ...STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+        label: 'sheet_stock private target label',
+      },
+    })],
+  })
   const actions = await registry.listTableActions()
   assert.equal(actions.length, 1)
   assert.equal(actions[0].actionId, PLM_STOCK_PREPARATION_ACTION_ID)
   assert.equal(actions[0].configured, true)
+  assert.equal(actions[0].label, 'Apply to target table')
+  assert.equal(actions[0].display.genericActionKind, 'apply_to_target_table')
+  assert.equal(actions[0].display.commandLabel, 'Apply to target table')
+  assert.equal(actions[0].display.commandLabelZh, 'Apply 到目标表')
+  assert.equal(actions[0].display.targetLabel, 'configured target table')
+  assert.equal(actions[0].display.targetLabelZh, '已配置目标表')
+  assert.equal(actions[0].display.presetLabel, 'PLM stock-preparation preset')
+  assert.equal(actions[0].display.policyLabel, 'fresh dry-run token + server recompute')
   assert.deepEqual(actions[0].parameters.map((param) => param.id), ['projectNo'])
+  assert.equal(actions[0].parameters[0].binding, undefined, 'public parameter metadata hides source binding details')
   const text = JSON.stringify(actions)
   assert.equal(text.includes('sheet_stock'), false, 'public action metadata does not expose target sheetId')
   assert.equal(text.includes('plm_source_1'), false, 'public action metadata does not expose source binding')

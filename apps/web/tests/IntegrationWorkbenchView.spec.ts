@@ -3499,7 +3499,10 @@ describe('IntegrationWorkbenchView', () => {
     app.mount(container)
     await flushUi(12)
 
-    expect(container.querySelector('[data-testid="table-action-panel"]')?.textContent).toContain('PLM project BOM -> stock preparation')
+    const tableActionPanel = container.querySelector('[data-testid="table-action-panel"]')?.textContent || ''
+    expect(tableActionPanel).toContain('Apply 到目标表')
+    expect(tableActionPanel).not.toContain('PLM project BOM -> stock preparation')
+    expect(tableActionPanel).not.toContain('Apply 到备料表')
     expect(container.querySelector('[data-testid="table-action-boundary"]')?.textContent).toContain('不提供 raw SQL')
     expect((container.querySelector('[data-testid="table-action-dry-run"]') as HTMLButtonElement).disabled).toBe(true)
 
@@ -3557,6 +3560,17 @@ describe('IntegrationWorkbenchView', () => {
       kind: 'parameterized_table_action',
       label: 'PLM project BOM -> stock preparation',
       configured: true,
+      display: {
+        genericActionKind: 'apply_to_target_table',
+        commandLabel: 'Apply to stock-preparation table',
+        commandLabelZh: 'Apply 到备料表',
+        targetLabel: 'configured target table',
+        targetLabelZh: '已配置目标表',
+        presetLabel: 'PLM stock-preparation preset',
+        presetLabelZh: 'PLM 备料预设',
+        policyLabel: 'fresh dry-run token + server recompute',
+        policyLabelZh: 'fresh dry-run token + 服务端重新计算',
+      },
       parameters: [{ id: 'projectNo', label: 'Project number', type: 'string', required: true }],
       permissions: { dryRun: 'read', apply: 'write' },
       evidence: { valuesFreeIssueEvidence: true },
@@ -3597,6 +3611,11 @@ describe('IntegrationWorkbenchView', () => {
     app.mount(container)
     await flushUi(12)
 
+    const tableActionPanel = container.querySelector('[data-testid="table-action-panel"]')?.textContent || ''
+    expect(tableActionPanel).toContain('Apply 到目标表')
+    expect(tableActionPanel).not.toContain('Apply 到备料表')
+    expect(tableActionPanel).not.toContain('Apply to stock-preparation table')
+
     const projectInput = container.querySelector('[data-testid="table-action-project-no"]') as HTMLInputElement
     projectInput.value = 'P-READ'
     projectInput.dispatchEvent(new Event('input', { bubbles: true }))
@@ -3622,6 +3641,17 @@ describe('IntegrationWorkbenchView', () => {
       kind: 'parameterized_table_action',
       label: 'PLM project BOM -> stock preparation',
       configured: true,
+      display: {
+        genericActionKind: 'apply_to_target_table',
+        commandLabel: 'Apply to target table',
+        commandLabelZh: 'Apply 到目标表',
+        targetLabel: 'configured target table',
+        targetLabelZh: '已配置目标表',
+        presetLabel: 'PLM stock-preparation preset',
+        presetLabelZh: 'PLM 备料预设',
+        policyLabel: 'fresh dry-run token + server recompute',
+        policyLabelZh: 'fresh dry-run token + 服务端重新计算',
+      },
       parameters: [{ id: 'projectNo', label: 'Project number', type: 'string', required: true }],
       permissions: { dryRun: 'read', apply: 'write' },
       evidence: { valuesFreeIssueEvidence: true },
@@ -3736,6 +3766,18 @@ describe('IntegrationWorkbenchView', () => {
     app.mount(container)
     await flushUi(12)
 
+    const tableActionPanel = container.querySelector('[data-testid="table-action-panel"]')?.textContent || ''
+    const actionSelect = container.querySelector('[data-testid="table-action-id"]')?.textContent || ''
+    const displayContext = container.querySelector('[data-testid="table-action-display-context"]')?.textContent || ''
+    const applyButton = container.querySelector('[data-testid="table-action-apply"]') as HTMLButtonElement
+    expect(applyButton.textContent).toContain('Apply 到目标表')
+    expect(applyButton.textContent).not.toContain('备料表')
+    expect(actionSelect).toContain('Apply 到目标表')
+    expect(displayContext).toContain('预设: PLM 备料预设')
+    expect(displayContext).toContain('目标: 已配置目标表')
+    expect(displayContext).toContain('策略: fresh dry-run token + 服务端重新计算')
+    expect(tableActionPanel).not.toContain('Apply 到备料表')
+
     const projectInput = container.querySelector('[data-testid="table-action-project-no"]') as HTMLInputElement
     projectInput.value = 'P-DUP'
     projectInput.dispatchEvent(new Event('input', { bubbles: true }))
@@ -3776,7 +3818,6 @@ describe('IntegrationWorkbenchView', () => {
     expect(evidence).not.toContain('Secret Alloy')
     expect(evidence).not.toContain('DETAIL-A')
     expect(container.querySelector('[data-testid="table-action-panel"]')?.textContent).not.toContain('duplicate-dry-token')
-    const applyButton = container.querySelector('[data-testid="table-action-apply"]') as HTMLButtonElement
     expect(applyButton.disabled).toBe(true)
     applyButton.click()
     await flushUi()
