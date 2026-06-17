@@ -206,6 +206,7 @@ describe('Multitable sheet-scoped permissions API', () => {
       canComment: true,
       canManageAutomation: false,
       canExport: true,
+      canSendNotification: false,
     })
     expect(contextResponse.body.data.viewPermissions).toEqual({
       view_grid: {
