@@ -128,6 +128,10 @@ const ALLOWLIST: Record<string, Record<string, { disposition: 'CHOKEPOINT' | 'SA
       disposition: 'CHOKEPOINT',
       reason: 'POST /records create echo: allowedFieldIds from maskStoredRecordFieldIds (defense-in-depth; recompute also taint-skips)',
     },
+    'rec.data|visibleFieldIds': {
+      disposition: 'CHOKEPOINT',
+      reason: 'GET /sheets/:sheetId/trash list (#15 recycle bin): visibleFieldIds from maskStoredRecordFieldIds masks each trashed record data so field_permissions-denied / taint values do not leak through the trash API',
+    },
   },
   'multitable/record-write-service.ts': {
     'row.data|visiblePropertyFieldIds': {

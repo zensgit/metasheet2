@@ -11101,7 +11101,16 @@ export function univerMetaRouter(): Router {
           return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
         },
       })
-      return res.json({ ok: true, data: result })
+      // Field-read mask: listDeletedRecords returns raw stored data, so mirror the live read/history path
+      // here — project each trashed record's data through the actor's visible field set so a
+      // field_permissions.visible=false (or taint-masked formula) value can't leak through the trash API.
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const visibleFields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
+      const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
+      const allowedFieldIds = computeAllowedFieldIds(visibleFields, capabilities, fieldScopeMap)
+      const visibleFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, visibleFields, allowedFieldIds)
+      const maskedRecords = result.records.map((rec) => ({ ...rec, data: filterRecordDataByFieldIds(rec.data, visibleFieldIds) }))
+      return res.json({ ok: true, data: { records: maskedRecords, total: result.total } })
     } catch (err) {
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)

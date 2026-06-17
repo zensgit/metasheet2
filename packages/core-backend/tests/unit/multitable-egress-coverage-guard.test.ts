@@ -56,7 +56,12 @@ const GOLDEN: Record<string, Partial<Record<(typeof EGRESS_HELPERS)[number], num
     // (deriveFieldPermissions allowCreateOnly) so read/write-denied fields never reach storage; the real-DB
     // locking test is tests/integration/multitable-record-duplicate.test.ts (denied-field canary absent from
     // the NEW row's unmasked stored data).
-    filterRecordDataByFieldIds: 14,
+    // 15 = +1 for the #15 recycle-bin trash list (GET /sheets/:sheetId/trash). listDeletedRecords returns
+    // raw stored data, so the handler re-derives the actor's allowed set (computeAllowedFieldIds layer-2∧3 →
+    // maskStoredRecordFieldIds) and masks each trashed record via filterRecordDataByFieldIds — mirroring the
+    // live read/history path. Real-DB canary: the field-mask redaction case in
+    // tests/integration/multitable-record-recycle-bin.test.ts (field_permissions.visible=false absent from trash data).
+    filterRecordDataByFieldIds: 15,
     loadRecordSummaries: 3,
     buildLinkSummaries: 4,
     serializeLinkSummaryMap: 1,
