@@ -8680,6 +8680,30 @@ export function univerMetaRouter(): Router {
       for (const row of rows) {
         row.data = filterRecordDataByFieldIds(row.data, allowedFieldIds)
       }
+      // SECURITY (record-level read leak): filter out records the user cannot read BEFORE building the
+      // link / attachment / person summaries. Summaries are keyed by recordId; they were previously built
+      // from the FULL row set and `rows` was filtered afterward, so the summary maps still carried display
+      // values (linked-record names, attachment names, person names) for records removed by record-level
+      // permissions. Building summaries from the already-filtered `rows` is leak-proof BY CONSTRUCTION — a
+      // future 4th summary type cannot reintroduce the leak (per-map pruning would leave that footgun).
+      // (Single-record GET /records/:id is unaffected: it gates via requireRecordReadable before assembly.)
+      if (!access.isAdminRole && access.userId && rows.length > 0) {
+        const hasRecordPerms = await hasRecordPermissionAssignments(pool.query.bind(pool), sheetId)
+        if (hasRecordPerms) {
+          const recordScopeMap = await loadRecordPermissionScopeMap(
+            pool.query.bind(pool),
+            sheetId,
+            rows.map((r) => r.id),
+            access.userId,
+          )
+          if (recordScopeMap.size > 0) {
+            rows = rows.filter((row) => {
+              const perms = deriveRecordPermissions(row.id, capabilities, recordScopeMap)
+              return perms.canRead
+            })
+          }
+        }
+      }
       const linkSummaries = includeLinkSummaries
         ? filterRecordFieldSummaryMap(
             serializeLinkSummaryMap(
@@ -8719,25 +8743,6 @@ export function univerMetaRouter(): Router {
             allowedFieldIds,
           )
         : undefined
-      // Record-level permission filtering: remove records user cannot read (admin bypass)
-      if (!access.isAdminRole && access.userId && rows.length > 0) {
-        const hasRecordPerms = await hasRecordPermissionAssignments(pool.query.bind(pool), sheetId)
-        if (hasRecordPerms) {
-          const recordScopeMap = await loadRecordPermissionScopeMap(
-            pool.query.bind(pool),
-            sheetId,
-            rows.map((r) => r.id),
-            access.userId,
-          )
-          if (recordScopeMap.size > 0) {
-            rows = rows.filter((row) => {
-              const perms = deriveRecordPermissions(row.id, capabilities, recordScopeMap)
-              return perms.canRead
-            })
-          }
-        }
-      }
-
       const rowActionOverrides = buildRowActionOverrides(
         rows,
         requiresOwnWriteRowPolicy(sheetScope, access.isAdminRole)
