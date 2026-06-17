@@ -1137,9 +1137,11 @@ const ROLLUP_FILTER_OPS_STRING = new Set(['is', 'equal', 'isnot', 'notequal', 'c
 export function isRollupFilterOperatorCompatible(fieldType: string, operator: string): boolean {
   const op = operator.trim().toLowerCase()
   if (op === 'isempty' || op === 'isnotempty') return true
-  // Mirror evaluateMetaFilterCondition's effectiveType EXACTLY: it coerces a rollup-typed field to
-  // 'number'. If this helper didn't, `rollupField contains x` would look string-compatible here, pass
-  // the guard, then hit the numeric catch-all (match-all) at eval — the same leak as `number contains`.
+  // LEGACY FALLBACK, not the main contract: callers now pass the already-resolved effective type
+  // (resolveEffectiveFieldType maps a rollup to its result kind — string/boolean/number — per its
+  // aggregation), so a raw 'rollup' should never reach here. This `rollup → number` only mirrors
+  // evaluateMetaFilterCondition's own fallback as a defensive backstop if an unresolved rollup ever slips
+  // through; it does NOT mean rollups are numeric-by-default. (See resolveEffectiveFieldType.)
   const effectiveType = fieldType === 'rollup' ? 'number' : fieldType
   if (isNumericQueryFieldType(effectiveType) || effectiveType === 'date') return ROLLUP_FILTER_OPS_NUMERIC.has(op)
   if (effectiveType === 'boolean') return ROLLUP_FILTER_OPS_BOOLEAN.has(op)
@@ -3066,6 +3068,9 @@ export function evaluateMetaFilterCondition(
   cellValue: unknown,
   condition: MetaFilterCondition,
 ): boolean {
+  // `rollup → number` here is a LEGACY FALLBACK only: every caller resolves the field through
+  // resolveEffectiveFieldType first (rollup → its result kind string/boolean/number), so a raw 'rollup'
+  // should not reach this function. Rollups are NOT numeric-by-default — see resolveEffectiveFieldType.
   const effectiveType = type === 'rollup' ? 'number' : type
   const op = condition.operator.trim()
   const opNorm = op.toLowerCase()
@@ -3135,13 +3140,9 @@ const DASHBOARD_GROUPABLE_FIELD_TYPES = new Set<UniverMetaField['type']>([
   'rollup',
 ])
 
-// 'rollup' is intentionally NOT a blanket member (slice 2b): a rollup is numeric ONLY when its
-// aggregation produces a number. The widget validation resolves the rollup's effective type via
-// resolveEffectiveFieldType before checking this set, so sum/avg over a concatenate/boolean rollup is
-// rejected while a numeric rollup (count/sum/avg/min/max/countall/unique) still passes.
-const DASHBOARD_NUMERIC_FIELD_TYPES = new Set<string>([
-  'number',
-])
+// (The dashboard numeric-metric gate uses isNumericQueryFieldType directly — the canonical numeric-field
+// predicate, kept in lockstep with the FE dashboard's numeric set — applied to resolveEffectiveFieldType
+// so a rollup is numeric only when its aggregation produces a number. See the widget validation.)
 
 const dashboardWidgetSchema = z.object({
   id: z.string().min(1).max(120).optional(),
@@ -6781,9 +6782,12 @@ export function univerMetaRouter(): Router {
           if (!valueField) {
             throw new ValidationError('valueFieldId is required for sum and avg dashboard metrics')
           }
-          // Resolve the rollup's effective type: sum/avg over a concatenate (string) or and/or/xor
-          // (boolean) rollup is rejected; a numeric rollup still passes. (Slice 2b.)
-          if (!DASHBOARD_NUMERIC_FIELD_TYPES.has(resolveEffectiveFieldType(valueField))) {
+          // Numeric-metric gate. isNumericQueryFieldType is the canonical "is this numeric" predicate
+          // (number/currency/percent/rating/duration) — the SAME set the FE dashboard offers, so a metric
+          // the UI shows is never rejected here (no FE/BE drift). resolveEffectiveFieldType first maps a
+          // rollup to its result kind, so sum/avg over a concatenate (string) or and/or/xor (boolean)
+          // rollup is rejected while a numeric rollup passes. (Slice 2b + dashboard parity.)
+          if (!isNumericQueryFieldType(resolveEffectiveFieldType(valueField))) {
             throw new ValidationError(`Field ${valueField.name} must be numeric for dashboard ${widget.metric}`)
           }
         }

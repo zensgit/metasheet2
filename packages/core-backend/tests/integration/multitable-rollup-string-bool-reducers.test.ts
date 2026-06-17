@@ -37,6 +37,7 @@ const FLD_AND = `fld_sb_and_${TS}` // and(flag) -> false (FR3 false)
 const FLD_OR = `fld_sb_or_${TS}` // or(flag) -> true
 const FLD_XOR = `fld_sb_xor_${TS}` // xor(flag) -> 2 truthy -> false
 const FLD_SUM = `fld_sb_sum_${TS}` // sum(num) -> 35 (numeric rollup control)
+const FLD_CURRENCY = `fld_sb_cur_${TS}` // MS currency field — FE offers it as a numeric metric; backend must too (parity)
 
 // Views that FILTER source records by a rollup CONDITION field — these lock the consumer threading: the
 // filter path must resolve the rollup to its effective kind (string/boolean), not the blind 'number'.
@@ -110,6 +111,8 @@ describeIfDatabase('multitable rollup string/boolean reducers (slice 2b, real DB
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_GROUP, MS, 'Group', 'string', '{}', 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_CURRENCY, MS, 'Price', 'currency', '{}', 8])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_LINK, MS, 'Link', 'link', JSON.stringify({ foreignSheetId: FS }), 2])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_CONCAT, MS, 'Concat', 'rollup', rollup('concatenate', FLD_TAG), 3])
@@ -123,7 +126,7 @@ describeIfDatabase('multitable rollup string/boolean reducers (slice 2b, real DB
       [FLD_SUM, MS, 'Sum', 'rollup', rollup('sum', FLD_NUM), 7])
 
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
-      [REC, MS, JSON.stringify({ [FLD_GROUP]: 'g1', [FLD_LINK]: [FR1, FR2, FR3] })])
+      [REC, MS, JSON.stringify({ [FLD_GROUP]: 'g1', [FLD_CURRENCY]: 100, [FLD_LINK]: [FR1, FR2, FR3] })])
     for (const fr of [FR1, FR2, FR3]) {
       await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)',
         [`lnk_sb_${fr}`, FLD_LINK, REC, fr])
@@ -187,6 +190,14 @@ describeIfDatabase('multitable rollup string/boolean reducers (slice 2b, real DB
 
   test('dashboard ACCEPTS sum over a numeric rollup (not rejected as non-numeric)', async () => {
     const res = await dashboardSum(FLD_SUM, 'sum')
+    expect(res.status).toBe(200)
+  })
+
+  test('FE/BE parity: dashboard ACCEPTS sum over a CURRENCY field (the FE offers it as numeric)', async () => {
+    // The FE dashboard offers number/currency/percent/rating/duration as numeric metrics; the backend gate
+    // (isNumericQueryFieldType) must accept the same set, or a UI-offered metric 400s. Pre-fix, the backend
+    // set was {number} only → this returned 400.
+    const res = await dashboardSum(FLD_CURRENCY, 'sum')
     expect(res.status).toBe(200)
   })
 })
