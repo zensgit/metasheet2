@@ -496,10 +496,33 @@
           </label>
           <label class="meta-field-mgr__field">
             <span>{{ ml('field.buttonActionType') }}</span>
-            <select v-model="buttonDraft.actionType" class="meta-field-mgr__input">
-              <option v-for="t in BUTTON_ACTION_TYPES" :key="t" :value="t">{{ ml('field.buttonActionRecordClick') }}</option>
+            <select v-model="buttonDraft.actionType" class="meta-field-mgr__input" data-test="button-action-type">
+              <option v-for="t in BUTTON_ACTION_TYPES" :key="t" :value="t">{{ buttonActionTypeLabel(t) }}</option>
             </select>
           </label>
+          <!-- B1-S1 D0-A: send_notification authoring (message + member-scoped recipients). -->
+          <template v-if="buttonDraft.actionType === 'send_notification'">
+            <label class="meta-field-mgr__field">
+              <span>{{ ml('field.buttonNotifyMessage') }}</span>
+              <textarea
+                v-model="buttonNotifyDraft.message"
+                class="meta-field-mgr__input"
+                rows="2"
+                data-test="button-notify-message"
+              ></textarea>
+              <span class="meta-field-mgr__hint">{{ ml('field.buttonNotifyMessageHint') }}</span>
+            </label>
+            <label class="meta-field-mgr__field">
+              <span>{{ ml('field.buttonNotifyRecipients') }}</span>
+              <input
+                v-model="buttonNotifyDraft.userIds"
+                class="meta-field-mgr__input"
+                type="text"
+                data-test="button-notify-recipients"
+              />
+              <span class="meta-field-mgr__hint">{{ ml('field.buttonNotifyRecipientsHint') }}</span>
+            </label>
+          </template>
           <label class="meta-field-mgr__toggle">
             <input v-model="buttonDraft.confirm.enabled" type="checkbox" />
             <span>{{ ml('field.buttonConfirmEnable') }}</span>
@@ -979,15 +1002,11 @@ const lookupDraft = reactive<{ linkFieldId: string; targetFieldId: string; forei
   targetFieldId: '',
   foreignSheetId: '',
 })
-// filters/filterConjunction are carried OPAQUELY (no builder UI yet) so an API/template-authored rollup
-// filter survives an unrelated edit instead of being silently dropped on save.
-const rollupDraft = reactive<{ linkFieldId: string; targetFieldId: string; foreignSheetId: string; aggregation: RollupAggregation; filters?: unknown[]; filterConjunction?: string }>({
+const rollupDraft = reactive<{ linkFieldId: string; targetFieldId: string; foreignSheetId: string; aggregation: RollupAggregation }>({
   linkFieldId: '',
   targetFieldId: '',
   foreignSheetId: '',
   aggregation: 'count',
-  filters: undefined,
-  filterConjunction: undefined,
 })
 const formulaDraft = reactive<{ expression: string }>({
   expression: '',
@@ -1034,9 +1053,31 @@ const buttonDraft = reactive<{
   confirm: { enabled: false, message: '' },
   actionConfig: null,
 })
-// Only record_click is runnable today (run route ENABLED_BUTTON_ACTIONS); the
-// picker offers exactly it so an authored button can't 400 on run.
-const BUTTON_ACTION_TYPES = ['record_click'] as const
+// B1-S1 D0-A: record_click (inert) + send_notification (first side-effecting
+// action) are runnable from a button. The picker offers exactly the run route's
+// enabled set so an authored button can't 400 on run.
+const BUTTON_ACTION_TYPES = ['record_click', 'send_notification'] as const
+
+function buttonActionTypeLabel(type: (typeof BUTTON_ACTION_TYPES)[number]): string {
+  return type === 'send_notification'
+    ? ml('field.buttonActionSendNotification')
+    : ml('field.buttonActionRecordClick')
+}
+
+// B1-S1 D0-A: send_notification authoring fields. Held in a SEPARATE draft (the
+// editable form view of buttonDraft.actionConfig) so the opaque-actionConfig
+// clobber guard still holds for OTHER action types — we only re-serialize the
+// notify shape into actionConfig when actionType === 'send_notification'.
+const buttonNotifyDraft = reactive<{ message: string; userIds: string }>({
+  message: '',
+  userIds: '',
+})
+
+function parseRecipientUserIds(raw: string): string[] {
+  return Array.from(new Set(
+    raw.split(',').map((id) => id.trim()).filter((id) => id.length > 0),
+  ))
+}
 const autoNumberDraft = reactive<{ prefix: string; digits: number; start: number }>({
   prefix: '',
   digits: 0,
@@ -1496,8 +1537,6 @@ function resetDrafts() {
   rollupDraft.targetFieldId = ''
   rollupDraft.foreignSheetId = ''
   rollupDraft.aggregation = 'count'
-  rollupDraft.filters = undefined
-  rollupDraft.filterConjunction = undefined
   formulaDraft.expression = ''
   formulaFunctionSearch.value = ''
   formulaFunctionCategory.value = 'all'
@@ -1521,6 +1560,8 @@ function resetDrafts() {
   buttonDraft.actionType = 'record_click'
   buttonDraft.confirm = { enabled: false, message: '' }
   buttonDraft.actionConfig = null
+  buttonNotifyDraft.message = ''
+  buttonNotifyDraft.userIds = ''
   validationDraft.value = []
   validationDraftTouched.value = false
   fieldConfigError.value = ''
@@ -1567,10 +1608,6 @@ function serializeFieldDraft(type: string | null): string {
       targetFieldId: rollupDraft.targetFieldId,
       foreignSheetId: rollupDraft.foreignSheetId,
       aggregation: rollupDraft.aggregation,
-      // Opaque filter carry — part of the signature so editing a filtered rollup isn't seen as "clean".
-      ...(rollupDraft.filters && rollupDraft.filters.length > 0
-        ? { filters: rollupDraft.filters, filterConjunction: rollupDraft.filterConjunction ?? 'and' }
-        : {}),
     })
   }
   if (type === 'formula') {
@@ -1603,12 +1640,19 @@ function serializeFieldDraft(type: string | null): string {
     return JSON.stringify({ durationFormat: durationDraft.durationFormat })
   }
   if (type === 'button') {
+    // B1-S1 D0-A: for send_notification, the actionConfig is the EDITABLE notify
+    // shape (message + recipient user ids). Other action types keep the opaque
+    // carried-through actionConfig (clobber guard).
+    const actionType = buttonDraft.actionType.trim()
+    const actionConfig = actionType === 'send_notification'
+      ? { message: buttonNotifyDraft.message.trim(), userIds: parseRecipientUserIds(buttonNotifyDraft.userIds) }
+      : buttonDraft.actionConfig
     return JSON.stringify({
       label: buttonDraft.label.trim(),
       variant: buttonDraft.variant,
-      actionType: buttonDraft.actionType.trim(),
+      actionType,
       confirm: { enabled: buttonDraft.confirm.enabled, message: buttonDraft.confirm.message.trim() },
-      actionConfig: buttonDraft.actionConfig,
+      actionConfig,
     })
   }
   if (type === 'autoNumber') {
@@ -1702,8 +1746,6 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
     rollupDraft.targetFieldId = property.targetFieldId ?? ''
     rollupDraft.foreignSheetId = property.foreignSheetId ?? ''
     rollupDraft.aggregation = property.aggregation
-    rollupDraft.filters = property.filters
-    rollupDraft.filterConjunction = property.filterConjunction
   } else if (fieldType === 'formula') {
     formulaDraft.expression = resolveFormulaFieldProperty(field.property).expression
   } else if (fieldType === 'attachment') {
@@ -1743,6 +1785,13 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
     buttonDraft.actionType = property.actionType
     buttonDraft.confirm = { enabled: property.confirm.enabled, message: property.confirm.message }
     buttonDraft.actionConfig = property.actionConfig
+    // B1-S1 D0-A: hydrate the editable notify draft from the persisted actionConfig
+    // so re-opening a send_notification button shows its message + recipients.
+    const cfg = property.actionConfig ?? {}
+    buttonNotifyDraft.message = typeof cfg.message === 'string' ? cfg.message : ''
+    buttonNotifyDraft.userIds = Array.isArray(cfg.userIds)
+      ? cfg.userIds.filter((id): id is string => typeof id === 'string').join(', ')
+      : ''
   } else if (fieldType === 'string' || fieldType === 'longText') {
     // A3 CLOBBER GUARD leg 1 (LOCKED §2.1): hydrate the persisted aiShortcut
     // into the draft so EVERY subsequent save re-emits it (see
@@ -2146,10 +2195,6 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
       targetFieldId: rollupDraft.targetFieldId,
       aggregation: rollupDraft.aggregation,
       ...(rollupDraft.foreignSheetId ? { foreignSheetId: rollupDraft.foreignSheetId } : {}),
-      // Opaque filter carry (no builder UI yet) — re-emit a stored filter so it isn't dropped on save.
-      ...(rollupDraft.filters && rollupDraft.filters.length > 0
-        ? { filters: rollupDraft.filters, filterConjunction: rollupDraft.filterConjunction ?? 'and' }
-        : {}),
     }
   }
   if (normalizedType === 'formula') {
@@ -2223,6 +2268,24 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     if (!actionType) {
       fieldConfigError.value = ml('field.error.buttonActionType')
       return undefined
+    }
+    // B1-S1 D0-A: send_notification authors an EDITABLE actionConfig (message +
+    // recipient user ids). Require both; recipients are FILTERED to members
+    // server-side at run, but config-time must be non-empty.
+    if (actionType === 'send_notification') {
+      const message = buttonNotifyDraft.message.trim()
+      const userIds = parseRecipientUserIds(buttonNotifyDraft.userIds)
+      if (!message || userIds.length === 0) {
+        fieldConfigError.value = ml('field.error.buttonNotifyConfig')
+        return undefined
+      }
+      return {
+        label: buttonDraft.label.trim(),
+        variant: buttonDraft.variant,
+        actionType,
+        confirm: { enabled: buttonDraft.confirm.enabled, message: buttonDraft.confirm.message.trim() },
+        actionConfig: { message, userIds },
+      }
     }
     // KEYSTONE: re-emit actionConfig from the draft (hydrated on edit) so a
     // label/variant change never drops a server-authored config — update-field

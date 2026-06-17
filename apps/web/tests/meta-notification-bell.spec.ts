@@ -9,7 +9,11 @@ import MetaNotificationBell from '../src/multitable/components/MetaNotificationB
 import type { MetaRecordSubscriptionNotification } from '../src/multitable/types'
 
 function notif(id: string, readAt: string | null = null): MetaRecordSubscriptionNotification {
-  return { id, sheetId: 's1', recordId: `rec_${id}`, userId: 'u1', eventType: 'record.updated', actorId: null, revisionId: null, commentId: null, createdAt: '2026-06-16T00:00:00Z', readAt }
+  return { id, sheetId: 's1', recordId: `rec_${id}`, userId: 'u1', eventType: 'record.updated', actorId: null, revisionId: null, commentId: null, message: null, createdAt: '2026-06-16T00:00:00Z', readAt }
+}
+// B1-S1 D0-A: a durable button-delivered notification carries a custom message body.
+function notifSent(id: string, message: string): MetaRecordSubscriptionNotification {
+  return { id, sheetId: 's1', recordId: `rec_${id}`, userId: 'u1', eventType: 'notification.sent', actorId: null, revisionId: null, commentId: null, message, createdAt: '2026-06-16T00:00:00Z', readAt: null }
 }
 const flush = async () => { await nextTick(); await Promise.resolve(); await Promise.resolve(); await nextTick() }
 
@@ -78,6 +82,20 @@ describe('MetaNotificationBell (S1b)', () => {
     expect(m.container.querySelector('.meta-notif-bell__state--error')?.textContent).toContain('mark fail')
     // the list is NOT replaced by the error — both render
     expect(m.container.querySelectorAll('[data-test="notification-item"]').length).toBe(2)
+  })
+
+  it('B1-S1 D0-A: renders the custom message for a notification.sent row', async () => {
+    const m = mount({
+      listRecordSubscriptionNotifications: vi.fn(async () => [notifSent('n1', 'Ship the release')]),
+      getRecordSubscriptionUnreadCount: vi.fn(async () => 1),
+    })
+    mounted = m
+    await flush()
+    m.container.querySelector<HTMLButtonElement>('[data-test="notification-bell-btn"]')!.click()
+    await flush()
+    const message = m.container.querySelector('[data-test="notification-message"]')
+    expect(message).not.toBeNull()
+    expect(message?.textContent).toContain('Ship the release')
   })
 
   it('does not crash when the client fails — renders the error state instead (P2-1)', async () => {

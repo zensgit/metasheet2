@@ -6,7 +6,11 @@ export type QueryFn = (
   params?: unknown[],
 ) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
-export type RecordSubscriptionEventType = 'record.updated' | 'comment.created'
+// B1-S1 D0-A: `notification.sent` joins the two watcher event types. It is the
+// durable in-app notification produced by a side-effecting `send_notification`
+// button action (recipient-validated server-side at dispatch). The two watcher
+// types stay untouched (no regression).
+export type RecordSubscriptionEventType = 'record.updated' | 'comment.created' | 'notification.sent'
 
 export interface RecordSubscription {
   id: string
@@ -26,6 +30,8 @@ export interface RecordSubscriptionNotification {
   actorId: string | null
   revisionId: string | null
   commentId: string | null
+  /** Custom message body — populated for `notification.sent`; NULL for watcher events. */
+  message: string | null
   createdAt: string
   readAt: string | null
 }
@@ -37,6 +43,95 @@ export interface NotifyRecordSubscribersInput {
   actorId?: string | null
   revisionId?: string | null
   commentId?: string | null
+}
+
+/**
+ * Explicit-recipient INSERT seam (B1-S1 D0-A). Extracted from
+ * `notifyRecordSubscribers` so the durable notification write has ONE home that
+ * both the watcher path (recipients derived from subscriptions) and the
+ * side-effecting button/rule path (recipients supplied + server-validated) share
+ * — no parallel INSERT.
+ *
+ * Faithful SUPERSET of the watcher INSERT: it still carries `revisionId`/
+ * `commentId` so re-pointing `notifyRecordSubscribers` to it does NOT regress the
+ * watcher rows (record.updated → revision_id; the comment.created path uses the
+ * Kysely variant, untouched). `message` is the only NEW column, NULL on the
+ * watcher path.
+ *
+ * RECIPIENTS ARE NOT AUTHORIZED HERE — the caller owns recipient policy (the
+ * button route member-filters before dispatch). This seam writes exactly what it
+ * is handed.
+ */
+export interface InsertRecordSubscriptionNotificationsInput {
+  userIds: string[]
+  sheetId: string
+  recordId?: string | null
+  eventType: RecordSubscriptionEventType
+  message?: string | null
+  actorId?: string | null
+  revisionId?: string | null
+  commentId?: string | null
+}
+
+export async function insertRecordSubscriptionNotifications(
+  query: QueryFn,
+  input: InsertRecordSubscriptionNotificationsInput,
+): Promise<{ inserted: number }> {
+  const userIds = input.userIds
+    .map((userId) => (typeof userId === 'string' ? userId.trim() : ''))
+    .filter((userId) => userId.length > 0)
+  if (userIds.length === 0) return { inserted: 0 }
+
+  const recordId = input.recordId ?? ''
+  const values = userIds.map((userId) => ({
+    id: randomUUID(),
+    sheet_id: input.sheetId,
+    record_id: recordId,
+    user_id: userId,
+    event_type: input.eventType,
+    actor_id: input.actorId ?? null,
+    revision_id: input.revisionId ?? null,
+    comment_id: input.commentId ?? null,
+    message: input.message ?? null,
+  }))
+
+  await query(
+    `INSERT INTO meta_record_subscription_notifications (
+       id,
+       sheet_id,
+       record_id,
+       user_id,
+       event_type,
+       actor_id,
+       revision_id,
+       comment_id,
+       message
+     )
+     SELECT
+       item.id::uuid,
+       item.sheet_id,
+       item.record_id,
+       item.user_id,
+       item.event_type,
+       item.actor_id,
+       item.revision_id::uuid,
+       item.comment_id,
+       item.message
+     FROM jsonb_to_recordset($1::jsonb) AS item(
+       id text,
+       sheet_id text,
+       record_id text,
+       user_id text,
+       event_type text,
+       actor_id text,
+       revision_id text,
+       comment_id text,
+       message text
+     )`,
+    [JSON.stringify(values)],
+  )
+
+  return { inserted: userIds.length }
 }
 
 export async function subscribeRecord(
@@ -115,60 +210,20 @@ export async function notifyRecordSubscribers(
 
   if (userIds.length === 0) return { inserted: 0, userIds: [] }
 
-  const values = userIds.map((userId) => ({
-    id: randomUUID(),
+  // Re-pointed onto the shared writer seam (B1-S1 D0-A). Watcher events never
+  // carry a `message`, so it stays NULL — revision_id/comment_id round-trip
+  // exactly as before (no regression).
+  const { inserted } = await insertRecordSubscriptionNotifications(query, {
+    userIds,
     sheetId: input.sheetId,
     recordId: input.recordId,
-    userId,
     eventType: input.eventType,
     actorId: input.actorId ?? null,
     revisionId: input.revisionId ?? null,
     commentId: input.commentId ?? null,
-  }))
+  })
 
-  await query(
-    `INSERT INTO meta_record_subscription_notifications (
-       id,
-       sheet_id,
-       record_id,
-       user_id,
-       event_type,
-       actor_id,
-       revision_id,
-       comment_id
-     )
-     SELECT
-       item.id::uuid,
-       item.sheet_id,
-       item.record_id,
-       item.user_id,
-       item.event_type,
-       item.actor_id,
-       item.revision_id::uuid,
-       item.comment_id
-     FROM jsonb_to_recordset($1::jsonb) AS item(
-       id text,
-       sheet_id text,
-       record_id text,
-       user_id text,
-       event_type text,
-       actor_id text,
-       revision_id text,
-       comment_id text
-     )`,
-    [JSON.stringify(values.map((item) => ({
-      id: item.id,
-      sheet_id: item.sheetId,
-      record_id: item.recordId,
-      user_id: item.userId,
-      event_type: item.eventType,
-      actor_id: item.actorId,
-      revision_id: item.revisionId,
-      comment_id: item.commentId,
-    })))],
-  )
-
-  return { inserted: userIds.length, userIds }
+  return { inserted, userIds }
 }
 
 export async function notifyRecordSubscribersBestEffort(
@@ -246,7 +301,7 @@ export async function listRecordSubscriptionNotifications(
     filters.push(`record_id = $${params.length}`)
   }
   const result = await query(
-    `SELECT id, sheet_id, record_id, user_id, event_type, actor_id, revision_id, comment_id, created_at, read_at
+    `SELECT id, sheet_id, record_id, user_id, event_type, actor_id, revision_id, comment_id, message, created_at, read_at
      FROM meta_record_subscription_notifications
      WHERE ${filters.join(' AND ')}
      ORDER BY created_at DESC, id DESC
@@ -321,13 +376,22 @@ function serializeNotification(row: Record<string, unknown>): RecordSubscription
     sheetId: String(row.sheet_id),
     recordId: String(row.record_id),
     userId: String(row.user_id),
-    eventType: row.event_type === 'comment.created' ? 'comment.created' : 'record.updated',
+    // Map ALL three known types — coercing an unknown value to record.updated
+    // would silently mislabel a notification.sent row and hide its message.
+    eventType: normalizeEventType(row.event_type),
     actorId: typeof row.actor_id === 'string' ? row.actor_id : null,
     revisionId: typeof row.revision_id === 'string' ? row.revision_id : null,
     commentId: typeof row.comment_id === 'string' ? row.comment_id : null,
+    message: typeof row.message === 'string' ? row.message : null,
     createdAt: serializeTime(row.created_at),
     readAt: row.read_at === null || row.read_at === undefined ? null : serializeTime(row.read_at),
   }
+}
+
+function normalizeEventType(value: unknown): RecordSubscriptionEventType {
+  if (value === 'comment.created') return 'comment.created'
+  if (value === 'notification.sent') return 'notification.sent'
+  return 'record.updated'
 }
 
 function serializeTime(value: unknown): string {

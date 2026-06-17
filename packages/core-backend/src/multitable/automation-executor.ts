@@ -2349,7 +2349,15 @@ export class AutomationExecutor {
     }
 
     try {
-      // Emit notification event — CollabService or other handler picks this up
+      // Emit notification event — CollabService or other handler picks this up.
+      //
+      // B1-S1 D0-A SCOPE NOTE: the DURABLE notification write does NOT live here. A
+      // button's durable Notification-Center delivery is a route-level dedicated
+      // side-effect transaction (see routes/multitable-button.ts) so it composes
+      // with the run's dedup + audit as one all-or-nothing unit. The automation-RULE
+      // path stays eventBus-only here — adding durable writes / member-filter / dedup
+      // to the shared executor would expand automation's behavior surface, which is
+      // out of scope for a button slice.
       this.deps.eventBus.emit('automation.notification', {
         userIds,
         message,

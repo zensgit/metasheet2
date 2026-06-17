@@ -492,6 +492,7 @@ import {
 } from '../utils/workbench-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
 import { recordLabel } from '../utils/meta-record-labels'
+import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
   bulkFailure as fmtBulkFailure,
   bulkPartialSuccess as fmtBulkPartialSuccess,
@@ -672,9 +673,24 @@ async function onRunButton({ recordId, field }: { recordId: string; field: MetaF
   if (!sheetId) return
   const key = `${recordId}:${field.id}`
   if (buttonRunPending.value.includes(key)) return
+
+  // B1-S1 D0-A: CONFIRM dialog (UX affordance — the SERVER is the gate). If the
+  // button declares confirm.enabled, prompt BEFORE the side-effecting call;
+  // cancelling writes NOTHING. On confirm we send confirmed:true so the server's
+  // §4 confirm gate passes (a direct POST without it is rejected server-side). A
+  // requestId scopes server-side at-most-once dedup for side effects.
+  const buttonProperty = resolveButtonFieldProperty(field.property)
+  let confirmed = false
+  if (buttonProperty.confirm.enabled) {
+    const prompt = buttonProperty.confirm.message || wb('confirm.buttonRun', isZh.value)
+    if (!window.confirm(prompt)) return
+    confirmed = true
+  }
+  const requestId = crypto.randomUUID()
+
   buttonRunPending.value = [...buttonRunPending.value, key]
   try {
-    const result = await workbench.client.runButton(sheetId, recordId, field.id)
+    const result = await workbench.client.runButton(sheetId, recordId, field.id, { requestId, confirmed })
     if (result.status === 'failed') {
       showError(result.message || wb('toast.buttonRunFailed', isZh.value))
     } else {

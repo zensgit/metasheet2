@@ -204,8 +204,12 @@ describe('MultitableWorkbench drawer run-button handler wiring (B1-e)', () => {
     await flushUi()
     expect(workbenchMock.client.runButton).toHaveBeenCalledTimes(1)
     // Active sheet from the workbench + record + field id, in order — a reorder would silently
-    // run the wrong button; caught here.
-    expect(workbenchMock.client.runButton).toHaveBeenCalledWith('sheet_orders', 'rec_42', 'fld_btn')
+    // run the wrong button; caught here. B1-S1 D0-A passes an options 4th arg carrying a
+    // generated requestId. A non-confirm button does NOT set confirmed.
+    expect(workbenchMock.client.runButton).toHaveBeenCalledWith(
+      'sheet_orders', 'rec_42', 'fld_btn',
+      expect.objectContaining({ requestId: expect.any(String), confirmed: false }),
+    )
     expect(showSuccessSpy).toHaveBeenCalledTimes(1)
     expect(showErrorSpy).not.toHaveBeenCalled()
   })
@@ -233,6 +237,35 @@ describe('MultitableWorkbench drawer run-button handler wiring (B1-e)', () => {
     await onRunButton({ recordId: 'rec_42', field: { id: 'fld_btn' } })
     await flushUi()
     expect(workbenchMock.client.runButton).not.toHaveBeenCalled()
+  })
+
+  // B1-S1 D0-A confirm enforcement: a confirm.enabled button must NOT dispatch
+  // (no runButton call → no notification, no audit) when the user cancels the
+  // confirm; it MUST dispatch when confirmed.
+  const confirmField = { id: 'fld_btn', name: 'Notify', type: 'button', property: { label: 'Notify', actionType: 'send_notification', confirm: { enabled: true, message: 'Send it?' } } }
+
+  it('confirm.enabled + user CANCELS → runButton is NOT called (no side effect)', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const onRunButton = await mountAndGetRunButton()
+    await onRunButton({ recordId: 'rec_42', field: confirmField as any })
+    await flushUi()
+    expect(confirmSpy).toHaveBeenCalledWith('Send it?')
+    expect(workbenchMock.client.runButton).not.toHaveBeenCalled()
+    expect(showSuccessSpy).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
+  })
+
+  it('confirm.enabled + user CONFIRMS → runButton IS called with a requestId AND confirmed:true', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const onRunButton = await mountAndGetRunButton()
+    await onRunButton({ recordId: 'rec_42', field: confirmField as any })
+    await flushUi()
+    // §4: confirming sends confirmed:true so the server-confirm gate passes.
+    expect(workbenchMock.client.runButton).toHaveBeenCalledWith(
+      'sheet_orders', 'rec_42', 'fld_btn',
+      expect.objectContaining({ requestId: expect.any(String), confirmed: true }),
+    )
+    confirmSpy.mockRestore()
   })
 })
 
