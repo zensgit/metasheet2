@@ -6109,6 +6109,7 @@
                 </button>
               </div>
               <div v-if="annualBalanceData" class="attendance__annual-balance">
+                <h5>{{ tr('Balance for', '余额 ·') }} {{ annualBalanceData.userId }}</h5>
                 <div class="attendance__annual-balance-summary">
                   <span>{{ tr('Granted', '已发放') }}: {{ annualBalanceData.summary.grantedMinutes }} {{ tr('min', '分钟') }}</span>
                   <span>{{ tr('Remaining', '剩余') }}: {{ annualBalanceData.summary.remainingMinutes }} {{ tr('min', '分钟') }}</span>
@@ -19661,6 +19662,9 @@ const annualBalanceLoading = ref(false)
 const annualBalanceData = ref<AnnualLeaveBalanceData | null>(null)
 
 async function loadAnnualLeaveBalance() {
+  // clear any prior result up front so an empty ID / failed / 403 / errored query never leaves a stale balance
+  // from a previously-queried user on screen (the view renders solely on v-if="annualBalanceData").
+  annualBalanceData.value = null
   const targetUser = annualBalanceUserId.value.trim()
   if (!targetUser) {
     setStatus(tr('Enter a user ID to view the annual leave balance', '请输入用户 ID 查询年假余额'), 'error')
