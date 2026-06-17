@@ -73,6 +73,7 @@ export type MetaViewRenderLabelKey =
   | 'kanban.noSelectFields'
   | 'kanban.groupedBy'
   | 'kanban.cardFields'
+  | 'kanban.swimlane'
   | 'kanban.clear'
   | 'kanban.uncategorized'
   | 'kanban.dropOrAdd'
@@ -217,6 +218,7 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'kanban.noSelectFields',
   'kanban.groupedBy',
   'kanban.cardFields',
+  'kanban.swimlane',
   'kanban.clear',
   'kanban.uncategorized',
   'kanban.dropOrAdd',
@@ -365,6 +367,7 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'kanban.noSelectFields': { en: 'No select-type fields found. Add a select field first.', zh: '未找到单选字段。请先添加一个单选字段。' },
   'kanban.groupedBy': { en: 'Grouped by:', zh: '分组依据：' },
   'kanban.cardFields': { en: 'Card fields', zh: '卡片字段' },
+  'kanban.swimlane': { en: 'Swimlane', zh: '泳道' },
   'kanban.clear': { en: 'Clear', zh: '清除' },
   'kanban.uncategorized': { en: 'Uncategorized', zh: '未分类' },
   'kanban.dropOrAdd': { en: 'Drop a card here or add a new record', zh: '将卡片拖到此处，或添加新记录' },

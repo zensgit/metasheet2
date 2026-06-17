@@ -118,8 +118,17 @@ export function resolveKanbanViewConfig(
     .map((field) => field.id)
   const hasConfiguredCardFieldIds = hasOwnKey(raw, 'cardFieldIds')
   const configuredFieldIds = stringArray(raw?.cardFieldIds).filter((fieldId) => fields.some((field) => field.id === fieldId))
+  // Swimlane (row dimension) is opt-in: default null, no auto-pick. Must be a real field, must NOT be the
+  // column group field (a field can't be both axes), and is dropped if its field no longer exists.
+  const rawSwimlaneFieldId = stringOrNull(raw?.swimlaneFieldId)
+  const swimlaneFieldId = rawSwimlaneFieldId
+    && rawSwimlaneFieldId !== groupFieldId
+    && fields.some((field) => field.id === rawSwimlaneFieldId)
+    ? rawSwimlaneFieldId
+    : null
   return {
     groupFieldId,
+    swimlaneFieldId,
     cardFieldIds: hasConfiguredCardFieldIds ? configuredFieldIds : fallbackCardFieldIds,
   }
 }

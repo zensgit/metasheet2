@@ -861,6 +861,8 @@ export interface MetaCalendarViewConfig {
 
 export interface MetaKanbanViewConfig {
   groupFieldId?: string | null
+  // Optional second (row) grouping dimension — swimlanes. Unset → single-dimension board (legacy).
+  swimlaneFieldId?: string | null
   cardFieldIds?: string[]
 }
 
