@@ -15400,6 +15400,38 @@ async function deductCompTimeBalance(trx, { orgId, userId, requestId, minutes })
   })
 }
 
+// 年假/法定假 L3 (owner design-lock 2026-06-15): convert an annual leave request's duration into STANDARD-DAY
+// deduction minutes. The request model is a single workDate + metadata.minutes (defaulted from the leave type's
+// defaultMinutesPerDay); v1 is single-day only (multi-day/cross-day annual = future). requestedUnits =
+// minutes / defaultMinutesPerDay (1.0 = whole day, 0.5 = half day); deductMinutes = requestedUnits ×
+// standardDayMinutes — computed INTEGER-FIRST as (minutes × standardDayMinutes) / defaultMinutesPerDay with an
+// exact-divisibility check, so a clean half-day cannot float-round into a spurious non-integer (the L2b proration
+// lesson: multiply first, divide last). Result MUST be a positive integer, else HttpError(422). This keeps the
+// "standard-day entitlement" basis from being conflated with the request's actual scheduled minutes.
+function computeAnnualLeaveStandardDayMinutes({ requestMinutes, defaultMinutesPerDay, standardDayMinutes }) {
+  const m = Number(requestMinutes)
+  const d = Number(defaultMinutesPerDay)
+  const s = Number(standardDayMinutes)
+  if (!Number.isInteger(m) || m <= 0 || !Number.isInteger(d) || d <= 0 || !Number.isInteger(s) || s <= 0) {
+    throw new HttpError(422, 'ANNUAL_LEAVE_DEDUCTION_AMOUNT_INVALID', 'Cannot derive a standard-day annual-leave deduction from this request')
+  }
+  // v1 is SINGLE-DAY only: an annual leave request is one workDate, so its minutes cannot exceed one standard
+  // work day (defaultMinutesPerDay). minutes > defaultMinutesPerDay would deduct >1 standard day from a single
+  // date — that's a multi-day request, explicitly out of scope for v1 → reject (don't silently over-deduct).
+  if (m > d) {
+    throw new HttpError(422, 'ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED', 'Annual leave is single-day in v1: requested minutes exceed one standard work day')
+  }
+  const numerator = m * s
+  if (numerator % d !== 0) {
+    throw new HttpError(422, 'ANNUAL_LEAVE_DEDUCTION_NOT_WHOLE', 'Annual-leave deduction does not resolve to a whole number of minutes')
+  }
+  const deductMinutes = numerator / d
+  if (!Number.isInteger(deductMinutes) || deductMinutes <= 0) {
+    throw new HttpError(422, 'ANNUAL_LEAVE_DEDUCTION_AMOUNT_INVALID', 'Annual-leave deduction must be a positive integer')
+  }
+  return deductMinutes
+}
+
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // 年假/法定假 accrual engine (L2b — design-lock #2622 + dev-verification report 2026-06-15). Annual
 // leave is a COMPUTED ENTITLEMENT (not comp_time's idempotent event-credit): eligibility (连续满12个月)
@@ -25242,6 +25274,32 @@ module.exports = {
                 requestId,
                 minutes: requestMetadata.minutes,
               })
+            }
+            // 年假/法定假 L3 (owner design-lock 2026-06-15): annual leave approval → deduct the annual balance on a
+            // STANDARD-DAY basis. GATED on annualLeavePolicy.enabled: a customer that has an 'annual' leave type but
+            // hasn't turned the engine on keeps today's behavior (approve, never touch balance) — zero regression.
+            // Same approval txn as comp_time C3; an insufficient balance or a non-whole standard-day amount throws
+            // → 422 + full rollback, request stays pending (no partial approval). Idempotency is inherited from
+            // resolveRequest's FOR UPDATE + pending-status guard (re-approve can't double-deduct). v1 = single-day.
+            if (requestType === 'leave' && requestMetadata.leaveType?.code === 'annual') {
+              const annualPolicy = (await getSettings(trx))?.annualLeavePolicy
+              if (annualPolicy?.enabled === true) {
+                const deductMinutes = computeAnnualLeaveStandardDayMinutes({
+                  requestMinutes: requestMetadata.minutes,
+                  defaultMinutesPerDay: requestMetadata.leaveType?.defaultMinutesPerDay,
+                  standardDayMinutes: annualPolicy.standardDayMinutes,
+                })
+                await deductLeaveBalance(trx, {
+                  orgId,
+                  userId: requestRow.user_id,
+                  leaveTypeCode: 'annual',
+                  amountMinutes: deductMinutes,
+                  sourceType: 'annual_leave',
+                  insufficientCode: 'ANNUAL_LEAVE_BALANCE_INSUFFICIENT',
+                  insufficientLabel: 'Annual leave',
+                  sourceId: requestId,
+                })
+              }
             }
             const baseRule = await loadDefaultRule(trx, orgId)
             const context = await resolveWorkContext({
