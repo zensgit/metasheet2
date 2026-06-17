@@ -281,6 +281,22 @@
               </div>
             </template>
           </section>
+
+          <!-- #18 row-level read-deny: per-sheet flag -->
+          <section class="meta-sheet-perm__section meta-sheet-perm__rowdeny">
+            <h4 class="meta-sheet-perm__section-title">{{ p('rowDeny.title') }}</h4>
+            <label class="meta-sheet-perm__rowdeny-toggle">
+              <input
+                type="checkbox"
+                :checked="rowDenyEnabled"
+                :disabled="rowDenyBusy"
+                @change="toggleRowDeny(($event.target as HTMLInputElement).checked)"
+              />
+              <span>{{ p('rowDeny.toggle') }}</span>
+            </label>
+            <p class="meta-sheet-perm__rowdeny-warning" role="note">{{ p('rowDeny.warning') }}</p>
+            <p v-if="rowDenyEnabled" class="meta-sheet-perm__rowdeny-note">{{ p('rowDeny.enabledNote') }}</p>
+          </section>
         </template>
 
         <!-- Field Permissions tab -->
@@ -1342,7 +1358,36 @@ async function refreshAll(query?: string) {
   await Promise.all([
     loadEntries(),
     loadCandidates(query ?? search.value),
+    loadRowDeny(),
   ])
+}
+
+// #18 row-level read-deny per-sheet flag
+const rowDenyEnabled = ref(false)
+const rowDenyBusy = ref(false)
+
+async function loadRowDeny() {
+  try {
+    rowDenyEnabled.value = await props.client.getRowLevelReadDeny(props.sheetId)
+  } catch {
+    // non-fatal: leave the toggle at its last-known state (the section still renders)
+  }
+}
+
+async function toggleRowDeny(next: boolean) {
+  if (rowDenyBusy.value) return
+  rowDenyBusy.value = true
+  clearMessages()
+  try {
+    rowDenyEnabled.value = await props.client.setRowLevelReadDeny(props.sheetId, next)
+    emit('updated')
+  } catch (err) {
+    // revert the optimistic checkbox; surface the error (e.g. 403 for non-managers)
+    rowDenyEnabled.value = !next
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    rowDenyBusy.value = false
+  }
 }
 
 function scheduleCandidateRefresh() {

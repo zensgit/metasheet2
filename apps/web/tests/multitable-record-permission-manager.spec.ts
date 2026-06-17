@@ -125,7 +125,7 @@ describe('MetaRecordPermissionManager', () => {
     const entry = container!.querySelector('[data-record-permission-entry="perm_zh"]')!
     expect(entry.querySelector('.meta-record-perm__badge')?.getAttribute('data-access-level')).toBe('write')
     const candidateSelect = container!.querySelector('[data-record-permission-candidate="member-group:group_north"] select') as HTMLSelectElement
-    expect(Array.from(candidateSelect.options).map((option) => option.value)).toEqual(['read', 'write', 'admin'])
+    expect(Array.from(candidateSelect.options).map((option) => option.value)).toEqual(['read', 'write', 'admin', 'none'])
   })
 
   it('renders permission list when visible', async () => {
@@ -422,5 +422,33 @@ describe('MetaRecordPermissionManager', () => {
     await flushUi()
 
     expect(container!.querySelector('.meta-record-perm__overlay')).toBeNull()
+  })
+
+  it('offers the #18 "No access (deny read)" option in the access-level selector', async () => {
+    useLocale().setLocale('en')
+    mountManager({
+      client: makeClient({
+        listRecordPermissions: vi.fn().mockResolvedValue([
+          {
+            id: 'perm_1',
+            sheetId: 'sheet_1',
+            recordId: 'record_1',
+            subjectType: 'user',
+            subjectId: 'user_a',
+            accessLevel: 'read',
+            label: 'A',
+            subtitle: null,
+            isActive: true,
+          },
+        ]),
+      }),
+    })
+    await flushUi()
+    const select = container!.querySelector('.meta-record-perm__select') as HTMLSelectElement | null
+    expect(select).not.toBeNull()
+    const values = Array.from(select!.options).map((o) => o.value)
+    expect(values).toContain('none')
+    const noneOption = Array.from(select!.options).find((o) => o.value === 'none')
+    expect(noneOption?.textContent).toContain('No access')
   })
 })

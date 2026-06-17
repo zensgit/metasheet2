@@ -1202,4 +1202,31 @@ describe('MetaSheetPermissionManager', () => {
     expect(viewOrphanRow.textContent).toContain('Inactive user')
     expect(viewOrphanRow.textContent).toContain('No current sheet access')
   })
+
+  it('renders the #18 row-level read-deny toggle (with warning) and persists via setRowLevelReadDeny', async () => {
+    useLocale().setLocale('en')
+    const setRowLevelReadDeny = vi.fn().mockResolvedValue(true)
+    mountManager({
+      client: {
+        listSheetPermissions: vi.fn().mockResolvedValue({ items: [] }),
+        listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+        updateSheetPermission: vi.fn().mockResolvedValue({}),
+        updateFieldPermission: vi.fn().mockResolvedValue({}),
+        updateViewPermission: vi.fn().mockResolvedValue({}),
+        getRowLevelReadDeny: vi.fn().mockResolvedValue(false),
+        setRowLevelReadDeny,
+      } as never,
+    })
+    await flushUi()
+
+    const toggle = container!.querySelector('.meta-sheet-perm__rowdeny-toggle input[type="checkbox"]') as HTMLInputElement | null
+    expect(toggle).not.toBeNull()
+    expect(toggle!.checked).toBe(false)
+    expect(container!.querySelector('.meta-sheet-perm__rowdeny-warning')?.textContent).toContain('invisible')
+
+    toggle!.checked = true
+    toggle!.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(setRowLevelReadDeny).toHaveBeenCalledWith('sheet_orders', true)
+  })
 })

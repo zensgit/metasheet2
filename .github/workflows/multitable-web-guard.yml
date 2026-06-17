@@ -34,6 +34,13 @@ on:
       - 'apps/web/src/multitable/components/MetaGridTable.vue'
       - 'apps/web/src/multitable/views/MultitableWorkbench.vue'
       - 'apps/web/tests/multitable-sheet-cursor-state.spec.ts'
+      - 'apps/web/src/multitable/components/MetaRecordPermissionManager.vue'
+      - 'apps/web/src/multitable/components/MetaSheetPermissionManager.vue'
+      - 'apps/web/src/multitable/utils/meta-permission-labels.ts'
+      - 'apps/web/src/multitable/api/client.ts'
+      - 'apps/web/src/multitable/types.ts'
+      - 'apps/web/tests/multitable-record-permission-manager.spec.ts'
+      - 'apps/web/tests/multitable-sheet-permission-manager.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
   push:
     branches: [main]
@@ -56,6 +63,13 @@ on:
       - 'apps/web/src/multitable/components/MetaGridTable.vue'
       - 'apps/web/src/multitable/views/MultitableWorkbench.vue'
       - 'apps/web/tests/multitable-sheet-cursor-state.spec.ts'
+      - 'apps/web/src/multitable/components/MetaRecordPermissionManager.vue'
+      - 'apps/web/src/multitable/components/MetaSheetPermissionManager.vue'
+      - 'apps/web/src/multitable/utils/meta-permission-labels.ts'
+      - 'apps/web/src/multitable/api/client.ts'
+      - 'apps/web/src/multitable/types.ts'
+      - 'apps/web/tests/multitable-record-permission-manager.spec.ts'
+      - 'apps/web/tests/multitable-sheet-permission-manager.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
 
 jobs:
@@ -98,4 +112,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run multitable web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager --reporter=dot
