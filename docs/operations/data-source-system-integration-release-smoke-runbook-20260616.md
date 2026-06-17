@@ -46,7 +46,7 @@ the corresponding section below and post fresh values-free evidence.
 | C3 incremental/watermark | Runtime and CI real-DB wire locks are landed on main, but no release-package entity-machine incremental/resume smoke is recorded in this runbook. Large-BOM #2425 is related Data Factory C3/C4 evidence, not the SQL watermark/resume release gate. | Section 4 remains required for complete delivery unless an owner explicitly narrows the release scope and uses downgraded wording. Do not cite #2425 as C3 watermark/resume PASS. |
 | C4 UI configuration | Source/object/schema picker, source-field picker, watermark UI, and read-only/source-only boundary UX have landed, but this runbook has no final release-package UI smoke evidence yet. | Section 5 remains required for complete delivery unless exact UI smoke is explicitly deferred with downgraded wording. |
 | C5 K3/MSSQL read-only seam | issue #2670 closed PASS on package `dea391a1`: generic SQL Server smoke and K3 SQL Server executor smoke both passed after operator SQL scope adjustment; no K3 Save/Submit/Audit/BOM, external DB write, raw SQL, credentials, or row values were printed. | May be cited when no C5-relevant package/runtime surface changed after `dea391a1`; otherwise rerun the C5 runbook on the release package. |
-| C6 external write | issue #2720 core sandbox dry-run/apply/re-pull/rollback PASS and read-only dedicated-route PASS; controlled bad-row remains HOLD after both `HOLD_TARGET_DDL_UNAVAILABLE` and `HOLD_NO_SAFE_FAILURE_SHAPE`. C6-5a now routes this to a separate test-only failure-injection design path. | C6-5 is not closed. Release signoff cannot claim complete database/source-system delivery until controlled bad-row row-level failure/dead-letter/provenance evidence passes values-free on a later sandbox package. |
+| C6 external write | issue #2720 core sandbox dry-run/apply/re-pull/rollback PASS and read-only dedicated-route PASS; controlled bad-row remains HOLD after both `HOLD_TARGET_DDL_UNAVAILABLE` and `HOLD_NO_SAFE_FAILURE_SHAPE`. C6-5a design and C6-5b seam are on main; first C6-5c package `642560126` was blocked during deploy, #2761 fixed package-contained `node_modules` handling, and recut package `d8244ee13` is published for entity-machine retry. | C6-5 is not closed. Release signoff cannot claim complete database/source-system delivery until package `d8244ee13` deploys and controlled bad-row row-level failure/dead-letter/provenance evidence passes values-free. |
 
 ## Required Inputs
 
@@ -276,6 +276,25 @@ Current #2720 checkpoint as of 2026-06-17:
   `environment=sandbox`. Mutable external-system config is not a sandbox proof.
   This runbook still does not authorize production, batch, raw SQL, DDL,
   trigger, or broad runtime failure hooks.
+- First C6-5c sandbox package was published but not validated on the entity
+  machine:
+  `multitable-onprem-datasource-c6-failure-injection-20260617-642560126`
+  / `metasheet-multitable-onprem-v2.5.0-datasource-c6-failure-injection-20260617-642560126`.
+  Workflow `https://github.com/zensgit/metasheet2/actions/runs/27659564604`
+  passed and published the full asset set plus tgz/zip verify reports.
+  The entity-machine deploy attempt was blocked before rerun:
+  `c6_5c_deploy=blocked`, `c6_5c_rerun=not_started`, with missing staged package
+  paths reported for `.zip` and `.tgz`.
+- #2761 fixed the package-contained `node_modules` gap and recut the C6-5c
+  package:
+  `multitable-onprem-datasource-c6-package-prune-20260617-d8244ee13`
+  / `metasheet-multitable-onprem-v2.5.0-datasource-c6-package-prune-d8244ee13`.
+  Workflow `https://github.com/zensgit/metasheet2/actions/runs/27661650691`
+  passed; both verifier reports passed before publish, and downloaded
+  archive-list checks found no `node_modules` entries. Current routing is
+  `c6_5c_deploy=ready_for_retry`, `c6_5c_rerun=not_started`. This package
+  identity is not a C6 PASS claim; `controlledBadRow` remains `hold` until the
+  C6-5c entity-machine rerun proves the row-level failure evidence values-free.
 
 ## Stop Rules
 
