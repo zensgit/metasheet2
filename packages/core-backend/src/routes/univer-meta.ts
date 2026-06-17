@@ -1062,15 +1062,17 @@ function isBlankRollupValue(value: unknown): boolean {
 }
 
 /**
- * Pure rollup reducer (exported for unit tests). Every reducer here returns number|null, so a rollup's
- * computed value stays NUMERIC — keeping the `rollup → number` assumption in filter/sort/dashboard correct.
- * (The string/boolean reducers concatenate/and/or/xor are deferred to slice 2b, which must also teach those
- * consumers the rollup's non-numeric result type before they can ship.)
+ * Pure rollup reducer (exported for unit tests). Returns number | string | boolean | null depending on the
+ * aggregation's result kind (see rollupResultType): count/countall/unique/sum/avg/min/max → number,
+ * concatenate → string, and/or/xor → boolean. Because a rollup is no longer always numeric, every
+ * filter/sort/dashboard/rollup-filter consumer resolves the field through resolveEffectiveFieldType.
  * - `values`: target values of foreign records the actor may read (post sheet-read + field-mask). null/
- *   undefined are dropped upstream; count/unique additionally drop blank values (see isBlankRollupValue).
+ *   undefined are dropped upstream; count/unique/concatenate/and/or/xor additionally drop blank values
+ *   (isBlankRollupValue: null/undefined/empty-or-whitespace string/empty array — `0` and `false` are NOT blank).
  * - `count`: resolved linked records incl. empty/blank target — the only signal `countall` needs.
- * Numeric reducers (sum/avg/min/max) return null when no numeric values exist. Record-level read is
- * NON-GATING here by design (record_permissions is write/admin elevation, not read-deny) — see #20 contract.
+ * Empty input → null for the value reducers (sum/avg/min/max + concatenate/and/or/xor); only the cardinality
+ * reducers (count/countall/unique) return 0. Record-level read is NON-GATING here by design
+ * (record_permissions is write/admin elevation, not read-deny) — see #20 contract.
  */
 export function aggregateRollup(
   values: unknown[],
