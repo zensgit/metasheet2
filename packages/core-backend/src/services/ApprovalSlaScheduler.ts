@@ -24,7 +24,8 @@ export interface ApprovalSlaSchedulerOptions {
   runtime?: ApprovalSlaSchedulerRuntimeOptions
   /**
    * Optional hook invoked once per breach cycle with the newly-breached
-   * instance ids. Main caller wires it to approval audit + notifications.
+   * instance ids. Main caller (index.ts) wires it to the SLA breach notifier
+   * (notifications only); audit-event emission on breach is not yet wired.
    */
   onBreach?: (instanceIds: string[]) => Promise<void> | void
   logger?: Logger
