@@ -4,6 +4,10 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 
+// Real-DB spec: runs only with a Postgres DATABASE_URL (DB-backed CI step in
+// plugin-tests.yml + local); excluded from the no-DB default test job, skipped here.
+const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+
 type JsonRecord = Record<string, unknown>
 
 async function canListenOnEphemeralPort(): Promise<boolean> {
@@ -163,7 +167,7 @@ async function authorPublishStart(
   return created
 }
 
-describe('Approval P1-C node field permissions (hidden subset) API', () => {
+describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   const bookkeeping = { templates: new Set<string>(), approvals: new Set<string>() }
@@ -198,6 +202,10 @@ describe('Approval P1-C node field permissions (hidden subset) API', () => {
       // ignore cleanup failures
     }
     if (server) await server.stop()
+  })
+
+  it('sentinel: DATABASE_URL is set (DB-backed lane must not silently skip)', () => {
+    expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
   it('redacts a hidden field for every viewer while AT the hiding node, on detail AND list, and restores it after advancing', async () => {
