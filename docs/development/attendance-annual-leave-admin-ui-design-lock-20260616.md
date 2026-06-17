@@ -17,7 +17,7 @@ Two slices ship in v1, each its own PR:
 
 - **summary** — `remaining` / `granted` / `expired` / `exhausted` minutes.
 - **active lots** — the contributing lots (`amount_minutes`, `remaining_minutes`, `source_type`, `source_id`, `expires_at`, `status`).
-- **recent events** — the ledger (`grant` / `deduct` / `expire`), limited or paginated but **present**, so an administrator can see *why* the balance is what it is (accrual, manual adjustment, deduction, expiry).
+- **recent events** — the ledger (`grant` / `deduct` / `expire`), limited or paginated but **present**, so an administrator can see *why* the balance is what it is (accrual, manual adjustment, deduction, expiry). (The generic ledger also defines a `revoke` event; the annual L0–L4 chain does not emit it, so it does not appear here.)
 
 An employee **self-service** balance view is explicitly **out of scope** here: it will be a separate future endpoint under a `/me` 口径 with the subject locked to the authenticated token, never mixed into this admin read.
 
