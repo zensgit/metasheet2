@@ -20,6 +20,29 @@ export type ApprovalTerminalStatus = typeof APPROVAL_TERMINAL_STATUSES[number]
 export type ApprovalTemplateStatus = 'draft' | 'published' | 'archived'
 export type ApprovalTemplateVisibilityType = 'all' | 'dept' | 'role' | 'user'
 export type FormFieldVisibilityOperator = 'eq' | 'neq' | 'in' | 'isEmpty' | 'notEmpty'
+
+/**
+ * P1-C node-level field permissions (HIDDEN subset).
+ *
+ * `editable` (the absent default) === current behavior — a node without
+ * `fieldPermissions` leaves every form field fully visible/editable, so every
+ * pre-existing template and instance is byte-for-byte unchanged.
+ *
+ * Only `hidden` is enforced at runtime (server-side echo-redaction: a hidden
+ * field is stripped from the `formSnapshot` echoed in read DTOs while the
+ * instance is AT the hiding node). `readonly`/`editable` are part of the
+ * contract enum (default-preserving, normalized-through) but have NO runtime
+ * effect yet — they are blocked on the edit-form-at-node prerequisite (form
+ * snapshots are written once at create and no dispatch branch edits them, so
+ * `readonly` is indistinguishable from plain display today). The enum members
+ * are declared now so the contract is forward-stable; do not wire them.
+ */
+export type NodeFieldAccess = 'editable' | 'readonly' | 'hidden'
+
+export interface NodeFieldPermission {
+  fieldId: string
+  access: NodeFieldAccess
+}
 export type FormFieldType =
   | 'text'
   | 'textarea'
@@ -50,6 +73,11 @@ export interface ApprovalNodeConfig {
   approvalMode?: ApprovalMode
   emptyAssigneePolicy?: EmptyAssigneePolicy
   autoApprovalPolicy?: AutoApprovalPolicy
+  // P1-C node-level field permissions. Default-absent === editable === current
+  // behavior. `hidden` entries are enforced server-side; `readonly`/`editable`
+  // are inert (forward-stable contract only). Orthogonal to FormFieldVisibilityRule
+  // (data-value-keyed); fieldPermissions is node-keyed.
+  fieldPermissions?: NodeFieldPermission[]
 }
 
 export type ApprovalAssigneeSource =

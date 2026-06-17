@@ -20,6 +20,8 @@ import type {
   FormSchema,
   FormFieldVisibilityOperator,
   FormFieldVisibilityRule,
+  NodeFieldAccess,
+  NodeFieldPermission,
   PublishApprovalTemplateRequest,
   RuntimeGraph,
   RuntimePolicy,
@@ -276,6 +278,7 @@ const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any'])
 const PARALLEL_JOIN_MODES = new Set(['all', 'any'])
 const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve'])
 const AUTO_APPROVAL_ACTOR_MODES = new Set<AutoApprovalActorMode>(['system', 'original_approver'])
+const NODE_FIELD_ACCESS_VALUES = new Set<NodeFieldAccess>(['editable', 'readonly', 'hidden'])
 const APPROVAL_MAX_AUTO_STEPS = 50
 
 function toNullableRecord(value: unknown): Record<string, unknown> | null {
@@ -638,6 +641,86 @@ function validateFormFieldVisibilityRules(
   fields.forEach((field) => visit(field.id, []))
 }
 
+/**
+ * P1-C: normalize a node's `fieldPermissions` array (shape only).
+ *
+ * Enforces shape invariants here (no formSchema needed): each entry must be an
+ * object with a non-empty-string `fieldId` and an `access` in the strict enum;
+ * `fieldId`s are trimmed and must be unique within the node (no last-write-wins
+ * ambiguity). Invalid `access`, missing `fieldId`, or a duplicate `fieldId`
+ * → `failValidation(400)`, never a coerced default (no silent flatten).
+ *
+ * `editable` entries are kept through (inert but round-trip byte-stable). An
+ * empty/absent array returns `undefined` so the caller omits the key entirely
+ * (consistent with the `assigneeSources`/`approvalMode` omit-empty pattern).
+ *
+ * The cross-reference check (every `fieldId` must exist in the version's
+ * formSchema) is NOT done here — `normalizeApprovalGraph` does not see the
+ * formSchema. It is done post-normalize in
+ * `validateNodeFieldPermissionsAgainstFormSchema`, mirroring how
+ * `validateApprovalAssigneeSourcesAgainstFormSchema` cross-validates
+ * `form_field_user` sources. This keeps `normalizeApprovalGraph`'s signature
+ * unchanged (hot-file collision discipline) while still failing closed on a
+ * dangling `fieldId`.
+ */
+function normalizeNodeFieldPermissions(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): NodeFieldPermission[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) {
+    failValidation(context, `${path} must be an array`)
+  }
+  if (value.length === 0) return undefined
+
+  const seen = new Set<string>()
+  const normalized = value.map((entry, entryIndex) => {
+    const entryPath = `${path}[${entryIndex}]`
+    if (!isRecord(entry) || !isNonEmptyString(entry.fieldId)) {
+      failValidation(context, `${entryPath}.fieldId is required`)
+    }
+    if (typeof entry.access !== 'string' || !NODE_FIELD_ACCESS_VALUES.has(entry.access as NodeFieldAccess)) {
+      failValidation(context, `${entryPath}.access must be editable, readonly, or hidden`)
+    }
+    const fieldId = entry.fieldId.trim()
+    if (seen.has(fieldId)) {
+      failValidation(context, `${entryPath}.fieldId is duplicated`)
+    }
+    seen.add(fieldId)
+    return { fieldId, access: entry.access as NodeFieldAccess }
+  })
+
+  return normalized
+}
+
+/**
+ * P1-C cross-reference: every `fieldPermissions[].fieldId` on an approval node
+ * must reference a field that exists in the version's formSchema. Runs after
+ * both graph and formSchema are normalized (mirrors
+ * `validateApprovalAssigneeSourcesAgainstFormSchema`). Unknown `fieldId`
+ * → `failValidation(400)` (no silent drop).
+ */
+function validateNodeFieldPermissionsAgainstFormSchema(
+  approvalGraph: ApprovalGraph,
+  formSchema: FormSchema,
+  context: ValidationContext,
+): void {
+  const fieldIds = new Set(formSchema.fields.map((field) => field.id))
+  approvalGraph.nodes.forEach((node) => {
+    if (node.type !== 'approval') return
+    const config = node.config as { fieldPermissions?: NodeFieldPermission[] }
+    for (const permission of config.fieldPermissions ?? []) {
+      if (!fieldIds.has(permission.fieldId)) {
+        failValidation(
+          context,
+          `approvalGraph node ${node.key} fieldPermissions references unknown field ${permission.fieldId}`,
+        )
+      }
+    }
+  })
+}
+
 function normalizeApprovalGraph(
   value: unknown,
   context: ValidationContext,
@@ -700,6 +783,11 @@ function normalizeApprovalGraph(
             context,
             `approvalGraph.nodes[${index}].config.autoApprovalPolicy`,
           )
+          const fieldPermissions = normalizeNodeFieldPermissions(
+            node.config.fieldPermissions,
+            context,
+            `approvalGraph.nodes[${index}].config.fieldPermissions`,
+          )
           normalizedNode.config = {
             ...(hasLegacyAssignees
               ? {
@@ -711,6 +799,7 @@ function normalizeApprovalGraph(
             ...(approvalMode ? { approvalMode } : {}),
             ...(emptyAssigneePolicy ? { emptyAssigneePolicy } : {}),
             ...(autoApprovalPolicy ? { autoApprovalPolicy } : {}),
+            ...(fieldPermissions ? { fieldPermissions } : {}),
           }
         }
         break
@@ -2002,6 +2091,7 @@ export class ApprovalProductService {
     const formSchema = assertFormSchema(request.formSchema)
     const approvalGraph = assertApprovalGraph(request.approvalGraph)
     validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
 
     let client: ApprovalDbClient | null = null
     try {
@@ -2155,6 +2245,7 @@ export class ApprovalProductService {
         const nextFormSchema = formSchema ?? asFormSchema(latestVersion.form_schema)
         const nextApprovalGraph = approvalGraph ?? asApprovalGraph(latestVersion.approval_graph)
         validateApprovalAssigneeSourcesAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
+        validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
 
         const versionResult = await client.query<TemplateVersionRow>(
           `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
@@ -2241,6 +2332,7 @@ export class ApprovalProductService {
       const formSchema = asFormSchema(version.form_schema)
       const approvalGraph = asApprovalGraph(version.approval_graph)
       validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
+      validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       const runtimeGraph = buildRuntimeGraph(approvalGraph, policy)
 
       const publishedDefinitionResult = await client.query<PublishedDefinitionRow>(
