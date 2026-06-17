@@ -213,9 +213,21 @@ function copy_path() {
   mkdir -p "$(dirname "$dst")"
   if [[ -d "$src" ]]; then
     cp -R "$src" "$dst"
+    prune_node_modules "$dst"
   else
     cp "$src" "$dst"
   fi
+}
+
+function prune_node_modules() {
+  local root="$1"
+  [[ -e "$root" ]] || return 0
+  # On-prem packages intentionally refresh dependencies on apply. Bundling
+  # pnpm node_modules symlinks makes Windows extraction/copy fail on staged
+  # paths before the dependency refresh can run.
+  while IFS= read -r -d '' path; do
+    rm -rf "$path"
+  done < <(find "$root" -name node_modules -prune -print0)
 }
 
 function write_windows_entrypoints() {
@@ -475,6 +487,7 @@ command -v zip >/dev/null 2>&1 || die "zip command is required to build Windows 
 for rel in "${REQUIRED_PATHS[@]}"; do
   copy_path "$rel"
 done
+prune_node_modules "$PACKAGE_ROOT"
 
 stamp_packaged_version "package.json"
 stamp_packaged_version "packages/core-backend/package.json"
