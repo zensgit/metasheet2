@@ -929,9 +929,14 @@ export async function loadRecordPermissionScopeMap(
       const recordId = typeof row.record_id === 'string' ? row.record_id : ''
       if (!recordId) continue
       const existing = scopes.get(recordId)
-      const level = row.access_level as 'read' | 'write' | 'admin'
+      const raw = row.access_level
+      // #18 read-deny FOUNDATION: 'none' is now a valid level. Defensive narrow (DB-constrained anyway).
+      const level: 'read' | 'write' | 'admin' | 'none' =
+        raw === 'none' || raw === 'write' || raw === 'admin' ? raw : 'read'
       if (existing) {
-        const rank = { read: 0, write: 1, admin: 2 } as const
+        // DENY-WINS: a 'none' read-deny is the most restrictive and overrides grants via other subjects
+        // (a deny cannot be bypassed by group/role membership). Otherwise max of read<write<admin.
+        const rank = { read: 0, write: 1, admin: 2, none: 3 } as const
         if (rank[level] > rank[existing.accessLevel]) {
           existing.accessLevel = level
         }

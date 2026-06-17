@@ -113,3 +113,34 @@ describe('deriveRecordPermissions', () => {
     expect(result.canDelete).toBe(false)
   })
 })
+
+describe('deriveRecordPermissions — #18 read-deny foundation (flag-gated none)', () => {
+  const caps = { canRead: true, canEditRecord: true }
+  const noneScope = () => new Map([['r1', { recordId: 'r1', accessLevel: 'none' as const }]])
+
+  it('none scope is INERT when the flag is off (default) — grant-additive, reads per sheet', () => {
+    const r = deriveRecordPermissions('r1', caps, noneScope())
+    expect(r.canRead).toBe(true)
+    expect(r.canEdit).toBe(false)
+    expect(r.canDelete).toBe(false)
+  })
+
+  it('none scope DENIES read only when the flag is on', () => {
+    const r = deriveRecordPermissions('r1', caps, noneScope(), true)
+    expect(r.canRead).toBe(false)
+    expect(r.canEdit).toBe(false)
+    expect(r.canDelete).toBe(false)
+  })
+
+  it('read/write/admin scopes are grant-additive — flag never reduces their read', () => {
+    for (const lvl of ['read', 'write', 'admin'] as const) {
+      const m = new Map([['r1', { recordId: 'r1', accessLevel: lvl }]])
+      expect(deriveRecordPermissions('r1', caps, m, true).canRead).toBe(true)
+      expect(deriveRecordPermissions('r1', caps, m, false).canRead).toBe(true)
+    }
+  })
+
+  it('flag-on does not deny an UNMAPPED record (no scope) — #2754 canary stays additive', () => {
+    expect(deriveRecordPermissions('r2', caps, noneScope(), true).canRead).toBe(true)
+  })
+})

@@ -39,7 +39,8 @@ export type FieldPermissionScope = {
 
 export type RecordPermissionScope = {
   recordId: string
-  accessLevel: 'read' | 'write' | 'admin'
+  // #18 read-deny FOUNDATION: 'none' is a read-deny grant (enforced only when the per-sheet flag is on).
+  accessLevel: 'read' | 'write' | 'admin' | 'none'
 }
 
 export type MultitableRecordPermission = {
@@ -131,6 +132,10 @@ export function deriveRecordPermissions(
   recordId: string,
   capabilities: Pick<MultitableCapabilities, 'canRead' | 'canEditRecord'>,
   recordScopeMap?: Map<string, RecordPermissionScope>,
+  // #18 read-deny FOUNDATION: when true (caller passes the sheet's row_level_read_permissions_enabled),
+  // a 'none' scope DENIES read. Default false → 'none' is inert (no read path passes this yet), so the
+  // model stays grant-ADDITIVE (#2787) and behavior is byte-identical to today.
+  rowLevelReadDenyEnabled = false,
 ): MultitableRecordPermission {
   const scope = recordScopeMap?.get(recordId)
   if (!scope) {
@@ -140,8 +145,11 @@ export function deriveRecordPermissions(
       canDelete: capabilities.canEditRecord,
     }
   }
+  // Read stays grant-additive: a read/write/admin grant never reduces the sheet-level canRead. ONLY an
+  // ACTIVE 'none' (flag on) subtracts read. Write/delete are unchanged (a 'none' grants neither).
+  const readDeniedByNone = scope.accessLevel === 'none' && rowLevelReadDenyEnabled
   return {
-    canRead: capabilities.canRead && (scope.accessLevel === 'read' || scope.accessLevel === 'write' || scope.accessLevel === 'admin'),
+    canRead: capabilities.canRead && !readDeniedByNone,
     canEdit: capabilities.canEditRecord && (scope.accessLevel === 'write' || scope.accessLevel === 'admin'),
     canDelete: capabilities.canEditRecord && scope.accessLevel === 'admin',
   }
