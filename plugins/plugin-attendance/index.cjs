@@ -37791,6 +37791,83 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/leave-balances',
+      withPermission('attendance:admin', async (req, res) => {
+        // 年假/法定假 L5a (design-lock 2026-06-16): admin-only, org-scoped balance/ledger READ. Query by userId
+        // (+ optional leaveTypeCode, default 'annual'). Returns summary (granted/remaining/exhausted/expired) +
+        // active lots + recent ledger events, so a balance is EXPLAINABLE (accrual/manual-adjust/deduction/expiry).
+        // Employee self-view (/me, token-subject-locked) is a SEPARATE future endpoint — never mixed into admin read.
+        const schema = z.object({
+          userId: z.string().min(1).max(255),
+          leaveTypeCode: z.string().min(1).max(64).optional(),
+          eventLimit: z.coerce.number().int().min(1).max(200).optional(),
+        })
+        const parsed = schema.safeParse(req.query ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const { userId } = parsed.data
+        const leaveTypeCode = parsed.data.leaveTypeCode ?? 'annual'
+        const eventLimit = parsed.data.eventLimit ?? 50
+        try {
+          // summary from the ledger (granted/exhausted/expired) + active-lot remaining. Conservation (no revoke in
+          // this chain): granted = remaining + exhausted + expired. Events are joined to lots only for the type filter.
+          const summaryRows = await db.query(
+            `SELECT
+               COALESCE(SUM(CASE WHEN e.event_type = 'grant'  THEN e.delta_minutes  ELSE 0 END), 0) AS granted,
+               COALESCE(SUM(CASE WHEN e.event_type = 'deduct' THEN -e.delta_minutes ELSE 0 END), 0) AS exhausted,
+               COALESCE(SUM(CASE WHEN e.event_type = 'expire' THEN -e.delta_minutes ELSE 0 END), 0) AS expired
+             FROM attendance_leave_balance_events e
+             JOIN attendance_leave_balances b ON b.id = e.balance_id
+             WHERE e.org_id = $1 AND e.user_id = $2 AND b.leave_type_code = $3`,
+            [orgId, userId, leaveTypeCode]
+          )
+          const remainingRows = await db.query(
+            `SELECT COALESCE(SUM(remaining_minutes), 0) AS remaining
+             FROM attendance_leave_balances
+             WHERE org_id = $1 AND user_id = $2 AND leave_type_code = $3 AND status = 'active'`,
+            [orgId, userId, leaveTypeCode]
+          )
+          const activeLots = await db.query(
+            `SELECT id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, status, granted_at, expires_at
+             FROM attendance_leave_balances
+             WHERE org_id = $1 AND user_id = $2 AND leave_type_code = $3 AND status = 'active'
+             ORDER BY expires_at ASC NULLS LAST, granted_at ASC, id ASC`,
+            [orgId, userId, leaveTypeCode]
+          )
+          const recentEvents = await db.query(
+            `SELECT e.event_type, e.delta_minutes, e.source_type, e.source_id, e.balance_id, e.occurred_at
+             FROM attendance_leave_balance_events e
+             JOIN attendance_leave_balances b ON b.id = e.balance_id
+             WHERE e.org_id = $1 AND e.user_id = $2 AND b.leave_type_code = $3
+             ORDER BY e.occurred_at DESC, e.id DESC
+             LIMIT $4`,
+            [orgId, userId, leaveTypeCode, eventLimit]
+          )
+          const s = summaryRows[0] || {}
+          const summary = {
+            leaveTypeCode,
+            grantedMinutes: Number(s.granted || 0),
+            remainingMinutes: Number(remainingRows[0]?.remaining || 0),
+            exhaustedMinutes: Number(s.exhausted || 0),
+            expiredMinutes: Number(s.expired || 0),
+          }
+          res.json({ ok: true, data: { userId, summary, activeLots, recentEvents, eventLimit } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Annual leave balance read failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: error instanceof Error ? error.message : String(error) } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/annual-leave-manual-adjustment',
       withPermission('attendance:admin', async (req, res) => {
