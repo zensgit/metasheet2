@@ -1049,6 +1049,17 @@ export interface IntegrationTableActionMetadata {
   kind: string
   label: string
   configured: boolean
+  display?: {
+    genericActionKind?: string
+    commandLabel?: string
+    commandLabelZh?: string
+    targetLabel?: string
+    targetLabelZh?: string
+    presetLabel?: string
+    presetLabelZh?: string
+    policyLabel?: string
+    policyLabelZh?: string
+  }
   parameters: IntegrationTableActionParameter[]
   permissions?: {
     dryRun?: string

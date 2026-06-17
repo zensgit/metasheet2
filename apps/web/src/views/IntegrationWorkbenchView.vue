@@ -855,7 +855,7 @@
               <span>动作</span>
               <select v-model="selectedTableActionId" data-testid="table-action-id">
                 <option v-for="action in tableActions" :key="action.actionId" :value="action.actionId">
-                  {{ action.label }} · {{ action.configured ? '已配置' : '未配置' }}
+                  {{ tableActionOptionLabel(action) }} · {{ action.configured ? '已配置' : '未配置' }}
                 </option>
               </select>
             </label>
@@ -866,6 +866,9 @@
           </div>
           <p class="integration-workbench__hint" data-testid="table-action-boundary">
             不提供 raw SQL、source/object、sheetId、C3 plan 或 C4 payload 输入；apply 会用 dry-run token 触发服务端重新计算。
+          </p>
+          <p v-if="tableActionDisplayContextItems.length" class="integration-workbench__hint" data-testid="table-action-display-context">
+            {{ tableActionDisplayContextItems.join(' · ') }}
           </p>
           <div class="integration-workbench__actions">
             <button
@@ -884,7 +887,7 @@
               :disabled="!tableActionCanApply"
               @click="applyTableAction"
             >
-              {{ runningTableAction === 'apply' ? 'Apply 中' : 'Apply 到备料表' }}
+              {{ runningTableAction === 'apply' ? 'Apply 中' : tableActionApplyCommandLabel }}
             </button>
           </div>
           <div v-if="tableActionDryRunResult" class="integration-workbench__table-action-review" data-testid="table-action-review">
@@ -2338,6 +2341,65 @@ const dryRunBlockedSummary = computed(() => {
 })
 const configuredTableActions = computed(() => tableActions.value.filter((action) => action.configured === true))
 const selectedTableAction = computed(() => tableActions.value.find((action) => action.actionId === selectedTableActionId.value) || configuredTableActions.value[0] || tableActions.value[0] || null)
+type TableActionDisplayKey = keyof NonNullable<IntegrationTableActionMetadata['display']>
+type TableActionDisplay = NonNullable<IntegrationTableActionMetadata['display']>
+
+const GENERIC_TABLE_ACTION_KIND = 'apply_to_target_table'
+const TABLE_ACTION_GENERIC_APPLY_LABEL = 'Apply 到目标表'
+const DOMAIN_SPECIFIC_APPLY_LABEL_PATTERN = /备料表|stock[-\s]?preparation/i
+
+function safeTableActionDisplay(action: IntegrationTableActionMetadata | null | undefined): TableActionDisplay | null {
+  const display = action?.display
+  return display?.genericActionKind === GENERIC_TABLE_ACTION_KIND ? display : null
+}
+
+function safeTableActionCommandLabel(value: string, fallback: string): string {
+  return DOMAIN_SPECIFIC_APPLY_LABEL_PATTERN.test(value) ? fallback : value
+}
+
+function tableActionDisplayString(
+  action: IntegrationTableActionMetadata | null | undefined,
+  zhKey: TableActionDisplayKey,
+  key: TableActionDisplayKey,
+  fallback: string,
+): string {
+  const display = safeTableActionDisplay(action)
+  const localized = display?.[zhKey]
+  if (typeof localized === 'string' && localized.trim()) {
+    const value = localized.trim()
+    return key === 'commandLabel' ? safeTableActionCommandLabel(value, fallback) : value
+  }
+  const value = display?.[key]
+  if (typeof value === 'string' && value.trim()) {
+    const normalized = value.trim()
+    return key === 'commandLabel' ? safeTableActionCommandLabel(normalized, fallback) : normalized
+  }
+  return fallback
+}
+
+function tableActionOptionLabel(action: IntegrationTableActionMetadata): string {
+  const command = tableActionDisplayString(action, 'commandLabelZh', 'commandLabel', TABLE_ACTION_GENERIC_APPLY_LABEL)
+  const preset = tableActionDisplayString(action, 'presetLabelZh', 'presetLabel', '')
+  return preset ? `${command} · ${preset}` : command
+}
+
+const tableActionApplyCommandLabel = computed(() => tableActionDisplayString(
+  selectedTableAction.value,
+  'commandLabelZh',
+  'commandLabel',
+  TABLE_ACTION_GENERIC_APPLY_LABEL,
+))
+const tableActionDisplayContextItems = computed(() => {
+  const action = selectedTableAction.value
+  if (!action) return []
+  return [
+    ['预设', tableActionDisplayString(action, 'presetLabelZh', 'presetLabel', '')],
+    ['目标', tableActionDisplayString(action, 'targetLabelZh', 'targetLabel', '')],
+    ['策略', tableActionDisplayString(action, 'policyLabelZh', 'policyLabel', '')],
+  ]
+    .filter((entry): entry is [string, string] => Boolean(entry[1]))
+    .map(([label, value]) => `${label}: ${value}`)
+})
 const tableActionCounts = computed(() => tableActionDryRunResult.value?.counts || {})
 const tableActionManualConfirmCount = computed(() => Number(tableActionCounts.value.manual_confirm || 0))
 const tableActionDryRunToken = computed(() => tableActionDryRunResult.value?.dryRunToken || '')
@@ -4342,7 +4404,7 @@ async function applyTableAction(): Promise<void> {
     return
   }
   if (!auth.hasPermission('integration:write')) {
-    setStatus('当前用户只有 dry-run 读取权限，不能 apply 到备料表。', 'error')
+    setStatus(`当前用户只有 dry-run 读取权限，不能 ${tableActionApplyCommandLabel.value}。`, 'error')
     return
   }
   if (!tableActionDryRunToken.value) {
