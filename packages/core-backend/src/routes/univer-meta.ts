@@ -1085,14 +1085,25 @@ export function aggregateRollup(
   return null
 }
 
-// Operators evaluateMetaFilterCondition recognizes (lowercased). Used to reject bogus operators on a
-// rollup filter at save time — the evaluator's catch-all returns match-all, which would silently hide a typo.
-const ROLLUP_FILTER_OPERATORS = new Set([
+// Operator compatibility by field type — mirrors the branches in evaluateMetaFilterCondition so a rollup
+// filter is validated AT SAVE the same way it will be EVALUATED. This is stricter than a flat allow-list:
+// the evaluator's per-type catch-all returns `true` (match-all) for an incompatible op (e.g. number
+// `contains`, boolean `greater`), so without a type-aware check such a filter would silently aggregate
+// ALL linked rows. isempty/isnotempty are universal.
+const ROLLUP_FILTER_OPS_NUMERIC = new Set([
   'is', 'equal', 'isnot', 'notequal',
   'greater', 'isgreater', 'greaterequal', 'isgreaterequal',
   'less', 'isless', 'lessequal', 'islessequal',
-  'contains', 'doesnotcontain', 'isempty', 'isnotempty',
 ])
+const ROLLUP_FILTER_OPS_BOOLEAN = new Set(['is', 'equal', 'isnot', 'notequal'])
+const ROLLUP_FILTER_OPS_STRING = new Set(['is', 'equal', 'isnot', 'notequal', 'contains', 'doesnotcontain'])
+export function isRollupFilterOperatorCompatible(fieldType: string, operator: string): boolean {
+  const op = operator.trim().toLowerCase()
+  if (op === 'isempty' || op === 'isnotempty') return true
+  if (isNumericQueryFieldType(fieldType) || fieldType === 'date') return ROLLUP_FILTER_OPS_NUMERIC.has(op)
+  if (fieldType === 'boolean') return ROLLUP_FILTER_OPS_BOOLEAN.has(op)
+  return ROLLUP_FILTER_OPS_STRING.has(op)
+}
 
 // Slice 3 — parse a rollup's optional filter conditions from stored property JSON. Each well-formed entry
 // needs a string fieldId + operator; `value` is preserved only when present (operators like isEmpty omit it).
@@ -1194,18 +1205,22 @@ async function validateLookupRollupConfig(
   const rollupConfig = type === 'rollup' ? (config as RollupFieldConfig) : null
   if (rollupConfig?.filters && rollupConfig.filters.length > 0) {
     const foreignFieldRes = await query(
-      'SELECT id FROM meta_fields WHERE sheet_id = $1',
+      'SELECT id, type FROM meta_fields WHERE sheet_id = $1',
       [linkCfg.foreignSheetId],
     )
-    const foreignFieldIds = new Set((foreignFieldRes as any).rows.map((r: any) => String(r.id)))
+    const foreignFieldTypeById = new Map<string, string>(
+      (foreignFieldRes as any).rows.map((r: any): [string, string] => [String(r.id), mapFieldType(String(r.type ?? ''))]),
+    )
     for (const cond of rollupConfig.filters) {
-      if (!foreignFieldIds.has(cond.fieldId)) {
+      const condFieldType = foreignFieldTypeById.get(cond.fieldId)
+      if (!condFieldType) {
         return `Rollup 过滤条件引用了不存在的外表字段：${cond.fieldId}（sheetId=${linkCfg.foreignSheetId}）`
       }
-      // Reject operators evaluateMetaFilterCondition doesn't recognize — its catch-all returns `true`
-      // (match-all), so a bogus operator would silently make the filter a no-op rather than erroring.
-      if (!ROLLUP_FILTER_OPERATORS.has(cond.operator.trim().toLowerCase())) {
-        return `Rollup 过滤条件使用了不支持的运算符：${cond.operator}`
+      // Per-TYPE operator check (not a flat allow-list): evaluateMetaFilterCondition's per-type catch-all
+      // returns match-all for an incompatible op (number `contains`, boolean `greater`), which would
+      // silently aggregate ALL linked rows. Reject at save so that can't be stored.
+      if (!isRollupFilterOperatorCompatible(condFieldType, cond.operator)) {
+        return `Rollup 过滤条件运算符 ${cond.operator} 与字段类型 ${condFieldType} 不兼容：${cond.fieldId}`
       }
     }
   }
@@ -2702,11 +2717,15 @@ async function applyLookupRollup(
     // Slice 3 — rollup filter (lookup configs carry no filters, so this is a no-op for them).
     // SECURITY (fail-closed): a condition that reads a foreign field the actor can't see is a
     // side-channel — the resulting match-count would leak the masked field's values — so mask the
-    // WHOLE rollup rather than evaluate it. Honors the same skipForeignFieldMasking opt-out as the target.
+    // WHOLE rollup rather than evaluate it.
+    // Condition fields IGNORE skipForeignFieldMasking (pass `false`, NOT cfg.skipForeignFieldMasking):
+    // that flag is a same-base PROJECTION opt-out for the TARGET value the author chose to surface.
+    // Using an unreadable field as a FILTER is a side-channel regardless of that opt-out, so a rollup
+    // with skipForeignFieldMasking:true must still fail closed when a CONDITION reads an unreadable field.
     const rollupCfg = 'aggregation' in cfg ? cfg : null
     const filters = rollupCfg?.filters ?? []
     for (const cond of filters) {
-      if (shouldMaskForeignField(foreignFieldReadability, foreignSheetId, cond.fieldId, cfg.skipForeignFieldMasking)) {
+      if (shouldMaskForeignField(foreignFieldReadability, foreignSheetId, cond.fieldId, false)) {
         return { values: [], count: 0, masked: true }
       }
     }

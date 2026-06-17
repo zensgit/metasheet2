@@ -38,6 +38,7 @@ const FLD_ALL = `fld_rf_all_${TS}` // countall, no filter -> 3
 const FLD_PAID_COUNT = `fld_rf_pc_${TS}` // countall where status = paid -> 2
 const FLD_PAID_SUM = `fld_rf_ps_${TS}` // sum amount where status = paid -> 30
 const FLD_BY_SECRET = `fld_rf_bs_${TS}` // countall where secret = yes -> 2 (masks to null for DENY_USER)
+const FLD_BY_SECRET_SKIP = `fld_rf_bsk_${TS}` // same + skipForeignFieldMasking:true — P1 bypass regression
 const FLD_OR_UNION = `fld_rf_or_${TS}` // countall where status=unpaid OR amount=10 -> union FR3+FR1 = 2
 const FLD_AND_EMPTY = `fld_rf_and_${TS}` // countall where status=unpaid AND amount=10 -> 0 (contrast for OR)
 const FLD_AMT_GT8 = `fld_rf_gt8_${TS}` // countall where amount greater 8 -> FR1(10),FR2(20) = 2
@@ -127,6 +128,10 @@ describeIfDatabase('multitable rollup filter condition + fail-closed field-reada
     // isEmpty: note absent on FR2, FR3 → 2.
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_NOTE_EMPTY, MS, 'NoteEmpty', 'rollup', rollup('countall', { filters: [{ fieldId: FLD_NOTE, operator: 'isEmpty' }] }), 10])
+    // P1 regression: skipForeignFieldMasking is a same-base TARGET-projection opt-out; it must NOT let a
+    // CONDITION read an unreadable field (side-channel). Same as FLD_BY_SECRET but with the opt-out set.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_BY_SECRET_SKIP, MS, 'BySecretSkip', 'rollup', rollup('countall', { filters: [{ fieldId: FLD_SECRET, operator: 'is', value: 'yes' }], skipForeignFieldMasking: true }), 11])
 
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
       [REC, MS, JSON.stringify({ [FLD_LINK]: [FR1, FR2, FR3] })])
@@ -160,6 +165,13 @@ describeIfDatabase('multitable rollup filter condition + fail-closed field-reada
 
   test('SECURITY fail-closed: a condition on a field the actor cannot read masks that rollup to null', async () => {
     expect(await readRollup(DENY_USER, FLD_BY_SECRET) ?? null).toBeNull() // condition reads denied FLD_SECRET
+  })
+
+  test('SECURITY: skipForeignFieldMasking does NOT bypass the condition fail-closed (it is a target-projection opt-out only)', async () => {
+    // ALLOW_USER (can read FLD_SECRET) still gets the real count even with the opt-out set.
+    expect(await readRollup(ALLOW_USER, FLD_BY_SECRET_SKIP)).toBe(2)
+    // DENY_USER: the same-base opt-out must NOT leak — a CONDITION on the unreadable field still masks to null.
+    expect(await readRollup(DENY_USER, FLD_BY_SECRET_SKIP) ?? null).toBeNull()
   })
 
   test('fail-closed is SCOPED: sibling rollups whose condition reads a readable field still work', async () => {

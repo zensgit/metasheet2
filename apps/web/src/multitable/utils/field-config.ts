@@ -160,18 +160,25 @@ export function resolveLookupFieldProperty(value: unknown): NormalizedLookupFiel
 export function resolveRollupFieldProperty(value: unknown): NormalizedRollupFieldProperty {
   const property = asRecord(value)
   const aggregation = stringOrNull(property.aggregation ?? property.agg ?? property.function ?? property.rollupFunction)
+  // Align with the backend parser (parseRollupFieldConfig): accept the filters / conditions /
+  // filterConditions aliases and a case-insensitive filterConjunction / conjunction. If the FE only
+  // recognized a subset, an alias-authored rollup would lose its filter — or flip OR→AND — after an
+  // unrelated Field Manager edit re-saved it in the FE's canonical shape.
   const rawFilters = Array.isArray(property.filters)
     ? property.filters
     : Array.isArray(property.conditions)
       ? property.conditions
-      : null
+      : Array.isArray(property.filterConditions)
+        ? property.filterConditions
+        : null
+  const conjunction = String(property.filterConjunction ?? property.conjunction ?? '').trim().toLowerCase()
   return {
     linkFieldId: stringOrNull(property.linkFieldId ?? property.linkedFieldId ?? property.relatedLinkFieldId ?? property.sourceFieldId),
     targetFieldId: stringOrNull(property.targetFieldId ?? property.lookUpTargetFieldId ?? property.lookupTargetFieldId ?? property.lookupFieldId),
     foreignSheetId: stringOrNull(property.foreignSheetId ?? property.foreignDatasheetId ?? property.datasheetId),
     aggregation: normalizeRollupAggregation(aggregation),
     ...(rawFilters && rawFilters.length > 0
-      ? { filters: rawFilters, filterConjunction: property.filterConjunction === 'or' ? 'or' : 'and' }
+      ? { filters: rawFilters, filterConjunction: conjunction === 'or' ? 'or' : 'and' }
       : {}),
   }
 }

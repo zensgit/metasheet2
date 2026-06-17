@@ -73,4 +73,28 @@ describe('rollup filter condition — opaque FE preservation (slice 3)', () => {
     })
     expect(p.filterConjunction).toBe('and')
   })
+
+  // The backend parser accepts filters/conditions/filterConditions + filterConjunction/conjunction
+  // (case-insensitive). The FE resolver must match, or an alias-authored rollup loses its filter — or
+  // flips OR→AND — when the field manager re-saves in its canonical shape.
+  it('preserves the filterConditions alias (backend parity)', () => {
+    const p = resolveRollupFieldProperty({
+      linkFieldId: 'l', targetFieldId: 't', aggregation: 'count',
+      filterConditions: [{ fieldId: 'f', operator: 'is', value: 'x' }],
+    })
+    expect(p.filters).toEqual([{ fieldId: 'f', operator: 'is', value: 'x' }])
+  })
+
+  it('honors the conjunction alias and is case-insensitive (uppercase OR is not demoted to and)', () => {
+    const viaAlias = resolveRollupFieldProperty({
+      linkFieldId: 'l', targetFieldId: 't', aggregation: 'count',
+      filters: [{ fieldId: 'f', operator: 'is', value: 'x' }], conjunction: 'or',
+    })
+    expect(viaAlias.filterConjunction).toBe('or')
+    const upper = resolveRollupFieldProperty({
+      linkFieldId: 'l', targetFieldId: 't', aggregation: 'count',
+      filters: [{ fieldId: 'f', operator: 'is', value: 'x' }], filterConjunction: 'OR',
+    })
+    expect(upper.filterConjunction).toBe('or')
+  })
 })
