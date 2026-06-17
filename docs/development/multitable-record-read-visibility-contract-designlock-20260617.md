@@ -26,7 +26,7 @@ Any user who can read a sheet can read **all** records in that sheet. `record_pe
 The read paths that call `deriveRecordPermissions` — `/view`, `GET /records/:id`, the records-list path, etc. — are kept **unchanged**. They are a deliberate forward-compatibility **seam**: if a deny/whitelist semantic is ever introduced (see point 4), it can be inherited at the same seam without re-wiring every read path. Do **not** delete these filters on the grounds that they are "currently inert for reads" — that inertness is the point of A, and the seam is the asset.
 
 **(3) Current canary is retained (grant-additive golden).**
-The `#2754` summary canary — a record granted to another subject (`REC_B`) is still **returned**, and the `summaries ⊆ returned-rows` invariant holds — is the **grant-additive golden**. `REC_B` being returned is **correct** under this contract. The canary carries an inline note that a future private-record arc (B) **must explicitly flip** these assertions (then `REC_B` would be *excluded*). Until then, do not "fix" the canary to expect exclusion.
+The `#2754` summary canary — an unmapped record (`REC_B`, with no `record_permissions` grant to the current user) is still **returned**, and the `summaries ⊆ returned-rows` invariant holds — is the **grant-additive golden**. `REC_B` being returned is **correct** under this contract. The canary carries an inline note that a future private-record arc (B) **must explicitly flip** these assertions (then `REC_B` would be *excluded*). Until then, do not "fix" the canary to expect exclusion.
 
 **(4) Private records (B) is a demand-gated future arc, not this lock's tail.**
 A "private records" / row-level read-deny model is its own **demand-gated security arc**, requiring:
