@@ -191,8 +191,7 @@ describeIfDatabase('#18 row-level read-deny core enforcement (real DB)', () => {
   test('view-aggregate flag ON: an admin counts everything (deny bypassed)', async () => {
     await setFlag(true)
     testUserId = USER_ID
-    testPerms = ['multitable:admin']
+    testRoles = ['admin'] // isAdminRole derives from roles, not perms — bypasses the deny
     expect(await aggTotal()).toBe(2)
-    testPerms = ['multitable:read']
   })
 })
