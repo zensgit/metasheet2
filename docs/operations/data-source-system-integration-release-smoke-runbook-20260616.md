@@ -22,7 +22,7 @@ Current release package anchor:
   `missing_staged_path_under_default_temp`, then short-temp rerun passed with
   `deployApplyExit=0`, API/root health `200`, pending migration diff clean,
   `migrationPendingCount=0`, auth login/me `200`, backend online, and
-  integration plugin present.
+  integration plugin present. The default-temp caveat is tracked by #2642.
 
 This package/deploy/auth checkpoint does not close the release gate by itself.
 C3 incremental/resume and C4 UI exact-package evidence are still HOLD unless
@@ -121,7 +121,8 @@ Current #2769 checkpoint:
   with a short operator temp path passed with `deployApplyExit=0` and health
   `200`;
 - boundary: the default-temp failure is an operational deploy caveat, not a
-  runtime release PASS blocker once the short-temp rerun succeeds.
+  runtime release PASS blocker once the short-temp rerun succeeds; #2642 tracks
+  retiring this workaround.
 
 ## 2. Migration / Auth Preflight
 

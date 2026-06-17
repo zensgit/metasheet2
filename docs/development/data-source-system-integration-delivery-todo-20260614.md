@@ -592,7 +592,8 @@ TODO:
 - [x] `79ab455e` release package deployed on entity machine and migration/auth
   preflight passed for #2769.
   - first Windows deploy attempt using the default temp path failed before a
-    healthy app start with `missing_staged_path_under_default_temp`.
+    healthy app start with `missing_staged_path_under_default_temp`; this
+    operational caveat is tracked by #2642.
   - rerun with a short operator temp path passed: `deployApplyExit=0`,
     dependency refresh reached, migrations step reached, PM2 restart reached,
     healthcheck reached, post-deploy API health `200`, and root health `200`.
