@@ -32,11 +32,17 @@ const MS = `sheet_rf_main_${TS}`
 const FLD_AMOUNT = `fld_rf_amt_${TS}` // number target
 const FLD_STATUS = `fld_rf_status_${TS}` // string filter field (readable by all)
 const FLD_SECRET = `fld_rf_secret_${TS}` // string filter field (DENIED for DENY_USER)
+const FLD_NOTE = `fld_rf_note_${TS}` // string filter field, set on FR1 only (readable by all)
 const FLD_LINK = `fld_rf_lk_${TS}`
 const FLD_ALL = `fld_rf_all_${TS}` // countall, no filter -> 3
 const FLD_PAID_COUNT = `fld_rf_pc_${TS}` // countall where status = paid -> 2
 const FLD_PAID_SUM = `fld_rf_ps_${TS}` // sum amount where status = paid -> 30
 const FLD_BY_SECRET = `fld_rf_bs_${TS}` // countall where secret = yes -> 2 (masks to null for DENY_USER)
+const FLD_OR_UNION = `fld_rf_or_${TS}` // countall where status=unpaid OR amount=10 -> union FR3+FR1 = 2
+const FLD_AND_EMPTY = `fld_rf_and_${TS}` // countall where status=unpaid AND amount=10 -> 0 (contrast for OR)
+const FLD_AMT_GT8 = `fld_rf_gt8_${TS}` // countall where amount greater 8 -> FR1(10),FR2(20) = 2
+const FLD_NOTE_SET = `fld_rf_ns_${TS}` // countall where note isNotEmpty -> FR1 only = 1
+const FLD_NOTE_EMPTY = `fld_rf_ne_${TS}` // countall where note isEmpty -> FR2,FR3 = 2
 
 const FR1 = `rec_rf_f1_${TS}` // amount 10, paid,   secret yes
 const FR2 = `rec_rf_f2_${TS}` // amount 20, paid,   secret no
@@ -76,13 +82,15 @@ describeIfDatabase('multitable rollup filter condition + fail-closed field-reada
       [FLD_AMOUNT, 'Amount', 'number', 1],
       [FLD_STATUS, 'Status', 'string', 2],
       [FLD_SECRET, 'Secret', 'string', 3],
+      [FLD_NOTE, 'Note', 'string', 4],
     ] as const) {
       await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
         [fid, FS, name, type, '{}', order])
     }
 
+    // FLD_NOTE is set on FR1 only (absent key on FR2/FR3) → isNotEmpty matches 1, isEmpty matches 2.
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
-      [FR1, FS, JSON.stringify({ [FLD_AMOUNT]: 10, [FLD_STATUS]: 'paid', [FLD_SECRET]: 'yes' })])
+      [FR1, FS, JSON.stringify({ [FLD_AMOUNT]: 10, [FLD_STATUS]: 'paid', [FLD_SECRET]: 'yes', [FLD_NOTE]: 'hi' })])
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
       [FR2, FS, JSON.stringify({ [FLD_AMOUNT]: 20, [FLD_STATUS]: 'paid', [FLD_SECRET]: 'no' })])
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
@@ -98,6 +106,27 @@ describeIfDatabase('multitable rollup filter condition + fail-closed field-reada
       [FLD_PAID_SUM, MS, 'PaidSum', 'rollup', rollup('sum', { filters: [{ fieldId: FLD_STATUS, operator: 'is', value: 'paid' }] }), 4])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_BY_SECRET, MS, 'BySecret', 'rollup', rollup('countall', { filters: [{ fieldId: FLD_SECRET, operator: 'is', value: 'yes' }] }), 5])
+
+    // OR over two disjoint singletons: status=unpaid (FR3) OR amount=10 (FR1) → union = 2.
+    // Their AND is empty (no record is both) so OR=2 genuinely proves union, not coincidental all-3.
+    const orConds = [
+      { fieldId: FLD_STATUS, operator: 'is', value: 'unpaid' },
+      { fieldId: FLD_AMOUNT, operator: 'is', value: 10 },
+    ]
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_OR_UNION, MS, 'OrUnion', 'rollup', rollup('countall', { filters: orConds, filterConjunction: 'or' }), 6])
+    // Same two conditions with default conjunction (and) → 0: proves conjunction is honored, not ignored.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_AND_EMPTY, MS, 'AndEmpty', 'rollup', rollup('countall', { filters: orConds }), 7])
+    // Numeric operator: amount greater 8 → FR1(10), FR2(20) match, FR3(5) does not → 2.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_AMT_GT8, MS, 'AmtGt8', 'rollup', rollup('countall', { filters: [{ fieldId: FLD_AMOUNT, operator: 'greater', value: 8 }] }), 8])
+    // isNotEmpty: note set on FR1 only → 1.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_NOTE_SET, MS, 'NoteSet', 'rollup', rollup('countall', { filters: [{ fieldId: FLD_NOTE, operator: 'isNotEmpty' }] }), 9])
+    // isEmpty: note absent on FR2, FR3 → 2.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_NOTE_EMPTY, MS, 'NoteEmpty', 'rollup', rollup('countall', { filters: [{ fieldId: FLD_NOTE, operator: 'isEmpty' }] }), 10])
 
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
       [REC, MS, JSON.stringify({ [FLD_LINK]: [FR1, FR2, FR3] })])
@@ -137,5 +166,20 @@ describeIfDatabase('multitable rollup filter condition + fail-closed field-reada
     expect(await readRollup(DENY_USER, FLD_ALL)).toBe(3) // no filter
     expect(await readRollup(DENY_USER, FLD_PAID_COUNT)).toBe(2) // condition reads FLD_STATUS (readable)
     expect(await readRollup(DENY_USER, FLD_PAID_SUM)).toBe(30)
+  })
+
+  test("conjunction 'or' returns the UNION of two disjoint conditions; default 'and' returns the intersection", async () => {
+    // status=unpaid (FR3) OR amount=10 (FR1) → union of 2; AND of the same is empty.
+    expect(await readRollup(ALLOW_USER, FLD_OR_UNION)).toBe(2)
+    expect(await readRollup(ALLOW_USER, FLD_AND_EMPTY)).toBe(0)
+  })
+
+  test('numeric operator: amount greater 8 matches FR1(10), FR2(20) but not FR3(5)', async () => {
+    expect(await readRollup(ALLOW_USER, FLD_AMT_GT8)).toBe(2)
+  })
+
+  test('isNotEmpty / isEmpty on a foreign field set on a subset of linked records', async () => {
+    expect(await readRollup(ALLOW_USER, FLD_NOTE_SET)).toBe(1) // note set on FR1 only
+    expect(await readRollup(ALLOW_USER, FLD_NOTE_EMPTY)).toBe(2) // note absent on FR2, FR3
   })
 })

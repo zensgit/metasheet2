@@ -1085,6 +1085,15 @@ export function aggregateRollup(
   return null
 }
 
+// Operators evaluateMetaFilterCondition recognizes (lowercased). Used to reject bogus operators on a
+// rollup filter at save time — the evaluator's catch-all returns match-all, which would silently hide a typo.
+const ROLLUP_FILTER_OPERATORS = new Set([
+  'is', 'equal', 'isnot', 'notequal',
+  'greater', 'isgreater', 'greaterequal', 'isgreaterequal',
+  'less', 'isless', 'lessequal', 'islessequal',
+  'contains', 'doesnotcontain', 'isempty', 'isnotempty',
+])
+
 // Slice 3 — parse a rollup's optional filter conditions from stored property JSON. Each well-formed entry
 // needs a string fieldId + operator; `value` is preserved only when present (operators like isEmpty omit it).
 function parseRollupFilterConditions(raw: unknown): MetaFilterCondition[] {
@@ -1115,8 +1124,13 @@ function parseRollupFieldConfig(property: unknown): RollupFieldConfig | null {
   const foreignSheetId = typeof foreign === 'string' && foreign.trim().length > 0 ? foreign.trim() : undefined
 
   const filters = parseRollupFilterConditions(obj.filters ?? obj.conditions ?? obj.filterConditions)
-  const filterConjunction: MetaFilterConjunction =
-    obj.filterConjunction === 'or' || obj.conjunction === 'or' ? 'or' : 'and'
+  // Case-insensitive (parity with parseMetaFilterInfo) so a stored 'OR'/'Or' isn't silently demoted to 'and'.
+  const conjRaw = (typeof obj.filterConjunction === 'string'
+    ? obj.filterConjunction
+    : typeof obj.conjunction === 'string'
+      ? obj.conjunction
+      : '').trim().toLowerCase()
+  const filterConjunction: MetaFilterConjunction = conjRaw === 'or' ? 'or' : 'and'
 
   return {
     linkFieldId: linkFieldId.trim(),
@@ -1187,6 +1201,11 @@ async function validateLookupRollupConfig(
     for (const cond of rollupConfig.filters) {
       if (!foreignFieldIds.has(cond.fieldId)) {
         return `Rollup 过滤条件引用了不存在的外表字段：${cond.fieldId}（sheetId=${linkCfg.foreignSheetId}）`
+      }
+      // Reject operators evaluateMetaFilterCondition doesn't recognize — its catch-all returns `true`
+      // (match-all), so a bogus operator would silently make the filter a no-op rather than erroring.
+      if (!ROLLUP_FILTER_OPERATORS.has(cond.operator.trim().toLowerCase())) {
+        return `Rollup 过滤条件使用了不支持的运算符：${cond.operator}`
       }
     }
   }
