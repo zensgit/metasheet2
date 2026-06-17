@@ -102,6 +102,7 @@ const ElSelect = defineComponent({
     return h('select', {
       value: this.modelValue ?? '',
       disabled: this.disabled,
+      'data-testid': (this.$attrs as any)?.['data-testid'],
       onChange: (event: Event) => {
         const value = (event.target as HTMLSelectElement).value
         this.$emit('update:modelValue', value)
@@ -448,6 +449,58 @@ describe('TemplateAuthoringView', () => {
     expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
     expect(updateTemplateSpy.mock.calls[0]?.[0]).toBe('tpl_1')
     expect((updateTemplateSpy.mock.calls[0]?.[1] as any).name).toBe('费用审批 v2')
+  })
+
+  it('wires the visibility subform through the mounted view into the saved payload', async () => {
+    routeParams = { id: 'tpl_1' }
+    getTemplateSpy.mockResolvedValue(buildTemplate()) // fields[1] reviewer depends on `amount` (notEmpty)
+    await mountView()
+    await flushUi()
+
+    const reviewerRow = () => container!.querySelectorAll('[data-testid="approval-template-field-row"]')[1] as HTMLElement
+    const inRow = (testId: string) => reviewerRow().querySelector(`[data-testid="${testId}"]`)
+
+    // hydrated wiring: the depends-on select reflects the stored rule.
+    expect((inRow('approval-field-visibility-depends') as HTMLSelectElement).value).toBe('amount')
+    // there is no value input yet because the stored operator is notEmpty.
+    expect(inRow('approval-field-visibility-value')).toBeNull()
+
+    // switch operator notEmpty -> eq (reveals the value input), then enter a value.
+    const operatorSelect = inRow('approval-field-visibility-operator') as HTMLSelectElement
+    operatorSelect.value = 'eq'
+    operatorSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    const valueInput = inRow('approval-field-visibility-value') as HTMLInputElement
+    valueInput.value = '1000'
+    valueInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.formSchema.fields[1].visibilityRule).toEqual({ fieldId: 'amount', operator: 'eq', value: '1000' })
+  })
+
+  it('clearing the dependency in the mounted view drops the rule from the saved payload', async () => {
+    routeParams = { id: 'tpl_1' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    const reviewerRow = container!.querySelectorAll('[data-testid="approval-template-field-row"]')[1] as HTMLElement
+    const dependsSelect = reviewerRow.querySelector('[data-testid="approval-field-visibility-depends"]') as HTMLSelectElement
+    dependsSelect.value = ''
+    dependsSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.formSchema.fields[1].visibilityRule).toBeUndefined()
   })
 
   it('publishes with an explicit allowRevoke policy after saving', async () => {
