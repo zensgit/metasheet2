@@ -24,7 +24,17 @@ export type NormalizedLookupFieldProperty = {
   foreignSheetId: string | null
 }
 
-export type RollupAggregation = 'count' | 'sum' | 'avg' | 'min' | 'max' | 'countall' | 'unique'
+export type RollupAggregation =
+  | 'count' | 'sum' | 'avg' | 'min' | 'max' | 'countall' | 'unique'
+  | 'concatenate' | 'and' | 'or' | 'xor'
+
+// The VALUE KIND a rollup aggregation produces (mirror of backend rollupResultType). Drives the FE
+// operator map + numeric-metric gating so the UI matches what the backend will actually compute.
+export function rollupResultType(aggregation: RollupAggregation): 'number' | 'string' | 'boolean' {
+  if (aggregation === 'concatenate') return 'string'
+  if (aggregation === 'and' || aggregation === 'or' || aggregation === 'xor') return 'boolean'
+  return 'number'
+}
 
 export type NormalizedRollupFieldProperty = {
   linkFieldId: string | null
@@ -39,11 +49,15 @@ export type NormalizedRollupFieldProperty = {
 
 // Keep in lockstep with parseRollupAggregation in core-backend (routes/univer-meta.ts + field-codecs.ts):
 // an aggregation this rejects gets silently shown/saved as 'count', corrupting a stored countall/unique.
-const ROLLUP_AGGREGATIONS: readonly RollupAggregation[] = ['count', 'sum', 'avg', 'min', 'max', 'countall', 'unique']
+const ROLLUP_AGGREGATIONS: readonly RollupAggregation[] = [
+  'count', 'sum', 'avg', 'min', 'max', 'countall', 'unique',
+  'concatenate', 'and', 'or', 'xor',
+]
 export function normalizeRollupAggregation(value: string | null | undefined): RollupAggregation {
   const a = (value ?? '').trim().toLowerCase()
   if (a === 'counta') return 'count'
   if (a === 'distinct' || a === 'uniquecount') return 'unique'
+  if (a === 'concat') return 'concatenate'
   return (ROLLUP_AGGREGATIONS as readonly string[]).includes(a) ? (a as RollupAggregation) : 'count'
 }
 

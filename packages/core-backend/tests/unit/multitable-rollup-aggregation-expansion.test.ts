@@ -15,7 +15,7 @@
  * when the foreign sheet/field is masked, so these tests exercise the un-masked numeric/value paths.
  */
 import { describe, test, expect } from 'vitest'
-import { aggregateRollup } from '../../src/routes/univer-meta'
+import { aggregateRollup, rollupResultType, resolveEffectiveFieldType } from '../../src/routes/univer-meta'
 
 describe('aggregateRollup — rollup reducer expansion', () => {
   describe('count (≡ COUNTA: non-blank target values)', () => {
@@ -115,6 +115,81 @@ describe('aggregateRollup — rollup reducer expansion', () => {
       expect(aggregateRollup(['x'], 1, 'max')).toBeNull()
       expect(aggregateRollup([], 0, 'min')).toBeNull()
       expect(aggregateRollup([], 0, 'max')).toBeNull()
+    })
+  })
+
+  // ---- Slice 2b: non-numeric reducers (locked semantics) ----
+  describe('concatenate (slice 2b — string)', () => {
+    test('joins non-blank values with ", "', () => {
+      expect(aggregateRollup(['a', 'b', 'c'], 3, 'concatenate')).toBe('a, b, c')
+      expect(aggregateRollup([1, 2], 2, 'concatenate')).toBe('1, 2')
+    })
+    test('drops blanks; false/0 are PRESENT', () => {
+      expect(aggregateRollup(['a', '', '   ', [], 'b'], 5, 'concatenate')).toBe('a, b')
+      expect(aggregateRollup([0, false], 2, 'concatenate')).toBe('0, false')
+    })
+    test('empty (none / all-blank) → null, NOT ""', () => {
+      expect(aggregateRollup([], 0, 'concatenate')).toBeNull()
+      expect(aggregateRollup(['', '   ', []], 3, 'concatenate')).toBeNull()
+    })
+    test('objects/arrays use stable JSON', () => {
+      expect(aggregateRollup([{ a: 1 }, [1, 2]], 2, 'concatenate')).toBe('{"a":1}, [1,2]')
+    })
+  })
+
+  describe('and / or / xor (slice 2b — boolean, via toComparableBoolean)', () => {
+    test('and = all PRESENT values truthy', () => {
+      expect(aggregateRollup([true, 1, 'yes'], 3, 'and')).toBe(true)
+      expect(aggregateRollup([true, false], 2, 'and')).toBe(false)
+      expect(aggregateRollup([true, 0], 2, 'and')).toBe(false) // 0 present and falsy
+    })
+    test('or = any PRESENT value truthy', () => {
+      expect(aggregateRollup([false, 0, 'yes'], 3, 'or')).toBe(true)
+      expect(aggregateRollup([false, 0, 'no'], 3, 'or')).toBe(false)
+    })
+    test('xor = ODD number of truthy', () => {
+      expect(aggregateRollup([true], 1, 'xor')).toBe(true)
+      expect(aggregateRollup([true, true], 2, 'xor')).toBe(false)
+      expect(aggregateRollup([true, true, true], 3, 'xor')).toBe(true)
+    })
+    test("'false'/'0'/'no' strings are PRESENT-but-falsy", () => {
+      expect(aggregateRollup(['false', '0', 'no'], 3, 'or')).toBe(false)
+      expect(aggregateRollup(['false', 'true'], 2, 'xor')).toBe(true) // exactly 1 truthy
+    })
+    test('blanks excluded; empty → null', () => {
+      expect(aggregateRollup([null, '', []], 3, 'and')).toBeNull()
+      expect(aggregateRollup([], 0, 'or')).toBeNull()
+      expect(aggregateRollup([true, null, ''], 3, 'and')).toBe(true) // blanks dropped, only true remains
+    })
+  })
+
+  describe('rollupResultType', () => {
+    test('numeric reducers → number', () => {
+      for (const a of ['count', 'countall', 'unique', 'sum', 'avg', 'min', 'max'] as const) {
+        expect(rollupResultType(a)).toBe('number')
+      }
+    })
+    test('concatenate → string; and/or/xor → boolean', () => {
+      expect(rollupResultType('concatenate')).toBe('string')
+      expect(rollupResultType('and')).toBe('boolean')
+      expect(rollupResultType('or')).toBe('boolean')
+      expect(rollupResultType('xor')).toBe('boolean')
+    })
+  })
+
+  describe('resolveEffectiveFieldType', () => {
+    test('non-rollup field passes through', () => {
+      expect(resolveEffectiveFieldType({ type: 'string' })).toBe('string')
+      expect(resolveEffectiveFieldType({ type: 'number' })).toBe('number')
+    })
+    test('rollup resolves via its aggregation', () => {
+      const mk = (aggregation: string) => ({ type: 'rollup', property: { linkFieldId: 'l', targetFieldId: 't', aggregation } })
+      expect(resolveEffectiveFieldType(mk('sum'))).toBe('number')
+      expect(resolveEffectiveFieldType(mk('concatenate'))).toBe('string')
+      expect(resolveEffectiveFieldType(mk('and'))).toBe('boolean')
+    })
+    test('rollup with unparseable property defaults to number (count)', () => {
+      expect(resolveEffectiveFieldType({ type: 'rollup', property: {} })).toBe('number')
     })
   })
 })

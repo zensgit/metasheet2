@@ -921,12 +921,21 @@ type LookupFieldConfig = {
 }
 
 type RollupAggregation =
-  | 'count' | 'sum' | 'avg' | 'min' | 'max'
-  // Expansion slice 2a — both NUMERIC, so a rollup's value stays number|null and the `rollup → number`
-  // assumption baked into filter/sort/dashboard stays correct. countall = resolved linked records incl.
-  // empty target; unique = distinct-value count. The string/boolean reducers (concatenate/and/or/xor) are
-  // deferred to slice 2b, which must first teach those consumers the rollup's non-numeric result type.
-  | 'countall' | 'unique'
+  // NUMERIC reducers (rollupResultType → 'number').
+  | 'count' | 'sum' | 'avg' | 'min' | 'max' | 'countall' | 'unique'
+  // Slice 2b — NON-numeric reducers. concatenate → 'string'; and/or/xor → 'boolean'. A rollup's value is
+  // therefore no longer always numeric, so every filter/sort/dashboard/automation/rollup-filter consumer
+  // resolves the field through resolveEffectiveFieldType (which maps rollup → rollupResultType) instead of
+  // assuming 'number'.
+  | 'concatenate' | 'and' | 'or' | 'xor'
+
+// Slice 2b — the VALUE KIND a rollup aggregation produces. The single source of truth that lets every
+// rollup-aware consumer pick string/number/boolean comparators instead of hardcoding 'number'.
+export function rollupResultType(aggregation: RollupAggregation): 'number' | 'string' | 'boolean' {
+  if (aggregation === 'concatenate') return 'string'
+  if (aggregation === 'and' || aggregation === 'or' || aggregation === 'xor') return 'boolean'
+  return 'number' // count/countall/unique/sum/avg/min/max
+}
 
 type RollupFieldConfig = {
   linkFieldId: string
@@ -1027,9 +1036,12 @@ function parseRollupAggregation(value: unknown): RollupAggregation | null {
   // is the count of non-empty values. Use `countall` for the all-records-incl-empty count.
   if (normalized === 'counta') return 'count'
   if (normalized === 'distinct' || normalized === 'uniquecount') return 'unique'
+  if (normalized === 'concat') return 'concatenate'
   if (
     normalized === 'count' || normalized === 'sum' || normalized === 'avg' || normalized === 'min' || normalized === 'max'
     || normalized === 'countall' || normalized === 'unique'
+    // Slice 2b — non-numeric reducers.
+    || normalized === 'concatenate' || normalized === 'and' || normalized === 'or' || normalized === 'xor'
   ) {
     return normalized as RollupAggregation
   }
@@ -1064,7 +1076,7 @@ export function aggregateRollup(
   values: unknown[],
   count: number,
   aggregation: RollupAggregation,
-): number | null {
+): number | string | boolean | null {
   if (aggregation === 'count') return values.filter((v) => !isBlankRollupValue(v)).length // ≡ COUNTA
   if (aggregation === 'countall') return count // all resolved linked records, incl. blank/empty target
   if (aggregation === 'unique') {
@@ -1073,6 +1085,29 @@ export function aggregateRollup(
         .filter((v) => !isBlankRollupValue(v))
         .map((v) => (typeof v === 'object' ? JSON.stringify(v) : v)),
     ).size
+  }
+  // Slice 2b non-numeric reducers operate on the NON-BLANK values (false/0 are PRESENT; null/undefined/
+  // empty-or-whitespace string/empty array are blank). Empty (no non-blank value) → null, matching
+  // sum/avg/min/max — only the cardinality reducers (count/countall/unique) return 0 on empty.
+  if (aggregation === 'concatenate' || aggregation === 'and' || aggregation === 'or' || aggregation === 'xor') {
+    const present = values.filter((v) => !isBlankRollupValue(v))
+    if (present.length === 0) return null
+    if (aggregation === 'concatenate') {
+      return present
+        .map((v) => {
+          if (v !== null && typeof v === 'object') {
+            try { return JSON.stringify(v) } catch { return String(v) } // stable for plain data; fallback for cyclic
+          }
+          return String(v)
+        })
+        .join(', ')
+    }
+    // and/or/xor: truthiness via the canonical toComparableBoolean (so 'false'/'0'/'no'/0/false are falsy
+    // but present); a value counts as truthy ONLY when it coerces to exactly true.
+    const truthy = present.filter((v) => toComparableBoolean(v) === true).length
+    if (aggregation === 'and') return truthy === present.length
+    if (aggregation === 'or') return truthy > 0
+    return truthy % 2 === 1 // xor — odd number of truthy values
   }
   const nums = values
     .map((v) => toComparableNumber(v))
@@ -1157,6 +1192,19 @@ function parseRollupFieldConfig(property: unknown): RollupFieldConfig | null {
   }
 }
 
+/**
+ * Slice 2b — the SINGLE chokepoint for "what kind of value does this field compare as". For a rollup the
+ * answer depends on its aggregation (concatenate → string, and/or/xor → boolean, else number), so every
+ * filter/sort/dashboard/rollup-filter consumer must resolve through here instead of hardcoding
+ * `type === 'rollup' ? 'number'`. Non-rollup fields pass through unchanged. A rollup with an unparseable
+ * property defaults to 'count' → 'number' (the historical assumption), which is the safe fallback.
+ */
+export function resolveEffectiveFieldType(field: { type: string; property?: unknown }): UniverMetaField['type'] {
+  if (field.type !== 'rollup') return field.type as UniverMetaField['type']
+  const cfg = parseRollupFieldConfig(field.property)
+  return rollupResultType(cfg?.aggregation ?? 'count') // 'number' | 'string' | 'boolean' — all valid field types
+}
+
 async function validateLookupRollupConfig(
   req: Request,
   query: QueryFn,
@@ -1209,11 +1257,17 @@ async function validateLookupRollupConfig(
   const rollupConfig = type === 'rollup' ? (config as RollupFieldConfig) : null
   if (rollupConfig?.filters && rollupConfig.filters.length > 0) {
     const foreignFieldRes = await query(
-      'SELECT id, type FROM meta_fields WHERE sheet_id = $1',
+      'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
       [linkCfg.foreignSheetId],
     )
+    // Resolve the EFFECTIVE type per condition field. A foreign condition field that is itself a rollup
+    // must compare as its result kind (concatenate → string, and/or/xor → boolean), NOT blindly number —
+    // otherwise the per-type operator check below would mis-validate it. (Slice 2b chokepoint.)
     const foreignFieldTypeById = new Map<string, string>(
-      (foreignFieldRes as any).rows.map((r: any): [string, string] => [String(r.id), mapFieldType(String(r.type ?? ''))]),
+      (foreignFieldRes as any).rows.map((r: any): [string, string] => [
+        String(r.id),
+        resolveEffectiveFieldType({ type: mapFieldType(String(r.type ?? '')), property: r.property }),
+      ]),
     )
     for (const cond of rollupConfig.filters) {
       const condFieldType = foreignFieldTypeById.get(cond.fieldId)
@@ -2695,8 +2749,10 @@ async function applyLookupRollup(
   }
   const foreignFieldTypesBySheet = new Map<string, Map<string, string>>()
   for (const fsid of filteredRollupForeignSheetIds) {
-    const ffields = (await loadFieldsForSheetShared(query, fsid)) as Array<{ id: string; type: string }>
-    foreignFieldTypesBySheet.set(fsid, new Map(ffields.map((f) => [f.id, f.type])))
+    const ffields = (await loadFieldsForSheetShared(query, fsid)) as Array<{ id: string; type: string; property?: unknown }>
+    // EFFECTIVE type per field: a rollup-typed condition field resolves to its result kind (concatenate →
+    // string, and/or/xor → boolean), so the runtime operator guard + evaluator treat it correctly. (2b.)
+    foreignFieldTypesBySheet.set(fsid, new Map(ffields.map((f) => [f.id, resolveEffectiveFieldType(f)])))
   }
 
   const resolveLookupValues = (
@@ -3077,9 +3133,12 @@ const DASHBOARD_GROUPABLE_FIELD_TYPES = new Set<UniverMetaField['type']>([
   'rollup',
 ])
 
-const DASHBOARD_NUMERIC_FIELD_TYPES = new Set<UniverMetaField['type']>([
+// 'rollup' is intentionally NOT a blanket member (slice 2b): a rollup is numeric ONLY when its
+// aggregation produces a number. The widget validation resolves the rollup's effective type via
+// resolveEffectiveFieldType before checking this set, so sum/avg over a concatenate/boolean rollup is
+// rejected while a numeric rollup (count/sum/avg/min/max/countall/unique) still passes.
+const DASHBOARD_NUMERIC_FIELD_TYPES = new Set<string>([
   'number',
-  'rollup',
 ])
 
 const dashboardWidgetSchema = z.object({
@@ -3596,7 +3655,8 @@ async function loadDashboardSourceRows(args: {
     visibleFields,
     new Set(visibleFields.map((field) => field.id)),
   )
-  const fieldTypeById = new Map(visibleFields.map((field) => [field.id, field.type] as const))
+  // Effective type per field (slice 2b): a rollup compares as its result kind, not blindly number.
+  const fieldTypeById = new Map(visibleFields.map((field) => [field.id, resolveEffectiveFieldType(field)] as const))
   const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
   // §2a.3 ANTI-ORACLE: prune saved filterInfo.conditions by the SAME post-chokepoint allow-set
   // (visibleFieldIds, masked by maskStoredRecordFieldIds above) that masks the per-row output at
@@ -3726,7 +3786,9 @@ function buildDashboardWidgetResult(args: {
         const rightEpoch = toEpoch(right.key)
         if (leftEpoch !== null && rightEpoch !== null && leftEpoch !== rightEpoch) return leftEpoch - rightEpoch
       }
-      if (groupField?.type === 'number' || groupField?.type === 'rollup') {
+      // Effective type (2b): a numeric rollup sorts numerically; a concatenate (string) / and-or-xor
+      // (boolean) rollup falls through to the locale string sort below.
+      if (groupField && resolveEffectiveFieldType(groupField) === 'number') {
         const leftNumber = toComparableNumber(left.key)
         const rightNumber = toComparableNumber(right.key)
         if (leftNumber !== null && rightNumber !== null && leftNumber !== rightNumber) return leftNumber - rightNumber
@@ -6717,7 +6779,9 @@ export function univerMetaRouter(): Router {
           if (!valueField) {
             throw new ValidationError('valueFieldId is required for sum and avg dashboard metrics')
           }
-          if (!DASHBOARD_NUMERIC_FIELD_TYPES.has(valueField.type)) {
+          // Resolve the rollup's effective type: sum/avg over a concatenate (string) or and/or/xor
+          // (boolean) rollup is rejected; a numeric rollup still passes. (Slice 2b.)
+          if (!DASHBOARD_NUMERIC_FIELD_TYPES.has(resolveEffectiveFieldType(valueField))) {
             throw new ValidationError(`Field ${valueField.name} must be numeric for dashboard ${widget.metric}`)
           }
         }
@@ -8269,7 +8333,7 @@ export function univerMetaRouter(): Router {
       // stays display-only for SELECTION (a readable-but-view-hidden field is still searchable/filterable on both).
       const viewHiddenFieldIds = view?.hiddenFieldIds ?? []
       const visibleFields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
-      const filterFieldTypeById = new Map(visibleFields.map((field) => [field.id, field.type]))
+      const filterFieldTypeById = new Map(visibleFields.map((field) => [field.id, resolveEffectiveFieldType(field)]))
       const filterInfo = view ? parseMetaFilterInfo(view.filterInfo) : null
 
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
@@ -8585,7 +8649,7 @@ export function univerMetaRouter(): Router {
       // appears in the returned field list (parity with how a masked lookup keeps its column); only
       // the per-row materialized value is withheld.
       allowedFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, visiblePropertyFields, allowedFieldIds)
-      const fieldTypeById = new Map(visiblePropertyFields.map((f) => [f.id, f.type] as const))
+      const fieldTypeById = new Map(visiblePropertyFields.map((f) => [f.id, resolveEffectiveFieldType(f)] as const))
       // #2038 (a): search/sort/filter SELECTION is gated by allowedFieldIds (layer-3, the field-read gate) —
       // a field_permissions-denied field is treated as unavailable (not searchable/filterable/sortable),
       // exactly like a non-existent field. `allowedFieldIds` is layer-3-ONLY (hiddenFieldIds: [], :6161), so

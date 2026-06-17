@@ -236,6 +236,10 @@
               <option value="avg">{{ aggregationLabel('avg', isZh) }}</option>
               <option value="min">{{ aggregationLabel('min', isZh) }}</option>
               <option value="max">{{ aggregationLabel('max', isZh) }}</option>
+              <option value="concatenate">{{ aggregationLabel('concatenate', isZh) }}</option>
+              <option value="and">{{ aggregationLabel('and', isZh) }}</option>
+              <option value="or">{{ aggregationLabel('or', isZh) }}</option>
+              <option value="xor">{{ aggregationLabel('xor', isZh) }}</option>
             </select>
           </label>
         </template>

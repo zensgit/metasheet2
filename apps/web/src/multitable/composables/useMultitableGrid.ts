@@ -16,6 +16,7 @@ import type {
 import { MultitableApiClient, multitableClient } from '../api/client'
 import { isPropertyHiddenField } from '../utils/field-permissions'
 import { metaCoreLabel } from '../utils/meta-core-labels'
+import { resolveRollupFieldProperty, rollupResultType } from '../utils/field-config'
 
 // --- Sort / Filter types ---
 
@@ -194,6 +195,8 @@ export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; lab
     { value: 'isEmpty', label: 'is empty' },
     { value: 'isNotEmpty', label: 'is not empty' },
   ],
+  // Default rollup entry = numeric ops (a count/sum/avg/... rollup). For concatenate/and/or/xor rollups,
+  // effectiveFilterTypeKey resolves to string/boolean so the right ops are offered (slice 2b).
   rollup: [
     { value: 'is', label: '=' },
     { value: 'greater', label: '>' },
@@ -201,6 +204,15 @@ export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; lab
     { value: 'isEmpty', label: 'is empty' },
     { value: 'isNotEmpty', label: 'is not empty' },
   ],
+}
+
+// Slice 2b — the map key to use for a field's filter operators. A rollup's operators depend on its
+// aggregation's result kind (concatenate → string, and/or/xor → boolean, else number), mirroring the
+// backend resolveEffectiveFieldType. Non-rollup fields key by their own type.
+export function effectiveFilterTypeKey(field: { type: string; property?: unknown } | null | undefined): string {
+  if (!field) return 'string'
+  if (field.type === 'rollup') return rollupResultType(resolveRollupFieldProperty(field.property).aggregation)
+  return field.type
 }
 
 // --- Main composable ---

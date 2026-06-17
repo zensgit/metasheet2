@@ -461,6 +461,7 @@ import type {
 } from '../types'
 import {
   FILTER_OPERATORS_BY_TYPE,
+  effectiveFilterTypeKey,
   type FilterConjunction,
   type FilterRule,
   type SortRule,
@@ -1052,8 +1053,9 @@ function isPermissionHiddenFilterValue(rule: FilterRule): boolean {
 }
 
 function operatorsForField(fieldId: string) {
-  const fieldType = props.fields.find((field) => field.id === fieldId)?.type ?? 'string'
-  return FILTER_OPERATORS_BY_TYPE[fieldType] ?? FILTER_OPERATORS_BY_TYPE.string
+  // Slice 2b: a rollup field's operators follow its aggregation result kind, not a blanket numeric set.
+  const field = props.fields.find((f) => f.id === fieldId)
+  return FILTER_OPERATORS_BY_TYPE[effectiveFilterTypeKey(field)] ?? FILTER_OPERATORS_BY_TYPE.string
 }
 
 function inputTypeForField(fieldId: string): string {

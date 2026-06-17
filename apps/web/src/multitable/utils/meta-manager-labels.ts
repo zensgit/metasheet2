@@ -610,10 +610,18 @@ export function aggregationLabel(value: string, isZh: boolean): string {
     if (value === 'max') return '最大值'
     if (value === 'countall') return '记录数'
     if (value === 'unique') return '去重计数'
+    if (value === 'concatenate') return '拼接'
+    if (value === 'and') return '全部为真'
+    if (value === 'or') return '任一为真'
+    if (value === 'xor') return '奇数为真'
     return value
   }
   if (value === 'countall') return 'Count all'
   if (value === 'unique') return 'Unique'
+  if (value === 'concatenate') return 'Concatenate'
+  if (value === 'and') return 'All true (AND)'
+  if (value === 'or') return 'Any true (OR)'
+  if (value === 'xor') return 'Odd true (XOR)'
   return value
 }
 

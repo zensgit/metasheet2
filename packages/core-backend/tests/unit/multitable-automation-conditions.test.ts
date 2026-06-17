@@ -246,4 +246,20 @@ describe('multitable automation conditions', () => {
       ],
     }, fields)).not.toThrow()
   })
+
+  // NON-GOAL (slice 2b): automation has its OWN evaluator (not the shared evaluateMetaFilterCondition)
+  // and restricts rollup condition fields to equality operators for ALL result kinds — safe for
+  // string/number/boolean — so slice 2b deliberately does not upgrade automation. Lock it: equality on a
+  // rollup is accepted, a comparison operator is rejected.
+  it('rollup automation condition fields stay EQUALITY-ONLY (2b non-goal)', () => {
+    const fields = [{ id: 'roll', type: 'rollup' }]
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'roll', operator: 'equals', value: 'x' }],
+    }, fields)).not.toThrow()
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'roll', operator: 'greater_than', value: 1 }],
+    }, fields)).toThrow(/not supported for field type rollup/)
+  })
 })
