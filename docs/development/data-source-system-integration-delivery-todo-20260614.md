@@ -43,8 +43,8 @@
 | C3 | incremental / watermark runtime | core done through CI real-DB lock (#2609/#2619/#2625/#2628/#2631); bind-time/index hardening deferred | 避免每次全量读数据库 | 游标漏读 / 重读 / 过滤条件漂移 |
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
-| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 sandbox smoke PASS; C6-5a design done; C6-5b seam done (#2756); first C6-5c package `642560126` deploy blocked; package prune fix #2761 done; recut package `d8244ee13` entity-machine controlled bad-row PASS | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
-| Release | 总包 + 实体机验收 | #2720 core C6 sandbox smoke PASS, read-only subgate PASS, controlled bad-row PASS on package `d8244ee13`; final release evidence package still pending | 交付签收 | C2/C3/C4 exact-release evidence and clean-machine/migration/auth gate still need owner decision/rerun |
+| C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 CLOSED as sandbox smoke PASS; C6-5a design done; C6-5b seam done (#2756); first C6-5c package `642560126` deploy blocked; package prune fix #2761 done; recut package `d8244ee13` entity-machine controlled bad-row PASS | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
+| Release | 总包 + 实体机验收 | #2769 opened for final release evidence package; #2720 C6 sandbox smoke PASS can be cited; C2/C3/C4 exact-release evidence and clean-machine/migration/auth gate still need owner decision/rerun | 交付签收 | 不得把 sandbox C6 PASS 误写成 production/batch authorization |
 
 ## P0 - ②b Arc 收口 Follow-Up
 
@@ -425,7 +425,8 @@ TODO:
   - apply is disabled for read-only users and requires an explicit review checkbox.
   - changing pipeline id or scope clears the pending dry-run token/review.
 - [x] C6-5 entity-machine smoke: apply、re-pull、rollback、controlled bad-row。
-  - issue: #2720 `[Data Source] C6 external-write entity-machine smoke gate`.
+  - issue: #2720 `[Data Source] C6 external-write entity-machine smoke gate`，已关闭为
+    C6 sandbox smoke PASS。
   - runbook: `docs/operations/data-source-system-integration-c6-sandbox-smoke-runbook-20260616.md`.
   - release: `multitable-onprem-datasource-c6-ui-20260616-9fb34fd91`.
   - package: `metasheet-multitable-onprem-v2.5.0-datasource-c6-ui-20260616-9fb34fd91`.
@@ -592,6 +593,8 @@ TODO:
     failure plus one clean sibling write, dead-letter/provenance evidence values-free,
     and restored the injection config after the check.
 - [x] issue 上贴 values-free 验收证据（#2720 entity-machine evidence + acceptance reply）。
+- [x] #2720 closed as C6 sandbox external-write smoke PASS after #2767 docs backfill.
+- [x] #2769 opened for the separate release evidence package gate.
 
 交付判据:
 
