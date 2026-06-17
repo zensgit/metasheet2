@@ -23,6 +23,13 @@ const BASE_ID = `base_btnup_${TS}`
 const SHEET_ID = `sheet_btnup_${TS}`
 const FLD_TARGET = `fld_btnup_target_${TS}`
 const FLD_BTN = `fld_btnup_btn_${TS}`
+const FLD_RO = `fld_btnup_ro_${TS}` // field_permissions/intrinsic read-only
+const FLD_FORMULA = `fld_btnup_formula_${TS}` // computed (always read-only)
+const FLD_SELECT = `fld_btnup_select_${TS}` // select with options a/b
+const FLD_BTN_RO = `fld_btnup_btnro_${TS}`
+const FLD_BTN_FORMULA = `fld_btnup_btnformula_${TS}`
+const FLD_BTN_SEL_BAD = `fld_btnup_btnselbad_${TS}`
+const FLD_BTN_SEL_OK = `fld_btnup_btnselok_${TS}`
 const REC_OWN = `rec_btnup_own_${TS}` // created_by = OWNER
 const REC_OTHER = `rec_btnup_other_${TS}` // created_by = OTHER
 const USER_EDITOR = `u_btnup_editor_${TS}` // global multitable:write → can edit any row
@@ -31,6 +38,7 @@ const USER_OTHER = `u_btnup_other_${TS}`
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 const runUrl = (recId: string) => `/api/multitable/sheets/${SHEET_ID}/records/${recId}/fields/${FLD_BTN}/button/run`
+const runUrlBtn = (recId: string, btnId: string) => `/api/multitable/sheets/${SHEET_ID}/records/${recId}/fields/${btnId}/button/run`
 
 function buildApp(userId: string, perms: string[]): Express {
   const app = express()
@@ -68,6 +76,15 @@ describeIfDatabase('B1-S1 D0-B update_record button — per-row no-elevation gat
       'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [FLD_BTN, SHEET_ID, 'Mark', 'button', JSON.stringify({ actionType: 'update_record', label: 'Mark', actionConfig: { fields: { [FLD_TARGET]: 'updated' } } }), 2],
     )
+    // Field-level gate fixtures: a read-only field, a computed (formula) field, a select field, and a
+    // button per case (each targeting a field the field-gate must reject or validate).
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_RO, SHEET_ID, 'ReadOnly', 'string', JSON.stringify({ readonly: true }), 3])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_FORMULA, SHEET_ID, 'Calc', 'formula', JSON.stringify({ expression: '1+1' }), 4])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_SELECT, SHEET_ID, 'Stage', 'select', JSON.stringify({ options: [{ value: 'a' }, { value: 'b' }] }), 5])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_BTN_RO, SHEET_ID, 'BtnRO', 'button', JSON.stringify({ actionType: 'update_record', actionConfig: { fields: { [FLD_RO]: 'x' } } }), 6])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_BTN_FORMULA, SHEET_ID, 'BtnF', 'button', JSON.stringify({ actionType: 'update_record', actionConfig: { fields: { [FLD_FORMULA]: 'x' } } }), 7])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_BTN_SEL_BAD, SHEET_ID, 'BtnSB', 'button', JSON.stringify({ actionType: 'update_record', actionConfig: { fields: { [FLD_SELECT]: 'nope' } } }), 8])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_BTN_SEL_OK, SHEET_ID, 'BtnSO', 'button', JSON.stringify({ actionType: 'update_record', actionConfig: { fields: { [FLD_SELECT]: 'a' } } }), 9])
     await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [REC_OWN, SHEET_ID, JSON.stringify({ [FLD_TARGET]: 'orig' }), USER_OWNER])
     await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [REC_OTHER, SHEET_ID, JSON.stringify({ [FLD_TARGET]: 'orig' }), USER_OTHER])
   })
@@ -112,5 +129,33 @@ describeIfDatabase('B1-S1 D0-B update_record button — per-row no-elevation gat
     const res = await request(buildApp(USER_OWNER, ['multitable:read'])).post(runUrl(REC_OWN)).send({ requestId: `req-own-own-${TS}` })
     expect(res.status).toBe(200)
     expect(await fieldValue(REC_OWN)).toBe('updated')
+  })
+
+  // ── Field-level no-elevation: even a FULL writer (row gate passes) cannot write a field the normal
+  //    PATCH path would reject, nor store an unvalidated value. ────────────────────────────────────
+  test('NO FIELD ELEVATION: button targeting a READ-ONLY field → 403 FIELD_FORBIDDEN', async () => {
+    const res = await request(buildApp(USER_EDITOR, ['multitable:read', 'multitable:write'])).post(runUrlBtn(REC_OTHER, FLD_BTN_RO)).send({ requestId: `req-ro-${TS}` })
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FIELD_FORBIDDEN')
+  })
+
+  test('NO COMPUTED CORRUPTION: button targeting a formula field → 403, the row untouched', async () => {
+    const res = await request(buildApp(USER_EDITOR, ['multitable:read', 'multitable:write'])).post(runUrlBtn(REC_OTHER, FLD_BTN_FORMULA)).send({ requestId: `req-f-${TS}` })
+    expect(res.status).toBe(403)
+    expect(await fieldValue(REC_OTHER)).toBe('orig')
+  })
+
+  test('VALUE VALIDATION: button writing an INVALID select option → 422, no mutation', async () => {
+    const res = await request(buildApp(USER_EDITOR, ['multitable:read', 'multitable:write'])).post(runUrlBtn(REC_OTHER, FLD_BTN_SEL_BAD)).send({ requestId: `req-sb-${TS}` })
+    expect(res.status).toBe(422)
+    const data = ((await q('SELECT data FROM meta_records WHERE id = $1', [REC_OTHER])).rows[0] as { data: Record<string, unknown> }).data
+    expect(data[FLD_SELECT]).toBeUndefined()
+  })
+
+  test('VALUE VALIDATION: button writing a VALID select option → 200, select updated', async () => {
+    const res = await request(buildApp(USER_EDITOR, ['multitable:read', 'multitable:write'])).post(runUrlBtn(REC_OTHER, FLD_BTN_SEL_OK)).send({ requestId: `req-so-${TS}` })
+    expect(res.status).toBe(200)
+    const data = ((await q('SELECT data FROM meta_records WHERE id = $1', [REC_OTHER])).rows[0] as { data: Record<string, unknown> }).data
+    expect(data[FLD_SELECT]).toBe('a')
   })
 })

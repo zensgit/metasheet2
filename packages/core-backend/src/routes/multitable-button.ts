@@ -50,7 +50,7 @@ import type { AutomationActionType } from '../multitable/automation-actions'
 import { AutomationLogService } from '../multitable/automation-log-service'
 import { loadSheetMemberUserIdSet } from '../multitable/permission-service'
 import { insertRecordSubscriptionNotifications } from '../multitable/record-subscription-service'
-import { normalizeJson } from '../multitable/field-codecs'
+import { normalizeJson, normalizeMultiSelectValue } from '../multitable/field-codecs'
 import { ensureRecordWriteAllowed } from '../multitable/sheet-capabilities'
 import { ensureRecordNotLocked } from '../multitable/record-lock'
 import { Logger } from '../core/logger'
@@ -328,6 +328,47 @@ export function createMultitableButtonRoutes(): Router {
           return res.status(400).json({ ok: false, error: { code: 'NO_FIELDS', message: 'Button update_record has no fields configured' } })
         }
 
+        // §3.3 PER-FIELD WRITE GATE + per-type validation (no field-LEVEL elevation). The §3.1 row gate
+        // does not bound WHICH fields/values are written, and the executor does a raw `data || $jsonb`
+        // merge with NO field checks — so without this a button could write a field the clicker cannot
+        // write via a normal PATCH (field_permissions read-only / computed / system), corrupt a computed
+        // field, or store an unvalidated value. Enforce the SAME field-level contract as PATCH:
+        // `ctx.fieldPermissions[id].readOnly` folds the actor's field_permissions + isFieldAlwaysReadOnly
+        // (computed formula/lookup/rollup + system + mirror + intrinsic) — the same deriveFieldPermissions
+        // source the PATCH path uses, so a field not writable directly is not writable via a button. Then
+        // validate select/multiSelect values via the shared codecs. link/person/attachment need meta_links
+        // / membership / attachment writes the executor cannot do → rejected (deferred to a follow-up that
+        // routes through the full write path). Either failure → reject BEFORE the tx (no dedup consumed).
+        const fieldDefById = new Map(ctx.fields.map((f) => [f.id, f]))
+        const validatedFields: Record<string, unknown> = {}
+        for (const [fid, value] of Object.entries(fields)) {
+          const perm = ctx.fieldPermissions[fid]
+          const def = fieldDefById.get(fid)
+          if (!def || !perm || perm.readOnly !== false) {
+            return res.status(403).json({ ok: false, error: { code: 'FIELD_FORBIDDEN', message: `Field is not writable by this actor: ${fid}` } })
+          }
+          if (def.type === 'link' || def.type === 'person' || def.type === 'attachment') {
+            return res.status(400).json({ ok: false, error: { code: 'FIELD_UNSUPPORTED', message: `Button update_record does not support ${def.type} fields yet: ${fid}` } })
+          }
+          if (def.type === 'select') {
+            const options = def.options?.map((o) => o.value) ?? []
+            if (typeof value !== 'string' || (value !== '' && !options.includes(value))) {
+              return res.status(422).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid select option for ${fid}` } })
+            }
+            validatedFields[fid] = value
+            continue
+          }
+          if (def.type === 'multiSelect') {
+            try {
+              validatedFields[fid] = normalizeMultiSelectValue(value, fid, def.options?.map((o) => o.value) ?? [])
+            } catch (err) {
+              return res.status(422).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err instanceof Error ? err.message : `Invalid multiSelect value for ${fid}` } })
+            }
+            continue
+          }
+          validatedFields[fid] = value
+        }
+
         // §6 + §2: dedup → executor write (SAME tx client) → audit, all-or-nothing.
         // Mirrors the send_notification transaction; the executor performs the real
         // versioned write via the SAME path automations use (no parallel write path).
@@ -353,7 +394,7 @@ export function createMultitableButtonRoutes(): Router {
           // Same-base update of the clicked record (fields only). The executor write
           // runs on the tx client, so a failed audit rolls the write back (fail-closed).
           const executor = new AutomationExecutor({ eventBus, queryFn: txq })
-          const step = await executor.runSingleAction({ type: 'update_record', config: { fields } }, context)
+          const step = await executor.runSingleAction({ type: 'update_record', config: { fields: validatedFields } }, context)
           if (step.status !== 'success') {
             // Roll back the dedup + any partial write so a transient failure is retryable.
             throw new Error(step.error ?? 'update_record failed')
