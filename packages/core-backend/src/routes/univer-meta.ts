@@ -8972,8 +8972,11 @@ export function univerMetaRouter(): Router {
             access.userId,
           )
           if (recordScopeMap.size > 0) {
+            // #18 read-deny: pass the per-sheet flag so a 'none' scope drops the record when the sheet
+            // opted in (this /view canRead filter loads-all + filters in-app, so the set stays exact).
+            const rowLevelDeny = await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)
             rows = rows.filter((row) => {
-              const perms = deriveRecordPermissions(row.id, capabilities, recordScopeMap)
+              const perms = deriveRecordPermissions(row.id, capabilities, recordScopeMap, rowLevelDeny)
               return perms.canRead
             })
           }
@@ -10080,7 +10083,11 @@ export function univerMetaRouter(): Router {
             access.userId,
           )
           if (recordScopeMap.size > 0) {
-            items = items.filter((r) => deriveRecordPermissions(r.id, capabilities, recordScopeMap).canRead)
+            // #18 read-deny: pass the per-sheet flag so a 'none' scope drops the record when the sheet
+            // opted in. Cursor pagination has no total, so post-filtering the page just yields shorter
+            // pages the client continues via nextCursor — exact + safe (mirrors GET /view's in-app filter).
+            const rowLevelDeny = await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)
+            items = items.filter((r) => deriveRecordPermissions(r.id, capabilities, recordScopeMap, rowLevelDeny).canRead)
           }
         }
       }

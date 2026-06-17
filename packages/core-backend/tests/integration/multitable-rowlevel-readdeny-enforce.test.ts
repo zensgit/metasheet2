@@ -99,4 +99,37 @@ describeIfDatabase('#18 row-level read-deny core enforcement (real DB)', () => {
     expect(res.status).toBe(200)
     testPerms = ['multitable:read']
   })
+
+  // GET /records (cursor list) — this slice threaded the flag into its existing record-permission
+  // post-filter, mirroring /view. Cursor pagination has no total, so the denied record drops from the page.
+  const listRecordIds = async (): Promise<string[]> => {
+    const res = await request(app).get('/api/multitable/records').query({ sheetId: SHEET_ID, limit: 100 })
+    expect(res.status).toBe(200)
+    return (res.body?.data?.records ?? []).map((r: { id: string }) => r.id)
+  }
+
+  test('GET /records flag OFF: the none-scoped record is listed (grant-additive)', async () => {
+    await setFlag(false)
+    testUserId = USER_ID
+    const ids = await listRecordIds()
+    expect(ids).toContain(REC_DENIED)
+    expect(ids).toContain(REC_OK)
+  })
+
+  test('GET /records flag ON: the none-scoped record is EXCLUDED, the non-scoped one remains', async () => {
+    await setFlag(true)
+    testUserId = USER_ID
+    const ids = await listRecordIds()
+    expect(ids).not.toContain(REC_DENIED)
+    expect(ids).toContain(REC_OK)
+  })
+
+  test('GET /records flag ON: an admin lists everything (deny bypassed)', async () => {
+    await setFlag(true)
+    testUserId = USER_ID
+    testPerms = ['multitable:admin']
+    const ids = await listRecordIds()
+    expect(ids).toContain(REC_DENIED)
+    testPerms = ['multitable:read']
+  })
 })
