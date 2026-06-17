@@ -65,6 +65,12 @@ test('attendance strict gates default product mode matches current shared prod',
     raw,
     /EXPECT_PRODUCT_MODE:\s+\$\{\{\s*inputs\.expect_product_mode\s+\|\|\s+'attendance'\s*\}\}/,
   )
+  assert.match(
+    readFileSync(path.join(repoRoot, 'scripts/ops/attendance-run-gates.sh'), 'utf8'),
+    /EXPECT_PRODUCT_MODE="\$\{EXPECT_PRODUCT_MODE:-platform\}"/,
+  )
+  assert.match(raw, /expectProductMode:\s+"platform"/)
+  assert.doesNotMatch(raw, /expectProductMode:\s+"attendance"/)
 })
 
 test('attendance full-flow reselects import section after payroll readiness check', () => {
