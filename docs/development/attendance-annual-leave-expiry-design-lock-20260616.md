@@ -27,7 +27,20 @@ The accrual run computes the boundary **once** from the run's own policy snapsho
 
 An application-layer, idempotent backfill (not a database migration — mutable policy/timezone/carryover must not be baked into a migration) sets `expires_at` on `annual_accrual` lots whose expiry is still null. For each lot it derives the **grant-time** carryover, timezone, and period from that lot's accrual-run provenance — `lot.source_id` (the run-item id) → run-item → run → the run's serialized policy snapshot (carryover), the run's `period_key`, and the run's `timezone` — never from today's settings. So changing the carryover setting today never re-expires past years.
 
-The backfill never guesses: a lot whose grant-time snapshot cannot be recovered is skipped, counted under a reason code, and left null (grandfathered). Reason codes: `NON_ACCRUAL_SOURCE`, `MISSING_RUN_ITEM`, `MISSING_RUN`, `UNPARSEABLE_POLICY_VERSION`, `MISSING_TIMEZONE`, `UNPARSEABLE_PERIOD_KEY`. It returns an auditable summary `{ scanned, updated, skipped, dryRun, reasons }`; a dry run previews without writing; re-running is idempotent (it scans only null-expiry lots and re-checks null in the update).
+The backfill never guesses: a lot whose grant-time snapshot cannot be recovered — or whose provenance does not validly belong to it — is skipped, counted under a reason code, and left null (grandfathered). The provenance must validate, not merely join: the run-item must be this org's *granted annual* item and the run must be this org's *real (non-dry-run) annual* run, else the snapshot is not this lot's and is not used.
+
+Reason codes (each = one skipped, grandfathered lot):
+
+- `MISSING_RUN_ITEM` — `source_id` resolves to no run-item.
+- `INVALID_RUN_ITEM` — the run-item is wrong-tenant, non-annual, or not `granted`.
+- `MISSING_RUN` — the run-item's run does not resolve.
+- `INVALID_RUN` — the run is wrong-tenant, non-annual, or a dry run.
+- `UNPARSEABLE_POLICY_VERSION` — the run's serialized policy snapshot is not parseable / lacks carryover.
+- `MISSING_TIMEZONE` — the run's timezone is absent or not a valid IANA identifier.
+- `UNPARSEABLE_PERIOD_KEY` — the run's `period_key` is not `annual:YYYY`.
+- `ALREADY_SET` — a concurrent backfill set the expiry between this run's scan and update; the 0-row update is recorded here, **not** counted as updated.
+
+It returns an auditable summary `{ scanned, updated, skipped, dryRun, reasons }` where `updated` counts only rows this run actually wrote (verified via `RETURNING`); a dry run previews without writing; re-running is idempotent (it scans only null-expiry lots and re-checks null in the update). The endpoint declares the target org explicitly in its request contract rather than reading it implicitly. (A `NON_ACCRUAL_SOURCE` guard exists defensively in code but is unreachable while the scan is filtered to `source_type = 'annual_accrual'`.)
 
 ## Scope boundary
 

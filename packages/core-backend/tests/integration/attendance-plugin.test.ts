@@ -5092,6 +5092,75 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④/年假 L4b — provenance-snapshot expires_at backfill: idempotent, dryRun, auditable skip reasons', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const adminId = `al-l4b-admin-${runSuffix}`
+    const org = `al-l4b-org-${runSuffix}` // unique org → backfill scans ONLY my lots
+    const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) { await pool.end().catch(() => undefined); return }
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+    const pvOf = (carryover: boolean, tz = 'Asia/Shanghai') => JSON.stringify({ tenureMode: 'cumulative_service', standardDayMinutes: 480, tiers: [], timezone: tz, carryover: { enabled: carryover } })
+    const mkRun = async (policyVersion: string, periodKey = 'annual:2026', timezone = 'Asia/Shanghai', dryRunFlag = false) => (await pool.query<{ id: string }>(
+      `INSERT INTO attendance_leave_accrual_runs (org_id, period_key, leave_type_code, policy_version, tenure_mode, timezone, standard_day_minutes, tiers, triggered_by, dry_run, as_of)
+       VALUES ($1,$2,'annual',$3,'cumulative_service',$4,480,'[]'::jsonb,'manual',$5,'2026-01-01') RETURNING id`, [org, periodKey, policyVersion, timezone, dryRunFlag])).rows[0].id
+    const mkRunItem = async (runId: string, userId: string, status = 'granted', skipReason: string | null = null) => (await pool.query<{ id: string }>(
+      `INSERT INTO attendance_leave_accrual_run_items (run_id, org_id, user_id, leave_type_code, tenure_years, tier_days, proration_factor, entitlement_minutes, status, skip_reason)
+       VALUES ($1,$2,$3,'annual',5,5,1,2400,$4,$5) RETURNING id`, [runId, org, userId, status, skipReason])).rows[0].id
+    const mkLot = async (userId: string, sourceId: string | null, tag: string) => (await pool.query<{ id: string }>(
+      `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status, granted_at, expires_at)
+       VALUES ($1,$2,'annual',2400,2400,'annual_accrual',$3,$4,'active','2026-01-01',NULL) RETURNING id`, [org, userId, sourceId, `l4b:${runSuffix}:${tag}`])).rows[0].id
+    const expiryOf = async (lotId: string) => (await pool.query(`SELECT expires_at FROM attendance_leave_balances WHERE id=$1`, [lotId])).rows[0]?.expires_at as Date | null
+    const backfill = (dryRun: boolean) => requestJson(`${baseUrl}/api/attendance/annual-leave-expiry-backfill`, { method: 'POST', headers, body: JSON.stringify({ dryRun, orgId: org }) })
+    const ids: string[] = []
+    const seed = (tag: string) => { const id = `al-l4b-${runSuffix}-${tag}`; ids.push(id); return id }
+    try {
+      // good lots (recoverable provenance):
+      const uA = seed('a'); const lotA = await mkLot(uA, await mkRunItem(await mkRun(pvOf(false)), uA), 'a')   // carryover=false → Jan1 2027
+      const uB = seed('b'); const lotB = await mkLot(uB, await mkRunItem(await mkRun(pvOf(true)), uB), 'b')    // carryover=true  → Jan1 2028
+      // unrecoverable lots → must skip with a reason, stay NULL (grandfather, never guess):
+      const uMI = seed('mi'); const lotMI = await mkLot(uMI, '00000000-0000-4000-8000-000000000000', 'mi')     // source_id resolves to no run_item
+      const uPv = seed('pv'); const lotPv = await mkLot(uPv, await mkRunItem(await mkRun('not-json'), uPv), 'pv') // unparseable policy_version
+      const uTz = seed('tz'); const lotTz = await mkLot(uTz, await mkRunItem(await mkRun(pvOf(false), 'annual:2026', ''), uTz), 'tz') // empty timezone
+      const uPk = seed('pk'); const lotPk = await mkLot(uPk, await mkRunItem(await mkRun(pvOf(false), 'annual:bad'), uPk), 'pk')       // unparseable period_key
+      // wrong provenance shape → NOT a recoverable grant snapshot (never guess from mismatched provenance):
+      const uSk = seed('sk'); const lotSk = await mkLot(uSk, await mkRunItem(await mkRun(pvOf(false)), uSk, 'skipped', 'NO_MATCHING_TIER'), 'sk') // run_item not 'granted' → INVALID_RUN_ITEM
+      const uDry = seed('dry'); const lotDry = await mkLot(uDry, await mkRunItem(await mkRun(pvOf(false), 'annual:2026', 'Asia/Shanghai', true), uDry), 'dry') // dry-run run → INVALID_RUN
+
+      // (A) dryRun → previews 2 updatable, writes nothing.
+      const dry = await backfill(true)
+      expect(dry.status, JSON.stringify(dry.body)).toBe(200)
+      const dryData = (dry.body as { data?: { scanned?: number; updated?: number; skipped?: number; dryRun?: boolean } } | undefined)?.data
+      expect(dryData).toMatchObject({ scanned: 8, updated: 2, skipped: 6, dryRun: true })
+      expect(await expiryOf(lotA)).toBeNull() // dryRun wrote nothing
+
+      // (B) real backfill → 2 updated to the provenance-derived expiry, 4 skipped with auditable reasons.
+      const real = await backfill(false)
+      expect(real.status, JSON.stringify(real.body)).toBe(200)
+      const realData = (real.body as { data?: { updated?: number; skipped?: number; reasons?: Record<string, number> } } | undefined)?.data
+      expect(realData).toMatchObject({ scanned: 8, updated: 2, skipped: 6 })
+      expect(realData?.reasons).toMatchObject({ MISSING_RUN_ITEM: 1, UNPARSEABLE_POLICY_VERSION: 1, MISSING_TIMEZONE: 1, UNPARSEABLE_PERIOD_KEY: 1, INVALID_RUN_ITEM: 1, INVALID_RUN: 1 })
+      expect(new Date((await expiryOf(lotA))!).toISOString()).toBe('2026-12-31T16:00:00.000Z') // carryover=false → Jan 1 2027 CST
+      expect(new Date((await expiryOf(lotB))!).toISOString()).toBe('2027-12-31T16:00:00.000Z') // carryover=true  → Jan 1 2028 CST
+      for (const l of [lotMI, lotPv, lotTz, lotPk, lotSk, lotDry]) expect(await expiryOf(l)).toBeNull() // grandfathered, never guessed
+
+      // (C) idempotent re-run → the 2 good lots are now excluded (expires_at set); only the 4 unrecoverable remain, re-skipped.
+      const again = await backfill(false)
+      const againData = (again.body as { data?: { scanned?: number; updated?: number; skipped?: number } } | undefined)?.data
+      expect(againData).toMatchObject({ scanned: 6, updated: 0, skipped: 6 })
+    } finally {
+      await pool.query(`DELETE FROM attendance_leave_balances WHERE org_id = $1`, [org]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_leave_accrual_run_items WHERE org_id = $1`, [org]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_leave_accrual_runs WHERE org_id = $1`, [org]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [ids.concat([adminId])]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('④/年假 L2c — manual adjustment: positive lot+grant / negative FIFO-deduct / insufficient-422-rollback / idempotency / delta-0 / org-scoping', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
