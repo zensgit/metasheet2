@@ -211,6 +211,7 @@ jobs:
             tests/integration/multitable-lookup-foreign-field-mask-create.test.ts \
             tests/integration/multitable-lookup-foreign-field-mask-aggregate.test.ts \
             tests/integration/multitable-lookup-foreign-field-mask-sibling-reads.test.ts \
+            tests/integration/multitable-dashboard-filterinfo-oracle.test.ts \
             tests/integration/multitable-lookup-foreign-field-mask-convergence.test.ts \
             tests/integration/multitable-cross-base-link-wall.test.ts \
             tests/integration/multitable-cross-base-sheet-create-toctou.test.ts \
