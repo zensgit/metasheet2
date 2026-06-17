@@ -242,6 +242,31 @@
               <option value="xor">{{ aggregationLabel('xor', isZh) }}</option>
             </select>
           </label>
+
+          <!-- Slice 3b — rollup filter conditions builder. Conditions read FOREIGN-sheet fields; the
+               field id is typed (consistent with the target-field input above); operators are validated
+               per the resolved foreign-field type by the backend at save. -->
+          <div class="meta-field-mgr__field meta-field-mgr__rollup-filters">
+            <span>{{ ml('field.rollupFilters') }}</span>
+            <div v-if="rollupDraft.filters.length > 1" class="meta-field-mgr__rollup-conj">
+              <label><input type="radio" value="and" v-model="rollupDraft.filterConjunction" /> {{ ml('field.rollupFilterAll') }}</label>
+              <label><input type="radio" value="or" v-model="rollupDraft.filterConjunction" /> {{ ml('field.rollupFilterAny') }}</label>
+            </div>
+            <div v-for="(cond, i) in rollupDraft.filters" :key="i" class="meta-field-mgr__rollup-cond">
+              <input v-model="cond.fieldId" class="meta-field-mgr__input" :placeholder="ml('field.rollupFilterFieldPlaceholder')" />
+              <select v-model="cond.operator" class="meta-field-mgr__select">
+                <option v-for="op in ROLLUP_FILTER_OPERATOR_OPTIONS" :key="op.value" :value="op.value">{{ op.label }}</option>
+              </select>
+              <input
+                v-if="!ROLLUP_FILTER_OPS_NO_VALUE.has(cond.operator)"
+                v-model="cond.value"
+                class="meta-field-mgr__input"
+                :placeholder="ml('field.rollupFilterValuePlaceholder')"
+              />
+              <button type="button" class="meta-field-mgr__icon-btn" :aria-label="ml('action.remove')" @click="removeRollupFilter(i)">×</button>
+            </div>
+            <button type="button" class="meta-field-mgr__add-btn" @click="addRollupFilter">{{ ml('field.rollupFilterAdd') }}</button>
+          </div>
         </template>
 
         <template v-else-if="configTargetType === 'formula'">
@@ -769,6 +794,7 @@ import {
   resolveRollupFieldProperty,
   resolveSelectFieldOptions,
   type RollupAggregation,
+  type RollupFilterCondition,
 } from '../utils/field-config'
 import {
   SYSTEM_FIELD_TYPES,
@@ -1006,12 +1032,44 @@ const lookupDraft = reactive<{ linkFieldId: string; targetFieldId: string; forei
   targetFieldId: '',
   foreignSheetId: '',
 })
-const rollupDraft = reactive<{ linkFieldId: string; targetFieldId: string; foreignSheetId: string; aggregation: RollupAggregation }>({
+// Slice 3b — filter conditions are edited as string-valued rows in the builder; mapped to/from the
+// typed RollupFilterCondition (value: unknown) on hydrate/save so the UI never binds v-model to unknown.
+type RollupFilterDraftRow = { fieldId: string; operator: string; value: string }
+const rollupDraft = reactive<{ linkFieldId: string; targetFieldId: string; foreignSheetId: string; aggregation: RollupAggregation; filters: RollupFilterDraftRow[]; filterConjunction: 'and' | 'or' }>({
   linkFieldId: '',
   targetFieldId: '',
   foreignSheetId: '',
   aggregation: 'count',
+  filters: [],
+  filterConjunction: 'and',
 })
+// Operators offered in the builder. The backend (isRollupFilterOperatorCompatible) validates per the
+// resolved target-field type at SAVE and returns a clear error for an incompatible op — so the builder
+// offers the full set rather than constraining (constraining needs foreign-field type enumeration, a
+// follow-up data flow). Values lower-case to the backend's accepted operators.
+const ROLLUP_FILTER_OPERATOR_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'is', label: '=' }, { value: 'isNot', label: '≠' },
+  { value: 'contains', label: 'contains' }, { value: 'doesNotContain', label: 'does not contain' },
+  { value: 'greater', label: '>' }, { value: 'greaterequal', label: '≥' },
+  { value: 'less', label: '<' }, { value: 'lessequal', label: '≤' },
+  { value: 'isEmpty', label: 'is empty' }, { value: 'isNotEmpty', label: 'is not empty' },
+]
+const ROLLUP_FILTER_OPS_NO_VALUE = new Set(['isEmpty', 'isNotEmpty', 'isempty', 'isnotempty'])
+function addRollupFilter(): void {
+  rollupDraft.filters.push({ fieldId: '', operator: 'is', value: '' })
+}
+function removeRollupFilter(index: number): void {
+  rollupDraft.filters.splice(index, 1)
+}
+// Builder rows → typed conditions for save: drop incomplete rows (need fieldId+operator), omit `value`
+// for the no-value operators (isEmpty/isNotEmpty).
+function rollupFilterPayload(): RollupFilterCondition[] {
+  return rollupDraft.filters
+    .filter((c) => c.fieldId.trim() !== '' && c.operator.trim() !== '')
+    .map((c) => (ROLLUP_FILTER_OPS_NO_VALUE.has(c.operator.trim().toLowerCase())
+      ? { fieldId: c.fieldId.trim(), operator: c.operator }
+      : { fieldId: c.fieldId.trim(), operator: c.operator, value: c.value }))
+}
 const formulaDraft = reactive<{ expression: string }>({
   expression: '',
 })
@@ -1541,6 +1599,8 @@ function resetDrafts() {
   rollupDraft.targetFieldId = ''
   rollupDraft.foreignSheetId = ''
   rollupDraft.aggregation = 'count'
+  rollupDraft.filters = []
+  rollupDraft.filterConjunction = 'and'
   formulaDraft.expression = ''
   formulaFunctionSearch.value = ''
   formulaFunctionCategory.value = 'all'
@@ -1612,6 +1672,8 @@ function serializeFieldDraft(type: string | null): string {
       targetFieldId: rollupDraft.targetFieldId,
       foreignSheetId: rollupDraft.foreignSheetId,
       aggregation: rollupDraft.aggregation,
+      filters: rollupFilterPayload(),
+      filterConjunction: rollupDraft.filterConjunction,
     })
   }
   if (type === 'formula') {
@@ -1750,6 +1812,13 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
     rollupDraft.targetFieldId = property.targetFieldId ?? ''
     rollupDraft.foreignSheetId = property.foreignSheetId ?? ''
     rollupDraft.aggregation = property.aggregation
+    // Hydrate the builder from the (typed, normalized) stored filters; value → string for the inputs.
+    rollupDraft.filters = (property.filters ?? []).map((c) => ({
+      fieldId: c.fieldId,
+      operator: c.operator,
+      value: c.value === null || c.value === undefined ? '' : String(c.value),
+    }))
+    rollupDraft.filterConjunction = property.filterConjunction ?? 'and'
   } else if (fieldType === 'formula') {
     formulaDraft.expression = resolveFormulaFieldProperty(field.property).expression
   } else if (fieldType === 'attachment') {
@@ -2194,11 +2263,15 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
       fieldConfigError.value = ml('field.error.rollupNeedsValidTargetSheet')
       return undefined
     }
+    const rollupFilters = rollupFilterPayload()
     return {
       linkedFieldId: rollupDraft.linkFieldId,
       targetFieldId: rollupDraft.targetFieldId,
       aggregation: rollupDraft.aggregation,
       ...(rollupDraft.foreignSheetId ? { foreignSheetId: rollupDraft.foreignSheetId } : {}),
+      // Slice 3b — emit the authored filter conditions (omit entirely when none, so an unfiltered rollup's
+      // property is byte-identical to before this feature). Backend validates operators per resolved type.
+      ...(rollupFilters.length > 0 ? { filters: rollupFilters, filterConjunction: rollupDraft.filterConjunction } : {}),
     }
   }
   if (normalizedType === 'formula') {
