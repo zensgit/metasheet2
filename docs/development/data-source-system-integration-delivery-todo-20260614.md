@@ -8,8 +8,9 @@
 
 - 只读数据库接入 Data Factory 源系统: 已经基本可用。
 - 可交付定义: C6 sandbox 外部写能力通过实体机验收后，才称为 sandbox
-  交付链路闭合；完整 release 签收仍要按 release runbook 汇总最终 values-free
-  evidence package。production/batch 写入始终是独立显式 gate。
+  交付链路闭合；完整 release 签收要按 release runbook 汇总最终 values-free
+  evidence package。#2769 已关闭为 scoped release evidence PASS。production/batch
+  写入始终是独立显式 gate。
 - 下一步建议: C2-close 已通过实体机 smoke；C3 core runtime + CI real-DB wire lock 已落地；
   C4 配置体验和已知 polish 已落地（source/object/schema picker、source-field picker、watermark config、
   read-only/source-only 边界提示、SQL bridge values-free 错误提示）。
@@ -18,7 +19,7 @@
   C5 K3/MSSQL smoke gate #2670 已在 `dea391a1` 包上通过并关闭：operator scope-adjusted rerun
   中 generic SQL Server smoke 和 K3 SQL Server executor smoke 均 PASS，且 evidence values-free、无 K3
   Save/Submit/Audit/BOM、无外部 DB 写、无 raw SQL。#2700 已补 C5 runbook 的 SQL auth/scope triage。
-- 下一门: release evidence package 收口。C6 是最大风险刀；C6-0 只锁 design contract，
+- 当前收口: release evidence package 已关闭。C6 是最大风险刀；C6-0 只锁 design contract，
   C6-1 只落地 backend latent writer helper 和 write-gated target adapter 的关闭态合同；
   C6-2 只增加 read-only dry-run route + dry-run token，不授权 apply runtime 或 external write。
   C6-3 增加 token-bound apply route；C6-4 UI dry-run -> review -> apply 已合并并发出实体机
@@ -31,8 +32,10 @@
   #2761 已修复 on-prem package 不应携带 `node_modules` 的打包/校验缺口，并已重发
   `d8244ee13` sandbox 包；实体机已部署该包并完成 C6-5c controlled bad-row PASS：
   one synthetic row-level failure `C6_TEST_INJECTED_ROW_FAILURE` + one clean sibling write，
-  dead-letter/provenance evidence values-free，注入配置已恢复关闭。production/batch 仍关闭；
-  Release 还需按 release runbook 汇总最终 values-free evidence package。
+  dead-letter/provenance evidence values-free，注入配置已恢复关闭。#2769 随后在
+  `79ab455e` release package 上完成 package/deploy/auth、C3 incremental/resume、
+  C4 UI exact-package evidence，并关闭为 scoped release evidence PASS。
+  production/batch 仍关闭；Windows 默认 temp path caveat 仍由 #2642 跟踪。
 
 ## 收口顺序
 
@@ -44,7 +47,7 @@
 | C4 | UI / 配置体验统一 | done (#2643/#2646/#2649/#2652/#2655); later UX polish demand-gated | 让用户不手写 JSON | 产品误导 / 凭据边界混乱 |
 | C5 | K3 generic MSSQL seam | done (#2670 PASS/CLOSED; #2700 runbook triage) | K3 SQL Server 通道复用 generic MSSQL 能力 | K3 红线被误开 |
 | C6 | external write | C6-0 design locked; C6-1 latent helper done; C6-2 dry-run route done; C6-3 apply route done; C6-4 UI done (#2719); C6-5 issue #2720 CLOSED as sandbox smoke PASS; C6-5a design done; C6-5b seam done (#2756); first C6-5c package `642560126` deploy blocked; package prune fix #2761 done; recut package `d8244ee13` entity-machine controlled bad-row PASS | 外部系统写回能力 | 权限、幂等、回滚、部分失败 |
-| Release | 总包 + 实体机验收 | #2769 opened for final release evidence package; release package `79ab455e` is published, package-preflight verified, and deployed healthy after short-temp rerun; migration/auth/startup PASS; #2720 C6 sandbox smoke PASS can be cited; C3/C4 exact-release evidence still HOLD unless owner explicitly narrows or defers those gates with downgraded wording | 交付签收 | 不得把 package preflight、deploy/auth PASS 或 sandbox C6 PASS 误写成 production/batch authorization |
+| Release | 总包 + 实体机验收 | done (#2769 CLOSED/PASS); release package `79ab455e` package-preflight, deploy/auth, C3 incremental/resume, C4 UI, C5 cite, and C6 sandbox cite all accepted; #2642 remains open for Windows default-temp workaround | 交付签收 | 不得把 scoped release PASS 误写成 production/batch authorization |
 
 ## P0 - ②b Arc 收口 Follow-Up
 
@@ -605,11 +608,26 @@ TODO:
   - boundary: evidence remained values-free; auth token was present but not
     printed; temporary auth user cleanup passed; production/batch writes remain
     closed.
-- [ ] 干净实体机 / 全新 DB smoke，用来暴露 migration 排序缺口。
+- [x] Entity-machine deploy/migration-ordering smoke for #2769.
+  - the release package reached dependency refresh, migration step, PM2 restart,
+    and healthcheck; pending migration diff was clean and `migrationPendingCount=0`.
+  - dedicated fresh-DB rebuild was not separately posted as #2769 evidence; the
+    owner-reviewed scoped release gate accepted the deploy/migration/auth
+    evidence above.
 - [x] 部署前/后 pending-migration diff + auth round-trip；静默 401 优先按 schema/migration 缺口排查，不先归咎 JWT secret。
-- [ ] C2 read-only smoke。
-- [ ] C3 incremental resume smoke。
-- [ ] C4 UI config smoke。
+- [x] C2 read-only smoke cited from #2600 for release signoff.
+- [x] C3 incremental resume smoke on exact package `79ab455e`.
+  - #2769 evidence: `mode=monotonic_id`, `pagesRead=2`,
+    `resumeReadDuplicateCount=0`, first/second/third run row counts recorded
+    values-free, `watermarkStableOnEmptyResume=true`, no dead letters, no
+    external DB write, no raw SQL, cursor values not printed, row values not
+    printed, payload JSON not printed.
+- [x] C4 UI config smoke on exact package `79ab455e`.
+  - #2769 evidence: Workbench page loaded, advanced connectors enabled,
+    bridge adapter option and picker visible, source/object/schema/source-field
+    picker and watermark UI passed, credentials input and credential JSON
+    textarea not visible, no credential copy, boundary text visible, no failed
+    API responses, token/password/values not printed.
 - [x] C5 K3 seam smoke。
 - [x] C6 core dry-run/apply/re-pull/rollback smoke（#2720）。
   - core sandbox smoke PASS; read-only dedicated dry-run subgate PASS.
@@ -623,12 +641,14 @@ TODO:
 - [x] issue 上贴 values-free 验收证据（#2720 entity-machine evidence + acceptance reply）。
 - [x] #2720 closed as C6 sandbox external-write smoke PASS after #2767 docs backfill.
 - [x] #2769 opened for the separate release evidence package gate.
+- [x] #2769 closed as scoped release evidence package PASS after exact-package
+  C3/C4 evidence and #2775 docs caveat backfill.
 
 交付判据:
 
 - C6 sandbox smoke 完成前: 只能称为“只读数据库接入可用”。
 - C6 sandbox smoke 已完成并通过实体机验收；现在可以称为“数据库及系统连接能力的 sandbox 交付链路已闭合”。
-- 完整 release 签收仍需 release runbook 的最终 values-free evidence package；production/batch 写入仍是独立显式 gate。
+- #2769 scoped release evidence package 已关闭为 PASS；production/batch 写入仍是独立显式 gate。
 
 ## 并行策略
 
