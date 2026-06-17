@@ -311,6 +311,64 @@ describe('approval template authoring helpers', () => {
     expect(errors.some((error) => error.includes('表单用户字段无效'))).toBe(true)
   })
 
+  it('emits an editable visibility rule (eq / in / isEmpty) from the draft', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.fields = [
+      { ...draft.fields[0], id: 'kind', label: '类型', type: 'select', optionsText: 'A:a\nB:b' },
+      { ...draft.fields[0], localId: 'field_2', id: 'reason', label: '原因', type: 'text',
+        visibility: { dependsOnFieldId: 'kind', operator: 'eq', valueText: 'a' } },
+    ]
+    expect(buildFormSchema(draft).fields[1]?.visibilityRule).toEqual({ fieldId: 'kind', operator: 'eq', value: 'a' })
+
+    draft.fields[1].visibility = { dependsOnFieldId: 'kind', operator: 'in', valueText: 'a\nb\n' }
+    expect(buildFormSchema(draft).fields[1]?.visibilityRule).toEqual({ fieldId: 'kind', operator: 'in', values: ['a', 'b'] })
+
+    draft.fields[1].visibility = { dependsOnFieldId: 'kind', operator: 'isEmpty', valueText: 'ignored' }
+    expect(buildFormSchema(draft).fields[1]?.visibilityRule).toEqual({ fieldId: 'kind', operator: 'isEmpty' })
+  })
+
+  it('is authoritative: clearing the rule removes it instead of leaking the original', () => {
+    // buildTemplate's `reviewer` field carries visibilityRule { amount, notEmpty }.
+    const draft = draftFromTemplate(buildTemplate())
+    expect(draft.fields[1].visibility.dependsOnFieldId).toBe('amount')
+    draft.fields[1].visibility = { dependsOnFieldId: '', operator: 'eq', valueText: '' }
+    expect(buildFormSchema(draft).fields[1]?.visibilityRule).toBeUndefined()
+  })
+
+  it('mirrors the server visibility reject-set (existing / self / in-empty / cycle)', () => {
+    const base = () => {
+      const draft = createEmptyTemplateDraft()
+      draft.key = 'k'
+      draft.name = 'n'
+      draft.fields = [
+        { ...draft.fields[0], id: 'a', label: 'A', type: 'text' },
+        { ...draft.fields[0], localId: 'field_2', id: 'b', label: 'B', type: 'text' },
+      ]
+      return draft
+    }
+
+    const missing = base()
+    missing.fields[1].visibility = { dependsOnFieldId: 'nope', operator: 'eq', valueText: 'x' }
+    expect(validateTemplateDraft(missing).some((e) => e.includes('显隐依赖字段不存在'))).toBe(true)
+
+    const self = base()
+    self.fields[1].visibility = { dependsOnFieldId: 'b', operator: 'eq', valueText: 'x' }
+    expect(validateTemplateDraft(self).some((e) => e.includes('不能依赖自身'))).toBe(true)
+
+    const inEmpty = base()
+    inEmpty.fields[1].visibility = { dependsOnFieldId: 'a', operator: 'in', valueText: '  \n ' }
+    expect(validateTemplateDraft(inEmpty).some((e) => e.includes('需要至少一个值'))).toBe(true)
+
+    const cycle = base()
+    cycle.fields[0].visibility = { dependsOnFieldId: 'b', operator: 'eq', valueText: 'x' }
+    cycle.fields[1].visibility = { dependsOnFieldId: 'a', operator: 'eq', valueText: 'y' }
+    expect(validateTemplateDraft(cycle).some((e) => e.includes('循环依赖'))).toBe(true)
+
+    const valid = base()
+    valid.fields[1].visibility = { dependsOnFieldId: 'a', operator: 'eq', valueText: 'x' }
+    expect(validateTemplateDraft(valid).some((e) => e.includes('显隐'))).toBe(false)
+  })
+
   it('builds a create payload with C1 assigneeSources and a deterministic linear graph', () => {
     const draft = createEmptyTemplateDraft()
     draft.key = 'leave'

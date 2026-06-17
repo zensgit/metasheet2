@@ -7,6 +7,8 @@ import type {
   EmptyAssigneePolicy,
   FormField,
   FormFieldType,
+  FormFieldVisibilityOperator,
+  FormFieldVisibilityRule,
   FormOption,
   FormSchema,
   CreateApprovalTemplateRequest,
@@ -27,6 +29,17 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'user',
 ]
 
+/**
+ * Editable representation of a `FormFieldVisibilityRule`. `dependsOnFieldId === ''`
+ * means "no rule". `valueText` holds the eq/neq single value, or — for `in` —
+ * newline-separated values; it is unused for isEmpty/notEmpty.
+ */
+export interface FieldVisibilityDraft {
+  dependsOnFieldId: string
+  operator: FormFieldVisibilityOperator
+  valueText: string
+}
+
 export interface FieldAuthoringDraft {
   localId: string
   id: string
@@ -35,6 +48,7 @@ export interface FieldAuthoringDraft {
   required: boolean
   placeholder: string
   optionsText: string
+  visibility: FieldVisibilityDraft
   original?: FormField
 }
 
@@ -77,7 +91,39 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     required: false,
     placeholder: '',
     optionsText: '',
+    visibility: emptyVisibilityDraft(),
   }
+}
+
+export function emptyVisibilityDraft(): FieldVisibilityDraft {
+  return { dependsOnFieldId: '', operator: 'eq', valueText: '' }
+}
+
+/** Hydrate an editable visibility draft from a stored rule (or blank for none). */
+function visibilityDraftFromRule(rule: FormFieldVisibilityRule | undefined): FieldVisibilityDraft {
+  if (!rule) return emptyVisibilityDraft()
+  const valueText = rule.operator === 'in'
+    ? (rule.values ?? []).map((value) => String(value)).join('\n')
+    : (rule.value === undefined || rule.value === null ? '' : String(rule.value))
+  return { dependsOnFieldId: rule.fieldId, operator: rule.operator, valueText }
+}
+
+/**
+ * Build the emitted `visibilityRule` from the draft, or `undefined` for "no rule".
+ * The editor is authoritative: callers MUST delete a missing rule rather than let
+ * a stale one survive via the `original` spread (see buildFormSchema).
+ */
+function buildVisibilityRule(visibility: FieldVisibilityDraft): FormFieldVisibilityRule | undefined {
+  const fieldId = visibility.dependsOnFieldId.trim()
+  if (!fieldId) return undefined
+  if (visibility.operator === 'in') {
+    const values = visibility.valueText.split('\n').map((line) => line.trim()).filter(Boolean)
+    return { fieldId, operator: 'in', values }
+  }
+  if (visibility.operator === 'isEmpty' || visibility.operator === 'notEmpty') {
+    return { fieldId, operator: visibility.operator }
+  }
+  return { fieldId, operator: visibility.operator, value: visibility.valueText.trim() }
 }
 
 export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
@@ -159,6 +205,7 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     required: field.required === true,
     placeholder: field.placeholder ?? '',
     optionsText: formatOptionsText(field.options),
+    visibility: visibilityDraftFromRule(field.visibilityRule),
     original: field,
   }
 }
@@ -352,6 +399,14 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
       } else {
         delete next.options
       }
+      // Editor is authoritative for visibilityRule: emit the built rule, or
+      // delete it so a cleared rule is not resurrected from the `original` spread.
+      const visibilityRule = buildVisibilityRule(field.visibility)
+      if (visibilityRule) {
+        next.visibilityRule = visibilityRule
+      } else {
+        delete next.visibilityRule
+      }
       return next
     }),
   }
@@ -436,6 +491,48 @@ export function validateTemplateDraft(
       }
     }
   })
+  // Mirror the server visibility-rule reject-set (normalizeFormFieldVisibilityRule +
+  // validateFormFieldVisibilityRules): dependency must reference an existing field,
+  // not itself; `in` needs >=1 value; and the dependency graph must be acyclic.
+  const fieldIdSet = new Set(draft.fields.map((field) => field.id.trim()).filter(Boolean))
+  const visibilityDeps = new Map<string, string>()
+  draft.fields.forEach((field) => {
+    const dependsOn = field.visibility.dependsOnFieldId.trim()
+    if (!dependsOn) return
+    const fieldId = field.id.trim()
+    const label = field.label.trim() || fieldId || '(未命名)'
+    if (!fieldIdSet.has(dependsOn)) {
+      errors.push(`字段 ${label} 的显隐依赖字段不存在`)
+      return
+    }
+    if (dependsOn === fieldId) {
+      errors.push(`字段 ${label} 的显隐规则不能依赖自身`)
+      return
+    }
+    if (field.visibility.operator === 'in'
+      && field.visibility.valueText.split('\n').map((line) => line.trim()).filter(Boolean).length === 0) {
+      errors.push(`字段 ${label} 的显隐"包含"规则需要至少一个值`)
+    }
+    if (fieldId) visibilityDeps.set(fieldId, dependsOn)
+  })
+  const cycleState = new Map<string, 0 | 1 | 2>()
+  let cycleReported = false
+  const visitVisibility = (fieldId: string): void => {
+    const state = cycleState.get(fieldId) ?? 0
+    if (state === 1) {
+      if (!cycleReported) {
+        errors.push('字段显隐规则存在循环依赖')
+        cycleReported = true
+      }
+      return
+    }
+    if (state === 2) return
+    cycleState.set(fieldId, 1)
+    const dependsOn = visibilityDeps.get(fieldId)
+    if (dependsOn) visitVisibility(dependsOn)
+    cycleState.set(fieldId, 2)
+  }
+  visibilityDeps.forEach((_dependsOn, fieldId) => visitVisibility(fieldId))
   if (draft.steps.length === 0) errors.push('至少需要一个审批步骤')
   const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
   draft.steps.forEach((step, index) => {
