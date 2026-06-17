@@ -892,6 +892,20 @@ export async function loadFieldPermissionScopeMap(
   }
 }
 
+/**
+ * #18 read-deny: the per-sheet opt-in flag. When true, a 'none' record_permission DENIES read on its
+ * record. Default-off → the deny is inert and the read model stays grant-additive (#2787).
+ */
+export async function loadRowLevelReadDenyEnabled(query: QueryFn, sheetId: string): Promise<boolean> {
+  if (!sheetId) return false
+  try {
+    const r = await query('SELECT row_level_read_permissions_enabled AS enabled FROM meta_sheets WHERE id = $1', [sheetId])
+    return (r.rows[0] as { enabled?: boolean } | undefined)?.enabled === true
+  } catch {
+    return false
+  }
+}
+
 export async function loadRecordPermissionScopeMap(
   query: QueryFn,
   sheetId: string,
