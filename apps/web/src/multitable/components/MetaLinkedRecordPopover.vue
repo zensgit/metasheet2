@@ -24,6 +24,7 @@
                 :field="field"
                 :value="context.record.data[field.id]"
                 :link-summaries="context.linkSummaries?.[field.id]"
+                :person-summaries="context.personSummaries?.[field.id]"
                 :attachment-summaries="context.attachmentSummaries?.[field.id]"
               />
             </span>

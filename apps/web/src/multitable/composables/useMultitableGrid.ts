@@ -60,6 +60,7 @@ export interface GridConflictState {
 
 type RemoteRecordMergeOptions = {
   linkSummaries?: Record<string, LinkedRecordSummary[]>
+  personSummaries?: Record<string, PersonSummary[]>
   attachmentSummaries?: Record<string, MetaAttachment[]>
 }
 
@@ -972,6 +973,20 @@ export function useMultitableGrid(opts: {
     }
   }
 
+  function replaceRecordPersonSummaries(recordId: string, summaries?: Record<string, PersonSummary[]>) {
+    const normalized = summaries && Object.keys(summaries).length > 0 ? summaries : null
+    if (!normalized) {
+      const next = { ...personSummaries.value }
+      delete next[recordId]
+      personSummaries.value = next
+      return
+    }
+    personSummaries.value = {
+      ...personSummaries.value,
+      [recordId]: normalized,
+    }
+  }
+
   function replaceRecordAttachmentSummaries(recordId: string, summaries?: Record<string, MetaAttachment[]>) {
     const normalized = summaries && Object.keys(summaries).length > 0 ? summaries : null
     if (!normalized) {
@@ -997,6 +1012,7 @@ export function useMultitableGrid(opts: {
     }
     rows.value = nextRows
     replaceRecordLinkSummaries(record.id, options?.linkSummaries)
+    replaceRecordPersonSummaries(record.id, options?.personSummaries)
     replaceRecordAttachmentSummaries(record.id, options?.attachmentSummaries)
     return true
   }
