@@ -1360,9 +1360,11 @@ export async function resolveReadableSheetIds(
  *   3. base ownership (`meta_bases.owner_id` === actor) → that base.
  * A missing / soft-deleted base is NOT readable (no null-deref).
  *
- * This is the primitive ②b will consume when an opt-in cross-base READ path opens. It is deliberately
- * UNWIRED here: the §2a.2 wall compares two base_id strings and does not call this. It does NOT touch
- * central RBAC / auth — it is kernel-internal to multitable.
+ * This is the ②b cross-base READ primitive. It is WIRED (since #2582): the read paths call it via
+ * `resolveForeignFieldReadability` (univer-meta.ts) — a cross-base foreign field (foreignBaseId !=
+ * sourceBaseId) resolves only when the actor canReadBase(foreignBaseId), else its value is masked and
+ * dropped from lookup/rollup (no cardinality leak). The §2a.2 wall remains a separate same-base/base-id
+ * check; this is the per-actor base-read gate on top. Kernel-internal to multitable; no central RBAC/auth.
  */
 export async function resolveBaseReadable(
   req: Request,
