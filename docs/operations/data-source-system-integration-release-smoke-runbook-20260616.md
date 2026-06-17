@@ -7,7 +7,8 @@ release evidence package.
 
 Current evidence issue:
 
-- #2769 `[Data Source] Release evidence package gate`
+- #2769 `[Data Source] Release evidence package gate` — CLOSED/PASS for the
+  scoped release evidence package.
 
 Current release package anchor:
 
@@ -23,15 +24,15 @@ Current release package anchor:
   `deployApplyExit=0`, API/root health `200`, pending migration diff clean,
   `migrationPendingCount=0`, auth login/me `200`, backend online, and
   integration plugin present. The default-temp caveat is tracked by #2642.
+- C3/C4 exact-package checkpoint: #2769 accepted C3 monotonic-id
+  incremental/resume smoke and C4 Workbench UI configuration smoke on package
+  `79ab455e`; both evidence blocks are values-free.
 
-This package/deploy/auth checkpoint does not close the release gate by itself.
-C3 incremental/resume and C4 UI exact-package evidence are still HOLD unless
-the owner explicitly narrows or defers those gates with downgraded wording.
-
-This runbook does not authorize production rollout, batch writes, K3 Save /
-Submit / Audit / BOM, raw SQL, or broad writable database grants. C6 external
-write remains sandbox-only until the C6 smoke gate passes and a separate
-production/batch gate is explicitly approved and passes its own evidence/signoff.
+This closes the scoped release evidence package gate. It does not authorize
+production rollout, batch writes, K3 Save / Submit / Audit / BOM, raw SQL, or
+broad writable database grants.
+The C6 evidence cited here is sandbox-scoped; production/batch rollout still
+requires a separate explicit gate and evidence/signoff.
 
 ## Scope
 
@@ -66,8 +67,8 @@ the corresponding section below and post fresh values-free evidence.
 | Gate | Current anchor | Reuse rule for release signoff |
 | --- | --- | --- |
 | C2 read-only SQL source | issue #2600 closed PASS on package `f483bfdac`: PostgreSQL, MySQL/MariaDB, and SQL Server read-only paths all passed with `rowsWritten=0`, credentials stayed in `/data-sources`, and C3/C6/K3 writes were not run. | May be cited as prior entity-machine coverage for the read-only bridge. Rerun section 3 on the release package if C2 source/adapter/package surfaces changed or if exact-package evidence is required. |
-| C3 incremental/watermark | Runtime and CI real-DB wire locks are landed on main, but no release-package entity-machine incremental/resume smoke is recorded in this runbook. Large-BOM #2425 is related Data Factory C3/C4 evidence, not the SQL watermark/resume release gate. | Section 4 remains required for complete delivery unless an owner explicitly narrows the release scope and uses downgraded wording. Do not cite #2425 as C3 watermark/resume PASS. |
-| C4 UI configuration | Source/object/schema picker, source-field picker, watermark UI, and read-only/source-only boundary UX have landed, but this runbook has no final release-package UI smoke evidence yet. | Section 5 remains required for complete delivery unless exact UI smoke is explicitly deferred with downgraded wording. |
+| C3 incremental/watermark | issue #2769 closed PASS on package `79ab455e`: exact-package monotonic-id incremental/resume smoke passed with multi-run counts, `resumeReadDuplicateCount=0`, stable empty resume, no dead letters, no external DB write, no raw SQL, and no cursor/row/payload values printed. Large-BOM #2425 remains separate Data Factory evidence and is not the SQL watermark/resume gate. | Closed for the scoped release package. Future release packages should rerun section 4 if C3 source/adapter/package surfaces changed or if exact-package evidence is required again. |
+| C4 UI configuration | issue #2769 closed PASS on package `79ab455e`: Workbench page loaded, advanced connectors enabled, data-source bridge adapter option/picker visible, source/object/schema/source-field picker and watermark UI passed, credential inputs/textareas hidden, no credential copy, boundary text visible, and no token/password/values printed. | Closed for the scoped release package. Future release packages should rerun section 5 if C4 UI/source-picker/package surfaces changed or if exact-package evidence is required again. |
 | C5 K3/MSSQL read-only seam | issue #2670 closed PASS on package `dea391a1`: generic SQL Server smoke and K3 SQL Server executor smoke both passed after operator SQL scope adjustment; no K3 Save/Submit/Audit/BOM, external DB write, raw SQL, credentials, or row values were printed. | May be cited when no C5-relevant package/runtime surface changed after `dea391a1`; otherwise rerun the C5 runbook on the release package. |
 | C6 external write | issue #2720 is CLOSED/PASS: core sandbox dry-run/apply/re-pull/rollback PASS, read-only dedicated-route PASS, and C6-5c controlled bad-row PASS on package `d8244ee13`. The final pass used the reviewed C6-5b default-off, sandbox-only, server-owned failure-injection seam after real sandbox failure shapes were unavailable. Evidence showed one clean sibling write, one synthetic row-level failure `C6_TEST_INJECTED_ROW_FAILURE`, dead-letter/provenance counters, no request-body injection, and injection config restored/disabled after the check. | May be cited as C6 sandbox external-write smoke PASS for release evidence. Production/batch writes remain closed unless a separate production rollout gate is explicitly approved and passes its own evidence/signoff. |
 
@@ -209,6 +210,18 @@ c3Incremental:
   valuesFreeEvidence=true
 ```
 
+Current #2769 checkpoint:
+
+- `mode=monotonic_id`;
+- `pagesRead=2`;
+- `resumeReadDuplicateCount=0`;
+- first/second/third run row counts were posted as counts only;
+- `watermarkStableOnEmptyResume=true`;
+- `deadLetters=0`;
+- `externalDbWrite=false`;
+- `rawSqlExecuted=false`;
+- cursor values, row values, and payload JSON were not printed.
+
 ## 5. C4 UI Configuration Smoke
 
 Use the Workbench UI on the deployed package.
@@ -235,6 +248,18 @@ c4Ui:
   boundaryTextVisible=true|false
   valuesFreeEvidence=true
 ```
+
+Current #2769 checkpoint:
+
+- Workbench page loaded;
+- advanced connectors enabled;
+- data-source bridge adapter option and picker visible;
+- source/object/schema/source-field picker and watermark UI passed;
+- credential input and credential JSON textarea not visible;
+- credentials were not copied;
+- boundary text visible;
+- no failed API responses;
+- token/password/values were not printed.
 
 ## 6. C5 K3/MSSQL Read-Only Seam
 
@@ -478,12 +503,11 @@ Release signoff requires all of:
 
 The Evidence Reuse Ledger above may justify citing prior gates where explicitly
 allowed, but it does not change these pass criteria and does not turn a HOLD into
-PASS.
+PASS. #2769 is the owner-reviewed issue that closes these criteria for the
+scoped release package.
 
 Before C6 sandbox smoke passes, describe the product as "read-only database
-source integration available with external-write still gated". Only after C2,
-C3, C4, C5, and C6 all pass may the release discuss complete
-database/source-system integration delivery. If an owner explicitly removes C3
-from a narrower release scope, use downgraded wording that names the missing
-incremental/resume gate; do not call it complete delivery. Production/batch
-rollout still requires a separate explicit gate.
+source integration available with external-write still gated". After #2769, the
+scoped database/source-system integration release evidence package may be
+described as passed. Production/batch rollout still requires a separate explicit
+gate.
