@@ -1100,8 +1100,12 @@ const ROLLUP_FILTER_OPS_STRING = new Set(['is', 'equal', 'isnot', 'notequal', 'c
 export function isRollupFilterOperatorCompatible(fieldType: string, operator: string): boolean {
   const op = operator.trim().toLowerCase()
   if (op === 'isempty' || op === 'isnotempty') return true
-  if (isNumericQueryFieldType(fieldType) || fieldType === 'date') return ROLLUP_FILTER_OPS_NUMERIC.has(op)
-  if (fieldType === 'boolean') return ROLLUP_FILTER_OPS_BOOLEAN.has(op)
+  // Mirror evaluateMetaFilterCondition's effectiveType EXACTLY: it coerces a rollup-typed field to
+  // 'number'. If this helper didn't, `rollupField contains x` would look string-compatible here, pass
+  // the guard, then hit the numeric catch-all (match-all) at eval — the same leak as `number contains`.
+  const effectiveType = fieldType === 'rollup' ? 'number' : fieldType
+  if (isNumericQueryFieldType(effectiveType) || effectiveType === 'date') return ROLLUP_FILTER_OPS_NUMERIC.has(op)
+  if (effectiveType === 'boolean') return ROLLUP_FILTER_OPS_BOOLEAN.has(op)
   return ROLLUP_FILTER_OPS_STRING.has(op)
 }
 

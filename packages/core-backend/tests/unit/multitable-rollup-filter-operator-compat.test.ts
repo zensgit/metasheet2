@@ -28,6 +28,16 @@ describe('isRollupFilterOperatorCompatible', () => {
     expect(isRollupFilterOperatorCompatible('boolean', 'contains')).toBe(false)
   })
 
+  test('rollup-typed condition field is coerced to NUMERIC (mirrors evaluateMetaFilterCondition)', () => {
+    // The evaluator does `effectiveType = type === 'rollup' ? 'number' : type`; the guard must match, or
+    // `rollupField contains x` looks string-compatible, passes, then match-alls via the numeric catch-all.
+    expect(isRollupFilterOperatorCompatible('rollup', 'greater')).toBe(true)
+    expect(isRollupFilterOperatorCompatible('rollup', 'is')).toBe(true)
+    expect(isRollupFilterOperatorCompatible('rollup', 'contains')).toBe(false)
+    expect(isRollupFilterOperatorCompatible('rollup', 'doesnotcontain')).toBe(false)
+    expect(isRollupFilterOperatorCompatible('rollup', 'isempty')).toBe(true) // universal
+  })
+
   test('string: equality + contains, comparison rejected', () => {
     expect(isRollupFilterOperatorCompatible('string', 'is')).toBe(true)
     expect(isRollupFilterOperatorCompatible('string', 'contains')).toBe(true)
