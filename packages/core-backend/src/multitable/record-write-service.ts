@@ -643,12 +643,57 @@ export class RecordWriteService {
       // Native person (人员): resolve the sheet member set ONCE per patch op (lazily, only when a
       // person field value is actually written), then reuse it for every person cell's write-time
       // membership validation (SECURITY boundary) — parallel to the link-target-exists hot-path.
+      //
+      // #16 org-member directory: when a person field carries `restrictToMemberGroupIds`, the allowed
+      // set narrows to (sheet members ∩ users in those member groups) — a NEW assignment must be both a
+      // sheet member AND in an allowed group (fail-closed). Unrestricted fields keep the sheet set.
+      // Read-back is unaffected (validation is write-only), so pre-existing out-of-scope values are
+      // grandfathered. Resolved sets are cached per restrict-key so a bulk patch hits the DB once.
       let personMemberUserIds: Set<string> | null = null
-      const resolvePersonMemberUserIds = async (): Promise<Set<string>> => {
+      const restrictedMemberSetCache = new Map<string, Set<string>>()
+      const loadMemberGroupUserIds = async (groupIds: string[]): Promise<Set<string>> => {
+        if (groupIds.length === 0) return new Set<string>()
+        const res = await query(
+          `SELECT DISTINCT gm.user_id::text AS uid
+             FROM platform_member_group_members gm
+             JOIN users u ON u.id = gm.user_id
+            WHERE gm.group_id::text = ANY($1::text[])
+              AND u.is_active = TRUE`,
+          [groupIds],
+        )
+        return new Set(
+          (res.rows as Array<Record<string, unknown>>)
+            .map((row) => (typeof row.uid === 'string' ? row.uid.trim() : ''))
+            .filter((v): v is string => v.length > 0),
+        )
+      }
+      const resolvePersonMemberUserIds = async (restrictGroupIds: string[]): Promise<Set<string>> => {
         if (personMemberUserIds === null) {
           personMemberUserIds = await h.loadSheetMemberUserIds(query, sheetId)
         }
-        return personMemberUserIds
+        if (restrictGroupIds.length === 0) return personMemberUserIds
+        const key = Array.from(new Set(restrictGroupIds)).sort().join(',')
+        let restricted = restrictedMemberSetCache.get(key)
+        if (!restricted) {
+          const groupSet = await loadMemberGroupUserIds(restrictGroupIds)
+          // Intersect with the sheet member set: strictly narrows, never widens, the current contract.
+          restricted = new Set<string>()
+          for (const id of personMemberUserIds) if (groupSet.has(id)) restricted.add(id)
+          restrictedMemberSetCache.set(key, restricted)
+        }
+        return restricted
+      }
+
+      // #16: source each person field's restrictToMemberGroupIds from the property-bearing `fields`
+      // list (the per-change `fieldById` guard does not carry property). Built once per patch op.
+      const personRestrictByFieldId = new Map<string, string[]>()
+      for (const f of fields as Array<{ id?: unknown; type?: unknown; property?: unknown }>) {
+        if (!f || f.type !== 'person') continue
+        const raw = (f.property as Record<string, unknown> | undefined)?.restrictToMemberGroupIds
+        if (!Array.isArray(raw)) continue
+        const ids = Array.from(new Set(raw.filter((v): v is string => typeof v === 'string' && v.trim().length > 0).map((v) => v.trim())))
+        const fid = typeof f.id === 'string' ? f.id : ''
+        if (fid && ids.length > 0) personRestrictByFieldId.set(fid, ids)
       }
 
       for (const [recordId, changes] of changesByRecord.entries()) {
@@ -739,7 +784,10 @@ export class RecordWriteService {
 
           if (field.type === 'person') {
             try {
-              const allowed = await resolvePersonMemberUserIds()
+              // NB: `field` here is the fieldById GUARD (type/readOnly/hidden), which does NOT carry
+              // `property`. The restrict config is sourced from `personRestrictByFieldId`, built from the
+              // full `fields` list (which does carry property) once per patch op.
+              const allowed = await resolvePersonMemberUserIds(personRestrictByFieldId.get(change.fieldId) ?? [])
               patch[change.fieldId] = validatePersonValue(change.value, change.fieldId, allowed, isPersonSingleRecord(field.property))
             } catch (error) {
               throw new RecordValidationError(error instanceof Error ? error.message : String(error))
