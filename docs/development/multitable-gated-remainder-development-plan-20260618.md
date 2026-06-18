@@ -19,7 +19,7 @@ Closed and removed from the active remainder:
 
 The remaining development is exactly:
 
-1. **2c · Gated arc** (`#16` Person field → true org-member directory): the **only** remaining arc. **Owner-gated on a source-of-truth decision (A internal users / B member-group directory / C external IdP).** Design-lock #2860 is merged; runtime is **blocked until the owner explicitly picks the source** — it has NOT been chosen yet (B is the design-lock's recommendation, not a selection).
+1. **2c · in-progress arc** (`#16` Person field → true org-member directory): the **only** active arc. **Source-of-truth DECIDED = B (member-group directory)** — design-lock #2860 → **S2 resolver `resolvePersonAssignableDirectory` shipped (#2866, unit + real-DB)**, on top of the fail-closed assignment enforcement (#2833 + #2854). No longer source-blocked; remaining is **S3 picker-UX (filter to assignable) + S4 inactive/historical handling** (out-of-scope values readable, not newly assignable).
 
 Everything else belongs to a future roadmap pool, not to this closure ledger. See Appendix A. (2a closed #2851; 2b closed S1–S4 by 2026-06-18 after #2836/#2841/#2847/#2861.)
 
@@ -175,15 +175,17 @@ Non-goals:
 - Do not introduce a rule DSL without a parser/evaluator golden and a real-DB route golden.
 - Do not assume the current grant/additive row-permission model can express these rules without a new contract.
 
-## 3. 2c · Gated Arc Not Started
+## 3. 2c · In-Progress Arc (through S2 — source decided)
 
 ### 3.1 `#16` Person Field → True Org-Member Directory
+
+> **UPDATED 2026-06-18:** source-of-truth **DECIDED = B (member-group directory)** (design-lock #2860); the fail-closed assignment enforcement (#2833 + route-parity #2854) and the S2 directory resolver `resolvePersonAssignableDirectory` (#2866) are shipped. Remaining: **S3 picker-UX + S4 inactive/historical handling.** The "Gate / Required decisions / slice" detail below is the original decomposition, retained as history — the source decision is no longer open.
 
 Current state:
 
 - Native `person` fields exist as first-class fields.
-- `restrictToMemberGroupIds` is sanitized and persisted as optional configuration.
-- A true org-member directory product arc is not yet started.
+- `restrictToMemberGroupIds` is a **hard fail-closed validator** (sheet members ∩ allowed groups), enforced across all write paths (#2833 + #2854), with the directory resolver shipped (source B, #2866).
+- Remaining: S3 picker-UX (filter to assignable) + S4 inactive/historical handling (out-of-scope values readable, not newly assignable).
 
 Gate:
 
@@ -226,7 +228,7 @@ Because every remaining item is gated, the default action is **hold**.
 
 **2a is complete and 2b is complete through S4 (`#2861`) — those gates are closed, not next options.** The remaining gated next options:
 
-1. **2c / #16 person-directory source-of-truth design-lock** — the **sole** remaining product arc (owner-gated: directory source of truth + assignability semantics + picker UX).
+1. **2c / #16 person-directory S3/S4** — the **sole** in-progress product arc. Source-of-truth already decided (B) + S2 resolver shipped (#2866); remaining is **S3 picker-UX** (filter to assignable) + **S4 inactive/historical handling** (out-of-scope values readable, not newly assignable).
 2. **D2 high-scale re-baseline harness work** — only if the product wants to revisit large-table performance after the existing D2 verdict; this is not a grid-virtualization slice.
 
 Do not open more than one security-sensitive runtime arc at the same time.

@@ -35,7 +35,7 @@
 
 ## 2. 2b · #18 Phase-2 Conditional Permission Rules
 
-> **COMPLETE — S1–S4 (2026-06-18).** S1 #2836, S2 #2841 (wired into the #18 seam, flag-off inert), S3 #2847, S4 #2861 (content-keyed parse cache, staleness-free — DB reads not cached). All slices shipped; sub-items below retained as history. The only remaining multitable arc is **2c** (owner-gated on source-of-truth).
+> **COMPLETE — S1–S4 (2026-06-18).** S1 #2836, S2 #2841 (wired into the #18 seam, flag-off inert), S3 #2847, S4 #2861 (content-keyed parse cache, staleness-free — DB reads not cached). All slices shipped; sub-items below retained as history. The only in-progress multitable arc is **2c** (through S2 — source B + resolver #2866; S3 picker-UX + S4 inactive/historical remain).
 
 - [x] Gate: owner-approved rule model and threat model — settled (S1–S3 built on it).
   - [ ] Decide rule language and field/operator matrix.
@@ -79,33 +79,16 @@
 
 ### 3.1 `#16` Person Field → True Org-Member Directory
 
-- [!] Gate: owner decision on directory source of truth and assignability semantics.
-  - [ ] Decide source: internal users, directory sync member groups, external identity metadata, or hybrid.
-  - [ ] Decide whether `restrictToMemberGroupIds` is a hard validator.
-  - [ ] Decide inactive/deleted user behavior.
-  - [ ] Decide historical out-of-scope values: readable-only vs forced cleanup.
-  - [ ] Decide picker explanation UX.
+- [x] Source-of-truth **DECIDED = B** (member-group directory) — design-lock #2860. Assignability locked:
+  `restrictToMemberGroupIds` is a hard validator; out-of-scope historical values readable, not newly assignable.
 
-- [ ] 16-S0 Design-lock.
-  - [ ] Lock stored value shape as unchanged unless a migration is explicitly designed.
-  - [ ] Lock legacy link-backed person coexistence.
-  - [ ] Lock API/import/automation/Yjs parity requirements.
-
-- [ ] 16-S1 Backend validator and resolver.
-  - [ ] Shared person validator for REST, bulk edit, import, form, automation, and Yjs write paths.
-  - [ ] Real-DB positive assignment test.
-  - [ ] Real-DB negative restricted-group assignment test.
-  - [ ] Real-DB inactive/deleted user characterization.
-
-- [ ] 16-S2 Frontend picker.
-  - [ ] Filter to assignable members.
-  - [ ] Explain empty/disabled states.
-  - [ ] Browser picker evidence.
-
-- [ ] 16-S3 Parity hardening.
-  - [ ] API route tests.
-  - [ ] Import/bulk tests.
-  - [ ] Automation/form/Yjs tests.
+- [x] **16-S0 Design-lock** — source B + assignability semantics (#2860).
+- [x] **16-S1 Backend validator + resolver** — fail-closed person validator across all write paths
+  (#2833 validator + route-parity hardening #2854, real-PG) + `resolvePersonAssignableDirectory` resolver,
+  source B (#2866, unit + real-DB).
+- [ ] **16-S3 Frontend picker UX** — filter options to assignable members; explain empty/disabled states; browser evidence. (REMAINING)
+- [ ] **16-S4 Inactive / historical handling** — inactive/deleted-user behavior + out-of-scope historical values
+  readable-not-assignable, with a display affordance. (REMAINING)
 
 ## 4. Roadmap Pool — Not Current Remainder
 
@@ -125,5 +108,5 @@ These are future candidates or reopen-only lines. They are not open work in the 
 
 Use one of these when opening the next arc (2a is complete and 2b is **complete through S4** `#2861` — those gates are closed, not next options):
 
-- **Unlock 2c / #16 person directory:** choose directory source of truth and assignability semantics + picker UX. (The sole remaining multitable arc.)
+- **Continue 2c / #16 person directory:** source-of-truth already decided = B + S2 resolver shipped (#2866); next is **S3 picker-UX** (filter to assignable) + **S4 inactive/historical handling**. (The sole in-progress multitable arc.)
 - **Revisit grid performance:** opt into D2 high-scale harness/re-baseline work first; row virtualization stays closed unless the verdict flips.
