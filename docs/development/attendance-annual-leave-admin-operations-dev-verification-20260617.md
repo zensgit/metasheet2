@@ -105,3 +105,27 @@ runbook's `user_orgs` single-member-org gate and residue=0 teardown remain the L
   design-lock first).
 - **A full audit-history viewer** — out of v1; each card surfaces its returned identifiers (adjustment `id`, run
   `runId`/`periodKey`) inline.
+
+## Addendum — #2834: policy-off gate corrected to all three cards (design-lock §6)
+
+This **supersedes** the policy-off statements above that describe the #2830 build — §3 (Accrual run: "commit disabled
+when the policy is off"), §4 (Shared scaffold: "load-bearing disable on the accrual commit, informational hint
+elsewhere"), and §6's verification list ("policy-off accrual disable"). At #2830 only the **accrual commit** was
+disabled when `annualLeavePolicy.enabled === false`; manual-adjustment and backfill stayed callable — inconsistent
+with **design-lock §6** ("all three cards are proactively disabled… the adjustment/backfill cards disable for
+consistency and to steer the operator to enable the policy first").
+
+**Fixed in #2834 (`ca7d3051c`), on `main`:**
+- Every mutating action across **all three cards** is gated on `!annualOpsPolicyEnabled` — manual-adjust submit,
+  backfill dry-run, backfill commit, accrual dry-run, and accrual commit. The read-only balance **preview** (a GET)
+  stays enabled.
+- A **handler-level guard** in `annualOpsPost` throws `ANNUAL_LEAVE_NOT_ENABLED` when the policy is off, so no card
+  can POST a mutation via a keyboard / direct / test call — not only via the disabled buttons. Accrual remains
+  load-bearing on the server (the backend `422`s); adjust/backfill disable for consistency + misoperation-prevention,
+  per §6.
+- The policy-off regression test is **expanded** to assert **all three cards' actions are disabled AND that no write
+  POST reaches the backend** (`writePosts === []`), not merely the accrual commit.
+
+`vue-tsc -b` clean; **119/119** web specs. Lesson: a locked design-lock口径 (§6) outranks a plan's internal note —
+the #2830 accrual-only choice had followed the dev-plan's R6 "don't over-disable" note, but the merged design-lock is
+the authority.
