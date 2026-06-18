@@ -556,7 +556,22 @@ export class DataSourceManager extends EventEmitter {
       // Mirror addDataSourceInternal's wording; the route maps this to a 400 (client error).
       throw new Error(`Unsupported data source type: ${config.type}`)
     }
-    const adapter = new AdapterClass(config)
+    // Bound the connect attempt (follow-up m3): a hanging / black-hole host otherwise ties up the
+    // request to the driver default (pg = 30s). Inject a short connect-timeout via each driver's own
+    // knob — pg `poolConfig.acquireTimeout`, mysql2 `options.connectTimeout`, mssql
+    // `connection.connectionTimeoutMs` — defaulting ONLY when the caller didn't set one (each driver
+    // ignores the others' keys). Scrub below still reads the original `config` (same host/username).
+    const TEST_CONNECT_TIMEOUT_MS = 10000
+    const conn = (config.connection ?? {}) as Record<string, unknown>
+    const opts = (config.options ?? {}) as Record<string, unknown>
+    const pool = (config.poolConfig ?? {}) as Record<string, unknown>
+    const boundedConfig = {
+      ...config,
+      connection: { ...conn, connectionTimeoutMs: conn.connectionTimeoutMs ?? TEST_CONNECT_TIMEOUT_MS },
+      options: { ...opts, connectTimeout: opts.connectTimeout ?? TEST_CONNECT_TIMEOUT_MS },
+      poolConfig: { ...pool, acquireTimeout: pool.acquireTimeout ?? TEST_CONNECT_TIMEOUT_MS },
+    } as unknown as DataSourceConfig
+    const adapter = new AdapterClass(boundedConfig)
     adapter.on('error', () => { /* ephemeral: cause captured via connectionError; no emit/persist */ })
     // No-echo (design-lock 钉子②): the adapter redacts secret VALUES, but a driver diagnostic can still
     // reflect the caller's submitted host/username (e.g. `password authentication failed for user "x"`,

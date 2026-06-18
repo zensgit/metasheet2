@@ -388,6 +388,16 @@ export function dataSourcesRouter(): Router {
       const manager = getManager()
       const config = parse.data as DataSourceConfig
       const result = await manager.testEphemeralConnection(config)
+      // Audit the dial-out attempt (values-free: id/name/type + outcome only — never connection/creds).
+      // This is a write-tier capability that connects to an arbitrary host, so it leaves a probe trail.
+      await auditLog({
+        actorId: req.user?.id?.toString(),
+        actorType: 'user',
+        action: 'test',
+        resourceType: 'data_source',
+        resourceId: config.id,
+        meta: { name: config.name, type: config.type, success: result.success },
+      })
       // RESULT-ONLY surface (design-lock 钉子②): success / latency / redacted error — NEVER echo the
       // submitted config, connection, or credentials back to the caller.
       return res.json({
