@@ -1062,6 +1062,28 @@ export class MultitableApiClient {
     return normalizeSheetPermissionCandidates(data)
   }
 
+  /**
+   * 2c-S3 — the assignable directory for ONE person field (source = B member-group directory).
+   * Returns the same allowed set the write validator accepts (active-only, member-group-scoped),
+   * so the picker offers exactly what a save will accept. Gated server-side on canEditRecord.
+   */
+  async listPersonFieldDirectory(
+    sheetId: string,
+    fieldId: string,
+    params?: { q?: string },
+  ): Promise<{ items: Array<{ userId: string; name: string | null; email: string | null }>; total: number; query: string }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/person-fields/${encodeURIComponent(fieldId)}/directory${qs(params ?? {})}`)
+    const data = await this.parseJson<{ items?: Array<{ userId?: unknown; name?: unknown; email?: unknown }>; total?: number; query?: string }>(res)
+    const items = (data.items ?? [])
+      .map((it) => ({
+        userId: String(it.userId ?? ''),
+        name: typeof it.name === 'string' ? it.name : null,
+        email: typeof it.email === 'string' ? it.email : null,
+      }))
+      .filter((it) => it.userId.length > 0)
+    return { items, total: typeof data.total === 'number' ? data.total : items.length, query: typeof data.query === 'string' ? data.query : '' }
+  }
+
   async updateSheetPermission(
     sheetId: string,
     subjectType: 'user' | 'role' | 'member-group',
