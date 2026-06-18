@@ -1,13 +1,22 @@
 /**
- * Yjs → RecordWriteService bridge (POC scope: single text field only).
+ * Yjs → RecordWriteService bridge.
  *
- * Converts Y.Text changes on a record doc into a single-field patch
- * and writes via RecordWriteService.patchRecords() — the authoritative
- * write path shared with REST.
+ * Converts changes on a record doc's `fields` Y.Map into single-field patches
+ * and writes via RecordWriteService.patchRecords() — the authoritative write
+ * path shared with REST. Field-type-agnostic: collects both Y.Text values
+ * (string fields, char-level merged) AND any PLAIN value set directly under a
+ * Y.Map key (atomic scalars, LWW). Nested Yjs shared types (Y.Map/Y.Array) are
+ * skipped.
  *
- * NOT in scope: create/delete, non-text fields, field-level permissions,
- * webhook/automation (those are downstream of RecordWriteService and will
- * fire automatically once bridge calls patchRecords).
+ * NOTE: being a generic plain-value collector does NOT mean every scalar type is
+ * live in the product. Which fields actually reach the bridge is determined by the
+ * seed (yjs-sync-service) + the FE cell bindings, not here — e.g. string-stored
+ * select/date/dateTime currently seed as Y.Text and have no scalar binding, so they
+ * do not flow as plain values yet (a gated decision), even though this collector
+ * would accept them if they did.
+ *
+ * NOT in scope: create/delete, field-level permissions, webhook/automation
+ * (downstream of RecordWriteService; they fire once the bridge calls patchRecords).
  */
 
 import * as Y from 'yjs'

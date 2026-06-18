@@ -499,9 +499,10 @@ const yjsCollaborators = computed(() => yjsBinding.collaborators.value)
 // Wired for the atomic types that read directly from modelValue (no local edit
 // buffer): numeric/boolean + rating (number) + multiSelect (string[]).
 // DEFERRED: `duration` has an intentional local text buffer decoupled from
-// modelValue (advisor B: live re-derivation fights the typist); `select`/`date`
-// are string-stored atomics seeded as Y.Text today — flipping them to plain-value
-// is a separate gated call (persisted docs hold them as Y.Text).
+// modelValue (advisor B: live re-derivation fights the typist); `select`/`date`/
+// `dateTime` are string-stored atomics seeded as Y.Text today — flipping them to
+// plain-value is a separate gated call (persisted docs hold them as Y.Text, so it
+// needs a migration story, not just a seed flip).
 // Inactive → byte-identical REST path (setValue is a no-op; nothing changes).
 const SCALAR_YJS_TYPES = ['number', 'currency', 'percent', 'boolean', 'rating', 'multiSelect']
 const scalarFieldIdRef = computed<string | null>(() => {

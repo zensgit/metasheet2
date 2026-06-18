@@ -6,17 +6,20 @@ import type { YjsPersistenceAdapter } from './yjs-persistence-adapter'
  * `meta_records.data`. Only invoked when there's no persisted Yjs state
  * yet (no snapshot, no incremental updates).
  *
- * Seeding rule:
- *   - For each field whose current value is a string, create a Y.Text
- *     pre-populated with that string and put it in the fields map under
- *     the fieldId key.
- *   - Non-string values are left out of the fields map. The frontend
- *     `useYjsTextField` only binds to Y.Text entries, so non-string
- *     fields continue to go through the existing REST edit path.
+ * Seeding rule (see the loop below for the authoritative logic):
+ *   - String values (free-text AND string-stored atomics like select/date) → a
+ *     Y.Text pre-populated with the string, under the fieldId key (char-level merge).
+ *   - Non-string ATOMIC values (number/currency/percent/rating/duration/boolean,
+ *     multiSelect arrays) → a PLAIN value under the fieldId key, synced LWW per key
+ *     via the Y.Map. The bridge persists these through the validated patchRecords
+ *     path, so the stored shape is unchanged.
+ *   - null/undefined → left absent (a delete; nothing to seed).
  *
- * Returning null (e.g. record was deleted) leaves the Y.Doc empty;
- * `useYjsTextField` will then decline to activate for that cell and the
- * caller falls back to REST.
+ * Frontend binding: `useYjsTextField`/`useYjsCellBinding` bind Y.Text string cells;
+ * `useYjsScalarCell` binds the plain-value scalar cells the grid has wired so far
+ * (number/currency/percent/boolean/rating/multiSelect). A cell with no active binding
+ * (incl. the not-yet-wired scalar types, and any field once the doc is empty) falls
+ * back to the existing REST edit path.
  */
 export type YjsRecordSeedFn = (
   recordId: string,
