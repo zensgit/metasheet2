@@ -833,6 +833,26 @@ describe('Attendance admin regressions', () => {
     ).toEqual([])
   })
 
+  it('overview self-service — the annual leave card reads the token-locked /me balance (no userId param)', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/leave-balances/me')) {
+        return jsonResponse(200, { ok: true, data: { userId: 'self', summary: { leaveTypeCode: 'annual', grantedMinutes: 2400, remainingMinutes: 1800, exhaustedMinutes: 600, expiredMinutes: 0 }, activeLots: [], recentEvents: [], eventLimit: 50 } })
+      }
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(10)
+    const card = container!.querySelector('[data-selfservice-card="annual-balance"]')
+    expect(card).toBeTruthy()
+    expect(card!.querySelector('[data-annual-self-balance]')?.textContent).toContain('1800') // remaining
+    // the request hits the token-locked /me endpoint and carries NO userId param (self-service, server-forced subject)
+    const meCall = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).find(u => u.includes('/leave-balances/me'))
+    expect(meCall).toBeTruthy()
+    expect(meCall).not.toContain('userId=')
+  })
+
   it('exposes shift_swap as an approval-flow type and saves it through the admin form', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
