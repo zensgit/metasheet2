@@ -86,6 +86,7 @@ describeIfDatabase('native person restrictToMemberGroupIds enforcement (real DB)
 
   test('a sheet member IN the configured group is assignable (accepted)', async () => {
     const res = await createReq({ [FLD_NAME]: 'r1', [FLD_PERSON]: [USER_IN] })
+    if (res.status >= 300) throw new Error(`accept(in-group) failed ${res.status}: ${JSON.stringify(res.body)}`)
     expect(res.status).toBeLessThan(300) // created — the in-group sheet member is accepted
   })
 
@@ -96,6 +97,7 @@ describeIfDatabase('native person restrictToMemberGroupIds enforcement (real DB)
 
   test('an unrestricted person field still admits any sheet member (no regression)', async () => {
     const res = await createReq({ [FLD_NAME]: 'r3', [FLD_PERSON_OPEN]: [USER_OUT] })
+    if (res.status >= 300) throw new Error(`accept(unrestricted) failed ${res.status}: ${JSON.stringify(res.body)}`)
     expect(res.status).toBeLessThan(300)
   })
 
