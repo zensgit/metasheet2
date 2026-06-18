@@ -1,5 +1,7 @@
 # 多维表 2a · live-CRDT `dateTime` — DESIGN-LOCK (2a-S1) — 2026-06-18
 
+> ⚠️ **IMPLEMENTED by #2849 — this is now a HISTORICAL, pre-runtime design-lock.** dateTime live CRDT shipped (canonical-UTC-ISO value invariant + persisted-doc corruption golden); the full scalar set is collaborative. Retained for design rationale only — do **not** read the "sole remaining / deferred" framing below as current fact.
+>
 > Status: **DESIGN-LOCK (design only — NO runtime).** Opens gate **2a** of `multitable-gated-remainder-development-plan-20260618.md` (#2828) for its **last** field type, `dateTime`.
 > Owner opt-in: 2026-06-18 ("open 2a dateTime first; design-lock timezone/canonical/persisted-doc corruption").
 > Grounding: code-anchored on `origin/main` — `MetaCellEditor.vue` (binding allowlists), `useYjsScalarCell.ts` (dual-reader), `yjs-scalar-strdate-migration-realdb.test.ts` (the migration golden template).
@@ -7,7 +9,7 @@
 
 ## 0. Where dateTime sits today
 
-`select` + `date` (#2832) and `duration` (#2838) now bind to live CRDT. `dateTime` is the **sole** remaining string-stored atomic, explicitly deferred in `MetaCellEditor.vue` (`STRING_STORED_ATOMIC_YJS_TYPES = ['select', 'date']` — dateTime excluded).
+*(Historical, as of this design-lock — superseded by #2849.)* At lock time, `select` + `date` (#2832) and `duration` (#2838) bound to live CRDT and `dateTime` was the sole remaining string-stored atomic, deferred in `MetaCellEditor.vue`. **Post-#2849, `dateTime` is wired and the scalar set is complete** — the binding allowlist now includes it.
 
 Why it was held back (the real gate): unlike `select`/`date`, the dateTime backend codec **normalizes the stored value to canonical UTC ISO**. The editor reads/writes a *local* representation via `dateTimeInputValue` (stored→local display) and `dateTimeValueFromLocalInput` (local→canonical stored). So a naive "write the editor's value into the Y.Map" would put a **local, non-canonical** string into the shared doc — diverging from the stored form and drifting across collaborators' timezones.
 
