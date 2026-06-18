@@ -95,6 +95,11 @@ export class PostgresAdapter extends BaseDataAdapter {
       await this.onConnect()
     } catch (error) {
       await this.onError(error as Error)
+      // A failed connect must not leak the pool created above. The ephemeral test-before-save helper
+      // gates teardown on isConnected() (false here) and disconnect() self-guards on `connected`, so
+      // neither would end it — close it here. connect() always recreates the pool, so nulling is safe.
+      try { await this.pool?.end() } catch { /* pool may be partially constructed */ }
+      this.pool = null
       throw new Error(`Failed to connect to PostgreSQL: ${error}`)
     }
   }
