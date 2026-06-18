@@ -33,9 +33,11 @@ function buildApp(userId: string, perms: string[]): Express {
   a.use('/api/multitable', univerMetaRouter())
   return a
 }
-// manager: multitable:share → canManageSheetAccess; reader: read-only (canRead, NOT manage)
+// manager: multitable:share → canManageSheetAccess; reader: read-only (canRead, NOT manage);
+// no-read: no multitable perms at all → NOT canRead (GET must 403).
 const managerApp = () => buildApp(MANAGER, ['multitable:read', 'multitable:share'])
 const readerApp = () => buildApp(READER, ['multitable:read'])
+const noReadApp = () => buildApp(`u_rld_nr_${TS}`, [])
 const FLAG = `/api/multitable/sheets/${SHEET}/row-level-read-deny`
 
 async function dbFlag(): Promise<boolean | null> {
@@ -88,6 +90,11 @@ describeIfDatabase('#18 row-level-read-deny flag endpoints (real DB)', () => {
     const get = await request(readerApp()).get(FLAG)
     expect(get.status).toBe(200)
     expect(get.body.data.enabled).toBe(false)
+  })
+
+  test('no-read user GET → 403 (canRead gate, the negative authz lock)', async () => {
+    const get = await request(noReadApp()).get(FLAG)
+    expect(get.status).toBe(403)
   })
 
   test('PUT with a non-boolean / missing enabled → 400 (validation), flag unchanged', async () => {
