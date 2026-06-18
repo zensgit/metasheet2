@@ -439,6 +439,14 @@ async function runDraftTest(): Promise<void> {
   }
 }
 
+// Drop a rendered draft result the moment the user edits any connection field — a stale
+// 连接成功/失败 next to changed params would be misleading (advisory, so no gate either way).
+watch(form, () => {
+  if (draftTest.value.status === 'ok' || draftTest.value.status === 'fail') {
+    draftTest.value = { status: 'idle' }
+  }
+}, { deep: true })
+
 // `server` is a SQL-Server-only concept; clear it when switching away so a stale value can't linger
 // (the builder + guard already ignore it for non-sqlserver — this keeps the form state clean).
 watch(() => form.type, (type) => {

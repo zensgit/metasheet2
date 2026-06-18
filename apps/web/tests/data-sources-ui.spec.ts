@@ -820,6 +820,19 @@ describe('DataSourcesView (UI-2 connection test reachability)', () => {
     const pw = container.querySelector('[data-testid="ds-field-password"]') as HTMLInputElement
     pw.value = 'newpw'; pw.dispatchEvent(new Event('input'))
     await flush()
-    expect(container.querySelector('[data-testid="ds-test-draft"]')).not.toBeNull()
+    const testBtn = container.querySelector('[data-testid="ds-test-draft"]') as HTMLButtonElement
+    expect(testBtn).not.toBeNull()
+
+    // wire: the credential-mode draft test posts the STORED connection params + the NEW secret.
+    testDraftMock.mockResolvedValue({ success: true, latency: '8ms' })
+    testBtn.click()
+    await flush()
+    await flush()
+    expect(testDraftMock).toHaveBeenCalledTimes(1)
+    expect(testDraftMock.mock.calls[0][0]).toMatchObject({
+      type: 'postgres',
+      connection: { host: 'db.internal', database: 'erp' },
+      credentials: { password: 'newpw' },
+    })
   })
 })
