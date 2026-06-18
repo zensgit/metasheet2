@@ -505,7 +505,7 @@ TODO:
       `deadLetters.persisted=1`, `provenance.target_write_succeeded=1`,
       `provenance.target_write_failed=1`, request-body injection fields absent, and
       injection env/runtime config restored after the check.
-- [ ] Post-C6 package reroll PM2 env hygiene hardening.
+- [x] Post-C6 package reroll PM2 env hygiene hardening.
   - trigger: #2769 found `app.env` no longer contained C6 failure-injection markers,
     while the running PM2 process still reported marker presence.
   - intended guard: when the two C6 test-only keys are absent from `app.env`,
@@ -517,6 +517,15 @@ TODO:
     absent from `app.env`, that path must delete + fresh-start instead of
     restart-only reuse because the helper cannot inspect the old definition's
     runtime env.
+  - fix: #2820 (`58143a2ac`) makes the `jlist`-uninspectable / `describe`-found
+    fallback delete + fresh-start when the retired keys are absent from `app.env`.
+  - entity-machine PASS package:
+    `multitable-onprem-pm2-env-hygiene-fallback-20260618-58143a2a`.
+    Evidence: `deployApplyExit=0`, dependency refresh / migrations / PM2 restart /
+    healthcheck reached, `pm2StaleDefinitionFound=unknown_jlist_uninspectable`,
+    `pm2RecreatedFromCleanEnv=true`, `pm2RestartOnlyFallbackObserved=false`,
+    `pm2RuntimeFailureInjectionMarkersPresent=false`, root/API health `200`,
+    and `valuesFreeEvidence=true`.
   - evidence must stay values-free:
     `appEnvFailureInjectionMarkersPresent=false`,
     `pm2RuntimeFailureInjectionMarkersPresent=false`,
