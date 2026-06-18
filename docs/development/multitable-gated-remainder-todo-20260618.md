@@ -14,10 +14,13 @@
 - [x] `#18` flag endpoint positive and negative GET authz tests (`#2819`).
 - [x] Live scalar CRDT for `number`, `currency`, `percent`, `boolean`.
 - [x] Live scalar CRDT for `rating`, `multiSelect` (`#2821`).
+- [x] Live scalar CRDT for `select` + `date` (`#2832`), `duration` (`#2838`), `dateTime` (`#2849`, 2a-DT-S2 canonical-UTC-ISO invariant) — **2a COMPLETE; full scalar set collaborative, no type deferred** (2026-06-18).
 - [x] CRDT comment hygiene documenting the real seed/bridge/frontend boundary (`#2823`; `#2825` PR head closes the final internal JSDoc/dateTime comment tails, pending merge).
 - [x] Runtime conclusion: no non-gated multitable remainder is open.
 
 ## 1. 2a · Live CRDT Remaining Field Types
+
+> **CLOSED 2026-06-18** (select/date #2832, duration #2838, dateTime #2849). The checkboxes below were satisfied per type — lazy `coerceText` dual-reader; the strdate real-DB golden covers select/date/dateTime; duration has its own FE + flush proof. Retained as history; no remaining 2a work. Active remainder is now **2b** and **2c** only.
 
 ### 1.1 `select` / `date` / `dateTime`
 
