@@ -16,6 +16,7 @@ import type {
   DbValue,
 } from '../../src/data-adapters/BaseAdapter'
 import { dataSourcesRouter, getDataSourceManager } from '../../src/routes/data-sources'
+import { auditLog } from '../../src/audit/audit'
 
 const SECRET = 'EphemeralSecretPw!2026'
 
@@ -69,6 +70,16 @@ class FailAdapter extends FakeBase {
   async disconnect(): Promise<void> { disconnectCalls.push(this.config.id); this.connected = false }
   isConnected(): boolean { return this.connected }
   async testConnection(): Promise<boolean> { return false }
+}
+
+// Records the config it was constructed with, so we can assert the helper injected bounded timeouts.
+let capturedConfig: DataSourceConfig | null = null
+class CapturingAdapter extends FakeBase {
+  constructor(c: DataSourceConfig) { super(c); capturedConfig = c }
+  async connect(): Promise<void> { this.connected = true; await this.onConnect() }
+  async disconnect(): Promise<void> { this.connected = false; await this.onDisconnect() }
+  isConnected(): boolean { return this.connected }
+  async testConnection(): Promise<boolean> { return true }
 }
 
 function appAs(userId: string) {
@@ -204,5 +215,68 @@ describe('POST /api/data-sources/test (route)', () => {
     expect(ids).not.toContain('eph_nopersist')
     const got = await request(appAs('tester')).get('/api/data-sources/eph_nopersist')
     expect(got.status).toBe(404)
+  })
+
+  it('injects a bounded connect-timeout per driver knob (defaults only when caller omits)', async () => {
+    const manager = getDataSourceManager()
+    manager.registerAdapterType('postgres', CapturingAdapter as never)
+    capturedConfig = null
+    await request(appAs('tester')).post('/api/data-sources/test').send({
+      id: 'eph_timeout', name: 'x', type: 'postgres', connection: { host: 'h' },
+    }).expect(200)
+    // pg reads poolConfig.acquireTimeout; mysql2 options.connectTimeout; mssql connection.connectionTimeoutMs.
+    expect(capturedConfig?.poolConfig?.acquireTimeout).toBe(10000)
+    expect((capturedConfig?.options as Record<string, unknown>)?.connectTimeout).toBe(10000)
+    expect((capturedConfig?.connection as Record<string, unknown>)?.connectionTimeoutMs).toBe(10000)
+  })
+
+  it('does not override caller-supplied connect-timeouts (all three driver knobs)', async () => {
+    const manager = getDataSourceManager()
+    manager.registerAdapterType('postgres', CapturingAdapter as never)
+    capturedConfig = null
+    // Call the helper directly: the route's create-schema would strip options.connectTimeout, so a
+    // route request can't exercise that knob's caller-supplied case — the helper preserves all three.
+    await manager.testEphemeralConnection({
+      id: 'eph_t3', name: 'x', type: 'postgres',
+      connection: { host: 'h', connectionTimeoutMs: 1111 },
+      options: { connectTimeout: 2222 },
+      poolConfig: { acquireTimeout: 3333 },
+    } as never)
+    expect(capturedConfig?.poolConfig?.acquireTimeout).toBe(3333)
+    expect((capturedConfig?.options as Record<string, unknown>)?.connectTimeout).toBe(2222)
+    expect((capturedConfig?.connection as Record<string, unknown>)?.connectionTimeoutMs).toBe(1111)
+  })
+
+  it('audits the test attempt (action=test) without leaking connection / credentials', async () => {
+    const manager = getDataSourceManager()
+    manager.registerAdapterType('postgres', OkAdapter as never)
+    ;(auditLog as unknown as { mockClear?: () => void }).mockClear?.()
+    await request(appAs('tester')).post('/api/data-sources/test').send({
+      id: 'eph_audit', name: 'Audit Probe', type: 'postgres',
+      connection: { host: 'secret-host.internal' }, credentials: { username: 'admin_user', password: SECRET },
+    }).expect(200)
+    expect(auditLog).toHaveBeenCalled()
+    const arg = (auditLog as unknown as { mock: { calls: unknown[][] } }).mock.calls.at(-1)?.[0]
+    expect(arg).toMatchObject({ action: 'test', resourceType: 'data_source', resourceId: 'eph_audit' })
+    // meta is constrained to exactly name/success/type — a future connection-derived field can't slip in.
+    expect(Object.keys((arg as { meta: Record<string, unknown> }).meta).sort()).toEqual(['name', 'success', 'type'])
+    const wire = JSON.stringify(arg)
+    for (const leak of [SECRET, 'secret-host.internal', 'admin_user']) {
+      expect(wire).not.toContain(leak)
+    }
+  })
+
+  it('audits a FAILED probe too (meta.success === false), still leaking nothing', async () => {
+    const manager = getDataSourceManager()
+    manager.registerAdapterType('postgres', FailAdapter as never)
+    ;(auditLog as unknown as { mockClear?: () => void }).mockClear?.()
+    await request(appAs('tester')).post('/api/data-sources/test').send({
+      id: 'eph_audit_fail', name: 'x', type: 'postgres',
+      connection: { host: 'secret-host.internal' }, credentials: { username: 'admin_user', password: SECRET },
+    }).expect(200)
+    expect(auditLog).toHaveBeenCalled()
+    const arg = (auditLog as unknown as { mock: { calls: unknown[][] } }).mock.calls.at(-1)?.[0]
+    expect(arg).toMatchObject({ action: 'test', resourceId: 'eph_audit_fail', meta: { success: false } })
+    expect(JSON.stringify(arg)).not.toContain(SECRET)
   })
 })
