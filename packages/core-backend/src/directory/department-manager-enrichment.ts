@@ -64,7 +64,9 @@ export function resolveManagerListForDept(
 }
 
 /**
- * THE SEAM. Best-effort, sequential (QPS-throttled) per-department detail fetch.
+ * THE SEAM. Best-effort, sequential (concurrency=1; explicit min-interval throttle
+ * deferred — there is no real rate limiter yet, throughput is bounded only by
+ * per-call latency) per-department detail fetch.
  * On success sets `managerUserIds` (incl. `[]`); on failure LEAVES IT `undefined`
  * (so the composer carries the prior value forward) and reports via `onError` —
  * it must never throw or fail the whole sync.
