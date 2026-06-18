@@ -65,7 +65,9 @@
         v-for="item in personItems"
         :key="item.id"
         class="meta-cell-renderer__person-chip"
+        :class="{ 'meta-cell-renderer__person-chip--inactive': item.inactive }"
         :title="item.display"
+        :data-inactive="item.inactive ? 'true' : undefined"
       >
         <span class="meta-cell-renderer__person-avatar" aria-hidden="true">{{ item.initial }}</span>
         <span class="meta-cell-renderer__person-name">{{ item.display }}</span>
@@ -361,10 +363,12 @@ const personItems = computed(() => {
   // NATIVE person (type='person', userId[]) → personSummaries. It has NO linkSummaries, so this
   // is the load-bearing display source (an advisor-flagged hidden dependency).
   if (isNativePersonField(props.field)) {
-    const summaryById = new Map((props.personSummaries ?? []).map((s) => [s.id, s.display]))
+    const summaryById = new Map((props.personSummaries ?? []).map((s) => [s.id, s]))
     return nativePersonIds.value.map((id) => {
-      const display = summaryById.get(id) || id
-      return { id, display, initial: personInitial(display) }
+      const summary = summaryById.get(id)
+      const display = summary?.display || id
+      // 2c-S4: surface the deactivated state of a stored assignee (read-only; never re-assignable).
+      return { id, display, initial: personInitial(display), inactive: summary?.inactive === true }
     })
   }
   // LEGACY link-backed person (type='link'+refKind:user, recordId[]) → linkSummaries (unchanged).
@@ -372,6 +376,7 @@ const personItems = computed(() => {
     id: item.id,
     display: item.display,
     initial: personInitial(item.display),
+    inactive: false,
   }))
 })
 
@@ -543,6 +548,18 @@ button.meta-cell-renderer__link--clickable:hover { background: #d9ecff; }
   font-size: 11px;
   max-width: 100%;
   min-width: 0;
+}
+/* 2c-S4: deactivated stored assignee — muted, read-only cue (still shown, never re-assignable). */
+.meta-cell-renderer__person-chip--inactive {
+  background: #f2f3f5;
+  color: #8a9099;
+}
+.meta-cell-renderer__person-chip--inactive .meta-cell-renderer__person-avatar {
+  background: #b8bec7;
+}
+.meta-cell-renderer__person-chip--inactive .meta-cell-renderer__person-name {
+  text-decoration: line-through;
+  text-decoration-color: #b8bec7;
 }
 .meta-cell-renderer__person-avatar {
   display: inline-flex;
