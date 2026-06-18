@@ -39,6 +39,7 @@ const SOCKET = `socket_scalarflush_${TS}`
 
 const F_RATING = 'fld_rating'
 const F_TAGS = 'fld_tags'
+const F_DURATION = 'fld_dur'
 const TAG_OPTS = [{ value: 'x' }, { value: 'y' }, { value: 'z' }]
 
 async function readData(): Promise<Record<string, unknown>> {
@@ -107,13 +108,17 @@ describeIfDatabase('Yjs scalar FLUSH (real DB) — rating/multiSelect round-trip
       'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [F_TAGS, SHEET_ID, 'Tags', 'multiSelect', JSON.stringify({ options: TAG_OPTS }), 2],
     )
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [F_DURATION, SHEET_ID, 'Dur', 'duration', JSON.stringify({ durationFormat: 'h:mm' }), 3],
+    )
   })
   beforeEach(async () => {
     // Fresh starting state each run: rating=1, tags=['x'].
     await q(
       'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1) ' +
         'ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, version = 1',
-      [REC_ID, SHEET_ID, JSON.stringify({ [F_RATING]: 1, [F_TAGS]: ['x'] })],
+      [REC_ID, SHEET_ID, JSON.stringify({ [F_RATING]: 1, [F_TAGS]: ['x'], [F_DURATION]: 60 })],
     )
   })
   afterAll(async () => {
@@ -163,6 +168,9 @@ describeIfDatabase('Yjs scalar FLUSH (real DB) — rating/multiSelect round-trip
       doc.transact(() => {
         fields.set(F_RATING, 4)
         fields.set(F_TAGS, ['x', 'y', 'z'])
+        // 2a-2 duration: commit-on-confirm writes the parsed seconds (a plain number) to the
+        // Y.Map; the bridge must persist a native number (not '5400', not [object Object]).
+        fields.set(F_DURATION, 5400)
       }, SOCKET)
 
       // Wait out the debounce + the async patchRecords landing in Postgres.
@@ -173,6 +181,8 @@ describeIfDatabase('Yjs scalar FLUSH (real DB) — rating/multiSelect round-trip
       expect(typeof data[F_RATING]).toBe('number') // native number, not '4'
       expect(data[F_TAGS]).toEqual(['x', 'y', 'z']) // plain JSON array, not a Y.Array, not stringified
       expect(Array.isArray(data[F_TAGS])).toBe(true)
+      expect(data[F_DURATION]).toBe(5400) // duration seconds — native number
+      expect(typeof data[F_DURATION]).toBe('number') // not '5400', not [object Object]
     } finally {
       bridge.unobserve(REC_ID)
       await svc.destroy()

@@ -215,7 +215,7 @@
       :placeholder="durationFormat"
       :value="durationText"
       @input="onDurationInput"
-      @keydown.enter="emit('confirm')"
+      @keydown.enter="durationConfirm()"
       @keydown.escape="emit('cancel')"
     />
 
@@ -520,8 +520,18 @@ const SCALAR_YJS_TYPES = ['number', 'currency', 'percent', 'boolean', 'rating', 
 // real-DB corruption golden surfaced this). select + date have no such codec
 // conversion (exact string round-trip), so they ship here.
 const STRING_STORED_ATOMIC_YJS_TYPES = ['select', 'date']
+// 2a-2: duration is a plain number (seconds-backed) but commits ON CONFIRM, not per
+// keystroke — its editor's local h:mm buffer (durationText) owns the input while typing
+// (live re-derivation would reformat under the cursor). The binding is constructed so a
+// confirmed edit syncs LWW, but the read defers to the local buffer (the editor is only
+// mounted while editing, so it never drives off the remote value) and the Y.Map write
+// happens only in durationConfirm() — never on @input.
+const DURATION_COMMIT_ON_CONFIRM_YJS_TYPES = ['duration']
 const isScalarYjsType = (t: string | undefined): boolean =>
-  !!t && (SCALAR_YJS_TYPES.includes(t) || STRING_STORED_ATOMIC_YJS_TYPES.includes(t))
+  !!t &&
+  (SCALAR_YJS_TYPES.includes(t) ||
+    STRING_STORED_ATOMIC_YJS_TYPES.includes(t) ||
+    DURATION_COMMIT_ON_CONFIRM_YJS_TYPES.includes(t))
 const scalarFieldIdRef = computed<string | null>(() => {
   if (!props.field || !isScalarYjsType(props.field.type)) return null
   if (!props.recordId) return null
@@ -561,6 +571,18 @@ function commitScalar(next: unknown) {
 // patch (the server bridge persists the Y.Map change), then confirm.
 function scalarConfirm() {
   if (scalarActive.value) emit('yjs-commit')
+  emit('confirm')
+}
+// 2a-2 duration: commit-on-confirm LWW. onDurationInput only updates the local buffer +
+// REST emit (never the Y.Map), so the remote value never reformats the field mid-type
+// (defer-remote-while-dirty). Only on confirm do we write the parsed seconds (a plain
+// number) to the Y.Map when live, then signal yjs-commit so the host skips the redundant
+// REST patch; inactive → just emit('confirm'), byte-identical to before.
+function durationConfirm() {
+  if (scalarActive.value) {
+    scalarBinding.setValue(durationSecondsFromInput(durationText.value, durationFormat.value))
+    emit('yjs-commit')
+  }
   emit('confirm')
 }
 function onBooleanChange(event: Event) {
