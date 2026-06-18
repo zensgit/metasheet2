@@ -32,6 +32,32 @@ describe('ApprovalAssigneeResolver', () => {
     ])
   })
 
+  // direct_manager — resolves to requesterSnapshot.managerId (frozen at start).
+  function resolveDirectManager(requesterSnapshot: Record<string, unknown> | null) {
+    return resolveApprovalAssignees({
+      nodeKey: 'review',
+      sourceStep: 2,
+      config: { assigneeSources: [{ kind: 'direct_manager' }] },
+      formSnapshot: {},
+      requesterSnapshot,
+    })
+  }
+
+  it('resolves direct_manager to the requester snapshot managerId, with resolvedFrom metadata', () => {
+    expect(resolveDirectManager({ id: 'requester-1', managerId: 'manager-9' })).toEqual([
+      { assignmentType: 'user', assigneeId: 'manager-9', nodeKey: 'review', sourceStep: 2, metadata: { resolvedFrom: { kind: 'direct_manager', sourceIndex: 0 } } },
+    ])
+  })
+
+  it('resolves direct_manager to empty when the requester has no manager (falls to emptyAssigneePolicy)', () => {
+    expect(resolveDirectManager({ id: 'requester-1' })).toEqual([])
+    expect(resolveDirectManager(null)).toEqual([])
+  })
+
+  it('excludes self: a direct_manager that resolves to the requester is not a valid manager (empty)', () => {
+    expect(resolveDirectManager({ id: 'requester-1', managerId: 'requester-1' })).toEqual([])
+  })
+
   it('resolves requester and static sources with source metadata', () => {
     expect(resolve({
       assigneeSources: [

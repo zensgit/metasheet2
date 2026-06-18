@@ -122,6 +122,18 @@ export function resolveApprovalAssignees(
         if (requesterId) pushResolved('user', requesterId, source, sourceIndex)
         break
       }
+      case 'direct_manager': {
+        // Resolve to the requester's direct manager, frozen in the requester snapshot at
+        // approval start (no live directory re-query during dispatch/admin-jump/return).
+        // Self-exclusion: a manager that resolves to the requester is not a valid manager,
+        // so we return empty here and let the node's emptyAssigneePolicy decide.
+        const managerId = normalizeId(options.requesterSnapshot?.managerId)
+        const requesterId = normalizeId(options.requesterSnapshot?.id)
+        if (managerId && managerId !== requesterId) {
+          pushResolved('user', managerId, source, sourceIndex)
+        }
+        break
+      }
       case 'form_field_user': {
         assertFormUserSource(source, options.formSchema, options.nodeKey)
         const assigneeId = resolveFormUserValue(options.formSnapshot[source.fieldId])

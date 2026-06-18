@@ -9,7 +9,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager'
 export type ApprovalMode = 'single' | 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
@@ -93,6 +93,7 @@ export type ApprovalAssigneeSource =
   | { kind: 'static_role'; roleIds: string[] }
   | { kind: 'requester' }
   | { kind: 'form_field_user'; fieldId: string }
+  | { kind: 'direct_manager' }
 
 export interface ApprovalAssigneeResolutionMetadata {
   resolvedFrom: {
