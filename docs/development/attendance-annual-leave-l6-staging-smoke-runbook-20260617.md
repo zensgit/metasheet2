@@ -412,7 +412,7 @@ curl -s "${H[@]}" -X PUT "$BASE/api/attendance/settings" \
 # final residue assertion — all four annual tables clean for this org/user
 psql "$PGURL" -v org="'$ORG'" -v emp="'$EMP'" -c "SELECT
    (SELECT count(*) FROM attendance_leave_balances WHERE org_id=:org AND user_id=:emp AND leave_type_code='annual') AS lots,
-   (SELECT count(*) FROM attendance_leave_balance_events WHERE org_id=:org AND user_id=:emp AND source_type IN ('annual_accrual','annual_manual_adjust')) AS events,
+   (SELECT count(*) FROM attendance_leave_balance_events WHERE org_id=:org AND user_id=:emp AND source_type IN ('annual_accrual','annual_manual_adjust','annual_leave_expiry')) AS events,
    (SELECT count(*) FROM attendance_leave_manual_adjustments WHERE org_id=:org AND user_id=:emp AND leave_type_code='annual') AS adjustments,
    (SELECT count(*) FROM attendance_leave_accrual_runs WHERE org_id=:org AND period_key='annual:2026') AS runs;"
 ```
