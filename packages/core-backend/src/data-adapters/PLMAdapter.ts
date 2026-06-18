@@ -2153,10 +2153,11 @@ export class PLMAdapter extends HTTPAdapter {
       const entitled = body.entitled === true
       if (entitled && body.context != null && !isBomMultitableContext(body.context)) {
         // Entitled, and a context object IS present, but its inner shape drifted from the contract
-        // (e.g. a renamed/removed line field). Refuse to pass undefined-laden rows to the review
-        // table: throw so the governed relay degrades to its visible 'error' state instead of
-        // silently rendering corrupt rows. (Benign additions don't trip this -- the guard checks
-        // only the required structural fields.)
+        // (e.g. a renamed/removed/retyped line field). Refuse to pass undefined-laden rows to the
+        // review table: throw so the governed relay degrades to its visible 'error' state instead of
+        // silently rendering corrupt rows. (The guard validates every declared context field --
+        // structural keys and displayed cells alike, null allowed where the type is nullable -- while
+        // tolerating unknown extras, so a benign provider addition does not trip it.)
         throw new Error(`getBomMultitableContext: malformed bom_multitable context shape for part ${partId}`)
       }
       return {
