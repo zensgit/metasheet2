@@ -212,4 +212,69 @@ describe('MetaCellEditor scalar Yjs wiring', () => {
     expect(onYjsCommit).not.toHaveBeenCalled()
     expect(onConfirm).toHaveBeenCalled()
   })
+
+  // --- 2a-1: string-stored atomics select / date (dual-reader; value = exact stored shape) ---
+  it('active select: change writes the option-value string via setValue + emits yjs-commit then confirm', async () => {
+    scalarActive.value = true
+    scalarVal.value = 'optA'
+    const onUpdate = vi.fn(); const onConfirm = vi.fn(); const onYjsCommit = vi.fn()
+    mountField({ id: 'fld_status', name: 'Status', type: 'select', options: [{ value: 'optA' }, { value: 'optB' }] }, 'optA', { 'onUpdate:modelValue': onUpdate, onConfirm, onYjsCommit })
+    const select = container!.querySelector('select') as HTMLSelectElement
+    expect(select).toBeTruthy()
+    select.value = 'optB'
+    select.dispatchEvent(new Event('change'))
+    await nextTick()
+    expect(setValueMock).toHaveBeenCalledWith('optB')
+    expect(onUpdate).toHaveBeenCalledWith('optB')
+    expect(onYjsCommit).toHaveBeenCalled()
+    expect(onConfirm).toHaveBeenCalled()
+  })
+
+  it('inactive select: REST byte-identical — setValue not called, no yjs-commit', async () => {
+    scalarActive.value = false
+    const onUpdate = vi.fn(); const onConfirm = vi.fn(); const onYjsCommit = vi.fn()
+    mountField({ id: 'fld_status', name: 'Status', type: 'select', options: [{ value: 'optA' }, { value: 'optB' }] }, 'optA', { 'onUpdate:modelValue': onUpdate, onConfirm, onYjsCommit })
+    const select = container!.querySelector('select') as HTMLSelectElement
+    select.value = 'optB'
+    select.dispatchEvent(new Event('change'))
+    await nextTick()
+    expect(setValueMock).not.toHaveBeenCalled()
+    expect(onUpdate).toHaveBeenCalledWith('optB')
+    expect(onYjsCommit).not.toHaveBeenCalled()
+    expect(onConfirm).toHaveBeenCalled()
+  })
+
+  it('active date: input writes the date string via setValue; Enter emits yjs-commit then confirm', async () => {
+    scalarActive.value = true
+    scalarVal.value = '2026-01-01'
+    const onUpdate = vi.fn(); const onConfirm = vi.fn(); const onYjsCommit = vi.fn()
+    mountField({ id: 'fld_day', name: 'Day', type: 'date' }, '2026-01-01', { 'onUpdate:modelValue': onUpdate, onConfirm, onYjsCommit })
+    const input = container!.querySelector('input[type="date"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+    input.value = '2026-02-02'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    expect(setValueMock).toHaveBeenCalledWith('2026-02-02')
+    expect(onUpdate).toHaveBeenCalledWith('2026-02-02')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await nextTick()
+    expect(onYjsCommit).toHaveBeenCalled()
+    expect(onConfirm).toHaveBeenCalled()
+  })
+
+  it('inactive date: REST byte-identical — setValue not called, no yjs-commit', async () => {
+    scalarActive.value = false
+    const onUpdate = vi.fn(); const onConfirm = vi.fn(); const onYjsCommit = vi.fn()
+    mountField({ id: 'fld_day', name: 'Day', type: 'date' }, '2026-01-01', { 'onUpdate:modelValue': onUpdate, onConfirm, onYjsCommit })
+    const input = container!.querySelector('input[type="date"]') as HTMLInputElement
+    input.value = '2026-02-02'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    expect(setValueMock).not.toHaveBeenCalled()
+    expect(onUpdate).toHaveBeenCalledWith('2026-02-02')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await nextTick()
+    expect(onYjsCommit).not.toHaveBeenCalled()
+    expect(onConfirm).toHaveBeenCalled()
+  })
 })

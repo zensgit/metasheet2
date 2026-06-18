@@ -144,4 +144,47 @@ describe('useYjsScalarCell', () => {
     m.binding.setValue(2)
     expect(sharedDoc.getMap('fields').get('fld_num')).toBe(1) // unchanged
   })
+
+  // --- 2a-1: dual-reader (coerceText) for string-stored atomics (select/date/dateTime) ---
+  async function mountCoerce(fieldId: string) {
+    const { useYjsScalarCell } = await loadScalar()
+    let binding!: ReturnType<typeof useYjsScalarCell>
+    const Comp = defineComponent({
+      setup() {
+        binding = useYjsScalarCell({ recordId: ref('rec1'), fieldId: ref(fieldId), connectTimeoutMs: 200, coerceText: true })
+        return () => h('div')
+      },
+    })
+    const c = document.createElement('div'); document.body.appendChild(c)
+    const a = createApp(Comp); a.mount(c); await flush()
+    return { binding, app: a, container: c }
+  }
+
+  it('coerceText reads a persisted Y.Text value as its plain string (dual-reader)', async () => {
+    const yt = new Y.Text(); yt.insert(0, 'optA')
+    sharedDoc.getMap('fields').set('fld_sel', yt)
+    const m = await mountCoerce('fld_sel')
+    app = m.app; container = m.container
+    expect(m.binding.active.value).toBe(true)
+    expect(m.binding.value.value).toBe('optA')
+    expect(typeof m.binding.value.value).toBe('string') // not a Y.Text object
+  })
+
+  it('coerceText reads a plain string verbatim (post-convergence)', async () => {
+    sharedDoc.getMap('fields').set('fld_date', '2026-01-01')
+    const m = await mountCoerce('fld_date')
+    app = m.app; container = m.container
+    expect(m.binding.value.value).toBe('2026-01-01')
+  })
+
+  it('coerceText setValue writes a PLAIN string, replacing the Y.Text (lazy convergence)', async () => {
+    const yt = new Y.Text(); yt.insert(0, 'optA')
+    sharedDoc.getMap('fields').set('fld_sel', yt)
+    const m = await mountCoerce('fld_sel')
+    app = m.app; container = m.container
+    m.binding.setValue('optB')
+    const stored = sharedDoc.getMap('fields').get('fld_sel')
+    expect(stored).toBe('optB')
+    expect(stored instanceof Y.Text).toBe(false)
+  })
 })

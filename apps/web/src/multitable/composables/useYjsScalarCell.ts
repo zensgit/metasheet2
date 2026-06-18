@@ -41,6 +41,15 @@ export interface UseYjsScalarCellOptions {
   fieldId: Ref<string | null>
   /** Connect-timeout override (tests). */
   connectTimeoutMs?: number
+  /**
+   * Dual-reader for string-stored atomics (select/date/dateTime). When true, a
+   * `Y.Text` value read from the map is coerced to its string via `.toString()`.
+   * This lets a string-stored atomic cell bind even when an existing/persisted
+   * doc still holds the field as `Y.Text` (the historical seed shape); on the
+   * first `setValue` it converges to a plain string (LWW). Off by default so
+   * genuine non-string scalars (number/boolean/array) are returned verbatim.
+   */
+  coerceText?: boolean
   /** Soft-fallback notification; callers MUST continue with REST regardless. */
   onFallback?: (reason: 'timeout' | 'error' | 'disabled') => void
 }
@@ -113,7 +122,11 @@ export function useYjsScalarCell<T = unknown>(options: UseYjsScalarCellOptions):
     const present = !!map && !!fid && map.has(fid)
     if (yjs.synced.value && present) {
       clearTimer()
-      value.value = map!.get(fid!) as T
+      const raw = map!.get(fid!)
+      // Dual-reader: a string-stored atomic cell (coerceText) may find a
+      // persisted Y.Text under its key — coerce to the plain string. Genuine
+      // scalars are returned verbatim.
+      value.value = (options.coerceText === true && raw instanceof Y.Text ? raw.toString() : raw) as T
       active.value = true
     } else if (!present && active.value) {
       active.value = false
