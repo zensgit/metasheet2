@@ -46,7 +46,8 @@ counts + the **reasons code→count table** (`ALREADY_SET` framed as a concurren
 `{period, dryRun:true}` → summary + `skipReasons` table; **Commit accrual** opens the confirm restating the dry-run
 numbers. When the period is **not the current or next year**, the confirm requires an **extra explicit checkbox**
 (拍板 C — soft-warn, *not* a hard block). The committed result surfaces `runId` + `periodKey` (provenance). The
-commit is **disabled when the policy is off** (load-bearing — the backend `422`s `ANNUAL_LEAVE_NOT_ENABLED`).
+card's actions (dry-run + commit) are **disabled when the policy is off**; accrual's disable is load-bearing — the
+backend `422`s `ANNUAL_LEAVE_NOT_ENABLED` (manual-adjust + backfill are disabled too — see §4).
 
 ## 4. Shared scaffold
 
@@ -58,7 +59,10 @@ commit is **disabled when the policy is off** (load-bearing — the backend `422
 - **`annualOpsPost(path, body, fallback)`** — shared POST that pins `orgId` in the body (so the write lands in the
   current org via `getOrgId` precedence) and surfaces structured `error.code`s; routes `403 → adminForbidden`.
 - **`annualOpsPolicyEnabled`** — computed off `annualPolicyForm.enabled`, hydrated first-screen via
-  `loadSettings → applyAnnualPolicyToForm`; load-bearing disable on the accrual commit, informational hint elsewhere.
+  `loadSettings → applyAnnualPolicyToForm`. When off, **all three cards' mutating actions are disabled** (manual-adjust
+  submit, backfill dry-run/commit, accrual dry-run/commit) — accrual load-bearing (backend `422`s), adjust/backfill for
+  consistency + misoperation-prevention (design-lock §6) — and **`annualOpsPost` carries a handler-level guard** so no
+  card can POST a mutation via a keyboard/direct/test call. The read-only balance **preview** (a GET) stays enabled.
 
 ## 5. Symbols + stable selectors (for L6 + future reference)
 
@@ -72,8 +76,9 @@ off-year extra confirm `[data-annual-ops-extra-confirm]`; policy-off hint `[data
 - **`vue-tsc -b`** (project-references build, not `--noEmit`): **0 errors**.
 - **Local vitest**: `attendance-admin-regressions` + `attendance-admin-anchor-nav` → **119 passed**. New tests:
   manual-adjust (preview → in-DOM confirm → POST body incl. idempotency key → result id); backfill (dry-run code→count
-  table → commit `dryRun:false`); accrual off-year (extra-confirm gating + `skipReasons` table); policy-off accrual
-  disable; **TOCTOU snapshot** (tamper the period while the confirm is open → the POST carries the snapshot, not the
+  table → commit `dryRun:false`); accrual off-year (extra-confirm gating + `skipReasons` table); **policy-off — all
+  three cards' actions disabled and no write POST reaches the backend**; **TOCTOU snapshot** (tamper the period while
+  the confirm is open → the POST carries the snapshot, not the
   tampered value); error-code → human-line mapping.
 - **attendance-web-guard**: anchor-nav `29 → 30` on both literals (`groupLabels` unchanged at 6).
 
@@ -106,11 +111,11 @@ runbook's `user_orgs` single-member-org gate and residue=0 teardown remain the L
 - **A full audit-history viewer** — out of v1; each card surfaces its returned identifiers (adjustment `id`, run
   `runId`/`periodKey`) inline.
 
-## Addendum — #2834: policy-off gate corrected to all three cards (design-lock §6)
+## Addendum — #2834: policy-off gate change history (design-lock §6)
 
-This **supersedes** the policy-off statements above that describe the #2830 build — §3 (Accrual run: "commit disabled
-when the policy is off"), §4 (Shared scaffold: "load-bearing disable on the accrual commit, informational hint
-elsewhere"), and §6's verification list ("policy-off accrual disable"). At #2830 only the **accrual commit** was
+The §3/§4/§6 policy-off口径 above already reflects the **current** (post-#2834) state — all three cards disabled + the
+`annualOpsPost` handler guard. This addendum records the **history** for the audit trail. At #2830 only the **accrual
+commit** was
 disabled when `annualLeavePolicy.enabled === false`; manual-adjustment and backfill stayed callable — inconsistent
 with **design-lock §6** ("all three cards are proactively disabled… the adjustment/backfill cards disable for
 consistency and to steer the operator to enable the policy first").
