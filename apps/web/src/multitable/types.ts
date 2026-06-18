@@ -581,6 +581,8 @@ export interface LinkedRecordSummary {
 export interface PersonSummary {
   id: string
   display: string
+  /** 2c-S4: the stored assignee's user is deactivated (displayed read-only, not re-assignable). */
+  inactive?: boolean
 }
 
 export interface LinkFieldRef {
