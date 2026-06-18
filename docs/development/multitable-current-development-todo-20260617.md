@@ -1,6 +1,10 @@
 # 多维表当前开发 TODO — 2026-06-17
 
-> Status: **CURRENT TODO**.
+> Status: **SUPERSEDED / HISTORICAL TODO SNAPSHOT**.
+> Superseded by: `multitable-gated-remainder-development-plan-20260618.md` and `multitable-gated-remainder-todo-20260618.md`.
+> Reason: after this file was written, `#18` row-level read-deny completed, scalar CRDT reached the six product-wired types, and the D2 perf verdict was re-applied to move grid virtualization out of active remainder. Use the 2026-06-18 gated remainder docs for current next-work routing.
+>
+> Former status: **CURRENT TODO**.
 > Pair: `multitable-current-development-plan-20260617.md`.
 > Grounding: `origin/main@4c5244532`.
 > Markers: `[x]` closed · `[ ]` open · `[~]` optional/demand-gated · `[!]` owner/ops/PM gate.

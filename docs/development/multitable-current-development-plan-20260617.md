@@ -1,6 +1,10 @@
 # 多维表当前开发计划 — 2026-06-17
 
-> Status: **CURRENT ROUTING PLAN**.
+> Status: **SUPERSEDED / HISTORICAL ROUTING SNAPSHOT**.
+> Superseded by: `multitable-gated-remainder-development-plan-20260618.md` and `multitable-gated-remainder-todo-20260618.md`.
+> Reason: after this file was written, `#18` row-level read-deny completed, scalar CRDT reached the six product-wired types, and the D2 perf verdict was re-applied to move grid virtualization out of active remainder. Use the 2026-06-18 gated remainder docs for current next-work routing.
+
+> Former status: **CURRENT ROUTING PLAN**.
 > Grounding: `origin/main@4c5244532` (`docs+chore(multitable): correct recycle-bin contract for #2794 + untrack node_modules`).
 > Purpose: replace the stale "what next?" routing in the 2026-06-10/2026-06-15 ledgers. This file does **not** rewrite historical design-locks; it is the current source of truth for choosing the next multitable development slice.
 
