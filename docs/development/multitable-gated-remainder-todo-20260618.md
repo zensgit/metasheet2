@@ -15,7 +15,7 @@
 - [x] Live scalar CRDT for `number`, `currency`, `percent`, `boolean`.
 - [x] Live scalar CRDT for `rating`, `multiSelect` (`#2821`).
 - [x] Live scalar CRDT for `select` + `date` (`#2832`), `duration` (`#2838`), `dateTime` (`#2849`, 2a-DT-S2 canonical-UTC-ISO invariant) — **2a COMPLETE; full scalar set collaborative, no type deferred** (2026-06-18).
-- [x] CRDT comment hygiene documenting the real seed/bridge/frontend boundary (`#2823`; `#2825` PR head closes the final internal JSDoc/dateTime comment tails, pending merge).
+- [x] CRDT comment hygiene documenting the real seed/bridge/frontend boundary (`#2823`; the final internal JSDoc/dateTime comment tails landed via `#2859`. The earlier `#2825`/`#2857` PR heads are **closed as superseded by `#2859`** — no comment-tail PR is pending merge).
 - [x] Runtime conclusion: no non-gated multitable remainder is open.
 
 ## 1. 2a · Live CRDT Remaining Field Types
@@ -107,7 +107,6 @@ These are future candidates or reopen-only lines. They are not open work in the 
 
 ## 5. Owner Unlock Prompts
 
-Use one of these when opening the next arc (2a is complete and 2b is **complete through S4** `#2861` — those gates are closed, not next options):
+No active multitable development arc remains — **2a, 2b (through S4 `#2861`), and 2c (through S4 `#2874`) are all complete and closed; none is a "next option".** Opening the next arc means starting a new owner-gated line. The only pre-identified candidate:
 
-- **Continue 2c / #16 person directory:** source-of-truth already decided = B + S2 resolver shipped (#2866); next is **S3 picker-UX** (filter to assignable) + **S4 inactive/historical handling**. (The sole in-progress multitable arc.)
 - **Revisit grid performance:** opt into D2 high-scale harness/re-baseline work first; row virtualization stays closed unless the verdict flips.

@@ -174,7 +174,7 @@ Non-goals:
 - Do not introduce a rule DSL without a parser/evaluator golden and a real-DB route golden.
 - Do not assume the current grant/additive row-permission model can express these rules without a new contract.
 
-## 3. 2c · In-Progress Arc (through S2 — source decided)
+## 3. 2c · COMPLETE
 
 ### 3.1 `#16` Person Field → True Org-Member Directory
 
@@ -184,7 +184,7 @@ Current state:
 
 - Native `person` fields exist as first-class fields.
 - `restrictToMemberGroupIds` is a **hard fail-closed validator** (sheet members ∩ allowed groups), enforced across all write paths (#2833 + #2854), with the directory resolver shipped (source B, #2866).
-- Remaining: S3 picker-UX (filter to assignable) + S4 inactive/historical handling (out-of-scope values readable, not newly assignable).
+- No remaining 2c work — S3 picker-UX (filter to assignable, #2867/#2869) and S4 inactive/historical handling (out-of-scope values readable, not newly assignable, #2874) both shipped; detail below retained as history.
 
 Gate:
 
