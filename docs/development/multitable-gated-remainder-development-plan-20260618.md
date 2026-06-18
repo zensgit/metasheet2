@@ -13,18 +13,19 @@ The current multitable mainline has no non-gated residual runtime work.
 Closed and removed from the active remainder:
 
 - `#18` row-level read-deny: foundation, all-surface enforcement, authoring UI, and flag endpoint tests are complete. The flag endpoint includes positive and negative GET authz locks.
-- Live scalar CRDT user-usable edit path: `number`, `currency`, `percent`, `boolean`, `rating`, and `multiSelect` are live.
+- Live scalar CRDT user-usable edit path: `number`, `currency`, `percent`, `boolean`, `rating`, `multiSelect`, and now `select` + `date` (#2832), `duration` (#2838), and `dateTime` (#2849, canonical-UTC-ISO value invariant) are live. **2a is COMPLETE — the full scalar field set is collaborative; no scalar type remains deferred.** (Updated 2026-06-18 after #2849; §1 retained below as history.)
 - CRDT comment hygiene: the repository documents that the backend bridge is a generic plain-value collector, which is not the same as a field type being product-open in the editor.
 
 The remaining development is exactly:
 
-1. **2a · Live CRDT remaining field types**: `select`, `date`, `dateTime`, and `duration`.
-2. **2b · #18 phase-2**: conditional / dynamic field-predicate permission rules.
-3. **2c · Gated arc not started**: `#16` Person field as a true org-member directory.
+1. **2b · #18 phase-2**: conditional / dynamic field-predicate permission rules.
+2. **2c · Gated arc not started**: `#16` Person field as a true org-member directory.
 
 Everything else belongs to a future roadmap pool, not to this closure ledger. See Appendix A.
 
 ## 1. 2a · Live CRDT Remaining Field Types
+
+> **STATUS: CLOSED (2026-06-18).** All field types named below are now live: `select` + `date` (#2832), `duration` (#2838, commit-on-confirm), and `dateTime` (#2849, 2a-DT-S2 — canonical-UTC-ISO value invariant + `coerceText` dual-reader; design-lock `multitable-2a-datetime-live-crdt-designlock-20260618.md` / #2843). The migration gate below was satisfied per type (lazy `coerceText` dual-reader; the strdate real-DB golden covers select/date/dateTime; duration has its own FE + flush proof). Section retained as history; no remaining 2a work.
 
 ### 1.1 Current Contract
 
