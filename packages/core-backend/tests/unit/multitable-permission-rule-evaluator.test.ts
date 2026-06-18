@@ -5,11 +5,13 @@
  * the FAIL-CLOSED paths (missing field, deleted field, operator-not-allowed-for-type, malformed value,
  * thrown predicate -> DENIED); OR-combination; and the no-value-leak reason invariant.
  */
-import { describe, expect, test } from 'vitest'
+import { beforeEach, describe, expect, test } from 'vitest'
 
 import {
   evaluateRecordDenied,
   parseConditionalRules,
+  parseConditionalRulesCached,
+  _clearConditionalRuleParseCache,
   type ConditionalRule,
   type FieldMeta,
 } from '../../src/multitable/permission-rule-evaluator'
@@ -165,5 +167,47 @@ describe('OR-combination + no-leak reason', () => {
   })
   test('empty rule set -> not denied', () => {
     expect(evaluateRecordDenied(rec({ a: 'x' }), [], fields(['a', 'select'])).denied).toBe(false)
+  })
+})
+
+describe('2b-S4 conditional-rule parse cache (content-keyed, staleness-free)', () => {
+  beforeEach(() => _clearConditionalRuleParseCache())
+  const raw = [{ id: 'r1', fieldId: 'f1', operator: 'eq', value: 'x', effect: 'deny_read' }]
+
+  test('identical raw → SAME cached reference (hit)', () => {
+    const a = parseConditionalRulesCached(raw)
+    const b = parseConditionalRulesCached([{ id: 'r1', fieldId: 'f1', operator: 'eq', value: 'x', effect: 'deny_read' }])
+    expect(b).toBe(a) // content-keyed hit, no re-parse
+  })
+
+  test('cached result equals the direct parse (correctness preserved)', () => {
+    expect(parseConditionalRulesCached(raw)).toEqual(parseConditionalRules(raw))
+  })
+
+  test('changed rules → re-parsed (auto-invalidation by content; no stale permissions)', () => {
+    const a = parseConditionalRulesCached(raw)
+    const b = parseConditionalRulesCached([{ id: 'r2', fieldId: 'f1', operator: 'eq', value: 'y', effect: 'deny_read' }])
+    expect(b).not.toBe(a)
+    expect(b.rules[0]?.id).toBe('r2')
+  })
+
+  test('clear hook forces a fresh parse (new ref, identical content)', () => {
+    const a = parseConditionalRulesCached(raw)
+    _clearConditionalRuleParseCache()
+    const b = parseConditionalRulesCached(raw)
+    expect(b).not.toBe(a)
+    expect(b).toEqual(a)
+  })
+
+  test('perf: a large identical rule set parses once across many reads', () => {
+    const big = Array.from({ length: 200 }, (_, i) => ({ id: `r${i}`, fieldId: 'f1', operator: 'eq', value: i, effect: 'deny_read' }))
+    const first = parseConditionalRulesCached(big)
+    for (let i = 0; i < 50; i++) expect(parseConditionalRulesCached(big)).toBe(first) // 50 reads → 1 parse
+  })
+
+  test('unstringifiable input bypasses the cache without throwing', () => {
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    expect(() => parseConditionalRulesCached([cyclic])).not.toThrow()
   })
 })

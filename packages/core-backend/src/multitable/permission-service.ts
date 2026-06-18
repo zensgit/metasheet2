@@ -46,6 +46,7 @@ import {
 import { filterPermissionCodesByNamespaceAdmission } from '../rbac/namespace-admission'
 import {
   parseConditionalRules,
+  parseConditionalRulesCached,
   evaluateRecordDenied,
   type FieldMeta as RuleFieldMeta,
 } from './permission-rule-evaluator'
@@ -1078,7 +1079,7 @@ export async function loadRuleDeniedRecordIds(
     if (isUndefinedColumnError(err, 'conditional_read_rules')) return new Set<string>() // pre-migration → inert
     throw err // a real load failure → propagate (fail-closed: the surface errors, never grants read)
   }
-  const { rules } = parseConditionalRules(rawRules)
+  const { rules } = parseConditionalRulesCached(rawRules) // 2b-S4: content-keyed parse cache (staleness-free; the per-read DB load above is the freshness guarantee)
   if (rules.length === 0) return new Set<string>() // no valid rules → inert
   const fieldsById: Record<string, RuleFieldMeta | undefined> = {}
   const fr = await query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])
