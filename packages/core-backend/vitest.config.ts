@@ -25,6 +25,7 @@ export default defineConfig({
       'tests/integration/approval-wp-add-reduce-sign.api.test.ts',
       'tests/integration/approval-direct-manager.api.test.ts',
       'tests/integration/approval-postgate-acceptance.api.test.ts',
+      'tests/integration/dept-head-sync-plumbing.test.ts',
       'tests/integration/approval-pack1a-lifecycle.api.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
