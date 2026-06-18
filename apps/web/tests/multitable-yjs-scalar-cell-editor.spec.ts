@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App, type Ref } from 'vue'
+import { dateTimeInputValue, dateTimeValueFromLocalInput } from '../src/multitable/utils/field-display'
 
 // Controllable scalar-binding mock: tests flip `scalarActive`/`scalarVal` to
 // exercise the active (Yjs) vs inactive (REST) paths of MetaCellEditor's
@@ -329,5 +330,53 @@ describe('MetaCellEditor scalar Yjs wiring', () => {
     scalarVal.value = 9999 // a remote edit arrives mid-type
     await nextTick()
     expect(input.value).toBe('1:') // still the user's partial buffer, not remote-derived text
+  })
+
+  // ── 2a-DT-S2: dateTime live-CRDT (canonical UTC ISO value invariant) ──
+  it('constructs a dateTime scalar binding with coerceText (dual-reader for old Y.Text docs)', () => {
+    mountField({ id: 'fld_dt', name: 'When', type: 'dateTime' }, null)
+    expect(useYjsScalarCellMock).toHaveBeenCalled()
+    expect(useYjsScalarCellMock.mock.calls[0][0]).toMatchObject({ coerceText: true })
+  })
+
+  it('active dateTime: input writes the CANONICAL UTC ISO via setValue (never the raw local input)', async () => {
+    scalarActive.value = true
+    const onUpdate = vi.fn(); const onConfirm = vi.fn(); const onYjsCommit = vi.fn()
+    mountField({ id: 'fld_dt', name: 'When', type: 'dateTime' }, null, { 'onUpdate:modelValue': onUpdate, onConfirm, onYjsCommit })
+    const input = container!.querySelector('input[type="datetime-local"]') as HTMLInputElement
+    const local = '2026-06-18T14:30'
+    input.value = local
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    const canonical = dateTimeValueFromLocalInput(local)
+    expect(setValueMock).toHaveBeenCalledWith(canonical) // canonical UTC ISO, not the local input
+    expect(setValueMock).not.toHaveBeenCalledWith(local) // the raw local input is NEVER written
+    expect(onUpdate).toHaveBeenCalledWith(canonical)
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await nextTick()
+    expect(onYjsCommit).toHaveBeenCalled()
+    expect(onConfirm).toHaveBeenCalled()
+  })
+
+  it('active dateTime: displays the canonical scalar value in local form (read side)', () => {
+    scalarActive.value = true
+    const canonical = dateTimeValueFromLocalInput('2026-06-18T14:30')
+    scalarVal.value = canonical
+    mountField({ id: 'fld_dt', name: 'When', type: 'dateTime' }, null)
+    const input = container!.querySelector('input[type="datetime-local"]') as HTMLInputElement
+    expect(input.value).toBe(dateTimeInputValue(canonical))
+  })
+
+  it('inactive dateTime: REST path — setValue not called; input still emits canonical update:modelValue', async () => {
+    scalarActive.value = false
+    const onUpdate = vi.fn()
+    mountField({ id: 'fld_dt', name: 'When', type: 'dateTime' }, null, { 'onUpdate:modelValue': onUpdate })
+    const input = container!.querySelector('input[type="datetime-local"]') as HTMLInputElement
+    const local = '2026-06-18T09:00'
+    input.value = local
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    expect(setValueMock).not.toHaveBeenCalled()
+    expect(onUpdate).toHaveBeenCalledWith(dateTimeValueFromLocalInput(local))
   })
 })

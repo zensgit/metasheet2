@@ -17,9 +17,9 @@
       ref="inputRef"
       class="meta-cell-editor__input"
       type="datetime-local"
-      :value="dateTimeInputValue(modelValue)"
-      @input="emit('update:modelValue', dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
-      @keydown.enter="emit('confirm')"
+      :value="dateTimeInputValue(scalarActive ? scalarValue : modelValue)"
+      @input="commitScalar(dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
+      @keydown.enter="scalarConfirm()"
       @keydown.escape="emit('cancel')"
     />
     <!-- string: date-like -->
@@ -503,12 +503,10 @@ const yjsCollaborators = computed(() => yjsBinding.collaborators.value)
 // convergence, no seed flip / migration needed; the value written is the exact
 // stored shape — select option value, date raw string — verified no-corruption
 // on real PG).
-// DEFERRED: `dateTime` — the backend codec normalizes it to canonical UTC ISO, so
-// the editor-written value diverges from the stored form (a tz round-trip/display
-// question; the real-DB golden surfaced it). It remains its own gate (see the
-// dateTime note below). (`duration` was once deferred for the same "local text buffer
-// fights the typist" reason, but now binds via the commit-on-confirm path — see 2a-2 /
-// DURATION_COMMIT_ON_CONFIRM_YJS_TYPES below; it is no longer a separate gate.)
+// `dateTime` (2a-DT-S2) and `duration` (2a-2) were once deferred but now bind: dateTime via
+// the string-stored-atomic path writing the CANONICAL UTC ISO value (see the
+// STRING_STORED_ATOMIC_YJS_TYPES note below), duration via commit-on-confirm
+// (DURATION_COMMIT_ON_CONFIRM_YJS_TYPES). No multitable scalar field type remains deferred.
 // Inactive → byte-identical REST path (setValue is a no-op; nothing changes).
 const SCALAR_YJS_TYPES = ['number', 'currency', 'percent', 'boolean', 'rating', 'multiSelect']
 // 2a-1: string-stored ATOMIC types. Values are strings but atomic (LWW, not
@@ -516,12 +514,13 @@ const SCALAR_YJS_TYPES = ['number', 'currency', 'percent', 'boolean', 'rating', 
 // may exist in a persisted doc as Y.Text (the historical seed shape), so the
 // binding is constructed with coerceText (read Y.Text-or-plain) and writes a
 // plain string on edit — lazy convergence, no seed flip / migration needed.
-// dateTime is DEFERRED: the backend codec normalizes it to a canonical UTC ISO
-// string, so the value the editor writes diverges from the stored form — a tz
-// round-trip/display-consistency question that needs its own decision (the
-// real-DB corruption golden surfaced this). select + date have no such codec
-// conversion (exact string round-trip), so they ship here.
-const STRING_STORED_ATOMIC_YJS_TYPES = ['select', 'date']
+// 2a-DT-S2 (design-lock multitable-2a-datetime-live-crdt-designlock-20260618): dateTime
+// joins here. It is a string-stored atomic with the SAME Y.Text history (coerceText reads
+// old docs), but its editor handler writes the CANONICAL UTC ISO form — the dateTime
+// `@input` calls commitScalar(dateTimeValueFromLocalInput(localInput)), never the raw local
+// input — so cross-TZ collaborators converge on the canonical stored value and the flush
+// preserves the byte-identical REST shape. Display stays local via dateTimeInputValue.
+const STRING_STORED_ATOMIC_YJS_TYPES = ['select', 'date', 'dateTime']
 // 2a-2: duration is a plain number (seconds-backed) but commits ON CONFIRM, not per
 // keystroke — its editor's local h:mm buffer (durationText) owns the input while typing
 // (live re-derivation would reformat under the cursor). The binding is constructed so a
