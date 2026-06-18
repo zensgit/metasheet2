@@ -970,6 +970,7 @@ function createWorkbenchMock() {
       deleteView: vi.fn(),
       listSheetPermissions: vi.fn().mockResolvedValue({ items: [] }),
       listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      listPersonFieldDirectory: vi.fn().mockResolvedValue({ items: [], total: 0, query: '' }),
       updateSheetPermission: vi.fn().mockResolvedValue({}),
       patchRecords: vi.fn(),
       submitForm: vi.fn(),
