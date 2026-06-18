@@ -6,9 +6,9 @@
       ref="inputRef"
       class="meta-cell-editor__input"
       type="date"
-      :value="textControlValue(modelValue)"
-      @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
+      :value="textControlValue(scalarActive ? scalarValue : modelValue)"
+      @input="commitScalar(($event.target as HTMLInputElement).value)"
+      @keydown.enter="scalarConfirm()"
       @keydown.escape="emit('cancel')"
     />
     <!-- datetime field type -->
@@ -146,8 +146,8 @@
       v-else-if="field.type === 'select'"
       ref="inputRef"
       class="meta-cell-editor__select"
-      :value="modelValue ?? ''"
-      @change="emit('update:modelValue', ($event.target as HTMLSelectElement).value); emit('confirm')"
+      :value="(scalarActive ? scalarValue : modelValue) ?? ''"
+      @change="commitScalar(($event.target as HTMLSelectElement).value); scalarConfirm()"
       @keydown.escape="emit('cancel')"
     >
       <option value="">—</option>
@@ -497,16 +497,33 @@ const yjsCollaborators = computed(() => yjsBinding.collaborators.value)
 // `scalarActive` flips true only once a live Y.Doc is attached AND the field
 // key exists in the Y.Map (the backend seeds atomic fields as plain LWW values).
 // Wired for the atomic types that read directly from modelValue (no local edit
-// buffer): numeric/boolean + rating (number) + multiSelect (string[]).
-// DEFERRED: `duration` has an intentional local text buffer decoupled from
-// modelValue (advisor B: live re-derivation fights the typist); `select`/`date`/
-// `dateTime` are string-stored atomics seeded as Y.Text today — flipping them to
-// plain-value is a separate gated call (persisted docs hold them as Y.Text, so it
-// needs a migration story, not just a seed flip).
+// buffer): numeric/boolean + rating (number) + multiSelect (string[]), and (2a-1)
+// the string-stored atomics select + date via the dual-reader (coerceText: a
+// persisted Y.Text reads as a string, an edit writes a plain string → lazy
+// convergence, no seed flip / migration needed; the value written is the exact
+// stored shape — select option value, date raw string — verified no-corruption
+// on real PG).
+// DEFERRED: `dateTime` — the backend codec normalizes it to canonical UTC ISO, so
+// the editor-written value diverges from the stored form (a tz round-trip/display
+// question; the real-DB golden surfaced it). `duration` — an intentional local text
+// buffer (advisor B: live re-derivation fights the typist). Both are separate gates.
 // Inactive → byte-identical REST path (setValue is a no-op; nothing changes).
 const SCALAR_YJS_TYPES = ['number', 'currency', 'percent', 'boolean', 'rating', 'multiSelect']
+// 2a-1: string-stored ATOMIC types. Values are strings but atomic (LWW, not
+// char-merge), so they bind via useYjsScalarCell like the other scalars. They
+// may exist in a persisted doc as Y.Text (the historical seed shape), so the
+// binding is constructed with coerceText (read Y.Text-or-plain) and writes a
+// plain string on edit — lazy convergence, no seed flip / migration needed.
+// dateTime is DEFERRED: the backend codec normalizes it to a canonical UTC ISO
+// string, so the value the editor writes diverges from the stored form — a tz
+// round-trip/display-consistency question that needs its own decision (the
+// real-DB corruption golden surfaced this). select + date have no such codec
+// conversion (exact string round-trip), so they ship here.
+const STRING_STORED_ATOMIC_YJS_TYPES = ['select', 'date']
+const isScalarYjsType = (t: string | undefined): boolean =>
+  !!t && (SCALAR_YJS_TYPES.includes(t) || STRING_STORED_ATOMIC_YJS_TYPES.includes(t))
 const scalarFieldIdRef = computed<string | null>(() => {
-  if (!props.field || !SCALAR_YJS_TYPES.includes(props.field.type)) return null
+  if (!props.field || !isScalarYjsType(props.field.type)) return null
   if (!props.recordId) return null
   return props.field.id
 })
@@ -516,11 +533,13 @@ const inertScalarBinding: YjsScalarCellBinding = {
   setValue: () => { /* inactive: caller keeps using REST */ },
   release: () => { /* nothing to release */ },
 }
-const scalarEligibleAtSetup = !!props.field && SCALAR_YJS_TYPES.includes(props.field.type) && !!props.recordId
+const scalarEligibleAtSetup = !!props.field && isScalarYjsType(props.field.type) && !!props.recordId
 const scalarBinding = scalarEligibleAtSetup
   ? useYjsScalarCell({
       recordId: computed<string | null>(() => recordIdRef.value ?? null),
       fieldId: scalarFieldIdRef,
+      // Dual-reader for string-stored atomics so a persisted Y.Text reads as a string.
+      coerceText: !!props.field && STRING_STORED_ATOMIC_YJS_TYPES.includes(props.field.type),
       onFallback: (reason) => {
         if (reason === 'disabled') return
         // eslint-disable-next-line no-console
