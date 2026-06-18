@@ -94,6 +94,24 @@
       </section>
 
       <section v-if="showOverview" class="attendance__grid attendance__grid--selfservice">
+        <div class="attendance__card attendance__card--selfservice" data-selfservice-card="annual-balance">
+          <div class="attendance__requests-header">
+            <div><h3>{{ tr('My annual leave', '我的年假') }}</h3></div>
+          </div>
+          <p v-if="annualSelfBalanceLoading" class="attendance__field-hint">{{ tr('Loading...', '加载中...') }}</p>
+          <p v-else-if="annualSelfBalanceError" class="attendance__error" data-annual-self-balance-error>{{ annualSelfBalanceError }}</p>
+          <div v-else-if="annualSelfBalance" class="attendance__selfbalance" data-annual-self-balance>
+            <div class="attendance__selfbalance-remaining">
+              <strong>{{ annualSelfBalance.summary.remainingMinutes }}</strong> {{ tr('min remaining', '分钟剩余') }}
+            </div>
+            <small class="attendance__field-hint">
+              {{ tr('Granted', '已发放') }} {{ annualSelfBalance.summary.grantedMinutes }} ·
+              {{ tr('Used', '已用') }} {{ annualSelfBalance.summary.exhaustedMinutes }} ·
+              {{ tr('Expired', '已过期') }} {{ annualSelfBalance.summary.expiredMinutes }}
+            </small>
+          </div>
+          <p v-else class="attendance__field-hint">{{ tr('No annual leave balance yet.', '暂无年假余额。') }}</p>
+        </div>
         <div class="attendance__card attendance__card--selfservice" data-selfservice-card="status">
           <div class="attendance__requests-header">
             <div>
@@ -19837,6 +19855,34 @@ const annualBalanceUserId = ref('')
 const annualBalanceLoading = ref(false)
 const annualBalanceData = ref<AnnualLeaveBalanceData | null>(null)
 
+// 年假/法定假 employee self-service: the overview card reads the caller's OWN balance via the token-locked /me
+// endpoint (no userId — the server forces the subject to the authenticated token). Read-only.
+const annualSelfBalance = ref<AnnualLeaveBalanceData | null>(null)
+const annualSelfBalanceLoading = ref(false)
+const annualSelfBalanceError = ref<string | null>(null)
+
+async function loadAnnualSelfBalance(): Promise<void> {
+  annualSelfBalanceLoading.value = true
+  annualSelfBalanceError.value = null
+  try {
+    const response = await apiFetch('/api/attendance/leave-balances/me?leaveTypeCode=annual')
+    if (response.status === 401 || response.status === 403) {
+      annualSelfBalance.value = null
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load your leave balance', '加载您的休假余额失败')))
+    }
+    // only accept a real balance payload (a summary); anything else leaves the card in its empty state
+    annualSelfBalance.value = data.data && data.data.summary ? (data.data as AnnualLeaveBalanceData) : null
+  } catch (error: any) {
+    annualSelfBalanceError.value = readErrorMessage(error, tr('Failed to load your leave balance', '加载您的休假余额失败'))
+  } finally {
+    annualSelfBalanceLoading.value = false
+  }
+}
+
 async function loadAnnualLeaveBalance() {
   // clear any prior result up front so an empty ID / failed / 403 / errored query never leaves a stale balance
   // from a previously-queried user on screen (the view renders solely on v-if="annualBalanceData").
@@ -23795,6 +23841,9 @@ onMounted(() => {
         refreshAll()
         if (showAdmin.value) {
           loadAdminData()
+        }
+        if (showOverview.value) {
+          void loadAnnualSelfBalance()
         }
       }
     })
