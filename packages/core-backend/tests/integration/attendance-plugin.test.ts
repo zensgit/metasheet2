@@ -5429,6 +5429,59 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④/年假 /me — employee self-read: subject is the token; neither a userId param nor an x-user-id header can read another user', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const meId = `al-me-${runSuffix}`
+    const otherId = `al-me-other-${runSuffix}`
+    // an EMPLOYEE token (attendance:read, NOT admin)
+    const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${meId}&roles=employee&perms=attendance:read`)
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) { await pool.end().catch(() => undefined); return }
+    const headers = { Authorization: `Bearer ${token}` }
+    const mkLot = async (uid: string, amount: number, remaining: number, tag: string) => (await pool.query<{ id: string }>(
+      `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at)
+       VALUES ('default',$1,'annual',$2,$3,'annual_accrual',$4,'active','2026-01-01') RETURNING id`,
+      [uid, amount, remaining, `me:${runSuffix}:${tag}`])).rows[0].id
+    const mkEvent = async (uid: string, balanceId: string, delta: number) => { await pool.query(
+      `INSERT INTO attendance_leave_balance_events (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+       VALUES ('default',$1,$2,'grant',$3,'annual_accrual',$4)`, [uid, balanceId, delta, balanceId]) }
+    try {
+      // the caller has 2400; ANOTHER user has 9999 the caller must NEVER be able to read
+      const myLot = await mkLot(meId, 2400, 2400, 'mine'); await mkEvent(meId, myLot, 2400)
+      const otherLot = await mkLot(otherId, 9999, 9999, 'other'); await mkEvent(otherId, otherLot, 9999)
+
+      // (1) /me returns the caller's OWN balance (subject from the token; no userId param exists on this route)
+      const mine = await requestJson(`${baseUrl}/api/attendance/leave-balances/me`, { headers })
+      expect(mine.status, JSON.stringify(mine.body)).toBe(200)
+      const d1 = (mine.body as { data?: { userId?: string; summary?: { grantedMinutes?: number; remainingMinutes?: number } } } | undefined)?.data
+      expect(d1?.userId).toBe(meId)
+      expect(d1?.summary?.grantedMinutes).toBe(2400)
+      expect(d1?.summary?.remainingMinutes).toBe(2400)
+
+      // (2) a userId QUERY PARAM cannot override the subject → still the caller's 2400, never the other's 9999
+      const spoofParam = await requestJson(`${baseUrl}/api/attendance/leave-balances/me?userId=${encodeURIComponent(otherId)}`, { headers })
+      expect(spoofParam.status).toBe(200)
+      const d2 = (spoofParam.body as { data?: { userId?: string; summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect(d2?.userId).toBe(meId)
+      expect(d2?.summary?.grantedMinutes).toBe(2400)
+
+      // (3) an x-user-id HEADER cannot override the authenticated subject either
+      const spoofHeader = await requestJson(`${baseUrl}/api/attendance/leave-balances/me`, { headers: { ...headers, 'x-user-id': otherId } })
+      expect(spoofHeader.status).toBe(200)
+      const d3 = (spoofHeader.body as { data?: { userId?: string; summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect(d3?.userId).toBe(meId)
+      expect(d3?.summary?.grantedMinutes).toBe(2400)
+    } finally {
+      await pool.query(`DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])`, [[meId, otherId]]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])`, [[meId, otherId]]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('A2 auto-shift auto-write ledger — active-run claim and item invariants are DB-enforced (latent schema)', async () => {
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
     if (!dbUrl) return
