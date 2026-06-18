@@ -355,6 +355,68 @@ export function dataSourcesRouter(): Router {
   })
 
   /**
+   * POST /api/data-sources/test
+   * test-before-save (design-lock 2026-06-17): ephemeral connection test for the create /
+   * credential-rotation form. Accepts the create-payload shape, runs a transient connection test
+   * via DataSourceManager.testEphemeralConnection (persists nothing, registers nothing), and returns
+   * a RESULT-ONLY body — it never echoes back the submitted config / connection / credentials.
+   * rbac `write`: supplying arbitrary connection params + actively dialing out is a write-tier
+   * capability (matches create, and narrows the caller set vs `read`).
+   * NOTE: must precede the `/:id/*` routes is unnecessary (single-segment `/test` cannot match a
+   * two-segment `/:id/test`), but it is grouped with create for clarity.
+   */
+  router.post('/api/data-sources/test', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
+    const parse = DataSourceCreateSchema.safeParse(req.body)
+    if (!parse.success) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: parse.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('; ')
+        }
+      })
+    }
+
+    try {
+      const userId = resolveUserId(req)
+      if (!userId) {
+        return res.status(401).json({
+          ok: false,
+          error: { code: 'UNAUTHENTICATED', message: 'Authentication required' }
+        })
+      }
+      const manager = getManager()
+      const config = parse.data as DataSourceConfig
+      const result = await manager.testEphemeralConnection(config)
+      // RESULT-ONLY surface (design-lock 钉子②): success / latency / redacted error — NEVER echo the
+      // submitted config, connection, or credentials back to the caller.
+      return res.json({
+        ok: true,
+        data: {
+          success: result.success,
+          ...(typeof result.latency === 'number' ? { latency: `${result.latency}ms` } : {}),
+          ...(result.error ? { error: { message: result.error } } : {})
+        }
+      })
+    } catch (error) {
+      // Unsupported type is a client error (mirror create's allowlist semantics), not a 500.
+      if (error instanceof Error && error.message.toLowerCase().includes('unsupported data source type')) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: error.message }
+        })
+      }
+      return res.status(500).json({
+        ok: false,
+        error: {
+          code: 'TEST_FAILED',
+          message: error instanceof Error ? error.message : 'Connection test failed'
+        }
+      })
+    }
+  })
+
+  /**
    * PUT /api/data-sources/:id
    * Update data source configuration (requires reconnect)
    */

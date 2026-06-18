@@ -540,6 +540,46 @@ export class DataSourceManager extends EventEmitter {
     return ok ? { success: true } : { success: false, error: adapter.connectionError ?? undefined }
   }
 
+  // test-before-save (design-lock 2026-06-17): validate connection PARAMS before a source exists,
+  // so the create / credential-rotation form can surface a bad host/credential WITHOUT first
+  // persisting a broken source. Fully EPHEMERAL — builds a transient adapter via the same
+  // `adapterTypes` factory, then connects/probes/disposes. It deliberately does NOT go through
+  // addDataSourceInternal: it never writes `adapters`/`scopes`/`connectionPool`, never persists,
+  // and wires NO manager event forwarding (no `this.emit` / `updateStatus`). The only listener is a
+  // local no-op `error` swallow so BaseDataAdapter.onError()'s `emit('error')` can't throw on an
+  // unhandled emitter error; the redacted cause is still read from `adapter.connectionError`.
+  async testEphemeralConnection(
+    config: DataSourceConfig
+  ): Promise<{ success: boolean; latency?: number; error?: string }> {
+    const AdapterClass = this.adapterTypes.get(config.type.toLowerCase())
+    if (!AdapterClass) {
+      // Mirror addDataSourceInternal's wording; the route maps this to a 400 (client error).
+      throw new Error(`Unsupported data source type: ${config.type}`)
+    }
+    const adapter = new AdapterClass(config)
+    adapter.on('error', () => { /* ephemeral: cause captured via connectionError; no emit/persist */ })
+    const start = Date.now()
+    try {
+      if (!adapter.isConnected()) {
+        await adapter.connect() // throws on failure; onError records the redacted cause
+      }
+      const ok = await adapter.testConnection()
+      const latency = Date.now() - start
+      return ok
+        ? { success: true, latency }
+        : { success: false, latency, error: adapter.connectionError ?? undefined }
+    } catch {
+      return { success: false, latency: Date.now() - start, error: adapter.connectionError ?? undefined }
+    } finally {
+      try {
+        if (adapter.isConnected()) await adapter.disconnect()
+      } catch {
+        // best-effort teardown of the transient adapter
+      }
+      adapter.removeAllListeners()
+    }
+  }
+
   // Query routing methods
   async query<T = Record<string, DbValue>>(
     dataSourceId: string,
