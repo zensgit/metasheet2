@@ -78,7 +78,7 @@
 
 ## 2. 2b · #18 Phase-2 Conditional Permission Rules
 
-> **SHIPPED THROUGH S3 (2026-06-18).** S1 #2836, S2 #2841 (wired into the #18 seam, flag-off inert), S3 #2847. The gate (rule + threat model, S0) is settled by those. Only **S4 (perf/caching)** remains, and it is demand-gated. Sub-items below are retained as history.
+> **COMPLETE — S1–S4 (2026-06-18).** S1 #2836, S2 #2841 (wired into the #18 seam, flag-off inert), S3 #2847, S4 #2861 (content-keyed parse cache, staleness-free — DB reads not cached). All slices shipped; sub-items below retained as history. The only remaining multitable arc is **2c** (owner-gated on source-of-truth).
 
 - [x] Gate: owner-approved rule model and threat model — settled (S1–S3 built on it).
   - [ ] Decide rule language and field/operator matrix.
@@ -113,7 +113,7 @@
   - [ ] Browser evidence for create/edit/delete rule flows.
   - [ ] i18n labels through typed modules.
 
-- [~] 2b-S4 Performance/caching — REMAINING, demand-gated (do on a large-rule-set perf need, else deferred).
+- [x] 2b-S4 Performance/caching (#2861 — content-keyed parse cache; staleness-free, DB reads not cached).
   - [ ] Large fixture query evidence.
   - [ ] Rule-change invalidation tests.
   - [ ] Field-change invalidation tests.
