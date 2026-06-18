@@ -505,8 +505,10 @@ const yjsCollaborators = computed(() => yjsBinding.collaborators.value)
 // on real PG).
 // DEFERRED: `dateTime` — the backend codec normalizes it to canonical UTC ISO, so
 // the editor-written value diverges from the stored form (a tz round-trip/display
-// question; the real-DB golden surfaced it). `duration` — an intentional local text
-// buffer (advisor B: live re-derivation fights the typist). Both are separate gates.
+// question; the real-DB golden surfaced it). It remains its own gate (see the
+// dateTime note below). (`duration` was once deferred for the same "local text buffer
+// fights the typist" reason, but now binds via the commit-on-confirm path — see 2a-2 /
+// DURATION_COMMIT_ON_CONFIRM_YJS_TYPES below; it is no longer a separate gate.)
 // Inactive → byte-identical REST path (setValue is a no-op; nothing changes).
 const SCALAR_YJS_TYPES = ['number', 'currency', 'percent', 'boolean', 'rating', 'multiSelect']
 // 2a-1: string-stored ATOMIC types. Values are strings but atomic (LWW, not
