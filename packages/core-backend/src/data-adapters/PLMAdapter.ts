@@ -722,21 +722,50 @@ export interface BomMultitableContextResult {
   context: BomMultitableContext | null;
 }
 
-// Structural guard for the governed BOM multi-table context. Validates ONLY the fields the review
-// table depends on as keys/structure: the stable row key `bom_line_id`, the line `part_id`, the
-// hierarchy `level`/`path`, `sync_status`, the context `part.part_id`, the `lines` array and the
-// `template_key`. It deliberately TOLERATES extra/unknown fields (so a benign provider addition does
-// not trip it) and only rejects a renamed / removed / retyped REQUIRED field — exactly the drift that
-// would otherwise pass `typeof === 'object'` and render `undefined` rows. Used to fail LOUDLY (throw →
-// the governed relay degrades to its visible 'error' state) instead of corrupting the table silently.
+// Field guard for the governed BOM multi-table context. Validates EVERY field declared on
+// BomMultitableLine / BomMultitablePart / BomMultitableContext — both the structural keys
+// (bom_line_id, part_id, level, path, ...) AND the displayed cells (item_number, name, state,
+// quantity, uom, refdes, source_version, source_updated_at, ...), because the review table renders
+// those too: a renamed/removed *display* field would otherwise pass `typeof === 'object'` and render
+// silent empty cells (the same drift class as a missing row key). Nullable fields accept the typed
+// value OR null (a legitimate null is NOT drift); an ABSENT / renamed / retyped key IS caught. Extra
+// unknown fields are TOLERATED (a benign provider addition does not trip it). Used to fail LOUDLY
+// (throw → the governed relay degrades to its visible 'error' state) instead of corrupting silently.
+const isStringOrNull = (v: unknown): boolean => typeof v === 'string' || v === null;
+const isNumberOrNull = (v: unknown): boolean => typeof v === 'number' || v === null;
+const isStringArray = (v: unknown): boolean => Array.isArray(v) && v.every((x) => typeof x === 'string');
+
+function isBomMultitablePart(value: unknown): value is BomMultitablePart {
+  const p = value as Record<string, unknown> | null;
+  return (
+    !!p && typeof p === 'object'
+    && typeof p.part_id === 'string'
+    && isStringOrNull(p.item_number)
+    && isStringOrNull(p.name)
+    && isStringOrNull(p.state)
+    && isNumberOrNull(p.generation)
+  );
+}
+
 function isBomMultitableLine(value: unknown): value is BomMultitableLine {
   const l = value as Record<string, unknown> | null;
   return (
     !!l && typeof l === 'object'
     && typeof l.bom_line_id === 'string' && l.bom_line_id.length > 0
     && typeof l.part_id === 'string'
+    && isStringOrNull(l.item_number)
+    && isStringOrNull(l.name)
+    && isStringOrNull(l.state)
+    && isNumberOrNull(l.generation)
+    && isNumberOrNull(l.quantity)
+    && isStringOrNull(l.uom)
+    && isStringOrNull(l.find_num)
+    && isStringOrNull(l.refdes)
     && typeof l.level === 'number'
-    && Array.isArray(l.path)
+    && isStringArray(l.path)
+    && isStringArray(l.path_labels)
+    && isNumberOrNull(l.source_version)
+    && isStringOrNull(l.source_updated_at)
     && typeof l.sync_status === 'string'
   );
 }
@@ -744,10 +773,12 @@ function isBomMultitableLine(value: unknown): value is BomMultitableLine {
 function isBomMultitableContext(value: unknown): value is BomMultitableContext {
   const c = value as Record<string, unknown> | null;
   if (!c || typeof c !== 'object') return false;
-  const part = c.part as Record<string, unknown> | null;
-  if (!part || typeof part !== 'object' || typeof part.part_id !== 'string') return false;
-  if (typeof c.template_key !== 'string') return false;
+  if (!isBomMultitablePart(c.part)) return false;
   if (!Array.isArray(c.lines) || !c.lines.every(isBomMultitableLine)) return false;
+  if (!isNumberOrNull(c.source_version)) return false;
+  if (!isStringOrNull(c.source_updated_at)) return false;
+  if (typeof c.sync_status !== 'string') return false;
+  if (typeof c.template_key !== 'string') return false;
   return true;
 }
 

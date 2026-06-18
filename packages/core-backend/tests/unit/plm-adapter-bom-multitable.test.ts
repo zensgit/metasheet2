@@ -126,4 +126,35 @@ describe('PLMAdapter.getBomMultitableContext (PLM-COLLAB P3-C)', () => {
     expect(result.entitled).toBe(true)
     expect(result.context).toEqual(withExtra)
   })
+
+  it('yuantus + entitled but a DISPLAYED field drifts (quantity renamed -> qty): THROWS (display drift is the same failure class as a missing row key)', async () => {
+    const adapter = createAdapter('yuantus')
+    const drifted = {
+      ...PROVIDER_CONTEXT,
+      lines: [{ ...PROVIDER_CONTEXT.lines[0], quantity: undefined, qty: 2 }],
+    }
+    ;(adapter as never as { query: unknown }).query = vi.fn().mockResolvedValue({
+      data: [{ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: drifted }],
+    })
+
+    await expect(adapter.getBomMultitableContext('P1')).rejects.toThrow(/malformed/i)
+  })
+
+  it('yuantus + entitled with legitimate null cells (quantity/uom/source_updated_at = null): relays (null is a valid value, not drift)', async () => {
+    const adapter = createAdapter('yuantus')
+    const withNulls = {
+      ...PROVIDER_CONTEXT,
+      source_version: null,
+      source_updated_at: null,
+      lines: [{ ...PROVIDER_CONTEXT.lines[0], quantity: null, uom: null, item_number: null, source_version: null, source_updated_at: null }],
+    }
+    ;(adapter as never as { query: unknown }).query = vi.fn().mockResolvedValue({
+      data: [{ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: withNulls }],
+    })
+
+    const result = await adapter.getBomMultitableContext('P1')
+
+    expect(result.entitled).toBe(true)
+    expect(result.context).toEqual(withNulls)
+  })
 })
