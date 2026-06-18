@@ -6232,6 +6232,105 @@
             </div>
 
             <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations)"
+            >
+              <div class="attendance__admin-section-header">
+                <h4>{{ tr('Annual leave operations', '年假操作') }}</h4>
+              </div>
+              <p v-if="!annualOpsPolicyEnabled" class="attendance__hint" data-annual-ops-policy-off>
+                {{ tr('The annual leave engine is disabled — accrual is blocked until you enable it in', '年假引擎未启用——发放将被拦截，请先在') }}
+                <a href="#attendance-admin-annual-leave-policy" @click.prevent="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.annualLeavePolicy)">{{ tr('Annual leave policy', '年假策略') }}</a>.
+              </p>
+
+              <div class="attendance__admin-subsection" data-annual-ops-card="adjust">
+                <h5>{{ tr('Manual adjustment', '手工调整') }}</h5>
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field"><span>{{ tr('User ID', '用户 ID') }}</span><input v-model="annualAdjustForm.userId" type="text" /></label>
+                  <label class="attendance__field"><span>{{ tr('Delta (minutes, ±)', '变动(分钟,±)') }}</span><input v-model.number="annualAdjustForm.deltaMinutes" type="number" /></label>
+                  <label class="attendance__field"><span>{{ tr('Reason', '原因') }}</span><input v-model="annualAdjustForm.reason" type="text" maxlength="500" /></label>
+                </div>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn" @click="() => previewAnnualAdjust()">{{ tr('Preview', '预览') }}</button>
+                  <button class="attendance__btn attendance__btn--primary" :disabled="annualAdjustSubmitting" @click="() => requestAnnualAdjust()">{{ annualAdjustSubmitting ? tr('Submitting...', '提交中...') : tr('Adjust balance', '调整余额') }}</button>
+                </div>
+                <p v-if="annualAdjustPreview" class="attendance__hint">{{ tr('Preview (client)', '预览(客户端)') }}: {{ annualAdjustPreview.before }} → {{ annualAdjustPreview.after }} {{ tr('min', '分钟') }} — <em>{{ tr('advisory; the server is the final authority', '仅供参考，以服务端为准') }}</em></p>
+                <p v-if="annualAdjustError" class="attendance__error" data-annual-ops-error-adjust>{{ annualAdjustError }}</p>
+                <div v-if="annualAdjustResult" class="attendance__annual-ops-result" data-annual-ops-result-adjust>
+                  <span v-if="annualAdjustResult.applied">✅ {{ tr('Applied', '已应用') }}</span>
+                  <span v-else-if="annualAdjustResult.alreadyApplied">↻ {{ tr('Already applied (no change)', '已应用(无变化)') }}</span>
+                  <span>{{ tr('Delta', '变动') }}: {{ annualAdjustResult.delta }} {{ tr('min', '分钟') }}</span>
+                  <span>{{ tr('Adjustment id', '调整 id') }}: {{ annualAdjustResult.id }}</span>
+                </div>
+              </div>
+
+              <div class="attendance__admin-subsection" data-annual-ops-card="backfill">
+                <h5>{{ tr('Expiry backfill', '过期回填') }}</h5>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn" :disabled="annualBackfillRunning" @click="() => runAnnualBackfillDryRun()">{{ tr('Dry-run', '预演') }}</button>
+                  <button class="attendance__btn attendance__btn--primary" :disabled="annualBackfillRunning || !annualBackfillDry" @click="() => requestAnnualBackfillCommit()">{{ tr('Commit backfill', '提交回填') }}</button>
+                </div>
+                <p v-if="annualBackfillError" class="attendance__error" data-annual-ops-error-backfill>{{ annualBackfillError }}</p>
+                <div v-if="annualBackfillDry" class="attendance__annual-ops-result" data-annual-ops-result-backfill>
+                  <h6>{{ tr('Dry-run', '预演') }}</h6>
+                  <span>{{ tr('Scanned', '扫描') }}: {{ annualBackfillDry.scanned }} · {{ tr('Updated', '更新') }}: {{ annualBackfillDry.updated }} · {{ tr('Skipped', '跳过') }}: {{ annualBackfillDry.skipped }}</span>
+                  <table v-if="Object.keys(annualBackfillDry.reasons || {}).length" class="attendance__table">
+                    <thead><tr><th>{{ tr('Reason', '原因') }}</th><th>{{ tr('Count', '数量') }}</th></tr></thead>
+                    <tbody><tr v-for="(count, code) in annualBackfillDry.reasons" :key="code"><td>{{ code }}</td><td>{{ count }}</td></tr></tbody>
+                  </table>
+                </div>
+                <div v-if="annualBackfillCommitted" class="attendance__annual-ops-result" data-annual-ops-committed-backfill>
+                  <h6>{{ tr('Committed', '已提交') }}</h6>
+                  <span>{{ tr('Updated', '更新') }}: {{ annualBackfillCommitted.updated }} / {{ annualBackfillCommitted.scanned }}</span>
+                </div>
+              </div>
+
+              <div class="attendance__admin-subsection" data-annual-ops-card="accrual">
+                <h5>{{ tr('Accrual run', '发放') }}</h5>
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field"><span>{{ tr('Period (year)', '年度') }}</span><input v-model.number="annualAccrualForm.period" type="number" /></label>
+                  <label class="attendance__field"><span>{{ tr('As-of (optional)', 'as-of(可选)') }}</span><input v-model="annualAccrualForm.asOf" type="date" /></label>
+                </div>
+                <p v-if="annualAccrualOffYear" class="attendance__hint" data-annual-ops-accrual-offyear>⚠ {{ tr('Period is not the current or next year — committing requires an extra confirmation.', '年度非当前或次年——提交需要额外确认。') }}</p>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn" :disabled="annualAccrualRunning" @click="() => runAnnualAccrualDryRun()">{{ tr('Dry-run', '预演') }}</button>
+                  <button class="attendance__btn attendance__btn--primary" :disabled="annualAccrualRunning || !annualAccrualDry || !annualOpsPolicyEnabled" @click="() => requestAnnualAccrualCommit()">{{ tr('Commit accrual', '提交发放') }}</button>
+                </div>
+                <p v-if="annualAccrualError" class="attendance__error" data-annual-ops-error-accrual>{{ annualAccrualError }}</p>
+                <div v-if="annualAccrualDry" class="attendance__annual-ops-result" data-annual-ops-result-accrual>
+                  <h6>{{ tr('Dry-run', '预演') }}</h6>
+                  <span>{{ tr('Granted', '发放') }}: {{ annualAccrualDry.granted }} · {{ tr('Minutes', '分钟') }}: {{ annualAccrualDry.grantedMinutes }} · {{ tr('Skipped', '跳过') }}: {{ annualAccrualDry.skipped }}</span>
+                  <table v-if="Object.keys(annualAccrualDry.skipReasons || {}).length" class="attendance__table">
+                    <thead><tr><th>{{ tr('Skip reason', '跳过原因') }}</th><th>{{ tr('Count', '数量') }}</th></tr></thead>
+                    <tbody><tr v-for="(count, code) in annualAccrualDry.skipReasons" :key="code"><td>{{ code }}</td><td>{{ count }}</td></tr></tbody>
+                  </table>
+                </div>
+                <div v-if="annualAccrualCommitted" class="attendance__annual-ops-result" data-annual-ops-committed-accrual>
+                  <h6>{{ tr('Committed', '已提交') }}</h6>
+                  <span>{{ tr('Lots created', '创建额度') }}: {{ annualAccrualCommitted.lotsCreated }} · {{ tr('Already granted', '已发放') }}: {{ annualAccrualCommitted.alreadyGranted }}</span>
+                  <span>{{ tr('Run id', '运行 id') }}: {{ annualAccrualCommitted.runId }} · {{ tr('Period', '年度') }}: {{ annualAccrualCommitted.periodKey }}</span>
+                </div>
+              </div>
+
+              <div v-if="annualOpsConfirm.open" class="attendance__modal" role="dialog" aria-modal="true" data-annual-ops-confirm>
+                <div class="attendance__modal-body">
+                  <h5>{{ annualOpsConfirm.title }}</h5>
+                  <table class="attendance__table">
+                    <tbody><tr v-for="(line, i) in annualOpsConfirm.lines" :key="i"><th>{{ line.label }}</th><td>{{ line.value }}</td></tr></tbody>
+                  </table>
+                  <label v-if="annualOpsConfirm.extraConfirmRequired" class="attendance__field" data-annual-ops-extra-confirm>
+                    <input type="checkbox" v-model="annualOpsConfirm.extraConfirmChecked" /> <span>{{ annualOpsConfirm.extraConfirmLabel }}</span>
+                  </label>
+                  <div class="attendance__admin-actions">
+                    <button class="attendance__btn" @click="() => closeAnnualOpsConfirm()">{{ tr('Cancel', '取消') }}</button>
+                    <button class="attendance__btn attendance__btn--primary" :disabled="annualOpsConfirm.extraConfirmRequired && !annualOpsConfirm.extraConfirmChecked" @click="() => confirmAnnualOps()" data-annual-ops-confirm-submit>{{ tr('Confirm', '确认') }}</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)"
               class="attendance__admin-section"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)"
@@ -19915,6 +20014,301 @@ async function saveAnnualPolicy() {
     setStatus(readErrorMessage(error, tr('Failed to save annual leave policy', '保存年假策略失败')), 'error')
   } finally {
     annualPolicySaving.value = false
+  }
+}
+
+// ===== 年假/法定假 L5c: admin operations (the three balance-mutating actions) =====
+// Three cards (manual adjustment / expiry backfill / accrual run) behind one in-DOM two-step confirm. The three
+// back-ends DIFFER and are kept distinct: manual-adjust has NO server dry-run (client preview only; backend 422
+// is final) and returns {id,delta,applied,alreadyApplied} — NOT a reasons map; backfill + accrual have a server
+// dry-run and return a {code→count} reasons/skipReasons map. Cards are proactively disabled when the policy is
+// off (load-bearing for accrual; UX-only hint for the others).
+
+// -- shared in-DOM confirm panel (mirrors the role="dialog" pattern; window.confirm can't restate a request) --
+interface AnnualOpsConfirmLine { label: string; value: string }
+const annualOpsConfirm = reactive<{
+  open: boolean
+  title: string
+  lines: AnnualOpsConfirmLine[]
+  extraConfirmRequired: boolean
+  extraConfirmChecked: boolean
+  extraConfirmLabel: string
+  onConfirm: (() => void) | null
+}>({ open: false, title: '', lines: [], extraConfirmRequired: false, extraConfirmChecked: false, extraConfirmLabel: '', onConfirm: null })
+
+function openAnnualOpsConfirm(payload: { title: string; lines: AnnualOpsConfirmLine[]; extraConfirmRequired?: boolean; extraConfirmLabel?: string; onConfirm: () => void }): void {
+  annualOpsConfirm.open = true
+  annualOpsConfirm.title = payload.title
+  annualOpsConfirm.lines = payload.lines
+  annualOpsConfirm.extraConfirmRequired = payload.extraConfirmRequired === true
+  annualOpsConfirm.extraConfirmChecked = false
+  annualOpsConfirm.extraConfirmLabel = payload.extraConfirmLabel || ''
+  annualOpsConfirm.onConfirm = payload.onConfirm
+}
+function closeAnnualOpsConfirm(): void {
+  annualOpsConfirm.open = false
+  annualOpsConfirm.onConfirm = null
+}
+function confirmAnnualOps(): void {
+  if (annualOpsConfirm.extraConfirmRequired && !annualOpsConfirm.extraConfirmChecked) return
+  const cb = annualOpsConfirm.onConfirm
+  closeAnnualOpsConfirm()
+  if (cb) cb()
+}
+
+// -- the policy.enabled gate (hydrated first-screen via loadSettings → applyAnnualPolicyToForm) --
+const annualOpsPolicyEnabled = computed(() => annualPolicyForm.enabled === true)
+
+// -- shared failure-code → human line mapper (per-card code sets live in §3; this carries them all + a fallback) --
+function annualOpsErrorLine(code: string): string {
+  switch (code) {
+    case 'ANNUAL_LEAVE_NOT_ENABLED': return tr('The annual leave engine is disabled — enable it in Annual leave policy first.', '年假引擎未启用——请先在「年假策略」中启用。')
+    case 'ANNUAL_LEAVE_TIMEZONE_REQUIRED': return tr('The policy is missing a timezone.', '策略缺少时区。')
+    case 'ANNUAL_LEAVE_TIMEZONE_INVALID': return tr('The policy timezone is not a valid IANA zone.', '策略时区不是有效的 IANA 时区。')
+    case 'ANNUAL_LEAVE_INVALID_ASOF': return tr('The as-of date is invalid.', 'as-of 日期无效。')
+    case 'ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED': return tr('Multi-day standard-day conversion is not supported.', '不支持多天标准工作日折算。')
+    case 'USER_NOT_IN_ORG': return tr('That user is not an active member of this org.', '该用户不是本组织的有效成员。')
+    case 'ANNUAL_LEAVE_ADJUST_DELTA_INVALID': return tr('The adjustment amount must be non-zero.', '调整数值必须非零。')
+    case 'ANNUAL_LEAVE_BALANCE_INSUFFICIENT': return tr('Insufficient balance — the negative adjustment exceeds the available active lots.', '余额不足——负向调整超过可用额度。')
+    case 'ANNUAL_LEAVE_ADJUST_IDEMPOTENCY_CONFLICT': return tr('This idempotency key already names a different adjustment.', '该幂等键已对应另一笔不同的调整。')
+    case 'DB_NOT_READY': return tr('Attendance tables are not ready on this environment.', '本环境的考勤表尚未就绪。')
+    case 'VALIDATION_ERROR': return tr('The request was rejected as invalid.', '请求校验失败。')
+    default: return tr('The operation failed', '操作失败') + (code ? ` (${code})` : '')
+  }
+}
+
+// -- shared POST helper: pins orgId in the body so the write lands in the current org; surfaces structured codes --
+async function annualOpsPost(path: string, body: Record<string, unknown>, fallbackMsg: string): Promise<any | null> {
+  const response = await apiFetch(path, { method: 'POST', body: JSON.stringify({ orgId: normalizedOrgId(), ...body }) })
+  if (response.status === 403) {
+    adminForbidden.value = true
+    return null
+  }
+  const data = await response.json()
+  if (!response.ok || !data.ok) {
+    const code = data?.error?.code
+    throw new Error(code ? annualOpsErrorLine(code) : readErrorMessage(data, fallbackMsg))
+  }
+  adminForbidden.value = false
+  return data.data
+}
+function annualOpsIdempotencyKey(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  } catch { /* fall through */ }
+  return `annual-adjust-${Date.now()}-${Math.floor(Math.random() * 1e9)}`
+}
+
+// -- Card 1: manual adjustment (client preview; backend 422 final; returns {id,delta,applied,alreadyApplied}) --
+interface AnnualAdjustResult { id: string; delta: number; applied: boolean; alreadyApplied: boolean }
+const annualAdjustForm = reactive<{ userId: string; deltaMinutes: number; reason: string }>({ userId: '', deltaMinutes: 0, reason: '' })
+const annualAdjustSubmitting = ref(false)
+const annualAdjustResult = ref<AnnualAdjustResult | null>(null)
+const annualAdjustError = ref<string | null>(null)
+const annualAdjustPreview = ref<{ user: string; before: number; after: number } | null>(null)
+const annualAdjustIdemKey = ref('')
+
+async function previewAnnualAdjust(): Promise<void> {
+  const userId = annualAdjustForm.userId.trim()
+  annualAdjustError.value = null
+  annualAdjustPreview.value = null
+  if (!userId) {
+    annualAdjustError.value = tr('Enter a user ID first', '请先输入用户 ID')
+    return
+  }
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId(), userId, leaveTypeCode: 'annual' })
+    const response = await apiFetch(`/api/attendance/leave-balances?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to read balance', '读取余额失败')))
+    }
+    adminForbidden.value = false
+    // client preview ONLY — advisory; the backend 422 (FIFO-insufficient) is the final authority on a save.
+    const before = Number(data.data?.summary?.remainingMinutes) || 0
+    annualAdjustPreview.value = { user: userId, before, after: before + (Number(annualAdjustForm.deltaMinutes) || 0) }
+  } catch (error: any) {
+    annualAdjustError.value = readErrorMessage(error, tr('Failed to read balance', '读取余额失败'))
+  }
+}
+
+function requestAnnualAdjust(): void {
+  annualAdjustError.value = null
+  const userId = annualAdjustForm.userId.trim()
+  const delta = Number(annualAdjustForm.deltaMinutes)
+  const reason = annualAdjustForm.reason.trim()
+  if (!userId) {
+    annualAdjustError.value = tr('Enter a user ID', '请输入用户 ID')
+    return
+  }
+  if (!Number.isInteger(delta) || delta === 0) {
+    annualAdjustError.value = tr('The adjustment must be a non-zero whole number of minutes', '调整必须是非零整数分钟')
+    return
+  }
+  if (!reason) {
+    annualAdjustError.value = tr('A reason is required', '必须填写原因')
+    return
+  }
+  annualAdjustIdemKey.value = annualOpsIdempotencyKey()
+  const preview = annualAdjustPreview.value
+  openAnnualOpsConfirm({
+    title: tr('Confirm manual adjustment', '确认手工调整'),
+    lines: [
+      { label: tr('User', '用户'), value: userId },
+      { label: tr('Delta (min)', '变动(分钟)'), value: (delta > 0 ? '+' : '') + delta },
+      ...(preview && preview.user === userId ? [{ label: tr('Remaining (preview)', '剩余(预览)'), value: `${preview.before} → ${preview.after}` }] : []),
+      { label: tr('Reason', '原因'), value: reason },
+      { label: tr('Idempotency key', '幂等键'), value: annualAdjustIdemKey.value },
+    ],
+    onConfirm: () => { void submitAnnualAdjust() },
+  })
+}
+
+async function submitAnnualAdjust(): Promise<void> {
+  annualAdjustSubmitting.value = true
+  annualAdjustError.value = null
+  annualAdjustResult.value = null
+  try {
+    const data = await annualOpsPost('/api/attendance/annual-leave-manual-adjustment', {
+      userId: annualAdjustForm.userId.trim(),
+      deltaMinutes: Number(annualAdjustForm.deltaMinutes),
+      reason: annualAdjustForm.reason.trim(),
+      idempotencyKey: annualAdjustIdemKey.value,
+    }, tr('Failed to adjust balance', '调整余额失败'))
+    if (data) annualAdjustResult.value = data as AnnualAdjustResult
+  } catch (error: any) {
+    annualAdjustError.value = readErrorMessage(error, tr('Failed to adjust balance', '调整余额失败'))
+  } finally {
+    annualAdjustSubmitting.value = false
+  }
+}
+
+// -- Card 2: expiry backfill (server dry-run; returns {scanned,updated,skipped,reasons{code→count}}) --
+interface AnnualBackfillSummary { scanned: number; updated: number; skipped: number; reasons: Record<string, number> }
+const annualBackfillRunning = ref(false)
+const annualBackfillDry = ref<AnnualBackfillSummary | null>(null)
+const annualBackfillCommitted = ref<AnnualBackfillSummary | null>(null)
+const annualBackfillError = ref<string | null>(null)
+
+async function runAnnualBackfillDryRun(): Promise<void> {
+  annualBackfillRunning.value = true
+  annualBackfillError.value = null
+  annualBackfillCommitted.value = null
+  try {
+    const data = await annualOpsPost('/api/attendance/annual-leave-expiry-backfill', { dryRun: true }, tr('Backfill dry-run failed', '回填预演失败'))
+    if (data) annualBackfillDry.value = data as AnnualBackfillSummary
+  } catch (error: any) {
+    annualBackfillError.value = readErrorMessage(error, tr('Backfill dry-run failed', '回填预演失败'))
+  } finally {
+    annualBackfillRunning.value = false
+  }
+}
+
+function requestAnnualBackfillCommit(): void {
+  annualBackfillError.value = null
+  const dry = annualBackfillDry.value
+  if (!dry) {
+    annualBackfillError.value = tr('Run a dry-run first', '请先执行预演')
+    return
+  }
+  openAnnualOpsConfirm({
+    title: tr('Commit expiry backfill', '提交过期回填'),
+    lines: [
+      { label: tr('Scanned', '扫描'), value: String(dry.scanned) },
+      { label: tr('To update', '将更新'), value: String(dry.updated) },
+      { label: tr('Skipped', '跳过'), value: String(dry.skipped) },
+    ],
+    onConfirm: () => { void submitAnnualBackfillCommit() },
+  })
+}
+
+async function submitAnnualBackfillCommit(): Promise<void> {
+  annualBackfillRunning.value = true
+  annualBackfillError.value = null
+  try {
+    const data = await annualOpsPost('/api/attendance/annual-leave-expiry-backfill', { dryRun: false }, tr('Backfill failed', '回填失败'))
+    if (data) annualBackfillCommitted.value = data as AnnualBackfillSummary
+  } catch (error: any) {
+    annualBackfillError.value = readErrorMessage(error, tr('Backfill failed', '回填失败'))
+  } finally {
+    annualBackfillRunning.value = false
+  }
+}
+
+// -- Card 3: accrual run (server dry-run + period guardrail; returns full summary incl skipReasons{code→count}) --
+interface AnnualAccrualSummary { runId: string; periodKey: string; asOf: string; dryRun: boolean; granted: number; skipped: number; grantedMinutes: number; lotsCreated: number; alreadyGranted: number; skipReasons: Record<string, number> }
+const annualOpsCurrentYear = new Date().getFullYear()
+const annualAccrualForm = reactive<{ period: number; asOf: string }>({ period: annualOpsCurrentYear, asOf: '' })
+const annualAccrualRunning = ref(false)
+const annualAccrualDry = ref<AnnualAccrualSummary | null>(null)
+const annualAccrualCommitted = ref<AnnualAccrualSummary | null>(null)
+const annualAccrualError = ref<string | null>(null)
+const annualAccrualOffYear = computed(() => {
+  const p = Number(annualAccrualForm.period)
+  return p !== annualOpsCurrentYear && p !== annualOpsCurrentYear + 1
+})
+
+async function runAnnualAccrualDryRun(): Promise<void> {
+  annualAccrualRunning.value = true
+  annualAccrualError.value = null
+  annualAccrualCommitted.value = null
+  try {
+    const asOf = annualAccrualForm.asOf.trim()
+    const data = await annualOpsPost('/api/attendance/annual-leave-accrual/run', {
+      period: Number(annualAccrualForm.period),
+      ...(asOf ? { asOf } : {}),
+      dryRun: true,
+    }, tr('Accrual dry-run failed', '发放预演失败'))
+    if (data) annualAccrualDry.value = data as AnnualAccrualSummary
+  } catch (error: any) {
+    annualAccrualError.value = readErrorMessage(error, tr('Accrual dry-run failed', '发放预演失败'))
+  } finally {
+    annualAccrualRunning.value = false
+  }
+}
+
+function requestAnnualAccrualCommit(): void {
+  annualAccrualError.value = null
+  const dry = annualAccrualDry.value
+  if (!dry) {
+    annualAccrualError.value = tr('Run a dry-run first', '请先执行预演')
+    return
+  }
+  openAnnualOpsConfirm({
+    title: tr('Commit accrual run', '提交发放'),
+    lines: [
+      { label: tr('Period', '年度'), value: String(annualAccrualForm.period) },
+      { label: tr('Granted', '发放'), value: String(dry.granted) },
+      { label: tr('Granted (min)', '发放(分钟)'), value: String(dry.grantedMinutes) },
+      { label: tr('Skipped', '跳过'), value: String(dry.skipped) },
+    ],
+    extraConfirmRequired: annualAccrualOffYear.value,
+    extraConfirmLabel: annualAccrualOffYear.value
+      ? tr(`I confirm granting for the off-year period ${annualAccrualForm.period}`, `我确认为非当前/次年年度 ${annualAccrualForm.period} 发放`)
+      : '',
+    onConfirm: () => { void submitAnnualAccrualCommit() },
+  })
+}
+
+async function submitAnnualAccrualCommit(): Promise<void> {
+  annualAccrualRunning.value = true
+  annualAccrualError.value = null
+  try {
+    const asOf = annualAccrualForm.asOf.trim()
+    const data = await annualOpsPost('/api/attendance/annual-leave-accrual/run', {
+      period: Number(annualAccrualForm.period),
+      ...(asOf ? { asOf } : {}),
+      dryRun: false,
+    }, tr('Accrual run failed', '发放失败'))
+    if (data) annualAccrualCommitted.value = data as AnnualAccrualSummary
+  } catch (error: any) {
+    annualAccrualError.value = readErrorMessage(error, tr('Accrual run failed', '发放失败'))
+  } finally {
+    annualAccrualRunning.value = false
   }
 }
 
