@@ -6,12 +6,17 @@ const {
   AdapterContractError,
   AdapterValidationError,
   UnsupportedAdapterOperationError,
+  assertAdapterContract,
   createAdapterRegistry,
   createReadResult,
   createUpsertResult,
   normalizeReadRequest,
   normalizeUpsertRequest,
   unsupportedAdapterOperation,
+  hasTargetWriteLifecycle,
+  assertTargetWriteLifecycle,
+  createLookupResult,
+  createApplyResult,
 } = require(path.join(__dirname, '..', 'lib', 'contracts.cjs'))
 
 function createCompleteAdapter() {
@@ -130,7 +135,56 @@ async function main() {
   }
   assert.ok(unsupported instanceof UnsupportedAdapterOperationError, 'unsupported operation throws typed error')
 
-  console.log('✓ adapter-contracts: registry + normalizer tests passed')
+  // --- 7. OPTIONAL target-write lifecycle: base 5-method contract UNCHANGED -
+  // A complete adapter WITHOUT the optional capability still passes the contract
+  // and is detected as not-opted-in (design-lock §6.1 acceptance #1).
+  const plain = createCompleteAdapter()
+  assertAdapterContract(plain, 'plain')
+  assert.equal(hasTargetWriteLifecycle(plain), false, 'plain adapter is not opted in')
+  assert.equal(assertTargetWriteLifecycle(plain, 'plain'), null, 'non-opt-in: nothing to assert')
+  registry.registerAdapter('plain', () => createCompleteAdapter())
+  registry.createAdapter({ kind: 'plain', config: {} }) // no throw — the capability is optional
+
+  // --- 8. Opt-in target validates; a PARTIAL lifecycle is rejected ---------
+  const optIn = {
+    ...createCompleteAdapter(),
+    targetWriteLifecycle: {
+      async lookup() { return createLookupResult({ matches: [] }) },
+      async apply() { return createApplyResult({ rows: [] }) },
+    },
+  }
+  assert.equal(hasTargetWriteLifecycle(optIn), true)
+  assert.ok(assertTargetWriteLifecycle(optIn, 'optIn'), 'full opt-in lifecycle validates')
+  const partial = { ...createCompleteAdapter(), targetWriteLifecycle: { async lookup() { return createLookupResult({}) } } }
+  assert.throws(() => assertTargetWriteLifecycle(partial, 'partial'), /missing apply/, 'partial lifecycle rejected')
+
+  // --- 9. apply result status is ENUM-STRICT (design-lock §6.1 acceptance #2) -
+  assert.throws(
+    () => createApplyResult({ rows: [{ key: { id: 'a' }, status: 'definitely-wrong' }] }),
+    /status must be one of/,
+    'unknown apply status rejected',
+  )
+  const okApply = createApplyResult({
+    rows: [{ key: { id: 'a' }, status: 'written' }, { key: { id: 'b' }, status: 'held' }],
+    written: 1, held: 1,
+  })
+  assert.equal(okApply.rows.length, 2)
+  assert.equal(okApply.rows[0].index, 0, 'row index defaults to position')
+
+  // --- 10. lookup/apply results are VALUES-FREE (no submitted row data) -----
+  const apply = createApplyResult({
+    rows: [{ key: { id: 'a' }, status: 'failed', errorCode: 'CONFLICT', error: 'revision drift', secretValue: 'p@ss', data: { col: 'submitted' } }],
+    failed: 1,
+  })
+  const applyWire = JSON.stringify(apply)
+  assert.ok(!applyWire.includes('p@ss') && !applyWire.includes('submitted'), 'apply result is values-free (drops non-allow-listed fields)')
+  assert.equal(apply.rows[0].errorCode, 'CONFLICT')
+  assert.equal(apply.rows[0].status, 'failed')
+  const lookup = createLookupResult({ matches: [{ key: { id: 'a' }, exists: true, revision: 7, data: { col: 'x' } }] })
+  assert.ok(!JSON.stringify(lookup).includes('"col"'), 'lookup result is values-free')
+  assert.equal(lookup.matches[0].revision, '7', 'revision normalized to string')
+
+  console.log('✓ adapter-contracts: registry + normalizer + optional target-write lifecycle tests passed')
 }
 
 main().catch((err) => {
