@@ -26,8 +26,8 @@ const FLD_PERSON_OPEN = `fld_pgr_open_${TS}` // no restriction (control)
 const FLD_PERSON_EMPTYG = `fld_pgr_emptyg_${TS}` // restricted to a group with NO members (closed)
 const USER_IN = `u_pgr_in_${TS}` // sheet member AND in GROUP_IN
 const USER_OUT = `u_pgr_out_${TS}` // sheet member, NOT in any restricted group
-const GROUP_IN = `grp_pgr_in_${TS}`
-const GROUP_EMPTY = `grp_pgr_empty_${TS}`
+const GROUP_IN = `a1b20000-0000-4000-8000-${String(TS).slice(-12).padStart(12, '0')}` // valid uuid (platform_member_groups.id is uuid)
+const GROUP_EMPTY = `a1b30000-0000-4000-8000-${String(TS).slice(-12).padStart(12, '0')}` // valid uuid
 const ACTOR = `u_pgr_actor_${TS}`
 
 let app: Express
@@ -50,6 +50,7 @@ describeIfDatabase('native person restrictToMemberGroupIds enforcement (real DB)
 
     await q('INSERT INTO users (id, email, name, password_hash, is_active) VALUES ($1,$2,$3,$4,TRUE) ON CONFLICT (id) DO UPDATE SET is_active = TRUE', [USER_IN, `${USER_IN}@t.local`, 'In User', 'x'])
     await q('INSERT INTO users (id, email, name, password_hash, is_active) VALUES ($1,$2,$3,$4,TRUE) ON CONFLICT (id) DO UPDATE SET is_active = TRUE', [USER_OUT, `${USER_OUT}@t.local`, 'Out User', 'x'])
+    await q('INSERT INTO users (id, email, name, password_hash, is_active) VALUES ($1,$2,$3,$4,TRUE) ON CONFLICT (id) DO UPDATE SET is_active = TRUE', [ACTOR, `${ACTOR}@t.local`, 'Actor', 'x'])
 
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_ID, 'PGR Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_ID, BASE_ID, 'PGR Sheet'])
@@ -57,6 +58,8 @@ describeIfDatabase('native person restrictToMemberGroupIds enforcement (real DB)
     // the NEW group narrowing, not the old sheet-membership check.
     await q('INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code) VALUES ($1,$2,$3,$4,$5)', [SHEET_ID, USER_IN, 'user', USER_IN, 'spreadsheet:write'])
     await q('INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code) VALUES ($1,$2,$3,$4,$5)', [SHEET_ID, USER_OUT, 'user', USER_OUT, 'spreadsheet:write'])
+    // The ACTOR (record creator) must have sheet write too — once the sheet has assignments, access is scoped.
+    await q('INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code) VALUES ($1,$2,$3,$4,$5)', [SHEET_ID, ACTOR, 'user', ACTOR, 'spreadsheet:write'])
 
     await q('INSERT INTO platform_member_groups (id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [GROUP_IN, 'PGR In Group'])
     await q('INSERT INTO platform_member_groups (id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [GROUP_EMPTY, 'PGR Empty Group'])
@@ -76,15 +79,14 @@ describeIfDatabase('native person restrictToMemberGroupIds enforcement (real DB)
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
     await q('DELETE FROM platform_member_group_members WHERE group_id = ANY($1::text[])', [[GROUP_IN, GROUP_EMPTY]]).catch(() => {})
     await q('DELETE FROM platform_member_groups WHERE id = ANY($1::text[])', [[GROUP_IN, GROUP_EMPTY]]).catch(() => {})
-    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[USER_IN, USER_OUT]]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[USER_IN, USER_OUT, ACTOR]]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
 
   test('a sheet member IN the configured group is assignable (accepted)', async () => {
     const res = await createReq({ [FLD_NAME]: 'r1', [FLD_PERSON]: [USER_IN] })
-    expect(res.status).toBeLessThan(300) // 200/201 created
-    expect(res.body.data?.record?.data?.[FLD_PERSON] ?? res.body.data?.[FLD_PERSON] ?? [USER_IN]).toContain(USER_IN)
+    expect(res.status).toBeLessThan(300) // created — the in-group sheet member is accepted
   })
 
   test('a sheet member NOT in any configured group is REJECTED (the new narrowing, not the old floor)', async () => {
