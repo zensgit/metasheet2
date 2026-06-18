@@ -1,7 +1,7 @@
 # 多维表剩余门控开发计划 — 2026-06-18
 
 > Status: **CURRENT GATED REMAINDER PLAN**.
-> Grounding: `origin/main` (live-main, 2026-06-18). Completed since the prior snapshot and now on `main`: **2a** scalar-type extensions (`#2832` / `#2838` / `#2849`) and **2b** dynamic rule-engine **through S3** (`#2836` / `#2841` / `#2847`). `#2825` (final CRDT comment tails) remains open with green checks — **comment-tail hygiene only**, not a main-grounding line to update here.
+> Grounding: `origin/main` (live-main, 2026-06-18). Completed since the prior snapshot and now on `main`: **2a** scalar-type extensions (`#2832` / `#2838` / `#2849`) and **2b** dynamic rule-engine **complete through S4** (`#2836` / `#2841` / `#2847` / `#2861` parse cache). The earlier comment/ledger tail PRs `#2825` + `#2857` are closed as superseded by `#2859` (this reconciliation).
 > Supersedes: `multitable-current-development-plan-20260617.md` and `multitable-current-development-todo-20260617.md` for current multitable remainder routing.
 > Pair: `multitable-gated-remainder-todo-20260618.md`.
 > Rule: this is a closure ledger for the current multitable mainline. Every item below is gated. Do not start runtime work from this document without an explicit opt-in for that gate.
@@ -19,7 +19,7 @@ Closed and removed from the active remainder:
 
 The remaining development is exactly:
 
-1. **2c · Gated arc** (`#16` Person field → true org-member directory): the **only** remaining arc. **Owner-gated on a source-of-truth decision (A internal users / B member-group directory / C external IdP).** Design-lock #2860 is merged; runtime is **blocked until the owner explicitly picks the source** — it has NOT been chosen yet (B is the design-lock's recommendation, not a selection).
+1. **2c · in-progress arc** (`#16` Person field → true org-member directory): the **only** active arc. **Source-of-truth DECIDED = B (member-group directory)** — design-lock #2860 → **S2 resolver `resolvePersonAssignableDirectory` shipped (#2866, unit + real-DB)**, on top of the fail-closed assignment enforcement (#2833 + #2854). No longer source-blocked; remaining is **S3 picker-UX (filter to assignable) + S4 inactive/historical handling** (out-of-scope values readable, not newly assignable).
 
 Everything else belongs to a future roadmap pool, not to this closure ledger. See Appendix A. (2a closed #2851; 2b closed S1–S4 by 2026-06-18 after #2836/#2841/#2847/#2861.)
 
@@ -35,11 +35,11 @@ Everything else belongs to a future roadmap pool, not to this closure ledger. Se
 - non-string atomic values seed as plain values under the `fields` Y.Map;
 - `null` / `undefined` stay absent.
 
-The product editor only enables scalar Yjs binding for:
+The product editor enables scalar Yjs binding for the **full scalar field set**:
 
-`number`, `currency`, `percent`, `boolean`, `rating`, `multiSelect`.
+`number`, `currency`, `percent`, `boolean`, `rating`, `multiSelect`, `select`, `date`, `duration`, and `dateTime` (#2849).
 
-The backend bridge can collect generic plain values, but that does not open the remaining field types in the product path. The seed shape and frontend binding are the product boundary.
+**2a is COMPLETE — no scalar type remains REST-only for collaborative editing** (updated 2026-06-18 after #2832 / #2838 / #2849). The seed shape + frontend binding now cover the full set; the backend bridge collects generic plain values consistent with that. (§1.2/§1.3 below are retained as history of the per-type gates that have since been resolved.)
 
 ### 1.2 `select` / `date` / `dateTime` Gate
 
@@ -175,15 +175,17 @@ Non-goals:
 - Do not introduce a rule DSL without a parser/evaluator golden and a real-DB route golden.
 - Do not assume the current grant/additive row-permission model can express these rules without a new contract.
 
-## 3. 2c · Gated Arc Not Started
+## 3. 2c · In-Progress Arc (through S2 — source decided)
 
 ### 3.1 `#16` Person Field → True Org-Member Directory
+
+> **UPDATED 2026-06-18:** source-of-truth **DECIDED = B (member-group directory)** (design-lock #2860); the fail-closed assignment enforcement (#2833 + route-parity #2854) and the S2 directory resolver `resolvePersonAssignableDirectory` (#2866) are shipped. Remaining: **S3 picker-UX + S4 inactive/historical handling.** The "Gate / Required decisions / slice" detail below is the original decomposition, retained as history — the source decision is no longer open.
 
 Current state:
 
 - Native `person` fields exist as first-class fields.
-- `restrictToMemberGroupIds` is sanitized and persisted as optional configuration.
-- A true org-member directory product arc is not yet started.
+- `restrictToMemberGroupIds` is a **hard fail-closed validator** (sheet members ∩ allowed groups), enforced across all write paths (#2833 + #2854), with the directory resolver shipped (source B, #2866).
+- Remaining: S3 picker-UX (filter to assignable) + S4 inactive/historical handling (out-of-scope values readable, not newly assignable).
 
 Gate:
 
@@ -224,11 +226,10 @@ Non-goals:
 
 Because every remaining item is gated, the default action is **hold**.
 
-**2a is complete and 2b is shipped through S3 — those gates are closed, not next options.** The remaining gated next options:
+**2a is complete and 2b is complete through S4 (`#2861`) — those gates are closed, not next options.** The remaining gated next options:
 
-1. **2c / #16 person-directory source-of-truth design-lock** — the remaining user-visible product slice (owner-gated: directory source of truth + assignability semantics).
-2. **2b-S4 (rule-engine perf / caching)** — only on **large-rule-set demand**; `2b` is otherwise shipped through S3 (`#2836`/`#2841`/`#2847`), so this is a perf follow-up, not a fresh security gate.
-3. **D2 high-scale re-baseline harness work** — only if the product wants to revisit large-table performance after the existing D2 verdict; this is not a grid-virtualization slice.
+1. **2c / #16 person-directory S3/S4** — the **sole** in-progress product arc. Source-of-truth already decided (B) + S2 resolver shipped (#2866); remaining is **S3 picker-UX** (filter to assignable) + **S4 inactive/historical handling** (out-of-scope values readable, not newly assignable).
+2. **D2 high-scale re-baseline harness work** — only if the product wants to revisit large-table performance after the existing D2 verdict; this is not a grid-virtualization slice.
 
 Do not open more than one security-sensitive runtime arc at the same time.
 

@@ -2,7 +2,7 @@
 
 > Status: **CURRENT GATED TODO**.
 > Pair: `multitable-gated-remainder-development-plan-20260618.md`.
-> Grounding: `origin/main` (live-main, 2026-06-18). Completed + on `main`: **2a** (`#2832`/`#2838`/`#2849`), **2b through S3** (`#2836`/`#2841`/`#2847`). `#2825` remains open (final CRDT comment tails) — **comment-tail hygiene only**, not a main-grounding line to update here.
+> Grounding: `origin/main` (live-main, 2026-06-18). Completed + on `main`: **2a** (`#2832`/`#2838`/`#2849`), **2b complete through S4** (`#2836`/`#2841`/`#2847`/`#2861`). The earlier comment/ledger tail PRs `#2825` + `#2857` are closed as superseded by `#2859` (this reconciliation).
 > Supersedes: `multitable-current-development-plan-20260617.md` and `multitable-current-development-todo-20260617.md` for current multitable remainder routing.
 > Legend: `[x]` closed · `[ ]` todo after opt-in · `[!]` gate requiring owner/design decision · `[~]` roadmap pool, not current remainder.
 
@@ -24,61 +24,18 @@
 
 ### 1.1 `select` / `date` / `dateTime`
 
-- [!] Gate: choose a persisted-doc migration strategy before any seed flip or frontend scalar binding.
-  - [ ] Decide migration style: lazy, offline/admin, dual-reader, or another explicit strategy.
-  - [ ] Define rollback compatibility for old `Y.Text` docs and new plain-value docs.
-  - [ ] Define mixed-client behavior during deployment.
-  - [ ] Lock `date` and `dateTime` canonical stored string semantics, including timezone expectations.
+- [x] **2a RESOLVED — full scalar set shipped (2026-06-18).** The speculative per-type migration/UX gate
+  checkboxes that were here are obsolete (the shipped path differed from them) and have been removed:
+  - [x] `select` / `date` — lazy `coerceText` dual-reader (read Y.Text-or-plain, write plain, lazy
+    convergence; no big-bang migration) + strdate real-DB corruption golden (#2832).
+  - [x] `dateTime` — canonical-UTC-ISO value invariant + persisted-doc golden (#2849).
+  - [x] `duration` — commit-on-confirm LWW + defer-remote-while-dirty + real-DB no-corruption (#2838).
 
-- [ ] 2a-S1 Design-lock.
-  - [ ] Inventory current seed and persisted-doc shapes.
-  - [ ] Write corruption model: what values must never reach `patchRecords`.
-  - [ ] Define the exact corruption golden fixtures.
-  - [ ] Define whether `select` pilots before `date` / `dateTime`.
-
-- [ ] 2a-S2 Migration / dual-reader helper.
-  - [ ] Unit test old `Y.Text` doc -> safe read/migration.
-  - [ ] Unit test new plain-value doc -> no migration.
-  - [ ] Real-DB persisted-doc fixture for all three types.
-  - [ ] Assert no `Y.Text` object, nested Yjs type, `[object Object]`, or stringified object reaches `meta_records.data`.
-
-- [ ] 2a-S3 Product binding pilot.
-  - [ ] Enable one pilot type only after corruption golden is green.
-  - [ ] Add FE active/inactive binding tests.
-  - [ ] Add real-browser edit smoke.
-  - [ ] Add plugin-tests / web-guard allowlist entries where needed.
-
-- [ ] 2a-S4 Extend to remaining string-stored atomics.
-  - [ ] Repeat seed + flush + persisted-doc migration tests for `date`.
-  - [ ] Repeat seed + flush + persisted-doc migration tests for `dateTime`.
-  - [ ] Add timezone / local-input conversion regression.
-
-### 1.2 `duration`
-
-- [!] Gate: choose the local-buffer UX semantics.
-  - [ ] Decide between REST-only, commit-on-confirm LWW, or a separate collaborative draft channel.
-  - [ ] Define remote-update behavior while local buffer is dirty.
-  - [ ] Define cursor/selection preservation expectations.
-  - [ ] Define partially valid input behavior.
-
-- [ ] 2a-D1 Duration UX design-lock.
-  - [ ] Document local-buffer invariants.
-  - [ ] Document conflict behavior.
-  - [ ] Define browser typing evidence.
-
-- [ ] 2a-D2 Runtime implementation after UX lock.
-  - [ ] Preserve local text buffer while typing.
-  - [ ] Add component tests for partially valid input.
-  - [ ] Add browser evidence for typing without interruption.
-
-- [ ] 2a-D3 Real-DB no-corruption proof.
-  - [ ] Flush valid duration through the real path.
-  - [ ] Assert stored shape is unchanged.
-  - [ ] Assert invalid values fail through existing validation.
+  No remaining 2a work; the full scalar set is collaborative. See §1 of the plan doc for the as-shipped design.
 
 ## 2. 2b · #18 Phase-2 Conditional Permission Rules
 
-> **COMPLETE — S1–S4 (2026-06-18).** S1 #2836, S2 #2841 (wired into the #18 seam, flag-off inert), S3 #2847, S4 #2861 (content-keyed parse cache, staleness-free — DB reads not cached). All slices shipped; sub-items below retained as history. The only remaining multitable arc is **2c** (owner-gated on source-of-truth).
+> **COMPLETE — S1–S4 (2026-06-18).** S1 #2836, S2 #2841 (wired into the #18 seam, flag-off inert), S3 #2847, S4 #2861 (content-keyed parse cache, staleness-free — DB reads not cached). All slices shipped; sub-items below retained as history. The only in-progress multitable arc is **2c** (through S2 — source B + resolver #2866; S3 picker-UX + S4 inactive/historical remain).
 
 - [x] Gate: owner-approved rule model and threat model — settled (S1–S3 built on it).
   - [ ] Decide rule language and field/operator matrix.
@@ -122,33 +79,16 @@
 
 ### 3.1 `#16` Person Field → True Org-Member Directory
 
-- [!] Gate: owner decision on directory source of truth and assignability semantics.
-  - [ ] Decide source: internal users, directory sync member groups, external identity metadata, or hybrid.
-  - [ ] Decide whether `restrictToMemberGroupIds` is a hard validator.
-  - [ ] Decide inactive/deleted user behavior.
-  - [ ] Decide historical out-of-scope values: readable-only vs forced cleanup.
-  - [ ] Decide picker explanation UX.
+- [x] Source-of-truth **DECIDED = B** (member-group directory) — design-lock #2860. Assignability locked:
+  `restrictToMemberGroupIds` is a hard validator; out-of-scope historical values readable, not newly assignable.
 
-- [ ] 16-S0 Design-lock.
-  - [ ] Lock stored value shape as unchanged unless a migration is explicitly designed.
-  - [ ] Lock legacy link-backed person coexistence.
-  - [ ] Lock API/import/automation/Yjs parity requirements.
-
-- [ ] 16-S1 Backend validator and resolver.
-  - [ ] Shared person validator for REST, bulk edit, import, form, automation, and Yjs write paths.
-  - [ ] Real-DB positive assignment test.
-  - [ ] Real-DB negative restricted-group assignment test.
-  - [ ] Real-DB inactive/deleted user characterization.
-
-- [ ] 16-S2 Frontend picker.
-  - [ ] Filter to assignable members.
-  - [ ] Explain empty/disabled states.
-  - [ ] Browser picker evidence.
-
-- [ ] 16-S3 Parity hardening.
-  - [ ] API route tests.
-  - [ ] Import/bulk tests.
-  - [ ] Automation/form/Yjs tests.
+- [x] **16-S0 Design-lock** — source B + assignability semantics (#2860).
+- [x] **16-S1 Backend validator + resolver** — fail-closed person validator across all write paths
+  (#2833 validator + route-parity hardening #2854, real-PG) + `resolvePersonAssignableDirectory` resolver,
+  source B (#2866, unit + real-DB).
+- [ ] **16-S3 Frontend picker UX** — filter options to assignable members; explain empty/disabled states; browser evidence. (REMAINING)
+- [ ] **16-S4 Inactive / historical handling** — inactive/deleted-user behavior + out-of-scope historical values
+  readable-not-assignable, with a display affordance. (REMAINING)
 
 ## 4. Roadmap Pool — Not Current Remainder
 
@@ -166,8 +106,7 @@ These are future candidates or reopen-only lines. They are not open work in the 
 
 ## 5. Owner Unlock Prompts
 
-Use one of these when opening the next arc (2a is complete and 2b is shipped through S3 — those gates are closed, not next options):
+Use one of these when opening the next arc (2a is complete and 2b is **complete through S4** `#2861` — those gates are closed, not next options):
 
-- **Unlock 2c / #16 person directory:** choose directory source of truth and assignability semantics.
-- **Unlock 2b-S4 (rule-engine perf / caching):** only on large-rule-set demand; `2b` is otherwise shipped through S3 — a perf follow-up, not a fresh security gate.
+- **Continue 2c / #16 person directory:** source-of-truth already decided = B + S2 resolver shipped (#2866); next is **S3 picker-UX** (filter to assignable) + **S4 inactive/historical handling**. (The sole in-progress multitable arc.)
 - **Revisit grid performance:** opt into D2 high-scale harness/re-baseline work first; row virtualization stays closed unless the verdict flips.
