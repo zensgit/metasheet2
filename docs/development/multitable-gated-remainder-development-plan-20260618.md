@@ -1,7 +1,7 @@
 # 多维表剩余门控开发计划 — 2026-06-18
 
 > Status: **CURRENT GATED REMAINDER PLAN**.
-> Grounding: `origin/main@31a5efe05` (`feat(attendance): annual-leave L5c — admin operations UI (manual-adjust / backfill / accrual) + closeout MD (#2830)`). The multitable boundary in this document is grounded on `#18` through `#2819`, scalar CRDT through `#2821`, and comment hygiene through `#2823`. `#2825` is open with green checks and closes the final CRDT comment tails; update this line to `#2825` after it merges.
+> Grounding: `origin/main` (live-main, 2026-06-18). Completed since the prior snapshot and now on `main`: **2a** scalar-type extensions (`#2832` / `#2838` / `#2849`) and **2b** dynamic rule-engine **through S3** (`#2836` / `#2841` / `#2847`). `#2825` (final CRDT comment tails) remains open with green checks — **comment-tail hygiene only**, not a main-grounding line to update here.
 > Supersedes: `multitable-current-development-plan-20260617.md` and `multitable-current-development-todo-20260617.md` for current multitable remainder routing.
 > Pair: `multitable-gated-remainder-todo-20260618.md`.
 > Rule: this is a closure ledger for the current multitable mainline. Every item below is gated. Do not start runtime work from this document without an explicit opt-in for that gate.
@@ -224,14 +224,13 @@ Non-goals:
 
 Because every remaining item is gated, the default action is **hold**.
 
-If the product wants the fastest precise next design-lock:
+**2a is complete and 2b is shipped through S3 — those gates are closed, not next options.** The remaining gated next options:
 
-1. **2a select/date/dateTime migration design-lock** if the goal is CRDT completeness.
-2. **#16 person directory design-lock** if the goal is a user-visible product slice.
-3. **2b rule-engine threat model** only if the product explicitly wants dynamic permission semantics.
-4. **D2 high-scale re-baseline harness work** only if the product wants to revisit large-table performance after the existing D2 verdict; this is not a grid-virtualization slice.
+1. **2c / #16 person-directory source-of-truth design-lock** — the remaining user-visible product slice (owner-gated: directory source of truth + assignability semantics).
+2. **2b-S4 (rule-engine perf / caching)** — only on **large-rule-set demand**; `2b` is otherwise shipped through S3 (`#2836`/`#2841`/`#2847`), so this is a perf follow-up, not a fresh security gate.
+3. **D2 high-scale re-baseline harness work** — only if the product wants to revisit large-table performance after the existing D2 verdict; this is not a grid-virtualization slice.
 
-Do not open more than one security-sensitive runtime arc at the same time. `2b` should get an adversarial review lane before implementation, not after.
+Do not open more than one security-sensitive runtime arc at the same time.
 
 ## Appendix A. Roadmap Pool, Not Current Remainder
 
