@@ -17,6 +17,7 @@ import {
 } from '../multitable/permission-derivation'
 import { validateAiShortcutFieldProperty } from '../multitable/ai-shortcut-config'
 import { withFieldVisibilityRule } from '../multitable/field-visibility-rule'
+import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { projectFormContextView } from '../multitable/form-context-view-projection'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
@@ -5600,6 +5601,70 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] set row-level-read-deny flag failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to set row-level read-deny flag' } })
+    }
+  })
+
+  // #18 phase-2 (2b): conditional read-deny rules authoring. Rules live in meta_sheets.conditional_read_rules
+  // and only ENFORCE when the row-level-read-deny flag is on (see permission-service). GET is canRead-gated;
+  // PUT replaces the list, canManageSheetAccess-gated, validated through parseConditionalRules — a
+  // structurally-invalid rule is REJECTED (400) and nothing is written (no silent drop).
+  router.get('/sheets/:sheetId/conditional-rules', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
+      const r = await pool.query('SELECT conditional_read_rules AS rules FROM meta_sheets WHERE id = $1', [sheetId])
+      const raw = (r.rows[0] as { rules?: unknown } | undefined)?.rules
+      // parseConditionalRules round-trips the stored rules; `rejected` surfaces any legacy/unknown rows so
+      // the editor can show them disabled rather than silently dropping them.
+      const { rules, rejected } = parseConditionalRules(raw)
+      return res.json({ ok: true, data: { rules, rejected } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] read conditional-rules failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to read conditional rules' } })
+    }
+  })
+
+  router.put('/sheets/:sheetId/conditional-rules', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    const body = req.body as { rules?: unknown } | undefined
+    if (!body || !Array.isArray(body.rules)) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'rules must be an array' } })
+    }
+    // Validate at author time: any structurally-invalid rule rejects the whole PUT (never store a bad rule,
+    // never silently drop one).
+    const { rules, rejected } = parseConditionalRules(body.rules)
+    if (rejected.length > 0) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `invalid rule(s): ${rejected.map((x) => x.reason).join('; ')}` } })
+    }
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      await pool.query('UPDATE meta_sheets SET conditional_read_rules = $1::jsonb WHERE id = $2', [JSON.stringify(rules), sheetId])
+      return res.json({ ok: true, data: { rules } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] set conditional-rules failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to set conditional rules' } })
     }
   })
 

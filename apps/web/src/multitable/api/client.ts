@@ -74,6 +74,7 @@ import type {
 } from '../types'
 import { apiFetch } from '../../utils/api'
 import { apiDefaultErrorMessage, apiFieldValidationFallback } from '../utils/meta-api-error-labels'
+import type { ConditionalRuleDTO } from '../utils/conditional-rule-ops'
 
 type FetchFn = (input: string, init?: RequestInit) => Promise<Response>
 type ApiErrorLocaleResolver = () => boolean
@@ -1622,6 +1623,27 @@ export class MultitableApiClient {
     )
     const data = await this.parseJson<{ enabled?: boolean }>(res)
     return data?.enabled === true
+  }
+
+  // #18 phase-2 (2b): conditional read-deny rules. Stored per-sheet; only enforce when the
+  // row-level-read-deny flag is on. PUT re-validates server-side (throws on a structurally-invalid rule).
+  async getConditionalRules(sheetId: string): Promise<{ rules: ConditionalRuleDTO[]; rejected: unknown[] }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/conditional-rules`)
+    const data = await this.parseJson<{ rules?: ConditionalRuleDTO[]; rejected?: unknown[] }>(res)
+    return { rules: Array.isArray(data?.rules) ? data!.rules : [], rejected: Array.isArray(data?.rejected) ? data!.rejected : [] }
+  }
+
+  async setConditionalRules(sheetId: string, rules: ConditionalRuleDTO[]): Promise<ConditionalRuleDTO[]> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/conditional-rules`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rules }),
+      },
+    )
+    const data = await this.parseJson<{ rules?: ConditionalRuleDTO[] }>(res)
+    return Array.isArray(data?.rules) ? data!.rules : []
   }
 
   // --- Automation rules ---

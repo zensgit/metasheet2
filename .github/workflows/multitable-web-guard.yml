@@ -37,6 +37,10 @@ on:
       - 'apps/web/src/multitable/components/MetaRecordPermissionManager.vue'
       - 'apps/web/src/multitable/components/MetaSheetPermissionManager.vue'
       - 'apps/web/src/multitable/utils/meta-permission-labels.ts'
+      - 'apps/web/src/multitable/components/MetaConditionalRuleBuilder.vue'
+      - 'apps/web/src/multitable/utils/conditional-rule-ops.ts'
+      - 'apps/web/tests/multitable-conditional-rule-builder.spec.ts'
+      - 'apps/web/tests/multitable-conditional-rule-ops.spec.ts'
       - 'apps/web/src/multitable/api/client.ts'
       - 'apps/web/src/multitable/types.ts'
       - 'apps/web/tests/multitable-record-permission-manager.spec.ts'
@@ -71,6 +75,10 @@ on:
       - 'apps/web/src/multitable/components/MetaRecordPermissionManager.vue'
       - 'apps/web/src/multitable/components/MetaSheetPermissionManager.vue'
       - 'apps/web/src/multitable/utils/meta-permission-labels.ts'
+      - 'apps/web/src/multitable/components/MetaConditionalRuleBuilder.vue'
+      - 'apps/web/src/multitable/utils/conditional-rule-ops.ts'
+      - 'apps/web/tests/multitable-conditional-rule-builder.spec.ts'
+      - 'apps/web/tests/multitable-conditional-rule-ops.spec.ts'
       - 'apps/web/src/multitable/api/client.ts'
       - 'apps/web/src/multitable/types.ts'
       - 'apps/web/tests/multitable-record-permission-manager.spec.ts'
@@ -122,4 +130,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run multitable web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule --reporter=dot
