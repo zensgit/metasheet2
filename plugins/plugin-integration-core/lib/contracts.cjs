@@ -1,5 +1,7 @@
 'use strict'
 
+const crypto = require('node:crypto')
+
 // ---------------------------------------------------------------------------
 // Adapter contracts - plugin-integration-core
 //
@@ -246,7 +248,37 @@ function normalizeLookupRequest(input = {}) {
   }
 }
 
-function createLookupResult({ matches = [], metadata = {} } = {}) {
+// VALUES-FREE helpers for the two lifecycle builders. A natural key can itself be PII
+// (email/phone) and metadata can hide row data, so these builders never carry a raw key or a
+// nested metadata value: they emit an OPAQUE keyHash (projected to declared keyFields, then
+// sha256'd — mirroring external-write-dry-run.cjs's keyFromRecord + hashJson) and accept only
+// SCALAR metadata. This is the values-free LOCK at the contract layer (design-lock §5/§6.1).
+function hashKey(key, keyFields) {
+  const source = Array.isArray(keyFields) && keyFields.length > 0
+    ? keyFields.reduce((acc, field) => {
+        if (isPlainObject(key) && Object.prototype.hasOwnProperty.call(key, field)) acc[field] = key[field]
+        return acc
+      }, {})
+    : (isPlainObject(key) ? key : {})
+  return crypto.createHash('sha256').update(JSON.stringify(source)).digest('hex')
+}
+
+function scalarMetadata(value, field) {
+  if (value === undefined || value === null) return {}
+  if (!isPlainObject(value)) {
+    throw new AdapterContractError(`${field} must be an object`, { field })
+  }
+  const out = {}
+  for (const [key, entry] of Object.entries(value)) {
+    if (entry !== null && typeof entry === 'object') {
+      throw new AdapterContractError(`${field}.${key} must be a scalar (values-free)`, { field, key })
+    }
+    out[key] = entry
+  }
+  return out
+}
+
+function createLookupResult({ matches = [], keyFields = [], metadata = {} } = {}) {
   if (!Array.isArray(matches)) {
     throw new AdapterContractError('lookup result matches must be an array', { field: 'matches' })
   }
@@ -255,14 +287,15 @@ function createLookupResult({ matches = [], metadata = {} } = {}) {
       if (!isPlainObject(match)) {
         throw new AdapterContractError(`matches[${index}] must be an object`, { field: 'matches' })
       }
-      // allow-list projection — key/exists/revision only (no row values)
+      // VALUES-FREE: index + opaque keyHash + existence/revision only — never the raw key.
       return {
-        key: objectOrEmpty(match.key, `matches[${index}].key`),
+        index: normalizeResultCount(match.index === undefined ? index : match.index, `matches[${index}].index`),
+        keyHash: hashKey(match.key, keyFields),
         exists: Boolean(match.exists),
         revision: match.revision === undefined || match.revision === null ? null : String(match.revision),
       }
     }),
-    metadata: objectOrEmpty(metadata, 'metadata'),
+    metadata: scalarMetadata(metadata, 'metadata'),
   }
 }
 
@@ -293,7 +326,7 @@ function normalizeApplyRequest(input = {}) {
 
 // Per-row apply result: ENUM-STRICT status + VALUES-FREE (allow-list projection of
 // index/key/status/errorCode/error — the submitted row values are never carried).
-function createApplyResult({ rows = [], written = 0, updated = 0, skipped = 0, failed = 0, held = 0, metadata = {} } = {}) {
+function createApplyResult({ rows = [], keyFields = [], written = 0, updated = 0, skipped = 0, failed = 0, held = 0, metadata = {} } = {}) {
   if (!Array.isArray(rows)) {
     throw new AdapterContractError('apply result rows must be an array', { field: 'rows' })
   }
@@ -308,9 +341,10 @@ function createApplyResult({ rows = [], written = 0, updated = 0, skipped = 0, f
         { field: 'rows', index, value: row.status, allowed: APPLY_ROW_STATUSES },
       )
     }
+    // VALUES-FREE: index + opaque keyHash + status + redacted errorCode/error only — never the raw key.
     return {
       index: normalizeResultCount(row.index === undefined ? index : row.index, `rows[${index}].index`),
-      key: objectOrEmpty(row.key, `rows[${index}].key`),
+      keyHash: hashKey(row.key, keyFields),
       status,
       ...(row.errorCode ? { errorCode: requiredString(row.errorCode, `rows[${index}].errorCode`) } : {}),
       ...(row.error ? { error: requiredString(row.error, `rows[${index}].error`) } : {}),
@@ -323,7 +357,7 @@ function createApplyResult({ rows = [], written = 0, updated = 0, skipped = 0, f
     skipped: normalizeResultCount(skipped, 'skipped'),
     failed: normalizeResultCount(failed, 'failed'),
     held: normalizeResultCount(held, 'held'),
-    metadata: objectOrEmpty(metadata, 'metadata'),
+    metadata: scalarMetadata(metadata, 'metadata'),
   }
 }
 

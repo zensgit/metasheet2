@@ -171,18 +171,42 @@ async function main() {
   assert.equal(okApply.rows.length, 2)
   assert.equal(okApply.rows[0].index, 0, 'row index defaults to position')
 
-  // --- 10. lookup/apply results are VALUES-FREE (no submitted row data) -----
+  // --- 10. VALUES-FREE incl. inside key{} + metadata{} (the real leak vectors) -
+  // Plant PII/secret canaries INSIDE the key (a natural key can BE PII) and a nested
+  // metadata value — the result must carry only an opaque keyHash + scalar metadata.
   const apply = createApplyResult({
-    rows: [{ key: { id: 'a' }, status: 'failed', errorCode: 'CONFLICT', error: 'revision drift', secretValue: 'p@ss', data: { col: 'submitted' } }],
+    keyFields: ['id'],
+    rows: [{ key: { id: 'a', ssn: '123-45-6789', password: 'p@ss' }, status: 'failed', errorCode: 'CONFLICT', error: 'revision drift' }],
     failed: 1,
   })
   const applyWire = JSON.stringify(apply)
-  assert.ok(!applyWire.includes('p@ss') && !applyWire.includes('submitted'), 'apply result is values-free (drops non-allow-listed fields)')
+  for (const leak of ['123-45-6789', 'p@ss', '"ssn"', '"key"']) {
+    assert.ok(!applyWire.includes(leak), `apply result must not carry ${leak} (values-free)`)
+  }
+  assert.match(apply.rows[0].keyHash, /^[a-f0-9]{64}$/, 'apply row carries an opaque keyHash, not the raw key')
   assert.equal(apply.rows[0].errorCode, 'CONFLICT')
   assert.equal(apply.rows[0].status, 'failed')
-  const lookup = createLookupResult({ matches: [{ key: { id: 'a' }, exists: true, revision: 7, data: { col: 'x' } }] })
-  assert.ok(!JSON.stringify(lookup).includes('"col"'), 'lookup result is values-free')
+  assert.throws(
+    () => createApplyResult({ rows: [], metadata: { mode: 'append', leak: { col: 'submitted' } } }),
+    /scalar \(values-free\)/,
+    'nested apply metadata rejected',
+  )
+
+  const lookup = createLookupResult({
+    keyFields: ['id'],
+    matches: [{ key: { id: 'a', email: 'pii@example.test' }, exists: true, revision: 7 }],
+  })
+  const lookupWire = JSON.stringify(lookup)
+  for (const leak of ['pii@example.test', '"email"', '"key"']) {
+    assert.ok(!lookupWire.includes(leak), `lookup result must not carry ${leak} (values-free)`)
+  }
+  assert.match(lookup.matches[0].keyHash, /^[a-f0-9]{64}$/, 'lookup match carries an opaque keyHash')
   assert.equal(lookup.matches[0].revision, '7', 'revision normalized to string')
+  assert.throws(
+    () => createLookupResult({ matches: [], metadata: { nested: { x: 1 } } }),
+    /scalar \(values-free\)/,
+    'nested lookup metadata rejected',
+  )
 
   console.log('✓ adapter-contracts: registry + normalizer + optional target-write lifecycle tests passed')
 }
