@@ -45,7 +45,7 @@ describe('MetaCellEditor scalar Yjs wiring', () => {
     container = null
   })
 
-  function mountField(field: { id: string; name: string; type: string }, modelValue: unknown, handlers: Record<string, unknown> = {}) {
+  function mountField(field: { id: string; name: string; type: string; options?: Array<{ value: string }> }, modelValue: unknown, handlers: Record<string, unknown> = {}) {
     app = createApp(defineComponent({
       render() {
         return h(loadedEditor, {
@@ -132,6 +132,83 @@ describe('MetaCellEditor scalar Yjs wiring', () => {
     await nextTick()
     expect(setValueMock).not.toHaveBeenCalled()
     expect(onUpdate).toHaveBeenCalledWith(true)
+    expect(onYjsCommit).not.toHaveBeenCalled()
+    expect(onConfirm).toHaveBeenCalled()
+  })
+
+  it('active rating: star pick writes the native Number via setValue + yjs-commit then confirm; clear writes null', async () => {
+    scalarActive.value = true
+    scalarVal.value = 2
+    const onUpdate = vi.fn(); const onConfirm = vi.fn(); const onYjsCommit = vi.fn()
+    mountField({ id: 'fld_score', name: 'Score', type: 'rating' }, 2, { 'onUpdate:modelValue': onUpdate, onConfirm, onYjsCommit })
+    const stars = container!.querySelectorAll('.meta-cell-editor__rating-star')
+    expect(stars.length).toBe(5)
+    ;(stars[2] as HTMLButtonElement).click() // pick 3
+    await nextTick()
+    expect(setValueMock).toHaveBeenCalledWith(3) // native number, not '3'
+    expect(onUpdate).toHaveBeenCalledWith(3)
+    expect(onYjsCommit).toHaveBeenCalled()
+    expect(onConfirm).toHaveBeenCalled()
+    // clear → null (the field-clear shape REST would write)
+    const clear = container!.querySelector('.meta-cell-editor__rating-clear') as HTMLButtonElement
+    expect(clear).toBeTruthy()
+    clear.click()
+    await nextTick()
+    expect(setValueMock).toHaveBeenLastCalledWith(null)
+    expect(onUpdate).toHaveBeenLastCalledWith(null)
+  })
+
+  it('inactive rating: REST path byte-identical — setValue not called, no yjs-commit', async () => {
+    scalarActive.value = false
+    const onUpdate = vi.fn(); const onConfirm = vi.fn(); const onYjsCommit = vi.fn()
+    mountField({ id: 'fld_score', name: 'Score', type: 'rating' }, 2, { 'onUpdate:modelValue': onUpdate, onConfirm, onYjsCommit })
+    const stars = container!.querySelectorAll('.meta-cell-editor__rating-star')
+    ;(stars[2] as HTMLButtonElement).click()
+    await nextTick()
+    expect(setValueMock).not.toHaveBeenCalled()
+    expect(onUpdate).toHaveBeenCalledWith(3)
+    expect(onYjsCommit).not.toHaveBeenCalled()
+    expect(onConfirm).toHaveBeenCalled()
+  })
+
+  it('active multiSelect: change writes the plain string[] via setValue + emits update; meta+Enter emits yjs-commit then confirm', async () => {
+    scalarActive.value = true
+    scalarVal.value = ['a']
+    const onUpdate = vi.fn(); const onConfirm = vi.fn(); const onYjsCommit = vi.fn()
+    mountField(
+      { id: 'fld_tags', name: 'Tags', type: 'multiSelect', options: [{ value: 'a' }, { value: 'b' }, { value: 'c' }] },
+      ['a'],
+      { 'onUpdate:modelValue': onUpdate, onConfirm, onYjsCommit },
+    )
+    const select = container!.querySelector('select.meta-cell-editor__select--multi') as HTMLSelectElement
+    expect(select).toBeTruthy()
+    Array.from(select.options).forEach((o) => { o.selected = o.value === 'a' || o.value === 'c' })
+    select.dispatchEvent(new Event('change'))
+    await nextTick()
+    expect(setValueMock).toHaveBeenCalledWith(['a', 'c']) // plain string[], not a Y.Array
+    expect(onUpdate).toHaveBeenCalledWith(['a', 'c'])
+    select.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }))
+    await nextTick()
+    expect(onYjsCommit).toHaveBeenCalled()
+    expect(onConfirm).toHaveBeenCalled()
+  })
+
+  it('inactive multiSelect: REST path byte-identical — setValue not called, no yjs-commit', async () => {
+    scalarActive.value = false
+    const onUpdate = vi.fn(); const onConfirm = vi.fn(); const onYjsCommit = vi.fn()
+    mountField(
+      { id: 'fld_tags', name: 'Tags', type: 'multiSelect', options: [{ value: 'a' }, { value: 'b' }, { value: 'c' }] },
+      ['a'],
+      { 'onUpdate:modelValue': onUpdate, onConfirm, onYjsCommit },
+    )
+    const select = container!.querySelector('select.meta-cell-editor__select--multi') as HTMLSelectElement
+    Array.from(select.options).forEach((o) => { o.selected = o.value === 'b' })
+    select.dispatchEvent(new Event('change'))
+    await nextTick()
+    expect(setValueMock).not.toHaveBeenCalled()
+    expect(onUpdate).toHaveBeenCalledWith(['b'])
+    select.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }))
+    await nextTick()
     expect(onYjsCommit).not.toHaveBeenCalled()
     expect(onConfirm).toHaveBeenCalled()
   })
