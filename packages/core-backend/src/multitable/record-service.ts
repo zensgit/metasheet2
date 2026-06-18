@@ -18,7 +18,7 @@ import {
   validatePersonValue,
   type MultitableField,
 } from './field-codecs'
-import { loadSheetMemberUserIdSet } from './permission-service'
+import { createPersonMemberResolver, personRestrictGroupIds } from './person-field-restriction'
 import {
   HierarchyCycleError,
   assertNoHierarchyParentCycle,
@@ -504,14 +504,16 @@ export class RecordService {
       const fieldById = buildCreateFieldGuardMap(fieldRes.rows)
       const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
 
-      // Native person (人员): resolve the sheet member set ONCE (lazily, only on the first person
-      // cell write) and reuse it for membership validation — parallel to the link-exists query.
-      let personMemberUserIds: Set<string> | null = null
-      const resolvePersonMemberUserIds = async (): Promise<Set<string>> => {
-        if (personMemberUserIds === null) {
-          personMemberUserIds = await loadSheetMemberUserIdSet(query, sheetId)
-        }
-        return personMemberUserIds
+      // Native person (人员): #16 per-field allowed-assignee resolver (sheet members ∩ the field's
+      // restrictToMemberGroupIds) — shared with RecordWriteService so REST create enforces the group
+      // restriction identically (not sheet-member-only). Lazy + cached per restrict-key.
+      const resolvePersonAllowed = createPersonMemberResolver(query, sheetId)
+      const personRestrictByFieldId = new Map<string, string[]>()
+      for (const row of fieldRes.rows as Array<Record<string, unknown>>) {
+        if (row.type !== 'person') continue
+        const ids = personRestrictGroupIds({ property: row.property })
+        const fid = typeof row.id === 'string' ? row.id : ''
+        if (fid && ids.length > 0) personRestrictByFieldId.set(fid, ids)
       }
 
       for (const [fieldId, value] of Object.entries(data)) {
@@ -526,7 +528,7 @@ export class RecordService {
 
         if (field.type === 'person') {
           try {
-            const allowed = await resolvePersonMemberUserIds()
+            const allowed = await resolvePersonAllowed(personRestrictByFieldId.get(fieldId) ?? [])
             patch[fieldId] = validatePersonValue(value, fieldId, allowed, isPersonSingleRecord(field.property))
           } catch (error) {
             throw new RecordValidationError(error instanceof Error ? error.message : String(error))
@@ -1032,14 +1034,15 @@ export class RecordService {
     const patch: Record<string, unknown> = {}
     const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
 
-    // Native person (人员): resolve the sheet member set ONCE (lazily on the first person cell)
-    // and reuse it for membership validation.
-    let personMemberUserIds: Set<string> | null = null
-    const resolvePersonMemberUserIds = async (): Promise<Set<string>> => {
-      if (personMemberUserIds === null) {
-        personMemberUserIds = await loadSheetMemberUserIdSet(this.pool.query.bind(this.pool), sheetId)
-      }
-      return personMemberUserIds
+    // Native person (人员): #16 per-field allowed-assignee resolver (sheet members ∩ the field's
+    // restrictToMemberGroupIds) — shared with RecordWriteService so REST patch enforces the group
+    // restriction identically (not sheet-member-only).
+    const resolvePersonAllowed = createPersonMemberResolver(this.pool.query.bind(this.pool), sheetId)
+    const personRestrictByFieldId = new Map<string, string[]>()
+    for (const f of fields) {
+      if (f.type !== 'person') continue
+      const ids = personRestrictGroupIds(f)
+      if (f.id && ids.length > 0) personRestrictByFieldId.set(f.id, ids)
     }
 
     for (const [fieldId, value] of Object.entries(data)) {
@@ -1058,7 +1061,7 @@ export class RecordService {
       }
       if (field.type === 'person') {
         try {
-          const allowed = await resolvePersonMemberUserIds()
+          const allowed = await resolvePersonAllowed(personRestrictByFieldId.get(fieldId) ?? [])
           patch[fieldId] = validatePersonValue(value, fieldId, allowed, isPersonSingleRecord(field.property))
         } catch (error) {
           fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
