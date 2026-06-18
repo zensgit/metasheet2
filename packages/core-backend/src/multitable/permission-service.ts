@@ -982,12 +982,17 @@ export async function loadRecordPermissionScopeMap(
   // (b) 2b conditional rule-deny: a record matched by a predicate rule gets a synthetic 'none' scope
   // (DENY-WINS), so the derive-based read paths (single GET / view / list) enforce predicate rules
   // exactly like an explicit 'none' grant. Actor-independent; admins bypass at the call site (same as #18).
-  for (const rid of await loadRuleDeniedRecordIds(query, sheetId, recordIds)) {
-    const existing = scopes.get(rid)
-    if (existing) {
-      if (rank.none > rank[existing.accessLevel]) existing.accessLevel = 'none'
-    } else {
-      scopes.set(rid, { recordId: rid, accessLevel: 'none' })
+  // FLAG-GATED (matching #18): a flag-off sheet does ZERO rule work — no rule query is issued, so callers
+  // of the derive path on non-opted-in sheets are byte-identical to pre-2b (loadRowLevelReadDenyEnabled
+  // returns false on any error, so an absent column/flag is inert, never a 500).
+  if (await loadRowLevelReadDenyEnabled(query, sheetId)) {
+    for (const rid of await loadRuleDeniedRecordIds(query, sheetId, recordIds)) {
+      const existing = scopes.get(rid)
+      if (existing) {
+        if (rank.none > rank[existing.accessLevel]) existing.accessLevel = 'none'
+      } else {
+        scopes.set(rid, { recordId: rid, accessLevel: 'none' })
+      }
     }
   }
   return scopes
@@ -1114,7 +1119,13 @@ export async function hasRecordPermissionAssignments(
     if (!isUndefinedTableError(err, 'record_permissions')) throw err
     // record_permissions table absent — fall through to the conditional-rules check.
   }
-  // 2b: a sheet with conditional read-deny rules also needs the derive-path scope check.
+  // 2b: a sheet with conditional read-deny rules also needs the derive-path scope check — but ONLY when
+  // the read-deny flag is on (matching #18 + loadRecordPermissionScopeMap). Flag-off → the rules are inert,
+  // so we don't even issue the conditional_read_rules query: a non-opted-in sheet is byte-identical to
+  // pre-2b. loadRowLevelReadDenyEnabled returns false on any error, so an absent column/flag is inert
+  // (never a 500). record_permissions above stays unconditional (it is not flag-gated); only the 2b rule
+  // check is gated here.
+  if (!(await loadRowLevelReadDenyEnabled(query, sheetId))) return false
   try {
     const r = await query(
       `SELECT 1 FROM meta_sheets WHERE id = $1 AND jsonb_array_length(COALESCE(conditional_read_rules, '[]'::jsonb)) > 0 LIMIT 1`,
