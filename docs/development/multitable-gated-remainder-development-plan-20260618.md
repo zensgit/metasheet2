@@ -1,7 +1,7 @@
 # 多维表剩余门控开发计划 — 2026-06-18
 
 > Status: **CURRENT GATED REMAINDER PLAN**.
-> Grounding: `origin/main` (live-main, 2026-06-18). Completed since the prior snapshot and now on `main`: **2a** scalar-type extensions (`#2832` / `#2838` / `#2849`) and **2b** dynamic rule-engine **through S3** (`#2836` / `#2841` / `#2847`). `#2825` (final CRDT comment tails) remains open with green checks — **comment-tail hygiene only**, not a main-grounding line to update here.
+> Grounding: `origin/main` (live-main, 2026-06-18). Completed since the prior snapshot and now on `main`: **2a** scalar-type extensions (`#2832` / `#2838` / `#2849`) and **2b** dynamic rule-engine **complete through S4** (`#2836` / `#2841` / `#2847` / `#2861` parse cache). The earlier comment/ledger tail PRs `#2825` + `#2857` are closed as superseded by `#2859` (this reconciliation).
 > Supersedes: `multitable-current-development-plan-20260617.md` and `multitable-current-development-todo-20260617.md` for current multitable remainder routing.
 > Pair: `multitable-gated-remainder-todo-20260618.md`.
 > Rule: this is a closure ledger for the current multitable mainline. Every item below is gated. Do not start runtime work from this document without an explicit opt-in for that gate.
@@ -224,11 +224,10 @@ Non-goals:
 
 Because every remaining item is gated, the default action is **hold**.
 
-**2a is complete and 2b is shipped through S3 — those gates are closed, not next options.** The remaining gated next options:
+**2a is complete and 2b is complete through S4 (`#2861`) — those gates are closed, not next options.** The remaining gated next options:
 
-1. **2c / #16 person-directory source-of-truth design-lock** — the remaining user-visible product slice (owner-gated: directory source of truth + assignability semantics).
-2. **2b-S4 (rule-engine perf / caching)** — only on **large-rule-set demand**; `2b` is otherwise shipped through S3 (`#2836`/`#2841`/`#2847`), so this is a perf follow-up, not a fresh security gate.
-3. **D2 high-scale re-baseline harness work** — only if the product wants to revisit large-table performance after the existing D2 verdict; this is not a grid-virtualization slice.
+1. **2c / #16 person-directory source-of-truth design-lock** — the **sole** remaining product arc (owner-gated: directory source of truth + assignability semantics + picker UX).
+2. **D2 high-scale re-baseline harness work** — only if the product wants to revisit large-table performance after the existing D2 verdict; this is not a grid-virtualization slice.
 
 Do not open more than one security-sensitive runtime arc at the same time.
 
