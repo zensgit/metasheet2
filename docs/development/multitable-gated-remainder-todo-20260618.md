@@ -78,7 +78,9 @@
 
 ## 2. 2b · #18 Phase-2 Conditional Permission Rules
 
-- [!] Gate: owner-approved rule model and threat model.
+> **SHIPPED THROUGH S3 (2026-06-18).** S1 #2836, S2 #2841 (wired into the #18 seam, flag-off inert), S3 #2847. The gate (rule + threat model, S0) is settled by those. Only **S4 (perf/caching)** remains, and it is demand-gated. Sub-items below are retained as history.
+
+- [x] Gate: owner-approved rule model and threat model — settled (S1–S3 built on it).
   - [ ] Decide rule language and field/operator matrix.
   - [ ] Decide whether predicates can reference current user, groups, roles, time, or related records.
   - [ ] Decide fail-closed behavior for malformed/deleted/unsupported fields.
@@ -87,31 +89,31 @@
   - [ ] Decide evaluation timing: SQL pushdown, post-filter, materialized, or hybrid.
   - [ ] Decide audit/explainability requirements.
 
-- [ ] 2b-S0 Security design-lock.
+- [x] 2b-S0 Security design-lock — settled (S1–S3 build on the locked rule model).
   - [ ] Enumerate every read surface inherited from static `#18`.
   - [ ] Include trash list/restore in the surface sweep.
   - [ ] Include summaries, export, aggregate/dashboard, search/filter, link picker, and single-record GET.
   - [ ] Define side-channel rules: no hidden-field existence/change leaks.
 
-- [ ] 2b-S1 Parser/evaluator.
+- [x] 2b-S1 Parser/evaluator (#2836).
   - [ ] Pure evaluator with no DB side effects.
   - [ ] Per-field-type operator compatibility tests.
   - [ ] Malformed rule fail-closed tests.
   - [ ] Deleted/hidden predicate field tests.
 
-- [ ] 2b-S2 Backend enforcement.
+- [x] 2b-S2 Backend enforcement (#2841 — wired into the #18 seam, flag-off inert).
   - [ ] Real-DB list/view/single-record tests.
   - [ ] Real-DB summary subset tests.
   - [ ] Real-DB export and aggregate/dashboard tests.
   - [ ] Real-DB link picker and trash tests.
   - [ ] CI allowlist confirmation; do not infer from green jobs.
 
-- [ ] 2b-S3 Authoring UI.
+- [x] 2b-S3 Authoring UI (#2847, + text-type operator allowlist fix).
   - [ ] Rule builder preserves aliases/case/unsupported fields without silent loss.
   - [ ] Browser evidence for create/edit/delete rule flows.
   - [ ] i18n labels through typed modules.
 
-- [ ] 2b-S4 Performance/caching.
+- [~] 2b-S4 Performance/caching — REMAINING, demand-gated (do on a large-rule-set perf need, else deferred).
   - [ ] Large fixture query evidence.
   - [ ] Rule-change invalidation tests.
   - [ ] Field-change invalidation tests.

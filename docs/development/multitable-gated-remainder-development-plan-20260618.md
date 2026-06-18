@@ -18,10 +18,10 @@ Closed and removed from the active remainder:
 
 The remaining development is exactly:
 
-1. **2b · #18 phase-2**: conditional / dynamic field-predicate permission rules.
+1. **2b · #18 phase-2** (conditional / dynamic field-predicate permission rules): **mostly shipped — S1 parser/evaluator (#2836), S2 backend read-deny enforcement wired into the #18 seam, flag-off inert (#2841), and S3 authoring UI + API (#2847) are all merged.** The rule + threat model (S0) is settled by those. **Only 2b-S4 (performance/caching pass) remains — and it is itself demand-gated (do it when a large-rule-set perf need appears; otherwise deferred).**
 2. **2c · Gated arc not started**: `#16` Person field as a true org-member directory.
 
-Everything else belongs to a future roadmap pool, not to this closure ledger. See Appendix A.
+Everything else belongs to a future roadmap pool, not to this closure ledger. See Appendix A. (2b status updated 2026-06-18 after #2836/#2841/#2847.)
 
 ## 1. 2a · Live CRDT Remaining Field Types
 
@@ -114,6 +114,8 @@ Non-goals:
 
 ## 2. 2b · #18 Phase-2 Permission Rule Engine
 
+> **STATUS (2026-06-18): SHIPPED THROUGH S3.** The gate below (§2.2) is satisfied and the engine is built: **S1** pure parser/evaluator, fail-closed (#2836); **S2** conditional read-deny enforcement wired into the static-#18 seam, flag-off inert (#2841); **S3** authoring UI + API (#2847). Only **S4 (performance/caching)** is unbuilt, and it is **demand-gated** — pursue it when a large-rule-set perf need appears, otherwise deferred. §2.1–§2.4 retained as history.
+
 ### 2.1 Current Contract
 
 The shipped `#18` line is static row-level read-deny:
@@ -155,11 +157,11 @@ Recommended implementation slices after the gate opens:
 
 | Slice | Scope | Verification |
 |---|---|---|
-| 2b-S0 | Security design-lock and adversarial threat model. | Owner sign-off; no runtime. |
-| 2b-S1 | Pure evaluator + parser, no route wiring. | Unit matrix per field type/operator; malformed rule fail-closed. |
-| 2b-S2 | Backend enforcement for the same read surfaces covered by static #18. | Real-DB golden over list, single record, view, summaries, export, aggregate/dashboard, search/filter, link picker, trash list/restore. |
-| 2b-S3 | Authoring UI for conditional rules. | Frontend tests + browser evidence; no silent rule loss on edit. |
-| 2b-S4 | Performance and caching pass. | Large fixture query evidence; invalidation tests for rule and field changes. |
+| ✅ 2b-S0 | Security design-lock and adversarial threat model. (Settled — S1–S3 built on the locked rule model.) | Owner sign-off; no runtime. |
+| ✅ 2b-S1 | Pure evaluator + parser, no route wiring. **(#2836)** | Unit matrix per field type/operator; malformed rule fail-closed. |
+| ✅ 2b-S2 | Backend enforcement for the same read surfaces covered by static #18. **(#2841 — wired into the #18 seam, flag-off inert)** | Real-DB golden over list, single record, view, summaries, export, aggregate/dashboard, search/filter, link picker, trash list/restore. |
+| ✅ 2b-S3 | Authoring UI for conditional rules. **(#2847, + text-type operator allowlist fix)** | Frontend tests + browser evidence; no silent rule loss on edit. |
+| ⬜ 2b-S4 | Performance and caching pass. **(REMAINING — demand-gated: do when a large-rule-set perf need appears, else deferred.)** | Large fixture query evidence; invalidation tests for rule and field changes. |
 
 Security invariants:
 
