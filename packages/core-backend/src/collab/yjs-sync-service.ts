@@ -7,7 +7,7 @@ import type { YjsPersistenceAdapter } from './yjs-persistence-adapter'
  * yet (no snapshot, no incremental updates).
  *
  * Seeding rule (see the loop below for the authoritative logic):
- *   - String values (free-text AND string-stored atomics like select/date) → a
+ *   - String values (free-text AND string-stored atomics like select/date/dateTime) → a
  *     Y.Text pre-populated with the string, under the fieldId key (char-level merge).
  *   - Non-string ATOMIC values (number/currency/percent/rating/duration/boolean,
  *     multiSelect arrays) → a PLAIN value under the fieldId key, synced LWW per key
@@ -79,8 +79,8 @@ export class YjsSyncService {
           // multiSelect arrays, etc.): seed as a PLAIN value so they sync LWW per key
           // via the Y.Map (char-merge is meaningless for atomic values). The bridge
           // persists whatever's here through the validated patchRecords path, so the
-          // stored shape is unchanged. (string-stored atomics like select/date stay
-          // Y.Text for now — flipping their representation is a separate, gated decision.)
+          // stored shape is unchanged. (string-stored atomics like select/date/dateTime
+          // stay Y.Text for now — flipping their representation is a separate, gated decision.)
           fields.set(fieldId, value as never)
         }
         // null/undefined: leave absent (a delete; nothing to seed).

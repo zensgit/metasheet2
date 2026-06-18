@@ -43,9 +43,10 @@ interface PendingWrite {
 /**
  * Bridges Y.Doc field changes → RecordWriteService.patchRecords().
  *
- * Each record doc has a Y.Map "fields". When a Y.Text field inside that
- * map changes (from a remote Yjs client, NOT from 'rest' origin), the
- * bridge debounces the change and flushes it as a patch.
+ * Each record doc has a Y.Map "fields". When a field inside that map changes
+ * — a Y.Text string edit OR a plain scalar value set under the key (from a
+ * remote Yjs client, NOT from 'rest' origin) — the bridge debounces the change
+ * and flushes it as a patch.
  */
 export class YjsRecordBridge {
   private pendingWrites = new Map<string, PendingWrite>()
