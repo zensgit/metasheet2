@@ -16,12 +16,11 @@ Closed and removed from the active remainder:
 - Live scalar CRDT user-usable edit path: `number`, `currency`, `percent`, `boolean`, `rating`, `multiSelect`, and now `select` + `date` (#2832), `duration` (#2838), and `dateTime` (#2849, canonical-UTC-ISO value invariant) are live. **2a is COMPLETE — the full scalar field set is collaborative; no scalar type remains deferred.** (Updated 2026-06-18 after #2849; §1 retained below as history.)
 - CRDT comment hygiene: the repository documents that the backend bridge is a generic plain-value collector, which is not the same as a field type being product-open in the editor.
 - **2b · #18 phase-2 conditional permission rules — COMPLETE.** S1 parser/evaluator (#2836), S2 backend read-deny enforcement wired into the #18 seam flag-off-inert (#2841), S3 authoring UI + API (#2847), and S4 content-keyed parse cache (#2861). All slices shipped.
+- **2c · #16 Person field → org-member directory — COMPLETE.** Source-of-truth DECIDED = **B (member-group directory)** (owner pick via design-lock #2860). S2 resolver `resolvePersonAssignableDirectory` (#2866), S3a `canEditRecord`-gated directory endpoint (#2867), S3b `MetaPersonPicker` wired to it — offers exactly what the validator accepts (#2869), S4 inactive/historical display cue — stored-but-deactivated assignees shown read-only, never re-assignable (#2874). Built on the fail-closed assignment enforcement (#2833 + #2854). All slices shipped.
 
-The remaining development is exactly:
+**The active remainder is EMPTY — all planned development (2a, 2b, 2c) is complete.**
 
-1. **2c · in-progress arc** (`#16` Person field → true org-member directory): the **only** active arc. **Source-of-truth DECIDED = B (member-group directory)** — design-lock #2860 → **S2 resolver `resolvePersonAssignableDirectory` shipped (#2866, unit + real-DB)**, on top of the fail-closed assignment enforcement (#2833 + #2854). No longer source-blocked; remaining is **S3 picker-UX (filter to assignable) + S4 inactive/historical handling** (out-of-scope values readable, not newly assignable).
-
-Everything else belongs to a future roadmap pool, not to this closure ledger. See Appendix A. (2a closed #2851; 2b closed S1–S4 by 2026-06-18 after #2836/#2841/#2847/#2861.)
+Everything else belongs to a future roadmap pool, not to this closure ledger. See Appendix A. (2a closed #2851; 2b closed S1–S4 after #2836/#2841/#2847/#2861; 2c closed S2–S4 after #2866/#2867/#2869/#2874 — all 2026-06-18.)
 
 ## 1. 2a · Live CRDT Remaining Field Types
 
@@ -179,7 +178,7 @@ Non-goals:
 
 ### 3.1 `#16` Person Field → True Org-Member Directory
 
-> **UPDATED 2026-06-18:** source-of-truth **DECIDED = B (member-group directory)** (design-lock #2860); the fail-closed assignment enforcement (#2833 + route-parity #2854) and the S2 directory resolver `resolvePersonAssignableDirectory` (#2866) are shipped. Remaining: **S3 picker-UX + S4 inactive/historical handling.** The "Gate / Required decisions / slice" detail below is the original decomposition, retained as history — the source decision is no longer open.
+> **COMPLETE 2026-06-18.** Source-of-truth **DECIDED = B (member-group directory)** (owner pick, design-lock #2860). Shipped: fail-closed assignment enforcement (#2833 + route-parity #2854); S2 directory resolver `resolvePersonAssignableDirectory` (#2866); S3a `canEditRecord`-gated directory endpoint (#2867); S3b `MetaPersonPicker` wired to it (#2869); S4 inactive/historical display cue (#2874). All slices shipped — 2c is closed. The "Gate / Required decisions / slice" detail below is the original decomposition, retained as history.
 
 Current state:
 
@@ -228,7 +227,7 @@ Because every remaining item is gated, the default action is **hold**.
 
 **2a is complete and 2b is complete through S4 (`#2861`) — those gates are closed, not next options.** The remaining gated next options:
 
-1. **2c / #16 person-directory S3/S4** — the **sole** in-progress product arc. Source-of-truth already decided (B) + S2 resolver shipped (#2866); remaining is **S3 picker-UX** (filter to assignable) + **S4 inactive/historical handling** (out-of-scope values readable, not newly assignable).
+1. **2c / #16 person-directory — COMPLETE** (source = B; S2 #2866, S3a #2867, S3b #2869, S4 #2874). No in-progress product arc remains in this ledger.
 2. **D2 high-scale re-baseline harness work** — only if the product wants to revisit large-table performance after the existing D2 verdict; this is not a grid-virtualization slice.
 
 Do not open more than one security-sensitive runtime arc at the same time.

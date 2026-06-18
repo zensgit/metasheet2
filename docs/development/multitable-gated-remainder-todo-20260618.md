@@ -2,7 +2,7 @@
 
 > Status: **CURRENT GATED TODO**.
 > Pair: `multitable-gated-remainder-development-plan-20260618.md`.
-> Grounding: `origin/main` (live-main, 2026-06-18). Completed + on `main`: **2a** (`#2832`/`#2838`/`#2849`), **2b complete through S4** (`#2836`/`#2841`/`#2847`/`#2861`). The earlier comment/ledger tail PRs `#2825` + `#2857` are closed as superseded by `#2859` (this reconciliation).
+> Grounding: `origin/main` (live-main, 2026-06-18). Completed + on `main`: **2a** (`#2832`/`#2838`/`#2849`), **2b complete through S4** (`#2836`/`#2841`/`#2847`/`#2861`), **2c complete S2–S4** (`#2866`/`#2867`/`#2869`/`#2874`, source = B). **All planned development (2a/2b/2c) is done; the active remainder is empty.** The earlier comment/ledger tail PRs `#2825` + `#2857` are closed as superseded by `#2859` (this reconciliation).
 > Supersedes: `multitable-current-development-plan-20260617.md` and `multitable-current-development-todo-20260617.md` for current multitable remainder routing.
 > Legend: `[x]` closed · `[ ]` todo after opt-in · `[!]` gate requiring owner/design decision · `[~]` roadmap pool, not current remainder.
 
@@ -20,7 +20,7 @@
 
 ## 1. 2a · Live CRDT Remaining Field Types
 
-> **CLOSED 2026-06-18** (select/date #2832, duration #2838, dateTime #2849). The checkboxes below were satisfied per type — lazy `coerceText` dual-reader; the strdate real-DB golden covers select/date/dateTime; duration has its own FE + flush proof. Retained as history; no remaining 2a work. Active remainder is now **2b** and **2c** only.
+> **CLOSED 2026-06-18** (select/date #2832, duration #2838, dateTime #2849). The checkboxes below were satisfied per type — lazy `coerceText` dual-reader; the strdate real-DB golden covers select/date/dateTime; duration has its own FE + flush proof. Retained as history; no remaining 2a work. (2b and 2c are now also complete — the active remainder is empty.)
 
 ### 1.1 `select` / `date` / `dateTime`
 
@@ -35,7 +35,7 @@
 
 ## 2. 2b · #18 Phase-2 Conditional Permission Rules
 
-> **COMPLETE — S1–S4 (2026-06-18).** S1 #2836, S2 #2841 (wired into the #18 seam, flag-off inert), S3 #2847, S4 #2861 (content-keyed parse cache, staleness-free — DB reads not cached). All slices shipped; sub-items below retained as history. The only in-progress multitable arc is **2c** (through S2 — source B + resolver #2866; S3 picker-UX + S4 inactive/historical remain).
+> **COMPLETE — S1–S4 (2026-06-18).** S1 #2836, S2 #2841 (wired into the #18 seam, flag-off inert), S3 #2847, S4 #2861 (content-keyed parse cache, staleness-free — DB reads not cached). All slices shipped; sub-items below retained as history. **2c is now also COMPLETE** (#2866/#2867/#2869/#2874) — see §3. All planned development (2a/2b/2c) is done; the active remainder is empty.
 
 - [x] Gate: owner-approved rule model and threat model — settled (S1–S3 built on it).
   - [ ] Decide rule language and field/operator matrix.
@@ -75,7 +75,7 @@
   - [ ] Rule-change invalidation tests.
   - [ ] Field-change invalidation tests.
 
-## 3. 2c · Gated Arc Not Started
+## 3. 2c · COMPLETE — `#16` Person Org-Member Directory
 
 ### 3.1 `#16` Person Field → True Org-Member Directory
 
@@ -86,9 +86,10 @@
 - [x] **16-S1 Backend validator + resolver** — fail-closed person validator across all write paths
   (#2833 validator + route-parity hardening #2854, real-PG) + `resolvePersonAssignableDirectory` resolver,
   source B (#2866, unit + real-DB).
-- [ ] **16-S3 Frontend picker UX** — filter options to assignable members; explain empty/disabled states; browser evidence. (REMAINING)
-- [ ] **16-S4 Inactive / historical handling** — inactive/deleted-user behavior + out-of-scope historical values
-  readable-not-assignable, with a display affordance. (REMAINING)
+- [x] **16-S3 Frontend picker UX** — `canEditRecord`-gated directory endpoint (#2867) + `MetaPersonPicker` wired
+  to it (#2869); offers exactly what the validator accepts; stored chips preserved (not dropped).
+- [x] **16-S4 Inactive / historical handling** — deactivated stored assignees shown read-only with a muted cue,
+  not re-assignable; out-of-scope historical values preserved (#2874, backend `inactive` flag + FE chip cue).
 
 ## 4. Roadmap Pool — Not Current Remainder
 
