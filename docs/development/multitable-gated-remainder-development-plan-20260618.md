@@ -15,13 +15,13 @@ Closed and removed from the active remainder:
 - `#18` row-level read-deny: foundation, all-surface enforcement, authoring UI, and flag endpoint tests are complete. The flag endpoint includes positive and negative GET authz locks.
 - Live scalar CRDT user-usable edit path: `number`, `currency`, `percent`, `boolean`, `rating`, `multiSelect`, and now `select` + `date` (#2832), `duration` (#2838), and `dateTime` (#2849, canonical-UTC-ISO value invariant) are live. **2a is COMPLETE — the full scalar field set is collaborative; no scalar type remains deferred.** (Updated 2026-06-18 after #2849; §1 retained below as history.)
 - CRDT comment hygiene: the repository documents that the backend bridge is a generic plain-value collector, which is not the same as a field type being product-open in the editor.
+- **2b · #18 phase-2 conditional permission rules — COMPLETE.** S1 parser/evaluator (#2836), S2 backend read-deny enforcement wired into the #18 seam flag-off-inert (#2841), S3 authoring UI + API (#2847), and S4 content-keyed parse cache (#2861). All slices shipped.
 
 The remaining development is exactly:
 
-1. **2b · #18 phase-2** (conditional / dynamic field-predicate permission rules): **mostly shipped — S1 parser/evaluator (#2836), S2 backend read-deny enforcement wired into the #18 seam, flag-off inert (#2841), and S3 authoring UI + API (#2847) are all merged.** The rule + threat model (S0) is settled by those. **Only 2b-S4 (performance/caching pass) remains — and it is itself demand-gated (do it when a large-rule-set perf need appears; otherwise deferred).**
-2. **2c · Gated arc not started**: `#16` Person field as a true org-member directory.
+1. **2c · Gated arc** (`#16` Person field → true org-member directory): the **only** remaining arc. **Owner-gated on a source-of-truth decision (A internal users / B member-group directory / C external IdP).** Design-lock #2860 is merged; runtime is **blocked until the owner explicitly picks the source** — it has NOT been chosen yet (B is the design-lock's recommendation, not a selection).
 
-Everything else belongs to a future roadmap pool, not to this closure ledger. See Appendix A. (2b status updated 2026-06-18 after #2836/#2841/#2847.)
+Everything else belongs to a future roadmap pool, not to this closure ledger. See Appendix A. (2a closed #2851; 2b closed S1–S4 by 2026-06-18 after #2836/#2841/#2847/#2861.)
 
 ## 1. 2a · Live CRDT Remaining Field Types
 
@@ -114,7 +114,7 @@ Non-goals:
 
 ## 2. 2b · #18 Phase-2 Permission Rule Engine
 
-> **STATUS (2026-06-18): SHIPPED THROUGH S3.** The gate below (§2.2) is satisfied and the engine is built: **S1** pure parser/evaluator, fail-closed (#2836); **S2** conditional read-deny enforcement wired into the static-#18 seam, flag-off inert (#2841); **S3** authoring UI + API (#2847). Only **S4 (performance/caching)** is unbuilt, and it is **demand-gated** — pursue it when a large-rule-set perf need appears, otherwise deferred. §2.1–§2.4 retained as history.
+> **STATUS (2026-06-18): COMPLETE (S1–S4).** S1 parser/evaluator, fail-closed (#2836); S2 conditional read-deny enforcement wired into the static-#18 seam, flag-off inert (#2841); S3 authoring UI + API (#2847); **S4 content-keyed parse cache (#2861) — staleness-free (DB reads are NOT cached; the per-read rules load is the freshness guarantee).** §2.1–§2.4 retained as history.
 
 ### 2.1 Current Contract
 
@@ -161,7 +161,7 @@ Recommended implementation slices after the gate opens:
 | ✅ 2b-S1 | Pure evaluator + parser, no route wiring. **(#2836)** | Unit matrix per field type/operator; malformed rule fail-closed. |
 | ✅ 2b-S2 | Backend enforcement for the same read surfaces covered by static #18. **(#2841 — wired into the #18 seam, flag-off inert)** | Real-DB golden over list, single record, view, summaries, export, aggregate/dashboard, search/filter, link picker, trash list/restore. |
 | ✅ 2b-S3 | Authoring UI for conditional rules. **(#2847, + text-type operator allowlist fix)** | Frontend tests + browser evidence; no silent rule loss on edit. |
-| ⬜ 2b-S4 | Performance and caching pass. **(REMAINING — demand-gated: do when a large-rule-set perf need appears, else deferred.)** | Large fixture query evidence; invalidation tests for rule and field changes. |
+| ✅ 2b-S4 | Performance and caching pass. **(#2861 — content-keyed parse cache; staleness-free, DB reads not cached.)** | Unit cache cases (hit / equals-direct / content-change re-parse / 200-rule set parsed once across 50 reads / cyclic bypass). |
 
 Security invariants:
 
