@@ -122,4 +122,36 @@ describe('MetaPersonPicker (field member-group directory)', () => {
     })
     app.unmount(); container.remove()
   })
+
+  // 2c-S4: a preserved stored chip that's absent from the assignable directory is VISUALLY MARKED
+  // historical (muted + title) so the user sees it's kept-but-not-reassignable; an in-directory chip is not.
+  it('marks a stored chip absent from the directory as historical; leaves an in-directory chip unmarked', async () => {
+    mockListDirectory.mockResolvedValue(directory) // u1, u2 offered — u_gone is NOT
+    const { container, app, vm } = mount({ id: 'f', name: 'Owner', type: 'person', property: { limitSingleRecord: false } }, ['u_gone', 'u1'], vi.fn())
+    vm.visible = true
+    await flush()
+    const chips = Array.from(container.querySelectorAll('.meta-person-picker__chip')) as HTMLElement[]
+    const historical = chips.filter((c) => c.getAttribute('data-historical') === 'true')
+    expect(historical).toHaveLength(1) // only u_gone
+    const hist = historical[0]
+    expect(hist.classList.contains('meta-person-picker__chip--historical')).toBe(true)
+    expect(hist.getAttribute('title')).toBeTruthy() // i18n personPicker.historicalMember resolves
+    expect(hist.textContent).toContain('u_gone') // still rendered — never dropped (2c-S3b invariant held)
+    const inDir = chips.find((c) => (c.textContent ?? '').includes('Alice'))
+    expect(inDir?.getAttribute('data-historical')).toBeNull() // u1 is assignable → not marked
+    app.unmount(); container.remove()
+  })
+
+  // Guard: with no directory loaded (unsaved field, no id) we cannot know the assignable set, so NO chip
+  // is marked historical (avoids false positives) — the stored chip still renders.
+  it('does not mark chips historical when the directory has not loaded (unsaved field)', async () => {
+    mockListDirectory.mockResolvedValue(directory)
+    const { container, app, vm } = mount({ name: 'Owner', type: 'person', property: { limitSingleRecord: false } }, ['u_gone'], vi.fn())
+    vm.visible = true
+    await flush()
+    const chips = Array.from(container.querySelectorAll('.meta-person-picker__chip')) as HTMLElement[]
+    expect(chips).toHaveLength(1)
+    expect(chips[0].getAttribute('data-historical')).toBeNull()
+    app.unmount(); container.remove()
+  })
 })

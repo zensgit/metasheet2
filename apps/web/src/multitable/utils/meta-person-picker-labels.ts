@@ -15,6 +15,7 @@ export type MetaPersonPickerLabelKey =
   | 'personPicker.confirm'
   | 'personPicker.close'
   | 'personPicker.errorLoad'
+  | 'personPicker.historicalMember'
 
 const META_PERSON_PICKER_LABELS: Record<MetaPersonPickerLabelKey, { en: string; zh: string }> = {
   'personPicker.title': { en: 'Select People', zh: '选择人员' },
@@ -27,6 +28,7 @@ const META_PERSON_PICKER_LABELS: Record<MetaPersonPickerLabelKey, { en: string; 
   'personPicker.confirm': { en: 'Confirm', zh: '确认' },
   'personPicker.close': { en: 'Close people picker', zh: '关闭人员选择器' },
   'personPicker.errorLoad': { en: 'Failed to load members', zh: '加载成员失败' },
+  'personPicker.historicalMember': { en: 'No longer assignable (kept from a previous value)', zh: '已不可分配（保留的历史值）' },
 }
 
 export function personPickerLabel(key: MetaPersonPickerLabelKey, isZh: boolean): string {
