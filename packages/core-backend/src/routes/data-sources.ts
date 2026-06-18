@@ -362,8 +362,8 @@ export function dataSourcesRouter(): Router {
    * a RESULT-ONLY body — it never echoes back the submitted config / connection / credentials.
    * rbac `write`: supplying arbitrary connection params + actively dialing out is a write-tier
    * capability (matches create, and narrows the caller set vs `read`).
-   * NOTE: must precede the `/:id/*` routes is unnecessary (single-segment `/test` cannot match a
-   * two-segment `/:id/test`), but it is grouped with create for clarity.
+   * Route placement: `/test` is single-segment and there is no bare `POST /:id`, so it cannot collide
+   * with the two-segment `/:id/*` routes; it is grouped with create for clarity.
    */
   router.post('/api/data-sources/test', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
     const parse = DataSourceCreateSchema.safeParse(req.body)
@@ -399,7 +399,8 @@ export function dataSourcesRouter(): Router {
         }
       })
     } catch (error) {
-      // Unsupported type is a client error (mirror create's allowlist semantics), not a 500.
+      // Defensive: the Zod enum rejects unknown types with a 400 before the helper runs; this maps the
+      // helper's "unsupported type" throw (a registered type with no adapter) to 400 too, not a 500.
       if (error instanceof Error && error.message.toLowerCase().includes('unsupported data source type')) {
         return res.status(400).json({
           ok: false,

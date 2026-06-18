@@ -54,10 +54,15 @@ class OkAdapter extends FakeBase {
   async testConnection(): Promise<boolean> { return true }
 }
 
-// connect() fails with an error embedding the configured password (proves redaction + no echo).
+// connect() fails with an error embedding the configured host + username + password — proves the
+// adapter redacts the secret AND the helper's scrubInput strips the submitted host/username (no echo).
 class FailAdapter extends FakeBase {
   async connect(): Promise<void> {
-    const err = new Error(`ECONNREFUSED 127.0.0.1: login failed (password=${this.config.credentials?.password})`)
+    const c = this.config
+    const err = new Error(
+      `connect to ${String(c.connection?.host)} failed: password authentication failed for user ` +
+        `"${c.credentials?.username}" (password=${c.credentials?.password})`,
+    )
     await this.onError(err) // records redactSecrets(err.message) into lastConnectionError, emits 'error'
     throw err
   }
@@ -78,7 +83,7 @@ function cfg(id: string, type: string, extra?: Partial<DataSourceConfig>): DataS
   return {
     id, name: id, type,
     connection: { host: 'unreachable.example' },
-    credentials: { username: 'u', password: SECRET },
+    credentials: { username: 'svc_user', password: SECRET },
     options: { autoConnect: false },
     ...extra,
   } as DataSourceConfig
@@ -115,7 +120,10 @@ describe('DataSourceManager.testEphemeralConnection (helper)', () => {
 
     expect(result.success).toBe(false)
     expect(result.error).toContain('***')
-    expect(JSON.stringify(result)).not.toContain(SECRET)
+    // no-echo: neither the password, the submitted host, nor the username survive in the cause
+    for (const leak of [SECRET, 'unreachable.example', 'svc_user']) {
+      expect(JSON.stringify(result)).not.toContain(leak)
+    }
     expect(manager.getScope(id)).toBeUndefined() // still nothing registered on failure
     expect(removeAllListenerCalls).toContain(id) // disposed even on failure
   })
@@ -162,18 +170,23 @@ describe('POST /api/data-sources/test (route)', () => {
     }
   })
 
-  it('returns a RESULT-ONLY failure body with a redacted error and no secret', async () => {
+  it('failure body is result-only and echoes back NO submitted host / username / password', async () => {
     const manager = getDataSourceManager()
     manager.registerAdapterType('postgres', FailAdapter as never)
     const res = await request(appAs('tester')).post('/api/data-sources/test').send({
       id: 'eph_echo_fail', name: 'x', type: 'postgres',
-      connection: { host: 'h' }, credentials: { username: 'u', password: SECRET },
+      connection: { host: 'secret-host.internal' },
+      credentials: { username: 'admin_user', password: SECRET },
     })
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(true)
     expect(res.body.data.success).toBe(false)
-    expect(res.body.data.error.message).toContain('***')
-    expect(JSON.stringify(res.body)).not.toContain(SECRET)
+    expect(res.body.data.error.message).toBeTruthy()      // category survives (e.g. "authentication failed")
+    expect(res.body.data.error.message).toContain('***')  // submitted identifiers scrubbed
+    const wire = JSON.stringify(res.body)
+    for (const leak of [SECRET, 'secret-host.internal', 'admin_user', 'connection', 'credentials']) {
+      expect(wire).not.toContain(leak)
+    }
   })
 
   it('persists nothing: a /test call adds no source to the list and the id stays 404', async () => {

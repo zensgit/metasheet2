@@ -558,6 +558,19 @@ export class DataSourceManager extends EventEmitter {
     }
     const adapter = new AdapterClass(config)
     adapter.on('error', () => { /* ephemeral: cause captured via connectionError; no emit/persist */ })
+    // No-echo (design-lock 钉子②): the adapter redacts secret VALUES, but a driver diagnostic can still
+    // reflect the caller's submitted host/username (e.g. `password authentication failed for user "x"`,
+    // `getaddrinfo ENOTFOUND <host>`). Strip those submitted identifiers too so the ephemeral test never
+    // echoes connection input back. Scoped here — shared redactSecrets stays intact for /:id/test.
+    const scrubInput = (msg: string | undefined): string | undefined => {
+      if (!msg) return msg
+      const conn = config.connection ?? {}
+      const ids = [conn.host, conn.server, conn.database, config.credentials?.username]
+        .filter((v): v is string => typeof v === 'string' && v.trim().length >= 3)
+      let out = msg
+      for (const id of ids) out = out.split(id).join('***')
+      return out
+    }
     const start = Date.now()
     try {
       if (!adapter.isConnected()) {
@@ -567,9 +580,9 @@ export class DataSourceManager extends EventEmitter {
       const latency = Date.now() - start
       return ok
         ? { success: true, latency }
-        : { success: false, latency, error: adapter.connectionError ?? undefined }
+        : { success: false, latency, error: scrubInput(adapter.connectionError ?? undefined) }
     } catch {
-      return { success: false, latency: Date.now() - start, error: adapter.connectionError ?? undefined }
+      return { success: false, latency: Date.now() - start, error: scrubInput(adapter.connectionError ?? undefined) }
     } finally {
       try {
         if (adapter.isConnected()) await adapter.disconnect()
