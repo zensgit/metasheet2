@@ -97,7 +97,7 @@ const ElInput = defineComponent({
 
 const ElSelect = defineComponent({
   name: 'ElSelect',
-  props: { modelValue: String, disabled: Boolean },
+  props: { modelValue: [String, Array], disabled: Boolean },
   emits: ['update:modelValue', 'change'],
   render() {
     return h('select', {
@@ -553,6 +553,48 @@ describe('TemplateAuthoringView', () => {
     expect(payload.name).toBe('出差审批')
     expect(payload.approvalGraph.nodes.map((node: any) => node.key)).toEqual(['start', 'approval_1', 'end'])
     expect(replaceSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_created/edit' })
+  })
+
+  // POST-GATE combined-view acceptance (runbook Stage A1/A2): A picker + E self-approver
+  // coexist editable on one template; the same shape carrying B fieldPermissions is fail-closed.
+  function buildComboGraph(node1Config: Record<string, unknown>) {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '审批人 1', config: node1Config },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'end' },
+      ],
+    }
+  }
+
+  it('combined view A1: a static_user + self-approver step renders the directory picker (A) and the self-approver toggle (E) together, editable', async () => {
+    routeParams = { id: 'tpl_combo' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true } }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-step-user-picker"]')).not.toBeNull() // A renders
+    expect(container!.querySelector('[data-testid="approval-step-merge-with-requester"]')).not.toBeNull() // E renders, same step
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // editable, not fail-closed
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('combined view A2: the same template carrying fieldPermissions opens fail-closed (B) — unsupported alert + save disabled', async () => {
+    routeParams = { id: 'tpl_combo_fp' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true }, fieldPermissions: [{ fieldId: 'secret', access: 'hidden' }] }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).not.toBeNull() // B fail-closed
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(true) // save disabled
   })
 
   it('updates an existing supported template without replacing it through create', async () => {
