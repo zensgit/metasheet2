@@ -1081,6 +1081,207 @@ describe('Attendance admin regressions', () => {
     expect(savedPayload?.annualLeavePolicy?.tiers).toEqual([])
   })
 
+  // ===== L5c admin operations =====
+  const enabledPolicySettings = () => jsonResponse(200, {
+    ok: true,
+    data: { annualLeavePolicy: { enabled: true, tenureMode: 'cumulative_service', standardDayMinutes: 480, tiers: [{ minYears: 1, maxYears: null, days: 5 }], carryover: { enabled: false }, timezone: 'Asia/Shanghai' } },
+  })
+  const openOpsSection = async () => {
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-operations"]')!.click()
+    await flushUi(4)
+    return container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-operations')!
+  }
+
+  it('annual operations — manual adjustment: preview, in-DOM confirm, POST with idempotency key, result shows id', async () => {
+    let adjustBody: any = null
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/annual-leave-manual-adjustment')) {
+        adjustBody = JSON.parse(String(init!.body))
+        return jsonResponse(200, { ok: true, data: { id: 'adj-1', delta: 240, applied: true, alreadyApplied: false } })
+      }
+      if (url.includes('/api/attendance/leave-balances')) {
+        return jsonResponse(200, { ok: true, data: { userId: 'u1', summary: { grantedMinutes: 1000, remainingMinutes: 1000, exhaustedMinutes: 0, expiredMinutes: 0 }, activeLots: [], recentEvents: [], eventLimit: 50 } })
+      }
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
+    const inputs = card.querySelectorAll<HTMLInputElement>('input')
+    inputs[0].value = 'u1'; inputs[0].dispatchEvent(new Event('input'))
+    inputs[1].value = '240'; inputs[1].dispatchEvent(new Event('input'))
+    inputs[2].value = 'comp grant'; inputs[2].dispatchEvent(new Event('input'))
+    await flushUi(2)
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Adjust balance'))!.click()
+    await flushUi(2)
+    expect(section.querySelector('[data-annual-ops-confirm]')).toBeTruthy() // in-DOM confirm, not window.confirm
+    section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!.click()
+    await flushUi(4)
+    expect(adjustBody?.userId).toBe('u1')
+    expect(adjustBody?.deltaMinutes).toBe(240)
+    expect(adjustBody?.reason).toBe('comp grant')
+    expect(typeof adjustBody?.idempotencyKey).toBe('string')
+    expect(adjustBody.idempotencyKey.length).toBeGreaterThan(0)
+    expect(card.querySelector('[data-annual-ops-result-adjust]')?.textContent).toContain('adj-1')
+  })
+
+  it('annual operations — expiry backfill: dry-run renders the code→count table, commit sends dryRun:false', async () => {
+    const bodies: any[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/annual-leave-expiry-backfill')) {
+        const b = JSON.parse(String(init!.body)); bodies.push(b)
+        return jsonResponse(200, { ok: true, data: { scanned: 10, updated: 7, skipped: 3, dryRun: b.dryRun, reasons: { ALREADY_SET: 2, NON_ACCRUAL_SOURCE: 1 } } })
+      }
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="backfill"]')!
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Dry-run'))!.click()
+    await flushUi(4)
+    const result = card.querySelector('[data-annual-ops-result-backfill]')
+    expect(result?.textContent).toContain('ALREADY_SET')
+    expect(result?.textContent).toContain('NON_ACCRUAL_SOURCE') // reasons rendered as a code→count table (object, not array)
+    expect(bodies[0].dryRun).toBe(true)
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Commit backfill'))!.click()
+    await flushUi(2)
+    section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!.click()
+    await flushUi(4)
+    expect(bodies[1].dryRun).toBe(false)
+  })
+
+  it('annual operations — accrual run: an off-year period requires the extra confirm before committing', async () => {
+    const bodies: any[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/annual-leave-accrual/run')) {
+        const b = JSON.parse(String(init!.body)); bodies.push(b)
+        return jsonResponse(200, { ok: true, data: { runId: 'run-1', periodKey: `annual:${b.period}`, asOf: '2026-01-01', dryRun: b.dryRun, granted: 3, skipped: 1, grantedMinutes: 7200, lotsCreated: b.dryRun ? 0 : 3, alreadyGranted: 0, skipReasons: { NOT_YET_HIRED: 1 } } })
+      }
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="accrual"]')!
+    const periodInput = card.querySelector<HTMLInputElement>('input[type="number"]')!
+    periodInput.value = '2000'; periodInput.dispatchEvent(new Event('input')) // an off-year (not current/next)
+    await flushUi(2)
+    expect(card.querySelector('[data-annual-ops-accrual-offyear]')).toBeTruthy()
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Dry-run'))!.click()
+    await flushUi(4)
+    expect(bodies[0].dryRun).toBe(true)
+    expect(bodies[0].period).toBe(2000)
+    // accrual skipReasons render as a code→count table (object map, not an array)
+    expect(card.querySelector('[data-annual-ops-result-accrual]')?.textContent).toContain('NOT_YET_HIRED')
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Commit accrual'))!.click()
+    await flushUi(2)
+    const confirmSubmit = section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!
+    expect(section.querySelector('[data-annual-ops-extra-confirm]')).toBeTruthy()
+    expect(confirmSubmit.disabled).toBe(true) // blocked until the off-year box is checked
+    const extra = section.querySelector<HTMLInputElement>('[data-annual-ops-extra-confirm] input[type="checkbox"]')!
+    extra.checked = true; extra.dispatchEvent(new Event('change'))
+    await flushUi(2)
+    confirmSubmit.click()
+    await flushUi(4)
+    expect(bodies[1].dryRun).toBe(false)
+    expect(bodies[1].period).toBe(2000)
+  })
+
+  it('annual operations — accrual commit is disabled when the annual leave policy is off', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/settings')) {
+        return jsonResponse(200, { ok: true, data: { annualLeavePolicy: { enabled: false, tenureMode: 'cumulative_service', standardDayMinutes: 480, tiers: [], carryover: { enabled: false }, timezone: null } } })
+      }
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    expect(section.querySelector('[data-annual-ops-policy-off]')).toBeTruthy()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="accrual"]')!
+    const commit = Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Commit accrual'))!
+    expect(commit.disabled).toBe(true) // load-bearing: accrual needs the engine enabled (backend 422s otherwise)
+  })
+
+  it('annual operations — accrual: the submitted period is the snapshot at confirm time, not the live form (no TOCTOU)', async () => {
+    const bodies: any[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/annual-leave-accrual/run')) {
+        const b = JSON.parse(String(init!.body)); bodies.push(b)
+        return jsonResponse(200, { ok: true, data: { runId: 'run-1', periodKey: `annual:${b.period}`, asOf: '', dryRun: b.dryRun, granted: 1, skipped: 0, grantedMinutes: 2400, lotsCreated: b.dryRun ? 0 : 1, alreadyGranted: 0, skipReasons: {} } })
+      }
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="accrual"]')!
+    const periodInput = card.querySelector<HTMLInputElement>('input[type="number"]')!
+    const currentYear = new Date().getFullYear()
+    // dry-run a SAFE (current-year) period → confirm opens with no off-year extra-confirm
+    periodInput.value = String(currentYear); periodInput.dispatchEvent(new Event('input'))
+    await flushUi(2)
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Dry-run'))!.click()
+    await flushUi(4)
+    expect(bodies[0].period).toBe(currentYear)
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Commit accrual'))!.click()
+    await flushUi(2)
+    expect(section.querySelector('[data-annual-ops-confirm]')).toBeTruthy()
+    // tamper the period to an off-year WHILE the confirm panel is open
+    periodInput.value = '2000'; periodInput.dispatchEvent(new Event('input'))
+    await flushUi(2)
+    section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!.click()
+    await flushUi(4)
+    expect(bodies[1].dryRun).toBe(false)
+    expect(bodies[1].period).toBe(currentYear) // the snapshot wins — the tampered off-year is NOT submitted
+  })
+
+  it('annual operations — manual adjustment maps a backend error code to a human line', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/annual-leave-manual-adjustment')) {
+        return jsonResponse(404, { ok: false, error: { code: 'USER_NOT_IN_ORG', message: 'raw' } })
+      }
+      if (url.includes('/api/attendance/leave-balances')) {
+        return jsonResponse(200, { ok: true, data: { userId: 'u9', summary: { grantedMinutes: 0, remainingMinutes: 0, exhaustedMinutes: 0, expiredMinutes: 0 }, activeLots: [], recentEvents: [], eventLimit: 50 } })
+      }
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
+    const inputs = card.querySelectorAll<HTMLInputElement>('input')
+    inputs[0].value = 'u9'; inputs[0].dispatchEvent(new Event('input'))
+    inputs[1].value = '60'; inputs[1].dispatchEvent(new Event('input'))
+    inputs[2].value = 'x'; inputs[2].dispatchEvent(new Event('input'))
+    await flushUi(2)
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Adjust balance'))!.click()
+    await flushUi(2)
+    section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!.click()
+    await flushUi(4)
+    // the structured code maps to its human line, not a raw "raw"/generic failure
+    expect(card.querySelector('[data-annual-ops-error-adjust]')?.textContent || '').toContain('not an active member')
+  })
+
   it('warns when the attendance-group picker source is capped (no silent caps)', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)
