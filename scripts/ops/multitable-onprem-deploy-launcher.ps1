@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory = $true)]
   [string]$PackageArchive,
-  [string]$RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+  [string]$RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
+  [string]$StagingRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,8 +48,29 @@ function Resolve-LauncherPath {
   return (Resolve-Path -LiteralPath $trimmed).Path
 }
 
+function Resolve-StagingBase {
+  param([string]$Candidate)
+
+  $base = $Candidate
+  if ([string]::IsNullOrWhiteSpace($base)) {
+    $base = $env:METASHEET_ONPREM_STAGING_ROOT
+  }
+  if ([string]::IsNullOrWhiteSpace($base)) {
+    $base = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+  }
+  if ([string]::IsNullOrWhiteSpace($base)) {
+    throw 'No staging root is available. Set METASHEET_ONPREM_STAGING_ROOT to a short local path such as C:\ms-tmp.'
+  }
+
+  $base = [System.IO.Path]::GetFullPath($base.Trim().Trim('"'))
+  New-Item -ItemType Directory -Path $base -Force | Out-Null
+  return (Resolve-Path -LiteralPath $base).Path
+}
+
 function New-StagingDirectory {
-  $base = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+  param([string]$BaseRoot)
+
+  $base = Resolve-StagingBase -Candidate $BaseRoot
   $name = 'msdl-' + ([System.Guid]::NewGuid().ToString('N').Substring(0, 8))
   $path = Join-Path $base $name
   New-Item -ItemType Directory -Path $path -Force | Out-Null
@@ -101,7 +123,10 @@ $resolvedRoot = Resolve-LauncherPath -Candidate $RootDir -Label 'RootDir'
 Write-LauncherInfo "Package archive: $resolvedArchive"
 Write-LauncherInfo "Install root:    $resolvedRoot"
 
-$stage = New-StagingDirectory
+$stagingBase = Resolve-StagingBase -Candidate $StagingRoot
+Write-LauncherInfo "Staging base:    $stagingBase"
+
+$stage = New-StagingDirectory -BaseRoot $stagingBase
 $launcherExit = 1
 try {
   Write-LauncherInfo "Staging extraction root: $stage"
@@ -126,7 +151,7 @@ try {
   # complete" + health 200) reliably yields launcher exit 0 and a Last
   # Result of 0 in the outer scheduled task (#1526 follow-up).
   try {
-    & $stagedApply -RootDir $resolvedRoot -PackageArchive $resolvedArchive
+    & $stagedApply -RootDir $resolvedRoot -PackageArchive $resolvedArchive -StagingRoot $stagingBase
     $launcherExit = 0
   }
   catch {

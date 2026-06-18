@@ -12,6 +12,7 @@ param(
   [string]$BuildBackend = '0',
   [string]$RunMigrations = '1',
   [string]$RestartService = '1',
+  [string]$StagingRoot = '',
   [string]$DependencyRefreshTimeoutSec = '1800',
   [string]$DependencyRefreshHeartbeatSec = '60'
 )
@@ -78,13 +79,32 @@ function Write-Info {
   Write-Host "[multitable-onprem-apply-package] $Message"
 }
 
-function New-ShortTempDirectory {
-  param([string]$Prefix = 'mspa')
+function Resolve-StagingBase {
+  param([string]$Candidate)
 
-  $tempBase = [System.IO.Path]::GetTempPath()
-  if ([string]::IsNullOrWhiteSpace($tempBase) -or -not (Test-Path -LiteralPath $tempBase)) {
-    throw 'System temp directory is unavailable'
+  $tempBase = $Candidate
+  if ([string]::IsNullOrWhiteSpace($tempBase)) {
+    $tempBase = $env:METASHEET_ONPREM_STAGING_ROOT
   }
+  if ([string]::IsNullOrWhiteSpace($tempBase)) {
+    $tempBase = [System.IO.Path]::GetTempPath()
+  }
+  if ([string]::IsNullOrWhiteSpace($tempBase)) {
+    throw 'Staging root is unavailable. Set METASHEET_ONPREM_STAGING_ROOT to a short local path such as C:\ms-tmp.'
+  }
+
+  $tempBase = [System.IO.Path]::GetFullPath($tempBase.Trim().Trim('"'))
+  New-Item -ItemType Directory -Path $tempBase -Force | Out-Null
+  return (Resolve-Path -LiteralPath $tempBase).Path
+}
+
+function New-ShortTempDirectory {
+  param(
+    [string]$Prefix = 'mspa',
+    [string]$BaseRoot = ''
+  )
+
+  $tempBase = Resolve-StagingBase -Candidate $BaseRoot
 
   for ($index = 0; $index -lt 5; $index += 1) {
     $candidate = Join-Path $tempBase ($Prefix + '-' + [System.Guid]::NewGuid().ToString('N').Substring(0, 12))
@@ -527,7 +547,9 @@ Initialize-WindowsSystemToolPath
 
 $outputLogs = Join-Path $resolvedRoot 'output\logs'
 New-Item -ItemType Directory -Force -Path $outputLogs | Out-Null
-$extractRoot = New-ShortTempDirectory -Prefix 'mspa'
+$stagingBase = Resolve-StagingBase -Candidate $StagingRoot
+Write-Info "Staging base: $stagingBase"
+$extractRoot = New-ShortTempDirectory -Prefix 'mspa' -BaseRoot $stagingBase
 
 try {
   Write-Info "Package archive: $resolvedArchive"
