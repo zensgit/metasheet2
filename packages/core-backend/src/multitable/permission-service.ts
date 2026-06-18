@@ -607,6 +607,36 @@ export async function loadSheetMemberUserIdSet(
   return members
 }
 
+/**
+ * P1 (native person `restrictToMemberGroupIds` enforcement, design 2026-06-17): resolve the
+ * union of ACTIVE member-group members' userIds for the given member-group ids. Used to NARROW
+ * a person field's assignable set (sheet membership ∩ this set) when the field configures
+ * `restrictToMemberGroupIds`. Empty / unknown groups → empty set (a closed narrowing — all
+ * assignments rejected, consistent with validatePersonValue's "null set = closed" rule).
+ * Mirrors the member-group resolution used by the automation recipient path.
+ */
+export async function loadMemberGroupUserIdSet(
+  query: QueryFn,
+  groupIds: string[],
+): Promise<Set<string>> {
+  const ids = Array.from(new Set(groupIds.map((g) => (typeof g === 'string' ? g.trim() : '')).filter(Boolean)))
+  if (ids.length === 0) return new Set<string>()
+  const res = await query(
+    `SELECT DISTINCT gm.user_id::text AS user_id
+       FROM platform_member_group_members gm
+       JOIN users u ON u.id = gm.user_id
+      WHERE gm.group_id::text = ANY($1::text[])
+        AND u.is_active = TRUE`,
+    [ids],
+  )
+  const members = new Set<string>()
+  for (const row of res.rows as Array<Record<string, unknown>>) {
+    const id = typeof row.user_id === 'string' ? row.user_id.trim() : ''
+    if (id) members.add(id)
+  }
+  return members
+}
+
 export async function enrichFormShareCandidatesWithDingTalkStatus(
   query: QueryFn,
   candidates: MultitableSheetPermissionCandidate[],

@@ -22,7 +22,8 @@ import {
   type RecordPostCommitHook,
   type YjsInvalidator,
 } from './post-commit-hooks'
-import { BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateLongTextValue, validatePersonValue } from './field-codecs'
+import { BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, narrowPersonAllowedByGroups, normalizeMultiSelectValue, personRestrictGroupIds, validateLongTextValue, validatePersonValue } from './field-codecs'
+import { loadMemberGroupUserIdSet } from './permission-service'
 import {
   HierarchyCycleError,
   assertNoHierarchyParentCycle,
@@ -650,6 +651,22 @@ export class RecordWriteService {
         }
         return personMemberUserIds
       }
+      // P1 (design 2026-06-17): when a person field configures restrictToMemberGroupIds, narrow the
+      // assignable set to sheetMembers ∩ (union of those groups' members). Per-op cache keyed by the
+      // sorted group ids so repeated fields/groups resolve once.
+      const personGroupMemberCache = new Map<string, Set<string>>()
+      const resolvePersonAllowed = async (property: Record<string, unknown> | undefined): Promise<Set<string>> => {
+        const sheetMembers = await resolvePersonMemberUserIds()
+        const restrict = personRestrictGroupIds(property)
+        if (restrict.length === 0) return sheetMembers
+        const key = [...restrict].sort().join(',')
+        let groupMembers = personGroupMemberCache.get(key)
+        if (!groupMembers) {
+          groupMembers = await loadMemberGroupUserIdSet(query, restrict)
+          personGroupMemberCache.set(key, groupMembers)
+        }
+        return narrowPersonAllowedByGroups(sheetMembers, restrict, groupMembers)
+      }
 
       for (const [recordId, changes] of changesByRecord.entries()) {
         const expectedVersion = Array.from(
@@ -739,7 +756,7 @@ export class RecordWriteService {
 
           if (field.type === 'person') {
             try {
-              const allowed = await resolvePersonMemberUserIds()
+              const allowed = await resolvePersonAllowed(field.property)
               patch[change.fieldId] = validatePersonValue(change.value, change.fieldId, allowed, isPersonSingleRecord(field.property))
             } catch (error) {
               throw new RecordValidationError(error instanceof Error ? error.message : String(error))

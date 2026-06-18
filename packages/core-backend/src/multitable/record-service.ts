@@ -11,14 +11,16 @@ import {
   coerceBatch1Value,
   extractSelectOptions,
   isPersonSingleRecord,
+  narrowPersonAllowedByGroups,
   normalizeMultiSelectValue,
   normalizeJson,
   normalizeJsonArray,
+  personRestrictGroupIds,
   validateLongTextValue,
   validatePersonValue,
   type MultitableField,
 } from './field-codecs'
-import { loadSheetMemberUserIdSet } from './permission-service'
+import { loadMemberGroupUserIdSet, loadSheetMemberUserIdSet } from './permission-service'
 import {
   HierarchyCycleError,
   assertNoHierarchyParentCycle,
@@ -513,6 +515,21 @@ export class RecordService {
         }
         return personMemberUserIds
       }
+      // P1 (design 2026-06-17): narrow the assignable set by restrictToMemberGroupIds (sheet ∩ group
+      // members). Per-op cache keyed by sorted group ids.
+      const personGroupMemberCache = new Map<string, Set<string>>()
+      const resolvePersonAllowed = async (property: Record<string, unknown> | undefined): Promise<Set<string>> => {
+        const sheetMembers = await resolvePersonMemberUserIds()
+        const restrict = personRestrictGroupIds(property)
+        if (restrict.length === 0) return sheetMembers
+        const key = [...restrict].sort().join(',')
+        let groupMembers = personGroupMemberCache.get(key)
+        if (!groupMembers) {
+          groupMembers = await loadMemberGroupUserIdSet(query, restrict)
+          personGroupMemberCache.set(key, groupMembers)
+        }
+        return narrowPersonAllowedByGroups(sheetMembers, restrict, groupMembers)
+      }
 
       for (const [fieldId, value] of Object.entries(data)) {
         const field = fieldById.get(fieldId)
@@ -526,7 +543,7 @@ export class RecordService {
 
         if (field.type === 'person') {
           try {
-            const allowed = await resolvePersonMemberUserIds()
+            const allowed = await resolvePersonAllowed(field.property)
             patch[fieldId] = validatePersonValue(value, fieldId, allowed, isPersonSingleRecord(field.property))
           } catch (error) {
             throw new RecordValidationError(error instanceof Error ? error.message : String(error))
@@ -1041,6 +1058,20 @@ export class RecordService {
       }
       return personMemberUserIds
     }
+    // P1 (design 2026-06-17): narrow assignable set by restrictToMemberGroupIds (sheet ∩ group members).
+    const personGroupMemberCache = new Map<string, Set<string>>()
+    const resolvePersonAllowed = async (property: Record<string, unknown> | undefined): Promise<Set<string>> => {
+      const sheetMembers = await resolvePersonMemberUserIds()
+      const restrict = personRestrictGroupIds(property)
+      if (restrict.length === 0) return sheetMembers
+      const key = [...restrict].sort().join(',')
+      let groupMembers = personGroupMemberCache.get(key)
+      if (!groupMembers) {
+        groupMembers = await loadMemberGroupUserIdSet(this.pool.query.bind(this.pool), restrict)
+        personGroupMemberCache.set(key, groupMembers)
+      }
+      return narrowPersonAllowedByGroups(sheetMembers, restrict, groupMembers)
+    }
 
     for (const [fieldId, value] of Object.entries(data)) {
       const field = fieldById.get(fieldId)
@@ -1058,7 +1089,7 @@ export class RecordService {
       }
       if (field.type === 'person') {
         try {
-          const allowed = await resolvePersonMemberUserIds()
+          const allowed = await resolvePersonAllowed(field.property)
           patch[fieldId] = validatePersonValue(value, fieldId, allowed, isPersonSingleRecord(field.property))
         } catch (error) {
           fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)

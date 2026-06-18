@@ -51,6 +51,7 @@ import {
   loadRecordPermissionScopeMap,
   loadRowLevelReadDenyEnabled,
   loadDeniedRecordIds,
+  loadMemberGroupUserIdSet,
   loadSheetMemberUserIdSet,
   loadSheetPermissionScopeMap,
   loadViewPermissionScopeMap,
@@ -111,7 +112,7 @@ import { MultitableFormulaEngine } from '../multitable/formula-engine'
 import { FormulaEngine } from '../formula/engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
-import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
+import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, isRichLongTextProperty, narrowPersonAllowedByGroups, normalizeMultiSelectValue, personRestrictGroupIds, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import {
   AutomationRuleValidationError,
@@ -9480,6 +9481,20 @@ export function univerMetaRouter(): Router {
         }
         return personMemberUserIds
       }
+      // P1 (design 2026-06-17): narrow the assignable set by restrictToMemberGroupIds (sheet ∩ group members).
+      const personGroupMemberCache = new Map<string, Set<string>>()
+      const resolvePersonAllowed = async (property: Record<string, unknown> | undefined): Promise<Set<string>> => {
+        const sheetMembers = await resolvePersonMemberUserIds()
+        const restrict = personRestrictGroupIds(property)
+        if (restrict.length === 0) return sheetMembers
+        const key = [...restrict].sort().join(',')
+        let groupMembers = personGroupMemberCache.get(key)
+        if (!groupMembers) {
+          groupMembers = await loadMemberGroupUserIdSet(pool.query.bind(pool), restrict)
+          personGroupMemberCache.set(key, groupMembers)
+        }
+        return narrowPersonAllowedByGroups(sheetMembers, restrict, groupMembers)
+      }
 
       for (const [fieldId, value] of Object.entries(data)) {
         const field = fieldById.get(fieldId)
@@ -9523,7 +9538,7 @@ export function univerMetaRouter(): Router {
 
         if (field.type === 'person') {
           try {
-            const allowed = await resolvePersonMemberUserIds()
+            const allowed = await resolvePersonAllowed(field.property)
             patch[fieldId] = validatePersonValue(value, fieldId, allowed, isPersonSingleRecord(field.property))
           } catch (error) {
             fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)

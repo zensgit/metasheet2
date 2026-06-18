@@ -1063,6 +1063,31 @@ export function isPersonSingleRecord(property: Record<string, unknown> | undefin
   return property?.limitSingleRecord !== false
 }
 
+/** P1: the configured member-group narrowing ids on a person field (empty if none/invalid). */
+export function personRestrictGroupIds(property: Record<string, unknown> | undefined): string[] {
+  const v = property?.restrictToMemberGroupIds
+  if (!Array.isArray(v)) return []
+  return v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim())
+}
+
+/**
+ * P1 (design 2026-06-17): narrow a person field's assignable set by configured member groups.
+ * If `restrictGroupIds` is non-empty, the assignable set is the INTERSECTION of the sheet member
+ * set and the union of those groups' members (a person must be BOTH a sheet member AND in a
+ * configured group). Empty config → the sheet member set unchanged. This only ever TIGHTENS the
+ * existing sheet-membership floor — it can never grant a non-sheet-member.
+ */
+export function narrowPersonAllowedByGroups(
+  sheetMembers: ReadonlySet<string>,
+  restrictGroupIds: readonly string[],
+  groupMembers: ReadonlySet<string>,
+): Set<string> {
+  if (restrictGroupIds.length === 0) return new Set(sheetMembers)
+  const out = new Set<string>()
+  for (const id of sheetMembers) if (groupMembers.has(id)) out.add(id)
+  return out
+}
+
 /**
  * Coerce / validate a value for one of the MF2 batch-1 field types and
  * return the normalized form to persist. Returns the original value if
