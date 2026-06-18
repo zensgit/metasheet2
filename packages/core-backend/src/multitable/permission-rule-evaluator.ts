@@ -161,6 +161,44 @@ export function parseConditionalRules(raw: unknown): ParsedRulesResult {
   return { rules, rejected }
 }
 
+// ── 2b-S4: content-keyed parse cache ────────────────────────────────────────
+// parseConditionalRules is PURE over `raw`, so memoizing by the raw JSON is staleness-free: a rule
+// change yields a different key (automatic miss → re-parse), and field changes don't affect parsing
+// (fields are evaluated separately). This saves re-parsing identical rule sets across the many read
+// surfaces WITHOUT caching DB reads — caching the rules/fields query results would risk stale =
+// wrong access, which is unacceptable for a permission feature. Bounded LRU; the freshness guarantee
+// stays with the per-read DB load of the rules.
+const RULE_PARSE_CACHE = new Map<string, ParsedRulesResult>()
+const RULE_PARSE_CACHE_MAX = 256
+
+export function parseConditionalRulesCached(raw: unknown): ParsedRulesResult {
+  let key: string | null
+  try {
+    key = JSON.stringify(raw ?? null)
+  } catch {
+    key = null // unstringifiable (cycles) → bypass the cache, never throw
+  }
+  if (key === null) return parseConditionalRules(raw)
+  const hit = RULE_PARSE_CACHE.get(key)
+  if (hit) {
+    RULE_PARSE_CACHE.delete(key)
+    RULE_PARSE_CACHE.set(key, hit) // LRU bump
+    return hit
+  }
+  const parsed = parseConditionalRules(raw)
+  RULE_PARSE_CACHE.set(key, parsed)
+  if (RULE_PARSE_CACHE.size > RULE_PARSE_CACHE_MAX) {
+    const oldest = RULE_PARSE_CACHE.keys().next().value
+    if (oldest !== undefined) RULE_PARSE_CACHE.delete(oldest)
+  }
+  return parsed
+}
+
+/** Test hook: clear the 2b-S4 parse cache. */
+export function _clearConditionalRuleParseCache(): void {
+  RULE_PARSE_CACHE.clear()
+}
+
 function isEmptyValue(v: unknown): boolean {
   if (v === null || v === undefined) return true
   if (typeof v === 'string') return v.trim().length === 0
