@@ -24,6 +24,7 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { RecordWriteService, RecordValidationError, type RecordPatchInput } from '../../src/multitable/record-write-service'
 import { createRecordWriteHelpers } from '../../src/routes/univer-meta'
 import { deriveCapabilities } from '../../src/multitable/sheet-capabilities'
+import { resolvePersonAssignableDirectory } from '../../src/multitable/person-field-restriction'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -38,6 +39,7 @@ const G_ALLOW = '11111111-1111-4111-8111-111111111111'
 const G_OTHER = '22222222-2222-4222-8222-222222222222'
 const U_IN = `u_pmg_in_${TS}`
 const U_OUT = `u_pmg_out_${TS}`
+const U_INACTIVE = `u_pmg_inactive_${TS}` // 2c-S2: in G_ALLOW but is_active=FALSE → excluded from the assignable directory
 
 const F_PERSON = 'fld_person_restricted'
 const F_PERSON_FREE = 'fld_person_free'
@@ -104,6 +106,11 @@ describeIfDatabase('#16 person restrictToMemberGroupIds enforcement (real DB)', 
     await q('INSERT INTO platform_member_groups (id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [G_OTHER, 'Other'])
     await q('INSERT INTO platform_member_group_members (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [G_ALLOW, U_IN])
     await q('INSERT INTO platform_member_group_members (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [G_OTHER, U_OUT])
+    // 2c-S2 fixture: an INACTIVE user in the allowed group — must be excluded from the assignable directory
+    // (not assignable) while remaining readable via stored values elsewhere.
+    await q(`INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin) VALUES ($1,$2,$3,'x','user','[]'::jsonb,FALSE,FALSE) ON CONFLICT (id) DO NOTHING`, [U_INACTIVE, `${U_INACTIVE}@t.local`, U_INACTIVE])
+    await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'multitable:read') ON CONFLICT DO NOTHING`, [U_INACTIVE])
+    await q('INSERT INTO platform_member_group_members (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [G_ALLOW, U_INACTIVE])
   })
   beforeEach(async () => {
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, version = 1', [REC_ID, SHEET_ID, JSON.stringify({})])
@@ -155,5 +162,33 @@ describeIfDatabase('#16 person restrictToMemberGroupIds enforcement (real DB)', 
     const svc = makeService()
     await expect(svc.patchRecords(await buildInput(REC_ID, { [F_PERSON]: [U_OUT] }, 'yjs-bridge'))).rejects.toBeInstanceOf(RecordValidationError)
     expect((await readData(REC_ID))[F_PERSON]).toBeUndefined()
+  })
+
+  // ── 2c-S2: member-group directory READ model (resolvePersonAssignableDirectory) ──────────────
+  test('2c-S2 directory: restricted field → only in-group ACTIVE members, with display info', async () => {
+    const dir = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW])
+    const ids = dir.map((e) => e.userId)
+    expect(ids).toContain(U_IN) // in G_ALLOW, active, sheet member → assignable
+    expect(ids).not.toContain(U_OUT) // sheet member but not in G_ALLOW
+    expect(ids).not.toContain(ACTOR) // sheet member but not in G_ALLOW
+    expect(ids).not.toContain(U_INACTIVE) // in G_ALLOW but inactive → NOT assignable
+    const inEntry = dir.find((e) => e.userId === U_IN)
+    expect(inEntry?.email).toBe(`${U_IN}@t.local`) // hydrated display info
+    expect(inEntry?.name).toBe(U_IN)
+  })
+
+  test('2c-S2 directory: == the write-validator allowed set (display parity — offers exactly what patchRecords accepts)', async () => {
+    // The existing POSITIVE/NEGATIVE tests prove patchRecords accepts U_IN and rejects U_OUT for
+    // [G_ALLOW]; the directory must list exactly that allowed set so the picker never offers a value
+    // the validator would reject.
+    const dir = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW])
+    expect(dir.map((e) => e.userId).sort()).toEqual([U_IN])
+  })
+
+  test('2c-S2 directory: unrestricted field → all active sheet members (inactive excluded)', async () => {
+    const dir = await resolvePersonAssignableDirectory(q, SHEET_ID, [])
+    const ids = dir.map((e) => e.userId)
+    expect(ids).toEqual(expect.arrayContaining([ACTOR, U_IN, U_OUT])) // all active sheet members
+    expect(ids).not.toContain(U_INACTIVE) // inactive → not a sheet member, not in the directory
   })
 })
