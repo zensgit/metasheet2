@@ -42,10 +42,13 @@ So neither a `?userId=<other>` param nor an `x-user-id: <other>` header can make
   3. `/me` with an `x-user-id: <other>` header still returns the caller's `2400` (the header cannot override the subject).
 - The admin **L5a** read still passes via the shared helper (no regression from the refactor). **9/9** annual tests green.
 
-## 5. Out of scope here / follow-up
+## 5. The view + follow-up
 
-- **Employee overview card** — a thin self-balance card in the `overview` surface that fetches `/me` on mount and shows
-  the summary (+ a detail expansion). It reuses this endpoint with no new security surface; it's the natural next thin
-  slice once the direction is confirmed. (It touches the overview section registry / nav, so it's its own small PR.)
+- **Employee overview card — SHIPPED (#2853).** A read-only "My annual leave" card in the `overview` surface
+  (`mode='overview'`) fetches `/me` on overview mount and shows remaining / granted / used / expired. It reuses this
+  endpoint with no new security surface (no `userId` param). The handler only accepts a real balance payload, so a
+  non-balance response leaves the card empty rather than crashing; loading/error/empty states are handled. Frontend
+  test asserts the card renders the `/me` balance and the request carries no `userId`. So the self-service **view**
+  (endpoint + card) is complete.
 - **Self-service for other leave types** — the endpoint already accepts `leaveTypeCode`; v1 surfaces `annual`.
 - This endpoint is **read-only**; no employee-facing mutation (employees never adjust their own balances).
