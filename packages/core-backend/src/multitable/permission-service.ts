@@ -44,6 +44,11 @@ import {
   type ViewPermissionScope,
 } from './permission-derivation'
 import { filterPermissionCodesByNamespaceAdmission } from '../rbac/namespace-admission'
+import {
+  parseConditionalRules,
+  evaluateRecordDenied,
+  type FieldMeta as RuleFieldMeta,
+} from './permission-rule-evaluator'
 
 export { deriveRowActions, type MultitableRowActions } from './access'
 
@@ -209,6 +214,13 @@ function isUndefinedTableError(err: unknown, tableName: string): boolean {
   const msg = typeof (err as any)?.message === 'string' ? (err as any).message : ''
   if (code === '42P01') return msg.includes(tableName)
   return msg.includes(`relation "${tableName}" does not exist`)
+}
+
+function isUndefinedColumnError(err: unknown, columnName: string): boolean {
+  const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
+  const msg = typeof (err as any)?.message === 'string' ? (err as any).message : ''
+  if (code === '42703') return msg.includes(columnName)
+  return msg.includes(`column "${columnName}" does not exist`)
 }
 
 export function isSheetPermissionSubjectType(
@@ -913,6 +925,9 @@ export async function loadRecordPermissionScopeMap(
   userId: string,
 ): Promise<Map<string, RecordPermissionScope>> {
   if (!userId || !sheetId || recordIds.length === 0) return new Map()
+  const scopes = new Map<string, RecordPermissionScope>()
+  const rank = { read: 0, write: 1, admin: 2, none: 3 } as const
+  // (a) grant scopes via the actor's subjects (user / member-group / role).
   try {
     const result = await query(
       `SELECT rp.record_id, rp.access_level
@@ -938,7 +953,6 @@ export async function loadRecordPermissionScopeMap(
          )`,
       [userId, sheetId, recordIds],
     )
-    const scopes = new Map<string, RecordPermissionScope>()
     for (const row of result.rows as Array<{ record_id: string; access_level: string }>) {
       const recordId = typeof row.record_id === 'string' ? row.record_id : ''
       if (!recordId) continue
@@ -950,7 +964,6 @@ export async function loadRecordPermissionScopeMap(
       if (existing) {
         // DENY-WINS: a 'none' read-deny is the most restrictive and overrides grants via other subjects
         // (a deny cannot be bypassed by group/role membership). Otherwise max of read<write<admin.
-        const rank = { read: 0, write: 1, admin: 2, none: 3 } as const
         if (rank[level] > rank[existing.accessLevel]) {
           existing.accessLevel = level
         }
@@ -958,15 +971,26 @@ export async function loadRecordPermissionScopeMap(
         scopes.set(recordId, { recordId, accessLevel: level })
       }
     }
-    return scopes
   } catch (err) {
     if (
-      isUndefinedTableError(err, 'record_permissions')
-      || isUndefinedTableError(err, 'user_roles')
-      || isUndefinedTableError(err, 'platform_member_group_members')
-    ) return new Map()
-    throw err
+      !isUndefinedTableError(err, 'record_permissions')
+      && !isUndefinedTableError(err, 'user_roles')
+      && !isUndefinedTableError(err, 'platform_member_group_members')
+    ) throw err
+    // else: grant tables absent (pre-feature) — no grant scopes, but rule-deny below still applies.
   }
+  // (b) 2b conditional rule-deny: a record matched by a predicate rule gets a synthetic 'none' scope
+  // (DENY-WINS), so the derive-based read paths (single GET / view / list) enforce predicate rules
+  // exactly like an explicit 'none' grant. Actor-independent; admins bypass at the call site (same as #18).
+  for (const rid of await loadRuleDeniedRecordIds(query, sheetId, recordIds)) {
+    const existing = scopes.get(rid)
+    if (existing) {
+      if (rank.none > rank[existing.accessLevel]) existing.accessLevel = 'none'
+    } else {
+      scopes.set(rid, { recordId: rid, accessLevel: 'none' })
+    }
+  }
+  return scopes
 }
 
 /**
@@ -979,6 +1003,8 @@ export async function loadRecordPermissionScopeMap(
  */
 export async function loadDeniedRecordIds(query: QueryFn, sheetId: string, userId: string): Promise<Set<string>> {
   if (!userId || !sheetId) return new Set<string>()
+  const denied = new Set<string>()
+  // (a) grant-deny: explicit 'none' record_permissions via any of the actor's subjects.
   try {
     const result = await query(
       `SELECT DISTINCT rp.record_id
@@ -1004,21 +1030,76 @@ export async function loadDeniedRecordIds(query: QueryFn, sheetId: string, userI
          )`,
       [userId, sheetId],
     )
-    const denied = new Set<string>()
     for (const row of result.rows as Array<{ record_id?: unknown }>) {
       if (typeof row.record_id === 'string' && row.record_id) denied.add(row.record_id)
     }
-    return denied
   } catch (err) {
     if (
-      isUndefinedTableError(err, 'record_permissions')
-      || isUndefinedTableError(err, 'user_roles')
-      || isUndefinedTableError(err, 'platform_member_group_members')
-    ) return new Set<string>()
-    throw err
+      !isUndefinedTableError(err, 'record_permissions')
+      && !isUndefinedTableError(err, 'user_roles')
+      && !isUndefinedTableError(err, 'platform_member_group_members')
+    ) throw err
+    // else: the grant tables are absent (pre-feature) — no grant-deny, but rule-deny below still applies.
   }
+  // (b) rule-deny (2b): predicate rules evaluated against each LIVE record's data. Unioned in — a
+  // rule-denied record is masked/excluded EXACTLY like a grant-denied one by every surface that
+  // consumes this set (admin-bypass + no-cardinality-leak inherited from #18). DENY-WINS by union.
+  for (const id of await loadRuleDeniedRecordIds(query, sheetId)) denied.add(id)
+  return denied
 }
 
+/**
+ * #18 phase-2 (2b): the set of LIVE record ids in `sheetId` denied by a conditional read-deny rule
+ * (predicate on the record's data), independent of the actor (a rule hides a record from every
+ * non-admin reader). Fail-closed: a structurally-valid rule whose field is missing/deleted, or whose
+ * operator/value is invalid for the field type, DENIES the record (see evaluateRecordDenied). A
+ * pre-migration sheet (no `conditional_read_rules` column) or an empty rule list → empty set (inert).
+ * Caller gates on `loadRowLevelReadDenyEnabled` + admin-bypass, exactly like the grant-deny set.
+ * NOTE: evaluates live `meta_records` only — trash (meta_records_trash) is a separate surface not yet
+ * covered (the flag-off default keeps everything inert until 2b is complete).
+ */
+export async function loadRuleDeniedRecordIds(
+  query: QueryFn,
+  sheetId: string,
+  recordIds?: string[],
+): Promise<Set<string>> {
+  if (!sheetId) return new Set<string>()
+  if (recordIds && recordIds.length === 0) return new Set<string>() // nothing to evaluate
+  let rawRules: unknown
+  try {
+    const r = await query('SELECT conditional_read_rules AS rules FROM meta_sheets WHERE id = $1', [sheetId])
+    rawRules = (r.rows[0] as { rules?: unknown } | undefined)?.rules
+  } catch (err) {
+    if (isUndefinedColumnError(err, 'conditional_read_rules')) return new Set<string>() // pre-migration → inert
+    throw err // a real load failure → propagate (fail-closed: the surface errors, never grants read)
+  }
+  const { rules } = parseConditionalRules(rawRules)
+  if (rules.length === 0) return new Set<string>() // no valid rules → inert
+  const fieldsById: Record<string, RuleFieldMeta | undefined> = {}
+  const fr = await query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])
+  for (const row of fr.rows as Array<{ id?: unknown; type?: unknown }>) {
+    if (typeof row.id === 'string' && row.id) {
+      fieldsById[row.id] = { id: row.id, type: typeof row.type === 'string' ? row.type : '' }
+    }
+  }
+  const denied = new Set<string>()
+  const rr = recordIds && recordIds.length > 0
+    ? await query('SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])', [sheetId, recordIds])
+    : await query('SELECT id, data FROM meta_records WHERE sheet_id = $1', [sheetId])
+  for (const row of rr.rows as Array<{ id?: unknown; data?: unknown }>) {
+    if (typeof row.id !== 'string' || !row.id) continue
+    const data = row.data && typeof row.data === 'object' ? (row.data as Record<string, unknown>) : {}
+    if (evaluateRecordDenied({ data }, rules, fieldsById).denied) denied.add(row.id)
+  }
+  return denied
+}
+
+/**
+ * Whether `sheetId` carries any record-level read constraint that the derive-based read paths must
+ * consult: an explicit record_permission assignment OR (2b) a conditional read-deny rule. Used purely
+ * as the gate to skip the scope-map load on sheets with no constraints — a rules-bearing sheet must
+ * load the scope map so loadRecordPermissionScopeMap can contribute the rule-denied 'none' scopes.
+ */
 export async function hasRecordPermissionAssignments(
   query: QueryFn,
   sheetId: string,
@@ -1028,9 +1109,20 @@ export async function hasRecordPermissionAssignments(
       'SELECT 1 FROM record_permissions WHERE sheet_id = $1 LIMIT 1',
       [sheetId],
     )
-    return result.rows.length > 0
+    if (result.rows.length > 0) return true
   } catch (err) {
-    if (isUndefinedTableError(err, 'record_permissions')) return false
+    if (!isUndefinedTableError(err, 'record_permissions')) throw err
+    // record_permissions table absent — fall through to the conditional-rules check.
+  }
+  // 2b: a sheet with conditional read-deny rules also needs the derive-path scope check.
+  try {
+    const r = await query(
+      `SELECT 1 FROM meta_sheets WHERE id = $1 AND jsonb_array_length(COALESCE(conditional_read_rules, '[]'::jsonb)) > 0 LIMIT 1`,
+      [sheetId],
+    )
+    return r.rows.length > 0
+  } catch (err) {
+    if (isUndefinedColumnError(err, 'conditional_read_rules')) return false // pre-migration → inert
     throw err
   }
 }

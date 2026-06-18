@@ -191,6 +191,7 @@ jobs:
             tests/integration/multitable-viewconfig-resave-guard.test.ts \
             tests/integration/multitable-records-list-authz.test.ts \
             tests/integration/multitable-rowlevel-readdeny-enforce.test.ts \
+            tests/integration/multitable-conditional-rule-enforce-realdb.test.ts \
             tests/integration/multitable-rowlevel-readdeny-xrec.test.ts \
             tests/integration/multitable-rowlevel-readdeny-flag-endpoint.test.ts \
             tests/integration/multitable-record-history-field-mask.test.ts \
