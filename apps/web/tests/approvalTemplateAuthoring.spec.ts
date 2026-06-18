@@ -423,6 +423,19 @@ describe('approval template authoring helpers', () => {
     ])
   })
 
+  it('round-trips a direct_manager assignee source (save emits {kind} + hydrate restores sourceKind)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'mgr'
+    draft.name = '经理审批'
+    draft.steps[0].sourceKind = 'direct_manager'
+
+    const payload = buildCreateTemplatePayload(draft)
+    expect((payload.approvalGraph.nodes[1]?.config as any).assigneeSources).toEqual([{ kind: 'direct_manager' }])
+
+    const rehydrated = draftFromTemplate(buildTemplate({ approvalGraph: payload.approvalGraph }))
+    expect(rehydrated.steps[0].sourceKind).toBe('direct_manager')
+  })
+
   // Lane E — self-approver authoring (autoApprovalPolicy.mergeWithRequester).
   function buildAutoApprovalTemplate(
     policy: AutoApprovalPolicy,
@@ -595,6 +608,19 @@ describe('TemplateAuthoringView', () => {
 
     expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).not.toBeNull() // B fail-closed
     expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(true) // save disabled
+  })
+
+  it('direct_manager reads back editable: a saved direct_manager template is NOT fail-closed (no unsupported alert, save enabled, sourceKind hydrated)', async () => {
+    routeParams = { id: 'tpl_dm' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // in the allowlist → not fail-closed
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // editable
+    expect((container!.querySelector('[data-testid="approval-step-source-kind"]') as HTMLSelectElement).value).toBe('direct_manager') // hydrated back
   })
 
   it('updates an existing supported template without replacing it through create', async () => {

@@ -95,3 +95,6 @@ output/releases/
 
 # multitable browser-verification lane outputs (screenshots, traces)
 apps/web/verification-output/
+
+# vue-tsc -b (the `type-check` script) emits .js/.vue.js next to TS/Vue source; never commit them
+apps/web/src/**/*.js

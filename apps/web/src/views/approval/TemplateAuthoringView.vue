@@ -277,10 +277,11 @@
               <el-input v-model="step.name" :disabled="readOnly" />
             </el-form-item>
             <el-form-item label="审批人来源">
-              <el-select v-model="step.sourceKind" :disabled="readOnly" style="width: 100%" @change="syncStepOptions(step)">
+              <el-select v-model="step.sourceKind" :disabled="readOnly" style="width: 100%" data-testid="approval-step-source-kind" @change="syncStepOptions(step)">
                 <el-option label="指定用户" value="static_user" />
                 <el-option label="指定角色" value="static_role" />
                 <el-option label="发起人" value="requester" />
+                <el-option label="直属上级" value="direct_manager" />
                 <el-option label="表单用户字段" value="form_field_user" />
               </el-select>
             </el-form-item>
