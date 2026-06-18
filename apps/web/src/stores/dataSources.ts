@@ -11,6 +11,7 @@ import {
   previewDataSourceRows,
   rotateDataSourceCredentials,
   testDataSourceConnection,
+  testDataSourceDraftConnection,
   updateDataSource,
 } from '../data-sources/api'
 import type {
@@ -20,6 +21,7 @@ import type {
   DataSourceSchemaInfo,
   DataSourceSelectPayload,
   DataSourceSelectResult,
+  DataSourceDraftTestResult,
   DataSourceTableInfo,
   DataSourceTestResult,
   RotateDataSourceCredentialsPayload,
@@ -150,6 +152,12 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
     }
   }
 
+  // test-before-save: stateless proxy to the ephemeral connection-test endpoint. Returns the result
+  // for the caller to render form-locally; keeps NO store state (no source/id exists yet).
+  async function testDraftConnection(payload: CreateDataSourcePayload): Promise<DataSourceDraftTestResult> {
+    return testDataSourceDraftConnection(payload)
+  }
+
   function isSchemaLoading(id: string): boolean {
     return schemaLoading.value[id] === true
   }
@@ -250,6 +258,7 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
     rotateCredentials,
     remove,
     testConnection,
+    testDraftConnection,
     loadSchema,
     loadTableInfo,
     previewRows,

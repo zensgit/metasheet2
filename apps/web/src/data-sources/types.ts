@@ -39,6 +39,13 @@ export interface DataSourceTestResult {
   error?: { message?: string }
 }
 
+/** Result from `POST /api/data-sources/test` (ephemeral draft test). No `id` — nothing is persisted. */
+export interface DataSourceDraftTestResult {
+  success: boolean
+  latency?: string
+  error?: { message?: string }
+}
+
 export interface DataSourceColumnInfo {
   name: string
   type?: string

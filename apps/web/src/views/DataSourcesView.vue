@@ -96,10 +96,32 @@
       </label>
 
       <div class="data-sources__form-actions">
+        <button
+          v-if="canDraftTest"
+          type="button"
+          class="data-sources__btn"
+          data-testid="ds-test-draft"
+          :disabled="draftTest.status === 'testing'"
+          @click="runDraftTest"
+        >
+          {{ draftTest.status === 'testing' ? '测试中…' : '测试连接' }}
+        </button>
         <button type="submit" class="data-sources__btn data-sources__btn--primary" :disabled="submitDisabled" data-testid="ds-submit">
           {{ submitLabel }}
         </button>
       </div>
+      <p
+        v-if="draftTest.status === 'ok'"
+        class="data-sources__muted"
+        data-testid="ds-test-draft-ok"
+        role="status"
+      >连接成功{{ draftTest.latency ? ` · ${draftTest.latency}` : '' }}</p>
+      <p
+        v-else-if="draftTest.status === 'fail'"
+        class="data-sources__error"
+        data-testid="ds-test-draft-fail"
+        role="alert"
+      >连接失败{{ draftTest.message ? ` · ${draftTest.message}` : '' }}</p>
     </form>
 
     <div class="data-sources__list" data-testid="ds-list">
@@ -351,6 +373,7 @@ const activeSchemaId = ref<string | null>(null)
 const schemaTable = ref('')
 const activePreviewId = ref<string | null>(null)
 const previewTable = ref('')
+const draftTest = ref<{ status: 'idle' | 'testing' | 'ok' | 'fail'; latency?: string; message?: string }>({ status: 'idle' })
 
 interface TableChoice {
   value: string
@@ -394,6 +417,27 @@ const submitLabel = computed(() => {
   if (formMode.value === 'credentials') return '更新凭据'
   return formMode.value === 'edit' ? '保存' : '创建'
 })
+
+// test-before-save: offered for create, and for credential rotation ONLY when a new secret is entered
+// (a stateless /test can't reuse the stored secret — same limit as edit; see design-lock §4). Hidden
+// for edit (no secret available → would false-fail); the row-level GET /:id/test stays for saved sources.
+const canDraftTest = computed(() => {
+  if (formMode.value === 'edit') return false
+  if (formMode.value === 'credentials') return credentialFieldsFilled.value
+  return true
+})
+
+async function runDraftTest(): Promise<void> {
+  draftTest.value = { status: 'testing' }
+  try {
+    const result = await store.testDraftConnection(buildCreatePayload(form))
+    draftTest.value = result.success
+      ? { status: 'ok', latency: result.latency }
+      : { status: 'fail', message: result.error?.message }
+  } catch (e) {
+    draftTest.value = { status: 'fail', message: e instanceof Error ? e.message : '连接测试失败' }
+  }
+}
 
 // `server` is a SQL-Server-only concept; clear it when switching away so a stale value can't linger
 // (the builder + guard already ignore it for non-sqlserver — this keeps the form state clean).
@@ -528,6 +572,7 @@ function resetForm(): void {
     id: '', name: '', type: 'postgres', host: '', server: '', port: undefined, database: '',
     username: '', password: '', baseURL: '', apiKey: '', readOnly: true,
   })
+  draftTest.value = { status: 'idle' }
 }
 
 function fillFormFromDetail(detail: DataSourceDetail): void {

@@ -17,6 +17,7 @@ const updateMock = vi.hoisted(() => vi.fn())
 const rotateCredentialsMock = vi.hoisted(() => vi.fn())
 const deleteMock = vi.hoisted(() => vi.fn())
 const testConnectionMock = vi.hoisted(() => vi.fn())
+const testDraftMock = vi.hoisted(() => vi.fn())
 const getSchemaMock = vi.hoisted(() => vi.fn())
 const getTableInfoMock = vi.hoisted(() => vi.fn())
 const previewRowsMock = vi.hoisted(() => vi.fn())
@@ -28,6 +29,7 @@ vi.mock('../src/data-sources/api', () => ({
   rotateDataSourceCredentials: rotateCredentialsMock,
   deleteDataSource: deleteMock,
   testDataSourceConnection: testConnectionMock,
+  testDataSourceDraftConnection: testDraftMock,
   getDataSourceSchema: getSchemaMock,
   getDataSourceTableInfo: getTableInfoMock,
   previewDataSourceRows: previewRowsMock,
@@ -732,5 +734,92 @@ describe('DataSourcesView (UI-2 connection test reachability)', () => {
     expect(previewRowsMock).not.toHaveBeenCalled()
     expect(store.previewErrors.pg).toBe('')
     expect(container.querySelector('[data-testid="ds-preview-empty-schema"]')?.textContent).toContain('没有可预览')
+  })
+
+  it('create form: 测试连接 posts the built payload and renders inline success with latency', async () => {
+    listMock.mockResolvedValue([])
+    testDraftMock.mockResolvedValue({ success: true, latency: '12ms' })
+
+    const container = await mountView()
+    ;(container.querySelector('[data-testid="ds-new-button"]') as HTMLButtonElement).click()
+    await flush()
+
+    const host = container.querySelector('[data-testid="ds-field-host"]') as HTMLInputElement
+    host.value = 'db.internal'; host.dispatchEvent(new Event('input'))
+    const db = container.querySelector('[data-testid="ds-field-database"]') as HTMLInputElement
+    db.value = 'erp'; db.dispatchEvent(new Event('input'))
+    await flush()
+
+    const testBtn = container.querySelector('[data-testid="ds-test-draft"]') as HTMLButtonElement
+    expect(testBtn).not.toBeNull()
+    testBtn.click()
+    await flush()
+    await flush()
+
+    expect(testDraftMock).toHaveBeenCalledTimes(1)
+    // wire check: the button posts the SAME create-payload builder used by submit (anti wire-drift).
+    expect(testDraftMock.mock.calls[0][0]).toMatchObject({
+      type: 'postgres',
+      connection: { host: 'db.internal', database: 'erp' },
+      options: { readOnly: true },
+    })
+    const ok = container.querySelector('[data-testid="ds-test-draft-ok"]')
+    expect(ok?.textContent).toContain('连接成功')
+    expect(ok?.textContent).toContain('12ms')
+    // a passing test must NOT auto-submit / create the source (no hard gate, advisory only)
+    expect(createMock).not.toHaveBeenCalled()
+  })
+
+  it('create form: a failed draft test renders inline failure with the (already redacted) message', async () => {
+    listMock.mockResolvedValue([])
+    testDraftMock.mockResolvedValue({ success: false, error: { message: 'authentication failed' } })
+
+    const container = await mountView()
+    ;(container.querySelector('[data-testid="ds-new-button"]') as HTMLButtonElement).click()
+    await flush()
+    const host = container.querySelector('[data-testid="ds-field-host"]') as HTMLInputElement
+    host.value = 'h'; host.dispatchEvent(new Event('input'))
+    await flush()
+    ;(container.querySelector('[data-testid="ds-test-draft"]') as HTMLButtonElement).click()
+    await flush()
+    await flush()
+
+    const fail = container.querySelector('[data-testid="ds-test-draft-fail"]')
+    expect(fail?.textContent).toContain('连接失败')
+    expect(fail?.textContent).toContain('authentication failed')
+    expect(container.querySelector('[data-testid="ds-test-draft-ok"]')).toBeNull()
+  })
+
+  it('edit mode hides the draft 测试连接 button (no secret available → would false-fail)', async () => {
+    listMock.mockResolvedValue([{ id: 'a', name: 'A', type: 'postgres', connected: false }])
+    getMock.mockResolvedValue({
+      id: 'a', name: 'A', type: 'postgres', connected: false, hasCredentials: true,
+      connection: { host: 'db.internal', port: 5432, database: 'erp' }, options: { readOnly: true },
+    })
+    const container = await mountView()
+    ;(container.querySelector('[data-testid="ds-edit"]') as HTMLButtonElement).click()
+    await flush()
+    await flush()
+    await flush()
+    expect(container.querySelector('[data-testid="ds-create-form"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="ds-test-draft"]')).toBeNull()
+  })
+
+  it('credential mode shows the draft test only after a new secret is entered', async () => {
+    listMock.mockResolvedValue([{ id: 'a', name: 'A', type: 'postgres', connected: false }])
+    getMock.mockResolvedValue({
+      id: 'a', name: 'A', type: 'postgres', connected: false, hasCredentials: true,
+      connection: { host: 'db.internal', port: 5432, database: 'erp' }, options: { readOnly: true },
+    })
+    const container = await mountView()
+    ;(container.querySelector('[data-testid="ds-credentials"]') as HTMLButtonElement).click()
+    await flush()
+    await flush()
+    await flush()
+    expect(container.querySelector('[data-testid="ds-test-draft"]')).toBeNull() // no new secret yet
+    const pw = container.querySelector('[data-testid="ds-field-password"]') as HTMLInputElement
+    pw.value = 'newpw'; pw.dispatchEvent(new Event('input'))
+    await flush()
+    expect(container.querySelector('[data-testid="ds-test-draft"]')).not.toBeNull()
   })
 })

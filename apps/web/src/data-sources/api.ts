@@ -3,6 +3,7 @@ import { apiGet, apiFetch } from '../utils/api'
 import type {
   CreateDataSourcePayload,
   DataSourceDetail,
+  DataSourceDraftTestResult,
   DataSourceListItem,
   DataSourceSchemaInfo,
   DataSourceSelectPayload,
@@ -26,6 +27,11 @@ interface DetailEnvelope {
 interface TestEnvelope {
   ok: boolean
   data?: DataSourceTestResult
+}
+
+interface DraftTestEnvelope {
+  ok: boolean
+  data?: DataSourceDraftTestResult
 }
 
 interface SchemaEnvelope {
@@ -111,6 +117,24 @@ export async function testDataSourceConnection(id: string): Promise<DataSourceTe
   const body = await res.json() as TestEnvelope
   if (!body.data) {
     throw new Error('Failed to test data source: empty response')
+  }
+  return body.data
+}
+
+/**
+ * test-before-save: POST the create-shaped payload to the ephemeral connection-test endpoint. No
+ * source is persisted; the response is result-only (the backend never echoes the submitted config).
+ */
+export async function testDataSourceDraftConnection(
+  payload: CreateDataSourcePayload,
+): Promise<DataSourceDraftTestResult> {
+  const res = await apiFetch('/api/data-sources/test', { method: 'POST', body: JSON.stringify(payload) })
+  if (!res.ok) {
+    throw new Error(await errorFrom(res, 'Failed to test connection'))
+  }
+  const body = await res.json() as DraftTestEnvelope
+  if (!body.data) {
+    throw new Error('Failed to test connection: empty response')
   }
   return body.data
 }
