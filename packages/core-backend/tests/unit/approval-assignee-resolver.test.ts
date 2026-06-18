@@ -58,6 +58,32 @@ describe('ApprovalAssigneeResolver', () => {
     expect(resolveDirectManager({ id: 'requester-1', managerId: 'requester-1' })).toEqual([])
   })
 
+  // dept_head — resolves to requesterSnapshot.deptHeadId (frozen at start), mirroring direct_manager.
+  function resolveDeptHead(requesterSnapshot: Record<string, unknown> | null) {
+    return resolveApprovalAssignees({
+      nodeKey: 'review',
+      sourceStep: 2,
+      config: { assigneeSources: [{ kind: 'dept_head' }] },
+      formSnapshot: {},
+      requesterSnapshot,
+    })
+  }
+
+  it('resolves dept_head to the requester snapshot deptHeadId, with resolvedFrom metadata', () => {
+    expect(resolveDeptHead({ id: 'requester-1', deptHeadId: 'head-7' })).toEqual([
+      { assignmentType: 'user', assigneeId: 'head-7', nodeKey: 'review', sourceStep: 2, metadata: { resolvedFrom: { kind: 'dept_head', sourceIndex: 0 } } },
+    ])
+  })
+
+  it('resolves dept_head to empty when the requester has no department head (falls to emptyAssigneePolicy)', () => {
+    expect(resolveDeptHead({ id: 'requester-1' })).toEqual([])
+    expect(resolveDeptHead(null)).toEqual([])
+  })
+
+  it('excludes self: a dept_head that resolves to the requester is not a valid approver (empty)', () => {
+    expect(resolveDeptHead({ id: 'requester-1', deptHeadId: 'requester-1' })).toEqual([])
+  })
+
   it('resolves requester and static sources with source metadata', () => {
     expect(resolve({
       assigneeSources: [

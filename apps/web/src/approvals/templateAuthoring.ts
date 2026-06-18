@@ -250,6 +250,8 @@ function stepDraftFromApprovalNode(
     fieldId = source.fieldId
   } else if (source?.kind === 'direct_manager') {
     sourceKind = 'direct_manager'
+  } else if (source?.kind === 'dept_head') {
+    sourceKind = 'dept_head'
   } else if (legacyType === 'user') {
     sourceKind = 'static_user'
     idsText = formatIds(legacyIds)
@@ -364,7 +366,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     if (sources !== undefined) {
       if (!Array.isArray(sources) || sources.length !== 1) return true
       const source = sources[0] as ApprovalAssigneeSource
-      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager'].includes(source?.kind)) return true
+      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head'].includes(source?.kind)) return true
     }
     return false
   })
@@ -444,6 +446,9 @@ function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource {
   }
   if (step.sourceKind === 'direct_manager') {
     return { kind: 'direct_manager' }
+  }
+  if (step.sourceKind === 'dept_head') {
+    return { kind: 'dept_head' }
   }
   return { kind: 'requester' }
 }
