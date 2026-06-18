@@ -110,6 +110,34 @@ export type MetaPermissionLabelKey =
   | 'view.status.copyTemplateNoop'
   | 'view.status.updated'
   | 'view.title'
+  | 'condRule.title'
+  | 'condRule.desc'
+  | 'condRule.empty'
+  | 'condRule.field'
+  | 'condRule.operator'
+  | 'condRule.value'
+  | 'condRule.add'
+  | 'condRule.delete'
+  | 'condRule.save'
+  | 'condRule.saved'
+  | 'condRule.unknownField'
+  | 'condRule.disabledHint'
+  | 'condRule.error.load'
+  | 'condRule.error.save'
+  | 'condRule.deny'
+  | 'condRule.op.eq'
+  | 'condRule.op.neq'
+  | 'condRule.op.contains'
+  | 'condRule.op.isEmpty'
+  | 'condRule.op.isNotEmpty'
+  | 'condRule.op.gt'
+  | 'condRule.op.lt'
+  | 'condRule.op.gte'
+  | 'condRule.op.lte'
+  | 'condRule.op.before'
+  | 'condRule.op.after'
+  | 'condRule.op.hasAny'
+  | 'condRule.op.hasNone'
 
 const LABELS: Record<MetaPermissionLabelKey, { en: string; zh: string }> = {
   'action.clearOverrides': { en: 'Clear overrides', zh: '清除覆盖' },
@@ -226,6 +254,34 @@ const LABELS: Record<MetaPermissionLabelKey, { en: string; zh: string }> = {
   'view.status.copyTemplateNoop': { en: 'View ACL template already matches source member group', zh: '视图 ACL 模板已与源成员组一致' },
   'view.status.updated': { en: 'View permission updated', zh: '视图权限已更新' },
   'view.title': { en: 'View-level permissions', zh: '视图级权限' },
+  'condRule.title': { en: 'Conditional read-deny rules', zh: '条件读取拒绝规则' },
+  'condRule.desc': { en: 'A record matched by any rule below is hidden from non-admin readers on every surface. Rules only take effect when row-level read permissions are enabled above.', zh: '被下列任一规则匹配的记录，将在所有界面对非管理员读者隐藏。仅当上方启用了行级读取权限时，规则才生效。' },
+  'condRule.empty': { en: 'No conditional rules.', zh: '暂无条件规则。' },
+  'condRule.field': { en: 'Field', zh: '字段' },
+  'condRule.operator': { en: 'Condition', zh: '条件' },
+  'condRule.value': { en: 'Value', zh: '值' },
+  'condRule.add': { en: 'Add rule', zh: '添加规则' },
+  'condRule.delete': { en: 'Remove', zh: '移除' },
+  'condRule.save': { en: 'Save rules', zh: '保存规则' },
+  'condRule.saved': { en: 'Rules saved', zh: '规则已保存' },
+  'condRule.unknownField': { en: '(field not found — preserved)', zh: '（字段不存在——已保留）' },
+  'condRule.disabledHint': { en: 'Rules are stored but only enforce when row-level read permissions are enabled.', zh: '规则已保存，但仅在启用行级读取权限后才会强制执行。' },
+  'condRule.error.load': { en: 'Failed to load conditional rules', zh: '加载条件规则失败' },
+  'condRule.error.save': { en: 'Failed to save conditional rules', zh: '保存条件规则失败' },
+  'condRule.deny': { en: 'deny read', zh: '拒绝读取' },
+  'condRule.op.eq': { en: 'equals', zh: '等于' },
+  'condRule.op.neq': { en: 'not equals', zh: '不等于' },
+  'condRule.op.contains': { en: 'contains', zh: '包含' },
+  'condRule.op.isEmpty': { en: 'is empty', zh: '为空' },
+  'condRule.op.isNotEmpty': { en: 'is not empty', zh: '不为空' },
+  'condRule.op.gt': { en: 'greater than', zh: '大于' },
+  'condRule.op.lt': { en: 'less than', zh: '小于' },
+  'condRule.op.gte': { en: 'at least', zh: '大于等于' },
+  'condRule.op.lte': { en: 'at most', zh: '小于等于' },
+  'condRule.op.before': { en: 'before', zh: '早于' },
+  'condRule.op.after': { en: 'after', zh: '晚于' },
+  'condRule.op.hasAny': { en: 'has any of', zh: '包含任一' },
+  'condRule.op.hasNone': { en: 'has none of', zh: '不包含任一' },
 }
 
 export function permissionLabel(key: MetaPermissionLabelKey, isZh: boolean): string {

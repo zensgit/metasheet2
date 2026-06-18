@@ -68,22 +68,44 @@ const DATE_OPS: RuleOperator[] = ['eq', 'neq', 'before', 'after', 'isEmpty', 'is
 const ARRAY_OPS: RuleOperator[] = ['hasAny', 'hasNone', 'isEmpty', 'isNotEmpty']
 
 const OPS_BY_TYPE: Record<string, RuleOperator[]> = {
+  // text-like (the FE field type for plain single-line text is `string`; `text`/`singleLineText` are
+  // accepted aliases so a rule authored against either naming evaluates rather than failing closed)
   text: TEXT_OPS,
+  string: TEXT_OPS,
   singleLineText: TEXT_OPS,
   longText: TEXT_OPS,
   select: TEXT_OPS,
+  url: TEXT_OPS,
+  email: TEXT_OPS,
+  phone: TEXT_OPS,
+  // numeric
   number: NUM_OPS,
   currency: NUM_OPS,
   percent: NUM_OPS,
   rating: NUM_OPS,
   duration: NUM_OPS,
+  autoNumber: NUM_OPS,
+  // boolean
   boolean: BOOL_OPS,
   checkbox: BOOL_OPS,
+  // date-like
   date: DATE_OPS,
   dateTime: DATE_OPS,
+  createdTime: DATE_OPS,
+  modifiedTime: DATE_OPS,
+  // array-like
   multiSelect: ARRAY_OPS,
   person: ARRAY_OPS,
   user: ARRAY_OPS,
+}
+
+/**
+ * The canonical operator allowlist for a field type (the authoring UI mirrors this to filter the
+ * operator picker). An unknown field type → empty list (no operator is valid → any rule on it would
+ * fail closed at evaluation). Returned as a fresh array so callers can't mutate the internal map.
+ */
+export function operatorsForFieldType(type: string): RuleOperator[] {
+  return [...(OPS_BY_TYPE[type] ?? [])]
 }
 
 const ALL_OPERATORS: ReadonlySet<RuleOperator> = new Set<RuleOperator>([
