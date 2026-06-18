@@ -124,6 +124,16 @@ describeIfDatabase('#16/P1 person restrict route parity + P2 admin-bypass/multiS
     expect(bad.status).toBeLessThan(500)
   })
 
+  test('POST /views/:viewId/submit — in-group person accepted + stored (form path positive)', async () => {
+    // Positive half of the form-path parity: without this, a "form rejects ALL restricted person
+    // writes" regression would still pass. Assert the submit succeeds AND the created record stores [U_IN].
+    const ok = await request(actorApp()).post(`/api/multitable/views/${VIEW_ID}/submit`).send({ data: { [F_PERSON]: [U_IN], [F_STR]: 'viaform-in' } })
+    expect(ok.status).toBe(200)
+    const found = await q('SELECT data FROM meta_records WHERE sheet_id = $1 AND data ->> $2 = $3', [SHEET_ID, F_STR, 'viaform-in'])
+    expect(found.rows.length).toBe(1)
+    expect((found.rows[0].data as Record<string, unknown>)[F_PERSON]).toEqual([U_IN])
+  })
+
   // ---- P2: multiSelect person guard (property carried) ----
   test('POST /patch — multiSelect person accepts an array (not rejected as single)', async () => {
     const created = await request(actorApp()).post('/api/multitable/records').send({ sheetId: SHEET_ID, data: { [F_STR]: 'm' } })
