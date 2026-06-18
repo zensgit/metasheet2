@@ -54,8 +54,10 @@ import {
   type MetaPersonPickerLabelKey,
 } from '../utils/meta-person-picker-labels'
 
-// Native person (人员) picker. Member-scoped by construction: candidates come from the SHEET's
-// permission-candidates (the SAME set the write-time validator accepts) — NO global org directory.
+// Native person (人员) picker. The offered set is the field's assignable member-group DIRECTORY
+// (2c-S3, GET .../person-fields/:fieldId/directory) — the SAME active, member-group-scoped set the
+// write-time validator accepts (display parity). Stored chips render independently of this list, so
+// historical inactive / out-of-restriction values are never dropped (their display polish is 2c-S4).
 // Emits userId[] (NOT recordIds) + a personSummaries echo so the chip renders immediately.
 const props = defineProps<{
   visible: boolean
@@ -106,16 +108,25 @@ watch(() => props.visible, async (visible) => {
 
 async function loadMembers() {
   if (!props.sheetId) return
+  const fieldId = props.field?.id
+  // Field-aware directory (2c-S3): the offered set is the field's assignable member-group directory —
+  // exactly what the write validator accepts. An unsaved field (no id) has no directory yet; stored
+  // chips still render from `selected` / `summaryById`, so nothing already-set is dropped.
+  if (!fieldId) {
+    members.value = []
+    return
+  }
   loading.value = true
   errorMessage.value = ''
   try {
-    const data = await multitableClient.listSheetPermissionCandidates(props.sheetId, {
+    const data = await multitableClient.listPersonFieldDirectory(props.sheetId, fieldId, {
       q: search.value || undefined,
-      limit: 100,
     })
-    members.value = (data.items ?? [])
-      .filter((item) => item.subjectType === 'user' && item.isActive)
-      .map((item) => ({ id: item.subjectId, display: item.label || item.subjectId, subtitle: item.subtitle ?? null }))
+    members.value = (data.items ?? []).map((item) => ({
+      id: item.userId,
+      display: item.name || item.email || item.userId,
+      subtitle: item.email ?? null,
+    }))
     for (const member of members.value) {
       if (selected.has(member.id) || summaryById[member.id]) {
         summaryById[member.id] = { id: member.id, display: member.display }
