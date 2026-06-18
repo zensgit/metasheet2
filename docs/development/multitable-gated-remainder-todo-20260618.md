@@ -2,7 +2,7 @@
 
 > Status: **CURRENT GATED TODO**.
 > Pair: `multitable-gated-remainder-development-plan-20260618.md`.
-> Grounding: `origin/main` (live-main, 2026-06-18). Completed + on `main`: **2a** (`#2832`/`#2838`/`#2849`), **2b through S3** (`#2836`/`#2841`/`#2847`). `#2825` remains open (final CRDT comment tails) — **comment-tail hygiene only**, not a main-grounding line to update here.
+> Grounding: `origin/main` (live-main, 2026-06-18). Completed + on `main`: **2a** (`#2832`/`#2838`/`#2849`), **2b COMPLETE S1–S4** (`#2836`/`#2841`/`#2847`/`#2861`). **`2c` (#16 person directory) is the sole remaining gated arc.** `#2825` remains open (final CRDT comment tails) — **comment-tail hygiene only**, not a main-grounding line to update here.
 > Supersedes: `multitable-current-development-plan-20260617.md` and `multitable-current-development-todo-20260617.md` for current multitable remainder routing.
 > Legend: `[x]` closed · `[ ]` todo after opt-in · `[!]` gate requiring owner/design decision · `[~]` roadmap pool, not current remainder.
 
@@ -166,8 +166,7 @@ These are future candidates or reopen-only lines. They are not open work in the 
 
 ## 5. Owner Unlock Prompts
 
-Use one of these when opening the next arc (2a is complete and 2b is shipped through S3 — those gates are closed, not next options):
+Use one of these when opening the next arc (2a and 2b are both complete — 2b S1–S4 — so those gates are closed; `2c` is the sole remaining gated arc):
 
-- **Unlock 2c / #16 person directory:** choose directory source of truth and assignability semantics.
-- **Unlock 2b-S4 (rule-engine perf / caching):** only on large-rule-set demand; `2b` is otherwise shipped through S3 — a perf follow-up, not a fresh security gate.
+- **Unlock 2c / #16 person directory:** choose directory source of truth and assignability semantics. (Sole remaining gated arc.)
 - **Revisit grid performance:** opt into D2 high-scale harness/re-baseline work first; row virtualization stays closed unless the verdict flips.
