@@ -46,11 +46,11 @@ const F_DATETIME = 'fld_datetime'
 const SELECT_OPTS = [{ value: 'optA' }, { value: 'optB' }]
 
 // initial (seed) values — strings; the seed will store them as Y.Text.
-const SEED = { [F_SELECT]: 'optA', [F_DATE]: '2026-01-01', [F_DATETIME]: '2026-01-01T10:00' }
+const SEED = { [F_SELECT]: 'optA', [F_DATE]: '2026-01-01', [F_DATETIME]: '2026-01-01T10:00:00.000Z' }
 // edited values — what the client writes as PLAIN strings.
 const EDIT_SELECT = 'optB'
 const EDIT_DATE = '2026-02-02'
-const EDIT_DATETIME = '2026-02-02T12:30'
+const EDIT_DATETIME = '2026-02-02T12:30:00.000Z' // canonical UTC ISO — what the FE binding (dateTimeValueFromLocalInput) writes
 
 async function readData(): Promise<Record<string, unknown>> {
   const r = await q('SELECT data FROM meta_records WHERE id = $1', [REC_ID])
@@ -149,7 +149,7 @@ describeIfDatabase('Yjs string-stored atomic MIGRATION (real DB) — select/date
       // And they read back as the exact seed strings (what coerceText does on the FE).
       expect((fields.get(F_SELECT) as Y.Text).toString()).toBe('optA')
       expect((fields.get(F_DATE) as Y.Text).toString()).toBe('2026-01-01')
-      expect((fields.get(F_DATETIME) as Y.Text).toString()).toBe('2026-01-01T10:00')
+      expect((fields.get(F_DATETIME) as Y.Text).toString()).toBe('2026-01-01T10:00:00.000Z')
     } finally {
       await svc.destroy()
     }
@@ -204,15 +204,14 @@ describeIfDatabase('Yjs string-stored atomic MIGRATION (real DB) — select/date
         expect(data[k]).toBe(v)
         expect(data[k]).not.toBe('[object Object]')
       }
-      // dateTime is DEFERRED from live wiring precisely because its codec normalizes to canonical UTC
-      // ISO — a plain-string flush does NOT round-trip the raw input. Assert it is a valid normalized
-      // string (NOT corrupted: not a Y.Text object, not '[object Object]', not a nested Yjs type) but
-      // NOT the raw input — this is the evidence that dateTime must stay REST-only (not in
-      // STRING_STORED_ATOMIC_YJS_TYPES) until a tz-aware live-edit design exists.
+      // dateTime is WIRED (2a-DT-S2, design-lock multitable-2a-datetime-live-crdt-designlock-20260618):
+      // the FE binding writes the CANONICAL UTC ISO (dateTimeValueFromLocalInput) and the backend codec
+      // keeps it canonical, so the flush round-trips the SAME INSTANT with no tz drift — as an uncorrupted
+      // ISO string, never a Y.Text object, '[object Object]', or a nested Yjs type.
       expect(typeof data[F_DATETIME]).toBe('string')
       expect(data[F_DATETIME]).not.toBe('[object Object]')
-      expect(data[F_DATETIME]).not.toBe(EDIT_DATETIME) // normalized by the codec, not the raw input
       expect(data[F_DATETIME] as string).toMatch(/\dT\d.*Z$/) // canonical UTC ISO, a valid (uncorrupted) string
+      expect(new Date(data[F_DATETIME] as string).getTime()).toBe(new Date(EDIT_DATETIME).getTime()) // same instant — no tz drift (format-independent round-trip)
     } finally {
       bridge.unobserve(REC_ID)
       await svc.destroy()
