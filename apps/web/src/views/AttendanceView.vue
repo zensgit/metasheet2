@@ -6253,7 +6253,7 @@
                 </div>
                 <div class="attendance__admin-actions">
                   <button class="attendance__btn" @click="() => previewAnnualAdjust()">{{ tr('Preview', '预览') }}</button>
-                  <button class="attendance__btn attendance__btn--primary" :disabled="annualAdjustSubmitting" @click="() => requestAnnualAdjust()">{{ annualAdjustSubmitting ? tr('Submitting...', '提交中...') : tr('Adjust balance', '调整余额') }}</button>
+                  <button class="attendance__btn attendance__btn--primary" :disabled="annualAdjustSubmitting || !annualOpsPolicyEnabled" @click="() => requestAnnualAdjust()">{{ annualAdjustSubmitting ? tr('Submitting...', '提交中...') : tr('Adjust balance', '调整余额') }}</button>
                 </div>
                 <p v-if="annualAdjustPreview" class="attendance__hint">{{ tr('Preview (client)', '预览(客户端)') }}: {{ annualAdjustPreview.before }} → {{ annualAdjustPreview.after }} {{ tr('min', '分钟') }} — <em>{{ tr('advisory; the server is the final authority', '仅供参考，以服务端为准') }}</em></p>
                 <p v-if="annualAdjustError" class="attendance__error" data-annual-ops-error-adjust>{{ annualAdjustError }}</p>
@@ -6268,8 +6268,8 @@
               <div class="attendance__admin-subsection" data-annual-ops-card="backfill">
                 <h5>{{ tr('Expiry backfill', '过期回填') }}</h5>
                 <div class="attendance__admin-actions">
-                  <button class="attendance__btn" :disabled="annualBackfillRunning" @click="() => runAnnualBackfillDryRun()">{{ tr('Dry-run', '预演') }}</button>
-                  <button class="attendance__btn attendance__btn--primary" :disabled="annualBackfillRunning || !annualBackfillDry" @click="() => requestAnnualBackfillCommit()">{{ tr('Commit backfill', '提交回填') }}</button>
+                  <button class="attendance__btn" :disabled="annualBackfillRunning || !annualOpsPolicyEnabled" @click="() => runAnnualBackfillDryRun()">{{ tr('Dry-run', '预演') }}</button>
+                  <button class="attendance__btn attendance__btn--primary" :disabled="annualBackfillRunning || !annualBackfillDry || !annualOpsPolicyEnabled" @click="() => requestAnnualBackfillCommit()">{{ tr('Commit backfill', '提交回填') }}</button>
                 </div>
                 <p v-if="annualBackfillError" class="attendance__error" data-annual-ops-error-backfill>{{ annualBackfillError }}</p>
                 <div v-if="annualBackfillDry" class="attendance__annual-ops-result" data-annual-ops-result-backfill>
@@ -6294,7 +6294,7 @@
                 </div>
                 <p v-if="annualAccrualOffYear" class="attendance__hint" data-annual-ops-accrual-offyear>⚠ {{ tr('Period is not the current or next year — committing requires an extra confirmation.', '年度非当前或次年——提交需要额外确认。') }}</p>
                 <div class="attendance__admin-actions">
-                  <button class="attendance__btn" :disabled="annualAccrualRunning" @click="() => runAnnualAccrualDryRun()">{{ tr('Dry-run', '预演') }}</button>
+                  <button class="attendance__btn" :disabled="annualAccrualRunning || !annualOpsPolicyEnabled" @click="() => runAnnualAccrualDryRun()">{{ tr('Dry-run', '预演') }}</button>
                   <button class="attendance__btn attendance__btn--primary" :disabled="annualAccrualRunning || !annualAccrualDry || !annualOpsPolicyEnabled" @click="() => requestAnnualAccrualCommit()">{{ tr('Commit accrual', '提交发放') }}</button>
                 </div>
                 <p v-if="annualAccrualError" class="attendance__error" data-annual-ops-error-accrual>{{ annualAccrualError }}</p>
@@ -20078,6 +20078,13 @@ function annualOpsErrorLine(code: string): string {
 
 // -- shared POST helper: pins orgId in the body so the write lands in the current org; surfaces structured codes --
 async function annualOpsPost(path: string, body: Record<string, unknown>, fallbackMsg: string): Promise<any | null> {
+  // design-lock §6: all three operation cards are blocked when the annual leave policy is disabled. The buttons are
+  // disabled in the template (proactive UX); this handler-level guard is the real gate — a keyboard / direct / test
+  // call cannot POST a mutation while the engine is off (accrual would 422 server-side anyway; adjust/backfill the
+  // backend still accepts, so this client guard is what enforces the consistency口径 the design-lock mandates).
+  if (!annualOpsPolicyEnabled.value) {
+    throw new Error(annualOpsErrorLine('ANNUAL_LEAVE_NOT_ENABLED'))
+  }
   const response = await apiFetch(path, { method: 'POST', body: JSON.stringify({ orgId: normalizedOrgId(), ...body }) })
   if (response.status === 403) {
     adminForbidden.value = true

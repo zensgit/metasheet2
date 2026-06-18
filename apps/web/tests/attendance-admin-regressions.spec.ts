@@ -1198,9 +1198,14 @@ describe('Attendance admin regressions', () => {
     expect(bodies[1].period).toBe(2000)
   })
 
-  it('annual operations — accrual commit is disabled when the annual leave policy is off', async () => {
-    vi.mocked(apiFetch).mockImplementation(async (input) => {
+  it('annual operations — policy off: all three cards are disabled and none can POST a mutation (design-lock §6)', async () => {
+    const writePosts: string[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = String(input)
+      if ((url.includes('annual-leave-manual-adjustment') || url.includes('annual-leave-expiry-backfill') || url.includes('annual-leave-accrual/run')) && init?.method === 'POST') {
+        writePosts.push(url)
+        return jsonResponse(200, { ok: true, data: {} })
+      }
       if (url.includes('/api/attendance/settings')) {
         return jsonResponse(200, { ok: true, data: { annualLeavePolicy: { enabled: false, tenureMode: 'cumulative_service', standardDayMinutes: 480, tiers: [], carryover: { enabled: false }, timezone: null } } })
       }
@@ -1211,9 +1216,21 @@ describe('Attendance admin regressions', () => {
     await flushUi(8)
     const section = await openOpsSection()
     expect(section.querySelector('[data-annual-ops-policy-off]')).toBeTruthy()
-    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="accrual"]')!
-    const commit = Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Commit accrual'))!
-    expect(commit.disabled).toBe(true) // load-bearing: accrual needs the engine enabled (backend 422s otherwise)
+    const btn = (cardSel: string, text: string) =>
+      Array.from(section.querySelector<HTMLElement>(cardSel)!.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes(text))!
+    const actions = [
+      btn('[data-annual-ops-card="adjust"]', 'Adjust balance'),
+      btn('[data-annual-ops-card="backfill"]', 'Dry-run'),
+      btn('[data-annual-ops-card="backfill"]', 'Commit backfill'),
+      btn('[data-annual-ops-card="accrual"]', 'Dry-run'),
+      btn('[data-annual-ops-card="accrual"]', 'Commit accrual'),
+    ]
+    // every mutating action across all three cards is proactively disabled (accrual load-bearing; adjust/backfill consistency)
+    actions.forEach(b => expect(b.disabled).toBe(true))
+    // and no write can reach the backend (disabled buttons + the annualOpsPost handler guard)
+    actions.forEach(b => b.click())
+    await flushUi(4)
+    expect(writePosts).toEqual([])
   })
 
   it('annual operations — accrual: the submitted period is the snapshot at confirm time, not the live form (no TOCTOU)', async () => {
