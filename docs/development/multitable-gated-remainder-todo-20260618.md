@@ -2,7 +2,7 @@
 
 > Status: **CURRENT GATED TODO**.
 > Pair: `multitable-gated-remainder-development-plan-20260618.md`.
-> Grounding: `origin/main@31a5efe05`; multitable closure through `#2823`. `#2825` is open with green checks and closes the final CRDT comment tails; update this line to `#2825` after it merges.
+> Grounding: `origin/main` (live-main, 2026-06-18). Completed + on `main`: **2a** (`#2832`/`#2838`/`#2849`), **2b through S3** (`#2836`/`#2841`/`#2847`). `#2825` remains open (final CRDT comment tails) — **comment-tail hygiene only**, not a main-grounding line to update here.
 > Supersedes: `multitable-current-development-plan-20260617.md` and `multitable-current-development-todo-20260617.md` for current multitable remainder routing.
 > Legend: `[x]` closed · `[ ]` todo after opt-in · `[!]` gate requiring owner/design decision · `[~]` roadmap pool, not current remainder.
 
@@ -166,10 +166,8 @@ These are future candidates or reopen-only lines. They are not open work in the 
 
 ## 5. Owner Unlock Prompts
 
-Use one of these when opening the next arc:
+Use one of these when opening the next arc (2a is complete and 2b is shipped through S3 — those gates are closed, not next options):
 
-- **Unlock 2a select/date/dateTime:** choose migration strategy + rollback compatibility + whether `select` pilots first.
-- **Unlock 2a duration:** choose REST-only, commit-on-confirm LWW, or collaborative draft channel.
-- **Unlock 2b:** approve rule language, fail-closed behavior, scope, and evaluation timing.
-- **Unlock #16:** choose directory source of truth and assignability semantics.
+- **Unlock 2c / #16 person directory:** choose directory source of truth and assignability semantics.
+- **Unlock 2b-S4 (rule-engine perf / caching):** only on large-rule-set demand; `2b` is otherwise shipped through S3 — a perf follow-up, not a fresh security gate.
 - **Revisit grid performance:** opt into D2 high-scale harness/re-baseline work first; row virtualization stays closed unless the verdict flips.
