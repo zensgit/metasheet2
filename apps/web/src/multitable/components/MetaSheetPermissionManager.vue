@@ -296,6 +296,12 @@
             </label>
             <p class="meta-sheet-perm__rowdeny-warning" role="note">{{ p('rowDeny.warning') }}</p>
             <p v-if="rowDenyEnabled" class="meta-sheet-perm__rowdeny-note">{{ p('rowDeny.enabledNote') }}</p>
+            <MetaConditionalRuleBuilder
+              :sheet-id="sheetId"
+              :client="client"
+              :fields="fields"
+              :flag-enabled="rowDenyEnabled"
+            />
           </section>
         </template>
 
@@ -690,6 +696,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import MetaConditionalRuleBuilder from './MetaConditionalRuleBuilder.vue'
 import type { MultitableApiClient } from '../api/client'
 import type {
   MetaField,
