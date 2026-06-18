@@ -505,17 +505,23 @@ TODO:
       `deadLetters.persisted=1`, `provenance.target_write_succeeded=1`,
       `provenance.target_write_failed=1`, request-body injection fields absent, and
       injection env/runtime config restored after the check.
-  - [ ] Post-C6 package reroll PM2 env hygiene hardening.
-    - trigger: #2769 found `app.env` no longer contained C6 failure-injection markers,
-      while the running PM2 process still reported marker presence.
-    - intended guard: when the two C6 test-only keys are absent from `app.env`,
-      the PM2 startup helper must clear them from the launch process and recreate
-      the PM2 app if an existing process definition still contains them.
-    - evidence must stay values-free:
-      `appEnvFailureInjectionMarkersPresent=false`,
-      `pm2RuntimeFailureInjectionMarkersPresent=false`,
-      `pm2StaleDefinitionFound=true|false`,
-      `pm2RecreatedFromCleanEnv=true|not_needed`, `health=200`; never print env values.
+- [ ] Post-C6 package reroll PM2 env hygiene hardening.
+  - trigger: #2769 found `app.env` no longer contained C6 failure-injection markers,
+    while the running PM2 process still reported marker presence.
+  - intended guard: when the two C6 test-only keys are absent from `app.env`,
+    the PM2 startup helper must clear them from the launch process and recreate
+    the PM2 app if an existing process definition still contains them.
+  - follow-up trigger: #2788 implemented the first guard, but #2769 entity-machine
+    validation showed a missed fallback path: `pm2 jlist` did not return the app,
+    while `pm2 describe` / restart could still find it. When the retired keys are
+    absent from `app.env`, that path must delete + fresh-start instead of
+    restart-only reuse because the helper cannot inspect the old definition's
+    runtime env.
+  - evidence must stay values-free:
+    `appEnvFailureInjectionMarkersPresent=false`,
+    `pm2RuntimeFailureInjectionMarkersPresent=false`,
+    `pm2StaleDefinitionFound=true|false|unknown_jlist_uninspectable`,
+    `pm2RecreatedFromCleanEnv=true|not_needed`, `health=200`; never print env values.
   - C6-5 remains sandbox/entity-machine validation only; no production/batch rollout.
 
 完成条件:
