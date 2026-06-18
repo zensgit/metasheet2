@@ -197,11 +197,22 @@ describeIfDatabase('Yjs string-stored atomic MIGRATION (real DB) — select/date
       await new Promise((r) => setTimeout(r, 500))
 
       const data = await readData()
-      for (const [k, v] of [[F_SELECT, EDIT_SELECT], [F_DATE, EDIT_DATE], [F_DATETIME, EDIT_DATETIME]] as const) {
+      // WIRED string-stored atomics (select + date): exact round-trip, no corruption. These have no
+      // normalizing codec, so the plain string the dual-reader writes is persisted verbatim.
+      for (const [k, v] of [[F_SELECT, EDIT_SELECT], [F_DATE, EDIT_DATE]] as const) {
         expect(typeof data[k]).toBe('string')
         expect(data[k]).toBe(v)
         expect(data[k]).not.toBe('[object Object]')
       }
+      // dateTime is DEFERRED from live wiring precisely because its codec normalizes to canonical UTC
+      // ISO — a plain-string flush does NOT round-trip the raw input. Assert it is a valid normalized
+      // string (NOT corrupted: not a Y.Text object, not '[object Object]', not a nested Yjs type) but
+      // NOT the raw input — this is the evidence that dateTime must stay REST-only (not in
+      // STRING_STORED_ATOMIC_YJS_TYPES) until a tz-aware live-edit design exists.
+      expect(typeof data[F_DATETIME]).toBe('string')
+      expect(data[F_DATETIME]).not.toBe('[object Object]')
+      expect(data[F_DATETIME]).not.toBe(EDIT_DATETIME) // normalized by the codec, not the raw input
+      expect(data[F_DATETIME] as string).toMatch(/\dT\d.*Z$/) // canonical UTC ISO, a valid (uncorrupted) string
     } finally {
       bridge.unobserve(REC_ID)
       await svc.destroy()
