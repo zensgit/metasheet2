@@ -382,6 +382,13 @@ Current #2720 checkpoint as of 2026-06-17:
   values. Collect and post only these booleans plus the helper log marker; do
   not paste raw `app.env` contents or raw `pm2 jlist` JSON, because both can
   include sensitive runtime values.
+- PM2 env-hygiene fallback checkpoint passed on package
+  `multitable-onprem-pm2-env-hygiene-fallback-20260618-58143a2a` (#2820,
+  `58143a2ac`): the entity machine reproduced the `jlist`-uninspectable shape,
+  observed delete + fresh-start instead of restart-only reuse, and reported
+  `pm2RuntimeFailureInjectionMarkersPresent=false`, `pm2RecreatedFromCleanEnv=true`,
+  `pm2RestartOnlyFallbackObserved=false`, root/API health `200`, and
+  `valuesFreeEvidence=true`.
 
 ## Stop Rules
 
