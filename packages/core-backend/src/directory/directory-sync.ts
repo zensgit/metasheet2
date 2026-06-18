@@ -8,12 +8,19 @@ import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
 import {
   fetchDingTalkAppAccessToken,
+  getDingTalkDepartmentDetail,
   getDingTalkUserDetail,
   listDingTalkDepartments,
   listDingTalkDepartmentUsers,
   type DingTalkDepartment,
   type DingTalkDirectoryUser,
 } from '../integrations/dingtalk/client'
+import {
+  capturePriorDeptManagers,
+  enrichDepartmentsWithManagers,
+  mergeDeptManagerIntoRaw,
+  resolveManagerListForDept,
+} from './department-manager-enrichment'
 import { assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
 import {
   deriveDelegatedAdminNamespace,
@@ -1870,6 +1877,19 @@ async function fetchAllDepartments(config: DirectoryIntegrationConfig, integrati
     }
   }
 
+  // dept-head plumbing: enrich each department with its manager user ids from the
+  // department-detail API (listsub does not return them). Best-effort + sequential
+  // (QPS-throttled): a per-dept failure leaves managerUserIds undefined so the upsert
+  // carries the prior dept_manager_userid_list forward instead of wiping it.
+  await enrichDepartmentsWithManagers(
+    departments.values(),
+    (deptId) => getDingTalkDepartmentDetail(accessToken, deptId, { baseUrl: config.baseUrl }),
+    (deptId, error) =>
+      logger.warn(
+        `dept-head: department/get failed for dept ${deptId} (integration ${integrationName}); carrying prior forward: ${readErrorMessage(error, 'unknown error')}`,
+      ),
+  )
+
   return departments
 }
 
@@ -2115,6 +2135,10 @@ export async function syncDirectoryIntegration(
   try {
     const departments = await fetchAllDepartments(config, integration.name)
     const departmentPathMap = buildDepartmentPathMap(departments)
+    // dept-head plumbing: capture last-known-good dept_manager_userid_list BEFORE the
+    // whole-column upsert (raw = EXCLUDED.raw) overwrites raw, so a failed department/get
+    // (managerUserIds left undefined) carries the prior value forward instead of wiping it.
+    const priorDeptManagers = await capturePriorDeptManagers(integrationId, query)
     const users = await fetchAllUsers(config, departments)
 
     let directoryDiagnosticStats: JsonRecord = {}
@@ -2173,7 +2197,12 @@ export async function syncDirectoryIntegration(
             department.name,
             departmentPathMap.get(department.id) ?? department.name,
             department.order,
-            JSON.stringify(department.source),
+            JSON.stringify(
+              mergeDeptManagerIntoRaw(
+                department.source,
+                resolveManagerListForDept(department.managerUserIds, priorDeptManagers.get(department.id)),
+              ),
+            ),
             syncTimestamp,
           ],
         )

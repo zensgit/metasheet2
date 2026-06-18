@@ -81,6 +81,11 @@ export interface DingTalkDepartment {
   name: string
   order: number
   source: Record<string, unknown>
+  /**
+   * Filled by the dept-head enrichment pass (department-detail fetch).
+   * `undefined` = not fetched / fetch failed (carry prior forward); `[]` = success-empty.
+   */
+  managerUserIds?: string[]
 }
 
 export interface DingTalkDepartmentUserSummary {
@@ -493,6 +498,36 @@ export async function listDingTalkDepartments(
       source: entry,
     }))
     .filter((entry) => entry.id.length > 0 && entry.name.length > 0)
+}
+
+export async function getDingTalkDepartmentDetail(
+  accessToken: string,
+  departmentId: string,
+  config?: { baseUrl?: string },
+): Promise<{ deptManagerUserIdList: string[] }> {
+  const payload = await requestDingTalkDirectoryJson(
+    `/topapi/v2/department/get?access_token=${encodeURIComponent(accessToken)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        dept_id: Number.isNaN(Number(departmentId)) ? departmentId : Number(departmentId),
+      }),
+    },
+    'Failed to read DingTalk department detail',
+    config?.baseUrl,
+  )
+
+  const result = readNestedPayload(payload)
+  // DingTalk `/topapi/v2/department/get` returns `dept_manager_userid_list` as a
+  // comma-separated string of userids; tolerate an array too for forward-compat.
+  const rawManagers = result.dept_manager_userid_list ?? result.deptManagerUseridList
+  const deptManagerUserIdList = Array.isArray(rawManagers)
+    ? rawManagers.map((item) => String(item ?? '').trim()).filter(Boolean)
+    : typeof rawManagers === 'string'
+      ? rawManagers.split(',').map((item) => item.trim()).filter(Boolean)
+      : []
+  return { deptManagerUserIdList }
 }
 
 export async function listDingTalkDepartmentUsers(

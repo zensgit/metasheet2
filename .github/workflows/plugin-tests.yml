@@ -257,7 +257,7 @@ jobs:
             tests/integration/data-source-test-ephemeral-realdb.test.ts \
             --reporter=dot
 
-      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance)
+      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward)
         # Lane A (directory endpoints) + Lane B (P1-C hidden field redaction) + Lane D (add_sign/reduce_sign). Wired as WHOLE FILE runs so the
         # gate is robust (a name filter that matches zero tests would exit green and hide
         # regressions). The file is describeIfDatabase-guarded + excluded from the no-DB
@@ -273,6 +273,7 @@ jobs:
             tests/integration/approval-wp-add-reduce-sign.api.test.ts \
             tests/integration/approval-direct-manager.api.test.ts \
             tests/integration/approval-postgate-acceptance.api.test.ts \
+            tests/integration/dept-head-sync-plumbing.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
