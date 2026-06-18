@@ -16,9 +16,9 @@ import type { YjsPersistenceAdapter } from './yjs-persistence-adapter'
  *   - null/undefined → left absent (a delete; nothing to seed).
  *
  * Frontend binding: `useYjsTextField`/`useYjsCellBinding` bind Y.Text string cells;
- * `useYjsScalarCell` binds the plain-value scalar cells the grid has wired so far
- * (number/currency/percent/boolean/rating/multiSelect). A cell with no active binding
- * (incl. the not-yet-wired scalar types, and any field once the doc is empty) falls
+ * `useYjsScalarCell` binds the FULL scalar set the grid has wired (since #2832/#2838/#2849):
+ * number/currency/percent/boolean/rating/multiSelect/select/date/duration/dateTime. A cell with
+ * no active binding (a genuine free-text field, or any field once the doc is empty) falls
  * back to the existing REST edit path.
  */
 export type YjsRecordSeedFn = (

@@ -24,57 +24,14 @@
 
 ### 1.1 `select` / `date` / `dateTime`
 
-- [!] Gate: choose a persisted-doc migration strategy before any seed flip or frontend scalar binding.
-  - [ ] Decide migration style: lazy, offline/admin, dual-reader, or another explicit strategy.
-  - [ ] Define rollback compatibility for old `Y.Text` docs and new plain-value docs.
-  - [ ] Define mixed-client behavior during deployment.
-  - [ ] Lock `date` and `dateTime` canonical stored string semantics, including timezone expectations.
+- [x] **2a RESOLVED — full scalar set shipped (2026-06-18).** The speculative per-type migration/UX gate
+  checkboxes that were here are obsolete (the shipped path differed from them) and have been removed:
+  - [x] `select` / `date` — lazy `coerceText` dual-reader (read Y.Text-or-plain, write plain, lazy
+    convergence; no big-bang migration) + strdate real-DB corruption golden (#2832).
+  - [x] `dateTime` — canonical-UTC-ISO value invariant + persisted-doc golden (#2849).
+  - [x] `duration` — commit-on-confirm LWW + defer-remote-while-dirty + real-DB no-corruption (#2838).
 
-- [ ] 2a-S1 Design-lock.
-  - [ ] Inventory current seed and persisted-doc shapes.
-  - [ ] Write corruption model: what values must never reach `patchRecords`.
-  - [ ] Define the exact corruption golden fixtures.
-  - [ ] Define whether `select` pilots before `date` / `dateTime`.
-
-- [ ] 2a-S2 Migration / dual-reader helper.
-  - [ ] Unit test old `Y.Text` doc -> safe read/migration.
-  - [ ] Unit test new plain-value doc -> no migration.
-  - [ ] Real-DB persisted-doc fixture for all three types.
-  - [ ] Assert no `Y.Text` object, nested Yjs type, `[object Object]`, or stringified object reaches `meta_records.data`.
-
-- [ ] 2a-S3 Product binding pilot.
-  - [ ] Enable one pilot type only after corruption golden is green.
-  - [ ] Add FE active/inactive binding tests.
-  - [ ] Add real-browser edit smoke.
-  - [ ] Add plugin-tests / web-guard allowlist entries where needed.
-
-- [ ] 2a-S4 Extend to remaining string-stored atomics.
-  - [ ] Repeat seed + flush + persisted-doc migration tests for `date`.
-  - [ ] Repeat seed + flush + persisted-doc migration tests for `dateTime`.
-  - [ ] Add timezone / local-input conversion regression.
-
-### 1.2 `duration`
-
-- [!] Gate: choose the local-buffer UX semantics.
-  - [ ] Decide between REST-only, commit-on-confirm LWW, or a separate collaborative draft channel.
-  - [ ] Define remote-update behavior while local buffer is dirty.
-  - [ ] Define cursor/selection preservation expectations.
-  - [ ] Define partially valid input behavior.
-
-- [ ] 2a-D1 Duration UX design-lock.
-  - [ ] Document local-buffer invariants.
-  - [ ] Document conflict behavior.
-  - [ ] Define browser typing evidence.
-
-- [ ] 2a-D2 Runtime implementation after UX lock.
-  - [ ] Preserve local text buffer while typing.
-  - [ ] Add component tests for partially valid input.
-  - [ ] Add browser evidence for typing without interruption.
-
-- [ ] 2a-D3 Real-DB no-corruption proof.
-  - [ ] Flush valid duration through the real path.
-  - [ ] Assert stored shape is unchanged.
-  - [ ] Assert invalid values fail through existing validation.
+  No remaining 2a work; the full scalar set is collaborative. See §1 of the plan doc for the as-shipped design.
 
 ## 2. 2b · #18 Phase-2 Conditional Permission Rules
 

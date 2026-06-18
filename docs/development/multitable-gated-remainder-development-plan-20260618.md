@@ -35,11 +35,11 @@ Everything else belongs to a future roadmap pool, not to this closure ledger. Se
 - non-string atomic values seed as plain values under the `fields` Y.Map;
 - `null` / `undefined` stay absent.
 
-The product editor only enables scalar Yjs binding for:
+The product editor enables scalar Yjs binding for the **full scalar field set**:
 
-`number`, `currency`, `percent`, `boolean`, `rating`, `multiSelect`.
+`number`, `currency`, `percent`, `boolean`, `rating`, `multiSelect`, `select`, `date`, `duration`, and `dateTime` (#2849).
 
-The backend bridge can collect generic plain values, but that does not open the remaining field types in the product path. The seed shape and frontend binding are the product boundary.
+**2a is COMPLETE — no scalar type remains REST-only for collaborative editing** (updated 2026-06-18 after #2832 / #2838 / #2849). The seed shape + frontend binding now cover the full set; the backend bridge collects generic plain values consistent with that. (§1.2/§1.3 below are retained as history of the per-type gates that have since been resolved.)
 
 ### 1.2 `select` / `date` / `dateTime` Gate
 

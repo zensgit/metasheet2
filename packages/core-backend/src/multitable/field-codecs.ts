@@ -290,12 +290,13 @@ function sanitizeFieldPropertyByType(
     // + people-import) so single/multi behaviour never silently flips between a legacy
     // link-backed person and a native person. NOT readOnly (person is user-editable).
     //
-    // `restrictToMemberGroupIds` is an OPTIONAL future narrowing config (member-group scope);
-    // sanitized to a deduped string[] when present, omitted otherwise. NOTE: it is config-shape
-    // ONLY and NOT YET ENFORCED — `validatePersonValue` checks SHEET membership, not the group
-    // subset, so a field carrying this still accepts any sheet member. Enforcement (intersect the
-    // member set with the configured groups) is a follow-up; until then this is a stored hint, not
-    // an active restriction. (Sanitizing the shape now keeps the contract stable for that follow-up.)
+    // `restrictToMemberGroupIds` is an OPTIONAL member-group narrowing config; sanitized to a deduped
+    // string[] when present, omitted otherwise. ENFORCED (since #2854) via the shared
+    // `person-field-restriction.ts` helper at EVERY write path — RecordService.createRecord/patchRecord,
+    // RecordWriteService.patchRecords, and the inline form-submit handler: a restricted field's allowed
+    // set narrows to (sheet members ∩ active users in these groups), fail-closed. Pre-existing
+    // out-of-scope values are grandfathered (validation is write-only). Sanitizing the shape here keeps
+    // that contract stable.
     const restrict = sanitizeStringArray(obj.restrictToMemberGroupIds)
     return {
       limitSingleRecord: obj.limitSingleRecord !== false,

@@ -8,12 +8,12 @@
  * Y.Map key (atomic scalars, LWW). Nested Yjs shared types (Y.Map/Y.Array) are
  * skipped.
  *
- * NOTE: being a generic plain-value collector does NOT mean every scalar type is
- * live in the product. Which fields actually reach the bridge is determined by the
- * seed (yjs-sync-service) + the FE cell bindings, not here — e.g. string-stored
- * select/date/dateTime currently seed as Y.Text and have no scalar binding, so they
- * do not flow as plain values yet (a gated decision), even though this collector
- * would accept them if they did.
+ * NOTE: being a generic plain-value collector does NOT mean a type is live in the product;
+ * which fields reach the bridge is determined by the seed (yjs-sync-service) + the FE cell
+ * bindings, not here. As of #2832 / #2838 / #2849 the FULL scalar set is wired — incl.
+ * select/date (Y.Text-tolerant `coerceText` dual-reader), duration (commit-on-confirm), and
+ * dateTime (canonical-UTC-ISO invariant). Only genuine free-text fields use Y.Text char-merge
+ * rather than plain-value LWW.
  *
  * NOT in scope: create/delete, field-level permissions, webhook/automation
  * (downstream of RecordWriteService; they fire once the bridge calls patchRecords).
