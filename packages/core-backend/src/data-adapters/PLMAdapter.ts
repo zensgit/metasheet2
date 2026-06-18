@@ -722,6 +722,66 @@ export interface BomMultitableContextResult {
   context: BomMultitableContext | null;
 }
 
+// Field guard for the governed BOM multi-table context. Validates EVERY field declared on
+// BomMultitableLine / BomMultitablePart / BomMultitableContext — both the structural keys
+// (bom_line_id, part_id, level, path, ...) AND the displayed cells (item_number, name, state,
+// quantity, uom, refdes, source_version, source_updated_at, ...), because the review table renders
+// those too: a renamed/removed *display* field would otherwise pass `typeof === 'object'` and render
+// silent empty cells (the same drift class as a missing row key). Nullable fields accept the typed
+// value OR null (a legitimate null is NOT drift); an ABSENT / renamed / retyped key IS caught. Extra
+// unknown fields are TOLERATED (a benign provider addition does not trip it). Used to fail LOUDLY
+// (throw → the governed relay degrades to its visible 'error' state) instead of corrupting silently.
+const isStringOrNull = (v: unknown): boolean => typeof v === 'string' || v === null;
+const isNumberOrNull = (v: unknown): boolean => typeof v === 'number' || v === null;
+const isStringArray = (v: unknown): boolean => Array.isArray(v) && v.every((x) => typeof x === 'string');
+
+function isBomMultitablePart(value: unknown): value is BomMultitablePart {
+  const p = value as Record<string, unknown> | null;
+  return (
+    !!p && typeof p === 'object'
+    && typeof p.part_id === 'string'
+    && isStringOrNull(p.item_number)
+    && isStringOrNull(p.name)
+    && isStringOrNull(p.state)
+    && isNumberOrNull(p.generation)
+  );
+}
+
+function isBomMultitableLine(value: unknown): value is BomMultitableLine {
+  const l = value as Record<string, unknown> | null;
+  return (
+    !!l && typeof l === 'object'
+    && typeof l.bom_line_id === 'string' && l.bom_line_id.length > 0
+    && typeof l.part_id === 'string'
+    && isStringOrNull(l.item_number)
+    && isStringOrNull(l.name)
+    && isStringOrNull(l.state)
+    && isNumberOrNull(l.generation)
+    && isNumberOrNull(l.quantity)
+    && isStringOrNull(l.uom)
+    && isStringOrNull(l.find_num)
+    && isStringOrNull(l.refdes)
+    && typeof l.level === 'number'
+    && isStringArray(l.path)
+    && isStringArray(l.path_labels)
+    && isNumberOrNull(l.source_version)
+    && isStringOrNull(l.source_updated_at)
+    && typeof l.sync_status === 'string'
+  );
+}
+
+function isBomMultitableContext(value: unknown): value is BomMultitableContext {
+  const c = value as Record<string, unknown> | null;
+  if (!c || typeof c !== 'object') return false;
+  if (!isBomMultitablePart(c.part)) return false;
+  if (!Array.isArray(c.lines) || !c.lines.every(isBomMultitableLine)) return false;
+  if (!isNumberOrNull(c.source_version)) return false;
+  if (!isStringOrNull(c.source_updated_at)) return false;
+  if (typeof c.sync_status !== 'string') return false;
+  if (typeof c.template_key !== 'string') return false;
+  return true;
+}
+
 export class PLMAdapter extends HTTPAdapter {
   private mockMode = false;
   private apiMode: PLMApiMode = 'legacy';
@@ -2091,12 +2151,22 @@ export class PLMAdapter extends HTTPAdapter {
         return { feature_key: 'bom_multitable', entitled: false, upgrade: { available: true }, context: null }
       }
       const entitled = body.entitled === true
+      if (entitled && body.context != null && !isBomMultitableContext(body.context)) {
+        // Entitled, and a context object IS present, but its inner shape drifted from the contract
+        // (e.g. a renamed/removed/retyped line field). Refuse to pass undefined-laden rows to the
+        // review table: throw so the governed relay degrades to its visible 'error' state instead of
+        // silently rendering corrupt rows. (The guard validates every declared context field --
+        // structural keys and displayed cells alike, null allowed where the type is nullable -- while
+        // tolerating unknown extras, so a benign provider addition does not trip it.)
+        throw new Error(`getBomMultitableContext: malformed bom_multitable context shape for part ${partId}`)
+      }
       return {
         feature_key: typeof body.feature_key === 'string' && body.feature_key ? body.feature_key : 'bom_multitable',
         entitled,
         upgrade: { available: !entitled },
-        // context only when the provider says entitled (defence in depth against a stale manifest)
-        context: entitled && body.context && typeof body.context === 'object' ? body.context : null,
+        // context only when entitled AND the inner shape validates (defence in depth against a stale
+        // manifest + no silent corruption from provider field drift)
+        context: entitled && isBomMultitableContext(body.context) ? body.context : null,
       }
     }
     // legacy / non-yuantus PLM has no multitable review surface
