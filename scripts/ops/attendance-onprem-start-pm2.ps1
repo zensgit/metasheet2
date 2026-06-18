@@ -318,6 +318,21 @@ function Test-Pm2AppHasRetiredSensitiveEnvKey {
   return $false
 }
 
+function Test-RetiredSensitiveEnvKeyRetirementRequired {
+  param(
+    [string[]]$KeyNames,
+    [hashtable]$EnvFileKeys
+  )
+
+  foreach ($key in $KeyNames) {
+    if (-not $EnvFileKeys.ContainsKey($key)) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
 function Start-Pm2App {
   param(
     [string]$Pm2Command,
@@ -380,10 +395,20 @@ else {
     Start-Pm2App -Pm2Command $pm2Command -ConfigPath $ecosystemConfig -AppName $Pm2AppName -EnvName $Pm2Env
   }
   else {
-    Write-Host "[attendance-onprem-start-pm2] pm2 jlist did not return $Pm2AppName; falling back to restart"
-    & $pm2Command restart $Pm2AppName --update-env
-    if ($LASTEXITCODE -ne 0) {
-      throw "pm2 restart failed for $Pm2AppName"
+    if (Test-RetiredSensitiveEnvKeyRetirementRequired -KeyNames $RetiredSensitiveEnvKeys -EnvFileKeys $envFileKeys) {
+      Write-Host "[attendance-onprem-start-pm2] pm2 jlist did not return $Pm2AppName; deleting existing pm2 app definition to retire sensitive/test-only env keys"
+      & $pm2Command delete $Pm2AppName
+      if ($LASTEXITCODE -ne 0) {
+        throw "pm2 delete failed while retiring env keys for $Pm2AppName after jlist fallback"
+      }
+      Start-Pm2App -Pm2Command $pm2Command -ConfigPath $ecosystemConfig -AppName $Pm2AppName -EnvName $Pm2Env
+    }
+    else {
+      Write-Host "[attendance-onprem-start-pm2] pm2 jlist did not return $Pm2AppName; falling back to restart"
+      & $pm2Command restart $Pm2AppName --update-env
+      if ($LASTEXITCODE -ne 0) {
+        throw "pm2 restart failed for $Pm2AppName"
+      }
     }
   }
 }
