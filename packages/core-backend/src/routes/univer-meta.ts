@@ -419,6 +419,8 @@ type LinkedRecordSummary = {
 type PersonSummary = {
   id: string
   display: string
+  /** 2c-S4: the stored assignee's user is deactivated (still displayed read-only, not re-assignable). */
+  inactive?: boolean
 }
 
 type MultitableAttachment = SharedMultitableAttachment
@@ -4274,17 +4276,19 @@ async function buildPersonSummaries(
   if (userIds.size === 0) return result
 
   const displayByUserId = new Map<string, string>()
+  const inactiveUserIds = new Set<string>()
   try {
     const usersRes = await query(
-      'SELECT id, email, name FROM users WHERE id = ANY($1::text[])',
+      'SELECT id, email, name, is_active FROM users WHERE id = ANY($1::text[])',
       [Array.from(userIds)],
     )
-    for (const u of usersRes.rows as Array<{ id?: unknown; email?: unknown; name?: unknown }>) {
+    for (const u of usersRes.rows as Array<{ id?: unknown; email?: unknown; name?: unknown; is_active?: unknown }>) {
       const id = typeof u.id === 'string' ? u.id : String(u.id ?? '')
       if (!id) continue
       const name = typeof u.name === 'string' ? u.name.trim() : ''
       const email = typeof u.email === 'string' ? u.email.trim() : ''
       displayByUserId.set(id, name || email || id)
+      if (u.is_active === false) inactiveUserIds.add(id) // 2c-S4: mark deactivated stored assignees (read-only, not re-assignable)
     }
   } catch (err) {
     // users table absent (minimal test harness) — fall back to userId as display below.
@@ -4300,7 +4304,7 @@ async function buildPersonSummaries(
       for (const item of value) {
         if (typeof item !== 'string' || !item.trim()) continue
         const userId = item.trim()
-        summaries.push({ id: userId, display: displayByUserId.get(userId) ?? userId })
+        summaries.push({ id: userId, display: displayByUserId.get(userId) ?? userId, ...(inactiveUserIds.has(userId) ? { inactive: true } : {}) })
       }
       if (summaries.length > 0) fieldMap.set(fieldId, summaries)
     }

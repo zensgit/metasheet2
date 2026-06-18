@@ -35,6 +35,8 @@ const PERSON_USER = `u_psm_target_${TS}` // the userId stored in the person cell
 const PERSON_DISPLAY = `Person Canary ${TS}` // the resolved display name — second canary (personSummaries[...].display)
 const USER_DENIED = `u_psm_denied_${TS}` // field_permissions-denied on FLD_PERSON
 const USER_GRANTED = `u_psm_granted_${TS}` // no deny → positive control
+const PERSON_USER_INACTIVE = `u_psm_inactive_${TS}` // 2c-S4: a DEACTIVATED stored assignee
+const REC_INACTIVE = `rec_psm_inactive_${TS}` // record holding the inactive assignee
 
 let app: Express
 let testUserId: string | null = null
@@ -67,6 +69,15 @@ describeIfDatabase('native person personSummaries by-value field mask (real DB)'
       [PERSON_USER, `${PERSON_USER}@example.test`, PERSON_DISPLAY],
     )
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [REC_ID, SHEET_ID, JSON.stringify({ [FLD_VISIBLE]: 'visible-val', [FLD_PERSON]: [PERSON_USER] })])
+    // 2c-S4: a deactivated user stored in a person cell — buildPersonSummaries must still resolve its
+    // display (read-only) AND flag it inactive.
+    await q(
+      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1, $2, $3, 'x', 'user', '[]'::jsonb, FALSE, FALSE)
+       ON CONFLICT (id) DO UPDATE SET is_active = FALSE`,
+      [PERSON_USER_INACTIVE, `${PERSON_USER_INACTIVE}@example.test`, `Inactive ${TS}`],
+    )
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [REC_INACTIVE, SHEET_ID, JSON.stringify({ [FLD_PERSON]: [PERSON_USER_INACTIVE] })])
     // layer-3 read deny on FLD_PERSON for USER_DENIED only (USER_GRANTED = positive control)
     await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [SHEET_ID, FLD_PERSON, 'user', USER_DENIED, false, false])
   })
@@ -76,7 +87,7 @@ describeIfDatabase('native person personSummaries by-value field mask (real DB)'
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
-    await q('DELETE FROM users WHERE id = $1', [PERSON_USER]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[PERSON_USER, PERSON_USER_INACTIVE]]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
   })
 
@@ -90,6 +101,18 @@ describeIfDatabase('native person personSummaries by-value field mask (real DB)'
     expect(rec?.data[FLD_PERSON]).toEqual([PERSON_USER]) // readable: the raw value present
     expect(res.body.data.personSummaries?.[REC_ID]?.[FLD_PERSON]?.[0]?.id).toBe(PERSON_USER)
     expect(res.body.data.personSummaries?.[REC_ID]?.[FLD_PERSON]?.[0]?.display).toBe(PERSON_DISPLAY)
+  })
+
+  test('2c-S4: a deactivated stored assignee is still resolved (display) AND flagged inactive', async () => {
+    testUserId = USER_GRANTED; testPerms = ['multitable:read']
+    const res = await viewReq()
+    expect(res.status).toBe(200)
+    const inactiveSummary = res.body.data.personSummaries?.[REC_INACTIVE]?.[FLD_PERSON]?.[0]
+    expect(inactiveSummary?.id).toBe(PERSON_USER_INACTIVE) // still displayed read-only, not dropped
+    expect(inactiveSummary?.inactive).toBe(true) // flagged → the muted cue
+    const activeSummary = res.body.data.personSummaries?.[REC_ID]?.[FLD_PERSON]?.[0]
+    expect(activeSummary?.id).toBe(PERSON_USER)
+    expect(activeSummary?.inactive).toBeFalsy() // active assignee is NOT flagged
   })
 
   test('GET /view (DENIED): person value is absent from record.data AND personSummaries; neither userId nor display leaks', async () => {
