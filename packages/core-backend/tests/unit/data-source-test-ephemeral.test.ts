@@ -82,6 +82,19 @@ class CapturingAdapter extends FakeBase {
   async testConnection(): Promise<boolean> { return true }
 }
 
+// HTTP-style failure that echoes the submitted endpoint rather than just a host.
+class UrlFailAdapter extends FakeBase {
+  async connect(): Promise<void> {
+    const endpoint = String(this.config.connection?.baseURL ?? this.config.connection?.url)
+    const err = new Error(`request to ${endpoint} failed: getaddrinfo ENOTFOUND ${new URL(endpoint).hostname}`)
+    await this.onError(err)
+    throw err
+  }
+  async disconnect(): Promise<void> { disconnectCalls.push(this.config.id); this.connected = false }
+  isConnected(): boolean { return this.connected }
+  async testConnection(): Promise<boolean> { return false }
+}
+
 function appAs(userId: string) {
   const a = express()
   a.use(express.json())
@@ -137,6 +150,24 @@ describe('DataSourceManager.testEphemeralConnection (helper)', () => {
     }
     expect(manager.getScope(id)).toBeUndefined() // still nothing registered on failure
     expect(removeAllListenerCalls).toContain(id) // disposed even on failure
+  })
+
+  it('scrubs submitted HTTP endpoint values from failure summaries', async () => {
+    const manager = getDataSourceManager()
+    manager.registerAdapterType('urlfaileph', UrlFailAdapter as never)
+    const submittedUrl = 'https://submitted-endpoint.example/internal/probe'
+
+    const result = await manager.testEphemeralConnection(cfg('eph_url_fail', 'urlfaileph', {
+      connection: { baseURL: `${submittedUrl}/` },
+    }))
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('***')
+    const wire = JSON.stringify(result)
+    for (const leak of [submittedUrl, 'submitted-endpoint.example']) {
+      expect(wire).not.toContain(leak)
+    }
+    expect(removeAllListenerCalls).toContain('eph_url_fail')
   })
 
   it('throws Unsupported data source type for an unknown adapter type', async () => {
@@ -196,6 +227,28 @@ describe('POST /api/data-sources/test (route)', () => {
     expect(res.body.data.error.message).toContain('***')  // submitted identifiers scrubbed
     const wire = JSON.stringify(res.body)
     for (const leak of [SECRET, 'secret-host.internal', 'admin_user', 'connection', 'credentials']) {
+      expect(wire).not.toContain(leak)
+    }
+  })
+
+  it('failure body echoes back NO submitted HTTP endpoint URL', async () => {
+    const manager = getDataSourceManager()
+    manager.registerAdapterType('http', UrlFailAdapter as never)
+    const submittedUrl = 'https://submitted-endpoint.example/internal/probe'
+    const res = await request(appAs('tester')).post('/api/data-sources/test').send({
+      id: 'eph_http_fail',
+      name: 'x',
+      type: 'http',
+      connection: { baseURL: `${submittedUrl}/` },
+      credentials: { apiKey: SECRET },
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(res.body.data.success).toBe(false)
+    expect(res.body.data.error.message).toBeTruthy()
+    expect(res.body.data.error.message).toContain('***')
+    const wire = JSON.stringify(res.body)
+    for (const leak of [SECRET, submittedUrl, 'submitted-endpoint.example', 'connection', 'credentials']) {
       expect(wire).not.toContain(leak)
     }
   })

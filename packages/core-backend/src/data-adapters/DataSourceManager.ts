@@ -574,16 +574,45 @@ export class DataSourceManager extends EventEmitter {
     const adapter = new AdapterClass(boundedConfig)
     adapter.on('error', () => { /* ephemeral: cause captured via connectionError; no emit/persist */ })
     // No-echo (design-lock 钉子②): the adapter redacts secret VALUES, but a driver diagnostic can still
-    // reflect the caller's submitted host/username (e.g. `password authentication failed for user "x"`,
-    // `getaddrinfo ENOTFOUND <host>`). Strip those submitted identifiers too so the ephemeral test never
-    // echoes connection input back. Scoped here — shared redactSecrets stays intact for /:id/test.
+    // reflect the caller's submitted host/username/endpoint (e.g. `password authentication failed for
+    // user "x"`, `getaddrinfo ENOTFOUND <host>`, or an HTTP client echoing a submitted baseURL).
+    // Strip those submitted identifiers too so the ephemeral test never echoes connection input back.
+    // Scoped here — shared redactSecrets stays intact for /:id/test.
+    const submittedEndpointFragments = (): string[] => {
+      const conn = config.connection ?? {}
+      const fragments = new Set<string>()
+      const add = (value: unknown): void => {
+        if (typeof value !== 'string') return
+        const trimmed = value.trim()
+        if (trimmed.length < 3) return
+        fragments.add(trimmed)
+        fragments.add(trimmed.replace(/\/+$/, ''))
+        try {
+          const parsed = new URL(trimmed)
+          for (const part of [parsed.origin, parsed.host, parsed.hostname]) {
+            if (part.length >= 3) fragments.add(part)
+          }
+        } catch {
+          // Not every connection field is a URL; host/database/username are handled as plain strings.
+        }
+      }
+      for (const value of [
+        conn.host,
+        conn.server,
+        conn.database,
+        conn.baseURL,
+        conn.baseUrl,
+        conn.url,
+        config.credentials?.username,
+      ]) {
+        add(value)
+      }
+      return [...fragments].sort((a, b) => b.length - a.length)
+    }
     const scrubInput = (msg: string | undefined): string | undefined => {
       if (!msg) return msg
-      const conn = config.connection ?? {}
-      const ids = [conn.host, conn.server, conn.database, config.credentials?.username]
-        .filter((v): v is string => typeof v === 'string' && v.trim().length >= 3)
       let out = msg
-      for (const id of ids) out = out.split(id).join('***')
+      for (const id of submittedEndpointFragments()) out = out.split(id).join('***')
       return out
     }
     const start = Date.now()
