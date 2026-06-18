@@ -69,3 +69,44 @@ export function createPersonMemberResolver(
     return restricted
   }
 }
+
+export interface PersonDirectoryEntry {
+  userId: string
+  name: string | null
+  email: string | null
+}
+
+/**
+ * 2c-S2 (source of truth = B: member-group directory) — the READ counterpart of
+ * createPersonMemberResolver. Returns the assignable directory of a person field: the SAME allowed
+ * set the write-validator accepts (sheet members ∩ active group members; unrestricted ⇒ sheet
+ * members), hydrated with display info and filtered to ACTIVE users. Inactive/deleted users are
+ * excluded here (not assignable) — they remain READ-only via the stored value / buildPersonSummaries,
+ * never surfaced as assignable. The picker (2c-S3) consumes this so what it offers === what the
+ * validator will accept (display parity). Ordered by name for stable display. Read-only; sits behind
+ * the existing restriction seam (reuses createPersonMemberResolver — single source of truth).
+ */
+export async function resolvePersonAssignableDirectory(
+  query: QueryFn,
+  sheetId: string,
+  restrictGroupIds: string[],
+  /** Injectable allowed-set resolver (defaults to the canonical write-validator resolver) — lets unit
+   *  tests exercise hydration without the full candidate-resolution query chain. */
+  resolveAllowed: (groupIds: string[]) => Promise<Set<string>> = createPersonMemberResolver(query, sheetId),
+): Promise<PersonDirectoryEntry[]> {
+  const allowed = await resolveAllowed(restrictGroupIds)
+  if (allowed.size === 0) return []
+  const res = await query(
+    `SELECT id::text AS uid, name, email
+       FROM users
+      WHERE id::text = ANY($1::text[])
+        AND is_active = TRUE
+      ORDER BY name NULLS LAST, id`,
+    [Array.from(allowed)],
+  )
+  return (res.rows as Array<Record<string, unknown>>).map((row) => ({
+    userId: String(row.uid),
+    name: typeof row.name === 'string' ? row.name : null,
+    email: typeof row.email === 'string' ? row.email : null,
+  }))
+}
