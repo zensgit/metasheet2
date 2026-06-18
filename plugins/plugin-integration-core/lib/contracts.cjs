@@ -186,6 +186,147 @@ function assertAdapterContract(adapter, kind = 'unknown') {
   return adapter
 }
 
+// ---------------------------------------------------------------------------
+// OPTIONAL target-write lifecycle capability (S1a — design-lock 2026-06-18 §6.1)
+//
+// LOCK: "Target lookup/apply is an optional capability extension, not a
+// replacement for or expansion of the required 5-method adapter contract.
+// REQUIRED_ADAPTER_METHODS remains unchanged. Non-opt-in adapters must continue
+// to pass unchanged."
+//
+// A target adapter MAY expose `targetWriteLifecycle = { lookup, apply }` to opt
+// into the generalized C6 dry-run -> apply safe-write lifecycle (lifting it off
+// `data-source:sql-write-gated`). This is a SHAPE contract only — no runtime wire
+// here; S1b+ wires real targets. Opting in is all-or-nothing (a partial lifecycle
+// is a contract error). Result builders are allow-list projections so a target's
+// submitted row VALUES can never leak into a lookup/apply result (values-free).
+// ---------------------------------------------------------------------------
+
+const TARGET_WRITE_LIFECYCLE_METHODS = ['lookup', 'apply']
+const APPLY_ROW_STATUSES = ['written', 'updated', 'skipped', 'failed', 'held']
+
+function hasTargetWriteLifecycle(adapter) {
+  return Boolean(adapter && isPlainObject(adapter.targetWriteLifecycle))
+}
+
+// Validate the OPTIONAL capability ONLY when an adapter opts in. Not opted in =>
+// returns null (nothing to assert). Opted in => the whole lifecycle must exist.
+function assertTargetWriteLifecycle(adapter, kind = 'unknown') {
+  if (!hasTargetWriteLifecycle(adapter)) return null
+  const lifecycle = adapter.targetWriteLifecycle
+  for (const method of TARGET_WRITE_LIFECYCLE_METHODS) {
+    if (typeof lifecycle[method] !== 'function') {
+      throw new AdapterContractError(`${kind} targetWriteLifecycle missing ${method}()`, { kind, method })
+    }
+  }
+  return lifecycle
+}
+
+// lookup = keyed existence/revision probe before apply. VALUES-FREE: returns key
+// identity + existence + opaque revision only, never the target row's column data.
+function normalizeLookupRequest(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new AdapterValidationError('lookup input must be an object')
+  }
+  if (!Array.isArray(input.keys)) {
+    throw new AdapterValidationError('keys must be an array', { field: 'keys' })
+  }
+  return {
+    object: requiredString(input.object, 'object'),
+    keyFields: Array.isArray(input.keyFields)
+      ? input.keyFields.map((field) => requiredString(field, 'keyFields[]'))
+      : [],
+    keys: input.keys.map((key, index) => {
+      if (!isPlainObject(key)) {
+        throw new AdapterValidationError(`keys[${index}] must be an object`, { field: 'keys' })
+      }
+      return { ...key }
+    }),
+    options: objectOrEmpty(input.options, 'options'),
+  }
+}
+
+function createLookupResult({ matches = [], metadata = {} } = {}) {
+  if (!Array.isArray(matches)) {
+    throw new AdapterContractError('lookup result matches must be an array', { field: 'matches' })
+  }
+  return {
+    matches: matches.map((match, index) => {
+      if (!isPlainObject(match)) {
+        throw new AdapterContractError(`matches[${index}] must be an object`, { field: 'matches' })
+      }
+      // allow-list projection — key/exists/revision only (no row values)
+      return {
+        key: objectOrEmpty(match.key, `matches[${index}].key`),
+        exists: Boolean(match.exists),
+        revision: match.revision === undefined || match.revision === null ? null : String(match.revision),
+      }
+    }),
+    metadata: objectOrEmpty(metadata, 'metadata'),
+  }
+}
+
+function normalizeApplyRequest(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new AdapterValidationError('apply input must be an object')
+  }
+  if (!Array.isArray(input.records)) {
+    throw new AdapterValidationError('records must be an array', { field: 'records' })
+  }
+  return {
+    object: requiredString(input.object, 'object'),
+    records: input.records.map((record, index) => {
+      if (!isPlainObject(record)) {
+        throw new AdapterValidationError(`records[${index}] must be an object`, { field: 'records' })
+      }
+      return { ...record }
+    }),
+    keyFields: Array.isArray(input.keyFields)
+      ? input.keyFields.map((field) => requiredString(field, 'keyFields[]'))
+      : [],
+    // Single-use dry-run token carried opaquely; the contract layer does not
+    // interpret it — the S1b runtime binds it to the dry-run plan.
+    dryRunToken: optionalString(input.dryRunToken, 'dryRunToken'),
+    options: objectOrEmpty(input.options, 'options'),
+  }
+}
+
+// Per-row apply result: ENUM-STRICT status + VALUES-FREE (allow-list projection of
+// index/key/status/errorCode/error — the submitted row values are never carried).
+function createApplyResult({ rows = [], written = 0, updated = 0, skipped = 0, failed = 0, held = 0, metadata = {} } = {}) {
+  if (!Array.isArray(rows)) {
+    throw new AdapterContractError('apply result rows must be an array', { field: 'rows' })
+  }
+  const normalizedRows = rows.map((row, index) => {
+    if (!isPlainObject(row)) {
+      throw new AdapterContractError(`rows[${index}] must be an object`, { field: 'rows' })
+    }
+    const status = optionalString(row.status, `rows[${index}].status`)
+    if (!status || !APPLY_ROW_STATUSES.includes(status)) {
+      throw new AdapterContractError(
+        `rows[${index}].status must be one of ${APPLY_ROW_STATUSES.join('|')}`,
+        { field: 'rows', index, value: row.status, allowed: APPLY_ROW_STATUSES },
+      )
+    }
+    return {
+      index: normalizeResultCount(row.index === undefined ? index : row.index, `rows[${index}].index`),
+      key: objectOrEmpty(row.key, `rows[${index}].key`),
+      status,
+      ...(row.errorCode ? { errorCode: requiredString(row.errorCode, `rows[${index}].errorCode`) } : {}),
+      ...(row.error ? { error: requiredString(row.error, `rows[${index}].error`) } : {}),
+    }
+  })
+  return {
+    rows: normalizedRows,
+    written: normalizeResultCount(written, 'written'),
+    updated: normalizeResultCount(updated, 'updated'),
+    skipped: normalizeResultCount(skipped, 'skipped'),
+    failed: normalizeResultCount(failed, 'failed'),
+    held: normalizeResultCount(held, 'held'),
+    metadata: objectOrEmpty(metadata, 'metadata'),
+  }
+}
+
 function createAdapterRegistry({ logger } = {}) {
   const factories = new Map()
 
@@ -247,6 +388,15 @@ module.exports = {
   normalizeReadRequest,
   normalizeUpsertRequest,
   unsupportedAdapterOperation,
+  // S1a — OPTIONAL target-write lifecycle capability (not part of the required 5-method contract)
+  TARGET_WRITE_LIFECYCLE_METHODS,
+  APPLY_ROW_STATUSES,
+  hasTargetWriteLifecycle,
+  assertTargetWriteLifecycle,
+  normalizeLookupRequest,
+  createLookupResult,
+  normalizeApplyRequest,
+  createApplyResult,
   __internals: {
     isPlainObject,
     requiredString,
