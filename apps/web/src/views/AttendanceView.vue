@@ -20066,7 +20066,6 @@ function annualOpsErrorLine(code: string): string {
     case 'ANNUAL_LEAVE_TIMEZONE_REQUIRED': return tr('The policy is missing a timezone.', '策略缺少时区。')
     case 'ANNUAL_LEAVE_TIMEZONE_INVALID': return tr('The policy timezone is not a valid IANA zone.', '策略时区不是有效的 IANA 时区。')
     case 'ANNUAL_LEAVE_INVALID_ASOF': return tr('The as-of date is invalid.', 'as-of 日期无效。')
-    case 'ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED': return tr('Multi-day standard-day conversion is not supported.', '不支持多天标准工作日折算。')
     case 'USER_NOT_IN_ORG': return tr('That user is not an active member of this org.', '该用户不是本组织的有效成员。')
     case 'ANNUAL_LEAVE_ADJUST_DELTA_INVALID': return tr('The adjustment amount must be non-zero.', '调整数值必须非零。')
     case 'ANNUAL_LEAVE_BALANCE_INSUFFICIENT': return tr('Insufficient balance — the negative adjustment exceeds the available active lots.', '余额不足——负向调整超过可用额度。')
@@ -20154,6 +20153,9 @@ function requestAnnualAdjust(): void {
     return
   }
   annualAdjustIdemKey.value = annualOpsIdempotencyKey()
+  // Snapshot the resolved request NOW; the confirm consumes this snapshot, NOT the live form — so editing an input
+  // while the panel is open cannot change what is actually submitted (confirm-is-authoritative, no TOCTOU).
+  const snapshot = { userId, deltaMinutes: delta, reason, idempotencyKey: annualAdjustIdemKey.value }
   const preview = annualAdjustPreview.value
   openAnnualOpsConfirm({
     title: tr('Confirm manual adjustment', '确认手工调整'),
@@ -20164,20 +20166,20 @@ function requestAnnualAdjust(): void {
       { label: tr('Reason', '原因'), value: reason },
       { label: tr('Idempotency key', '幂等键'), value: annualAdjustIdemKey.value },
     ],
-    onConfirm: () => { void submitAnnualAdjust() },
+    onConfirm: () => { void submitAnnualAdjust(snapshot) },
   })
 }
 
-async function submitAnnualAdjust(): Promise<void> {
+async function submitAnnualAdjust(snapshot: { userId: string; deltaMinutes: number; reason: string; idempotencyKey: string }): Promise<void> {
   annualAdjustSubmitting.value = true
   annualAdjustError.value = null
   annualAdjustResult.value = null
   try {
     const data = await annualOpsPost('/api/attendance/annual-leave-manual-adjustment', {
-      userId: annualAdjustForm.userId.trim(),
-      deltaMinutes: Number(annualAdjustForm.deltaMinutes),
-      reason: annualAdjustForm.reason.trim(),
-      idempotencyKey: annualAdjustIdemKey.value,
+      userId: snapshot.userId,
+      deltaMinutes: snapshot.deltaMinutes,
+      reason: snapshot.reason,
+      idempotencyKey: snapshot.idempotencyKey,
     }, tr('Failed to adjust balance', '调整余额失败'))
     if (data) annualAdjustResult.value = data as AnnualAdjustResult
   } catch (error: any) {
@@ -20197,6 +20199,7 @@ const annualBackfillError = ref<string | null>(null)
 async function runAnnualBackfillDryRun(): Promise<void> {
   annualBackfillRunning.value = true
   annualBackfillError.value = null
+  annualBackfillDry.value = null // drop any prior dry-run so a failed re-run can't leave Commit enabled on stale data
   annualBackfillCommitted.value = null
   try {
     const data = await annualOpsPost('/api/attendance/annual-leave-expiry-backfill', { dryRun: true }, tr('Backfill dry-run failed', '回填预演失败'))
@@ -20251,10 +20254,14 @@ const annualAccrualOffYear = computed(() => {
   const p = Number(annualAccrualForm.period)
   return p !== annualOpsCurrentYear && p !== annualOpsCurrentYear + 1
 })
+// Editing the period/asOf invalidates a prior dry-run, so Commit (disabled on !annualAccrualDry) cannot fire against
+// a period that was never previewed — the highest-stakes safety on this card.
+watch(() => [annualAccrualForm.period, annualAccrualForm.asOf], () => { annualAccrualDry.value = null })
 
 async function runAnnualAccrualDryRun(): Promise<void> {
   annualAccrualRunning.value = true
   annualAccrualError.value = null
+  annualAccrualDry.value = null // never keep a stale dry-run from a prior period
   annualAccrualCommitted.value = null
   try {
     const asOf = annualAccrualForm.asOf.trim()
@@ -20278,29 +20285,34 @@ function requestAnnualAccrualCommit(): void {
     annualAccrualError.value = tr('Run a dry-run first', '请先执行预演')
     return
   }
+  // Snapshot the resolved request (period/asOf/off-year) NOW; the dry-run was for THIS period (the watch clears it on
+  // any edit). submitAnnualAccrualCommit consumes the snapshot, never the live form — a never-previewed period or a
+  // bypassed off-year guard cannot be submitted by editing the field while the panel is open.
+  const offYear = annualAccrualOffYear.value
+  const snapshot = { period: Number(annualAccrualForm.period), asOf: annualAccrualForm.asOf.trim() }
   openAnnualOpsConfirm({
     title: tr('Commit accrual run', '提交发放'),
     lines: [
-      { label: tr('Period', '年度'), value: String(annualAccrualForm.period) },
+      { label: tr('Period', '年度'), value: String(snapshot.period) },
       { label: tr('Granted', '发放'), value: String(dry.granted) },
       { label: tr('Granted (min)', '发放(分钟)'), value: String(dry.grantedMinutes) },
       { label: tr('Skipped', '跳过'), value: String(dry.skipped) },
     ],
-    extraConfirmRequired: annualAccrualOffYear.value,
-    extraConfirmLabel: annualAccrualOffYear.value
-      ? tr(`I confirm granting for the off-year period ${annualAccrualForm.period}`, `我确认为非当前/次年年度 ${annualAccrualForm.period} 发放`)
+    extraConfirmRequired: offYear,
+    extraConfirmLabel: offYear
+      ? tr(`I confirm granting for the off-year period ${snapshot.period}`, `我确认为非当前/次年年度 ${snapshot.period} 发放`)
       : '',
-    onConfirm: () => { void submitAnnualAccrualCommit() },
+    onConfirm: () => { void submitAnnualAccrualCommit(snapshot) },
   })
 }
 
-async function submitAnnualAccrualCommit(): Promise<void> {
+async function submitAnnualAccrualCommit(snapshot: { period: number; asOf: string }): Promise<void> {
   annualAccrualRunning.value = true
   annualAccrualError.value = null
   try {
-    const asOf = annualAccrualForm.asOf.trim()
+    const asOf = snapshot.asOf
     const data = await annualOpsPost('/api/attendance/annual-leave-accrual/run', {
-      period: Number(annualAccrualForm.period),
+      period: snapshot.period,
       ...(asOf ? { asOf } : {}),
       dryRun: false,
     }, tr('Accrual run failed', '发放失败'))
@@ -26474,5 +26486,39 @@ const holidaySectionBindings = {
   display: flex;
   gap: 8px;
   margin-top: 4px;
+}
+
+/* 年假/法定假 L5c: the balance-mutating confirm is a real overlay (backdrop + centered panel) so the form
+   underneath is not interactive while a two-step confirm is open. */
+.attendance__modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+.attendance__modal-body {
+  background: var(--surface, #fff);
+  color: inherit;
+  border-radius: 8px;
+  padding: 20px;
+  max-width: 480px;
+  width: calc(100% - 32px);
+  max-height: calc(100% - 32px);
+  overflow: auto;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+.attendance__admin-subsection {
+  border-top: 1px solid var(--border, #e5e7eb);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+.attendance__annual-ops-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
 }
 </style>
