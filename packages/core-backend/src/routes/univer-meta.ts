@@ -68,6 +68,7 @@ import {
   type MultitableSheetPermissionSubjectType,
   type SheetPermissionScope,
 } from '../multitable/permission-service'
+import { createPersonMemberResolver, personRestrictGroupIds } from '../multitable/person-field-restriction'
 import {
   loadFieldsForSheet as loadFieldsForSheetShared,
   loadSheetRow as loadSheetRowShared,
@@ -3412,6 +3413,9 @@ function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, Fiel
         type: field.type,
         readOnly: isFieldAlwaysReadOnly(field),
         hidden: isFieldPermissionHidden(field),
+        // #16/P2: carry property so RecordWriteService.validateChanges' isPersonSingleRecord(property)
+        // sees limitSingleRecord — without it a multiSelect person is wrongly rejected as single.
+        property,
       }
       if (field.type === 'select' || field.type === 'multiSelect') {
         return [field.id, { ...base, options: field.options?.map((option) => option.value) ?? [] }] as const
@@ -9341,7 +9345,7 @@ export function univerMetaRouter(): Router {
         // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): a denied record reads as
         // not-found in the form prefill (404, NOT 403 — no existence oracle). Anonymous public forms have
         // no subject, so the deny never applies to them (only the authenticated actor is gated).
-        if (access.userId && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+        if (access.userId && !access.isAdminRole && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
           const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
           if (deniedIds.has(recordIdParam)) {
             return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordIdParam}` } })
@@ -9535,15 +9539,15 @@ export function univerMetaRouter(): Router {
       const patch: Record<string, unknown> = {}
       const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
 
-      // Native person (人员): resolve the sheet member set ONCE per request (lazily, only when a
-      // person field value is actually written) — parallel to the link-target-exists hot-path —
-      // and reuse it for every person cell's write-time membership validation (SECURITY boundary).
-      let personMemberUserIds: Set<string> | null = null
-      const resolvePersonMemberUserIds = async (): Promise<Set<string>> => {
-        if (personMemberUserIds === null) {
-          personMemberUserIds = await loadSheetMemberUserIdSet(pool.query.bind(pool), view.sheetId)
-        }
-        return personMemberUserIds
+      // Native person (人员): #16 per-field allowed-assignee resolver (sheet members ∩ the field's
+      // restrictToMemberGroupIds) — shared with RecordService/RecordWriteService so FORM SUBMIT
+      // enforces the member-group restriction identically (SECURITY boundary), not sheet-member-only.
+      const resolvePersonAllowed = createPersonMemberResolver(pool.query.bind(pool), view.sheetId)
+      const personRestrictByFieldId = new Map<string, string[]>()
+      for (const f of fields) {
+        if (f.type !== 'person') continue
+        const ids = personRestrictGroupIds(f)
+        if (f.id && ids.length > 0) personRestrictByFieldId.set(f.id, ids)
       }
 
       for (const [fieldId, value] of Object.entries(data)) {
@@ -9588,7 +9592,7 @@ export function univerMetaRouter(): Router {
 
         if (field.type === 'person') {
           try {
-            const allowed = await resolvePersonMemberUserIds()
+            const allowed = await resolvePersonAllowed(personRestrictByFieldId.get(fieldId) ?? [])
             patch[fieldId] = validatePersonValue(value, fieldId, allowed, isPersonSingleRecord(field.property))
           } catch (error) {
             fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
@@ -11348,7 +11352,7 @@ export function univerMetaRouter(): Router {
       // is denied so a denied record's data never surfaces via trash. (total left as-is — the
       // canDeleteRecord-gated trash count may include a denied row; exact-count exclusion is a minor follow-up.)
       let trashRecords = result.records
-      if (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+      if (!access.isAdminRole && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
         const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
         if (deniedIds.size > 0) trashRecords = result.records.filter((rec) => !deniedIds.has(rec.recordId))
       }
