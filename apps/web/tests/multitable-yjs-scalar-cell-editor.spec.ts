@@ -277,4 +277,57 @@ describe('MetaCellEditor scalar Yjs wiring', () => {
     expect(onYjsCommit).not.toHaveBeenCalled()
     expect(onConfirm).toHaveBeenCalled()
   })
+
+  // 2a-2 duration: commit-on-confirm LWW. Typing must NOT drive the Y.Map (the local
+  // h:mm buffer owns the input); only Enter commits the parsed seconds.
+  it('active duration: @input does NOT write Y.Map (buffer owns the input); Enter commits parsed seconds + yjs-commit then confirm', async () => {
+    scalarActive.value = true
+    scalarVal.value = 60
+    const onUpdate = vi.fn(); const onConfirm = vi.fn(); const onYjsCommit = vi.fn()
+    mountField({ id: 'fld_dur', name: 'Dur', type: 'duration' }, 60, { 'onUpdate:modelValue': onUpdate, onConfirm, onYjsCommit })
+    const input = container!.querySelector('input[inputmode="numeric"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+    input.value = '1:30'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    // typing must NOT reformat under the cursor: no Y.Map write on input.
+    expect(setValueMock).not.toHaveBeenCalled()
+    expect(onUpdate).toHaveBeenCalledWith(5400) // h:mm → seconds, REST emit only
+    // Enter commits the parsed seconds (native number) to the Y.Map (LWW) + yjs-commit.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await nextTick()
+    expect(setValueMock).toHaveBeenCalledWith(5400)
+    expect(onYjsCommit).toHaveBeenCalled()
+    expect(onConfirm).toHaveBeenCalled()
+  })
+
+  it('inactive duration: REST byte-identical — setValue never called, no yjs-commit on Enter', async () => {
+    scalarActive.value = false
+    const onUpdate = vi.fn(); const onConfirm = vi.fn(); const onYjsCommit = vi.fn()
+    mountField({ id: 'fld_dur', name: 'Dur', type: 'duration' }, 60, { 'onUpdate:modelValue': onUpdate, onConfirm, onYjsCommit })
+    const input = container!.querySelector('input[inputmode="numeric"]') as HTMLInputElement
+    input.value = '2:00'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    expect(setValueMock).not.toHaveBeenCalled()
+    expect(onUpdate).toHaveBeenCalledWith(7200)
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await nextTick()
+    expect(setValueMock).not.toHaveBeenCalled()
+    expect(onYjsCommit).not.toHaveBeenCalled()
+    expect(onConfirm).toHaveBeenCalled()
+  })
+
+  it('defer-remote-while-dirty: a remote duration change does NOT reformat the input the user is mid-typing', async () => {
+    scalarActive.value = true
+    scalarVal.value = 60
+    mountField({ id: 'fld_dur', name: 'Dur', type: 'duration' }, 60, {})
+    const input = container!.querySelector('input[inputmode="numeric"]') as HTMLInputElement
+    input.value = '1:'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    scalarVal.value = 9999 // a remote edit arrives mid-type
+    await nextTick()
+    expect(input.value).toBe('1:') // still the user's partial buffer, not remote-derived text
+  })
 })
