@@ -115,4 +115,42 @@ describe('YjsRecordBridge — scalar (non-text) field sync', () => {
     expect(captured.patch).not.toHaveProperty('fld_nested')
     vi.useRealTimers()
   })
+
+  it('collects a plain string[] (multiSelect) and a number (rating) VERBATIM — Y.Map.set stores a plain array, not a Y.Array, so it is not dropped as a shared type', async () => {
+    vi.useFakeTimers()
+    const { svc, bridge, captured } = makeBridge()
+    const doc = await svc.getOrCreateDoc('rec_1')
+    bridge.observe('rec_1', doc)
+
+    const fields = doc.getMap('fields')
+    fields.set('fld_tags', ['x', 'y', 'z']) // multiSelect: a PLAIN JS array (NOT a Y.Array)
+    fields.set('fld_rating', 4) // rating: a plain number
+
+    await Promise.resolve()
+    vi.advanceTimersByTime(200)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // The array reaches the validated patch path deep-equal + still a real array (uncorrupted,
+    // not stringified, not a Yjs shared type that the `!(value instanceof Y.AbstractType)` guard drops).
+    expect(captured.patch).toMatchObject({ fld_tags: ['x', 'y', 'z'], fld_rating: 4 })
+    expect(Array.isArray((captured.patch as Record<string, unknown>).fld_tags)).toBe(true)
+    vi.useRealTimers()
+  })
+
+  it('two-client LWW: a multiSelect array + rating set on one doc sync to a peer via the Y.Map (plain array survives, not a Y.Array)', () => {
+    const docA = new Y.Doc()
+    const docB = new Y.Doc()
+    const fa = docA.getMap('fields')
+    const fb = docB.getMap('fields')
+    fa.set('fld_tags', ['a', 'b'])
+    fa.set('fld_rating', 5)
+    Y.applyUpdate(docB, Y.encodeStateAsUpdate(docA))
+    expect(fb.get('fld_tags')).toEqual(['a', 'b'])
+    expect(Array.isArray(fb.get('fld_tags'))).toBe(true) // plain array crosses the wire intact
+    expect(fb.get('fld_tags')).not.toBeInstanceOf(Y.AbstractType)
+    expect(fb.get('fld_rating')).toBe(5)
+    docA.destroy()
+    docB.destroy()
+  })
 })

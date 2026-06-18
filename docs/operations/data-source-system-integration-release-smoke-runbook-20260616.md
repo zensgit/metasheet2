@@ -371,10 +371,13 @@ Current #2720 checkpoint as of 2026-06-17:
 - Post-C6 package rerolls must also prove PM2 runtime env hygiene before any
   further Apply/write validation. The C6 test-only keys are retired when they
   are absent from `app.env`; the PM2 helper recreates the app if a previous PM2
-  definition still contains those keys. Required values-free evidence:
+  definition still contains those keys, and it also recreates the app if PM2
+  `jlist` cannot inspect the app while `describe` still proves the app exists.
+  Restart-only reuse is not a valid cleanup path when the retired keys are
+  absent from `app.env`. Required values-free evidence:
   `appEnvFailureInjectionMarkersPresent=false`,
   `pm2RuntimeFailureInjectionMarkersPresent=false`,
-  `pm2StaleDefinitionFound=true|false`,
+  `pm2StaleDefinitionFound=true|false|unknown_jlist_uninspectable`,
   `pm2RecreatedFromCleanEnv=true|not_needed`, `health=200`. Do not print env
   values. Collect and post only these booleans plus the helper log marker; do
   not paste raw `app.env` contents or raw `pm2 jlist` JSON, because both can
@@ -489,7 +492,7 @@ c6Sandbox:
 pm2EnvHygiene:
   appEnvFailureInjectionMarkersPresent=false
   pm2RuntimeFailureInjectionMarkersPresent=false
-  pm2StaleDefinitionFound=true|false
+  pm2StaleDefinitionFound=true|false|unknown_jlist_uninspectable
   pm2RecreatedFromCleanEnv=true|not_needed
   health=200|...
 

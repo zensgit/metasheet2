@@ -68,3 +68,18 @@ test('PM2 startup helper retires sensitive test-only env keys absent from app.en
   assert.match(script, /deleting pm2 app definition for \$Pm2AppName to retire sensitive\/test-only env keys/)
   assert.match(script, /pm2 delete failed while retiring env keys/)
 })
+
+test('PM2 startup helper deletes existing app when jlist cannot inspect retired-key state', () => {
+  const script = readScript('scripts/ops/attendance-onprem-start-pm2.ps1')
+
+  assert.match(script, /function Test-RetiredSensitiveEnvKeyRetirementRequired/)
+  assert.match(script, /if \(-not \$EnvFileKeys\.ContainsKey\(\$key\)\) \{\s+return \$true\s+\}/)
+  assert.match(script, /Test-RetiredSensitiveEnvKeyRetirementRequired -KeyNames \$RetiredSensitiveEnvKeys -EnvFileKeys \$envFileKeys/)
+  assert.match(script, /pm2 jlist did not return \$Pm2AppName; deleting existing pm2 app definition to retire sensitive\/test-only env keys/)
+  assert.match(script, /pm2 delete failed while retiring env keys for \$Pm2AppName after jlist fallback/)
+
+  const fallbackBlockStart = script.indexOf('pm2 jlist did not return $Pm2AppName; deleting existing pm2 app definition')
+  const restartBlockStart = script.indexOf('pm2 jlist did not return $Pm2AppName; falling back to restart')
+  assert.ok(fallbackBlockStart > -1)
+  assert.ok(restartBlockStart > fallbackBlockStart)
+})

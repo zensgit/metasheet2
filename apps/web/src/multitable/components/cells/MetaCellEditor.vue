@@ -164,8 +164,8 @@
       multiple
       :value="multiSelectValue"
       @change="onMultiSelectChange"
-      @keydown.meta.enter.prevent="emit('confirm')"
-      @keydown.ctrl.enter.prevent="emit('confirm')"
+      @keydown.meta.enter.prevent="scalarConfirm()"
+      @keydown.ctrl.enter.prevent="scalarConfirm()"
       @keydown.escape="emit('cancel')"
     >
       <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">
@@ -495,11 +495,16 @@ const yjsCollaborators = computed(() => yjsBinding.collaborators.value)
 // --- Yjs opt-in binding for ATOMIC (non-text) scalar cells (LWW via the
 // `fields` Y.Map). Same gating/fallback discipline as the text binding:
 // `scalarActive` flips true only once a live Y.Doc is attached AND the field
-// key exists in the Y.Map (the backend seeds atomic fields). Wired here only
-// for the unambiguous numeric/boolean types — select/date (string-stored
-// atomics) + multiSelect/rating/duration are deferred to a focused pass.
+// key exists in the Y.Map (the backend seeds atomic fields as plain LWW values).
+// Wired for the atomic types that read directly from modelValue (no local edit
+// buffer): numeric/boolean + rating (number) + multiSelect (string[]).
+// DEFERRED: `duration` has an intentional local text buffer decoupled from
+// modelValue (advisor B: live re-derivation fights the typist); `select`/`date`/
+// `dateTime` are string-stored atomics seeded as Y.Text today — flipping them to
+// plain-value is a separate gated call (persisted docs hold them as Y.Text, so it
+// needs a migration story, not just a seed flip).
 // Inactive → byte-identical REST path (setValue is a no-op; nothing changes).
-const SCALAR_YJS_TYPES = ['number', 'currency', 'percent', 'boolean']
+const SCALAR_YJS_TYPES = ['number', 'currency', 'percent', 'boolean', 'rating', 'multiSelect']
 const scalarFieldIdRef = computed<string | null>(() => {
   if (!props.field || !SCALAR_YJS_TYPES.includes(props.field.type)) return null
   if (!props.recordId) return null
@@ -562,14 +567,20 @@ function onTextConfirm() {
 
 const inputRef = ref<HTMLElement | null>(null)
 const multiSelectValue = computed(() => {
-  const raw = props.modelValue
+  // Read the synced Y.Map value (a plain string[]) when the scalar binding is
+  // live; otherwise the REST modelValue. Both normalize to string[] for <select>.
+  const raw = scalarActive.value ? scalarValue.value : props.modelValue
   if (!Array.isArray(raw)) return []
   return raw.map(String)
 })
 
 function onMultiSelectChange(event: Event) {
   const select = event.target as HTMLSelectElement
-  emit('update:modelValue', Array.from(select.selectedOptions).map((option) => option.value))
+  // multiSelect is a plain string[] scalar (LWW via the fields Y.Map). commitScalar
+  // drives the Y.Map when live (Y.Map.set stores a plain array — NOT a Y.Array — so
+  // the bridge flushes it verbatim through patchRecords) and always mirrors via
+  // update:modelValue. Inactive → byte-identical REST emit.
+  commitScalar(Array.from(select.selectedOptions).map((option) => option.value))
 }
 
 const linkButtonLabel = computed(() => {
@@ -730,15 +741,20 @@ const ratingMax = computed(() => {
 })
 
 const ratingValue = computed(() => {
-  const v = props.modelValue
+  const v = scalarActive.value ? scalarValue.value : props.modelValue
   const num = typeof v === 'number' ? v : Number(v)
   if (!Number.isFinite(num)) return 0
   return Math.max(0, Math.min(ratingMax.value, Math.round(num)))
 })
 
 function onRatingPick(value: number) {
-  emit('update:modelValue', value === 0 ? null : value)
-  emit('confirm')
+  // Rating is a plain-number scalar (seeded LWW in the fields Y.Map). When the
+  // scalar binding is live, commitScalar drives the Y.Map AND mirrors via
+  // update:modelValue; scalarConfirm signals yjs-commit so the host skips the
+  // redundant REST patch. Inactive → byte-identical to the old REST emit
+  // (commitScalar emits update:modelValue, scalarConfirm emits confirm).
+  commitScalar(value === 0 ? null : value)
+  scalarConfirm()
 }
 
 async function onRemoveAttachment(attachmentId: string) {
