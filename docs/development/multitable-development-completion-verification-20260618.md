@@ -1,8 +1,15 @@
 # 多维表开发完成度核验 — 2026-06-18
 
 > Status: **VERIFICATION** of the `/goal` "complete all development per the plan/TODO MD".
-> Grounding: `origin/main@9f68ed67c`, code-anchored (not doc-marker — two stale-marker traps this session, see §5).
+> Grounding: `origin/main@9f68ed67c`, code-anchored (not doc-marker — stale-marker traps this session, see §5).
 > Authoritative plan: **`multitable-gated-remainder-development-plan-20260618.md` (#2828)**, which **supersedes** `multitable-current-development-plan/todo-20260617.md` (#2801).
+>
+> ### ⟳ REFRESHED 2026-06-18 (re-verified on `origin/main@0c6e8a8d9` — supersedes §0/§2/§6 below for current status)
+> Since this doc's first draft, two gates advanced:
+> - **2a · live-CRDT field types — COMPLETE.** dateTime shipped (2a-DT-S2 #2849, canonical-UTC-ISO invariant) on top of select/date (#2832) + duration (#2838); the full scalar set is collaborative, no type deferred. Closed in the ledger by #2851.
+> - **2b · conditional permission rules — shipped through S3** (S1 #2836, S2 #2841 wired into the #18 seam flag-off-inert, S3 #2847; S0 rule/threat model settled by them). Only **2b-S4 (perf/caching)** remains and is **demand-gated**. Ledger refreshed by #2855.
+>
+> **FINAL VERIFIED STATE: no non-gated multitable runtime work is open.** The entire remainder is **2b-S4 (demand-gated — do only on a real large-rule-set perf need) + 2c (person org-directory, owner-gated on a directory source-of-truth decision; #2833 shipped the assignment-validator part).** The accurate live ledger is `multitable-gated-remainder-development-plan/todo-20260618.md`. The §0/§2/§6 below are retained as the original session-closeout snapshot (when 2a/2b were still open).
 
 ## 0. Headline
 
