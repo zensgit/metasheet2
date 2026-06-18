@@ -37901,7 +37901,9 @@ module.exports = {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
-        const orgId = getOrgId(req)
+        // Self-service reads the caller's OWN org, pinned from the authenticated token — a ?orgId param / header cannot
+        // point /me at another org (getOrgId is only a fallback for a token that carries no org).
+        const orgId = req.user?.orgId ?? req.user?.workspaceId ?? getOrgId(req)
         const leaveTypeCode = parsed.data.leaveTypeCode ?? 'annual'
         const eventLimit = parsed.data.eventLimit ?? 50
         try {
