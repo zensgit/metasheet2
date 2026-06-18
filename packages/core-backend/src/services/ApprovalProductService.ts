@@ -411,6 +411,8 @@ function normalizeApprovalAssigneeSources(
         return { kind: 'requester' }
       case 'direct_manager':
         return { kind: 'direct_manager' }
+      case 'dept_head':
+        return { kind: 'dept_head' }
       case 'form_field_user':
         if (!isNonEmptyString(source.fieldId)) {
           failValidation(context, `${sourcePath}.fieldId is required`)

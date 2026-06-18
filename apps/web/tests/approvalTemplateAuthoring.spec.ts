@@ -436,6 +436,19 @@ describe('approval template authoring helpers', () => {
     expect(rehydrated.steps[0].sourceKind).toBe('direct_manager')
   })
 
+  it('round-trips a dept_head assignee source (save emits {kind} + hydrate restores sourceKind)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'dh'
+    draft.name = '部门主管审批'
+    draft.steps[0].sourceKind = 'dept_head'
+
+    const payload = buildCreateTemplatePayload(draft)
+    expect((payload.approvalGraph.nodes[1]?.config as any).assigneeSources).toEqual([{ kind: 'dept_head' }])
+
+    const rehydrated = draftFromTemplate(buildTemplate({ approvalGraph: payload.approvalGraph }))
+    expect(rehydrated.steps[0].sourceKind).toBe('dept_head')
+  })
+
   // Lane E — self-approver authoring (autoApprovalPolicy.mergeWithRequester).
   function buildAutoApprovalTemplate(
     policy: AutoApprovalPolicy,
@@ -621,6 +634,19 @@ describe('TemplateAuthoringView', () => {
     expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // in the allowlist → not fail-closed
     expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // editable
     expect((container!.querySelector('[data-testid="approval-step-source-kind"]') as HTMLSelectElement).value).toBe('direct_manager') // hydrated back
+  })
+
+  it('dept_head reads back editable: a saved dept_head template is NOT fail-closed (no unsupported alert, save enabled, sourceKind hydrated)', async () => {
+    routeParams = { id: 'tpl_dh' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // in the allowlist → not fail-closed
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // editable
+    expect((container!.querySelector('[data-testid="approval-step-source-kind"]') as HTMLSelectElement).value).toBe('dept_head') // hydrated back
   })
 
   it('updates an existing supported template without replacing it through create', async () => {

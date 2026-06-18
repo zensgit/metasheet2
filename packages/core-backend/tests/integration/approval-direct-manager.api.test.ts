@@ -30,18 +30,18 @@ async function tok(base: string, userId: string): Promise<string> {
 async function req(base: string, path: string, token: string, opts: { method?: string; body?: unknown } = {}): Promise<Response> {
   return fetch(`${base}${path}`, { method: opts.method || 'GET', headers: { Authorization: `Bearer ${token}`, ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}) }, ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}) })
 }
-function graph(emptyAssigneePolicy: 'auto-approve' | 'error') {
+function graph(emptyAssigneePolicy: 'auto-approve' | 'error', kind: 'direct_manager' | 'dept_head' = 'direct_manager') {
   return {
     nodes: [
       { key: 'start', type: 'start', name: 's', config: {} },
-      { key: 'approval_1', type: 'approval', name: '直属上级', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy } },
+      { key: 'approval_1', type: 'approval', name: '上级', config: { assigneeSources: [{ kind }], approvalMode: 'single', emptyAssigneePolicy } },
       { key: 'end', type: 'end', name: 'e', config: {} },
     ],
     edges: [{ key: 'e1', source: 'start', target: 'approval_1' }, { key: 'e2', source: 'approval_1', target: 'end' }],
   }
 }
 
-describeIfDatabase('direct_manager assignee source — real-DB create/start', () => {
+describeIfDatabase('direct_manager + dept_head assignee sources — real-DB create/start', () => {
   let server: MetaSheetServer | undefined, base = '', reqTok = ''
 
   beforeAll(async () => {
@@ -74,9 +74,9 @@ describeIfDatabase('direct_manager assignee source — real-DB create/start', ()
     expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
-  async function publish(key: string, emptyAssigneePolicy: 'auto-approve' | 'error'): Promise<string> {
-    const created = await req(base, '/api/approval-templates', reqTok, { method: 'POST', body: { key, name: key, formSchema: { fields: [{ id: 'reason', type: 'text', label: 'r', required: true }] }, approvalGraph: graph(emptyAssigneePolicy) } })
-    expect(created.status, await created.clone().text()).toBe(201) // normalizer accepts direct_manager
+  async function publish(key: string, emptyAssigneePolicy: 'auto-approve' | 'error', kind: 'direct_manager' | 'dept_head' = 'direct_manager'): Promise<string> {
+    const created = await req(base, '/api/approval-templates', reqTok, { method: 'POST', body: { key, name: key, formSchema: { fields: [{ id: 'reason', type: 'text', label: 'r', required: true }] }, approvalGraph: graph(emptyAssigneePolicy, kind) } })
+    expect(created.status, await created.clone().text()).toBe(201) // normalizer accepts the org-derived source kind
     const tid = ((await created.json()) as { id: string }).id
     expect((await req(base, `/api/approval-templates/${tid}/publish`, reqTok, { method: 'POST', body: { policy: { allowRevoke: true } } })).status).toBe(200)
     return tid
@@ -98,5 +98,21 @@ describeIfDatabase('direct_manager assignee source — real-DB create/start', ()
     const tid = await publish(`dm-err-${TS}`, 'error')
     const started = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' } } })
     expect(started.status).toBeGreaterThanOrEqual(400) // empty assignee under 'error' policy rejects at start
+  })
+
+  it('dept_head auto-approve branch: a requester with no department head auto-resolves the dept_head node', async () => {
+    const tid = await publish(`dh-auto-${TS}`, 'auto-approve', 'dept_head')
+    const started = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' } } })
+    expect(started.status, await started.clone().text()).toBeLessThan(300)
+    const body = (await started.json()) as { id?: string; data?: { id: string } }
+    const aid = body.id ?? body.data?.id
+    const status = (await (await req(base, `/api/approvals/${aid}`, reqTok)).json()) as any
+    expect(['approved', 'completed', 'auto_approved']).toContain(String(status.status ?? status.data?.status))
+  })
+
+  it('dept_head error branch: a requester with no department head makes the dept_head node fail-create', async () => {
+    const tid = await publish(`dh-err-${TS}`, 'error', 'dept_head')
+    const started = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' } } })
+    expect(started.status).toBeGreaterThanOrEqual(400)
   })
 })

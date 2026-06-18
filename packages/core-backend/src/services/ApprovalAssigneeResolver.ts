@@ -134,6 +134,18 @@ export function resolveApprovalAssignees(
         }
         break
       }
+      case 'dept_head': {
+        // Resolve to the requester's department head, frozen in the requester snapshot at
+        // approval start (no live directory re-query). Self-exclusion: a dept head that
+        // resolves to the requester is not a valid approver, so we return empty and let the
+        // node's emptyAssigneePolicy decide.
+        const deptHeadId = normalizeId(options.requesterSnapshot?.deptHeadId)
+        const requesterId = normalizeId(options.requesterSnapshot?.id)
+        if (deptHeadId && deptHeadId !== requesterId) {
+          pushResolved('user', deptHeadId, source, sourceIndex)
+        }
+        break
+      }
       case 'form_field_user': {
         assertFormUserSource(source, options.formSchema, options.nodeKey)
         const assigneeId = resolveFormUserValue(options.formSnapshot[source.fieldId])

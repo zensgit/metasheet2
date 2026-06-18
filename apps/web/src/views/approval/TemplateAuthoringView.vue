@@ -282,6 +282,7 @@
                 <el-option label="指定角色" value="static_role" />
                 <el-option label="发起人" value="requester" />
                 <el-option label="直属上级" value="direct_manager" />
+                <el-option label="部门主管" value="dept_head" />
                 <el-option label="表单用户字段" value="form_field_user" />
               </el-select>
             </el-form-item>
