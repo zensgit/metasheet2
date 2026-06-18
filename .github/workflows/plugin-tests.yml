@@ -248,6 +248,7 @@ jobs:
             tests/integration/multitable-ai-ledger-retention.test.ts \
             tests/integration/multitable-ai-suggest-formula.test.ts \
             tests/integration/data-source-c3-keyset-realdb.test.ts \
+            tests/integration/data-source-test-ephemeral-realdb.test.ts \
             --reporter=dot
 
       - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign 会签/或签/reduce/guards)

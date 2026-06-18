@@ -222,6 +222,8 @@ export class MSSQLAdapter extends BaseDataAdapter {
       this.connected = true
       await this.onConnect()
     } catch (error) {
+      // Close (not just drop) the pool so a failed connect leaks no open ConnectionPool.
+      try { await this.pool?.close() } catch { /* pool may be partially constructed */ }
       this.pool = null
       await this.onError(error as Error)
       throw new Error(`Failed to connect to SQL Server: ${error}`)

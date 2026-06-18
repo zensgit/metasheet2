@@ -220,6 +220,10 @@ export class MySQLAdapter extends BaseDataAdapter {
       await this.onConnect()
     } catch (error) {
       await this.onError(error as Error)
+      // A failed connect must not leak the pool (see PostgresAdapter): end + null so the ephemeral
+      // test-before-save path and any failed reconnect leave no open pool.
+      try { await this.pool?.end() } catch { /* pool may be partially constructed */ }
+      this.pool = null
       throw new Error(`Failed to connect to MySQL: ${error}`)
     }
   }
