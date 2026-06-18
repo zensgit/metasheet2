@@ -16,7 +16,7 @@ Closed and removed from the active remainder:
 - Live scalar CRDT user-usable edit path: `number`, `currency`, `percent`, `boolean`, `rating`, `multiSelect`, and now `select` + `date` (#2832), `duration` (#2838), and `dateTime` (#2849, canonical-UTC-ISO value invariant) are live. **2a is COMPLETE — the full scalar field set is collaborative; no scalar type remains deferred.** (Updated 2026-06-18 after #2849; §1 retained below as history.)
 - CRDT comment hygiene: the repository documents that the backend bridge is a generic plain-value collector, which is not the same as a field type being product-open in the editor.
 - **2b · #18 phase-2 conditional permission rules — COMPLETE.** S1 parser/evaluator (#2836), S2 backend read-deny enforcement wired into the #18 seam flag-off-inert (#2841), S3 authoring UI + API (#2847), and S4 content-keyed parse cache (#2861). All slices shipped.
-- **2c · #16 Person field → org-member directory — COMPLETE.** Source-of-truth DECIDED = **B (member-group directory)** (owner pick via design-lock #2860). S2 resolver `resolvePersonAssignableDirectory` (#2866), S3a `canEditRecord`-gated directory endpoint (#2867), S3b `MetaPersonPicker` wired to it — offers exactly what the validator accepts (#2869), S4 inactive/historical display cue — stored-but-deactivated assignees shown read-only, never re-assignable (#2874). Built on the fail-closed assignment enforcement (#2833 + #2854). All slices shipped.
+- **2c · #16 Person field → org-member directory — COMPLETE.** Source-of-truth DECIDED = **B (member-group directory)** (owner pick via design-lock #2860). S2 resolver `resolvePersonAssignableDirectory` (#2866), S3a `canEditRecord`-gated directory endpoint (#2867), S3b `MetaPersonPicker` wired to it — offers exactly what the validator accepts (#2869), S4 inactive/historical display cue — stored-but-deactivated assignees shown read-only, never re-assignable, in the grid **cell/summary** renderer (#2874). Built on the fail-closed assignment enforcement (#2833 + #2854). All planned slices shipped. (The **picker-chip** historical affordance — the one S4 surface #2874 left out — is a separate optional polish, open as #2877, pending an owner land-or-close decision; not part of this claim.)
 
 **The active remainder is EMPTY — all planned development (2a, 2b, 2c) is complete.**
 
@@ -178,13 +178,13 @@ Non-goals:
 
 ### 3.1 `#16` Person Field → True Org-Member Directory
 
-> **COMPLETE 2026-06-18.** Source-of-truth **DECIDED = B (member-group directory)** (owner pick, design-lock #2860). Shipped: fail-closed assignment enforcement (#2833 + route-parity #2854); S2 directory resolver `resolvePersonAssignableDirectory` (#2866); S3a `canEditRecord`-gated directory endpoint (#2867); S3b `MetaPersonPicker` wired to it (#2869); S4 inactive/historical display cue (#2874). All slices shipped — 2c is closed. The "Gate / Required decisions / slice" detail below is the original decomposition, retained as history.
+> **COMPLETE 2026-06-18.** Source-of-truth **DECIDED = B (member-group directory)** (owner pick, design-lock #2860). Shipped: fail-closed assignment enforcement (#2833 + route-parity #2854); S2 directory resolver `resolvePersonAssignableDirectory` (#2866); S3a `canEditRecord`-gated directory endpoint (#2867); S3b `MetaPersonPicker` wired to it (#2869); S4 inactive/historical display cue in the grid cell/summary renderer (#2874). All planned slices shipped — 2c is closed. (Picker-chip historical affordance = separate optional polish, open as #2877, owner land-or-close decision pending; not part of this claim.) The "Gate / Required decisions / slice" detail below is the original decomposition, retained as history.
 
 Current state:
 
 - Native `person` fields exist as first-class fields.
 - `restrictToMemberGroupIds` is a **hard fail-closed validator** (sheet members ∩ allowed groups), enforced across all write paths (#2833 + #2854), with the directory resolver shipped (source B, #2866).
-- No remaining 2c work — S3 picker-UX (filter to assignable, #2867/#2869) and S4 inactive/historical handling (out-of-scope values readable, not newly assignable, #2874) both shipped; detail below retained as history.
+- No remaining *planned* 2c work — S3 picker-UX (filter to assignable, #2867/#2869) and S4 read-only cell/summary inactive cue (out-of-scope values readable, not newly assignable, #2874) both shipped; detail below retained as history. The picker-chip historical affordance (#2877) is a separate optional polish pending an owner land-or-close decision — not part of this claim.
 
 Gate:
 
@@ -227,7 +227,7 @@ Because every remaining item is gated, the default action is **hold**.
 
 **2a is complete and 2b is complete through S4 (`#2861`) — those gates are closed, not next options.** The remaining gated next options:
 
-1. **2c / #16 person-directory — COMPLETE** (source = B; S2 #2866, S3a #2867, S3b #2869, S4 #2874). No in-progress product arc remains in this ledger.
+1. **2c / #16 person-directory — COMPLETE** (source = B; S2 #2866, S3a #2867, S3b #2869, S4 read-only cell/summary cue #2874). No in-progress product arc remains; the only open item is the #2877 picker-chip affordance owner decision (land or close).
 2. **D2 high-scale re-baseline harness work** — only if the product wants to revisit large-table performance after the existing D2 verdict; this is not a grid-virtualization slice.
 
 Do not open more than one security-sensitive runtime arc at the same time.
