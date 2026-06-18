@@ -68,7 +68,7 @@ import {
   type MultitableSheetPermissionSubjectType,
   type SheetPermissionScope,
 } from '../multitable/permission-service'
-import { createPersonMemberResolver, personRestrictGroupIds } from '../multitable/person-field-restriction'
+import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
 import {
   loadFieldsForSheet as loadFieldsForSheetShared,
   loadSheetRow as loadSheetRowShared,
@@ -5452,6 +5452,45 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list sheet permission candidates failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list sheet permission candidates' } })
+    }
+  })
+
+  // 2c-S3a: person field assignable directory (source = B member-group directory). Returns the
+  // resolvePersonAssignableDirectory read model for ONE person field — the same allowed set the write
+  // validator accepts, hydrated + active-only. Gated on canEditRecord (the picker is used while editing
+  // a record's person field), NOT canManageSheetAccess like /permission-candidates.
+  router.get('/sheets/:sheetId/person-fields/:fieldId/directory', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId.trim() : ''
+    if (!sheetId || !fieldId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and fieldId are required' } })
+    }
+    const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : ''
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canEditRecord) return sendForbidden(res)
+
+      const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
+      const field = fields.find((f) => f.id === fieldId)
+      if (!field || field.type !== 'person') {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Person field not found: ${fieldId}` } })
+      }
+
+      const directory = await resolvePersonAssignableDirectory(pool.query.bind(pool), sheetId, personRestrictGroupIds(field))
+      const items = q
+        ? directory.filter((e) => (e.name ?? '').toLowerCase().includes(q) || (e.email ?? '').toLowerCase().includes(q))
+        : directory
+      return res.json({ ok: true, data: { items, total: items.length, query: q } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list person field directory failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list person field directory' } })
     }
   })
 

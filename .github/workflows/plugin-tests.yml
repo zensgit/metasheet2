@@ -221,6 +221,7 @@ jobs:
             tests/integration/multitable-lookup-foreign-field-mask-view.test.ts \
             tests/integration/multitable-lookup-foreign-field-mask-export.test.ts \
             tests/integration/multitable-export-permission-canary.test.ts \
+            tests/integration/multitable-person-directory-route.test.ts \
             tests/integration/multitable-lookup-foreign-field-mask-write.test.ts \
             tests/integration/multitable-lookup-foreign-field-mask-create.test.ts \
             tests/integration/multitable-lookup-foreign-field-mask-aggregate.test.ts \
