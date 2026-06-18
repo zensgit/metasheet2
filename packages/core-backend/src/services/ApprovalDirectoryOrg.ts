@@ -16,11 +16,12 @@
  *     It writes nothing, and it touches no `approval_*` / `automation_*` table —
  *     so it is outside the convergence guard's write-boundary entirely and never
  *     crosses an automation boundary.
- *   - It is NOT a resolver kind. The new `direct_manager` / `dept_head` /
- *     `continuous_managers` assignee-source kinds (and their runtime in
- *     `ApprovalAssigneeResolver`) are DESIGN-ONLY for this slice and are NOT wired
- *     here. This module's sole job is to populate the snapshot fields those future
- *     kinds will read.
+ *   - It is NOT a resolver kind. The `direct_manager` / `dept_head` assignee-source
+ *     kinds are now LIVE in `ApprovalAssigneeResolver` and consume the snapshot
+ *     fields this module bakes (`managerId` / `deptHeadId`); `continuous_managers`
+ *     remains future/DESIGN-ONLY. Either way this module's sole job is unchanged:
+ *     snapshot plumbing — it populates those fields and does not resolve assignees
+ *     itself.
  *
  * Provider shape (DingTalk, the only synced provider today):
  *   - `directory_accounts.raw.leader_in_dept`: `Array<{ dept_id, leader: boolean }>`
