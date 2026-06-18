@@ -95,4 +95,35 @@ describe('PLMAdapter.getBomMultitableContext (PLM-COLLAB P3-C)', () => {
     expect(result.context?.lines[0].bom_line_id).toBeTruthy()
     expect(result.context?.template_key).toBe('bom_review')
   })
+
+  it('yuantus + entitled but MALFORMED context (a required line field renamed/removed): THROWS so the relay degrades to a visible error, not silent corrupt rows', async () => {
+    const adapter = createAdapter('yuantus')
+    // the silent-corruption scenario: the stable row key `bom_line_id` is renamed away
+    const drifted = {
+      ...PROVIDER_CONTEXT,
+      lines: [{ ...PROVIDER_CONTEXT.lines[0], bom_line_id: undefined, bomLineId: 'R1' }],
+    }
+    ;(adapter as never as { query: unknown }).query = vi.fn().mockResolvedValue({
+      data: [{ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: drifted }],
+    })
+
+    await expect(adapter.getBomMultitableContext('P1')).rejects.toThrow(/malformed/i)
+  })
+
+  it('yuantus + entitled with EXTRA unknown fields: still relays (benign provider additions do not trip the guard)', async () => {
+    const adapter = createAdapter('yuantus')
+    const withExtra = {
+      ...PROVIDER_CONTEXT,
+      some_new_top_level_field: true,
+      lines: [{ ...PROVIDER_CONTEXT.lines[0], some_new_line_field: 'x' }],
+    }
+    ;(adapter as never as { query: unknown }).query = vi.fn().mockResolvedValue({
+      data: [{ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: withExtra }],
+    })
+
+    const result = await adapter.getBomMultitableContext('P1')
+
+    expect(result.entitled).toBe(true)
+    expect(result.context).toEqual(withExtra)
+  })
 })

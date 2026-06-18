@@ -722,6 +722,35 @@ export interface BomMultitableContextResult {
   context: BomMultitableContext | null;
 }
 
+// Structural guard for the governed BOM multi-table context. Validates ONLY the fields the review
+// table depends on as keys/structure: the stable row key `bom_line_id`, the line `part_id`, the
+// hierarchy `level`/`path`, `sync_status`, the context `part.part_id`, the `lines` array and the
+// `template_key`. It deliberately TOLERATES extra/unknown fields (so a benign provider addition does
+// not trip it) and only rejects a renamed / removed / retyped REQUIRED field — exactly the drift that
+// would otherwise pass `typeof === 'object'` and render `undefined` rows. Used to fail LOUDLY (throw →
+// the governed relay degrades to its visible 'error' state) instead of corrupting the table silently.
+function isBomMultitableLine(value: unknown): value is BomMultitableLine {
+  const l = value as Record<string, unknown> | null;
+  return (
+    !!l && typeof l === 'object'
+    && typeof l.bom_line_id === 'string' && l.bom_line_id.length > 0
+    && typeof l.part_id === 'string'
+    && typeof l.level === 'number'
+    && Array.isArray(l.path)
+    && typeof l.sync_status === 'string'
+  );
+}
+
+function isBomMultitableContext(value: unknown): value is BomMultitableContext {
+  const c = value as Record<string, unknown> | null;
+  if (!c || typeof c !== 'object') return false;
+  const part = c.part as Record<string, unknown> | null;
+  if (!part || typeof part !== 'object' || typeof part.part_id !== 'string') return false;
+  if (typeof c.template_key !== 'string') return false;
+  if (!Array.isArray(c.lines) || !c.lines.every(isBomMultitableLine)) return false;
+  return true;
+}
+
 export class PLMAdapter extends HTTPAdapter {
   private mockMode = false;
   private apiMode: PLMApiMode = 'legacy';
@@ -2091,12 +2120,21 @@ export class PLMAdapter extends HTTPAdapter {
         return { feature_key: 'bom_multitable', entitled: false, upgrade: { available: true }, context: null }
       }
       const entitled = body.entitled === true
+      if (entitled && body.context != null && !isBomMultitableContext(body.context)) {
+        // Entitled, and a context object IS present, but its inner shape drifted from the contract
+        // (e.g. a renamed/removed line field). Refuse to pass undefined-laden rows to the review
+        // table: throw so the governed relay degrades to its visible 'error' state instead of
+        // silently rendering corrupt rows. (Benign additions don't trip this -- the guard checks
+        // only the required structural fields.)
+        throw new Error(`getBomMultitableContext: malformed bom_multitable context shape for part ${partId}`)
+      }
       return {
         feature_key: typeof body.feature_key === 'string' && body.feature_key ? body.feature_key : 'bom_multitable',
         entitled,
         upgrade: { available: !entitled },
-        // context only when the provider says entitled (defence in depth against a stale manifest)
-        context: entitled && body.context && typeof body.context === 'object' ? body.context : null,
+        // context only when entitled AND the inner shape validates (defence in depth against a stale
+        // manifest + no silent corruption from provider field drift)
+        context: entitled && isBomMultitableContext(body.context) ? body.context : null,
       }
     }
     // legacy / non-yuantus PLM has no multitable review surface
