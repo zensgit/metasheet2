@@ -19,7 +19,7 @@
         <li v-for="row in rows" :key="row.rec.recordId" class="meta-trash__row">
           <div class="meta-trash__identity">
             <span class="meta-trash__title-text" :title="row.rec.recordId" data-test="trash-record-title">{{ row.title }}</span>
-            <span class="meta-trash__meta">{{ formatDeleted(row.rec.deletedAt) }}<template v-if="row.rec.deletedBy"> · {{ deletedByLabel(row.rec.deletedBy) }}</template></span>
+            <span class="meta-trash__meta">{{ formatDeleted(row.rec.deletedAt) }}<template v-if="row.rec.deletedBy"> · {{ deletedByLabel(row.rec.deletedByName || row.rec.deletedBy) }}</template></span>
           </div>
           <template v-if="confirmingId === row.rec.recordId">
             <span class="meta-trash__confirm-text">{{ t(`恢复「${row.title}」？`, `Restore “${row.title}”?`) }}</span>

@@ -307,6 +307,8 @@ export interface MetaDeletedRecord {
   originalVersion: number
   createdBy: string | null
   deletedBy: string | null
+  /** Backend-resolved display name (name → email) for `deletedBy`; null when unresolved → fall back to the id. */
+  deletedByName?: string | null
   deletedAt: string
 }
 
@@ -318,6 +320,8 @@ export interface MetaRecordRevision {
   action: MetaRecordRevisionAction
   source: string
   actorId: string | null
+  /** Backend-resolved display name (name → email) for `actorId`; null when unresolved → fall back to the id. */
+  actorName?: string | null
   changedFieldIds: string[]
   patch: Record<string, unknown>
   snapshot: Record<string, unknown> | null
