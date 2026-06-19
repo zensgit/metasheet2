@@ -48,6 +48,7 @@ const ROUTES = [
   ['DELETE', '/api/integration/templates/:id', 'templatesDelete'],
   ['POST', '/api/integration/templates/preview', 'templatesPreview'],
   ['POST', '/api/integration/templates/derive', 'templatesDerive'],
+  ['POST', '/api/integration/templates/:id/instantiate', 'templatesInstantiate'],
   ['GET', '/api/integration/staging/descriptors', 'stagingDescriptors'],
   ['POST', '/api/integration/staging/install', 'stagingInstall'],
   ['GET', '/api/integration/runs', 'runsList'],
@@ -390,6 +391,9 @@ const VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS = new Set(['confirm'])
 const VALID_EMPTY_REQUEST_KEYS = new Set()
 const VALID_C6_WRITE_DRY_RUN_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'maxRows'])
 const VALID_C6_WRITE_APPLY_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'confirm'])
+// S3-2: instantiate binds to caller-supplied systems by id only. The write profile / credentials
+// are NEVER request-sourced; only these scope + binding keys are accepted (closed allowlist).
+const VALID_TEMPLATE_INSTANTIATE_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'targetSystemId', 'sourceSystemId', 'pipelineName'])
 const VALID_C6_WRITE_APPLY_CONFIRM_KEYS = new Set(['dryRunToken'])
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
 const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
@@ -426,6 +430,24 @@ function normalizeC6WriteDryRunBody(body = {}) {
     tenantId: firstString(body.tenantId),
     workspaceId: firstString(body.workspaceId),
     maxRows: body.maxRows,
+  }
+}
+
+function normalizeTemplateInstantiateBody(body = {}) {
+  if (!isPlainObject(body)) {
+    throw new HttpRouteError(400, 'TEMPLATE_INSTANTIATE_REQUEST_INVALID', 'request body must be an object')
+  }
+  for (const key of Object.keys(body)) {
+    if (!VALID_TEMPLATE_INSTANTIATE_BODY_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'TEMPLATE_INSTANTIATE_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    tenantId: firstString(body.tenantId),
+    workspaceId: firstString(body.workspaceId),
+    targetSystemId: firstString(body.targetSystemId),
+    sourceSystemId: firstString(body.sourceSystemId),
+    pipelineName: firstString(body.pipelineName),
   }
 }
 
@@ -1178,7 +1200,7 @@ function createHandlers(services, options = {}) {
   const runner = requireService('pipelineRunner', ['runPipeline'])
   const deadLetters = requireService('deadLetterStore', ['listDeadLetters'])
   const stagingInstaller = requireService('stagingInstaller', ['installStaging', 'listStagingDescriptors'])
-  const templateRegistry = requireService('templateRegistry', ['upsertTemplate', 'getTemplate', 'listTemplates', 'deleteTemplate'])
+  const templateRegistry = requireService('templateRegistry', ['upsertTemplate', 'getTemplate', 'listTemplates', 'deleteTemplate', 'instantiateTemplate'])
   const context = options.context || {}
   const configuredTableActions = context && context.config
     ? (context.config.stockPreparationTableActions || context.config.tableActions)
@@ -1429,6 +1451,25 @@ function createHandlers(services, options = {}) {
       return sendOk(res, await templateRegistry.deleteTemplate(scopedInput(req, {
         id: requestParams(req).id,
       })))
+    },
+
+    // S3-2: instantiate a template into a live pipeline, BINDING to caller-supplied source/target
+    // systems (kind-validated, fail-closed). Body is a closed allowlist — credentials / write profile
+    // are NEVER request-sourced. 404 (template) / 422 (bind) / 409 (name conflict) map via error.status.
+    async templatesInstantiate(req, res) {
+      requireAccess(req, 'write')
+      const user = getUser(req)
+      const body = normalizeTemplateInstantiateBody(requestBody(req))
+      const created = await templateRegistry.instantiateTemplate(scopedInput(req, {
+        tenantId: body.tenantId,
+        workspaceId: body.workspaceId,
+        templateId: requestParams(req).id,
+        targetSystemId: body.targetSystemId,
+        sourceSystemId: body.sourceSystemId,
+        pipelineName: body.pipelineName,
+        createdBy: user && (user.id || user.email),
+      }))
+      return sendOk(res, created, 201)
     },
 
     async pipelinesRun(req, res) {

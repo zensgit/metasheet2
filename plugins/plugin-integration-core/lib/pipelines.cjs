@@ -481,6 +481,57 @@ async function loadFieldMappings(db, pipelineId) {
   return rows.map(rowToFieldMapping)
 }
 
+// S3-2: the tx-aware pipeline write (system check + pipeline insert/update + field-mappings),
+// extracted to module level so BOTH upsertPipeline and template instantiation share ONE
+// pipeline-write path (no row-builder drift). Runs on the caller's scopedDb, so a caller can
+// wrap it in a single db.transaction for all-or-nothing.
+async function writePipelineRow(scopedDb, normalized, idGenerator) {
+  await requireExternalSystem(scopedDb, normalized, normalized.sourceSystemId, SOURCE_ROLES, 'sourceSystemId')
+  await requireExternalSystem(scopedDb, normalized, normalized.targetSystemId, TARGET_ROLES, 'targetSystemId')
+
+  const existing = await selectPipeline(scopedDb, normalized)
+  const baseRow = {
+    tenant_id: normalized.tenantId,
+    workspace_id: normalized.workspaceId,
+    project_id: normalized.projectId,
+    name: normalized.name,
+    description: normalized.description,
+    source_system_id: normalized.sourceSystemId,
+    source_object: normalized.sourceObject,
+    target_system_id: normalized.targetSystemId,
+    target_object: normalized.targetObject,
+    staging_sheet_id: normalized.stagingSheetId,
+    mode: normalized.mode,
+    idempotency_key_fields: jsonbParam(normalized.idempotencyKeyFields),
+    options: jsonbParam(normalized.options),
+    status: normalized.status,
+  }
+
+  let row
+  if (existing) {
+    const updateRow = { ...baseRow }
+    const rows = unwrapRows(await scopedDb.updateRow(PIPELINES_TABLE, updateRow, {
+      ...scopeWhere(normalized),
+      id: existing.id,
+    }))
+    row = rows[0] || { ...existing, ...updateRow }
+  } else {
+    const insertRow = {
+      id: normalized.id || idGenerator(),
+      ...baseRow,
+      created_by: normalized.createdBy,
+    }
+    const rows = unwrapRows(await scopedDb.insertOne(PIPELINES_TABLE, insertRow))
+    row = rows[0] || insertRow
+  }
+
+  let fieldMappings
+  if (normalized.fieldMappings !== undefined) {
+    fieldMappings = await replaceFieldMappings(scopedDb, row.id, normalized.fieldMappings, idGenerator)
+  }
+  return rowToPipeline(row, fieldMappings)
+}
+
 function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
   if (!db || typeof db.selectOne !== 'function' || typeof db.insertOne !== 'function' || typeof db.updateRow !== 'function' || typeof db.select !== 'function') {
     throw new Error('createPipelineRegistry: scoped db helper is required')
@@ -510,52 +561,7 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
   async function upsertPipeline(input) {
     const normalized = normalizePipelineInput(input)
 
-    const write = async (scopedDb) => {
-      await requireExternalSystem(scopedDb, normalized, normalized.sourceSystemId, SOURCE_ROLES, 'sourceSystemId')
-      await requireExternalSystem(scopedDb, normalized, normalized.targetSystemId, TARGET_ROLES, 'targetSystemId')
-
-      const existing = await selectPipeline(scopedDb, normalized)
-      const baseRow = {
-        tenant_id: normalized.tenantId,
-        workspace_id: normalized.workspaceId,
-        project_id: normalized.projectId,
-        name: normalized.name,
-        description: normalized.description,
-        source_system_id: normalized.sourceSystemId,
-        source_object: normalized.sourceObject,
-        target_system_id: normalized.targetSystemId,
-        target_object: normalized.targetObject,
-        staging_sheet_id: normalized.stagingSheetId,
-        mode: normalized.mode,
-        idempotency_key_fields: jsonbParam(normalized.idempotencyKeyFields),
-        options: jsonbParam(normalized.options),
-        status: normalized.status,
-      }
-
-      let row
-      if (existing) {
-        const updateRow = { ...baseRow }
-        const rows = unwrapRows(await scopedDb.updateRow(PIPELINES_TABLE, updateRow, {
-          ...scopeWhere(normalized),
-          id: existing.id,
-        }))
-        row = rows[0] || { ...existing, ...updateRow }
-      } else {
-        const insertRow = {
-          id: normalized.id || idGenerator(),
-          ...baseRow,
-          created_by: normalized.createdBy,
-        }
-        const rows = unwrapRows(await scopedDb.insertOne(PIPELINES_TABLE, insertRow))
-        row = rows[0] || insertRow
-      }
-
-      let fieldMappings
-      if (normalized.fieldMappings !== undefined) {
-        fieldMappings = await replaceFieldMappings(scopedDb, row.id, normalized.fieldMappings, idGenerator)
-      }
-      return rowToPipeline(row, fieldMappings)
-    }
+    const write = (scopedDb) => writePipelineRow(scopedDb, normalized, idGenerator)
 
     if (normalized.fieldMappings !== undefined) {
       if (typeof db.transaction !== 'function') {
@@ -803,6 +809,9 @@ module.exports = {
   PipelineValidationError,
   PipelineNotFoundError,
   PipelineConflictError,
+  // S3-2: shared tx-aware pipeline write path + input normalizer, reused by template instantiation.
+  writePipelineRow,
+  normalizePipelineInput,
   __internals: {
     PIPELINES_TABLE,
     FIELD_MAPPINGS_TABLE,

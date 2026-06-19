@@ -5,17 +5,26 @@
 //
 // First-class, DECLARATIVE integration-template object: stores a reusable
 // composition of source + target (by adapter KIND) + key fields + field
-// mappings + orchestration config. Definition state ONLY:
-//   - NO instantiation (template -> pipeline + mappings + system.config) — that
-//     is S3-2 and lives elsewhere.
-//   - NO external adapter calls, NO run execution, NO credential reads.
+// mappings + orchestration config.
 //   - The template references a target KIND/object/keyFields/mappings; it does
-//     NOT redefine C6 write-safety (that is the target's write profile).
+//     NOT redefine C6 write-safety (that is the target's write profile) and stores
+//     NO credentials, NO concrete sheet/connection.
+//   - S3-2 instantiation (here): template -> pipeline + field-mappings in ONE DB
+//     transaction, BINDING to caller-supplied, already-provisioned source/target
+//     systems (kind-validated, fail-closed). It creates NO external system and
+//     triggers NO run/external write; runtime writes stay behind their own gates.
+//     The created pipeline records a SNAPSHOT (instantiatedFromTemplateId +
+//     templateVersion); later template edits never re-sync a live pipeline.
 // ---------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
+// S3-2: reuse the single tx-aware pipeline write path + input normalizer (no row-builder drift).
+const { writePipelineRow, normalizePipelineInput } = require('./pipelines.cjs')
 
 const TEMPLATES_TABLE = 'integration_templates'
+// S3-2: instantiation reads this table for the idempotency pre-check. The pipeline WRITE goes
+// exclusively through pipelines.cjs#writePipelineRow (single pipeline-write path, no row-builder drift).
+const PIPELINES_TABLE = 'integration_pipelines'
 const VALID_STATUSES = new Set(['active', 'inactive'])
 
 class TemplateValidationError extends Error {
@@ -46,6 +55,18 @@ class TemplateVersionConflictError extends Error {
     this.name = 'TemplateVersionConflictError'
     this.status = 409
     this.code = 'INTEGRATION_TEMPLATE_VERSION_CONFLICT'
+    this.details = details
+  }
+}
+
+// S3-2: instantiation would collide with an existing pipeline of the resolved name in scope.
+// 409 so the caller picks a distinct pipelineName rather than us duplicating/overwriting.
+class TemplateInstantiationConflictError extends Error {
+  constructor(message, details = {}) {
+    super(message)
+    this.name = 'TemplateInstantiationConflictError'
+    this.status = 409
+    this.code = 'INTEGRATION_TEMPLATE_INSTANTIATION_CONFLICT'
     this.details = details
   }
 }
@@ -220,7 +241,7 @@ function rowToTemplate(row) {
   }
 }
 
-function createIntegrationTemplateRegistry({ db, idGenerator = crypto.randomUUID, now = () => new Date().toISOString() } = {}) {
+function createIntegrationTemplateRegistry({ db, idGenerator = crypto.randomUUID, now = () => new Date().toISOString(), externalSystemRegistry = null } = {}) {
   if (
     !db ||
     typeof db.selectOne !== 'function' ||
@@ -322,7 +343,149 @@ function createIntegrationTemplateRegistry({ db, idGenerator = crypto.randomUUID
     return { deleted }
   }
 
-  return { upsertTemplate, getTemplate, listTemplates, deleteTemplate }
+  // S3-2: bind + KIND-validate one caller-supplied, already-provisioned system, fail-closed.
+  // getExternalSystem throws ExternalSystemNotFoundError when absent; any resolution failure is a
+  // BIND error (422), never a 404 on the template and never a 500. We surface only the error
+  // class/code (no message/values) so this stays values-free. NEVER auto-creates a system.
+  async function loadBoundSystem(scope, systemId, field) {
+    let system
+    try {
+      system = await externalSystemRegistry.getExternalSystem({
+        tenantId: scope.tenantId,
+        workspaceId: scope.workspaceId,
+        id: systemId,
+      })
+    } catch (error) {
+      throw new TemplateValidationError(`${field} could not be resolved to a visible external system`, {
+        field,
+        systemId,
+        cause: (error && (error.code || error.name)) || 'LOAD_FAILED',
+      })
+    }
+    if (!system) {
+      throw new TemplateValidationError(`${field} does not resolve to an external system`, { field, systemId })
+    }
+    return system
+  }
+
+  // S3-2 instantiation: template -> pipeline + field-mappings in ONE DB transaction, BINDING to
+  // caller-supplied source/target systems (kind-validated, fail-closed). Materializes a SNAPSHOT
+  // (mappings + orchestration copied, stamped with instantiatedFromTemplateId + templateVersion);
+  // later template edits never re-sync the live pipeline. Creates NO external system, reads NO
+  // credentials, triggers NO run/external write — runtime writes stay behind their own gates.
+  async function instantiateTemplate(input) {
+    if (!input || typeof input !== 'object') {
+      throw new TemplateValidationError('instantiate input must be an object')
+    }
+    if (!externalSystemRegistry || typeof externalSystemRegistry.getExternalSystem !== 'function') {
+      throw new Error('instantiateTemplate: externalSystemRegistry with getExternalSystem is required')
+    }
+    if (typeof db.transaction !== 'function') {
+      throw new Error('instantiateTemplate: db.transaction is required for atomic instantiation')
+    }
+
+    const tenantId = requiredString(input.tenantId, 'tenantId')
+    const workspaceId = normalizeWorkspaceId(input.workspaceId)
+    const templateId = requiredString(input.templateId, 'templateId')
+    const targetSystemId = requiredString(input.targetSystemId, 'targetSystemId')
+    const sourceSystemId = requiredString(input.sourceSystemId, 'sourceSystemId')
+    const pipelineName = optionalString(input.pipelineName, 'pipelineName')
+    const createdBy = optionalString(input.createdBy, 'createdBy')
+    const scope = { tenantId, workspaceId }
+
+    // 1) Load the template (404 if missing). The version + definition captured here ARE the snapshot.
+    const template = await getTemplate({ tenantId, workspaceId, id: templateId })
+
+    // 2) A pipeline needs a fully-specified source + target. A template that only declares a target
+    //    (or omits the bound objects) cannot be instantiated — fail-closed 422 with a clear field.
+    if (!template.sourceKind) {
+      throw new TemplateValidationError('template has no sourceKind; cannot bind a source system', { field: 'sourceKind', templateId })
+    }
+    if (!template.sourceObject) {
+      throw new TemplateValidationError('template has no sourceObject; cannot instantiate a pipeline', { field: 'sourceObject', templateId })
+    }
+    if (!template.targetObject) {
+      throw new TemplateValidationError('template has no targetObject; cannot instantiate a pipeline', { field: 'targetObject', templateId })
+    }
+
+    // 3) Bind + KIND-validate both systems, fail-closed. The bound system's kind MUST equal the
+    //    kind the template was authored against; otherwise the mappings/keyFields are meaningless.
+    const target = await loadBoundSystem(scope, targetSystemId, 'targetSystemId')
+    if (target.kind !== template.targetKind) {
+      throw new TemplateValidationError(
+        `targetSystemId kind mismatch: template targets ${template.targetKind}, bound system is ${target.kind}`,
+        { field: 'targetSystemId', expected: template.targetKind, actual: target.kind },
+      )
+    }
+    const source = await loadBoundSystem(scope, sourceSystemId, 'sourceSystemId')
+    if (source.kind !== template.sourceKind) {
+      throw new TemplateValidationError(
+        `sourceSystemId kind mismatch: template sources ${template.sourceKind}, bound system is ${source.kind}`,
+        { field: 'sourceSystemId', expected: template.sourceKind, actual: source.kind },
+      )
+    }
+
+    const resolvedName = pipelineName || template.name
+
+    // 4) Idempotency: writePipelineRow upserts by (scope, name), so without a guard a re-instantiate
+    //    would silently UPDATE the live pipeline. Pre-check for a fast 409; re-check INSIDE the tx so
+    //    the check + write are atomic (a concurrent instantiate can't slip a duplicate past the gap).
+    const preExisting = await db.selectOne(PIPELINES_TABLE, {
+      tenant_id: tenantId,
+      workspace_id: workspaceId,
+      name: resolvedName,
+    })
+    if (preExisting) {
+      throw new TemplateInstantiationConflictError(
+        `a pipeline named "${resolvedName}" already exists in this tenant/workspace; choose a distinct pipelineName`,
+        { name: resolvedName, pipelineId: preExisting.id, templateId },
+      )
+    }
+
+    // 5) Materialize the SNAPSHOT into a normalized pipeline input. provenance is stamped LAST so a
+    //    template orchestrationConfig key can never shadow it. mode is intentionally NOT taken from
+    //    orchestrationConfig (pipeline mode != orchestration config) — normalizePipelineInput defaults it.
+    const normalized = normalizePipelineInput({
+      tenantId,
+      workspaceId,
+      projectId: template.projectId,
+      name: resolvedName,
+      sourceSystemId,
+      sourceObject: template.sourceObject,
+      targetSystemId,
+      targetObject: template.targetObject,
+      status: 'draft',
+      idempotencyKeyFields: template.keyFields,
+      fieldMappings: template.mappingDef,
+      options: {
+        ...(template.orchestrationConfig || {}),
+        provenance: {
+          instantiatedFromTemplateId: template.id,
+          templateVersion: template.version,
+        },
+      },
+      createdBy,
+    })
+
+    // 6) Single transaction: pipeline row + field-mappings are all-or-nothing. writePipelineRow
+    //    re-validates both systems (existence + role) inside the tx as defense-in-depth.
+    return db.transaction(async (scopedDb) => {
+      const clash = await scopedDb.selectOne(PIPELINES_TABLE, {
+        tenant_id: tenantId,
+        workspace_id: workspaceId,
+        name: resolvedName,
+      })
+      if (clash) {
+        throw new TemplateInstantiationConflictError(
+          `a pipeline named "${resolvedName}" already exists in this tenant/workspace; choose a distinct pipelineName`,
+          { name: resolvedName, pipelineId: clash.id, templateId },
+        )
+      }
+      return writePipelineRow(scopedDb, normalized, idGenerator)
+    })
+  }
+
+  return { upsertTemplate, getTemplate, listTemplates, deleteTemplate, instantiateTemplate }
 }
 
 module.exports = {
@@ -330,6 +493,7 @@ module.exports = {
   TemplateValidationError,
   TemplateNotFoundError,
   TemplateVersionConflictError,
+  TemplateInstantiationConflictError,
   __internals: {
     TEMPLATES_TABLE,
     VALID_STATUSES,
