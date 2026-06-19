@@ -117,6 +117,7 @@ import { validateRecord, getDefaultValidationRules } from '../multitable/field-v
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
+import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
 import {
   AutomationRuleValidationError,
   getAutomationServiceInstance,
@@ -10233,7 +10234,7 @@ export function univerMetaRouter(): Router {
    * When `cursor` is absent the first page is returned.
    * When `cursor` is present, offset-based params are ignored.
    */
-  router.get('/records', async (req: Request, res: Response) => {
+  router.get('/records', apiTokenAuth, requireScope('records:read'), async (req: Request, res: Response) => {
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -10362,7 +10363,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/records/:recordId', async (req: Request, res: Response) => {
+  router.get('/records/:recordId', apiTokenAuth, requireScope('records:read'), async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
