@@ -209,3 +209,23 @@ export function formatFieldDisplay(params: {
 
   return String(value)
 }
+
+/**
+ * Pick a human-readable title for a record from its (possibly backend-masked) `data`: the first field
+ * in column order whose value renders to a non-empty display string via `formatFieldDisplay`. Masked /
+ * unreadable / empty fields render `'—'` and are skipped, so a field the actor can't read transparently
+ * falls through to the next readable one. Returns `null` when nothing is readable — the caller decides
+ * the fallback (e.g. a short record id). Used by the recycle bin so a trashed row is identifiable.
+ */
+export function pickRecordTitle(params: {
+  fields: MetaField[]
+  data: Record<string, unknown>
+  isZh?: boolean
+}): string | null {
+  const ordered = [...params.fields].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+  for (const field of ordered) {
+    const text = formatFieldDisplay({ field, value: params.data[field.id], isZh: params.isZh })
+    if (text && text !== '—') return text
+  }
+  return null
+}

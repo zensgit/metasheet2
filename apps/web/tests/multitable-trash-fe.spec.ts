@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { useTrash } from '../src/multitable/composables/useTrash'
-import type { MetaDeletedRecord } from '../src/multitable/types'
+import { pickRecordTitle } from '../src/multitable/utils/field-display'
+import type { MetaDeletedRecord, MetaField } from '../src/multitable/types'
 
 // #15 recycle bin — useTrash composable contract. Locks: load populates list+total; restore is
 // optimistic-on-success (removes row, decrements total) and NEVER throws — a 409 (id occupied) / 403
@@ -55,5 +56,31 @@ describe('useTrash — recycle bin composable', () => {
     const { load } = useTrash(c)
     await load('')
     expect((c as { listDeletedRecords: { mock: { calls: unknown[] } } }).listDeletedRecords.mock.calls.length).toBe(0)
+  })
+})
+
+// The recycle bin shows a human-readable title for each trashed row instead of the raw record id, so a
+// record is identifiable before restore. Title = first field (by column ORDER) whose backend-masked
+// value renders non-empty; masked/empty fields fall through; null when nothing is readable.
+describe('pickRecordTitle — recycle bin record identity', () => {
+  const f = (id: string, order: number, type = 'text'): MetaField => ({ id, name: id, type: type as MetaField['type'], order })
+
+  it('picks the first field by ORDER with a non-empty value (not array position)', () => {
+    const fields = [f('b', 2), f('a', 1)]
+    expect(pickRecordTitle({ fields, data: { a: 'Acme Corp', b: 'x' } })).toBe('Acme Corp')
+  })
+
+  it('skips masked / empty fields (—) and falls through to the next readable field', () => {
+    // a denied/masked primary field is simply absent from the backend-masked data → renders '—' → skipped
+    const fields = [f('secret', 1), f('name', 2)]
+    expect(pickRecordTitle({ fields, data: { name: 'Visible Name' } })).toBe('Visible Name')
+  })
+
+  it('returns null when no field is readable (caller falls back to a short record id)', () => {
+    expect(pickRecordTitle({ fields: [f('a', 1), f('b', 2)], data: {} })).toBeNull()
+  })
+
+  it('returns null with no fields', () => {
+    expect(pickRecordTitle({ fields: [], data: { a: 'x' } })).toBeNull()
   })
 })

@@ -464,6 +464,7 @@
     <TrashModal
       :open="showTrash"
       :sheet-id="workbench.activeSheetId.value"
+      :fields="scopedAllFields"
       @close="showTrash = false"
       @restored="onTrashRestored"
     />
