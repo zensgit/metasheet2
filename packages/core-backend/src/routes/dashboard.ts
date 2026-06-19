@@ -38,11 +38,14 @@ import type { MultitableField } from '../multitable/field-codecs'
 import { loadFieldsForSheet } from '../multitable/loaders'
 import { deriveFieldPermissions, isFieldPermissionHidden } from '../multitable/permission-derivation'
 import {
+  loadDeniedRecordIds,
   loadFieldPermissionScopeMap,
+  loadRowLevelReadDenyEnabled,
   resolveSheetCapabilities,
   resolveSheetReadableCapabilities,
   type QueryFn,
 } from '../multitable/permission-service'
+import type { ResolvedRequestAccess } from '../multitable/access'
 
 const dashboardService = new DashboardService()
 const CHART_TYPES = new Set<ChartType>(['bar', 'line', 'pie', 'number', 'table', 'area', 'funnel', 'gauge', 'scatter'])
@@ -82,6 +85,28 @@ type SheetAuthContext = {
   query: QueryFn
   userId: string
   capabilities: MultitableCapabilities
+  access: ResolvedRequestAccess
+}
+
+/**
+ * Load the records that feed chart aggregation, with the SAME row-level read-deny the live read
+ * surfaces apply (grant-deny ∪ conditional-rule-deny via loadDeniedRecordIds), so chart totals/series
+ * never aggregate over records the actor cannot read. Admin-bypass + flag-off inert mirror /view +
+ * /view-aggregate exactly. (Field-level masking is handled separately at the route via
+ * loadAllowedFieldIds + isChartDataRestricted — a chart over a non-visible field is refused wholesale.)
+ */
+async function loadChartRecords(
+  query: QueryFn,
+  sheetId: string,
+  access: ResolvedRequestAccess,
+): Promise<Array<{ data: Record<string, unknown> }>> {
+  const rowsRes = await query('SELECT id, data FROM meta_records WHERE sheet_id = $1', [sheetId])
+  let rows = rowsRes.rows as Array<{ id?: unknown; data?: unknown }>
+  if (!access.isAdminRole && access.userId && await loadRowLevelReadDenyEnabled(query, sheetId)) {
+    const denied = await loadDeniedRecordIds(query, sheetId, access.userId)
+    if (denied.size > 0) rows = rows.filter((r) => typeof r.id === 'string' && !denied.has(r.id))
+  }
+  return rows.map((r) => ({ data: r.data && typeof r.data === 'object' ? (r.data as Record<string, unknown>) : {} }))
 }
 
 async function requireSheetRead(
@@ -99,7 +124,7 @@ async function requireSheetRead(
     sendForbidden(res)
     return null
   }
-  return { query, userId: access.userId, capabilities }
+  return { query, userId: access.userId, capabilities, access }
 }
 
 async function requireSheetManageViews(
@@ -117,7 +142,7 @@ async function requireSheetManageViews(
     sendForbidden(res)
     return null
   }
-  return { query, userId: access.userId, capabilities }
+  return { query, userId: access.userId, capabilities, access }
 }
 
 function filterVisiblePropertyFields(fields: MultitableField[]): MultitableField[] {
@@ -322,7 +347,8 @@ export function dashboardRouter() {
         res.json(restrictedChartData(chart))
         return
       }
-      const data = await dashboardService.computeChartDataForConfig(chart)
+      const records = await loadChartRecords(auth.query, req.params.sheetId, auth.access)
+      const data = await dashboardService.computeChartDataForConfig(chart, records)
       res.json(data)
     } catch (err: unknown) {
       res.status(400).json({ error: (err as Error).message })
@@ -415,7 +441,8 @@ export function dashboardRouter() {
         res.json(restrictedChartData(chart))
         return
       }
-      const data = await dashboardService.getChartData(req.params.id)
+      const records = await loadChartRecords(auth.query, req.params.sheetId, auth.access)
+      const data = await dashboardService.getChartData(req.params.id, records)
       res.json(data)
     } catch (err: unknown) {
       res.status(500).json({ error: (err as Error).message })

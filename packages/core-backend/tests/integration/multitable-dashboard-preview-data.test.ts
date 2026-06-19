@@ -73,6 +73,13 @@ describeIfDatabase('Dashboard BI v2-b2 preview-data endpoint (real DB)', () => {
       'INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)',
       [SHEET_ID, FLD_SECRET, 'user', USER_DENIED, false, false],
     )
+    // Seed REAL meta_records: the route now loads records itself (with row-level read-deny) and passes
+    // them into chart aggregation, so these tests exercise the wired PRODUCTION path — not a
+    // setRecordProvider fixture (the bypass that previously let the empty-prod-charts defect hide).
+    let recSeq = 0
+    for (const r of rows) {
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [`rec_biv2b2_${TS}_${recSeq++}`, SHEET_ID, JSON.stringify(r.data)])
+    }
     await q(
       `INSERT INTO multitable_charts (id, name, type, sheet_id, data_source, display, created_by)
        VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7)`,
@@ -104,11 +111,14 @@ describeIfDatabase('Dashboard BI v2-b2 preview-data endpoint (real DB)', () => {
   beforeEach(() => {
     testUserId = USER_ID
     testPerms = ['multitable:read']
-    getDashboardService().setRecordProvider(async (sheetId: string) => (sheetId === SHEET_ID ? rows : []))
+    // Empty provider on purpose: the route must NOT depend on it (it loads real meta_records). P1/P2
+    // computing non-empty data with this empty provider is the proof the wired DB path is in use.
+    getDashboardService().setRecordProvider(async () => [])
   })
 
   afterAll(async () => {
     getDashboardService().setRecordProvider(async () => [])
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM multitable_charts WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
