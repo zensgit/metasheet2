@@ -534,11 +534,21 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
       const physicalToLogical = invertFieldMap(logicalToPhysical)
       const physicalKeyData = mapRecordFieldsForWrite(key || {}, logicalToPhysical)
       const physicalKeyFields = Object.keys(key || {}).map((field) => mapLogicalFieldName(field, logicalToPhysical))
-      const existing = await findExistingRecord(recordsApi, objectConfig, physicalKeyData, physicalKeyFields)
-      if (!existing) return { data: [], metadata: {} }
-      // map the stored physical record back to logical so the planner's writableFields
+      if (physicalKeyFields.length === 0 || typeof recordsApi.queryRecords !== 'function') {
+        return { data: [], metadata: {} }
+      }
+      // IMPORTANT: fetch >1 (NOT the upsert helper's limit:1 findExistingRecord). MetaSheet
+      // sheets do NOT enforce uniqueness on a logical key, so duplicate-key rows must surface
+      // as multiple rows — that is what lets the C6 planner's ambiguity guard
+      // (existingRows.length > 1 -> 'held'/ambiguous_target_key) fire instead of silently
+      // updating one. Mirrors the SQL facade's deliberate limit:2.
+      const filters = {}
+      for (const field of physicalKeyFields) filters[field] = physicalKeyData[field]
+      const matches = await recordsApi.queryRecords({ sheetId: objectConfig.sheetId, filters, limit: 2, offset: 0 })
+      const list = Array.isArray(matches) ? matches : []
+      // map each stored physical record back to logical so the planner's writableFields
       // value-diff compares like-for-like.
-      return { data: [mapRecordFieldsToLogical(existing.data || {}, physicalToLogical)], metadata: {} }
+      return { data: list.map((record) => mapRecordFieldsToLogical(record.data || {}, physicalToLogical)), metadata: {} }
     },
     async insertRows(dataSourceId, object, rows, policy, principal) {
       const recordsApi = getRecordsApi(context)

@@ -209,6 +209,93 @@ async function testMultitableWriteSourceRidesC6Lifecycle() {
   )
 }
 
+// S1b-2 (review P2): MetaSheet sheets don't enforce key uniqueness, so a DUPLICATE key must
+// surface as ambiguous -> the C6 planner HOLDS (no write), not silently updates one row.
+async function testMultitableAmbiguousKeyHolds() {
+  const fieldIdMap = { code: 'f_code', name: 'f_name', quantity: 'f_qty' }
+  const { context, rows } = createContext({
+    existing: [
+      { id: 'rec_a', sheetId: 'sheet_approved_materials', version: 1, data: { f_code: 'DUP-1', f_name: 'A', f_qty: 1 } },
+      { id: 'rec_b', sheetId: 'sheet_approved_materials', version: 1, data: { f_code: 'DUP-1', f_name: 'B', f_qty: 2 } },
+    ],
+  })
+  const system = createSystem({
+    objects: {
+      approved_materials: {
+        name: 'Approved Materials', sheetId: 'sheet_approved_materials', keyFields: ['code'],
+        fieldDetails: [{ id: 'code' }, { id: 'name' }, { id: 'quantity' }], fieldIdMap,
+      },
+    },
+  })
+  const writeSource = createMetaSheetMultitableWriteSource({ system, context })
+  const dry = await dryRunExternalWrite({
+    pipeline: {
+      id: 'pipe_dup', tenantId: 't1', workspaceId: 'w1', sourceSystemId: 'src', sourceObject: 'items',
+      targetSystemId: system.id, targetObject: 'approved_materials', createdBy: 'owner-1',
+      fieldMappings: [
+        { sourceField: 'code', targetField: 'code', validation: [{ type: 'required' }] },
+        { sourceField: 'name', targetField: 'name' },
+        { sourceField: 'quantity', targetField: 'quantity' },
+      ],
+    },
+    sourceSystem: { id: 'src', kind: 'data-source:sql-readonly' },
+    targetSystem: { id: system.id, kind: 'metasheet:multitable', config: { dataSourceId: 'mt', object: 'approved_materials', keyFields: ['code'], writableFields: ['name', 'quantity'] } },
+    sourceAdapter: { async read() { return { records: [{ code: 'DUP-1', name: 'C', quantity: 3 }], done: true, nextCursor: null } } },
+    dataSourceWrites: writeSource,
+    targetWriteProfile: MULTITABLE_WRITE_PROFILE,
+    tokenStore: memoryStore(),
+    dryRunUser: 'owner-1', dataSourceOwnerPrincipal: 'owner-1', maxRows: 100,
+  })
+  assert.equal(dry.counts.held, 1, 'duplicate key HOLDS (ambiguous), not silently updated')
+  assert.equal(dry.canApply, false, 'a held row blocks apply')
+  assert.equal(dry.dryRunToken, null, 'no token issued when a row is held')
+  assert.ok(dry.evidence.rowErrorTypes.includes('ambiguous_target_key'), 'ambiguity surfaced values-free')
+  assert.equal(rows.length, 2, 'no write attempted on an ambiguous key')
+}
+
+// S1b-2 (review P3): a writable field NOT in fieldIdMap must round-trip identity on BOTH write
+// and read-back (else re-pull would never be idempotent for unmapped fields).
+async function testMultitableUnmappedFieldRoundTrips() {
+  const fieldIdMap = { code: 'f_code' } // 'name' deliberately unmapped -> identity
+  const { context, rows } = createContext({ existing: [] })
+  const system = createSystem({
+    objects: {
+      approved_materials: {
+        name: 'Approved Materials', sheetId: 'sheet_approved_materials', keyFields: ['code'],
+        fieldDetails: [{ id: 'code' }, { id: 'name' }], fieldIdMap,
+      },
+    },
+  })
+  const writeSource = createMetaSheetMultitableWriteSource({ system, context })
+  const baseInput = () => ({
+    pipeline: {
+      id: 'pipe_unmapped', tenantId: 't1', workspaceId: 'w1', sourceSystemId: 'src', sourceObject: 'items',
+      targetSystemId: system.id, targetObject: 'approved_materials', createdBy: 'owner-1',
+      fieldMappings: [
+        { sourceField: 'code', targetField: 'code', validation: [{ type: 'required' }] },
+        { sourceField: 'name', targetField: 'name' },
+      ],
+    },
+    sourceSystem: { id: 'src', kind: 'data-source:sql-readonly' },
+    targetSystem: { id: system.id, kind: 'metasheet:multitable', config: { dataSourceId: 'mt', object: 'approved_materials', keyFields: ['code'], writableFields: ['name'] } },
+    sourceAdapter: { async read() { return { records: [{ code: 'U-1', name: 'Hello' }], done: true, nextCursor: null } } },
+    dataSourceWrites: writeSource,
+    targetWriteProfile: MULTITABLE_WRITE_PROFILE,
+    tokenStore: memoryStore(),
+    dryRunUser: 'owner-1', dataSourceOwnerPrincipal: 'owner-1', maxRows: 100,
+  })
+  const input1 = baseInput()
+  const dry1 = await dryRunExternalWrite(input1)
+  assert.equal(dry1.counts.add, 1)
+  await applyExternalWrite({ ...input1, dryRunToken: dry1.dryRunToken, applyUser: 'owner-1' })
+  const created = rows.find((r) => r.data.f_code === 'U-1')
+  assert.deepEqual(created.data, { f_code: 'U-1', name: 'Hello' }, 'mapped field uses physical id; unmapped field stays identity')
+  // re-pull: read-back of the unmapped field must equal -> skip (idempotent)
+  const dry2 = await dryRunExternalWrite(baseInput())
+  assert.equal(dry2.counts.skip, 1, 'unmapped field round-trips so re-pull is idempotent')
+  assert.equal(dry2.counts.update, 0)
+}
+
 async function main() {
   const { context, calls, rows } = createContext({
     existing: [
@@ -425,6 +512,8 @@ async function main() {
   })
 
   await testMultitableWriteSourceRidesC6Lifecycle()
+  await testMultitableAmbiguousKeyHolds()
+  await testMultitableUnmappedFieldRoundTrips()
 
   console.log('✓ metasheet-multitable-target-adapter: write-only multitable target tests passed')
 }
