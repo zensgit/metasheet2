@@ -1,10 +1,10 @@
 # 通用对接 S1b(keystone)设计锁定 — 2026-06-18
 
-> 状态:**DESIGN-LOCK 草案(待 owner 评审)**。不授权任何 runtime;首笔真实外部写仍是独立 owner gate。
-> 上游:`generic-integration-design-lock-20260618.md`(总设计锁,S1a→S5 切片序);S1a 合同层已落地(能力面 #2872 + values-free 加固 #2882)。
+> 状态:**已落地(S1b-1 #2887 + S1b-2 #2892 + S1b-3 #2898 完成)**。本文是 S1b 设计期的"高度问题"分析记录;最终落地形态见下注与各节就地更正。首笔真实外部写仍是独立 owner gate。
+> 上游:`generic-integration-design-lock-20260618.md`(总设计锁,S1a→S5 切片序)。
 > 目的:把总设计锁 §6 的 **S1b**(让自有 `metasheet:multitable` target 走 C6 `dry-run→apply` 安全生命周期,证明"安全写能脱离 `data-source:sql-write-gated` 泛化",零外部写)从"一刀"细化为**可评审的设计 + 可机械执行的实现计划**。
 >
-> **更新(2026-06-19)**:§2-§4 的"高度问题"已由 owner 裁定为 **A(双接口)**,并在实现后进一步 **退役了 `targetWriteLifecycle` lookup/apply method surface**(orphaned;S1a-retire PR)。最终形态:planner 经 **target write profile + 注入式 raw write-source**(非 adapter 级 lookup/apply)驱动安全写;values-free 证据由 planner 自身 evidence 产出,**不**再有"adapter 级 evidence 投影"这一层。下方 §3-A/§4 中 `targetWriteLifecycle`/"evidence 投影"措辞以此为准。已落地:S1b-1 seam(#2887)+ S1b-2 multitable raw 写源 + profile(#2892);S1b-3(route/wire smoke)在 retire 后进行。
+> **最终落地(2026-06-19)**:§2-§4 记录的"高度问题"由 owner 裁定为 **A(双接口)**;实现后进一步**退役了** adapter 级 `targetWriteLifecycle`(lookup/apply)方法面(orphaned + 绕过 C6 gate 误用风险;S1a-retire)。**最终形态:planner 经 target write profile + 注入式 raw write-source 驱动安全写,自产 values-free evidence——没有"adapter 级 evidence 投影"这一层。** §2-§4 是当时的分析(历史);其中"lookup/apply = evidence 投影"的措辞已就地标注为被该退役取代。落地:S1b-1 seam(#2887)+ S1b-2 multitable 写源 + profile(#2892)+ S1b-3 route/smoke(#2898)。
 
 ## 0. 为什么 S1b 需要先设计锁(不是直接实现)
 
@@ -40,13 +40,13 @@
 | B 修判定为 revision 制 | `lookup`(values-free)即内部通路,用 `revisionHash` diff 取代字段值 diff 决定 update/skip | 改 `classifyExisting` 语义 | 正确,但语义变了 | 中(幂等语义变更,需独立验证) |
 | C 另起 capability 生命周期 | 自成一套,绕开 SQL planner | 不动 planner,但复制 token/fence/per-row/dead-letter | 正确 | 中-大(**违反总锁 §4"复用不重造"**) |
 
-**推荐 A——双接口拆分**:planner 已验证的判定 + 安全逻辑原样保留,只让写原语**来源**可插拔(adapter 提供原始内向 `lookupByKey/insertRows/updateRows`,而非 host `data-source:sql-write-gated` facade);S1a 的 `targetWriteLifecycle.lookup/apply`(values-free)定位为 **evidence 投影**,run/issue evidence 用它,planner 内部判定用原始内向接口。这样 **S1a 加固保持正确**(它就是 evidence 形态),且最贴合"复用不重造"。
+**推荐 A——双接口拆分**:planner 已验证的判定 + 安全逻辑原样保留,只让写原语**来源**可插拔(adapter 提供原始内向 `lookupByKey/insertRows/updateRows`,而非 host `data-source:sql-write-gated` facade)。【最终更正】当时还设想 S1a 的 `targetWriteLifecycle.lookup/apply` 作为 **evidence 投影**层;**实现后该层证明多余并退役**——planner 直接自产 values-free evidence,无 adapter 级投影层。落地形态 = **profile(选 kind/能力)+ 注入式 raw write-source**,最贴合"复用不重造"。
 
 > **裁决请求**:请 owner 对**高度问题**签字(`lookup/apply` = evidence 投影,A 双接口),而不仅是选 A 这个字母。签字后,下方 S1b-1/2/3 即可机械执行。
 
 ## 4. S1a 加固的归位说明(本锁顺带锁死)
 
-`targetWriteLifecycle.lookup/apply`(#2872 形态 + #2882 values-free)= **evidence 投影**,**不是** planner 内部数据通路。planner 内部继续用原始内向写原语接口(A)。故 #2882 把 result builder 做成 values-free(opaque keyHash/revisionHash、drop free-text error、metadata number\|boolean\|null、errorCode code-only)是**正确且就位**的——它服务于 evidence,不服务于 value-diff 判定。
+【最终更正(S1a-retire 后)】当时把 `targetWriteLifecycle.lookup/apply`(#2872 形态 + #2882 values-free)定位为 **evidence 投影**(planner 内部用原始内向写原语接口,A)。**实现后该方法面证明 orphaned 并已退役**:planner 直接自产 values-free evidence(`publicEvidence`/`publicApplyEvidence` — opaque hash、code-only error、计数、无行值),**不再有 adapter 级 result builder / evidence 投影层**。#2882 的 values-free 加固随该退役一并移除——values-free 改由 planner evidence + dead-letter 保证。最终 = profile + raw write-source。
 
 ## 5. 实现计划(每刀:独立 opt-in + 独立 PR + 子智能体审阅;contracts/seam-first)
 
@@ -58,7 +58,7 @@
   - 触点文件:`lib/external-write-dry-run.cjs`(seam)、可能新增 `lib/target-write-source.cjs`(把"原始内向写源"normalize 成 planner 期望形态)。
   - **不变式**:既有 `data-source:sql-write-gated` 全部测试**原样绿**(零行为漂移),`external-write-dry-run.test.cjs` 不改判定;新增"capability 写源"路径用一个 **fake/in-memory 写源**单测覆盖 add/update/skip/held + token/fence/per-row/dead-letter,证明安全生命周期脱离 sql-write-gated 仍成立。
   - 风险:中(动安全代码,但**加法式**——新增可插拔来源,不重写判定)。
-- **S1b-2(multitable 写源)**:让自有 `metasheet:multitable` target 提供 §3-A 的**原始内向写源**(对自有 sheet/record 的 lookup-by-key + insert + update),并实现 `targetWriteLifecycle.lookup/apply`(values-free)作为 evidence 投影。
+- **S1b-2(multitable 写源)**:让自有 `metasheet:multitable` target 提供 §3-A 的**原始内向写源**(对自有 sheet/record 的 lookup-by-key + insert + update)+ 一个 `MULTITABLE_WRITE_PROFILE`(own-sheet 安全态,fail-closed)。**不**实现 adapter 级 `targetWriteLifecycle`(已退役)。【已落地 #2892】
   - 触点:`lib/adapters/metasheet-multitable-target-adapter.cjs`(现仅 5-method;新增写源 + 能力面)、其单测。
   - **不变式**:写仅落自有 sheet(零外部系统写);凭据/边界不变。
 - **S1b-3(sandbox pipeline + route + smoke)**:配一条 sandbox pipeline(source→multitable target),走 C6 `dry-run→apply` 走通用写源路径;wire-vs-fixture 集成测试断言真实 route body/response 的 per-row 结果与 evidence values-free。
@@ -77,7 +77,7 @@
 ## 7. 验收(S1b 各刀必过)
 
 - S1b-1:既有 sql-write-gated 测试全绿(零漂移)+ fake 写源新路径覆盖 add/update/skip/held/token/fence/per-row/dead-letter。
-- S1b-2:multitable 写源单测 + `targetWriteLifecycle` evidence values-free(逐 vector canary,沿用 S1a §6.1 验收 #3)。
+- S1b-2:multitable 写源 + profile 单测(非身份 fieldIdMap 往返、re-pull 幂等、重复键→held);values-free 由 C6 planner evidence 保证(无 adapter 级 targetWriteLifecycle)。
 - S1b-3:sandbox dry-run→apply→re-pull 幂等的 wire-vs-fixture 集成测试,断言真实 route body/response;evidence values-free;零外部写。
 
 ## 8. 切片不做什么(防 scope 漂移)
