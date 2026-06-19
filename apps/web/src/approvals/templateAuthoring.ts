@@ -62,7 +62,11 @@ export interface ApprovalStepDraft {
   fieldId: string
   // How many management levels the `continuous_managers` source resolves (level 1 =
   // direct manager). Carried for every step but only meaningful when
-  // `sourceKind === 'continuous_managers'`; the backend re-validates `[1, 10]`.
+  // `sourceKind === 'continuous_managers'`. The backend re-validates against its
+  // configurable cap `[1, MAX_MANAGER_CHAIN_LEVELS]` (default 10, env
+  // `APPROVAL_MANAGER_CHAIN_MAX_LEVELS`, hard ceiling 50). The authoring UI (v1)
+  // intentionally fixes the input max at 10; reading the server cap into the UI so
+  // ops can configure more than 10 is a follow-up (not wired in v1).
   levels: number
   approvalMode: ApprovalMode
   emptyAssigneePolicy: EmptyAssigneePolicy
