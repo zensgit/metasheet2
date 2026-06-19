@@ -64,9 +64,10 @@
   - [x] Real-DB summary subset tests (#2841).
   - [x] Real-DB export and aggregate/dashboard tests (#2890 — export-xlsx parse + view-aggregate total).
   - [x] Real-DB link-picker test (#2890 link-options) + search/filter deny-before-filter (#2890).
-  - [!] Real-DB **trash list/restore** — DEFERRED, owner-gated. `loadRuleDeniedRecordIds` evaluates live
-    `meta_records` only (code-acknowledged docstring); extending rule-deny to trashed records + gating
-    restore is new access-control on a flag-off feature → explicit owner decision (build vs record-as-deferral). See §5.
+  - [x] Real-DB **trash list/restore** — BUILT (选 Build, #2900). `loadRuleDeniedTrashRecordIds` evaluates
+    rules against `meta_records_trash` → rule-denied deleted records are hidden from the trash list and restore
+    is refused (403) for a currently-rule-denied record. Real-DB golden green in `test (20.x)`. (Trash `total`
+    COUNT not deny-adjusted — pre-existing, shared with grant-deny; records excluded, count is a minor follow-up.)
   - [x] CI allowlist confirmation — `plugin-tests.yml:194` registers enforce-realdb (verified by reading the workflow, not inferred from green jobs); the goldens ran green in `test (20.x)` on #2890.
 
 - [x] 2b-S3 Authoring UI (#2847, + text-type operator allowlist fix).
