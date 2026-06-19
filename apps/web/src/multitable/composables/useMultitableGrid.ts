@@ -39,6 +39,19 @@ export interface FilterRule {
   value?: unknown
 }
 
+// 2a nested filter groups (mirrors the backend recursive AND/OR tree). A node is EITHER a leaf condition
+// OR a (sub)group with its own conjunction. A flat filter is the degenerate case (root group of leaves).
+export interface FilterGroup {
+  conjunction: FilterConjunction
+  conditions: FilterNode[]
+}
+export type FilterNode = FilterRule | FilterGroup
+export function isFilterGroup(node: FilterNode): node is FilterGroup {
+  return Array.isArray((node as FilterGroup).conditions)
+}
+// Authoring depth cap — mirror the backend MAX_FILTER_DEPTH so the UI never builds a filter the server 400s.
+export const MAX_FILTER_DEPTH = 5
+
 export interface CellEdit {
   recordId: string
   fieldId: string
@@ -86,6 +99,56 @@ export function buildFilterInfo(
     conjunction,
     conditions: rules.map((r) => ({ fieldId: r.fieldId, operator: r.operator, value: r.value })),
   }
+}
+
+// Recursively serialize one filter node (faithful + ORDER-preserving — the round-trip relies on it).
+function serializeFilterNode(node: FilterNode): Record<string, unknown> {
+  if (isFilterGroup(node)) {
+    return { conjunction: node.conjunction, conditions: node.conditions.map(serializeFilterNode) }
+  }
+  return { fieldId: node.fieldId, operator: node.operator, value: node.value }
+}
+
+// Serialize a (possibly nested) root child list into a filterInfo payload. The nesting-aware counterpart
+// of buildFilterInfo; when `nodes` are all leaves the output is byte-identical to buildFilterInfo.
+export function buildFilterInfoFromNodes(
+  nodes: FilterNode[],
+  conjunction: FilterConjunction = 'and',
+): { conjunction: FilterConjunction; conditions: Record<string, unknown>[] } | undefined {
+  if (!nodes.length) return undefined
+  return { conjunction, conditions: nodes.map(serializeFilterNode) }
+}
+
+// Recursively parse one raw filter node from a stored filterInfo. Depth-bounded (mirrors the backend cap);
+// drops malformed leaves, empty groups, ambiguous (group+leaf) nodes, and groups nested past the cap.
+function parseFilterNode(raw: unknown, depth: number): FilterNode | null {
+  if (!raw || typeof raw !== 'object') return null
+  const obj = raw as Record<string, unknown>
+  if (Array.isArray(obj.conditions)) {
+    if (typeof obj.fieldId === 'string' || typeof obj.operator === 'string') return null // ambiguous shape
+    if (depth >= MAX_FILTER_DEPTH) return null // too deep → drop (matches server cap)
+    const children = (obj.conditions as unknown[])
+      .map((c) => parseFilterNode(c, depth + 1))
+      .filter((c): c is FilterNode => c !== null)
+    if (!children.length) return null
+    return { conjunction: obj.conjunction === 'or' ? 'or' : 'and', conditions: children }
+  }
+  const fieldId = String(obj.fieldId ?? '')
+  if (!fieldId) return null
+  return { fieldId, operator: String(obj.operator ?? 'is'), value: obj.value }
+}
+
+// Parse a stored filterInfo into the root conjunction + ordered child nodes (leaves and/or groups).
+// Returns null when there is no usable filter. Symmetric with buildFilterInfoFromNodes (round-trips).
+export function parseFilterTree(filterInfo: unknown): { conjunction: FilterConjunction; nodes: FilterNode[] } | null {
+  if (!filterInfo || typeof filterInfo !== 'object') return null
+  const obj = filterInfo as Record<string, unknown>
+  if (!Array.isArray(obj.conditions)) return null
+  const nodes = (obj.conditions as unknown[])
+    .map((c) => parseFilterNode(c, 1))
+    .filter((c): c is FilterNode => c !== null)
+  if (!nodes.length) return null
+  return { conjunction: obj.conjunction === 'or' ? 'or' : 'and', nodes }
 }
 
 // --- Operator map by field type ---
@@ -433,6 +496,12 @@ export function useMultitableGrid(opts: {
   // Filter
   const filterRules = ref<FilterRule[]>([])
   const filterConjunction = ref<FilterConjunction>('and')
+  // 2a nested groups: when a loaded view carries nested subgroups, the flat `filterRules` (top-level leaves)
+  // cannot represent them, so the FULL ordered tree is preserved here and serialized faithfully on save —
+  // a view authored via API/import round-trips without silent flattening. null = pure-flat mode. Any flat
+  // edit (add/update/remove/clear) clears this: editing via the flat toolbar commits to the flat shape.
+  // The recursive authoring UI (PR-2b) will make this the editable source of truth.
+  const nestedFilterNodes = ref<FilterNode[] | null>(null)
   const sortFilterDirty = ref(false)
 
   // GroupBy — ordered 1..MAX_GROUP_LEVELS group fields (nested / multi-level grouping). The array is the
@@ -535,14 +604,15 @@ export function useMultitableGrid(opts: {
         direction: r.desc ? 'desc' as const : 'asc' as const,
       })).filter((r) => r.fieldId)
     }
-    // Parse server filter
+    // Parse server filter (nesting-aware). The flat `filterRules` mirror the top-level LEAF conditions for
+    // the current flat toolbar; if the stored filter has any subgroup, the full ordered tree is kept in
+    // `nestedFilterNodes` so save round-trips faithfully (the old flat parse silently dropped group nodes —
+    // a group has no fieldId, so `.filter(r => r.fieldId)` discarded it and the next save lost it).
     if (view.filterInfo && Array.isArray((view.filterInfo as any).conditions)) {
-      filterConjunction.value = (view.filterInfo as any).conjunction === 'or' ? 'or' : 'and'
-      filterRules.value = ((view.filterInfo as any).conditions as any[]).map((c: any) => ({
-        fieldId: String(c.fieldId ?? ''),
-        operator: String(c.operator ?? 'is'),
-        value: c.value,
-      })).filter((r) => r.fieldId)
+      const tree = parseFilterTree(view.filterInfo)
+      filterConjunction.value = tree?.conjunction ?? 'and'
+      filterRules.value = tree ? tree.nodes.filter((n): n is FilterRule => !isFilterGroup(n)) : []
+      nestedFilterNodes.value = tree && tree.nodes.some(isFilterGroup) ? tree.nodes : null
     }
     if (view.hiddenFieldIds) hiddenFieldIds.value = [...view.hiddenFieldIds]
     // Dual-read for back-compat: prefer the NEW ordered groupInfo.fieldIds; fall back to the legacy
@@ -561,7 +631,9 @@ export function useMultitableGrid(opts: {
     try {
       await client.updateView(viewId, {
         sortInfo: buildSortInfo(sortRules.value) as Record<string, unknown> | undefined,
-        filterInfo: buildFilterInfo(filterRules.value, filterConjunction.value) as Record<string, unknown> | undefined,
+        filterInfo: (nestedFilterNodes.value
+          ? buildFilterInfoFromNodes(nestedFilterNodes.value, filterConjunction.value)
+          : buildFilterInfo(filterRules.value, filterConjunction.value)) as Record<string, unknown> | undefined,
       })
       sortFilterDirty.value = false
     } catch {
@@ -650,26 +722,33 @@ export function useMultitableGrid(opts: {
 
   // --- Filter ---
 
+  // Editing via the flat toolbar commits to the flat shape: drop any preserved nested tree so the flat
+  // `filterRules` become the single source of truth on the next save (no stale nested/flat divergence).
+  // PR-2b's recursive authoring UI will replace these flat ops with tree-aware edits.
   function addFilterRule(rule: FilterRule) {
     filterRules.value.push(rule)
+    nestedFilterNodes.value = null
     sortFilterDirty.value = true
   }
 
   function updateFilterRule(index: number, rule: FilterRule) {
     if (index >= 0 && index < filterRules.value.length) {
       filterRules.value[index] = rule
+      nestedFilterNodes.value = null
       sortFilterDirty.value = true
     }
   }
 
   function removeFilterRule(index: number) {
     filterRules.value.splice(index, 1)
+    nestedFilterNodes.value = null
     sortFilterDirty.value = true
   }
 
   function clearFilters() {
     filterRules.value = []
     filterConjunction.value = 'and'
+    nestedFilterNodes.value = null
     sortFilterDirty.value = true
   }
 
@@ -1098,14 +1177,14 @@ export function useMultitableGrid(opts: {
   return {
     // State
     fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
-    sortRules, filterRules, filterConjunction, sortFilterDirty,
+    sortRules, filterRules, filterConjunction, nestedFilterNodes, sortFilterDirty,
     groupFieldId, groupFieldIds, groupField, groupFields,
     editHistory, historyIndex, canUndo, canRedo,
     searchQuery,
     // Computed
     currentPage, totalPages,
     // Methods
-    loadViewData, reloadCurrentPage, goToPage,
+    loadViewData, syncFromView, reloadCurrentPage, goToPage,
     toggleFieldVisibility,
     addSortRule, removeSortRule,
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
