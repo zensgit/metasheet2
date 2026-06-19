@@ -16,7 +16,7 @@
 
 | Track | 已完成 (on main) | gated 剩余 | 权威 ledger |
 |---|---|---|---|
-| **多维表 (multitable)** | 2a 全标量 CRDT · 2b 条件读权限 S1–S4 · 2c 人员目录 S2–S4 · #18 行级读拒 | roadmap pool(导出/required-if/仪表盘联动/网格虚拟化 reopen-only/AI rings/原生同步表/FOL 深链/A6 余项) | `multitable-gated-remainder-development-plan/todo-20260618.md` |
+| **多维表 (multitable)** | 2a 全标量 CRDT · 2b 条件读权限 S1–S4(读-deny 8/9 surface)· 2c 人员目录 S2–S4 · #18 行级读拒 | **2b trash/restore rule-deny 继承(owner-gated Build/Defer)** · roadmap pool(导出/required-if/仪表盘联动/网格虚拟化 reopen-only/AI rings/原生同步表/FOL 深链/A6 余项) | `multitable-gated-remainder-development-plan/todo-20260618.md` |
 | **数据库/系统对接 (data-source)** | C2–C6 · Release · S1a(合同层;orphaned 面已由 #2894 retire) | **S1b(impl 进行中 #2887/#2892,S1b-3 续接)** · S2 · S3 · S4 · S5 · 首笔生产外部写 | `data-source-system-integration-plan-and-verification-20260618.md` |
 | **考勤 H2 (attendance core)** | 一天多班次 · 排班发布/草稿 · 临时班次 · 加班三段 · 自动对班 A2 · C5 通知 · **排班合规引擎(block-on-save runtime)** · **打卡策略组** | §1 OUT 红线(算薪/防作弊/AI/人脸/原生 app/插件市场,🚫) · H3 高级(调度/换班/多门店,gated;3a 可建) | `attendance-dingtalk-benchmark-target-and-tracker-20260601.md` |
 | **考勤年假引擎 (annual-leave)** | 引擎 L0–L5c(含 L5a/b/c admin)+ 员工自助 surfaces | **L6 staging smoke(owner-run gate,非自主构建)** | `attendance-annual-leave-admin-operations-dev-plan-20260617.md` |
@@ -25,7 +25,7 @@
 
 ### 2.1 多维表 (multitable) — 全部完成
 - **2a 实时标量 CRDT(全标量集)**:select/date **#2832**、duration **#2838**、dateTime **#2849**(canonical-UTC-ISO 不变量);number/currency/percent/boolean/rating/multiSelect 此前已落。无标量类型仍是 REST-only。
-- **2b #18 条件读权限规则 S1–S4**:evaluator **#2836** · enforcement(接入 #18 seam,flag-off inert)**#2841** · authoring UI/API **#2847** · content-keyed parse cache(staleness-free)**#2861**。
+- **2b #18 条件读权限规则 S1–S4**:evaluator **#2836** · enforcement(接入 #18 seam,flag-off inert)**#2841** · authoring UI/API **#2847** · content-keyed parse cache(staleness-free)**#2861**。**读-deny 覆盖 8/9 read surfaces**(list/view/search-filter · single-record · summary · aggregate/dashboard · export · link-picker;real-DB goldens 由 **#2890** 补齐,green in `test (20.x)`)。**第 9 个 surface —— trash list/restore —— 是 deliberate deferral,不是缺陷**:`loadRuleDeniedRecordIds` 只评估 live `meta_records`,trashed 记录不在该 live 路径里(code-acknowledged),故"把条件 rule-deny 完全继承到 trash/restore"是**新的 access-control 行为 = 显式 owner-gated Build-vs-Defer 决策**(见 §3.3,及权威 `multitable-development-completion-verification-20260618.md` L14–16/26 + TODO §5)。**恢复(restore)功能本身已可用、已完成**;待决的只是这条安全增强。(注:`plugins/plugin-intelligent-restore` 是旧的/示例式 plugin 壳,**不是**已交付的主线恢复功能,不能据它判断完成度。)
 - **2c 人员字段 → 组织成员目录 S2–S4**:source = B 设计锁 **#2860** · resolver **#2866** · `canEditRecord`-gated directory endpoint **#2867** · `MetaPersonPicker` 接线 **#2869** · S4 inactive/historical 显示线索(read-only cell/summary cue)**#2874**;fail-closed 写校验 **#2833 + #2854**。
 - **closeout/ledger 一致性**:**#2878**(2c COMPLETE closeout)· **#2881**(P1/P2/P3 reconciliation + #2877 carve-out)· **#2883**(grounding-line 2c)· **#2885**(`MetaPersonPicker` 注释对齐)。**#2877**(2c-S4 picker-chip)= **CLOSED not-landed**(S4 口径由 #2874 cell/summary cue 满足;picker chip 为不同 surface 的补充打磨,非正确性缺口)。
 
@@ -67,8 +67,11 @@
 - **H3 钉钉级高级**(调度/换班/多门店/设备围栏/人脸/算薪)— gated,不一口吞;**3a 可建**(多门店挂部门,约 1–2 周)单点 opt-in;3b 不自研。
 - **§1 OUT 红线**(算薪 SaaS/防作弊/AI/人脸/原生 app/插件市场)— 🚫 明确不做。
 
-### 3.3 多维表 roadmap pool(reopen-only / 未来候选)
-服务端全量导出 · 表单 `required-if` · 仪表盘联动筛选/下钻 · 仪表盘缺失日期桶/系列数上限 · **网格虚拟化(D2 verdict 判定不需要,reopen-only)** · AI rings 进阶 · 原生同步/外源表 · FOL 深链(多跳/公式套公式/物化/Yjs 重算/automation 触发)· automation A6 余项。各为独立 gated opt-in。
+### 3.3 多维表 — 待决 owner 决策 + roadmap pool
+
+- **【安全决策 · 非 reopen-only】2b 条件读权限 → trash list/restore 继承(owner-gated Build vs Defer)**:条件 rule-deny 现覆盖 8/9 read surfaces;**trash list/restore 未继承**(`loadRuleDeniedRecordIds` 只评估 live `meta_records`,trashed 记录不在该路径)。**Build** = 关闭「被 rule 隐藏的记录仍可能经 trash 可见/可恢复」这条 read-deny 旁路 —— 需先出 design-lock(rule 如何对 trashed 记录求值:它们有 stored 字段值但无 live `meta_records` 行);**Defer** = 记录为已知、bounded、被接受的 gap(仅当 #18 phase-2 规则开启 ∧ 记录已 trash ∧ 用户有 trash 访问 三者同时成立才暴露)。**本会话不自建,等 owner 明确选 Build 或 Defer。**
+
+**roadmap pool(reopen-only / 未来候选):** 服务端全量导出 · 表单 `required-if` · 仪表盘联动筛选/下钻 · 仪表盘缺失日期桶/系列数上限 · **网格虚拟化(D2 verdict 判定不需要,reopen-only)** · AI rings 进阶 · 原生同步/外源表 · FOL 深链(多跳/公式套公式/物化/Yjs 重算/automation 触发)· automation A6 余项。各为独立 gated opt-in。
 
 ## 4. 本轮 ledger hygiene(已做,非 gated)
 
