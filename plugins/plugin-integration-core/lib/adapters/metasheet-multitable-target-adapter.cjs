@@ -428,7 +428,166 @@ function createMetaSheetMultitableTargetAdapterFactory({ context } = {}) {
   return ({ system }) => createMetaSheetMultitableTargetAdapter({ system, context })
 }
 
+// ---------------------------------------------------------------------------
+// S1b-2: raw inward write-source + profile for the C6 safe-write lifecycle
+//
+// The C6 planner (external-write-dry-run.cjs) drives the FULL dry-run -> apply ->
+// token -> revision-fence -> per-row -> dead-letter lifecycle and consumes a raw
+// write-source (test/lookupByKey/insertRows/updateRows) + a target-write profile
+// (the S1b-1 seam). This lets the OWN metasheet:multitable target ride the SAME
+// safe lifecycle as data-source:sql-write-gated, writing ONLY to own plugin-scoped
+// sheets (zero external write).
+//
+// NOTE (design follow-up): this write-source + profile supersedes S1a's adapter-level
+// `targetWriteLifecycle` method surface for the write path — the S1b-1 seam consumes
+// the profile + raw source, never `targetWriteLifecycle`, so that S1a surface is now
+// orphaned. See the S1b-2 PR body / design-lock follow-up (owner to ratify retire vs
+// reposition). This file intentionally does NOT expose `targetWriteLifecycle`: a
+// write-performing apply outside the C6 lifecycle would be an ungated bypass.
+// ---------------------------------------------------------------------------
+const MULTITABLE_WRITE_TARGET_KIND = 'metasheet:multitable'
+
+const MULTITABLE_WRITE_PROFILE = {
+  kind: MULTITABLE_WRITE_TARGET_KIND,
+  normalizeCapabilityState(result) {
+    const state = result && result.capabilityState
+    if (
+      !state || typeof state !== 'object' ||
+      typeof state.ownSheetTarget !== 'boolean' ||
+      typeof state.externalWrite !== 'boolean'
+    ) {
+      throw new AdapterValidationError('metasheet:multitable write target capability state is unavailable', {
+        field: 'capabilityState',
+      })
+    }
+    return {
+      success: result.success === true,
+      ownSheetTarget: state.ownSheetTarget,
+      externalWrite: state.externalWrite,
+    }
+  },
+  assertSafeCapabilityState(state) {
+    // Real safety property (not a rubber stamp): writes are scoped to OWN plugin sheets and
+    // never reach an external system. A misconfigured target fails closed.
+    if (state.ownSheetTarget !== true || state.externalWrite !== false) {
+      throw new AdapterValidationError('metasheet:multitable write target is not own-sheet scoped', {
+        field: 'capabilityState',
+      })
+    }
+  },
+}
+
+function invertFieldMap(logicalToPhysical) {
+  const out = {}
+  for (const [logical, physical] of Object.entries(logicalToPhysical || {})) out[physical] = logical
+  return out
+}
+
+function mapRecordFieldsToLogical(data, physicalToLogical) {
+  const mapped = {}
+  for (const [field, value] of Object.entries(data || {})) {
+    mapped[physicalToLogical[field] || field] = value
+  }
+  return mapped
+}
+
+// Builds the raw inward write-source the C6 planner consumes (same shape as the host
+// context.api.dataSourceWrites facade), backed by context.api.multitable.records over our
+// own plugin sheets. Field names are mapped logical<->physical so the planner's value-diff
+// classifier (logical) and the record store (physical) agree.
+function createMetaSheetMultitableWriteSource({ system, context } = {}) {
+  const normalizedSystem = normalizeExternalSystemForAdapter(system)
+  const objects = normalizeObjects(normalizedSystem.config)
+  const fieldMapCache = new Map()
+
+  async function fieldMapForObject(objectConfig) {
+    if (fieldMapCache.has(objectConfig.objectId)) return fieldMapCache.get(objectConfig.objectId)
+    const resolved = {
+      ...objectConfig.fieldIdMap,
+      ...await resolveProvisionedFieldIdMap(context, objectConfig),
+    }
+    fieldMapCache.set(objectConfig.objectId, resolved)
+    return resolved
+  }
+
+  return {
+    async test() {
+      const recordsApi = context && context.api && context.api.multitable && context.api.multitable.records
+      const ready = Boolean(
+        recordsApi &&
+        typeof recordsApi.createRecord === 'function' &&
+        typeof recordsApi.queryRecords === 'function' &&
+        typeof recordsApi.patchRecord === 'function' &&
+        Object.keys(objects).length > 0,
+      )
+      // fail closed: a missing/partial records API or no configured objects -> success:false
+      // -> the planner raises C6_WRITE_TARGET_TEST_FAILED before any write.
+      return {
+        success: ready,
+        capabilityState: { ownSheetTarget: true, externalWrite: false },
+      }
+    },
+    async lookupByKey(dataSourceId, object, key, policy, principal) {
+      const recordsApi = getRecordsApi(context)
+      const objectConfig = getObjectConfig(objects, object)
+      const logicalToPhysical = await fieldMapForObject(objectConfig)
+      const physicalToLogical = invertFieldMap(logicalToPhysical)
+      const physicalKeyData = mapRecordFieldsForWrite(key || {}, logicalToPhysical)
+      const physicalKeyFields = Object.keys(key || {}).map((field) => mapLogicalFieldName(field, logicalToPhysical))
+      if (physicalKeyFields.length === 0 || typeof recordsApi.queryRecords !== 'function') {
+        return { data: [], metadata: {} }
+      }
+      // IMPORTANT: fetch >1 (NOT the upsert helper's limit:1 findExistingRecord). MetaSheet
+      // sheets do NOT enforce uniqueness on a logical key, so duplicate-key rows must surface
+      // as multiple rows — that is what lets the C6 planner's ambiguity guard
+      // (existingRows.length > 1 -> 'held'/ambiguous_target_key) fire instead of silently
+      // updating one. Mirrors the SQL facade's deliberate limit:2.
+      const filters = {}
+      for (const field of physicalKeyFields) filters[field] = physicalKeyData[field]
+      const matches = await recordsApi.queryRecords({ sheetId: objectConfig.sheetId, filters, limit: 2, offset: 0 })
+      const list = Array.isArray(matches) ? matches : []
+      // map each stored physical record back to logical so the planner's writableFields
+      // value-diff compares like-for-like.
+      return { data: list.map((record) => mapRecordFieldsToLogical(record.data || {}, physicalToLogical)), metadata: {} }
+    },
+    async insertRows(dataSourceId, object, rows, policy, principal) {
+      const recordsApi = getRecordsApi(context)
+      const objectConfig = getObjectConfig(objects, object)
+      const logicalToPhysical = await fieldMapForObject(objectConfig)
+      const created = []
+      for (const row of rows) {
+        const data = mapRecordFieldsForWrite(projectRecordForWrite(row, objectConfig), logicalToPhysical)
+        created.push(await recordsApi.createRecord({ sheetId: objectConfig.sheetId, data }))
+      }
+      return { data: created, metadata: {} }
+    },
+    async updateRows(dataSourceId, object, rows, policy, principal) {
+      const recordsApi = getRecordsApi(context)
+      const objectConfig = getObjectConfig(objects, object)
+      const logicalToPhysical = await fieldMapForObject(objectConfig)
+      const keyFields = policy && Array.isArray(policy.keyFields) && policy.keyFields.length > 0
+        ? policy.keyFields
+        : objectConfig.keyFields
+      let rowCount = 0
+      for (const row of rows) {
+        const physicalRow = mapRecordFieldsForWrite(projectRecordForWrite(row, objectConfig), logicalToPhysical)
+        const physicalKeyFields = keyFields.map((field) => mapLogicalFieldName(field, logicalToPhysical))
+        const existing = await findExistingRecord(recordsApi, objectConfig, physicalRow, physicalKeyFields)
+        if (!existing || !existing.id) {
+          throw new AdapterValidationError('metasheet:multitable update target row not found for key', { object })
+        }
+        await recordsApi.patchRecord({ sheetId: objectConfig.sheetId, recordId: existing.id, changes: physicalRow })
+        rowCount += 1
+      }
+      return { rowCount, results: [] }
+    },
+  }
+}
+
 module.exports = {
+  MULTITABLE_WRITE_TARGET_KIND,
+  MULTITABLE_WRITE_PROFILE,
+  createMetaSheetMultitableWriteSource,
   createMetaSheetMultitableTargetAdapter,
   createMetaSheetMultitableTargetAdapterFactory,
   __internals: {
