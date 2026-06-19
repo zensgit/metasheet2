@@ -9,10 +9,12 @@ const migrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migration
 const runningUniqueMigrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '058_integration_runs_running_unique.sql')
 const runHistoryIndexMigrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '059_integration_runs_history_index.sql')
 const runProvenanceMigrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '060_integration_runs_provenance.sql')
+const templatesMigrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '061_create_integration_templates.sql')
 const sql = fs.readFileSync(migrationPath, 'utf8')
 const runningUniqueSql = fs.readFileSync(runningUniqueMigrationPath, 'utf8')
 const runHistoryIndexSql = fs.readFileSync(runHistoryIndexMigrationPath, 'utf8')
 const runProvenanceSql = fs.readFileSync(runProvenanceMigrationPath, 'utf8')
+const templatesSql = fs.readFileSync(templatesMigrationPath, 'utf8')
 
 const expectedTables = [
   'integration_external_systems',
@@ -195,7 +197,28 @@ function main() {
     .map((match) => match[1])
   assertOnlyIntegrationTableRefs('foreign key', foreignTableRefs)
 
-  console.log('✓ migration-sql: 057/058/059/060 integration migration structure passed')
+  // --- 061: integration_templates (S3-1 first-class template object; contract + storage) ---
+  const templatesBlockMatch = templatesSql.match(/CREATE TABLE IF NOT EXISTS integration_templates \(([\s\S]*?)\n\);/m)
+  assert.ok(templatesBlockMatch, '061 creates integration_templates table')
+  const templatesBlock = templatesBlockMatch[1]
+  assert.match(templatesBlock, /\bid\s+TEXT PRIMARY KEY\b/, '061 integration_templates has TEXT primary key id')
+  assert.match(templatesBlock, /\btenant_id\s+TEXT NOT NULL\b/, '061 integration_templates has tenant_id scope')
+  assert.match(templatesBlock, /\bworkspace_id\s+TEXT\b/, '061 integration_templates has workspace_id scope')
+  assert.match(templatesBlock, /\bversion\s+INTEGER NOT NULL DEFAULT 1\b/, '061 integration_templates has a version column (snapshot semantics)')
+  assert.match(templatesBlock, /\btarget_kind\s+TEXT NOT NULL\b/, '061 integration_templates references a target kind')
+  assert.match(
+    templatesSql,
+    /CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_templates_scope_name\s+ON integration_templates \(tenant_id, COALESCE\(workspace_id, ''\), name\);/m,
+    '061 templates unique index treats NULL workspace_id deterministically',
+  )
+  assert.doesNotMatch(templatesSql, /\bDROP\s+(?:TABLE|INDEX)\b/i, '061 migration must not drop objects')
+  const templatesDdlRefs = Array.from(templatesSql.matchAll(/\b(?:CREATE|ALTER|DROP|TRUNCATE)\s+TABLE(?:\s+IF\s+(?:NOT\s+)?EXISTS)?\s+([a-zA-Z_][a-zA-Z0-9_]*)/gi))
+    .map((match) => match[1]).filter((table) => table !== 'IF')
+  const templatesIndexRefs = Array.from(templatesSql.matchAll(/\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+[a-zA-Z_][a-zA-Z0-9_]*[\s\S]*?\bON\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/gi))
+    .map((match) => match[1])
+  assertOnlyIntegrationTableRefs('061 DDL/index', templatesDdlRefs.concat(templatesIndexRefs))
+
+  console.log('✓ migration-sql: 057/058/059/060/061 integration migration structure passed')
 }
 
 main()

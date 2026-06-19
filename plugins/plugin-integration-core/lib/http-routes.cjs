@@ -42,6 +42,10 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/target/readiness', 'stockPreparationTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
   ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
+  ['GET', '/api/integration/templates', 'templatesList'],
+  ['POST', '/api/integration/templates', 'templatesUpsert'],
+  ['GET', '/api/integration/templates/:id', 'templatesGet'],
+  ['DELETE', '/api/integration/templates/:id', 'templatesDelete'],
   ['POST', '/api/integration/templates/preview', 'templatesPreview'],
   ['POST', '/api/integration/templates/derive', 'templatesDerive'],
   ['GET', '/api/integration/staging/descriptors', 'stagingDescriptors'],
@@ -1174,6 +1178,7 @@ function createHandlers(services, options = {}) {
   const runner = requireService('pipelineRunner', ['runPipeline'])
   const deadLetters = requireService('deadLetterStore', ['listDeadLetters'])
   const stagingInstaller = requireService('stagingInstaller', ['installStaging', 'listStagingDescriptors'])
+  const templateRegistry = requireService('templateRegistry', ['upsertTemplate', 'getTemplate', 'listTemplates', 'deleteTemplate'])
   const context = options.context || {}
   const configuredTableActions = context && context.config
     ? (context.config.stockPreparationTableActions || context.config.tableActions)
@@ -1387,6 +1392,42 @@ function createHandlers(services, options = {}) {
       return sendOk(res, await pipelineRegistry.getPipeline(scopedInput(req, {
         id: requestParams(req).id,
         includeFieldMappings,
+      })))
+    },
+
+    // S3-1: first-class integration-template object CRUD (declarative; no instantiation).
+    async templatesList(req, res) {
+      requireAccess(req, 'read')
+      const query = requestQuery(req)
+      return sendOk(res, await templateRegistry.listTemplates(scopedInput(req, {
+        status: query.status,
+        targetKind: query.targetKind,
+        limit: asListLimit(query.limit),
+        offset: asListOffset(query.offset),
+      })))
+    },
+
+    async templatesUpsert(req, res) {
+      requireAccess(req, 'write')
+      const user = getUser(req)
+      const body = requestBody(req)
+      return sendOk(res, await templateRegistry.upsertTemplate(scopedInput(req, {
+        ...body,
+        createdBy: user && (user.id || user.email),
+      })), 201)
+    },
+
+    async templatesGet(req, res) {
+      requireAccess(req, 'read')
+      return sendOk(res, await templateRegistry.getTemplate(scopedInput(req, {
+        id: requestParams(req).id,
+      })))
+    },
+
+    async templatesDelete(req, res) {
+      requireAccess(req, 'write')
+      return sendOk(res, await templateRegistry.deleteTemplate(scopedInput(req, {
+        id: requestParams(req).id,
       })))
     },
 

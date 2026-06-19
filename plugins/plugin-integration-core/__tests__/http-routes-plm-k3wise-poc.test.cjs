@@ -502,6 +502,12 @@ function createHarness() {
       pipelineRunner,
       deadLetterStore,
       stagingInstaller,
+      templateRegistry: {
+        async upsertTemplate() { return {} },
+        async getTemplate() { return {} },
+        async listTemplates() { return [] },
+        async deleteTemplate() { return { deleted: 0 } },
+      },
     },
     logger: {
       warn() {},
