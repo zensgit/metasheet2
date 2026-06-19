@@ -112,12 +112,12 @@
 
 | 顺序 | 项 | 当前状态 | 完成口径 |
 |---|---|---|---|
-| L0 | latent config + `deductLeaveBalance` 抽取 | ⬜ | `annualLeavePolicy` 默认全关 + 抽参数化 deduct helper（`deductionBasis`），**comp_time C3 真 DB 逐字节不变** |
-| L1 | expiry `source_type` 泛化 | ⬜ | 按 `leave_type_code` 派生（`annual_leave_expiry`），**`comp_time_expiry` 不回归**（重跑 C4） |
-| L2 | accrual snapshot 引擎 + run provenance + manual adjustment | ⬜ | eligibility gate（连续满 12 个月，否则 `NOT_ELIGIBLE_UNDER_ONE_YEAR`）+ 累计工龄阶梯 + 满足条件新进员工首年折算 + `attendance_leave_accrual_runs(_run_items id PK)` + 缺工龄字段/时区 skip 可见 + **手工调整动 lot 非 event-only** |
-| L3 | 年假审批扣减 | ⬜ | final approval gated `annual` → `deductLeaveBalance(standard_day)`，不足 block 不预支 |
-| L4 | 结转 / 年末过期 | ⬜ | org 时区年末 `expires_at` + `annual_leave_expiry`，重复 tick 不重复 |
-| L5 | admin UI | ⬜ | 余额 / policy 配置 / 手工调整 / skip reasons |
+| L0 | latent config + `deductLeaveBalance` 抽取 | ✅ #2627 | `annualLeavePolicy` 默认全关 + 抽参数化 deduct helper（`deductionBasis`），**comp_time C3 真 DB 逐字节不变** |
+| L1 | expiry `source_type` 泛化 | ✅ #2633 | 按 `leave_type_code` 派生（`annual_leave_expiry`），**`comp_time_expiry` 不回归**（重跑 C4） |
+| L2 | accrual snapshot 引擎 + run provenance + manual adjustment | ✅ #2638/#2678/#2687 | eligibility gate（连续满 12 个月，否则 `NOT_ELIGIBLE_UNDER_ONE_YEAR`）+ 累计工龄阶梯 + 满足条件新进员工首年折算 + `attendance_leave_accrual_runs(_run_items id PK)` + 缺工龄字段/时区 skip 可见 + **手工调整动 lot 非 event-only** |
+| L3 | 年假审批扣减 | ✅ #2713 | final approval gated `annual` → `deductLeaveBalance(standard_day)`，不足 block 不预支 |
+| L4 | 结转 / 年末过期 | ✅ #2717/#2718 | org 时区年末 `expires_at` + `annual_leave_expiry`，重复 tick 不重复 |
+| L5 | admin UI | ✅ #2779/#2782/#2830 | 余额 / policy 配置 / 手工调整 / skip reasons |
 | L6 | staging smoke | ⬜ | 端到端 + residue=0 |
 
 ### Out of this target
