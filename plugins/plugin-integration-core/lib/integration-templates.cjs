@@ -222,7 +222,8 @@ function createIntegrationTemplateRegistry({ db, idGenerator = crypto.randomUUID
 
     let row
     if (existing) {
-      // 061 has no updated_at trigger (unlike the 057 tables), so bump it here.
+      // updated_at is set by the 061 BEFORE UPDATE trigger in real Postgres; we also set it
+      // here so the in-memory test db (which has no trigger) bumps it. The trigger wins in PG.
       const updateRow = { ...baseRow, updated_at: now() }
       const rows = unwrapRows(await db.updateRow(TEMPLATES_TABLE, updateRow, {
         ...scopeWhere(normalized),
