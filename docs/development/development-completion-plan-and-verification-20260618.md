@@ -1,7 +1,7 @@
 # 开发完成度 — 计划与验证汇总(2026-06-18)
 
 > Status: **VERIFICATION + PLAN** for the `/goal` "请并行开发,根据计划及 TODO MD 完成所有开发,完成后给出计划及验证 MD".
-> Grounding: `origin/main @ 060d72635` (live-main, 2026-06-18). Every claim below was verified **against `origin/main` by live code/PR ancestry, not by checkbox** (stale-marker traps recur in this repo — see §5).
+> Grounding: `origin/main @ 14ffaf10b` (live-main, 2026-06-18; **pinned snapshot** — the S1b/data-source write track is under active parallel development and moves per-commit, so this MD pins one SHA rather than chasing its tip). Every claim below was verified **against `origin/main` by live code/PR ancestry, not by checkbox** (stale-marker traps recur in this repo — see §5).
 > Method: **parallel read-only verification** — three concurrent agents (data-source/integration · attendance annual-leave engine · attendance H2 benchmark) cross-checked against the author's own exhaustive multitable verification this session. Each cited squash SHA was tested with `git merge-base --is-ancestor`; on-main symbols confirmed via `git show`/`git grep`.
 
 ## 0. 一页结论 (headline)
@@ -10,14 +10,14 @@
 
 因此本轮交付 = **验证 + 计划 MD + 两类 ledger hygiene**:(a) 回填三份 stale ledger(把已落地却仍标 ⬜ 的 checkbox 改成 ✅);(b) 本 MD 逐 track 列出 **已完成(带证据锚点)** 与 **gated 剩余(带每项所需的具名 opt-in/决策)**,让 owner 一次性挑选下一批授权。**未自主打开任何 gated arc。**
 
-> ⚠️ Live note:主干在本轮进行中仍在快速移动 — **S1b-1(#2887)** 在验证期间刚落 `origin/main`,说明 S1b altitude 问题已由 owner 签字、一条并行 effort 正在执行 S1b。S1b 因此从 "design-locked, impl gated" 进入 "**impl in-progress(并行 effort 拥有)**";本会话不触碰它(全系统风险最高写路径)。
+> ⚠️ Live note:主干持续快速移动,S1b 正由一条**并行 effort 主动执行**(owner 已签 altitude:A 双接口拆分)。截至 `14ffaf10b` 已落:**S1b-1 #2887**(pluggable C6 write-source profile)、**S1b-2 #2892**(multitable raw write-source,own-sheet only,rides C6 lifecycle)、**S1a-retire #2894**(S1b 真实 write-source 落地后移除孤儿 `targetWriteLifecycle` 合同面)。S1b 从 "design-locked, impl gated" 进入 "**impl in-progress(并行 effort 拥有)**";本会话**不触碰**(最高风险写路径,已有 lander)。另:多维表侧 **#2890**(2b-S2 real-DB goldens:view/filter·aggregate·export·link-picker)+ **#2891**(CI:2c FE specs 入 web-guard)= 已完成 track 的测试/CI 加固(非新特性);**#2886** = approval `continuous_managers` **PROPOSED** design-lock(需 owner ratify A vs B,gated;在本 MD 深度验证的四条 track 之外,仅提示)。
 
 ## 1. 状态阶梯 — 四条 track 总览
 
 | Track | 已完成 (on main) | gated 剩余 | 权威 ledger |
 |---|---|---|---|
 | **多维表 (multitable)** | 2a 全标量 CRDT · 2b 条件读权限 S1–S4 · 2c 人员目录 S2–S4 · #18 行级读拒 | roadmap pool(导出/required-if/仪表盘联动/网格虚拟化 reopen-only/AI rings/原生同步表/FOL 深链/A6 余项) | `multitable-gated-remainder-development-plan/todo-20260618.md` |
-| **数据库/系统对接 (data-source)** | C2–C6 · Release · S1a(合同层) | **S1b(impl 进行中 #2887)** · S2 · S3 · S4 · S5 · 首笔生产外部写 | `data-source-system-integration-plan-and-verification-20260618.md` |
+| **数据库/系统对接 (data-source)** | C2–C6 · Release · S1a(合同层;orphaned 面已由 #2894 retire) | **S1b(impl 进行中 #2887/#2892,S1b-3 续接)** · S2 · S3 · S4 · S5 · 首笔生产外部写 | `data-source-system-integration-plan-and-verification-20260618.md` |
 | **考勤 H2 (attendance core)** | 一天多班次 · 排班发布/草稿 · 临时班次 · 加班三段 · 自动对班 A2 · C5 通知 · **排班合规引擎(block-on-save runtime)** · **打卡策略组** | §1 OUT 红线(算薪/防作弊/AI/人脸/原生 app/插件市场,🚫) · H3 高级(调度/换班/多门店,gated;3a 可建) | `attendance-dingtalk-benchmark-target-and-tracker-20260601.md` |
 | **考勤年假引擎 (annual-leave)** | 引擎 L0–L5c(含 L5a/b/c admin)+ 员工自助 surfaces | **L6 staging smoke(owner-run gate,非自主构建)** | `attendance-annual-leave-admin-operations-dev-plan-20260617.md` |
 
@@ -55,7 +55,7 @@
 > 以下 **均不可自主开工**;每项需 owner 显式 opt-in + 列出的具名决策。本会话不打开任何一项。
 
 ### 3.1 数据库/系统对接
-- **S1b(自有 multitable target 走泛化安全写,keystone)** — **impl 进行中(#2887 S1b-1 已落,并行 effort 拥有)**。altitude 问题(`targetWriteLifecycle.lookup/apply` = planner 内部数据通路 vs 证据投影)已由 owner 倾向 A(双接口拆分)签字;S1b-2/S1b-3 续接。**本会话不触碰**(最高风险写路径,已有并行 lander)。
+- **S1b(自有 multitable target 走泛化安全写,keystone)** — **impl 进行中(并行 effort 拥有)**:S1b-1 #2887(pluggable write-source profile)+ S1b-2 #2892(multitable raw write-source,own-sheet only)已落;S1a 孤儿合同面由 #2894 retire;S1b-3 续接。altitude 问题(`lookup/apply` = 内部数据通路 vs 证据投影)owner 已签 A(双接口拆分)。**本会话不触碰**(最高风险写路径,已有并行 lander)。
 - **S2(K3 WebAPI target 走同一安全写)** — opt-in + 实体机 smoke(operator 执行);红线保留;仅 sandbox。当前 K3 WebAPI 仅 read-only smoke,未接入 C6 写。
 - **S3(first-class `integration-template` 对象)** — opt-in;K3/PLM 各出一个参考模版。
 - **S4(adapter 自描述元数据)** — opt-in;替换 `ADAPTER_METADATA` 静态字面量(现仍为静态 literal)。
@@ -80,7 +80,7 @@
 ## 5. 本轮经验 (lessons)
 - **验证按代码、不按 checkbox。** 一个并行 agent 因信任 §0.4 的 stale ⬜,误报年假引擎 "runtime unbuilt";按 `origin/main` 实测纠正为 L0–L5c 已建。账本 marker 滞后于 main 是本仓库的常态陷阱。
 - **"完成所有开发" ≠ 打开 gated arc。** 唯一带显式授权标记的刀(L5c)早已发货;通用 goal 不授权打开 S1b/S2–S5/H3/年假 L-series 重开等 gated 项。诚实路径 = 验证 + 计划 + opt-in 菜单,而非制造并行去开 gate。
-- **主干快速移动 + 并行 lander。** 验证期间 #2887(S1b-1)落地,说明 S1b 已被并行 effort 开工;交付前以最新 `origin/main` 重新校准,避免把旧快照当最终树。
+- **主干快速移动 + 并行 lander。** 验证/刷新期间 S1b 连续落 #2887→#2892→#2894(retire),S1b 被并行 effort 持续执行;本 MD 以最新 `origin/main` 校准并**显式 pin 一个 SHA(snapshot,不逐 commit 追)**,既避免把旧快照当最终树,也避免陷入追 tip 的 treadmill。
 
 ## 6. 结论 + 建议
-**所有已授权开发已建、已验、在 `origin/main`。** 四条 track 的主体链路全部闭合(多维表 2a/2b/2c + closeout;data-source C2–C6/Release/S1a;考勤 H2 全 MUST/SHOULD/OPTIONAL;年假引擎 L0–L5c)。**没有可自主开工的已授权剩余开发** — 剩余项全部 gated,每项需 owner 显式 opt-in + §3 所列具名决策。S1b 已由并行 effort 开工(#2887),本会话不触碰。**建议**:owner 从 §3 菜单挑选下一批授权(最近的自然候选 = 年假 L6 owner-run staging smoke;以及 S1b-2/3 由现有并行 lander 续接)。在拿到具名 opt-in 前,本会话不开任何 gated arc。
+**所有已授权开发已建、已验、在 `origin/main`。** 四条 track 的主体链路全部闭合(多维表 2a/2b/2c + closeout;data-source C2–C6/Release/S1a;考勤 H2 全 MUST/SHOULD/OPTIONAL;年假引擎 L0–L5c)。**没有可自主开工的已授权剩余开发** — 剩余项全部 gated,每项需 owner 显式 opt-in + §3 所列具名决策。S1b 已由并行 effort 持续执行(#2887/#2892,S1a-retire #2894),本会话不触碰。**建议**:owner 从 §3 菜单挑选下一批授权(最近的自然候选 = 年假 L6 owner-run staging smoke;S1b-3 由现有并行 lander 续接)。在拿到具名 opt-in 前,本会话不开任何 gated arc。
