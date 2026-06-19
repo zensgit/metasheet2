@@ -6,7 +6,7 @@
 
 ## 0. 一页结论 (headline)
 
-**所有"显式已授权"的开发都已完成并在 `origin/main` 实测验收闭合;没有可自主开工的已授权剩余开发。** "请并行开发...完成所有开发" 的诚实解析:唯一带 **"⬜ UNBLOCKED — build authorized"** 标记的刀(annual-leave **L5c**)早已由 **#2830** 落地并自带 dev-verification MD;其余每一项都是 **gated**(各自独立 owner opt-in + 具名 design 决策),通用的 "完成所有开发" **不构成**打开这些 gate 的授权(这正是 §6 "每 slice 独立 opt-in" 纪律,违反它在 #2831/#2177 烧过工)。
+**本轮深度验证的四条 track(多维表 · 数据库/系统对接 · 考勤 H2 · 考勤年假引擎)上,所有"显式已授权"的开发都已完成并在 `origin/main` 实测验收闭合;没有可自主开工的已授权剩余开发。** 另:对仓库内全部 plan/TODO MD 做了 authorization-marker(`UNBLOCKED`/`build authorized`/`可建`/`授权`)grep 普查,未发现任何其它带显式"可建"标记的刀 —— 但 approval/PLM/workflow 等 track 仅做此 marker 普查,**未逐一深度验证其完成度**(本 MD 的 COMPLETE 断言只覆盖上述四条 track)。"请并行开发...完成所有开发" 的诚实解析:唯一带 **"⬜ UNBLOCKED — build authorized"** 标记的刀(annual-leave **L5c**)早已由 **#2830** 落地并自带 dev-verification MD;其余每一项都是 **gated**(各自独立 owner opt-in + 具名 design 决策),通用的 "完成所有开发" **不构成**打开这些 gate 的授权(这正是 §6 "每 slice 独立 opt-in" 纪律,违反它在 #2831/#2177 烧过工)。
 
 因此本轮交付 = **验证 + 计划 MD + 两类 ledger hygiene**:(a) 回填三份 stale ledger(把已落地却仍标 ⬜ 的 checkbox 改成 ✅);(b) 本 MD 逐 track 列出 **已完成(带证据锚点)** 与 **gated 剩余(带每项所需的具名 opt-in/决策)**,让 owner 一次性挑选下一批授权。**未自主打开任何 gated arc。**
 
