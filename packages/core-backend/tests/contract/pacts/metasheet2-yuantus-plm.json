@@ -3490,6 +3490,27 @@
                   "match": "type"
                 }
               ]
+            },
+            "$.features.bom_multitable.scenarios": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.bom_multitable.cache_scope.supported": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.bom_multitable.cache_scope.entitled": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
             }
           }
         }
@@ -3617,6 +3638,160 @@
               ]
             },
             "$.context.template_key": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.upgrade.available": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.part.item_number": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.part.name": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.part.state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.part.generation": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].part_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].item_number": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].name": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].generation": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].uom": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].find_num": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].refdes": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].level": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].path": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].path_labels": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].source_version": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].source_updated_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.lines[*].sync_status": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.source_version": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.source_updated_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.context.sync_status": {
               "matchers": [
                 {
                   "match": "type"
