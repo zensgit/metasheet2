@@ -46,6 +46,11 @@ describe('SSRF guard — IPv6 ranges', () => {
     expect(isInternalIpv6('::ffff:8.8.8.8')).toBe(false)
     expect(isInternalIpv6('fe80::1%eth0')).toBe(true) // scope id stripped, still link-local
   })
+  test('malformed IPv6 fails closed (treated as internal), not read as public via first hextet (#2950 P3)', () => {
+    for (const ip of ['2606:nonsense', 'fc00:garbage', '12345::1', 'fc00:::1', 'not-an-ip', '2606:4700:zzzz::1']) {
+      expect(isInternalIpv6(ip), ip).toBe(true)
+    }
+  })
   test('isInternalAddress dispatches by family', () => {
     expect(isInternalAddress('10.0.0.1')).toBe(true)
     expect(isInternalAddress('fc00::1')).toBe(true)
