@@ -3140,6 +3140,16 @@ export function evaluateMetaFilterCondition(
   if (opNorm === 'isnot' || opNorm === 'notequal') return leftNorm !== rightNorm
   if (opNorm === 'contains') return rightNorm === '' ? true : leftNorm.includes(rightNorm)
   if (opNorm === 'doesnotcontain') return rightNorm === '' ? true : !leftNorm.includes(rightNorm)
+  // 2a (view filter operators): set-membership over a multi-value selection — `value` is an array of
+  // option values (so it reads condition.value directly, not the scalar-normalized `value`). Empty
+  // array = inactive filter (match all), mirroring the empty-`contains` convention above. Each element
+  // is case/whitespace-normalized like `is`/`contains` so a select-option match stays consistent.
+  if (opNorm === 'isanyof' || opNorm === 'isnoneof') {
+    const arr = Array.isArray(condition.value) ? condition.value : []
+    if (arr.length === 0) return true
+    const member = arr.some((v) => toComparableString(v).trim().toLowerCase() === leftNorm)
+    return opNorm === 'isanyof' ? member : !member
+  }
   return true
 }
 
