@@ -502,6 +502,11 @@ export function useMultitableGrid(opts: {
   // edit (add/update/remove/clear) clears this: editing via the flat toolbar commits to the flat shape.
   // The recursive authoring UI (PR-2b) will make this the editable source of truth.
   const nestedFilterNodes = ref<FilterNode[] | null>(null)
+  // 2b: editable root subgroups (the nested condition groups authored in the toolbar, recursively). The
+  // flat `filterRules` are the root's leaf conditions; `filterGroups` are the root's group children. On save
+  // the two are concatenated (leaves then groups) — `nestedFilterNodes` still serves the untouched-view
+  // faithful passthrough, and ANY edit clears it so the editable filterRules+filterGroups become the truth.
+  const filterGroups = ref<FilterGroup[]>([])
   const sortFilterDirty = ref(false)
 
   // GroupBy — ordered 1..MAX_GROUP_LEVELS group fields (nested / multi-level grouping). The array is the
@@ -612,6 +617,7 @@ export function useMultitableGrid(opts: {
       const tree = parseFilterTree(view.filterInfo)
       filterConjunction.value = tree?.conjunction ?? 'and'
       filterRules.value = tree ? tree.nodes.filter((n): n is FilterRule => !isFilterGroup(n)) : []
+      filterGroups.value = tree ? tree.nodes.filter((n): n is FilterGroup => isFilterGroup(n)) : []
       nestedFilterNodes.value = tree && tree.nodes.some(isFilterGroup) ? tree.nodes : null
     }
     if (view.hiddenFieldIds) hiddenFieldIds.value = [...view.hiddenFieldIds]
@@ -633,7 +639,7 @@ export function useMultitableGrid(opts: {
         sortInfo: buildSortInfo(sortRules.value) as Record<string, unknown> | undefined,
         filterInfo: (nestedFilterNodes.value
           ? buildFilterInfoFromNodes(nestedFilterNodes.value, filterConjunction.value)
-          : buildFilterInfo(filterRules.value, filterConjunction.value)) as Record<string, unknown> | undefined,
+          : buildFilterInfoFromNodes([...filterRules.value, ...filterGroups.value], filterConjunction.value)) as Record<string, unknown> | undefined,
       })
       sortFilterDirty.value = false
     } catch {
@@ -747,7 +753,29 @@ export function useMultitableGrid(opts: {
 
   function clearFilters() {
     filterRules.value = []
+    filterGroups.value = []
     filterConjunction.value = 'and'
+    nestedFilterNodes.value = null
+    sortFilterDirty.value = true
+  }
+
+  // 2b: nested condition-group edits. The recursive MetaFilterGroup emits the whole updated subtree, so an
+  // update replaces the group at `index` wholesale. Like the flat ops, any edit drops the untouched-faithful
+  // `nestedFilterNodes` cache so filterRules+filterGroups become the single source of truth on save.
+  function addFilterGroup(group: FilterGroup) {
+    filterGroups.value.push(group)
+    nestedFilterNodes.value = null
+    sortFilterDirty.value = true
+  }
+  function updateFilterGroup(index: number, group: FilterGroup) {
+    if (index >= 0 && index < filterGroups.value.length) {
+      filterGroups.value[index] = group
+      nestedFilterNodes.value = null
+      sortFilterDirty.value = true
+    }
+  }
+  function removeFilterGroup(index: number) {
+    filterGroups.value.splice(index, 1)
     nestedFilterNodes.value = null
     sortFilterDirty.value = true
   }
@@ -1177,7 +1205,7 @@ export function useMultitableGrid(opts: {
   return {
     // State
     fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
-    sortRules, filterRules, filterConjunction, nestedFilterNodes, sortFilterDirty,
+    sortRules, filterRules, filterConjunction, nestedFilterNodes, filterGroups, sortFilterDirty,
     groupFieldId, groupFieldIds, groupField, groupFields,
     editHistory, historyIndex, canUndo, canRedo,
     searchQuery,
@@ -1188,6 +1216,7 @@ export function useMultitableGrid(opts: {
     toggleFieldVisibility,
     addSortRule, removeSortRule,
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
+    addFilterGroup, updateFilterGroup, removeFilterGroup,
     applySortFilter,
     createRecord, duplicateRecord, deleteRecord, patchCell, bulkPatch,
     // A3: exposed as the single echo-application seam for the AI shortcut
