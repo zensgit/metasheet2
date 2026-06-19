@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   resolveApprovalRequesterOrgRelations,
   resolveMaxManagerChainLevels,
@@ -224,6 +224,30 @@ describe('resolveMaxManagerChainLevels (configurable cap, env APPROVAL_MANAGER_C
   it('fails SAFE to the default on any invalid value (never throws, never 0/negative/fractional)', () => {
     for (const bad of ['0', '-3', '3.5', 'abc', 'NaN', '1e3', '0x10']) {
       expect(resolveMaxManagerChainLevels(bad)).toBe(DEFAULT_MAX_MANAGER_CHAIN_LEVELS)
+    }
+  })
+
+  // Module-level smoke: the EXPORTED `MAX_MANAGER_CHAIN_LEVELS` is resolved from the env at module
+  // LOAD (a deploy-time read), so the pure-resolver tests above don't by themselves prove the exported
+  // const honors the env. A fresh import under env=3 must actually yield 3 — `resetModules` + re-import
+  // is required because the const is captured once at load. (Restores env + resets in `finally` so the
+  // env-loaded instance never leaks into another test.)
+  it('module-level MAX_MANAGER_CHAIN_LEVELS reflects the env at load (env=3 → 3, env=invalid → default)', async () => {
+    const prev = process.env.APPROVAL_MANAGER_CHAIN_MAX_LEVELS
+    try {
+      process.env.APPROVAL_MANAGER_CHAIN_MAX_LEVELS = '3'
+      vi.resetModules()
+      const underEnv3 = await import('../../src/services/ApprovalDirectoryOrg')
+      expect(underEnv3.MAX_MANAGER_CHAIN_LEVELS).toBe(3)
+
+      process.env.APPROVAL_MANAGER_CHAIN_MAX_LEVELS = 'not-a-number'
+      vi.resetModules()
+      const underBadEnv = await import('../../src/services/ApprovalDirectoryOrg')
+      expect(underBadEnv.MAX_MANAGER_CHAIN_LEVELS).toBe(underBadEnv.DEFAULT_MAX_MANAGER_CHAIN_LEVELS)
+    } finally {
+      if (prev === undefined) delete process.env.APPROVAL_MANAGER_CHAIN_MAX_LEVELS
+      else process.env.APPROVAL_MANAGER_CHAIN_MAX_LEVELS = prev
+      vi.resetModules()
     }
   })
 })
