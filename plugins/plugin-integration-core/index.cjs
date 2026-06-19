@@ -31,6 +31,7 @@ const { createMetaSheetMultitableTargetAdapterFactory, METASHEET_MULTITABLE_ADAP
 const { createDataSourceSqlReadonlySourceAdapterFactory, DATA_SOURCE_SQL_READONLY_ADAPTER_METADATA } = require('./lib/adapters/data-source-sql-readonly-source-adapter.cjs')
 const { createDataSourceSqlWriteGatedTargetAdapterFactory, DATA_SOURCE_SQL_WRITE_GATED_ADAPTER_METADATA } = require('./lib/adapters/data-source-sql-write-gated-target-adapter.cjs')
 const { createPipelineRegistry } = require('./lib/pipelines.cjs')
+const { createIntegrationTemplateRegistry } = require('./lib/integration-templates.cjs')
 const { createDeadLetterStore } = require('./lib/dead-letter.cjs')
 const { createWatermarkStore } = require('./lib/watermark.cjs')
 const { createRunLogger } = require('./lib/run-log.cjs')
@@ -48,6 +49,7 @@ let credentialStore = null
 let externalSystemRegistry = null
 let adapterRegistry = null
 let pipelineRegistry = null
+let templateRegistry = null
 let deadLetterStore = null
 let watermarkStore = null
 let runLogger = null
@@ -219,6 +221,7 @@ module.exports = {
       .registerAdapter('data-source:sql-readonly', createDataSourceSqlReadonlySourceAdapterFactory({ context }), { metadata: DATA_SOURCE_SQL_READONLY_ADAPTER_METADATA })
       .registerAdapter('data-source:sql-write-gated', createDataSourceSqlWriteGatedTargetAdapterFactory({ context }), { metadata: DATA_SOURCE_SQL_WRITE_GATED_ADAPTER_METADATA })
     pipelineRegistry = createPipelineRegistry({ db })
+    templateRegistry = createIntegrationTemplateRegistry({ db })
     deadLetterStore = createDeadLetterStore({ db })
     watermarkStore = createWatermarkStore({ db })
     runLogger = createRunLogger({ pipelineRegistry })
@@ -259,6 +262,7 @@ module.exports = {
         externalSystemRegistry,
         adapterRegistry,
         pipelineRegistry,
+        templateRegistry,
         pipelineRunner,
         deadLetterStore,
         stagingInstaller,
@@ -282,6 +286,7 @@ module.exports = {
     externalSystemRegistry = null
     adapterRegistry = null
     pipelineRegistry = null
+    templateRegistry = null
     deadLetterStore = null
     watermarkStore = null
     runLogger = null

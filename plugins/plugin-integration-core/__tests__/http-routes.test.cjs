@@ -356,6 +356,49 @@ function createMockServices(overrides = {}) {
         }
       },
     },
+    templateRegistry: (() => {
+      const store = new Map()
+      const scopeKey = (i) => `${i.tenantId}::${i.workspaceId ?? ''}`
+      return {
+        async upsertTemplate(input) {
+          calls.push(['upsertTemplate', input])
+          const id = input.id || `tmpl_${store.size + 1}`
+          const rec = {
+            id,
+            tenantId: input.tenantId,
+            workspaceId: input.workspaceId ?? null,
+            name: input.name,
+            version: input.version || 1,
+            targetKind: input.targetKind,
+            targetObject: input.targetObject ?? null,
+            keyFields: input.keyFields || [],
+            mappingDef: input.mappingDef || [],
+            orchestrationConfig: input.orchestrationConfig || {},
+            status: input.status || 'active',
+            createdBy: input.createdBy ?? null,
+          }
+          store.set(`${scopeKey(input)}::${id}`, rec)
+          return rec
+        },
+        async getTemplate(input) {
+          calls.push(['getTemplate', input])
+          const rec = store.get(`${scopeKey(input)}::${input.id}`)
+          if (!rec) { const e = new Error('not found'); e.status = 404; e.code = 'INTEGRATION_TEMPLATE_NOT_FOUND'; throw e }
+          return rec
+        },
+        async listTemplates(input) {
+          calls.push(['listTemplates', input])
+          return [...store.values()].filter((r) => r.tenantId === input.tenantId && (r.workspaceId ?? null) === (input.workspaceId ?? null))
+        },
+        async deleteTemplate(input) {
+          calls.push(['deleteTemplate', input])
+          const k = `${scopeKey(input)}::${input.id}`
+          if (!store.has(k)) { const e = new Error('not found'); e.status = 404; e.code = 'INTEGRATION_TEMPLATE_NOT_FOUND'; throw e }
+          store.delete(k)
+          return { deleted: 1 }
+        },
+      }
+    })(),
   }
 
   return {
@@ -4771,7 +4814,53 @@ async function testPipelineExternalWriteMultitableRoute() {
   assert.equal(rows.length, 2, 'rejected apply wrote nothing')
 }
 
+// S3-1: integration-template object CRUD routes (declarative; no instantiation route exists).
+async function testTemplatesCrudRoutes() {
+  const { services } = createMockServices()
+  const { routes } = mountRoutes(services)
+
+  // create -> 201
+  let res = await invoke(routes, 'POST', '/api/integration/templates', {
+    user: WRITE_USER,
+    body: { tenantId: 'tenant_1', name: 'k3-material', targetKind: 'metasheet:multitable', targetObject: 'approved_materials', keyFields: ['code'] },
+  })
+  assertOkResponse(res, 201)
+  const id = res.body.data.id
+  assert.equal(typeof id, 'string')
+  assert.equal(res.body.data.targetKind, 'metasheet:multitable')
+
+  // read-only user cannot create
+  res = await invoke(routes, 'POST', '/api/integration/templates', {
+    user: READ_USER,
+    body: { tenantId: 'tenant_1', name: 'nope', targetKind: 'http' },
+  })
+  assert.equal(res.statusCode, 403, 'read-only user cannot create templates')
+
+  // get -> 200
+  res = await invoke(routes, 'GET', '/api/integration/templates/:id', { user: READ_USER, params: { id }, query: {} })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.name, 'k3-material')
+
+  // list -> 200
+  res = await invoke(routes, 'GET', '/api/integration/templates', { user: READ_USER, query: {} })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.length, 1)
+  assert.equal(res.body.data[0].id, id)
+
+  // delete -> 200 (write only)
+  res = await invoke(routes, 'DELETE', '/api/integration/templates/:id', { user: WRITE_USER, params: { id } })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.deleted, 1)
+
+  // NO instantiation route exists (S3-1 contract+storage only)
+  assert.throws(
+    () => getRoute(routes, 'POST', '/api/integration/templates/:id/instantiate'),
+    'no instantiate route in S3-1',
+  )
+}
+
 async function main() {
+  await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
   await testStockPreparationTargetProvisioningRoutes()
   await testStockPreparationOptionSyncRoute()
