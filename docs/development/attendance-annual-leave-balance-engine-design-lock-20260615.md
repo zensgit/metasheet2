@@ -1,6 +1,6 @@
 # 年假 / 法定假余额引擎 — 设计锁（design-lock）
 
-> **状态**：design-lock（owner 决策 2026-06-15 锁定）；**实现 gated**，子链 L0–L6 各自独立 opt-in，未开工。
+> **状态**：design-lock（owner 决策 2026-06-15 锁定）；**实现 L0–L5c 已全部 BUILT + MERGED 落 `origin/main`**（L0 #2627 · L1 #2633 · L2 #2638/#2678/#2687 · L3 #2713 · L4 #2717/#2718 · L5a/b/c #2779/#2782/#2830，L0–L4 capstone #2753）；**仅 L6 staging smoke 为 owner-run gate，尚未跑**。子链「各自独立 opt-in」纪律保留为历史。
 > **口径**：本文写 MetaSheet 自有设计口径；默认法定阶梯 preset 校准自**《职工带薪年休假条例》+《企业职工带薪年休假实施办法》**（法规来源，非竞品对标）。不引用任何竞品产品。
 > **基线**：代码实测 @ `origin/main`（plugin `index.cjs` 37.4k 行 + `packages/core-backend/src/services/AttendanceExpiryService.ts`/`AttendanceScheduler.ts`）。
 > **谱系**：复用 ④ 加班调休假期闭环建成的 leave-balance ledger（#2231）+ FIFO 扣减（#2261/C3）+ leader-elected `AttendanceScheduler` 过期基座（#2270/#2274/C4）。**这是该梯子的"下一主线"**（refresh 审计 v2 #2617 §2 档 A #1）。
