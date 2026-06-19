@@ -4,7 +4,7 @@
 > 目标:出一个**通用对接**能力——接一个新外部系统 = **配一个模版/config**,而非再写一套 bespoke adapter+writer。**PLM BOM 备料 与 K3 WISE 是这套通用流的两个参考模版实例**(它们是我们的集成目标系统,非外部对标品)。
 > 依据:通用底座盘点(2026-06-18,/tmp/...substrate map);引用既有件,不重造。
 >
-> **更新(2026-06-19 · S1a-retire)**:S1a 的"可选写能力"最终落为 **target write profile + 注入式 raw write-source 合同**(planner 经 profile + 写源驱动安全写),**不是** adapter 级 `targetWriteLifecycle`(lookup/apply)。该 method surface 在 S1b 实现中被证明 **orphaned**(S1b-1 seam 只消费 profile + raw 写源,planner 自产 values-free 证据),且在 adapter 上保留 `apply()` 有"绕过 C6 token/revision gate 直接写"的误用风险,**已退役**(S1a-retire PR)。下方 §6.1/§7 中 `targetWriteLifecycle`/`lookup`/`apply`/"evidence 投影"措辞均以此更新为准——S1a 合同 = profile(kind + capability normalize/assert)+ raw write-source(test/lookupByKey/insertRows/updateRows)。
+> **更新(2026-06-19 · S1a-retire)**:正文已对齐**退役后形态**——S1a 可选写能力 = **target write profile(`kind` + capability normalize/assert)+ 注入式 raw write-source(`test/lookupByKey/insertRows/updateRows`)**;早期 adapter 级 `targetWriteLifecycle`(lookup/apply)方法面已退役(orphaned + 绕过 C6 gate 误用风险)。本说明仅为变更记录,正文各节自洽,无需脑内 override。
 
 ## 1. 现状(盘点结论)
 
@@ -20,7 +20,7 @@
 
 通用对接 = 在已有通用底座上,**把写侧收敛为「适配器合同 + C6 安全生命周期(泛化到合同上)+ 一个 first-class 模版对象」**:
 
-- **写路统一**:C6 的 `dry-run → revision-fence → token-apply → per-row → dead-letter` 生命周期,从 `sql-write-gated` 泛化到一个 **target-adapter 可选写能力扩展**(`targetWriteLifecycle` / `safeWrite`,内含 `lookup`/`apply`,与现有 `previewUpsert` 同族)。**关键约束(owner 裁决 2026-06-18):它是 OPTIONAL capability,绝不进 `REQUIRED_ADAPTER_METHODS`——5-method base 合同保持不变,只有 opt-in target 才实现 `lookup`/`apply`;不 opt-in 的 adapter 必须原样通过。** 让 K3 WebAPI / HTTP / multitable 各自 opt-in 同一安全写。
+- **写路统一**:C6 的 `dry-run → revision-fence → token-apply → per-row → dead-letter` 生命周期,从 `sql-write-gated` 泛化到 **target write profile + 注入式 raw write-source**——**profile** = `kind` + capability `normalize`/`assert`(per-kind 安全策略,**server-side 装配,绝不来自 request**);**raw write-source** = `test/lookupByKey/insertRows/updateRows`(planner 注入消费,与 host facade 同形)。**5-method base 合同保持不变(`REQUIRED_ADAPTER_METHODS` 不变);不 opt-in 的 target 原样通过。** planner 已验证的判定 + 安全原语原样不动,自产 values-free evidence。让 multitable(已落地)/ K3 WebAPI / HTTP 各自经其 profile + 写源 opt-in 同一安全写。(早期设想的 adapter 级 `targetWriteLifecycle`(lookup/apply)方法面在实现中被证明 orphaned 且有绕过 C6 gate 误用风险,**已退役**;见 S1a-retire。)
 - **模版对象**:一个 declarative 的 `integration-template`,组合 source + target + mapping + orchestration + write-safety 参数;**"实例化" = 从模版生成 pipeline + mappings + system.config**。
 - **自描述元数据**:adapter 自声明(label/roles/supports/guardrails),registry 收集,取代手维护的 `ADAPTER_METADATA` 静态字面量。
 
@@ -45,7 +45,7 @@
 
 | 刀 | 内容 | 风险 | gate |
 |---|---|---|---|
-| **S1a (合同层)** | 定义 target 的**可选**写能力扩展 `targetWriteLifecycle`(`lookup`/`apply`,抽象 C6 planner write 原语);**不进 `REQUIRED_ADAPTER_METHODS`**;enum-strict、result **values-free**(opaque keyHash/revisionHash、code-only errorCode、无 free-text error、metadata number\|boolean\|null)、**不接 runtime**(见 §6.1)。注:这是 **plugin-local 内部合同,无公开 API surface,OpenAPI 不适用** | 低 | lock-safe 合同,可直接评审 |
+| **S1a (合同层)** | 定义 target 的**可选**写能力 = **target write profile**(`kind` + capability `normalize`/`assert`)+ **注入式 raw write-source**(`test/lookupByKey/insertRows/updateRows`);**不进 `REQUIRED_ADAPTER_METHODS`**;**不接 runtime**(见 §6.1)。plugin-local 内部合同,无公开 API surface,OpenAPI 不适用 | 低 | lock-safe 合同,可直接评审 |
 | **S1b (keystone)** | 让 **`metasheet:multitable`**(自有 sheet)target 实现该能力面 + 走 C6 `dry-run→apply` 生命周期 —— 证明"安全写能脱离 `sql-write-gated` 泛化",**零外部写、纯 sandbox** | 低(自有 target) | opt-in |
 | **S2** | **K3 WebAPI** target opt-in 同一安全写路(on-contract,红线保留),仅 sandbox | 中 | opt-in + 实体机 |
 | **S3** | first-class `integration-template` 对象 + 实例化(从模版生成 pipeline+mappings);K3 / PLM 各出一个参考模版 | 中-大 | opt-in |
@@ -53,29 +53,24 @@
 | **S5** | 统一 field-mapping(generic vs stock-prep `fieldIdMap`);PLM stock-prep 编排吸收进通用 table-action seam | 中-大 | opt-in |
 | **首笔生产外部写** | S1-S3 sandbox 验证齐 + **owner 显式授权**后,单独一刀,走 sandbox-first 序列 | 最高 | **owner 授权** |
 
-### 6.1 S1a 锁定约束 + 验收(owner 裁决 2026-06-18)
+### 6.1 S1a 锁定约束 + 验收(owner 裁决 2026-06-18;2026-06-19 对齐退役后形态)
 
-**锁文本(逐字)**:
-> Target lookup/apply is an optional capability extension, not a replacement for or expansion of the required 5-method adapter contract. `REQUIRED_ADAPTER_METHODS` remains unchanged. Non-opt-in adapters must continue to pass unchanged.
+**锁文本**:可选写能力 = **target write profile + 注入式 raw write-source**,**不是**对必需 5-method 合同的替换或扩展。`REQUIRED_ADAPTER_METHODS` 保持不变;不 opt-in 的 target 必须原样通过。
 
-**验收(S1a 必过)**:
-1. `adapter-contracts.test` 证明**旧 adapter 不实现 `lookup`/`apply` 仍通过**(5-method base 合同不爆)。
-2. 一个 **opt-in 假 target** 实现新能力,锁住:enum-strict、result **values-free**、**no runtime wire**(S1a 绝不接真实写)。
-3. **result values-free 形态(逐 vector canary 锁)**:result 流向 UI / issue evidence,故只携带不可逆/受控字段——
-   - key → **opaque `keyHash`**(投影到声明的 keyFields 后 sha256);
-   - revision → **opaque `revisionHash`**(sha256;保留**相等性**,故 dry-run→apply 的 revision-fence 仍可判漂移);
-   - **不携带 free-text `error`**(DB 错误会内嵌行值);人类可读原因改落 **dead-letter**(`sanitizeIntegrationPayload`,32KB cap)——**relocated, not lost**;
-   - `errorCode` 受 **CODE charset `[A-Z0-9_]{1,64}`** 约束(允许全数字 SQLSTATE 如 `42501`)——这是**纵深防御 + canary 锚点**,不是硬结构保证(`WIDGET`/`123456` 也能过),合同仍依赖 adapter 传稳定常量;
-   - `metadata` 仅 **number\|boolean\|null**(拒绝字符串与嵌套——字符串可能藏行值)。
-   canary 须对每个 vector(key/error/revision/metadata)各种一颗 PII/secret/行值,断言不出现在 wire。
+> 历史:S1a 初版曾以 adapter 级 `targetWriteLifecycle`(`lookup`/`apply`)方法面表达该能力;实现后证明该方法面 orphaned(planner 经 profile + raw 写源驱动,自产 evidence,无消费者)且在 adapter 上保留 `apply()` 有"绕过 C6 token/revision gate 直接写"的误用风险,已于 **S1a-retire** 退役。最终形态即 profile + raw write-source。
 
-C6-gated adapter 在 S1a 后**仍不自动 runtime 写**。
+**验收(已满足)**:
+1. `adapter-contracts.test` 证明不实现写能力的 adapter 仍通过 5-method base 合同(`REQUIRED_ADAPTER_METHODS` 不爆)。
+2. opt-in target 经其 **profile + raw write-source** 走 C6 安全写;非 opt-in 原样通过;**SQL 路径零漂移**(既有套件原样绿 = 硬验收)。
+3. **values-free 是 C6 planner 的职责**:planner 的 evidence(`publicEvidence`/`publicApplyEvidence`)只携带不可逆/受控字段(opaque hash、code-only error、计数),**不含行值**;人类可读细节落 **dead-letter**(`sanitizeIntegrationPayload`,32KB cap)。逐 vector 经验非空洞证明见各 S1b PR + 验证 MD。
+
+C6-gated target 在 S1a 后**仍不自动 runtime 写**;首笔真实外部写 = 独立 owner 授权。
 
 > **S1b 衔接**:lifecycle result = **code-only 分流类**(status + errorCode);**sanitized 人类可读 detail 落 dead-letter**,不进 result。S1b runtime 必须按此分流,不得把 free-text 原因塞回 result/evidence。
 
 ## 7. 首步建议(keystone)
 
-**S1a 合同层先行**:定义 target-adapter 的 `lookup`/`apply` 能力面(把 C6 planner 硬编码的 `dataSourceWrites.lookupByKey/insertRows/updateRows` 抽象成合同方法),enum-strict + result values-free-locked(plugin-local 内部合同,无公开 API surface,OpenAPI 不适用),**不 wire runtime**——纯 lock-safe 合同,可直接评审。它是整条收敛的 **keystone**:解锁后 S1b 用自有 `metasheet:multitable` target 验证"安全写生命周期能脱离 `sql-write-gated` 泛化"(零外部写),再逐个让 K3 / HTTP opt-in。风险最低、解锁面最大。
+**S1a 合同层先行**:定义 target 的可选写能力 = **target write profile + 注入式 raw write-source**(把 C6 planner 对 `dataSourceWrites.test/lookupByKey/insertRows/updateRows` 的硬绑消费,变成由 profile 按 kind 选择 + 注入写源提供),plugin-local 内部合同(无公开 API surface,OpenAPI 不适用),**不 wire runtime**——纯 lock-safe 合同,可直接评审。它是整条收敛的 **keystone**:解锁后 S1b 用自有 `metasheet:multitable` target 验证"安全写生命周期能脱离 `sql-write-gated` 泛化"(零外部写),再逐个让 K3 / HTTP opt-in。风险最低、解锁面最大。(注:初版以 adapter 级 `lookup`/`apply` 方法面表达,实现后退役——见 §6.1 历史。)
 
 **owner 裁决(2026-06-18)**:① 收敛方向**认可**;② 切片序**认可**,但 S1a 必须是**可选能力面**(§6.1 锁文本 + 两条验收);③ PLM stock-prep "合同绕过吸收进通用流"**认可为方向**,低优先、渐进吸收,短期不重写专用链路(§3)。
 
