@@ -9,7 +9,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers'
 export type ApprovalMode = 'single' | 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
@@ -77,6 +77,7 @@ export type ApprovalAssigneeSource =
   | { kind: 'form_field_user'; fieldId: string }
   | { kind: 'direct_manager' }
   | { kind: 'dept_head' }
+  | { kind: 'continuous_managers'; levels: number }
 
 export interface ConditionNodeConfig {
   branches: ConditionBranch[]

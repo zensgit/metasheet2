@@ -40,7 +40,7 @@ import {
   validateApprovalFormData,
 } from './ApprovalGraphExecutor'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
-import { resolveApprovalRequesterOrgRelations, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
+import { resolveApprovalRequesterOrgRelations, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
 import type {
   ApprovalAssignmentDTO,
   ApprovalAssignmentRow,
@@ -413,6 +413,15 @@ function normalizeApprovalAssigneeSources(
         return { kind: 'direct_manager' }
       case 'dept_head':
         return { kind: 'dept_head' }
+      case 'continuous_managers': {
+        // Deterministic validation — an out-of-range / non-integer / missing
+        // `levels` is rejected, never silently defaulted (enum-strictness).
+        const levels = source.levels
+        if (typeof levels !== 'number' || !Number.isInteger(levels) || levels < 1 || levels > MAX_MANAGER_CHAIN_LEVELS) {
+          failValidation(context, `${sourcePath}.levels must be an integer between 1 and ${MAX_MANAGER_CHAIN_LEVELS}`)
+        }
+        return { kind: 'continuous_managers', levels }
+      }
       case 'form_field_user':
         if (!isNonEmptyString(source.fieldId)) {
           failValidation(context, `${sourcePath}.fieldId is required`)

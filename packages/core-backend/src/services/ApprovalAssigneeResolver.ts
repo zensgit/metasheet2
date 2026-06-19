@@ -146,6 +146,24 @@ export function resolveApprovalAssignees(
         }
         break
       }
+      case 'continuous_managers': {
+        // Resolve to the requester's management chain (levels 1..source.levels),
+        // frozen in the snapshot at start (no live directory re-query). pushResolved's
+        // seen-set dedups a person appearing at two levels; self-exclusion drops a hop
+        // that resolves to the requester. An empty result falls through to the node's
+        // emptyAssigneePolicy; the node's approvalMode (会签 all / 或签 any) then governs
+        // how the resolved chain must act.
+        const requesterId = normalizeId(options.requesterSnapshot?.id)
+        const rawChain = options.requesterSnapshot?.managerChainIds
+        const chain = Array.isArray(rawChain) ? rawChain : []
+        chain.slice(0, source.levels).forEach((entry) => {
+          const managerId = normalizeId(entry)
+          if (managerId && managerId !== requesterId) {
+            pushResolved('user', managerId, source, sourceIndex)
+          }
+        })
+        break
+      }
       case 'form_field_user': {
         assertFormUserSource(source, options.formSchema, options.nodeKey)
         const assigneeId = resolveFormUserValue(options.formSnapshot[source.fieldId])

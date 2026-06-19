@@ -84,6 +84,42 @@ describe('ApprovalAssigneeResolver', () => {
     expect(resolveDeptHead({ id: 'requester-1', deptHeadId: 'requester-1' })).toEqual([])
   })
 
+  // continuous_managers — resolves the snapshot managerChainIds, sliced to `levels`.
+  function resolveContinuousManagers(levels: number, requesterSnapshot: Record<string, unknown> | null) {
+    return resolveApprovalAssignees({
+      nodeKey: 'review',
+      sourceStep: 2,
+      config: { assigneeSources: [{ kind: 'continuous_managers', levels }] },
+      formSnapshot: {},
+      requesterSnapshot,
+    })
+  }
+
+  const cmEntry = (assigneeId: string) => ({
+    assignmentType: 'user', assigneeId, nodeKey: 'review', sourceStep: 2,
+    metadata: { resolvedFrom: { kind: 'continuous_managers', sourceIndex: 0 } },
+  })
+
+  it('resolves continuous_managers to the chain sliced to levels, with metadata', () => {
+    expect(resolveContinuousManagers(2, { id: 'requester-1', managerChainIds: ['m1', 'm2', 'm3'] }))
+      .toEqual([cmEntry('m1'), cmEntry('m2')])
+  })
+
+  it('resolves the whole chain when it is shorter than levels', () => {
+    expect(resolveContinuousManagers(5, { id: 'requester-1', managerChainIds: ['m1', 'm2'] }))
+      .toEqual([cmEntry('m1'), cmEntry('m2')])
+  })
+
+  it('resolves continuous_managers to empty with no chain (falls to emptyAssigneePolicy)', () => {
+    expect(resolveContinuousManagers(3, { id: 'requester-1' })).toEqual([])
+    expect(resolveContinuousManagers(3, null)).toEqual([])
+  })
+
+  it('excludes self and dedups within the sliced chain', () => {
+    expect(resolveContinuousManagers(4, { id: 'requester-1', managerChainIds: ['requester-1', 'm2', 'm2', 'm3'] }))
+      .toEqual([cmEntry('m2'), cmEntry('m3')])
+  })
+
   it('resolves requester and static sources with source metadata', () => {
     expect(resolve({
       assigneeSources: [
