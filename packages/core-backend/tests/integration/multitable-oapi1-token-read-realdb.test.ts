@@ -38,6 +38,7 @@ let app: Express
 let tokReadOk = '' // records:read
 let tokNoScope = '' // comments:read only
 let tokRevoked = '' // records:read, then revoked
+let tokFields = '' // fields:read (no records:read)
 const auth = (path: string, token: string) => request(app).get(path).set('Authorization', `Bearer ${token}`)
 const setFlag = (on: boolean) => q('UPDATE meta_sheets SET row_level_read_permissions_enabled = $2 WHERE id = $1', [SHEET_ID, on])
 const setRules = (rules: unknown[]) => q('UPDATE meta_sheets SET conditional_read_rules = $2::jsonb WHERE id = $1', [SHEET_ID, JSON.stringify(rules)])
@@ -63,6 +64,7 @@ describeIfDatabase('OAPI-1 read-only API-token routes (real DB)', () => {
     const svc = new ApiTokenService(db)
     tokReadOk = (await svc.createToken(CREATOR, { name: 'read-ok', scopes: ['records:read'] })).plainTextToken
     tokNoScope = (await svc.createToken(CREATOR, { name: 'no-scope', scopes: ['comments:read'] })).plainTextToken
+    tokFields = (await svc.createToken(CREATOR, { name: 'fields', scopes: ['fields:read'] })).plainTextToken
     const revoked = await svc.createToken(CREATOR, { name: 'revoked', scopes: ['records:read'] })
     tokRevoked = revoked.plainTextToken
     await svc.revokeToken(revoked.token.id, CREATOR)
@@ -127,5 +129,44 @@ describeIfDatabase('OAPI-1 read-only API-token routes (real DB)', () => {
     expect(res.status).toBe(401) // no apiTokenAuth on write → actor unset → rejected
     const check = await q('SELECT data FROM meta_records WHERE id = $1', [REC_OPEN])
     expect((check.rows[0] as { data?: Record<string, unknown> })?.data?.[STATUS]).toBe('open') // unchanged
+  })
+
+  // ---- OAPI-1 continuation: records:read on /view, /view-aggregate, /records-summary; fields:read on /fields ----
+
+  // Guard-proof per route: wrong-scope → 403 and revoked → 401 prove BOTH apiTokenAuth + requireScope are
+  // mounted (a happy-200 alone passes even if apiTokenAuth were missing). A valid token must NOT 401/403.
+  test('records:read guards mounted on /view + /view-aggregate + /records-summary (403 wrong-scope, 401 revoked)', async () => {
+    for (const p of [
+      '/api/multitable/view',
+      `/api/multitable/sheets/${SHEET_ID}/view-aggregate`,
+      '/api/multitable/records-summary',
+    ]) {
+      expect((await auth(p, tokNoScope).query({ sheetId: SHEET_ID })).status).toBe(403) // requireScope mounted
+      expect((await auth(p, tokRevoked).query({ sheetId: SHEET_ID })).status).toBe(401) // apiTokenAuth mounted
+      expect([401, 403]).not.toContain((await auth(p, tokReadOk).query({ sheetId: SHEET_ID })).status) // valid passes guards
+    }
+  })
+
+  test('fields:read guard mounted on /fields (200 with fields:read; 403 with records:read-only; 401 revoked)', async () => {
+    expect((await auth('/api/multitable/fields', tokFields).query({ sheetId: SHEET_ID })).status).toBe(200)
+    expect((await auth('/api/multitable/fields', tokReadOk).query({ sheetId: SHEET_ID })).status).toBe(403) // records:read ≠ fields:read
+    expect((await auth('/api/multitable/fields', tokRevoked).query({ sheetId: SHEET_ID })).status).toBe(401)
+  })
+
+  // The spine on the AGGREGATE surfaces: a row the creator is read-denied must not be counted/summarized
+  // (aggregation is the classic place row-deny gets dropped — count-before-filter).
+  test('NEVER EXCEEDS CREATOR (aggregates) — denied row excluded from /records-summary records + /view-aggregate total', async () => {
+    await setFlag(true)
+    await setRules([{ id: 'r1', fieldId: STATUS, operator: 'eq', value: 'secret', effect: 'deny_read' }])
+
+    const summary = await auth('/api/multitable/records-summary', tokReadOk).query({ sheetId: SHEET_ID, limit: 100 })
+    expect(summary.status).toBe(200)
+    const sIds = (summary.body?.data?.records ?? []).map((r: { id: string }) => r.id)
+    expect(sIds).toContain(REC_OPEN)
+    expect(sIds).not.toContain(REC_SECRET) // denied → not in the summary slice
+
+    const agg = await auth(`/api/multitable/sheets/${SHEET_ID}/view-aggregate`, tokReadOk).query({ sheetId: SHEET_ID })
+    expect(agg.status).toBe(200)
+    expect(agg.body?.data?.total).toBe(1) // denied REC_SECRET excluded from the aggregate row set (no count leak)
   })
 })

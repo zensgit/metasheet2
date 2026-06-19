@@ -18,9 +18,15 @@ describe('OAPI-1 read-allowlist gate matcher', () => {
     expect(isApiTokenBearer(undefined)).toBe(false)
   })
 
-  test('ALLOWS: mst_ + GET on the records read routes', () => {
+  test('ALLOWS: mst_ + GET on the OAPI-1 read routes (records:read + fields:read surface)', () => {
+    // records:read
     expect(isOapiReadAllowlistRequest('GET', '/api/multitable/records', MST)).toBe(true)
     expect(isOapiReadAllowlistRequest('GET', '/api/multitable/records/rec_123', MST)).toBe(true)
+    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/records-summary', MST)).toBe(true)
+    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/view', MST)).toBe(true)
+    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/sheets/s1/view-aggregate', MST)).toBe(true)
+    // fields:read
+    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/fields', MST)).toBe(true)
   })
 
   test('DENIES: non-mst_ bearer (session/JWT) → false (normal JWT gate runs)', () => {
@@ -34,12 +40,20 @@ describe('OAPI-1 read-allowlist gate matcher', () => {
     expect(isOapiReadAllowlistRequest('DELETE', '/api/multitable/records/rec_1', MST)).toBe(false)
   })
 
-  test('DENIES: paths outside the OAPI-1 records read routes (fail-closed)', () => {
-    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/records-summary', MST)).toBe(false)
+  test('DENIES: adjacent/unguarded paths (fail-closed — no over-match = no JWT-skip bypass)', () => {
+    // records family
     expect(isOapiReadAllowlistRequest('GET', '/api/multitable/records/rec_1/history', MST)).toBe(false)
     expect(isOapiReadAllowlistRequest('GET', '/api/multitable/records/rec_1/restore', MST)).toBe(false)
+    // /view vs /views (list) and /views/:id/permissions — NOT in scope
+    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/views', MST)).toBe(false)
+    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/views/v1/permissions', MST)).toBe(false)
+    // /sheets/:id/view is NOT the guarded /view route; bare /view-aggregate (no /sheets/:id) is not a route
     expect(isOapiReadAllowlistRequest('GET', '/api/multitable/sheets/s1/view', MST)).toBe(false)
-    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/fields', MST)).toBe(false)
+    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/view-aggregate', MST)).toBe(false)
+    // /fields ALLOWED, but its PII/expansion siblings are NOT
+    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/fields/f1/link-options', MST)).toBe(false)
+    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/sheets/s1/person-fields/f1/directory', MST)).toBe(false)
+    // misc
     expect(isOapiReadAllowlistRequest('GET', '/api/multitable/form-context', MST)).toBe(false)
     expect(isOapiReadAllowlistRequest('GET', '/api/other/records', MST)).toBe(false)
   })
