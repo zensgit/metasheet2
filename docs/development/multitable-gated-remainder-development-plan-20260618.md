@@ -1,7 +1,7 @@
 # 多维表剩余门控开发计划 — 2026-06-18
 
 > Status: **CURRENT GATED REMAINDER PLAN**.
-> Grounding: `origin/main` (live-main, 2026-06-18). Completed since the prior snapshot and now on `main`: **2a** scalar-type extensions (`#2832` / `#2838` / `#2849`) and **2b** dynamic rule-engine **complete through S4** (`#2836` / `#2841` / `#2847` / `#2861` parse cache). The earlier comment/ledger tail PRs `#2825` + `#2857` are closed as superseded by `#2859` (this reconciliation).
+> Grounding: `origin/main` (live-main, 2026-06-18). Completed since the prior snapshot and now on `main`: **2a** scalar-type extensions (`#2832` / `#2838` / `#2849`), **2b** dynamic rule-engine **complete through S4** (`#2836` / `#2841` / `#2847` / `#2861` parse cache), and **2c** `#16` person org-member directory **COMPLETE** (`#2866` / `#2867` / `#2869` / `#2874`, source = B). The earlier comment/ledger tail PRs `#2825` + `#2857` are closed as superseded by `#2859` (this reconciliation).
 > Supersedes: `multitable-current-development-plan-20260617.md` and `multitable-current-development-todo-20260617.md` for current multitable remainder routing.
 > Pair: `multitable-gated-remainder-todo-20260618.md`.
 > Rule: this is a closure ledger for the current multitable mainline. Every item below is gated. Do not start runtime work from this document without an explicit opt-in for that gate.
