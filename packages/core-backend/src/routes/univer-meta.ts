@@ -11619,7 +11619,25 @@ export function univerMetaRouter(): Router {
       if (!patchContext) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById } = patchContext
+      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
+
+      // Layer-3 per-subject field-WRITE gate (parity with revision-restore + record-copy). The write
+      // spine (RecordWriteService.patchRecords) enforces only PROPERTY-level guards (fieldById →
+      // readOnly/hidden/computed); it does NOT enforce per-subject `field_permissions.read_only`. So a
+      // field set read-only for THIS actor via field_permissions would otherwise be writable through the
+      // everyday grid PATCH. Gate it here, fail-closed, before any write. `fieldPermissions` is derived
+      // by buildRecordPatchContext over the FULL visible-property-field set, so every visible field has
+      // an entry (a field with no explicit per-subject rule still gets a permissive entry) — a missing
+      // entry means not-visible/unknown ⇒ forbidden, never a false block of a normal field. `/patch`
+      // fieldIds are caller-submitted, so naming the rejected ids leaks nothing (nonexistent and
+      // read-masked fields are indistinguishable here — both fail the same way, so no existence oracle).
+      const forbiddenWriteFieldIds = [...new Set(parsed.data.changes.map((c) => c.fieldId))].filter((fid) => {
+        const perm = fieldPermissions[fid]
+        return !perm || perm.visible === false || perm.readOnly === true
+      })
+      if (forbiddenWriteFieldIds.length > 0) {
+        return sendForbidden(res, `Field(s) not writable for this user: ${forbiddenWriteFieldIds.join(', ')}`)
+      }
 
       const changesByRecord = new Map<string, typeof parsed.data.changes>()
       for (const change of parsed.data.changes) {
