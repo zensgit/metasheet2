@@ -70,6 +70,7 @@ import {
   type SheetPermissionScope,
 } from '../multitable/permission-service'
 import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
+import { resolveUserDisplayNames } from '../multitable/user-display'
 import {
   loadFieldsForSheet as loadFieldsForSheetShared,
   loadSheetRow as loadSheetRowShared,
@@ -116,6 +117,7 @@ import { validateRecord, getDefaultValidationRules } from '../multitable/field-v
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
+import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
 import {
   AutomationRuleValidationError,
   getAutomationServiceInstance,
@@ -3138,6 +3140,16 @@ export function evaluateMetaFilterCondition(
   if (opNorm === 'isnot' || opNorm === 'notequal') return leftNorm !== rightNorm
   if (opNorm === 'contains') return rightNorm === '' ? true : leftNorm.includes(rightNorm)
   if (opNorm === 'doesnotcontain') return rightNorm === '' ? true : !leftNorm.includes(rightNorm)
+  // 2a (view filter operators): set-membership over a multi-value selection — `value` is an array of
+  // option values (so it reads condition.value directly, not the scalar-normalized `value`). Empty
+  // array = inactive filter (match all), mirroring the empty-`contains` convention above. Each element
+  // is case/whitespace-normalized like `is`/`contains` so a select-option match stays consistent.
+  if (opNorm === 'isanyof' || opNorm === 'isnoneof') {
+    const arr = Array.isArray(condition.value) ? condition.value : []
+    if (arr.length === 0) return true
+    const member = arr.some((v) => toComparableString(v).trim().toLowerCase() === leftNorm)
+    return opNorm === 'isanyof' ? member : !member
+  }
   return true
 }
 
@@ -6231,7 +6243,11 @@ export function univerMetaRouter(): Router {
       const allowedFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowedFieldIds)
       const items = (await listRecordRevisions(pool.query.bind(pool), { sheetId, recordId, limit, offset }))
         .map((item) => redactRecordRevisionEntry(item, allowedFieldIds))
-      return res.json({ ok: true, data: { items, limit, offset } })
+      // Enrich each revision's actor with a display name (name → email) so the history timeline can show
+      // "by <name>" instead of a raw user id; falls back to the id on the client when unresolved.
+      const actorNames = await resolveUserDisplayNames(pool.query.bind(pool), items.map((it) => it.actorId))
+      const enrichedItems = items.map((it) => ({ ...it, actorName: it.actorId ? (actorNames.get(it.actorId) ?? null) : null }))
+      return res.json({ ok: true, data: { items: enrichedItems, limit, offset } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) {
         return res.json({ ok: true, data: { items: [], limit, offset } })
@@ -10228,7 +10244,7 @@ export function univerMetaRouter(): Router {
    * When `cursor` is absent the first page is returned.
    * When `cursor` is present, offset-based params are ignored.
    */
-  router.get('/records', async (req: Request, res: Response) => {
+  router.get('/records', apiTokenAuth, requireScope('records:read'), async (req: Request, res: Response) => {
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -10357,7 +10373,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/records/:recordId', async (req: Request, res: Response) => {
+  router.get('/records/:recordId', apiTokenAuth, requireScope('records:read'), async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
@@ -11412,7 +11428,14 @@ export function univerMetaRouter(): Router {
       // 2b-S2: records AND total are already deny-aware (excluded in SQL via excludeRecordIds above), so no
       // post-filter is needed here — both the row set and the count hide rule-denied / grant-denied trashed
       // records (LOCK-3 list-hide + LOCK-4 count-exclude). Field-read mask still applies to the survivors.
-      const maskedRecords = result.records.map((rec) => ({ ...rec, data: filterRecordDataByFieldIds(rec.data, visibleFieldIds) }))
+      // Enrich each trashed row's deletedBy with a display name (name → email) so the recycle bin can show
+      // who deleted it by name instead of a raw user id; falls back to the id on the client when unresolved.
+      const deletedByNames = await resolveUserDisplayNames(pool.query.bind(pool), result.records.map((rec) => rec.deletedBy))
+      const maskedRecords = result.records.map((rec) => ({
+        ...rec,
+        data: filterRecordDataByFieldIds(rec.data, visibleFieldIds),
+        deletedByName: rec.deletedBy ? (deletedByNames.get(rec.deletedBy) ?? null) : null,
+      }))
       return res.json({ ok: true, data: { records: maskedRecords, total: result.total } })
     } catch (err) {
       if (err instanceof RecordServicePermissionError) {

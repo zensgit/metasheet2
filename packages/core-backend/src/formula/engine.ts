@@ -271,6 +271,148 @@ export class FormulaEngine {
       const scaled = Number((n * f).toPrecision(15))
       return (n >= 0 ? Math.floor(scaled) : Math.ceil(scaled)) / f
     })
+
+    // 1a (capability-depth hardening) — scalar math expansion. All single-value-in/out, no range/array
+    // semantics (range/criteria funcs like SUMIF are 1b). Excel-compatible sentinels on bad input.
+    this.functions.set('INT', (x: unknown) => {
+      const n = Number(x); return Number.isNaN(n) ? '#VALUE!' : Math.floor(n) // Excel INT rounds toward -∞
+    })
+    this.functions.set('TRUNC', (x: unknown, digits: unknown = 0) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      const f = Math.pow(10, Math.trunc(Number(digits) || 0))
+      return Math.trunc(n * f) / f // truncate toward zero (distinct from INT/floor for negatives)
+    })
+    this.functions.set('LN', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      return n <= 0 ? '#NUM!' : Math.log(n)
+    })
+    this.functions.set('LOG', (x: unknown, base: unknown = 10) => {
+      const n = Number(x); const b = Number(base)
+      if (Number.isNaN(n) || Number.isNaN(b)) return '#VALUE!'
+      if (n <= 0 || b <= 0 || b === 1) return '#NUM!'
+      return Math.log(n) / Math.log(b)
+    })
+    this.functions.set('EXP', (x: unknown) => {
+      const n = Number(x); return Number.isNaN(n) ? '#VALUE!' : Math.exp(n)
+    })
+
+    // ── Capability-depth 1a (companion to #2930 math): scalar text + date/time expansion ──
+    // Text
+    this.functions.set('FIND', (find: unknown, within: unknown, start: unknown = 1) => {
+      // Case-SENSITIVE; 1-based; '#VALUE!' when not found.
+      const idx = String(within).indexOf(String(find), Math.max(0, Number(start) - 1))
+      return idx === -1 ? '#VALUE!' : idx + 1
+    })
+    this.functions.set('SEARCH', (find: unknown, within: unknown, start: unknown = 1) => {
+      // Case-INSENSITIVE substring; 1-based. Documented scalar subset: no wildcard (?/*) expansion.
+      const idx = String(within).toLowerCase().indexOf(String(find).toLowerCase(), Math.max(0, Number(start) - 1))
+      return idx === -1 ? '#VALUE!' : idx + 1
+    })
+    this.functions.set('REPLACE', (old: unknown, start: unknown, numChars: unknown, newText: unknown) => {
+      const st = Math.max(0, Number(start) - 1); const cnt = Math.max(0, Number(numChars))
+      if (Number.isNaN(st) || Number.isNaN(cnt)) return '#VALUE!'
+      const s = String(old)
+      return s.slice(0, st) + String(newText) + s.slice(st + cnt)
+    })
+    this.functions.set('REPT', (text: unknown, count: unknown) => {
+      const c = Math.floor(Number(count))
+      if (Number.isNaN(c) || c < 0) return '#VALUE!'
+      const out = String(text)
+      if (out.length * c > 32767) return '#VALUE!' // cell-text cap; guard runaway repeat
+      return out.repeat(c)
+    })
+    this.functions.set('TEXT', (value: unknown, format: unknown) => this.textFormat(value, format))
+    this.functions.set('REGEXMATCH', (text: unknown, pattern: unknown) => {
+      try { return new RegExp(String(pattern)).test(String(text)) } catch { return '#ERROR!' }
+    })
+    this.functions.set('REGEXEXTRACT', (text: unknown, pattern: unknown) => {
+      try { const m = String(text).match(new RegExp(String(pattern))); return m ? (m[1] ?? m[0]) : '#VALUE!' } catch { return '#ERROR!' }
+    })
+    this.functions.set('REGEXREPLACE', (text: unknown, pattern: unknown, replacement: unknown) => {
+      try { return String(text).replace(new RegExp(String(pattern), 'g'), String(replacement)) } catch { return '#ERROR!' }
+    })
+    // Date / time (reuse the timezone-stable date parse used by WEEKDAY, via coerceDateValue)
+    this.functions.set('HOUR', (date: unknown) => { const d = this.coerceDateValue(date); return d ? d.getHours() : '#VALUE!' })
+    this.functions.set('MINUTE', (date: unknown) => { const d = this.coerceDateValue(date); return d ? d.getMinutes() : '#VALUE!' })
+    this.functions.set('DATEADD', (date: unknown, count: unknown, unit: unknown = 'days') => this.dateAdd(date, count, unit))
+    this.functions.set('EOMONTH', (date: unknown, months: unknown = 0) => {
+      const d = this.coerceDateValue(date); if (!d) return '#VALUE!'
+      const m = Math.trunc(Number(months) || 0)
+      return new Date(d.getFullYear(), d.getMonth() + m + 1, 0) // day 0 of next month = last day of target month
+    })
+    this.functions.set('WORKDAY', (date: unknown, days: unknown) => {
+      // Adds `days` working days, skipping Sat/Sun. Holiday-list support is array/record semantics (1b), not here.
+      const d = this.coerceDateValue(date); if (!d) return '#VALUE!'
+      let remaining = Math.trunc(Number(days)); if (Number.isNaN(remaining)) return '#VALUE!'
+      const step = remaining >= 0 ? 1 : -1; remaining = Math.abs(remaining)
+      const cur = new Date(d.getTime())
+      while (remaining > 0) {
+        cur.setDate(cur.getDate() + step)
+        const dow = cur.getDay()
+        if (dow !== 0 && dow !== 6) remaining--
+      }
+      return cur
+    })
+    this.functions.set('WEEKNUM', (date: unknown) => {
+      // ISO-8601 week number: weeks start Monday; week 1 holds the first Thursday of the year.
+      const d = this.coerceDateValue(date); if (!d) return '#VALUE!'
+      const target = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
+      const dayNr = (target.getUTCDay() + 6) % 7 // Mon=0..Sun=6
+      target.setUTCDate(target.getUTCDate() - dayNr + 3) // move to the Thursday of this week
+      const firstThursday = new Date(Date.UTC(target.getUTCFullYear(), 0, 4))
+      const firstDayNr = (firstThursday.getUTCDay() + 6) % 7
+      firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDayNr + 3)
+      return 1 + Math.round((target.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000))
+    })
+  }
+
+  /** Timezone-stable date coercion: a bare 'YYYY-MM-DD' is parsed as LOCAL midnight (matching DATE()),
+   *  not UTC, so weekday/day-of-month are stable on negative-UTC-offset hosts. Returns null on invalid. */
+  private coerceDateValue(value: unknown): Date | null {
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value
+    const s = String(value)
+    const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+    const d = iso ? new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])) : new Date(s)
+    return Number.isNaN(d.getTime()) ? null : d
+  }
+
+  /** DATEADD(date, count, unit): unit ∈ days/weeks/months/years/hours/minutes/seconds (+ short forms;
+   *  short 'm' = months, 'min' = minutes to avoid the month/minute clash). '#VALUE!' on bad input/unit. */
+  private dateAdd(date: unknown, count: unknown, unit: unknown): Date | string {
+    const d = this.coerceDateValue(date); if (!d) return '#VALUE!'
+    const n = Math.trunc(Number(count)); if (Number.isNaN(n)) return '#VALUE!'
+    const u = String(unit).toLowerCase().trim()
+    const out = new Date(d.getTime())
+    if (u === 'days' || u === 'day' || u === 'd') out.setDate(out.getDate() + n)
+    else if (u === 'weeks' || u === 'week' || u === 'w') out.setDate(out.getDate() + n * 7)
+    else if (u === 'months' || u === 'month' || u === 'm') out.setMonth(out.getMonth() + n)
+    else if (u === 'years' || u === 'year' || u === 'y') out.setFullYear(out.getFullYear() + n)
+    else if (u === 'hours' || u === 'hour' || u === 'h') out.setHours(out.getHours() + n)
+    else if (u === 'minutes' || u === 'minute' || u === 'min') out.setMinutes(out.getMinutes() + n)
+    else if (u === 'seconds' || u === 'second' || u === 's') out.setSeconds(out.getSeconds() + n)
+    else return '#VALUE!'
+    return out
+  }
+
+  /** TEXT(value, format): documented scalar subset — percent (`0%`/`0.00%`), fixed decimals (`0`/`0.00`),
+   *  and thousands grouping (`#,##0`/`#,##0.00`). Unsupported patterns fall back to String(value), never guess. */
+  private textFormat(value: unknown, format: unknown): string {
+    const fmt = String(format)
+    const n = Number(value)
+    if (!Number.isNaN(n) && value !== '' && value !== null && value !== undefined) {
+      const pct = fmt.match(/^0(?:\.(0+))?%$/)
+      if (pct) { const dp = pct[1] ? pct[1].length : 0; return (n * 100).toFixed(dp) + '%' }
+      const grouped = fmt.match(/^#,##0(?:\.(0+))?$/)
+      if (grouped) { const dp = grouped[1] ? grouped[1].length : 0; return n.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp }) }
+      const fixed = fmt.match(/^0(?:\.(0+))?$/)
+      if (fixed) { const dp = fixed[1] ? fixed[1].length : 0; return n.toFixed(dp) }
+    }
+    return String(value)
+  }
+
+  /** Names of every registered built-in function (source of truth for the user-facing catalog). */
+  getRegisteredFunctionNames(): string[] {
+    return [...this.functions.keys()].sort()
   }
 
   /**

@@ -151,6 +151,7 @@ import plmEmbedRouter from './routes/plm-embed'
 import { createHostPluginStorage } from './plugins/plugin-durable-storage'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
+import { isOapiReadAllowlistRequest } from './multitable/oapi-read-allowlist'
 import { dashboardRouter } from './routes/dashboard'
 import { createAutomationRoutes } from './routes/automation'
 import { createMultitableAiRoutes } from './routes/multitable-ai'
@@ -975,6 +976,10 @@ export class MetaSheetServer {
     this.app.use((req: Request, res: Response, next: NextFunction) => {
       if (isWhitelisted(req.path)) return next()
       if (isPublicFormAuthBypass(req)) return optionalJwtAuthMiddleware(req, res, next)
+      // OAPI-1: let an `mst_` API token reach the per-route apiTokenAuth + requireScope guards on the
+      // read allowlist ONLY (fail-closed). An `mst_` bearer on any non-allowlisted path falls through to
+      // jwtAuthMiddleware → 401, so tokens can never reach write/side-effecting or non-gating routes.
+      if (isOapiReadAllowlistRequest(req.method, req.path, req.headers.authorization)) return next()
       if (req.path.startsWith('/api/')) return jwtAuthMiddleware(req, res, next)
       return next()
     })
