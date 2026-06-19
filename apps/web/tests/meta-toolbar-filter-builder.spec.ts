@@ -301,4 +301,35 @@ describe('MetaToolbar i18n', () => {
     await setSelectValue(operatorSelect, 'isAnyOf')
     expect(state.filterRules[0]).toEqual({ fieldId: 'status', operator: 'isAnyOf', value: [] })
   })
+
+  // 2a: between — two-bound value control on numeric fields
+  it('offers between for numeric fields and renders two-bound inputs emitting a [min,max] array', async () => {
+    const { state, container: root } = mountToolbar({
+      filterRules: [{ fieldId: 'amount', operator: 'between', value: [] }],
+    })
+    const panel = await openFilterPanel(root)
+    const operatorSelect = panel.querySelector('select[aria-label="Filter operator"]') as HTMLSelectElement
+    expect(Array.from(operatorSelect.options).map((o) => o.value)).toContain('between')
+    const minInput = panel.querySelector('input[data-filter-between-min="true"]') as HTMLInputElement | null
+    const maxInput = panel.querySelector('input[data-filter-between-max="true"]') as HTMLInputElement | null
+    expect(minInput).toBeTruthy()
+    expect(maxInput).toBeTruthy()
+    minInput!.value = '10'
+    minInput!.dispatchEvent(new Event('change'))
+    await nextTick()
+    maxInput!.value = '20'
+    maxInput!.dispatchEvent(new Event('change'))
+    await nextTick()
+    expect(state.filterRules[0]).toEqual({ fieldId: 'amount', operator: 'between', value: ['10', '20'] })
+  })
+
+  it('switching to between seeds an empty array (two-bound, not scalar)', async () => {
+    const { state, container: root } = mountToolbar({
+      filterRules: [{ fieldId: 'amount', operator: 'greater', value: 5 }],
+    })
+    const panel = await openFilterPanel(root)
+    const operatorSelect = panel.querySelector('select[aria-label="Filter operator"]') as HTMLSelectElement
+    await setSelectValue(operatorSelect, 'between')
+    expect(state.filterRules[0]).toEqual({ fieldId: 'amount', operator: 'between', value: [] })
+  })
 })
