@@ -52,6 +52,7 @@ import {
   loadRecordPermissionScopeMap,
   loadRowLevelReadDenyEnabled,
   loadDeniedRecordIds,
+  loadRuleDeniedTrashRecordIds,
   loadSheetMemberUserIdSet,
   loadSheetPermissionScopeMap,
   loadViewPermissionScopeMap,
@@ -11396,7 +11397,15 @@ export function univerMetaRouter(): Router {
       // canDeleteRecord-gated trash count may include a denied row; exact-count exclusion is a minor follow-up.)
       let trashRecords = result.records
       if (!access.isAdminRole && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
-        const deniedIds = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        // grant-deny (record_permissions, persists across delete) ∪ rule-deny evaluated against the
+        // TRASHED records' data (loadRuleDeniedRecordIds reads live meta_records only, so a rule-denied
+        // record would otherwise resurface here once deleted — 2b-S2 trash-surface close-out).
+        const trashedIds = result.records.map((rec) => rec.recordId)
+        const [deniedIds, ruleDeniedTrash] = await Promise.all([
+          loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId),
+          loadRuleDeniedTrashRecordIds(pool.query.bind(pool), sheetId, trashedIds),
+        ])
+        for (const id of ruleDeniedTrash) deniedIds.add(id)
         if (deniedIds.size > 0) trashRecords = result.records.filter((rec) => !deniedIds.has(rec.recordId))
       }
       const maskedRecords = trashRecords.map((rec) => ({ ...rec, data: filterRecordDataByFieldIds(rec.data, visibleFieldIds) }))
@@ -11426,6 +11435,23 @@ export function univerMetaRouter(): Router {
       const access = await resolveRequestAccess(req)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
+      }
+      // 2b-S2 trash-surface close-out: a record currently denied by a CONDITIONAL READ-DENY RULE for
+      // this actor must not be restorable — otherwise restore would reintroduce a rule-denied record onto
+      // the live/operable path. Resolve the trashed record's sheet; if the flag is on, the actor is
+      // non-admin, and a conditional rule denies the trashed record's data, refuse (403). Admin-bypass +
+      // flag-off inert mirror the read surfaces. (Scope: conditional-rule deny only — grant-deny
+      // (record_permissions) on restore is pre-existing and out of this change's scope.)
+      if (!access.isAdminRole) {
+        const trashRow = await pool.query('SELECT sheet_id FROM meta_records_trash WHERE record_id = $1 LIMIT 1', [recordId])
+        const trashSheetId = (trashRow.rows[0] as { sheet_id?: unknown } | undefined)?.sheet_id
+        if (typeof trashSheetId === 'string' && trashSheetId
+          && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), trashSheetId)) {
+          const ruleDenied = await loadRuleDeniedTrashRecordIds(pool.query.bind(pool), trashSheetId, [recordId])
+          if (ruleDenied.has(recordId)) {
+            return sendForbidden(res, 'Cannot restore a record you are not permitted to read')
+          }
+        }
       }
       const recordService = new RecordService(pool, eventBus)
       const result = await recordService.restoreRecord({

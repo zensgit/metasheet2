@@ -1055,14 +1055,43 @@ export async function loadDeniedRecordIds(query: QueryFn, sheetId: string, userI
 }
 
 /**
+ * Shared loader for a sheet's conditional read-deny rule set + field-type map. Returns null when the
+ * surface is inert: a pre-migration sheet (no `conditional_read_rules` column) or an empty/invalid rule
+ * list. Used by BOTH the live (`loadRuleDeniedRecordIds`) and trash (`loadRuleDeniedTrashRecordIds`)
+ * evaluators so they share identical parse-cache (2b-S4) + fail-closed + inert semantics.
+ */
+async function loadConditionalRulesAndFields(
+  query: QueryFn,
+  sheetId: string,
+): Promise<{ rules: ReturnType<typeof parseConditionalRulesCached>['rules']; fieldsById: Record<string, RuleFieldMeta | undefined> } | null> {
+  let rawRules: unknown
+  try {
+    const r = await query('SELECT conditional_read_rules AS rules FROM meta_sheets WHERE id = $1', [sheetId])
+    rawRules = (r.rows[0] as { rules?: unknown } | undefined)?.rules
+  } catch (err) {
+    if (isUndefinedColumnError(err, 'conditional_read_rules')) return null // pre-migration → inert
+    throw err // a real load failure → propagate (fail-closed: the surface errors, never grants read)
+  }
+  const { rules } = parseConditionalRulesCached(rawRules) // 2b-S4: content-keyed parse cache (staleness-free; the per-read DB load above is the freshness guarantee)
+  if (rules.length === 0) return null // no valid rules → inert
+  const fieldsById: Record<string, RuleFieldMeta | undefined> = {}
+  const fr = await query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])
+  for (const row of fr.rows as Array<{ id?: unknown; type?: unknown }>) {
+    if (typeof row.id === 'string' && row.id) {
+      fieldsById[row.id] = { id: row.id, type: typeof row.type === 'string' ? row.type : '' }
+    }
+  }
+  return { rules, fieldsById }
+}
+
+/**
  * #18 phase-2 (2b): the set of LIVE record ids in `sheetId` denied by a conditional read-deny rule
  * (predicate on the record's data), independent of the actor (a rule hides a record from every
  * non-admin reader). Fail-closed: a structurally-valid rule whose field is missing/deleted, or whose
  * operator/value is invalid for the field type, DENIES the record (see evaluateRecordDenied). A
  * pre-migration sheet (no `conditional_read_rules` column) or an empty rule list → empty set (inert).
  * Caller gates on `loadRowLevelReadDenyEnabled` + admin-bypass, exactly like the grant-deny set.
- * NOTE: evaluates live `meta_records` only — trash (meta_records_trash) is a separate surface not yet
- * covered (the flag-off default keeps everything inert until 2b is complete).
+ * Evaluates live `meta_records`; the trash surface is covered by the sibling `loadRuleDeniedTrashRecordIds`.
  */
 export async function loadRuleDeniedRecordIds(
   query: QueryFn,
@@ -1071,23 +1100,8 @@ export async function loadRuleDeniedRecordIds(
 ): Promise<Set<string>> {
   if (!sheetId) return new Set<string>()
   if (recordIds && recordIds.length === 0) return new Set<string>() // nothing to evaluate
-  let rawRules: unknown
-  try {
-    const r = await query('SELECT conditional_read_rules AS rules FROM meta_sheets WHERE id = $1', [sheetId])
-    rawRules = (r.rows[0] as { rules?: unknown } | undefined)?.rules
-  } catch (err) {
-    if (isUndefinedColumnError(err, 'conditional_read_rules')) return new Set<string>() // pre-migration → inert
-    throw err // a real load failure → propagate (fail-closed: the surface errors, never grants read)
-  }
-  const { rules } = parseConditionalRulesCached(rawRules) // 2b-S4: content-keyed parse cache (staleness-free; the per-read DB load above is the freshness guarantee)
-  if (rules.length === 0) return new Set<string>() // no valid rules → inert
-  const fieldsById: Record<string, RuleFieldMeta | undefined> = {}
-  const fr = await query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])
-  for (const row of fr.rows as Array<{ id?: unknown; type?: unknown }>) {
-    if (typeof row.id === 'string' && row.id) {
-      fieldsById[row.id] = { id: row.id, type: typeof row.type === 'string' ? row.type : '' }
-    }
-  }
+  const rf = await loadConditionalRulesAndFields(query, sheetId)
+  if (!rf) return new Set<string>() // pre-migration / no valid rules → inert
   const denied = new Set<string>()
   const rr = recordIds && recordIds.length > 0
     ? await query('SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])', [sheetId, recordIds])
@@ -1095,7 +1109,46 @@ export async function loadRuleDeniedRecordIds(
   for (const row of rr.rows as Array<{ id?: unknown; data?: unknown }>) {
     if (typeof row.id !== 'string' || !row.id) continue
     const data = row.data && typeof row.data === 'object' ? (row.data as Record<string, unknown>) : {}
-    if (evaluateRecordDenied({ data }, rules, fieldsById).denied) denied.add(row.id)
+    if (evaluateRecordDenied({ data }, rf.rules, rf.fieldsById).denied) denied.add(row.id)
+  }
+  return denied
+}
+
+/**
+ * 2b-S2 (trash surface): the set of TRASHED record ids in `sheetId` denied by a conditional read-deny
+ * rule, evaluated against each trashed record's stored data in `meta_records_trash` (keyed by the
+ * original `record_id`). Same fail-closed + inert semantics as the live `loadRuleDeniedRecordIds`, and
+ * the caller gates on `loadRowLevelReadDenyEnabled` + admin-bypass identically. Closes the trash gap so a
+ * rule-denied record stays hidden after deletion (trash list) and cannot be brought back via restore.
+ * A pre-migration trash table (absent `meta_records_trash`) → empty set (inert).
+ */
+export async function loadRuleDeniedTrashRecordIds(
+  query: QueryFn,
+  sheetId: string,
+  recordIds?: string[],
+): Promise<Set<string>> {
+  if (!sheetId) return new Set<string>()
+  if (recordIds && recordIds.length === 0) return new Set<string>()
+  const rf = await loadConditionalRulesAndFields(query, sheetId)
+  if (!rf) return new Set<string>() // pre-migration / no valid rules → inert
+  const denied = new Set<string>()
+  const useIds = Boolean(recordIds && recordIds.length > 0)
+  const sql = useIds
+    ? 'SELECT record_id AS id, data FROM meta_records_trash WHERE sheet_id = $1 AND record_id = ANY($2::text[])'
+    : 'SELECT record_id AS id, data FROM meta_records_trash WHERE sheet_id = $1'
+  const params = useIds ? [sheetId, recordIds] : [sheetId]
+  let rows: Array<{ id?: unknown; data?: unknown }>
+  try {
+    const rr = await query(sql, params)
+    rows = rr.rows as Array<{ id?: unknown; data?: unknown }>
+  } catch (err) {
+    if (isUndefinedTableError(err, 'meta_records_trash')) return new Set<string>() // pre-migration → inert
+    throw err // a real load failure → propagate (fail-closed: the surface errors, never grants read)
+  }
+  for (const row of rows) {
+    if (typeof row.id !== 'string' || !row.id) continue
+    const data = row.data && typeof row.data === 'object' ? (row.data as Record<string, unknown>) : {}
+    if (evaluateRecordDenied({ data }, rf.rules, rf.fieldsById).denied) denied.add(row.id)
   }
   return denied
 }
