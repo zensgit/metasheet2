@@ -58,12 +58,16 @@
   - [ ] Malformed rule fail-closed tests.
   - [ ] Deleted/hidden predicate field tests.
 
-- [x] 2b-S2 Backend enforcement (#2841 — wired into the #18 seam, flag-off inert).
-  - [ ] Real-DB list/view/single-record tests.
-  - [ ] Real-DB summary subset tests.
-  - [ ] Real-DB export and aggregate/dashboard tests.
-  - [ ] Real-DB link picker and trash tests.
-  - [ ] CI allowlist confirmation; do not infer from green jobs.
+- [x] 2b-S2 Backend enforcement (#2841 — wired into the #18 seam, flag-off inert). Real-DB read-surface
+  goldens extended to 8/9 surfaces (#2890); trash is the one deliberate deferral (see below).
+  - [x] Real-DB list / single-record / view tests (#2841 list+single; #2890 view-aggregate).
+  - [x] Real-DB summary subset tests (#2841).
+  - [x] Real-DB export and aggregate/dashboard tests (#2890 — export-xlsx parse + view-aggregate total).
+  - [x] Real-DB link-picker test (#2890 link-options) + search/filter deny-before-filter (#2890).
+  - [!] Real-DB **trash list/restore** — DEFERRED, owner-gated. `loadRuleDeniedRecordIds` evaluates live
+    `meta_records` only (code-acknowledged docstring); extending rule-deny to trashed records + gating
+    restore is new access-control on a flag-off feature → explicit owner decision (build vs record-as-deferral). See §5.
+  - [x] CI allowlist confirmation — `plugin-tests.yml:194` registers enforce-realdb (verified by reading the workflow, not inferred from green jobs); the goldens ran green in `test (20.x)` on #2890.
 
 - [x] 2b-S3 Authoring UI (#2847, + text-type operator allowlist fix).
   - [ ] Rule builder preserves aliases/case/unsupported fields without silent loss.
@@ -107,7 +111,8 @@ These are future candidates or reopen-only lines. They are not open work in the 
 
 ## 5. Owner Unlock Prompts
 
-No active multitable development *arc* remains — **2a, 2b (through S4 `#2861`), and 2c (through S4 `#2874`) are all complete and closed; none is a "next option".** The `#2877` picker-chip decision has been made (closed not-landed — see below). One pre-identified owner option remains (not active planned work):
+No active multitable development *arc* remains — **2a, 2b (through S4 `#2861`), and 2c (through S4 `#2874`) are all complete and closed; none is a "next option".** The `#2877` picker-chip decision has been made (closed not-landed — see below). Two pre-identified owner decisions remain (neither is active planned work):
 
+- **[!] 2b-S2 trash list/restore rule-deny — DECISION NEEDED:** conditional read-deny now reaches **8/9** read surfaces (real-DB goldens, #2890). The 9th — **trash list/restore** — is a deliberate deferral: `loadRuleDeniedRecordIds` evaluates live `meta_records` only (code-acknowledged docstring), so a rule-denied record, once trashed, is no longer hidden, and restore consults no rules. The feature is **flag-off / inert in prod**, so nothing leaks for any user today. **选 Build** trash rule-deny + restore gating + a real-DB golden now, or **选 Defer** — record it as a known limitation and narrow the S2 criterion to live surfaces. This is new access-control behavior on a flag-off feature = owner's call; I will not start it without an explicit pick.
 - **[x] `#2877` (2c-S4 picker-chip affordance) — CLOSED not-landed (2026-06-18):** the green, display-only PR marking no-longer-assignable chips inside `MetaPersonPicker` (the one S4 surface `#2874` left out) was **closed rather than landed**. S4's display-affordance bar is met by `#2874` (cell/summary cue) and ratified by the merged closeout `#2878`; the picker chip is supplementary polish on a different surface, **not** a correctness gap (re-assignment is already fail-closed by `#2854`, and the picker already excludes inactive members per `#2869`). Branch preserved — reopen as an explicitly-scoped picker-polish item if wanted, not as "the last 2c slice".
 - **[~] Revisit grid performance:** opt into D2 high-scale harness/re-baseline work first; row virtualization stays closed unless the verdict flips.
