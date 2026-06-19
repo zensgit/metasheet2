@@ -618,150 +618,6 @@ const TEST_CONNECTION_RESULT_KEYS = new Set([
 const DEFAULT_ADAPTER_SUPPORTS = ['testConnection', 'listObjects', 'getSchema', 'read', 'upsert']
 const DEFAULT_ADAPTER_ROLES = ['source', 'target', 'bidirectional']
 const DANGEROUS_JSON_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
-const ADAPTER_METADATA = {
-  http: {
-    label: 'HTTP API',
-    roles: DEFAULT_ADAPTER_ROLES,
-    advanced: false,
-  },
-  'plm:yuantus-wrapper': {
-    label: 'Yuantus PLM',
-    roles: ['source'],
-    advanced: false,
-  },
-  'erp:k3-wise-webapi': {
-    label: 'K3 WISE WebAPI',
-    roles: ['target'],
-    advanced: false,
-  },
-  'erp:k3-wise-sqlserver': {
-    label: 'K3 WISE SQL Server Channel',
-    roles: ['source', 'target'],
-    advanced: true,
-    guardrails: {
-      read: {
-        requiresTableAllowlist: true,
-        allowlistKeys: ['readTables', 'allowedTables'],
-      },
-      write: {
-        requiresMiddleTableMode: true,
-        requiresTableAllowlist: true,
-        allowlistKeys: ['writeTables', 'allowedTables'],
-        writeModes: ['middle-table'],
-      },
-      ui: {
-        hiddenByDefault: true,
-        normalUiDirectCoreTableWrites: false,
-      },
-    },
-  },
-  'bridge:legacy-sql-readonly': {
-    label: 'Readonly Bridge Agent',
-    roles: ['source'],
-    supports: ['testConnection', 'listObjects', 'getSchema', 'read'],
-    advanced: true,
-    guardrails: {
-      read: {
-        localhostOnly: true,
-        requiresObjectAllowlist: true,
-        maxPreviewLimit: 20,
-        noRawSql: true,
-        dryRunFriendly: true,
-      },
-      write: {
-        supported: false,
-      },
-      ui: {
-        hiddenByDefault: true,
-        recommendedForLegacySqlBridge: true,
-      },
-    },
-  },
-  'metasheet:staging': {
-    label: 'MetaSheet staging multitable',
-    roles: ['source'],
-    supports: ['testConnection', 'listObjects', 'getSchema', 'read'],
-    advanced: false,
-    guardrails: {
-      read: {
-        hostOwned: true,
-        dryRunFriendly: true,
-        noExternalNetwork: true,
-      },
-      write: {
-        supported: false,
-      },
-      ui: {
-        recommendedForPreSourceDryRun: true,
-      },
-    },
-  },
-  'metasheet:multitable': {
-    label: 'MetaSheet multitable',
-    roles: ['target'],
-    supports: ['testConnection', 'listObjects', 'getSchema', 'upsert'],
-    advanced: false,
-    guardrails: {
-      read: {
-        supported: false,
-      },
-      write: {
-        hostOwned: true,
-        pluginScopedSheetsOnly: true,
-        supportsAppend: true,
-        supportsUpsertByKey: true,
-      },
-      ui: {
-        recommendedForCleansedOutput: true,
-      },
-    },
-  },
-  'data-source:sql-readonly': {
-    label: 'Read-only SQL data source',
-    roles: ['source'],
-    supports: ['testConnection', 'listObjects', 'getSchema', 'read'],
-    advanced: true,
-    guardrails: {
-      read: {
-        readOnlyBindingOnly: true,
-        ownerScoped: true,
-        offsetPagingOnly: true,
-        maxRowsPerPage: 10000,
-        noRawSql: true,
-        dryRunFriendly: true,
-      },
-      write: {
-        supported: false,
-      },
-      ui: {
-        referencesDataSources: true,
-      },
-    },
-  },
-  'data-source:sql-write-gated': {
-    label: 'Write-gated SQL data source',
-    roles: ['target'],
-    supports: ['testConnection', 'listObjects', 'getSchema'],
-    advanced: true,
-    guardrails: {
-      read: {
-        supported: false,
-      },
-      write: {
-        c6TokenBoundApplyRequired: true,
-        requiresWritableDataSource: true,
-        requiresGenericQueryDisabled: true,
-        noRawSql: true,
-        deleteSupported: false,
-        upsertRuntimeAvailable: false,
-      },
-      ui: {
-        hiddenByDefault: true,
-        serverConfiguredOnly: true,
-      },
-    },
-  },
-}
 
 // Route-level secret-text redaction delegates to the shared scrubber
 // (payload-redaction.cjs) — single secret-shape source, no second regex set here.
@@ -777,8 +633,8 @@ function cloneJson(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value))
 }
 
-function describeAdapterKind(kind) {
-  const metadata = ADAPTER_METADATA[kind] || {}
+function describeAdapterKind(kind, adapterMetadata) {
+  const metadata = adapterMetadata || {}
   return {
     kind,
     label: metadata.label || kind,
@@ -1405,7 +1261,10 @@ function createHandlers(services, options = {}) {
 
     async adaptersList(req, res) {
       requireAccess(req, 'read')
-      return sendOk(res, adapterRegistry.listAdapterKinds().map(describeAdapterKind))
+      const describe = typeof adapterRegistry.getAdapterMetadata === 'function'
+        ? (kind) => describeAdapterKind(kind, adapterRegistry.getAdapterMetadata(kind))
+        : (kind) => describeAdapterKind(kind)
+      return sendOk(res, adapterRegistry.listAdapterKinds().map(describe))
     },
 
     async externalSystemsList(req, res) {

@@ -319,7 +319,28 @@ function createMetaSheetStagingSourceAdapterFactory({ context } = {}) {
   return ({ system }) => createMetaSheetStagingSourceAdapter({ system, context })
 }
 
+const METASHEET_STAGING_ADAPTER_METADATA = {
+  label: 'MetaSheet staging multitable',
+  roles: ['source'],
+  supports: ['testConnection', 'listObjects', 'getSchema', 'read'],
+  advanced: false,
+  guardrails: {
+    read: {
+      hostOwned: true,
+      dryRunFriendly: true,
+      noExternalNetwork: true,
+    },
+    write: {
+      supported: false,
+    },
+    ui: {
+      recommendedForPreSourceDryRun: true,
+    },
+  },
+}
+
 module.exports = {
+  METASHEET_STAGING_ADAPTER_METADATA,
   createMetaSheetStagingSourceAdapter,
   createMetaSheetStagingSourceAdapterFactory,
   __internals: {

@@ -428,7 +428,31 @@ function createDataSourceSqlReadonlySourceAdapterFactory({ context } = {}) {
     createDataSourceSqlReadonlySourceAdapter({ system, context, principal })
 }
 
+const DATA_SOURCE_SQL_READONLY_ADAPTER_METADATA = {
+  label: 'Read-only SQL data source',
+  roles: ['source'],
+  supports: ['testConnection', 'listObjects', 'getSchema', 'read'],
+  advanced: true,
+  guardrails: {
+    read: {
+      readOnlyBindingOnly: true,
+      ownerScoped: true,
+      offsetPagingOnly: true,
+      maxRowsPerPage: 10000,
+      noRawSql: true,
+      dryRunFriendly: true,
+    },
+    write: {
+      supported: false,
+    },
+    ui: {
+      referencesDataSources: true,
+    },
+  },
+}
+
 module.exports = {
+  DATA_SOURCE_SQL_READONLY_ADAPTER_METADATA,
   ADAPTER_KIND,
   createDataSourceSqlReadonlySourceAdapter,
   createDataSourceSqlReadonlySourceAdapterFactory,

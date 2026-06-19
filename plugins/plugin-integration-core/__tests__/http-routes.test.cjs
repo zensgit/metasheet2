@@ -8,6 +8,19 @@ const httpRoutes = require(HTTP_ROUTES_PATH)
 const { MAX_LIST_LIMIT } = httpRoutes
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
+// S4: adapter self-described metadata — the mock registry serves the REAL per-module metadata
+// so the /adapters route assertions verify the actual shipped values (no duplicated literal).
+const ADAPTER_METADATA_BY_KIND = {
+  http: require(path.join(__dirname, '..', 'lib', 'adapters', 'http-adapter.cjs')).HTTP_ADAPTER_METADATA,
+  'plm:yuantus-wrapper': require(path.join(__dirname, '..', 'lib', 'adapters', 'plm-yuantus-wrapper.cjs')).YUANTUS_PLM_ADAPTER_METADATA,
+  'erp:k3-wise-webapi': require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-webapi-adapter.cjs')).K3_WISE_WEBAPI_ADAPTER_METADATA,
+  'erp:k3-wise-sqlserver': require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-sqlserver-channel.cjs')).K3_WISE_SQLSERVER_ADAPTER_METADATA,
+  'bridge:legacy-sql-readonly': require(path.join(__dirname, '..', 'lib', 'adapters', 'bridge-agent-readonly-adapter.cjs')).BRIDGE_READONLY_ADAPTER_METADATA,
+  'metasheet:staging': require(path.join(__dirname, '..', 'lib', 'adapters', 'metasheet-staging-source-adapter.cjs')).METASHEET_STAGING_ADAPTER_METADATA,
+  'metasheet:multitable': require(path.join(__dirname, '..', 'lib', 'adapters', 'metasheet-multitable-target-adapter.cjs')).METASHEET_MULTITABLE_ADAPTER_METADATA,
+  'data-source:sql-readonly': require(path.join(__dirname, '..', 'lib', 'adapters', 'data-source-sql-readonly-source-adapter.cjs')).DATA_SOURCE_SQL_READONLY_ADAPTER_METADATA,
+  'data-source:sql-write-gated': require(path.join(__dirname, '..', 'lib', 'adapters', 'data-source-sql-write-gated-target-adapter.cjs')).DATA_SOURCE_SQL_WRITE_GATED_ADAPTER_METADATA,
+}
 const STOCK_PREPARATION_RESOLVED_FIELD_ID_MAP = Object.fromEntries(
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, `fld_${field.id}`]),
 )
@@ -882,6 +895,9 @@ async function testDiscoveryRoutes() {
       listAdapterKinds() {
         calls.push(['listAdapterKinds'])
         return ['http', 'erp:k3-wise-sqlserver', 'bridge:legacy-sql-readonly', 'metasheet:staging', 'metasheet:multitable', 'data-source:sql-readonly', 'data-source:sql-write-gated', 'custom:unknown']
+      },
+      getAdapterMetadata(kind) {
+        return ADAPTER_METADATA_BY_KIND[kind]
       },
       createAdapter(input, deps) {
         calls.push(['createAdapter', input, deps])

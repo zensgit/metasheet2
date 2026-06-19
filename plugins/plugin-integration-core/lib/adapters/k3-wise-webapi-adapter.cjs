@@ -1362,7 +1362,14 @@ function createK3WiseWebApiAdapterFactory(defaults = {}) {
   return (input = {}) => createK3WiseWebApiAdapter({ ...defaults, ...input })
 }
 
+const K3_WISE_WEBAPI_ADAPTER_METADATA = {
+  label: 'K3 WISE WebAPI',
+  roles: ['target'],
+  advanced: false,
+}
+
 module.exports = {
+  K3_WISE_WEBAPI_ADAPTER_METADATA,
   K3WiseWebApiAdapterError,
   createK3WiseWebApiAdapter,
   createK3WiseWebApiAdapterFactory,

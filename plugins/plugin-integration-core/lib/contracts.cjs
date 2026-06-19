@@ -188,8 +188,12 @@ function assertAdapterContract(adapter, kind = 'unknown') {
 
 function createAdapterRegistry({ logger } = {}) {
   const factories = new Map()
+  // S4: adapters self-describe their metadata (label/roles/supports/guardrails/advanced); the
+  // registry collects it so the /adapters route reflects the adapters themselves rather than a
+  // duplicated static table. Optional — kinds registered without metadata simply return undefined.
+  const metadataByKind = new Map()
 
-  function registerAdapter(kind, factory, { replace = false } = {}) {
+  function registerAdapter(kind, factory, { replace = false, metadata } = {}) {
     const normalizedKind = requiredString(kind, 'kind')
     if (typeof factory !== 'function') {
       throw new AdapterValidationError('adapter factory must be a function', { kind: normalizedKind })
@@ -198,6 +202,9 @@ function createAdapterRegistry({ logger } = {}) {
       throw new AdapterValidationError(`adapter already registered: ${normalizedKind}`, { kind: normalizedKind })
     }
     factories.set(normalizedKind, factory)
+    if (metadata !== undefined && metadata !== null) {
+      metadataByKind.set(normalizedKind, metadata)
+    }
     if (logger && typeof logger.info === 'function') {
       logger.info(`[plugin-integration-core] adapter registered: ${normalizedKind}`)
     }
@@ -206,6 +213,10 @@ function createAdapterRegistry({ logger } = {}) {
 
   function listAdapterKinds() {
     return Array.from(factories.keys()).sort()
+  }
+
+  function getAdapterMetadata(kind) {
+    return metadataByKind.get(kind)
   }
 
   function createAdapter(system, deps = {}) {
@@ -227,6 +238,7 @@ function createAdapterRegistry({ logger } = {}) {
   const registry = {
     registerAdapter,
     listAdapterKinds,
+    getAdapterMetadata,
     createAdapter,
   }
   return registry

@@ -448,7 +448,14 @@ function createYuantusPlmWrapperAdapterFactory(defaults = {}) {
   return (input = {}) => createYuantusPlmWrapperAdapter({ ...defaults, ...input })
 }
 
+const YUANTUS_PLM_ADAPTER_METADATA = {
+  label: 'Yuantus PLM',
+  roles: ['source'],
+  advanced: false,
+}
+
 module.exports = {
+  YUANTUS_PLM_ADAPTER_METADATA,
   createYuantusPlmWrapperAdapter,
   createYuantusPlmWrapperAdapterFactory,
   __internals: {
