@@ -248,11 +248,17 @@ function normalizeLookupRequest(input = {}) {
   }
 }
 
-// VALUES-FREE helpers for the two lifecycle builders. A natural key can itself be PII
-// (email/phone) and metadata can hide row data, so these builders never carry a raw key or a
-// nested metadata value: they emit an OPAQUE keyHash (projected to declared keyFields, then
-// sha256'd — mirroring external-write-dry-run.cjs's keyFromRecord + hashJson) and accept only
-// SCALAR metadata. This is the values-free LOCK at the contract layer (design-lock §5/§6.1).
+// VALUES-FREE helpers for the two lifecycle builders. This is the values-free LOCK at the
+// contract layer (design-lock §5/§6.1). A lifecycle result flows to UI / issue evidence, so
+// it must never carry a raw row value. The STRUCTURAL guarantees are: opaque keyHash (a
+// natural key can itself be PII — email/phone), opaque revisionHash, no free-text error, and
+// number|boolean|null-only metadata (a string could hide a row value). errorCode is gated to
+// a CODE charset as DEFENSE-IN-DEPTH + a canary anchor — NOT a hard guarantee (an uppercase
+// product name like WIDGET or a numeric id like 123456 also pass); the contract still relies
+// on adapters passing a stable constant there, and the sanitized human-readable reason lives
+// in dead-letter (sanitizeIntegrationPayload), not in this result.
+
+// keyHash / revisionHash mirror external-write-dry-run.cjs's keyFromRecord + hashJson.
 function hashKey(key, keyFields) {
   const source = Array.isArray(keyFields) && keyFields.length > 0
     ? keyFields.reduce((acc, field) => {
@@ -263,17 +269,52 @@ function hashKey(key, keyFields) {
   return crypto.createHash('sha256').update(JSON.stringify(source)).digest('hex')
 }
 
-function scalarMetadata(value, field) {
+// Opaque revision: sha256 preserves EQUALITY (so the dry-run→apply revision-fence still
+// detects drift) while a stuffed row value is high-entropy and non-reversible.
+function hashRevision(revision) {
+  if (revision === undefined || revision === null) return null
+  return crypto.createHash('sha256').update(String(revision)).digest('hex')
+}
+
+// A stable adapter-defined code (e.g. Postgres SQLSTATE `42501`/`23505`, or `C6_ROW_FAILED`).
+// Charset gate is defense-in-depth: it rejects emails / part numbers / free text, anchoring
+// the values-free canary. Codes may be all-digit, so no leading-letter requirement.
+const CODE_PATTERN = /^[A-Z0-9_]{1,64}$/
+
+function assertErrorCode(value, field) {
+  const code = requiredString(value, field)
+  if (!CODE_PATTERN.test(code)) {
+    throw new AdapterContractError(`${field} must be a stable code matching [A-Z0-9_]{1,64} (values-free)`, { field })
+  }
+  return code
+}
+
+// metadata carries only counts/flags. STRUCTURAL values-free guarantee: number | boolean |
+// null only. Strings are rejected outright (a row value could ride out as a metadata string)
+// and nested objects can never hide row data.
+function valuesFreeMetadata(value, field) {
   if (value === undefined || value === null) return {}
   if (!isPlainObject(value)) {
     throw new AdapterContractError(`${field} must be an object`, { field })
   }
   const out = {}
   for (const [key, entry] of Object.entries(value)) {
-    if (entry !== null && typeof entry === 'object') {
-      throw new AdapterContractError(`${field}.${key} must be a scalar (values-free)`, { field, key })
+    if (entry === null) {
+      out[key] = null
+      continue
     }
-    out[key] = entry
+    if (typeof entry === 'number') {
+      if (!Number.isFinite(entry)) {
+        throw new AdapterContractError(`${field}.${key} must be a finite number (values-free)`, { field, key })
+      }
+      out[key] = entry
+      continue
+    }
+    if (typeof entry === 'boolean') {
+      out[key] = entry
+      continue
+    }
+    throw new AdapterContractError(`${field}.${key} must be number|boolean|null (values-free)`, { field, key })
   }
   return out
 }
@@ -287,15 +328,16 @@ function createLookupResult({ matches = [], keyFields = [], metadata = {} } = {}
       if (!isPlainObject(match)) {
         throw new AdapterContractError(`matches[${index}] must be an object`, { field: 'matches' })
       }
-      // VALUES-FREE: index + opaque keyHash + existence/revision only — never the raw key.
+      // VALUES-FREE: index + opaque keyHash + existence + opaque revisionHash — never the
+      // raw key and never a raw revision token.
       return {
         index: normalizeResultCount(match.index === undefined ? index : match.index, `matches[${index}].index`),
         keyHash: hashKey(match.key, keyFields),
         exists: Boolean(match.exists),
-        revision: match.revision === undefined || match.revision === null ? null : String(match.revision),
+        revisionHash: hashRevision(match.revision),
       }
     }),
-    metadata: scalarMetadata(metadata, 'metadata'),
+    metadata: valuesFreeMetadata(metadata, 'metadata'),
   }
 }
 
@@ -325,7 +367,8 @@ function normalizeApplyRequest(input = {}) {
 }
 
 // Per-row apply result: ENUM-STRICT status + VALUES-FREE (allow-list projection of
-// index/key/status/errorCode/error — the submitted row values are never carried).
+// index/keyHash/status/errorCode — the submitted row values are never carried, and the
+// free-text error is intentionally NOT in the result; sanitized detail goes to dead-letter).
 function createApplyResult({ rows = [], keyFields = [], written = 0, updated = 0, skipped = 0, failed = 0, held = 0, metadata = {} } = {}) {
   if (!Array.isArray(rows)) {
     throw new AdapterContractError('apply result rows must be an array', { field: 'rows' })
@@ -341,13 +384,15 @@ function createApplyResult({ rows = [], keyFields = [], written = 0, updated = 0
         { field: 'rows', index, value: row.status, allowed: APPLY_ROW_STATUSES },
       )
     }
-    // VALUES-FREE: index + opaque keyHash + status + redacted errorCode/error only — never the raw key.
+    // VALUES-FREE: index + opaque keyHash + enum-strict status + code-only errorCode. No raw
+    // key, no free-text error (that leaks DB/row values — it belongs in dead-letter).
     return {
       index: normalizeResultCount(row.index === undefined ? index : row.index, `rows[${index}].index`),
       keyHash: hashKey(row.key, keyFields),
       status,
-      ...(row.errorCode ? { errorCode: requiredString(row.errorCode, `rows[${index}].errorCode`) } : {}),
-      ...(row.error ? { error: requiredString(row.error, `rows[${index}].error`) } : {}),
+      ...(row.errorCode === undefined || row.errorCode === null
+        ? {}
+        : { errorCode: assertErrorCode(row.errorCode, `rows[${index}].errorCode`) }),
     }
   })
   return {
@@ -357,7 +402,7 @@ function createApplyResult({ rows = [], keyFields = [], written = 0, updated = 0
     skipped: normalizeResultCount(skipped, 'skipped'),
     failed: normalizeResultCount(failed, 'failed'),
     held: normalizeResultCount(held, 'held'),
-    metadata: scalarMetadata(metadata, 'metadata'),
+    metadata: valuesFreeMetadata(metadata, 'metadata'),
   }
 }
 
