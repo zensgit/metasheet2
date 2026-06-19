@@ -113,7 +113,7 @@ Non-goals:
 
 ## 2. 2b · #18 Phase-2 Permission Rule Engine
 
-> **STATUS (2026-06-18): COMPLETE (S1–S4).** S1 parser/evaluator, fail-closed (#2836); S2 conditional read-deny enforcement wired into the static-#18 seam, flag-off inert (#2841); S3 authoring UI + API (#2847); **S4 content-keyed parse cache (#2861) — staleness-free (DB reads are NOT cached; the per-read rules load is the freshness guarantee).** §2.1–§2.4 retained as history.
+> **STATUS (2026-06-18): COMPLETE (S1–S4).** S1 parser/evaluator, fail-closed (#2836); S2 conditional read-deny enforcement wired into the static-#18 seam, flag-off inert (#2841), with real-DB read-surface goldens now over **8/9** surfaces (#2890 added view/search-filter, aggregate/dashboard, export, link-picker to the prior list/single/summary); S3 authoring UI + API (#2847); **S4 content-keyed parse cache (#2861) — staleness-free (DB reads are NOT cached; the per-read rules load is the freshness guarantee).** §2.1–§2.4 retained as history. **One read surface — trash list/restore — is a deliberate deferral (`loadRuleDeniedRecordIds` evaluates live `meta_records` only; flag-off/inert); it is an explicit owner decision (build vs record-as-deferral), not autonomous remainder.**
 
 ### 2.1 Current Contract
 
@@ -158,7 +158,7 @@ Recommended implementation slices after the gate opens:
 |---|---|---|
 | ✅ 2b-S0 | Security design-lock and adversarial threat model. (Settled — S1–S3 built on the locked rule model.) | Owner sign-off; no runtime. |
 | ✅ 2b-S1 | Pure evaluator + parser, no route wiring. **(#2836)** | Unit matrix per field type/operator; malformed rule fail-closed. |
-| ✅ 2b-S2 | Backend enforcement for the same read surfaces covered by static #18. **(#2841 — wired into the #18 seam, flag-off inert)** | Real-DB golden over list, single record, view, summaries, export, aggregate/dashboard, search/filter, link picker, trash list/restore. |
+| ✅ 2b-S2 | Backend enforcement for the same read surfaces covered by static #18. **(#2841 — wired into the #18 seam, flag-off inert)** | Real-DB golden over list, single record (#2841), summaries (#2841), view, search/filter, aggregate/dashboard, export, link picker (**#2890** — 8/9). Trash list/restore = **deliberate deferral** (live-`meta_records`-only; owner decision, §5 of the TODO). |
 | ✅ 2b-S3 | Authoring UI for conditional rules. **(#2847, + text-type operator allowlist fix)** | Frontend tests + browser evidence; no silent rule loss on edit. |
 | ✅ 2b-S4 | Performance and caching pass. **(#2861 — content-keyed parse cache; staleness-free, DB reads not cached.)** | Unit cache cases (hit / equals-direct / content-change re-parse / 200-rule set parsed once across 50 reads / cyclic bypass). |
 
