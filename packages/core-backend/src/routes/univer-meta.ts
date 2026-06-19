@@ -70,6 +70,7 @@ import {
   type SheetPermissionScope,
 } from '../multitable/permission-service'
 import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
+import { resolveUserDisplayNames } from '../multitable/user-display'
 import {
   loadFieldsForSheet as loadFieldsForSheetShared,
   loadSheetRow as loadSheetRowShared,
@@ -6231,7 +6232,11 @@ export function univerMetaRouter(): Router {
       const allowedFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowedFieldIds)
       const items = (await listRecordRevisions(pool.query.bind(pool), { sheetId, recordId, limit, offset }))
         .map((item) => redactRecordRevisionEntry(item, allowedFieldIds))
-      return res.json({ ok: true, data: { items, limit, offset } })
+      // Enrich each revision's actor with a display name (name → email) so the history timeline can show
+      // "by <name>" instead of a raw user id; falls back to the id on the client when unresolved.
+      const actorNames = await resolveUserDisplayNames(pool.query.bind(pool), items.map((it) => it.actorId))
+      const enrichedItems = items.map((it) => ({ ...it, actorName: it.actorId ? (actorNames.get(it.actorId) ?? null) : null }))
+      return res.json({ ok: true, data: { items: enrichedItems, limit, offset } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) {
         return res.json({ ok: true, data: { items: [], limit, offset } })
@@ -11412,7 +11417,14 @@ export function univerMetaRouter(): Router {
       // 2b-S2: records AND total are already deny-aware (excluded in SQL via excludeRecordIds above), so no
       // post-filter is needed here — both the row set and the count hide rule-denied / grant-denied trashed
       // records (LOCK-3 list-hide + LOCK-4 count-exclude). Field-read mask still applies to the survivors.
-      const maskedRecords = result.records.map((rec) => ({ ...rec, data: filterRecordDataByFieldIds(rec.data, visibleFieldIds) }))
+      // Enrich each trashed row's deletedBy with a display name (name → email) so the recycle bin can show
+      // who deleted it by name instead of a raw user id; falls back to the id on the client when unresolved.
+      const deletedByNames = await resolveUserDisplayNames(pool.query.bind(pool), result.records.map((rec) => rec.deletedBy))
+      const maskedRecords = result.records.map((rec) => ({
+        ...rec,
+        data: filterRecordDataByFieldIds(rec.data, visibleFieldIds),
+        deletedByName: rec.deletedBy ? (deletedByNames.get(rec.deletedBy) ?? null) : null,
+      }))
       return res.json({ ok: true, data: { records: maskedRecords, total: result.total } })
     } catch (err) {
       if (err instanceof RecordServicePermissionError) {

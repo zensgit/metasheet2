@@ -320,7 +320,7 @@
             </div>
             <div class="meta-record-drawer__history-meta">
               <span>{{ formatHistoryTime(item.createdAt) }}</span>
-              <span v-if="item.actorId">{{ historyActor(item.actorId, isZh) }}</span>
+              <span v-if="item.actorId">{{ historyActor(item.actorName || item.actorId, isZh) }}</span>
               <span>{{ item.source }}</span>
             </div>
             <div v-if="item.changedFieldIds.length" class="meta-record-drawer__history-fields">

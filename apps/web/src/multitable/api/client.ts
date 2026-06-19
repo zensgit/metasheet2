@@ -715,6 +715,7 @@ function normalizeRecordHistoryEntry(payload: Partial<MetaRecordRevision> | null
     action,
     source: typeof payload?.source === 'string' ? payload.source : 'rest',
     actorId: typeof payload?.actorId === 'string' ? payload.actorId : null,
+    actorName: typeof payload?.actorName === 'string' ? payload.actorName : null,
     changedFieldIds: Array.isArray(payload?.changedFieldIds) ? payload.changedFieldIds.map(String) : [],
     patch: isPlainObject(payload?.patch) ? payload.patch : {},
     snapshot: payload?.snapshot === null || payload?.snapshot === undefined
