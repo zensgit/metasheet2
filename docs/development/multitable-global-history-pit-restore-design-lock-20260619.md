@@ -88,6 +88,8 @@ A user must not infer denied records or hidden fields from:
 
 Rule-denied records are invisible unless the route has an explicit admin-bypass contract. Field-hidden / field-read-denied values never appear in history detail or restore preview.
 
+**Affected-counts are not a side channel (folded review):** the read model's `affected_record_count` / `affected_field_count` are **internal / raw only**. The public API returns **`visibleAffectedRecordCount` / `visibleAffectedFieldCount` computed AFTER permission filtering**; the raw stored count is **never returned to a non-admin**, and the delta caused by hidden/denied records or fields **must not be inferable** (same class as the 2b trash count leak).
+
 ### LOCK-4: Restore Is Always Forward-Writing
 
 Restore never rewinds storage in place. It creates new revisions / changes that appear in the history center and can themselves be understood and, where applicable, undone by a later restore.
@@ -163,8 +165,8 @@ The exact migration shape is a later implementation decision, but the design ass
 - `source`: `manual | api | automation | import | ai | restore | system`
 - `action`: `create | update | delete | restore | bulk_update | config_change`
 - `created_at`
-- `affected_record_count`
-- `affected_field_count`
+- `affected_record_count` (internal/raw — never returned to non-admins; API returns a permission-filtered `visibleAffectedRecordCount`, see LOCK-3)
+- `affected_field_count` (internal/raw — same; API returns `visibleAffectedFieldCount`)
 - `trace_id` nullable
 - `request_id` nullable
 - `metadata jsonb`
@@ -228,6 +230,7 @@ Body:
 - `fieldIds?`
 - `changeIds?`
 - `mode: batch | point_in_time | selected_changes`
+- `strategy: 'revert' | 'reset'` — **required for point_in_time / batch restore; default `revert`.** Selects LOCK-10 semantics: `revert` runs the non-destructive Revert-to-T; `reset` runs the destructive Reset-to-T with the all-or-nothing permission preflight. The preview MUST run the chosen strategy's logic (revert keeps post-T-created records; reset lists them as delete candidates).
 
 Returns:
 
@@ -240,7 +243,7 @@ Returns:
 
 ### `POST /api/multitable/history/restore`
 
-Requires a preview token or equivalent server-verifiable preview identity. Creates forward revisions only. Restore-created batches must link back to the source batch / target time where applicable.
+Requires a preview token or equivalent server-verifiable preview identity. The preview token **binds the `strategy` and scope**: a `revert` preview token MUST NOT execute a `reset` (and vice versa) — the executed strategy must equal the previewed one. Creates forward revisions only. Restore-created batches must link back to the source batch / target time where applicable.
 
 ## 6. UI Shape
 
@@ -262,8 +265,8 @@ Batch detail shows:
 
 - action summary;
 - actor and source;
-- affected record count;
-- affected field count;
+- visible affected record count (post-permission-filter — never the raw stored count);
+- visible affected field count (post-permission-filter);
 - grouped record list;
 - field-level before/after diffs;
 - hidden/denied items summarized only when doing so does not leak existence.

@@ -162,6 +162,7 @@ Scope:
 - preview selected records;
 - preview selected fields;
 - preview selected changes;
+- accept `strategy: revert | reset` (default revert) and run that strategy's logic;
 - report denied changes;
 - report schema drift;
 - report missing/deleted targets;
@@ -177,7 +178,12 @@ Tests:
 - preview reports field write conflicts;
 - preview reports schema drift;
 - preview token cannot be forged trivially;
-- same-shape missing/denied where required.
+- same-shape missing/denied where required;
+- revert preview keeps post-T-created records;
+- reset preview lists post-T-created records as delete candidates;
+- reset: any delete/update/undelete permission failure blocks the entire preview/execute (all-or-nothing, no partial skip);
+- preview token binds strategy — a revert preview token cannot execute reset (and vice versa);
+- API returns visibleAffected{Record,Field}Count (post-filter), never the raw stored count.
 
 ### T6 - Scoped Restore
 
