@@ -1,6 +1,6 @@
 # L5c — Annual-leave admin operations UI · development plan (gated TODO-checklist)
 
-**Status:** ⬜ UNBLOCKED — build authorized. Design-lock `docs/development/attendance-annual-leave-admin-operations-design-lock-20260617.md` is MERGED on `origin/main` (at commit `619fab564`, #2795) and is the authority for every field, code, and 拍板 below. The L6 staging runbook `docs/development/attendance-annual-leave-l6-staging-smoke-runbook-20260617.md` is also merged (#2796) but is a **downstream owner-run gate** (§Dependencies), not part of this build.
+**Status:** ✅ **BUILT + MERGED — SUPERSEDED (2026-06-18 backfill).** This plan's build is complete on `origin/main`: impl **#2830** (the new `annualLeaveOperations` admin section + 3 operation cards + in-DOM confirm/result panels + failure-code mapper + 201-line regression suite + dev-verification MD `attendance-annual-leave-admin-operations-dev-verification-20260617.md`), policy-off fix **#2834** (all three cards disabled when policy off), closeout-MD corrections **#2835/#2844**. The design-lock (#2795) and L6 staging runbook (#2796) remain the authority / downstream gate. **The build-step boxes below were flipped to ✅ to reflect merged reality; only the L6 staging smoke (marked 🔒, §7 / G1) remains as an owner-run gate.** Retained as history.
 
 **One-line scope:** put the three existing **balance-mutating** annual-leave endpoints behind buttons inside **one** new admin nav section, in **one** PR, with the five locked dimensions (preview / confirm / idempotency / failure-code / permission-audit) instantiated three times — **without flattening the three different back-ends**.
 
@@ -52,38 +52,38 @@ All inside one new section **年假操作 / Annual leave operations**, the 30th 
 
 > **Anti-flatten rule (design-lock §1, the #1 codebase-fit trap):** the shared scaffold is the **interaction model** (preview → confirm → result) plus two helpers that do **NOT** apply uniformly. The three back-ends differ — keep the asymmetries explicit. A result panel that assumes all three return a `{code→count}` map is the flatten bug: **manual-adjust returns `{id,delta,applied,alreadyApplied}` with NO reasons map.**
 
-### 2.1 Section registration (rail) — ⬜
+### 2.1 Section registration (rail) — ✅
 - **`apps/web/src/views/attendance/useAttendanceAdminRail.ts`:**
   - Add `annualLeaveOperations: 'attendance-admin-annual-leave-operations'` to `ATTENDANCE_ADMIN_SECTION_IDS` (after `annualLeavePolicy`, line ~41).
   - Add nav-link label after line ~193: `{ id: ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations, label: tr('Annual leave operations', '年假操作') }`.
   - **Append** `ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations` to the existing `annual-leave` group `itemIds` (line ~248), after `annualLeavePolicy`. **Do NOT create a new group** — `groupLabels` must stay the 6 locked labels.
 
-### 2.2 Anchor-nav literal bump (the web-guard gate) — ⬜
+### 2.2 Anchor-nav literal bump (the web-guard gate) — ✅
 - **`apps/web/tests/attendance-admin-anchor-nav.spec.ts`:**
   - Line **127**: `expect(labels).toHaveLength(29)` → `30`.
   - Line **832**: `expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(29)` → `30`.
   - Add `'Annual leave operations'` to the line-130 `arrayContaining([...])` list (optional but recommended — proves the new label renders).
   - **Leave line-126 `groupLabels` `toEqual([...6 groups...])` untouched.**
 
-### 2.3 Section shell in the SFC — ⬜
+### 2.3 Section shell in the SFC — ✅
 - **`apps/web/src/views/AttendanceView.vue`**, insert a new `<section v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations)" class="attendance__admin-section" v-bind="adminSectionBinding(...)">` immediately after the `annualLeavePolicy` section (ends ~line 6230). One `<h4>{{ tr('Annual leave operations', '年假操作') }}</h4>` header, then the three cards stacked.
 
-### 2.4 Shared confirm panel (in-DOM, NOT `window.confirm`) — ⬜
+### 2.4 Shared confirm panel (in-DOM, NOT `window.confirm`) — ✅
 - One reactive `annualOpsConfirm` ref: `{ open: boolean; card: 'adjust'|'backfill'|'accrual'; title: string; lines: Array<{label,value}>; extraConfirmRequired?: boolean; onConfirm: () => void }`.
 - Template: an in-DOM `role="dialog"` panel (mirror the line-4545 pattern) with a **restatement table** built from `lines` (target user / period / delta / `dryRun=false` / and, for accrual+backfill, the dry-run counts just seen — 拍板 dimension 2). Buttons: 取消 / 确认提交. Accrual off-year (拍板 C) adds a second explicit checkbox/confirm gated by `extraConfirmRequired`.
 - Helper `openAnnualOpsConfirm(payload)` / `closeAnnualOpsConfirm()`. **Stable selector** `[data-annual-ops-confirm]` for tests.
 
-### 2.5 Shared result panels — TWO shapes, NOT one — ⬜
+### 2.5 Shared result panels — TWO shapes, NOT one — ✅
 - **`renderReasonTable(map: Record<string,number>)`** — a `code → count` `<table>` fragment. Used by **backfill (`reasons`)** and **accrual (`skipReasons`)** ONLY. Renders unexpected keys gracefully (iterate `Object.entries`).
 - **Manual-adjust result is a DIFFERENT shape**: before/after numbers + `applied` / `alreadyApplied` badges + the returned adjustment **`id`**; **no reasons table**. Do not route it through `renderReasonTable`.
 - **Provenance IDs (design-lock §5 — traceability):** each result panel surfaces the returned identifier(s) so an action is auditable from the UI — manual-adjust's **`id`**, accrual's **`runId` + `periodKey`**, backfill's **`scanned/updated/skipped`** audit — rendered alongside the counts/badges, not hidden.
 - Stable selectors `[data-annual-ops-result-<card>]`.
 
-### 2.6 Shared failure-code mapper — ⬜
+### 2.6 Shared failure-code mapper — ✅
 - `annualOpsErrorLine(code: string, card): string` returning a `tr(en,zh)` human line. Shared function, **per-card code sets** (§3 lists). Accrual's map **must carry a default/fallback line** for the `UNKNOWN` skip bucket and any unlisted code — do NOT hardcode only the seven reason codes.
 - On `apiFetch` reject, read `error.code` (the routes return `{ ok:false, error:{ code, message } }`); render `annualOpsErrorLine(code)`, falling back to the raw code + message if unmapped.
 
-### 2.7 policy.enabled proactive gating (§6) — ⬜
+### 2.7 policy.enabled proactive gating (§6) — ✅
 - Computed `annualOpsPolicyEnabled = computed(() => annualPolicyForm.enabled === true)` (hydrated on first screen via `loadSettings → applyAnnualPolicyToForm`).
 - When `false`: **disable all three cards' commit buttons** + show an informational hint linking to the L5b Policy block (`#attendance-admin-annual-leave-policy`).
 - **Asymmetry to keep explicit:** the disable is **load-bearing for accrual** (backend hard-422s `ANNUAL_LEAVE_NOT_ENABLED`) but **UX-consistency-only for adjust/backfill** (backend stays callable). The hint is informational, not a hard client block layered on top of the server contract.
@@ -94,7 +94,7 @@ All inside one new section **年假操作 / Annual leave operations**, the 30th 
 
 > Each card = (state refs) + (handlers) + (template) + (regression test). Concrete `file:symbol` targets below. All POSTs via `apiFetch`. SFC hazards (§4) apply to every numeric input.
 
-### 3.1 Card 1 — Manual adjustment (client-preview) — ⬜
+### 3.1 Card 1 — Manual adjustment (client-preview) — ✅
 
 **Endpoint:** `POST /api/attendance/annual-leave-manual-adjustment`, body `{ userId, deltaMinutes:int32 nonzero, reason:1-500, idempotencyKey?:1-200, runId?:uuid }` → `{ id, delta, applied, alreadyApplied }`.
 
@@ -127,7 +127,7 @@ All inside one new section **年假操作 / Annual leave operations**, the 30th 
 - (e) disabled when `annualPolicyForm.enabled=false` (mock first-screen settings with `annualLeavePolicy.enabled:false`).
 - **Assert the request by type/URL match, never by call index** (§4 flake rule).
 
-### 3.2 Card 2 — Expiry backfill (server dry-run) — ⬜
+### 3.2 Card 2 — Expiry backfill (server dry-run) — ✅
 
 **Endpoint:** `POST /api/attendance/annual-leave-expiry-backfill`, body `{ dryRun?:bool }` (card sends only `dryRun`; `getOrgId` resolves org) → `{ scanned, updated, skipped, dryRun, reasons }` where `reasons` is an **object/map**.
 
@@ -152,7 +152,7 @@ All inside one new section **年假操作 / Annual leave operations**, the 30th 
 - (c) reasons-as-map: assert the result reads the map (not an array) — guards the flatten bug.
 - (d) disabled-when-policy-off.
 
-### 3.3 Card 3 — Accrual run (server dry-run + period guardrail) — ⬜
+### 3.3 Card 3 — Accrual run (server dry-run + period guardrail) — ✅
 
 **Endpoint:** `POST /api/attendance/annual-leave-accrual/run`, body `{ period:int 2000-2100, asOf?:'YYYY-MM-DD', dryRun?:bool }` → `{ runId, periodKey, asOf, dryRun, granted, skipped, grantedMinutes, lotsCreated, alreadyGranted, skipReasons }` (`skipReasons` an **object/map**).
 
@@ -181,7 +181,7 @@ All inside one new section **年假操作 / Annual leave operations**, the 30th 
 
 ---
 
-## 4. Cross-cutting engineering — ⬜
+## 4. Cross-cutting engineering — ✅
 
 - **Typecheck:** run `pnpm -C apps/web exec vue-tsc -b` (project-references build). **NOT `vue-tsc --noEmit`** — that false-greens cross-file union/ref errors (burned on a prior condition_branch FE union miss).
 - **Local vitest, NOT CI roulette:** debug in the worktree — `pnpm install` (warm store ≈3s) then `pnpm -C apps/web exec vitest run -t '<test name>'` and `vitest run apps/web/tests/attendance-admin-regressions.spec.ts apps/web/tests/attendance-admin-anchor-nav.spec.ts`. A 26k-line SFC test must be iterated locally, not by pushing and watching CI.
@@ -193,21 +193,21 @@ All inside one new section **年假操作 / Annual leave operations**, the 30th 
 
 ---
 
-## 5. Review loop — ⬜ (per-card, gated)
+## 5. Review loop — ✅ (per-card, gated)
 
 Per the L0–L4 precedent, **happy-path adversarial passes miss codebase-fit and RBAC issues** — the review must hunt those specifically, not just "does the button click."
 
-- **🔒 → ⬜ Adversarial sub-agent review, per card** (after each card is locally green; do not batch all three blind):
+- **🔒 → ✅ Adversarial sub-agent review, per card** (after each card is locally green; do not batch all three blind):
   - **Flatten check:** does the result panel route manual-adjust through the reasons-table? (must NOT). Does any card label a client preview as a "dry-run"? (must NOT for manual-adjust).
   - **RBAC / codebase-fit:** is every commit behind `adminForbidden` + the policy-enabled gate? Does the section use `shouldShowAdminSection`/`adminSectionBinding` (not a bespoke `v-if`)? Does `getOrgId` resolution stay server-side (card sends no `orgId`)?
   - **Failure-surface completeness:** every §3 code mapped; accrual fallback line present; `409`/`422`/`404` distinguished (not collapsed to "failed").
   - **Idempotency legibility:** `alreadyApplied` / `alreadyGranted` / `ALREADY_SET` each rendered as a no-op, not a zero-change blank.
   - **Test honesty:** assertions on real wire (body fields), by-type not by-index; not a vacuous mount.
-- **⬜ Owner-review-fix rounds:** fold owner comments per card; re-run local vitest + `vue-tsc -b` after each round. Do not declare a card done until its regression test + the anchor-nav guard are green locally.
+- **✅ Owner-review-fix rounds:** fold owner comments per card; re-run local vitest + `vue-tsc -b` after each round. Do not declare a card done until its regression test + the anchor-nav guard are green locally.
 
 ---
 
-## 6. L5c dev + verification closeout MD — ⬜ (final L5c deliverable, AFTER the build)
+## 6. L5c dev + verification closeout MD — ✅ (final L5c deliverable, AFTER the build)
 
 After all three cards land and CI is green, write an **L5c development + verification closeout** `docs/development/attendance-annual-leave-admin-operations-dev-verification-<date>.md` recording: the per-card 口径 as built, the exact state refs/handlers/selectors shipped, the local-vitest + `vue-tsc -b` evidence, the anchor-nav 29→30 diff, notes of each card's preview→confirm→result flow, and an explicit **L6-readiness handoff** (what the staging smoke can now drive). **Scope note:** this is the **L5c slice** closeout, **not** the whole annual-leave engine's final capstone — the engine track (§0.4) only flips to ✅ after the **L6 staging smoke** passes. This MD is described here but is **NOT produced by this planning step** — it is the closing checklist item of the build.
 
@@ -254,41 +254,41 @@ After all three cards land and CI is green, write an **L5c development + verific
 ## 10. Consolidated TODO-checklist
 
 **Shared scaffold (FIRST)**
-- ⬜ S1 — rail: add `annualLeaveOperations` to `ATTENDANCE_ADMIN_SECTION_IDS` + nav label + append to existing `annual-leave` group `itemIds` (no new group)
-- ⬜ S2 — anchor-nav spec: bump line 127 `toHaveLength(29)→30` AND line 832 `toBe(29)→30`; add label to `arrayContaining`; leave `groupLabels` `toEqual` untouched
-- ⬜ S3 — SFC section shell after `annualLeavePolicy` (`shouldShowAdminSection`/`adminSectionBinding`/`.attendance__admin-section`, `tr` header)
-- ⬜ S4 — shared in-DOM confirm panel (`role="dialog"`, restatement table, off-year extra-confirm slot, `[data-annual-ops-confirm]`) — NOT `window.confirm`
-- ⬜ S5 — TWO result shapes: `renderReasonTable(map)` (backfill+accrual only) + manual-adjust before/after+applied/alreadyApplied panel
-- ⬜ S6 — `annualOpsErrorLine(code,card)` shared mapper, per-card code sets, accrual default/fallback line
-- ⬜ S7 — `annualOpsPolicyEnabled` proactive gate (hydrated via `loadSettings→applyAnnualPolicyToForm`); load-bearing for accrual, UX-only hint for adjust/backfill
+- ✅ S1 — rail: add `annualLeaveOperations` to `ATTENDANCE_ADMIN_SECTION_IDS` + nav label + append to existing `annual-leave` group `itemIds` (no new group)
+- ✅ S2 — anchor-nav spec: bump line 127 `toHaveLength(29)→30` AND line 832 `toBe(29)→30`; add label to `arrayContaining`; leave `groupLabels` `toEqual` untouched
+- ✅ S3 — SFC section shell after `annualLeavePolicy` (`shouldShowAdminSection`/`adminSectionBinding`/`.attendance__admin-section`, `tr` header)
+- ✅ S4 — shared in-DOM confirm panel (`role="dialog"`, restatement table, off-year extra-confirm slot, `[data-annual-ops-confirm]`) — NOT `window.confirm`
+- ✅ S5 — TWO result shapes: `renderReasonTable(map)` (backfill+accrual only) + manual-adjust before/after+applied/alreadyApplied panel
+- ✅ S6 — `annualOpsErrorLine(code,card)` shared mapper, per-card code sets, accrual default/fallback line
+- ✅ S7 — `annualOpsPolicyEnabled` proactive gate (hydrated via `loadSettings→applyAnnualPolicyToForm`); load-bearing for accrual, UX-only hint for adjust/backfill
 
 **Card 1 — manual adjustment (client preview)**
-- ⬜ C1.1 — state refs + client-preview computed off L5a balance read
-- ⬜ C1.2 — preview/request/submit handlers; idempotencyKey surfacing; 422-final note
-- ⬜ C1.3 — template + 6 failure codes (runId/RUN_NOT_FOUND scoped out of v1) + alreadyApplied/409 wording + surface returned adjustment `id`
-- ⬜ C1.4 — regression tests (commit / replay / insufficient / 409 / disabled), assert-by-type
+- ✅ C1.1 — state refs + client-preview computed off L5a balance read
+- ✅ C1.2 — preview/request/submit handlers; idempotencyKey surfacing; 422-final note
+- ✅ C1.3 — template + 6 failure codes (runId/RUN_NOT_FOUND scoped out of v1) + alreadyApplied/409 wording + surface returned adjustment `id`
+- ✅ C1.4 — regression tests (commit / replay / insufficient / 409 / disabled), assert-by-type
 
 **Card 2 — expiry backfill (server dry-run)**
-- ⬜ C2.1 — state refs; dry-run-default + commit handlers
-- ⬜ C2.2 — reasons code→count table; ALREADY_SET-as-no-op framing
-- ⬜ C2.3 — regression tests (dry-run table / commit dryRun:false / reasons-as-map / disabled)
+- ✅ C2.1 — state refs; dry-run-default + commit handlers
+- ✅ C2.2 — reasons code→count table; ALREADY_SET-as-no-op framing
+- ✅ C2.3 — regression tests (dry-run table / commit dryRun:false / reasons-as-map / disabled)
 
 **Card 3 — accrual run (server dry-run + guardrail)**
-- ⬜ C3.1 — state refs incl off-year computed; dry-run + commit handlers
-- ⬜ C3.2 — period soft-warn + extra confirm (拍板 C, no hard block); alreadyGranted surface + link to Card 1
-- ⬜ C3.3 — skipReasons table incl UNKNOWN fallback; `ANNUAL_LEAVE_NOT_ENABLED` gate
-- ⬜ C3.4 — regression tests (dry-run+UNKNOWN row / commit / off-year extra-confirm / not-enabled)
+- ✅ C3.1 — state refs incl off-year computed; dry-run + commit handlers
+- ✅ C3.2 — period soft-warn + extra confirm (拍板 C, no hard block); alreadyGranted surface + link to Card 1
+- ✅ C3.3 — skipReasons table incl UNKNOWN fallback; `ANNUAL_LEAVE_NOT_ENABLED` gate
+- ✅ C3.4 — regression tests (dry-run+UNKNOWN row / commit / off-year extra-confirm / not-enabled)
 
 **Cross-cutting**
-- ⬜ X1 — `vue-tsc -b` green (not `--noEmit`)
-- ⬜ X2 — local vitest green: regressions + anchor-nav specs
-- ⬜ X3 — attendance-web-guard green; SFC hazards (numeric coercion, assert-by-type) hardened
-- ⬜ X4 — attendance-web-guard green on Node 20.x (the single pinned version); path-filter check (apps/web-only)
+- ✅ X1 — `vue-tsc -b` green (not `--noEmit`)
+- ✅ X2 — local vitest green: regressions + anchor-nav specs
+- ✅ X3 — attendance-web-guard green; SFC hazards (numeric coercion, assert-by-type) hardened
+- ✅ X4 — attendance-web-guard green on Node 20.x (the single pinned version); path-filter check (apps/web-only)
 
 **Review + close**
 - 🔒 R1 — adversarial sub-agent review per card (flatten / RBAC / failure-surface / idempotency-legibility / test-honesty) — gated on each card local-green
-- ⬜ R2 — owner-review-fix rounds folded, re-verified
-- ⬜ M1 — L5c dev+verification CLOSEOUT MD (built 口径 + evidence + L6-readiness handoff; NOT the whole-engine capstone — engine ✅ awaits L6)
+- ✅ R2 — owner-review-fix rounds folded, re-verified
+- ✅ M1 — L5c dev+verification CLOSEOUT MD (built 口径 + evidence + L6-readiness handoff; NOT the whole-engine capstone — engine ✅ awaits L6)
 
 **Dependencies**
 - ✅ G0 — upstream unblocked (design-lock merged, L5a/L5b on main, endpoints verified)
