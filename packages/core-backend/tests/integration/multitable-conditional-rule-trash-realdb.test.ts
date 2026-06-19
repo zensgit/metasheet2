@@ -118,18 +118,28 @@ describeIfDatabase('#18 phase-2 conditional read-deny — trash list + restore (
     const ids = (res.body?.data?.records ?? []).map((r: { recordId: string }) => r.recordId)
     expect(ids).not.toContain(REC_SECRET) // the denied record's row + data are excluded
     expect(ids).toContain(REC_PUBLIC)
-    // KNOWN CAVEAT (pinned, out of this scope): `total` is a sheet-wide COUNT(*) in listDeletedRecords,
-    // NOT adjusted for the deny filter — it still counts the hidden row. Pre-existing count behavior also
-    // shared with grant-deny (route comments it a minor follow-up); the data is protected, only the count
-    // is unadjusted. Pinned so a future deny-aware counter is an intentional change, not a silent one.
-    expect(res.body?.data?.total).toBe(2)
+    // LOCK-4 (deny-aware count): `total` now EXCLUDES denied trashed records in SQL (listDeletedRecords
+    // excludeRecordIds), so the aggregate can't reveal the cardinality of hidden rows — 2 trashed, 1 denied → 1.
+    expect(res.body?.data?.total).toBe(1)
   })
 
-  test('enforce — flag ON + deny rule: restoring the rule-denied record is REFUSED (403); a non-denied record restores (200)', async () => {
+  test('enforce — flag ON + deny rule: restoring the rule-denied record is REFUSED as 404 not-found (no existence oracle); a non-denied record restores (200)', async () => {
     await setFlag(true)
     await setRules(denySecretRule)
     const denied = await restore(REC_SECRET)
-    expect(denied.status).toBe(403)
+    // LOCK-6: the refusal is INDISTINGUISHABLE from "no such deleted record" — the SAME 404 NOT_FOUND body a
+    // genuinely-nonexistent id returns (`No deleted record to restore: <probed id>`). A 403 would be an
+    // existence oracle letting a canDeleteRecord actor enumerate which rule-hidden records sit in the trash.
+    expect(denied.status).toBe(404)
+    expect(denied.body?.error?.code).toBe('NOT_FOUND')
+    expect(denied.body?.error?.message).toBe(`No deleted record to restore: ${REC_SECRET}`)
+    // a genuinely-nonexistent id returns the SAME shape (status + code + id-echoing message format), so the
+    // two cases are indistinguishable for any given probe id (the echoed id is attacker-supplied, not a leak).
+    const GHOST_ID = 'rec_nonexistent_oracle_probe'
+    const ghost = await restore(GHOST_ID)
+    expect(ghost.status).toBe(404)
+    expect(ghost.body?.error?.code).toBe('NOT_FOUND')
+    expect(ghost.body?.error?.message).toBe(`No deleted record to restore: ${GHOST_ID}`)
     // the refused record stays in trash (not resurrected onto the live path)
     const trashRow = await q('SELECT 1 FROM meta_records_trash WHERE sheet_id = $1 AND record_id = $2', [SHEET_ID, REC_SECRET])
     expect(trashRow.rows.length).toBe(1)

@@ -1,6 +1,9 @@
 # 2b 条件读权限 → 回收站(trash)/恢复(restore)继承 — 设计锁(design-lock)
 
-> **状态**:design-lock(**owner 决策 2026-06-18 = Build**:"被条件规则拒读的记录,即使进了回收站也不可见/不可恢复" 作为安全一致性要求)。**实现 GATED —— 本文先锁语义,owner ratify 后再写 runtime**(与 S1b 同一门:design-lock → 签字 → impl)。
+> **状态**:**IMPLEMENTED**(owner 决策 2026-06-18 = Build:"被条件规则拒读的记录,即使进了回收站也不可见/不可恢复" 作为安全一致性要求)。
+> - **首版 runtime by #2900**(`b86751f77`,并行 effort,与本设计锁并发开发):LOCK-1/2(shared evaluator + `loadRuleDeniedTrashRecordIds` 对 `meta_records_trash.data` 求值)、LOCK-3(trash list hide)、LOCK-5(restore refuse)、LOCK-7(admin bypass)、LOCK-8(flag-off inert)均已落地。
+> - **LOCK-4 + LOCK-6 fix by 本 PR**(owner review 指出 #2900 未按这两条实现):**LOCK-4** —— `total` 改为 deny-aware(`listDeletedRecords` 新增 `excludeRecordIds`,COUNT+page 同口径排除,不再泄露隐藏记录基数);**LOCK-6** —— rule-denied restore 改返回与"记录不存在"完全同形态的 **404 NOT_FOUND**(非 403),消除存在性 oracle。real-DB golden 同步改 `total === 1` + restore 404 + 不存在 id 同形态断言。
+> - 历史:本设计锁原写"实现 GATED, ratify 后再写 runtime";但 runtime 已由 #2900 先行合入 `origin/main`,故状态据实改为 IMPLEMENTED(+ LOCK-4/6 fix)。LOCK-1..8 仍是本特性的安全合同。
 > **口径**:本文写 MetaSheet 自有安全设计口径,不引用任何竞品。
 > **基线**:代码实测 @ `origin/main`(`permission-service.ts`、`permission-rule-evaluator.ts`、`record-service.ts`、`routes/univer-meta.ts`)。
 
