@@ -10,16 +10,34 @@
  * `apiTokenAuth` (univer-meta.ts). Read-only by construction: no write/side-effecting path is listed,
  * so a token can never reach one (it 401s there).
  *
- * OAPI-1 scope: `records:read` only — GET /records (list) and GET /records/:id (single). The remaining
- * read surfaces (view / view-aggregate / records-summary → records:read; fields → fields:read;
- * comments → comments:read) are the same pattern and land as the OAPI-1 continuation.
+ * OAPI-1 scope (univer-meta read surface): `records:read` — GET /records (list), /records/:id (single),
+ * /view, /sheets/:sheetId/view-aggregate, /records-summary; and `fields:read` — GET /fields. All apply the
+ * creator's row-deny + field-permission stack per-request (Option A). `comments:read` lives in a different
+ * router (`comments.ts`, `rbacGuard`-based) and is the remaining OAPI-1 slice — NOT yet allowlisted here.
  */
 const TOKEN_BEARER_PREFIX = 'Bearer mst_'
 
-// GET /api/multitable/records (list) and GET /api/multitable/records/<id> (single). Exactly 0 or 1 path
-// segment after `records` — so `/records-summary`, `/records/:id/history`, `/records/:id/restore`, etc.
-// are NOT matched (they are not part of OAPI-1).
-const RECORDS_READ_PATH = /^\/api\/multitable\/records(?:\/[^/]+)?$/
+/**
+ * THE auth boundary. Each pattern must be in **exact lockstep** with a route that mounts BOTH
+ * `apiTokenAuth` + `requireScope` (univer-meta.ts), and every pattern is **anchored `^…$`**. Rationale:
+ * a match lets an `mst_` bearer SKIP the global JWT gate to reach those per-route guards. An OVER-match
+ * (a path with no guards) would be a silent no-auth bypass — `requireScope` fail-opens when no token
+ * scopes are attached. Under-match merely 401s a token (harmless). So: anchor everything; never add a
+ * pattern without the matching mounted guards; keep the adjacent-route exclusions below intentional.
+ */
+const OAPI_READ_PATHS: readonly RegExp[] = [
+  // records:read — GET /records (list), /records/:id (single). Exactly 0/1 segment after `records`, so
+  // `/records-summary` (own pattern below), `/records/:id/history`, `/records/:id/restore` do NOT match.
+  /^\/api\/multitable\/records(?:\/[^/]+)?$/,
+  // records:read — GET /records-summary (a SIBLING of /records, not under it).
+  /^\/api\/multitable\/records-summary$/,
+  // records:read — GET /view. NOT `/views` (list-views), `/views/:id/permissions`, `/sheets/:id/view`.
+  /^\/api\/multitable\/view$/,
+  // records:read — GET /sheets/:sheetId/view-aggregate (exactly one sheetId segment).
+  /^\/api\/multitable\/sheets\/[^/]+\/view-aggregate$/,
+  // fields:read — GET /fields ONLY. NOT `/fields/:id/link-options`, NOT `/sheets/:id/person-fields/:id/directory`.
+  /^\/api\/multitable\/fields$/,
+]
 
 export function isApiTokenBearer(authHeader: string | undefined): boolean {
   return typeof authHeader === 'string' && authHeader.startsWith(TOKEN_BEARER_PREFIX)
@@ -33,5 +51,5 @@ export function isApiTokenBearer(authHeader: string | undefined): boolean {
 export function isOapiReadAllowlistRequest(method: string, path: string, authHeader: string | undefined): boolean {
   if (!isApiTokenBearer(authHeader)) return false
   if (method !== 'GET') return false
-  return RECORDS_READ_PATH.test(path)
+  return OAPI_READ_PATHS.some((pattern) => pattern.test(path))
 }
