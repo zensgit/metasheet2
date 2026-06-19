@@ -110,6 +110,9 @@ const PACT_PATHS = [
   { method: 'GET', path: '/api/v1/cad/files/01H000000000000000000000F8/history' },
   { method: 'GET', path: '/api/v1/cad/files/01H000000000000000000000F9/diff' },
   { method: 'GET', path: '/api/v1/cad/files/01H000000000000000000000F11/mesh-stats' },
+  // PLM-COLLAB V1.1: the two modern Path-A surfaces (advisory manifest + governed BOM context).
+  { method: 'GET', path: '/api/v1/integrations/capabilities' },
+  { method: 'GET', path: '/api/v1/bom/multitable/01H000000000000000000000P1/context' },
 ] as const
 
 function loadPact(): PactDocument {
@@ -180,6 +183,8 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       '/api/v1/cad/files/${fileId}/diff',
       '/api/v1/cad/files/${fileId}/mesh-stats',
       'fetchYuantusFileMetadata',
+      '/api/v1/integrations/capabilities',
+      '/api/v1/bom/multitable/${partId}/context',
     ]
     for (const ep of endpointsToFind) {
       expect(

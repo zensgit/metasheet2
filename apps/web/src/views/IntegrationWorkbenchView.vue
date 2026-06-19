@@ -1934,6 +1934,12 @@ const selectedPlmApprovalCapabilityEntry = computed<PlmApprovalCapabilityEntry |
       actionStatus,
     }
   }
+  // V1.1 pilot: approval_automation has no execution engine yet (action_status "stubbed").
+  // Do NOT show an UPGRADE CTA that would over-promise an automation product to an unentitled
+  // external pilot. The entitled/'enabled' entry above stays (it honestly tells a buyer that
+  // notify is still a placeholder). Self-correcting: once the engine ships, action_status changes
+  // away from "stubbed" and this upgrade entry returns.
+  if (actionStatus === 'stubbed') return null
   return {
     state: 'upgrade',
     badge: '可升级',

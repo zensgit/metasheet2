@@ -3281,7 +3281,7 @@ describe('IntegrationWorkbenchView', () => {
     expect(calls.some((u) => u.includes('/bom-multitable/'))).toBe(false)
   })
 
-  it('C3: shows only the upgrade affordance for supported but not entitled approval automation', async () => {
+  it('V1.1: hides the upgrade CTA for a supported-but-unentitled STUBBED approval automation (no over-promise)', async () => {
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') {
         return jsonResponse([
@@ -3338,12 +3338,11 @@ describe('IntegrationWorkbenchView', () => {
     app.mount(container)
     await flushUi(8)
 
+    // V1.1 pilot: approval_automation is still a stub (no execution engine), so its upgrade CTA is
+    // suppressed — an unentitled external pilot must not be shown an automation product promise.
+    // (The entitled/'enabled' entry is unaffected — see the "marks stubbed actions" test above.)
     const entry = container.querySelector('[data-testid="plm-approval-capability-entry"]') as HTMLElement | null
-    expect(entry).not.toBeNull()
-    expect(entry!.dataset.state).toBe('upgrade')
-    expect(entry!.textContent).toContain('升级审批自动化')
-    expect(entry!.textContent).toContain('尚未开通 approval_automation')
-    expect(entry!.textContent).not.toContain('ECO 审批自动化')
+    expect(entry).toBeNull()
   })
 
   it('C3: hides approval automation entry for unsupported or unavailable PLM capability manifests', async () => {
