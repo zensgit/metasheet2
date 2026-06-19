@@ -364,6 +364,21 @@ export class FormulaEngine {
       firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDayNr + 3)
       return 1 + Math.round((target.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000))
     })
+
+    // ── 1a date-function edge hardening: month-end CLAMP + HOUR/MINUTE/SECOND triplet + day-diff ──
+    this.functions.set('EDATE', (date: unknown, months: unknown = 0) => {
+      // Shift by whole months and CLAMP day to the target month's last day (Excel EDATE), so
+      // EDATE('2026-01-31', 1) → 2026-02-28 (vs DATEADD ...,'months' which overflows to early March).
+      const d = this.coerceDateValue(date); if (!d) return '#VALUE!'
+      const m = Math.trunc(Number(months) || 0)
+      // Reuse EOMONTH's "day 0 of next month = last day of target month" to get the clamp bound.
+      const lastDay = new Date(d.getFullYear(), d.getMonth() + m + 1, 0).getDate()
+      return new Date(d.getFullYear(), d.getMonth() + m, Math.min(d.getDate(), lastDay))
+    })
+    // SECOND completes the HOUR/MINUTE/SECOND triplet (mirrors HOUR/MINUTE exactly).
+    this.functions.set('SECOND', (date: unknown) => { const d = this.coerceDateValue(date); return d ? d.getSeconds() : '#VALUE!' })
+    // DAYS(end_date, start_date): integer calendar-day diff in Excel arg order (note: datedif is start,end).
+    this.functions.set('DAYS', (endDate: unknown, startDate: unknown) => this.datedif(startDate, endDate, 'D'))
   }
 
   /** Timezone-stable date coercion: a bare 'YYYY-MM-DD' is parsed as LOCAL midnight (matching DATE()),
@@ -385,6 +400,8 @@ export class FormulaEngine {
     const out = new Date(d.getTime())
     if (u === 'days' || u === 'day' || u === 'd') out.setDate(out.getDate() + n)
     else if (u === 'weeks' || u === 'week' || u === 'w') out.setDate(out.getDate() + n * 7)
+    // Month-end rollover follows JS setMonth: Jan 31 + 1mo → Mar 2/3 (the short month overflows forward),
+    // NOT clamped to Feb 28. This is intentional/legacy here; EDATE is the month-end-CLAMPED alternative.
     else if (u === 'months' || u === 'month' || u === 'm') out.setMonth(out.getMonth() + n)
     else if (u === 'years' || u === 'year' || u === 'y') out.setFullYear(out.getFullYear() + n)
     else if (u === 'hours' || u === 'hour' || u === 'h') out.setHours(out.getHours() + n)

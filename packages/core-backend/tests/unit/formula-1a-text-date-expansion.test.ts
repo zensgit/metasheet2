@@ -92,12 +92,46 @@ describe('1a scalar text + date expansion', () => {
     })
   })
 
+  describe('1a date-function edge hardening', () => {
+    test('EDATE shifts whole months and CLAMPS to the target month-end', async () => {
+      // The central edge: a long-month day-of-month that the target short month cannot hold.
+      expect(await calc('=YEAR(EDATE(DATE(2026, 1, 31), 1))')).toBe(2026)
+      expect(await calc('=MONTH(EDATE(DATE(2026, 1, 31), 1))')).toBe(2)
+      expect(await calc('=DAY(EDATE(DATE(2026, 1, 31), 1))')).toBe(28) // Jan 31 + 1mo → Feb 28 (2026 not leap)
+      expect(await calc('=DAY(EDATE(DATE(2024, 1, 31), 1))')).toBe(29) // leap year → Feb 29
+      expect(await calc('=DAY(EDATE(DATE(2026, 3, 31), -1))')).toBe(28) // Mar 31 − 1mo → Feb 28
+      expect(await calc('=MONTH(EDATE(DATE(2026, 3, 31), -1))')).toBe(2)
+      // A day the target month CAN hold is preserved unchanged (no spurious clamping).
+      expect(await calc('=DAY(EDATE(DATE(2026, 1, 15), 2))')).toBe(15)
+      expect(await calc('=MONTH(EDATE(DATE(2026, 1, 15), 2))')).toBe(3)
+    })
+    test('DATEADD ...,"months" does NOT clamp — it overflows forward (documented contrast to EDATE)', async () => {
+      // Same Jan-31 + 1 month input as the EDATE clamp test above: setMonth rolls the extra days into
+      // the next month, so the result lands in MARCH, not February. This contrast is intentional/locked.
+      expect(await calc('=MONTH(DATEADD(DATE(2026, 1, 31), 1, "months"))')).toBe(3)
+    })
+    test('EDATE returns #VALUE! on an invalid date', async () => {
+      expect(await calc('=EDATE("not-a-date", 1)')).toBe('#VALUE!')
+    })
+    test('SECOND extracts seconds; #VALUE! on garbage (completes HOUR/MINUTE/SECOND)', async () => {
+      expect(await calc('=SECOND("2026-01-01T13:30:45")')).toBe(45)
+      expect(await calc('=SECOND("not-a-date")')).toBe('#VALUE!')
+    })
+    test('DAYS is the integer day-diff in (end, start) order; signed; #VALUE! on garbage', async () => {
+      expect(await calc('=DAYS(DATE(2026, 1, 10), DATE(2026, 1, 1))')).toBe(9)
+      expect(await calc('=DAYS(DATE(2026, 1, 1), DATE(2026, 1, 10))')).toBe(-9) // reversed args → negative
+      expect(await calc('=DAYS("bad", DATE(2026, 1, 1))')).toBe('#VALUE!')
+      expect(await calc('=DAYS(DATE(2026, 1, 1), "bad")')).toBe('#VALUE!')
+    })
+  })
+
   test('the full 1a set is registered (math via #2930 + text/date here); range/criteria are NOT', () => {
     const names = new Set(engine.getRegisteredFunctionNames())
     const scalar1a = [
       'INT', 'TRUNC', 'EXP', 'LN', 'LOG', // math (#2930)
       'FIND', 'SEARCH', 'REPLACE', 'REPT', 'TEXT', 'REGEXMATCH', 'REGEXEXTRACT', 'REGEXREPLACE', // text
       'HOUR', 'MINUTE', 'DATEADD', 'EOMONTH', 'WORKDAY', 'WEEKNUM', // date
+      'EDATE', 'SECOND', 'DAYS', // date-edge hardening (month-clamp + HOUR/MINUTE/SECOND triplet + day-diff)
     ]
     for (const fn of scalar1a) expect(names.has(fn), `missing ${fn}`).toBe(true)
     // SUMIF/COUNTIFS/AVERAGEIF need range/criteria semantics (1b) — must not be smuggled in as scalar.
