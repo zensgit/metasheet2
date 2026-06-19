@@ -14,10 +14,10 @@
 >   **#2890** added goldens for view/search-filter, aggregate/dashboard, export, and link-picker → 8/9. The 9th
 >   — **trash list/restore** — was the one access-control surface left; surfaced as an owner decision and the
 >   owner picked **选 Build**, shipped in **#2900**: `loadRuleDeniedTrashRecordIds` hides rule-denied deleted
->   records from the trash list and **refuses restore (403)** for a currently-rule-denied record, so it can't
->   be reintroduced onto the live path. Real-DB golden green in `test (20.x)` → **9/9**. Known caveat (pre-existing,
->   out of scope): trash `total` COUNT is not deny-adjusted (records excluded; aggregate count shared with
->   grant-deny — a minor cross-cutting follow-up, pinned by a test). Grant-deny on restore is likewise pre-existing.
+>   records from the trash list and gates restore so a currently-rule-denied record cannot be reintroduced
+>   onto the live path. **#2910** then closed the follow-up locks: trash `total` is deny-aware and restore-denied
+>   returns the same 404 shape as a missing deleted record (no existence oracle). Real-DB golden green in
+>   `test (20.x)` → **9/9**. Grant-deny on restore is pre-existing/out of this scope.
 > - **2c · #16 person org-directory — ALL COVERED.** Native `userId[]`; fail-closed validator across all write
 >   paths (incl. import via shared `createRecord`); active-only directory resolver; `canEditRecord`-gated
 >   endpoint; picker display-parity + no-silent-drop; inactive cue. **CI gap closed:** the two FE specs
@@ -26,8 +26,8 @@
 >
 > **Net for the `/goal`:** every planned arc (2a / 2b / 2c) is built + tested on main; verification surfaced and
 > closed three real gaps — two test/CI (#2890, #2891) and, on the owner's 选 Build, the last access-control
-> surface (#2900, trash rule-deny → **2b-S2 9/9**). No owner decision is pending. The only future candidates are
-> reopen-only / roadmap-pool items (#2877 picker-chip; #17 grid-virtualization; the trash-`total` count caveat),
+> surface (#2900 + #2910, trash rule-deny → **2b-S2 9/9**, deny-aware total, no restore oracle). No owner decision is pending. The only future candidates are
+> reopen-only / roadmap-pool items (#2877 picker-chip; #17 grid-virtualization),
 > none of which is autonomous planned remainder.
 >
 > Status: **VERIFICATION** of the `/goal` "complete all development per the plan/TODO MD".
