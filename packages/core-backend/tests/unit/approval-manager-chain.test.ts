@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { resolveApprovalRequesterOrgRelations } from '../../src/services/ApprovalDirectoryOrg'
+import {
+  resolveApprovalRequesterOrgRelations,
+  resolveMaxManagerChainLevels,
+  DEFAULT_MAX_MANAGER_CHAIN_LEVELS,
+  MANAGER_CHAIN_LEVELS_HARD_CEILING,
+} from '../../src/services/ApprovalDirectoryOrg'
 import { runtimeGraphUsesContinuousManagers } from '../../src/services/ApprovalProductService'
 import type { RuntimeGraph } from '../../src/types/approval-product'
 
@@ -195,5 +200,30 @@ describe('runtimeGraphUsesContinuousManagers (conditional-bake scanner)', () => 
   it('returns false for nodes without assignee sources or non-approval nodes', () => {
     expect(runtimeGraphUsesContinuousManagers({ nodes: [{ key: 'c', type: 'condition', config: {} }] } as unknown as RuntimeGraph)).toBe(false)
     expect(runtimeGraphUsesContinuousManagers({ nodes: [] } as unknown as RuntimeGraph)).toBe(false)
+  })
+})
+
+describe('resolveMaxManagerChainLevels (configurable cap, env APPROVAL_MANAGER_CHAIN_MAX_LEVELS)', () => {
+  it('defaults to 10 when unconfigured / blank', () => {
+    expect(resolveMaxManagerChainLevels(undefined)).toBe(DEFAULT_MAX_MANAGER_CHAIN_LEVELS)
+    expect(resolveMaxManagerChainLevels('')).toBe(DEFAULT_MAX_MANAGER_CHAIN_LEVELS)
+    expect(resolveMaxManagerChainLevels('   ')).toBe(DEFAULT_MAX_MANAGER_CHAIN_LEVELS)
+  })
+
+  it('honors a valid positive integer', () => {
+    expect(resolveMaxManagerChainLevels('1')).toBe(1)
+    expect(resolveMaxManagerChainLevels('5')).toBe(5)
+    expect(resolveMaxManagerChainLevels(String(MANAGER_CHAIN_LEVELS_HARD_CEILING))).toBe(MANAGER_CHAIN_LEVELS_HARD_CEILING)
+  })
+
+  it('clamps above the hard ceiling (a misconfig can never make the walk unbounded)', () => {
+    expect(resolveMaxManagerChainLevels('100')).toBe(MANAGER_CHAIN_LEVELS_HARD_CEILING)
+    expect(resolveMaxManagerChainLevels('99999')).toBe(MANAGER_CHAIN_LEVELS_HARD_CEILING)
+  })
+
+  it('fails SAFE to the default on any invalid value (never throws, never 0/negative/fractional)', () => {
+    for (const bad of ['0', '-3', '3.5', 'abc', 'NaN', '1e3', '0x10']) {
+      expect(resolveMaxManagerChainLevels(bad)).toBe(DEFAULT_MAX_MANAGER_CHAIN_LEVELS)
+    }
   })
 })
