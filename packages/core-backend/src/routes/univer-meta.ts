@@ -1984,13 +1984,34 @@ function isNullishSortValue(value: unknown): boolean {
   return false
 }
 
-type MetaFilterConjunction = 'and' | 'or'
-type MetaFilterCondition = { fieldId: string; operator: string; value?: unknown }
+export type MetaFilterConjunction = 'and' | 'or'
+export type MetaFilterCondition = { fieldId: string; operator: string; value?: unknown }
 
-type MetaFilterInfo = {
+// 2a nested filter groups: a filter node is EITHER a leaf condition OR a (sub)group that carries its own
+// conjunction and its own child nodes. The root filter (MetaFilterInfo) is itself a group. A flat
+// { conjunction, conditions: [leaf, leaf] } is the degenerate single-level group — it parses and evaluates
+// IDENTICALLY to the pre-nesting behavior, so this is fully backward-compatible.
+export type MetaFilterGroup = {
   conjunction: MetaFilterConjunction
-  conditions: MetaFilterCondition[]
+  conditions: MetaFilterNode[]
 }
+export type MetaFilterNode = MetaFilterCondition | MetaFilterGroup
+export type MetaFilterInfo = MetaFilterGroup
+
+// SINGLE source of truth for the leaf-vs-group discriminator. A node is a group iff it carries a
+// `conditions` array. Every site (parse / eval / prune / collect / redact / merge) MUST use this one
+// predicate — a discriminator that diverges between, say, parse and the redaction guard is itself a
+// value-leak path (a node classified as a leaf by one and a group by another could slip a denied literal
+// past redaction). For already-stored data a node carrying BOTH `conditions` and leaf keys resolves as a
+// group (the leaf keys are ignored); at the SAVE boundary that same ambiguity is rejected (fail loud).
+export function isFilterGroup(node: unknown): node is MetaFilterGroup {
+  return !!node && typeof node === 'object' && Array.isArray((node as { conditions?: unknown }).conditions)
+}
+
+// Bound recursion depth on untrusted filter input (DoS guard). The root group is depth 0; its direct
+// children are depth 1. A group nested deeper than this is dropped at parse (cap, not crash) — legitimate
+// filter UIs stay shallow (2-3 levels), so this only ever trims pathological/abusive payloads.
+const MAX_FILTER_DEPTH = 5
 
 function parseMetaSortRules(sortInfo: unknown): MetaSortRule[] {
   if (!sortInfo || typeof sortInfo !== 'object') return []
@@ -2070,29 +2091,88 @@ function normalizeFilterScalar(value: unknown): unknown {
   return value
 }
 
-function parseMetaFilterInfo(filterInfo: unknown): MetaFilterInfo | null {
+// Recursively parse one filter node. A node bearing a `conditions` array is a (sub)group; otherwise it is a
+// leaf condition. Returns null to DROP the node (malformed leaf, empty group, too-deep group, or a node
+// ambiguously carrying both group + leaf shape). Empty groups are dropped so the evaluator never has to
+// disambiguate empty-AND (vacuously true) from empty-OR (vacuously false) on real data.
+export function parseFilterNode(raw: unknown, depth: number): MetaFilterNode | null {
+  if (!isPlainObject(raw)) return null
+  if (Array.isArray((raw as { conditions?: unknown }).conditions)) {
+    // group node. A node that ALSO carries leaf keys is structurally ambiguous → drop it (read path is
+    // lenient: ignore it rather than poison the whole filter; the save path rejects the same shape 400).
+    if (typeof (raw as any).fieldId === 'string' || typeof (raw as any).operator === 'string') return null
+    if (depth >= MAX_FILTER_DEPTH) return null // too deep → trim this subtree (DoS cap)
+    const children: MetaFilterNode[] = []
+    for (const childRaw of (raw as { conditions: unknown[] }).conditions) {
+      const child = parseFilterNode(childRaw, depth + 1)
+      if (child) children.push(child)
+    }
+    if (children.length === 0) return null // drop empty group
+    const conjRaw = typeof (raw as any).conjunction === 'string' ? (raw as any).conjunction.trim().toLowerCase() : 'and'
+    return { conjunction: conjRaw === 'or' ? 'or' : 'and', conditions: children }
+  }
+  // leaf condition
+  const fieldId = (raw as any).fieldId
+  const operator = (raw as any).operator
+  if (typeof fieldId !== 'string' || fieldId.trim().length === 0) return null
+  if (typeof operator !== 'string' || operator.trim().length === 0) return null
+  const leaf: MetaFilterCondition = { fieldId: fieldId.trim(), operator: operator.trim() }
+  if (Object.prototype.hasOwnProperty.call(raw, 'value')) leaf.value = (raw as any).value
+  return leaf
+}
+
+export function parseMetaFilterInfo(filterInfo: unknown): MetaFilterInfo | null {
   if (!filterInfo || typeof filterInfo !== 'object') return null
   const obj = filterInfo as { conjunction?: unknown; conditions?: unknown }
   if (!Array.isArray(obj.conditions)) return null
-
-  const conditions: MetaFilterCondition[] = []
+  const conditions: MetaFilterNode[] = []
   for (const raw of obj.conditions) {
-    if (!isPlainObject(raw)) continue
-    const fieldId = raw.fieldId
-    const operator = raw.operator
-    if (typeof fieldId !== 'string' || fieldId.trim().length === 0) continue
-    if (typeof operator !== 'string' || operator.trim().length === 0) continue
-    conditions.push({
-      fieldId: fieldId.trim(),
-      operator: operator.trim(),
-      ...(Object.prototype.hasOwnProperty.call(raw, 'value') ? { value: (raw as any).value } : {}),
-    })
+    const node = parseFilterNode(raw, 1)
+    if (node) conditions.push(node)
   }
   if (conditions.length === 0) return null
-
   const conjunctionRaw = typeof obj.conjunction === 'string' ? obj.conjunction.trim().toLowerCase() : 'and'
   const conjunction: MetaFilterConjunction = conjunctionRaw === 'or' ? 'or' : 'and'
   return { conjunction, conditions }
+}
+
+// Evaluate a (possibly nested) filter node against a single record via the per-leaf evaluator. Empty groups
+// are dropped at parse/prune so the empty-group arms are defensive only (empty AND = true, empty OR = false).
+export function evaluateFilterNode(node: MetaFilterNode, evalLeaf: (leaf: MetaFilterCondition) => boolean): boolean {
+  if (isFilterGroup(node)) {
+    if (node.conditions.length === 0) return node.conjunction !== 'or'
+    return node.conjunction === 'or'
+      ? node.conditions.some((child) => evaluateFilterNode(child, evalLeaf))
+      : node.conditions.every((child) => evaluateFilterNode(child, evalLeaf))
+  }
+  return evalLeaf(node)
+}
+
+// Flatten a filter tree to its leaf conditions (order-preserving, depth-first). For the flat-list consumers
+// that only need the set of fields/operators referenced anywhere in the filter (computed-field detection,
+// ignored-/denied-field detection) — NOT for redaction/merge, which must preserve tree structure.
+export function collectLeafConditions(node: MetaFilterNode | null | undefined): MetaFilterCondition[] {
+  if (!node) return []
+  if (isFilterGroup(node)) return node.conditions.flatMap(collectLeafConditions)
+  return [node]
+}
+
+// Recursively prune leaves the caller does not want kept (e.g. denied/non-selectable fields), then drop any
+// group left empty. A pruned-empty subtree returns null. This is the nesting-correct equivalent of the flat
+// "filter out non-selectable conditions, then evaluate" pattern: dropping (rather than retaining as an empty
+// group) preserves "a denied field behaves exactly like a non-existent one" under OR as well as AND — an
+// empty OR-group retained as `some([]) = false` would wrongly suppress its siblings.
+export function pruneFilterNode(node: MetaFilterNode, keepLeaf: (leaf: MetaFilterCondition) => boolean): MetaFilterNode | null {
+  if (isFilterGroup(node)) {
+    const kept: MetaFilterNode[] = []
+    for (const child of node.conditions) {
+      const pruned = pruneFilterNode(child, keepLeaf)
+      if (pruned) kept.push(pruned)
+    }
+    if (kept.length === 0) return null
+    return { conjunction: node.conjunction, conditions: kept }
+  }
+  return keepLeaf(node) ? node : null
 }
 
 function toComparableString(value: unknown): string {
@@ -3654,20 +3734,37 @@ async function loadAllowedFieldIds(query: QueryFn, sheetId: string | null | unde
 // allowedFieldIds, OMIT the `value` key (keep fieldId+operator so the client can still render the chip);
 // sortInfo/groupInfo/config carry only fieldIds (not literals) → untouched. Returns the input unchanged
 // when nothing needs redacting (still never mutated).
-function redactViewConfigFilterLiterals<T extends { filterInfo?: unknown } | null | undefined>(view: T, allowedFieldIds: Set<string>): T {
+// Recursively redact denied-field literals anywhere in the (possibly nested) filter tree, preserving
+// structure. For each leaf on a field NOT in allowedFieldIds, OMIT the `value` key (keep fieldId+operator so
+// the client can still render the chip). Returns a COPY only where something changed (the `changed` flag),
+// so a clean tree passes through by identity — view configs are cached/shared and must never be mutated in
+// place. A nested denied value that escaped this recursion would leak straight to the client, so the walk
+// uses the single isFilterGroup discriminator and recurses every group.
+function redactFilterNodeLiterals(node: unknown, allowedFieldIds: Set<string>): { node: unknown; changed: boolean } {
+  if (!node || typeof node !== 'object') return { node, changed: false }
+  const obj = node as Record<string, unknown>
+  if (Array.isArray(obj.conditions)) {
+    let changed = false
+    const next = (obj.conditions as unknown[]).map((child) => {
+      const r = redactFilterNodeLiterals(child, allowedFieldIds)
+      if (r.changed) changed = true
+      return r.node
+    })
+    return changed ? { node: { ...obj, conditions: next }, changed: true } : { node, changed: false }
+  }
+  const denied = typeof obj.fieldId === 'string' && !allowedFieldIds.has(obj.fieldId) && Object.prototype.hasOwnProperty.call(obj, 'value')
+  if (!denied) return { node, changed: false }
+  const { value: _omitted, ...rest } = obj // omit the literal; keep fieldId + operator
+  return { node: rest, changed: true }
+}
+
+export function redactViewConfigFilterLiterals<T extends { filterInfo?: unknown } | null | undefined>(view: T, allowedFieldIds: Set<string>): T {
   if (!view || typeof view !== 'object') return view
   const filterInfo = (view as { filterInfo?: unknown }).filterInfo
   if (!filterInfo || typeof filterInfo !== 'object' || !Array.isArray((filterInfo as { conditions?: unknown }).conditions)) return view
-  const conditions = (filterInfo as { conditions: Array<Record<string, unknown>> }).conditions
-  const isDenied = (c: Record<string, unknown>) =>
-    typeof c?.fieldId === 'string' && !allowedFieldIds.has(c.fieldId) && Object.prototype.hasOwnProperty.call(c, 'value')
-  if (!conditions.some(isDenied)) return view
-  const redactedConditions = conditions.map((c) => {
-    if (!isDenied(c)) return c
-    const { value: _omitted, ...rest } = c // omit the literal; keep fieldId + operator
-    return rest
-  })
-  return { ...(view as object), filterInfo: { ...(filterInfo as object), conditions: redactedConditions } } as T
+  const redacted = redactFilterNodeLiterals(filterInfo, allowedFieldIds)
+  if (!redacted.changed) return view
+  return { ...(view as object), filterInfo: redacted.node } as T
 }
 
 // #2068 re-save guard: PURE merge of an incoming PATCH filterInfo against the current DB filterInfo, so a
@@ -3676,30 +3773,47 @@ function redactViewConfigFilterLiterals<T extends { filterInfo?: unknown } | nul
 // only filterInfo.conditions[].value is ever preserved; sortInfo/groupInfo/config/operator/fieldId pass through.
 // Matches by array-index + (fieldId, operator) (no stable condition IDs); rejects on structural mismatch
 // rather than guess. Returns null on structural mismatch so the route can answer 400 (never persist a missing literal).
-function mergeRedactedFilterInfoForUpdate(incoming: Record<string, unknown>, current: unknown, allowedFieldIds: Set<string>): Record<string, unknown> | null {
+export function mergeRedactedFilterInfoForUpdate(incoming: Record<string, unknown>, current: unknown, allowedFieldIds: Set<string>): Record<string, unknown> | null {
   if (!Array.isArray((incoming as { conditions?: unknown }).conditions)) {
     return incoming // not a conditions-bearing filter → nothing to preserve
   }
-  const incomingConditions = (incoming as { conditions: Array<Record<string, unknown>> }).conditions
-  const currentConditions = (current && typeof current === 'object' && Array.isArray((current as { conditions?: unknown }).conditions))
-    ? (current as { conditions: Array<Record<string, unknown>> }).conditions
-    : []
-  const merged: Array<Record<string, unknown>> = []
-  for (let i = 0; i < incomingConditions.length; i++) {
-    const c = incomingConditions[i]
-    if (!c || typeof c !== 'object' || Array.isArray(c)) return null // malformed condition (null/non-object) → reject (route → 400), never a 500 or persisted garbage
-    const fieldId = typeof c.fieldId === 'string' ? c.fieldId : null
-    const allowed = fieldId !== null && allowedFieldIds.has(fieldId)
-    const hasValue = !!c && typeof c === 'object' && Object.prototype.hasOwnProperty.call(c, 'value')
-    if (allowed || hasValue) { merged.push(c); continue } // allowed field, or explicit value (incl. denied) → trust incoming
-    // denied field with NO value key → must restore from the same-index current condition or reject.
-    const cur = currentConditions[i]
-    const sameShape = !!cur && typeof cur === 'object' && cur.fieldId === c.fieldId && cur.operator === c.operator
-    if (!sameShape) return null // structural mismatch → reject (route answers 400; never persist a missing literal)
-    if (Object.prototype.hasOwnProperty.call(cur, 'value')) merged.push({ ...c, value: (cur as { value?: unknown }).value }) // restore the literal
-    else merged.push(c) // current is also unary (no value) → nothing to protect; keep as-is
+  const merged = mergeRedactedFilterNodeForUpdate(incoming, current, allowedFieldIds)
+  if (!merged || !merged.node || typeof merged.node !== 'object') return null
+  return merged.node as Record<string, unknown>
+}
+
+// Recursive parallel walk of incoming-tree vs current-tree (structure-preserving). One strict rule: an
+// incoming LEAF on a denied field arriving WITHOUT a `value` (it was redacted on the way out) must have its
+// persisted literal restored from the structurally-aligned current leaf — and if the trees don't align at
+// that position (group-vs-leaf, length, or fieldId/operator mismatch), REJECT (return null → route 400)
+// rather than silently drop the hidden literal. Allowed fields and explicit values are trusted from incoming
+// and need no alignment. A node carrying BOTH group + leaf shape is rejected at this write boundary.
+function mergeRedactedFilterNodeForUpdate(incoming: unknown, current: unknown, allowedFieldIds: Set<string>): { node: unknown } | null {
+  if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return null
+  const inc = incoming as Record<string, unknown>
+  if (Array.isArray(inc.conditions)) {
+    if (typeof inc.fieldId === 'string' || typeof inc.operator === 'string') return null // ambiguous write shape → fail loud
+    const incChildren = inc.conditions as unknown[]
+    const curChildren = isFilterGroup(current) ? (current as { conditions: unknown[] }).conditions : null
+    const mergedChildren: unknown[] = []
+    for (let i = 0; i < incChildren.length; i++) {
+      const childMerge = mergeRedactedFilterNodeForUpdate(incChildren[i], curChildren ? curChildren[i] : undefined, allowedFieldIds)
+      if (!childMerge) return null
+      mergedChildren.push(childMerge.node)
+    }
+    return { node: { ...inc, conditions: mergedChildren } }
   }
-  return { ...incoming, conditions: merged }
+  // leaf condition
+  const fieldId = typeof inc.fieldId === 'string' ? inc.fieldId : null
+  const allowed = fieldId !== null && allowedFieldIds.has(fieldId)
+  const hasValue = Object.prototype.hasOwnProperty.call(inc, 'value')
+  if (allowed || hasValue) return { node: inc } // allowed field, or explicit value (incl. denied) → trust incoming
+  // denied field with NO value key → restore from the structurally-aligned current leaf, or reject.
+  if (!current || typeof current !== 'object' || Array.isArray(current) || isFilterGroup(current)) return null
+  const cur = current as Record<string, unknown>
+  if (cur.fieldId !== inc.fieldId || cur.operator !== inc.operator) return null // structural mismatch → reject
+  if (Object.prototype.hasOwnProperty.call(cur, 'value')) return { node: { ...inc, value: cur.value } } // restore the literal
+  return { node: inc } // current is also unary (no value) → nothing to protect; keep as-is
 }
 
 async function loadXlsxModule(): Promise<XlsxModule> {
@@ -3769,13 +3883,8 @@ async function loadDashboardSourceRows(args: {
   // records-list authz path (filteredConditions: fieldTypeById.has && allowedFieldIds.has) so a
   // denied filter field is SILENTLY dropped — behaving identically to a non-existent field (no
   // distinguishable warning/error, which would itself be an existence oracle).
-  const filteredConditions = rawFilterInfo
-    ? rawFilterInfo.conditions.filter(
-        (condition) => fieldTypeById.has(condition.fieldId) && visibleFieldIds.has(condition.fieldId),
-      )
-    : []
-  const filterInfo = filteredConditions.length > 0 && rawFilterInfo
-    ? { ...rawFilterInfo, conditions: filteredConditions }
+  const filterInfo = rawFilterInfo
+    ? pruneFilterNode(rawFilterInfo, (condition) => fieldTypeById.has(condition.fieldId) && visibleFieldIds.has(condition.fieldId))
     : null
 
   const relationalLinkFields = fields
@@ -3791,7 +3900,7 @@ async function loadDashboardSourceRows(args: {
   }
   const needsComputedFields =
     Array.from(widgetFieldIds).some((fieldId) => computedFieldIds.has(fieldId)) ||
-    (filterInfo?.conditions ?? []).some((condition) => computedFieldIds.has(condition.fieldId))
+    collectLeafConditions(filterInfo).some((condition) => computedFieldIds.has(condition.fieldId))
 
   if (needsComputedFields && rows.length > 0) {
     const linkValuesByRecord = await loadLinkValuesByRecord(
@@ -3803,16 +3912,11 @@ async function loadDashboardSourceRows(args: {
   }
 
   if (filterInfo) {
-    rows = rows.filter((record) => {
-      const matches = (condition: MetaFilterCondition) => {
-        const fieldType = fieldTypeById.get(condition.fieldId)
-        if (!fieldType) return true
-        return evaluateMetaFilterCondition(fieldType, record.data[condition.fieldId], condition)
-      }
-      return filterInfo.conjunction === 'or'
-        ? filterInfo.conditions.some(matches)
-        : filterInfo.conditions.every(matches)
-    })
+    rows = rows.filter((record) => evaluateFilterNode(filterInfo, (condition) => {
+      const fieldType = fieldTypeById.get(condition.fieldId)
+      if (!fieldType) return true
+      return evaluateMetaFilterCondition(fieldType, record.data[condition.fieldId], condition)
+    }))
   }
 
   if (!access.isAdminRole && access.userId && rows.length > 0) {
@@ -8657,7 +8761,7 @@ export function univerMetaRouter(): Router {
       // Only SELECTABLE (non-denied) conditions trip this — a denied condition is dropped (= non-existent),
       // matching /view, so it never forces a 422 (which would break the parity invariant).
       const COMPUTED_FILTER_TYPES = new Set(['lookup', 'rollup', 'formula'])
-      if (filterInfo?.conditions.some((c) => selectableFieldIds.has(c.fieldId) && COMPUTED_FILTER_TYPES.has(filterFieldTypeById.get(c.fieldId) ?? ''))) {
+      if (collectLeafConditions(filterInfo).some((c) => selectableFieldIds.has(c.fieldId) && COMPUTED_FILTER_TYPES.has(filterFieldTypeById.get(c.fieldId) ?? ''))) {
         return res.status(422).json({ ok: false, error: { code: 'AGGREGATE_COMPUTED_FILTER_UNSUPPORTED', message: 'Aggregation over a view filtering on a computed (lookup/rollup/formula) field is not yet supported' } })
       }
 
@@ -8702,12 +8806,9 @@ export function univerMetaRouter(): Router {
       }
       if (search) rows = rows.filter((rec) => recordMatchesSearch(rec, selectableFields, search))
       if (filterInfo) {
-        const conditions = filterInfo.conditions.filter((c) => filterFieldTypeById.has(c.fieldId) && selectableFieldIds.has(c.fieldId))
-        if (conditions.length > 0) {
-          rows = rows.filter((rec) => {
-            const matches = (c: MetaFilterCondition) => evaluateMetaFilterCondition(filterFieldTypeById.get(c.fieldId)!, rec.data[c.fieldId], c)
-            return filterInfo.conjunction === 'or' ? conditions.some(matches) : conditions.every(matches)
-          })
+        const pruned = pruneFilterNode(filterInfo, (c) => filterFieldTypeById.has(c.fieldId) && selectableFieldIds.has(c.fieldId))
+        if (pruned) {
+          rows = rows.filter((rec) => evaluateFilterNode(pruned, (c) => evaluateMetaFilterCondition(filterFieldTypeById.get(c.fieldId)!, rec.data[c.fieldId], c)))
         }
       }
 
@@ -8982,14 +9083,11 @@ export function univerMetaRouter(): Router {
         .map((rule) => rule.fieldId)
       const sortRules = rawSortRules.filter((rule) => fieldTypeById.has(rule.fieldId) && allowedFieldIds.has(rule.fieldId))
 
-      const ignoredFilterFieldIds = rawFilterInfo
-        ? rawFilterInfo.conditions.filter((condition) => !fieldTypeById.has(condition.fieldId)).map((c) => c.fieldId)
-        : []
-      const filteredConditions = rawFilterInfo
-        ? rawFilterInfo.conditions.filter((condition) => fieldTypeById.has(condition.fieldId) && allowedFieldIds.has(condition.fieldId))
-        : []
-      const filterInfo = filteredConditions.length > 0 && rawFilterInfo
-        ? { ...rawFilterInfo, conditions: filteredConditions }
+      const ignoredFilterFieldIds = collectLeafConditions(rawFilterInfo)
+        .filter((condition) => !fieldTypeById.has(condition.fieldId))
+        .map((c) => c.fieldId)
+      const filterInfo = rawFilterInfo
+        ? pruneFilterNode(rawFilterInfo, (condition) => fieldTypeById.has(condition.fieldId) && allowedFieldIds.has(condition.fieldId))
         : null
 
       if (ignoredSortFieldIds.length > 0) {
@@ -9094,7 +9192,7 @@ export function univerMetaRouter(): Router {
         const needsComputedFilterSort =
           computedFieldIdSet.size > 0 &&
           (sortRules.some((rule) => computedFieldIdSet.has(rule.fieldId)) ||
-            (filterInfo?.conditions ?? []).some((condition) => computedFieldIdSet.has(condition.fieldId)))
+            collectLeafConditions(filterInfo).some((condition) => computedFieldIdSet.has(condition.fieldId)))
 
         if (needsComputedFilterSort) {
           warnings.push('筛选/排序包含 Lookup/Rollup，当前为内存计算，数据量大时较慢。')
@@ -9123,18 +9221,13 @@ export function univerMetaRouter(): Router {
         }
 
         if (filterInfo) {
-          const conditions = filterInfo.conditions.filter((c) => fieldTypeById.has(c.fieldId))
-          if (conditions.length > 0) {
-            all = all.filter((record) => {
-              const matches = (condition: MetaFilterCondition) => {
-                const fieldType = fieldTypeById.get(condition.fieldId)
-                if (!fieldType) return true
-                return evaluateMetaFilterCondition(fieldType, record.data[condition.fieldId], condition)
-              }
-
-              if (filterInfo.conjunction === 'or') return conditions.some(matches)
-              return conditions.every(matches)
-            })
+          const pruned = pruneFilterNode(filterInfo, (c) => fieldTypeById.has(c.fieldId))
+          if (pruned) {
+            all = all.filter((record) => evaluateFilterNode(pruned, (condition) => {
+              const fieldType = fieldTypeById.get(condition.fieldId)
+              if (!fieldType) return true
+              return evaluateMetaFilterCondition(fieldType, record.data[condition.fieldId], condition)
+            }))
           }
         }
 
