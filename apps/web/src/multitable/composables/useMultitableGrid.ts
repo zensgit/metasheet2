@@ -100,6 +100,7 @@ const NUMERIC_FILTER_OPERATORS: Array<{ value: string; label: string }> = [
   { value: 'greaterEqual', label: '≥' },
   { value: 'less', label: '<' },
   { value: 'lessEqual', label: '≤' },
+  { value: 'between', label: 'between' },
   { value: 'isEmpty', label: 'is empty' },
   { value: 'isNotEmpty', label: 'is not empty' },
 ]
@@ -172,6 +173,7 @@ export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; lab
     { value: 'isNot', label: 'is not' },
     { value: 'greater', label: 'after' },
     { value: 'less', label: 'before' },
+    { value: 'between', label: 'between' },
     { value: 'isEmpty', label: 'is empty' },
     { value: 'isNotEmpty', label: 'is not empty' },
   ],

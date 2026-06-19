@@ -76,6 +76,25 @@
                 :selected="Array.isArray(rule.value) && rule.value.includes(option.value)"
               >{{ option.label }}</option>
             </select>
+            <template v-else-if="isBetweenOp(rule.operator)">
+              <input
+                class="meta-toolbar__filter-value"
+                :type="getInputType(rule.fieldId)"
+                :value="Array.isArray(rule.value) ? (rule.value[0] ?? '') : ''"
+                :aria-label="l('toolbar.filterValue')"
+                data-filter-between-min="true"
+                @change="onFilterBetweenChange(idx, 0, ($event.target as HTMLInputElement).value)"
+              />
+              <span class="meta-toolbar__filter-between-sep">–</span>
+              <input
+                class="meta-toolbar__filter-value"
+                :type="getInputType(rule.fieldId)"
+                :value="Array.isArray(rule.value) ? (rule.value[1] ?? '') : ''"
+                :aria-label="l('toolbar.filterValue')"
+                data-filter-between-max="true"
+                @change="onFilterBetweenChange(idx, 1, ($event.target as HTMLInputElement).value)"
+              />
+            </template>
             <select
               v-else-if="isSelectLikeField(rule.fieldId)"
               class="meta-toolbar__filter-value"
@@ -319,6 +338,9 @@ const isUnaryOp = (op: string) => UNARY.has(op)
 // multi-select. Mirrors the backend evaluateMetaFilterCondition isAnyOf/isNoneOf branch.
 const ARRAY_OPS = new Set(['isAnyOf', 'isNoneOf'])
 const isArrayOp = (op: string) => ARRAY_OPS.has(op)
+// 2a: between — value is a [min, max] array, rendered as two bound inputs. Mirrors the backend
+// evaluateMetaFilterCondition between branch (inclusive, reversed-tolerant).
+const isBetweenOp = (op: string) => op === 'between'
 const getField = (id: string) => props.fields.find((f) => f.id === id)
 const getFieldType = (id: string) => getField(id)?.type ?? 'string'
 const isSelectLikeField = (id: string) => {
@@ -379,7 +401,7 @@ function onFilterFieldChange(idx: number, fieldId: string) {
 function onFilterOperatorChange(idx: number, operator: string) {
   const r = { ...props.filterRules[idx], operator }
   if (isUnaryOp(operator)) r.value = undefined
-  else if (isArrayOp(operator)) r.value = Array.isArray(r.value) ? r.value : [] // start empty array (= inactive)
+  else if (isArrayOp(operator) || isBetweenOp(operator)) r.value = Array.isArray(r.value) ? r.value : [] // start empty array (= inactive)
   else if (r.value === undefined || Array.isArray(r.value)) r.value = getDefaultFilterValue(r.fieldId) // scalar op: drop stale array
   emit('update-filter', idx, r)
 }
@@ -387,6 +409,12 @@ function onFilterMultiValueChange(idx: number, event: Event) {
   const sel = event.target as HTMLSelectElement
   const values = Array.from(sel.selectedOptions).map((o) => o.value)
   emit('update-filter', idx, { ...props.filterRules[idx], value: values })
+}
+function onFilterBetweenChange(idx: number, slot: 0 | 1, value: string) {
+  const r = props.filterRules[idx]
+  const cur = Array.isArray(r.value) ? [...r.value] : []
+  cur[slot] = value
+  emit('update-filter', idx, { ...r, value: [cur[0], cur[1]] }) // always a [min, max] pair (backend coerces strings + tolerates incomplete)
 }
 function onFilterValueChange(idx: number, value: string) {
   const ft = getFieldType(props.filterRules[idx].fieldId)
