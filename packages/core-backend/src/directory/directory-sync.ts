@@ -1879,8 +1879,9 @@ async function fetchAllDepartments(config: DirectoryIntegrationConfig, integrati
 
   // dept-head plumbing: enrich each department with its manager user ids from the
   // department-detail API (listsub does not return them). Best-effort + sequential
-  // (QPS-throttled): a per-dept failure leaves managerUserIds undefined so the upsert
-  // carries the prior dept_manager_userid_list forward instead of wiping it.
+  // (concurrency=1; explicit min-interval throttle deferred — no real rate limiter
+  // yet): a per-dept failure leaves managerUserIds undefined so the upsert carries
+  // the prior dept_manager_userid_list forward instead of wiping it.
   await enrichDepartmentsWithManagers(
     departments.values(),
     (deptId) => getDingTalkDepartmentDetail(accessToken, deptId, { baseUrl: config.baseUrl }),

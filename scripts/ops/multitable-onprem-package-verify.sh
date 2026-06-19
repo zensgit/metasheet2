@@ -68,6 +68,8 @@ function verify_windows_entrypoints() {
   search_fixed_string '[multitable-onprem-deploy-launcher]' "$launcher_helper" || die "launcher must self-identify in its logs"
   search_fixed_string 'Expand-StagingArchive' "$launcher_helper" || die "launcher must extract the supplied package into a staging directory before invoking the apply helper"
   search_fixed_string 'Resolve-StagedPackageRoot' "$launcher_helper" || die "launcher must resolve the staged package root before invoking the apply helper"
+  search_fixed_string 'METASHEET_ONPREM_STAGING_ROOT' "$launcher_helper" || die "launcher must support METASHEET_ONPREM_STAGING_ROOT for short Windows staging paths"
+  search_fixed_string '-StagingRoot $stagingBase' "$launcher_helper" || die "launcher must pass its resolved staging base to the staged apply helper"
   search_fixed_string 'multitable-onprem-apply-package.ps1' "$launcher_helper" || die "launcher must invoke the staged apply helper from inside the extracted package"
   search_fixed_string 'Remove-Item -LiteralPath $stage' "$launcher_helper" || die "launcher must clean up staging extraction on exit"
   # #1526 follow-up (2026-05-20): launcher must use the apply.ps1
@@ -84,6 +86,8 @@ function verify_windows_entrypoints() {
   search_fixed_string 'Refresh dependencies (cmd.exe /c pnpm install --frozen-lockfile)' "$apply_helper" || die "PowerShell apply helper must refresh dependencies on package apply through cmd.exe"
   search_fixed_string 'DependencyRefreshTimeoutSec' "$apply_helper" || die "PowerShell apply helper must expose dependency refresh timeout"
   search_fixed_string 'DependencyRefreshHeartbeatSec' "$apply_helper" || die "PowerShell apply helper must expose dependency refresh heartbeat"
+  search_fixed_string 'METASHEET_ONPREM_STAGING_ROOT' "$apply_helper" || die "PowerShell apply helper must support METASHEET_ONPREM_STAGING_ROOT for short Windows extraction paths"
+  search_fixed_string 'Staging base:' "$apply_helper" || die "PowerShell apply helper must log the resolved staging base"
   search_fixed_string 'dependency-refresh-' "$apply_helper" || die "PowerShell apply helper must write dependency refresh stdout/stderr logs"
   search_fixed_string 'pnpm path:' "$apply_helper" || die "PowerShell apply helper must log pnpm path before dependency refresh"
   search_fixed_string 'pnpm version:' "$apply_helper" || die "PowerShell apply helper must log pnpm version before dependency refresh"
@@ -207,6 +211,7 @@ function verify_deployable_artifact_contract() {
   search_fixed_string 'source-only archive' "$deployment_txt" || die "DEPLOYMENT.txt must explain that the workspace layout is not source-only"
   search_fixed_string 'not direct-replace-safe' "$deployment_txt" || die "DEPLOYMENT.txt must warn against direct replacement of a running install"
   search_fixed_string 'deploy.bat <downloaded-package.zip>' "$deployment_txt" || die "DEPLOYMENT.txt must show the Windows upgrade entrypoint"
+  search_fixed_string 'METASHEET_ONPREM_STAGING_ROOT' "$deployment_txt" || die "DEPLOYMENT.txt must document the short Windows staging root override"
   search_fixed_string 'node_modules are intentionally not bundled' "$deployment_txt" || die "DEPLOYMENT.txt must document node_modules policy"
 
   search_fixed_string 'DEPLOYMENT.txt' "$install_txt" || die "INSTALL.txt must point operators at DEPLOYMENT.txt"
@@ -219,6 +224,7 @@ function verify_deployable_artifact_contract() {
   search_fixed_string '"nodeModulesBundled": false' "$metadata_json" || die "PACKAGE-METADATA.json must document node_modules policy"
   search_fixed_string '"dependencyInstallMode": "refresh-on-apply"' "$metadata_json" || die "PACKAGE-METADATA.json must document dependency refresh policy"
   search_fixed_string '"windowsEntryPoint": "deploy.bat <package.zip|package.tgz>"' "$metadata_json" || die "PACKAGE-METADATA.json must document the Windows entrypoint"
+  search_fixed_string '"windowsStagingRootEnv": "METASHEET_ONPREM_STAGING_ROOT"' "$metadata_json" || die "PACKAGE-METADATA.json must document the Windows staging root environment override"
 }
 
 function verify_build_provenance() {
