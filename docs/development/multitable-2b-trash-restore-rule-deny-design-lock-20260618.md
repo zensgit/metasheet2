@@ -9,7 +9,7 @@
 
 ## 0. 一句话
 
-条件读权限规则(2b)的 read-deny 目前覆盖 **8/9** read surfaces;第 9 个 —— **回收站 list + 恢复(undelete)** —— 未继承,因为 `loadRuleDeniedRecordIds` 只对 **live `meta_records`** 求值,而 trashed 记录在独立的 `meta_records_trash` 表里。本设计把同一套规则求值扩到 trash snapshot,使「被规则拒读的记录」在回收站里**既不可见、也不可恢复**,且严格保持 #18 既有不变量(admin-bypass / flag-off inert / 不泄露基数)。
+条件读权限规则(2b)的 read-deny 现覆盖 **9/9** read surfaces:8 个 live surface + 第 9 个 **回收站 list + 恢复(undelete)**。trash 此前未继承(`loadRuleDeniedRecordIds` 只对 live `meta_records` 求值,trashed 记录在独立的 `meta_records_trash` 表),**现已由 #2900(LOCK-1/2/3/5/7/8)+ #2910(LOCK-4 deny-aware total / LOCK-6 restore 404 not-found-shape)实现**:同一套规则对 trash snapshot 求值,使「被规则拒读的记录」在回收站里**既不可见、也不可恢复**(数据 + 基数都不泄露,restore 与 not-found 同形态),严格保持 #18 既有不变量(admin-bypass / flag-off inert)。
 
 ## 1. 现状对账(代码实测,verified)
 
@@ -52,7 +52,7 @@
 `loadRowLevelReadDenyEnabled(sheetId)` 为 false(默认)时,trash list + undelete **与 pre-2b 逐字节一致**:不发 `conditional_read_rules` 查询、不对 trash 求值。列缺失 / 规则空 / 表缺失(pre-migration)→ inert,**绝不** 500、绝不静默放行成 deny 之外的行为(沿用 `loadRuleDeniedRecordIds` 既有 fail-closed-on-error)。
 
 ## 4. 不变量(继承 #18,必须保持)
-deny-wins(并集)· admin-bypass(LOCK-7)· flag-off byte-identical(LOCK-8)· 无基数泄露(LOCK-4 + LOCK-6)· fail-closed(LOCK-2)· 不改 grant-deny 范围(§1)· 不碰 live 8/9 surfaces · 不碰版本恢复(6259)。
+deny-wins(并集)· admin-bypass(LOCK-7)· flag-off byte-identical(LOCK-8)· 无基数泄露(LOCK-4 + LOCK-6)· fail-closed(LOCK-2)· 不改 grant-deny 范围(§1)· 不碰 live(非-trash)read surfaces · 不碰版本恢复(6259)。
 
 ## 5. 验收 / 测试计划(real-DB,impl 阶段交付)
 1. **trash list 排除**:flag-on、非 admin、一条 trashed 记录其 data 命中规则 → 不在 list;`total` 也 -1(LOCK-3/4)。
@@ -62,7 +62,7 @@ deny-wins(并集)· admin-bypass(LOCK-7)· flag-off byte-identical(LOCK-8)· 无
 5. **undelete 正常**:非 denied trashed 记录 → 正常复活。
 6. **deleted-field fail-closed**:规则引用的字段在 trash 后被删 → 该 trashed 行 deny(list 排除 + undelete 拒)(LOCK-2 预期副作用)。
 7. **grant-deny 回归**:grant-denied trashed 记录仍被排除(§1 未回归)。
-8. CI allowlist 确认(不靠 green job 推断);live 8/9 surfaces 回归不变。
+8. CI allowlist 确认(不靠 green job 推断);live(非-trash)read surfaces 回归不变。
 
 ## 6. 实现切片(ratify 后,各自 gated;**现在不写**)
 - **S1**:共享求值核 + `loadRuleDeniedTrashRecordIds`(纯逻辑 + 单测:fail-closed / 字段缺失 / 空规则 / flag-off-inert 等价)。
@@ -71,4 +71,4 @@ deny-wins(并集)· admin-bypass(LOCK-7)· flag-off byte-identical(LOCK-8)· 无
 - 每片独立 PR + real-DB 反向测试;先 S1(逻辑)再 S2/S3(路由)。
 
 ## 7. STOP
-**本文是 design-lock,不含 runtime。** 上述 LOCK-1..8 是 ratify 对象;owner 签字后才进 §6 实现。未签字前不写 runtime(同 S1b design-lock #2884 → 签字 → impl 的门)。
+**本文原为 design-lock(ratify-then-impl);runtime 已实现并落 `origin/main`** —— #2900(并行 effort,LOCK-1/2/3/5/7/8)+ #2910(LOCK-4/6 fix)。LOCK-1..8 现为本特性的安全合同(已全部满足),非待 ratify 项。
