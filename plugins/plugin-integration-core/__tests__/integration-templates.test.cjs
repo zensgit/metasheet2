@@ -5,6 +5,7 @@ const path = require('node:path')
 const {
   createIntegrationTemplateRegistry,
   TemplateNotFoundError,
+  TemplateVersionConflictError,
   __internals,
 } = require(path.join(__dirname, '..', 'lib', 'integration-templates.cjs'))
 
@@ -57,7 +58,7 @@ async function main() {
   assert.throws(() => __internals.normalizeTemplateInput({ tenantId: 't', name: 'x', targetKind: 'k', orchestrationConfig: [] }), /must be an object/, 'orchestrationConfig object')
 
   const norm = __internals.normalizeTemplateInput({ tenantId: 't1', name: 'tmpl', targetKind: 'metasheet:multitable' })
-  assert.equal(norm.version, 1, 'version defaults to 1')
+  assert.equal(norm.version, undefined, 'normalizer does NOT default version (system-managed; resolved in upsert)')
   assert.equal(norm.status, 'active', 'status defaults active')
   assert.equal(norm.workspaceId, null, 'workspaceId nullable')
   assert.deepEqual(norm.keyFields, [])
@@ -91,8 +92,35 @@ async function main() {
   })
   assert.equal(updated.id, 'tmpl_1', 'upsert matched existing by scope+name (no duplicate)')
   assert.equal(updated.targetObject, 'approved_materials_v2')
-  assert.equal(updated.updatedAt, 'updated-ts', 'update bumps updated_at (no DB trigger on 061)')
+  assert.equal(updated.version, 2, 'S3-1b: edit without a supplied version auto-bumps v1 -> v2')
+  assert.equal(updated.updatedAt, 'updated-ts', 'update bumps updated_at (061 trigger in PG; in-memory test db bumps in app)')
   assert.equal(db.rows.filter((r) => r._table === 'integration_templates').length, 1, 'no duplicate row')
+
+  // --- S3-1b: version-bump + optimistic-concurrency semantics ---
+  // another plain edit (no version supplied) -> v3
+  const v3 = await reg.upsertTemplate({
+    tenantId: 't1', workspaceId: 'w1', name: 'k3-material',
+    targetKind: 'metasheet:multitable', targetObject: 'approved_materials_v3',
+  })
+  assert.equal(v3.version, 3, 'consecutive edit auto-bumps v2 -> v3')
+  // stale supplied version (current is 3) -> 409 conflict, NOT a silent overwrite
+  await assert.rejects(
+    () => reg.upsertTemplate({
+      tenantId: 't1', workspaceId: 'w1', name: 'k3-material',
+      targetKind: 'metasheet:multitable', targetObject: 'x', version: 1,
+    }),
+    (e) => e instanceof TemplateVersionConflictError && e.status === 409 && e.details.expected === 3 && e.details.actual === 1,
+    'stale supplied version is an optimistic conflict (409), not a silent overwrite',
+  )
+  // the conflict did not mutate the row
+  assert.equal((await reg.getTemplate({ tenantId: 't1', workspaceId: 'w1', id: 'tmpl_1' })).version, 3, 'conflicted update left version at 3')
+  assert.equal((await reg.getTemplate({ tenantId: 't1', workspaceId: 'w1', id: 'tmpl_1' })).targetObject, 'approved_materials_v3', 'conflicted update did not overwrite fields')
+  // correct supplied version (3) -> passes optimistic check and bumps to 4
+  const v4 = await reg.upsertTemplate({
+    tenantId: 't1', workspaceId: 'w1', name: 'k3-material',
+    targetKind: 'metasheet:multitable', targetObject: 'approved_materials_v4', version: 3,
+  })
+  assert.equal(v4.version, 4, 'matching supplied version passes the optimistic check and bumps v3 -> v4')
 
   const list = await reg.listTemplates({ tenantId: 't1', workspaceId: 'w1' })
   assert.equal(list.length, 1)
