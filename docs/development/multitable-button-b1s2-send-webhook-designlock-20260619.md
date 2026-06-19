@@ -50,12 +50,16 @@ Egress ≠ edit. Options:
 A field author supplies `url`. Without constraints the server can be made to call internal endpoints. **LOCK (all required):**
 
 - **https-only.** `WebhookService` already enforces `parsed.protocol === 'https:'` (`webhook-service.ts:155`); the button path MUST enforce the same — no `http:`, no `file:`, no other schemes.
-- **Block private / loopback / link-local / metadata targets** after DNS resolution: `127.0.0.0/8`, `::1`, RFC1918 (`10/8`, `172.16/12`, `192.168/16`), link-local `169.254/16` (incl. the cloud metadata IP `169.254.169.254`), `.internal`/`.local` names.
+- **Block private / loopback / link-local / metadata targets** after DNS resolution, for **both IPv4 and IPv6** (an IPv6-only environment must be locked as tightly as IPv4):
+  - **IPv4:** `127.0.0.0/8`, RFC1918 (`10/8`, `172.16/12`, `192.168/16`), link-local `169.254/16` (incl. the cloud metadata IP `169.254.169.254`);
+  - **IPv6:** `::1` (loopback), **`fc00::/7`** (unique-local / ULA), **`fe80::/10`** (link-local), and **IPv4-mapped** `::ffff:0:0/96` (so an IPv4 private address cannot be smuggled in mapped form);
+  - **name-based:** `.internal` / `.local` names.
+  - Apply the check to **every** address a name resolves to — a name with multiple A/AAAA records is rejected if **any** resolved address is internal.
 - **Resolve-then-pin** to defeat DNS-rebinding: validate the resolved IP and connect to that pinned IP (or re-validate at connect time), not a name that can re-resolve to a private address between check and use.
 - **No redirects to private targets** — validate every hop, or disable redirect-following.
 - **Optional admin-managed domain allowlist** as a stricter overlay.
 
-A rejected URL → `400` writing nothing (no dedup consumed, no audit of a non-attempt — same "validate before the txn" order as #2768).
+**Canonical return contract (binds §6/§7):** a missing/malformed URL or any SSRF-rejected target is a **pre-transaction `400`, fail-fast** — **no dedup row consumed, no audit/delivery row written** (a non-attempt is not an execution; same validate-before-the-txn order as #2768). §6/§7 MUST NOT reclassify an SSRF/config rejection as a `200 { status:'failed' }` execution.
 
 ## 4. confirm (server-enforced; reuse #2768)
 
@@ -76,10 +80,14 @@ There is a **direct conflict** to settle: B1-S1 locked **at-most-once** (dedup-b
 
 ## 7. Failure semantics (3-way; reuse)
 
-- `200 { status:'succeeded' }` = target returned 2xx;
-- `200 { status:'failed', message }` = config/validation failure (missing URL, SSRF-rejected, or non-2xx response per policy) — **decide that a non-2xx target response = `failed`, surfaced, no retry** (recommended);
-- non-2xx = permission / contract / idempotency rejection.
+Validation is **fail-fast before the transaction**; only a *reached* target yields an execution outcome:
+
+- **`400` / `403` — pre-transaction rejection, no dedup consumed, no audit/delivery written:** config/validation (missing or malformed URL), **SSRF-rejected target (§3.1)**, actor-gate failure (§3), or missing `requestId` (§6). A non-attempt is never recorded as an execution.
+- `200 { status:'succeeded' }` = the validated, non-SSRF target was reached and returned **2xx**.
+- `200 { status:'failed', message }` = the target was reached but returned a **non-2xx response** (per policy) — surfaced, **no retry**. This is the **only** `200 failed` case; config/SSRF rejections are the `400` bucket above, never this one.
 - Never leak the response body in the failure message (redact).
+
+This separation is load-bearing for implementation order + idempotency: SSRF/config rejection happens **before** the dedup row is written, so it never consumes a `requestId` and never lands an audit/delivery row; only a genuine egress attempt (a reached target, whatever its response) is dedup-keyed and audited.
 
 ## 8. Channel boundary
 
@@ -97,8 +105,8 @@ The framework (enable = policy + validated dispatch · server-confirm · request
 
 Unit + real-DB/HTTP-boundary:
 
-- SSRF: `http://`, `127.0.0.1`, `169.254.169.254`, RFC1918, `.internal`, and DNS-rebinding → **rejected, nothing sent**.
-- actor unauthorized → `403`.
+- SSRF (IPv4 **and** IPv6): `http://`, `127.0.0.1`, `169.254.169.254`, RFC1918, `::1`, `fc00::/7` (ULA), `fe80::/10` (link-local), IPv4-mapped `::ffff:7f00:1`, `.internal`, multi-record name with one internal address, and DNS-rebinding → **rejected pre-txn with `400`, nothing sent, no dedup consumed, no audit/delivery row**.
+- actor unauthorized → `403` (pre-txn, no dedup/audit).
 - confirm enforced (server, not FE).
 - requestId required (side-effecting) → reject if missing; same dedup key replay → **single egress** (at-most-once, retry disabled).
 - durable audit row + delivery record land, with `secret` / signature / `Authorization` / response body **redacted** (assert they are absent).
