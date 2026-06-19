@@ -11436,11 +11436,12 @@ export function univerMetaRouter(): Router {
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
-      // 2b-S2 trash-surface close-out: a record currently rule-denied for this actor must not be
-      // restorable — otherwise restore would reintroduce an unreadable record onto the live/operable
-      // path. Resolve the trashed record's sheet; if the flag is on, the actor is non-admin, and a
-      // conditional rule denies the trashed record's data, refuse (403). Admin-bypass + flag-off inert
-      // mirror the read surfaces exactly.
+      // 2b-S2 trash-surface close-out: a record currently denied by a CONDITIONAL READ-DENY RULE for
+      // this actor must not be restorable — otherwise restore would reintroduce a rule-denied record onto
+      // the live/operable path. Resolve the trashed record's sheet; if the flag is on, the actor is
+      // non-admin, and a conditional rule denies the trashed record's data, refuse (403). Admin-bypass +
+      // flag-off inert mirror the read surfaces. (Scope: conditional-rule deny only — grant-deny
+      // (record_permissions) on restore is pre-existing and out of this change's scope.)
       if (!access.isAdminRole) {
         const trashRow = await pool.query('SELECT sheet_id FROM meta_records_trash WHERE record_id = $1 LIMIT 1', [recordId])
         const trashSheetId = (trashRow.rows[0] as { sheet_id?: unknown } | undefined)?.sheet_id

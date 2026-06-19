@@ -11,6 +11,11 @@
  * Admin bypass + flag-off inertness mirror the live surfaces exactly. Each test re-seeds trash in
  * beforeEach so the (mutating) restore cases are independent.
  *
+ * SCOPE: this closes the CONDITIONAL-RULE deny on the trash surface. Grant-deny (record_permissions)
+ * on restore, and the unadjusted trash `total` COUNT (a pre-existing count caveat shared with grant-deny
+ * — the record's data is excluded, only the aggregate count is not), are deliberately out of scope here
+ * (a separate cross-cutting follow-up); the `total` behavior is pinned below so a future change is intentional.
+ *
  * Runs only with DATABASE_URL (sentinel fails-not-skips in CI).
  */
 import express, { type Express } from 'express'
@@ -33,7 +38,7 @@ const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, param
 let app: Express
 let testUserId = USER_ID
 let testPerms: string[] = ['multitable:read', 'multitable:write'] // full write → canDeleteRecord, non-admin
-let testRoles: string[] = []
+let testRoles: string[] = ['member'] // non-admin; full write (above) grants canDeleteRecord (gates the bin)
 
 const setFlag = (on: boolean) =>
   q('UPDATE meta_sheets SET row_level_read_permissions_enabled = $2 WHERE id = $1', [SHEET_ID, on])
@@ -87,7 +92,7 @@ describeIfDatabase('#18 phase-2 conditional read-deny — trash list + restore (
   beforeEach(async () => {
     testUserId = USER_ID
     testPerms = ['multitable:read', 'multitable:write']
-    testRoles = []
+    testRoles = ['member']
     await setFlag(false)
     await setRules([])
     await seedTrash()
@@ -108,9 +113,16 @@ describeIfDatabase('#18 phase-2 conditional read-deny — trash list + restore (
   test('enforce — flag ON + deny rule: trash list HIDES the rule-denied record, keeps the rest', async () => {
     await setFlag(true)
     await setRules(denySecretRule)
-    const ids = await trashIds()
-    expect(ids).not.toContain(REC_SECRET)
+    const res = await request(app).get(`/api/multitable/sheets/${SHEET_ID}/trash`).query({ limit: 100 })
+    expect(res.status).toBe(200)
+    const ids = (res.body?.data?.records ?? []).map((r: { recordId: string }) => r.recordId)
+    expect(ids).not.toContain(REC_SECRET) // the denied record's row + data are excluded
     expect(ids).toContain(REC_PUBLIC)
+    // KNOWN CAVEAT (pinned, out of this scope): `total` is a sheet-wide COUNT(*) in listDeletedRecords,
+    // NOT adjusted for the deny filter — it still counts the hidden row. Pre-existing count behavior also
+    // shared with grant-deny (route comments it a minor follow-up); the data is protected, only the count
+    // is unadjusted. Pinned so a future deny-aware counter is an intentional change, not a silent one.
+    expect(res.body?.data?.total).toBe(2)
   })
 
   test('enforce — flag ON + deny rule: restoring the rule-denied record is REFUSED (403); a non-denied record restores (200)', async () => {
