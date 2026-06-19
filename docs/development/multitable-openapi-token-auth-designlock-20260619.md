@@ -1,9 +1,19 @@
-# Multitable Open-API Token Auth — Design-Lock (REVIEW BEFORE IMPLEMENTATION)
+# Multitable Open-API Token Auth — Design-Lock (RATIFIED)
 
-> Status: **PROPOSED design-lock — do NOT mount auth until ratified.**
+> Status: **RATIFIED 2026-06-19.** The §2 decisions are owner-signed (see "Ratification" below). Read-only
+> routes are being mounted slice by slice: `records:read` (#2929) + the read continuation (`records:read`
+> on `/view`/`/view-aggregate`/`/records-summary`; `fields:read` on `/fields`) this slice. `comments:read`
+> and all write routes remain unmounted pending their own slices.
 > Grounding: `origin/main` (2026-06-19). Owner-gated: this enables a public data API surface; it is
 > NOT a wiring bug-fix. Mounting token auth without the decisions below would create a **half-authorized
 > entry point** (worse than today's "tokens authenticate nothing").
+
+## Ratification (owner-signed 2026-06-19)
+1. **Route matrix (§2.1) ratified as proposed** — export/import/automation/dashboard/permission/token-mgmt/attachments stay **session-only** (no `records:export` scope this lock).
+2. **Scoping (§2.3): Option A (creator-wide, capability-scoped) for v1; Option B (per-base/sheet) as the fast-follow (OAPI-4).** A token never exceeds its creator's *live* permissions (resolved per-request from the DB, not from a cached/req object).
+3. **Auth precedence + limits (§2.4): token-wins on token-accepting routes; 600 req/min/token default.**
+4. **Read-only-first phasing (§4) confirmed** — no write route is token-exposed before OAPI-2/3.
+> **Drift note:** #2929 mounted `records:read` (correctly, per this ratification) while this doc still read "PROPOSED"; this status flip closes that drift so the doc matches `main`.
 
 ## 0. Problem
 
@@ -84,6 +94,9 @@ permission management, api-token management, attachments upload. (Rationale: bul
 
 ## 4. Phased implementation (each a gated, separately-opted-in slice)
 1. **OAPI-1** `requireScope` guard + mount `apiTokenAuth` on the **read** routes only (`records:read`, `fields:read`, `comments:read`) — read-only blast radius first. Real-DB golden: valid-scope 200, missing-scope 403, revoked 401, creator-permission-still-applies (denied row/field stays denied via token).
+   - **#2929**: `records:read` on `GET /records`, `/records/:id`. **DONE.**
+   - **Continuation (this slice)**: `records:read` on `GET /view`, `/sheets/:sheetId/view-aggregate`, `/records-summary`; `fields:read` on `GET /fields`. **DONE** — each verified to apply the creator's row-deny *before aggregating* (the `/view-aggregate` total + `/records-summary` slice exclude a row-denied record), guards proven via wrong-scope→403 + revoked→401 per route, and the gate allowlist anchored `^…$` with adjacent-route over-match denied (no JWT-skip bypass).
+   - **Remaining**: `comments:read` — lives in `comments.ts` behind `rbacGuard`, with ~8 GET sub-routes; the in-scope set + how token-scope composes with `rbacGuard` is its own (small) decision. **Deferred to the next slice.**
 2. **OAPI-2** write routes (`records:write`, `comments:write`) + audit events + rate limit.
 3. **OAPI-3** webhooks:manage.
 4. **OAPI-4 (v2 scoping)** per-base/sheet `ApiToken` columns + UI + enforcement (Option B).
