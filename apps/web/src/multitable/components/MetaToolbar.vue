@@ -62,6 +62,21 @@
             </select>
             <span v-if="isUnaryOp(rule.operator)" class="meta-toolbar__filter-empty-hint">{{ l('toolbar.noValueNeeded') }}</span>
             <select
+              v-else-if="isArrayOp(rule.operator) && isSelectLikeField(rule.fieldId)"
+              class="meta-toolbar__filter-value"
+              multiple
+              :aria-label="l('toolbar.filterValue')"
+              data-filter-multi-value="true"
+              @change="onFilterMultiValueChange(idx, $event)"
+            >
+              <option
+                v-for="option in getSelectOptions(rule.fieldId)"
+                :key="option.value"
+                :value="option.value"
+                :selected="Array.isArray(rule.value) && rule.value.includes(option.value)"
+              >{{ option.label }}</option>
+            </select>
+            <select
               v-else-if="isSelectLikeField(rule.fieldId)"
               class="meta-toolbar__filter-value"
               :value="String(rule.value ?? '')"
@@ -300,6 +315,10 @@ function dedupeGroupIds(ids: string[]): string[] {
 const hiddenCount = computed(() => props.hiddenFieldIds.length)
 const UNARY = new Set(['isEmpty', 'isNotEmpty'])
 const isUnaryOp = (op: string) => UNARY.has(op)
+// 2a: array-valued operators (set membership) — value is an array of option values, rendered as a
+// multi-select. Mirrors the backend evaluateMetaFilterCondition isAnyOf/isNoneOf branch.
+const ARRAY_OPS = new Set(['isAnyOf', 'isNoneOf'])
+const isArrayOp = (op: string) => ARRAY_OPS.has(op)
 const getField = (id: string) => props.fields.find((f) => f.id === id)
 const getFieldType = (id: string) => getField(id)?.type ?? 'string'
 const isSelectLikeField = (id: string) => {
@@ -360,8 +379,14 @@ function onFilterFieldChange(idx: number, fieldId: string) {
 function onFilterOperatorChange(idx: number, operator: string) {
   const r = { ...props.filterRules[idx], operator }
   if (isUnaryOp(operator)) r.value = undefined
-  else if (r.value === undefined) r.value = getDefaultFilterValue(r.fieldId)
+  else if (isArrayOp(operator)) r.value = Array.isArray(r.value) ? r.value : [] // start empty array (= inactive)
+  else if (r.value === undefined || Array.isArray(r.value)) r.value = getDefaultFilterValue(r.fieldId) // scalar op: drop stale array
   emit('update-filter', idx, r)
+}
+function onFilterMultiValueChange(idx: number, event: Event) {
+  const sel = event.target as HTMLSelectElement
+  const values = Array.from(sel.selectedOptions).map((o) => o.value)
+  emit('update-filter', idx, { ...props.filterRules[idx], value: values })
 }
 function onFilterValueChange(idx: number, value: string) {
   const ft = getFieldType(props.filterRules[idx].fieldId)

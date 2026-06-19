@@ -263,4 +263,42 @@ describe('MetaToolbar i18n', () => {
     expect(panel.textContent).toContain('筛选更改将在应用后生效。')
     expect(panel.textContent).not.toContain('Apply filter changes')
   })
+
+  // 2a: isAnyOf/isNoneOf user-usable via a multi-select value control
+  it('offers isAnyOf/isNoneOf for select fields', async () => {
+    const { container: root } = mountToolbar({
+      filterRules: [{ fieldId: 'status', operator: 'is', value: 'todo' }],
+    })
+    const panel = await openFilterPanel(root)
+    const operatorSelect = panel.querySelector('select[aria-label="Filter operator"]') as HTMLSelectElement
+    const ops = Array.from(operatorSelect.options).map((o) => o.value)
+    expect(ops).toContain('isAnyOf')
+    expect(ops).toContain('isNoneOf')
+  })
+
+  it('renders a multi-select for isAnyOf and emits an ARRAY value', async () => {
+    const { state, container: root } = mountToolbar({
+      filterRules: [{ fieldId: 'status', operator: 'isAnyOf', value: [] }],
+    })
+    const panel = await openFilterPanel(root)
+    const multi = panel.querySelector('select[data-filter-multi-value="true"]') as HTMLSelectElement | null
+    expect(multi).toBeTruthy()
+    expect(multi!.multiple).toBe(true)
+    expect(Array.from(multi!.options).map((o) => o.value)).toEqual(['todo', 'done'])
+    multi!.options[0].selected = true
+    multi!.options[1].selected = true
+    multi!.dispatchEvent(new Event('change'))
+    await nextTick()
+    expect(state.filterRules[0]).toEqual({ fieldId: 'status', operator: 'isAnyOf', value: ['todo', 'done'] })
+  })
+
+  it('switching to isAnyOf seeds an empty ARRAY value (not a scalar)', async () => {
+    const { state, container: root } = mountToolbar({
+      filterRules: [{ fieldId: 'status', operator: 'is', value: 'todo' }],
+    })
+    const panel = await openFilterPanel(root)
+    const operatorSelect = panel.querySelector('select[aria-label="Filter operator"]') as HTMLSelectElement
+    await setSelectValue(operatorSelect, 'isAnyOf')
+    expect(state.filterRules[0]).toEqual({ fieldId: 'status', operator: 'isAnyOf', value: [] })
+  })
 })

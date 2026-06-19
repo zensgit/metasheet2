@@ -156,6 +156,8 @@ export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; lab
   select: [
     { value: 'is', label: 'is' },
     { value: 'isNot', label: 'is not' },
+    { value: 'isAnyOf', label: 'is any of' },
+    { value: 'isNoneOf', label: 'is none of' },
     { value: 'isEmpty', label: 'is empty' },
     { value: 'isNotEmpty', label: 'is not empty' },
   ],
