@@ -94,4 +94,33 @@ describe('Formula library expansion', () => {
     expect(await calc('=ISERROR(SQRT(-1))')).toBe(true)
     expect(await calc('=IFERROR(SQRT(-1), "x")')).toBe('x')
   })
+
+  // 1a scalar math expansion (capability-depth hardening)
+  test('INT rounds toward -∞ (distinct from TRUNC for negatives)', async () => {
+    expect(await calc('=INT(4.7)')).toBe(4)
+    expect(await calc('=INT(-4.2)')).toBe(-5)
+    expect(await calc('=INT("x")')).toBe('#VALUE!')
+  })
+
+  test('TRUNC truncates toward zero, with optional digits', async () => {
+    expect(await calc('=TRUNC(4.78)')).toBe(4)
+    expect(await calc('=TRUNC(-4.78)')).toBe(-4) // toward zero, NOT -5
+    expect(await calc('=TRUNC(4.789, 2)')).toBe(4.78)
+    expect(await calc('=TRUNC("x")')).toBe('#VALUE!')
+  })
+
+  test('LN / LOG with domain sentinels', async () => {
+    expect(await calc('=LN(1)')).toBe(0)
+    expect(await calc('=LN(0)')).toBe('#NUM!')
+    expect(await calc('=LN(-2)')).toBe('#NUM!')
+    expect(await calc('=LOG(100)')).toBe(2) // base 10 default
+    expect(await calc('=LOG(8, 2)')).toBe(3)
+    expect(await calc('=LOG(0)')).toBe('#NUM!')
+    expect(await calc('=LOG(10, 1)')).toBe('#NUM!') // base 1 undefined
+  })
+
+  test('EXP', async () => {
+    expect(await calc('=EXP(0)')).toBe(1)
+    expect(await calc('=EXP("x")')).toBe('#VALUE!')
+  })
 })
