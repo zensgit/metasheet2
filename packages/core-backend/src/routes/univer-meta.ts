@@ -11374,9 +11374,26 @@ export function univerMetaRouter(): Router {
         return res.status(401).json({ error: 'Authentication required' })
       }
       const recordService = new RecordService(pool, eventBus)
+      // 2b-S2 LOCK-4: compute the SHEET-WIDE trash deny set BEFORE listing, so listDeletedRecords excludes
+      // denied rows from BOTH the COUNT and the page — an aggregate `total` that still counted hidden rows
+      // would leak their cardinality. grant-deny (record_permissions, persists across delete) ∪ rule-deny
+      // over ALL trashed rows' data (page-independent; loadRuleDeniedRecordIds reads live meta_records only,
+      // so a rule-denied record would otherwise resurface here once deleted). Admin-bypass + flag-off inert
+      // mirror the read surfaces (default-OFF → byte-identical to pre-2b).
+      let excludeRecordIds: string[] = []
+      if (!access.isAdminRole && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
+        const [grantDenied, ruleDeniedTrash] = await Promise.all([
+          loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId),
+          loadRuleDeniedTrashRecordIds(pool.query.bind(pool), sheetId),
+        ])
+        const merged = new Set<string>(grantDenied)
+        for (const id of ruleDeniedTrash) merged.add(id)
+        excludeRecordIds = [...merged]
+      }
       const result = await recordService.listDeletedRecords({
         sheetId,
         access,
+        ...(excludeRecordIds.length > 0 ? { excludeRecordIds } : {}),
         ...(Number.isFinite(limitRaw) ? { limit: limitRaw } : {}),
         ...(Number.isFinite(offsetRaw) ? { offset: offsetRaw } : {}),
         resolveSheetAccess: async (sid) => {
@@ -11392,23 +11409,10 @@ export function univerMetaRouter(): Router {
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
       const allowedFieldIds = computeAllowedFieldIds(visibleFields, capabilities, fieldScopeMap)
       const visibleFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, visibleFields, allowedFieldIds)
-      // #18 row-level read-deny (flag-gated, default-OFF → byte-identical): drop trashed records the actor
-      // is denied so a denied record's data never surfaces via trash. (total left as-is — the
-      // canDeleteRecord-gated trash count may include a denied row; exact-count exclusion is a minor follow-up.)
-      let trashRecords = result.records
-      if (!access.isAdminRole && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)) {
-        // grant-deny (record_permissions, persists across delete) ∪ rule-deny evaluated against the
-        // TRASHED records' data (loadRuleDeniedRecordIds reads live meta_records only, so a rule-denied
-        // record would otherwise resurface here once deleted — 2b-S2 trash-surface close-out).
-        const trashedIds = result.records.map((rec) => rec.recordId)
-        const [deniedIds, ruleDeniedTrash] = await Promise.all([
-          loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId),
-          loadRuleDeniedTrashRecordIds(pool.query.bind(pool), sheetId, trashedIds),
-        ])
-        for (const id of ruleDeniedTrash) deniedIds.add(id)
-        if (deniedIds.size > 0) trashRecords = result.records.filter((rec) => !deniedIds.has(rec.recordId))
-      }
-      const maskedRecords = trashRecords.map((rec) => ({ ...rec, data: filterRecordDataByFieldIds(rec.data, visibleFieldIds) }))
+      // 2b-S2: records AND total are already deny-aware (excluded in SQL via excludeRecordIds above), so no
+      // post-filter is needed here — both the row set and the count hide rule-denied / grant-denied trashed
+      // records (LOCK-3 list-hide + LOCK-4 count-exclude). Field-read mask still applies to the survivors.
+      const maskedRecords = result.records.map((rec) => ({ ...rec, data: filterRecordDataByFieldIds(rec.data, visibleFieldIds) }))
       return res.json({ ok: true, data: { records: maskedRecords, total: result.total } })
     } catch (err) {
       if (err instanceof RecordServicePermissionError) {
@@ -11439,9 +11443,13 @@ export function univerMetaRouter(): Router {
       // 2b-S2 trash-surface close-out: a record currently denied by a CONDITIONAL READ-DENY RULE for
       // this actor must not be restorable — otherwise restore would reintroduce a rule-denied record onto
       // the live/operable path. Resolve the trashed record's sheet; if the flag is on, the actor is
-      // non-admin, and a conditional rule denies the trashed record's data, refuse (403). Admin-bypass +
+      // non-admin, and a conditional rule denies the trashed record's data, refuse. Admin-bypass +
       // flag-off inert mirror the read surfaces. (Scope: conditional-rule deny only — grant-deny
       // (record_permissions) on restore is pre-existing and out of this change's scope.)
+      // LOCK-6: the refusal must be INDISTINGUISHABLE from "no such deleted record" — return the EXACT same
+      // 404 NOT_FOUND body the restore path produces for a missing id (RecordNotFoundError → 404 with
+      // `No deleted record to restore: <id>`), NOT a 403. A 403-vs-404 difference would be an existence
+      // oracle letting a canDeleteRecord actor enumerate which rule-hidden records sit in the trash.
       if (!access.isAdminRole) {
         const trashRow = await pool.query('SELECT sheet_id FROM meta_records_trash WHERE record_id = $1 LIMIT 1', [recordId])
         const trashSheetId = (trashRow.rows[0] as { sheet_id?: unknown } | undefined)?.sheet_id
@@ -11449,7 +11457,7 @@ export function univerMetaRouter(): Router {
           && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), trashSheetId)) {
           const ruleDenied = await loadRuleDeniedTrashRecordIds(pool.query.bind(pool), trashSheetId, [recordId])
           if (ruleDenied.has(recordId)) {
-            return sendForbidden(res, 'Cannot restore a record you are not permitted to read')
+            return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `No deleted record to restore: ${recordId}` } })
           }
         }
       }

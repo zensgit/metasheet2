@@ -861,6 +861,10 @@ export class RecordService {
     resolveSheetAccess: RecordDeleteInput['resolveSheetAccess']
     limit?: number
     offset?: number
+    // 2b-S2 LOCK-4: record ids the caller has determined are read-denied for this actor (grant-deny ∪
+    // trash rule-deny). Excluded in SQL from BOTH the COUNT and the page, so `total` can't reveal the
+    // cardinality of hidden trashed records (deny-aware count, not just deny-filtered rows).
+    excludeRecordIds?: string[]
   }): Promise<{
     records: Array<{ recordId: string; sheetId: string; data: Record<string, unknown>; originalVersion: number; createdBy: string | null; deletedBy: string | null; deletedAt: string }>
     total: number
@@ -877,18 +881,23 @@ export class RecordService {
     // allow restore of) rows created by other users. Apply the own-only filter in SQL so total+pagination
     // stay exact. Full-write / admin scopes see all trash for the sheet (no extra filter).
     const ownOnly = requiresOwnWriteRowPolicy(sheetScope, access.isAdminRole)
-    const ownSql = ownOnly ? ' AND created_by = $OWN' : ''
+    const excludeIds = input.excludeRecordIds && input.excludeRecordIds.length > 0 ? input.excludeRecordIds : null
     try {
-      const totalRes = await this.pool.query(
-        `SELECT COUNT(*)::int AS n FROM meta_records_trash WHERE sheet_id = $1${ownSql.replace('$OWN', '$2')}`,
-        ownOnly ? [sheetId, access.userId] : [sheetId],
-      )
+      // Build COUNT + page with the same own-only and (LOCK-4) deny-exclude predicates so total and
+      // pagination stay exact. Placeholders are appended in order to avoid index drift.
+      const countParams: unknown[] = [sheetId]
+      let countSql = 'SELECT COUNT(*)::int AS n FROM meta_records_trash WHERE sheet_id = $1'
+      if (ownOnly) { countParams.push(access.userId); countSql += ` AND created_by = $${countParams.length}` }
+      if (excludeIds) { countParams.push(excludeIds); countSql += ` AND record_id <> ALL($${countParams.length}::text[])` }
+      const totalRes = await this.pool.query(countSql, countParams)
       const total = Number((totalRes.rows[0] as { n?: number } | undefined)?.n ?? 0)
-      const rowsRes = await this.pool.query(
-        `SELECT record_id, sheet_id, data, original_version, created_by, deleted_by, deleted_at
-         FROM meta_records_trash WHERE sheet_id = $1${ownSql.replace('$OWN', '$4')} ORDER BY deleted_at DESC LIMIT $2 OFFSET $3`,
-        ownOnly ? [sheetId, limit, offset, access.userId] : [sheetId, limit, offset],
-      )
+      const pageParams: unknown[] = [sheetId, limit, offset]
+      let pageSql = `SELECT record_id, sheet_id, data, original_version, created_by, deleted_by, deleted_at
+         FROM meta_records_trash WHERE sheet_id = $1`
+      if (ownOnly) { pageParams.push(access.userId); pageSql += ` AND created_by = $${pageParams.length}` }
+      if (excludeIds) { pageParams.push(excludeIds); pageSql += ` AND record_id <> ALL($${pageParams.length}::text[])` }
+      pageSql += ' ORDER BY deleted_at DESC LIMIT $2 OFFSET $3'
+      const rowsRes = await this.pool.query(pageSql, pageParams)
       const records = (rowsRes.rows as Array<Record<string, unknown>>).map((r) => ({
         recordId: String(r.record_id),
         sheetId: String(r.sheet_id),
