@@ -221,7 +221,9 @@ module.exports = {
       .registerAdapter('data-source:sql-readonly', createDataSourceSqlReadonlySourceAdapterFactory({ context }), { metadata: DATA_SOURCE_SQL_READONLY_ADAPTER_METADATA })
       .registerAdapter('data-source:sql-write-gated', createDataSourceSqlWriteGatedTargetAdapterFactory({ context }), { metadata: DATA_SOURCE_SQL_WRITE_GATED_ADAPTER_METADATA })
     pipelineRegistry = createPipelineRegistry({ db })
-    templateRegistry = createIntegrationTemplateRegistry({ db })
+    // S3-2: the template registry needs externalSystemRegistry to bind + kind-validate the
+    // caller-supplied source/target systems at instantiation (created above on line ~209).
+    templateRegistry = createIntegrationTemplateRegistry({ db, externalSystemRegistry })
     deadLetterStore = createDeadLetterStore({ db })
     watermarkStore = createWatermarkStore({ db })
     runLogger = createRunLogger({ pipelineRegistry })

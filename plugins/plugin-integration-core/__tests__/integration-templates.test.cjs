@@ -5,7 +5,9 @@ const path = require('node:path')
 const {
   createIntegrationTemplateRegistry,
   TemplateNotFoundError,
+  TemplateValidationError,
   TemplateVersionConflictError,
+  TemplateInstantiationConflictError,
   __internals,
 } = require(path.join(__dirname, '..', 'lib', 'integration-templates.cjs'))
 
@@ -13,7 +15,7 @@ function createFakeDb() {
   const rows = []
   const calls = []
   const matches = (row, where) => Object.entries(where).every(([k, v]) => (row[k] ?? null) === (v ?? null))
-  return {
+  const api = {
     rows,
     calls,
     async selectOne(table, where) {
@@ -25,6 +27,12 @@ function createFakeDb() {
       const rec = { ...row, _table: table, created_at: 'now', updated_at: 'now' }
       rows.push(rec)
       return [rec]
+    },
+    async insertMany(table, newRows) {
+      calls.push(['insertMany', table, newRows.map((r) => ({ ...r }))])
+      const recs = newRows.map((row) => ({ ...row, _table: table, created_at: 'now', updated_at: 'now' }))
+      for (const rec of recs) rows.push(rec)
+      return recs
     },
     async updateRow(table, set, where) {
       calls.push(['updateRow', table, { ...set }, { ...where }])
@@ -44,7 +52,63 @@ function createFakeDb() {
       }
       return before - rows.length
     },
+    // Real rollback semantics: snapshot the rows before the callback; on throw, restore them.
+    // This lets the atomicity test prove no orphan pipeline row survives a mid-tx failure.
+    async transaction(fn) {
+      calls.push(['transaction'])
+      const snapshot = rows.map((r) => ({ ...r }))
+      try {
+        return await fn(api)
+      } catch (error) {
+        rows.length = 0
+        for (const r of snapshot) rows.push(r)
+        throw error
+      }
+    },
   }
+  return api
+}
+
+// Fake external-system registry: getExternalSystem throws (ExternalSystemNotFoundError-shaped)
+// when absent, exactly like the real one — instantiation must map that to a 422 bind error.
+function createFakeExternalSystemRegistry(systems) {
+  return {
+    async getExternalSystem({ tenantId, workspaceId, id }) {
+      const sys = systems.find((s) =>
+        s.id === id &&
+        (s.tenantId ?? null) === (tenantId ?? null) &&
+        (s.workspaceId ?? null) === (workspaceId ?? null))
+      if (!sys) {
+        const err = new Error('external system not found')
+        err.name = 'ExternalSystemNotFoundError'
+        err.status = 404
+        err.code = 'INTEGRATION_EXTERNAL_SYSTEM_NOT_FOUND'
+        throw err
+      }
+      return { ...sys }
+    },
+  }
+}
+
+// Seed a system into BOTH the db (so writePipelineRow#requireExternalSystem sees role+existence)
+// AND the registry (so instantiate's kind-validation can resolve it).
+function seedSystem(db, systems, { id, tenantId = 't1', workspaceId = 'w1', kind, role }) {
+  db.rows.push({ _table: 'integration_external_systems', id, tenant_id: tenantId, workspace_id: workspaceId, kind, role })
+  systems.push({ id, tenantId, workspaceId, kind, role })
+}
+
+function pipelineRowsByName(db, name) {
+  return db.rows.filter((r) => r._table === 'integration_pipelines' && r.name === name)
+}
+// pipelines.cjs stores `options` as a JSONB-as-text column (jsonbParam = JSON.stringify), so a raw
+// row read returns a string; parse it the way rowToPipeline does. target_field is a plain column.
+function parseOptions(row) {
+  return typeof row.options === 'string' ? JSON.parse(row.options) : (row.options || {})
+}
+function fieldMappingRows(db, pipelineId) {
+  return db.rows
+    .filter((r) => r._table === 'integration_field_mappings' && r.pipeline_id === pipelineId)
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
 }
 
 async function main() {
@@ -138,14 +202,176 @@ async function main() {
     'delete missing -> 404',
   )
 
-  // --- 3. NO instantiation surface (S3-1 is contract+storage only) ---
+  // --- 3. instantiate is a REGISTRY method (S3-2), not a free module export ---
   const mod = require(path.join(__dirname, '..', 'lib', 'integration-templates.cjs'))
-  assert.equal(typeof mod.instantiateTemplate, 'undefined', 'no module-level instantiate')
-  assert.equal(typeof reg.instantiateTemplate, 'undefined', 'registry exposes no instantiate')
-  // and the registry never wrote to pipelines / external_systems tables
-  assert.ok(db.calls.every((c) => c[1] === 'integration_templates'), 'registry only touches integration_templates')
+  assert.equal(typeof mod.instantiateTemplate, 'undefined', 'instantiate is a registry method, not a module-level export')
+  assert.equal(typeof reg.instantiateTemplate, 'function', 'registry exposes instantiateTemplate (S3-2)')
+  // a registry built WITHOUT externalSystemRegistry still constructs, but instantiate fails loudly
+  await assert.rejects(
+    () => reg.instantiateTemplate({ tenantId: 't1', workspaceId: 'w1', templateId: 'x', targetSystemId: 'a', sourceSystemId: 'b' }),
+    /externalSystemRegistry/,
+    'instantiate without a wired externalSystemRegistry throws a clear error',
+  )
 
-  console.log('✓ integration-templates: normalizer + CRUD + no-instantiate tests passed')
+  // --- 4. S3-2 instantiation: BIND to caller-supplied systems, single tx, SNAPSHOT provenance ---
+  {
+    const idb = createFakeDb()
+    const systems = []
+    seedSystem(idb, systems, { id: 'sys_mt', kind: 'metasheet:multitable', role: 'target' })
+    seedSystem(idb, systems, { id: 'sys_src', kind: 'data-source:sql-readonly', role: 'source' })
+    let seq = 0
+    const ireg = createIntegrationTemplateRegistry({
+      db: idb,
+      idGenerator: () => `gen_${++seq}`,
+      now: () => 'ts',
+      externalSystemRegistry: createFakeExternalSystemRegistry(systems),
+    })
+
+    const tmpl = await ireg.upsertTemplate({
+      tenantId: 't1', workspaceId: 'w1', name: 'k3-material-pipeline',
+      sourceKind: 'data-source:sql-readonly', sourceObject: 'dbo.materials',
+      targetKind: 'metasheet:multitable', targetObject: 'approved_materials',
+      keyFields: ['code'],
+      mappingDef: [
+        { sourceField: 'c', targetField: 'code' },
+        { sourceField: 'n', targetField: 'name' },
+      ],
+      orchestrationConfig: { schedule: 'manual' },
+      createdBy: 'owner-1',
+    })
+    assert.equal(tmpl.version, 1)
+
+    // happy path: instantiate -> a live pipeline materialized from the v1 snapshot
+    const pipe = await ireg.instantiateTemplate({
+      tenantId: 't1', workspaceId: 'w1', templateId: tmpl.id,
+      targetSystemId: 'sys_mt', sourceSystemId: 'sys_src', createdBy: 'owner-1',
+    })
+    assert.equal(pipe.name, 'k3-material-pipeline', 'pipeline name defaults to template name')
+    assert.equal(pipe.sourceSystemId, 'sys_src', 'bound source system')
+    assert.equal(pipe.targetSystemId, 'sys_mt', 'bound target system')
+    assert.equal(pipe.sourceObject, 'dbo.materials', 'source object from template')
+    assert.equal(pipe.targetObject, 'approved_materials', 'target object from template')
+    assert.equal(pipe.status, 'draft', 'instantiated pipelines start as draft')
+    assert.deepEqual(pipe.idempotencyKeyFields, ['code'], 'key fields copied from template')
+    assert.equal(pipe.mode, 'incremental', 'mode is DEFAULTED, never taken from orchestrationConfig')
+    assert.equal(pipe.options.schedule, 'manual', 'orchestrationConfig merged into options')
+    assert.equal(pipe.options.provenance.instantiatedFromTemplateId, tmpl.id, 'provenance: source template id')
+    assert.equal(pipe.options.provenance.templateVersion, 1, 'provenance: snapshot version')
+    assert.deepEqual(pipe.fieldMappings.map((m) => m.targetField), ['code', 'name'], 'mappings materialized from template')
+
+    // --- SNAPSHOT (load-bearing): edit the template AFTER instantiation; the live pipeline must NOT re-sync ---
+    const edited = await ireg.upsertTemplate({
+      tenantId: 't1', workspaceId: 'w1', name: 'k3-material-pipeline',
+      sourceKind: 'data-source:sql-readonly', sourceObject: 'dbo.materials',
+      targetKind: 'metasheet:multitable', targetObject: 'approved_materials',
+      keyFields: ['code'],
+      mappingDef: [
+        { sourceField: 'c', targetField: 'code_CHANGED' }, // mutate a mapping target
+        { sourceField: 'n', targetField: 'name' },
+        { sourceField: 'x', targetField: 'extra' },        // add a mapping
+      ],
+      orchestrationConfig: { schedule: 'cron' },
+    })
+    assert.equal(edited.version, 2, 'template edit bumped to v2')
+    assert.equal(edited.mappingDef[0].targetField, 'code_CHANGED', 'template definition changed')
+
+    // re-read the LIVE pipeline straight from storage (not via the template)
+    const pipeRow = pipelineRowsByName(idb, 'k3-material-pipeline')
+    assert.equal(pipeRow.length, 1, 'still exactly one pipeline')
+    assert.equal(parseOptions(pipeRow[0]).provenance.templateVersion, 1, 'provenance still pins v1 (no silent re-sync)')
+    const liveMappings = fieldMappingRows(idb, pipeRow[0].id).map((m) => m.target_field)
+    assert.deepEqual(liveMappings, ['code', 'name'], 'materialized mappings are the v1 SNAPSHOT, UNCHANGED by the v2 edit')
+
+    // --- idempotency: re-instantiate the same resolved name -> 409, no duplicate pipeline ---
+    await assert.rejects(
+      () => ireg.instantiateTemplate({
+        tenantId: 't1', workspaceId: 'w1', templateId: tmpl.id,
+        targetSystemId: 'sys_mt', sourceSystemId: 'sys_src',
+      }),
+      (e) => e instanceof TemplateInstantiationConflictError && e.status === 409 && e.code === 'INTEGRATION_TEMPLATE_INSTANTIATION_CONFLICT',
+      'second instantiate with same resolved name is a 409 conflict',
+    )
+    assert.equal(pipelineRowsByName(idb, 'k3-material-pipeline').length, 1, 'idempotent: still exactly one pipeline row')
+
+    // a DISTINCT pipelineName instantiates a second pipeline, snapshotting the CURRENT (v2) template
+    const pipe2 = await ireg.instantiateTemplate({
+      tenantId: 't1', workspaceId: 'w1', templateId: tmpl.id,
+      targetSystemId: 'sys_mt', sourceSystemId: 'sys_src', pipelineName: 'k3-material-pipeline-copy',
+    })
+    assert.equal(pipe2.options.provenance.templateVersion, 2, 'a fresh instantiation snapshots the CURRENT (v2) version')
+    assert.deepEqual(pipe2.fieldMappings.map((m) => m.targetField), ['code_CHANGED', 'name', 'extra'], 'fresh snapshot reflects v2 mappings')
+  }
+
+  // --- 5. bind fail-closed (422), creating NO pipeline ---
+  {
+    const idb = createFakeDb()
+    const systems = []
+    seedSystem(idb, systems, { id: 'sys_mt', kind: 'metasheet:multitable', role: 'target' })
+    seedSystem(idb, systems, { id: 'sys_src', kind: 'data-source:sql-readonly', role: 'source' })
+    seedSystem(idb, systems, { id: 'sys_wrongkind', kind: 'erp:k3-wise-webapi', role: 'target' })
+    let seq = 0
+    const ireg = createIntegrationTemplateRegistry({
+      db: idb, idGenerator: () => `gen_${++seq}`, now: () => 'ts',
+      externalSystemRegistry: createFakeExternalSystemRegistry(systems),
+    })
+    const tmpl = await ireg.upsertTemplate({
+      tenantId: 't1', workspaceId: 'w1', name: 'bind-tmpl',
+      sourceKind: 'data-source:sql-readonly', sourceObject: 'dbo.m',
+      targetKind: 'metasheet:multitable', targetObject: 'approved',
+      mappingDef: [{ sourceField: 'c', targetField: 'code' }],
+    })
+    const pipelineCount = () => idb.rows.filter((r) => r._table === 'integration_pipelines').length
+
+    // (a) missing targetSystemId -> 422
+    await assert.rejects(
+      () => ireg.instantiateTemplate({ tenantId: 't1', workspaceId: 'w1', templateId: tmpl.id, sourceSystemId: 'sys_src' }),
+      (e) => e instanceof TemplateValidationError && e.status === 422,
+      'missing targetSystemId fails closed (422)',
+    )
+    // (b) bound target system kind != template.targetKind -> 422
+    await assert.rejects(
+      () => ireg.instantiateTemplate({ tenantId: 't1', workspaceId: 'w1', templateId: tmpl.id, targetSystemId: 'sys_wrongkind', sourceSystemId: 'sys_src' }),
+      (e) => e instanceof TemplateValidationError && e.status === 422 && e.details.field === 'targetSystemId',
+      'target kind mismatch fails closed (422)',
+    )
+    // (c) non-existent targetSystemId -> 422 (registry throws not-found, mapped to a bind error)
+    await assert.rejects(
+      () => ireg.instantiateTemplate({ tenantId: 't1', workspaceId: 'w1', templateId: tmpl.id, targetSystemId: 'sys_ghost', sourceSystemId: 'sys_src' }),
+      (e) => e instanceof TemplateValidationError && e.status === 422,
+      'non-existent target system fails closed (422), not a 404/500',
+    )
+    assert.equal(pipelineCount(), 0, 'no pipeline created by any failed bind')
+  }
+
+  // --- 6. atomicity: a mid-tx field-mapping failure leaves NO orphan pipeline row ---
+  {
+    const idb = createFakeDb()
+    const systems = []
+    seedSystem(idb, systems, { id: 'sys_mt', kind: 'metasheet:multitable', role: 'target' })
+    seedSystem(idb, systems, { id: 'sys_src', kind: 'data-source:sql-readonly', role: 'source' })
+    let seq = 0
+    const ireg = createIntegrationTemplateRegistry({
+      db: idb, idGenerator: () => `gen_${++seq}`, now: () => 'ts',
+      externalSystemRegistry: createFakeExternalSystemRegistry(systems),
+    })
+    const tmpl = await ireg.upsertTemplate({
+      tenantId: 't1', workspaceId: 'w1', name: 'atomic-tmpl',
+      sourceKind: 'data-source:sql-readonly', sourceObject: 'dbo.m',
+      targetKind: 'metasheet:multitable', targetObject: 'approved',
+      mappingDef: [{ sourceField: 'c', targetField: 'code' }],
+    })
+    // make the field-mapping insert blow up AFTER the pipeline row is inserted, inside the tx
+    idb.insertMany = async () => { throw new Error('mappings insert boom') }
+    await assert.rejects(
+      () => ireg.instantiateTemplate({ tenantId: 't1', workspaceId: 'w1', templateId: tmpl.id, targetSystemId: 'sys_mt', sourceSystemId: 'sys_src' }),
+      /boom/,
+      'a mid-tx failure propagates out',
+    )
+    assert.equal(idb.rows.filter((r) => r._table === 'integration_pipelines').length, 0, 'transaction rolled back: NO orphan pipeline row')
+    assert.ok(idb.calls.some((c) => c[0] === 'transaction'), 'instantiation used db.transaction (all-or-nothing)')
+  }
+
+  console.log('✓ integration-templates: normalizer + CRUD + S3-2 instantiate (snapshot/idempotency/bind/atomicity) tests passed')
 }
 
 main().catch((err) => {

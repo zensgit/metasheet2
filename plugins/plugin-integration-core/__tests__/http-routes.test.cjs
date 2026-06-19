@@ -397,6 +397,25 @@ function createMockServices(overrides = {}) {
           store.delete(k)
           return { deleted: 1 }
         },
+        async instantiateTemplate(input) {
+          calls.push(['instantiateTemplate', input])
+          const tmpl = store.get(`${scopeKey(input)}::${input.templateId}`)
+          if (!tmpl) { const e = new Error('not found'); e.status = 404; e.code = 'INTEGRATION_TEMPLATE_NOT_FOUND'; throw e }
+          return {
+            id: 'pipe_inst_1',
+            tenantId: input.tenantId,
+            workspaceId: input.workspaceId ?? null,
+            name: input.pipelineName || tmpl.name,
+            sourceSystemId: input.sourceSystemId ?? null,
+            targetSystemId: input.targetSystemId ?? null,
+            sourceObject: tmpl.sourceObject ?? null,
+            targetObject: tmpl.targetObject ?? null,
+            status: 'draft',
+            fieldMappings: tmpl.mappingDef || [],
+            options: { provenance: { instantiatedFromTemplateId: tmpl.id, templateVersion: tmpl.version } },
+            createdBy: input.createdBy ?? null,
+          }
+        },
       }
     })(),
   }
@@ -4816,7 +4835,7 @@ async function testPipelineExternalWriteMultitableRoute() {
 
 // S3-1: integration-template object CRUD routes (declarative; no instantiation route exists).
 async function testTemplatesCrudRoutes() {
-  const { services } = createMockServices()
+  const { services, calls } = createMockServices()
   const { routes } = mountRoutes(services)
 
   // create -> 201
@@ -4852,11 +4871,52 @@ async function testTemplatesCrudRoutes() {
   assertOkResponse(res, 200)
   assert.equal(res.body.data.deleted, 1)
 
-  // NO instantiation route exists (S3-1 contract+storage only)
-  assert.throws(
-    () => getRoute(routes, 'POST', '/api/integration/templates/:id/instantiate'),
-    'no instantiate route in S3-1',
-  )
+  // --- S3-2: instantiate route (binds to caller-supplied systems; provenance stamped) ---
+  // fresh template (the one above was deleted)
+  res = await invoke(routes, 'POST', '/api/integration/templates', {
+    user: WRITE_USER,
+    body: {
+      tenantId: 'tenant_1', name: 'k3-material-inst',
+      sourceKind: 'data-source:sql-readonly', sourceObject: 'dbo.mat',
+      targetKind: 'metasheet:multitable', targetObject: 'approved_materials',
+      keyFields: ['code'], mappingDef: [{ sourceField: 'c', targetField: 'code' }],
+    },
+  })
+  assertOkResponse(res, 201)
+  const instTemplateId = res.body.data.id
+
+  // happy: instantiate -> 201, returns a pipeline carrying provenance + the bound system ids
+  res = await invoke(routes, 'POST', '/api/integration/templates/:id/instantiate', {
+    user: WRITE_USER,
+    params: { id: instTemplateId },
+    body: { tenantId: 'tenant_1', targetSystemId: 'sys_mt', sourceSystemId: 'sys_src' },
+  })
+  assertOkResponse(res, 201)
+  assert.equal(res.body.data.targetSystemId, 'sys_mt', 'bound target system id flows through')
+  assert.equal(res.body.data.sourceSystemId, 'sys_src', 'bound source system id flows through')
+  assert.equal(res.body.data.options.provenance.instantiatedFromTemplateId, instTemplateId, 'provenance stamped from template id')
+  const instCall = findCall(calls, 'instantiateTemplate')
+  assert.equal(instCall[1].templateId, instTemplateId, 'templateId comes from the :id path param')
+  assert.equal(instCall[1].targetSystemId, 'sys_mt')
+  assert.equal(instCall[1].sourceSystemId, 'sys_src')
+  assert.equal(instCall[1].createdBy, WRITE_USER.id, 'createdBy is the authed principal, never request-sourced')
+
+  // body allowlist: a write-profile / credential field is NEVER request-sourced -> 400
+  res = await invoke(routes, 'POST', '/api/integration/templates/:id/instantiate', {
+    user: WRITE_USER,
+    params: { id: instTemplateId },
+    body: { tenantId: 'tenant_1', targetSystemId: 'sys_mt', sourceSystemId: 'sys_src', writeProfile: { kind: 'evil' } },
+  })
+  assert.equal(res.statusCode, 400, 'unknown body field rejected by the closed allowlist')
+  assert.equal(res.body.error.code, 'TEMPLATE_INSTANTIATE_REQUEST_INVALID')
+
+  // read-only user cannot instantiate (write-gated)
+  res = await invoke(routes, 'POST', '/api/integration/templates/:id/instantiate', {
+    user: READ_USER,
+    params: { id: instTemplateId },
+    body: { tenantId: 'tenant_1', targetSystemId: 'sys_mt', sourceSystemId: 'sys_src' },
+  })
+  assert.equal(res.statusCode, 403, 'read-only user cannot instantiate')
 }
 
 async function main() {

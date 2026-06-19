@@ -507,6 +507,7 @@ function createHarness() {
         async getTemplate() { return {} },
         async listTemplates() { return [] },
         async deleteTemplate() { return { deleted: 0 } },
+        async instantiateTemplate() { return {} },
       },
     },
     logger: {
