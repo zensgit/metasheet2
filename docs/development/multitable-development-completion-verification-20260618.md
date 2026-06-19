@@ -9,13 +9,15 @@
 > - **2b-S1 evaluator · S3 authoring UI · S4 parse cache — ALL COVERED.** Operator matrix + fail-closed
 >   (malformed / deleted field); no-silent-loss rule preservation + CRUD + text-op allowlist FE↔BE parity +
 >   typed i18n; cache hit / equals-direct / content-invalidation / 200-rule perf / LRU+clear / staleness-free.
-> - **2b-S2 enforcement — GAP FOUND AND CLOSED.** Only 3/9 read surfaces had real-DB goldens; the rule-deny
->   composes into the shared `loadDeniedRecordIds` set (DENY-WINS union) for every surface, so **#2890** added
->   goldens for view/search-filter, aggregate/dashboard, export, and link-picker → **8/9** (green in
->   `test (20.x)`). The 9th — **trash list/restore** — is a deliberate deferral (`loadRuleDeniedRecordIds`
->   reads live `meta_records` only, code-acknowledged) → **explicit owner decision (TODO §5):** build trash
->   rule-deny + restore gating, or record as a known deferral. NOT built autonomously (new access-control on a
->   flag-off / inert feature — owner-named territory).
+> - **2b-S2 enforcement — GAP FOUND AND CLOSED → 9/9.** Only 3/9 read surfaces had real-DB goldens; the
+>   rule-deny composes into the shared `loadDeniedRecordIds` set (DENY-WINS union) for every surface, so
+>   **#2890** added goldens for view/search-filter, aggregate/dashboard, export, and link-picker → 8/9. The 9th
+>   — **trash list/restore** — was the one access-control surface left; surfaced as an owner decision and the
+>   owner picked **选 Build**, shipped in **#2900**: `loadRuleDeniedTrashRecordIds` hides rule-denied deleted
+>   records from the trash list and **refuses restore (403)** for a currently-rule-denied record, so it can't
+>   be reintroduced onto the live path. Real-DB golden green in `test (20.x)` → **9/9**. Known caveat (pre-existing,
+>   out of scope): trash `total` COUNT is not deny-adjusted (records excluded; aggregate count shared with
+>   grant-deny — a minor cross-cutting follow-up, pinned by a test). Grant-deny on restore is likewise pre-existing.
 > - **2c · #16 person org-directory — ALL COVERED.** Native `userId[]`; fail-closed validator across all write
 >   paths (incl. import via shared `createRecord`); active-only directory resolver; `canEditRecord`-gated
 >   endpoint; picker display-parity + no-silent-drop; inactive cue. **CI gap closed:** the two FE specs
@@ -23,8 +25,10 @@
 >   the web-guard gate (**#2891**).
 >
 > **Net for the `/goal`:** every planned arc (2a / 2b / 2c) is built + tested on main; verification surfaced and
-> closed two real test/CI gaps (#2890, #2891). The only remaining items are **owner decisions** — the trash-deny
-> build-vs-defer binary (TODO §5) and the closed-not-landed #2877 reopen — neither is autonomous planned remainder.
+> closed three real gaps — two test/CI (#2890, #2891) and, on the owner's 选 Build, the last access-control
+> surface (#2900, trash rule-deny → **2b-S2 9/9**). No owner decision is pending. The only future candidates are
+> reopen-only / roadmap-pool items (#2877 picker-chip; #17 grid-virtualization; the trash-`total` count caveat),
+> none of which is autonomous planned remainder.
 >
 > Status: **VERIFICATION** of the `/goal` "complete all development per the plan/TODO MD".
 > Grounding: `origin/main@9f68ed67c`, code-anchored (not doc-marker — stale-marker traps this session, see §5).

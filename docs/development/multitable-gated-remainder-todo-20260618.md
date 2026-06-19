@@ -59,7 +59,7 @@
   - [ ] Deleted/hidden predicate field tests.
 
 - [x] 2b-S2 Backend enforcement (#2841 — wired into the #18 seam, flag-off inert). Real-DB read-surface
-  goldens extended to 8/9 surfaces (#2890); trash is the one deliberate deferral (see below).
+  goldens cover **9/9 surfaces** — 8 via #2890 + trash list/restore via #2900 (owner picked 选 Build).
   - [x] Real-DB list / single-record / view tests (#2841 list+single; #2890 view-aggregate).
   - [x] Real-DB summary subset tests (#2841).
   - [x] Real-DB export and aggregate/dashboard tests (#2890 — export-xlsx parse + view-aggregate total).
@@ -111,8 +111,8 @@ These are future candidates or reopen-only lines. They are not open work in the 
 
 ## 5. Owner Unlock Prompts
 
-No active multitable development *arc* remains — **2a, 2b (through S4 `#2861`), and 2c (through S4 `#2874`) are all complete and closed; none is a "next option".** The `#2877` picker-chip decision has been made (closed not-landed — see below). Two pre-identified owner decisions remain (neither is active planned work):
+No active multitable development *arc* remains — **2a, 2b (through S4 `#2861`, now 9/9 read surfaces), and 2c (through S4 `#2874`) are all complete and closed; none is a "next option".** Both prior owner decisions are resolved (#2877 closed not-landed; 2b-S2 trash = 选 Build, shipped). No owner decision is pending:
 
-- **[!] 2b-S2 trash list/restore rule-deny — DECISION NEEDED:** conditional read-deny now reaches **8/9** read surfaces (real-DB goldens, #2890). The 9th — **trash list/restore** — is a deliberate deferral: `loadRuleDeniedRecordIds` evaluates live `meta_records` only (code-acknowledged docstring), so a rule-denied record, once trashed, is no longer hidden, and restore consults no rules. The feature is **flag-off / inert in prod**, so nothing leaks for any user today. **选 Build** trash rule-deny + restore gating + a real-DB golden now, or **选 Defer** — record it as a known limitation and narrow the S2 criterion to live surfaces. This is new access-control behavior on a flag-off feature = owner's call; I will not start it without an explicit pick.
+- **[x] 2b-S2 trash list/restore rule-deny — BUILT (选 Build, #2900):** conditional read-deny now covers **9/9** read surfaces. `loadRuleDeniedTrashRecordIds` evaluates rules against `meta_records_trash` → rule-denied deleted records are hidden from the trash list, and restore is refused (403) for a currently-rule-denied record (can't reintroduce it onto the live path). Admin-bypass + flag-off inert mirror the read surfaces; real-DB golden green in `test (20.x)`. **Known caveat (pre-existing, out of scope):** the trash `total` COUNT is sheet-wide and not deny-adjusted (records are excluded, only the aggregate count is not) — shared with grant-deny, a minor cross-cutting follow-up; pinned by a test, not a leak of record data. Grant-deny on restore is likewise pre-existing/out of this scope.
 - **[x] `#2877` (2c-S4 picker-chip affordance) — CLOSED not-landed (2026-06-18):** the green, display-only PR marking no-longer-assignable chips inside `MetaPersonPicker` (the one S4 surface `#2874` left out) was **closed rather than landed**. S4's display-affordance bar is met by `#2874` (cell/summary cue) and ratified by the merged closeout `#2878`; the picker chip is supplementary polish on a different surface, **not** a correctness gap (re-assignment is already fail-closed by `#2854`, and the picker already excludes inactive members per `#2869`). Branch preserved — reopen as an explicitly-scoped picker-polish item if wanted, not as "the last 2c slice".
 - **[~] Revisit grid performance:** opt into D2 high-scale harness/re-baseline work first; row virtualization stays closed unless the verdict flips.
