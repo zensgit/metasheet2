@@ -195,15 +195,72 @@ function normalizeFieldList(value, field) {
   })
 }
 
-function normalizeTargetConfig(system) {
-  if (!system || system.kind !== TARGET_KIND) {
-    throw new ExternalWriteDryRunError(422, 'C6_WRITE_TARGET_REQUIRED', `C6 write dry-run requires target kind ${TARGET_KIND}`, {
-      expectedKind: TARGET_KIND,
+// --- Target-write PROFILE (S1b design-lock §3-A: two-interface split) -----------------
+// A profile abstracts the two places the C6 safe-write lifecycle was welded to
+// `data-source:sql-write-gated`: (1) which target KIND is an accepted write target, and
+// (2) what a SAFE capability state looks like. The write PRIMITIVES stay the injected
+// `dataSourceWrites` (test/lookupByKey/insertRows/updateRows) — the planner's proven
+// classification, token/fence, per-row isolation and dead-letter are UNCHANGED. The default
+// profile is the SQL one, so the existing path behaves byte-for-byte as before.
+const SQL_WRITE_GATED_PROFILE = {
+  kind: TARGET_KIND,
+  normalizeCapabilityState(result) {
+    const state = result && result.capabilityState
+    if (
+      !isPlainObject(state) ||
+      typeof state.readOnly !== 'boolean' ||
+      typeof state.c6WriteTarget !== 'boolean' ||
+      typeof state.genericQueryDisabled !== 'boolean'
+    ) {
+      throw new ExternalWriteDryRunError(501, 'C6_WRITE_CAPABILITY_STATE_UNAVAILABLE', 'C6 write dry-run requires target capability state from context.api.dataSourceWrites.test')
+    }
+    return {
+      success: result.success === true,
+      readOnly: state.readOnly,
+      c6WriteTarget: state.c6WriteTarget,
+      genericQueryDisabled: state.genericQueryDisabled,
+    }
+  },
+  assertSafeCapabilityState(state) {
+    if (state.readOnly !== false || state.c6WriteTarget !== true || state.genericQueryDisabled !== true) {
+      throw new ExternalWriteDryRunError(422, 'C6_WRITE_TARGET_CAPABILITY_UNSAFE', 'C6 write target capability state is unsafe')
+    }
+  },
+}
+
+function assertTargetWriteProfile(profile) {
+  if (
+    !profile ||
+    typeof profile.kind !== 'string' ||
+    profile.kind.length === 0 ||
+    typeof profile.normalizeCapabilityState !== 'function' ||
+    typeof profile.assertSafeCapabilityState !== 'function'
+  ) {
+    throw new ExternalWriteDryRunError(501, 'C6_WRITE_PROFILE_INVALID', 'C6 write requires a valid target-write profile (kind + normalizeCapabilityState + assertSafeCapabilityState)')
+  }
+  return profile
+}
+
+// Resolve the write profile for this run. Default = SQL write-gated, so the existing route
+// (which passes none) is unchanged; an opt-in target (S1b-2 multitable, S2 K3) supplies its
+// own profile via input.targetWriteProfile.
+// TRUST BOUNDARY: a profile IS the per-kind safety policy (its assertSafeCapabilityState is
+// the gate). targetWriteProfile is TRUSTED server-side planner wiring only — it must never be
+// sourced from request/user input. assertTargetWriteProfile validates shape, not strictness.
+function resolveTargetWriteProfile(input) {
+  return assertTargetWriteProfile(input && input.targetWriteProfile ? input.targetWriteProfile : SQL_WRITE_GATED_PROFILE)
+}
+
+function normalizeTargetConfig(system, profile = SQL_WRITE_GATED_PROFILE) {
+  if (!system || system.kind !== profile.kind) {
+    throw new ExternalWriteDryRunError(422, 'C6_WRITE_TARGET_REQUIRED', `C6 write dry-run requires target kind ${profile.kind}`, {
+      expectedKind: profile.kind,
       actualKind: system && system.kind,
     })
   }
   const config = isPlainObject(system.config) ? system.config : {}
   return {
+    kind: system.kind,
     dataSourceId: requiredString(config.dataSourceId, 'target.config.dataSourceId'),
     object: requiredString(config.object, 'target.config.object'),
     keyFields: normalizeFieldList(config.keyFields, 'target.config.keyFields'),
@@ -306,30 +363,6 @@ function requireDataSourceWritesApi(api) {
   return api
 }
 
-function normalizeTargetCapabilityState(result) {
-  const state = result && result.capabilityState
-  if (
-    !isPlainObject(state) ||
-    typeof state.readOnly !== 'boolean' ||
-    typeof state.c6WriteTarget !== 'boolean' ||
-    typeof state.genericQueryDisabled !== 'boolean'
-  ) {
-    throw new ExternalWriteDryRunError(501, 'C6_WRITE_CAPABILITY_STATE_UNAVAILABLE', 'C6 write dry-run requires target capability state from context.api.dataSourceWrites.test')
-  }
-  return {
-    success: result.success === true,
-    readOnly: state.readOnly,
-    c6WriteTarget: state.c6WriteTarget,
-    genericQueryDisabled: state.genericQueryDisabled,
-  }
-}
-
-function assertSafeTargetCapabilityState(state) {
-  if (state.readOnly !== false || state.c6WriteTarget !== true || state.genericQueryDisabled !== true) {
-    throw new ExternalWriteDryRunError(422, 'C6_WRITE_TARGET_CAPABILITY_UNSAFE', 'C6 write target capability state is unsafe')
-  }
-}
-
 function statusCounts() {
   return { add: 0, update: 0, skip: 0, held: 0, failed: 0 }
 }
@@ -423,7 +456,7 @@ function buildRevision(input) {
     },
     target: {
       systemId: input.pipeline.targetSystemId,
-      kind: TARGET_KIND,
+      kind: input.targetConfig.kind,
       dataSourceId: input.targetConfig.dataSourceId,
       object: input.targetConfig.object,
       keyFields: input.targetConfig.keyFields,
@@ -452,7 +485,7 @@ function publicRowErrorTypes(rowErrors) {
 function publicEvidence({ pipeline, targetConfig, sourceKind, counts, revision, canApply, sourceRead, rowErrorTypes, dryRunToken, testFailureInjection }) {
   return {
     pipelineId: pipeline.id,
-    targetKind: TARGET_KIND,
+    targetKind: targetConfig.kind,
     sourceKind: sourceKind || null,
     operationMode: 'upsert',
     keyFields: targetConfig.keyFields.slice(),
@@ -474,7 +507,7 @@ function publicEvidence({ pipeline, targetConfig, sourceKind, counts, revision, 
 function publicApplyEvidence({ pipeline, targetConfig, sourceKind, status, counts, revision, sourceRead, rowErrors, provenanceEvents, testFailureInjection }) {
   return {
     pipelineId: pipeline.id,
-    targetKind: TARGET_KIND,
+    targetKind: targetConfig.kind,
     sourceKind: sourceKind || null,
     operationMode: 'upsert',
     keyFields: targetConfig.keyFields.slice(),
@@ -515,20 +548,21 @@ function validatePlannerInput(input = {}, phase = 'dry-run') {
 
 async function computeExternalWritePlan(input = {}) {
   const pipeline = validatePlannerInput(input, input.phase || 'dry-run')
-  const targetConfig = normalizeTargetConfig(input.targetSystem)
+  const profile = resolveTargetWriteProfile(input)
+  const targetConfig = normalizeTargetConfig(input.targetSystem, profile)
   const testFailureInjection = normalizeTestFailureInjectionConfig(input.testFailureInjection, {
     pipeline,
     targetSystem: input.targetSystem,
     targetConfig,
   })
   const dataSourceWrites = requireDataSourceWritesApi(input.dataSourceWrites)
-  const targetCapabilityState = normalizeTargetCapabilityState(
+  const targetCapabilityState = profile.normalizeCapabilityState(
     await dataSourceWrites.test(targetConfig.dataSourceId, input.dataSourceOwnerPrincipal),
   )
   if (targetCapabilityState.success !== true) {
     throw new ExternalWriteDryRunError(422, 'C6_WRITE_TARGET_TEST_FAILED', 'C6 write target test did not pass')
   }
-  assertSafeTargetCapabilityState(targetCapabilityState)
+  profile.assertSafeCapabilityState(targetCapabilityState)
   if (!input.sourceAdapter || typeof input.sourceAdapter.read !== 'function') {
     throw new ExternalWriteDryRunError(501, 'C6_WRITE_SOURCE_ADAPTER_UNAVAILABLE', 'source adapter read is required')
   }
@@ -693,14 +727,14 @@ function syntheticRunId(pipeline, revision) {
   return `c6-external-write:${pipeline.id}:${revision}`
 }
 
-function provenanceEvent({ pipeline, revision, runId, row, eventType, attrs = {} }) {
+function provenanceEvent({ pipeline, revision, runId, row, eventType, targetKind = TARGET_KIND, attrs = {} }) {
   return {
     runId: runId || syntheticRunId(pipeline, revision),
     rowId: row && row.keyFingerprint ? row.keyFingerprint : hashJson({ pipelineId: pipeline.id, eventType, attrs }),
     eventType,
     at: new Date().toISOString(),
     attrs: {
-      targetKind: TARGET_KIND,
+      targetKind,
       dryRunRevision: revision,
       ...attrs,
     },
@@ -790,6 +824,7 @@ async function applyExternalWrite(input = {}) {
         pipeline: plan.pipeline,
         revision: plan.revision,
         runId,
+        targetKind: plan.targetConfig.kind,
         row,
         eventType: 'target_write_succeeded',
         attrs: { decision: 'skip', writePerformed: false },
@@ -802,6 +837,7 @@ async function applyExternalWrite(input = {}) {
         pipeline: plan.pipeline,
         revision: plan.revision,
         runId,
+        targetKind: plan.targetConfig.kind,
         row,
         eventType: 'target_write_failed',
         attrs: { decision: 'held', errorCode: 'C6_WRITE_ROW_HELD' },
@@ -840,6 +876,7 @@ async function applyExternalWrite(input = {}) {
         pipeline: plan.pipeline,
         revision: plan.revision,
         runId,
+        targetKind: plan.targetConfig.kind,
         row,
         eventType: 'target_write_succeeded',
         attrs: { decision: row.decision, writePerformed: true },
@@ -852,6 +889,7 @@ async function applyExternalWrite(input = {}) {
         pipeline: plan.pipeline,
         revision: plan.revision,
         runId,
+        targetKind: plan.targetConfig.kind,
         row,
         eventType: 'target_write_failed',
         attrs: { decision: row.decision, errorCode },
@@ -904,6 +942,9 @@ module.exports = {
     C6_WRITE_DRY_RUN_TOKEN_PREFIX,
     C6_TEST_INJECTED_ROW_FAILURE,
     TARGET_KIND,
+    SQL_WRITE_GATED_PROFILE,
+    resolveTargetWriteProfile,
+    assertTargetWriteProfile,
     buildRevision,
     computeExternalWritePlan,
     consumeDryRunToken,

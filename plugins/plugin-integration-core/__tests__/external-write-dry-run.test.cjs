@@ -691,8 +691,123 @@ async function testRejectsFailedTargetCapabilityCheck() {
   assert.equal(calls.lookupByKey.length, 0, 'failed target capability check fails before target lookup')
 }
 
+// --- S1b-1: the safe-write lifecycle generalizes off data-source:sql-write-gated ----------
+// A non-SQL target opts into the SAME C6 lifecycle via a write PROFILE + the injected write
+// source. The profile uses a DIFFERENT capability-state shape ({ ok }) to prove the planner
+// no longer hardcodes the SQL flags; the write primitives are the injected dataSourceWrites.
+function fakeWriteProfile() {
+  return {
+    kind: 'fake:write-target',
+    normalizeCapabilityState(result) {
+      const state = result && result.capabilityState
+      if (!state || typeof state.ok !== 'boolean') {
+        throw new Error('fake target capability state unavailable')
+      }
+      return { success: result.success === true, ok: state.ok }
+    },
+    assertSafeCapabilityState(state) {
+      if (state.ok !== true) throw new Error('fake target capability state is unsafe')
+    },
+  }
+}
+
+function fakeProfileInput(overrides = {}) {
+  return baseInput({
+    test: () => ({ success: true, capabilityState: { ok: true } }),
+    ...overrides,
+    input: {
+      dryRunUser: 'user_write',
+      targetWriteProfile: fakeWriteProfile(),
+      targetSystem: {
+        id: 'target_1',
+        kind: 'fake:write-target',
+        config: {
+          dataSourceId: 'fake-write-source',
+          object: 'own.target_items',
+          keyFields: ['externalId'],
+          writableFields: ['name', 'status'],
+        },
+      },
+      ...(overrides.input || {}),
+    },
+  })
+}
+
+async function testWriteSourceSeamGeneralizesLifecycleOffSqlProfile() {
+  const { input, calls } = fakeProfileInput()
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.canApply, true)
+  assert.equal(dryRun.counts.add, 1, 'classification (add) works through the generalized profile')
+  assert.equal(dryRun.counts.update, 1, 'classification (update) works through the generalized profile')
+  assert.equal(dryRun.counts.failed, 0)
+  assert.equal(dryRun.evidence.targetKind, 'fake:write-target', 'evidence carries the generalized kind, not the SQL constant')
+  const dryText = JSON.stringify(dryRun.evidence)
+  assert.equal(dryText.includes('P-001'), false, 'generalized dry-run evidence stays values-free')
+  assert.equal(dryText.includes('Widget'), false, 'generalized dry-run evidence stays values-free')
+  assert.equal(dryText.includes('data-source:sql-write-gated'), false, 'generalized run is not mislabeled as the SQL profile')
+
+  const apply = await applyExternalWrite({
+    ...input,
+    dryRunToken: dryRun.dryRunToken,
+    applyUser: 'user_write',
+    runId: 'run_fake_seam',
+  })
+  assert.equal(apply.status, 'succeeded')
+  assert.equal(apply.counts.written, 2)
+  assert.equal(apply.counts.add, 1)
+  assert.equal(apply.counts.update, 1)
+  assert.equal(calls.insertRows.length, 1, 'add routed to the injected (non-SQL) write source')
+  assert.equal(calls.updateRows.length, 1, 'update routed to the injected (non-SQL) write source')
+  assert.equal(apply.evidence.targetKind, 'fake:write-target')
+  assert.equal(input.tokenStore.map.size, 0, 'apply consumed the single-use token')
+  // Revision-fence / single-use still holds on the generalized path: the consumed token is dead.
+  await assert.rejects(
+    () => applyExternalWrite({ ...input, dryRunToken: dryRun.dryRunToken, applyUser: 'user_write' }),
+    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_INVALID',
+    'consumed token is single-use under the generalized profile',
+  )
+}
+
+async function testWriteSourceSeamIsolatesRowFailureValuesFree() {
+  const deadLetters = []
+  // The injected write source fails the add row with an error whose message embeds row
+  // values; the per-row failure must isolate, persist a values-free dead letter, and let the
+  // clean sibling (update) through — proving C6 safety holds on the generalized path.
+  const { input, calls } = fakeProfileInput({
+    insertRows: () => {
+      throw new Error('insert failed: (externalId)=(P-001) name=Widget')
+    },
+  })
+  const dryRun = await dryRunExternalWrite(input)
+  const apply = await applyExternalWrite({
+    ...input,
+    dryRunToken: dryRun.dryRunToken,
+    applyUser: 'user_write',
+    runId: 'run_fake_fail',
+    deadLetterStore: {
+      async createDeadLetter(entry) {
+        deadLetters.push(entry)
+        return { ...entry, id: `dl_${deadLetters.length}` }
+      },
+    },
+  })
+  assert.equal(apply.status, 'partial', 'add fails, update succeeds -> partial')
+  assert.equal(apply.counts.failed, 1)
+  assert.equal(apply.counts.update, 1)
+  assert.equal(apply.counts.written, 1)
+  assert.equal(calls.updateRows.length, 1, 'clean sibling still written through the injected source')
+  assert.deepEqual(apply.deadLetters, { attempted: 1, persisted: 1 })
+  const text = JSON.stringify(apply) + JSON.stringify(deadLetters)
+  for (const leak of ['P-001', 'P-002', 'Widget', 'Gadget']) {
+    assert.equal(text.includes(leak), false, `generalized row-failure path stays values-free (${leak})`)
+  }
+}
+
 async function main() {
   await testReadyDryRunIssuesTokenAndStaysValuesFree()
+  await testWriteSourceSeamGeneralizesLifecycleOffSqlProfile()
+  await testWriteSourceSeamIsolatesRowFailureValuesFree()
   await testAmbiguousTargetKeyHoldsAndDoesNotIssueToken()
   await testTruncatedSourceReadDoesNotIssueToken()
   await testRejectsNonC6Target()
