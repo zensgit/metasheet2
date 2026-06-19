@@ -14,6 +14,8 @@ export type MetaApiTokenLabelKey =
   | 'token.loading' | 'token.empty' | 'token.meta.scopes'
   | 'token.meta.created' | 'token.meta.lastUsed' | 'token.meta.expires'
   | 'token.scope.none' | 'token.scope.read' | 'token.scope.write' | 'token.scope.admin'
+  | 'token.scope.records-read' | 'token.scope.records-write' | 'token.scope.fields-read'
+  | 'token.scope.comments-read' | 'token.scope.comments-write' | 'token.scope.webhooks-manage'
   | 'token.action.copy' | 'token.action.copied' | 'token.action.create'
   | 'token.action.rotate' | 'token.action.revoke'
   | 'webhook.newTitle' | 'webhook.editTitle' | 'webhook.name'
@@ -95,6 +97,12 @@ const LABELS: Record<MetaApiTokenLabelKey, { en: string; zh: string }> = {
   'token.scope.read': { en: 'read', zh: '读取' },
   'token.scope.write': { en: 'write', zh: '写入' },
   'token.scope.admin': { en: 'admin', zh: '管理' },
+  'token.scope.records-read': { en: 'Records: read', zh: '记录：读取' },
+  'token.scope.records-write': { en: 'Records: write', zh: '记录：写入' },
+  'token.scope.fields-read': { en: 'Fields: read', zh: '字段：读取' },
+  'token.scope.comments-read': { en: 'Comments: read', zh: '评论：读取' },
+  'token.scope.comments-write': { en: 'Comments: write', zh: '评论：写入' },
+  'token.scope.webhooks-manage': { en: 'Webhooks: manage', zh: 'Webhook：管理' },
   'token.action.copy': { en: 'Copy', zh: '复制' },
   'token.action.copied': { en: 'Copied!', zh: '已复制！' },
   'token.action.create': { en: 'Create', zh: '创建' },
@@ -239,7 +247,19 @@ export function apiManagerTitle(canManageDingTalkGroups: boolean, isZh: boolean)
   return apiTokenLabel(canManageDingTalkGroups ? 'title.full' : 'title.basic', isZh)
 }
 
+const API_SCOPE_LABEL_KEY: Record<string, MetaApiTokenLabelKey> = {
+  'records:read': 'token.scope.records-read',
+  'records:write': 'token.scope.records-write',
+  'fields:read': 'token.scope.fields-read',
+  'comments:read': 'token.scope.comments-read',
+  'comments:write': 'token.scope.comments-write',
+  'webhooks:manage': 'token.scope.webhooks-manage',
+}
+
 export function apiScopeLabel(scope: string, isZh: boolean): string {
+  const key = API_SCOPE_LABEL_KEY[scope]
+  if (key) return apiTokenLabel(key, isZh)
+  // Legacy/unknown values render raw (covers any pre-existing read/write/admin display).
   if (scope === 'read') return apiTokenLabel('token.scope.read', isZh)
   if (scope === 'write') return apiTokenLabel('token.scope.write', isZh)
   if (scope === 'admin') return apiTokenLabel('token.scope.admin', isZh)
