@@ -244,6 +244,9 @@ function assertTargetWriteProfile(profile) {
 // Resolve the write profile for this run. Default = SQL write-gated, so the existing route
 // (which passes none) is unchanged; an opt-in target (S1b-2 multitable, S2 K3) supplies its
 // own profile via input.targetWriteProfile.
+// TRUST BOUNDARY: a profile IS the per-kind safety policy (its assertSafeCapabilityState is
+// the gate). targetWriteProfile is TRUSTED server-side planner wiring only — it must never be
+// sourced from request/user input. assertTargetWriteProfile validates shape, not strictness.
 function resolveTargetWriteProfile(input) {
   return assertTargetWriteProfile(input && input.targetWriteProfile ? input.targetWriteProfile : SQL_WRITE_GATED_PROFILE)
 }
