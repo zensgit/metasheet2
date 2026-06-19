@@ -38,6 +38,18 @@ class TemplateNotFoundError extends Error {
   }
 }
 
+// S3-1b: optimistic-concurrency conflict on update — a caller-supplied `version` that no longer
+// matches the stored version (a concurrent edit happened). 409 so the route surfaces it as such.
+class TemplateVersionConflictError extends Error {
+  constructor(message, details = {}) {
+    super(message)
+    this.name = 'TemplateVersionConflictError'
+    this.status = 409
+    this.code = 'INTEGRATION_TEMPLATE_VERSION_CONFLICT'
+    this.details = details
+  }
+}
+
 function requiredString(value, field) {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new TemplateValidationError(`${field} is required`, { field })
@@ -75,13 +87,40 @@ function jsonObject(value, field) {
   return value
 }
 
+// S3-1b: version is SYSTEM-MANAGED, not a plain settable field. The normalizer no longer
+// defaults to 1 — it returns undefined when absent (meaning "no caller-supplied version"), and
+// validates a supplied value. upsertTemplate/resolveTemplateVersion decides the stored version:
+// create -> 1; edit without version -> existing+1 (auto-bump); edit WITH version -> optimistic
+// lock (must match current, else 409), then bump.
 function normalizeVersion(value) {
-  if (value === undefined || value === null || value === '') return 1
+  if (value === undefined || value === null || value === '') return undefined
   const numeric = Number(value)
   if (!Number.isInteger(numeric) || numeric < 1) {
     throw new TemplateValidationError('version must be a positive integer', { field: 'version' })
   }
   return numeric
+}
+
+function resolveTemplateVersion(existing, requestedVersion) {
+  if (!existing) {
+    // create: version is system-managed and starts at 1 (a caller-supplied version is ignored
+    // on create — there is nothing to optimistic-lock against).
+    return 1
+  }
+  const currentVersion = Number(existing.version)
+  if (requestedVersion === undefined) {
+    // normal edit: auto-bump so every change advances the version (snapshot provenance).
+    return currentVersion + 1
+  }
+  // caller supplied a version => optimistic-concurrency lock: it must equal the current version;
+  // never a silent overwrite. On match, still bump.
+  if (requestedVersion !== currentVersion) {
+    throw new TemplateVersionConflictError(
+      `template version conflict: expected current version ${currentVersion}, caller sent ${requestedVersion} — reload and retry`,
+      { field: 'version', expected: currentVersion, actual: requestedVersion },
+    )
+  }
+  return currentVersion + 1
 }
 
 function normalizeStatus(value) {
@@ -203,12 +242,13 @@ function createIntegrationTemplateRegistry({ db, idGenerator = crypto.randomUUID
   async function upsertTemplate(input) {
     const normalized = normalizeTemplateInput(input)
     const existing = await selectExisting(normalized)
+    const version = resolveTemplateVersion(existing, normalized.version)
     const baseRow = {
       tenant_id: normalized.tenantId,
       workspace_id: normalized.workspaceId,
       project_id: normalized.projectId,
       name: normalized.name,
-      version: normalized.version,
+      version,
       description: normalized.description,
       source_kind: normalized.sourceKind,
       source_object: normalized.sourceObject,
@@ -289,10 +329,12 @@ module.exports = {
   createIntegrationTemplateRegistry,
   TemplateValidationError,
   TemplateNotFoundError,
+  TemplateVersionConflictError,
   __internals: {
     TEMPLATES_TABLE,
     VALID_STATUSES,
     normalizeTemplateInput,
     rowToTemplate,
+    resolveTemplateVersion,
   },
 }
