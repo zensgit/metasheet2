@@ -3088,10 +3088,50 @@ async function computeDependentLookupRollupRecords(
   return results
 }
 
+const RELATIVE_DATE_OPERATORS = new Set([
+  'istoday', 'isyesterday', 'istomorrow', 'isthisweek', 'isthismonth',
+  'islastndays', 'isnextndays', 'isoverdue',
+])
+
+/**
+ * 2a relative-date view-filter operators. Compares the cell's calendar day to `nowMs` (injectable for
+ * deterministic tests). Returns `null` when `opNorm` is not a relative-date operator (caller falls
+ * through to its catch-all), and `false` when the cell has no parseable date. `islastndays`/`isnextndays`
+ * read the window size N from `rawValue` and never match on an invalid N (< 1 / non-finite).
+ * Day math is in **UTC** — consistent with how date-only cell strings are parsed (`Date.parse` → UTC
+ * midnight), so a host's local TZ offset can never shift the day boundary. Week starts Monday (ISO);
+ * day windows are inclusive on the boundary.
+ */
+function evaluateRelativeDateOp(opNorm: string, cellEpoch: number | null, rawValue: unknown, nowMs: number): boolean | null {
+  if (!RELATIVE_DATE_OPERATORS.has(opNorm)) return null
+  if (cellEpoch === null) return false
+  const dayStart = (ms: number): number => { const d = new Date(ms); d.setUTCHours(0, 0, 0, 0); return d.getTime() }
+  const shiftDays = (ms: number, n: number): number => { const d = new Date(ms); d.setUTCHours(0, 0, 0, 0); d.setUTCDate(d.getUTCDate() + n); return d.getTime() }
+  const cellDay = dayStart(cellEpoch)
+  const today = dayStart(nowMs)
+  const n = Math.trunc(Number(rawValue))
+  switch (opNorm) {
+    case 'istoday': return cellDay === today
+    case 'isyesterday': return cellDay === shiftDays(nowMs, -1)
+    case 'istomorrow': return cellDay === shiftDays(nowMs, 1)
+    case 'isthismonth': { const c = new Date(cellDay), t = new Date(today); return c.getUTCFullYear() === t.getUTCFullYear() && c.getUTCMonth() === t.getUTCMonth() }
+    case 'isthisweek': {
+      const ws = new Date(nowMs); ws.setUTCHours(0, 0, 0, 0); ws.setUTCDate(ws.getUTCDate() - ((ws.getUTCDay() + 6) % 7)) // back to Monday
+      const weekStart = ws.getTime(); const weekEnd = shiftDays(weekStart, 7)
+      return cellDay >= weekStart && cellDay < weekEnd
+    }
+    case 'islastndays': return Number.isFinite(n) && n >= 1 && cellDay >= shiftDays(nowMs, -(n - 1)) && cellDay <= today
+    case 'isnextndays': return Number.isFinite(n) && n >= 1 && cellDay >= today && cellDay <= shiftDays(nowMs, n)
+    case 'isoverdue': return cellDay < today
+    default: return null
+  }
+}
+
 export function evaluateMetaFilterCondition(
   type: UniverMetaField['type'],
   cellValue: unknown,
   condition: MetaFilterCondition,
+  nowMs: number = Date.now(), // injectable clock so relative-date operators are deterministically testable
 ): boolean {
   // `rollup → number` here is a LEGACY FALLBACK only: every caller resolves the field through
   // resolveEffectiveFieldType first (rollup → its result kind string/boolean/number), so a raw 'rollup'
@@ -3115,6 +3155,13 @@ export function evaluateMetaFilterCondition(
     if (opNorm === 'greaterequal' || opNorm === 'isgreaterequal') return left !== null && right !== null && left >= right
     if (opNorm === 'less' || opNorm === 'isless') return left !== null && right !== null && left < right
     if (opNorm === 'lessequal' || opNorm === 'islessequal') return left !== null && right !== null && left <= right
+    // 2a (view filter operators): relative-date operators (date fields only). Compares the cell's LOCAL
+    // calendar day against `nowMs`. The helper returns null when `opNorm` is not a relative-date op, so a
+    // numeric field (or an unknown op) falls through to the catch-all below unchanged.
+    if (effectiveType === 'date') {
+      const rel = evaluateRelativeDateOp(opNorm, left, condition.value, nowMs)
+      if (rel !== null) return rel
+    }
     // Unrecognized operator on a numeric field → no-op (pre-existing catch-all). Accepted
     // reclassification effect: a `contains`/`doesNotContain` filter persisted on currency/
     // percent/rating BEFORE Slice 1 (when they fell back to the string operator set) now lands
