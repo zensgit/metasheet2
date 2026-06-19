@@ -59,15 +59,16 @@
   - [ ] Deleted/hidden predicate field tests.
 
 - [x] 2b-S2 Backend enforcement (#2841 — wired into the #18 seam, flag-off inert). Real-DB read-surface
-  goldens cover **9/9 surfaces** — 8 via #2890 + trash list/restore via #2900 (owner picked 选 Build).
+  goldens cover **9/9 surfaces** — 8 via #2890 + trash list/restore via #2900 (owner picked 选 Build),
+  with the follow-up cardinality/oracle locks closed by #2910.
   - [x] Real-DB list / single-record / view tests (#2841 list+single; #2890 view-aggregate).
   - [x] Real-DB summary subset tests (#2841).
   - [x] Real-DB export and aggregate/dashboard tests (#2890 — export-xlsx parse + view-aggregate total).
   - [x] Real-DB link-picker test (#2890 link-options) + search/filter deny-before-filter (#2890).
-  - [x] Real-DB **trash list/restore** — BUILT (选 Build, #2900). `loadRuleDeniedTrashRecordIds` evaluates
-    rules against `meta_records_trash` → rule-denied deleted records are hidden from the trash list and restore
-    is refused (403) for a currently-rule-denied record. Real-DB golden green in `test (20.x)`. (Trash `total`
-    COUNT not deny-adjusted — pre-existing, shared with grant-deny; records excluded, count is a minor follow-up.)
+  - [x] Real-DB **trash list/restore** — BUILT (选 Build, #2900 + #2910). `loadRuleDeniedTrashRecordIds`
+    evaluates rules against `meta_records_trash` → rule-denied deleted records are hidden from the trash list;
+    `total` is deny-aware; restore returns the same 404 shape as a missing deleted record for a
+    currently-rule-denied record (no existence oracle). Real-DB golden green in `test (20.x)`.
   - [x] CI allowlist confirmation — `plugin-tests.yml:194` registers enforce-realdb (verified by reading the workflow, not inferred from green jobs); the goldens ran green in `test (20.x)` on #2890.
 
 - [x] 2b-S3 Authoring UI (#2847, + text-type operator allowlist fix).
@@ -114,6 +115,6 @@ These are future candidates or reopen-only lines. They are not open work in the 
 
 No active multitable development *arc* remains — **2a, 2b (through S4 `#2861`, now 9/9 read surfaces), and 2c (through S4 `#2874`) are all complete and closed; none is a "next option".** Both prior owner decisions are resolved (#2877 closed not-landed; 2b-S2 trash = 选 Build, shipped). No owner decision is pending:
 
-- **[x] 2b-S2 trash list/restore rule-deny — BUILT (选 Build, #2900):** conditional read-deny now covers **9/9** read surfaces. `loadRuleDeniedTrashRecordIds` evaluates rules against `meta_records_trash` → rule-denied deleted records are hidden from the trash list, and restore is refused (403) for a currently-rule-denied record (can't reintroduce it onto the live path). Admin-bypass + flag-off inert mirror the read surfaces; real-DB golden green in `test (20.x)`. **Known caveat (pre-existing, out of scope):** the trash `total` COUNT is sheet-wide and not deny-adjusted (records are excluded, only the aggregate count is not) — shared with grant-deny, a minor cross-cutting follow-up; pinned by a test, not a leak of record data. Grant-deny on restore is likewise pre-existing/out of this scope.
+- **[x] 2b-S2 trash list/restore rule-deny — BUILT (选 Build, #2900 + #2910):** conditional read-deny now covers **9/9** read surfaces. `loadRuleDeniedTrashRecordIds` evaluates rules against `meta_records_trash` → rule-denied deleted records are hidden from the trash list, trash `total` is deny-aware, and restore returns the same 404 shape as a missing deleted record for a currently-rule-denied record (can't reintroduce it onto the live path, no existence oracle). Admin-bypass + flag-off inert mirror the read surfaces; real-DB golden green in `test (20.x)`. Grant-deny on restore remains pre-existing/out of this scope.
 - **[x] `#2877` (2c-S4 picker-chip affordance) — CLOSED not-landed (2026-06-18):** the green, display-only PR marking no-longer-assignable chips inside `MetaPersonPicker` (the one S4 surface `#2874` left out) was **closed rather than landed**. S4's display-affordance bar is met by `#2874` (cell/summary cue) and ratified by the merged closeout `#2878`; the picker chip is supplementary polish on a different surface, **not** a correctness gap (re-assignment is already fail-closed by `#2854`, and the picker already excludes inactive members per `#2869`). Branch preserved — reopen as an explicitly-scoped picker-polish item if wanted, not as "the last 2c slice".
 - **[~] Revisit grid performance:** opt into D2 high-scale harness/re-baseline work first; row virtualization stays closed unless the verdict flips.
