@@ -57,4 +57,21 @@ describe('OAPI-1 read-allowlist gate matcher', () => {
     expect(isOapiReadAllowlistRequest('GET', '/api/multitable/form-context', MST)).toBe(false)
     expect(isOapiReadAllowlistRequest('GET', '/api/other/records', MST)).toBe(false)
   })
+
+  test('ALLOWS: the narrow comments:read set', () => {
+    expect(isOapiReadAllowlistRequest('GET', '/api/comments', MST)).toBe(true)
+    expect(isOapiReadAllowlistRequest('GET', '/api/comments/summary', MST)).toBe(true)
+    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/sheet_1/comments/presence', MST)).toBe(true)
+  })
+
+  test('DENIES: the DEFERRED comment surfaces + adjacent (fail-closed)', () => {
+    // per-user / out-of-scope comment routes — deferred, must NOT be allowlisted
+    expect(isOapiReadAllowlistRequest('GET', '/api/comments/inbox', MST)).toBe(false)
+    expect(isOapiReadAllowlistRequest('GET', '/api/comments/unread-count', MST)).toBe(false)
+    expect(isOapiReadAllowlistRequest('GET', '/api/comments/mention-candidates', MST)).toBe(false)
+    expect(isOapiReadAllowlistRequest('GET', '/api/comments/mention-summary', MST)).toBe(false)
+    expect(isOapiReadAllowlistRequest('GET', '/api/multitable/sheet_1/mention-candidates', MST)).toBe(false)
+    // presence is GET-only; a write to it (or any non-GET) is excluded by the method check anyway
+    expect(isOapiReadAllowlistRequest('POST', '/api/comments', MST)).toBe(false)
+  })
 })

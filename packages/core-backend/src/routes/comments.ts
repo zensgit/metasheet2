@@ -5,6 +5,7 @@ import type { Injector } from '@wendellhu/redi'
 import { ICommentService, type CommentQueryOptions } from '../di/identifiers'
 import { Logger } from '../core/logger'
 import { rbacGuard } from '../rbac/rbac'
+import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
 import {
   CommentAccessError,
   CommentConflictError,
@@ -109,7 +110,7 @@ export function commentsRouter(injector?: Injector): Router {
     return router
   }
 
-  router.get('/api/comments', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+  router.get('/api/comments', apiTokenAuth, requireScope('comments:read'), rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     const schema = z.object({
       spreadsheetId: z.string().min(1).optional(),
       containerId: z.string().min(1).optional(),
@@ -258,7 +259,7 @@ export function commentsRouter(injector?: Injector): Router {
     }
   })
 
-  router.get('/api/comments/summary', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+  router.get('/api/comments/summary', apiTokenAuth, requireScope('comments:read'), rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     const schema = z.object({
       spreadsheetId: z.string().min(1).optional(),
       containerId: z.string().min(1).optional(),
@@ -551,7 +552,7 @@ export function commentsRouter(injector?: Injector): Router {
    * Returns comment presence summary per row. When includeViewers=true the
    * response also includes a `viewers` array of users currently in the room.
    */
-  router.get('/api/multitable/:spreadsheetId/comments/presence', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+  router.get('/api/multitable/:spreadsheetId/comments/presence', apiTokenAuth, requireScope('comments:read'), rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     const spreadsheetId = req.params.spreadsheetId?.trim()
     if (!spreadsheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'spreadsheetId required' } })
@@ -574,7 +575,10 @@ export function commentsRouter(injector?: Injector): Router {
         spreadsheetId,
         parsed.data.rowIds,
         getUserId(req),
-        parsed.data.includeViewers ?? false,
+        // OAPI-1 comments:read — a token request can read presence counts but MUST NOT egress viewer
+        // identities (a creator-acting token shouldn't surface who-is-viewing). Force includeViewers=false
+        // on the token path regardless of the query param; session requests are unchanged.
+        req.apiTokenScopes ? false : (parsed.data.includeViewers ?? false),
       )
       return res.json({ ok: true, data: result })
     } catch (error) {

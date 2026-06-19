@@ -12,8 +12,9 @@
  *
  * OAPI-1 scope (univer-meta read surface): `records:read` — GET /records (list), /records/:id (single),
  * /view, /sheets/:sheetId/view-aggregate, /records-summary; and `fields:read` — GET /fields. All apply the
- * creator's row-deny + field-permission stack per-request (Option A). `comments:read` lives in a different
- * router (`comments.ts`, `rbacGuard`-based) and is the remaining OAPI-1 slice — NOT yet allowlisted here.
+ * creator's row-deny + field-permission stack per-request (Option A). `comments:read` (a narrow set in
+ * `comments.ts`) is also allowlisted now and composes `requireScope` with the existing `rbacGuard` =
+ * min(token scope, creator RBAC); its per-user surfaces (inbox/unread-count/mention-*) stay deferred.
  */
 const TOKEN_BEARER_PREFIX = 'Bearer mst_'
 
@@ -37,6 +38,13 @@ const OAPI_READ_PATHS: readonly RegExp[] = [
   /^\/api\/multitable\/sheets\/[^/]+\/view-aggregate$/,
   // fields:read — GET /fields ONLY. NOT `/fields/:id/link-options`, NOT `/sheets/:id/person-fields/:id/directory`.
   /^\/api\/multitable\/fields$/,
+  // comments:read — narrow set (`comments.ts`, behind rbacGuard). GET /api/comments (list), /api/comments/summary,
+  // and /api/multitable/:spreadsheetId/comments/presence. The presence handler forces includeViewers=false on the
+  // token path. DEFERRED (NOT matched): /api/comments/inbox, /unread-count, /mention-candidates, /mention-summary,
+  // and /api/multitable/:id/mention-candidates — per-user / out-of-scope surfaces.
+  /^\/api\/comments$/,
+  /^\/api\/comments\/summary$/,
+  /^\/api\/multitable\/[^/]+\/comments\/presence$/,
 ]
 
 export function isApiTokenBearer(authHeader: string | undefined): boolean {
