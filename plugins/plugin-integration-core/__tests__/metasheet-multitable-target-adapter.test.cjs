@@ -8,8 +8,25 @@ const {
 } = require(path.join(__dirname, '..', 'lib', 'contracts.cjs'))
 const {
   createMetaSheetMultitableTargetAdapter,
+  createMetaSheetMultitableWriteSource,
+  MULTITABLE_WRITE_PROFILE,
   __internals,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'metasheet-multitable-target-adapter.cjs'))
+const {
+  dryRunExternalWrite,
+  applyExternalWrite,
+} = require(path.join(__dirname, '..', 'lib', 'external-write-dry-run.cjs'))
+
+function memoryStore() {
+  const map = new Map()
+  return {
+    map,
+    async get(key) { return map.get(key) || null },
+    async set(key, value) { map.set(key, JSON.parse(JSON.stringify(value))) },
+    async consume(key) { const v = map.get(key) || null; map.delete(key); return v },
+    async delete(key) { map.delete(key) },
+  }
+}
 
 function createContext({ existing = [], resolveFieldIds } = {}) {
   const rows = [...existing]
@@ -85,6 +102,111 @@ function createSystem(config = {}) {
       ...config,
     },
   }
+}
+
+// S1b-2: the multitable write-source rides the C6 dry-run->apply lifecycle (via the S1b-1
+// seam), writing ONLY to own sheets, idempotent on re-pull, values-free. Non-identity
+// fieldIdMap proves the logical<->physical round-trip.
+async function testMultitableWriteSourceRidesC6Lifecycle() {
+  const fieldIdMap = { code: 'f_code', name: 'f_name', quantity: 'f_qty' }
+  const { context, rows } = createContext({
+    existing: [
+      { id: 'rec_mat_002', sheetId: 'sheet_approved_materials', version: 1, data: { f_code: 'MAT-002', f_name: 'Gadget', f_qty: 5 } },
+    ],
+  })
+  const multitableSystem = createSystem({
+    objects: {
+      approved_materials: {
+        name: 'Approved Materials',
+        sheetId: 'sheet_approved_materials',
+        keyFields: ['code'],
+        fieldDetails: [
+          { id: 'code', name: 'Code', type: 'string' },
+          { id: 'name', name: 'Name', type: 'string' },
+          { id: 'quantity', name: 'Quantity', type: 'number' },
+        ],
+        fieldIdMap,
+      },
+    },
+  })
+  const writeSource = createMetaSheetMultitableWriteSource({ system: multitableSystem, context })
+
+  // capability test reports a REAL own-sheet-scoped safe state (not a rubber stamp)
+  const cap = await writeSource.test('mt', 'owner-1')
+  assert.deepEqual(MULTITABLE_WRITE_PROFILE.normalizeCapabilityState(cap), { success: true, ownSheetTarget: true, externalWrite: false })
+
+  const sourceRows = [
+    { code: 'MAT-001', name: 'Bolt', quantity: 2 },     // new -> add
+    { code: 'MAT-002', name: 'Gadget', quantity: 9 },   // exists with qty 5 -> update
+  ]
+  const baseInput = () => ({
+    pipeline: {
+      id: 'pipe_mt', tenantId: 't1', workspaceId: 'w1',
+      sourceSystemId: 'src', sourceObject: 'items',
+      targetSystemId: multitableSystem.id, targetObject: 'approved_materials',
+      createdBy: 'owner-1',
+      fieldMappings: [
+        { sourceField: 'code', targetField: 'code', validation: [{ type: 'required' }] },
+        { sourceField: 'name', targetField: 'name' },
+        { sourceField: 'quantity', targetField: 'quantity' },
+      ],
+    },
+    sourceSystem: { id: 'src', kind: 'data-source:sql-readonly' },
+    // flat planner target config (what the S1b-3 route derives from the multitable system)
+    targetSystem: {
+      id: multitableSystem.id,
+      kind: 'metasheet:multitable',
+      config: { dataSourceId: 'mt', object: 'approved_materials', keyFields: ['code'], writableFields: ['name', 'quantity'] },
+    },
+    sourceAdapter: { async read() { return { records: sourceRows, done: true, nextCursor: null } } },
+    dataSourceWrites: writeSource,
+    targetWriteProfile: MULTITABLE_WRITE_PROFILE,
+    tokenStore: memoryStore(),
+    dryRunUser: 'owner-1',
+    dataSourceOwnerPrincipal: 'owner-1',
+    maxRows: 100,
+  })
+
+  // Run 1: add + update through the full C6 lifecycle.
+  const input1 = baseInput()
+  const dry1 = await dryRunExternalWrite(input1)
+  assert.equal(dry1.status, 'ready')
+  assert.equal(dry1.canApply, true)
+  assert.equal(dry1.counts.add, 1, 'MAT-001 classified add')
+  assert.equal(dry1.counts.update, 1, 'MAT-002 (qty 5->9) classified update via logical<->physical round-trip')
+  assert.equal(dry1.evidence.targetKind, 'metasheet:multitable', 'evidence carries the multitable kind via the S1b-1 seam')
+  assert.equal(JSON.stringify(dry1.evidence).includes('MAT-001'), false, 'dry-run evidence stays values-free')
+  assert.equal(JSON.stringify(dry1.evidence).includes('Bolt'), false, 'dry-run evidence stays values-free')
+
+  const apply1 = await applyExternalWrite({ ...input1, dryRunToken: dry1.dryRunToken, applyUser: 'owner-1', runId: 'run_mt_1' })
+  assert.equal(apply1.status, 'succeeded')
+  assert.equal(apply1.counts.add, 1)
+  assert.equal(apply1.counts.update, 1)
+  assert.equal(apply1.counts.written, 2)
+  assert.equal(rows.length, 2, 'exactly one new record created on own sheet (MAT-001), MAT-002 patched in place')
+  const created = rows.find((r) => r.data.f_code === 'MAT-001')
+  assert.ok(created && created.sheetId === 'sheet_approved_materials', 'write landed on OWN sheet')
+  assert.deepEqual(created.data, { f_code: 'MAT-001', f_name: 'Bolt', f_qty: 2 }, 'logical->physical map applied on write')
+  const patched = rows.find((r) => r.data.f_code === 'MAT-002')
+  assert.equal(patched.data.f_qty, 9, 'update patched the changed field')
+  assert.equal(JSON.stringify(apply1).includes('MAT-001'), false, 'apply response stays values-free')
+
+  // Run 2 (re-pull): same source, now everything matches -> idempotent skip, no new writes.
+  const input2 = baseInput()
+  const dry2 = await dryRunExternalWrite(input2)
+  assert.equal(dry2.counts.add, 0, 're-pull adds nothing')
+  assert.equal(dry2.counts.update, 0, 're-pull updates nothing')
+  assert.equal(dry2.counts.skip, 2, 're-pull classifies both as skip (idempotent)')
+  const apply2 = await applyExternalWrite({ ...input2, dryRunToken: dry2.dryRunToken, applyUser: 'owner-1', runId: 'run_mt_2' })
+  assert.equal(apply2.counts.written, 0, 're-pull writes nothing')
+  assert.equal(rows.length, 2, 're-pull created no duplicate records')
+
+  // Profile fails closed on an unsafe (non-own-sheet) capability state.
+  assert.throws(
+    () => MULTITABLE_WRITE_PROFILE.assertSafeCapabilityState({ ownSheetTarget: false, externalWrite: true }),
+    /own-sheet scoped/,
+    'unsafe capability state rejected',
+  )
 }
 
 async function main() {
@@ -301,6 +423,8 @@ async function main() {
     fld_sourceSystemId: 'bridge_source_1',
     fld_objectType: 'material',
   })
+
+  await testMultitableWriteSourceRidesC6Lifecycle()
 
   console.log('✓ metasheet-multitable-target-adapter: write-only multitable target tests passed')
 }
