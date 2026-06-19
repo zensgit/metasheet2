@@ -21,16 +21,20 @@ formula ecosystem. This is the single largest depth gap.
 
 - **1a — Scalar function expansion *(do first; low risk, self-contained).*** Add the missing scalar
   functions: text (`TEXT`, `FIND`, `SEARCH`, `REPLACE`, `REPT`, `REGEX*`), date/time (`HOUR`, `MINUTE`,
-  `DATEADD`, `EOMONTH`, `WORKDAY`, `WEEKNUM`), math (`INT`, `TRUNC`, `LOG`/`LN`, `EXP`, `SUMIF`,
-  `COUNTIFS`, `AVERAGEIF`). Pure additions to the function registry + unit matrix per function + catalog
-  sync (the user-facing catalog currently drifts from the engine — reconcile it as part of 1a). No
-  architecture change. Verification: per-function unit goldens; catalog↔engine parity test.
+  `DATEADD`, `EOMONTH`, `WORKDAY`, `WEEKNUM`), math (`INT`, `TRUNC`, `LOG`/`LN`, `EXP`). Pure additions to
+  the function registry + unit matrix per function + catalog sync (the user-facing catalog currently
+  drifts from the engine — reconcile it as part of 1a). No architecture change. Verification:
+  per-function unit goldens; catalog↔engine parity test.
+  **Explicitly NOT in 1a:** range/criteria functions (`SUMIF`, `COUNTIFS`, `AVERAGEIF`) — by normal
+  spreadsheet semantics these operate over a range + criteria and therefore need the same record-data /
+  array semantics as 1b. Keeping them in "no-architecture-change" 1a would force a half-semantic / pseudo
+  implementation. They belong to **1b** (below).
 - **1b — Array / range / lookup-in-formula over record data *(heavy — design-lock first).*** Today the
   multitable engine is no-DB and substitutes field refs as scalars/comma-joined strings, so `VLOOKUP`/
-  `INDEX`/`MATCH`/array aggregation are not wired to record data, and multi-value fields aggregate
-  lossily. Making these real requires record-data array/range semantics + a cross-record evaluation
-  contract — a structural change that needs its own design-lock (data model + recompute + dependency
-  fan-out + permission taint) before any code.
+  `INDEX`/`MATCH`, **range/criteria aggregation (`SUMIF`/`COUNTIFS`/`AVERAGEIF`)**, and array aggregation
+  are not wired to record data, and multi-value fields aggregate lossily. Making these real requires
+  record-data array/range semantics + a cross-record evaluation contract — a structural change that needs
+  its own design-lock (data model + recompute + dependency fan-out + permission taint) before any code.
 
 ## Track 2 — View filtering + personal views
 
