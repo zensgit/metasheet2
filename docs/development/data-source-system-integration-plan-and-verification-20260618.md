@@ -7,7 +7,8 @@
 
 - **只读数据库接入(C2)+ 增量(C3)+ 配置体验(C4)+ K3 generic MSSQL seam(C5)+ 外部写 sandbox 链路(C6)**:已交付并实体机验收闭合(release evidence #2769 PASS)。
 - **通用对接收敛(S1a + S1b sandbox 弧)= 本轮全部落地**:C6 `dry-run→apply` 安全写生命周期**已从 `data-source:sql-write-gated` 泛化**到一个 **target write profile + 注入式 raw write-source 合同**;自有 `metasheet:multitable` target 已经骑上同一生命周期(**sandbox、零外部写**)。S1a 早期的 `targetWriteLifecycle`(lookup/apply)方法面在实现中被证明 orphaned 且有"绕过 C6 gate 直接写"误用风险,**已退役**;S1a 合同**重定义为 profile + raw write-source**。
-- **S2(K3)/ S3(模版对象)/ S4(自描述元数据)/ S5(PLM stock-prep 吸收)/ 首笔生产外部写**:后续 gated opt-in,各带自己的 gate(见 §5)。**S3 已出设计锁**(`generic-integration-s3-template-object-design-lock-20260619.md`);**S2 因实体机 gate + K3 红线**不在本轮自动构建;**S5 按计划短期不重写**。
+- **S4(adapter 自描述元数据)= 已落地**(#2903,`7734b8495`):静态 `ADAPTER_METADATA` 退役为各 adapter 自声明 + registry 收集;`/adapters` 输出**全 9 kind 字节级一致**(经验比对,含 3 个测试未断言的 kind)。
+- **S2(K3)/ S3(模版对象)/ S5(PLM stock-prep 吸收)/ 首笔生产外部写**:后续 gated opt-in,各带自己的 gate(见 §5)。**S3 已出设计锁**(`generic-integration-s3-template-object-design-lock-20260619.md`);**S2 因实体机 gate + K3 红线**不在本轮自动构建;**S5 按计划短期不重写**。
 
 ## 1. 状态阶梯
 
@@ -26,7 +27,7 @@
 | **S1b-3** | C6 route 接入 multitable target(server-side 解析,sandbox 零外部写)+ wire-vs-fixture smoke | ✅ done | #2898(`5e65a4add`) |
 | S2 | K3 WebAPI target opt-in 同一安全写(sandbox) | 🔒 gated(opt-in + **实体机** + K3 红线保留) | 总锁 §6 |
 | S3 | first-class `integration-template` 对象 | 🔒 **design-locked**,impl gated | `…s3-template-object-design-lock-20260619.md` |
-| S4 | adapter 自描述元数据(替换 `ADAPTER_METADATA` 静态字面量) | 🔒 gated(opt-in;已 scope:~13 文件,机械) | 总锁 §6 |
+| **S4** | adapter 自描述元数据(退役 `ADAPTER_METADATA` 静态字面量) | ✅ done(`/adapters` 输出全 9 kind 字节级一致) | #2903(`7734b8495`) |
 | S5 | 统一 field-mapping + PLM stock-prep 吸收 | 🔒 gated(**低优先,短期不重写**) | 总锁 §3/§6 |
 | 首笔生产外部写 | sandbox-first 序列后单独一刀 | 🔒 **owner 授权** | 总锁 §5/§6 |
 
@@ -68,8 +69,9 @@
 |---|---|---|
 | **S2(K3 WebAPI opt-in)** | opt-in + **实体机 smoke**(operator 执行,无法在此完成)+ **K3 Submit/Audit/BOM 红线保留** | 全系统最受控红线面;需 eyes-open 单独 opt-in;不自动构建 |
 | **S3(template 对象)** | opt-in;已出**设计锁** | `…s3-template-object-design-lock-20260619.md`:新 `integration_templates` 表 + migration 058 + 实例化(原子性 / 模版版本 vs 已实例化 live pipeline / 参考模版注册 = 开放裁决项) |
-| **S4(自描述元数据)** | opt-in | 已 scope:~13 文件(`ADAPTER_METADATA`→各 adapter 自声明 + registry 收集 + route 取 registry),机械,route 输出形态不变(既有 adapters 元数据测试 = 安全网) |
 | **S5(PLM stock-prep 吸收)** | opt-in | 计划:**低优先、短期不重写**专用链路;泛化到通用 table-action seam 是后续 |
+
+> S4(自描述元数据)已落地(#2903),从本"剩余 gated"表移除——见 §1 阶梯。
 | **首笔生产外部写** | **owner 授权** | 多样本只读 dry-run→sandbox apply→re-pull 幂等+人工字段保留→生产 |
 
 ---
