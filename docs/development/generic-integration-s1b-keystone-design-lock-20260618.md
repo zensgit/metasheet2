@@ -3,6 +3,8 @@
 > 状态:**DESIGN-LOCK 草案(待 owner 评审)**。不授权任何 runtime;首笔真实外部写仍是独立 owner gate。
 > 上游:`generic-integration-design-lock-20260618.md`(总设计锁,S1a→S5 切片序);S1a 合同层已落地(能力面 #2872 + values-free 加固 #2882)。
 > 目的:把总设计锁 §6 的 **S1b**(让自有 `metasheet:multitable` target 走 C6 `dry-run→apply` 安全生命周期,证明"安全写能脱离 `data-source:sql-write-gated` 泛化",零外部写)从"一刀"细化为**可评审的设计 + 可机械执行的实现计划**。
+>
+> **更新(2026-06-19)**:§2-§4 的"高度问题"已由 owner 裁定为 **A(双接口)**,并在实现后进一步 **退役了 `targetWriteLifecycle` lookup/apply method surface**(orphaned;S1a-retire PR)。最终形态:planner 经 **target write profile + 注入式 raw write-source**(非 adapter 级 lookup/apply)驱动安全写;values-free 证据由 planner 自身 evidence 产出,**不**再有"adapter 级 evidence 投影"这一层。下方 §3-A/§4 中 `targetWriteLifecycle`/"evidence 投影"措辞以此为准。已落地:S1b-1 seam(#2887)+ S1b-2 multitable raw 写源 + profile(#2892);S1b-3(route/wire smoke)在 retire 后进行。
 
 ## 0. 为什么 S1b 需要先设计锁(不是直接实现)
 

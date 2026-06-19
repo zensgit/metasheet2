@@ -3,6 +3,8 @@
 > 状态:**DESIGN-LOCK 草案(待 owner 评审)**。不授权任何 runtime;首笔真实外部写仍是独立 owner gate。
 > 目标:出一个**通用对接**能力——接一个新外部系统 = **配一个模版/config**,而非再写一套 bespoke adapter+writer。**PLM BOM 备料 与 K3 WISE 是这套通用流的两个参考模版实例**(它们是我们的集成目标系统,非外部对标品)。
 > 依据:通用底座盘点(2026-06-18,/tmp/...substrate map);引用既有件,不重造。
+>
+> **更新(2026-06-19 · S1a-retire)**:S1a 的"可选写能力"最终落为 **target write profile + 注入式 raw write-source 合同**(planner 经 profile + 写源驱动安全写),**不是** adapter 级 `targetWriteLifecycle`(lookup/apply)。该 method surface 在 S1b 实现中被证明 **orphaned**(S1b-1 seam 只消费 profile + raw 写源,planner 自产 values-free 证据),且在 adapter 上保留 `apply()` 有"绕过 C6 token/revision gate 直接写"的误用风险,**已退役**(S1a-retire PR)。下方 §6.1/§7 中 `targetWriteLifecycle`/`lookup`/`apply`/"evidence 投影"措辞均以此更新为准——S1a 合同 = profile(kind + capability normalize/assert)+ raw write-source(test/lookupByKey/insertRows/updateRows)。
 
 ## 1. 现状(盘点结论)
 
