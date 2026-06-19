@@ -64,9 +64,33 @@ export interface ApprovalRequesterOrgRelations {
   managerChainIds?: string[]
 }
 
-/** Hard ceiling on how far up the org tree the bake-time walk climbs. The per-source
- * `levels` slices this; the cap only bounds the walk cost + a pathological deep tree. */
-export const MAX_MANAGER_CHAIN_LEVELS = 10
+/** Default cap on how far up the org tree the bake-time walk climbs when unconfigured. */
+export const DEFAULT_MAX_MANAGER_CHAIN_LEVELS = 10
+/** Hard upper bound on the *configurable* cap — even a misconfigured env can't make the
+ * walk unbounded (each level is a sequential pair of directory queries). */
+export const MANAGER_CHAIN_LEVELS_HARD_CEILING = 50
+
+/**
+ * Resolve the configurable chain cap from a raw env value (pure, so it is unit-testable).
+ * `undefined`/missing or any invalid value (non-integer, < 1) → the safe default; a valid
+ * value is clamped to `[1, MANAGER_CHAIN_LEVELS_HARD_CEILING]`. Fail-safe, never throws —
+ * a bad env must not break approval creation.
+ */
+export function resolveMaxManagerChainLevels(raw: string | undefined): number {
+  const trimmed = raw?.trim()
+  // Accept ONLY a plain positive decimal integer — reject scientific (`1e3`), hex
+  // (`0x10`), signed, and fractional forms rather than silently coercing them.
+  if (!trimmed || !/^[0-9]+$/.test(trimmed)) return DEFAULT_MAX_MANAGER_CHAIN_LEVELS
+  const parsed = Number(trimmed)
+  if (parsed < 1) return DEFAULT_MAX_MANAGER_CHAIN_LEVELS
+  return Math.min(parsed, MANAGER_CHAIN_LEVELS_HARD_CEILING)
+}
+
+/** Cap on how far up the org tree the bake-time walk climbs — env-configurable via
+ * `APPROVAL_MANAGER_CHAIN_MAX_LEVELS` (default 10, hard-ceiling 50). The per-source
+ * `levels` slices this; the cap only bounds the walk cost + a pathological deep tree.
+ * Resolved at module load (a deploy-time setting, like the other `APPROVAL_*` tunables). */
+export const MAX_MANAGER_CHAIN_LEVELS = resolveMaxManagerChainLevels(process.env.APPROVAL_MANAGER_CHAIN_MAX_LEVELS)
 
 interface LeaderInDeptEntry {
   dept_id?: unknown
