@@ -13,6 +13,7 @@ import {
   type SortRule,
   type FilterRule,
   type FilterNode,
+  type FilterGroup,
 } from '../src/multitable/composables/useMultitableGrid'
 import { MultitableApiClient } from '../src/multitable/api/client'
 
@@ -1062,6 +1063,65 @@ describe('nested filter groups (FE model) — parseFilterTree / buildFilterInfoF
     // editing via the flat toolbar drops the preserved tree (flat becomes the source of truth)
     grid.addFilterRule({ fieldId: 'e', operator: 'is', value: 5 })
     expect(grid.nestedFilterNodes.value).toBeNull()
+  })
+})
+
+describe('nested filter groups (FE authoring) — filterGroups edit ops + serialize', () => {
+  const serialize = (grid: ReturnType<typeof useMultitableGrid>) =>
+    buildFilterInfoFromNodes([...grid.filterRules.value, ...grid.filterGroups.value], grid.filterConjunction.value)
+
+  it('syncFromView splits a stored filter into root leaves (filterRules) + groups (filterGroups)', () => {
+    const client = createMockClient()
+    const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
+    grid.syncFromView({ filterInfo: { conjunction: 'and', conditions: [
+      { fieldId: 'a', operator: 'is', value: 1 },
+      { conjunction: 'or', conditions: [{ fieldId: 'b', operator: 'is', value: 2 }] },
+    ] } })
+    expect(grid.filterRules.value.map((r) => r.fieldId)).toEqual(['a'])
+    expect(grid.filterGroups.value.length).toBe(1)
+    expect(grid.filterGroups.value[0].conjunction).toBe('or')
+  })
+
+  it('addFilterGroup / updateFilterGroup / removeFilterGroup edit the root subgroups and mark dirty', () => {
+    const client = createMockClient()
+    const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
+    const g: FilterGroup = { conjunction: 'or', conditions: [{ fieldId: 'a', operator: 'is', value: 1 }] }
+    grid.addFilterGroup(g)
+    expect(grid.filterGroups.value.length).toBe(1)
+    expect(grid.sortFilterDirty.value).toBe(true)
+
+    grid.updateFilterGroup(0, { conjunction: 'and', conditions: [{ fieldId: 'a', operator: 'is', value: 1 }, { fieldId: 'b', operator: 'is', value: 2 }] })
+    expect(grid.filterGroups.value[0].conjunction).toBe('and')
+    expect(grid.filterGroups.value[0].conditions.length).toBe(2)
+
+    grid.removeFilterGroup(0)
+    expect(grid.filterGroups.value.length).toBe(0)
+  })
+
+  it('serializes root leaves + authored groups together (leaves then groups)', () => {
+    const client = createMockClient()
+    const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
+    grid.addFilterRule({ fieldId: 'a', operator: 'is', value: 1 })
+    grid.addFilterGroup({ conjunction: 'or', conditions: [{ fieldId: 'b', operator: 'is', value: 2 }, { fieldId: 'c', operator: 'is', value: 3 }] })
+    expect(serialize(grid)).toEqual({
+      conjunction: 'and',
+      conditions: [
+        { fieldId: 'a', operator: 'is', value: 1 },
+        { conjunction: 'or', conditions: [{ fieldId: 'b', operator: 'is', value: 2 }, { fieldId: 'c', operator: 'is', value: 3 }] },
+      ],
+    })
+  })
+
+  it('a group authored on a hydrated nested view drops the untouched-faithful cache', () => {
+    const client = createMockClient()
+    const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
+    grid.syncFromView({ filterInfo: { conjunction: 'and', conditions: [
+      { fieldId: 'a', operator: 'is', value: 1 },
+      { conjunction: 'or', conditions: [{ fieldId: 'b', operator: 'is', value: 2 }] },
+    ] } })
+    expect(grid.nestedFilterNodes.value).not.toBeNull() // faithful passthrough until edited
+    grid.addFilterGroup({ conjunction: 'and', conditions: [{ fieldId: 'c', operator: 'is', value: 3 }] })
+    expect(grid.nestedFilterNodes.value).toBeNull() // edit → filterRules+filterGroups become the truth
   })
 })
 

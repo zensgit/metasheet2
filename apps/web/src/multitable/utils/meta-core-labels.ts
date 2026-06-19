@@ -31,6 +31,7 @@ export type MetaCoreLabelKey =
   | 'toolbar.noValueNeeded' | 'toolbar.chooseOption' | 'toolbar.noOptions'
   | 'toolbar.checkedTrue' | 'toolbar.uncheckedFalse'
   | 'toolbar.addFilter' | 'toolbar.clearAll'
+  | 'toolbar.addCondition' | 'toolbar.addGroup' | 'toolbar.removeGroup' | 'toolbar.groupBadge'
   | 'toolbar.applyFilterChanges' | 'toolbar.applyFilters' | 'toolbar.stagedHint'
   | 'toolbar.group' | 'toolbar.none'
   // Nested / multi-level grouping picker (ordered 1-3 levels)
@@ -120,6 +121,10 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'toolbar.uncheckedFalse': { en: 'unchecked / false', zh: '未勾选 / false' },
   'toolbar.addFilter': { en: '+ Add filter', zh: '+ 添加筛选' },
   'toolbar.clearAll': { en: 'Clear all', zh: '全部清除' },
+  'toolbar.addCondition': { en: '+ Add condition', zh: '+ 添加条件' },
+  'toolbar.addGroup': { en: '+ Add condition group', zh: '+ 添加条件组' },
+  'toolbar.removeGroup': { en: 'Remove group', zh: '删除条件组' },
+  'toolbar.groupBadge': { en: 'group', zh: '条件组' },
   'toolbar.applyFilterChanges': { en: 'Apply filter changes', zh: '应用筛选更改' },
   'toolbar.applyFilters': { en: 'Apply filters', zh: '应用筛选' },
   'toolbar.stagedHint': {

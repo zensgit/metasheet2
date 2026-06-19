@@ -41,10 +41,10 @@
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" @click="showFilterPanel = !showFilterPanel">
           <span class="meta-toolbar__btn-icon">&#x2A01;</span> {{ l('toolbar.filter') }}
-          <span v-if="filterRules.length" class="meta-toolbar__badge">{{ filterRules.length }}</span>
+          <span v-if="filterRules.length + filterGroups.length" class="meta-toolbar__badge">{{ filterRules.length + filterGroups.length }}</span>
         </button>
         <div v-if="showFilterPanel" class="meta-toolbar__panel meta-toolbar__panel--filter" @keydown.escape="showFilterPanel = false">
-          <div v-if="filterRules.length > 1" class="meta-toolbar__conjunction">
+          <div v-if="(filterRules.length + filterGroups.length) > 1" class="meta-toolbar__conjunction">
             <span>{{ l('toolbar.where') }}</span>
             <select :value="filterConjunction" @change="emit('set-conjunction', ($event.target as HTMLSelectElement).value as 'and'|'or')">
               <option value="and">{{ l('toolbar.all') }}</option>
@@ -60,11 +60,22 @@
             @update="(r) => emit('update-filter', idx, r)"
             @remove="emit('remove-filter', idx)"
           />
+          <MetaFilterGroup
+            v-for="(group, gidx) in filterGroups"
+            :key="'g' + gidx"
+            :model-value="group"
+            :fields="fields"
+            :depth="1"
+            removable
+            @update:model-value="(g) => emit('update-filter-group', gidx, g)"
+            @remove="emit('remove-filter-group', gidx)"
+          />
           <div class="meta-toolbar__filter-actions">
             <button v-if="fields.length" class="meta-toolbar__add" @click="onAddFilter">{{ l('toolbar.addFilter') }}</button>
-            <button v-if="filterRules.length" class="meta-toolbar__add meta-toolbar__add--danger" @click="emit('clear-filters')">{{ l('toolbar.clearAll') }}</button>
+            <button v-if="fields.length" class="meta-toolbar__add" data-add-filter-group="true" @click="onAddFilterGroup">{{ l('toolbar.addGroup') }}</button>
+            <button v-if="filterRules.length || filterGroups.length" class="meta-toolbar__add meta-toolbar__add--danger" @click="emit('clear-filters')">{{ l('toolbar.clearAll') }}</button>
           </div>
-          <button v-if="filterRules.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ applyButtonLabel }}</button>
+          <button v-if="filterRules.length || filterGroups.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ applyButtonLabel }}</button>
           <p v-if="filterRules.length && sortFilterDirty" class="meta-toolbar__apply-hint">{{ l('toolbar.stagedHint') }}</p>
         </div>
       </div>
@@ -139,21 +150,23 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import type { MetaField, RowDensity } from '../types'
-import type { SortRule, FilterRule, FilterConjunction } from '../composables/useMultitableGrid'
-import { FILTER_OPERATORS_BY_TYPE, effectiveFilterTypeKey } from '../composables/useMultitableGrid'
+import type { SortRule, FilterRule, FilterGroup, FilterConjunction } from '../composables/useMultitableGrid'
 import { useLocale } from '../../composables/useLocale'
 import MetaFilterConditionRow from './MetaFilterConditionRow.vue'
+import MetaFilterGroup from './MetaFilterGroup.vue'
+import { seedFilterCondition } from '../utils/filter-condition-seed'
 import {
   metaCoreLabel,
   rowCount,
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   fields: MetaField[]
   hiddenFieldIds: string[]
   sortRules: SortRule[]
   filterRules: FilterRule[]
+  filterGroups?: FilterGroup[]
   filterConjunction: FilterConjunction
   canCreateRecord: boolean
   canExport?: boolean
@@ -165,7 +178,7 @@ const props = defineProps<{
   totalRows?: number
   rowDensity?: RowDensity
   sortFilterDirty?: boolean
-}>()
+}>(), { filterGroups: () => [] })
 
 const emit = defineEmits<{
   (e: 'toggle-field', fieldId: string): void
@@ -175,6 +188,9 @@ const emit = defineEmits<{
   (e: 'add-filter', rule: FilterRule): void
   (e: 'update-filter', index: number, rule: FilterRule): void
   (e: 'remove-filter', index: number): void
+  (e: 'add-filter-group', group: FilterGroup): void
+  (e: 'update-filter-group', index: number, group: FilterGroup): void
+  (e: 'remove-filter-group', index: number): void
   (e: 'clear-filters'): void
   (e: 'set-conjunction', conj: FilterConjunction): void
   (e: 'apply-sort-filter'): void
@@ -265,48 +281,20 @@ function dedupeGroupIds(ids: string[]): string[] {
   return out
 }
 const hiddenCount = computed(() => props.hiddenFieldIds.length)
-// Per-condition operator/value-mode logic now lives in MetaFilterConditionRow. These helpers remain only
-// because onAddFilter seeds a new condition's operator + default value.
-const getField = (id: string) => props.fields.find((f) => f.id === id)
-const getFieldType = (id: string) => getField(id)?.type ?? 'string'
-const getOperatorsForField = (id: string) => {
-  const type = String(getFieldType(id))
-  if (type === 'multiSelect') {
-    return FILTER_OPERATORS_BY_TYPE.multiSelect ?? FILTER_OPERATORS_BY_TYPE.select
-  }
-  // Slice 2b: rollup operators follow the aggregation's result kind (string/boolean/number).
-  return FILTER_OPERATORS_BY_TYPE[effectiveFilterTypeKey(getField(id))] ?? FILTER_OPERATORS_BY_TYPE.string
-}
 const applyButtonLabel = computed(() => props.sortFilterDirty
   ? metaCoreLabel('toolbar.applyFilterChanges', isZh.value)
   : metaCoreLabel('toolbar.applyFilters', isZh.value))
-function getSelectOptions(id: string): Array<{ value: string; label: string }> {
-  const field = getField(id)
-  const rawOptions = field?.options ?? (Array.isArray(field?.property?.options) ? field.property.options : [])
-  return rawOptions
-    .map((option) => {
-      if (typeof option === 'string') return { value: option, label: option }
-      if (option && typeof option === 'object' && 'value' in option) {
-        const value = String((option as { value?: unknown }).value ?? '')
-        return value ? { value, label: value } : null
-      }
-      return null
-    })
-    .filter((option): option is { value: string; label: string } => option !== null)
-}
-function getDefaultFilterValue(fieldId: string): unknown {
-  const type = getFieldType(fieldId)
-  if (String(type) === 'select' || String(type) === 'multiSelect') return getSelectOptions(fieldId)[0]?.value ?? ''
-  if (type === 'boolean') return true
-  return ''
-}
 
 function onSortFieldChange(idx: number, fieldId: string) { emit('update-sort', idx, { ...props.sortRules[idx], fieldId }) }
 function onSortDirChange(idx: number, direction: 'asc'|'desc') { emit('update-sort', idx, { ...props.sortRules[idx], direction }) }
 function onAddFilter() {
   if (!props.fields.length) return
-  const ops = getOperatorsForField(props.fields[0].id)
-  emit('add-filter', { fieldId: props.fields[0].id, operator: ops[0]?.value ?? 'is', value: getDefaultFilterValue(props.fields[0].id) })
+  emit('add-filter', seedFilterCondition(props.fields[0]))
+}
+function onAddFilterGroup() {
+  if (!props.fields.length) return
+  // A new root condition group seeded with one condition (and its own AND conjunction).
+  emit('add-filter-group', { conjunction: 'and', conditions: [seedFilterCondition(props.fields[0])] })
 }
 </script>
 
