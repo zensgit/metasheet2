@@ -1,6 +1,6 @@
-# Design-lock (PROPOSED — for owner ratification): `continuous_managers` assignee source
+# Design-lock (RATIFIED + SHIPPED, reading A): `continuous_managers` assignee source
 
-**Status:** PROPOSED design-lock, 2026-06-18. Mirrors the shape of the `direct_manager` (#2852) and `dept_head` (#2863→#2871→#2873) design-locks, but with **one load-bearing decision the owner must ratify before any runtime** — because, unlike those two, the locks here are *agent-proposed*, not owner-handed. No code in this PR. The runtime PRs are a separate opt-in, gated on ratification of §1.
+**Status:** **RATIFIED reading A + SHIPPED** — runtime merged 2026-06-19 (PR-1 plumbing #2893 `550d57adb`, PR-2 resolver/authoring #2907 `99af6747d`). Originally PROPOSED 2026-06-18 with **one load-bearing decision** (§1, A vs B); the owner ratified **A** (manager-chain-as-approver-set) and **B** (sequential escalation = graph expansion) stays carved out as a separate future feature. See the **as-built refinement** under §3 for the `levels` semantic as implemented. Mirrors the `direct_manager` (#2852) and `dept_head` (#2863→#2871→#2873) design-locks.
 
 ---
 
@@ -40,12 +40,18 @@ These need no re-decision; they are the established posture for org-derived sour
 
 ## 3. Locks specific to `continuous_managers` (proposed)
 
-1. **`levels` parameter.** The source is `{ kind: 'continuous_managers'; levels: number }`. `levels` is **validated deterministically**: integer, clamped to `[1, MAX_LEVELS]` with `MAX_LEVELS = 10`; a missing/non-integer/out-of-range value is an **explicit normalizer rejection**, never a silent fallback-to-default (the enum-strictness rule from the #1776 finding). `levels = 1` is exactly `direct_manager`.
-2. **New ordered snapshot field `managerChainIds: string[]`.** Level 1 = direct manager, level 2 = manager's manager, … Baked alongside the existing `managerId` (which stays as-is for `direct_manager`; `managerChainIds[0]` will equal `managerId`). The resolver reads `managerChainIds.slice(0, levels)`.
+1. **`levels` parameter.** The source is `{ kind: 'continuous_managers'; levels: number }`. `levels` is **validated deterministically**: integer, clamped to `[1, MAX_LEVELS]` with `MAX_LEVELS = 10`; a missing/non-integer/out-of-range value is an **explicit normalizer rejection**, never a silent fallback-to-default (the enum-strictness rule from the #1776 finding). `levels = 1` is `direct_manager` *in the common case* — see the **as-built refinement** below.
+2. **New ordered snapshot field `managerChainIds: string[]`.** Level 1 = direct manager, level 2 = manager's manager, … Baked alongside the existing `managerId` (which stays as-is for `direct_manager`; `managerChainIds[0]` equals `managerId` *in the common case* — see the **as-built refinement** below). The resolver reads `managerChainIds.slice(0, levels)`.
 3. **Bake-time hop-by-hop walk** generalizes the existing single-hop manager resolution in `resolveApprovalRequesterOrgRelations`: from the requester, resolve the leader of their primary department; from that leader, resolve *their* leader; repeat. Each hop reuses the current `leader_in_dept` logic.
 4. **Cycle + depth termination.** Maintain a visited-set of local user ids during the walk; stop when (a) a hop revisits an already-seen id (cycle), (b) no manager is found at a level (top reached), or (c) `MAX_LEVELS` hops taken. The walk stores whatever prefix it found — possibly shorter than any template's requested `levels`.
 5. **Conditional baking (cost control).** The chain walk runs **only when the template's published runtime graph actually contains a `continuous_managers` source** — so the up-to-10 extra per-hop queries are *not* added to every `createApproval`. (Confirm during impl that the runtime graph is available at the bake site; it is constructed/read there today.)
 6. **Resolver dedup.** A person appearing at two levels (rare, e.g. a re-org artifact) is pushed once; self-exclusion applies after the slice.
+
+> **AS-BUILT REFINEMENT (shipped #2893 plumbing + #2907 resolver, 2026-06-19).** The walk is *more precise* than the "level N = N-th hierarchy manager / `[0] == managerId`" wording above, in two edge cases:
+> - **Unlinked hops are walked through, not counted.** A manager with no linked local user doesn't occupy a chain slot; the walk climbs past them. So `managerChainIds` holds the **first K *available linked* managers up the tree**, not "the managers at hierarchy levels 1..K".
+> - **Self-exclusion is on the LOCAL id (a HIGH caught in review, #2893).** A requester can own multiple directory accounts (distinct external ids) linking to the same local user; if an alt-account is flagged leader of their own dept, step 4's chain skips it (walking through to the real next manager), while the shipped step-2 `managerId` bake still excludes only the external id. So in that edge case `managerChainIds[0] !== managerId` (harmless — every reader self-excludes `!== requesterId`).
+>
+> Net: `levels` means "**the first K available linked managers walking up from the requester, skipping unlinked/self rungs**". `levels = 1` and `[0] == managerId` hold whenever the direct manager is a distinct linked user (the overwhelmingly common case), and the divergence only appears under unlinked-manager / alt-account org data. Functionally correct and safer; this note exists so the prose above isn't read literally for those edges.
 
 ---
 
