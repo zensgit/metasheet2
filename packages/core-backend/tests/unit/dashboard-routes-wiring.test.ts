@@ -18,7 +18,9 @@ vi.mock('../../src/integration/db/connection-pool', () => ({
   poolManager: {
     get: () => ({
       getInternalPool: () => ({}),
-      query: vi.fn(),
+      // loadChartRecords issues a SELECT over meta_records; return an empty rowset so the wired
+      // chart-data path runs without a DB (the route no longer depends on setRecordProvider).
+      query: vi.fn(async () => ({ rows: [] })),
     }),
   },
 }))
@@ -59,6 +61,10 @@ vi.mock('../../src/multitable/permission-service', () => ({
     },
   })),
   loadFieldPermissionScopeMap: vi.fn(async () => new Map()),
+  // Used by loadChartRecords (the wired chart-data path) — default to inert so the unit wiring test
+  // exercises the route without a real DB.
+  loadRowLevelReadDenyEnabled: vi.fn(async () => false),
+  loadDeniedRecordIds: vi.fn(async () => new Set()),
 }))
 
 // Mount on a fresh app in the same way index.ts does.

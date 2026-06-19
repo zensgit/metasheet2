@@ -99,6 +99,7 @@ async function loadChartRecords(
   query: QueryFn,
   sheetId: string,
   access: ResolvedRequestAccess,
+  allowedFieldIds: Set<string>,
 ): Promise<Array<{ data: Record<string, unknown> }>> {
   const rowsRes = await query('SELECT id, data FROM meta_records WHERE sheet_id = $1', [sheetId])
   let rows = rowsRes.rows as Array<{ id?: unknown; data?: unknown }>
@@ -106,7 +107,17 @@ async function loadChartRecords(
     const denied = await loadDeniedRecordIds(query, sheetId, access.userId)
     if (denied.size > 0) rows = rows.filter((r) => typeof r.id === 'string' && !denied.has(r.id))
   }
-  return rows.map((r) => ({ data: r.data && typeof r.data === 'object' ? (r.data as Record<string, unknown>) : {} }))
+  // Field mask: project each row to ONLY the actor's allowed fields BEFORE it reaches the aggregation
+  // engine — defense-in-depth so a denied field's value can never be aggregated/leaked, independent of
+  // the route's isChartDataRestricted gate. (Also keeps this off the raw-record-data egress surface.)
+  return rows.map((row) => {
+    const src = row.data && typeof row.data === 'object' ? (row.data as Record<string, unknown>) : {}
+    const masked: Record<string, unknown> = {}
+    for (const fid of allowedFieldIds) {
+      if (Object.prototype.hasOwnProperty.call(src, fid)) masked[fid] = src[fid]
+    }
+    return { data: masked }
+  })
 }
 
 async function requireSheetRead(
@@ -347,7 +358,7 @@ export function dashboardRouter() {
         res.json(restrictedChartData(chart))
         return
       }
-      const records = await loadChartRecords(auth.query, req.params.sheetId, auth.access)
+      const records = await loadChartRecords(auth.query, req.params.sheetId, auth.access, allowedFieldIds)
       const data = await dashboardService.computeChartDataForConfig(chart, records)
       res.json(data)
     } catch (err: unknown) {
@@ -441,7 +452,7 @@ export function dashboardRouter() {
         res.json(restrictedChartData(chart))
         return
       }
-      const records = await loadChartRecords(auth.query, req.params.sheetId, auth.access)
+      const records = await loadChartRecords(auth.query, req.params.sheetId, auth.access, allowedFieldIds)
       const data = await dashboardService.getChartData(req.params.id, records)
       res.json(data)
     } catch (err: unknown) {
