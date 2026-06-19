@@ -3155,6 +3155,18 @@ export function evaluateMetaFilterCondition(
     if (opNorm === 'greaterequal' || opNorm === 'isgreaterequal') return left !== null && right !== null && left >= right
     if (opNorm === 'less' || opNorm === 'isless') return left !== null && right !== null && left < right
     if (opNorm === 'lessequal' || opNorm === 'islessequal') return left !== null && right !== null && left <= right
+    // 2a: between — inclusive range. `value` is a [min, max] array (read condition.value directly, not
+    // the scalar-normalized value). Reversed bounds tolerated (min/max swap); a missing/incomplete or
+    // unparseable bound = inactive filter (match all), mirroring the empty-filter convention. Works for
+    // numeric AND date (toComparable already maps date cells → epoch in this branch).
+    if (opNorm === 'between') {
+      const arr = Array.isArray(condition.value) ? condition.value : []
+      if (arr.length < 2) return true
+      const a = toComparable(arr[0]); const b = toComparable(arr[1])
+      if (a === null || b === null) return true
+      if (left === null) return false
+      return left >= Math.min(a, b) && left <= Math.max(a, b)
+    }
     // 2a (view filter operators): relative-date operators (date fields only). Compares the cell's LOCAL
     // calendar day against `nowMs`. The helper returns null when `opNorm` is not a relative-date op, so a
     // numeric field (or an unknown op) falls through to the catch-all below unchanged.
