@@ -2,7 +2,7 @@
 
 > Status: **CURRENT GATED TODO**.
 > Pair: `multitable-gated-remainder-development-plan-20260618.md`.
-> Grounding: `origin/main` (live-main, 2026-06-18). Completed + on `main`: **2a** (`#2832`/`#2838`/`#2849`), **2b complete through S4** (`#2836`/`#2841`/`#2847`/`#2861`), **2c complete S2–S4** (`#2866`/`#2867`/`#2869`/`#2874`, source = B). **All planned development (2a/2b/2c) is done; the active remainder is empty.** The earlier comment/ledger tail PRs `#2825` + `#2857` are closed as superseded by `#2859` (this reconciliation).
+> Grounding: `origin/main` (live-main, 2026-06-18). Completed + on `main`: **2a** (`#2832`/`#2838`/`#2849`), **2b complete through S4** (`#2836`/`#2841`/`#2847`/`#2861`), **2c complete S2–S4** (`#2866`/`#2867`/`#2869`/`#2874`, source = B; S4-as-shipped = read-only **cell/summary** inactive cue — the **picker-chip** historical affordance is supplementary optional polish — `#2877` was **closed not-landed** (S4 bar met by #2874's cell/summary cue), **not** part of this claim). **All planned development (2a/2b/2c) is done; the active remainder is empty.** The earlier comment/ledger tail PRs `#2825` + `#2857` are closed as superseded by `#2859` (this reconciliation).
 > Supersedes: `multitable-current-development-plan-20260617.md` and `multitable-current-development-todo-20260617.md` for current multitable remainder routing.
 > Legend: `[x]` closed · `[ ]` todo after opt-in · `[!]` gate requiring owner/design decision · `[~]` roadmap pool, not current remainder.
 
@@ -15,7 +15,7 @@
 - [x] Live scalar CRDT for `number`, `currency`, `percent`, `boolean`.
 - [x] Live scalar CRDT for `rating`, `multiSelect` (`#2821`).
 - [x] Live scalar CRDT for `select` + `date` (`#2832`), `duration` (`#2838`), `dateTime` (`#2849`, 2a-DT-S2 canonical-UTC-ISO invariant) — **2a COMPLETE; full scalar set collaborative, no type deferred** (2026-06-18).
-- [x] CRDT comment hygiene documenting the real seed/bridge/frontend boundary (`#2823`; `#2825` PR head closes the final internal JSDoc/dateTime comment tails, pending merge).
+- [x] CRDT comment hygiene documenting the real seed/bridge/frontend boundary (`#2823`; the final internal JSDoc/dateTime comment tails landed via `#2859`. The earlier `#2825`/`#2857` PR heads are **closed as superseded by `#2859`** — no comment-tail PR is pending merge).
 - [x] Runtime conclusion: no non-gated multitable remainder is open.
 
 ## 1. 2a · Live CRDT Remaining Field Types
@@ -35,7 +35,7 @@
 
 ## 2. 2b · #18 Phase-2 Conditional Permission Rules
 
-> **COMPLETE — S1–S4 (2026-06-18).** S1 #2836, S2 #2841 (wired into the #18 seam, flag-off inert), S3 #2847, S4 #2861 (content-keyed parse cache, staleness-free — DB reads not cached). All slices shipped; sub-items below retained as history. **2c is now also COMPLETE** (#2866/#2867/#2869/#2874) — see §3. All planned development (2a/2b/2c) is done; the active remainder is empty.
+> **COMPLETE — S1–S4 (2026-06-18).** S1 #2836, S2 #2841 (wired into the #18 seam, flag-off inert), S3 #2847, S4 #2861 (content-keyed parse cache, staleness-free — DB reads not cached). All slices shipped; sub-items below retained as history. **2c is now also COMPLETE** (#2866/#2867/#2869/#2874; S4-as-shipped = read-only cell/summary cue — the picker-chip affordance #2877 was **closed not-landed**) — see §3. All planned development (2a/2b/2c) is done; the active remainder is empty.
 
 - [x] Gate: owner-approved rule model and threat model — settled (S1–S3 built on it).
   - [ ] Decide rule language and field/operator matrix.
@@ -89,7 +89,7 @@
 - [x] **16-S3 Frontend picker UX** — `canEditRecord`-gated directory endpoint (#2867) + `MetaPersonPicker` wired
   to it (#2869); offers exactly what the validator accepts; stored chips preserved (not dropped).
 - [x] **16-S4 Inactive / historical handling** — deactivated stored assignees shown read-only with a muted cue,
-  not re-assignable; out-of-scope historical values preserved (#2874, backend `inactive` flag + FE chip cue).
+  not re-assignable; out-of-scope historical values preserved (#2874, backend `inactive` flag + FE **cell-renderer** chip cue; the **picker-chip** cue, #2877, was **closed not-landed** — out-of-S4-scope supplementary polish).
 
 ## 4. Roadmap Pool — Not Current Remainder
 
@@ -107,7 +107,7 @@ These are future candidates or reopen-only lines. They are not open work in the 
 
 ## 5. Owner Unlock Prompts
 
-Use one of these when opening the next arc (2a is complete and 2b is **complete through S4** `#2861` — those gates are closed, not next options):
+No active multitable development *arc* remains — **2a, 2b (through S4 `#2861`), and 2c (through S4 `#2874`) are all complete and closed; none is a "next option".** The `#2877` picker-chip decision has been made (closed not-landed — see below). One pre-identified owner option remains (not active planned work):
 
-- **Continue 2c / #16 person directory:** source-of-truth already decided = B + S2 resolver shipped (#2866); next is **S3 picker-UX** (filter to assignable) + **S4 inactive/historical handling**. (The sole in-progress multitable arc.)
-- **Revisit grid performance:** opt into D2 high-scale harness/re-baseline work first; row virtualization stays closed unless the verdict flips.
+- **[x] `#2877` (2c-S4 picker-chip affordance) — CLOSED not-landed (2026-06-18):** the green, display-only PR marking no-longer-assignable chips inside `MetaPersonPicker` (the one S4 surface `#2874` left out) was **closed rather than landed**. S4's display-affordance bar is met by `#2874` (cell/summary cue) and ratified by the merged closeout `#2878`; the picker chip is supplementary polish on a different surface, **not** a correctness gap (re-assignment is already fail-closed by `#2854`, and the picker already excludes inactive members per `#2869`). Branch preserved — reopen as an explicitly-scoped picker-polish item if wanted, not as "the last 2c slice".
+- **[~] Revisit grid performance:** opt into D2 high-scale harness/re-baseline work first; row virtualization stays closed unless the verdict flips.
