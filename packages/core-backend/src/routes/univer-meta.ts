@@ -2013,6 +2013,20 @@ export function isFilterGroup(node: unknown): node is MetaFilterGroup {
 // filter UIs stay shallow (2-3 levels), so this only ever trims pathological/abusive payloads.
 const MAX_FILTER_DEPTH = 5
 
+// SAVE-path depth guard. The read path (parseFilterNode) caps depth by trimming, but the SAVE path stores
+// the raw blob (zod is `z.record(z.unknown())` — it does NOT recurse into `conditions`), and that stored
+// blob is later the input to BOTH redact-on-read and the recursive merge guard. So an unbounded deep payload
+// on create/update would stack-overflow those reads. Reject over-deep on write (fail loud, matching the
+// write-boundary philosophy) → stored data stays bounded → redact/merge on read are safe. This checker is
+// itself bounded: it returns at MAX_FILTER_DEPTH without recursing deeper, and iterates breadth flatly.
+export function filterInfoExceedsMaxDepth(node: unknown, depth: number): boolean {
+  if (!node || typeof node !== 'object') return false
+  const conditions = (node as { conditions?: unknown }).conditions
+  if (!Array.isArray(conditions)) return false // leaf — not depth-bearing
+  if (depth >= MAX_FILTER_DEPTH) return true // this group is nested too deeply
+  return conditions.some((child) => filterInfoExceedsMaxDepth(child, depth + 1))
+}
+
 function parseMetaSortRules(sortInfo: unknown): MetaSortRule[] {
   if (!sortInfo || typeof sortInfo !== 'object') return []
   const rawRules = (sortInfo as { rules?: unknown }).rules
@@ -3777,6 +3791,7 @@ export function mergeRedactedFilterInfoForUpdate(incoming: Record<string, unknow
   if (!Array.isArray((incoming as { conditions?: unknown }).conditions)) {
     return incoming // not a conditions-bearing filter → nothing to preserve
   }
+  if (filterInfoExceedsMaxDepth(incoming, 0)) return null // too-deeply-nested save → reject (route → 400), never recurse unbounded
   const merged = mergeRedactedFilterNodeForUpdate(incoming, current, allowedFieldIds)
   if (!merged || !merged.node || typeof merged.node !== 'object') return null
   return merged.node as Record<string, unknown>
@@ -7731,6 +7746,9 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
 
+      if (parsed.data.filterInfo !== undefined && filterInfoExceedsMaxDepth(parsed.data.filterInfo, 0)) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Filter nesting exceeds the maximum depth of ${MAX_FILTER_DEPTH}` } })
+      }
       const incomingConfig: Record<string, unknown> = normalizeHierarchyViewConfig(type, parsed.data.config ?? {})
       const incomingRules = incomingConfig.conditionalFormattingRules
       if (Array.isArray(incomingRules) && incomingRules.length > CONDITIONAL_FORMATTING_RULE_LIMIT) {

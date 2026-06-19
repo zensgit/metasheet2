@@ -18,10 +18,18 @@ import {
   collectLeafConditions,
   pruneFilterNode,
   isFilterGroup,
+  filterInfoExceedsMaxDepth,
   redactViewConfigFilterLiterals,
   mergeRedactedFilterInfoForUpdate,
   type MetaFilterNode,
 } from '../../src/routes/univer-meta'
+
+// Build `levels` nested groups (root counts as level 1) wrapping a single leaf.
+function nestGroups(levels: number): Record<string, unknown> {
+  let node: Record<string, unknown> = { fieldId: 'a', operator: 'is', value: 1 }
+  for (let i = 0; i < levels; i++) node = { conjunction: 'and', conditions: [node] }
+  return node
+}
 
 const leaf = (fieldId: string, value?: unknown) =>
   value === undefined ? { fieldId, operator: 'is' } : { fieldId, operator: 'is', value }
@@ -211,5 +219,27 @@ describe('nested filter groups — SECURITY: merge-on-save (preserve denied lite
   it('rejects an ambiguous node carrying BOTH group and leaf shape at the write boundary', () => {
     const incoming = { conjunction: 'and', conditions: [{ fieldId: 'pub', operator: 'is', conditions: [leaf('secret')] }] }
     expect(mergeRedactedFilterInfoForUpdate(incoming, current, allowed)).toBeNull()
+  })
+})
+
+describe('nested filter groups — SECURITY: save-path depth bound (DoS guard)', () => {
+  it('filterInfoExceedsMaxDepth flags an over-deep tree and clears a shallow one', () => {
+    expect(filterInfoExceedsMaxDepth(nestGroups(3), 0)).toBe(false) // well within MAX_FILTER_DEPTH
+    expect(filterInfoExceedsMaxDepth(nestGroups(50), 0)).toBe(true) // pathologically deep
+    expect(filterInfoExceedsMaxDepth({ conjunction: 'and', conditions: [leaf('a', 1)] }, 0)).toBe(false) // flat
+  })
+
+  it('the depth checker is itself bounded — a huge depth does not recurse to the bottom (no stack blowup)', () => {
+    // 10k-deep payload: the checker must return true without descending all 10k frames.
+    expect(filterInfoExceedsMaxDepth(nestGroups(10000), 0)).toBe(true)
+  })
+
+  it('merge-on-save REJECTS an over-deep payload (→ route 400) instead of recursing unbounded', () => {
+    expect(mergeRedactedFilterInfoForUpdate(nestGroups(10000), {}, new Set(['a']))).toBeNull()
+  })
+
+  it('merge-on-save still accepts a legitimately shallow nested payload', () => {
+    const incoming = nestGroups(3)
+    expect(mergeRedactedFilterInfoForUpdate(incoming, incoming, new Set(['a']))).not.toBeNull()
   })
 })
