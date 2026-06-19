@@ -29,3 +29,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_templates_scope_name
 CREATE INDEX IF NOT EXISTS idx_integration_templates_scope ON integration_templates(tenant_id, workspace_id);
 CREATE INDEX IF NOT EXISTS idx_integration_templates_status ON integration_templates(status);
 CREATE INDEX IF NOT EXISTS idx_integration_templates_target_kind ON integration_templates(target_kind);
+
+-- updated_at trigger — mirrors 057 (integration_set_updated_at() is defined in 057, which runs first).
+-- Guarded so re-running is idempotent; keeps updated_at correct even for direct SQL updates.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_integration_templates_updated_at') THEN
+    CREATE TRIGGER trg_integration_templates_updated_at
+      BEFORE UPDATE ON integration_templates
+      FOR EACH ROW EXECUTE FUNCTION integration_set_updated_at();
+  END IF;
+END $$;
