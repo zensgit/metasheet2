@@ -49,12 +49,17 @@ export interface ApprovalRequesterOrgRelations {
   deptHeadId?: string
   /**
    * Ordered local user ids of the requester's management chain, level 1 first
-   * (`[0]` is the direct manager, equal to `managerId`). Only populated when the
-   * caller opts in via `includeManagerChain` (i.e. a published graph actually uses
-   * the `continuous_managers` source). Cycle-guarded and capped at
-   * `MAX_MANAGER_CHAIN_LEVELS`; unlinked hops are walked through but not included.
-   * Read by the `continuous_managers` assignee-source kind (which slices it to its
-   * own `levels`). Omitted when the chain resolves empty.
+   * (`[0]` is the direct manager **when that manager is distinct from the
+   * requester**). It usually equals `managerId`, but can differ in one edge case:
+   * this chain self-excludes on the requester's LOCAL id, whereas `managerId`
+   * (step 2) excludes only the requester's external id — so if an alt-account of
+   * the requester is flagged leader of their own dept, `managerId` may be the
+   * requester (harmless; the resolver drops it) while this chain skips past it.
+   * Only populated when the caller opts in via `includeManagerChain` (i.e. a
+   * published graph actually uses the `continuous_managers` source). Cycle-guarded
+   * and capped at `MAX_MANAGER_CHAIN_LEVELS`; unlinked hops are walked through but
+   * not included. Read by the `continuous_managers` assignee-source kind (which
+   * slices it to its own `levels`). Omitted when the chain resolves empty.
    */
   managerChainIds?: string[]
 }
