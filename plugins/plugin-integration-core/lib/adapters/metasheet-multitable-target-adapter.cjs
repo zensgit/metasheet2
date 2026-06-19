@@ -438,12 +438,12 @@ function createMetaSheetMultitableTargetAdapterFactory({ context } = {}) {
 // safe lifecycle as data-source:sql-write-gated, writing ONLY to own plugin-scoped
 // sheets (zero external write).
 //
-// NOTE (design follow-up): this write-source + profile supersedes S1a's adapter-level
-// `targetWriteLifecycle` method surface for the write path — the S1b-1 seam consumes
-// the profile + raw source, never `targetWriteLifecycle`, so that S1a surface is now
-// orphaned. See the S1b-2 PR body / design-lock follow-up (owner to ratify retire vs
-// reposition). This file intentionally does NOT expose `targetWriteLifecycle`: a
-// write-performing apply outside the C6 lifecycle would be an ungated bypass.
+// NOTE: this write-source + profile ARE S1a's write contract. The earlier adapter-level
+// `targetWriteLifecycle` (lookup/apply) method surface was RETIRED (S1a-retire) as
+// orphaned — the C6 planner consumes the profile + raw source and produces its own
+// values-free evidence, never an adapter `targetWriteLifecycle`. This file intentionally
+// does NOT expose one: a write-performing apply outside the C6 lifecycle would be an
+// ungated bypass of the token/revision gate.
 // ---------------------------------------------------------------------------
 const MULTITABLE_WRITE_TARGET_KIND = 'metasheet:multitable'
 
