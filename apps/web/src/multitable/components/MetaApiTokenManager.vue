@@ -485,7 +485,9 @@ const showTokenForm = ref(false)
 const newTokenPlaintext = ref<string | null>(null)
 const copiedNewToken = ref(false)
 const tokenDraft = ref({ name: '', scopes: [] as string[], expiresAt: '' })
-const availableScopes = ['read', 'write', 'admin']
+// Must match the backend enum ALL_API_TOKEN_SCOPES (packages/core-backend/src/multitable/api-tokens.ts).
+// The old ['read','write','admin'] were rejected by the server (400) — a contract/UI drift.
+const availableScopes = ['records:read', 'records:write', 'fields:read', 'comments:read', 'comments:write', 'webhooks:manage']
 
 // ---- Webhooks ----
 const webhooks = ref<Webhook[]>([])

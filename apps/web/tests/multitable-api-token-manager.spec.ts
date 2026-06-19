@@ -592,7 +592,7 @@ describe('MetaApiTokenManager', () => {
     const newTokenBtn = document.querySelector('[data-token-new]') as HTMLButtonElement
     newTokenBtn.click()
     await flushPromises()
-    expect(document.querySelector('[data-token-scope="read"]')).toBeTruthy()
+    expect(document.querySelector('[data-token-scope="records:read"]')).toBeTruthy()
     expect(document.querySelector('[data-token-form]')?.textContent).toContain('权限范围')
 
     const webhookTab = document.querySelectorAll('[role="tab"]')[1] as HTMLButtonElement
