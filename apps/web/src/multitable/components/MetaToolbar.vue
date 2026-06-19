@@ -60,7 +60,7 @@
             <select :value="rule.operator" :aria-label="l('toolbar.filterOperator')" @change="onFilterOperatorChange(idx, ($event.target as HTMLSelectElement).value)">
               <option v-for="op in getOperatorsForField(rule.fieldId)" :key="op.value" :value="op.value">{{ op.label }}</option>
             </select>
-            <span v-if="isUnaryOp(rule.operator)" class="meta-toolbar__filter-empty-hint">{{ l('toolbar.noValueNeeded') }}</span>
+            <span v-if="isNoValueOp(rule.operator)" class="meta-toolbar__filter-empty-hint">{{ l('toolbar.noValueNeeded') }}</span>
             <select
               v-else-if="isArrayOp(rule.operator) && isSelectLikeField(rule.fieldId)"
               class="meta-toolbar__filter-value"
@@ -95,6 +95,17 @@
                 @change="onFilterBetweenChange(idx, 1, ($event.target as HTMLInputElement).value)"
               />
             </template>
+            <input
+              v-else-if="isNDaysOp(rule.operator)"
+              class="meta-toolbar__filter-value"
+              type="number"
+              min="1"
+              step="1"
+              :value="rule.value ?? ''"
+              :aria-label="l('toolbar.filterValue')"
+              data-filter-ndays="true"
+              @change="onFilterNDaysChange(idx, ($event.target as HTMLInputElement).value)"
+            />
             <select
               v-else-if="isSelectLikeField(rule.fieldId)"
               class="meta-toolbar__filter-value"
@@ -341,6 +352,19 @@ const isArrayOp = (op: string) => ARRAY_OPS.has(op)
 // 2a: between — value is a [min, max] array, rendered as two bound inputs. Mirrors the backend
 // evaluateMetaFilterCondition between branch (inclusive, reversed-tolerant).
 const isBetweenOp = (op: string) => op === 'between'
+// 2a: relative-date operators (date fields only — opNorm = op.toLowerCase() on the backend).
+// Two value modes: valueless (no control) and N-window (a single positive-integer input carrying N).
+// Mirrors the backend evaluateRelativeDateOp; N is read RAW from condition.value (not scalar-normalized),
+// so the picker must emit N as a number.
+const RELATIVE_DATE_NOVALUE_OPS = new Set(['isToday', 'isYesterday', 'isTomorrow', 'isThisWeek', 'isThisMonth', 'isOverdue'])
+const RELATIVE_DATE_NDAYS_OPS = new Set(['isLastNDays', 'isNextNDays'])
+const isRelativeNoValueOp = (op: string) => RELATIVE_DATE_NOVALUE_OPS.has(op)
+const isNDaysOp = (op: string) => RELATIVE_DATE_NDAYS_OPS.has(op)
+// Operators that need no value control: empty/not-empty + the valueless relative-date ops.
+const isNoValueOp = (op: string) => isUnaryOp(op) || isRelativeNoValueOp(op)
+// Default N-window seeded on switching to last/next N days — keeps the filter functional on select
+// (avoids an instant "all rows vanish" from an empty N, which the backend treats as n<1 = no match).
+const DEFAULT_RELATIVE_DAYS = 7
 const getField = (id: string) => props.fields.find((f) => f.id === id)
 const getFieldType = (id: string) => getField(id)?.type ?? 'string'
 const isSelectLikeField = (id: string) => {
@@ -400,8 +424,9 @@ function onFilterFieldChange(idx: number, fieldId: string) {
 }
 function onFilterOperatorChange(idx: number, operator: string) {
   const r = { ...props.filterRules[idx], operator }
-  if (isUnaryOp(operator)) r.value = undefined
+  if (isNoValueOp(operator)) r.value = undefined // empty/not-empty + valueless relative-date ops
   else if (isArrayOp(operator) || isBetweenOp(operator)) r.value = Array.isArray(r.value) ? r.value : [] // start empty array (= inactive)
+  else if (isNDaysOp(operator)) r.value = (typeof r.value === 'number' && Number.isFinite(r.value) && r.value >= 1) ? r.value : DEFAULT_RELATIVE_DAYS // seed a usable N
   else if (r.value === undefined || Array.isArray(r.value)) r.value = getDefaultFilterValue(r.fieldId) // scalar op: drop stale array
   emit('update-filter', idx, r)
 }
@@ -415,6 +440,11 @@ function onFilterBetweenChange(idx: number, slot: 0 | 1, value: string) {
   const cur = Array.isArray(r.value) ? [...r.value] : []
   cur[slot] = value
   emit('update-filter', idx, { ...r, value: [cur[0], cur[1]] }) // always a [min, max] pair (backend coerces strings + tolerates incomplete)
+}
+function onFilterNDaysChange(idx: number, value: string) {
+  // N-window relative-date ops (last/next N days): emit N as a NUMBER. The backend reads condition.value
+  // raw (Math.trunc(Number(...))), so a numeric N passes through untouched; '' marks an incomplete window.
+  emit('update-filter', idx, { ...props.filterRules[idx], value: value === '' ? '' : Number(value) })
 }
 function onFilterValueChange(idx: number, value: string) {
   const ft = getFieldType(props.filterRules[idx].fieldId)

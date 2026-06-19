@@ -332,4 +332,82 @@ describe('MetaToolbar i18n', () => {
     await setSelectValue(operatorSelect, 'between')
     expect(state.filterRules[0]).toEqual({ fieldId: 'amount', operator: 'between', value: [] })
   })
+
+  // 2a: relative-date operators — date fields only (mirrors backend evaluateRelativeDateOp).
+  const DATE_FIELD: MetaField[] = [{ id: 'due', name: 'Due', type: 'date' }]
+
+  it('offers relative-date operators for date fields (valueless + N-window)', async () => {
+    const { container: root } = mountToolbar({
+      fields: DATE_FIELD,
+      filterRules: [{ fieldId: 'due', operator: 'is', value: '' }],
+    })
+    const panel = await openFilterPanel(root)
+    const operatorSelect = panel.querySelector('select[aria-label="Filter operator"]') as HTMLSelectElement
+    const ops = Array.from(operatorSelect.options).map((o) => o.value)
+    for (const op of ['isToday', 'isYesterday', 'isTomorrow', 'isThisWeek', 'isThisMonth', 'isOverdue', 'isLastNDays', 'isNextNDays']) {
+      expect(ops).toContain(op)
+    }
+  })
+
+  it('hides the value control for valueless relative-date operators (isToday)', async () => {
+    const { container: root } = mountToolbar({
+      fields: DATE_FIELD,
+      filterRules: [{ fieldId: 'due', operator: 'isToday', value: undefined }],
+    })
+    const panel = await openFilterPanel(root)
+    expect(panel.querySelector('.meta-toolbar__filter-empty-hint')).toBeTruthy()
+    expect(panel.querySelector('input[data-filter-ndays="true"]')).toBeNull()
+    expect(panel.querySelector('input.meta-toolbar__filter-value')).toBeNull()
+  })
+
+  it('switching to a valueless relative-date op clears the value (no control)', async () => {
+    const { state, container: root } = mountToolbar({
+      fields: DATE_FIELD,
+      filterRules: [{ fieldId: 'due', operator: 'is', value: '2026-01-01' }],
+    })
+    const panel = await openFilterPanel(root)
+    const operatorSelect = panel.querySelector('select[aria-label="Filter operator"]') as HTMLSelectElement
+    await setSelectValue(operatorSelect, 'isThisWeek')
+    expect(state.filterRules[0]).toEqual({ fieldId: 'due', operator: 'isThisWeek', value: undefined })
+  })
+
+  it('renders a positive-integer input for isLastNDays and emits a NUMERIC N', async () => {
+    const { state, container: root } = mountToolbar({
+      fields: DATE_FIELD,
+      filterRules: [{ fieldId: 'due', operator: 'isLastNDays', value: 7 }],
+    })
+    const panel = await openFilterPanel(root)
+    const nDaysInput = panel.querySelector('input[data-filter-ndays="true"]') as HTMLInputElement | null
+    expect(nDaysInput).toBeTruthy()
+    expect(nDaysInput!.type).toBe('number')
+    expect(nDaysInput!.value).toBe('7')
+    nDaysInput!.value = '14'
+    nDaysInput!.dispatchEvent(new Event('change'))
+    await nextTick()
+    expect(state.filterRules[0]).toEqual({ fieldId: 'due', operator: 'isLastNDays', value: 14 })
+  })
+
+  it('switching to isNextNDays seeds a usable default window (N=7, not empty)', async () => {
+    const { state, container: root } = mountToolbar({
+      fields: DATE_FIELD,
+      filterRules: [{ fieldId: 'due', operator: 'is', value: '2026-01-01' }],
+    })
+    const panel = await openFilterPanel(root)
+    const operatorSelect = panel.querySelector('select[aria-label="Filter operator"]') as HTMLSelectElement
+    await setSelectValue(operatorSelect, 'isNextNDays')
+    expect(state.filterRules[0]).toEqual({ fieldId: 'due', operator: 'isNextNDays', value: 7 })
+  })
+
+  it('clearing the N-window input emits an empty (incomplete) window', async () => {
+    const { state, container: root } = mountToolbar({
+      fields: DATE_FIELD,
+      filterRules: [{ fieldId: 'due', operator: 'isLastNDays', value: 7 }],
+    })
+    const panel = await openFilterPanel(root)
+    const nDaysInput = panel.querySelector('input[data-filter-ndays="true"]') as HTMLInputElement
+    nDaysInput.value = ''
+    nDaysInput.dispatchEvent(new Event('change'))
+    await nextTick()
+    expect(state.filterRules[0]).toEqual({ fieldId: 'due', operator: 'isLastNDays', value: '' })
+  })
 })
