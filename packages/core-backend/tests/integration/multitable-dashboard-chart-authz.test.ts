@@ -100,6 +100,9 @@ describeIfDatabase('F0b dashboard/chart authz + chart-data mask (real DB)', () =
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_VISIBLE, SHEET_ID, 'Visible', 'string', '{}', 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_SECRET, SHEET_ID, 'Secret', 'string', '{}', 2])
     await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [SHEET_ID, FLD_SECRET, 'user', USER_ID_DENIED, false, false])
+    // Seed a REAL record carrying the canary: the route now loads meta_records via the wired path, so an
+    // allowed user sees the value and a denied user is masked — exercising production, not a provider fixture.
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [`rec_f0b_${TS}`, SHEET_ID, JSON.stringify({ [FLD_VISIBLE]: 'visible bucket', [FLD_SECRET]: SECRET_CANARY })])
 
     await insertChart(CHART_ID)
     await insertChart(CHART_SECRET_ID, {
@@ -123,6 +126,7 @@ describeIfDatabase('F0b dashboard/chart authz + chart-data mask (real DB)', () =
 
   afterAll(async () => {
     getDashboardService().setRecordProvider(async () => [])
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM multitable_dashboards WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM multitable_charts WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
@@ -237,14 +241,9 @@ describeIfDatabase('F0b dashboard/chart authz + chart-data mask (real DB)', () =
     expect((await request(app).delete(`/api/multitable/sheets/${SHEET_ID}/dashboards/${createdDashboardId}`)).status).toBe(204)
   })
 
-  test('R8: chart data withholds a denied referenced field while proving the injected provider can leak it for an allowed user', async () => {
-    getDashboardService().setRecordProvider(async (sheetId: string) => {
-      if (sheetId !== SHEET_ID) return []
-      return [
-        { data: { [FLD_VISIBLE]: 'visible bucket', [FLD_SECRET]: SECRET_CANARY } },
-      ]
-    })
-
+  test('R8: chart data withholds a denied referenced field while a real record value surfaces for an allowed user', async () => {
+    // Canary record seeded in the DB (beforeAll); the route loads it via the wired path. Allowed user
+    // sees the value; denied user gets restricted output (field mask short-circuits before record load).
     testUserId = USER_ID
     testPerms = ['multitable:read']
     const allowed = await chartData(CHART_SECRET_ID)
@@ -270,11 +269,7 @@ describeIfDatabase('F0b dashboard/chart authz + chart-data mask (real DB)', () =
 
   test('R9 (v2-d): a denied seriesByFieldId restricts chart data — the field values do not leak as series names', async () => {
     // groupBy = visible bucket, seriesBy = the SECRET field → series names would be the secret values.
-    getDashboardService().setRecordProvider(async (sheetId: string) => {
-      if (sheetId !== SHEET_ID) return []
-      return [{ data: { [FLD_VISIBLE]: 'visible bucket', [FLD_SECRET]: SECRET_CANARY } }]
-    })
-
+    // The canary record is seeded in the DB (beforeAll) and loaded via the wired route path.
     // Allowed reader: series IS computed → the secret value surfaces as a series name (proves the leak vector).
     testUserId = USER_ID
     testPerms = ['multitable:read']

@@ -231,20 +231,26 @@ export class DashboardService {
   // Chart data computation
   // -----------------------------------------------------------------------
 
-  async getChartData(chartId: string): Promise<ChartData> {
+  async getChartData(chartId: string, records?: Array<{ data: Record<string, unknown> }>): Promise<ChartData> {
     const chart = await this.getChart(chartId)
     if (!chart) throw new Error(`Chart not found: ${chartId}`)
 
-    return this.computeChartDataForConfig(chart)
+    return this.computeChartDataForConfig(chart, records)
   }
 
-  async computeChartDataForConfig(chart: ChartConfig): Promise<ChartData> {
-    let records: Array<{ data: Record<string, unknown> }> = []
-    if (this.recordProvider) {
-      records = await this.recordProvider(chart.sheetId)
+  /**
+   * Compute chart data. Callers SHOULD pass `records` already loaded with the actor's row-level
+   * read-deny applied (the production route does this via loadChartRecords) so aggregation never leaks
+   * over records the actor cannot read. When `records` is omitted, fall back to the injected
+   * recordProvider (test wiring) or an empty set.
+   */
+  async computeChartDataForConfig(chart: ChartConfig, records?: Array<{ data: Record<string, unknown> }>): Promise<ChartData> {
+    let recs = records
+    if (!recs) {
+      recs = this.recordProvider ? await this.recordProvider(chart.sheetId) : []
     }
 
-    return this.aggregationService.computeChartData(chart, records)
+    return this.aggregationService.computeChartData(chart, recs)
   }
 }
 
