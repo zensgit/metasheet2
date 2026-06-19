@@ -36,6 +36,12 @@ async function canListen(): Promise<boolean> {
 }
 const get = (base: string, path: string, token: string) =>
   fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}` } })
+// A real session JWT (NOT an mst_ token) so the presence contrast can prove the token path REWRITES
+// includeViewers while the session path is unchanged.
+async function devToken(base: string, userId: string): Promise<string> {
+  const res = await fetch(`${base}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`)
+  return ((await res.json()) as { token: string }).token
+}
 
 describeIfDatabase('OAPI-1 comments:read API-token routes (real DB, full server)', () => {
   let server: MetaSheetServer | undefined
@@ -111,10 +117,18 @@ describeIfDatabase('OAPI-1 comments:read API-token routes (real DB, full server)
     expect((await get(base, p, tokCommentsC)).status).toBe(200)
     expect((await get(base, p, tokRecordsC)).status).toBe(403)
     expect((await get(base, p, tokRevokedC)).status).toBe(401)
-    // includeViewers=true is forced to false on a token request → still 200, never errors / never leaks viewers
-    const withViewers = await get(base, `${p}?includeViewers=true`, tokCommentsC)
-    expect(withViewers.status).toBe(200)
-    expect(JSON.stringify((await withViewers.json())?.data ?? {})).not.toMatch(/"viewers":\s*\[[^\]]/) // no populated viewers array
+    // CONTRACT (bites the behavior, not just "no online viewers"): CommentService OMITS the `viewers` key
+    // when includeViewers=false and INCLUDES it (even when empty) when true. So:
+    //   - token path with includeViewers=true → forced false → response has NO `viewers` key;
+    //   - SESSION path (JWT, not a token) with includeViewers=true → unchanged → response HAS the `viewers` key.
+    // Deleting the token-path force-false would make the token response carry `viewers` → this fails.
+    const tokenBody = await (await get(base, `${p}?includeViewers=true`, tokCommentsC)).json()
+    expect(tokenBody.data).not.toHaveProperty('viewers') // token: param rewritten to false → viewers OMITTED
+
+    const jwt = await devToken(base, CREATOR_C)
+    const sessRes = await fetch(`${base}${p}?includeViewers=true`, { headers: { Authorization: `Bearer ${jwt}` } })
+    expect(sessRes.status).toBe(200)
+    expect((await sessRes.json()).data).toHaveProperty('viewers') // session: includeViewers honored → viewers PRESENT
   })
 
   test('NO OVER-MATCH BYPASS — a comments:read token on a DEFERRED route (/api/comments/inbox) → 401 (allowlist denies → JWT gate)', async () => {
