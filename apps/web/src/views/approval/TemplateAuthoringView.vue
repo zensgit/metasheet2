@@ -288,6 +288,9 @@
               </el-select>
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'continuous_managers'" label="上级层级数">
+              <!-- v1: UI input cap fixed at 10. The backend cap is configurable
+                   (APPROVAL_MANAGER_CHAIN_MAX_LEVELS, default 10, hard ceiling 50);
+                   reading the server cap into :max so ops can author >10 is a follow-up. -->
               <el-input-number
                 v-model="step.levels"
                 :min="1"
