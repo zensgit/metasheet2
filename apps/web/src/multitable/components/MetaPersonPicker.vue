@@ -57,7 +57,9 @@ import {
 // Native person (人员) picker. The offered set is the field's assignable member-group DIRECTORY
 // (2c-S3, GET .../person-fields/:fieldId/directory) — the SAME active, member-group-scoped set the
 // write-time validator accepts (display parity). Stored chips render independently of this list, so
-// historical inactive / out-of-restriction values are never dropped (their display polish is 2c-S4).
+// historical inactive / out-of-restriction values are never dropped. (Dedicated picker-chip marking
+// of such no-longer-assignable values was 2c-S4 picker polish — closed not-landed as #2877; the
+// shipped S4 affordance is the read-only cell/summary inactive cue, #2874.)
 // Emits userId[] (NOT recordIds) + a personSummaries echo so the chip renders immediately.
 const props = defineProps<{
   visible: boolean
