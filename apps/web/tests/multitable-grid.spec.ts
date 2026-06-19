@@ -5,10 +5,14 @@ import {
   useMultitableGrid,
   buildSortInfo,
   buildFilterInfo,
+  buildFilterInfoFromNodes,
+  parseFilterTree,
+  isFilterGroup,
   FILTER_OPERATORS_BY_TYPE,
   resolveCreateRecordContext,
   type SortRule,
   type FilterRule,
+  type FilterNode,
 } from '../src/multitable/composables/useMultitableGrid'
 import { MultitableApiClient } from '../src/multitable/api/client'
 
@@ -981,6 +985,83 @@ describe('buildFilterInfo', () => {
       conjunction: 'or',
       conditions: [{ fieldId: 'f1', operator: 'isEmpty', value: undefined }, { fieldId: 'f2', operator: 'greater', value: 10 }],
     })
+  })
+})
+
+describe('nested filter groups (FE model) — parseFilterTree / buildFilterInfoFromNodes round-trip', () => {
+  // The data-safety gate: a stored filter (flat OR nested, any depth the UI can't author) must hydrate and
+  // re-serialize byte-faithfully, so loading + re-saving a view never silently flattens/corrupts its filter.
+  const THREE_LEVEL = {
+    conjunction: 'and' as const,
+    conditions: [
+      { fieldId: 'a', operator: 'is', value: 1 },
+      {
+        conjunction: 'or' as const,
+        conditions: [
+          { fieldId: 'b', operator: 'is', value: 2 },
+          {
+            conjunction: 'and' as const,
+            conditions: [
+              { fieldId: 'c', operator: 'is', value: 3 },
+              { fieldId: 'd', operator: 'isNot', value: 4 },
+            ],
+          },
+        ],
+      },
+    ],
+  }
+
+  it('round-trips a 3-level filter the flat UI cannot author (deep-equal)', () => {
+    const tree = parseFilterTree(THREE_LEVEL)!
+    expect(tree).not.toBeNull()
+    expect(buildFilterInfoFromNodes(tree.nodes, tree.conjunction)).toEqual(THREE_LEVEL)
+  })
+
+  it('round-trips a flat filter and matches buildFilterInfo byte-for-byte', () => {
+    const flat = { conjunction: 'or' as const, conditions: [{ fieldId: 'a', operator: 'is', value: 1 }, { fieldId: 'b', operator: 'greater', value: 2 }] }
+    const tree = parseFilterTree(flat)!
+    const built = buildFilterInfoFromNodes(tree.nodes, tree.conjunction)
+    expect(built).toEqual(flat)
+    expect(built).toEqual(buildFilterInfo(tree.nodes as FilterRule[], tree.conjunction)) // flat parity with the legacy serializer
+  })
+
+  it('drops malformed leaves, empty groups, ambiguous (group+leaf) nodes, and groups past the depth cap', () => {
+    const parsed = parseFilterTree({
+      conjunction: 'and',
+      conditions: [
+        { fieldId: 'a', operator: 'is', value: 1 },
+        { operator: 'is' }, // no fieldId
+        { conjunction: 'and', conditions: [] }, // empty group
+        { fieldId: 'x', operator: 'is', conditions: [{ fieldId: 'y', operator: 'is' }] }, // ambiguous
+      ],
+    })
+    expect(parsed?.nodes.map((n) => (isFilterGroup(n) ? 'group' : n.fieldId))).toEqual(['a'])
+
+    // 7 levels of nesting → the over-deep subtree collapses, leaving only the shallow sibling.
+    let deep: any = { fieldId: 'deep', operator: 'is', value: 1 }
+    for (let i = 0; i < 7; i++) deep = { conjunction: 'and', conditions: [deep] }
+    const cap = parseFilterTree({ conjunction: 'and', conditions: [{ fieldId: 's', operator: 'is', value: 1 }, deep] })
+    expect(cap?.nodes.map((n) => (isFilterGroup(n) ? 'group' : n.fieldId))).toEqual(['s'])
+  })
+
+  it('parseFilterTree returns null for empty / non-filter input', () => {
+    expect(parseFilterTree(null)).toBeNull()
+    expect(parseFilterTree({})).toBeNull()
+    expect(parseFilterTree({ conjunction: 'and', conditions: [] })).toBeNull()
+  })
+
+  it('syncFromView preserves nested groups and re-serializes faithfully; a flat edit flattens (commits to flat)', () => {
+    const client = createMockClient()
+    const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
+    grid.syncFromView({ filterInfo: THREE_LEVEL })
+    // flat toolbar still shows the top-level leaf conditions...
+    expect(grid.filterRules.value.map((r) => r.fieldId)).toEqual(['a'])
+    // ...while the full ordered tree is preserved for a faithful save.
+    expect(grid.nestedFilterNodes.value).not.toBeNull()
+    expect(buildFilterInfoFromNodes(grid.nestedFilterNodes.value as FilterNode[], grid.filterConjunction.value)).toEqual(THREE_LEVEL)
+    // editing via the flat toolbar drops the preserved tree (flat becomes the source of truth)
+    grid.addFilterRule({ fieldId: 'e', operator: 'is', value: 5 })
+    expect(grid.nestedFilterNodes.value).toBeNull()
   })
 })
 

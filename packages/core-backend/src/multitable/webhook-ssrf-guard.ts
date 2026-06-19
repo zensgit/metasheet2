@@ -14,6 +14,7 @@
  * Pure + injectable resolver so it is deterministically testable without real DNS.
  */
 import { lookup as dnsLookup } from 'node:dns/promises'
+import { isIP } from 'node:net'
 
 export type SsrfLookupFn = (hostname: string) => Promise<Array<{ address: string; family: number }>>
 
@@ -45,7 +46,8 @@ export function isInternalIpv6(ip: string): boolean {
   if (zone !== -1) a = a.slice(0, zone)
   if (a === '::1' || a === '0:0:0:0:0:0:0:1') return true // loopback
   if (a === '::' || a === '0:0:0:0:0:0:0:0') return true // unspecified
-  // IPv4-mapped: ::ffff:a.b.c.d  (dotted) or ::ffff:HHHH:HHHH (hex) → check the embedded IPv4.
+  // IPv4-mapped: ::ffff:a.b.c.d  (dotted) or ::ffff:HHHH:HHHH (hex) → check the embedded IPv4. Handled
+  // BEFORE the net.isIP guard so the dotted-quad form (whose net.isIP support varies) is unambiguous.
   const mappedDotted = a.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/)
   if (mappedDotted) return isInternalIpv4(mappedDotted[1])
   const mappedHex = a.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
@@ -54,6 +56,10 @@ export function isInternalIpv6(ip: string): boolean {
     const lo = parseInt(mappedHex[2], 16)
     return isInternalIpv4(`${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`)
   }
+  // Fail-closed: a malformed-but-first-hextet-parseable string (e.g. "2606:nonsense") would otherwise read
+  // as public via the prefix check below. By here `a` is a plain (non-mapped) IPv6, so net.isIP is
+  // unambiguous — reject anything that is not a syntactically valid IPv6. (#2950 P3.)
+  if (isIP(a) !== 6) return true
   const firstHextet = (a.split(':')[0] || '').padStart(4, '0') // leading "::" → "0000" (not fc/fe)
   const firstByte = parseInt(firstHextet.slice(0, 2), 16)
   const secondByte = parseInt(firstHextet.slice(2, 4), 16)
