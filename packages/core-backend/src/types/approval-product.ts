@@ -222,6 +222,15 @@ export interface ApprovalRequesterSnapshot {
    * unresolvable. Read by the future `dept_head` assignee-source kind.
    */
   deptHeadId?: string
+  /**
+   * Org-relation plumbing — ordered local user ids of the requester's management
+   * chain, level 1 first (`[0]` equals `managerId`). Frozen at create time only
+   * when the published graph uses the `continuous_managers` source (so it is not
+   * baked for every approval). Cycle-guarded + capped; absent when unresolvable or
+   * unused. Read by the `continuous_managers` assignee-source kind, which slices it
+   * to its own `levels`. Purely additive; existing snapshots omit it.
+   */
+  managerChainIds?: string[]
   [key: string]: unknown
 }
 
