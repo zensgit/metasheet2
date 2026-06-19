@@ -271,6 +271,30 @@ export class FormulaEngine {
       const scaled = Number((n * f).toPrecision(15))
       return (n >= 0 ? Math.floor(scaled) : Math.ceil(scaled)) / f
     })
+
+    // 1a (capability-depth hardening) — scalar math expansion. All single-value-in/out, no range/array
+    // semantics (range/criteria funcs like SUMIF are 1b). Excel-compatible sentinels on bad input.
+    this.functions.set('INT', (x: unknown) => {
+      const n = Number(x); return Number.isNaN(n) ? '#VALUE!' : Math.floor(n) // Excel INT rounds toward -∞
+    })
+    this.functions.set('TRUNC', (x: unknown, digits: unknown = 0) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      const f = Math.pow(10, Math.trunc(Number(digits) || 0))
+      return Math.trunc(n * f) / f // truncate toward zero (distinct from INT/floor for negatives)
+    })
+    this.functions.set('LN', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      return n <= 0 ? '#NUM!' : Math.log(n)
+    })
+    this.functions.set('LOG', (x: unknown, base: unknown = 10) => {
+      const n = Number(x); const b = Number(base)
+      if (Number.isNaN(n) || Number.isNaN(b)) return '#VALUE!'
+      if (n <= 0 || b <= 0 || b === 1) return '#NUM!'
+      return Math.log(n) / Math.log(b)
+    })
+    this.functions.set('EXP', (x: unknown) => {
+      const n = Number(x); return Number.isNaN(n) ? '#VALUE!' : Math.exp(n)
+    })
   }
 
   /**
