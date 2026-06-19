@@ -75,6 +75,13 @@ const {
   applyExternalWrite,
   dryRunExternalWrite,
 } = require('./external-write-dry-run.cjs')
+// S1b-3: own metasheet:multitable C6 write target (raw write-source + profile + flat-config derive).
+const {
+  MULTITABLE_WRITE_TARGET_KIND,
+  MULTITABLE_WRITE_PROFILE,
+  createMetaSheetMultitableWriteSource,
+  deriveMultitablePlannerTargetConfig,
+} = require('./adapters/metasheet-multitable-target-adapter.cjs')
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
@@ -446,6 +453,33 @@ function normalizeC6WriteApplyBody(body = {}) {
     confirm: {
       dryRunToken,
     },
+  }
+}
+
+// S1b-3: resolve the C6 write-source + profile + flat planner target config SERVER-SIDE by
+// target kind. The profile is NEVER taken from the request — it IS the per-kind safety policy.
+// metasheet:multitable rides the same C6 dry-run->apply lifecycle via its own-sheet raw
+// write-source (zero external write); any other (default) target uses the host SQL write
+// facade unchanged. Used by BOTH the dry-run and apply handlers with identical inputs so the
+// apply recompute reproduces the same dry-run revision (the revision fence).
+function resolveC6WritePlanInputs({ targetSystem, pipeline, context }) {
+  if (targetSystem && targetSystem.kind === MULTITABLE_WRITE_TARGET_KIND) {
+    const flatConfig = deriveMultitablePlannerTargetConfig({
+      system: targetSystem,
+      object: pipeline.targetObject,
+      fieldMappings: pipeline.fieldMappings,
+    })
+    return {
+      planTargetSystem: { ...targetSystem, config: flatConfig },
+      dataSourceWrites: createMetaSheetMultitableWriteSource({ system: targetSystem, context }),
+      targetWriteProfile: MULTITABLE_WRITE_PROFILE,
+    }
+  }
+  // default (data-source:sql-write-gated): host SQL write facade, planner uses its SQL profile.
+  return {
+    planTargetSystem: targetSystem,
+    dataSourceWrites: context && context.api && context.api.dataSourceWrites,
+    targetWriteProfile: undefined,
   }
 }
 
@@ -1575,12 +1609,14 @@ function createHandlers(services, options = {}) {
         role: 'source',
         principal: ownerPrincipal,
       })
+      const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context })
       return sendOk(res, await dryRunExternalWrite({
         pipeline,
         sourceSystem,
-        targetSystem,
+        targetSystem: c6.planTargetSystem,
         sourceAdapter,
-        dataSourceWrites: context && context.api && context.api.dataSourceWrites,
+        dataSourceWrites: c6.dataSourceWrites,
+        targetWriteProfile: c6.targetWriteProfile,
         tokenStore: context.storage,
         dryRunUser: requestPrincipal(req),
         dataSourceOwnerPrincipal: ownerPrincipal,
@@ -1662,12 +1698,16 @@ function createHandlers(services, options = {}) {
         })
       }
       try {
+        // SAME resolution as dry-run (server-side, by target kind) so the apply recompute
+        // reproduces the dry-run revision; the multitable write-source writes own sheets only.
+        const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context })
         const result = await applyExternalWrite({
           pipeline,
           sourceSystem,
-          targetSystem,
+          targetSystem: c6.planTargetSystem,
           sourceAdapter,
-          dataSourceWrites: context && context.api && context.api.dataSourceWrites,
+          dataSourceWrites: c6.dataSourceWrites,
+          targetWriteProfile: c6.targetWriteProfile,
           tokenStore: context.storage,
           deadLetterStore: deadLetters,
           dryRunToken: body.confirm.dryRunToken,

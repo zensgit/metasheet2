@@ -4622,6 +4622,139 @@ async function testTableActionUnconfiguredFailsClosed() {
   assert.equal(res.body.error.code, 'TABLE_ACTION_NOT_CONFIGURED')
 }
 
+// S1b-3: the C6 dry-run->apply ROUTE drives the OWN metasheet:multitable target through the
+// same safe lifecycle (server-side write-source + profile resolution, never request-sourced),
+// writing only to own sheets, idempotent on re-pull, values-free. Wire-vs-fixture: asserts the
+// real route request/response, not a hand-built fixture.
+async function testPipelineExternalWriteMultitableRoute() {
+  const calls = []
+  const storage = createMemoryStorage()
+  const rows = [
+    { id: 'rec_mat2', sheetId: 'sheet_am', version: 1, data: { code: 'MAT-2', name: 'Gadget', qty: 5 } },
+  ]
+  const recordCalls = []
+  const recordsApi = {
+    async queryRecords(input) {
+      recordCalls.push(['queryRecords', input])
+      return rows
+        .filter((r) => Object.entries(input.filters || {}).every(([f, v]) => r.data[f] === v))
+        .slice(0, input.limit || 1000)
+    },
+    async createRecord(input) {
+      recordCalls.push(['createRecord', input])
+      const row = { id: `rec_${rows.length + 1}`, sheetId: input.sheetId, version: 1, data: { ...input.data } }
+      rows.push(row)
+      return row
+    },
+    async patchRecord(input) {
+      recordCalls.push(['patchRecord', input])
+      const row = rows.find((r) => r.id === input.recordId && r.sheetId === input.sheetId)
+      if (!row) throw new Error(`record not found: ${input.recordId}`)
+      row.version += 1
+      row.data = { ...row.data, ...input.changes }
+      return row
+    },
+  }
+  const sourceSystem = {
+    id: 'source_mt', tenantId: 'tenant_1', workspaceId: 'workspace_1', name: 'Readonly source',
+    kind: 'data-source:sql-readonly', role: 'source', status: 'active',
+    config: { dataSourceId: 'readonly-ds', object: 'src_items' },
+  }
+  const targetSystem = {
+    id: 'target_mt', tenantId: 'tenant_1', workspaceId: 'workspace_1', name: 'Own multitable target',
+    kind: 'metasheet:multitable', role: 'target', status: 'active',
+    config: {
+      objects: {
+        approved_materials: {
+          name: 'Approved Materials', sheetId: 'sheet_am', keyFields: ['code'],
+          fieldDetails: [{ id: 'code' }, { id: 'name' }, { id: 'qty' }],
+        },
+      },
+    },
+  }
+  const pipeline = {
+    id: 'pipe_mt', tenantId: 'tenant_1', workspaceId: 'workspace_1', name: 'C6 multitable', status: 'active',
+    sourceSystemId: sourceSystem.id, sourceObject: 'src_items',
+    targetSystemId: targetSystem.id, targetObject: 'approved_materials', createdBy: 'owner-7',
+    fieldMappings: [
+      { sourceField: 'c', targetField: 'code' },
+      { sourceField: 'n', targetField: 'name' },
+      { sourceField: 'q', targetField: 'qty' },
+    ],
+  }
+  const sourceRows = [
+    { c: 'MAT-1', n: 'Bolt', q: 2 },   // new -> add
+    { c: 'MAT-2', n: 'Gadget', q: 9 }, // exists with qty 5 -> update
+  ]
+  const { services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) { calls.push(['getExternalSystemForAdapter', input]); return input.id === sourceSystem.id ? { ...sourceSystem } : null },
+      async getExternalSystem(input) { calls.push(['getExternalSystem', input]); return input.id === targetSystem.id ? { ...targetSystem } : null },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['createAdapter', { system, deps }])
+        assert.equal(system.id, sourceSystem.id, 'external-write creates only the source adapter')
+        return { async read() { return { records: sourceRows, done: true, nextCursor: null } } }
+      },
+    },
+    pipelineRegistry: {
+      async getPipeline(input) { calls.push(['getPipeline', input]); return { ...pipeline, id: input.id } },
+    },
+  })
+  const { routes } = mountRoutes(services, { storage, recordsApi })
+
+  // read-only user may dry-run; route resolves the multitable write-source + profile server-side.
+  let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+    user: READ_USER, params: { id: pipeline.id }, body: { tenantId: 'tenant_1', workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.canApply, true)
+  assert.equal(res.body.data.counts.add, 1, 'MAT-1 -> add')
+  assert.equal(res.body.data.counts.update, 1, 'MAT-2 (qty 5->9) -> update')
+  assert.equal(res.body.data.evidence.targetKind, 'metasheet:multitable', 'route resolved the multitable target by kind')
+  const dryText = JSON.stringify(res.body)
+  assert.equal(dryText.includes('MAT-1'), false, 'route dry-run evidence stays values-free')
+  assert.equal(dryText.includes('Bolt'), false, 'route dry-run evidence stays values-free')
+  assert.equal(recordCalls.some((c) => c[0] === 'createRecord' || c[0] === 'patchRecord'), false, 'dry-run performs no writes')
+
+  // dry-run as the apply user (token is principal-bound), then apply.
+  res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+    user: WRITE_USER, params: { id: pipeline.id }, body: { tenantId: 'tenant_1', workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  const token = res.body.data.dryRunToken
+  assert.equal(typeof token, 'string')
+
+  res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+    user: WRITE_USER, params: { id: pipeline.id }, body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: { dryRunToken: token } },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.counts.written, 2)
+  assert.equal(recordCalls.filter((c) => c[0] === 'createRecord').length, 1, 'one add -> one own-sheet createRecord')
+  assert.equal(recordCalls.filter((c) => c[0] === 'patchRecord').length, 1, 'one update -> one own-sheet patchRecord')
+  assert.ok(recordCalls.filter((c) => c[0] === 'createRecord' || c[0] === 'patchRecord').every((c) => c[1].sheetId === 'sheet_am'), 'writes land on the OWN sheet')
+  assert.equal(rows.length, 2, 'MAT-1 created; MAT-2 patched in place (no duplicate)')
+  assert.equal(JSON.stringify(res.body).includes('MAT-1'), false, 'apply response stays values-free')
+
+  // re-pull: same source -> idempotent skip, no new writes.
+  res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+    user: WRITE_USER, params: { id: pipeline.id }, body: { tenantId: 'tenant_1', workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.counts.skip, 2, 're-pull is idempotent (both skip)')
+  assert.equal(res.body.data.counts.add, 0)
+  assert.equal(res.body.data.counts.update, 0)
+  assert.equal(rows.length, 2, 're-pull created no duplicate records')
+
+  // read-only user cannot apply (perm gate fires before token).
+  res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+    user: READ_USER, params: { id: pipeline.id }, body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: { dryRunToken: token } },
+  })
+  assert.equal(res.statusCode, 403, 'read-only integration user cannot apply multitable C6 writes')
+  assert.equal(rows.length, 2, 'rejected apply wrote nothing')
+}
+
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testStockPreparationTargetProvisioningRoutes()
@@ -4651,6 +4784,7 @@ async function main() {
   await testPipelineRoutes()
   await testPipelineExternalWriteDryRunRoute()
   await testPipelineExternalWriteApplyRoute()
+  await testPipelineExternalWriteMultitableRoute()
   await testPipelineExternalWriteApplyTestFailureInjectionRoute()
   await testPipelineExternalWriteApplyPersistsDeadLetterAndProvenance()
   await testPipelineExternalWriteApplyDoesNotOverstateProvenancePersistence()

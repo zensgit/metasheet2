@@ -584,10 +584,49 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
   }
 }
 
+// S1b-3: derive the FLAT planner target config (what the C6 planner's normalizeTargetConfig
+// expects) from the multitable object config + the pipeline's field mappings. object/keyFields
+// come from the object config; writableFields are the MAPPED non-key targetFields (the fields
+// actually present in the transformed record), intersected with the object's fields — so the
+// planner's value-diff classify is idempotent. (Deriving writableFields from ALL object fields
+// would compare an unmapped field as undefined-vs-stored and force perpetual 'update'.)
+function deriveMultitablePlannerTargetConfig({ system, object, fieldMappings = [] } = {}) {
+  const normalizedSystem = normalizeExternalSystemForAdapter(system)
+  const objects = normalizeObjects(normalizedSystem.config)
+  const objectId = requiredString(object, 'object')
+  const objectConfig = getObjectConfig(objects, objectId)
+  const keyFields = objectConfig.keyFields
+  if (keyFields.length === 0) {
+    throw new AdapterValidationError('metasheet:multitable C6 write requires keyFields on the target object', { object: objectId })
+  }
+  const keySet = new Set(keyFields)
+  const fieldNameSet = objectConfig.fieldNames
+  const seen = new Set()
+  const writableFields = []
+  for (const mapping of Array.isArray(fieldMappings) ? fieldMappings : []) {
+    const target = mapping && (mapping.targetField || mapping.target)
+    if (typeof target !== 'string' || target.length === 0) continue
+    if (keySet.has(target) || seen.has(target)) continue
+    if (fieldNameSet.size > 0 && !fieldNameSet.has(target)) continue // only real sheet fields
+    seen.add(target)
+    writableFields.push(target)
+  }
+  if (writableFields.length === 0) {
+    throw new AdapterValidationError('metasheet:multitable C6 write requires at least one mapped non-key writable field', { object: objectId })
+  }
+  return {
+    dataSourceId: normalizedSystem.id || objectId, // opaque to the multitable write-source (it resolves object -> sheetId)
+    object: objectId,
+    keyFields,
+    writableFields,
+  }
+}
+
 module.exports = {
   MULTITABLE_WRITE_TARGET_KIND,
   MULTITABLE_WRITE_PROFILE,
   createMetaSheetMultitableWriteSource,
+  deriveMultitablePlannerTargetConfig,
   createMetaSheetMultitableTargetAdapter,
   createMetaSheetMultitableTargetAdapterFactory,
   __internals: {
