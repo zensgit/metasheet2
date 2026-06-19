@@ -95,6 +95,21 @@ const ElInput = defineComponent({
   },
 })
 
+const ElInputNumber = defineComponent({
+  name: 'ElInputNumber',
+  props: { modelValue: Number, disabled: Boolean, min: Number, max: Number, step: Number },
+  emits: ['update:modelValue'],
+  render() {
+    return h('input', {
+      type: 'number',
+      value: this.modelValue ?? '',
+      disabled: this.disabled,
+      'data-testid': (this.$attrs as any)?.['data-testid'],
+      onInput: (event: Event) => this.$emit('update:modelValue', Number((event.target as HTMLInputElement).value)),
+    })
+  },
+})
+
 const ElSelect = defineComponent({
   name: 'ElSelect',
   props: { modelValue: [String, Array], disabled: Boolean },
@@ -167,6 +182,7 @@ function installStubs(app: VueApp<Element>) {
   app.directive('loading', {})
   app.component('ElButton', ElButton)
   app.component('ElInput', ElInput)
+  app.component('ElInputNumber', ElInputNumber)
   app.component('ElSelect', ElSelect)
   app.component('ElOption', ElOption)
   app.component('ElCheckbox', ElCheckbox)
@@ -449,6 +465,22 @@ describe('approval template authoring helpers', () => {
     expect(rehydrated.steps[0].sourceKind).toBe('dept_head')
   })
 
+  it('round-trips a continuous_managers source incl. levels (save emits {kind, levels}; levels survives the real wire)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'cm'
+    draft.name = '多级上级审批'
+    draft.steps[0].sourceKind = 'continuous_managers'
+    draft.steps[0].levels = 3
+
+    const payload = buildCreateTemplatePayload(draft)
+    expect((payload.approvalGraph.nodes[1]?.config as any).assigneeSources).toEqual([{ kind: 'continuous_managers', levels: 3 }])
+
+    // wire-vs-fixture trap: assert `levels` survives the real serialize→parse, not a hand-built chip.
+    const rehydrated = draftFromTemplate(buildTemplate({ approvalGraph: payload.approvalGraph }))
+    expect(rehydrated.steps[0].sourceKind).toBe('continuous_managers')
+    expect(rehydrated.steps[0].levels).toBe(3)
+  })
+
   // Lane E — self-approver authoring (autoApprovalPolicy.mergeWithRequester).
   function buildAutoApprovalTemplate(
     policy: AutoApprovalPolicy,
@@ -647,6 +679,20 @@ describe('TemplateAuthoringView', () => {
     expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // in the allowlist → not fail-closed
     expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // editable
     expect((container!.querySelector('[data-testid="approval-step-source-kind"]') as HTMLSelectElement).value).toBe('dept_head') // hydrated back
+  })
+
+  it('continuous_managers reads back editable: a saved continuous_managers template is NOT fail-closed (sourceKind + levels input hydrated)', async () => {
+    routeParams = { id: 'tpl_cm' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'continuous_managers', levels: 3 }], approvalMode: 'all', emptyAssigneePolicy: 'error' }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // in the allowlist → not fail-closed
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // editable
+    expect((container!.querySelector('[data-testid="approval-step-source-kind"]') as HTMLSelectElement).value).toBe('continuous_managers') // hydrated back
+    expect(container!.querySelector('[data-testid="approval-step-levels"]')).not.toBeNull() // the levels input renders for this kind
   })
 
   it('updates an existing supported template without replacing it through create', async () => {

@@ -30,18 +30,20 @@ async function tok(base: string, userId: string): Promise<string> {
 async function req(base: string, path: string, token: string, opts: { method?: string; body?: unknown } = {}): Promise<Response> {
   return fetch(`${base}${path}`, { method: opts.method || 'GET', headers: { Authorization: `Bearer ${token}`, ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}) }, ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}) })
 }
-function graph(emptyAssigneePolicy: 'auto-approve' | 'error', kind: 'direct_manager' | 'dept_head' = 'direct_manager') {
+type OrgSourceKind = 'direct_manager' | 'dept_head' | 'continuous_managers'
+function graph(emptyAssigneePolicy: 'auto-approve' | 'error', kind: OrgSourceKind = 'direct_manager') {
+  const source = kind === 'continuous_managers' ? { kind, levels: 2 } : { kind }
   return {
     nodes: [
       { key: 'start', type: 'start', name: 's', config: {} },
-      { key: 'approval_1', type: 'approval', name: '上级', config: { assigneeSources: [{ kind }], approvalMode: 'single', emptyAssigneePolicy } },
+      { key: 'approval_1', type: 'approval', name: '上级', config: { assigneeSources: [source], approvalMode: 'single', emptyAssigneePolicy } },
       { key: 'end', type: 'end', name: 'e', config: {} },
     ],
     edges: [{ key: 'e1', source: 'start', target: 'approval_1' }, { key: 'e2', source: 'approval_1', target: 'end' }],
   }
 }
 
-describeIfDatabase('direct_manager + dept_head assignee sources — real-DB create/start', () => {
+describeIfDatabase('direct_manager + dept_head + continuous_managers assignee sources — real-DB create/start', () => {
   let server: MetaSheetServer | undefined, base = '', reqTok = ''
 
   beforeAll(async () => {
@@ -55,7 +57,7 @@ describeIfDatabase('direct_manager + dept_head assignee sources — real-DB crea
   afterAll(async () => {
     try {
       const pool = poolManager.get()
-      const tids = (await pool.query(`SELECT id FROM approval_templates WHERE key LIKE $1`, [`dm-%-${TS}%`])).rows.map((r) => r.id as string)
+      const tids = (await pool.query(`SELECT id FROM approval_templates WHERE key LIKE $1`, [`%-${TS}`])).rows.map((r) => r.id as string)
       if (tids.length > 0) {
         const iids = (await pool.query(`SELECT id FROM approval_instances WHERE template_id = ANY($1)`, [tids])).rows.map((r) => r.id as string)
         if (iids.length > 0) {
@@ -74,7 +76,7 @@ describeIfDatabase('direct_manager + dept_head assignee sources — real-DB crea
     expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
-  async function publish(key: string, emptyAssigneePolicy: 'auto-approve' | 'error', kind: 'direct_manager' | 'dept_head' = 'direct_manager'): Promise<string> {
+  async function publish(key: string, emptyAssigneePolicy: 'auto-approve' | 'error', kind: OrgSourceKind = 'direct_manager'): Promise<string> {
     const created = await req(base, '/api/approval-templates', reqTok, { method: 'POST', body: { key, name: key, formSchema: { fields: [{ id: 'reason', type: 'text', label: 'r', required: true }] }, approvalGraph: graph(emptyAssigneePolicy, kind) } })
     expect(created.status, await created.clone().text()).toBe(201) // normalizer accepts the org-derived source kind
     const tid = ((await created.json()) as { id: string }).id
@@ -112,6 +114,28 @@ describeIfDatabase('direct_manager + dept_head assignee sources — real-DB crea
 
   it('dept_head error branch: a requester with no department head makes the dept_head node fail-create', async () => {
     const tid = await publish(`dh-err-${TS}`, 'error', 'dept_head')
+    const started = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' } } })
+    expect(started.status).toBeGreaterThanOrEqual(400)
+  })
+
+  // continuous_managers — same scope as above: the normalizer must accept the
+  // levels'd source on publish, and the real create/start path runs the resolver
+  // → an unresolvable chain (this requester has no directory chain) → empty →
+  // emptyAssigneePolicy on both branches. The RESOLVED non-empty chain is unit-
+  // covered (the chain walk through the real seam in approval-manager-chain.test.ts,
+  // the scanner, and the resolver case), not re-seeded as a directory fixture here.
+  it('continuous_managers auto-approve branch: publish accepts {kind, levels}; an unresolvable chain auto-resolves the node', async () => {
+    const tid = await publish(`cm-auto-${TS}`, 'auto-approve', 'continuous_managers')
+    const started = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' } } })
+    expect(started.status, await started.clone().text()).toBeLessThan(300)
+    const body = (await started.json()) as { id?: string; data?: { id: string } }
+    const aid = body.id ?? body.data?.id
+    const status = (await (await req(base, `/api/approvals/${aid}`, reqTok)).json()) as any
+    expect(['approved', 'completed', 'auto_approved']).toContain(String(status.status ?? status.data?.status))
+  })
+
+  it('continuous_managers error branch: an unresolvable chain makes the node fail-create (empty assignee)', async () => {
+    const tid = await publish(`cm-err-${TS}`, 'error', 'continuous_managers')
     const started = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' } } })
     expect(started.status).toBeGreaterThanOrEqual(400)
   })

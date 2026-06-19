@@ -283,8 +283,19 @@
                 <el-option label="发起人" value="requester" />
                 <el-option label="直属上级" value="direct_manager" />
                 <el-option label="部门主管" value="dept_head" />
+                <el-option label="连续多级上级" value="continuous_managers" />
                 <el-option label="表单用户字段" value="form_field_user" />
               </el-select>
+            </el-form-item>
+            <el-form-item v-if="step.sourceKind === 'continuous_managers'" label="上级层级数">
+              <el-input-number
+                v-model="step.levels"
+                :min="1"
+                :max="10"
+                :step="1"
+                :disabled="readOnly"
+                data-testid="approval-step-levels"
+              />
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'static_user'" label="选择用户">
               <el-select

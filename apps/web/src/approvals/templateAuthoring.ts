@@ -60,6 +60,10 @@ export interface ApprovalStepDraft {
   sourceKind: ApprovalStepSourceKind
   idsText: string
   fieldId: string
+  // How many management levels the `continuous_managers` source resolves (level 1 =
+  // direct manager). Carried for every step but only meaningful when
+  // `sourceKind === 'continuous_managers'`; the backend re-validates `[1, 10]`.
+  levels: number
   approvalMode: ApprovalMode
   emptyAssigneePolicy: EmptyAssigneePolicy
   // Self-approver authoring: the editable toggle (merge the requester in as an
@@ -142,6 +146,7 @@ export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
     sourceKind: 'requester',
     idsText: '',
     fieldId: '',
+    levels: 2,
     approvalMode: 'single',
     emptyAssigneePolicy: 'error',
     mergeWithRequester: false,
@@ -237,6 +242,7 @@ function stepDraftFromApprovalNode(
   let sourceKind: ApprovalStepSourceKind = 'requester'
   let idsText = ''
   let fieldId = ''
+  let levels = 2
   if (source?.kind === 'static_user') {
     sourceKind = 'static_user'
     idsText = formatIds(source.userIds)
@@ -252,6 +258,9 @@ function stepDraftFromApprovalNode(
     sourceKind = 'direct_manager'
   } else if (source?.kind === 'dept_head') {
     sourceKind = 'dept_head'
+  } else if (source?.kind === 'continuous_managers') {
+    sourceKind = 'continuous_managers'
+    levels = source.levels
   } else if (legacyType === 'user') {
     sourceKind = 'static_user'
     idsText = formatIds(legacyIds)
@@ -271,6 +280,7 @@ function stepDraftFromApprovalNode(
     sourceKind,
     idsText,
     fieldId,
+    levels,
     approvalMode: config.approvalMode === 'all' || config.approvalMode === 'any' ? config.approvalMode : 'single',
     emptyAssigneePolicy: config.emptyAssigneePolicy === 'auto-approve' ? 'auto-approve' : 'error',
     mergeWithRequester,
@@ -366,7 +376,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     if (sources !== undefined) {
       if (!Array.isArray(sources) || sources.length !== 1) return true
       const source = sources[0] as ApprovalAssigneeSource
-      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head'].includes(source?.kind)) return true
+      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head', 'continuous_managers'].includes(source?.kind)) return true
     }
     return false
   })
@@ -449,6 +459,9 @@ function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource {
   }
   if (step.sourceKind === 'dept_head') {
     return { kind: 'dept_head' }
+  }
+  if (step.sourceKind === 'continuous_managers') {
+    return { kind: 'continuous_managers', levels: step.levels }
   }
   return { kind: 'requester' }
 }
