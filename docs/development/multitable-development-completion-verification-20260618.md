@@ -1,5 +1,31 @@
 # 多维表开发完成度核验 — 2026-06-18
 
+> ### ⟳ RE-VERIFIED 2026-06-18 — parallel acceptance-criteria sweep for the `/goal` (LATEST; supersedes the banners below)
+> Method: five parallel read-only verification agents against live `origin/main@33db39688`, each confirming one
+> arc's acceptance criteria against the shipped code + tests (with file:line evidence), then the gaps acted on.
+> - **2a · live-CRDT full scalar set — ALL COVERED.** All 10 scalar types bind via `useYjsScalarCell`
+>   (`SCALAR_YJS_TYPES` / `STRING_STORED_ATOMIC_YJS_TYPES` `coerceText` / `DURATION_COMMIT_ON_CONFIRM`); unit +
+>   real-DB seed/flush/migration goldens; dateTime canonical-UTC-ISO invariant proven by instant-equality.
+> - **2b-S1 evaluator · S3 authoring UI · S4 parse cache — ALL COVERED.** Operator matrix + fail-closed
+>   (malformed / deleted field); no-silent-loss rule preservation + CRUD + text-op allowlist FE↔BE parity +
+>   typed i18n; cache hit / equals-direct / content-invalidation / 200-rule perf / LRU+clear / staleness-free.
+> - **2b-S2 enforcement — GAP FOUND AND CLOSED.** Only 3/9 read surfaces had real-DB goldens; the rule-deny
+>   composes into the shared `loadDeniedRecordIds` set (DENY-WINS union) for every surface, so **#2890** added
+>   goldens for view/search-filter, aggregate/dashboard, export, and link-picker → **8/9** (green in
+>   `test (20.x)`). The 9th — **trash list/restore** — is a deliberate deferral (`loadRuleDeniedRecordIds`
+>   reads live `meta_records` only, code-acknowledged) → **explicit owner decision (TODO §5):** build trash
+>   rule-deny + restore gating, or record as a known deferral. NOT built autonomously (new access-control on a
+>   flag-off / inert feature — owner-named territory).
+> - **2c · #16 person org-directory — ALL COVERED.** Native `userId[]`; fail-closed validator across all write
+>   paths (incl. import via shared `createRecord`); active-only directory resolver; `canEditRecord`-gated
+>   endpoint; picker display-parity + no-silent-drop; inactive cue. **CI gap closed:** the two FE specs
+>   (`multitable-person-picker`, `multitable-cell-renderer-person-inactive`) were in no required gate → now in
+>   the web-guard gate (**#2891**).
+>
+> **Net for the `/goal`:** every planned arc (2a / 2b / 2c) is built + tested on main; verification surfaced and
+> closed two real test/CI gaps (#2890, #2891). The only remaining items are **owner decisions** — the trash-deny
+> build-vs-defer binary (TODO §5) and the closed-not-landed #2877 reopen — neither is autonomous planned remainder.
+>
 > Status: **VERIFICATION** of the `/goal` "complete all development per the plan/TODO MD".
 > Grounding: `origin/main@9f68ed67c`, code-anchored (not doc-marker — stale-marker traps this session, see §5).
 > Authoritative plan: **`multitable-gated-remainder-development-plan-20260618.md` (#2828)**, which **supersedes** `multitable-current-development-plan/todo-20260617.md` (#2801).
