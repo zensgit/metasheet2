@@ -1513,6 +1513,23 @@ function getApprovalNodeConfig(runtimeGraph: RuntimeGraph, nodeKey: string): App
   return node?.type === 'approval' ? node.config : null
 }
 
+/**
+ * True when any approval node's assignee sources include a `continuous_managers`
+ * source. Used at create time to decide whether to walk the (more expensive)
+ * management chain into the requester snapshot — keeping the extra per-hop
+ * directory queries off every approval that does not use the source. `kind` is
+ * read structurally so this works before the kind is added to the typed union.
+ */
+export function runtimeGraphUsesContinuousManagers(runtimeGraph: RuntimeGraph): boolean {
+  return runtimeGraph.nodes.some((node) => {
+    if (node.type !== 'approval') return false
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) return false
+    return sources.some((source) => isRecord(source) && source.kind === 'continuous_managers')
+  })
+}
+
 function getEffectiveAutoApprovalPolicy(
   runtimeGraph: RuntimeGraph,
   nodeKey: string,
@@ -2589,15 +2606,21 @@ export class ApprovalProductService {
       )
     }
 
-    // Lane G (P1-A) plumbing — freeze the requester's org relations (direct
-    // manager / dept head, as LOCAL user ids) from the directory `raw` payload.
-    // READ-ONLY (directory_* SELECTs only) and best-effort: a directory read
-    // failure must never block create, so an unresolved lookup just omits the
-    // fields. The future direct_manager / dept_head assignee-source kinds read
-    // these; absence falls through to the node's emptyAssigneePolicy.
+    // Org-relation plumbing — freeze the requester's org relations (direct manager
+    // / dept head / management chain, as LOCAL user ids) from the directory `raw`
+    // payload. READ-ONLY (directory_* SELECTs only) and best-effort: a directory
+    // read failure must never block create, so an unresolved lookup just omits the
+    // fields. direct_manager / dept_head read managerId / deptHeadId; the chain is
+    // walked only when the published graph uses continuous_managers (so the extra
+    // per-hop queries stay off every approval). Absence falls through to the node's
+    // emptyAssigneePolicy.
+    const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
+    const needsManagerChain = runtimeGraphUsesContinuousManagers(runtimeGraph)
     let orgRelations: ApprovalRequesterOrgRelations = {}
     try {
-      orgRelations = await resolveApprovalRequesterOrgRelations(actor.userId, pool.query.bind(pool))
+      orgRelations = await resolveApprovalRequesterOrgRelations(actor.userId, pool.query.bind(pool), {
+        includeManagerChain: needsManagerChain,
+      })
     } catch (error) {
       metricsLogger.warn(
         `Failed to resolve requester org relations for ${actor.userId}: ${
@@ -2615,8 +2638,8 @@ export class ApprovalProductService {
       permissions: actor.permissions || [],
       ...(orgRelations.managerId ? { managerId: orgRelations.managerId } : {}),
       ...(orgRelations.deptHeadId ? { deptHeadId: orgRelations.deptHeadId } : {}),
+      ...(orgRelations.managerChainIds ? { managerChainIds: orgRelations.managerChainIds } : {}),
     }
-    const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
     const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData, {
       assignmentResolver: buildApprovalAssignmentResolver({
         formSchema,

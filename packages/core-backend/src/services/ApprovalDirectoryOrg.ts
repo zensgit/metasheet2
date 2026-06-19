@@ -47,7 +47,21 @@ export interface ApprovalRequesterOrgRelations {
   managerId?: string
   /** Local user id of the head of the requester's primary department, if resolvable. */
   deptHeadId?: string
+  /**
+   * Ordered local user ids of the requester's management chain, level 1 first
+   * (`[0]` is the direct manager, equal to `managerId`). Only populated when the
+   * caller opts in via `includeManagerChain` (i.e. a published graph actually uses
+   * the `continuous_managers` source). Cycle-guarded and capped at
+   * `MAX_MANAGER_CHAIN_LEVELS`; unlinked hops are walked through but not included.
+   * Read by the `continuous_managers` assignee-source kind (which slices it to its
+   * own `levels`). Omitted when the chain resolves empty.
+   */
+  managerChainIds?: string[]
 }
+
+/** Hard ceiling on how far up the org tree the bake-time walk climbs. The per-source
+ * `levels` slices this; the cap only bounds the walk cost + a pathological deep tree. */
+export const MAX_MANAGER_CHAIN_LEVELS = 10
 
 interface LeaderInDeptEntry {
   dept_id?: unknown
@@ -115,6 +129,7 @@ interface RequesterDirectoryRow {
 export async function resolveApprovalRequesterOrgRelations(
   localUserId: string,
   query: QueryFn,
+  options: { includeManagerChain?: boolean; maxLevels?: number } = {},
 ): Promise<ApprovalRequesterOrgRelations> {
   const userId = localUserId.trim()
   if (!userId) return {}
@@ -188,7 +203,134 @@ export async function resolveApprovalRequesterOrgRelations(
   const relations: ApprovalRequesterOrgRelations = {}
   if (managerId) relations.managerId = managerId
   if (deptHeadId) relations.deptHeadId = deptHeadId
+
+  // 4) Manager chain (opt-in): walk leader_in_dept hop-by-hop up the org tree,
+  //    starting from the requester. Only runs when the caller opts in — i.e. a
+  //    published graph actually uses `continuous_managers` — so the per-hop
+  //    queries are NOT added to every approval. Same point-in-time + self-exclusion
+  //    posture as the direct manager above.
+  if (options.includeManagerChain) {
+    const chain = await resolveManagerChain(
+      integrationId,
+      requester.external_user_id,
+      userId,
+      requesterDeptId,
+      clampChainLevels(options.maxLevels),
+      query,
+    )
+    if (chain.length > 0) relations.managerChainIds = chain
+  }
+
   return relations
+}
+
+function clampChainLevels(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) return MAX_MANAGER_CHAIN_LEVELS
+  return Math.min(value, MAX_MANAGER_CHAIN_LEVELS)
+}
+
+interface DeptLeaderHop {
+  accountId: string
+  externalUserId: string
+  primaryDeptExternalId: string | null
+}
+
+/**
+ * One hop up the tree: the active account flagged leader for `deptExternalId` in
+ * its own `leader_in_dept` (excluding `excludeExternalId` so a node is never its
+ * own manager), returned with the identity needed to continue the walk — the
+ * leader's external id and *their* primary department.
+ */
+async function findDeptLeaderHop(
+  integrationId: string,
+  deptExternalId: string,
+  excludeExternalId: string,
+  query: QueryFn,
+): Promise<DeptLeaderHop | undefined> {
+  const rows = await query<{
+    account_id: string
+    external_user_id: string
+    raw: unknown
+    primary_dept_external_id: string | null
+  }>(
+    `SELECT a.id::text                  AS account_id,
+            a.external_user_id          AS external_user_id,
+            a.raw                       AS raw,
+            pd.external_department_id   AS primary_dept_external_id
+       FROM directory_accounts a
+       JOIN directory_account_departments ad
+         ON ad.directory_account_id = a.id
+       JOIN directory_departments d
+         ON d.id = ad.directory_department_id
+       LEFT JOIN directory_account_departments pad
+         ON pad.directory_account_id = a.id
+        AND pad.is_primary = true
+       LEFT JOIN directory_departments pd
+         ON pd.id = pad.directory_department_id
+      WHERE a.integration_id = $1::uuid
+        AND a.is_active = true
+        AND d.external_department_id = $2
+        AND a.external_user_id <> $3`,
+    [integrationId, deptExternalId, excludeExternalId],
+  )
+  const leader = rows.rows.find((row) => parseLeaderDeptIds(asRecord(row.raw)).includes(deptExternalId))
+  if (!leader) return undefined
+  return {
+    accountId: leader.account_id,
+    externalUserId: leader.external_user_id,
+    primaryDeptExternalId: normalizeExternalId(leader.primary_dept_external_id),
+  }
+}
+
+/**
+ * Walk the management chain up from the requester, collecting linked LOCAL user
+ * ids in order (level 1 = direct manager). Termination is bounded three ways so a
+ * malformed org graph can never loop or run away:
+ *   - a visited-set of external ids stops cycles (A leads B's dept, B leads A's);
+ *   - a hop with no leader stops the walk (top of tree reached);
+ *   - at most `maxLevels` hops are taken.
+ * Unlinked managers are walked *through* (their own manager can still resolve) but
+ * not added to the chain; duplicates are collapsed.
+ *
+ * Self-exclusion is enforced on the requester's LOCAL id, not just their starting
+ * external id: a person can own multiple directory accounts (distinct external ids)
+ * that all link back to the same local user, and any of those alt-accounts could be
+ * flagged leader of the requester's department. Excluding only the starting external
+ * id would let such an alt-account resolve to the requester's own local id and land
+ * the requester in their own management chain. So a hop that resolves to
+ * `requesterLocalId` is walked *through* (we still climb past it to find the real
+ * next manager) but never added to the chain.
+ */
+async function resolveManagerChain(
+  integrationId: string,
+  requesterExternalId: string,
+  requesterLocalId: string,
+  requesterDeptExternalId: string | null,
+  maxLevels: number,
+  query: QueryFn,
+): Promise<string[]> {
+  const chain: string[] = []
+  const visited = new Set<string>([requesterExternalId])
+  let currentExternalId = requesterExternalId
+  let currentDeptExternalId = requesterDeptExternalId
+
+  for (let level = 0; level < maxLevels; level += 1) {
+    if (!currentDeptExternalId) break
+    const hop = await findDeptLeaderHop(integrationId, currentDeptExternalId, currentExternalId, query)
+    if (!hop) break
+    if (visited.has(hop.externalUserId)) break
+    visited.add(hop.externalUserId)
+
+    const localId = await resolveLinkedLocalUserId(hop.accountId, query)
+    // Self-exclusion on the LOCAL id: an alt-account of the requester (different
+    // external id, same local user) must not enter the chain. Walk through it.
+    if (localId && localId !== requesterLocalId && !chain.includes(localId)) chain.push(localId)
+
+    currentExternalId = hop.externalUserId
+    currentDeptExternalId = hop.primaryDeptExternalId
+  }
+
+  return chain
 }
 
 async function resolveLinkedLocalUserId(accountId: string, query: QueryFn): Promise<string | undefined> {
