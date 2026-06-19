@@ -4866,6 +4866,18 @@ async function testTemplatesCrudRoutes() {
   assert.equal(res.body.data.length, 1)
   assert.equal(res.body.data[0].id, id)
 
+  // S3-3: reference-template catalog -> 200 (read-gated), values-free, multitable-first.
+  // (Route is registered before '/templates/:id' so ':id' can't capture 'references'.)
+  res = await invoke(routes, 'GET', '/api/integration/templates/references', { user: READ_USER, query: {} })
+  assertOkResponse(res, 200)
+  assert.ok(res.body.data.length >= 1, 'references catalog non-empty')
+  assert.ok(res.body.data.some((d) => d.targetKind === 'metasheet:multitable'), 'catalog has a multitable reference')
+  for (const ref of res.body.data) {
+    for (const leakKey of ['tenantId', 'workspaceId', 'id', 'credentials', 'credentialsEncrypted', 'sheetId', 'config']) {
+      assert.ok(!(leakKey in ref), `reference ${ref.refId} must not leak "${leakKey}"`)
+    }
+  }
+
   // delete -> 200 (write only)
   res = await invoke(routes, 'DELETE', '/api/integration/templates/:id', { user: WRITE_USER, params: { id } })
   assertOkResponse(res, 200)

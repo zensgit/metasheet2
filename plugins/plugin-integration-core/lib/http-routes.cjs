@@ -44,6 +44,8 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
   ['POST', '/api/integration/templates', 'templatesUpsert'],
+  // S3-3: read-only reference-template catalog. MUST precede '/templates/:id' so ':id' can't capture 'references'.
+  ['GET', '/api/integration/templates/references', 'templatesReferences'],
   ['GET', '/api/integration/templates/:id', 'templatesGet'],
   ['DELETE', '/api/integration/templates/:id', 'templatesDelete'],
   ['POST', '/api/integration/templates/preview', 'templatesPreview'],
@@ -72,6 +74,7 @@ const { resolveReferenceRuleValue } = require('./reference-mapping-resolver.cjs'
 // DF-T3b-2b: live mapping-sheet bulk-read → referenceMappingIndexes for the preview seam (read-only).
 const { buildReferenceMappingIndexes } = require('./reference-mapping-source.cjs')
 const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-templates.cjs')
+const { listReferenceIntegrationTemplates } = require('./reference-integration-templates.cjs')
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
 const { deriveK3MaterialTemplateDraft, summarizeTemplateForEvidence, TemplateDeriveError } = require('./connector-template-derive.cjs')
 const { validateRecord } = require('./validator.cjs')
@@ -1427,6 +1430,13 @@ function createHandlers(services, options = {}) {
         limit: asListLimit(query.limit),
         offset: asListOffset(query.offset),
       })))
+    },
+
+    // S3-3: read-only catalog of opt-in reference (example) templates. Values-free constants; the
+    // operator copies a chosen one (with their scope) through POST /templates upsert — NOT auto-seeded.
+    async templatesReferences(req, res) {
+      requireAccess(req, 'read')
+      return sendOk(res, listReferenceIntegrationTemplates())
     },
 
     async templatesUpsert(req, res) {
