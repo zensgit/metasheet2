@@ -70,6 +70,7 @@ External egress is irreversible. Reuse the **server-enforced** confirm gate: `co
 - Reuse the #2768 transactional audit row (`triggered_by='button'`, excluded from DF-N1 `listExecutions`/`getRecent`, retrievable by id), in the **same** `pool.transaction` as dedup.
 - **Add an egress delivery record** (target [redacted], response status, duration) — reuse the `WebhookService.createDeliveryRecord` pattern.
 - **Redaction is mandatory and is a review focus:** never persist or log the `secret`, the `X-Webhook-Signature`, any `Authorization` header, or the full response body. The executor already redacts the URL via `redactString` in error text; extend that discipline to the whole audit/delivery surface.
+- **Value-level scrub is a load-bearing invariant, not just key-name redaction (#1882 F1).** The bullet above redacts the *known secret keys* by name — but a secret-shaped **value** under a **benign** key still leaks: a record field (e.g. `notes`), a `headers` value, the target URL's query string, or exception/error text can each carry a JDBC/ODBC connection string, token, or password. So **every persisted-or-logged egress surface — the audit row, the delivery record, the failure/error message, and any log line — MUST pass through the shared value-scrubber** (the `payload-redaction.cjs` *value-pattern* path, not only key-name matching) before it is written. Key-name redaction alone is insufficient. The #1882 F1 trap ("the key looks harmless but the value already leaked the secret") must not reopen on an egress action — where it is strictly worse than on the read paths it was first found on, because the data leaves the system.
 
 ## 6. Idempotency / failure mode (D6 — resolve the reuse conflict)
 
@@ -110,10 +111,11 @@ Unit + real-DB/HTTP-boundary:
 - confirm enforced (server, not FE).
 - requestId required (side-effecting) → reject if missing; same dedup key replay → **single egress** (at-most-once, retry disabled).
 - durable audit row + delivery record land, with `secret` / signature / `Authorization` / response body **redacted** (assert they are absent).
+- **value-scrub (#1882 F1):** a secret-shaped **value** (e.g. a JDBC/ODBC connection string with an embedded password) carried under a **benign** key — a record field, a `headers` value, the URL query, or forced into the error text — does **NOT** appear verbatim in the persisted audit row, the delivery record, or the failure message. Assert the **scrubbed** form is stored, not the raw secret value (key-name redaction would pass this test while still leaking — so the assertion targets the value, under a non-secret key).
 - 3-way failure incl. non-2xx target response = `failed`, surfaced, no leak.
 - regression: `record_click` / `send_notification` / `update_record` unchanged.
 - egress mocked at the `fetch` boundary; real-DB for dedup + audit + delivery record.
 
 ## 12. Landing
 
-This design-lock (docs) → **review decides D-GATE (actor capability) · D-SSRF (url safety) · D6 (at-most/least-once + retry-disable) · payload-interpolation** → implementation (policy entry + actor re-gate + SSRF guard + reuse confirm/dedup/audit + delivery record + redaction + retry-disable + FE config for `url`/`method`/`headers`). Runtime does not begin until the owner signs off on the security decisions above.
+This design-lock (docs) → **review decides D-GATE (actor capability) · D-SSRF (url safety) · D6 (at-most/least-once + retry-disable) · payload-interpolation · value-level scrub (§5, load-bearing — value-pattern scrub across audit/delivery/error/log surfaces, not key-name only)** → implementation (policy entry + actor re-gate + SSRF guard + reuse confirm/dedup/audit + delivery record + redaction + retry-disable + FE config for `url`/`method`/`headers`). Runtime does not begin until the owner signs off on the security decisions above.
