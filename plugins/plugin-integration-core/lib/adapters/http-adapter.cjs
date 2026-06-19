@@ -425,7 +425,14 @@ function createHttpAdapterFactory(defaults = {}) {
   return (input = {}) => createHttpAdapter({ ...defaults, ...input })
 }
 
+const HTTP_ADAPTER_METADATA = {
+  label: 'HTTP API',
+  roles: ['source', 'target', 'bidirectional'],
+  advanced: false,
+}
+
 module.exports = {
+  HTTP_ADAPTER_METADATA,
   createHttpAdapter,
   createHttpAdapterFactory,
   HttpAdapterError,

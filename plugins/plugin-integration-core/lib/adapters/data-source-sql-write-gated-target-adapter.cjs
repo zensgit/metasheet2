@@ -123,7 +123,32 @@ function createDataSourceSqlWriteGatedTargetAdapterFactory({ context } = {}) {
   return ({ system, principal }) => createDataSourceSqlWriteGatedTargetAdapter({ system, context, principal })
 }
 
+const DATA_SOURCE_SQL_WRITE_GATED_ADAPTER_METADATA = {
+  label: 'Write-gated SQL data source',
+  roles: ['target'],
+  supports: ['testConnection', 'listObjects', 'getSchema'],
+  advanced: true,
+  guardrails: {
+    read: {
+      supported: false,
+    },
+    write: {
+      c6TokenBoundApplyRequired: true,
+      requiresWritableDataSource: true,
+      requiresGenericQueryDisabled: true,
+      noRawSql: true,
+      deleteSupported: false,
+      upsertRuntimeAvailable: false,
+    },
+    ui: {
+      hiddenByDefault: true,
+      serverConfiguredOnly: true,
+    },
+  },
+}
+
 module.exports = {
+  DATA_SOURCE_SQL_WRITE_GATED_ADAPTER_METADATA,
   ADAPTER_KIND,
   createDataSourceSqlWriteGatedTargetAdapter,
   createDataSourceSqlWriteGatedTargetAdapterFactory,

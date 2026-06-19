@@ -622,7 +622,29 @@ function deriveMultitablePlannerTargetConfig({ system, object, fieldMappings = [
   }
 }
 
+const METASHEET_MULTITABLE_ADAPTER_METADATA = {
+  label: 'MetaSheet multitable',
+  roles: ['target'],
+  supports: ['testConnection', 'listObjects', 'getSchema', 'upsert'],
+  advanced: false,
+  guardrails: {
+    read: {
+      supported: false,
+    },
+    write: {
+      hostOwned: true,
+      pluginScopedSheetsOnly: true,
+      supportsAppend: true,
+      supportsUpsertByKey: true,
+    },
+    ui: {
+      recommendedForCleansedOutput: true,
+    },
+  },
+}
+
 module.exports = {
+  METASHEET_MULTITABLE_ADAPTER_METADATA,
   MULTITABLE_WRITE_TARGET_KIND,
   MULTITABLE_WRITE_PROFILE,
   createMetaSheetMultitableWriteSource,

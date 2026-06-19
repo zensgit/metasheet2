@@ -343,7 +343,30 @@ function createK3WiseSqlServerChannelFactory(defaults = {}) {
   return (input = {}) => createK3WiseSqlServerChannel({ ...defaults, ...input })
 }
 
+const K3_WISE_SQLSERVER_ADAPTER_METADATA = {
+  label: 'K3 WISE SQL Server Channel',
+  roles: ['source', 'target'],
+  advanced: true,
+  guardrails: {
+    read: {
+      requiresTableAllowlist: true,
+      allowlistKeys: ['readTables', 'allowedTables'],
+    },
+    write: {
+      requiresMiddleTableMode: true,
+      requiresTableAllowlist: true,
+      allowlistKeys: ['writeTables', 'allowedTables'],
+      writeModes: ['middle-table'],
+    },
+    ui: {
+      hiddenByDefault: true,
+      normalUiDirectCoreTableWrites: false,
+    },
+  },
+}
+
 module.exports = {
+  K3_WISE_SQLSERVER_ADAPTER_METADATA,
   createK3WiseSqlServerChannel,
   createK3WiseSqlServerChannelFactory,
   __internals: {
