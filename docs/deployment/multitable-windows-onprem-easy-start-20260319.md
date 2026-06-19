@@ -28,6 +28,21 @@ the existing deploy root's apply entrypoint:
 deploy.bat <downloaded-package.zip>
 ```
 
+On Windows hosts with deep default `%TEMP%` paths, set a short local staging
+root before running the upgrade. The deploy launcher and the staged apply helper
+both honor the same variable, so zip extraction and package copy stay under the
+short path instead of falling back to the user profile temp directory:
+
+```bat
+mkdir C:\ms-tmp 2>NUL
+set "METASHEET_ONPREM_STAGING_ROOT=C:\ms-tmp"
+deploy.bat <downloaded-package.zip>
+```
+
+The setting only changes deploy staging/extraction. It does not change the
+installed root, app data paths, database connection, dependency store, or service
+configuration.
+
 Local build on the release machine:
 
 ```bash

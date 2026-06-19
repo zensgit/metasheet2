@@ -338,8 +338,14 @@ Upgrade / corrective reroll:
   deploy root, run:
     deploy.bat <downloaded-package.zip>
 
+  On Windows hosts whose default %TEMP% path is deep or redirected, pin staging
+  to a short local root before running deploy.bat:
+    mkdir C:\ms-tmp 2>NUL
+    set "METASHEET_ONPREM_STAGING_ROOT=C:\ms-tmp"
+    deploy.bat <downloaded-package.zip>
+
   Or run the PowerShell helper directly:
-    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ops\multitable-onprem-apply-package.ps1 -RootDir . -PackageArchive <downloaded-package.zip>
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ops\multitable-onprem-apply-package.ps1 -RootDir . -PackageArchive <downloaded-package.zip> -StagingRoot C:\ms-tmp
 
 Dependency policy:
   node_modules are intentionally not bundled. The apply helper defaults to
@@ -365,6 +371,7 @@ EOF
   "nodeModulesBundled": false,
   "dependencyInstallMode": "refresh-on-apply",
   "windowsEntryPoint": "deploy.bat <package.zip|package.tgz>",
+  "windowsStagingRootEnv": "METASHEET_ONPREM_STAGING_ROOT",
   "linuxEntryPoint": "scripts/ops/multitable-onprem-package-install.sh",
   "includedRuntimeRoots": [
     "apps/web/dist",
@@ -576,6 +583,14 @@ Runtime dependencies:
   node_modules from missing newly added workspace runtime dependencies. If
   applying files manually without deploy.bat, run pnpm install --frozen-lockfile
   from the package root before migrations/bootstrap.
+
+Windows staging root:
+  If the host's default %TEMP% path is deep, redirected, or fails package
+  staging, create a short local directory and set METASHEET_ONPREM_STAGING_ROOT
+  before running deploy.bat:
+    mkdir C:\ms-tmp 2>NUL
+    set "METASHEET_ONPREM_STAGING_ROOT=C:\ms-tmp"
+    deploy.bat <downloaded-package.zip>
 EOF
 
 run rm -f "$ARCHIVE_TGZ_TMP_PATH" "$ARCHIVE_ZIP_TMP_PATH" "$ARCHIVE_TGZ_SHA_TMP_PATH" "$ARCHIVE_ZIP_SHA_TMP_PATH" "$METADATA_JSON_TMP_PATH"
@@ -603,6 +618,7 @@ cat > "${METADATA_JSON_TMP_PATH}" <<EOF
   "directReplaceSafe": false,
   "nodeModulesBundled": false,
   "windowsEntryPoint": "deploy.bat <package.zip|package.tgz>",
+  "windowsStagingRootEnv": "METASHEET_ONPREM_STAGING_ROOT",
   "attendanceOnly": false,
   "productMode": "platform",
   "includedPlugins": ["plugin-attendance", "plugin-integration-core"],
