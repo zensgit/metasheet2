@@ -6,7 +6,8 @@
 > this lock is reviewed.
 >
 > **Sequence note:** per the standing goal, the next *build* after this lock is **2a filter-by-link /
-> lookup-value**, NOT 1b Slice A. Slice A is its own opt-in once the keystone below is decided.
+> lookup-value**, NOT 1b Slice A. The keystone below is now **decided (relation-scoped, §1)**; Slice A is
+> still its own opt-in, taken only after filter-by-link is reviewable.
 
 ## 0. Why a lock first
 
@@ -16,9 +17,9 @@ once — they read *other* records (permissions), they fan out on *foreign* writ
 scan unboundedly (performance). Those three interact, so they must be decided together before any function
 lands.
 
-## 1. KEYSTONE (open question for review) — what can a range reference *reach*?
+## 1. KEYSTONE (decided at review 2026-06-20) — what can a range reference *reach*?
 
-Everything in blocks 3 / 5 / 7 depends on this, and it is **not yet pinned**. Two options:
+Everything in blocks 3 / 5 / 7 depends on this. It is now **pinned** (resolution below the table). Two options:
 
 | | **Relation-scoped** (locked default, first) | **Whole-sheet record-set** (gated extension) |
 |---|---|---|
@@ -31,11 +32,13 @@ Everything in blocks 3 / 5 / 7 depends on this, and it is **not yet pinned**. Tw
 **Locked decision:** the first implementation is **relation-scoped**, reusing FOL. **Whole-sheet
 record-set is a gated extension** behind its own opt-in + the §5 caps.
 
-**⚠️ Surfaced for the reviewer:** classic `SUMIF(range, criteria, sum_range)` semantics are *whole-sheet*
-(criteria scan over a column), so **Slice A's first sub-decision is its reach.** If Slice A must be true
-whole-sheet `SUMIF`, the whole-sheet skeleton is in-scope for Slice A and §3/§5/§7 take the heavier branch.
-If a relation-scoped `SUMIF` (criteria over linked records) is acceptable first, Slice A reuses FOL and
-whole-sheet is deferred. **Decide this at review before Slice A is opted into.**
+**✅ Resolved (2026-06-20):** Slice A is **relation-scoped** — its criteria/sum range is the set of records
+linked to the current row, reusing FOL; it does **not** scan a whole sheet. **This is explicitly *not*
+classic whole-sheet `SUMIF(range, criteria, sum_range)` parity** (classic `SUMIF` scans a column across the
+whole sheet). Relation-scoped `SUMIF`/`COUNTIFS`/`AVERAGEIF` ship first; the **whole-sheet record-set scan
+skeleton is a separate gated extension** (its own opt-in + §5 caps), tracked in §3's checklist. Slice A must
+state this scope difference in its own surface (function help / release note) so users are not surprised the
+first cut aggregates linked records, not an arbitrary sheet column.
 
 ## 2. The eight locked blocks
 
@@ -126,11 +129,11 @@ returns inert sentinel, no scan) · **pure-engine parity** (same array, no DB, i
 > 🔒 = locked/blocked on a prior gate · ⬜ = ready when its gate opens · ✅ = done
 
 - ✅ **G0 — this design-lock** (8 blocks + keystone framed).
-- 🔒 **G1 — keystone decision** (relation-scoped vs whole-sheet for Slice A) — *owner decision at review of this doc.*
-- 🔒 **Slice A — criteria aggregation** (`SUMIF`/`COUNTIFS`/`AVERAGEIF`): contracts → wrapper materialization (permission-filtered, §2) → pure-engine aggregation (§6) → fan-out registration (§3) → caps (§5) → real-DB goldens (§8). *Opt-in after G1.*
+- ✅ **G1 — keystone decided** 2026-06-20: **relation-scoped** for Slice A (not whole-sheet `SUMIF` parity, §1).
+- ⬜ **Slice A — criteria aggregation, relation-scoped** (`SUMIF`/`COUNTIFS`/`AVERAGEIF` over linked records): contracts → wrapper materialization (permission-filtered, §2) → pure-engine aggregation (§6) → fan-out registration via FOL reverse-edge (§3) → caps (§5) → real-DB goldens (§8). *Ready; opt-in taken after 2a filter-by-link is reviewable (goal sequence).*
 - 🔒 **Slice B — lookup family** (`VLOOKUP`/`INDEX`/`MATCH`): single-row resolution + not-found sentinel. *Opt-in after Slice A.*
 - 🔒 **Slice C — array** (array aggregation / array-return). *Opt-in after Slice B.*
-- 🔒 **Whole-sheet record-set extension** (if not chosen at G1): sheet-level dependency edge + scan skeleton + §5 caps. *Separate opt-in.*
+- 🔒 **Whole-sheet record-set extension** (the gated branch not chosen at G1): sheet-level dependency edge + scan skeleton + §5 caps. *Separate opt-in.*
 
 ## 4. Non-goals (explicit)
 - No new `{fld}` syntax or context-sensitive `{fld}`.
