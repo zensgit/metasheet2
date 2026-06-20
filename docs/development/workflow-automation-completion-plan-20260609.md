@@ -2,7 +2,7 @@
 
 Date: 2026-06-09
 
-Grounded on: `origin/main@741810a15`
+Originally grounded on: `origin/main@741810a15`; tracker status reconciled against current `origin/main` on 2026-06-20 by #2969.
 
 Scope: MetaSheet2 workflow, approval, and multitable automation as one product
 target. This is a completion definition and execution ledger, not a sprint
