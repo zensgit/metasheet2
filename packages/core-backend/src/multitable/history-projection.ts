@@ -202,7 +202,7 @@ export async function loadHistoryBatchDetail(
   const res = await query(
     `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, snapshot, patch, created_at
      FROM meta_record_revisions
-     WHERE sheet_id = ANY($1::text[]) AND COALESCE(batch_id, id) = $2
+     WHERE sheet_id = ANY($1::text[]) AND COALESCE(batch_id, id::text) = $2
      ORDER BY created_at DESC, version DESC, id DESC`,
     [sheetIds, batchId],
   )
