@@ -71,7 +71,7 @@ P0 should finish before advertising approval as broadly usable.
 
 ### P1-A. Organization-Derived Assignees
 
-**Status (reconciled 2026-06-20): SHIPPED (first wave).** `direct_manager` (#2852), `dept_head` (#2873), and `continuous_managers` / manager-chain "reading A" (#2907 resolver+authoring, #2911 design-lock ratified+shipped, #2915 configurable `APPROVAL_MANAGER_CHAIN_MAX_LEVELS`) all landed against the real DingTalk directory mirror; the "Likely contract" below matches what shipped. Still deferred within P1-A: `continuous_managers` "reading B" (sequential, level-by-level approval — design-locked, runtime not built) and `stopAt`-style chain termination beyond the shipped cap.
+**Status (reconciled 2026-06-20): SHIPPED (first wave).** `direct_manager` (#2852), `dept_head` (#2873), and `continuous_managers` / manager-chain "reading A" (#2907 resolver+authoring, #2911 design-lock ratified+shipped, #2915 configurable `APPROVAL_MANAGER_CHAIN_MAX_LEVELS`) all landed against the real DingTalk directory mirror. The **as-built contract is shown below**; the original 2026-06-16 proposal is kept as historical context and does **not** match as-built (`department_owner`→`dept_head`; `manager_chain` + `maxLevels` + `stopAt` → `continuous_managers` with a single `levels`; resolution is requester-rooted, no `of` form-field param). Still deferred within P1-A: `continuous_managers` "reading B" (sequential, level-by-level approval — design-locked, runtime not built).
 
 **Goal:** support dynamic assignees derived from organizational structure, such
 as direct manager, department owner, or a bounded chain of managers.
@@ -79,7 +79,7 @@ as direct manager, department owner, or a bounded chain of managers.
 **Why first:** it is the highest-value extension to the existing assignment
 resolver and should not require rewriting the approval executor.
 
-**Likely contract:**
+**Original proposal (2026-06-16, historical — superseded by as-built below):**
 
 ```ts
 type ApprovalAssigneeSource =
@@ -94,6 +94,20 @@ type ApprovalAssigneeSource =
     }
 ```
 
+**As-built contract (`origin/main` — `apps/web/src/types/approval.ts`, `packages/core-backend/src/types/approval-product.ts`):**
+
+```ts
+type ApprovalAssigneeSourceKind =
+  | 'static_user' | 'static_role' | 'requester' | 'form_field_user'
+  | 'direct_manager' | 'dept_head' | 'continuous_managers'
+
+type ApprovalAssigneeSource =
+  | ExistingSources
+  | { kind: 'direct_manager' }                       // requester's direct manager (#2852)
+  | { kind: 'dept_head' }                            // requester's department head (#2873)
+  | { kind: 'continuous_managers'; levels: number }  // reading-A: 会签/或签 over N levels (#2907/#2911/#2915)
+```
+
 **Hard gate (satisfied):** runtime required a real directory/reporting source — met by the DingTalk directory mirror (org-tree admin mirror #1524, `directory_departments`). The gate held until that source existed; a fake hierarchy would only have proven fixtures.
 
 **First safe slice:** a scope-gate plus a read-only directory data-source scout:
@@ -106,6 +120,8 @@ type ApprovalAssigneeSource =
 
 ### P1-B. Add / Remove Signers
 
+**Status (reconciled 2026-06-20): SHIPPED.** `add_sign` / `reduce_sign` landed (Lane D #2800 `673fa8b07`): `ApprovalActionType` union, route, executor/service, frontend authoring+runtime, and real-DB tests. The scope questions below were resolved in #2800; remaining policy extensions (placement rules / who-may-add governance beyond the shipped default) require a separate scope.
+
 **Goal:** allow a running approval to add or remove approvers without corrupting
 the current node state.
 
@@ -117,7 +133,7 @@ the current node state.
 - How is the action audited?
 - How does it interact with existing auto-approval dedupe rules?
 
-This is a runtime action rung. It needs a scope-gate before implementation.
+This was a runtime action rung; it **shipped in #2800** (see status above). Further policy extensions need a separate scope.
 
 ### P1-C. Node-Level Field Permissions
 
@@ -217,7 +233,7 @@ Recommended sequence:
    - Remaining P1-A: `continuous_managers` reading-B (sequential, level-by-level) is design-locked, runtime not built — owner-gated.
 3. **P1-C node-level field permissions — `hidden` facet SHIPPED** (#2799 server-side echo-redaction; guard #2848).
    - Remaining P1-C: `readonly` / `editable` node facets still need the edit-form-at-node direction + server-side validation, not frontend-only hiding.
-4. **Defer P1-B, P1-D, and all P2/P3 items until a named use case exists.**
+4. **Defer P1-D and all P2/P3 items until a named use case exists** (P1-A / P1-B shipped; P1-C `hidden` shipped).
 
 ## 8. PR Rules
 

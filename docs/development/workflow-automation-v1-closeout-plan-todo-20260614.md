@@ -2,7 +2,7 @@
 
 Date: 2026-06-14
 
-Grounded on: `origin/main@741810a15`
+Originally grounded on `origin/main@741810a15`; reconciled 2026-06-20 by #2969.
 
 Type: closeout plan + TODO ledger.
 
