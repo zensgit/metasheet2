@@ -71,6 +71,7 @@ import {
 } from '../multitable/permission-service'
 import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
 import { resolveUserDisplayNames } from '../multitable/user-display'
+import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import {
   loadFieldsForSheet as loadFieldsForSheetShared,
   loadSheetRow as loadSheetRowShared,
@@ -6363,6 +6364,72 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list record permissions failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record permissions' } })
+    }
+  })
+
+  // Global History & Point-in-Time Restore — T1b/T4: base-level read-only history center (project-on-read).
+  // Sheet-level read gate = filterReadableSheetRowsForAccess; record-level LOCK-3 deny lives in the projection.
+  router.get('/bases/:baseId/history/events', async (req: Request, res: Response) => {
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
+      if (!baseId) return res.status(400).json({ ok: false, error: { code: 'BAD_REQUEST', message: 'baseId required' } })
+      const sheetRows = (await pool.query('SELECT id FROM meta_sheets WHERE base_id = $1 AND deleted_at IS NULL', [baseId])).rows as Array<{ id: unknown }>
+      const readable = await filterReadableSheetRowsForAccess(pool.query.bind(pool), sheetRows.map((r) => ({ id: String(r.id) })), access)
+      let readableSheetIds = readable.map((r) => r.id)
+      const sheetFilter = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
+      if (sheetFilter) readableSheetIds = readableSheetIds.filter((id) => id === sheetFilter)
+      if (readableSheetIds.length === 0) return res.json({ ok: true, data: { batches: [], total: 0 } })
+      const limit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
+      const offset = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : 0
+      const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+      const { batches, total } = await loadHistoryBatchSummaries(
+        pool.query.bind(pool),
+        {
+          sheetIds: readableSheetIds,
+          actorId: str(req.query.actorId),
+          source: str(req.query.source),
+          action: str(req.query.action),
+          from: str(req.query.from),
+          to: str(req.query.to),
+          limit: Number.isFinite(limit) ? limit : 50,
+          offset: Number.isFinite(offset) ? offset : 0,
+        },
+        { userId: access.userId, isAdminRole: access.isAdminRole },
+      )
+      const names = await resolveUserDisplayNames(pool.query.bind(pool), batches.map((b) => b.actorId).filter((x): x is string => !!x))
+      const enriched = batches.map((b) => ({ ...b, actorName: b.actorId ? names.get(b.actorId) ?? null : null }))
+      return res.json({ ok: true, data: { batches: enriched, total } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] history events failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to load history' } })
+    }
+  })
+
+  router.get('/bases/:baseId/history/events/:batchId', async (req: Request, res: Response) => {
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
+      const batchId = typeof req.params.batchId === 'string' ? req.params.batchId.trim() : ''
+      if (!baseId || !batchId) return res.status(400).json({ ok: false, error: { code: 'BAD_REQUEST', message: 'baseId and batchId required' } })
+      const sheetRows = (await pool.query('SELECT id FROM meta_sheets WHERE base_id = $1 AND deleted_at IS NULL', [baseId])).rows as Array<{ id: unknown }>
+      const readable = await filterReadableSheetRowsForAccess(pool.query.bind(pool), sheetRows.map((r) => ({ id: String(r.id) })), access)
+      const detail = await loadHistoryBatchDetail(pool.query.bind(pool), readable.map((r) => r.id), batchId, { userId: access.userId, isAdminRole: access.isAdminRole })
+      // Denied and missing share the SAME 404 shape (LOCK-3: no existence oracle).
+      if (!detail) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'History batch not found' } })
+      const names = await resolveUserDisplayNames(pool.query.bind(pool), detail.actorId ? [detail.actorId] : [])
+      return res.json({ ok: true, data: { ...detail, actorName: detail.actorId ? names.get(detail.actorId) ?? null : null } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] history batch detail failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to load history batch' } })
     }
   })
 

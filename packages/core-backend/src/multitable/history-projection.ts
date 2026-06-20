@@ -24,8 +24,12 @@ export interface HistoryAccess {
 }
 
 export interface HistoryEventsParams {
-  baseId: string
-  sheetId?: string
+  /**
+   * The sheet ids the actor may read = (base sheets ∩ readable), resolved by the caller (route) via the
+   * canonical `filterReadableSheetRowsForAccess` gate. The projection trusts this as the sheet-level
+   * boundary and applies record-level LOCK-3 deny on top of it.
+   */
+  sheetIds: string[]
   actorId?: string
   source?: string
   action?: string
@@ -58,14 +62,6 @@ interface RevRow {
   changed_field_ids: string[]
   batch_id: string | null
   created_at: string
-}
-
-async function loadBaseSheetIds(query: QueryFn, baseId: string, sheetFilter?: string): Promise<string[]> {
-  const res = await query(
-    `SELECT id FROM meta_sheets WHERE base_id = $1 AND deleted_at IS NULL${sheetFilter ? ' AND id = $2' : ''}`,
-    sheetFilter ? [baseId, sheetFilter] : [baseId],
-  )
-  return (res.rows as Array<{ id?: unknown }>).map((r) => String(r.id)).filter(Boolean)
 }
 
 /** Per-sheet denied-record set, gated exactly like the live read surfaces (flag-on + non-admin). */
@@ -108,7 +104,7 @@ export async function loadHistoryBatchSummaries(
   params: HistoryEventsParams,
   access: HistoryAccess,
 ): Promise<{ batches: HistoryBatchSummary[]; total: number }> {
-  const sheetIds = await loadBaseSheetIds(query, params.baseId, params.sheetId)
+  const sheetIds = params.sheetIds
   if (sheetIds.length === 0) return { batches: [], total: 0 }
   const deniedBySheet = await loadDeniedBySheet(query, sheetIds, access)
 
@@ -198,11 +194,10 @@ export interface HistoryBatchDetail {
  */
 export async function loadHistoryBatchDetail(
   query: QueryFn,
-  baseId: string,
+  sheetIds: string[],
   batchId: string,
   access: HistoryAccess,
 ): Promise<HistoryBatchDetail | null> {
-  const sheetIds = await loadBaseSheetIds(query, baseId)
   if (sheetIds.length === 0) return null
   const res = await query(
     `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, snapshot, patch, created_at
