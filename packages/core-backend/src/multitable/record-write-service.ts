@@ -14,6 +14,7 @@
  * 6. EventBus emit (webhook/automation trigger)
  */
 
+import { randomUUID } from 'crypto'
 import type { EventBus } from '../integration/events/event-bus'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import {
@@ -665,6 +666,10 @@ export class RecordWriteService {
         if (fid && ids.length > 0) personRestrictByFieldId.set(fid, ids)
       }
 
+      // Global-history T1 (LOCK-12): one bulk patchRecords call = ONE user action = ONE batch. Share a
+      // single batch_id across every record's revision so the history projection groups them as one batch,
+      // not many unrelated ones.
+      const bulkBatchId = randomUUID()
       for (const [recordId, changes] of changesByRecord.entries()) {
         const expectedVersion = Array.from(
           new Set(changes.map((c) => c.expectedVersion).filter((v): v is number => typeof v === 'number')),
@@ -869,6 +874,7 @@ export class RecordWriteService {
           changedFieldIds: [...Object.keys(patch), ...unsetIds],
           patch: revisionPatch,
           snapshot: afterImage,
+          batchId: bulkBatchId,
         })
         pendingSubscriberNotifications.push({
           sheetId,

@@ -19,6 +19,12 @@ export interface RecordRevisionInput {
   changedFieldIds?: string[]
   patch?: Record<string, unknown>
   snapshot?: Record<string, unknown> | null
+  /**
+   * Global-history T1: deterministic batch grouping key (LOCK-12 — one user action = one batch).
+   * Defaults to the revision's own id (a single-record action = its own batch); a bulk action passes
+   * one shared id across all its rows so they group as one batch. NOT a parallel write store (LOCK-1).
+   */
+  batchId?: string | null
 }
 
 export interface RecordRevisionEntry {
@@ -32,6 +38,7 @@ export interface RecordRevisionEntry {
   changedFieldIds: string[]
   patch: Record<string, unknown>
   snapshot: Record<string, unknown> | null
+  batchId?: string | null
   createdAt: string
 }
 
@@ -49,9 +56,10 @@ export async function recordRecordRevision(query: QueryFn, input: RecordRevision
        actor_id,
        changed_field_ids,
        patch,
-       snapshot
+       snapshot,
+       batch_id
     )
-     VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::text[], $9::jsonb, $10::jsonb)`,
+     VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::text[], $9::jsonb, $10::jsonb, $11)`,
     [
       id,
       input.sheetId,
@@ -63,6 +71,7 @@ export async function recordRecordRevision(query: QueryFn, input: RecordRevision
       changedFieldIds,
       JSON.stringify(input.patch ?? {}),
       input.snapshot === undefined ? null : JSON.stringify(input.snapshot),
+      input.batchId ?? id,
     ],
   )
   return id
@@ -86,6 +95,7 @@ export async function listRecordRevisions(
        changed_field_ids,
        patch,
        snapshot,
+       batch_id,
        created_at
      FROM meta_record_revisions
      WHERE sheet_id = $1 AND record_id = $2
@@ -108,6 +118,7 @@ function serializeRecordRevision(row: Record<string, unknown>): RecordRevisionEn
     changedFieldIds: Array.isArray(row.changed_field_ids) ? row.changed_field_ids.map(String) : [],
     patch: normalizeJsonObject(row.patch),
     snapshot: row.snapshot === null || row.snapshot === undefined ? null : normalizeJsonObject(row.snapshot),
+    batchId: typeof row.batch_id === 'string' ? row.batch_id : null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at ?? ''),
   }
 }

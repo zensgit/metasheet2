@@ -328,6 +328,42 @@ export interface MetaRecordRevision {
   createdAt: string
 }
 
+/** Global History & Point-in-Time Restore — base-level read-only history center (T2/T3). */
+export interface HistoryBatchSummary {
+  batchId: string
+  sheetId: string
+  actorId: string | null
+  actorName?: string | null
+  source: string
+  action: string
+  createdAt: string
+  /** Post-permission-filter counts (LOCK-3) — never the raw stored count. */
+  visibleAffectedRecordCount: number
+  visibleAffectedFieldCount: number
+  provenanceQuality: 'stamped' | 'legacy'
+}
+
+export interface HistoryChange {
+  sheetId: string
+  recordId: string
+  action: string
+  version: number
+  changedFieldIds: string[]
+  before: Record<string, unknown> | null
+  after: Record<string, unknown> | null
+}
+
+export interface HistoryBatchDetail {
+  batchId: string
+  actorId: string | null
+  actorName?: string | null
+  source: string
+  createdAt: string
+  visibleAffectedRecordCount: number
+  visibleAffectedFieldCount: number
+  changes: HistoryChange[]
+}
+
 export interface MetaRecordSubscription {
   id: string
   sheetId: string

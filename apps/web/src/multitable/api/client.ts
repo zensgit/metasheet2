@@ -12,6 +12,9 @@ import type {
   MetaRecord,
   MetaRecordContext,
   MetaRecordRevision,
+  HistoryBatchSummary,
+  HistoryBatchDetail,
+  HistoryChange,
   MetaRecordSubscription,
   MetaRecordSubscriptionNotification,
   MetaRecordSubscriptionStatus,
@@ -696,6 +699,49 @@ function normalizeRecordPermissionEntries(
       .map((item) => normalizeRecordPermissionEntry(item))
       .filter((item): item is RecordPermissionEntry => !!item)
     : []
+}
+
+function normalizeHistoryBatchSummary(raw: unknown): HistoryBatchSummary {
+  const p = (raw ?? {}) as Record<string, unknown>
+  return {
+    batchId: String(p.batchId ?? ''),
+    sheetId: String(p.sheetId ?? ''),
+    actorId: typeof p.actorId === 'string' ? p.actorId : null,
+    actorName: typeof p.actorName === 'string' ? p.actorName : null,
+    source: typeof p.source === 'string' ? p.source : 'rest',
+    action: typeof p.action === 'string' ? p.action : 'update',
+    createdAt: typeof p.createdAt === 'string' ? p.createdAt : '',
+    visibleAffectedRecordCount: Number(p.visibleAffectedRecordCount ?? 0),
+    visibleAffectedFieldCount: Number(p.visibleAffectedFieldCount ?? 0),
+    provenanceQuality: p.provenanceQuality === 'legacy' ? 'legacy' : 'stamped',
+  }
+}
+
+function normalizeHistoryChange(raw: unknown): HistoryChange {
+  const p = (raw ?? {}) as Record<string, unknown>
+  return {
+    sheetId: String(p.sheetId ?? ''),
+    recordId: String(p.recordId ?? ''),
+    action: typeof p.action === 'string' ? p.action : 'update',
+    version: Number(p.version ?? 0),
+    changedFieldIds: Array.isArray(p.changedFieldIds) ? p.changedFieldIds.map(String) : [],
+    before: p.before && typeof p.before === 'object' ? (p.before as Record<string, unknown>) : null,
+    after: p.after && typeof p.after === 'object' ? (p.after as Record<string, unknown>) : null,
+  }
+}
+
+function normalizeHistoryBatchDetail(raw: unknown): HistoryBatchDetail {
+  const p = (raw ?? {}) as Record<string, unknown>
+  return {
+    batchId: String(p.batchId ?? ''),
+    actorId: typeof p.actorId === 'string' ? p.actorId : null,
+    actorName: typeof p.actorName === 'string' ? p.actorName : null,
+    source: typeof p.source === 'string' ? p.source : 'rest',
+    createdAt: typeof p.createdAt === 'string' ? p.createdAt : '',
+    visibleAffectedRecordCount: Number(p.visibleAffectedRecordCount ?? 0),
+    visibleAffectedFieldCount: Number(p.visibleAffectedFieldCount ?? 0),
+    changes: Array.isArray(p.changes) ? p.changes.map(normalizeHistoryChange) : [],
+  }
 }
 
 function normalizeRecordHistoryEntry(payload: Partial<MetaRecordRevision> | null | undefined): MetaRecordRevision | null {
@@ -1406,6 +1452,29 @@ export class MultitableApiClient {
     )
     const data = await this.parseJson<{ items?: Array<Partial<MetaRecordRevision>> }>(res)
     return normalizeRecordHistoryEntries(data)
+  }
+
+  // --- Global History & Point-in-Time Restore (read-only) ---
+  async listHistoryEvents(
+    baseId: string,
+    params?: { sheetId?: string; actorId?: string; source?: string; action?: string; from?: string; to?: string; limit?: number; offset?: number },
+  ): Promise<{ batches: HistoryBatchSummary[]; total: number }> {
+    const res = await this.fetch(`/api/multitable/bases/${encodeURIComponent(baseId)}/history/events${qs(params ?? {})}`)
+    const data = await this.parseJson<{ batches?: unknown[]; total?: number }>(res)
+    return {
+      batches: Array.isArray(data?.batches) ? data.batches.map(normalizeHistoryBatchSummary) : [],
+      total: Number(data?.total ?? 0),
+    }
+  }
+
+  async getHistoryBatch(baseId: string, batchId: string): Promise<HistoryBatchDetail | null> {
+    try {
+      const res = await this.fetch(`/api/multitable/bases/${encodeURIComponent(baseId)}/history/events/${encodeURIComponent(batchId)}`)
+      return normalizeHistoryBatchDetail(await this.parseJson<Partial<HistoryBatchDetail>>(res))
+    } catch (err) {
+      if ((err as { status?: number })?.status === 404) return null // denied = missing (LOCK-3, no oracle)
+      throw err
+    }
   }
 
   async getRecordSubscriptionStatus(sheetId: string, recordId: string): Promise<MetaRecordSubscriptionStatus> {

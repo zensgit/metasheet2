@@ -24,6 +24,9 @@ on:
       - 'apps/web/src/multitable/components/TrashModal.vue'
       - 'apps/web/tests/multitable-rollup-aggregation-fe.spec.ts'
       - 'apps/web/tests/multitable-trash-fe.spec.ts'
+      - 'apps/web/src/multitable/components/HistoryCenterModal.vue'
+      - 'apps/web/src/multitable/composables/useHistoryCenter.ts'
+      - 'apps/web/tests/multitable-history-fe.spec.ts'
       - 'apps/web/src/multitable/components/MetaKanbanView.vue'
       - 'apps/web/src/multitable/components/MetaViewManager.vue'
       - 'apps/web/src/multitable/utils/view-config.ts'
@@ -62,6 +65,9 @@ on:
       - 'apps/web/src/multitable/components/TrashModal.vue'
       - 'apps/web/tests/multitable-rollup-aggregation-fe.spec.ts'
       - 'apps/web/tests/multitable-trash-fe.spec.ts'
+      - 'apps/web/src/multitable/components/HistoryCenterModal.vue'
+      - 'apps/web/src/multitable/composables/useHistoryCenter.ts'
+      - 'apps/web/tests/multitable-history-fe.spec.ts'
       - 'apps/web/src/multitable/components/MetaKanbanView.vue'
       - 'apps/web/src/multitable/components/MetaViewManager.vue'
       - 'apps/web/src/multitable/utils/view-config.ts'
@@ -130,4 +136,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run multitable web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-history-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group --reporter=dot
