@@ -71,18 +71,24 @@ Tests:
 
 ### T2 - Global History Center Read-Only UI
 
-Status: TODO, blocked on T1 + T4 route contract.
+Status: split. **T2a SHIPPED (#2961); T2b FOLLOW-UP (read-only, in MVP envelope, not gated, not yet built).**
+The original single T2 scope over-stated what shipped; this split records the actual line.
 
 Goal: add a global history center entry and timeline UI.
 
-Scope:
+Scope — T2a (SHIPPED, #2961):
 
-- toolbar / more-menu entry;
+- toolbar / more-menu entry (🕰);
 - timeline list of batches;
-- filters for time, actor, action, source, sheet, field;
-- search by visible record title / data;
-- cursor pagination;
+- filters for actor, action, source;
+- expandable per-batch detail (the T3 drilldown);
 - empty, loading, error states.
+
+Scope — T2b (FOLLOW-UP, read-only, NOT yet built — each a small slice, not gated):
+
+- time-range (from/to) + sheet + field filters in the FE — backend already accepts `from`/`to`/`sheetId` (the FE just doesn't wire them); a **field** filter needs a new backend param;
+- search by visible record title / data — needs a new backend data-search param (a separate slice);
+- cursor pagination — the current backend is `offset`/`limit`; a cursor needs a new backend param.
 
 Out of scope:
 
@@ -126,7 +132,10 @@ Tests:
 
 ### T4 - Permission-Safe Query Hardening
 
-Status: TODO, should land before or together with T2/T3.
+Status: row layer SHIPPED in #2961; **field layer was MISSING there (the "hidden fields absent" locks + their
+goldens below were specified but not implemented — #2961 shipped only the row-level goldens yet claimed LOCK-3
+done). Field layer + the two field-mask goldens landed in the 2026-06-20 review-fix PR (see the MVP verification
+MD §0).** Both layers now done; mutation-checked.
 
 Goal: history queries cannot become a side channel.
 
