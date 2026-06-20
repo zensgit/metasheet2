@@ -48,6 +48,7 @@ The **locking test** is the real-DB integration test wired into `.github/workflo
 | ✅🔒 | **linkSummaries** (`buildLinkSummaries`) foreign default-display value across `GET /view` · single-record read · link-options `data.selected` · write-echo (review follow-up to F5) | Med | #2198 | `multitable-link-summary-display-field-mask` |
 | ✅🔒 | **D1** `form-context` (recordId load) + `POST /views/:id/submit` echo layer-3 mask — **identified-path leak (NOT no-op)**; anonymous moot (no subject) | Med | #2210 | `multitable-form-context-submit-field-mask` |
 | ✅ | **kanban / gallery / calendar** view-data egress scan — **scan-clean, no live egress** (standalone view plugins are dead-sample/unreachable; product reuses the gated `/view`) | Diligence | #2206 | *scan-clean — no test (no live egress); see scan doc + §3 latent-risk note* |
+| ✅🔒 | **filter-by-link** reuses `buildLinkSummaries` to materialize the permission-filtered display set for a `link` filter condition (`GET /view` + `loadDashboardSourceRows`) — **filter-internal, NO new wire-egress** (the displays gate the predicate via `evaluateLinkFilterCondition`, then are discarded; never serialized). Egress GOLDEN `buildLinkSummaries` 4→6. | Med | #2970 | `multitable-filter-by-link-view` (denied-link non-leak · `isEmpty` perm-invariant · admin/flag-OFF canaries) |
 
 ### 2c. §2a.3 — foreign-field-level over-read (materialized formula taint)
 

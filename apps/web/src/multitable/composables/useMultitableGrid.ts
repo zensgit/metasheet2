@@ -258,7 +258,13 @@ export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; lab
     { value: 'isEmpty', label: 'is empty' },
     { value: 'isNotEmpty', label: 'is not empty' },
   ],
+  // 2a filter-by-link (first cut): `is`/`contains` compare against the linked records' permission-filtered
+  // DISPLAY strings (backend evaluateLinkFilterCondition); `isEmpty`/`isNotEmpty` test raw link presence.
+  // Free-text value (no linked-record picker yet — deferred per design-lock D4). The row renders the
+  // default free-text input for is/contains since link is not select-like (MetaFilterConditionRow).
   link: [
+    { value: 'is', label: 'is' },
+    { value: 'contains', label: 'contains' },
     { value: 'isEmpty', label: 'is empty' },
     { value: 'isNotEmpty', label: 'is not empty' },
   ],
