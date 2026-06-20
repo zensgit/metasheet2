@@ -39,7 +39,7 @@ Current main already contains the governance and first convergence slices:
 | A6-3-1 condition branch runtime | Landed: `condition_branch`, exclusive first-match/default branch, C1 parent/child/downstream lineage. |
 | A6-3-2 frontend and runs readability | Landed in code: editor builder in `MetaAutomationRuleEditor.vue` and `conditionBranchAuthoring.ts`; runs readability in `AutomationExecutionsView.vue`. |
 | A6-3-4 parallel join-all | Landed end-to-end: backend `parallel_branch` / `joinMode: all` runtime (#2496), editor authoring (#2500), and admin runs readability (#2501). |
-| Still missing | A6-3-3 branch-local wait runtime/frontend, join-any/cancellation, live BPMN runtime, public webhook token emitter. (A6-3-3 now has a docs-only scope gate; A6-4c read-only Workflow Designer compile-preview UI landed #2604.) |
+| Still missing | join-any/cancellation, nested branches, live BPMN runtime, public webhook token emitter. (A6-3-3 branch-local wait landed end-to-end: A6-3-3a backend #2626, A6-3-3b frontend #2702; A6-4c read-only Workflow Designer compile-preview UI landed #2604.) |
 
 ### 1.2 Approval
 
@@ -115,7 +115,7 @@ operate a practical business workflow using existing product surfaces:
 |---|---|---|---|
 | W0 | Re-ground status docs against current main | Landed #2411/#2412 | Existing TODOs no longer say A6-3-2 is not started after #2339/#2348. |
 | W1 | Approval authoring deployed-browser smoke | Done | #2318 PASS accepted: UI-created template published, `/approvals/new/:templateId` started, submitted user field resolved to expected assignee, unsupported rich template was read-only/save-disabled. #2375/#2371 reconfirmed current deployment. |
-| W2 | Automation A6-3-3 branch-local wait/nesting | A6-3-3a backend runtime LANDED (#2626 `8b0468920`, real-DB verified); A6-3-3b frontend authoring not started | `wait_for_callback` can live inside selected branch with stable nested step cursor, rule-drift guard, resume tests, and no silent flattening in editor. `multitable-automation-a6-3-3-branch-local-wait-scope-gate-20260615.md` pins the high-amount review scenario and the nested cursor shape; implementation remains split into backend runtime then frontend/readability. |
+| W2 | Automation A6-3-3 branch-local wait/nesting | A6-3-3a backend runtime LANDED (#2626 `8b0468920`, real-DB verified); A6-3-3b frontend authoring LANDED (#2702 `20da674c8`); nested branches still deferred | `wait_for_callback` can live inside selected branch with stable nested step cursor, rule-drift guard, resume tests, and no silent flattening in editor. `multitable-automation-a6-3-3-branch-local-wait-scope-gate-20260615.md` pins the high-amount review scenario and the nested cursor shape; implementation remains split into backend runtime then frontend/readability. |
 | W3-0 | Automation parallel fan-out + join-all scope-gate | Landed before W3-1 | `multitable-automation-a6-3-parallel-join-all-scope-gate-20260611.md` locks fan-out/fan-in C1 graph shape, `join_all` only, fail/skip semantics, redaction, and tests. |
 | W3-1 | Automation parallel fan-out + join-all runtime | Landed #2496/#2500/#2501 | Parallel branches persist independent job lineage; join-all waits for all branches; failures and skipped branches are audited; editor and admin runs detail expose the constrained shape. |
 | W4 | Automation join-any / cancellation semantics | Not started; demand-gated after W3 | First completed branch continues; ignored/cancelled siblings are explicit in C1 jobs and audit. |

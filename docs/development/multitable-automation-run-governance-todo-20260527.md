@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance + whole-execution retry only
-Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3-1 `condition_branch` exclusive-branch runtime LANDED #2321 `127b29dd9` (2026-06-05; design-lock `multitable-automation-a6-3-branch-parallel-design-20260605.md`) + A6-3-2a editor LANDED #2339 `960ea9315` + A6-3-2b admin-runs readability LANDED #2348 `4b44f25c6`; A6-3 v1 operator/API/UI trial PASS (#2367/#2371), then A6-3-3 branch-local wait scope-gate opened by `multitable-automation-a6-3-3-branch-local-wait-scope-gate-20260615.md` (runtime/frontend not started); A6-3-4/W3 parallel join-all LANDED end-to-end (#2496 runtime `b161080b8`, #2500 editor `4408239d0`, #2501 admin-runs readability `88f5f538a`, 2026-06-12); A6-5 / W6-1 `start_approval` bridge LANDED #2469, with deployed/operator smoke tracked by #2480 + `automation-start-approval-operator-smoke-runbook-20260613.md`; W7-0 approval result backwrite scope-gate added (runtime not started); A6-4a BPMN compile/preview pure compiler LANDED #2568 `0f214a222` (2026-06-13; no route, persistence, deploy/start, or live BPMN runtime); A6-4b read-only route LANDED #2577 `b5646fa71` (2026-06-13; no persistence, deploy/start, or live BPMN runtime); A6-4c Workflow Designer compile-preview UI LANDED #2604 (read-only; consumes A6-4b route; no deploy/start/persist; stale-response guarded); A6-3-3 runtime/frontend, join-any cancellation semantics, public webhook/token emitter, live BPMN runtime, and W7-1 result backwrite remain demand-gated.
+Status: A0-A5 closed (2026-05-29); A6-1 COMPLETE end-to-end (runtime #2130 + enable-writer #2191 + admin UI toggle #2193, 2026-06) — rules can opt into the per-action WorkflowJob plane from the editor, no longer dormant; A6-2 suspend/resume backend (admin-gated v1, webhook/external resume) LANDED #2237 c363a78db (2026-06-03) + A6-2b frontend (admin Resume UI + `wait_for_callback` editor) LANDED #2245 cee99c8e4 (2026-06-04) + operator UAT PASS #2257 (2026-06-04) — A6-2 now closed end-to-end; delay/timer resume deferred; A6-3-1 `condition_branch` exclusive-branch runtime LANDED #2321 `127b29dd9` (2026-06-05; design-lock `multitable-automation-a6-3-branch-parallel-design-20260605.md`) + A6-3-2a editor LANDED #2339 `960ea9315` + A6-3-2b admin-runs readability LANDED #2348 `4b44f25c6`; A6-3 v1 operator/API/UI trial PASS (#2367/#2371), then A6-3-3 branch-local wait scope-gate opened by `multitable-automation-a6-3-3-branch-local-wait-scope-gate-20260615.md`, with A6-3-3a backend runtime LANDED #2626 `8b0468920` (real-DB verified) + A6-3-3b frontend authoring UI LANDED #2702 `20da674c8`; A6-3-4/W3 parallel join-all LANDED end-to-end (#2496 runtime `b161080b8`, #2500 editor `4408239d0`, #2501 admin-runs readability `88f5f538a`, 2026-06-12); A6-5 / W6-1 `start_approval` bridge LANDED #2469, with deployed/operator smoke tracked by #2480 + `automation-start-approval-operator-smoke-runbook-20260613.md`; W7-0 approval result backwrite scope-gate added (runtime not started); A6-4a BPMN compile/preview pure compiler LANDED #2568 `0f214a222` (2026-06-13; no route, persistence, deploy/start, or live BPMN runtime); A6-4b read-only route LANDED #2577 `b5646fa71` (2026-06-13; no persistence, deploy/start, or live BPMN runtime); A6-4c Workflow Designer compile-preview UI LANDED #2604 (read-only; consumes A6-4b route; no deploy/start/persist; stale-response guarded); join-any cancellation semantics, nested branches, public webhook/token emitter, live BPMN runtime, and W7-1 result backwrite remain demand-gated.
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, read-boundary wired only); RFC #1885
 
@@ -29,7 +29,7 @@ This closeout did NOT mark the convergence engine complete at the time. Current 
 A6-1 and A6-2 are complete end-to-end; A6-3-1 `condition_branch` exclusive-branch runtime
 landed (#2321), A6-3-2 frontend/runs readability landed (#2339 + #2348), and
 A6-3-4/W3 parallel `join_all` landed end-to-end (#2496 + #2500 + #2501). A6-3-3
-branch-local wait/nesting and A6-3-5 join-any remain gated; A6-5/W6-1
+branch-local wait landed (#2626 backend + #2702 frontend); nested branches and A6-3-5 join-any remain gated; A6-5/W6-1
 `start_approval` later landed separately in #2469; A6-4a pure BPMN compile/preview
 compiler later landed in #2568, and the read-only route later landed in #2577. The
 Workflow Designer compile-preview UI and any live BPMN runtime remain separate future
@@ -84,8 +84,9 @@ operator smoke tracked by #2480 and
 - A4 / A5: completed by explicit opt-in (#2039 + #2047); retry UI,
   idempotency keys, and re-fetch-current-record context remain future opt-ins.
 - A6: A6-0/A6-3/A6-4 design-locks are docs-only; A6-1/A6-2 + A6-3-1 `condition_branch` runtime
-  + A6-3-2 frontend/readability + A6-3-4/W3 parallel `join_all` + A6-5/W6-1
-  `start_approval` bridge + A6-4a pure BPMN compiler + A6-4b read-only route landed by explicit opt-in; A6-3-3 + join-any, A6-4c UI,
+  + A6-3-2 frontend/readability + A6-3-3 branch-local wait (a backend #2626 / b frontend #2702)
+  + A6-3-4/W3 parallel `join_all` + A6-5/W6-1
+  `start_approval` bridge + A6-4a pure BPMN compiler + A6-4b read-only route + A6-4c read-only UI landed by explicit opt-in; join-any,
   public webhook/token emitter, and W7 result
   backwrite runtime remain demand-gated.
 
@@ -133,14 +134,15 @@ Landed (capability half) — A6-1 COMPLETE, end-to-end & reachable in production
   auto-locks `workflow_job_v1`; token admin-detail-only, never rendered) — LANDED #2245 cee99c8e4
   (2026-06-04). **A6-2 now closed end-to-end.**
 - A6-3 exclusive condition branch + parallel join-all — LANDED through #2321/#2339/#2348 and
-  #2496/#2500/#2501. **A6-3 now covers first-match/default branching plus fan-out/fan-in
-  `join_all`; branch-local waits and join-any remain separate.**
+  #2496/#2500/#2501; branch-local wait (A6-3-3) LANDED #2626/#2702. **A6-3 now covers first-match/default
+  branching, fan-out/fan-in `join_all`, and branch-local `wait_for_callback`; join-any and nested
+  branches remain separate.**
 
 Deferred (capability half — A6, frozen/demand-gated):
 - A6-2 delay/timer resume (v1 was webhook/external only; delay/timer later forces a durable
   scheduler/worker/leader)
-- A6-3-3 branch-local wait/nesting; A6-3-5 join-any;
-  A6-4 BPMN compile/preview adapter; public webhook/token emitter; W7 approval result backwrite
+- A6-3-3 nested branches (nested `condition_branch`); A6-3-5 join-any;
+  A6-4 live BPMN runtime (A6-4a/b/c compile-preview landed #2568/#2577/#2604); public webhook/token emitter; W7 approval result backwrite
 
 ## Milestones
 
@@ -311,8 +313,8 @@ complete.
       readable line.
 - [x] A6-3 v1 operator/API/UI trial — PASS #2367/#2371; no A6-3-3 demand surfaced.
 - [x] A6-3-3 branch-local wait scope-gate — `multitable-automation-a6-3-3-branch-local-wait-scope-gate-20260615.md`: high-amount review scenario; branch-local `wait_for_callback` only; nested branch/parallel/start_approval, public webhook, join-any, W7, and live BPMN remain out of scope.
-- [ ] A6-3-3a backend runtime — not started; must add a nested resume cursor / step-key-aware suspended descriptor, branch-path drift guard, and real-DB high-amount scenario tests before frontend.
-- [ ] A6-3-3b frontend authoring/readability — not started; may allow branch-local `wait_for_callback` only after backend contract lands; loaded richer shapes still read-only/never-flatten.
+- [x] A6-3-3a backend runtime — LANDED #2626 `8b0468920` (2026-06-15, real-DB verified): nested resume cursor / step-key-aware suspended descriptor (`automation-resume-cursor.ts`), branch-path drift guard, and real-DB high-amount scenario tests; truth-reconciled in #2698.
+- [x] A6-3-3b frontend authoring/readability — LANDED #2702 `20da674c8`: branch-local `wait_for_callback` authoring UI (`MetaAutomationRuleEditor.vue` / `conditionBranchAuthoring.ts`); loaded richer shapes still read-only/never-flatten.
 - [x] A6-3-4 / W3-0 parallel fan-out + join-all scope-gate — `multitable-automation-a6-3-parallel-join-all-scope-gate-20260611.md`: `parallel_branch`, `joinMode: all` only, C1 fan-out/fan-in graph, fail/skip semantics, and no BPMN/approval/webhook expansion.
 - [x] A6-3-4 / W3-1 parallel fan-out + join-all runtime — LANDED #2496 `b161080b8` (2026-06-11): canonical `parallel_branch` action, `joinMode: all`, service/executor fail-closed validation, C1 parent/branch-child fan-out/fan-in lineage, fail/skip aggregation, and real-DB seam tests.
 - [x] A6-3-4 frontend and admin-runs readability — LANDED #2500 `4408239d0` + #2501 `88f5f538a` (2026-06-12): editor authoring for `parallel_branch` with workflow-job auto-lock and admin runs detail showing branch labels/child jobs. **A6-3-4/W3 join-all closed end-to-end.**

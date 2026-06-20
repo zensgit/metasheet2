@@ -133,19 +133,24 @@ This TODO covers only the frontend authoring MVP. It does not authorize approval
 - [ ] Requester sees terminal state under `我发起的`.
 - [ ] Non-manager cannot enter authoring view in deployed UI.
 
+## Shipped After MVP (post-2026-06-04 — separately gated slices)
+
+Recorded here so this TODO stops reading as if these are pending:
+
+- [x] Field visibility rule editor — LANDED: editable form-field `visibilityRule` editor #2771.
+- [x] Directory-backed user/role picker — LANDED read-only: static assignee directory picker #2792 (`P1-static-picker`, full-stack read-only).
+- [x] Automation `start_approval` — LANDED: automation `start_approval` bridge #2469 (operator smoke still tracked by #2480).
+
 ## Explicitly Deferred
 
-- [ ] Field visibility rule editor.
 - [ ] Attachment upload field authoring.
-- [ ] Directory-backed user/role picker.
 - [ ] Parallel gateway authoring.
 - [ ] Condition gateway authoring.
 - [ ] BPMN designer/runtime connection.
 - [ ] Approval trigger bindings.
 - [ ] Public form / multitable submit-to-approval binding.
 - [ ] Approval result backwrite.
-- [ ] Automation `start_approval`.
-- [ ] Approval-as-job / A6-5 convergence.
+- [ ] Approval-as-job / A6-5 convergence (the `start_approval` bridge above landed the first slice; broader approval-as-job remains deferred).
 
 ## Merge Gate for Implementation PR
 

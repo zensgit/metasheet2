@@ -250,7 +250,7 @@ These are not required for v1 closeout unless a concrete scenario demands them.
 
 | ID | Work | Gate |
 |---|---|---|
-| O1 | A6-3-3 branch-local `wait_for_callback` / nested branch | A named scenario needs waiting inside a selected branch, and A6-2 top-level wait cannot model it. |
+| O1 | A6-3-3 nested branch (branch-local `wait_for_callback` LANDED #2626/#2702) | A named scenario needs *nested* branches beyond the shipped branch-local wait; the basic branch-local `wait_for_callback` already shipped. |
 | O2 | A6-3-5 join-any / cancellation | A real workflow needs first-success or first-complete semantics; join-all is insufficient. |
 | O3 | Public webhook token emitter | An external system needs to resume waits without an admin manually copying a token. Requires auth/replay/expiry design. |
 | O4 | Delay/timer resume | A real workflow needs time-based waits. Requires durable scheduler, worker ownership, and restart semantics. |
