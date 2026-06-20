@@ -110,10 +110,10 @@ describe('B1-a1 button/run route (mock pool)', () => {
     expect(res.body.error.code).toBe('BUTTON_NOT_CONFIGURED')
   })
 
-  it('a non-inert actionType (send_webhook) is NOT enabled from a button yet → 400', async () => {
-    const res = await request(app).post(runUrl('fld_btn_webhook')).send({})
-    expect(res.status).toBe(400)
-    expect(res.body.error.code).toBe('BUTTON_ACTION_NOT_ENABLED')
+  it('send_webhook is now enabled but EGRESS-gated: a reader (no admin / no multitable:send_webhook) → 403', async () => {
+    const res = await request(app).post(runUrl('fld_btn_webhook')).send({ requestId: 'req_wh_1' })
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
   })
 
   it('unknown field → 404', async () => {

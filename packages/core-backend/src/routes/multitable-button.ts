@@ -53,6 +53,11 @@ import { insertRecordSubscriptionNotifications } from '../multitable/record-subs
 import { normalizeJson, normalizeMultiSelectValue } from '../multitable/field-codecs'
 import { ensureRecordWriteAllowed } from '../multitable/sheet-capabilities'
 import { ensureRecordNotLocked } from '../multitable/record-lock'
+import { hasPermission } from '../multitable/access'
+import { redactString, redactValue } from '../multitable/automation-log-redact'
+import { checkWebhookTargetUrl } from '../multitable/webhook-ssrf-guard'
+import { pinnedHttpsFetch } from '../multitable/webhook-pinned-fetch'
+import { WebhookService } from '../multitable/webhook-service'
 import { Logger } from '../core/logger'
 
 type PoolLike = ConnectionPool & { query: QueryFn }
@@ -65,7 +70,7 @@ const logger = new Logger('MultitableButton')
 // a single `sideEffecting` flag drives BOTH the requestId requirement (§6 dedup)
 // AND the server-side confirm requirement (§4): a side-effecting action whose
 // button declares confirm.enabled MUST be confirmed by the server, not just the FE.
-type ButtonActorGate = 'read' | 'edit' | 'notify'
+type ButtonActorGate = 'read' | 'edit' | 'notify' | 'webhook'
 interface ButtonActionPolicy {
   /** Actor permission required to RUN this action (server-evaluated at dispatch). */
   gate: ButtonActorGate
@@ -87,6 +92,10 @@ const BUTTON_ACTION_POLICIES: Record<string, ButtonActionPolicy> = {
   // pre-filter; the dispatch branch re-gates the SPECIFIC row (write-own + lock) so a
   // button can never mutate a row the clicker could not edit directly (no elevation).
   update_record: { gate: 'edit', sideEffecting: true, dispatchType: 'update_record' },
+  // B1-S2: first EXTERNAL-EGRESS button action. `webhook` gate = a dedicated egress capability
+  // (admin or `multitable:send_webhook`), checked DIRECTLY at dispatch (egress ≠ edit); the dispatch
+  // additionally SSRF-validates the target and connects to the pinned address (#2950/#2956).
+  send_webhook: { gate: 'webhook', sideEffecting: true, dispatchType: 'send_webhook' },
 }
 
 export function createMultitableButtonRoutes(): Router {
@@ -173,6 +182,13 @@ export function createMultitableButtonRoutes(): Router {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
       }
       if (policy.gate === 'notify' && !capabilities.canSendNotification) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      // EGRESS gate (B1-S2). Egress ≠ edit: a dedicated grant checked DIRECTLY off the authenticated
+      // access (admin role, or the explicit `multitable:send_webhook` permission) — NEVER plain write,
+      // and not threaded through the scoped capability projections (one explicit check, no silent-drop).
+      // Re-gated here at action time so a button can never egress for an actor who lacks it (no elevation).
+      if (policy.gate === 'webhook' && !(access.isAdminRole || hasPermission(access.permissions, 'multitable:send_webhook'))) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
       }
 
@@ -285,6 +301,116 @@ export function createMultitableButtonRoutes(): Router {
           recipients: requestedUserIds.length, deduplicated: txResult.deduplicated,
         })
         return res.json({ ok: true, data: { status: 'succeeded', executionId: txResult.executionId, ...(txResult.deduplicated ? { deduplicated: true } : {}) } })
+      }
+
+      // ── send_webhook dispatch (B1-S2) ───────────────────────────────────────
+      // First EXTERNAL-EGRESS action. Order is load-bearing for security (#2897 §3.1/§6/§7):
+      //   1. parse + validate config (NO write)   2. SSRF-validate target → 400 pre-txn (no dedup/audit)
+      //   3. Tx A: claim dedup (replay → return original, NO egress)
+      //   4. egress to the PINNED address, retry OFF (at-most-once)   5. Tx B: durable audit, value-scrubbed
+      // NOTE for review (D-ORDER): §5's "audit in the SAME tx as dedup" is unsatisfiable for an external
+      // call — no HTTP inside a DB tx. So dedup COMMITS before egress (a concurrent retry then sees the
+      // claim and cannot double-fire), and the audit lands in Tx B right after egress. The only miss window
+      // is a crash between dedup-commit and egress = §6's accepted "rare miss over double-fire".
+      if (actionType === 'send_webhook') {
+        const actorId = access.userId
+        const requestIdValue = requestId as string // §6 requestId required (shared sideEffecting check above).
+
+        const actionConfig = normalizeJson(property.actionConfig)
+        const url = typeof actionConfig.url === 'string' ? actionConfig.url.trim() : ''
+        const method = actionConfig.method === 'PUT' ? 'PUT' : 'POST' // allowlist; default POST
+        const secret = typeof actionConfig.secret === 'string' ? actionConfig.secret : undefined
+        // Headers: caller allowlist; NEVER Host / auth / signature from untrusted field config (§2/§3.1).
+        const FORBIDDEN_HEADER = /^(host|authorization|cookie|x-webhook-signature|x-webhook-timestamp|proxy-authorization)$/i
+        const rawHeaders = (actionConfig.headers && typeof actionConfig.headers === 'object' && !Array.isArray(actionConfig.headers))
+          ? (actionConfig.headers as Record<string, unknown>) : {}
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+        for (const [k, v] of Object.entries(rawHeaders)) {
+          if (!FORBIDDEN_HEADER.test(k) && typeof v === 'string') headers[k] = v
+        }
+        // Body sent AS-IS — NO record-data interpolation (exfil/injection surface, §2). Default {}.
+        const body = typeof actionConfig.body === 'string'
+          ? actionConfig.body
+          : actionConfig.body && typeof actionConfig.body === 'object' ? JSON.stringify(actionConfig.body) : '{}'
+
+        // §3.1 SSRF — fail-fast 400 BEFORE the transaction (no dedup consumed, no audit/delivery written).
+        const ssrf = await checkWebhookTargetUrl(url)
+        if (!ssrf.ok) {
+          return res.status(400).json({ ok: false, error: { code: 'WEBHOOK_TARGET_REJECTED', message: redactString(ssrf.reason) } })
+        }
+        if (secret) {
+          headers['X-Webhook-Signature'] = WebhookService.signPayload(body, secret)
+          headers['X-Webhook-Timestamp'] = new Date().toISOString()
+        }
+
+        // Tx A — claim dedup. Replay (prior committed effect) short-circuits with NO second egress.
+        const dedupKey = JSON.stringify([actorId, sheetId, recordId, fieldId, requestIdValue])
+        const claim = await pool.transaction<{ deduplicated: boolean; executionId: string }>(async ({ query: txq }) => {
+          const dedup = await txq(
+            `INSERT INTO multitable_button_run_dedup
+               (id, dedup_key, actor_id, sheet_id, record_id, field_id, request_id, execution_id)
+             VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (dedup_key) DO NOTHING`,
+            [randomUUID(), dedupKey, actorId, sheetId, recordId, fieldId, requestIdValue, executionId],
+          )
+          if (Number(dedup.rowCount ?? 0) === 0) {
+            const existing = await txq(`SELECT execution_id FROM multitable_button_run_dedup WHERE dedup_key = $1`, [dedupKey])
+            return { deduplicated: true, executionId: (existing.rows[0] as { execution_id?: string } | undefined)?.execution_id ?? executionId }
+          }
+          return { deduplicated: false, executionId }
+        })
+        if (claim.deduplicated) {
+          return res.json({ ok: true, data: { status: 'succeeded', executionId: claim.executionId, deduplicated: true } })
+        }
+
+        // Egress to the PINNED address (defeats rebinding), retry OFF (at-most-once). Status only; body discarded.
+        const pinned = ssrf.addresses[0]
+        const family: 4 | 6 = pinned.includes(':') ? 6 : 4
+        const startedAt = Date.now()
+        let httpStatus = 0
+        let reached = false
+        let failureMessage: string | undefined
+        try {
+          const result = await pinnedHttpsFetch(url, pinned, family, { method, headers, body, timeoutMs: 10_000 })
+          httpStatus = result.status
+          reached = true
+          if (!result.ok) failureMessage = `target returned HTTP ${httpStatus}`
+        } catch (err) {
+          failureMessage = redactString(err instanceof Error ? err.message : String(err)) // never leak target/body
+        }
+        const durationMs = Date.now() - startedAt
+        const succeeded = reached && !failureMessage
+
+        // Tx B — durable audit + delivery info, value-scrubbed on EVERY persisted surface (§5 / #1882 F1).
+        const step: AutomationStepResult = {
+          actionType: 'send_webhook',
+          status: succeeded ? 'success' : 'failed',
+          output: redactValue({ httpStatus, durationMs, reached, target: redactString(url) }),
+          durationMs,
+          ...(failureMessage ? { error: redactString(failureMessage) } : {}),
+        }
+        try {
+          await pool.transaction(async ({ query: txq }) => {
+            await writeButtonAudit(logService, txq, { executionId, sheetId, fieldId, actorId, requestId: requestIdValue, step })
+          })
+        } catch (auditErr) {
+          // Egress already happened + dedup is committed (no re-fire). Fail-closed log; never throw past here.
+          logger.error('[multitable.button.run] send_webhook EGRESSED but audit write failed (audit-pending)', {
+            executionId, sheetId, recordId, fieldId, actorId, requestId: requestIdValue,
+            error: redactString(auditErr instanceof Error ? auditErr.message : String(auditErr)),
+          })
+        }
+
+        logger.info('[multitable.button.run]', {
+          executionId, sheetId, recordId, fieldId, actionType, actorId,
+          status: succeeded ? 'succeeded' : 'failed', requestId: requestIdValue, httpStatus, durationMs,
+        })
+        // §7 3-way: pre-txn 400 handled above. A REACHED target = succeeded (2xx) or failed (non-2xx);
+        // a transport error = failed. Never leak the response body in the message.
+        return res.json({
+          ok: true,
+          data: { status: succeeded ? 'succeeded' : 'failed', executionId, ...(failureMessage ? { message: redactString(failureMessage) } : {}) },
+        })
       }
 
       // ── update_record dispatch (B1-S1 D0-B) ─────────────────────────────────
