@@ -1,7 +1,8 @@
 # 通用对接 on-prem 包 — artifact ready, **entity-machine smoke PENDING**(2026-06-19)
 
-> 状态:**artifact ready(可复现构建 + 本地/CI smoke 通过)**;**实体机 smoke 未做(PENDING)**。
-> 本文**不**声称已实体机验证。本地 smoke 只证明"代码与包结构未坏",**不**替代实体机真实部署验证。
+> 状态:**artifact ready(可复现构建 + 本地/CI smoke 通过)**;已 **GitHub prerelease 正式分发**(`multitable-onprem-s1s3s4-20260619`,`isPrerelease=true`);**实体机 smoke 未做(PENDING)**。
+> 本文**不**声称已实体机验证。GitHub 上是 **prerelease(非 GA)**,release notes 明确 entity-machine PENDING。本地/CI smoke 只证明"代码与包结构未坏",**不**替代实体机真实部署验证。
+> 对外措辞统一:*on-prem artifact has been built and locally verified; a GitHub **prerelease** is published; entity-machine smoke remains pending*(**不说 GA / 不说已验证**)。
 > 首笔真实外部写 = 始终独立 owner gate(与本包无关)。
 
 ## 0. 一句话
@@ -39,6 +40,7 @@ scripts/ops/multitable-onprem-package-verify.sh output/releases/multitable-onpre
 | **本地/CI smoke**(代码+结构未坏) | ✅ PASS | plugin-integration-core 全链 45 文件 `pnpm test` EXIT=0(见 §4) |
 | 包构建(本地) | ✅ PASS | `metasheet-multitable-onprem-v2.5.0-s1-s3-s4-artifact-ready-e88899394`;`BUILD_PROVENANCE.gitCommit=e8889939459a…`,`sourceIsOnOriginMain=true`;tgz sha256 `a0bfa5b4…`、zip sha256 `368d58a7…`(SHA256SUMS 全档)。产物 gitignored(`output/releases/`),本文只留记录 |
 | 包结构 verify(静态 smoke) | ✅ PASS | `multitable-onprem-package-verify.sh`:Checksum PASS / Required content PASS(121 paths)/ Deployability contract PASS(deployable-onprem-app-package, nodeModulesBundled=false)/ No-GitHub-links PASS |
+| **GitHub 正式分发** | ✅ **prerelease 已发**(**非 GA、非"已验证"**) | tag `multitable-onprem-s1s3s4-20260619`(`isPrerelease=true`;off `main`@`82e663347`;workflow run 27877510246 success;CI 重建产物 tag 为 `…-s1s3s4-20260619`)。10 assets:tgz/zip + 各 .sha256 + tgz/zip verify.json/md + 元数据 .json + SHA256SUMS。**release notes 明确 entity-machine smoke PENDING**(pre-create 写入,`upload --clobber` 未覆盖)。URL:`https://github.com/zensgit/metasheet2/releases/tag/multitable-onprem-s1s3s4-20260619` |
 | **实体机 smoke** | 🔒 **PENDING(blocked — 实体机不可用)** | operator 执行;**本轮未做** |
 
 ## 4. 本地/CI smoke 覆盖(证明什么)
