@@ -54,8 +54,8 @@ const seed = async () => {
   await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET_ID])
   await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_ID])
   for (const [rid, status] of [[REC_SECRET, 'secret'], [REC_PUBLIC, 'public']] as const) {
-    await q('INSERT INTO meta_records (id, sheet_id, base_id, data, version) VALUES ($1,$2,$3,$4::jsonb,1)', [
-      rid, SHEET_ID, BASE_ID, JSON.stringify({ [STATUS]: status }),
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
+      rid, SHEET_ID, JSON.stringify({ [STATUS]: status }),
     ])
   }
   const rev = (rid: string, batchId: string, status: string) =>
