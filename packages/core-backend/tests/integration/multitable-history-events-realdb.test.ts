@@ -6,15 +6,18 @@
  *   - a row-level rule-denied record never leaks through the batch list, the total, or the visible
  *     affected counts (a batch whose every record is denied is invisible AND uncounted; a mixed batch
  *     reports only the visible record/field counts);
+ *   - a field_permissions-denied FIELD on a row-readable record never leaks its id (changedFieldIds),
+ *     value (detail.after), or count (visibleAffectedFieldCount) — masked surgically, the visible field
+ *     of the same change still passes (the LOCK-3 field layer, parity with the per-record history route);
  *   - batch detail for a denied batch shares the SAME 404 shape as a missing batch (no existence oracle);
- *   - admin bypasses; flag-off is byte-inert;
+ *   - admin bypasses (row layer); flag-off is byte-inert;
  *   - a bulk action (shared batch_id) is ONE batch (the T1 acceptance), end-to-end through the projection.
  *
  * Runs only with DATABASE_URL (sentinel fails-not-skips in CI).
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
@@ -24,10 +27,12 @@ const TS = Date.now()
 const BASE_ID = `base_gh_${TS}`
 const SHEET_ID = `sheet_gh_${TS}`
 const STATUS = `fld_gh_status_${TS}`
+const SALARY = `fld_gh_salary_${TS}` // a second field, field_permission-deniable (LOCK-3 field layer)
 const REC_SECRET = `rec_gh_secret_${TS}`
 const REC_PUBLIC = `rec_gh_public_${TS}`
 const BULK_BATCH = `batch_gh_bulk_${TS}` // one bulk action touching BOTH records (shared id)
 const SECRET_BATCH = `batch_gh_secret_${TS}` // a single-record action on the secret record only
+const FIELD_BATCH = `batch_gh_field_${TS}` // a single-record action on REC_PUBLIC touching STATUS + SALARY
 const USER_ID = `user_gh_${TS}`
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
@@ -49,6 +54,26 @@ const batchOf = (res: { body?: { data?: { batches?: Array<{ batchId: string }> }
   (res.body?.data?.batches ?? []).find((b) => b.batchId === id) as
     | { batchId: string; visibleAffectedRecordCount: number; visibleAffectedFieldCount: number }
     | undefined
+
+type ChangeShape = { recordId: string; changedFieldIds: string[]; after: Record<string, unknown> | null }
+const changeOf = (res: { body?: { data?: { changes?: ChangeShape[] } } }, recordId: string) =>
+  (res.body?.data?.changes ?? []).find((c) => c.recordId === recordId)
+
+// A single-record action on the VISIBLE record touching BOTH fields (STATUS + SALARY). Added INSIDE the
+// field-layer tests (after the beforeEach seed) so the existing total===2 assertions are not perturbed.
+const mixedFieldRev = () =>
+  q(
+    `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id)
+     VALUES (gen_random_uuid(), $1, $2, 2, 'update', 'rest', $3, ARRAY[$4,$5]::text[], '{}'::jsonb, $6::jsonb, $7)`,
+    [SHEET_ID, REC_PUBLIC, USER_ID, STATUS, SALARY, JSON.stringify({ [STATUS]: 'public', [SALARY]: 99999 }), FIELD_BATCH],
+  )
+// field_permissions row hiding a field from the test user (subject_type='user'); afterEach clears it.
+const denyFieldForUser = (fieldId: string) =>
+  q(
+    `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+     VALUES ($1,$2,'user',$3,false,false)`,
+    [SHEET_ID, fieldId, USER_ID],
+  )
 
 const seed = async () => {
   await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET_ID])
@@ -81,14 +106,22 @@ describeIfDatabase('global-history events — LOCK-3 security goldens (real DB)'
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_ID, 'GH Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_ID, BASE_ID, 'GH Sheet'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [STATUS, SHEET_ID, 'Status', 'select', '{}', 1])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [SALARY, SHEET_ID, 'Salary', 'number', '{}', 2])
   })
 
   afterAll(async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
+  })
+
+  // The field layer toggles a field_permissions row; clear it after every test so the row-layer goldens
+  // (which assume no field denial) stay isolated regardless of order.
+  afterEach(async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
   })
 
   beforeEach(async () => {
@@ -160,5 +193,36 @@ describeIfDatabase('global-history events — LOCK-3 security goldens (real DB)'
     expect(batchIds(res)).toContain(SECRET_BATCH)
     expect(res.body?.data?.total).toBe(2)
     expect(batchOf(res, BULK_BATCH)?.visibleAffectedRecordCount).toBe(2)
+  })
+
+  // LOCK-3 FIELD layer. These two tests differ ONLY by the field_permissions denial row, on the SAME actor.
+  // Test A is the false-green guard: it proves SALARY genuinely changed and is visible without a denial, so
+  // Test B's absence assertions cannot pass vacuously.
+  test('field layer (no denial = control): a mixed-field change reports BOTH fields and the value', async () => {
+    await mixedFieldRev()
+    const res = await events()
+    expect(res.status).toBe(200)
+    expect(batchOf(res, FIELD_BATCH)?.visibleAffectedFieldCount).toBe(2) // STATUS + SALARY both visible
+    const d = await detail(FIELD_BATCH)
+    expect(d.status).toBe(200)
+    const change = changeOf(d, REC_PUBLIC)
+    expect(change?.changedFieldIds).toContain(SALARY) // field genuinely changed (guards against a vacuous pass)
+    expect(change?.after?.[SALARY]).toBe(99999) // value present when the field is allowed
+    expect(d.body?.data?.visibleAffectedFieldCount).toBe(2)
+  })
+
+  test('field layer (denial): a field_permissions-denied field is absent from changedFieldIds, after, and the field count', async () => {
+    await mixedFieldRev()
+    await denyFieldForUser(SALARY)
+    const res = await events()
+    expect(res.status).toBe(200)
+    expect(batchOf(res, FIELD_BATCH)?.visibleAffectedFieldCount).toBe(1) // only STATUS counted — SALARY masked
+    const d = await detail(FIELD_BATCH)
+    expect(d.status).toBe(200)
+    const change = changeOf(d, REC_PUBLIC)
+    expect(change?.changedFieldIds).toEqual([STATUS]) // hidden field id absent
+    expect(change?.after?.[SALARY]).toBeUndefined() // hidden value absent from the snapshot
+    expect(change?.after?.[STATUS]).toBe('public') // visible field of the SAME change still passes (surgical)
+    expect(d.body?.data?.visibleAffectedFieldCount).toBe(1) // detail count masked too
   })
 })

@@ -30,6 +30,16 @@ export interface HistoryEventsParams {
    * boundary and applies record-level LOCK-3 deny on top of it.
    */
   sheetIds: string[]
+  /**
+   * LOCK-3 FIELD layer. Per-sheet readable field-id sets = (visible property fields ∧ field_permissions
+   * scope ∧ formula-taint drop), resolved by the caller (route) via the SAME chain the per-record history
+   * route uses (`loadAllowedFieldIds` → `maskStoredRecordFieldIds`). A changed field id / snapshot value /
+   * field count for a field NOT in this set is dropped, so a row-readable-but-field-denied actor never sees
+   * the hidden field's id, value, or count. A sheet missing from the map → empty set → every field masked
+   * (FAIL CLOSED). Field-permissions are NOT admin-bypassed (parity with the per-record route); only
+   * row-level deny is (see `loadDeniedBySheet`).
+   */
+  allowedFieldsBySheet: Map<string, Set<string>>
   actorId?: string
   source?: string
   action?: string
@@ -95,6 +105,24 @@ function isDenied(deniedBySheet: Map<string, Set<string>>, sheetId: string, reco
   return deniedBySheet.get(sheetId)?.has(recordId) === true
 }
 
+const EMPTY_FIELD_SET: ReadonlySet<string> = new Set()
+
+/** LOCK-3 field layer: per-sheet allowed field-id set; a sheet missing from the map masks every field (fail-closed). */
+function allowedFieldsFor(map: Map<string, Set<string>>, sheetId: string): ReadonlySet<string> {
+  return map.get(sheetId) ?? EMPTY_FIELD_SET
+}
+
+/**
+ * Keep only the allowed field-id keys of a stored snapshot/patch object (mirrors univer-meta's
+ * `filterRecordDataByFieldIds`; kept local to avoid a routes→projection import cycle). A null/non-object
+ * snapshot stays null (matching the prior `after` semantics); an all-masked object becomes `{}` so no
+ * denied value leaks.
+ */
+function filterDataByAllowedFields(data: unknown, allowed: ReadonlySet<string>): Record<string, unknown> | null {
+  if (data === null || data === undefined || typeof data !== 'object' || Array.isArray(data)) return null
+  return Object.fromEntries(Object.entries(data as Record<string, unknown>).filter(([fieldId]) => allowed.has(fieldId)))
+}
+
 /**
  * List permission-filtered batch summaries for a base, newest first. Totals + pagination are computed
  * AFTER permission filtering (LOCK-3): a fully-denied batch never appears and never counts.
@@ -144,7 +172,8 @@ export async function loadHistoryBatchSummaries(
     for (const row of g) {
       if (isDenied(deniedBySheet, row.sheet_id, row.record_id)) continue // LOCK-3: drop denied record's rows
       visibleRecords.add(row.record_id)
-      for (const f of row.changed_field_ids) visibleFields.add(f)
+      const allowed = allowedFieldsFor(params.allowedFieldsBySheet, row.sheet_id) // LOCK-3 field layer
+      for (const f of row.changed_field_ids) if (allowed.has(f)) visibleFields.add(f) // count only readable fields
     }
     if (visibleRecords.size === 0) continue // LOCK-3: fully-denied batch is invisible AND not counted
     const head = g[0]
@@ -197,6 +226,7 @@ export async function loadHistoryBatchDetail(
   sheetIds: string[],
   batchId: string,
   access: HistoryAccess,
+  allowedFieldsBySheet: Map<string, Set<string>>,
 ): Promise<HistoryBatchDetail | null> {
   if (sheetIds.length === 0) return null
   const res = await query(
@@ -217,10 +247,13 @@ export async function loadHistoryBatchDetail(
   for (const r of rows) {
     const sheetId = String(r.sheet_id)
     const recordId = String(r.record_id)
-    if (isDenied(deniedBySheet, sheetId, recordId)) continue // LOCK-3
+    if (isDenied(deniedBySheet, sheetId, recordId)) continue // LOCK-3: row layer
     if (!head) head = r
     visibleRecords.add(recordId)
-    const fields = Array.isArray(r.changed_field_ids) ? r.changed_field_ids.map(String) : []
+    // LOCK-3 field layer: drop field ids / snapshot values / counts for fields this actor cannot read, so a
+    // row-readable-but-field-denied actor never learns the hidden field's id, value, or that it changed.
+    const allowed = allowedFieldsFor(allowedFieldsBySheet, sheetId)
+    const fields = (Array.isArray(r.changed_field_ids) ? r.changed_field_ids.map(String) : []).filter((f) => allowed.has(f))
     for (const f of fields) visibleFields.add(f)
     changes.push({
       sheetId,
@@ -229,7 +262,7 @@ export async function loadHistoryBatchDetail(
       version: Number(r.version ?? 0),
       changedFieldIds: fields,
       before: null, // T1b: before/after diff hydration is a detail refinement; after = snapshot
-      after: r.snapshot && typeof r.snapshot === 'object' ? (r.snapshot as Record<string, unknown>) : null,
+      after: filterDataByAllowedFields(r.snapshot, allowed),
     })
   }
   if (!head || visibleRecords.size === 0) return null // fully denied → same as missing (LOCK-3, no oracle)

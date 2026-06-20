@@ -3744,6 +3744,30 @@ async function loadAllowedFieldIds(query: QueryFn, sheetId: string | null | unde
   return computeAllowedFieldIds(fields, capabilities, fieldScopeMap)
 }
 
+/**
+ * Global History LOCK-3 FIELD layer: build the per-sheet readable field-id sets the project-on-read
+ * history projection masks with. Uses the EXACT chain the per-record history route uses —
+ * `loadAllowedFieldIds` (visible property fields ∧ field_permissions scope) then `maskStoredRecordFieldIds`
+ * (formula-taint drop, so a materialized formula value over a denied foreign lookup can't echo through a
+ * snapshot). One resolver pass per sheet; field-permissions are NOT admin-bypassed here, matching the
+ * per-record route (only row-level deny is admin-bypassed). Callers pass the minimal sheet set actually in
+ * scope (the detail route passes just the batch's sheet(s), not the whole base) to bound the cost.
+ */
+async function buildHistoryAllowedFieldsBySheet(
+  req: Request,
+  query: QueryFn,
+  sheetIds: string[],
+  userId: string,
+): Promise<Map<string, Set<string>>> {
+  const map = new Map<string, Set<string>>()
+  for (const sheetId of sheetIds) {
+    const { capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
+    const baseAllowed = await loadAllowedFieldIds(query, sheetId, userId, capabilities)
+    map.set(sheetId, await maskStoredRecordFieldIds(req, query, sheetId, undefined, baseAllowed))
+  }
+  return map
+}
+
 // #2052 (b): PURE — returns a redacted COPY (view configs are cached/shared; never mutate in place, or a
 // per-user redaction corrupts a later cross-user read). For each filterInfo condition on a field NOT in
 // allowedFieldIds, OMIT the `value` key (keep fieldId+operator so the client can still render the chip);
@@ -6385,10 +6409,13 @@ export function univerMetaRouter(): Router {
       const limit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
       const offset = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : 0
       const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+      // LOCK-3 field layer: a base-level list can show any readable sheet, so resolve allowed fields for all.
+      const allowedFieldsBySheet = await buildHistoryAllowedFieldsBySheet(req, pool.query.bind(pool), readableSheetIds, access.userId)
       const { batches, total } = await loadHistoryBatchSummaries(
         pool.query.bind(pool),
         {
           sheetIds: readableSheetIds,
+          allowedFieldsBySheet,
           actorId: str(req.query.actorId),
           source: str(req.query.source),
           action: str(req.query.action),
@@ -6420,7 +6447,17 @@ export function univerMetaRouter(): Router {
       if (!baseId || !batchId) return res.status(400).json({ ok: false, error: { code: 'BAD_REQUEST', message: 'baseId and batchId required' } })
       const sheetRows = (await pool.query('SELECT id FROM meta_sheets WHERE base_id = $1 AND deleted_at IS NULL', [baseId])).rows as Array<{ id: unknown }>
       const readable = await filterReadableSheetRowsForAccess(pool.query.bind(pool), sheetRows.map((r) => ({ id: String(r.id) })), access)
-      const detail = await loadHistoryBatchDetail(pool.query.bind(pool), readable.map((r) => r.id), batchId, { userId: access.userId, isAdminRole: access.isAdminRole })
+      const readableSheetIds = readable.map((r) => r.id)
+      // LOCK-3 field layer: resolve allowed fields ONLY for the sheet(s) this batch actually touches (a batch
+      // is normally one sheet) — same grouping key as the projection (LOCK-12 COALESCE(batch_id, id)).
+      const batchSheetIds = readableSheetIds.length === 0
+        ? []
+        : ((await pool.query(
+            `SELECT DISTINCT sheet_id FROM meta_record_revisions WHERE sheet_id = ANY($1::text[]) AND COALESCE(batch_id, id::text) = $2`,
+            [readableSheetIds, batchId],
+          )).rows as Array<{ sheet_id: unknown }>).map((r) => String(r.sheet_id))
+      const allowedFieldsBySheet = await buildHistoryAllowedFieldsBySheet(req, pool.query.bind(pool), batchSheetIds, access.userId)
+      const detail = await loadHistoryBatchDetail(pool.query.bind(pool), readableSheetIds, batchId, { userId: access.userId, isAdminRole: access.isAdminRole }, allowedFieldsBySheet)
       // Denied and missing share the SAME 404 shape (LOCK-3: no existence oracle).
       if (!detail) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'History batch not found' } })
       const names = await resolveUserDisplayNames(pool.query.bind(pool), detail.actorId ? [detail.actorId] : [])
