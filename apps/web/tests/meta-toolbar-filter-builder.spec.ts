@@ -158,6 +158,35 @@ describe('MetaToolbar filter builder', () => {
     expect(panel.textContent).toContain('checkbox')
   })
 
+  it('exposes is/contains for link fields (filter-by-link first cut) with a free-text value control', async () => {
+    const { state, container: root } = mountToolbar({
+      fields: [{ id: 'project', name: 'Project', type: 'link', property: { foreignSheetId: 'fs1' } } as MetaField],
+      filterRules: [{ fieldId: 'project', operator: 'isEmpty', value: undefined }],
+    })
+
+    const panel = await openFilterPanel(root)
+    const operatorSelect = panel.querySelector('select[aria-label="Filter operator"]') as HTMLSelectElement | null
+    expect(operatorSelect).toBeTruthy()
+    // first cut (design-lock D4): is / contains / isEmpty / isNotEmpty offered for a link field
+    expect(Array.from(operatorSelect!.options).map((o) => o.value)).toEqual(['is', 'contains', 'isEmpty', 'isNotEmpty'])
+    // isEmpty is a presence op → no value control rendered (raw presence)
+    expect(panel.querySelector('[aria-label="Filter value"]')).toBeNull()
+
+    // switch to contains → free-text input appears (no linked-record picker yet — D4 free-text first)
+    await setSelectValue(operatorSelect!, 'contains')
+    const valueInput = panel.querySelector('input[aria-label="Filter value"]') as HTMLInputElement | null
+    expect(valueInput).toBeTruthy()
+    expect(valueInput!.getAttribute('type')).toBe('text')
+    expect(state.filterRules[0]).toEqual({ fieldId: 'project', operator: 'contains', value: '' })
+
+    // typing the linked record's display flows through unchanged (compared backend-side against the
+    // permission-filtered display set)
+    valueInput!.value = 'Acme'
+    valueInput!.dispatchEvent(new Event('change'))
+    await nextTick()
+    expect(state.filterRules[0]).toEqual({ fieldId: 'project', operator: 'contains', value: 'Acme' })
+  })
+
   it('treats future multiSelect fields as option-backed filters', async () => {
     const { state, container: root } = mountToolbar({
       fields: [

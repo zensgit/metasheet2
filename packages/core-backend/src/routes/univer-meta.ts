@@ -3307,6 +3307,31 @@ export function evaluateMetaFilterCondition(
   return true
 }
 
+// 2a filter-by-link (first cut) — evaluate a link-field leaf condition. Kept PURE (no DB/IO) so it is
+// parity-testable: the route materializes the inputs, this decides the match. Two evaluation bases, BY
+// DESIGN (multitable-2a-filter-by-link-lookup-designlock §2):
+//   • PRESENCE (isEmpty / isNotEmpty) → the RAW link id count (from meta_links). Permission-INVARIANT and
+//     touches no display string, so a row whose links are ALL hidden from the requester still reads as
+//     non-empty (it has links). This is the D5 leak avoided: never empty-for-restricted / non-empty-for-full.
+//   • VALUE (contains / is) → the PERMISSION-FILTERED visible display set (denied foreign records already
+//     excluded upstream by buildLinkSummaries). A hidden link can neither produce a value match nor leak its
+//     display string. Multi-valued (D6): contains = any visible display contains the substring; is =
+//     MEMBERSHIP (any visible display equals the value exactly), not whole-set equality.
+// Any other operator is inert (match-all), mirroring evaluateMetaFilterCondition's catch-all.
+export function evaluateLinkFilterCondition(
+  rawLinkIds: string[],
+  visibleDisplays: string[],
+  condition: MetaFilterCondition,
+): boolean {
+  const opNorm = condition.operator.trim().toLowerCase()
+  if (opNorm === 'isempty') return rawLinkIds.length === 0
+  if (opNorm === 'isnotempty') return rawLinkIds.length > 0
+  const right = toComparableString(normalizeFilterScalar(condition.value)).trim().toLowerCase()
+  if (opNorm === 'contains') return right === '' ? true : visibleDisplays.some((d) => d.trim().toLowerCase().includes(right))
+  if (opNorm === 'is' || opNorm === 'equal') return visibleDisplays.some((d) => d.trim().toLowerCase() === right)
+  return true
+}
+
 function toEpoch(value: unknown): number | null {
   if (value instanceof Date) return value.getTime()
   if (typeof value === 'number' && Number.isFinite(value)) return value
@@ -3951,10 +3976,30 @@ async function loadDashboardSourceRows(args: {
     await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
   }
 
+  // 2a filter-by-link: materialize permission-filtered display strings for the link fields the filter
+  // references (the linkValuesByRecord load above is gated on needsComputedFields, which a link-only
+  // filter does not trip). Same discipline as /view — presence + display come from meta_links via the
+  // relational load, never record.data.
+  const linkFilterFieldIds = new Set(
+    collectLeafConditions(filterInfo).filter((c) => fieldTypeById.get(c.fieldId) === 'link').map((c) => c.fieldId),
+  )
+  const linkFilterFields = relationalLinkFields.filter((rl) => linkFilterFieldIds.has(rl.fieldId))
+  let filterLinkValues: Map<string, Map<string, string[]>> | null = null
+  let filterLinkSummaries: Map<string, Map<string, LinkedRecordSummary[]>> | null = null
+  if (linkFilterFields.length > 0 && rows.length > 0) {
+    filterLinkValues = await loadLinkValuesByRecord(query, rows.map((r) => r.id), linkFilterFields)
+    filterLinkSummaries = await buildLinkSummaries(req, query, sheetId, rows, linkFilterFields, filterLinkValues)
+  }
+
   if (filterInfo) {
     rows = rows.filter((record) => evaluateFilterNode(filterInfo, (condition) => {
       const fieldType = fieldTypeById.get(condition.fieldId)
       if (!fieldType) return true
+      if (fieldType === 'link') {
+        const ids = filterLinkValues?.get(record.id)?.get(condition.fieldId) ?? []
+        const displays = (filterLinkSummaries?.get(record.id)?.get(condition.fieldId) ?? []).map((s) => s.display)
+        return evaluateLinkFilterCondition(ids, displays, condition)
+      }
       return evaluateMetaFilterCondition(fieldType, record.data[condition.fieldId], condition)
     }))
   }
@@ -8879,12 +8924,17 @@ export function univerMetaRouter(): Router {
       const selectableFields = visibleFields.filter((field) => selectableFieldIds.has(field.id))
 
       // Computed (lookup/rollup/formula) filter conditions can't be evaluated here (no applyLookupRollup),
-      // so the filtered set would silently disagree with /view. HARD-FAIL instead (deferred to #4-3b-2).
-      // Only SELECTABLE (non-denied) conditions trip this — a denied condition is dropped (= non-existent),
-      // matching /view, so it never forces a 422 (which would break the parity invariant).
+      // and a `link` condition can't either (no buildLinkSummaries on this path) — either would make the
+      // filtered set silently DISAGREE with /view (which DOES support both). HARD-FAIL instead so the
+      // aggregate never diverges (computed deferred to #4-3b-2; link-aggregate is a filter-by-link
+      // follow-up). Only SELECTABLE (non-denied) conditions trip this — a denied condition is dropped
+      // (= non-existent), matching /view, so it never forces a 422 (which would break the parity invariant).
+      // NB: COMPUTED_FILTER_TYPES is reused by the group-by-axis 422 below (grouping by a computed field);
+      // link is added to the FILTER guard only, not to group-by.
       const COMPUTED_FILTER_TYPES = new Set(['lookup', 'rollup', 'formula'])
-      if (collectLeafConditions(filterInfo).some((c) => selectableFieldIds.has(c.fieldId) && COMPUTED_FILTER_TYPES.has(filterFieldTypeById.get(c.fieldId) ?? ''))) {
-        return res.status(422).json({ ok: false, error: { code: 'AGGREGATE_COMPUTED_FILTER_UNSUPPORTED', message: 'Aggregation over a view filtering on a computed (lookup/rollup/formula) field is not yet supported' } })
+      const isAggregateUnsupportedFilterType = (t: string) => COMPUTED_FILTER_TYPES.has(t) || t === 'link'
+      if (collectLeafConditions(filterInfo).some((c) => selectableFieldIds.has(c.fieldId) && isAggregateUnsupportedFilterType(filterFieldTypeById.get(c.fieldId) ?? ''))) {
+        return res.status(422).json({ ok: false, error: { code: 'AGGREGATE_COMPUTED_FILTER_UNSUPPORTED', message: 'Aggregation over a view filtering on a computed (lookup/rollup/formula) or link field is not yet supported' } })
       }
 
       // D3c permission composite → which fields' aggregates may be OUTPUT (layer-1∧layer-3; reuses fieldScopeMap above)
@@ -9338,6 +9388,23 @@ export function univerMetaRouter(): Router {
           )
         }
 
+        // 2a filter-by-link (first cut): materialize the linked records' permission-filtered DISPLAY strings
+        // for the link fields the filter references, BEFORE the predicate runs. Link ids live in meta_links
+        // (record.data[linkField] is discarded + rebuilt by the read path at :9406-9416), so presence AND
+        // display come from the relational load — never record.data. Scoped to the referenced link fields;
+        // permission discipline (denied foreign ids, field-mask display, cross-base gate) is reused verbatim
+        // from buildLinkSummaries (materialize-then-filter, never read-raw-then-mask).
+        const linkFilterFieldIds = new Set(
+          collectLeafConditions(filterInfo).filter((c) => fieldTypeById.get(c.fieldId) === 'link').map((c) => c.fieldId),
+        )
+        const linkFilterFields = relationalLinkFields.filter((rl) => linkFilterFieldIds.has(rl.fieldId))
+        let filterLinkValues: Map<string, Map<string, string[]>> | null = null
+        let filterLinkSummaries: Map<string, Map<string, LinkedRecordSummary[]>> | null = null
+        if (linkFilterFields.length > 0) {
+          filterLinkValues = await loadLinkValuesByRecord(pool.query.bind(pool), all.map((r) => r.id), linkFilterFields)
+          filterLinkSummaries = await buildLinkSummaries(req, pool.query.bind(pool), sheetId, all, linkFilterFields, filterLinkValues)
+        }
+
         if (hasSearch) {
           all = all.filter((record) => recordMatchesSearch(record, searchableFields, search))
         }
@@ -9348,6 +9415,11 @@ export function univerMetaRouter(): Router {
             all = all.filter((record) => evaluateFilterNode(pruned, (condition) => {
               const fieldType = fieldTypeById.get(condition.fieldId)
               if (!fieldType) return true
+              if (fieldType === 'link') {
+                const ids = filterLinkValues?.get(record.id)?.get(condition.fieldId) ?? []
+                const displays = (filterLinkSummaries?.get(record.id)?.get(condition.fieldId) ?? []).map((s) => s.display)
+                return evaluateLinkFilterCondition(ids, displays, condition)
+              }
               return evaluateMetaFilterCondition(fieldType, record.data[condition.fieldId], condition)
             }))
           }
