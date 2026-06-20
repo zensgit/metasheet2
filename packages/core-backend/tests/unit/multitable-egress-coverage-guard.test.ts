@@ -63,7 +63,15 @@ const GOLDEN: Record<string, Partial<Record<(typeof EGRESS_HELPERS)[number], num
     // tests/integration/multitable-record-recycle-bin.test.ts (field_permissions.visible=false absent from trash data).
     filterRecordDataByFieldIds: 15,
     loadRecordSummaries: 3,
-    buildLinkSummaries: 4,
+    // 6 = +2 for the 2a filter-by-link materialization in GET /view and loadDashboardSourceRows. These two
+    // call-sites are FILTER-INTERNAL: buildLinkSummaries computes the permission-filtered display set used
+    // ONLY by the link filter predicate (evaluateLinkFilterCondition) and is then DISCARDED — it is never
+    // serialized to the response, so it adds no NEW wire-egress channel. The permission discipline is
+    // buildLinkSummaries' own (denied foreign ids excluded, field-mask display auto-pick, cross-base gate),
+    // so a hidden link can neither match a value op nor leak its display. Locking test:
+    // tests/integration/multitable-filter-by-link-view.test.ts (denied-link non-leak + isEmpty
+    // permission-invariant + admin-bypass/flag-OFF canaries).
+    buildLinkSummaries: 6,
     serializeLinkSummaryMap: 1,
     // 3 = linkSummaries + attachmentSummaries + native person (人员) personSummaries (design
     // 2026-06-16). The personSummaries egress is routed through the SAME layer-2 ∧ layer-3
