@@ -41,10 +41,10 @@
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" @click="showFilterPanel = !showFilterPanel">
           <span class="meta-toolbar__btn-icon">&#x2A01;</span> {{ l('toolbar.filter') }}
-          <span v-if="filterRules.length" class="meta-toolbar__badge">{{ filterRules.length }}</span>
+          <span v-if="filterRules.length + filterGroups.length" class="meta-toolbar__badge">{{ filterRules.length + filterGroups.length }}</span>
         </button>
         <div v-if="showFilterPanel" class="meta-toolbar__panel meta-toolbar__panel--filter" @keydown.escape="showFilterPanel = false">
-          <div v-if="filterRules.length > 1" class="meta-toolbar__conjunction">
+          <div v-if="(filterRules.length + filterGroups.length) > 1" class="meta-toolbar__conjunction">
             <span>{{ l('toolbar.where') }}</span>
             <select :value="filterConjunction" @change="emit('set-conjunction', ($event.target as HTMLSelectElement).value as 'and'|'or')">
               <option value="and">{{ l('toolbar.all') }}</option>
@@ -52,96 +52,30 @@
             </select>
             <span>{{ l('toolbar.conditionsMatch') }}</span>
           </div>
-          <div v-for="(rule, idx) in filterRules" :key="idx" class="meta-toolbar__filter-rule">
-            <select :value="rule.fieldId" :aria-label="l('toolbar.filterField')" @change="onFilterFieldChange(idx, ($event.target as HTMLSelectElement).value)">
-              <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
-            </select>
-            <span class="meta-toolbar__field-type">{{ getFilterFieldTypeLabel(rule.fieldId) }}</span>
-            <select :value="rule.operator" :aria-label="l('toolbar.filterOperator')" @change="onFilterOperatorChange(idx, ($event.target as HTMLSelectElement).value)">
-              <option v-for="op in getOperatorsForField(rule.fieldId)" :key="op.value" :value="op.value">{{ op.label }}</option>
-            </select>
-            <span v-if="isNoValueOp(rule.operator)" class="meta-toolbar__filter-empty-hint">{{ l('toolbar.noValueNeeded') }}</span>
-            <select
-              v-else-if="isArrayOp(rule.operator) && isSelectLikeField(rule.fieldId)"
-              class="meta-toolbar__filter-value"
-              multiple
-              :aria-label="l('toolbar.filterValue')"
-              data-filter-multi-value="true"
-              @change="onFilterMultiValueChange(idx, $event)"
-            >
-              <option
-                v-for="option in getSelectOptions(rule.fieldId)"
-                :key="option.value"
-                :value="option.value"
-                :selected="Array.isArray(rule.value) && rule.value.includes(option.value)"
-              >{{ option.label }}</option>
-            </select>
-            <template v-else-if="isBetweenOp(rule.operator)">
-              <input
-                class="meta-toolbar__filter-value"
-                :type="getInputType(rule.fieldId)"
-                :value="Array.isArray(rule.value) ? (rule.value[0] ?? '') : ''"
-                :aria-label="l('toolbar.filterValue')"
-                data-filter-between-min="true"
-                @change="onFilterBetweenChange(idx, 0, ($event.target as HTMLInputElement).value)"
-              />
-              <span class="meta-toolbar__filter-between-sep">–</span>
-              <input
-                class="meta-toolbar__filter-value"
-                :type="getInputType(rule.fieldId)"
-                :value="Array.isArray(rule.value) ? (rule.value[1] ?? '') : ''"
-                :aria-label="l('toolbar.filterValue')"
-                data-filter-between-max="true"
-                @change="onFilterBetweenChange(idx, 1, ($event.target as HTMLInputElement).value)"
-              />
-            </template>
-            <input
-              v-else-if="isNDaysOp(rule.operator)"
-              class="meta-toolbar__filter-value"
-              type="number"
-              min="1"
-              step="1"
-              :value="rule.value ?? ''"
-              :aria-label="l('toolbar.filterValue')"
-              data-filter-ndays="true"
-              @change="onFilterNDaysChange(idx, ($event.target as HTMLInputElement).value)"
-            />
-            <select
-              v-else-if="isSelectLikeField(rule.fieldId)"
-              class="meta-toolbar__filter-value"
-              :value="String(rule.value ?? '')"
-              :aria-label="l('toolbar.filterValue')"
-              @change="onFilterValueChange(idx, ($event.target as HTMLSelectElement).value)"
-            >
-              <option value="" disabled>{{ getSelectOptions(rule.fieldId).length ? l('toolbar.chooseOption') : l('toolbar.noOptions') }}</option>
-              <option v-for="option in getSelectOptions(rule.fieldId)" :key="option.value" :value="option.value">{{ option.label }}</option>
-            </select>
-            <select
-              v-else-if="getFieldType(rule.fieldId) === 'boolean'"
-              class="meta-toolbar__filter-value"
-              :value="String(rule.value ?? 'true')"
-              :aria-label="l('toolbar.filterValue')"
-              @change="onFilterValueChange(idx, ($event.target as HTMLSelectElement).value)"
-            >
-              <option value="true">{{ l('toolbar.checkedTrue') }}</option>
-              <option value="false">{{ l('toolbar.uncheckedFalse') }}</option>
-            </select>
-            <input
-              v-else
-              class="meta-toolbar__filter-value"
-              :type="getInputType(rule.fieldId)"
-              :placeholder="getValuePlaceholder(rule.fieldId)"
-              :value="rule.value ?? ''"
-              :aria-label="l('toolbar.filterValue')"
-              @change="onFilterValueChange(idx, ($event.target as HTMLInputElement).value)"
-            />
-            <button class="meta-toolbar__remove" @click="emit('remove-filter', idx)">&times;</button>
-          </div>
+          <MetaFilterConditionRow
+            v-for="(rule, idx) in filterRules"
+            :key="idx"
+            :rule="rule"
+            :fields="fields"
+            @update="(r) => emit('update-filter', idx, r)"
+            @remove="emit('remove-filter', idx)"
+          />
+          <MetaFilterGroup
+            v-for="(group, gidx) in filterGroups"
+            :key="'g' + gidx"
+            :model-value="group"
+            :fields="fields"
+            :depth="1"
+            removable
+            @update:model-value="(g) => emit('update-filter-group', gidx, g)"
+            @remove="emit('remove-filter-group', gidx)"
+          />
           <div class="meta-toolbar__filter-actions">
             <button v-if="fields.length" class="meta-toolbar__add" @click="onAddFilter">{{ l('toolbar.addFilter') }}</button>
-            <button v-if="filterRules.length" class="meta-toolbar__add meta-toolbar__add--danger" @click="emit('clear-filters')">{{ l('toolbar.clearAll') }}</button>
+            <button v-if="fields.length" class="meta-toolbar__add" data-add-filter-group="true" @click="onAddFilterGroup">{{ l('toolbar.addGroup') }}</button>
+            <button v-if="filterRules.length || filterGroups.length" class="meta-toolbar__add meta-toolbar__add--danger" @click="emit('clear-filters')">{{ l('toolbar.clearAll') }}</button>
           </div>
-          <button v-if="filterRules.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ applyButtonLabel }}</button>
+          <button v-if="filterRules.length || filterGroups.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ applyButtonLabel }}</button>
           <p v-if="filterRules.length && sortFilterDirty" class="meta-toolbar__apply-hint">{{ l('toolbar.stagedHint') }}</p>
         </div>
       </div>
@@ -216,22 +150,23 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import type { MetaField, RowDensity } from '../types'
-import type { SortRule, FilterRule, FilterConjunction } from '../composables/useMultitableGrid'
-import { FILTER_OPERATORS_BY_TYPE, effectiveFilterTypeKey } from '../composables/useMultitableGrid'
+import type { SortRule, FilterRule, FilterGroup, FilterConjunction } from '../composables/useMultitableGrid'
 import { useLocale } from '../../composables/useLocale'
+import MetaFilterConditionRow from './MetaFilterConditionRow.vue'
+import MetaFilterGroup from './MetaFilterGroup.vue'
+import { seedFilterCondition } from '../utils/filter-condition-seed'
 import {
   metaCoreLabel,
   rowCount,
-  fieldTypeLabel,
-  filterValuePlaceholder,
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   fields: MetaField[]
   hiddenFieldIds: string[]
   sortRules: SortRule[]
   filterRules: FilterRule[]
+  filterGroups?: FilterGroup[]
   filterConjunction: FilterConjunction
   canCreateRecord: boolean
   canExport?: boolean
@@ -243,7 +178,7 @@ const props = defineProps<{
   totalRows?: number
   rowDensity?: RowDensity
   sortFilterDirty?: boolean
-}>()
+}>(), { filterGroups: () => [] })
 
 const emit = defineEmits<{
   (e: 'toggle-field', fieldId: string): void
@@ -253,6 +188,9 @@ const emit = defineEmits<{
   (e: 'add-filter', rule: FilterRule): void
   (e: 'update-filter', index: number, rule: FilterRule): void
   (e: 'remove-filter', index: number): void
+  (e: 'add-filter-group', group: FilterGroup): void
+  (e: 'update-filter-group', index: number, group: FilterGroup): void
+  (e: 'remove-filter-group', index: number): void
   (e: 'clear-filters'): void
   (e: 'set-conjunction', conj: FilterConjunction): void
   (e: 'apply-sort-filter'): void
@@ -343,115 +281,20 @@ function dedupeGroupIds(ids: string[]): string[] {
   return out
 }
 const hiddenCount = computed(() => props.hiddenFieldIds.length)
-const UNARY = new Set(['isEmpty', 'isNotEmpty'])
-const isUnaryOp = (op: string) => UNARY.has(op)
-// 2a: array-valued operators (set membership) — value is an array of option values, rendered as a
-// multi-select. Mirrors the backend evaluateMetaFilterCondition isAnyOf/isNoneOf branch.
-const ARRAY_OPS = new Set(['isAnyOf', 'isNoneOf'])
-const isArrayOp = (op: string) => ARRAY_OPS.has(op)
-// 2a: between — value is a [min, max] array, rendered as two bound inputs. Mirrors the backend
-// evaluateMetaFilterCondition between branch (inclusive, reversed-tolerant).
-const isBetweenOp = (op: string) => op === 'between'
-// 2a: relative-date operators (date fields only — opNorm = op.toLowerCase() on the backend).
-// Two value modes: valueless (no control) and N-window (a single positive-integer input carrying N).
-// Mirrors the backend evaluateRelativeDateOp; N is read RAW from condition.value (not scalar-normalized),
-// so the picker must emit N as a number.
-const RELATIVE_DATE_NOVALUE_OPS = new Set(['isToday', 'isYesterday', 'isTomorrow', 'isThisWeek', 'isThisMonth', 'isOverdue'])
-const RELATIVE_DATE_NDAYS_OPS = new Set(['isLastNDays', 'isNextNDays'])
-const isRelativeNoValueOp = (op: string) => RELATIVE_DATE_NOVALUE_OPS.has(op)
-const isNDaysOp = (op: string) => RELATIVE_DATE_NDAYS_OPS.has(op)
-// Operators that need no value control: empty/not-empty + the valueless relative-date ops.
-const isNoValueOp = (op: string) => isUnaryOp(op) || isRelativeNoValueOp(op)
-// Default N-window seeded on switching to last/next N days — keeps the filter functional on select
-// (avoids an instant "all rows vanish" from an empty N, which the backend treats as n<1 = no match).
-const DEFAULT_RELATIVE_DAYS = 7
-const getField = (id: string) => props.fields.find((f) => f.id === id)
-const getFieldType = (id: string) => getField(id)?.type ?? 'string'
-const isSelectLikeField = (id: string) => {
-  const type = String(getFieldType(id))
-  return type === 'select' || type === 'multiSelect'
-}
-const getOperatorsForField = (id: string) => {
-  const type = String(getFieldType(id))
-  if (type === 'multiSelect') {
-    return FILTER_OPERATORS_BY_TYPE.multiSelect ?? FILTER_OPERATORS_BY_TYPE.select
-  }
-  // Slice 2b: rollup operators follow the aggregation's result kind (string/boolean/number).
-  return FILTER_OPERATORS_BY_TYPE[effectiveFilterTypeKey(getField(id))] ?? FILTER_OPERATORS_BY_TYPE.string
-}
 const applyButtonLabel = computed(() => props.sortFilterDirty
   ? metaCoreLabel('toolbar.applyFilterChanges', isZh.value)
   : metaCoreLabel('toolbar.applyFilters', isZh.value))
-const getInputType = (id: string) => {
-  const t = getFieldType(id)
-  if (t === 'number') return 'number'
-  if (t === 'date') return 'date'
-  return 'text'
-}
-const getFilterFieldTypeLabel = (id: string) => fieldTypeLabel(String(getFieldType(id)), isZh.value)
-const getValuePlaceholder = (id: string) => filterValuePlaceholder(String(getFieldType(id)), isZh.value)
-function getSelectOptions(id: string): Array<{ value: string; label: string }> {
-  const field = getField(id)
-  const rawOptions = field?.options ?? (Array.isArray(field?.property?.options) ? field.property.options : [])
-  return rawOptions
-    .map((option) => {
-      if (typeof option === 'string') return { value: option, label: option }
-      if (option && typeof option === 'object' && 'value' in option) {
-        const value = String((option as { value?: unknown }).value ?? '')
-        return value ? { value, label: value } : null
-      }
-      return null
-    })
-    .filter((option): option is { value: string; label: string } => option !== null)
-}
-function getDefaultFilterValue(fieldId: string): unknown {
-  const type = getFieldType(fieldId)
-  if (String(type) === 'select' || String(type) === 'multiSelect') return getSelectOptions(fieldId)[0]?.value ?? ''
-  if (type === 'boolean') return true
-  return ''
-}
 
 function onSortFieldChange(idx: number, fieldId: string) { emit('update-sort', idx, { ...props.sortRules[idx], fieldId }) }
 function onSortDirChange(idx: number, direction: 'asc'|'desc') { emit('update-sort', idx, { ...props.sortRules[idx], direction }) }
 function onAddFilter() {
   if (!props.fields.length) return
-  const ops = getOperatorsForField(props.fields[0].id)
-  emit('add-filter', { fieldId: props.fields[0].id, operator: ops[0]?.value ?? 'is', value: getDefaultFilterValue(props.fields[0].id) })
+  emit('add-filter', seedFilterCondition(props.fields[0]))
 }
-function onFilterFieldChange(idx: number, fieldId: string) {
-  const ops = getOperatorsForField(fieldId)
-  emit('update-filter', idx, { ...props.filterRules[idx], fieldId, operator: ops[0]?.value ?? 'is', value: getDefaultFilterValue(fieldId) })
-}
-function onFilterOperatorChange(idx: number, operator: string) {
-  const r = { ...props.filterRules[idx], operator }
-  if (isNoValueOp(operator)) r.value = undefined // empty/not-empty + valueless relative-date ops
-  else if (isArrayOp(operator) || isBetweenOp(operator)) r.value = Array.isArray(r.value) ? r.value : [] // start empty array (= inactive)
-  else if (isNDaysOp(operator)) r.value = (typeof r.value === 'number' && Number.isFinite(r.value) && r.value >= 1) ? r.value : DEFAULT_RELATIVE_DAYS // seed a usable N
-  else if (r.value === undefined || Array.isArray(r.value)) r.value = getDefaultFilterValue(r.fieldId) // scalar op: drop stale array
-  emit('update-filter', idx, r)
-}
-function onFilterMultiValueChange(idx: number, event: Event) {
-  const sel = event.target as HTMLSelectElement
-  const values = Array.from(sel.selectedOptions).map((o) => o.value)
-  emit('update-filter', idx, { ...props.filterRules[idx], value: values })
-}
-function onFilterBetweenChange(idx: number, slot: 0 | 1, value: string) {
-  const r = props.filterRules[idx]
-  const cur = Array.isArray(r.value) ? [...r.value] : []
-  cur[slot] = value
-  emit('update-filter', idx, { ...r, value: [cur[0], cur[1]] }) // always a [min, max] pair (backend coerces strings + tolerates incomplete)
-}
-function onFilterNDaysChange(idx: number, value: string) {
-  // N-window relative-date ops (last/next N days): emit N as a NUMBER. The backend reads condition.value
-  // raw (Math.trunc(Number(...))), so a numeric N passes through untouched; '' marks an incomplete window.
-  emit('update-filter', idx, { ...props.filterRules[idx], value: value === '' ? '' : Number(value) })
-}
-function onFilterValueChange(idx: number, value: string) {
-  const ft = getFieldType(props.filterRules[idx].fieldId)
-  let nextValue: unknown = value
-  if (ft === 'number' && value !== '') nextValue = Number(value)
-  if (ft === 'boolean') nextValue = value === 'true'
-  emit('update-filter', idx, { ...props.filterRules[idx], value: nextValue })
+function onAddFilterGroup() {
+  if (!props.fields.length) return
+  // A new root condition group seeded with one condition (and its own AND conjunction).
+  emit('add-filter-group', { conjunction: 'and', conditions: [seedFilterCondition(props.fields[0])] })
 }
 </script>
 

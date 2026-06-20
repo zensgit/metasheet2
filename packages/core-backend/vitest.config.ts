@@ -43,6 +43,7 @@ export default defineConfig({
       // against real Postgres every PR — the B6 keystone (add/aggregate/idempotent
       // re-add/self-scoped DELETE/reader-deny 403/cascade) is no longer invisible debt.
       'tests/integration/comment-reactions.api.test.ts',
+      'tests/integration/multitable-oapi1-comments-read-realdb.test.ts',
       // comments.api.test.ts needs setup.integration.ts + a live DB. It stays
       // CI-excluded (NOT wired) because 8 of its tests have a pre-existing real-wire
       // failure (CommentService.mapRowToComment drops containerId/targetId/

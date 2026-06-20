@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createApp, h, nextTick, reactive, type App } from 'vue'
 import MetaToolbar from '../src/multitable/components/MetaToolbar.vue'
-import type { FilterConjunction, FilterRule, SortRule } from '../src/multitable/composables/useMultitableGrid'
+import type { FilterConjunction, FilterRule, FilterGroup, SortRule } from '../src/multitable/composables/useMultitableGrid'
+import { isFilterGroup } from '../src/multitable/composables/useMultitableGrid'
 import type { MetaField } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
 
@@ -10,6 +11,7 @@ type ToolbarState = {
   hiddenFieldIds: string[]
   sortRules: SortRule[]
   filterRules: FilterRule[]
+  filterGroups: FilterGroup[]
   filterConjunction: FilterConjunction
   sortFilterDirty: boolean
 }
@@ -43,6 +45,7 @@ function mountToolbar(initial: Partial<ToolbarState> = {}) {
     hiddenFieldIds: [],
     sortRules: [],
     filterRules: [],
+    filterGroups: [],
     filterConjunction: 'and',
     sortFilterDirty: false,
     ...initial,
@@ -66,6 +69,9 @@ function mountToolbar(initial: Partial<ToolbarState> = {}) {
           state.filterConjunction = 'and'
         },
         onSetConjunction: (conjunction: FilterConjunction) => { state.filterConjunction = conjunction },
+        onAddFilterGroup: (group: FilterGroup) => { state.filterGroups.push(group) },
+        onUpdateFilterGroup: (index: number, group: FilterGroup) => { state.filterGroups[index] = group },
+        onRemoveFilterGroup: (index: number) => { state.filterGroups.splice(index, 1) },
       })
     },
   })
@@ -179,6 +185,29 @@ describe('MetaToolbar filter builder', () => {
     const valueSelect = panel.querySelector('select[aria-label="Filter value"]') as HTMLSelectElement | null
     expect(valueSelect).toBeTruthy()
     expect(Array.from(valueSelect!.options).map((option) => option.value)).toEqual(['', 'urgent', 'vip'])
+  })
+
+  // 2b: nested condition groups — "+ Add condition group" + rendering a hydrated group
+  it('emits add-filter-group with a seeded one-condition group when "Add condition group" is clicked', async () => {
+    const { state, container: root } = mountToolbar()
+    const panel = await openFilterPanel(root)
+    const addGroup = panel.querySelector('[data-add-filter-group="true"]') as HTMLButtonElement | null
+    expect(addGroup).toBeTruthy()
+    addGroup!.click()
+    await nextTick()
+    expect(state.filterGroups.length).toBe(1)
+    expect(state.filterGroups[0].conjunction).toBe('and')
+    expect(state.filterGroups[0].conditions.length).toBe(1)
+    expect(isFilterGroup(state.filterGroups[0].conditions[0])).toBe(false) // seeded leaf
+  })
+
+  it('renders a hydrated root subgroup as a recursive MetaFilterGroup', async () => {
+    const { container: root } = mountToolbar({
+      filterGroups: [{ conjunction: 'or', conditions: [{ fieldId: 'status', operator: 'is', value: 'todo' }] }],
+    })
+    const panel = await openFilterPanel(root)
+    expect(panel.querySelector('.meta-filter-group')).toBeTruthy()
+    expect(panel.querySelector('select[data-filter-group-conjunction="true"]')).toBeTruthy()
   })
 })
 
