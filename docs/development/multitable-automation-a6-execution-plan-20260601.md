@@ -31,9 +31,9 @@ treatment **on purpose**:
   A6-3's first runtime slice (A6-3-1 `condition_branch` / exclusive branch v1) **landed via #2321**;
   the A6-3-2 frontend/readability slice **landed via #2339 + #2348**; the
   A6-3-4/W3 parallel fan-out + join-all slice **landed via #2496 + #2500 + #2501**.
-  A6-3-3 now has a docs-only branch-local wait scope gate
-  (`multitable-automation-a6-3-3-branch-local-wait-scope-gate-20260615.md`);
-  its backend/frontend runtime remains not started, and A6-3-5 join-any stays
+  A6-3-3 branch-local wait **landed via #2626 (backend) + #2702 (frontend)**
+  under scope gate `multitable-automation-a6-3-3-branch-local-wait-scope-gate-20260615.md`;
+  nested branches and A6-3-5 join-any stay
   deferred. A6-5's first `start_approval` bridge slice **landed via #2469**
   as a named cross-surface carve-out on top of A6-2 + W5 completion events. A6-4 now has
   a docs-only scope gate (`multitable-automation-a6-4-bpmn-compile-preview-scope-gate-20260612.md`);
@@ -185,10 +185,9 @@ Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
 > `4b44f25c6`)**: the rule editor can author a minimal `condition_branch` config (flat branch
 > conditions, `update_record` / `send_notification` branch action subset, default branch, read-only
 > never-flatten guard for richer loaded shapes, `workflow_job_v1` auto-lock), and the admin runs detail
-> shows selected branch `label (key)` plus branch child jobs. **A6-3-3 now has a docs-only
-> branch-local wait scope gate**:
-> `multitable-automation-a6-3-3-branch-local-wait-scope-gate-20260615.md`.
-> Its runtime/frontend remain separate build PRs. Nested `condition_branch` inside branches and
+> shows selected branch `label (key)` plus branch child jobs. **A6-3-3 branch-local wait LANDED** (#2626 backend `8b0468920` + #2702 frontend `20da674c8`)
+> under scope gate
+> `multitable-automation-a6-3-3-branch-local-wait-scope-gate-20260615.md`. Nested `condition_branch` inside branches and
 > A6-3 join-any / cancellation semantics remain deferred. A6-3-4/W3-0 has a docs-only scope gate:
 > `multitable-automation-a6-3-parallel-join-all-scope-gate-20260611.md`.
 >
@@ -197,8 +196,8 @@ Design-lock: `multitable-automation-a6-3-branch-parallel-design-20260605.md`.
 > can run `parallel_branch` with `joinMode: 'all'`, persist C1 parent/branch-child fan-out/fan-in
 > lineage, and aggregate fail/skip semantics; the editor can author the constrained `parallel_branch`
 > shape with `workflow_job_v1` auto-lock; admin runs detail can explain branch labels and child
-> jobs. **Still deferred:** A6-3-3b frontend authoring (A6-3-3a backend runtime LANDED #2626 `8b0468920`),
-> A6-3-5 join-any/cancellation, public webhook/token emitter, live BPMN runtime (note: the legacy
+> jobs. A6-3-3 branch-local wait now LANDED end-to-end (A6-3-3a backend #2626 `8b0468920` + A6-3-3b frontend #2702 `20da674c8`). **Still deferred:**
+> A6-3-5 join-any/cancellation, nested `condition_branch` inside branches, public webhook/token emitter, live BPMN runtime (note: the legacy
 > `BPMNWorkflowEngine` is still API-live at `/api/workflow` but outside the v1 convergence target —
 > owner decision needed), and W7 result backwrite (no runtime/implementation refs; owner-gated). (A6-4c
 > read-only compile-preview UI landed #2604.)
@@ -215,8 +214,7 @@ rung.
 - **Must not (this rung):** no BPMN import; no approval coupling.
 - **Depends on:** A6-2 (job persistence + resume stable before fan-out/join).
 - **Gate:** A6-3-4/W3 `join_all` landed after named opt-in (#2496/#2500/#2501).
-  A6-3-3 branch-local wait now has a scope gate, but still needs separate
-  backend/frontend build opt-ins. `join_any`, nested branch shapes beyond
+  A6-3-3 branch-local wait LANDED (#2626 backend + #2702 frontend). `join_any`, nested branch shapes beyond
   branch-local wait, BPMN, and approval coupling still need separate named
   opt-ins.
 - **Test surface:** see A6-0 scout "→ A6-3" (branch picks exactly one, parallel fan-out
@@ -303,6 +301,6 @@ A6-4a implementation checklist:
   2026-06-03 (#2236 design-lock + #2237 impl, admin-gated v1); A6-3 exclusive branch
   v1 **landed** (#2321/#2339/#2348); A6-3-4/W3 parallel join-all **landed**
   (#2496/#2500/#2501); A6-5 `start_approval` bridge **landed** (#2469).
-  A6-3-3, A6-3-5 join-any, A6-4 BPMN
-  compile/preview, public webhook/token emitter, and W7 result backwrite
+  A6-3-3 branch-local wait **landed** (#2626 + #2702). A6-3-5 join-any, A6-4 live BPMN
+  runtime (A6-4a/b/c compile-preview landed), public webhook/token emitter, and W7 result backwrite
   runtime remain demand-gated.

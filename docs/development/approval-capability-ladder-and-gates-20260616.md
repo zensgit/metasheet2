@@ -2,7 +2,7 @@
 
 Type: **development planning guardrail**.
 
-Status: **proposal / scope router**. This document ranks approval product
+Status: **proposal / scope router** (capability map reconciled against `origin/main` 2026-06-20). This document ranks approval product
 follow-ups. It does not authorize implementation by itself.
 
 Companions:
@@ -45,7 +45,7 @@ replace, them:
 |---|---|---|
 | Approval graph runtime | `ApprovalGraphExecutor` handles approval runtime graph progression. | Do not reimplement approval graph traversal in automation. |
 | Template authoring MVP | Template create/edit/publish, linear approval builder, fail-closed unsupported template handling. | Unsupported rich templates must remain read-only or save-blocked; never silently flatten. |
-| Assignment sources v1 | `static_user`, `static_role`, `requester`, `form_field_user`. | New sources must extend the resolver contract, not bypass it. |
+| Assignment sources | v1 `static_user`, `static_role`, `requester`, `form_field_user`; **shipped P1-A extensions** `direct_manager` (#2852), `dept_head` (#2873), `continuous_managers` / manager-chain reading-A (#2907/#2911, configurable max-levels #2915). | New sources must extend the resolver contract, not bypass it. |
 | Approval modes | `single`, `all`, `any`; parallel join modes exist in runtime types. | New modes need explicit semantics and migration/test coverage. |
 | Empty assignee policy | `error`, `auto-approve`. | Do not overload this to cover unrelated self-approval or delegation policies. |
 | Visibility rules | Existing form-field `visibilityRule` is data-driven field visibility. | Node-level field permissions are a separate axis. |
@@ -71,6 +71,8 @@ P0 should finish before advertising approval as broadly usable.
 
 ### P1-A. Organization-Derived Assignees
 
+**Status (reconciled 2026-06-20): SHIPPED (first wave).** `direct_manager` (#2852), `dept_head` (#2873), and `continuous_managers` / manager-chain "reading A" (#2907 resolver+authoring, #2911 design-lock ratified+shipped, #2915 configurable `APPROVAL_MANAGER_CHAIN_MAX_LEVELS`) all landed against the real DingTalk directory mirror; the "Likely contract" below matches what shipped. Still deferred within P1-A: `continuous_managers` "reading B" (sequential, level-by-level approval — design-locked, runtime not built) and `stopAt`-style chain termination beyond the shipped cap.
+
 **Goal:** support dynamic assignees derived from organizational structure, such
 as direct manager, department owner, or a bounded chain of managers.
 
@@ -92,8 +94,7 @@ type ApprovalAssigneeSource =
     }
 ```
 
-**Hard gate:** do not build runtime until there is a real directory/reporting
-line source. A fake hierarchy would only prove fixtures.
+**Hard gate (satisfied):** runtime required a real directory/reporting source — met by the DingTalk directory mirror (org-tree admin mirror #1524, `directory_departments`). The gate held until that source existed; a fake hierarchy would only have proven fixtures.
 
 **First safe slice:** a scope-gate plus a read-only directory data-source scout:
 
@@ -119,6 +120,8 @@ the current node state.
 This is a runtime action rung. It needs a scope-gate before implementation.
 
 ### P1-C. Node-Level Field Permissions
+
+**Status (reconciled 2026-06-20): PARTIALLY SHIPPED.** The `hidden` facet landed (Lane B #2799, server-side echo-redaction; cross-lane guard #2848). `readonly` / `editable` node-level facets remain deferred (depend on the edit-form-at-node direction).
 
 **Goal:** let each approval node define field-level behavior: editable,
 read-only, or hidden.
@@ -210,12 +213,10 @@ Recommended sequence:
 1. **Finish P0 trial readiness.**
    - It is the cheapest way to reduce uncertainty.
    - It also keeps W6/W7 honest.
-2. **If a real org directory/reporting source exists, start P1-A scope-gate.**
-   - This is the most valuable clean extension.
-   - Do not implement against fake hierarchy data.
-3. **If no org source exists, start P1-C node-level field permissions.**
-   - It is self-contained and fits current template authoring.
-   - It still needs server-side validation, not frontend-only hiding.
+2. **P1-A organization-derived assignees — first wave SHIPPED** (`direct_manager` #2852, `dept_head` #2873, `continuous_managers` reading-A #2907/#2911/#2915).
+   - Remaining P1-A: `continuous_managers` reading-B (sequential, level-by-level) is design-locked, runtime not built — owner-gated.
+3. **P1-C node-level field permissions — `hidden` facet SHIPPED** (#2799 server-side echo-redaction; guard #2848).
+   - Remaining P1-C: `readonly` / `editable` node facets still need the edit-form-at-node direction + server-side validation, not frontend-only hiding.
 4. **Defer P1-B, P1-D, and all P2/P3 items until a named use case exists.**
 
 ## 8. PR Rules
