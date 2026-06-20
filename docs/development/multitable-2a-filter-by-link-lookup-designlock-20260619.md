@@ -2,8 +2,8 @@
 
 > **Status: DESIGN-LOCK ONLY.** No implementation here. Filter-by-link is permission-sensitive and
 > cross-cutting (it touches the same ~10 filter eval/prune sites the nested-groups work just refactored),
-> so — like the 1b record-set lock — the model is pinned before code. Implementation is a separate opt-in
-> after the open questions below are decided at review.
+> so — like the 1b record-set lock — the model is pinned before code. The decisions below were **ratified
+> at review on 2026-06-20** (D1–D6); the first implementation slice is a separate opt-in that builds to them.
 
 ## 0. The problem
 
@@ -29,47 +29,61 @@ So filter-by-link requires **threading the permission-filtered display values to
 nested-filter redaction. That threading is the design decision; getting it wrong leaks a hidden linked
 record's display string into a match result.
 
-## 2. Open questions (decide at review — these gate implementation)
+## 2. Resolved decisions (ratified at review 2026-06-20 — these were the G0 open questions)
 
-- **Q1 — compare against what?** The linked record's **`display` string** (what the grid shows) vs its
-  **primary-field raw value**. Display is what users expect to type; primary-field value is more stable but
-  may differ from the rendered chip. *Lean: `display`, since it matches the visible chip and the existing
-  summary materialization — but confirm.*
-- **Q2 — denied linked record semantics.** When a row links to a record the requester cannot see: is that
-  link **excluded from the comparison set** (the row simply doesn't match on that hidden link — consistent
-  with row-deny filtering elsewhere), or does the whole condition return a **`#PERM!`-style controlled
-  result**? *Lean: exclude from the set (a hidden link is "not a match"), matching row-deny precedent — but
-  this is a real semantics decision, not a footnote.*
-- **Q3 — shared vs parallel eval path.** Reuse the nested-groups `pruneFilterNode` / `evaluateFilterNode`
-  threading (extend the per-leaf evaluator to receive the record's permission-filtered summaries) vs a
-  separate link-only filter pass. *Lean: extend the existing per-leaf evaluator so link conditions compose
-  inside nested AND/OR groups for free — but verify it doesn't bloat the pure eval's signature.*
-- **Q4 — operators + FE.** Which operators for link/lookup: `contains` / `is` / `isAnyOf` / `isEmpty` over
-  display values? And the FE operator menu + value control (free-text vs a linked-record picker). *Lean:
-  start with `contains`/`is`/`isEmpty` over display (free-text), defer a linked-record picker.*
+The owner ratified the leaning options. They are now **locked** and define the first implementation slice.
+
+- **D1 — compare against the linked record's `display` string** (the chip the grid shows), not the
+  primary-field raw value. Matches the visible chip and the existing `LinkedRecordSummary` materialization.
+- **D2 — a denied linked record is excluded from the comparison set** for **value operators** (`contains`/
+  `is`): a hidden link is simply "not a match", consistent with row-deny precedent, and its display string
+  is never compared or surfaced. (Presence operators are the explicit exception — see D5.)
+- **D3 — reuse the nested-groups per-leaf evaluator threading.** Extend the existing per-leaf evaluator to
+  receive the record's permission-filtered link summaries; link conditions are normal leaves inside the
+  nested AND/OR tree — no separate link-only pass.
+- **D4 — first cut = free-text `contains` / `is` / `isEmpty` over display.** No `isAnyOf`, no linked-record
+  picker in the first slice (both deferred).
+- **D5 — operator evaluation basis (the permission-critical pin).** `contains` / `is` evaluate over the
+  **permission-filtered display set** (denied links excluded, per D2). `isEmpty` evaluates over **raw link
+  presence/count** — it asks only "does this cell hold any link at all?", **without materializing or
+  comparing any display string** (so it leaks nothing) and **permission-invariantly** (a restricted user
+  gets the identical `isEmpty` result a full-permission user gets).
+  *Why this split is mandatory:* if `isEmpty` used the filtered set, a row whose links are **all** hidden
+  from the requester would read as *empty* for that requester yet *non-empty* for a full-permission user —
+  producing a match a full-permission user would not see, violating §3. Presence operators therefore never
+  consult the filtered set. (`isNotEmpty`, when added, follows the same raw-presence rule.)
+- **D6 — multi-valued semantics (link is an array).** `contains X` ⇒ **any** visible (permission-filtered)
+  display value contains substring X. `is X` ⇒ **membership**: any visible display value equals X exactly
+  ("the link set includes a record displayed as X"), not "the whole set equals `[X]`". `isEmpty` ⇒ the raw
+  link array has zero entries (per D5).
 
 ## 3. Locked principles (independent of the open questions)
 
-- **Permission: filter-at-materialization.** Denied linked records (`loadDeniedRecordIds(foreignSheetId)`)
-  are excluded from the comparison set **before** the eval sees them — never read-raw-then-mask. Reuses the
-  exact discipline from dashboard chart-data + nested-filter redaction.
-- **No silent wrong match.** Whatever Q2 resolves to, the rule is: a hidden link never produces a match a
-  full-permission user wouldn't see, and never leaks the hidden display string.
+- **Permission: filter-at-materialization (value operators).** For `contains`/`is`, denied linked records
+  (`loadDeniedRecordIds(foreignSheetId)`) are excluded from the comparison set **before** the eval sees
+  them — never read-raw-then-mask. Reuses the exact discipline from dashboard chart-data + nested-filter
+  redaction. **Presence operators (`isEmpty`) bypass materialization entirely** (raw array count, no
+  display values touched — D5), which is itself leak-free.
+- **No silent wrong match (the invariant D5 protects).** A hidden link never produces a match a
+  full-permission user wouldn't see, and never leaks the hidden display string — for *every* operator,
+  presence operators included.
 - **Compose with nested groups.** A link condition must be a normal leaf inside the nested AND/OR tree
-  (Q3) — not a special top-level-only case.
+  (D3) — not a special top-level-only case.
 - **Bounded.** Reuses the existing per-record summary materialization (already paginated/bounded); no new
   unbounded scan. Cross-base links out of scope at lock time.
 
 ## 4. Gated TODO checklist
 > 🔒 blocked · ⬜ ready · ✅ done
 
-- ✅ **G0 — this design-lock** (crux + 4 open questions + locked principles).
-- 🔒 **G1 — resolve Q1–Q4** at review (owner decision).
-- 🔒 **Slice — link filter eval** (permission-filtered display materialization → per-leaf eval threading →
-  operators → real-DB permission goldens: denied-link excluded, hidden-display non-leak, composes in nested
-  group). *Opt-in after G1.*
-- 🔒 **Slice — lookup filter eval** (same, over the materialized lookup value). *After link slice.*
-- 🔒 **FE — link/lookup operator menu + value control.** *With/after the eval slice.*
+- ✅ **G0 — this design-lock** (crux + open questions + locked principles).
+- ✅ **G1 — decisions ratified** at review 2026-06-20 (D1–D6).
+- ⬜ **Slice — link filter eval** (first cut, ready): permission-filtered display materialization →
+  per-leaf eval threading (D3) → `contains`/`is` over the filtered display set + `isEmpty` over raw
+  presence (D5/D6) → real-DB permission goldens: denied-link excluded · hidden-display non-leak ·
+  **all-links-hidden row ⇒ `isEmpty` permission-invariant (matches iff raw-empty), `is`/`contains` never
+  match via the hidden link** · composes inside a nested group.
+- 🔒 **Slice — lookup filter eval** (same discipline, over the materialized lookup value). *After link slice.*
+- 🔒 **FE — link/lookup operator menu + value control** (free-text first, D4). *With/after the eval slice.*
 
 ## 5. Non-goals
 - No cross-base link filtering at lock time.
