@@ -71,6 +71,59 @@ describe('MetaViewManager', () => {
     app.unmount()
   })
 
+  it('preserves a nested condition group on round-trip (no silent flatten of toolbar-authored groups)', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+    const NESTED = {
+      conjunction: 'and',
+      conditions: [
+        { fieldId: 'fld_name', operator: 'is', value: 'x' },
+        { conjunction: 'or', conditions: [{ fieldId: 'fld_owner', operator: 'is', value: 'a' }] },
+      ],
+    }
+    const app = createApp({
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_grid',
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_owner', name: 'Owner', type: 'string' },
+          ],
+          views: [{ id: 'view_grid', sheetId: 'sheet_1', name: 'Grid', type: 'grid', config: {}, filterInfo: NESTED }],
+          onUpdateView: updateSpy,
+        })
+      },
+    })
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    // top-level leaf is editable; the nested group is preserved read-only with an indicator
+    expect(container.querySelector('[data-nested-groups-note="true"]')).toBeTruthy()
+
+    ;(Array.from(container.querySelectorAll('.meta-view-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save view settings'))
+      ?.click()
+    await nextTick()
+
+    const payload = updateSpy.mock.calls.at(-1)?.[1] as { filterInfo?: unknown }
+    // the group survives the round-trip (the old flat hydrate would have dropped it)
+    expect(payload.filterInfo).toEqual({
+      conjunction: 'and',
+      conditions: [
+        { fieldId: 'fld_name', operator: 'is', value: 'x' },
+        { conjunction: 'or', conditions: [{ fieldId: 'fld_owner', operator: 'is', value: 'a' }] },
+      ],
+    })
+
+    app.unmount()
+  })
+
   it('emits persisted Gantt dependency field config when saving view settings', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

@@ -121,6 +121,7 @@ export type MetaManagerLabelKey =
   | 'view.filterSortGroup' | 'view.sharedByViews'
   | 'view.filters' | 'view.sorts' | 'view.allConditions'
   | 'view.anyCondition' | 'view.noValue' | 'view.valueHiddenByPermission' | 'view.addFilter'
+  | 'view.nestedGroupsReadOnly'
   | 'view.addSort' | 'view.sortAsc' | 'view.sortDesc'
   | 'view.changedWarning' | 'view.latestMetadataLoaded'
   | 'view.latestFieldMetadataLoaded'
@@ -460,6 +461,7 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   // permissions (server preserves it on re-save, #2074), so show a non-editable hint, not an empty input.
   'view.valueHiddenByPermission': { en: 'value hidden by permissions', zh: '该值因权限隐藏' },
   'view.addFilter': { en: '+ Add filter', zh: '+ 添加筛选' },
+  'view.nestedGroupsReadOnly': { en: 'nested condition group(s) — edit in the grid toolbar', zh: '个嵌套条件组 — 请在表格工具栏中编辑' },
   'view.addSort': { en: '+ Add sort', zh: '+ 添加排序' },
   'view.sortAsc': { en: 'A to Z', zh: 'A 到 Z' },
   'view.sortDesc': { en: 'Z to A', zh: 'Z 到 A' },

@@ -307,7 +307,7 @@
             <div class="meta-view-mgr__subheader">
               <span>{{ ml('view.filters') }}</span>
               <select
-                v-if="filterDraft.conditions.length > 1"
+                v-if="(filterDraft.conditions.length + filterDraft.groups.length) > 1"
                 v-model="filterDraft.conjunction"
                 class="meta-view-mgr__select meta-view-mgr__select--compact"
               >
@@ -353,6 +353,9 @@
               </div>
             </div>
             <button v-if="configTargetFields.length" class="meta-view-mgr__btn-inline" @click="addFilterRule">{{ ml('view.addFilter') }}</button>
+            <p v-if="filterDraft.groups.length" class="meta-view-mgr__nested-note" data-nested-groups-note="true">
+              &#x1F512; {{ filterDraft.groups.length }} {{ ml('view.nestedGroupsReadOnly') }}
+            </p>
           </div>
 
           <div class="meta-view-mgr__field">
@@ -462,8 +465,12 @@ import type {
 import {
   FILTER_OPERATORS_BY_TYPE,
   effectiveFilterTypeKey,
+  isFilterGroup,
+  parseFilterTree,
+  buildFilterInfoFromNodes,
   type FilterConjunction,
   type FilterRule,
+  type FilterGroup,
   type SortRule,
 } from '../composables/useMultitableGrid'
 import {
@@ -580,9 +587,15 @@ const hierarchyDraft = reactive<Required<MetaHierarchyViewConfig>>({
   defaultExpandDepth: 2,
   orphanMode: 'root',
 })
-const filterDraft = reactive<{ conjunction: FilterConjunction; conditions: FilterRule[] }>({
+// `conditions` are the root LEAF conditions (editable in this bespoke, permission-aware row UI). `groups`
+// are the root nested condition groups — preserved verbatim across hydrate→save so editing a view here never
+// silently flattens groups authored in the grid toolbar. They are shown read-only here (the toolbar is the
+// nested-group authoring surface; rendering group leaves with the toolbar row would bypass this manager's
+// permission-hidden value masking).
+const filterDraft = reactive<{ conjunction: FilterConjunction; conditions: FilterRule[]; groups: FilterGroup[] }>({
   conjunction: 'and',
   conditions: [],
+  groups: [],
 })
 const sortDraft = reactive<{ rules: SortRule[] }>({
   rules: [],
@@ -774,6 +787,7 @@ function resetConfigDrafts() {
   } satisfies Required<MetaHierarchyViewConfig>)
   filterDraft.conjunction = 'and'
   filterDraft.conditions.splice(0)
+  filterDraft.groups.splice(0)
   sortDraft.rules.splice(0)
   groupDraft.fieldId = ''
 }
@@ -855,17 +869,15 @@ function hasPayload(value: Record<string, unknown> | null | undefined): boolean 
 }
 
 function hydrateCommonViewRules(view: MetaView) {
-  const filterInfo = asRecord(view.filterInfo)
-  const conditions = Array.isArray(filterInfo.conditions) ? filterInfo.conditions : []
-  filterDraft.conjunction = filterInfo.conjunction === 'or' ? 'or' : 'and'
-  filterDraft.conditions.splice(0, filterDraft.conditions.length, ...conditions
-    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
-    .map((item) => ({
-      fieldId: String(item.fieldId ?? ''),
-      operator: String(item.operator ?? 'is'),
-      value: item.value,
-    }))
-    .filter((item) => item.fieldId))
+  // Nesting-aware: split a stored filter into root leaf conditions (editable below) and root nested groups
+  // (preserved read-only). The old flat parse mapped a group node to a garbage { fieldId: '' } row that the
+  // .filter then dropped — silently losing the group on the next save. parseFilterTree keeps the full tree.
+  const tree = parseFilterTree(view.filterInfo)
+  filterDraft.conjunction = tree?.conjunction ?? 'and'
+  filterDraft.conditions.splice(0, filterDraft.conditions.length,
+    ...(tree ? tree.nodes.filter((n): n is FilterRule => !isFilterGroup(n)) : []))
+  filterDraft.groups.splice(0, filterDraft.groups.length,
+    ...(tree ? tree.nodes.filter((n): n is FilterGroup => isFilterGroup(n)) : []))
 
   const sortInfo = asRecord(view.sortInfo)
   const sortRules = Array.isArray(sortInfo.rules) ? sortInfo.rules : []
@@ -883,11 +895,9 @@ function hydrateCommonViewRules(view: MetaView) {
 
 function serializeCommonViewDraft(type: MetaView['type'] | null): Record<string, unknown> {
   return {
-    filterInfo: filterDraft.conditions.map((condition) => ({
-      fieldId: condition.fieldId,
-      operator: condition.operator,
-      value: condition.value,
-    })),
+    // Root leaf conditions (edited here) + preserved nested groups, serialized faithfully (leaves then
+    // groups) so groups authored in the toolbar survive a save from this manager.
+    filterInfo: buildFilterInfoFromNodes([...filterDraft.conditions, ...filterDraft.groups], filterDraft.conjunction)?.conditions ?? [],
     filterConjunction: filterDraft.conjunction,
     sortInfo: sortDraft.rules.map((rule) => ({
       fieldId: rule.fieldId,
@@ -1136,13 +1146,17 @@ function removeSortRule(index: number) {
 }
 
 function buildFilterInfoPayload(): Record<string, unknown> {
-  const conditions = filterDraft.conditions
+  const leaves = filterDraft.conditions
     .filter((condition) => validFieldIds.value.has(condition.fieldId))
     .map((condition) => ({
       fieldId: condition.fieldId,
       operator: condition.operator,
       value: condition.value,
     }))
+  // Preserve toolbar-authored nested groups verbatim (serialized faithfully) so a save from this manager
+  // never silently drops them — the old payload only emitted flat leaves. Groups are appended after leaves.
+  const groupNodes = buildFilterInfoFromNodes(filterDraft.groups, filterDraft.conjunction)?.conditions ?? []
+  const conditions = [...leaves, ...groupNodes]
   return conditions.length > 0 ? { conjunction: filterDraft.conjunction, conditions } : {}
 }
 
