@@ -3450,6 +3450,32 @@ async function computeDependentLookupRollupRecords(
       }
     }
 
+    // A.2 (foreign-write fan-out for relation-aggregation): a RELSUMIF formula reaches the foreign
+    // target/criteria DIRECTLY (no lookup/rollup intermediary), so the gate above can't see it AND
+    // recalculateFormulaFields's SAME-sheet dep-gate won't fire on a foreign-field change. Detect the
+    // affected relation-agg formulas here — same three conditions as lookup/rollup: the formula's link
+    // resolves to the edited foreign sheet, the changed field is its target OR criteria, and the record
+    // actually links to an edited foreign record — then resolve them INLINE below.
+    const relAggAffectedByRecord = new Map<string, Set<string>>()
+    for (const field of fields) {
+      if (field.type !== 'formula') continue
+      const expr = formulaExpressionOf(field)
+      if (!expr) continue
+      const call = parseRelationAggregationCall(expr)
+      if (!call) continue
+      const linkField = fields.find((f) => f.id === call.linkFieldId && f.type === 'link')
+      const foreignSheetId = linkField ? parseLinkFieldConfig(linkField.property)?.foreignSheetId ?? null : null
+      if (foreignSheetId !== sourceSheetId) continue
+      if (!changedSourceFieldIds.has(call.targetFieldId) && !changedSourceFieldIds.has(call.criteria.fieldId)) continue
+      for (const row of rows) {
+        const linkedIds = linkValuesByRecord.get(row.id)?.get(call.linkFieldId) ?? normalizeLinkIds(row.data[call.linkFieldId])
+        if (!linkedIds.some((id) => updatedSourceRecordIds.has(id))) continue
+        const set = relAggAffectedByRecord.get(row.id) ?? new Set<string>()
+        set.add(field.id)
+        relAggAffectedByRecord.set(row.id, set)
+      }
+    }
+
     let formulaDataByRecord = new Map<string, Record<string, unknown>>()
     if (affectedFieldIdsByRecord.size > 0) {
       const affectedComputedFieldIds = new Set<string>()
@@ -3471,6 +3497,36 @@ async function computeDependentLookupRollupRecords(
         hydratedDataByRecord,
       )
       formulaDataByRecord = new Map(formulaRecords.map((record) => [record.recordId, record.data]))
+    }
+
+    // A.2 inline-resolve: materialize the affected relation-aggregation formulas in the EDITING actor's req
+    // (foreign-write → recompute). Taint-skip first — don't recompute/persist a formula whose foreign
+    // target/criteria the editor can't read (symmetric to recalculateFormulaFields's write-side taint skip).
+    // Merge into formulaDataByRecord so the (masked) echo AND the UNMASKED affectedFieldIds both carry the
+    // formula id (so realtime invalidation tells other readers to refetch → they get their own read-masked
+    // value). Materialized value is the editor's view (the documented materialize-model property).
+    if (relAggAffectedByRecord.size > 0) {
+      const candidateRel = new Set<string>()
+      for (const s of relAggAffectedByRecord.values()) for (const id of s) candidateRel.add(id)
+      const taintedRel = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateRel)
+      for (const [recordId, fieldIds] of relAggAffectedByRecord) {
+        const recData = rows.find((r) => r.id === recordId)?.data ?? (await loadRecordDataById(query, sheetId, recordId))
+        if (!recData) continue
+        const updates: Record<string, unknown> = {}
+        for (const fieldId of fieldIds) {
+          if (taintedRel.has(fieldId)) continue
+          const f = fields.find((ff) => ff.id === fieldId)
+          const expr = f ? formulaExpressionOf(f) : null
+          const call = expr ? parseRelationAggregationCall(expr) : null
+          if (!call) continue
+          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields)
+        }
+        if (Object.keys(updates).length > 0) {
+          // lock-exempt: system relation-aggregation fan-out materialization — derived value, no user actor (same posture as the same-record recompute write).
+          await query('UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3', [JSON.stringify(updates), recordId, sheetId])
+          formulaDataByRecord.set(recordId, { ...(formulaDataByRecord.get(recordId) ?? {}), ...updates })
+        }
+      }
     }
 
     for (const row of rows) {
