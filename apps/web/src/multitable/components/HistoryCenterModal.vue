@@ -59,6 +59,14 @@
         </li>
       </ul>
       <p v-else class="meta-hist__hint">{{ t('暂无历史记录', 'No history yet') }}</p>
+      <button
+        v-if="nextCursor && !loading"
+        class="meta-hist__more"
+        type="button"
+        data-test="hist-load-more"
+        :disabled="loadingMore"
+        @click="loadMore"
+      >{{ loadingMore ? t('加载中…', 'Loading…') : t('加载更多', 'Load more') }}</button>
     </div>
   </div>
 </template>
@@ -85,7 +93,7 @@ const filterTo = ref('')
 const filterField = ref('')
 const scopeAllSheets = ref(false) // T2b: default to the active sheet; opt in to all readable tables
 
-const { batches, loading, error, expandedId, detail, detailLoading, load, toggle: toggleBatch } = useHistoryCenter()
+const { batches, loading, loadingMore, error, nextCursor, expandedId, detail, detailLoading, load, loadMore, toggle: toggleBatch } = useHistoryCenter()
 
 function reload(): Promise<void> {
   return load(props.baseId, {

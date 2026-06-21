@@ -59,6 +59,9 @@ export interface HistoryEventsParams {
    * language; numbers/dates are matched by their stringified form. `total` is post-search.
    */
   search?: string
+  /** T2b cursor pagination: opaque (createdAt, batchId) of the last batch of the previous page. When present,
+   *  it takes precedence over `offset` (which is left working for any legacy caller). */
+  cursor?: string
   limit?: number
   offset?: number
 }
@@ -127,6 +130,35 @@ const EMPTY_FIELD_SET: ReadonlySet<string> = new Set()
 /** T2b search candidate-row cap (bound the snapshot load over a huge history; hitting it logs + truncates, never fails). */
 const SEARCH_CANDIDATE_ROW_CAP = 20000
 
+/**
+ * T2b cursor pagination (Option A — a stable key-cursor over the post-filter batch list; `total` stays exact).
+ * The cursor is the opaque (createdAt, batchId) of the last batch on a page. Pagination is over `all` AFTER it
+ * is sorted by the SAME total order the cursor compares on — (createdAt DESC, batchId DESC) — so a page
+ * boundary that lands on a createdAt tie cannot skip or duplicate (batchId is globally unique, the tiebreak).
+ * This buys page-reachability + stability under concurrent top-inserts; it does NOT reduce DB load (every page
+ * still loads + filters all rows — an exact post-filter `total` requires that). True SQL-level efficiency would
+ * trade the exact total for a `hasMore` estimate; that is a deferred follow-up, not this slice.
+ */
+function encodeHistoryCursor(b: { createdAt: string; batchId: string }): string {
+  return Buffer.from(`${b.createdAt}|${b.batchId}`, 'utf8').toString('base64')
+}
+function decodeHistoryCursor(cursor: string): { createdAt: string; batchId: string } | null {
+  try {
+    const raw = Buffer.from(cursor, 'base64').toString('utf8')
+    const sep = raw.lastIndexOf('|') // batchId is opaque but never contains '|' in our id space; split on the last
+    if (sep <= 0) return null
+    return { createdAt: raw.slice(0, sep), batchId: raw.slice(sep + 1) }
+  } catch {
+    return null // malformed cursor → treated as no cursor (first page); never throws
+  }
+}
+/** Total DESC order over (createdAt, batchId); batchId breaks createdAt ties. <0 → a sorts before b. */
+function compareBatchKeyDesc(a: { createdAt: string; batchId: string }, b: { createdAt: string; batchId: string }): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 1 : -1
+  if (a.batchId !== b.batchId) return a.batchId < b.batchId ? 1 : -1
+  return 0
+}
+
 /** LOCK-3 field layer: per-sheet allowed field-id set; a sheet missing from the map masks every field (fail-closed). */
 function allowedFieldsFor(map: Map<string, Set<string>>, sheetId: string): ReadonlySet<string> {
   return map.get(sheetId) ?? EMPTY_FIELD_SET
@@ -151,9 +183,9 @@ export async function loadHistoryBatchSummaries(
   query: QueryFn,
   params: HistoryEventsParams,
   access: HistoryAccess,
-): Promise<{ batches: HistoryBatchSummary[]; total: number }> {
+): Promise<{ batches: HistoryBatchSummary[]; total: number; nextCursor: string | null }> {
   const sheetIds = params.sheetIds
-  if (sheetIds.length === 0) return { batches: [], total: 0 }
+  if (sheetIds.length === 0) return { batches: [], total: 0, nextCursor: null }
   const deniedBySheet = await loadDeniedBySheet(query, sheetIds, access)
 
   // Filters are pushed to SQL; ordering is LOCK-11. Grouping by COALESCE(batch_id, id) is done in JS so
@@ -230,9 +262,24 @@ export async function loadHistoryBatchSummaries(
   }
 
   const total = all.length // post-permission-filter total (LOCK-3) — never the raw revision/batch count
-  const offset = Math.max(Number(params.offset ?? 0), 0)
   const limit = Math.min(Math.max(Number(params.limit ?? 50), 1), 100)
-  return { batches: all.slice(offset, offset + limit), total }
+  // Sort by the SAME total order the cursor compares on (createdAt DESC, batchId DESC) so a tie-straddling page
+  // boundary can't skip/duplicate. (Encounter order already ~matches but disagrees at createdAt ties.)
+  all.sort(compareBatchKeyDesc)
+  // Pagination start: a cursor (if valid) wins over offset and points just past the previous page's last batch.
+  let start = 0
+  const cur = params.cursor ? decodeHistoryCursor(params.cursor) : null
+  if (cur) {
+    const idx = all.findIndex((b) => compareBatchKeyDesc(b, cur) > 0) // first batch strictly AFTER the cursor
+    start = idx === -1 ? all.length : idx
+  } else if (params.offset) {
+    start = Math.max(Number(params.offset), 0)
+  }
+  const batches = all.slice(start, start + limit)
+  const nextCursor = start + limit < all.length && batches.length > 0
+    ? encodeHistoryCursor(batches[batches.length - 1])
+    : null
+  return { batches, total, nextCursor }
 }
 
 export interface HistoryChange {

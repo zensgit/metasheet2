@@ -25,7 +25,7 @@ type FakeClient = Parameters<typeof useHistoryCenter>[0]
 type Spied = { listHistoryEvents: ReturnType<typeof vi.fn>; getHistoryBatch: ReturnType<typeof vi.fn> }
 function fakeClient(over: Partial<Spied> = {}): FakeClient {
   return {
-    listHistoryEvents: over.listHistoryEvents ?? vi.fn().mockResolvedValue({ batches: [batch('b1', 2), batch('b2')], total: 2 }),
+    listHistoryEvents: over.listHistoryEvents ?? vi.fn().mockResolvedValue({ batches: [batch('b1', 2), batch('b2')], total: 2, nextCursor: null }),
     getHistoryBatch: over.getHistoryBatch ?? vi.fn().mockResolvedValue(detailOf('b1')),
   } as FakeClient
 }
@@ -48,6 +48,29 @@ describe('useHistoryCenter — read-only history center', () => {
     const params = spied(c).listHistoryEvents.mock.calls[0][1]
     // T2b: time-range + field filter + search forwarded alongside actor/source/action (search → client `q`)
     expect(params).toMatchObject({ actorId: 'u9', source: 'automation', action: 'create', from: '2026-06-01T00:00:00Z', to: '2026-06-30T23:59:59Z', fieldId: 'fld_x', q: 'invoice-42' })
+  })
+
+  it('T2b loadMore APPENDS the next cursor page, forwards the cursor, and stops when exhausted', async () => {
+    const calls = vi.fn()
+      .mockResolvedValueOnce({ batches: [batch('b1')], total: 3, nextCursor: 'cur1' })
+      .mockResolvedValueOnce({ batches: [batch('b2')], total: 3, nextCursor: null })
+    const c = fakeClient({ listHistoryEvents: calls })
+    const { batches, nextCursor, load, loadMore } = useHistoryCenter(c)
+    await load('base1', { search: 'x' })
+    expect(batches.value.map((b) => b.batchId)).toEqual(['b1'])
+    expect(nextCursor.value).toBe('cur1')
+    await loadMore()
+    expect(batches.value.map((b) => b.batchId)).toEqual(['b1', 'b2']) // appended, not replaced
+    expect(nextCursor.value).toBeNull() // exhausted
+    expect(calls.mock.calls[1][1]).toMatchObject({ cursor: 'cur1', q: 'x' }) // forwards cursor + reuses filters
+  })
+
+  it('T2b loadMore is a no-op when there is no nextCursor', async () => {
+    const c = fakeClient() // default mock → nextCursor null
+    const { load, loadMore } = useHistoryCenter(c)
+    await load('base1')
+    await loadMore()
+    expect(spied(c).listHistoryEvents.mock.calls.length).toBe(1) // no extra fetch
   })
 
   it('load NEVER throws — surfaces the error and clears batches', async () => {

@@ -16,35 +16,64 @@ type HistoryClient = Pick<typeof multitableClient, 'listHistoryEvents' | 'getHis
 export function useHistoryCenter(client: HistoryClient = multitableClient) {
   const batches = ref<HistoryBatchSummary[]>([])
   const loading = ref(false)
+  const loadingMore = ref(false)
   const error = ref<string | null>(null)
+  const nextCursor = ref<string | null>(null) // T2b cursor: present → another page is reachable
   const expandedId = ref<string | null>(null)
   const detail = ref<HistoryBatchDetail | null>(null)
   const detailLoading = ref(false)
+  // Remembered for loadMore so the next page reuses the SAME filter set (a cursor is only valid for its filters).
+  let lastBaseId = ''
+  let lastFilters: HistoryFilters = {}
+
+  const clientParams = (filters: HistoryFilters, cursor?: string) => ({
+    sheetId: filters.sheetId || undefined,
+    actorId: filters.actorId || undefined,
+    source: filters.source || undefined,
+    action: filters.action || undefined,
+    from: filters.from || undefined,
+    to: filters.to || undefined,
+    fieldId: filters.fieldId || undefined,
+    q: filters.search || undefined,
+    cursor,
+    limit: 100,
+  })
 
   async function load(baseId: string, filters: HistoryFilters = {}): Promise<void> {
     if (!baseId) return
+    lastBaseId = baseId
+    lastFilters = filters
     loading.value = true
     error.value = null
     expandedId.value = null
     detail.value = null
+    nextCursor.value = null
     try {
-      const res = await client.listHistoryEvents(baseId, {
-        sheetId: filters.sheetId || undefined,
-        actorId: filters.actorId || undefined,
-        source: filters.source || undefined,
-        action: filters.action || undefined,
-        from: filters.from || undefined,
-        to: filters.to || undefined,
-        fieldId: filters.fieldId || undefined,
-        q: filters.search || undefined,
-        limit: 100,
-      })
+      const res = await client.listHistoryEvents(baseId, clientParams(filters))
       batches.value = res.batches
+      nextCursor.value = res.nextCursor
     } catch (err) {
       error.value = err instanceof Error ? err.message : 'Failed to load history'
       batches.value = []
+      nextCursor.value = null
     } finally {
       loading.value = false
+    }
+  }
+
+  // T2b "load more": fetch the next cursor page and APPEND. Never throws — on failure it stops paging
+  // (clears the cursor) and keeps the batches already shown, so a click can't leak an unhandled rejection.
+  async function loadMore(): Promise<void> {
+    if (!nextCursor.value || !lastBaseId || loadingMore.value) return
+    loadingMore.value = true
+    try {
+      const res = await client.listHistoryEvents(lastBaseId, clientParams(lastFilters, nextCursor.value))
+      batches.value = [...batches.value, ...res.batches]
+      nextCursor.value = res.nextCursor
+    } catch {
+      nextCursor.value = null
+    } finally {
+      loadingMore.value = false
     }
   }
 
@@ -65,5 +94,5 @@ export function useHistoryCenter(client: HistoryClient = multitableClient) {
     }
   }
 
-  return { batches, loading, error, expandedId, detail, detailLoading, load, toggle }
+  return { batches, loading, loadingMore, error, nextCursor, expandedId, detail, detailLoading, load, loadMore, toggle }
 }

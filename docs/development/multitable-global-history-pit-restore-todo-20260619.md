@@ -71,7 +71,7 @@ Tests:
 
 ### T2 - Global History Center Read-Only UI
 
-Status: split. **T2a SHIPPED (#2961); T2b filters slice SHIPPED (2026-06-21: time-range + sheet-scope + field filter); T2b search SHIPPED (2026-06-21: post-mask snapshot value-search, leak-free); T2b cursor pagination still FOLLOW-UP (read-only, in MVP envelope, not gated, needs new backend cursor preserving the post-filter `total` semantics).**
+Status: **T2a + T2b COMPLETE (2026-06-21).** T2a #2961; T2b filters (time-range + sheet-scope + field filter), T2b search (post-mask snapshot value-search, leak-free), and T2b cursor pagination (stable key-cursor over the post-filter set, `total` preserved) all SHIPPED. Only the cross-table field-dropdown UX in "all tables" mode remains a non-blocking nicety (owner-deferred). The T2 read-only history center is now feature-complete.
 The original single T2 scope over-stated what shipped; this split records the actual line.
 
 Goal: add a global history center entry and timeline UI.
