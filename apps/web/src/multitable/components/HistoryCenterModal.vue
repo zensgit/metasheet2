@@ -36,6 +36,9 @@
       </div>
 
       <p v-if="error" class="meta-hist__error" role="alert">{{ error }}</p>
+      <p v-if="searchTruncated" class="meta-hist__warn" role="status" data-test="hist-search-truncated">
+        {{ t('搜索结果可能不完整（已达检索上限），请缩小时间区间或其它筛选条件。', 'Search may be incomplete (candidate limit reached) — narrow the date range or other filters.') }}
+      </p>
       <div v-if="loading" class="meta-hist__hint">{{ t('加载中…', 'Loading…') }}</div>
       <ul v-else-if="batches.length" class="meta-hist__list">
         <li v-for="b in batches" :key="b.batchId" class="meta-hist__row">
@@ -93,7 +96,7 @@ const filterTo = ref('')
 const filterField = ref('')
 const scopeAllSheets = ref(false) // T2b: default to the active sheet; opt in to all readable tables
 
-const { batches, loading, loadingMore, error, nextCursor, expandedId, detail, detailLoading, load, loadMore, toggle: toggleBatch } = useHistoryCenter()
+const { batches, loading, loadingMore, error, nextCursor, searchTruncated, expandedId, detail, detailLoading, load, loadMore, toggle: toggleBatch } = useHistoryCenter()
 
 function reload(): Promise<void> {
   return load(props.baseId, {

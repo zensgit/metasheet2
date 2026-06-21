@@ -20,6 +20,7 @@ import request from 'supertest'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { loadHistoryBatchSummaries } from '../../src/multitable/history-projection'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -333,5 +334,24 @@ describeIfDatabase('global-history events — LOCK-3 security goldens (real DB)'
     const res = await events({ cursor: 'not-a-valid-cursor!!!' })
     expect(res.status).toBe(200)
     expect(batchIds(res).length).toBeGreaterThan(0) // first page, not a 500
+  })
+
+  // ----- T2b search truncation is SURFACED (not silent) -----
+
+  test('T2b search truncation: the API surfaces searchTruncated=false for a normal (non-truncated) search', async () => {
+    await mixedFieldRev()
+    const res = await events({ q: 'public' })
+    expect(res.status).toBe(200)
+    expect(res.body?.data?.searchTruncated).toBe(false) // the flag is present, and false when within the cap
+  })
+
+  test('T2b search truncation: searchTruncated=true when the candidate cap is hit (and false with a generous cap)', async () => {
+    await mixedFieldRev() // ≥2 candidate revisions exist on the sheet
+    const params = { sheetIds: [SHEET_ID], allowedFieldsBySheet: new Map([[SHEET_ID, new Set([STATUS, SALARY])]]), search: '99999' }
+    const access = { userId: USER_ID, isAdminRole: false }
+    const capped = await loadHistoryBatchSummaries(q, { ...params, searchRowCap: 1 }, access)
+    expect(capped.searchTruncated).toBe(true) // cap=1 with ≥2 candidate rows → bounded, surfaced
+    const full = await loadHistoryBatchSummaries(q, { ...params, searchRowCap: 10000 }, access)
+    expect(full.searchTruncated).toBe(false) // generous cap → complete
   })
 })

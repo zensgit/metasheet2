@@ -19,6 +19,7 @@ export function useHistoryCenter(client: HistoryClient = multitableClient) {
   const loadingMore = ref(false)
   const error = ref<string | null>(null)
   const nextCursor = ref<string | null>(null) // T2b cursor: present → another page is reachable
+  const searchTruncated = ref(false) // T2b: search hit the candidate cap → results + total are bounded
   const expandedId = ref<string | null>(null)
   const detail = ref<HistoryBatchDetail | null>(null)
   const detailLoading = ref(false)
@@ -48,14 +49,17 @@ export function useHistoryCenter(client: HistoryClient = multitableClient) {
     expandedId.value = null
     detail.value = null
     nextCursor.value = null
+    searchTruncated.value = false
     try {
       const res = await client.listHistoryEvents(baseId, clientParams(filters))
       batches.value = res.batches
       nextCursor.value = res.nextCursor
+      searchTruncated.value = res.searchTruncated
     } catch (err) {
       error.value = err instanceof Error ? err.message : 'Failed to load history'
       batches.value = []
       nextCursor.value = null
+      searchTruncated.value = false
     } finally {
       loading.value = false
     }
@@ -70,6 +74,7 @@ export function useHistoryCenter(client: HistoryClient = multitableClient) {
       const res = await client.listHistoryEvents(lastBaseId, clientParams(lastFilters, nextCursor.value))
       batches.value = [...batches.value, ...res.batches]
       nextCursor.value = res.nextCursor
+      searchTruncated.value = res.searchTruncated
     } catch {
       nextCursor.value = null
     } finally {
@@ -94,5 +99,5 @@ export function useHistoryCenter(client: HistoryClient = multitableClient) {
     }
   }
 
-  return { batches, loading, loadingMore, error, nextCursor, expandedId, detail, detailLoading, load, loadMore, toggle }
+  return { batches, loading, loadingMore, error, nextCursor, searchTruncated, expandedId, detail, detailLoading, load, loadMore, toggle }
 }

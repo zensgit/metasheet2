@@ -59,6 +59,9 @@ export interface HistoryEventsParams {
    * language; numbers/dates are matched by their stringified form. `total` is post-search.
    */
   search?: string
+  /** Candidate-row cap for search (default SEARCH_CANDIDATE_ROW_CAP). Injectable so a test can exercise the
+   *  truncation path without seeding 20k rows; the route never sets it. */
+  searchRowCap?: number
   /** T2b cursor pagination: opaque (createdAt, batchId) of the last batch of the previous page. When present,
    *  it takes precedence over `offset` (which is left working for any legacy caller). */
   cursor?: string
@@ -183,9 +186,9 @@ export async function loadHistoryBatchSummaries(
   query: QueryFn,
   params: HistoryEventsParams,
   access: HistoryAccess,
-): Promise<{ batches: HistoryBatchSummary[]; total: number; nextCursor: string | null }> {
+): Promise<{ batches: HistoryBatchSummary[]; total: number; nextCursor: string | null; searchTruncated: boolean }> {
   const sheetIds = params.sheetIds
-  if (sheetIds.length === 0) return { batches: [], total: 0, nextCursor: null }
+  if (sheetIds.length === 0) return { batches: [], total: 0, nextCursor: null, searchTruncated: false }
   const deniedBySheet = await loadDeniedBySheet(query, sheetIds, access)
 
   // Filters are pushed to SQL; ordering is LOCK-11. Grouping by COALESCE(batch_id, id) is done in JS so
@@ -202,16 +205,21 @@ export async function loadHistoryBatchSummaries(
   // over a huge history is bounded. Capping a READ-ONLY search yields incomplete results, NOT a failure — do
   // NOT fail-closed here (unlike T5/PV-7, search has no execution-matches-preview invariant to protect).
   const searchQuery = params.search && params.search.trim() ? params.search.trim().toLowerCase() : null
+  const searchRowCap = Math.max(Number(params.searchRowCap ?? SEARCH_CANDIDATE_ROW_CAP), 1)
   const res = await query(
     `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, created_at${searchQuery ? ', snapshot' : ''}
      FROM meta_record_revisions
      WHERE ${where.join(' AND ')}
-     ORDER BY created_at DESC, version DESC, id DESC${searchQuery ? `\n     LIMIT ${SEARCH_CANDIDATE_ROW_CAP}` : ''}`,
+     ORDER BY created_at DESC, version DESC, id DESC${searchQuery ? `\n     LIMIT ${searchRowCap}` : ''}`,
     args,
   )
   const rows = normalizeRevRows(res.rows)
-  if (searchQuery && rows.length >= SEARCH_CANDIDATE_ROW_CAP) {
-    console.warn(`[history-projection] search candidate rows hit the ${SEARCH_CANDIDATE_ROW_CAP} cap; older revisions were not searched (results may be incomplete)`)
+  // When a search hits the candidate cap, older revisions were NOT searched: a visible match beyond the cap is
+  // absent. We surface that to the caller (searchTruncated) AND server-log it — never silently, so the UI can
+  // tell the user to narrow filters rather than read incomplete results as "nothing matched".
+  const searchTruncated = searchQuery !== null && rows.length >= searchRowCap
+  if (searchTruncated) {
+    console.warn(`[history-projection] search candidate rows hit the ${searchRowCap} cap; older revisions were not searched (results + total are bounded)`)
   }
 
   // Group into batches in encounter order (rows are already newest-first → batches stay newest-first).
@@ -279,7 +287,7 @@ export async function loadHistoryBatchSummaries(
   const nextCursor = start + limit < all.length && batches.length > 0
     ? encodeHistoryCursor(batches[batches.length - 1])
     : null
-  return { batches, total, nextCursor }
+  return { batches, total, nextCursor, searchTruncated }
 }
 
 export interface HistoryChange {
