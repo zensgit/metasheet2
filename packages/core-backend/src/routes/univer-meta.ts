@@ -7346,6 +7346,83 @@ export function univerMetaRouter(): Router {
   //  - Lock C update-restore only: hard-deleted record → 404; delete-target → RESTORE_UNSUPPORTED.
   //  - Lock D scalar-only: computed/link/system-auto/attachment excluded by type.
   // ---------------------------------------------------------------------------
+  // Global History — T5-2: record-version restore PREVIEW (read-only). Computes the diff a Layer-1 restore to
+  // `targetVersion` WOULD apply, masked to the actor's allowed fields (PV-2), WITHOUT writing (PV-1). The diff
+  // MIRRORS the restore route's shape so a preview matches the eventual write — pinned by the preview→restore
+  // consistency golden (the small helpers below duplicate the restore route's route-local copies; unifying
+  // them is a noted P3, guarded against drift by that golden). v1 = record-version, full-record; batch scope,
+  // strategy=reset, and the reconstructor-based as-of-T preview are explicitly out of v1 (follow-ups).
+  router.post('/sheets/:sheetId/records/:recordId/restore-preview', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!sheetId || !recordId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    const previewParsed = z.object({ targetVersion: z.number().int().positive() }).safeParse(req.body)
+    if (!previewParsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: previewParsed.error.message } })
+    const previewTargetVersion = previewParsed.data.targetVersion
+    try {
+      const pool = poolManager.get()
+      // Denied/missing record share the SAME 404 shape (no existence oracle), like the per-record history route.
+      if ((await pool.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])).rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (!capabilities.canEditRecord) return sendForbidden(res) // D5: gate the preview on the RESTORE capability
+      if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))) {
+        const denied = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        if (denied.has(recordId)) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } }) // row-deny → 404 no-oracle
+      }
+      const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
+      const liveRow = (await pool.query('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])).rows[0] as { data: unknown } | undefined
+      const currentData = asRec(liveRow?.data)
+      const revRows = (await pool.query('SELECT action, snapshot FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2 AND version = $3', [sheetId, recordId, previewTargetVersion])).rows as Array<{ action: string; snapshot: unknown }>
+      if (revRows.length === 0) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: `No revision at version ${previewTargetVersion}` } })
+      const targetRev = revRows.find((r) => r.action !== 'delete')
+      if (!targetRev) return res.status(422).json({ ok: false, error: { code: 'RESTORE_UNSUPPORTED', message: `Version ${previewTargetVersion} is a delete revision; undelete preview is not supported in this slice` } })
+      if (targetRev.snapshot === null || targetRev.snapshot === undefined) return res.status(422).json({ ok: false, error: { code: 'SNAPSHOT_UNAVAILABLE', message: `Revision ${previewTargetVersion} has no stored snapshot` } })
+      const targetSnapshot = asRec(targetRev.snapshot)
+
+      const previewCtx = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
+      if (!previewCtx) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
+      let schemaDrift = false
+      for (const fid of Object.keys(targetSnapshot)) if (!previewCtx.fieldById.has(fid)) { schemaDrift = true; break }
+
+      // Mirror of the restore route's set ∪ unset diff (scalar) + link-as-report. Helpers mirror restore (P3 dup).
+      const NON_RESTORABLE = new Set(['formula', 'lookup', 'rollup', 'link', 'attachment', 'button', 'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy'])
+      const sameVal = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+      const sameLinks = (a: string[], b: string[]): boolean => a.length === b.length && [...a].sort().join(' ') === [...b].sort().join(' ')
+      const changes: Array<{ fieldId: string; op: 'set' | 'unset'; value: unknown }> = []
+      for (const [fid, guard] of previewCtx.fieldById.entries()) {
+        if (rawTypeById.get(fid) === 'button') continue
+        const inSnap = Object.prototype.hasOwnProperty.call(targetSnapshot, fid)
+        const inCur = Object.prototype.hasOwnProperty.call(currentData, fid)
+        if (guard.type === 'link') {
+          const target = inSnap ? normalizeLinkIds(targetSnapshot[fid]) : []
+          if (!sameLinks(normalizeLinkIds(currentData[fid]), target)) changes.push({ fieldId: fid, op: 'set', value: target })
+          continue
+        }
+        if (NON_RESTORABLE.has(guard.type)) continue
+        if (inSnap) {
+          if (!sameVal(currentData[fid], targetSnapshot[fid])) changes.push({ fieldId: fid, op: 'set', value: targetSnapshot[fid] })
+        } else if (inCur) {
+          changes.push({ fieldId: fid, op: 'unset', value: null })
+        }
+      }
+      // PV-2 mask: filter the diff to the actor's allowed fields (visible ∧ field_permissions, taint-dropped),
+      // so a hidden field that WOULD change never appears in the preview — the SAME chain as history detail.
+      const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+      const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
+      const visibleChanges = changes.filter((c) => allowed.has(c.fieldId))
+      return res.json({ ok: true, data: { changes: visibleChanges, visibleAffectedFieldCount: visibleChanges.length, schemaDrift, targetVersion: previewTargetVersion } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] restore-preview failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to preview restore' } })
+    }
+  })
+
   router.post('/sheets/:sheetId/records/:recordId/restore', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
