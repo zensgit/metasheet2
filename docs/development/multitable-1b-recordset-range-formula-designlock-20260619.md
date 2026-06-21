@@ -40,6 +40,14 @@ skeleton is a separate gated extension** (its own opt-in + §5 caps), tracked in
 state this scope difference in its own surface (function help / release note) so users are not surprised the
 first cut aggregates linked records, not an arbitrary sheet column.
 
+**🔒 Naming gate (binding on the Slice A impl PR):** relation-scoped Slice A does **not** promise classic
+`SUMIF` parity. If the implementation exposes the names `SUMIF` / `COUNTIFS` / `AVERAGEIF` to users, the
+Slice A PR MUST re-confirm semantics/naming at that point and make the relation-scoped (NOT whole-sheet)
+reach explicit in the user-facing surface (function help / error text / release note). Reusing the
+well-known spreadsheet names **without** that disclaimer is not permitted — a user must never be led to
+believe whole-sheet range scan is already supported. (If a clean relation-scoped name is preferable to an
+`*IF` name carrying whole-sheet baggage, that naming decision is made in the Slice A PR, not assumed here.)
+
 ## 2. The eight locked blocks
 
 ### Block 1 — Reference model
