@@ -34,8 +34,9 @@ identity/token — is T6, and appears here ONLY as named forward-constraints (§
 
 - **PV-1 — Ruthlessly read-only (the defining invariant).** The preview path computes + returns a diff and
   writes NOTHING: no INSERT/UPDATE/DELETE on any table, no side effect, no token persisted. Tested as an
-  invariant, not asserted in a comment: a golden snapshots `meta_record_revisions` + `meta_records` row-counts
-  (and the target records' `version`) and asserts they are **byte-identical before/after** a preview call.
+  invariant, not asserted in a comment: a golden asserts the `meta_record_revisions` + `meta_records` row counts
+  AND the target records' `version` are **unchanged (equal) before and after** a preview call (a state
+  invariant — not a byte-level DB snapshot).
 - **PV-2 — Permission-safety is REUSE, not re-derivation (LOCK-3).** The preview diff runs through the SAME
   machinery the history *detail* already uses — row-deny (`loadDeniedRecordIds` / the projection's deny pass)
   + the field-mask (`buildHistoryAllowedFieldsBySheet`) + `visibleAffected*` counts. **Boundary correctness
@@ -64,6 +65,11 @@ identity/token — is T6, and appears here ONLY as named forward-constraints (§
   permission preflight (permission-check every delete/update/undelete target) and reports "executable" vs
   "blocked (and why)" — but it **writes nothing and enforces nothing**. T6 re-verifies and enforces
   all-or-nothing atomically at execution.
+- **PV-7 — Over-limit preview FAILS CLOSED (no truncated preview).** A preview whose target set exceeds the
+  configured cap returns an explicit "too large to preview safely" error, NOT a truncated diff. Truncation is
+  not ordinary pagination here: a truncated preview would let T6 later execute records the preview never showed,
+  breaking execution-matches-preview. (The alternative — bind T6 to execute ONLY the preview-enumerated set — is
+  a T6 design; T5 picks fail-closed.) The cap is configurable; hitting it is an error, never a silent drop.
 
 ## 4. Forward-constraints (T6 — named here, NOT designed here)
 
@@ -83,10 +89,19 @@ execution is entirely T6.
   the signed-payload-vs-persisted-row-vs-cache choice is T6's. [recommend: deferred — keeps T5 read-only]
 - **D2 — Target granularity for v1.** record-version / batch / full point-in-time T? Recommend: record-version
   + batch first; full-table point-in-time T (heaviest reconstruction) as a T5 follow-up.
-- **D3 — Reconstruction cost / limits.** A reset over a large post-T-created set can be expensive; cap + report
-  truncation explicitly (no silent cap — log what was dropped).
-- **D4 — Conflict surfacing.** If the live record changed since T, does the preview flag the would-be conflict?
-  Recommend: yes — preview shows current-vs-T and marks conflicts; resolution is T6.
+- **D3 — Over-limit handling → RESOLVED (owner review): FAIL-CLOSED (now PV-7).** A preview whose target set
+  exceeds the cap does NOT return a truncated diff — it fails closed. Truncation is not ordinary pagination
+  here: a truncated preview would let T6 later execute records the preview never showed, breaking
+  execution-matches-preview. (The alternative — T6 may execute ONLY the complete set the preview/token
+  enumerated — is a T6 binding; T5 picks fail-closed as the clean default.) See PV-7.
+- **D4 — Conflict CATEGORIES (clarified, owner review).** "The live record changed since T" is NOT a conflict —
+  that is just the diff (every diff is a change-since-T). The preview must classify genuine BLOCKERS distinctly
+  from ordinary value diffs: (b) **schema-drift** (a field/type changed since T so the T-value can't be
+  restored), (c) **permission / write-gate conflict** (the actor cannot write the target now), (d)
+  **deleted/missing target** (the record no longer exists). T5 enumerates (b)(c)(d) at preview time; (a)
+  **concurrent-after-preview** (the target changed between preview and would-be execution) is inherently a T6
+  execution-time freshness check, not detectable at preview. To ratify: the exact set surfaced + their wire
+  shape.
 - **D5 — Who may preview.** The history read gate, or the eventual restore capability? Recommend: gate preview
   on the SAME capability the restore will need (don't tease a preview to someone who could never execute) —
   preview stays read-only either way (PV-1/PV-2), this only narrows WHO sees it.
