@@ -40,3 +40,12 @@
 - **成本**：搜索时才 SELECT snapshot；候选行 cap 20000 + 命中即 `console.warn` 截断——**不 fail-closed**（只读搜索截断只是结果不全，无 execution-matches-preview 不变式，不照搬 T5/PV-7）。
 - 后端 `?q=`；FE 搜索框 → `useHistoryCenter` → client `q`。
 - **验证**：events goldens 10→14（**positive control 非空过** + **field-mask leak-free** + **row-deny leak-free** + **total post-search**）；完整历史套件 **52/52**；**mutation**：把 search 改成匹配 raw snapshot → field-mask leak-free golden 失败（被拒值泄漏），row-deny leak-free 仍过（依赖 row-skip 而非字段掩码）——精确隔离两轴守卫。tsc/vue-tsc 0；FE spec 5/5。
+
+## 6. T2b cursor 分页子刀（SHIPPED 2026-06-21 —— T2b 完整）
+
+稳定 key-cursor（Option A，over 已过滤的批次集；`total` 保持精确 post-filter）。
+
+- **设计抉择**：精确 post-filter `total` 需 load-all + filter——这正是高效 cursor 要避免的。owner 要「保持 post-filter total 语义」→ 选 Option A（cursor over post-filter `all`，total 不变）。买到的是**页可达**（此前 FE 写死 limit:100，第 101 条不可达）+ **并发头插下稳定**（offset 会重显边界行；key-cursor 不会）；**不**降 DB 负载（每页仍 load-all——这是 total 精确的代价；SQL 级高效需换成 `hasMore` 估算，单列为 deferred）。
+- **关键正确性**：cursor 比较键必须与 `all` 的排序**字节一致**。`all` 显式 `sort(compareBatchKeyDesc)` = (createdAt DESC, **batchId DESC**)，cursor 也比这个元组；batchId 全局唯一，破 createdAt 平局——否则边界落在时间戳平局上会 skip/duplicate。cursor = opaque base64(`createdAt|batchId`)；malformed → 当首页（不崩）。offset 保留（无消费者，但移除是无谓 churn）。
+- **leak**：cursor 编码的是 actor 已见批次的键，且 over 已 post-filter 的 `all` → 永不能寻址被拒批次。
+- **验证**：events goldens 14→18（**limit=1 全量分页 exactly-once 无 skip/dup** + **同 createdAt 两批跨页边界仍 exactly-once = 平局 golden** + **分页中 total 恒为 post-filter** + **malformed cursor→首页不崩**）；完整历史套件 **56/56**；**mutation**：去掉 compareBatchKeyDesc 的 batchId 平局位 → 平局 golden 失败（一条 tie 批次被 skip，`expected 0 to be 1`）——证明平局位 load-bearing。FE：`loadMore` 追加（不替换）+ 透传 cursor + 复用 filters，永不抛；「加载更多」按钮（nextCursor 时显示）。FE spec 5→7；vue-tsc 0；unit 3756/3756；无迁移。

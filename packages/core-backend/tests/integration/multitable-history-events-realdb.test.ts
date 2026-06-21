@@ -33,6 +33,8 @@ const REC_PUBLIC = `rec_gh_public_${TS}`
 const BULK_BATCH = `batch_gh_bulk_${TS}` // one bulk action touching BOTH records (shared id)
 const SECRET_BATCH = `batch_gh_secret_${TS}` // a single-record action on the secret record only
 const FIELD_BATCH = `batch_gh_field_${TS}` // a single-record action on REC_PUBLIC touching STATUS + SALARY
+const TIE_A = `batch_gh_tie_a_${TS}` // two batches sharing ONE created_at (cursor tie-break test)
+const TIE_B = `batch_gh_tie_b_${TS}`
 const USER_ID = `user_gh_${TS}`
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
@@ -67,6 +69,29 @@ const mixedFieldRev = () =>
      VALUES (gen_random_uuid(), $1, $2, 2, 'update', 'rest', $3, ARRAY[$4,$5]::text[], '{}'::jsonb, $6::jsonb, $7)`,
     [SHEET_ID, REC_PUBLIC, USER_ID, STATUS, SALARY, JSON.stringify({ [STATUS]: 'public', [SALARY]: 99999 }), FIELD_BATCH],
   )
+// A single-record visible-record revision (REC_PUBLIC) at an EXPLICIT created_at + batch_id (cursor tests).
+const revAt = (batchId: string, createdAt: string) =>
+  q(
+    `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id, created_at)
+     VALUES (gen_random_uuid(), $1, $2, 1, 'update', 'rest', $3, ARRAY[$4]::text[], '{}'::jsonb, $5::jsonb, $6, $7)`,
+    [SHEET_ID, REC_PUBLIC, USER_ID, STATUS, JSON.stringify({ [STATUS]: 'public' }), batchId, createdAt],
+  )
+// Page through (limit=1) collecting batchIds; asserts `total` is constant across pages. Returns {seen, total}.
+const pageAll = async (extra: Record<string, unknown> = {}): Promise<{ seen: string[]; total: number }> => {
+  const seen: string[] = []
+  let cursor: string | undefined
+  let total = -1
+  for (let i = 0; i < 50; i++) {
+    const res = await events({ ...extra, limit: 1, ...(cursor ? { cursor } : {}) })
+    expect(res.status).toBe(200)
+    if (total === -1) total = res.body?.data?.total
+    else expect(res.body?.data?.total).toBe(total) // total is constant across pages
+    seen.push(...batchIds(res))
+    cursor = res.body?.data?.nextCursor ?? undefined
+    if (!cursor) break
+  }
+  return { seen, total }
+}
 // field_permissions row hiding a field from the test user (subject_type='user'); afterEach clears it.
 const denyFieldForUser = (fieldId: string) =>
   q(
@@ -274,5 +299,39 @@ describeIfDatabase('global-history events — LOCK-3 security goldens (real DB)'
     const res = await events({ q: '99999' }) // only FIELD_BATCH carries 99999
     expect(batchIds(res)).toEqual([FIELD_BATCH])
     expect(res.body?.data?.total).toBe(1) // post-search total
+  })
+
+  // ----- T2b cursor pagination (stable key-cursor over the post-filter set) -----
+
+  test('T2b cursor: paging with limit=1 returns every batch EXACTLY once (no skip / no duplicate)', async () => {
+    await mixedFieldRev() // 3 batches: BULK, SECRET, FIELD
+    const { seen, total } = await pageAll()
+    expect(total).toBe(3)
+    expect(seen.length).toBe(3)
+    expect(new Set(seen).size).toBe(3) // no duplicates
+    expect(new Set(seen)).toEqual(new Set([BULK_BATCH, SECRET_BATCH, FIELD_BATCH])) // no skips
+  })
+
+  test('T2b cursor: two batches sharing ONE created_at straddling a page boundary — still exactly once', async () => {
+    const sameTime = new Date(TS - 60000).toISOString()
+    await revAt(TIE_A, sameTime)
+    await revAt(TIE_B, sameTime) // identical created_at, different batchId → the tie the cursor must break
+    const { seen } = await pageAll()
+    expect(seen.filter((id) => id === TIE_A).length).toBe(1) // the tie-break golden: no skip/duplicate
+    expect(seen.filter((id) => id === TIE_B).length).toBe(1)
+  })
+
+  test('T2b cursor: total stays POST-filter while paging (a row-denied batch is neither paged nor counted)', async () => {
+    await setRules(denySecretRule)
+    await setFlag(true) // SECRET_BATCH fully denied → invisible
+    const { seen, total } = await pageAll()
+    expect(seen).not.toContain(SECRET_BATCH) // a cursor from a visible page can never reach the denied batch
+    expect(total).toBe(seen.length) // total == the matches the actor can see
+  })
+
+  test('T2b cursor: a malformed cursor is treated as the first page (defined behavior, no crash)', async () => {
+    const res = await events({ cursor: 'not-a-valid-cursor!!!' })
+    expect(res.status).toBe(200)
+    expect(batchIds(res).length).toBeGreaterThan(0) // first page, not a 500
   })
 })

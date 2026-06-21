@@ -6524,7 +6524,7 @@ export function univerMetaRouter(): Router {
       const revealActive = await resolveHistoryRevealActive(pool.query.bind(pool), baseId, access.userId, revealRequested, reason, ticket, 'history.events')
       // LOCK-3 field layer: a base-level list can show any readable sheet, so resolve allowed fields for all.
       const allowedFieldsBySheet = await buildHistoryAllowedFieldsBySheet(req, pool.query.bind(pool), readableSheetIds, access.userId, revealActive)
-      const { batches, total } = await loadHistoryBatchSummaries(
+      const { batches, total, nextCursor } = await loadHistoryBatchSummaries(
         pool.query.bind(pool),
         {
           sheetIds: readableSheetIds,
@@ -6536,6 +6536,7 @@ export function univerMetaRouter(): Router {
           to: str(req.query.to),
           fieldId: str(req.query.fieldId),
           search: str(req.query.q),
+          cursor: str(req.query.cursor),
           limit: Number.isFinite(limit) ? limit : 50,
           offset: Number.isFinite(offset) ? offset : 0,
         },
@@ -6543,7 +6544,7 @@ export function univerMetaRouter(): Router {
       )
       const names = await resolveUserDisplayNames(pool.query.bind(pool), batches.map((b) => b.actorId).filter((x): x is string => !!x))
       const enriched = batches.map((b) => ({ ...b, actorName: b.actorId ? names.get(b.actorId) ?? null : null }))
-      return res.json({ ok: true, data: { batches: enriched, total } })
+      return res.json({ ok: true, data: { batches: enriched, total, nextCursor } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
