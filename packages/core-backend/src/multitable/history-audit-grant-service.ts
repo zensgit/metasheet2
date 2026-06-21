@@ -82,8 +82,9 @@ function serializeGrantRow(row: Record<string, unknown>): HistoryAuditGrantRow {
 /**
  * LOCK-2c / LOCK-5: write the grant issue/revoke to `operation_audit_logs`. The metadata carries the grant
  * SCOPE (base, subject, reason, ticket, expiry, standing) — never any record field VALUES (A1 reveals
- * nothing). Best-effort wrapper semantics are NOT used: an audit-write failure must surface (the caller is
- * inside the same request and the audit record is part of the contract), so this awaits the insert directly.
+ * nothing). The caller MUST run this together with the grant mutation inside ONE transaction
+ * (`pool.transaction`), so a failed audit insert ROLLS BACK the grant — "no successful audit ⇒ the mutation
+ * did not happen". Surfacing the error alone is not enough; atomicity is what enforces LOCK-2c.
  */
 async function writeGrantAudit(
   query: QueryFn,
@@ -110,6 +111,27 @@ async function writeGrantAudit(
 }
 
 /**
+ * Issue-time SELF_GRANT guardrail support: is the issuer CURRENTLY a member of the target role / group?
+ * Returns false (skip the guardrail) when the membership table is absent — the reveal-time `granted_by`
+ * check (A2) is the real closure, so a minimal env never blocks issuing here.
+ */
+async function issuerBelongsTo(
+  query: QueryFn,
+  kind: 'role' | 'member-group',
+  issuerUserId: string,
+  subjectId: string,
+): Promise<boolean> {
+  try {
+    const res = kind === 'role'
+      ? await query('SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = $2 LIMIT 1', [issuerUserId, subjectId])
+      : await query('SELECT 1 FROM platform_member_group_members WHERE user_id = $1 AND group_id::text = $2 LIMIT 1', [issuerUserId, subjectId])
+    return res.rows.length > 0
+  } catch {
+    return false // membership table missing → cannot confirm; reveal-time closure still applies
+  }
+}
+
+/**
  * Issue a grant. LOCK-2: issuer != grantee (a user cannot grant to themselves); D5: default-finite expiry
  * unless `standing` is explicitly set. The route MUST have already verified the issuer holds
  * `HISTORY_FIELD_AUDIT_GRANT_PERMISSION` (authority gate) and that the subject/base exist. Writes the
@@ -121,9 +143,22 @@ export async function issueHistoryAuditGrant(
   issuerUserId: string,
   nowMs: number,
 ): Promise<HistoryAuditGrantRow> {
-  // LOCK-2a: issuer != grantee. The unambiguous case is a user granting to their own user id.
+  // LOCK-2a: issuer != grantee.
+  //  - Direct: a user granting to their own user id.
+  //  - Indirect: granting to a role / member-group the issuer CURRENTLY belongs to. This is a fast-fail
+  //    GUARDRAIL, not the load-bearing closure: membership is mutable (the issuer could join the role/group
+  //    AFTER issuing), so an issue-time check can never be complete. The IMMUTABLE, subject-type-agnostic
+  //    closure that actually makes LOCK-2 self-grant-proof lives at REVEAL time (A2): deny the reveal when the
+  //    matching grant's `granted_by === revealer` (granted_by never changes). The membership tables may be
+  //    absent in minimal envs — there the guardrail is skipped (reveal-time still closes it), never blocking.
   if (input.subjectType === 'user' && input.subjectId === issuerUserId) {
     throw new HistoryAuditGrantError('SELF_GRANT', 'An issuer cannot grant history field-audit to themselves')
+  }
+  if (input.subjectType === 'role' && (await issuerBelongsTo(query, 'role', issuerUserId, input.subjectId))) {
+    throw new HistoryAuditGrantError('SELF_GRANT', 'An issuer cannot grant to a role they belong to')
+  }
+  if (input.subjectType === 'member-group' && (await issuerBelongsTo(query, 'member-group', issuerUserId, input.subjectId))) {
+    throw new HistoryAuditGrantError('SELF_GRANT', 'An issuer cannot grant to a member-group they belong to')
   }
 
   // D5: standing must be explicit; otherwise apply the finite default (or honour an explicit future expiry).
