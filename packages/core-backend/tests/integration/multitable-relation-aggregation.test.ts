@@ -37,6 +37,9 @@ const FLD_SUMIF = `fld_rel_sumif_${TS}` // = RELSUMIF(link, amt, status, is, pai
 const FLD_SECRETSUM = `fld_rel_secsum_${TS}` // = RELSUMIF(link, SECRET, status, is, paid) -> 300 (leak gate)
 const FLD_CLIFF = `fld_rel_cliff_${TS}` // = RELSUMIF(...)+1  -> composition cliff -> #ERROR!
 const FLD_CURVAL = `fld_rel_curval_${TS}` // current-record string used as a {fld} criteria value
+const FLD_AVGIF = `fld_rel_avgif_${TS}` // = RELAVGIF(link, amt, status, is, {curval}) -> avg(10,20) = 15
+const FLD_COUNTIF = `fld_rel_countif_${TS}` // = RELCOUNTIF(link, status, is, {curval}) -> count(paid) = 2 (4-arg)
+const FLD_SECRETCOUNT = `fld_rel_seccount_${TS}` // = RELCOUNTIF(link, SECRET, greater, 0) -> 3; DENIED-criteria leak gate
 
 const FR1 = `rec_rel_f1_${TS}` // amt 10, status paid,   secret 100
 const FR2 = `rec_rel_f2_${TS}` // amt 20, status paid,   secret 200
@@ -104,6 +107,11 @@ describeIfDatabase('multitable 1b Slice A — relation-scoped RELSUMIF (real DB)
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_SUMIF, MS, 'SumIf', 'formula', relExpr(FLD_AMT), 3])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_SECRETSUM, MS, 'SecretSum', 'formula', relExpr(FLD_SECRET), 4])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_CLIFF, MS, 'Cliff', 'formula', JSON.stringify({ expression: `RELSUMIF("${FLD_LINK}","${FLD_AMT}","${FLD_STATUS}","is",{${FLD_CURVAL}})+1` }), 5])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_AVGIF, MS, 'AvgIf', 'formula', JSON.stringify({ expression: `RELAVGIF("${FLD_LINK}","${FLD_AMT}","${FLD_STATUS}","is",{${FLD_CURVAL}})` }), 6])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_COUNTIF, MS, 'CountIf', 'formula', JSON.stringify({ expression: `RELCOUNTIF("${FLD_LINK}","${FLD_STATUS}","is",{${FLD_CURVAL}})` }), 7])
+    // RELCOUNTIF over the DENIED foreign SECRET field as criteria — the target=criteria bridge must route it
+    // through the same taint gate (a count over a denied criteria would otherwise leak its distribution).
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_SECRETCOUNT, MS, 'SecretCount', 'formula', JSON.stringify({ expression: `RELCOUNTIF("${FLD_LINK}","${FLD_SECRET}","greater","0")` }), 8])
 
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [REC, MS, JSON.stringify({ [FLD_LINK]: [FR1, FR2, FR3], [FLD_CURVAL]: 'unpaid' })])
     for (const fr of [FR1, FR2, FR3]) {
@@ -111,7 +119,7 @@ describeIfDatabase('multitable 1b Slice A — relation-scoped RELSUMIF (real DB)
     }
     // Formula deps on the current-record criteria field {CURVAL} (the recompute trigger; the create handler
     // would register it via extractFieldReferences, but these fields are seeded via SQL → insert directly).
-    for (const ff of [FLD_SUMIF, FLD_SECRETSUM, FLD_CLIFF]) {
+    for (const ff of [FLD_SUMIF, FLD_SECRETSUM, FLD_CLIFF, FLD_AVGIF, FLD_COUNTIF, FLD_SECRETCOUNT]) {
       await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,NULL)', [MS, ff, FLD_CURVAL])
     }
     // DENY cannot read the foreign SECRET field → any RELSUMIF over it must be masked for DENY on read.
@@ -144,10 +152,19 @@ describeIfDatabase('multitable 1b Slice A — relation-scoped RELSUMIF (real DB)
     expect(await hasField(DENY, FLD_SECRETSUM)).toBe(false)
     // and the readable aggregate is unaffected for DENY (amount + status are readable).
     expect(await readField(DENY, FLD_SUMIF)).toBe(30)
+    // A.3 RELCOUNTIF leak gate: a COUNT whose CRITERIA is the denied SECRET field (no separate target —
+    // target=criteria bridge) must also be dropped for DENY, else the match count leaks SECRET's distribution.
+    expect(await readField(ALLOW, FLD_SECRETCOUNT)).toBe(3) // SECRET > 0 for all 3 linked records
+    expect(await hasField(DENY, FLD_SECRETCOUNT)).toBe(false)
   })
 
   test('composition cliff: RELSUMIF composed with arithmetic is rejected fail-loud as #ERROR! (not silent-wrong)', async () => {
     expect(await readField(ALLOW, FLD_CLIFF)).toBe('#ERROR!')
+  })
+
+  test('A.3 — RELAVGIF averages the matched target (15) and RELCOUNTIF counts matched records (2, 4-arg)', async () => {
+    expect(await readField(ALLOW, FLD_AVGIF)).toBe(15) // avg amt where paid: (10+20)/2
+    expect(await readField(ALLOW, FLD_COUNTIF)).toBe(2) // count where status=paid: FR1, FR2
   })
 
   // A.2 — foreign-write fan-out (reverse-edge). Runs LAST: it mutates FR1's amount, which the earlier
