@@ -1184,6 +1184,97 @@ function parseRollupFilterConditions(raw: unknown): MetaFilterCondition[] {
   return out
 }
 
+// ============================================================================
+// 1b Slice A — relation-scoped criteria aggregation (RELSUMIF first cut).
+// A formula function aggregating a FOREIGN target field over the records linked
+// to the current row via a link field, keeping ONLY linked records matching one
+// criteria. RELATION-SCOPED ONLY — deliberately NOT classic whole-sheet SUMIF
+// parity (whole-sheet scan is a separate gated extension; see
+// docs/development/multitable-1b-recordset-range-formula-designlock). Reach = the
+// link relation (reuses the FOL machinery); aggregation = the pure aggregateRollup.
+// ============================================================================
+
+// New record-set sentinels (#VALUE!/#ERROR! stay for non-permission failures).
+// #PERM! = a permission boundary (denied foreign field/sheet/record) made the
+// result unknowable for THIS actor; #LIMIT! = a §5 hard cap was exceeded — both
+// fail-loud, never a silent null and never an unbounded scan.
+const REL_AGG_PERM_SENTINEL = '#PERM!'
+const REL_AGG_LIMIT_SENTINEL = '#LIMIT!'
+
+// §5 perf cap (hard-coded, fail-loud). Relation-scoped reach is bounded by relation
+// cardinality; this caps the linked records a single call may scan before #LIMIT!.
+const MAX_RELATION_SCAN_RECORDS = 1000
+
+// Aggregation kind per function name. First cut ships SUM only; the map is the
+// extension point for RELCOUNTIF/RELAVGIF (own goldens each).
+const RELATION_AGG_FUNCTIONS: Record<string, RollupAggregation> = {
+  RELSUMIF: 'sum',
+}
+
+type RelationAggregationCall = {
+  fnName: string
+  aggregation: RollupAggregation
+  linkFieldId: string
+  targetFieldId: string
+  criteria: { fieldId: string; operator: string; valueExpr: string }
+}
+
+// Split a call's arg list on top-level commas, respecting double-quoted strings.
+// Slice A's grammar has NO nested parens (field-id/op/value are quoted literals, a
+// bare number, or a single {fld_*} ref), so a quote-aware split suffices — and we
+// reject nested parens, keeping clear of the fragile general-expression substitution
+// the design-lock (Block 6) rejected.
+function splitTopLevelArgs(argText: string): string[] | null {
+  const args: string[] = []
+  let cur = ''
+  let inQuote = false
+  for (let i = 0; i < argText.length; i++) {
+    const ch = argText[i]
+    if (ch === '"') { inQuote = !inQuote; cur += ch; continue }
+    if (!inQuote && ch === ',') { args.push(cur.trim()); cur = ''; continue }
+    if (!inQuote && (ch === '(' || ch === ')')) return null // nested call/paren — outside Slice A grammar
+    cur += ch
+  }
+  if (inQuote) return null // unterminated quote
+  args.push(cur.trim())
+  return args
+}
+
+function unquoteStringArg(arg: string): string | null {
+  if (arg.length >= 2 && arg.startsWith('"') && arg.endsWith('"')) return arg.slice(1, -1)
+  return null
+}
+
+// Parse an expression IFF it is EXACTLY a single relation-aggregation call (Slice A's
+// narrow first cut — composition like `RELSUMIF(...)+1` is deferred and detected
+// separately as a fail-loud cliff). `expression` must have the leading '=' and
+// surrounding whitespace already stripped. Returns null for any normal formula.
+export function parseRelationAggregationCall(expression: string): RelationAggregationCall | null {
+  const m = /^([A-Za-z_]+)\s*\(([\s\S]*)\)$/.exec(expression.trim())
+  if (!m) return null
+  const fnName = m[1].toUpperCase()
+  const aggregation = RELATION_AGG_FUNCTIONS[fnName]
+  if (!aggregation) return null
+  const args = splitTopLevelArgs(m[2])
+  if (!args || args.length !== 5) return null
+  const linkFieldId = unquoteStringArg(args[0])
+  const targetFieldId = unquoteStringArg(args[1])
+  const criteriaFieldId = unquoteStringArg(args[2])
+  const operator = unquoteStringArg(args[3])
+  const valueExpr = args[4]
+  if (!linkFieldId || !targetFieldId || !criteriaFieldId || !operator || valueExpr.length === 0) return null
+  return { fnName, aggregation, linkFieldId, targetFieldId, criteria: { fieldId: criteriaFieldId, operator, valueExpr } }
+}
+
+// True iff the expression MENTIONS a relation-aggregation function but is NOT a sole
+// call (e.g. `RELSUMIF(...)+1`). Slice A is sole-call only; the recompute path turns
+// this into a fail-loud diagnostic rather than a silent wrong value or a raw #NAME?.
+export function expressionHasRelationAggregationButNotSole(expression: string): boolean {
+  const mentions = Object.keys(RELATION_AGG_FUNCTIONS).some((fn) => new RegExp(`\\b${fn}\\s*\\(`, 'i').test(expression))
+  if (!mentions) return false
+  return parseRelationAggregationCall(expression) === null
+}
+
 function parseRollupFieldConfig(property: unknown): RollupFieldConfig | null {
   const obj = normalizeJson(property)
   const linkFieldId = obj.linkedFieldId ?? obj.linkFieldId ?? obj.relatedLinkFieldId ?? obj.sourceFieldId
