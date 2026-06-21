@@ -1275,6 +1275,132 @@ export function expressionHasRelationAggregationButNotSole(expression: string): 
   return parseRelationAggregationCall(expression) === null
 }
 
+// The link field id of a relation-aggregation expression — a SAME-sheet dependency the {fld}-ref
+// extractor misses (the link arg is a string literal, not a {fld} ref). Registering it makes a link-field
+// edit recompute the aggregation; the criteria's {fld} value ref is caught by the normal extractor. The
+// FOREIGN target/criteria deps are handled parse-side by the taint (read mask) + fan-out paths.
+function extractRelationAggregationLinkFieldId(expression: string): string | null {
+  const e = expression.startsWith('=') ? expression.slice(1) : expression
+  return parseRelationAggregationCall(e.trim())?.linkFieldId ?? null
+}
+
+// Resolve a criteria value arg: a single {fld_*} ref reads the CURRENT record (the genuine delta over
+// rollup, whose filters are static literals); a "quoted" arg is a string; a bare token is parsed as a
+// number when numeric, else kept raw.
+function resolveRelationCriteriaValue(valueExpr: string, recordData: Record<string, unknown>): unknown {
+  const trimmed = valueExpr.trim()
+  const fld = /^\{(fld_[A-Za-z0-9_]+)\}$/.exec(trimmed)
+  if (fld) return recordData[fld[1]]
+  const str = unquoteStringArg(trimmed)
+  if (str !== null) return str
+  if (trimmed !== '') {
+    const num = Number(trimmed)
+    if (!Number.isNaN(num)) return num
+  }
+  return trimmed
+}
+
+// The Block-6 WRAPPER: materialize the permission-filtered linked-record set for ONE relation-aggregation
+// call, then hand the values to the pure aggregateRollup. Reuses the rollup core's permission discipline
+// verbatim (readable-sheet gate, foreign-FIELD fail-closed via shouldMaskForeignField, row-level deny via
+// loadDeniedRecordIds) — materialize-then-filter, never read-raw-then-mask. Returns the numeric/null
+// aggregate, or a fail-LOUD sentinel: #PERM! (boundary made it unknowable for this actor), #LIMIT! (a §5
+// cap was hit), #ERROR! (misconfig / operator-incompatible criteria). NEVER a silent null on a boundary.
+async function resolveRelationAggregation(
+  req: Request,
+  query: QueryFn,
+  sourceSheetId: string,
+  recordId: string,
+  recordData: Record<string, unknown>,
+  call: RelationAggregationCall,
+  fields: UniverMetaField[],
+): Promise<number | string | boolean | null> {
+  const linkField = fields.find((f) => f.id === call.linkFieldId && f.type === 'link')
+  const linkCfg = linkField ? parseLinkFieldConfig(linkField.property) : null
+  const foreignSheetId = linkCfg?.foreignSheetId
+  if (!linkCfg || !foreignSheetId) return '#ERROR!' // misconfigured: link arg is not a link field with a foreign sheet
+
+  // Authoritative linked ids come from meta_links (record.data[linkField] is not the source of truth).
+  const linkValues = await loadLinkValuesByRecord(query, [recordId], [{ fieldId: call.linkFieldId, cfg: linkCfg }])
+  const linkIds = linkValues.get(recordId)?.get(call.linkFieldId) ?? []
+  if (linkIds.length === 0) return aggregateRollup([], 0, call.aggregation)
+  // §5 cap — fail loud before any scan/materialization (count-first), never run unbounded.
+  if (linkIds.length > MAX_RELATION_SCAN_RECORDS) return REL_AGG_LIMIT_SENTINEL
+
+  // Sheet-level read gate.
+  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, [foreignSheetId])
+  if (!readableForeignSheetIds.has(foreignSheetId)) return REL_AGG_PERM_SENTINEL
+
+  // Foreign-FIELD readability + cross-base. Cross-base ranges are out of scope at lock time → #PERM!
+  // (fail-closed). Both the TARGET and the CRITERIA field must be readable; either unreadable → #PERM!
+  // (a criteria over an unreadable field is a side-channel — the match count would leak it).
+  const sourceSheet = await loadSheetRowShared(query, sourceSheetId)
+  const sourceBaseId = sourceSheet?.baseId ?? null
+  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, [foreignSheetId])
+  if (readability.get(foreignSheetId)?.crossBase) return REL_AGG_PERM_SENTINEL
+  if (shouldMaskForeignField(readability, foreignSheetId, call.targetFieldId, false)) return REL_AGG_PERM_SENTINEL
+  if (shouldMaskForeignField(readability, foreignSheetId, call.criteria.fieldId, false)) return REL_AGG_PERM_SENTINEL
+
+  // Materialize the foreign records, excluding row-level-denied ones (absent → never matched/counted).
+  const access = await resolveRequestAccess(req)
+  const foreignRes = await query(
+    'SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+    [foreignSheetId, linkIds],
+  )
+  let deniedForeign: Set<string> | null = null
+  if (!access.isAdminRole && access.userId && (await loadRowLevelReadDenyEnabled(query, foreignSheetId))) {
+    deniedForeign = await loadDeniedRecordIds(query, foreignSheetId, access.userId)
+  }
+  const foreignRecords: Array<Record<string, unknown>> = []
+  for (const raw of foreignRes.rows as Array<{ id: unknown; data: unknown }>) {
+    if (deniedForeign?.has(String(raw.id))) continue
+    foreignRecords.push(normalizeJson(raw.data))
+  }
+
+  // Criteria field type (effective) for type-correct comparison + the operator-compat runtime guard:
+  // an incompatible operator hits evaluateMetaFilterCondition's match-all catch-all (would aggregate
+  // ALL linked rows) → reject as #ERROR! instead, mirroring the rollup-filter runtime guard.
+  const ffields = (await loadFieldsForSheetShared(query, foreignSheetId)) as Array<{ id: string; type: string; property?: unknown }>
+  const criteriaField = ffields.find((f) => f.id === call.criteria.fieldId)
+  const criteriaType = criteriaField ? resolveEffectiveFieldType(criteriaField) : 'string'
+  if (!isRollupFilterOperatorCompatible(criteriaType, call.criteria.operator)) return '#ERROR!'
+  const criteriaValue = resolveRelationCriteriaValue(call.criteria.valueExpr, recordData)
+
+  const values: unknown[] = []
+  let count = 0
+  for (const data of foreignRecords) {
+    const matches = evaluateMetaFilterCondition(
+      criteriaType as UniverMetaField['type'],
+      data[call.criteria.fieldId],
+      { fieldId: call.criteria.fieldId, operator: call.criteria.operator, value: criteriaValue },
+    )
+    if (!matches) continue
+    count += 1
+    const v = data[call.targetFieldId]
+    if (v === null || v === undefined) continue
+    values.push(v)
+  }
+  return aggregateRollup(values, count, call.aggregation)
+}
+
+// The trimmed, '='-stripped expression of a formula field (from property.expression), or null.
+function formulaExpressionOf(field: { type: string; property?: unknown }): string | null {
+  if (field.type !== 'formula') return null
+  const prop = field.property
+  if (prop && typeof prop === 'object' && typeof (prop as { expression?: unknown }).expression === 'string') {
+    const e = (prop as { expression: string }).expression
+    const stripped = e.startsWith('=') ? e.slice(1) : e
+    return stripped.trim() || null
+  }
+  return null
+}
+
+async function loadRecordDataById(query: QueryFn, sheetId: string, recordId: string): Promise<Record<string, unknown> | null> {
+  const res = await query('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
+  const row = (res.rows as Array<{ data: unknown }>)[0]
+  return row ? normalizeJson(row.data) : null
+}
+
 function parseRollupFieldConfig(property: unknown): RollupFieldConfig | null {
   const obj = normalizeJson(property)
   const linkFieldId = obj.linkedFieldId ?? obj.linkFieldId ?? obj.relatedLinkFieldId ?? obj.sourceFieldId
@@ -2510,18 +2636,58 @@ async function recalculateFormulaFields(
   for (const id of taintedForWriter) dependentFormulaFieldIds.delete(id)
   if (dependentFormulaFieldIds.size === 0) return []
 
+  // 1b Slice A: relation-scoped aggregation formula fields reach FOREIGN records (IO + per-actor
+  // permission) which the pure engine can't do — the WRAPPER resolves them here in the WRITER's req
+  // (materialize + fail-closed: #PERM!/#LIMIT!). They're held OUT of the pure-engine set (it would hit an
+  // unknown function). A composed expression (e.g. RELSUMIF(...)+1) is a deferred cliff → fail-loud #ERROR!.
+  const relationAggByField = new Map<string, RelationAggregationCall>()
+  const cliffFieldIds = new Set<string>()
+  for (const f of fields) {
+    if (!dependentFormulaFieldIds.has(f.id)) continue
+    const expr = formulaExpressionOf(f)
+    if (!expr) continue
+    const call = parseRelationAggregationCall(expr)
+    if (call) relationAggByField.set(f.id, call)
+    else if (expressionHasRelationAggregationButNotSole(expr)) cliffFieldIds.add(f.id)
+  }
+  const pureFormulaFieldIds = new Set(
+    [...dependentFormulaFieldIds].filter((id) => !relationAggByField.has(id) && !cliffFieldIds.has(id)),
+  )
+
   const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
   for (const recordId of updatedRecordIds) {
     const hydrated = hydratedDataByRecord?.get(recordId)
-    const nextData = hydrated
-      ? await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, recordId, hydrated, fields, dependentFormulaFieldIds)
-      : await multitableFormulaEngine.recalculateRecord(query, sheetId, recordId, fields, dependentFormulaFieldIds)
-    if (!nextData) continue
     const formulaData: Record<string, unknown> = {}
-    for (const fieldId of dependentFormulaFieldIds) {
-      if (fieldId in nextData) formulaData[fieldId] = nextData[fieldId]
+    if (pureFormulaFieldIds.size > 0) {
+      const nextData = hydrated
+        ? await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, recordId, hydrated, fields, pureFormulaFieldIds)
+        : await multitableFormulaEngine.recalculateRecord(query, sheetId, recordId, fields, pureFormulaFieldIds)
+      if (nextData) {
+        for (const fieldId of pureFormulaFieldIds) {
+          if (fieldId in nextData) formulaData[fieldId] = nextData[fieldId]
+        }
+      }
     }
-    results.push({ recordId, data: formulaData })
+    if (relationAggByField.size > 0 || cliffFieldIds.size > 0) {
+      const recData = hydrated ?? (await loadRecordDataById(query, sheetId, recordId))
+      if (recData) {
+        const updates: Record<string, unknown> = {}
+        for (const [fieldId, call] of relationAggByField) {
+          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields)
+        }
+        for (const fieldId of cliffFieldIds) {
+          updates[fieldId] = '#ERROR!' // composition deferred (Slice A is sole-call) — fail loud, never silent-wrong
+        }
+        if (Object.keys(updates).length > 0) {
+          await query(
+            'UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3',
+            [JSON.stringify(updates), recordId, sheetId],
+          )
+          Object.assign(formulaData, updates)
+        }
+      }
+    }
+    if (Object.keys(formulaData).length > 0) results.push({ recordId, data: formulaData })
   }
   return results
 }
@@ -2711,8 +2877,25 @@ async function resolveTaintedFormulaFieldIds(
     }
   }
   const formulaFieldIds = new Set(fields.filter((f) => f.type === 'formula').map((f) => f.id))
-  // No computed fields on this sheet → nothing a formula could taint-leak.
-  if (computedConfigById.size === 0) return new Set()
+
+  // 1b Slice A leak edge: a relation-aggregation formula reaches a FOREIGN target/criteria DIRECTLY (no
+  // lookup/rollup intermediary), so the same-sheet edge walk below can't see it. Parse the candidate
+  // formulas' sole-call expressions; further down we taint any whose target OR criteria foreign field is
+  // unreadable for THIS actor (the cross-sheet read-leak this closes).
+  const relAggByField = new Map<string, { call: RelationAggregationCall; foreignSheetId: string | null }>()
+  for (const f of fields) {
+    if (f.type !== 'formula' || !candidateFormulaFieldIds.has(f.id)) continue
+    const expr = formulaExpressionOf(f)
+    if (!expr) continue
+    const call = parseRelationAggregationCall(expr)
+    if (!call) continue
+    const linkField = fields.find((lf) => lf.id === call.linkFieldId && lf.type === 'link')
+    const foreignSheetId = linkField ? parseLinkFieldConfig(linkField.property)?.foreignSheetId ?? null : null
+    relAggByField.set(f.id, { call, foreignSheetId })
+  }
+
+  // No computed fields AND no relation-aggregation formulas → nothing a formula could taint-leak.
+  if (computedConfigById.size === 0 && relAggByField.size === 0) return new Set()
 
   // All in-sheet dependency edges (field_id depends_on depends_on_field_id, same sheet).
   const depRes = await query(
@@ -2738,6 +2921,9 @@ async function resolveTaintedFormulaFieldIds(
     const fs = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
     if (fs) foreignSheetIds.add(fs)
   }
+  for (const { foreignSheetId } of relAggByField.values()) {
+    if (foreignSheetId) foreignSheetIds.add(foreignSheetId)
+  }
   const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, foreignSheetIds)
 
   // A computed (lookup/rollup) field is "masked" iff its foreign target field is masked.
@@ -2748,7 +2934,7 @@ async function resolveTaintedFormulaFieldIds(
       maskedComputedFieldIds.add(fieldId)
     }
   }
-  if (maskedComputedFieldIds.size === 0) return new Set()
+  if (maskedComputedFieldIds.size === 0 && relAggByField.size === 0) return new Set()
 
   // For each candidate FORMULA field, transitively resolve whether it reaches a masked computed
   // field via same-sheet formula→formula edges (bounded — visited-guarded, no cycles). Non-formula
@@ -2773,6 +2959,22 @@ async function resolveTaintedFormulaFieldIds(
       if (leaks) break
     }
     if (leaks) tainted.add(formulaFieldId)
+  }
+
+  // 1b Slice A leak edge: taint a relation-aggregation formula when its FOREIGN target or criteria field
+  // is unreadable for this actor (or the foreign sheet is cross-base — out of scope at lock time). This is
+  // the read-path mask (maskStoredRecordFieldIds → here) that makes materialize-at-write safe: a restricted
+  // reader gets the field dropped, never the writer's materialized aggregate. A misconfigured call (no
+  // foreign sheet) is left to resolveRelationAggregation's #ERROR! — not a leak.
+  for (const [fieldId, { call, foreignSheetId }] of relAggByField) {
+    if (!foreignSheetId) continue
+    if (
+      readability.get(foreignSheetId)?.crossBase ||
+      shouldMaskForeignField(readability, foreignSheetId, call.targetFieldId, false) ||
+      shouldMaskForeignField(readability, foreignSheetId, call.criteria.fieldId, false)
+    ) {
+      tainted.add(fieldId)
+    }
   }
   return tainted
 }
@@ -7603,6 +7805,8 @@ export function univerMetaRouter(): Router {
         // Track formula dependencies
         if (type === 'formula' && property?.expression) {
           const refs = multitableFormulaEngine.extractFieldReferences(String(property.expression))
+          const relLink = extractRelationAggregationLinkFieldId(String(property.expression))
+          if (relLink && !refs.includes(relLink)) refs.push(relLink)
           await syncFormulaDependencies(query, sheetId, fieldId, refs)
         }
 
@@ -8028,6 +8232,8 @@ export function univerMetaRouter(): Router {
         // Track formula dependencies on update
         if (nextType === 'formula' && nextProperty?.expression) {
           const refs = multitableFormulaEngine.extractFieldReferences(String(nextProperty.expression))
+          const relLink = extractRelationAggregationLinkFieldId(String(nextProperty.expression))
+          if (relLink && !refs.includes(relLink)) refs.push(relLink)
           await syncFormulaDependencies(query, sheetId, fieldId, refs)
         }
 
