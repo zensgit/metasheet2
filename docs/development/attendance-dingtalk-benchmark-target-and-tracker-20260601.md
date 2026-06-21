@@ -118,7 +118,9 @@
 | L3 | 年假审批扣减 | ✅ #2713 | final approval gated `annual` → `deductLeaveBalance(standard_day)`，不足 block 不预支 |
 | L4 | 结转 / 年末过期 | ✅ #2717/#2718 | org 时区年末 `expires_at` + `annual_leave_expiry`，重复 tick 不重复 |
 | L5 | admin UI | ✅ #2779/#2782/#2830 | 余额 / policy 配置 / 手工调整 / skip reasons |
-| L6 | staging smoke | ⬜ | 端到端 + residue=0 |
+| L6 | staging smoke | ✅ staging-proven | `ANNUAL_LEAVE_L6_STAGING_SMOKE_PASS` on staging deploy image `49050b82739f84bef20493f98f3f863fba642611`（stamp `annual-l6-mqnv0lnv-f47084`，period `2026`，residue `{"lots":0,"events":0,"adjustments":0,"runs":0}`） |
+
+> **回填（2026-06-21 年假 L6 staging closeout）**：年假 / 法定假余额引擎 L6 staging smoke **PASS**。staging 先从旧 `9179c65bb4a6d0014801896645f6108e94466a79` 升级到 runtime image tag `49050b82739f84bef20493f98f3f863fba642611`（该镜像已包含 L5c #2830 与 policy-off fix #2834；容器实际 image/env tag 为 `49050b827...`，但 `/api/health` build metadata 仍报告内嵌 `38e912719...`，本回填以容器 image tag + 路由/symbol proof 为 deploy 证据）。migration catch-up applied 18 pending migrations → pending 0；backend env verified `ATTENDANCE_SCHEDULER_ENABLED=true` / `ATTENDANCE_SCHEDULER_INTERVAL_MS=5000`。Smoke 在 staging backend container 内以 staging `JWT_SECRET` mint synthetic admin JWT，创建一次性单成员 org/user，验证 `user_orgs` gate `active_members=1` / `with_tenure_anchor=1`；settings 原值捕获并恢复。Evidence：L5b policy enable 成功且 invalid timezone 返回 422；L5c accrual dry-run 写 run/run_items 但 no lots/events，real run grants exactly one annual lot `2400` minutes，rerun idempotent `lotsCreated=0`；L5a balance read shows granted=remaining=2400 + ledger grant；manual adjustment +240 writes one lot/event，same idempotency key replay no-op，different payload 409，insufficient negative 422 rollback，non-member 404；expiry backfill dry-run summary accounted；L1 deployed background scheduler reaped aged annual lot to `status=expired, remaining_minutes=0` with exactly one `annual_leave_expiry` event, repeat tick no duplicate；policy restored；cleanup annual residue `{"lots":0,"events":0,"adjustments":0,"runs":0}` plus synthetic identity residue `{"users":0,"user_orgs":0,"user_roles":0}`。至此年假 / 法定假余额引擎 L0–L6 全链闭环 ✅。
 
 ### Out of this target
 
