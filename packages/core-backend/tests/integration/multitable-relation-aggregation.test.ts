@@ -43,6 +43,8 @@ const FLD_SECRETCOUNT = `fld_rel_seccount_${TS}` // = RELCOUNTIF(link, SECRET, g
 const FLD_LOOKUP = `fld_rel_lookup_${TS}` // = RELLOOKUP(link, status, amt, is, 10) -> 'paid' (FR1, only amt=10; order-independent)
 const FLD_LOOKUP_NA = `fld_rel_lookupna_${TS}` // = RELLOOKUP(link, status, amt, is, 999) -> #N/A (no match)
 const FLD_LOOKUP_SECRET = `fld_rel_lookupsec_${TS}` // = RELLOOKUP(link, SECRET, amt, is, 10) -> 100; DENIED returnField leak gate
+const FLD_VALUES = `fld_rel_values_${TS}` // = RELVALUES(link, amt, status, is, {curval}) -> [10, 20] (paid, link order)
+const FLD_VALUES_SECRET = `fld_rel_valuessec_${TS}` // = RELVALUES(link, SECRET, status, is, {curval}) -> [100,200]; DENIED leak gate
 
 const FR1 = `rec_rel_f1_${TS}` // amt 10, status paid,   secret 100
 const FR2 = `rec_rel_f2_${TS}` // amt 20, status paid,   secret 200
@@ -120,6 +122,9 @@ describeIfDatabase('multitable 1b Slice A — relation-scoped RELSUMIF (real DB)
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_LOOKUP, MS, 'Lookup', 'formula', JSON.stringify({ expression: `RELLOOKUP("${FLD_LINK}","${FLD_STATUS}","${FLD_AMT}","is","10")` }), 9])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_LOOKUP_NA, MS, 'LookupNA', 'formula', JSON.stringify({ expression: `RELLOOKUP("${FLD_LINK}","${FLD_STATUS}","${FLD_AMT}","is","999")` }), 10])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_LOOKUP_SECRET, MS, 'LookupSecret', 'formula', JSON.stringify({ expression: `RELLOOKUP("${FLD_LINK}","${FLD_SECRET}","${FLD_AMT}","is","10")` }), 11])
+    // Slice C — RELVALUES(link, target, criteria, op, value): array of ALL matched target values (link order).
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_VALUES, MS, 'Values', 'formula', JSON.stringify({ expression: `RELVALUES("${FLD_LINK}","${FLD_AMT}","${FLD_STATUS}","is",{${FLD_CURVAL}})` }), 12])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_VALUES_SECRET, MS, 'ValuesSecret', 'formula', JSON.stringify({ expression: `RELVALUES("${FLD_LINK}","${FLD_SECRET}","${FLD_STATUS}","is",{${FLD_CURVAL}})` }), 13])
 
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [REC, MS, JSON.stringify({ [FLD_LINK]: [FR1, FR2, FR3], [FLD_CURVAL]: 'unpaid' })])
     for (const fr of [FR1, FR2, FR3]) {
@@ -127,7 +132,7 @@ describeIfDatabase('multitable 1b Slice A — relation-scoped RELSUMIF (real DB)
     }
     // Formula deps on the current-record criteria field {CURVAL} (the recompute trigger; the create handler
     // would register it via extractFieldReferences, but these fields are seeded via SQL → insert directly).
-    for (const ff of [FLD_SUMIF, FLD_SECRETSUM, FLD_CLIFF, FLD_AVGIF, FLD_COUNTIF, FLD_SECRETCOUNT, FLD_LOOKUP, FLD_LOOKUP_NA, FLD_LOOKUP_SECRET]) {
+    for (const ff of [FLD_SUMIF, FLD_SECRETSUM, FLD_CLIFF, FLD_AVGIF, FLD_COUNTIF, FLD_SECRETCOUNT, FLD_LOOKUP, FLD_LOOKUP_NA, FLD_LOOKUP_SECRET, FLD_VALUES, FLD_VALUES_SECRET]) {
       await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,NULL)', [MS, ff, FLD_CURVAL])
     }
     // DENY cannot read the foreign SECRET field → any RELSUMIF over it must be masked for DENY on read.
@@ -181,6 +186,13 @@ describeIfDatabase('multitable 1b Slice A — relation-scoped RELSUMIF (real DB)
     // leak gate: returnField is the DENIED SECRET field → allowed reader gets the value, denied reader's field is dropped
     expect(await readField(ALLOW, FLD_LOOKUP_SECRET)).toBe(100) // FR1.secret (the amt=10 match)
     expect(await hasField(DENY, FLD_LOOKUP_SECRET)).toBe(false)
+  })
+
+  test('C — RELVALUES returns the matched values as an ARRAY (link order) + denied-field leak gate', async () => {
+    expect(await readField(ALLOW, FLD_VALUES)).toEqual([10, 20]) // amts where status=paid: FR1, FR2 (link order)
+    // leak gate: array over the DENIED SECRET field → allowed reader gets the array, denied reader's field is dropped
+    expect(await readField(ALLOW, FLD_VALUES_SECRET)).toEqual([100, 200])
+    expect(await hasField(DENY, FLD_VALUES_SECRET)).toBe(false)
   })
 
   // A.2 — foreign-write fan-out (reverse-edge). Runs LAST: it mutates FR1's amount, which the earlier

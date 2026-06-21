@@ -1218,12 +1218,16 @@ const RELATION_AGG_FUNCTIONS: Record<string, RollupAggregation> = {
 // permission/taint/fan-out pipeline as the aggregations; the resolver returns the FIRST matched linked
 // record's returnField (in link order) instead of reducing the set.
 const RELATION_LOOKUP_FUNCTIONS = new Set<string>(['RELLOOKUP'])
+// Slice C — array family: return the permission-filtered matched target values as an ARRAY (no reduction).
+// Same grammar + the same materialize/permission/taint/fan-out pipeline; the resolver returns the values[]
+// in link order instead of aggregating (Slice A) or first-matching (Slice B).
+const RELATION_ARRAY_FUNCTIONS = new Set<string>(['RELVALUES'])
 const REL_NA_SENTINEL = '#N/A' // lookup not-found (no matched row) — distinct from #PERM! (a denied FIELD)
 
 type RelationAggregationCall = {
   fnName: string
-  kind: 'aggregation' | 'lookup'
-  aggregation: RollupAggregation | null // null when kind === 'lookup'
+  kind: 'aggregation' | 'lookup' | 'array'
+  aggregation: RollupAggregation | null // null when kind === 'lookup' | 'array'
   linkFieldId: string
   targetFieldId: string // the returnField when kind === 'lookup'
   criteria: { fieldId: string; operator: string; valueExpr: string } // the matchField when kind === 'lookup'
@@ -1265,8 +1269,9 @@ export function parseRelationAggregationCall(expression: string): RelationAggreg
   const fnName = m[1].toUpperCase()
   const aggregation = RELATION_AGG_FUNCTIONS[fnName] ?? null
   const isLookup = RELATION_LOOKUP_FUNCTIONS.has(fnName)
-  if (!aggregation && !isLookup) return null
-  const kind: 'aggregation' | 'lookup' = isLookup ? 'lookup' : 'aggregation'
+  const isArray = RELATION_ARRAY_FUNCTIONS.has(fnName)
+  if (!aggregation && !isLookup && !isArray) return null
+  const kind: 'aggregation' | 'lookup' | 'array' = isLookup ? 'lookup' : isArray ? 'array' : 'aggregation'
   const args = splitTopLevelArgs(m[2])
   if (!args) return null
   // RELCOUNTIF counts MATCHED linked records — no sum target (4 args: link, criteria, op, value). The
@@ -1302,7 +1307,7 @@ export function parseRelationAggregationCall(expression: string): RelationAggreg
 // call (e.g. `RELSUMIF(...)+1`). Slice A is sole-call only; the recompute path turns
 // this into a fail-loud diagnostic rather than a silent wrong value or a raw #NAME?.
 export function expressionHasRelationAggregationButNotSole(expression: string): boolean {
-  const mentions = [...Object.keys(RELATION_AGG_FUNCTIONS), ...RELATION_LOOKUP_FUNCTIONS].some((fn) => new RegExp(`\\b${fn}\\s*\\(`, 'i').test(expression))
+  const mentions = [...Object.keys(RELATION_AGG_FUNCTIONS), ...RELATION_LOOKUP_FUNCTIONS, ...RELATION_ARRAY_FUNCTIONS].some((fn) => new RegExp(`\\b${fn}\\s*\\(`, 'i').test(expression))
   if (!mentions) return false
   return parseRelationAggregationCall(expression) === null
 }
@@ -1346,7 +1351,7 @@ async function resolveRelationAggregation(
   recordData: Record<string, unknown>,
   call: RelationAggregationCall,
   fields: UniverMetaField[],
-): Promise<number | string | boolean | null> {
+): Promise<number | string | boolean | null | unknown[]> {
   const linkField = fields.find((f) => f.id === call.linkFieldId && f.type === 'link')
   const linkCfg = linkField ? parseLinkFieldConfig(linkField.property) : null
   const foreignSheetId = linkCfg?.foreignSheetId
@@ -1355,7 +1360,7 @@ async function resolveRelationAggregation(
   // Authoritative linked ids come from meta_links (record.data[linkField] is not the source of truth).
   const linkValues = await loadLinkValuesByRecord(query, [recordId], [{ fieldId: call.linkFieldId, cfg: linkCfg }])
   const linkIds = linkValues.get(recordId)?.get(call.linkFieldId) ?? []
-  if (linkIds.length === 0) return call.kind === 'lookup' ? REL_NA_SENTINEL : aggregateRollup([], 0, call.aggregation as RollupAggregation)
+  if (linkIds.length === 0) return call.kind === 'lookup' ? REL_NA_SENTINEL : call.kind === 'array' ? [] : aggregateRollup([], 0, call.aggregation as RollupAggregation)
   // §5 cap — fail loud before any scan/materialization (count-first), never run unbounded.
   if (linkIds.length > MAX_RELATION_SCAN_RECORDS) return REL_AGG_LIMIT_SENTINEL
 
@@ -1415,6 +1420,20 @@ async function resolveRelationAggregation(
       return v === null || v === undefined ? REL_NA_SENTINEL : (v as number | string | boolean)
     }
     return REL_NA_SENTINEL
+  }
+
+  // Slice C — array: return ALL matched target values in LINK order, permission-filtered (denied rows were
+  // excluded above; a denied FIELD is gated to #PERM! earlier), null/undefined skipped. No reduction — the
+  // caller gets the raw array; the read-taint mask drops the whole field for a reader who can't see it.
+  if (call.kind === 'array') {
+    const out: unknown[] = []
+    for (const id of linkIds) {
+      const data = byId.get(id)
+      if (!data || !matchesCriteria(data)) continue
+      const v = data[call.targetFieldId]
+      if (v !== null && v !== undefined) out.push(v)
+    }
+    return out
   }
 
   const values: unknown[] = []
