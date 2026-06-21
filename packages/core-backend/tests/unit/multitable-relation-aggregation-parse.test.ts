@@ -76,6 +76,14 @@ describe('parseRelationAggregationCall — sole-call grammar', () => {
     expect(parseRelationAggregationCall('RELLOOKUP("a","b","c","is")')).toBeNull() // 4 args → null (lookup is 5-arg)
   })
 
+  it('C — parses RELVALUES (kind=array, 5-arg) — same shape, array-return (aggregation null)', () => {
+    expect(parseRelationAggregationCall('RELVALUES("fld_link","fld_amt","fld_status","is","paid")')).toEqual({
+      fnName: 'RELVALUES', kind: 'array', aggregation: null, linkFieldId: 'fld_link', targetFieldId: 'fld_amt',
+      criteria: { fieldId: 'fld_status', operator: 'is', valueExpr: '"paid"' },
+    })
+    expect(parseRelationAggregationCall('RELVALUES("a","b","c","is")')).toBeNull() // 4 args → null (array is 5-arg)
+  })
+
   it('A.3 — per-function arity: RELCOUNTIF needs 4 (5→null); RELAVGIF/RELSUMIF need 5 (4→null)', () => {
     expect(parseRelationAggregationCall('RELCOUNTIF("a","b","c","is","x")')).toBeNull() // 5 args → not COUNTIF
     expect(parseRelationAggregationCall('RELAVGIF("a","b","c","is")')).toBeNull() // 4 args → not AVGIF
