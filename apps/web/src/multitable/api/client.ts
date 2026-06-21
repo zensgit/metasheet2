@@ -57,6 +57,7 @@ import type {
   ChartCreateInput,
   ChartData,
   Dashboard,
+  DashboardFilter,
   DashboardUpdateInput,
   FormShareConfig,
   FormShareConfigUpdate,
@@ -2196,18 +2197,28 @@ export class MultitableApiClient {
     await this.parseJson(res)
   }
 
-  async getChartData(sheetId: string, chartId: string): Promise<ChartData> {
+  async getChartData(sheetId: string, chartId: string, dashboardFilters?: DashboardFilter[]): Promise<ChartData> {
+    // B4: an active dashboard-level filter rides on the query as URL-encoded JSON; omitted when empty
+    // (= no constraint). The server AND-combines it with the chart's own filter and rejects a denied
+    // filter field wholesale (it never reaches an unmasked scan).
+    const qs = dashboardFilters && dashboardFilters.length > 0
+      ? `?dashboardFilter=${encodeURIComponent(JSON.stringify(dashboardFilters))}`
+      : ''
     const res = await this.fetch(
-      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts/${encodeURIComponent(chartId)}/data`,
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts/${encodeURIComponent(chartId)}/data${qs}`,
     )
     return this.parseJson<ChartData>(res)
   }
 
-  async previewChartData(sheetId: string, input: ChartCreateInput): Promise<ChartData> {
+  async previewChartData(sheetId: string, input: ChartCreateInput, dashboardFilters?: DashboardFilter[]): Promise<ChartData> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts/preview-data`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(toChartCreateWire(input)),
+      // B4: a metric card refetches through preview-data, so the dashboard filter rides on the body.
+      body: JSON.stringify({
+        ...toChartCreateWire(input),
+        ...(dashboardFilters && dashboardFilters.length > 0 ? { dashboardFilter: dashboardFilters } : {}),
+      }),
     })
     return this.parseJson<ChartData>(res)
   }

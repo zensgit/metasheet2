@@ -50,7 +50,8 @@ function fakeChart(overrides: Partial<ChartConfig> = {}): ChartConfig {
 }
 
 const chartFields: MetaField[] = [
-  { id: 'fld_status', name: 'Status', type: 'select' },
+  // fld_status carries schema options → the B4 filter widget populates its value dropdown from them.
+  { id: 'fld_status', name: 'Status', type: 'select', options: [{ value: 'open' }, { value: 'closed' }] },
   { id: 'fld_amount', name: 'Amount', type: 'number' },
   { id: 'fld_date', name: 'Created', type: 'date' },
   { id: 'fld_hidden', name: 'Hidden', type: 'string', property: { hidden: true } },
@@ -1216,11 +1217,12 @@ describe('MetaDashboardView', () => {
     const panel = container.querySelector('[data-panel-id="panel_metric"]')
     expect(panel?.getAttribute('data-panel-type')).toBe('metric')
     // Computes through previewChartData (NOT getChartData) with a synthesized number config.
+    // B4: the 3rd arg is the active dashboard filter list — empty here (no filter widget on this dashboard).
     expect(previewSpy).toHaveBeenCalledTimes(1)
     expect(previewSpy).toHaveBeenCalledWith('sheet_1', expect.objectContaining({
       chartType: 'number',
       dataSource: expect.objectContaining({ aggregation: { function: 'sum', fieldId: 'fld_amount' } }),
-    }))
+    }), [])
     // No persisted chart fetch (no chartId on a metric panel).
     const dataLoads = fetchFn.mock.calls.filter(([url]: [string]) => /\/charts\/[^/]+\/data/.test(url))
     expect(dataLoads.length).toBe(0)
@@ -1287,38 +1289,102 @@ describe('MetaDashboardView', () => {
     expect(link?.getAttribute('target')).toBe('_blank')
   })
 
-  it('B4 filter: renders a PRESENTATIONAL control and updates local state only (no refetch / no cross-panel effect)', async () => {
+  it('B4 filter: a FUNCTIONAL value dropdown (from the configured field schema options) refetches every data panel with the filter; "All" clears it', async () => {
     const filterDashboard = fakeDashboard({
       panels: [
         { id: 'panel_chart', type: 'chart', chartId: 'chart_1', size: 'medium', order: 0 },
         { id: 'panel_filter', type: 'filter', title: 'Status filter', size: 'small', order: 1, filterConfig: { fieldId: 'fld_status' } },
       ],
     })
-    const { client, fetchFn } = mockClient([filterDashboard], [fakeChart()])
+    const { client } = mockClient([filterDashboard], [fakeChart()])
     const getDataSpy = vi.spyOn(client, 'getChartData')
     const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
     await flushPromises()
 
     const filterPanel = container.querySelector('[data-panel-id="panel_filter"]')
     expect(filterPanel?.getAttribute('data-panel-type')).toBe('filter')
+    // The OLD presentational note is gone — the widget is real now.
+    expect(filterPanel?.querySelector('[data-hint="filter-presentational"]')).toBeNull()
+    // The value dropdown lists the configured field's SCHEMA options (open/closed) + the "All" option,
+    // NOT a list of fields. (Schema options → no record scan → no row-deny leak.)
     const control = filterPanel?.querySelector('[data-field="filter-control"]') as HTMLSelectElement
     expect(control).toBeTruthy()
-    // Clearly labeled as presentational.
-    expect(filterPanel?.querySelector('[data-hint="filter-presentational"]')).toBeTruthy()
+    const optionValues = Array.from(control.options).map((o) => o.value)
+    expect(optionValues).toEqual(['', 'open', 'closed'])
 
-    const dataCallsBefore = getDataSpy.mock.calls.length
-    const patchBefore = fetchFn.mock.calls.filter(([url, init]: [string, RequestInit?]) => url.includes('/dashboards/') && init?.method === 'PATCH').length
+    getDataSpy.mockClear()
 
-    control.value = 'fld_status'
+    // Pick a value → every data panel (the one chart) refetches WITH the dashboard filter applied.
+    control.value = 'open'
     control.dispatchEvent(new Event('change'))
     await flushPromises()
 
-    // Changing the control triggers NO data refetch and NO dashboard PATCH (local UI state only).
-    expect(getDataSpy.mock.calls.length).toBe(dataCallsBefore)
-    const patchAfter = fetchFn.mock.calls.filter(([url, init]: [string, RequestInit?]) => url.includes('/dashboards/') && init?.method === 'PATCH').length
-    expect(patchAfter).toBe(patchBefore)
-    // The chart panel still renders unchanged (filter does not drive it).
-    expect(container.querySelector('[data-panel-id="panel_chart"] [data-chart-canvas]')).toBeTruthy()
+    expect(getDataSpy).toHaveBeenCalledWith('sheet_1', 'chart_1', [{ fieldId: 'fld_status', value: 'open' }])
+
+    // Select "All" → refetch with NO filter (empty list).
+    getDataSpy.mockClear()
+    control.value = ''
+    control.dispatchEvent(new Event('change'))
+    await flushPromises()
+    expect(getDataSpy).toHaveBeenCalledWith('sheet_1', 'chart_1', [])
+  })
+
+  it('B4 filter: a configured field WITHOUT schema options renders a free text input that applies on change', async () => {
+    // fld_amount has no `options` → the runtime widget falls back to a text input for the value.
+    const filterDashboard = fakeDashboard({
+      panels: [
+        { id: 'panel_chart', type: 'chart', chartId: 'chart_1', size: 'medium', order: 0 },
+        { id: 'panel_filter', type: 'filter', title: 'Amount filter', size: 'small', order: 1, filterConfig: { fieldId: 'fld_amount' } },
+      ],
+    })
+    const { client } = mockClient([filterDashboard], [fakeChart()])
+    const getDataSpy = vi.spyOn(client, 'getChartData')
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    const filterPanel = container.querySelector('[data-panel-id="panel_filter"]')
+    expect(filterPanel?.querySelector('[data-field="filter-control"]')).toBeNull() // no select
+    const text = filterPanel?.querySelector('[data-field="filter-control-text"]') as HTMLInputElement
+    expect(text).toBeTruthy()
+
+    getDataSpy.mockClear()
+    text.value = '100'
+    text.dispatchEvent(new Event('change'))
+    await flushPromises()
+    expect(getDataSpy).toHaveBeenCalledWith('sheet_1', 'chart_1', [{ fieldId: 'fld_amount', value: '100' }])
+  })
+
+  it('B4 filter: the active filter also rides on a metric card refetch (preview-data) and AND-combines multiple widgets', async () => {
+    const filterDashboard = fakeDashboard({
+      panels: [
+        { id: 'panel_metric', type: 'metric', title: 'KPI', size: 'small', order: 0, metricConfig: { aggregation: 'count' } },
+        { id: 'panel_f1', type: 'filter', title: 'Status', size: 'small', order: 1, filterConfig: { fieldId: 'fld_status' } },
+        { id: 'panel_f2', type: 'filter', title: 'Amount', size: 'small', order: 2, filterConfig: { fieldId: 'fld_amount' } },
+      ],
+    })
+    const { client } = mockClient([filterDashboard], [])
+    const previewSpy = vi.spyOn(client, 'previewChartData').mockResolvedValue({ chartType: 'number', dataPoints: [{ label: 'KPI', value: 1 }], total: 1 })
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    // Set the first filter (a select value).
+    const statusControl = container.querySelector('[data-panel-id="panel_f1"] [data-field="filter-control"]') as HTMLSelectElement
+    statusControl.value = 'open'
+    statusControl.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    // Set the second filter (a text value) — both should now AND-combine on the next refetch.
+    previewSpy.mockClear()
+    const amountText = container.querySelector('[data-panel-id="panel_f2"] [data-field="filter-control-text"]') as HTMLInputElement
+    amountText.value = '50'
+    amountText.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    // The metric card refetched via preview-data carrying BOTH filters.
+    expect(previewSpy).toHaveBeenCalledWith('sheet_1', expect.objectContaining({ chartType: 'number' }), [
+      { fieldId: 'fld_status', value: 'open' },
+      { fieldId: 'fld_amount', value: '50' },
+    ])
   })
 
   it('B4 mixed: a dashboard with [chart, metric, text] renders all three widget kinds in one grid', async () => {
@@ -1426,6 +1492,6 @@ describe('MetaDashboardView', () => {
     expect(container.textContent).toContain('组件类型')
     expect(container.textContent).toContain('指标卡')
     expect(container.textContent).toContain('文本说明')
-    expect(container.textContent).toContain('筛选器（预览）')
+    expect(container.textContent).toContain('筛选器')
   })
 })

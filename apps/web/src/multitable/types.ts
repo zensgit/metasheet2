@@ -1267,12 +1267,22 @@ export interface DashboardTextConfig {
   content: string
 }
 
-// B4 filter/control: PRESENTATIONAL-ONLY in this arc — it renders a control whose
-// value lives in local UI state and drives NOTHING else. A functional cross-panel
-// filter is a separate, design-locked slice (see designDecisions in the arc map).
+// B4 filter/control: a FUNCTIONAL dashboard-level filter. The widget is configured with a `fieldId`
+// (which field to filter on); at runtime the user picks a VALUE for that field and it becomes an
+// additional equals-constraint applied to EVERY data panel's aggregation (AND-combined with each
+// chart's own filter). The "All" selection clears it. Cross-filtering (click a chart segment → filter
+// the rest) is a separate follow-up, not this slice.
 export interface DashboardFilterConfig {
-  /** Field the (presentational) control is labeled against. */
+  /** Field this control filters on. The runtime value dropdown is populated from this field. */
   fieldId?: string
+}
+
+// B4: one resolved dashboard-level filter (field + chosen value) sent to the aggregation routes. The
+// server AND-combines all active filters and rejects one whose field the actor cannot read (it never
+// becomes a side-channel onto a hidden column). Equals-only by design — the widget surfaces one value.
+export interface DashboardFilter {
+  fieldId: string
+  value: unknown
 }
 
 export interface DashboardPanel {
