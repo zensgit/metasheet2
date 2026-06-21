@@ -12,9 +12,20 @@ async function settleMicrotasksAndRender() {
 }
 
 // MetaDashboardView renders MetaChartRenderer, which now uses ECharts (needs a canvas absent in
-// jsdom) → mock the runtime entry points so the dashboard mounts cleanly.
+// jsdom) → mock the runtime entry points so the dashboard mounts cleanly. The init stub now also
+// exposes `on` (the renderer binds a 'click' handler for cross-filtering); jsdom can't synthesize a
+// real canvas click, so the stub CAPTURES the handler so a test can invoke it to simulate a segment
+// click. `echartsClickHandlers` collects one entry per chart instance (in mount order).
+const echartsClickHandlers = vi.hoisted(() => [] as Array<(params: unknown) => void>)
 vi.mock('echarts/core', () => ({
-  init: vi.fn(() => ({ setOption: vi.fn(), resize: vi.fn(), dispose: vi.fn() })),
+  init: vi.fn(() => ({
+    setOption: vi.fn(),
+    resize: vi.fn(),
+    dispose: vi.fn(),
+    on: vi.fn((event: string, cb: (params: unknown) => void) => {
+      if (event === 'click') echartsClickHandlers.push(cb)
+    }),
+  })),
   use: vi.fn(),
 }))
 vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {}, FunnelChart: {}, GaugeChart: {}, ScatterChart: {} }))
@@ -125,6 +136,17 @@ function mount(props: Record<string, unknown>) {
   return { container, app }
 }
 
+// Cross-filtering: a dashboard-filter change clears chartDataMap, which unmounts→remounts each chart
+// (loading→rendered), so echarts.init runs again and the renderer re-binds its 'click' handler. Each
+// remount pushes a fresh entry into echartsClickHandlers, so the CURRENT live handler (bound to the
+// mounted instance whose emit reaches the live @segment-click listener) is always the LAST one — fire
+// that, never a stale index. `nth` (1-based from the end among the live charts) targets which chart
+// when several are mounted: 1 = the last-mounted chart, 2 = the one before, etc.
+function fireSegmentClick(name: string, nth = 1) {
+  const handler = echartsClickHandlers[echartsClickHandlers.length - nth]
+  handler?.({ name })
+}
+
 describe('MetaDashboardView', () => {
   // S1-9: MetaChartRenderer is an async chunk (defineAsyncComponent). Resolve its loader ONCE up
   // front (real timers) so every test — including the fake-timer preview tests — renders the
@@ -152,6 +174,7 @@ describe('MetaDashboardView', () => {
     vi.useRealTimers()
     useLocale().setLocale('en')
     document.body.innerHTML = ''
+    echartsClickHandlers.length = 0
     vi.restoreAllMocks()
   })
 
@@ -1493,5 +1516,154 @@ describe('MetaDashboardView', () => {
     expect(container.textContent).toContain('指标卡')
     expect(container.textContent).toContain('文本说明')
     expect(container.textContent).toContain('筛选器')
+  })
+
+  // ---- Cross-filtering: clicking a chart segment drives the SAME dashboard-filter state as the widget ----
+
+  it('cross-filter: clicking a chart segment sets a dashboard filter on the chart group-by field = the clicked value, and refetches panels with it applied', async () => {
+    // Two charts so we can see the OTHER panel narrow; chart_1 is the click source (groupBy fld_status).
+    const chart1 = fakeChart()
+    const chart2 = fakeChart({ id: 'chart_2', name: 'Second', dataSource: { sheetId: 'sheet_1', groupByFieldId: 'fld_status', aggregation: { function: 'count' } } })
+    const dashboard = fakeDashboard({
+      panels: [
+        { id: 'panel_1', type: 'chart', chartId: 'chart_1', size: 'medium', order: 0 },
+        { id: 'panel_2', type: 'chart', chartId: 'chart_2', size: 'medium', order: 1 },
+      ],
+    })
+    const { client } = mockClient([dashboard], [chart1, chart2])
+    const getDataSpy = vi.spyOn(client, 'getChartData')
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    // Two chart instances mounted → two captured click handlers (mount order = panel order).
+    expect(echartsClickHandlers.length).toBeGreaterThanOrEqual(2)
+    getDataSpy.mockClear()
+
+    // Click a segment on the FIRST chart (simulated via the captured ECharts click handler).
+    echartsClickHandlers[0]({ name: 'open', value: 5 })
+    await flushPromises()
+
+    // BOTH panels refetched with the cross-filter applied (same shape #3007's widget filter uses).
+    expect(getDataSpy).toHaveBeenCalledWith('sheet_1', 'chart_1', [{ fieldId: 'fld_status', value: 'open' }])
+    expect(getDataSpy).toHaveBeenCalledWith('sheet_1', 'chart_2', [{ fieldId: 'fld_status', value: 'open' }])
+
+    // The source panel shows the active cross-filter chip (field = value) + a clear control.
+    const chip = container.querySelector('[data-panel-id="panel_1"] [data-crossfilter-active]')
+    expect(chip).toBeTruthy()
+    expect(chip?.getAttribute('data-crossfilter-field')).toBe('fld_status')
+    expect(chip?.getAttribute('data-crossfilter-value')).toBe('open')
+    expect(chip?.textContent).toContain('Status = open')
+    // Only the source panel is marked, not the other.
+    expect(container.querySelector('[data-panel-id="panel_2"] [data-crossfilter-active]')).toBeNull()
+  })
+
+  it('cross-filter: clicking the SAME segment again toggles it off (refetch with no filter)', async () => {
+    const { client } = mockClient([fakeDashboard()], [fakeChart()])
+    const getDataSpy = vi.spyOn(client, 'getChartData')
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    expect(echartsClickHandlers.length).toBeGreaterThanOrEqual(1)
+
+    fireSegmentClick('open')
+    await flushPromises()
+    expect(container.querySelector('[data-crossfilter-active]')).toBeTruthy()
+
+    getDataSpy.mockClear()
+    fireSegmentClick('open') // same segment → toggle OFF (use the live, post-remount handler)
+    await flushPromises()
+    expect(getDataSpy).toHaveBeenCalledWith('sheet_1', 'chart_1', [])
+    expect(container.querySelector('[data-crossfilter-active]')).toBeNull()
+  })
+
+  it('cross-filter: the explicit clear control removes the cross-filter (refetch with no filter)', async () => {
+    const { client } = mockClient([fakeDashboard()], [fakeChart()])
+    const getDataSpy = vi.spyOn(client, 'getChartData')
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    fireSegmentClick('closed')
+    await flushPromises()
+    expect(container.querySelector('[data-crossfilter-active]')).toBeTruthy()
+
+    getDataSpy.mockClear()
+    ;(container.querySelector('[data-action="clear-crossfilter"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(getDataSpy).toHaveBeenCalledWith('sheet_1', 'chart_1', [])
+    expect(container.querySelector('[data-crossfilter-active]')).toBeNull()
+  })
+
+  it('cross-filter: AND-combines with an explicit widget selection (both on the chart refetch AND a metric preview-data)', async () => {
+    const dashboard = fakeDashboard({
+      panels: [
+        { id: 'panel_chart', type: 'chart', chartId: 'chart_1', size: 'medium', order: 0 },
+        { id: 'panel_metric', type: 'metric', title: 'KPI', size: 'small', order: 1, metricConfig: { aggregation: 'count' } },
+        { id: 'panel_filter', type: 'filter', title: 'Amount', size: 'small', order: 2, filterConfig: { fieldId: 'fld_amount' } },
+      ],
+    })
+    const { client } = mockClient([dashboard], [fakeChart()])
+    const getDataSpy = vi.spyOn(client, 'getChartData')
+    const previewSpy = vi.spyOn(client, 'previewChartData').mockResolvedValue({ chartType: 'number', dataPoints: [{ label: 'KPI', value: 1 }], total: 1 })
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    // Set the widget filter first (fld_amount = 50).
+    const amountText = container.querySelector('[data-panel-id="panel_filter"] [data-field="filter-control-text"]') as HTMLInputElement
+    amountText.value = '50'
+    amountText.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    // Now cross-filter via a chart segment click (fld_status = open). The widget change above remounted
+    // the chart, so fire the LIVE (latest) handler, not the stale initial one.
+    getDataSpy.mockClear()
+    previewSpy.mockClear()
+    expect(echartsClickHandlers.length).toBeGreaterThanOrEqual(1)
+    fireSegmentClick('open')
+    await flushPromises()
+
+    // Both constraints ride the SAME filter list (widget first, then cross-filter), AND-combined.
+    const expectedFilters = [
+      { fieldId: 'fld_amount', value: '50' },
+      { fieldId: 'fld_status', value: 'open' },
+    ]
+    expect(getDataSpy).toHaveBeenCalledWith('sheet_1', 'chart_1', expectedFilters)
+    expect(previewSpy).toHaveBeenCalledWith('sheet_1', expect.objectContaining({ chartType: 'number' }), expectedFilters)
+  })
+
+  it('cross-filter: clicking a segment on a chart with NO group-by field (date-grouped) is a no-op', async () => {
+    const dateChart = fakeChart({
+      dataSource: { sheetId: 'sheet_1', dateFieldId: 'fld_date', dateGrouping: 'month', aggregation: { function: 'count' } },
+    })
+    const { client } = mockClient([fakeDashboard()], [dateChart])
+    const getDataSpy = vi.spyOn(client, 'getChartData')
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+    expect(echartsClickHandlers.length).toBeGreaterThanOrEqual(1)
+
+    getDataSpy.mockClear()
+    fireSegmentClick('2026-01') // a date bucket label, NOT a field value
+    await flushPromises()
+
+    // No group-by field → no cross-filter set, no refetch, no chip.
+    expect(getDataSpy).not.toHaveBeenCalled()
+    expect(container.querySelector('[data-crossfilter-active]')).toBeNull()
+  })
+
+  it('cross-filter: switching dashboards clears the active cross-filter', async () => {
+    const dashA = fakeDashboard({ id: 'dash_A', name: 'A', panels: [{ id: 'panel_a', type: 'chart', chartId: 'chart_1', size: 'medium', order: 0 }] })
+    const dashB = fakeDashboard({ id: 'dash_B', name: 'B', panels: [{ id: 'panel_b', type: 'chart', chartId: 'chart_1', size: 'medium', order: 0 }] })
+    const { client } = mockClient([dashA, dashB], [fakeChart()])
+    const { container } = mount({ sheetId: 'sheet_1', client, fields: chartFields })
+    await flushPromises()
+
+    fireSegmentClick('open')
+    await flushPromises()
+    expect(container.querySelector('[data-crossfilter-active]')).toBeTruthy()
+
+    // Switch dashboards via the selector → cross-filter resets.
+    const select = container.querySelector('[data-field="dashboard-select"]') as HTMLSelectElement
+    select.value = 'dash_B'
+    select.dispatchEvent(new Event('change'))
+    await flushPromises()
+    expect(container.querySelector('[data-crossfilter-active]')).toBeNull()
   })
 })

@@ -68,6 +68,26 @@
       >
         <div class="meta-dashboard__panel-header">
           <span class="meta-dashboard__panel-chart-name">{{ panelTitle(panel) }}</span>
+          <!-- Cross-filtering: the source panel (the chart whose segment is driving the dashboard
+               filter) shows an active chip "field = value ×". Clicking × clears the cross-filter; the
+               chip is the visible cue for which segment is filtering the rest. -->
+          <span
+            v-if="crossFilter && crossFilter.panelId === panel.id"
+            class="meta-dashboard__crossfilter-chip"
+            data-crossfilter-active="true"
+            :data-crossfilter-field="crossFilter.fieldId"
+            :data-crossfilter-value="crossFilter.value"
+          >
+            <span class="meta-dashboard__crossfilter-text">{{ crossFilterFieldName }} = {{ crossFilter.value }}</span>
+            <button
+              class="meta-dashboard__crossfilter-clear"
+              type="button"
+              data-action="clear-crossfilter"
+              :aria-label="viewRenderLabel('dashboard.crossFilterClear', isZh)"
+              :title="viewRenderLabel('dashboard.crossFilterClear', isZh)"
+              @click="clearCrossFilter"
+            >&times;</button>
+          </span>
           <div class="meta-dashboard__panel-controls">
             <select
               :value="panel.size"
@@ -98,6 +118,7 @@
               :chart-data="panelChartData(panel)!"
               :display-config="panelChartConfig(panel)?.displayConfig"
               :aggregation="panelChartConfig(panel)?.dataSource?.aggregation?.function"
+              @segment-click="(label: string) => onSegmentClick(panel, label)"
             />
             <div v-else class="meta-dashboard__panel-loading">{{ viewRenderLabel('dashboard.loadingChart', isZh) }}</div>
           </template>
@@ -540,6 +561,14 @@ const metricDataMap = ref<Record<string, ChartData>>({})
 // applied to EVERY data panel's aggregation (see activeDashboardFilters). '' / absent = "All" = no
 // constraint. The widget's configured field lives in panel.filterConfig.fieldId.
 const filterSelections = ref<Record<string, string>>({})
+// Cross-filtering: clicking a chart segment sets ONE active cross-filter on that chart's group-by
+// field = the clicked segment's value. It reuses the SAME dashboard-filter mechanism filterSelections
+// feeds (activeDashboardFilters → getChartData/previewChartData → applyDashboardFilter) — NOT a
+// parallel path: it just contributes one more entry to activeDashboardFilters, AND-combined with the
+// widget selections, and rides the identical permission-safe aggregation route. `panelId` records the
+// source panel (so clicking the same segment again toggles it off, and the UI marks the source).
+// Equals-only (mirrors the widget). At most one cross-filter at a time (Feishu drill-down behavior).
+const crossFilter = ref<{ panelId: string; fieldId: string; value: string } | null>(null)
 const activeDashboardId = ref<string>(props.dashboardId ?? '')
 const showAddPanel = ref(false)
 const showAddWidget = ref(false)
@@ -654,6 +683,14 @@ const activeDashboardFilters = computed<DashboardFilter[]>(() => {
     if (value === undefined || value === '') continue
     out.push({ fieldId, value })
   }
+  // Cross-filter rides the SAME list (AND-combined with the widget selections). It passes through the
+  // identical dashboardFilterableField property-visibility gate, so a cross-filter on a field the actor
+  // can't read is dropped here AND the backend's isChartDataRestricted refuses the chart wholesale — no
+  // new leak path. This is the single point where a cross-filter becomes a server-bound constraint.
+  const cf = crossFilter.value
+  if (cf && dashboardFilterableField(cf.fieldId)) {
+    out.push({ fieldId: cf.fieldId, value: cf.value })
+  }
   return out
 })
 const groupableFields = computed(() => chartFields.value.filter((field) => GROUPABLE_FIELD_TYPES.has(field.type)))
@@ -745,17 +782,54 @@ function metricDisplayConfig(panel: DashboardPanel): ChartDisplayConfig {
   }
 }
 
-// B4: a dashboard-level filter change re-aggregates EVERY data panel. The chartId-keyed chartDataMap
-// (and panel.id-keyed metricDataMap) are filter-unaware caches, and loadPanelData skips already-loaded
-// charts — so the same chart would never refetch under a new filter. Clear both caches, then reload
-// with the new active filter applied. (Cross-filtering — a chart segment driving others — is a separate
-// follow-up; this is one filter widget → all panels.)
-function onFilterControlChange(panelId: string, value: string) {
-  filterSelections.value = { ...filterSelections.value, [panelId]: value }
+// A dashboard-level filter change (widget selection OR cross-filter) re-aggregates EVERY data panel.
+// The chartId-keyed chartDataMap (and panel.id-keyed metricDataMap) are filter-unaware caches, and
+// loadPanelData skips already-loaded charts — so the same chart would never refetch under a new
+// filter. Clear both caches, then reload with the new activeDashboardFilters applied.
+function refetchAllPanelsWithActiveFilters() {
   chartDataMap.value = {}
   metricDataMap.value = {}
   void loadPanelData()
 }
+
+// B4: one filter widget → all panels. The chosen value enters activeDashboardFilters keyed by panel.id.
+function onFilterControlChange(panelId: string, value: string) {
+  filterSelections.value = { ...filterSelections.value, [panelId]: value }
+  refetchAllPanelsWithActiveFilters()
+}
+
+// Cross-filtering: a chart segment was clicked. Resolve the source chart's group-by field; the clicked
+// segment's `label` is that field's value → set a cross-filter on (groupByFieldId = label). A chart
+// with NO group-by field (scatter's x/y projection, a date-grouped chart whose buckets are not field
+// values, a single-value gauge) yields no field here → the click is a no-op (never a broken filter).
+// Clicking the SAME segment again toggles it off. The cross-filter then flows through the shared
+// activeDashboardFilters path, so the source chart re-aggregates too ("filtering itself is fine") and
+// every other panel narrows by it — reusing #3007's permission-safe aggregation route end to end.
+function onSegmentClick(panel: DashboardPanel, label: string) {
+  const fieldId = panelChartConfig(panel)?.dataSource?.groupByFieldId
+  if (!fieldId) return
+  const current = crossFilter.value
+  if (current && current.panelId === panel.id && current.fieldId === fieldId && current.value === label) {
+    crossFilter.value = null
+  } else {
+    crossFilter.value = { panelId: panel.id, fieldId, value: label }
+  }
+  refetchAllPanelsWithActiveFilters()
+}
+
+// Cross-filtering: clear the active cross-filter (the visible "× clear" control). No-op if none active.
+function clearCrossFilter() {
+  if (!crossFilter.value) return
+  crossFilter.value = null
+  refetchAllPanelsWithActiveFilters()
+}
+
+// The display name of the cross-filter's field (for the active-filter chip). Falls back to the raw id
+// if the field is no longer property-visible (defensive — such a cross-filter is dropped from the
+// server-bound list anyway by the dashboardFilterableField gate in activeDashboardFilters).
+const crossFilterFieldName = computed(() =>
+  crossFilter.value ? (dashboardFilterableField(crossFilter.value.fieldId)?.name ?? crossFilter.value.fieldId) : '',
+)
 
 // B4: metric needs a value field only for sum/avg/min/max (count aggregates row presence).
 const widgetRequiresValueField = computed(() =>
@@ -1278,7 +1352,12 @@ async function finishRename() {
 
 watch(
   () => activeDashboard.value?.id,
-  () => { void loadPanelData() },
+  () => {
+    // Switching dashboards drops any cross-filter (its source panel belongs to the previous
+    // dashboard); the widget selections are panel.id-keyed so they harmlessly find no match.
+    crossFilter.value = null
+    void loadPanelData()
+  },
 )
 
 watch(
@@ -1398,6 +1477,34 @@ onBeforeUnmount(resetChartPreview)
 
 .meta-dashboard__panel-chart-name { font-size: 13px; font-weight: 600; color: #0f172a; }
 .meta-dashboard__panel-controls { display: flex; align-items: center; gap: 6px; }
+
+/* Cross-filter active chip on the source panel header. */
+.meta-dashboard__crossfilter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 8px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid #2563eb;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 600;
+  max-width: 60%;
+}
+.meta-dashboard__crossfilter-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-dashboard__crossfilter-clear {
+  border: none;
+  background: transparent;
+  color: #1d4ed8;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: 999px;
+}
+.meta-dashboard__crossfilter-clear:hover { background: #dbeafe; }
 
 .meta-dashboard__panel-body { padding: 12px 14px; flex: 1; display: flex; align-items: center; justify-content: center; }
 .meta-dashboard__panel-loading { font-size: 12px; color: #94a3b8; }

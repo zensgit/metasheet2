@@ -23,7 +23,20 @@
           class="meta-chart__legend"
           data-legend="true"
         >
-          <div v-for="(pt, idx) in chartData.dataPoints" :key="idx" class="meta-chart__legend-item">
+          <!-- Cross-filtering: the pie/funnel point legend is HTML, so clicking a legend row is the
+               accessible twin of clicking a canvas slice — both emit the row's label. Empty labels
+               (uncategorized) carry no filterable value, so their row is not interactive. -->
+          <div
+            v-for="(pt, idx) in chartData.dataPoints"
+            :key="idx"
+            class="meta-chart__legend-item"
+            :class="{ 'meta-chart__legend-item--clickable': pt.label !== '' }"
+            :role="pt.label !== '' ? 'button' : undefined"
+            :tabindex="pt.label !== '' ? 0 : undefined"
+            :data-legend-segment="pt.label !== '' ? pt.label : undefined"
+            @click="pt.label !== '' && emit('segment-click', pt.label)"
+            @keydown.enter="pt.label !== '' && emit('segment-click', pt.label)"
+          >
             <span class="meta-chart__legend-swatch" :style="{ background: pt.color || defaultColor(idx) }"></span>
             <span class="meta-chart__legend-label">{{ pt.label }}</span>
             <span class="meta-chart__legend-value">{{ pt.value }}</span>
@@ -97,6 +110,12 @@ const props = defineProps<{
   // whose share-of-total dial is misleading for a non-additive aggregation (avg/min/max).
   aggregation?: AggregationFunction
 }>()
+// Cross-filtering (dashboard): a click on a chart SEGMENT emits the clicked category's LABEL. The
+// renderer has no `dataSource`, so it cannot know which FIELD the label belongs to — the parent
+// (MetaDashboardView) maps `label → { fieldId: dataSource.groupByFieldId, value: label }` and folds
+// it into the SAME dashboard-filter state #3007 added (no parallel filter path). The renderer only
+// surfaces the user's intent; turning it into a (permission-gated) filter is the parent's job.
+const emit = defineEmits<{ (e: 'segment-click', label: string): void }>()
 const { isZh } = useLocale()
 
 // Additive aggregations are the only ones whose Σ values is a meaningful whole, so the gauge's
@@ -154,7 +173,18 @@ function renderChart(): void {
     return
   }
   if (!chartEl.value) return
-  if (!chart) chart = echarts.init(chartEl.value)
+  if (!chart) {
+    chart = echarts.init(chartEl.value)
+    // Cross-filtering: a click on a series item (bar/pie/funnel/line/area marks) emits the clicked
+    // category's label. `params.name` is the dataPoint label (= the group-by category value). Bound
+    // once on init (not per setOption) — ECharts keeps the handler across re-renders. The parent
+    // decides whether the source chart can become a cross-filter (scatter/date-grouped/gauge have no
+    // group-by category, so the parent no-ops those; see onSegmentClick in MetaDashboardView).
+    chart.on('click', (params: unknown) => {
+      const name = (params as { name?: unknown } | undefined)?.name
+      if (typeof name === 'string' && name !== '') emit('segment-click', name)
+    })
+  }
   ensureResizeObserver()
   const option = buildChartOption(props.chartData, props.displayConfig)
   if (option) chart.setOption(option, true)
@@ -214,6 +244,9 @@ onBeforeUnmount(teardownChart)
 .meta-chart__legend { display: flex; flex-direction: column; gap: 4px; }
 .meta-chart__legend--inline { flex-direction: row; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
 .meta-chart__legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.meta-chart__legend-item--clickable { cursor: pointer; border-radius: 4px; padding: 1px 3px; margin: -1px -3px; }
+.meta-chart__legend-item--clickable:hover { background: #f1f5f9; }
+.meta-chart__legend-item--clickable:focus-visible { outline: 2px solid #2563eb; outline-offset: 1px; }
 .meta-chart__legend-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
 .meta-chart__legend-label { color: #475569; }
 .meta-chart__legend-value { color: #0f172a; font-weight: 600; margin-left: auto; }

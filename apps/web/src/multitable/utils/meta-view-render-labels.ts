@@ -147,6 +147,7 @@ export type MetaViewRenderLabelKey =
   | 'dashboard.filterValueLabel'
   | 'dashboard.filterValuePlaceholder'
   | 'dashboard.filterConfigNote'
+  | 'dashboard.crossFilterClear'
   | 'dashboard.addWidgetAction'
   | 'dashboard.loadingMetric'
   | 'chart.label'
@@ -294,6 +295,7 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'dashboard.filterValueLabel',
   'dashboard.filterValuePlaceholder',
   'dashboard.filterConfigNote',
+  'dashboard.crossFilterClear',
   'dashboard.addWidgetAction',
   'dashboard.loadingMetric',
   'chart.label',
@@ -451,6 +453,7 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
     en: 'This filter applies to every data panel in the dashboard.',
     zh: '此筛选器将作用于仪表盘中的每个数据面板。',
   },
+  'dashboard.crossFilterClear': { en: 'Clear cross-filter', zh: '清除联动筛选' },
   'dashboard.addWidgetAction': { en: 'Add', zh: '添加' },
   'dashboard.loadingMetric': { en: 'Loading metric...', zh: '正在加载指标...' },
   'chart.label': { en: 'Label', zh: '标签' },
