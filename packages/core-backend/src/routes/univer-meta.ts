@@ -6648,11 +6648,15 @@ export function univerMetaRouter(): Router {
         const g = await pool.query('SELECT id FROM platform_member_groups WHERE id::text = $1', [subjectId])
         if (g.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Member group not found: ${subjectId}` } })
       }
-      const grant = await issueHistoryAuditGrant(
-        pool.query.bind(pool),
-        { baseId, subjectType, subjectId, reason: parsed.data.reason, ticket: parsed.data.ticket, expiresAt: parsed.data.expiresAt, standing: parsed.data.standing },
-        access.userId,
-        Date.now(),
+      // LOCK-2c atomicity: the grant INSERT and its audit row commit together or not at all — a failed audit
+      // write rolls back the grant, so there is never a grant without its audit record.
+      const grant = await pool.transaction(({ query }) =>
+        issueHistoryAuditGrant(
+          query,
+          { baseId, subjectType, subjectId, reason: parsed.data.reason, ticket: parsed.data.ticket, expiresAt: parsed.data.expiresAt, standing: parsed.data.standing },
+          access.userId,
+          Date.now(),
+        ),
       )
       return res.status(201).json({ ok: true, data: grant })
     } catch (err) {
@@ -6694,7 +6698,8 @@ export function univerMetaRouter(): Router {
       const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
       const grantId = typeof req.params.grantId === 'string' ? req.params.grantId.trim() : ''
       if (!baseId || !grantId) return res.status(400).json({ ok: false, error: { code: 'BAD_REQUEST', message: 'baseId and grantId required' } })
-      const revoked = await revokeHistoryAuditGrant(pool.query.bind(pool), baseId, grantId, access.userId)
+      // LOCK-2c atomicity: the revoke (soft-delete) and its audit row commit together or not at all.
+      const revoked = await pool.transaction(({ query }) => revokeHistoryAuditGrant(query, baseId, grantId, access.userId))
       if (!revoked) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Active grant not found' } })
       return res.json({ ok: true, data: { revoked: true } })
     } catch (err) {
