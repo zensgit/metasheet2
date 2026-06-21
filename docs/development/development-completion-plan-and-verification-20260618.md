@@ -19,7 +19,7 @@
 | **多维表 (multitable)** | 2a 全标量 CRDT · 2b 条件读权限 S1–S4(读-deny 9/9 surface,含 trash #2900/#2910)· 2c 人员目录 S2–S4 · #18 行级读拒 | roadmap pool(导出/required-if/仪表盘联动/网格虚拟化 reopen-only/AI rings/原生同步表/FOL 深链/A6 余项) | `multitable-gated-remainder-development-plan/todo-20260618.md` |
 | **数据库/系统对接 (data-source)** | C2–C6 · Release · S1a(合同层;orphaned 面已由 #2894 retire) | **S1b(impl 进行中 #2887/#2892,S1b-3 续接)** · S2 · S3 · S4 · S5 · 首笔生产外部写 | `data-source-system-integration-plan-and-verification-20260618.md` |
 | **考勤 H2 (attendance core)** | 一天多班次 · 排班发布/草稿 · 临时班次 · 加班三段 · 自动对班 A2 · C5 通知 · **排班合规引擎(block-on-save runtime)** · **打卡策略组** | §1 OUT 红线(算薪/防作弊/AI/人脸/原生 app/插件市场,🚫) · H3 高级(调度/换班/多门店,gated;3a 可建) | `attendance-dingtalk-benchmark-target-and-tracker-20260601.md` |
-| **考勤年假引擎 (annual-leave)** | 引擎 L0–L5c(含 L5a/b/c admin)+ 员工自助 surfaces | **L6 staging smoke(owner-run gate,非自主构建)** | `attendance-annual-leave-admin-operations-dev-plan-20260617.md` |
+| **考勤年假引擎 (annual-leave)** | 引擎 L0–L6 staging smoke（含 L5a/b/c admin）+ 员工自助 surfaces | 无已授权剩余开发 | `attendance-annual-leave-admin-operations-dev-plan-20260617.md` |
 
 ## 2. 已完成 — 逐 track 证据 (COMPLETE, evidence-anchored)
 
@@ -45,9 +45,10 @@
 - **排班合规引擎(block-on-save)** — **runtime 已建,非 design-lock-only**:`enforceShiftComplianceCap` → 422 `SHIFT_COMPLIANCE_CAP_EXCEEDED`,日/周/月三粒度 × 全 save 路径事务内投影;链 #2213→#2214→#2218→#2221(staging 13/13);#2242 是其上的 settings 卡。默认 `enforcement` off(config 默认,非未建)。
 - **打卡策略组** — 已建:`punchPolicy.{merge, outdoor, unscheduled}`;链 #2204→#2209→#2304/#2308→#2329/#2333/#2336/#2344。
 
-### 2.4 考勤年假引擎 (annual-leave) — L0–L5c 完成,仅 L6 owner-run 剩余
+### 2.4 考勤年假引擎 (annual-leave) — L0–L6 完成
 - **L0** latent config + `deductLeaveBalance` helper — #2627;**L1** expiry `source_type` 泛化(`annual_leave_expiry`)— #2633;**L2** accrual 引擎 + provenance + dry-run + manual adjust — #2638/#2678/#2687(`NOT_ELIGIBLE_UNDER_ONE_YEAR` gate · `attendance_leave_accrual_runs` provenance);**L3** 审批扣减 — #2713;**L4** 结转/年末过期 — #2717/#2718;**L0–L4 capstone** — #2753。
 - **L5a** admin 余额/台账读 — #2779;**L5b** policy 配置 UI — #2782;**L5c** admin 操作 UI(手工调整/回填/计提,in-DOM 两步确认 + 失败码 + policy-off 全禁用)— design #2795 / impl **#2830** / policy-off fix #2834 / closeout #2835/#2844;自带 dev-verification MD。
+- **L6 staging smoke** — PASS 2026-06-21：staging runtime image `49050b82739f84bef20493f98f3f863fba642611`（health build metadata 仍报告内嵌 `38e912719...`，以 container image tag + route/symbol proof 记 deploy），migration catch-up 18→0，synthetic single-member org/user，accrual dry-run→real→rerun idempotent，L5a balance read，manual-adjust replay/409/422/404，expiry-backfill dry-run，L1 background scheduler reaped annual lot once with `annual_leave_expiry`，policy restored，annual residue `{"lots":0,"events":0,"adjustments":0,"runs":0}` + synthetic identity residue 0。
 - 员工自助(超出 L0–L6 范围的 bonus,已落)— /me 余额读 #2850 + overview 卡 #2853。
 
 ## 3. Gated 剩余 — 每项所需 owner opt-in / 决策 (next-batch menu)
@@ -63,7 +64,6 @@
 - **首笔生产外部写** — owner 授权;序列 = 多样本只读 dry-run → sandbox apply → re-pull 幂等+人工字段保留 → 生产。
 
 ### 3.2 考勤
-- **年假 L6 staging smoke** — **owner-run gate(非自主构建)**:需 staging-realm `attendance:admin` JWT(prod token 在 staging 401)+ 一次性单成员 org,经 UI 驱动三个 L5c endpoint + L1 年末 reaper(`AttendanceExpiryService`),断言 residue=0。跑通后年假引擎 §0.4 总目标方翻 ✅。
 - **H3 钉钉级高级**(调度/换班/多门店/设备围栏/人脸/算薪)— gated,不一口吞;**3a 可建**(多门店挂部门,约 1–2 周)单点 opt-in;3b 不自研。
 - **§1 OUT 红线**(算薪 SaaS/防作弊/AI/人脸/原生 app/插件市场)— 🚫 明确不做。
 
@@ -76,14 +76,13 @@
 ## 4. 本轮 ledger hygiene(已做,非 gated)
 
 把"已落地却仍标 ⬜"的 stale checkbox 回填为 ✅,防止下个会话把已发货的工作误读为未开工(#2831 浪费的根因):
-- **`attendance-annual-leave-admin-operations-dev-plan-20260617.md`** — Status 行翻 ✅ BUILT+MERGED(#2830/#2834/#2835/#2844)+ 39 个 build-step ⬜ → ✅;唯一保留的 🔒 是 L6 owner-run gate(§7/G1)。
-- **`attendance-dingtalk-benchmark-target-and-tracker-20260601.md` §0.4** — L0–L5 行 ⬜ → ✅(带 PR 锚点);**L6 行保持 ⬜(正确 — owner-run staging gate 未跑,不可翻)**。
-- **`attendance-annual-leave-balance-engine-design-lock-20260615.md`** — 状态行从 "实现 gated…未开工" 改为 "L0–L5c 已 BUILT+MERGED;仅 L6 owner-run 剩余"。
+- **`attendance-annual-leave-admin-operations-dev-plan-20260617.md`** — Status 行翻 ✅ BUILT+MERGED(#2830/#2834/#2835/#2844)+ 39 个 build-step ⬜ → ✅;该计划当时记录的 L6 下游门已在 2026-06-21 staging closeout 中关闭。
+- **2026-06-21 closeout addendum**：L6 staging smoke 已 PASS，`attendance-dingtalk-benchmark-target-and-tracker-20260601.md` §0.4 已把 L6 翻 ✅ 并记录 `ANNUAL_LEAVE_L6_STAGING_SMOKE_PASS` evidence；`attendance-annual-leave-balance-engine-design-lock-20260615.md` 状态行同步为 L6 PASS。上条中 dev-plan 保留的 🔒 是 L5c build-plan 当时的下游门，已由本 closeout 关闭。
 
 ## 5. 本轮经验 (lessons)
-- **验证按代码、不按 checkbox。** 一个并行 agent 因信任 §0.4 的 stale ⬜,误报年假引擎 "runtime unbuilt";按 `origin/main` 实测纠正为 L0–L5c 已建。账本 marker 滞后于 main 是本仓库的常态陷阱。
+- **验证按代码、不按 checkbox。** 一个并行 agent 因信任 §0.4 的 stale ⬜,误报年假引擎 "runtime unbuilt";当时按 `origin/main` 实测先纠正为前序代码链已建，随后 L6 staging closeout 再把该链闭合到 L0–L6。账本 marker 滞后于 main 是本仓库的常态陷阱。
 - **"完成所有开发" ≠ 打开 gated arc。** 唯一带显式授权标记的刀(L5c)早已发货;通用 goal 不授权打开 S1b/S2–S5/H3/年假 L-series 重开等 gated 项。诚实路径 = 验证 + 计划 + opt-in 菜单,而非制造并行去开 gate。
 - **主干快速移动 + 并行 lander。** 验证/刷新期间 S1b 连续落 #2887→#2892→#2894(retire),S1b 被并行 effort 持续执行;本 MD 以最新 `origin/main` 校准并**显式 pin 一个 SHA(snapshot,不逐 commit 追)**,既避免把旧快照当最终树,也避免陷入追 tip 的 treadmill。
 
 ## 6. 结论 + 建议
-**所有已授权开发已建、已验、在 `origin/main`。** 四条 track 的主体链路全部闭合(多维表 2a/2b/2c + closeout;data-source C2–C6/Release/S1a;考勤 H2 全 MUST/SHOULD/OPTIONAL;年假引擎 L0–L5c)。**没有可自主开工的已授权剩余开发** — 剩余项全部 gated,每项需 owner 显式 opt-in + §3 所列具名决策。S1b 已由并行 effort 持续执行(#2887/#2892,S1a-retire #2894),本会话不触碰。**建议**:owner 从 §3 菜单挑选下一批授权(最近的自然候选 = 年假 L6 owner-run staging smoke;S1b-3 由现有并行 lander 续接)。在拿到具名 opt-in 前,本会话不开任何 gated arc。
+**所有已授权开发已建、已验、在 `origin/main`。** 四条 track 的主体链路全部闭合(多维表 2a/2b/2c + closeout;data-source C2–C6/Release/S1a;考勤 H2 全 MUST/SHOULD/OPTIONAL;年假引擎 L0–L6)。**没有可自主开工的已授权剩余开发** — 剩余项全部 gated,每项需 owner 显式 opt-in + §3 所列具名决策。S1b 已由并行 effort 持续执行(#2887/#2892,S1a-retire #2894),本会话不触碰。**建议**:owner 从 §3 菜单挑选下一批授权(S1b-3 由现有并行 lander 续接;考勤 H3/多门店等高级项仍需单点 opt-in)。在拿到具名 opt-in 前,本会话不开任何 gated arc。
