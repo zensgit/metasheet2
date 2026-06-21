@@ -4384,8 +4384,43 @@ function parseJsonFormField(value: unknown, fieldName: string): unknown {
 }
 
 function buildXlsxAttachmentFilename(sheetName: string): string {
+  return buildExportAttachmentFilename(sheetName, 'xlsx')
+}
+
+// Shared attachment-filename builder for the export route (xlsx + csv share the same sanitization).
+function buildExportAttachmentFilename(sheetName: string, extension: 'xlsx' | 'csv'): string {
   const base = sheetName.replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '') || 'multitable'
-  return `${base}.xlsx`
+  return `${base}.${extension}`
+}
+
+// Parse the optional ?format= query param for the export route. Default 'xlsx' (back-compat). 'csv' is the
+// only other accepted value; anything else is an explicit 400 (no silent fallback — a typo'd format must
+// not silently downgrade to xlsx). Returned as a discriminated result so the caller emits a VALIDATION_ERROR.
+function parseExportFormat(value: unknown):
+  | { ok: true; format: 'xlsx' | 'csv' }
+  | { ok: false; message: string } {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (raw === '' || raw === 'xlsx') return { ok: true, format: 'xlsx' }
+  if (raw === 'csv') return { ok: true, format: 'csv' }
+  return { ok: false, message: `Unsupported export format: ${raw} (expected 'xlsx' or 'csv')` }
+}
+
+// Serialize the already-MASKED header + cell matrix as CSV (RFC-4180-ish). The `rows` cells are the
+// serializeXlsxCell projection (string | number | boolean | null | undefined), so this only stringifies +
+// quotes — it adds NO data access and inherits the same field/view/§2a.3-taint mask applied upstream.
+function buildExportCsv(
+  headers: string[],
+  rows: Array<Array<string | number | boolean | null | undefined>>,
+): string {
+  const escape = (value: string | number | boolean | null | undefined): string => {
+    if (value === null || value === undefined) return ''
+    const s = typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value)
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  const lines = [headers.map(escape).join(',')]
+  for (const row of rows) lines.push(row.map(escape).join(','))
+  // CRLF line endings = the CSV de-facto standard (Excel-friendly).
+  return lines.join('\r\n')
 }
 
 async function loadDashboardSourceRows(args: {
@@ -9573,6 +9608,17 @@ export function univerMetaRouter(): Router {
     // hint only; it is intersected with the permitted/masked field set below and can ONLY narrow,
     // never widen — a denied/masked/tainted id requested here stays excluded.
     const requestedFieldIds = parseFieldIdSelection(req.query.fieldIds)
+    // Output format. Default 'xlsx' (unchanged behavior). 'csv' emits the SAME masked + cursor-paginated
+    // FULL-SHEET record set, only re-serialized as CSV — every field/view/§2a.3-taint mask below runs
+    // BEFORE the format branch (the `fields`/`fieldIds`/`rows` pipeline is format-agnostic), so CSV
+    // inherits the identical enforcement with no separate masking path. Unknown values 400 (no silent
+    // fallback — the enum-strictness convention; a typo'd format must not silently downgrade to xlsx).
+    const formatResult = parseExportFormat(req.query.format)
+    if (formatResult.ok === false) {
+      const message = formatResult.message
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message } })
+    }
+    const format = formatResult.format
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     }
@@ -9676,15 +9722,25 @@ export function univerMetaRouter(): Router {
         cursor = result.hasMore && rows.length < XLSX_MAX_ROWS ? result.nextCursor ?? undefined : undefined
       } while (cursor)
 
+      const headers = fields.map((field) => field.name)
+      // Format branch (mask already applied above — headers/rows are the masked projection). The
+      // truncation header is emitted for BOTH formats so a client can detect a >XLSX_MAX_ROWS cap.
+      res.setHeader('X-MetaSheet-XLSX-Truncated', truncated ? 'true' : 'false')
+      if (format === 'csv') {
+        const csv = buildExportCsv(headers, rows)
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+        res.setHeader('Content-Disposition', `attachment; filename="${buildExportAttachmentFilename(sheet.name, 'csv')}"`)
+        // UTF-8 BOM so Excel opens non-ASCII (e.g. CJK) CSV without mojibake — matches common export tooling.
+        return res.send(Buffer.concat([Buffer.from('﻿', 'utf8'), Buffer.from(csv, 'utf8')]))
+      }
       const xlsx = await loadXlsxModule()
       const buffer = buildXlsxBuffer(xlsx, {
         sheetName: sheet.name,
-        headers: fields.map((field) => field.name),
+        headers,
         rows,
       })
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
       res.setHeader('Content-Disposition', `attachment; filename="${buildXlsxAttachmentFilename(sheet.name)}"`)
-      res.setHeader('X-MetaSheet-XLSX-Truncated', truncated ? 'true' : 'false')
       return res.send(buffer)
     } catch (err) {
       if (err instanceof ValidationError) {

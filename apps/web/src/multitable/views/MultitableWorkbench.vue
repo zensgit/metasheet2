@@ -3010,10 +3010,23 @@ function onGridSelectionChange(recordIds: string[]) {
 }
 
 // --- Export (A2: column/row selection via MetaExportDialog) ---
-// The toolbar's CSV/XLSX buttons now open the export-options dialog (column
-// checklist + row scope + format) instead of exporting immediately. Export
-// stays fully client-side over grid.rows — already permission-masked at read
-// time — so filtering already-authorized columns/rows adds no auth surface.
+// The toolbar's CSV/XLSX buttons open the export-options dialog (column checklist
+// + row scope + format). Two scopes, two paths:
+//   - "all rows"  → the MASK-PRESERVING BACKEND ROUTE (client.exportSheet). The
+//     client grid is page-replaced at DEFAULT_PAGE_SIZE (50), so a client-side
+//     "all rows" could only ever serialize the loaded page — a data-loss bug.
+//     The route cursor-paginates the FULL sheet and re-applies the SAME
+//     field_permissions + view-hidden + §2a.3 formula-taint mask AFTER the
+//     fieldIds selection (selection narrows within the permitted set, never
+//     widens). NOTE: "all rows" = the full sheet, NOT the view-filtered subset
+//     (the route applies view HIDDEN-FIELDS but not the view's row filter/sort);
+//     view-filtered export is a follow-up.
+//   - "selected rows" → stays CLIENT-SIDE over grid.rows. Those rows are the
+//     /view response, already field-permission AND §2a.3-taint masked at read
+//     time (univer-meta.ts GET /view: filterRecordDataByFieldIds over the
+//     taint-masked allowedFieldIds), so serializing the chosen subset adds no
+//     egress surface. The selected ids are necessarily within the loaded page,
+//     so completeness is not at stake here.
 type GridExportField = (typeof scopedGridFields)['value'][number]
 type GridExportRow = (typeof grid.rows)['value'][number]
 
@@ -3032,18 +3045,43 @@ function onExportDialogConfirm(payload: ExportConfirmPayload) {
   // Preserve the on-screen column order; ignore unknown ids defensively.
   const fields = scopedGridFields.value.filter((f) => selectedFieldIds.has(f.id))
   if (!fields.length) return
-  const rows = payload.rowScope === 'selected'
-    ? grid.rows.value.filter((r) => exportSelectedRecordIds.value.has(r.id))
-    : grid.rows.value
-  if (payload.format === 'csv') doExportCsv(fields, rows)
-  else void doExportXlsx(fields, rows)
+  if (payload.rowScope === 'selected') {
+    // Client-side: the loaded+masked rows, narrowed to the selection.
+    const rows = grid.rows.value.filter((r) => exportSelectedRecordIds.value.has(r.id))
+    if (payload.format === 'csv') doExportCsv(fields, rows)
+    else void doExportXlsx(fields, rows)
+    return
+  }
+  // All rows → full-sheet masked backend route.
+  void exportAllRowsViaRoute(fields.map((f) => f.id), payload.format)
+}
+
+async function exportAllRowsViaRoute(fieldIds: string[], format: 'csv' | 'xlsx') {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return
+  try {
+    const { blob, filename } = await workbench.client.exportSheet({
+      sheetId,
+      viewId: workbench.activeViewId.value || undefined,
+      fieldIds,
+      format,
+    })
+    triggerDownloadNamed(blob, filename || `${sheetId}.${format}`)
+  } catch (err: any) {
+    showError(err?.message ?? wb(format === 'csv' ? 'toast.csvExportFailed' : 'toast.excelExportFailed', isZh.value))
+  }
 }
 
 function triggerDownload(blob: Blob, extension: string) {
+  triggerDownloadNamed(blob, `${workbench.activeSheetId.value || 'export'}.${extension}`)
+}
+
+// Download a blob under an exact filename (the server's Content-Disposition for the route path).
+function triggerDownloadNamed(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `${workbench.activeSheetId.value || 'export'}.${extension}`
+  a.download = filename
   a.click()
   URL.revokeObjectURL(url)
 }

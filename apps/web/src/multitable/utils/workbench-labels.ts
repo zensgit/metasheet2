@@ -53,7 +53,7 @@ export type WorkbenchLabelKey =
   | 'toast.externalContextBusy' | 'toast.externalContextUnsaved'
   | 'toast.baseCreateBlocked' | 'toast.baseCreateFailed'
   | 'toast.importCancelled' | 'toast.importFailed'
-  | 'toast.excelExportFailed' | 'toast.bulkDeleteFailed'
+  | 'toast.excelExportFailed' | 'toast.csvExportFailed' | 'toast.bulkDeleteFailed'
   | 'toast.workbenchInitFailed'
   | 'confirm.discardContextChanges' | 'confirm.discardRecordChanges'
   | 'confirm.pageLeaveBusy' | 'confirm.pageLeaveDirty'
@@ -199,6 +199,7 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.importCancelled': { en: 'Import cancelled', zh: '导入已取消' },
   'toast.importFailed': { en: 'Import failed', zh: '导入失败' },
   'toast.excelExportFailed': { en: 'Excel export failed', zh: 'Excel 导出失败' },
+  'toast.csvExportFailed': { en: 'CSV export failed', zh: 'CSV 导出失败' },
   'toast.bulkDeleteFailed': { en: 'Bulk delete failed', zh: '批量删除失败' },
   'toast.workbenchInitFailed': { en: 'Failed to initialize workbench', zh: '初始化工作台失败' },
 
