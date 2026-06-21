@@ -44,10 +44,10 @@ describe('useHistoryCenter — read-only history center', () => {
     const { load } = useHistoryCenter(c)
     await load('')
     expect(spied(c).listHistoryEvents.mock.calls.length).toBe(0)
-    await load('base1', { actorId: 'u9', source: 'automation', action: 'create', from: '2026-06-01T00:00:00Z', to: '2026-06-30T23:59:59Z', fieldId: 'fld_x' })
+    await load('base1', { actorId: 'u9', source: 'automation', action: 'create', from: '2026-06-01T00:00:00Z', to: '2026-06-30T23:59:59Z', fieldId: 'fld_x', search: 'invoice-42' })
     const params = spied(c).listHistoryEvents.mock.calls[0][1]
-    // T2b: time-range + field filter forwarded alongside actor/source/action
-    expect(params).toMatchObject({ actorId: 'u9', source: 'automation', action: 'create', from: '2026-06-01T00:00:00Z', to: '2026-06-30T23:59:59Z', fieldId: 'fld_x' })
+    // T2b: time-range + field filter + search forwarded alongside actor/source/action (search → client `q`)
+    expect(params).toMatchObject({ actorId: 'u9', source: 'automation', action: 'create', from: '2026-06-01T00:00:00Z', to: '2026-06-30T23:59:59Z', fieldId: 'fld_x', q: 'invoice-42' })
   })
 
   it('load NEVER throws — surfaces the error and clears batches', async () => {

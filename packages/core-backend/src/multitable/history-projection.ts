@@ -51,6 +51,14 @@ export interface HistoryEventsParams {
    * yields no batches (no "which batches touched the hidden field" probe) — the LOCK-3 boundary holds.
    */
   fieldId?: string
+  /**
+   * T2b search — substring (lowercase-contains) over a batch's VISIBLE snapshot values. Applied POST-mask
+   * (`filterDataByAllowedFields(snapshot, allowed)`): only the actor's readable fields of non-row-denied
+   * records are searched, so a denied record's data and a hidden field's value can NEVER produce a hit (the
+   * same leak-free construction as the field filter). Value-search only — no operators / regex / query
+   * language; numbers/dates are matched by their stringified form. `total` is post-search.
+   */
+  search?: string
   limit?: number
   offset?: number
 }
@@ -78,6 +86,8 @@ interface RevRow {
   changed_field_ids: string[]
   batch_id: string | null
   created_at: string
+  /** Loaded ONLY when a search query is present (the SELECT omits it otherwise). Searched post-mask. */
+  snapshot: Record<string, unknown> | null
 }
 
 /** Per-sheet denied-record set, gated exactly like the live read surfaces (flag-on + non-admin). */
@@ -104,6 +114,7 @@ function normalizeRevRows(rows: unknown[]): RevRow[] {
     changed_field_ids: Array.isArray(r.changed_field_ids) ? r.changed_field_ids.map(String) : [],
     batch_id: typeof r.batch_id === 'string' ? r.batch_id : null,
     created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at ?? ''),
+    snapshot: r.snapshot && typeof r.snapshot === 'object' && !Array.isArray(r.snapshot) ? (r.snapshot as Record<string, unknown>) : null,
   }))
 }
 
@@ -112,6 +123,9 @@ function isDenied(deniedBySheet: Map<string, Set<string>>, sheetId: string, reco
 }
 
 const EMPTY_FIELD_SET: ReadonlySet<string> = new Set()
+
+/** T2b search candidate-row cap (bound the snapshot load over a huge history; hitting it logs + truncates, never fails). */
+const SEARCH_CANDIDATE_ROW_CAP = 20000
 
 /** LOCK-3 field layer: per-sheet allowed field-id set; a sheet missing from the map masks every field (fail-closed). */
 function allowedFieldsFor(map: Map<string, Set<string>>, sheetId: string): ReadonlySet<string> {
@@ -152,14 +166,21 @@ export async function loadHistoryBatchSummaries(
   if (params.action) add('action = $N', params.action)
   if (params.from) add('created_at >= $N', params.from)
   if (params.to) add('created_at <= $N', params.to)
+  // T2b search: load the snapshot ONLY when searching (it is heavier), and cap the candidate rows so a search
+  // over a huge history is bounded. Capping a READ-ONLY search yields incomplete results, NOT a failure — do
+  // NOT fail-closed here (unlike T5/PV-7, search has no execution-matches-preview invariant to protect).
+  const searchQuery = params.search && params.search.trim() ? params.search.trim().toLowerCase() : null
   const res = await query(
-    `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, created_at
+    `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, created_at${searchQuery ? ', snapshot' : ''}
      FROM meta_record_revisions
      WHERE ${where.join(' AND ')}
-     ORDER BY created_at DESC, version DESC, id DESC`,
+     ORDER BY created_at DESC, version DESC, id DESC${searchQuery ? `\n     LIMIT ${SEARCH_CANDIDATE_ROW_CAP}` : ''}`,
     args,
   )
   const rows = normalizeRevRows(res.rows)
+  if (searchQuery && rows.length >= SEARCH_CANDIDATE_ROW_CAP) {
+    console.warn(`[history-projection] search candidate rows hit the ${SEARCH_CANDIDATE_ROW_CAP} cap; older revisions were not searched (results may be incomplete)`)
+  }
 
   // Group into batches in encounter order (rows are already newest-first → batches stay newest-first).
   const order: string[] = []
@@ -175,14 +196,24 @@ export async function loadHistoryBatchSummaries(
     const g = groups.get(key)!
     const visibleRecords = new Set<string>()
     const visibleFields = new Set<string>()
+    let searchMatched = !searchQuery // no search → trivially matched
     for (const row of g) {
       if (isDenied(deniedBySheet, row.sheet_id, row.record_id)) continue // LOCK-3: drop denied record's rows
       visibleRecords.add(row.record_id)
       const allowed = allowedFieldsFor(params.allowedFieldsBySheet, row.sheet_id) // LOCK-3 field layer
       for (const f of row.changed_field_ids) if (allowed.has(f)) visibleFields.add(f) // count only readable fields
+      // T2b search: match the query against the POST-MASK snapshot values only — a denied record's rows are
+      // already skipped above, and filterDataByAllowedFields drops hidden fields, so neither can ever match.
+      if (searchQuery && !searchMatched) {
+        const masked = filterDataByAllowedFields(row.snapshot, allowed)
+        if (masked && Object.values(masked).some((v) => v != null && String(v).toLowerCase().includes(searchQuery))) {
+          searchMatched = true
+        }
+      }
     }
     if (visibleRecords.size === 0) continue // LOCK-3: fully-denied batch is invisible AND not counted
     if (params.fieldId && !visibleFields.has(params.fieldId)) continue // T2b field filter (post-mask, leak-free)
+    if (searchQuery && !searchMatched) continue // T2b search (post-mask, leak-free); total stays post-search
     const head = g[0]
     const actions = new Set(g.map((r) => r.action))
     all.push({

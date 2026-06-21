@@ -14,6 +14,7 @@
       </header>
 
       <div class="meta-hist__filters">
+        <input v-model.trim="filterSearch" class="meta-hist__filter" :placeholder="t('搜索可见数据', 'Search visible data')" data-test="hist-filter-search" @keyup.enter="reload" />
         <input v-model.trim="filterActor" class="meta-hist__filter" :placeholder="t('操作人 ID', 'Actor id')" data-test="hist-filter-actor" @keyup.enter="reload" />
         <input v-model.trim="filterSource" class="meta-hist__filter" :placeholder="t('来源', 'Source')" data-test="hist-filter-source" @keyup.enter="reload" />
         <select v-model="filterAction" class="meta-hist__filter" data-test="hist-filter-action" @change="reload">
@@ -75,6 +76,7 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 const { isZh } = useLocale()
 const t = (zh: string, en: string) => (isZh.value ? zh : en)
 
+const filterSearch = ref('')
 const filterActor = ref('')
 const filterSource = ref('')
 const filterAction = ref('')
@@ -97,6 +99,7 @@ function reload(): Promise<void> {
     from: filterFrom.value ? new Date(`${filterFrom.value}T00:00:00`).toISOString() : undefined,
     to: filterTo.value ? new Date(`${filterTo.value}T23:59:59.999`).toISOString() : undefined,
     fieldId: filterField.value,
+    search: filterSearch.value,
   })
 }
 
