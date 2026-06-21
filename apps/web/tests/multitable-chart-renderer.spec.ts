@@ -12,9 +12,15 @@ const mocks = vi.hoisted(() => {
   const setOption = vi.fn()
   const resize = vi.fn()
   const dispose = vi.fn()
-  const instance = { setOption, resize, dispose }
+  // `on` captures the renderer's 'click' handler (cross-filtering): jsdom can't synthesize a real
+  // canvas click, so a test invokes the captured handler to simulate a segment click.
+  let clickHandler: ((params: unknown) => void) | null = null
+  const on = vi.fn((event: string, cb: (params: unknown) => void) => {
+    if (event === 'click') clickHandler = cb
+  })
+  const instance = { setOption, resize, dispose, on }
   const init = vi.fn(() => instance)
-  return { setOption, resize, dispose, init, instance }
+  return { setOption, resize, dispose, on, init, instance, fireClick: (params: unknown) => clickHandler?.(params) }
 })
 vi.mock('echarts/core', () => ({ init: mocks.init, use: vi.fn() }))
 vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {}, FunnelChart: {}, GaugeChart: {}, ScatterChart: {} }))
@@ -489,5 +495,38 @@ describe('MetaChartRenderer', () => {
     expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
     expect(container.querySelectorAll('[title]')).toHaveLength(0)
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(0)
+  })
+
+  // ---- Cross-filtering: a clicked segment emits its label (parent maps it to a dashboard filter) ----
+
+  it('emits segment-click with the clicked canvas segment label (ECharts click → params.name)', async () => {
+    const clicks: string[] = []
+    mount({ chartData: barData, onSegmentClick: (label: string) => clicks.push(label) })
+    await flushPromises()
+    // jsdom can't synthesize a canvas click; the renderer bound its handler via chart.on('click', …),
+    // captured by the mock. Fire it like ECharts would (params carries the dataPoint `name`).
+    mocks.fireClick({ name: 'B', value: 20 })
+    expect(clicks).toEqual(['B'])
+  })
+
+  it('does NOT emit segment-click for an empty / malformed canvas click payload', async () => {
+    const clicks: string[] = []
+    mount({ chartData: barData, onSegmentClick: (label: string) => clicks.push(label) })
+    await flushPromises()
+    mocks.fireClick({ name: '' })       // empty category → not filterable
+    mocks.fireClick({})                  // no name (e.g. axis/blank area)
+    mocks.fireClick({ name: 123 })       // non-string
+    expect(clicks).toEqual([])
+  })
+
+  it('emits segment-click from the HTML pie/funnel legend row (the accessible twin of a slice click)', async () => {
+    const clicks: string[] = []
+    const { container } = mount({ chartData: pieData, onSegmentClick: (label: string) => clicks.push(label) })
+    await flushPromises()
+    const blueRow = container.querySelector('[data-legend-segment="Blue"]') as HTMLElement
+    expect(blueRow).toBeTruthy()
+    expect(blueRow.getAttribute('role')).toBe('button')
+    blueRow.click()
+    expect(clicks).toEqual(['Blue'])
   })
 })
