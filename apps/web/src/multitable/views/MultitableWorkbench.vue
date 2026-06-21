@@ -260,6 +260,7 @@
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
           :group-fields="grid.groupFields.value"
           :search-text="searchText" :row-density="rowDensity"
+          :can-load-more="gridCanLoadMore" :infinite-scroll="gridIsFlatPath"
           :upload-fn="uploadAttachmentFn"
           :delete-attachment-fn="deleteAttachmentFn"
           :can-comment="effectiveRowActions.canComment"
@@ -275,7 +276,7 @@
           :remote-cursors-by-cell="sheetPresenceState.remoteCursorsByCell.value"
           @cursor-focus="onCellCursorFocus"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
-          @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @open-person-picker="onGridPersonPicker" @resize-column="onSetColumnWidth"
+          @go-to-page="grid.goToPage" @load-more="grid.loadMore" @open-link-picker="onGridLinkPicker" @open-person-picker="onGridPersonPicker" @resize-column="onSetColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
           @create-record="onAddRecord"
           @duplicate-record="onDuplicateRecord"
@@ -1100,6 +1101,15 @@ const formReadOnly = computed(() => {
   return selectedRecordResolved.value ? !effectiveRowActions.value.canEdit : !caps.canCreateRecord.value
 })
 const pageStartIndex = computed(() => grid.page.value.offset)
+// A1 infinite-scroll activation. The FLAT (ungrouped) grid path accumulates rows via scroll (loadMore)
+// instead of replacing per page — so the windowing in MetaGridTable engages once the set climbs past its
+// threshold. The grouped path keeps the classic footer pager (uniform-row windowing doesn't apply there,
+// and accumulation isn't wired for grouped subtotals), so it must NOT enable infinite scroll.
+const gridIsFlatPath = computed(() => grid.groupFields.value.length === 0)
+// Prop fed to MetaGridTable's load-more trigger: ask for a next page only on the flat path AND while the
+// composable says one exists (page.hasMore && !capped). The grid additionally re-checks flat/expanded
+// internally before emitting, so this is belt-and-suspenders.
+const gridCanLoadMore = computed(() => gridIsFlatPath.value && grid.canLoadMore.value)
 const selectedRecordLinkSummaries = computed<Record<string, LinkedRecordSummary[]>>(() => {
   const recordId = selectedRecordId.value
   if (!recordId) return {}

@@ -303,6 +303,14 @@ export function effectiveFilterTypeKey(field: { type: string; property?: unknown
 const DEFAULT_PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 150
 
+// A1 infinite-scroll accumulation safety ceiling. Each loadMore() fetches only one page (pageSize rows)
+// via offset pagination, so we never approach the server view-load `limit` clamp (max 5000) per fetch —
+// this cap bounds total in-memory ROWS only (the DOM is already bounded by the grid windowing). Aligned
+// with the server's 5000 view ceiling so the two limits don't silently diverge. On hit we STOP appending
+// and log once (NO silent truncation): the user has scrolled past 5000 accumulated rows; narrow via
+// filter/search to see further. Generous headroom for any realistic single-view scroll session.
+const MAX_ACCUMULATED_ROWS = 5000
+
 function normalizeRecordContextId(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
@@ -472,8 +480,19 @@ export function useMultitableGrid(opts: {
   const rowActions = ref<MetaRowActions | null>(null)
   const rowActionOverrides = ref<Record<string, MetaRowActions>>({})
   const loading = ref(false)
+  // A1 infinite-scroll: a SEPARATE in-flight flag for append fetches (loadMore). It must NOT reuse
+  // `loading` — `loading` drives the full-screen grid spinner and is set by every full reload, while an
+  // append is a quiet background fetch that should not blank the grid. Used to dedup rapid scroll events.
+  const loadingMore = ref(false)
+  // A1: latched true once accumulation hits MAX_ACCUMULATED_ROWS — surfaced (logged) so truncation is
+  // never silent. Cleared on every reset (a reset starts a fresh accumulation from page 1).
+  const accumulationCapped = ref(false)
   const error = ref<string | null>(null)
   const conflict = ref<GridConflictState | null>(null)
+  // Monotonic request id shared by loadViewData (reset/replace) AND loadMore (append). A reset bumps it,
+  // so any in-flight append re-checking it AFTER its await bails instead of appending stale, cross-filter
+  // rows onto the freshly-reset set. This is the single guard that keeps the masked/filtered/sorted
+  // per-fetch contract intact under interleaving (scroll-append racing a filter/sort/search/view change).
   let latestLoadRequestId = 0
 
   // Pagination
@@ -586,6 +605,11 @@ export function useMultitableGrid(opts: {
       }
       fields.value = data.fields ?? []
       rows.value = serverRows
+      // A1: this is the RESET/REPLACE path (filter/sort/search/view/sheet change, pagination, mutation
+      // reload). It bumped latestLoadRequestId above, so any in-flight append is already superseded; here
+      // we also clear the accumulation latches so a fresh page-1 set starts a clean accumulation.
+      accumulationCapped.value = false
+      loadingMore.value = false
       linkSummaries.value = data.linkSummaries ?? {}
       personSummaries.value = data.personSummaries ?? {}
       attachmentSummaries.value = data.attachmentSummaries ?? {}
@@ -604,6 +628,103 @@ export function useMultitableGrid(opts: {
       error.value = e.message ?? fallback('grid.errorLoadViewData')
     } finally {
       if (requestId === latestLoadRequestId) loading.value = false
+    }
+  }
+
+  // A1 infinite-scroll: can we fetch + APPEND another page? True only when the last load reported more
+  // rows server-side and we haven't hit the in-memory ceiling. The grid (MetaGridTable) additionally
+  // gates the scroll trigger on the FLAT path (not grouped / not expanded / not printing) — those modes
+  // keep the classic footer pager — so this stays a pure "is there a next page" predicate.
+  const canLoadMore = computed(() => page.value.hasMore && !accumulationCapped.value)
+
+  // A1: shallow-merge a per-record summary map (recordId → fieldMap) onto the accumulated one. APPEND
+  // must MERGE, never replace: a replace would drop every earlier page's link/person/attachment chips
+  // (the field-drop / wire-drift class). New keys win for the just-fetched records; existing records are
+  // untouched (the fetched page only ever contains NEW record ids on the append path).
+  function mergeSummaryMap<T>(
+    target: Record<string, Record<string, T[]>>,
+    incoming: Record<string, Record<string, T[]>> | undefined,
+  ): Record<string, Record<string, T[]>> {
+    if (!incoming || Object.keys(incoming).length === 0) return target
+    return { ...target, ...incoming }
+  }
+
+  // A1 infinite-scroll APPEND. Fetches the NEXT page (offset = current accumulated row count) using the
+  // EXISTING offset pagination + the server-side filter/sort/search already persisted on the view, then
+  // APPENDS to `rows` so the grid can hold thousands of rows while the windowing keeps the DOM bounded.
+  // Deliberately a SEPARATE function from loadViewData (which replaces rows, re-syncs the view, and
+  // reassigns fields — all wrong for an append). Offset is PINNED at page.offset = 0 on the infinite path
+  // so row numbers + the ~15 "reload after mutation" callers (loadViewData(page.offset)) degrade to a
+  // clean reset-to-page-1 rather than a broken middle-window — no per-call-site change needed.
+  async function loadMore() {
+    const sid = opts.sheetId.value
+    if (!sid) return
+    // Dedup rapid scroll (already appending) + don't race a full reset (loading) + nothing more to fetch.
+    if (loadingMore.value || loading.value || !canLoadMore.value) return
+
+    const requestId = ++latestLoadRequestId
+    loadingMore.value = true
+    const startCount = rows.value.length
+    try {
+      const data = await client.loadView({
+        sheetId: sid,
+        viewId: opts.viewId.value || undefined,
+        limit: pageSize,
+        offset: startCount,
+        includeLinkSummaries: true,
+        search: searchQuery.value || undefined,
+      })
+      // A reset (filter/sort/search/view/sheet change, or a mutation reload) bumped the id while we were
+      // in flight → DROP this page. Appending it would mix stale, cross-filter rows onto the fresh set,
+      // breaking the "masked/filtered/sorted per fetch" contract. The reset already replaced rows.
+      if (requestId !== latestLoadRequestId) return
+      const serverPage = data.page
+      const serverRows = data.rows ?? []
+
+      // Append (preserve realtime correctness: patch/merge/remove operate by id over the whole array, so
+      // a longer accumulated array is fine). New rows only — the offset guarantees no overlap with held
+      // rows; a defensive de-dup by id guards a server that returns a boundary row twice.
+      if (serverRows.length) {
+        const held = new Set(rows.value.map((r) => r.id))
+        const fresh = serverRows.filter((r) => !held.has(r.id))
+        if (fresh.length) rows.value = [...rows.value, ...fresh]
+      }
+      // MERGE the three display-summary maps by recordId (never replace — see mergeSummaryMap).
+      linkSummaries.value = mergeSummaryMap(linkSummaries.value, data.linkSummaries)
+      personSummaries.value = mergeSummaryMap(personSummaries.value, data.personSummaries)
+      attachmentSummaries.value = mergeSummaryMap(attachmentSummaries.value, data.attachmentSummaries)
+      // Per-record row-action overrides are additive too (a denied/locked row in a later page).
+      const incomingOverrides = data.meta?.permissions?.rowActionOverrides
+      if (incomingOverrides && Object.keys(incomingOverrides).length) {
+        rowActionOverrides.value = { ...rowActionOverrides.value, ...incomingOverrides }
+      }
+
+      // Pin offset at 0 (infinite path) so row numbers + mutation reloads behave; carry the server total
+      // and hasMore forward. End-of-data backstop: a short page (< pageSize) means no more rows even if
+      // the server's hasMore lagged.
+      const nextHasMore = serverPage ? serverPage.hasMore && serverRows.length >= pageSize : false
+      page.value = {
+        offset: 0,
+        limit: pageSize,
+        total: serverPage?.total ?? rows.value.length,
+        hasMore: nextHasMore,
+      }
+
+      // Memory ceiling: stop accumulating past MAX_ACCUMULATED_ROWS and surface it (NO silent truncation).
+      if (rows.value.length >= MAX_ACCUMULATED_ROWS && page.value.hasMore) {
+        accumulationCapped.value = true
+        page.value = { ...page.value, hasMore: false }
+        console.warn(
+          `[multitable] grid accumulation reached the ${MAX_ACCUMULATED_ROWS}-row ceiling; ` +
+          'further rows are not loaded — narrow the view with a filter or search to see beyond this point.',
+        )
+      }
+    } catch {
+      // Silent: an append failure leaves the already-held rows intact; the user can scroll to retry.
+      // (loadViewData owns the user-facing error surface for the reset path.)
+    } finally {
+      // Only clear the flag if THIS request is still the latest — a superseding reset manages its own.
+      if (requestId === latestLoadRequestId) loadingMore.value = false
     }
   }
 
@@ -1211,14 +1332,16 @@ export function useMultitableGrid(opts: {
   return {
     // State
     fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
+    // A1 infinite-scroll accumulation state
+    loadingMore, accumulationCapped,
     sortRules, filterRules, filterConjunction, nestedFilterNodes, filterGroups, sortFilterDirty,
     groupFieldId, groupFieldIds, groupField, groupFields,
     editHistory, historyIndex, canUndo, canRedo,
     searchQuery,
     // Computed
-    currentPage, totalPages,
+    currentPage, totalPages, canLoadMore,
     // Methods
-    loadViewData, syncFromView, reloadCurrentPage, goToPage,
+    loadViewData, loadMore, syncFromView, reloadCurrentPage, goToPage,
     toggleFieldVisibility,
     addSortRule, removeSortRule,
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,

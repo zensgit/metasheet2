@@ -11,7 +11,7 @@
  * and assert WINDOWING BEHAVIOR (rendered row count << total; window contents shift on scroll; frozen +
  * conditional-format cells still render in-window) — never brittle exact pixel counts.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App } from 'vue'
 import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
@@ -222,5 +222,66 @@ describe('MetaGridTable row virtualization (A1)', () => {
     expect(renderedRowCount(root)).toBe(2000)
     expect(root.querySelector('[data-test="grid-top-spacer"]')).toBeNull()
     expect(root.querySelector('[data-test="grid-bottom-spacer"]')).toBeNull()
+  })
+})
+
+/**
+ * A1 — infinite-scroll TRIGGER (the activation that makes the windowing engage). The grid emits
+ * `load-more` when the user scrolls near the bottom of the FLAT body and a next page is available
+ * (`canLoadMore`). The composable owns dedup + the actual append; here we assert the EMIT contract only.
+ */
+describe('MetaGridTable infinite-scroll load-more trigger (A1)', () => {
+  // jsdom reports 0 for scrollHeight/clientHeight. Define them so "distance from bottom" is measurable:
+  // a tall content (scrollHeight) in a short viewport (clientHeight), scrolled to a given scrollTop.
+  function setScrollGeometry(root: HTMLDivElement, opts: { scrollHeight: number; clientHeight: number; scrollTop: number }): HTMLElement {
+    const wrap = root.querySelector('.meta-grid__table-wrap') as HTMLElement
+    Object.defineProperty(wrap, 'clientHeight', { value: opts.clientHeight, configurable: true })
+    Object.defineProperty(wrap, 'scrollHeight', { value: opts.scrollHeight, configurable: true })
+    wrap.scrollTop = opts.scrollTop
+    return wrap
+  }
+
+  it('emits load-more when scrolled near the bottom and a next page is available', async () => {
+    const loadMore = vi.fn()
+    const root = mountGrid(makeRows(60), { canLoadMore: true, onLoadMore: loadMore })
+    // tall content (2160px), 600px viewport; scroll to within the 400px threshold of the bottom.
+    const wrap = setScrollGeometry(root, { scrollHeight: 2160, clientHeight: 600, scrollTop: 1300 })
+    await nextTick()
+
+    wrap.dispatchEvent(new Event('scroll'))
+    await nextTick()
+    expect(loadMore).toHaveBeenCalled()
+  })
+
+  it('does NOT emit load-more when far from the bottom', async () => {
+    const loadMore = vi.fn()
+    const root = mountGrid(makeRows(60), { canLoadMore: true, onLoadMore: loadMore })
+    const wrap = setScrollGeometry(root, { scrollHeight: 2160, clientHeight: 600, scrollTop: 0 })
+    await nextTick()
+
+    wrap.dispatchEvent(new Event('scroll'))
+    await nextTick()
+    expect(loadMore).not.toHaveBeenCalled()
+  })
+
+  it('does NOT emit load-more when canLoadMore is false (end-of-data / small dataset)', async () => {
+    const loadMore = vi.fn()
+    const root = mountGrid(makeRows(60), { canLoadMore: false, onLoadMore: loadMore })
+    const wrap = setScrollGeometry(root, { scrollHeight: 2160, clientHeight: 600, scrollTop: 1300 })
+    await nextTick()
+
+    wrap.dispatchEvent(new Event('scroll'))
+    await nextTick()
+    expect(loadMore).not.toHaveBeenCalled()
+  })
+
+  it('kicks one load-more when the loaded rows do not fill the viewport (no scrollbar) but more exist', async () => {
+    const loadMore = vi.fn()
+    // 10 rows; content shorter than the viewport → no scrollbar → scroll never fires, so a kick is needed.
+    const root = mountGrid(makeRows(10), { canLoadMore: true, onLoadMore: loadMore })
+    setScrollGeometry(root, { scrollHeight: 360, clientHeight: 600, scrollTop: 0 })
+    window.dispatchEvent(new Event('resize')) // re-measures → maybeKickWhenNotScrollable
+    await nextTick()
+    expect(loadMore).toHaveBeenCalled()
   })
 })

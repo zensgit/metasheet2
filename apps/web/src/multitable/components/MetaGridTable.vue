@@ -342,7 +342,9 @@
         </tfoot>
       </table>
     </div>
-    <div v-if="totalPages > 1" class="meta-grid__pagination">
+    <!-- A1: classic offset pager — hidden on the infinite-scroll (flat/accumulating) path; kept for the
+         grouped path which doesn't accumulate. The two paging models are mutually exclusive. -->
+    <div v-if="totalPages > 1 && !infiniteScroll" class="meta-grid__pagination">
       <button class="meta-grid__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ l('grid.prev') }}</button>
       <span class="meta-grid__page-info">{{ currentPage }} / {{ totalPages }}</span>
       <button class="meta-grid__page-btn" :disabled="currentPage >= totalPages" @click="emit('go-to-page', currentPage + 1)">{{ l('grid.next') }} &rsaquo;</button>
@@ -447,6 +449,17 @@ const props = defineProps<{
   collapsedGroupKeys?: string[]
   searchText?: string
   rowDensity?: RowDensity
+  // A1 infinite-scroll: the composable's "is there a next page" signal (page.hasMore && !capped). When
+  // true and the user scrolls near the bottom of the FLAT body, the grid emits `load-more` so the parent
+  // appends the next page (which then lets the windowing engage as the set climbs past its threshold).
+  // Absent/false → the grid never emits load-more (small dataset / grouped / end-of-data); the classic
+  // footer pager remains the only paging affordance for those.
+  canLoadMore?: boolean
+  // A1: this grid uses infinite scroll (the parent accumulates rows) → hide the classic offset footer
+  // pager (the two are different paging models; showing both is confusing). Set on the flat/ungrouped
+  // path; the grouped path leaves it false so its footer pager stays. Independent of transient expand
+  // state so the pager doesn't flash back when a row is expanded.
+  infiniteScroll?: boolean
   uploadFn?: MetaAttachmentUploadFn
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   canComment?: boolean
@@ -490,6 +503,10 @@ const emit = defineEmits<{
   (e: 'toggle-sort', fieldId: string): void
   (e: 'patch-cell', recordId: string, fieldId: string, value: unknown, version: number): void
   (e: 'go-to-page', page: number): void
+  // A1 infinite-scroll: user scrolled near the bottom of the flat body and a next page is available.
+  // The parent (workbench) calls grid.loadMore(), which dedups + appends. Emitting with no listener is
+  // harmless (the windowing tests dispatch scroll without one).
+  (e: 'load-more'): void
   (e: 'open-link-picker', ctx: { recordId: string; field: MetaField }): void
   (e: 'open-person-picker', ctx: { recordId: string; field: MetaField }): void
   (e: 'resize-column', fieldId: string, width: number): void
@@ -642,9 +659,35 @@ const bottomSpacerHeight = computed(() =>
   flatWindowEnabled.value ? (filteredRows.value.length - windowEnd.value) * rowHeightPx.value : 0,
 )
 
+// ── A1: infinite-scroll trigger (the ACTIVATION of the windowing above) ─────────────────────────────
+// Windowing is dormant until the grid actually HOLDS more than VIRTUALIZE_MIN_ROWS rows. Default paging
+// replaces at 50/page (< 60), so without accumulation the threshold is never crossed. This trigger asks
+// the parent to APPEND the next page when the user scrolls near the bottom, so the set climbs 50→100→…
+// and the windowing engages on its own.
+//
+// FLOORLESS gate (the keystone): we DO NOT reuse `flatWindowEnabled` — that requires >60 rows, which is
+// exactly the deadlock (never >60 → never fetch → never >60). We gate only on the flat path (not grouped
+// / not expanded / not printing); those non-flat modes keep the classic footer pager. Dedup against
+// double-fire is owned by the composable (loadMore's loadingMore flag), so emitting freely is safe.
+const LOAD_MORE_THRESHOLD_PX = 400
+const infiniteScrollEnabled = computed(() =>
+  !printing.value && !groupedRows.value && expandedRowIds.value.size === 0,
+)
+
+// Emit `load-more` when the scroll position is within the threshold of the bottom AND a next page exists.
+// Safe to call on every scroll tick: the composable dedups overlapping fetches and ignores it past
+// end-of-data, and an emit with no listener is a no-op (windowing specs mount without one).
+function maybeLoadMore() {
+  if (!infiniteScrollEnabled.value || !props.canLoadMore || !tableWrap.value) return
+  const el = tableWrap.value
+  const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  if (distanceFromBottom <= LOAD_MORE_THRESHOLD_PX) emit('load-more')
+}
+
 function onTableScroll() {
   if (!tableWrap.value) return
   scrollTop.value = tableWrap.value.scrollTop
+  maybeLoadMore()
 }
 function measureViewport() {
   if (!tableWrap.value) return
@@ -654,6 +697,20 @@ function measureViewport() {
   const firstRow = tableWrap.value.querySelector<HTMLElement>('tbody tr.meta-grid__row')
   const rh = firstRow?.offsetHeight ?? 0
   if (rh > 0) measuredRowHeight.value = rh
+  maybeKickWhenNotScrollable()
+}
+
+// A1: if the loaded rows don't fill the viewport (no scrollbar) yet a next page exists, a scroll event
+// will never fire and accumulation would stall at one page. Kick one more fetch so the set grows until it
+// either fills the viewport (then scroll takes over) or reaches end-of-data. Composable dedups + stops.
+function maybeKickWhenNotScrollable() {
+  if (!infiniteScrollEnabled.value || !props.canLoadMore || !tableWrap.value) return
+  const el = tableWrap.value
+  // Only when the wrap has REAL layout — clientHeight 0 means it isn't laid out yet (or jsdom with no
+  // geometry); kicking then would fire spuriously before we know whether the content fills the viewport.
+  if (el.clientHeight <= 0) return
+  // Not scrollable: full content height fits within the visible viewport (allow a small slack).
+  if (el.scrollHeight <= el.clientHeight + 1) emit('load-more')
 }
 // Keep the focused row inside the mounted window during keyboard navigation so arrow-keys never land on
 // an un-rendered row. No-op when windowing is off or no row is focused.
