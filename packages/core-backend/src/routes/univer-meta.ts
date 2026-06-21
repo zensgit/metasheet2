@@ -6788,6 +6788,61 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  // A3 — History Field-Audit audit-trail read surface. Read-only "who granted / revoked / revealed what" over
+  // operation_audit_logs, gated on the SAME platform capability that manages grants (LOCK-5: the auditor is
+  // itself auditable). The serializer picks ONLY scope fields from metadata — never echoes a record field value.
+  router.get('/bases/:baseId/history-audit-log', async (req: Request, res: Response) => {
+    try {
+      const access = await requireHistoryAuditGrantAuthority(req, res)
+      if (!access) return
+      const pool = poolManager.get()
+      const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
+      if (!baseId) return res.status(400).json({ ok: false, error: { code: 'BAD_REQUEST', message: 'baseId required' } })
+      const limitRaw = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 100
+      const offsetRaw = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : 0
+      const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 100
+      const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0
+      const kindFilter = req.query.kind === 'grant' || req.query.kind === 'reveal' ? String(req.query.kind) : null
+      const resourceTypes = kindFilter === 'reveal'
+        ? ['meta_history_audit_reveal']
+        : kindFilter === 'grant'
+          ? ['meta_history_audit_grant']
+          : ['meta_history_audit_grant', 'meta_history_audit_reveal']
+      const rows = (await pool.query(
+        `SELECT id, actor_id, action, resource_type, metadata, created_at
+         FROM operation_audit_logs
+         WHERE resource_type = ANY($1::text[]) AND metadata->>'baseId' = $2
+         ORDER BY created_at DESC
+         LIMIT $3 OFFSET $4`,
+        [resourceTypes, baseId, limit, offset],
+      )).rows as Array<Record<string, unknown>>
+      const entries = rows.map((r) => {
+        const md = (r.metadata && typeof r.metadata === 'object' ? r.metadata : {}) as Record<string, unknown>
+        return {
+          id: String(r.id),
+          actorId: typeof r.actor_id === 'string' ? r.actor_id : null,
+          action: String(r.action),
+          kind: r.resource_type === 'meta_history_audit_reveal' ? 'reveal' : 'grant',
+          subjectType: typeof md.subjectType === 'string' ? md.subjectType : null,
+          subjectId: typeof md.subjectId === 'string' ? md.subjectId : null,
+          reason: typeof md.reason === 'string' ? md.reason : null,
+          ticket: typeof md.ticket === 'string' ? md.ticket : null,
+          scope: typeof md.scope === 'string' ? md.scope : null,
+          grantId: typeof md.grantId === 'string' ? md.grantId : null,
+          at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at ?? ''),
+        }
+      })
+      const names = await resolveUserDisplayNames(pool.query.bind(pool), entries.map((e) => e.actorId).filter((x): x is string => !!x))
+      const enriched = entries.map((e) => ({ ...e, actorName: e.actorId ? names.get(e.actorId) ?? null : null }))
+      return res.json({ ok: true, data: { entries: enriched, limit, offset } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] history audit-log failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to load audit log' } })
+    }
+  })
+
   // ---------------------------------------------------------------------------
   // Layer 1 — record-level version restore.
   // Design-lock: docs/development/multitable-record-restore-layer1-design-20260615.md
