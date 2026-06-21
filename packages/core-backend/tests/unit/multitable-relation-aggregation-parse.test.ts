@@ -53,6 +53,25 @@ describe('parseRelationAggregationCall — sole-call grammar', () => {
     expect(parseRelationAggregationCall('RELSUMIF(a,b,c,is,x)')).toBeNull() // unquoted ids
   })
 
+  it('A.3 — parses RELAVGIF (avg) with the same 5-arg signature as RELSUMIF', () => {
+    expect(parseRelationAggregationCall('RELAVGIF("fld_link","fld_amt","fld_status","is","paid")')).toEqual({
+      fnName: 'RELAVGIF', aggregation: 'avg', linkFieldId: 'fld_link', targetFieldId: 'fld_amt',
+      criteria: { fieldId: 'fld_status', operator: 'is', valueExpr: '"paid"' },
+    })
+  })
+
+  it('A.3 — parses RELCOUNTIF (countall, 4-arg, no sum target → targetFieldId = criteria for the readability gate)', () => {
+    expect(parseRelationAggregationCall('RELCOUNTIF("fld_link","fld_status","is","paid")')).toEqual({
+      fnName: 'RELCOUNTIF', aggregation: 'countall', linkFieldId: 'fld_link', targetFieldId: 'fld_status',
+      criteria: { fieldId: 'fld_status', operator: 'is', valueExpr: '"paid"' },
+    })
+  })
+
+  it('A.3 — per-function arity: RELCOUNTIF needs 4 (5→null); RELAVGIF/RELSUMIF need 5 (4→null)', () => {
+    expect(parseRelationAggregationCall('RELCOUNTIF("a","b","c","is","x")')).toBeNull() // 5 args → not COUNTIF
+    expect(parseRelationAggregationCall('RELAVGIF("a","b","c","is")')).toBeNull() // 4 args → not AVGIF
+  })
+
   it('returns null when a nested paren appears (outside the Slice A grammar)', () => {
     expect(parseRelationAggregationCall('RELSUMIF("a","b","c","is",SUM(1,2))')).toBeNull()
   })
