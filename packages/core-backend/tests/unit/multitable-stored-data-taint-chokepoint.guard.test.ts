@@ -219,7 +219,7 @@ describe('§2a.3 stored-data taint chokepoint — durable structural guard', () 
     ).toEqual([])
   })
 
-  test('the taint resolver is only called from the two chokepoint helpers + the two write-path skips (no ad-hoc re-bolting)', () => {
+  test('the taint resolver is only called from the two chokepoint helpers + the three write-path skips (no ad-hoc re-bolting)', () => {
     // resolveTaintedFormulaFieldIds(...) — the resolver may live ONLY in univer-meta.ts (alongside the
     // chokepoints + the two write-path recompute-SKIP sites). Whole-`src` enforcement: a call from ANY
     // OTHER file is forbidden (that is exactly the ad-hoc re-bolting the chokepoint design forbids).
@@ -234,19 +234,21 @@ describe('§2a.3 stored-data taint chokepoint — durable structural guard', () 
         'Do NOT re-bolt the resolver onto another surface — route through the chokepoint instead.',
     ).toEqual([])
     // Within univer-meta.ts: exclude the definition line. Every remaining call must live inside
-    // maskStoredRecordFieldIds / resolveDisplayFieldTaint (the read chokepoints) or the two write-path
-    // recompute-SKIP sites (recalculateFormulaFields / recalcNewRecordFormulas), which drop tainted ids
-    // from the RECOMPUTE set — a different operation than a read mask.
+    // maskStoredRecordFieldIds / resolveDisplayFieldTaint (the read chokepoints) or the three write-path
+    // recompute-SKIP sites (recalculateFormulaFields / recalcNewRecordFormulas / the 1b Slice A.2
+    // relation-aggregation foreign-write fan-out in computeDependentLookupRollupRecords), which drop tainted
+    // ids from the RECOMPUTE set — a different operation than a read mask.
     const calls = [...UNIVER_META.matchAll(/resolveTaintedFormulaFieldIds\(/g)]
-    // 1 definition (`async function resolveTaintedFormulaFieldIds(`) + 2 chokepoint helpers + 2 write skips.
+    // 1 definition (`async function resolveTaintedFormulaFieldIds(`) + 2 chokepoint helpers + 3 write skips.
     const defs = [...UNIVER_META.matchAll(/function resolveTaintedFormulaFieldIds\(/g)]
     expect(defs.length).toBe(1)
     expect(
       calls.length,
       'resolveTaintedFormulaFieldIds call count drifted. Read chokepoints (maskStoredRecordFieldIds, ' +
-        'resolveDisplayFieldTaint) own the read rule; the two write-path skips own the recompute rule. ' +
+        'resolveDisplayFieldTaint) own the read rule; the three write-path skips own the recompute rule ' +
+        '(recalculateFormulaFields / recalcNewRecordFormulas / A.2 relation-agg fan-out). ' +
         'Do NOT re-bolt the resolver onto a surface ad hoc — route through the chokepoint instead.',
-    ).toBe(5) // 1 def + 2 chokepoint helpers + 2 write-path recompute skips
+    ).toBe(6) // 1 def + 2 chokepoint helpers + 3 write-path recompute skips (incl. A.2 fan-out taint-skip)
   })
 
   test('the chokepoint helpers exist and are wired (smoke)', () => {
