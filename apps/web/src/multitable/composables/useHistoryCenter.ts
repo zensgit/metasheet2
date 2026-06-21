@@ -10,7 +10,7 @@ import type { HistoryBatchSummary, HistoryBatchDetail } from '../types'
  * NEVER throw — a failure surfaces via `error` / a null detail, so a click can't leak an unhandled
  * rejection. The client is injectable for testing.
  */
-type HistoryFilters = { sheetId?: string; actorId?: string; source?: string; action?: string }
+type HistoryFilters = { sheetId?: string; actorId?: string; source?: string; action?: string; from?: string; to?: string; fieldId?: string }
 type HistoryClient = Pick<typeof multitableClient, 'listHistoryEvents' | 'getHistoryBatch'>
 
 export function useHistoryCenter(client: HistoryClient = multitableClient) {
@@ -33,6 +33,9 @@ export function useHistoryCenter(client: HistoryClient = multitableClient) {
         actorId: filters.actorId || undefined,
         source: filters.source || undefined,
         action: filters.action || undefined,
+        from: filters.from || undefined,
+        to: filters.to || undefined,
+        fieldId: filters.fieldId || undefined,
         limit: 100,
       })
       batches.value = res.batches

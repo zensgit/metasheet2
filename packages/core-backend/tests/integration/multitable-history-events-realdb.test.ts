@@ -225,4 +225,21 @@ describeIfDatabase('global-history events — LOCK-3 security goldens (real DB)'
     expect(change?.after?.[STATUS]).toBe('public') // visible field of the SAME change still passes (surgical)
     expect(d.body?.data?.visibleAffectedFieldCount).toBe(1) // detail count masked too
   })
+
+  // ----- T2b field filter (post-mask, leak-free) -----
+
+  test('T2b field filter: ?fieldId returns batches that touched a READABLE field', async () => {
+    await mixedFieldRev()
+    expect(batchIds(await events({ fieldId: STATUS }))).toContain(FIELD_BATCH)
+    expect(batchIds(await events({ fieldId: SALARY }))).toContain(FIELD_BATCH) // SALARY readable here → matches
+  })
+
+  test('T2b field filter is LEAK-FREE: filtering by a field_permissions-denied field returns NO batch (post-mask)', async () => {
+    await mixedFieldRev()
+    await denyFieldForUser(SALARY)
+    // The denied field is never in the batch's VISIBLE field set, so filtering by it yields nothing — the
+    // actor cannot probe "which batches touched the hidden field". A readable field still filters normally.
+    expect(batchIds(await events({ fieldId: SALARY }))).not.toContain(FIELD_BATCH)
+    expect(batchIds(await events({ fieldId: STATUS }))).toContain(FIELD_BATCH)
+  })
 })

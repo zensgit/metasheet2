@@ -45,6 +45,12 @@ export interface HistoryEventsParams {
   action?: string
   from?: string
   to?: string
+  /**
+   * T2b field filter — keep only batches that touched this field, applied POST-mask: a batch matches iff the
+   * field is in its VISIBLE field set. A field the actor cannot read is never visible, so filtering by it
+   * yields no batches (no "which batches touched the hidden field" probe) — the LOCK-3 boundary holds.
+   */
+  fieldId?: string
   limit?: number
   offset?: number
 }
@@ -176,6 +182,7 @@ export async function loadHistoryBatchSummaries(
       for (const f of row.changed_field_ids) if (allowed.has(f)) visibleFields.add(f) // count only readable fields
     }
     if (visibleRecords.size === 0) continue // LOCK-3: fully-denied batch is invisible AND not counted
+    if (params.fieldId && !visibleFields.has(params.fieldId)) continue // T2b field filter (post-mask, leak-free)
     const head = g[0]
     const actions = new Set(g.map((r) => r.action))
     all.push({

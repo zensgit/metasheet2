@@ -6534,6 +6534,7 @@ export function univerMetaRouter(): Router {
           action: str(req.query.action),
           from: str(req.query.from),
           to: str(req.query.to),
+          fieldId: str(req.query.fieldId),
           limit: Number.isFinite(limit) ? limit : 50,
           offset: Number.isFinite(offset) ? offset : 0,
         },
