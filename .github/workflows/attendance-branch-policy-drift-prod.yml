@@ -64,7 +64,7 @@ jobs:
       GH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_GH_TOKEN || github.token }}
       GH_TOKEN_FALLBACK: ${{ github.token }}
       BRANCH: ${{ inputs.branch || 'main' }}
-      REQUIRED_CHECKS_CSV: ${{ inputs.required_checks_csv || 'contracts (strict),contracts (dashboard)' }}
+      REQUIRED_CHECKS_CSV: ${{ inputs.required_checks_csv || 'contracts (strict),contracts (dashboard),pr-validate,test (20.x),contracts (openapi)' }}
       REQUIRE_STRICT: ${{ inputs.require_strict || 'true' }}
       REQUIRE_ENFORCE_ADMINS: ${{ inputs.require_enforce_admins || 'true' }}
       REQUIRE_PR_REVIEWS: ${{ inputs.require_pr_reviews || 'false' }}
