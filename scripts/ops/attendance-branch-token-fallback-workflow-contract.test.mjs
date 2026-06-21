@@ -10,6 +10,8 @@ const workflows = [
   '.github/workflows/attendance-branch-policy-drift-prod.yml',
 ]
 
+const currentRequiredChecks = 'contracts (strict),contracts (dashboard),pr-validate,test (20.x),contracts (openapi)'
+
 for (const workflow of workflows) {
   test(`${workflow} retries with github.token when configured token is stale`, () => {
     const raw = readFileSync(path.join(repoRoot, workflow), 'utf8')
@@ -29,4 +31,30 @@ test('branch protection checker sends a single graphql query field', () => {
 
   assert.equal(queryFieldCount, 1)
   assert.match(raw, /requiredStatusCheckContexts/)
+})
+
+test('branch policy drift schedule fallback matches the current main protection contract', () => {
+  const raw = readFileSync(
+    path.join(repoRoot, '.github/workflows/attendance-branch-policy-drift-prod.yml'),
+    'utf8',
+  )
+
+  assert.match(
+    raw,
+    new RegExp(`REQUIRED_CHECKS_CSV: \\\$\\{\\{ inputs\\.required_checks_csv \\|\\| '${currentRequiredChecks.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}' \\}\\}`),
+  )
+  assert.match(raw, /REQUIRE_PR_REVIEWS:\s+\$\{\{\s*inputs\.require_pr_reviews\s+\|\|\s+'false'\s*\}\}/)
+})
+
+test('post-merge verifier dispatches current shared-prod policy defaults', () => {
+  const raw = readFileSync(
+    path.join(repoRoot, 'scripts/ops/attendance-post-merge-verify.sh'),
+    'utf8',
+  )
+
+  assert.match(raw, new RegExp(`REQUIRED_CHECKS_CSV="\\$\\{REQUIRED_CHECKS_CSV:-${currentRequiredChecks.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\}"`))
+  assert.match(raw, /REQUIRE_PR_REVIEWS="\$\{REQUIRE_PR_REVIEWS:-false\}"/)
+  assert.match(raw, /EXPECT_PRODUCT_MODE="\$\{EXPECT_PRODUCT_MODE:-platform\}"/)
+  assert.doesNotMatch(raw, /REQUIRE_PR_REVIEWS="\$\{REQUIRE_PR_REVIEWS:-true\}"/)
+  assert.doesNotMatch(raw, /EXPECT_PRODUCT_MODE="\$\{EXPECT_PRODUCT_MODE:-attendance\}"/)
 })

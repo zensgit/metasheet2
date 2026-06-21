@@ -1457,13 +1457,15 @@ export class MultitableApiClient {
   // --- Global History & Point-in-Time Restore (read-only) ---
   async listHistoryEvents(
     baseId: string,
-    params?: { sheetId?: string; actorId?: string; source?: string; action?: string; from?: string; to?: string; limit?: number; offset?: number },
-  ): Promise<{ batches: HistoryBatchSummary[]; total: number }> {
+    params?: { sheetId?: string; actorId?: string; source?: string; action?: string; from?: string; to?: string; fieldId?: string; q?: string; cursor?: string; limit?: number; offset?: number },
+  ): Promise<{ batches: HistoryBatchSummary[]; total: number; nextCursor: string | null; searchTruncated: boolean }> {
     const res = await this.fetch(`/api/multitable/bases/${encodeURIComponent(baseId)}/history/events${qs(params ?? {})}`)
-    const data = await this.parseJson<{ batches?: unknown[]; total?: number }>(res)
+    const data = await this.parseJson<{ batches?: unknown[]; total?: number; nextCursor?: unknown; searchTruncated?: unknown }>(res)
     return {
       batches: Array.isArray(data?.batches) ? data.batches.map(normalizeHistoryBatchSummary) : [],
       total: Number(data?.total ?? 0),
+      nextCursor: typeof data?.nextCursor === 'string' ? data.nextCursor : null,
+      searchTruncated: data?.searchTruncated === true,
     }
   }
 

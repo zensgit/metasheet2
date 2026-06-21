@@ -45,6 +45,26 @@ export interface HistoryEventsParams {
   action?: string
   from?: string
   to?: string
+  /**
+   * T2b field filter — keep only batches that touched this field, applied POST-mask: a batch matches iff the
+   * field is in its VISIBLE field set. A field the actor cannot read is never visible, so filtering by it
+   * yields no batches (no "which batches touched the hidden field" probe) — the LOCK-3 boundary holds.
+   */
+  fieldId?: string
+  /**
+   * T2b search — substring (lowercase-contains) over a batch's VISIBLE snapshot values. Applied POST-mask
+   * (`filterDataByAllowedFields(snapshot, allowed)`): only the actor's readable fields of non-row-denied
+   * records are searched, so a denied record's data and a hidden field's value can NEVER produce a hit (the
+   * same leak-free construction as the field filter). Value-search only — no operators / regex / query
+   * language; numbers/dates are matched by their stringified form. `total` is post-search.
+   */
+  search?: string
+  /** Candidate-row cap for search (default SEARCH_CANDIDATE_ROW_CAP). Injectable so a test can exercise the
+   *  truncation path without seeding 20k rows; the route never sets it. */
+  searchRowCap?: number
+  /** T2b cursor pagination: opaque (createdAt, batchId) of the last batch of the previous page. When present,
+   *  it takes precedence over `offset` (which is left working for any legacy caller). */
+  cursor?: string
   limit?: number
   offset?: number
 }
@@ -72,6 +92,8 @@ interface RevRow {
   changed_field_ids: string[]
   batch_id: string | null
   created_at: string
+  /** Loaded ONLY when a search query is present (the SELECT omits it otherwise). Searched post-mask. */
+  snapshot: Record<string, unknown> | null
 }
 
 /** Per-sheet denied-record set, gated exactly like the live read surfaces (flag-on + non-admin). */
@@ -98,6 +120,7 @@ function normalizeRevRows(rows: unknown[]): RevRow[] {
     changed_field_ids: Array.isArray(r.changed_field_ids) ? r.changed_field_ids.map(String) : [],
     batch_id: typeof r.batch_id === 'string' ? r.batch_id : null,
     created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at ?? ''),
+    snapshot: r.snapshot && typeof r.snapshot === 'object' && !Array.isArray(r.snapshot) ? (r.snapshot as Record<string, unknown>) : null,
   }))
 }
 
@@ -106,6 +129,38 @@ function isDenied(deniedBySheet: Map<string, Set<string>>, sheetId: string, reco
 }
 
 const EMPTY_FIELD_SET: ReadonlySet<string> = new Set()
+
+/** T2b search candidate-row cap (bound the snapshot load over a huge history; hitting it logs + truncates, never fails). */
+const SEARCH_CANDIDATE_ROW_CAP = 20000
+
+/**
+ * T2b cursor pagination (Option A — a stable key-cursor over the post-filter batch list; `total` stays exact).
+ * The cursor is the opaque (createdAt, batchId) of the last batch on a page. Pagination is over `all` AFTER it
+ * is sorted by the SAME total order the cursor compares on — (createdAt DESC, batchId DESC) — so a page
+ * boundary that lands on a createdAt tie cannot skip or duplicate (batchId is globally unique, the tiebreak).
+ * This buys page-reachability + stability under concurrent top-inserts; it does NOT reduce DB load (every page
+ * still loads + filters all rows — an exact post-filter `total` requires that). True SQL-level efficiency would
+ * trade the exact total for a `hasMore` estimate; that is a deferred follow-up, not this slice.
+ */
+function encodeHistoryCursor(b: { createdAt: string; batchId: string }): string {
+  return Buffer.from(`${b.createdAt}|${b.batchId}`, 'utf8').toString('base64')
+}
+function decodeHistoryCursor(cursor: string): { createdAt: string; batchId: string } | null {
+  try {
+    const raw = Buffer.from(cursor, 'base64').toString('utf8')
+    const sep = raw.lastIndexOf('|') // batchId is opaque but never contains '|' in our id space; split on the last
+    if (sep <= 0) return null
+    return { createdAt: raw.slice(0, sep), batchId: raw.slice(sep + 1) }
+  } catch {
+    return null // malformed cursor → treated as no cursor (first page); never throws
+  }
+}
+/** Total DESC order over (createdAt, batchId); batchId breaks createdAt ties. <0 → a sorts before b. */
+function compareBatchKeyDesc(a: { createdAt: string; batchId: string }, b: { createdAt: string; batchId: string }): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 1 : -1
+  if (a.batchId !== b.batchId) return a.batchId < b.batchId ? 1 : -1
+  return 0
+}
 
 /** LOCK-3 field layer: per-sheet allowed field-id set; a sheet missing from the map masks every field (fail-closed). */
 function allowedFieldsFor(map: Map<string, Set<string>>, sheetId: string): ReadonlySet<string> {
@@ -131,9 +186,9 @@ export async function loadHistoryBatchSummaries(
   query: QueryFn,
   params: HistoryEventsParams,
   access: HistoryAccess,
-): Promise<{ batches: HistoryBatchSummary[]; total: number }> {
+): Promise<{ batches: HistoryBatchSummary[]; total: number; nextCursor: string | null; searchTruncated: boolean }> {
   const sheetIds = params.sheetIds
-  if (sheetIds.length === 0) return { batches: [], total: 0 }
+  if (sheetIds.length === 0) return { batches: [], total: 0, nextCursor: null, searchTruncated: false }
   const deniedBySheet = await loadDeniedBySheet(query, sheetIds, access)
 
   // Filters are pushed to SQL; ordering is LOCK-11. Grouping by COALESCE(batch_id, id) is done in JS so
@@ -146,14 +201,30 @@ export async function loadHistoryBatchSummaries(
   if (params.action) add('action = $N', params.action)
   if (params.from) add('created_at >= $N', params.from)
   if (params.to) add('created_at <= $N', params.to)
+  // T2b search: load the snapshot ONLY when searching (it is heavier), and cap the candidate rows so a search
+  // over a huge history is bounded. Capping a READ-ONLY search yields incomplete results, NOT a failure — do
+  // NOT fail-closed here (unlike T5/PV-7, search has no execution-matches-preview invariant to protect).
+  const searchQuery = params.search && params.search.trim() ? params.search.trim().toLowerCase() : null
+  // Finite positive integer only. Resolve the default FIRST (`??` catches null + undefined — `Number(null)` is
+  // 0, which would otherwise clamp to LIMIT 1 instead of the default), then guard: a non-finite value falls
+  // back to the default (never `LIMIT NaN`), a fractional value is floored (never `LIMIT 2.5`). SQL-interpolated.
+  const numericRowCap = Number(params.searchRowCap ?? SEARCH_CANDIDATE_ROW_CAP)
+  const searchRowCap = Number.isFinite(numericRowCap) ? Math.max(Math.floor(numericRowCap), 1) : SEARCH_CANDIDATE_ROW_CAP
   const res = await query(
-    `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, created_at
+    `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, created_at${searchQuery ? ', snapshot' : ''}
      FROM meta_record_revisions
      WHERE ${where.join(' AND ')}
-     ORDER BY created_at DESC, version DESC, id DESC`,
+     ORDER BY created_at DESC, version DESC, id DESC${searchQuery ? `\n     LIMIT ${searchRowCap}` : ''}`,
     args,
   )
   const rows = normalizeRevRows(res.rows)
+  // When a search hits the candidate cap, older revisions were NOT searched: a visible match beyond the cap is
+  // absent. We surface that to the caller (searchTruncated) AND server-log it — never silently, so the UI can
+  // tell the user to narrow filters rather than read incomplete results as "nothing matched".
+  const searchTruncated = searchQuery !== null && rows.length >= searchRowCap
+  if (searchTruncated) {
+    console.warn(`[history-projection] search candidate rows hit the ${searchRowCap} cap; older revisions were not searched (results + total are bounded)`)
+  }
 
   // Group into batches in encounter order (rows are already newest-first → batches stay newest-first).
   const order: string[] = []
@@ -169,13 +240,24 @@ export async function loadHistoryBatchSummaries(
     const g = groups.get(key)!
     const visibleRecords = new Set<string>()
     const visibleFields = new Set<string>()
+    let searchMatched = !searchQuery // no search → trivially matched
     for (const row of g) {
       if (isDenied(deniedBySheet, row.sheet_id, row.record_id)) continue // LOCK-3: drop denied record's rows
       visibleRecords.add(row.record_id)
       const allowed = allowedFieldsFor(params.allowedFieldsBySheet, row.sheet_id) // LOCK-3 field layer
       for (const f of row.changed_field_ids) if (allowed.has(f)) visibleFields.add(f) // count only readable fields
+      // T2b search: match the query against the POST-MASK snapshot values only — a denied record's rows are
+      // already skipped above, and filterDataByAllowedFields drops hidden fields, so neither can ever match.
+      if (searchQuery && !searchMatched) {
+        const masked = filterDataByAllowedFields(row.snapshot, allowed)
+        if (masked && Object.values(masked).some((v) => v != null && String(v).toLowerCase().includes(searchQuery))) {
+          searchMatched = true
+        }
+      }
     }
     if (visibleRecords.size === 0) continue // LOCK-3: fully-denied batch is invisible AND not counted
+    if (params.fieldId && !visibleFields.has(params.fieldId)) continue // T2b field filter (post-mask, leak-free)
+    if (searchQuery && !searchMatched) continue // T2b search (post-mask, leak-free); total stays post-search
     const head = g[0]
     const actions = new Set(g.map((r) => r.action))
     all.push({
@@ -192,9 +274,24 @@ export async function loadHistoryBatchSummaries(
   }
 
   const total = all.length // post-permission-filter total (LOCK-3) — never the raw revision/batch count
-  const offset = Math.max(Number(params.offset ?? 0), 0)
   const limit = Math.min(Math.max(Number(params.limit ?? 50), 1), 100)
-  return { batches: all.slice(offset, offset + limit), total }
+  // Sort by the SAME total order the cursor compares on (createdAt DESC, batchId DESC) so a tie-straddling page
+  // boundary can't skip/duplicate. (Encounter order already ~matches but disagrees at createdAt ties.)
+  all.sort(compareBatchKeyDesc)
+  // Pagination start: a cursor (if valid) wins over offset and points just past the previous page's last batch.
+  let start = 0
+  const cur = params.cursor ? decodeHistoryCursor(params.cursor) : null
+  if (cur) {
+    const idx = all.findIndex((b) => compareBatchKeyDesc(b, cur) > 0) // first batch strictly AFTER the cursor
+    start = idx === -1 ? all.length : idx
+  } else if (params.offset) {
+    start = Math.max(Number(params.offset), 0)
+  }
+  const batches = all.slice(start, start + limit)
+  const nextCursor = start + limit < all.length && batches.length > 0
+    ? encodeHistoryCursor(batches[batches.length - 1])
+    : null
+  return { batches, total, nextCursor, searchTruncated }
 }
 
 export interface HistoryChange {

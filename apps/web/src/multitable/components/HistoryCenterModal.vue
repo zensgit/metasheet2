@@ -14,6 +14,7 @@
       </header>
 
       <div class="meta-hist__filters">
+        <input v-model.trim="filterSearch" class="meta-hist__filter" :placeholder="t('搜索可见数据', 'Search visible data')" data-test="hist-filter-search" @keyup.enter="reload" />
         <input v-model.trim="filterActor" class="meta-hist__filter" :placeholder="t('操作人 ID', 'Actor id')" data-test="hist-filter-actor" @keyup.enter="reload" />
         <input v-model.trim="filterSource" class="meta-hist__filter" :placeholder="t('来源', 'Source')" data-test="hist-filter-source" @keyup.enter="reload" />
         <select v-model="filterAction" class="meta-hist__filter" data-test="hist-filter-action" @change="reload">
@@ -22,10 +23,22 @@
           <option value="update">{{ t('更新', 'Update') }}</option>
           <option value="delete">{{ t('删除', 'Delete') }}</option>
         </select>
+        <input v-model="filterFrom" type="date" class="meta-hist__filter" :aria-label="t('起始日期', 'From date')" data-test="hist-filter-from" @change="reload" />
+        <input v-model="filterTo" type="date" class="meta-hist__filter" :aria-label="t('结束日期', 'To date')" data-test="hist-filter-to" @change="reload" />
+        <select v-if="fields && fields.length" v-model="filterField" class="meta-hist__filter" :aria-label="t('字段', 'Field')" data-test="hist-filter-field" @change="reload">
+          <option value="">{{ t('全部字段', 'All fields') }}</option>
+          <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
+        </select>
+        <label v-if="sheetId" class="meta-hist__scope" data-test="hist-filter-scope">
+          <input v-model="scopeAllSheets" type="checkbox" @change="reload" />{{ t('全部表', 'All tables') }}
+        </label>
         <button class="meta-hist__apply" type="button" data-test="hist-apply" @click="reload">{{ t('筛选', 'Filter') }}</button>
       </div>
 
       <p v-if="error" class="meta-hist__error" role="alert">{{ error }}</p>
+      <p v-if="searchTruncated" class="meta-hist__warn" role="status" data-test="hist-search-truncated">
+        {{ t('搜索结果可能不完整（已达检索上限），请缩小时间区间或其它筛选条件。', 'Search may be incomplete (candidate limit reached) — narrow the date range or other filters.') }}
+      </p>
       <div v-if="loading" class="meta-hist__hint">{{ t('加载中…', 'Loading…') }}</div>
       <ul v-else-if="batches.length" class="meta-hist__list">
         <li v-for="b in batches" :key="b.batchId" class="meta-hist__row">
@@ -49,6 +62,14 @@
         </li>
       </ul>
       <p v-else class="meta-hist__hint">{{ t('暂无历史记录', 'No history yet') }}</p>
+      <button
+        v-if="nextCursor && !loading"
+        class="meta-hist__more"
+        type="button"
+        data-test="hist-load-more"
+        :disabled="loadingMore"
+        @click="loadMore"
+      >{{ loadingMore ? t('加载中…', 'Loading…') : t('加载更多', 'Load more') }}</button>
     </div>
   </div>
 </template>
@@ -60,24 +81,36 @@ import { useHistoryCenter } from '../composables/useHistoryCenter'
 import { historyActor } from '../utils/meta-record-labels'
 import type { HistoryBatchSummary } from '../types'
 
-const props = defineProps<{ open: boolean; baseId: string; sheetId?: string }>()
+const props = defineProps<{ open: boolean; baseId: string; sheetId?: string; fields?: Array<{ id: string; name: string }> }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const { isZh } = useLocale()
 const t = (zh: string, en: string) => (isZh.value ? zh : en)
 
+const filterSearch = ref('')
 const filterActor = ref('')
 const filterSource = ref('')
 const filterAction = ref('')
+const filterFrom = ref('')
+const filterTo = ref('')
+const filterField = ref('')
+const scopeAllSheets = ref(false) // T2b: default to the active sheet; opt in to all readable tables
 
-const { batches, loading, error, expandedId, detail, detailLoading, load, toggle: toggleBatch } = useHistoryCenter()
+const { batches, loading, loadingMore, error, nextCursor, searchTruncated, expandedId, detail, detailLoading, load, loadMore, toggle: toggleBatch } = useHistoryCenter()
 
 function reload(): Promise<void> {
   return load(props.baseId, {
-    sheetId: props.sheetId,
+    // sheet scope: the active sheet by default; "all tables" clears it (the backend then spans every
+    // readable sheet in the base). The field filter is leak-free server-side (post-mask), so the dropdown
+    // is a convenience, not a security boundary.
+    sheetId: scopeAllSheets.value ? undefined : props.sheetId,
     actorId: filterActor.value,
     source: filterSource.value,
     action: filterAction.value,
+    from: filterFrom.value ? new Date(`${filterFrom.value}T00:00:00`).toISOString() : undefined,
+    to: filterTo.value ? new Date(`${filterTo.value}T23:59:59.999`).toISOString() : undefined,
+    fieldId: filterField.value,
+    search: filterSearch.value,
   })
 }
 

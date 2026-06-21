@@ -20,6 +20,7 @@ import request from 'supertest'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { loadHistoryBatchSummaries } from '../../src/multitable/history-projection'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -33,6 +34,8 @@ const REC_PUBLIC = `rec_gh_public_${TS}`
 const BULK_BATCH = `batch_gh_bulk_${TS}` // one bulk action touching BOTH records (shared id)
 const SECRET_BATCH = `batch_gh_secret_${TS}` // a single-record action on the secret record only
 const FIELD_BATCH = `batch_gh_field_${TS}` // a single-record action on REC_PUBLIC touching STATUS + SALARY
+const TIE_A = `batch_gh_tie_a_${TS}` // two batches sharing ONE created_at (cursor tie-break test)
+const TIE_B = `batch_gh_tie_b_${TS}`
 const USER_ID = `user_gh_${TS}`
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
@@ -67,6 +70,29 @@ const mixedFieldRev = () =>
      VALUES (gen_random_uuid(), $1, $2, 2, 'update', 'rest', $3, ARRAY[$4,$5]::text[], '{}'::jsonb, $6::jsonb, $7)`,
     [SHEET_ID, REC_PUBLIC, USER_ID, STATUS, SALARY, JSON.stringify({ [STATUS]: 'public', [SALARY]: 99999 }), FIELD_BATCH],
   )
+// A single-record visible-record revision (REC_PUBLIC) at an EXPLICIT created_at + batch_id (cursor tests).
+const revAt = (batchId: string, createdAt: string) =>
+  q(
+    `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id, created_at)
+     VALUES (gen_random_uuid(), $1, $2, 1, 'update', 'rest', $3, ARRAY[$4]::text[], '{}'::jsonb, $5::jsonb, $6, $7)`,
+    [SHEET_ID, REC_PUBLIC, USER_ID, STATUS, JSON.stringify({ [STATUS]: 'public' }), batchId, createdAt],
+  )
+// Page through (limit=1) collecting batchIds; asserts `total` is constant across pages. Returns {seen, total}.
+const pageAll = async (extra: Record<string, unknown> = {}): Promise<{ seen: string[]; total: number }> => {
+  const seen: string[] = []
+  let cursor: string | undefined
+  let total = -1
+  for (let i = 0; i < 50; i++) {
+    const res = await events({ ...extra, limit: 1, ...(cursor ? { cursor } : {}) })
+    expect(res.status).toBe(200)
+    if (total === -1) total = res.body?.data?.total
+    else expect(res.body?.data?.total).toBe(total) // total is constant across pages
+    seen.push(...batchIds(res))
+    cursor = res.body?.data?.nextCursor ?? undefined
+    if (!cursor) break
+  }
+  return { seen, total }
+}
 // field_permissions row hiding a field from the test user (subject_type='user'); afterEach clears it.
 const denyFieldForUser = (fieldId: string) =>
   q(
@@ -224,5 +250,123 @@ describeIfDatabase('global-history events — LOCK-3 security goldens (real DB)'
     expect(change?.after?.[SALARY]).toBeUndefined() // hidden value absent from the snapshot
     expect(change?.after?.[STATUS]).toBe('public') // visible field of the SAME change still passes (surgical)
     expect(d.body?.data?.visibleAffectedFieldCount).toBe(1) // detail count masked too
+  })
+
+  // ----- T2b field filter (post-mask, leak-free) -----
+
+  test('T2b field filter: ?fieldId returns batches that touched a READABLE field', async () => {
+    await mixedFieldRev()
+    expect(batchIds(await events({ fieldId: STATUS }))).toContain(FIELD_BATCH)
+    expect(batchIds(await events({ fieldId: SALARY }))).toContain(FIELD_BATCH) // SALARY readable here → matches
+  })
+
+  test('T2b field filter is LEAK-FREE: filtering by a field_permissions-denied field returns NO batch (post-mask)', async () => {
+    await mixedFieldRev()
+    await denyFieldForUser(SALARY)
+    // The denied field is never in the batch's VISIBLE field set, so filtering by it yields nothing — the
+    // actor cannot probe "which batches touched the hidden field". A readable field still filters normally.
+    expect(batchIds(await events({ fieldId: SALARY }))).not.toContain(FIELD_BATCH)
+    expect(batchIds(await events({ fieldId: STATUS }))).toContain(FIELD_BATCH)
+  })
+
+  // ----- T2b search (post-mask snapshot match, leak-free) -----
+
+  test('T2b search positive control: a VISIBLE field value IS searchable (non-vacuous)', async () => {
+    await mixedFieldRev() // FIELD_BATCH snapshot = { STATUS: 'public', SALARY: 99999 }
+    expect(batchIds(await events({ q: '99999' }))).toContain(FIELD_BATCH) // SALARY value (visible) searchable
+    expect(batchIds(await events({ q: 'public' }))).toContain(FIELD_BATCH) // STATUS value searchable
+  })
+
+  test('T2b search is LEAK-FREE (field-mask): a field_permissions-denied value is NOT searchable (post-mask)', async () => {
+    await mixedFieldRev()
+    await denyFieldForUser(SALARY)
+    // 99999 lives ONLY in the now-denied SALARY → searching it must return no batch (can't probe hidden values).
+    expect(batchIds(await events({ q: '99999' }))).not.toContain(FIELD_BATCH)
+    // non-vacuous: the still-visible STATUS value is still searchable.
+    expect(batchIds(await events({ q: 'public' }))).toContain(FIELD_BATCH)
+  })
+
+  test('T2b search is LEAK-FREE (row-deny): a row-denied record value is NOT searchable', async () => {
+    await setRules(denySecretRule)
+    await setFlag(true) // deny status='secret' records (REC_SECRET)
+    // 'secret' lives only in the row-denied REC_SECRET → searching it returns nothing.
+    expect(batchIds(await events({ q: 'secret' }))).toHaveLength(0)
+    // non-vacuous: 'public' (REC_PUBLIC, visible) still matches the bulk batch.
+    expect(batchIds(await events({ q: 'public' }))).toContain(BULK_BATCH)
+  })
+
+  test('T2b search: total is POST-search (a non-matching batch is not counted)', async () => {
+    await mixedFieldRev()
+    const res = await events({ q: '99999' }) // only FIELD_BATCH carries 99999
+    expect(batchIds(res)).toEqual([FIELD_BATCH])
+    expect(res.body?.data?.total).toBe(1) // post-search total
+  })
+
+  // ----- T2b cursor pagination (stable key-cursor over the post-filter set) -----
+
+  test('T2b cursor: paging with limit=1 returns every batch EXACTLY once (no skip / no duplicate)', async () => {
+    await mixedFieldRev() // 3 batches: BULK, SECRET, FIELD
+    const { seen, total } = await pageAll()
+    expect(total).toBe(3)
+    expect(seen.length).toBe(3)
+    expect(new Set(seen).size).toBe(3) // no duplicates
+    expect(new Set(seen)).toEqual(new Set([BULK_BATCH, SECRET_BATCH, FIELD_BATCH])) // no skips
+  })
+
+  test('T2b cursor: two batches sharing ONE created_at straddling a page boundary — still exactly once', async () => {
+    const sameTime = new Date(TS - 60000).toISOString()
+    await revAt(TIE_A, sameTime)
+    await revAt(TIE_B, sameTime) // identical created_at, different batchId → the tie the cursor must break
+    const { seen } = await pageAll()
+    expect(seen.filter((id) => id === TIE_A).length).toBe(1) // the tie-break golden: no skip/duplicate
+    expect(seen.filter((id) => id === TIE_B).length).toBe(1)
+  })
+
+  test('T2b cursor: total stays POST-filter while paging (a row-denied batch is neither paged nor counted)', async () => {
+    await setRules(denySecretRule)
+    await setFlag(true) // SECRET_BATCH fully denied → invisible
+    const { seen, total } = await pageAll()
+    expect(seen).not.toContain(SECRET_BATCH) // a cursor from a visible page can never reach the denied batch
+    expect(total).toBe(seen.length) // total == the matches the actor can see
+  })
+
+  test('T2b cursor: a malformed cursor is treated as the first page (defined behavior, no crash)', async () => {
+    const res = await events({ cursor: 'not-a-valid-cursor!!!' })
+    expect(res.status).toBe(200)
+    expect(batchIds(res).length).toBeGreaterThan(0) // first page, not a 500
+  })
+
+  // ----- T2b search truncation is SURFACED (not silent) -----
+
+  test('T2b search truncation: the API surfaces searchTruncated=false for a normal (non-truncated) search', async () => {
+    await mixedFieldRev()
+    const res = await events({ q: 'public' })
+    expect(res.status).toBe(200)
+    expect(res.body?.data?.searchTruncated).toBe(false) // the flag is present, and false when within the cap
+  })
+
+  test('T2b search truncation: searchTruncated=true when the candidate cap is hit (and false with a generous cap)', async () => {
+    await mixedFieldRev() // ≥2 candidate revisions exist on the sheet
+    const params = { sheetIds: [SHEET_ID], allowedFieldsBySheet: new Map([[SHEET_ID, new Set([STATUS, SALARY])]]), search: '99999' }
+    const access = { userId: USER_ID, isAdminRole: false }
+    const capped = await loadHistoryBatchSummaries(q, { ...params, searchRowCap: 1 }, access)
+    expect(capped.searchTruncated).toBe(true) // cap=1 with ≥2 candidate rows → bounded, surfaced
+    const full = await loadHistoryBatchSummaries(q, { ...params, searchRowCap: 10000 }, access)
+    expect(full.searchTruncated).toBe(false) // generous cap → complete
+  })
+
+  test('T2b search cap is finite-guarded: a NaN / non-integer searchRowCap never produces invalid SQL', async () => {
+    await mixedFieldRev()
+    const params = { sheetIds: [SHEET_ID], allowedFieldsBySheet: new Map([[SHEET_ID, new Set([STATUS, SALARY])]]), search: '99999' }
+    const access = { userId: USER_ID, isAdminRole: false }
+    // NaN → falls back to the default cap (no `LIMIT NaN` — the await would reject on invalid SQL); not truncated.
+    const nanCap = await loadHistoryBatchSummaries(q, { ...params, searchRowCap: NaN }, access)
+    expect(nanCap.searchTruncated).toBe(false)
+    // null → the DEFAULT cap, NOT 1 (Number(null)===0 would clamp to LIMIT 1 → spuriously "truncated").
+    const nullCap = await loadHistoryBatchSummaries(q, { ...params, searchRowCap: null as unknown as number }, access)
+    expect(nullCap.searchTruncated).toBe(false)
+    // A fractional cap is floored to a valid integer LIMIT (no `LIMIT 1.9`); floor(1.9)=1 with ≥2 rows → truncated.
+    const fracCap = await loadHistoryBatchSummaries(q, { ...params, searchRowCap: 1.9 }, access)
+    expect(fracCap.searchTruncated).toBe(true)
   })
 })

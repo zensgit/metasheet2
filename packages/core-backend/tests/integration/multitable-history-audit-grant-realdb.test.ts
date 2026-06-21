@@ -19,13 +19,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
-import { resolveHistoryFieldAuditReveal } from '../../src/multitable/history-audit-grant-service'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 const BASE_ID = `base_hag_${TS}`
 const ISSUER = `user_hag_issuer_${TS}` // holds the grant capability
 const GRANTEE = `user_hag_grantee_${TS}` // receives a grant; holds NO capability
+const ISSUER_ROLE = `role_hag_${TS}` // a role the ISSUER belongs to (indirect self-grant guardrail)
+let issuerGroupId = '' // a member-group the ISSUER belongs to (uuid, captured in beforeAll)
 const CAP = 'multitable:history-field-audit:grant'
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
@@ -64,11 +65,23 @@ describeIfDatabase('history field-audit grant — A1 LOCK-2 governance goldens (
     for (const uid of [ISSUER, GRANTEE]) {
       await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [uid])
     }
+    // The ISSUER belongs to a role + a member-group, to exercise the indirect self-grant guardrail.
+    await q('INSERT INTO roles (id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [ISSUER_ROLE, 'HAG Auditors'])
+    await q('INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [ISSUER, ISSUER_ROLE])
+    const grp = await q('INSERT INTO platform_member_groups (name) VALUES ($1) RETURNING id', ['HAG Group'])
+    issuerGroupId = String((grp.rows[0] as { id: unknown }).id)
+    await q('INSERT INTO platform_member_group_members (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [issuerGroupId, ISSUER])
   })
 
   afterAll(async () => {
     await q('DELETE FROM meta_history_audit_grants WHERE base_id = $1', [BASE_ID]).catch(() => {})
     await q("DELETE FROM operation_audit_logs WHERE resource_type = 'meta_history_audit_grant' AND metadata->>'baseId' = $1", [BASE_ID]).catch(() => {})
+    await q('DELETE FROM user_roles WHERE role_id = $1', [ISSUER_ROLE]).catch(() => {})
+    await q('DELETE FROM roles WHERE id = $1', [ISSUER_ROLE]).catch(() => {})
+    if (issuerGroupId) {
+      await q('DELETE FROM platform_member_group_members WHERE group_id::text = $1', [issuerGroupId]).catch(() => {})
+      await q('DELETE FROM platform_member_groups WHERE id::text = $1', [issuerGroupId]).catch(() => {})
+    }
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
     await q('DELETE FROM users WHERE id = ANY($1::text[])', [[ISSUER, GRANTEE]]).catch(() => {})
   })
@@ -162,8 +175,58 @@ describeIfDatabase('history field-audit grant — A1 LOCK-2 governance goldens (
     expect((await revoke(grantId)).status).toBe(404)
   })
 
-  test('A1/A2 seam: resolveHistoryFieldAuditReveal returns no reveal (history mask untouched in A1)', async () => {
-    const revealed = await resolveHistoryFieldAuditReveal()
-    expect(revealed.size).toBe(0)
+  // ----- A1 hardening (owner review): atomicity + indirect self-grant guardrail -----
+
+  test('LOCK-2a indirect (guardrail): issuer cannot grant to a ROLE they belong to', async () => {
+    const res = await issue({ subjectType: 'role', subjectId: ISSUER_ROLE })
+    expect(res.status).toBe(403)
+    expect(res.body?.error?.code).toBe('SELF_GRANT')
+  })
+
+  test('LOCK-2a indirect (guardrail): issuer cannot grant to a MEMBER-GROUP they belong to', async () => {
+    const res = await issue({ subjectType: 'member-group', subjectId: issuerGroupId })
+    expect(res.status).toBe(403)
+    expect(res.body?.error?.code).toBe('SELF_GRANT')
+  })
+
+  test('LOCK-2c atomicity: a failing issue-audit insert ROLLS BACK the grant (no grant without audit)', async () => {
+    await q('DROP TRIGGER IF EXISTS _hag_fail_audit_trg ON operation_audit_logs', [])
+    await q(`CREATE OR REPLACE FUNCTION _hag_fail_audit() RETURNS trigger AS $f$ BEGIN RAISE EXCEPTION 'forced audit failure'; END; $f$ LANGUAGE plpgsql`, [])
+    await q('CREATE TRIGGER _hag_fail_audit_trg BEFORE INSERT ON operation_audit_logs FOR EACH ROW EXECUTE FUNCTION _hag_fail_audit()', [])
+    try {
+      const res = await issue({ subjectType: 'user', subjectId: GRANTEE, reason: 'will-roll-back' })
+      expect(res.status).not.toBe(201) // audit insert raised → tx rolled back → error
+      const rows = (await q('SELECT id FROM meta_history_audit_grants WHERE base_id = $1 AND subject_id = $2', [BASE_ID, GRANTEE])).rows
+      expect(rows.length).toBe(0) // the grant must NOT exist — atomic rollback
+    } finally {
+      await q('DROP TRIGGER IF EXISTS _hag_fail_audit_trg ON operation_audit_logs', []).catch(() => {})
+      await q('DROP FUNCTION IF EXISTS _hag_fail_audit()', []).catch(() => {})
+    }
+  })
+
+  test('LOCK-2c atomicity: a failing revoke-audit insert ROLLS BACK the revoke (grant stays active)', async () => {
+    const created = await issue({ subjectType: 'user', subjectId: GRANTEE }) // audit OK (no trigger yet)
+    const grantId = created.body?.data?.id as string
+    await q('DROP TRIGGER IF EXISTS _hag_fail_audit_trg ON operation_audit_logs', [])
+    await q(`CREATE OR REPLACE FUNCTION _hag_fail_audit() RETURNS trigger AS $f$ BEGIN RAISE EXCEPTION 'forced audit failure'; END; $f$ LANGUAGE plpgsql`, [])
+    await q('CREATE TRIGGER _hag_fail_audit_trg BEFORE INSERT ON operation_audit_logs FOR EACH ROW EXECUTE FUNCTION _hag_fail_audit()', [])
+    try {
+      const rev = await revoke(grantId)
+      expect(rev.status).not.toBe(200)
+      const rows = (await q('SELECT revoked_at FROM meta_history_audit_grants WHERE id = $1', [grantId])).rows as Array<{ revoked_at: unknown }>
+      expect(rows.length).toBe(1)
+      expect(rows[0].revoked_at).toBeNull() // still active — revoke rolled back
+    } finally {
+      await q('DROP TRIGGER IF EXISTS _hag_fail_audit_trg ON operation_audit_logs', []).catch(() => {})
+      await q('DROP FUNCTION IF EXISTS _hag_fail_audit()', []).catch(() => {})
+    }
+  })
+
+  test('unique-active survives the transaction: a duplicate active grant → 409, first grant intact', async () => {
+    expect((await issue({ subjectType: 'user', subjectId: GRANTEE })).status).toBe(201)
+    const dup = await issue({ subjectType: 'user', subjectId: GRANTEE })
+    expect(dup.status).toBe(409)
+    expect(dup.body?.error?.code).toBe('GRANT_EXISTS')
+    expect((await listGrants()).body?.data?.grants?.length).toBe(1) // the rolled-back 2nd tx didn't disturb the 1st
   })
 })

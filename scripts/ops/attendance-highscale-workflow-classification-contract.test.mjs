@@ -29,3 +29,11 @@ test('highscale workflow writes runtime classification into issue output and art
   assert.match(raw, /High-scale perf benchmark classified as runtime failure\./)
   assert.match(raw, /PERF_CLASSIFICATION: \$\{\{ needs\.perf\.outputs\.classification \|\| '' \}\}/)
 })
+
+test('highscale workflow writes perf-summary.json under the uploaded artifact tree', () => {
+  const raw = workflowRaw()
+
+  assert.match(raw, /OUTPUT_DIR="\$\{log_dir\}"/)
+  assert.match(raw, /output\/playwright\/attendance-import-perf-highscale\/\*\*/)
+  assert.doesNotMatch(raw, /run_once "\$attempt[12]_log" node \.\/scripts\/ops\/attendance-import-perf\.mjs/)
+})

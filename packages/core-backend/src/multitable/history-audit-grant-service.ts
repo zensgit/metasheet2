@@ -82,8 +82,9 @@ function serializeGrantRow(row: Record<string, unknown>): HistoryAuditGrantRow {
 /**
  * LOCK-2c / LOCK-5: write the grant issue/revoke to `operation_audit_logs`. The metadata carries the grant
  * SCOPE (base, subject, reason, ticket, expiry, standing) — never any record field VALUES (A1 reveals
- * nothing). Best-effort wrapper semantics are NOT used: an audit-write failure must surface (the caller is
- * inside the same request and the audit record is part of the contract), so this awaits the insert directly.
+ * nothing). The caller MUST run this together with the grant mutation inside ONE transaction
+ * (`pool.transaction`), so a failed audit insert ROLLS BACK the grant — "no successful audit ⇒ the mutation
+ * did not happen". Surfacing the error alone is not enough; atomicity is what enforces LOCK-2c.
  */
 async function writeGrantAudit(
   query: QueryFn,
@@ -110,6 +111,27 @@ async function writeGrantAudit(
 }
 
 /**
+ * Issue-time SELF_GRANT guardrail support: is the issuer CURRENTLY a member of the target role / group?
+ * Returns false (skip the guardrail) when the membership table is absent — the reveal-time `granted_by`
+ * check (A2) is the real closure, so a minimal env never blocks issuing here.
+ */
+async function issuerBelongsTo(
+  query: QueryFn,
+  kind: 'role' | 'member-group',
+  issuerUserId: string,
+  subjectId: string,
+): Promise<boolean> {
+  try {
+    const res = kind === 'role'
+      ? await query('SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = $2 LIMIT 1', [issuerUserId, subjectId])
+      : await query('SELECT 1 FROM platform_member_group_members WHERE user_id = $1 AND group_id::text = $2 LIMIT 1', [issuerUserId, subjectId])
+    return res.rows.length > 0
+  } catch {
+    return false // membership table missing → cannot confirm; reveal-time closure still applies
+  }
+}
+
+/**
  * Issue a grant. LOCK-2: issuer != grantee (a user cannot grant to themselves); D5: default-finite expiry
  * unless `standing` is explicitly set. The route MUST have already verified the issuer holds
  * `HISTORY_FIELD_AUDIT_GRANT_PERMISSION` (authority gate) and that the subject/base exist. Writes the
@@ -121,9 +143,22 @@ export async function issueHistoryAuditGrant(
   issuerUserId: string,
   nowMs: number,
 ): Promise<HistoryAuditGrantRow> {
-  // LOCK-2a: issuer != grantee. The unambiguous case is a user granting to their own user id.
+  // LOCK-2a: issuer != grantee.
+  //  - Direct: a user granting to their own user id.
+  //  - Indirect: granting to a role / member-group the issuer CURRENTLY belongs to. This is a fast-fail
+  //    GUARDRAIL, not the load-bearing closure: membership is mutable (the issuer could join the role/group
+  //    AFTER issuing), so an issue-time check can never be complete. The IMMUTABLE, subject-type-agnostic
+  //    closure that actually makes LOCK-2 self-grant-proof lives at REVEAL time (A2): deny the reveal when the
+  //    matching grant's `granted_by === revealer` (granted_by never changes). The membership tables may be
+  //    absent in minimal envs — there the guardrail is skipped (reveal-time still closes it), never blocking.
   if (input.subjectType === 'user' && input.subjectId === issuerUserId) {
     throw new HistoryAuditGrantError('SELF_GRANT', 'An issuer cannot grant history field-audit to themselves')
+  }
+  if (input.subjectType === 'role' && (await issuerBelongsTo(query, 'role', issuerUserId, input.subjectId))) {
+    throw new HistoryAuditGrantError('SELF_GRANT', 'An issuer cannot grant to a role they belong to')
+  }
+  if (input.subjectType === 'member-group' && (await issuerBelongsTo(query, 'member-group', issuerUserId, input.subjectId))) {
+    throw new HistoryAuditGrantError('SELF_GRANT', 'An issuer cannot grant to a member-group they belong to')
   }
 
   // D5: standing must be explicit; otherwise apply the finite default (or honour an explicit future expiry).
@@ -200,42 +235,46 @@ export async function listHistoryAuditGrants(query: QueryFn, baseId: string): Pr
 }
 
 /**
- * The active, non-expired grant for any of the actor's subject keys on a base (or null). A2 reads this to
- * decide whether a reveal is permitted; A1 exposes it for grant administration + tests. `subjectKeys` is the
- * actor's identity set: their user id + role ids + member-group ids, each as `{type, id}`.
+ * A2 reveal-authority resolver. Returns the active, non-expired grant that authorises `userId` to reveal
+ * field-permission-masked history on `baseId` — matching the actor by user id, role membership, OR
+ * member-group membership (the same subject model as `field_permissions`) — and EXCLUDING any grant the
+ * actor issued to themselves.
+ *
+ * `granted_by <> userId` is the IMMUTABLE, subject-type-agnostic LOCK-2a closure: because `granted_by` never
+ * changes, it defeats every self-grant path — direct (user→own id) AND indirect (a role/group the issuer
+ * later joined) — that an issue-time membership check structurally cannot. Returns null when no qualifying
+ * grant exists. Fail-closed: any resolver error (e.g. a missing membership table) → null → no reveal → the
+ * masked response, never a leak.
  */
-export async function loadActiveHistoryAuditGrant(
+export async function resolveActiveRevealGrant(
   query: QueryFn,
   baseId: string,
-  subjectKeys: Array<{ type: HistoryAuditGrantSubjectType; id: string }>,
+  userId: string,
   nowMs: number,
 ): Promise<HistoryAuditGrantRow | null> {
-  if (subjectKeys.length === 0) return null
-  const types = subjectKeys.map((k) => k.type)
-  const ids = subjectKeys.map((k) => k.id)
-  const res = await query(
-    `SELECT id, base_id, subject_type, subject_id, granted_by, reason, ticket, expires_at, is_standing, created_at
-     FROM meta_history_audit_grants
-     WHERE base_id = $1
-       AND revoked_at IS NULL
-       AND (expires_at IS NULL OR expires_at > $4)
-       AND (subject_type, subject_id) IN (
-         SELECT * FROM unnest($2::text[], $3::text[])
-       )
-     ORDER BY created_at DESC
-     LIMIT 1`,
-    [baseId, types, ids, new Date(nowMs).toISOString()],
-  )
-  const rows = res.rows as Array<Record<string, unknown>>
-  return rows.length > 0 ? serializeGrantRow(rows[0]) : null
-}
-
-/**
- * A1/A2 SEAM. A2 will compute the field ids a valid grant + explicit reveal request lifts and UNION them into
- * the #2968 allowed-field set. For A1 this ALWAYS returns an empty set (no reveal) and is NOT called from the
- * history mask path — so the history field mask is byte-for-byte the #2968 behaviour. Do not wire this into
- * `buildHistoryAllowedFieldsBySheet` or the per-record allowed-set until the A2 opt-in.
- */
-export async function resolveHistoryFieldAuditReveal(): Promise<Set<string>> {
-  return new Set<string>()
+  if (!baseId || !userId) return null
+  try {
+    const res = await query(
+      `SELECT g.id, g.base_id, g.subject_type, g.subject_id, g.granted_by, g.reason, g.ticket, g.expires_at, g.is_standing, g.created_at
+       FROM meta_history_audit_grants g
+       WHERE g.base_id = $1
+         AND g.revoked_at IS NULL
+         AND (g.expires_at IS NULL OR g.expires_at > $3)
+         AND g.granted_by <> $2
+         AND (
+           (g.subject_type = 'user' AND g.subject_id = $2)
+           OR (g.subject_type = 'role' AND EXISTS (
+                 SELECT 1 FROM user_roles ur WHERE ur.user_id = $2 AND ur.role_id = g.subject_id))
+           OR (g.subject_type = 'member-group' AND EXISTS (
+                 SELECT 1 FROM platform_member_group_members m WHERE m.user_id = $2 AND m.group_id::text = g.subject_id))
+         )
+       ORDER BY g.created_at DESC
+       LIMIT 1`,
+      [baseId, userId, new Date(nowMs).toISOString()],
+    )
+    const rows = res.rows as Array<Record<string, unknown>>
+    return rows.length > 0 ? serializeGrantRow(rows[0]) : null
+  } catch {
+    return null // fail-closed: a resolver error never enables a reveal
+  }
 }

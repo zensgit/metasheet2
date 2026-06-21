@@ -71,7 +71,7 @@ Tests:
 
 ### T2 - Global History Center Read-Only UI
 
-Status: split. **T2a SHIPPED (#2961); T2b FOLLOW-UP (read-only, in MVP envelope, not gated, not yet built).**
+Status: **T2a + T2b COMPLETE (2026-06-21).** T2a #2961; T2b filters (time-range + sheet-scope + field filter), T2b search (post-mask snapshot value-search, leak-free), and T2b cursor pagination (stable key-cursor over the post-filter set, `total` preserved) all SHIPPED. Only the cross-table field-dropdown UX in "all tables" mode remains a non-blocking nicety (owner-deferred). The T2 read-only history center is now feature-complete.
 The original single T2 scope over-stated what shipped; this split records the actual line.
 
 Goal: add a global history center entry and timeline UI.
@@ -84,11 +84,11 @@ Scope — T2a (SHIPPED, #2961):
 - expandable per-batch detail (the T3 drilldown);
 - empty, loading, error states.
 
-Scope — T2b (FOLLOW-UP, read-only, NOT yet built — each a small slice, not gated):
+Scope — T2b (read-only, in the MVP envelope, not gated) — **ALL SHIPPED 2026-06-21**:
 
-- time-range (from/to) + sheet + field filters in the FE — backend already accepts `from`/`to`/`sheetId` (the FE just doesn't wire them); a **field** filter needs a new backend param;
-- search by visible record title / data — needs a new backend data-search param (a separate slice);
-- cursor pagination — the current backend is `offset`/`limit`; a cursor needs a new backend param.
+- ~~time-range (from/to) + sheet + field filters~~ — **SHIPPED (#2988)**: from/to date inputs + sheet-scope toggle + a `fieldId` filter applied POST-mask so it's leak-free (a field the actor can't read is never in `visibleFields`);
+- ~~search by visible record title / data~~ — **SHIPPED (#2989)**: post-mask snapshot value-search (revision-snapshot ∩ `visibleFields`), leak-free on both axes (row-deny skip + field mask). Bounded by a 20000 candidate-row cap; when hit, the API returns `searchTruncated: true` and the UI warns — NOT silent;
+- ~~cursor pagination~~ — **SHIPPED (#2990)**: a stable key-cursor over the post-filter set sorted on (createdAt DESC, batchId DESC); `total` stays exact post-filter (and post-search). Buys reachability + stability, not lower DB load (SQL-level efficiency that drops the exact total = deferred).
 
 Out of scope:
 
