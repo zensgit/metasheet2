@@ -57,11 +57,15 @@ export async function reconstructRecordsAtT(
   for (const raw of res.rows as Array<Record<string, unknown>>) {
     const recordId = String(raw.record_id)
     const deleted = raw.action === 'delete'
+    // version is `number | null` per the contract: a finite numeric value stays a number; anything else (null /
+    // undefined / non-numeric) becomes null — NEVER coerced to 0, so "unknown version" cannot masquerade as a
+    // real version 0 for the T5-2 / T7 / T8 consumers. Check `typeof` BEFORE Number() — `Number(null) === 0`
+    // would otherwise resurrect the very bug this guards against.
     out.set(recordId, {
       recordId,
       exists: !deleted,
       data: deleted ? null : asRecord(raw.snapshot),
-      version: typeof raw.version === 'number' ? raw.version : Number(raw.version ?? 0),
+      version: typeof raw.version === 'number' && Number.isFinite(raw.version) ? raw.version : null,
     })
   }
   return out

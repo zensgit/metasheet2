@@ -41,9 +41,12 @@ is the reason T6 is design-locked, not a mechanical extension.
   widens only what history SHOWS; it can never widen what a restore WRITES. The T6 write path never consults
   `resolveActiveRevealGrant`/`loadRevealedFieldIds`; the restorable field set is the actor's NORMAL (masked)
   write-permitted set. Verifiable by construction (grep).
-- **SR-5 — All-or-nothing for the destructive sub-modes (LOCK-10).** `revert`-scoped may partial-skip denied
-  targets (and reports them). A `reset`-style scope (delete post-T-created) is all-or-nothing: any single
-  delete/update/undelete permission failure blocks the ENTIRE execution — no partial skip, no fail-halfway.
+- **SR-5 — Optional all-or-nothing scoped mode; T6 NEVER deletes (the T6/T8 boundary, LOCK-10).** T6 writes
+  ONLY forward revisions over the selected scope — it has **no destructive mode and never deletes post-T-created
+  records** (sheet-wide reset / delete-post-T-created is **T8's Reset, not T6**). The default scoped restore may
+  partial-skip denied targets (and reports them); an OPTIONAL all-or-nothing scoped mode instead blocks the
+  ENTIRE restore if any selected target is denied (no partial skip, no fail-halfway) — but still writes only
+  forward revisions (set/unset/undelete), never a delete.
 - **SR-6 — Atomic, idempotent execution.** The whole scoped restore commits in ONE transaction (forward
   revisions + the `source=restore` batch row). Re-submitting the same preview identity must not double-apply
   (idempotency key = the preview identity); a retry after a partial failure leaves the table unchanged.
