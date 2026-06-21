@@ -1213,12 +1213,19 @@ const RELATION_AGG_FUNCTIONS: Record<string, RollupAggregation> = {
   RELCOUNTIF: 'countall', // counts MATCHED linked records (no sum target — 4-arg form, see the parser)
 }
 
+// Slice B — lookup family: single-row first-match resolution (NOT aggregation). Same grammar + the same
+// permission/taint/fan-out pipeline as the aggregations; the resolver returns the FIRST matched linked
+// record's returnField (in link order) instead of reducing the set.
+const RELATION_LOOKUP_FUNCTIONS = new Set<string>(['RELLOOKUP'])
+const REL_NA_SENTINEL = '#N/A' // lookup not-found (no matched row) — distinct from #PERM! (a denied FIELD)
+
 type RelationAggregationCall = {
   fnName: string
-  aggregation: RollupAggregation
+  kind: 'aggregation' | 'lookup'
+  aggregation: RollupAggregation | null // null when kind === 'lookup'
   linkFieldId: string
-  targetFieldId: string
-  criteria: { fieldId: string; operator: string; valueExpr: string }
+  targetFieldId: string // the returnField when kind === 'lookup'
+  criteria: { fieldId: string; operator: string; valueExpr: string } // the matchField when kind === 'lookup'
 }
 
 // Split a call's arg list on top-level commas, respecting double-quoted strings.
@@ -1255,8 +1262,10 @@ export function parseRelationAggregationCall(expression: string): RelationAggreg
   const m = /^([A-Za-z_]+)\s*\(([\s\S]*)\)$/.exec(expression.trim())
   if (!m) return null
   const fnName = m[1].toUpperCase()
-  const aggregation = RELATION_AGG_FUNCTIONS[fnName]
-  if (!aggregation) return null
+  const aggregation = RELATION_AGG_FUNCTIONS[fnName] ?? null
+  const isLookup = RELATION_LOOKUP_FUNCTIONS.has(fnName)
+  if (!aggregation && !isLookup) return null
+  const kind: 'aggregation' | 'lookup' = isLookup ? 'lookup' : 'aggregation'
   const args = splitTopLevelArgs(m[2])
   if (!args) return null
   // RELCOUNTIF counts MATCHED linked records — no sum target (4 args: link, criteria, op, value). The
@@ -1284,14 +1293,15 @@ export function parseRelationAggregationCall(expression: string): RelationAggreg
     valueExpr = args[4]
   }
   if (!linkFieldId || !targetFieldId || !criteriaFieldId || !operator || valueExpr.length === 0) return null
-  return { fnName, aggregation, linkFieldId, targetFieldId, criteria: { fieldId: criteriaFieldId, operator, valueExpr } }
+  // RELLOOKUP uses the 5-arg branch: link, returnField (→ targetFieldId), matchField (→ criteria.fieldId), op, value.
+  return { fnName, kind, aggregation, linkFieldId, targetFieldId, criteria: { fieldId: criteriaFieldId, operator, valueExpr } }
 }
 
 // True iff the expression MENTIONS a relation-aggregation function but is NOT a sole
 // call (e.g. `RELSUMIF(...)+1`). Slice A is sole-call only; the recompute path turns
 // this into a fail-loud diagnostic rather than a silent wrong value or a raw #NAME?.
 export function expressionHasRelationAggregationButNotSole(expression: string): boolean {
-  const mentions = Object.keys(RELATION_AGG_FUNCTIONS).some((fn) => new RegExp(`\\b${fn}\\s*\\(`, 'i').test(expression))
+  const mentions = [...Object.keys(RELATION_AGG_FUNCTIONS), ...RELATION_LOOKUP_FUNCTIONS].some((fn) => new RegExp(`\\b${fn}\\s*\\(`, 'i').test(expression))
   if (!mentions) return false
   return parseRelationAggregationCall(expression) === null
 }
@@ -1344,7 +1354,7 @@ async function resolveRelationAggregation(
   // Authoritative linked ids come from meta_links (record.data[linkField] is not the source of truth).
   const linkValues = await loadLinkValuesByRecord(query, [recordId], [{ fieldId: call.linkFieldId, cfg: linkCfg }])
   const linkIds = linkValues.get(recordId)?.get(call.linkFieldId) ?? []
-  if (linkIds.length === 0) return aggregateRollup([], 0, call.aggregation)
+  if (linkIds.length === 0) return call.kind === 'lookup' ? REL_NA_SENTINEL : aggregateRollup([], 0, call.aggregation as RollupAggregation)
   // §5 cap — fail loud before any scan/materialization (count-first), never run unbounded.
   if (linkIds.length > MAX_RELATION_SCAN_RECORDS) return REL_AGG_LIMIT_SENTINEL
 
@@ -1372,10 +1382,10 @@ async function resolveRelationAggregation(
   if (!access.isAdminRole && access.userId && (await loadRowLevelReadDenyEnabled(query, foreignSheetId))) {
     deniedForeign = await loadDeniedRecordIds(query, foreignSheetId, access.userId)
   }
-  const foreignRecords: Array<Record<string, unknown>> = []
+  const byId = new Map<string, Record<string, unknown>>()
   for (const raw of foreignRes.rows as Array<{ id: unknown; data: unknown }>) {
-    if (deniedForeign?.has(String(raw.id))) continue
-    foreignRecords.push(normalizeJson(raw.data))
+    if (deniedForeign?.has(String(raw.id))) continue // denied ROW → absent (skipped); never #PERM! (that is field-level)
+    byId.set(String(raw.id), normalizeJson(raw.data))
   }
 
   // Criteria field type (effective) for type-correct comparison + the operator-compat runtime guard:
@@ -1387,21 +1397,35 @@ async function resolveRelationAggregation(
   if (!isRollupFilterOperatorCompatible(criteriaType, call.criteria.operator)) return '#ERROR!'
   const criteriaValue = resolveRelationCriteriaValue(call.criteria.valueExpr, recordData)
 
+  const matchesCriteria = (data: Record<string, unknown>): boolean => evaluateMetaFilterCondition(
+    criteriaType as UniverMetaField['type'],
+    data[call.criteria.fieldId],
+    { fieldId: call.criteria.fieldId, operator: call.criteria.operator, value: criteriaValue },
+  )
+
+  // Slice B — lookup: return the FIRST matched linked record's returnField (= targetFieldId), in LINK order;
+  // no match → #N/A. A denied ROW was skipped above (absent → can't be the match), so this never yields
+  // #PERM! — only a denied FIELD is #PERM! (gated earlier). Same materialization/permission path as aggregation.
+  if (call.kind === 'lookup') {
+    for (const id of linkIds) {
+      const data = byId.get(id)
+      if (!data || !matchesCriteria(data)) continue
+      const v = data[call.targetFieldId]
+      return v === null || v === undefined ? REL_NA_SENTINEL : (v as number | string | boolean)
+    }
+    return REL_NA_SENTINEL
+  }
+
   const values: unknown[] = []
   let count = 0
-  for (const data of foreignRecords) {
-    const matches = evaluateMetaFilterCondition(
-      criteriaType as UniverMetaField['type'],
-      data[call.criteria.fieldId],
-      { fieldId: call.criteria.fieldId, operator: call.criteria.operator, value: criteriaValue },
-    )
-    if (!matches) continue
+  for (const data of byId.values()) {
+    if (!matchesCriteria(data)) continue
     count += 1
     const v = data[call.targetFieldId]
     if (v === null || v === undefined) continue
     values.push(v)
   }
-  return aggregateRollup(values, count, call.aggregation)
+  return aggregateRollup(values, count, call.aggregation as RollupAggregation)
 }
 
 // The trimmed, '='-stripped expression of a formula field (from property.expression), or null.
