@@ -238,6 +238,7 @@ jobs:
             tests/integration/multitable-lookup-foreign-field-mask-aggregate.test.ts \
             tests/integration/multitable-rollup-countall-nongating.test.ts \
             tests/integration/multitable-rollup-filter-condition.test.ts \
+            tests/integration/multitable-relation-aggregation.test.ts \
             tests/integration/multitable-filter-by-link-view.test.ts \
             tests/integration/multitable-rollup-string-bool-reducers.test.ts \
             tests/integration/multitable-lookup-foreign-field-mask-sibling-reads.test.ts \
