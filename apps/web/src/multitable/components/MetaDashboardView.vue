@@ -121,23 +121,38 @@
             />
             <div v-else class="meta-dashboard__panel-loading" data-widget="text-empty">{{ viewRenderLabel('dashboard.textEmpty', isZh) }}</div>
           </template>
-          <!-- Filter / control: PRESENTATIONAL ONLY — local UI state, drives no other panel. -->
+          <!-- Filter / control: FUNCTIONAL — the chosen value filters EVERY data panel (AND-combined
+               with each chart's own filter). Configured field = panel.filterConfig.fieldId; the value
+               dropdown is populated from that field's SCHEMA options (no record scan → no row-deny
+               leak), falling back to a free text input when the field has no options. -->
           <template v-else-if="panelType(panel) === 'filter'">
             <div class="meta-dashboard__filter-widget" data-widget="filter">
+              <span class="meta-dashboard__filter-field-label" data-field="filter-field-name">{{ dashboardFilterableField(panel.filterConfig?.fieldId)?.name ?? viewRenderLabel('dashboard.filterField', isZh) }}</span>
               <select
+                v-if="dashboardFilterOptions(panel).length > 0"
                 :value="filterSelections[panel.id] ?? ''"
                 class="meta-dashboard__select meta-dashboard__select--sm"
                 data-field="filter-control"
+                :aria-label="viewRenderLabel('dashboard.filterValueLabel', isZh)"
                 @change="onFilterControlChange(panel.id, ($event.target as HTMLSelectElement).value)"
               >
                 <option value="">{{ viewRenderLabel('dashboard.filterAllOption', isZh) }}</option>
                 <option
-                  v-for="field in chartFields"
-                  :key="field.id"
-                  :value="field.id"
-                >{{ field.name }}</option>
+                  v-for="value in dashboardFilterOptions(panel)"
+                  :key="value"
+                  :value="value"
+                >{{ value }}</option>
               </select>
-              <small class="meta-dashboard__hint" data-hint="filter-presentational">{{ viewRenderLabel('dashboard.filterPresentationalNote', isZh) }}</small>
+              <input
+                v-else
+                :value="filterSelections[panel.id] ?? ''"
+                class="meta-dashboard__input meta-dashboard__input--sm"
+                type="text"
+                data-field="filter-control-text"
+                :aria-label="viewRenderLabel('dashboard.filterValueLabel', isZh)"
+                :placeholder="viewRenderLabel('dashboard.filterValuePlaceholder', isZh)"
+                @change="onFilterControlChange(panel.id, ($event.target as HTMLInputElement).value)"
+              />
             </div>
           </template>
         </div>
@@ -265,7 +280,7 @@
             </label>
           </template>
 
-          <!-- Filter config (presentational only) -->
+          <!-- Filter config: pick the field this dashboard-level filter constrains on. -->
           <template v-else-if="widgetDraft.kind === 'filter'">
             <label class="meta-dashboard__field">
               <span>{{ viewRenderLabel('dashboard.filterField', isZh) }}</span>
@@ -275,7 +290,7 @@
                   {{ field.name }} · {{ fieldTypeLabel(field.type, isZh) }}
                 </option>
               </select>
-              <small class="meta-dashboard__hint" data-hint="filter-presentational-config">{{ viewRenderLabel('dashboard.filterPresentationalNote', isZh) }}</small>
+              <small class="meta-dashboard__hint" data-hint="filter-config-note">{{ viewRenderLabel('dashboard.filterConfigNote', isZh) }}</small>
             </label>
           </template>
         </div>
@@ -496,7 +511,7 @@ const MetaChartRenderer = defineAsyncComponent({
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
-import type { AggregationFunction, ChartDisplayConfig, ChartType, Dashboard, DashboardPanel, DashboardPanelType, ChartConfig, ChartCreateInput, ChartData, ChartDataSource, MetaField, MetaFieldType } from '../types'
+import type { AggregationFunction, ChartDisplayConfig, ChartType, Dashboard, DashboardFilter, DashboardPanel, DashboardPanelType, ChartConfig, ChartCreateInput, ChartData, ChartDataSource, MetaField, MetaFieldType } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import { useLocale } from '../../composables/useLocale'
 import { dashboardDefaultName, viewRenderLabel, viewSizeLabel } from '../utils/meta-view-render-labels'
@@ -520,8 +535,10 @@ const chartConfigMap = ref<Record<string, ChartConfig>>({})
 // B4: metric-card data is keyed by panel.id (a metric has no chartId) so it never
 // collides with the chartId-keyed chartDataMap.
 const metricDataMap = ref<Record<string, ChartData>>({})
-// B4: presentational filter selections — LOCAL UI state only, keyed by panel.id.
-// Deliberately not persisted and drives nothing else (scoped-out functional filter).
+// B4: dashboard-level filter selections — the chosen VALUE per filter widget, keyed by panel.id.
+// Not persisted (a transient view state); each non-empty selection becomes an equals-constraint
+// applied to EVERY data panel's aggregation (see activeDashboardFilters). '' / absent = "All" = no
+// constraint. The widget's configured field lives in panel.filterConfig.fieldId.
 const filterSelections = ref<Record<string, string>>({})
 const activeDashboardId = ref<string>(props.dashboardId ?? '')
 const showAddPanel = ref(false)
@@ -609,6 +626,36 @@ const editingChart = computed(() => editingChartId.value ? chartConfigMap.value[
 const editingDateGrouped = computed(() => Boolean(editingChart.value?.dataSource.dateFieldId))
 
 const chartFields = computed(() => filterPropertyVisibleFields(props.fields ?? []))
+// B4: only PROPERTY-VISIBLE fields are filterable (mirrors chartFields) — the runtime filter widget
+// never offers a hidden field, and the server independently rejects a denied filter field, so a hidden
+// field can't become a probe side-channel even via a hand-crafted request.
+function dashboardFilterableField(fieldId: string | undefined): MetaField | undefined {
+  if (!fieldId) return undefined
+  return chartFields.value.find((f) => f.id === fieldId)
+}
+// B4: a configured filter field's selectable VALUES come from its SCHEMA options (select/multiSelect
+// `options`), not from a record scan — so the value dropdown sidesteps row-level read-deny entirely
+// (options are field config, not data). A field without schema options renders a free text input.
+function dashboardFilterOptions(panel: DashboardPanel): string[] {
+  const field = dashboardFilterableField(panel.filterConfig?.fieldId)
+  return (field?.options ?? []).map((o) => o.value)
+}
+// B4: resolve every filter widget's chosen value into the equals-constraint list sent to the
+// aggregation routes. AND-combined server-side; an empty/"All" selection contributes nothing. A
+// selection whose configured field is no longer property-visible is dropped (never sent).
+const activeDashboardFilters = computed<DashboardFilter[]>(() => {
+  const panels = activeDashboard.value?.panels ?? []
+  const out: DashboardFilter[] = []
+  for (const panel of panels) {
+    if ((panel.type ?? 'chart') !== 'filter') continue
+    const fieldId = panel.filterConfig?.fieldId
+    if (!fieldId || !dashboardFilterableField(fieldId)) continue
+    const value = filterSelections.value[panel.id]
+    if (value === undefined || value === '') continue
+    out.push({ fieldId, value })
+  }
+  return out
+})
 const groupableFields = computed(() => chartFields.value.filter((field) => GROUPABLE_FIELD_TYPES.has(field.type)))
 const numericFields = computed(() => chartFields.value.filter((field) => isNumericMetricField(field)))
 // r12: scatter is the one non-grouped chart type — it hides groupBy/aggregation/value/series/bar-mode
@@ -698,9 +745,16 @@ function metricDisplayConfig(panel: DashboardPanel): ChartDisplayConfig {
   }
 }
 
-// B4: presentational filter — update LOCAL state only. No data refetch, no cross-panel effect.
+// B4: a dashboard-level filter change re-aggregates EVERY data panel. The chartId-keyed chartDataMap
+// (and panel.id-keyed metricDataMap) are filter-unaware caches, and loadPanelData skips already-loaded
+// charts — so the same chart would never refetch under a new filter. Clear both caches, then reload
+// with the new active filter applied. (Cross-filtering — a chart segment driving others — is a separate
+// follow-up; this is one filter widget → all panels.)
 function onFilterControlChange(panelId: string, value: string) {
   filterSelections.value = { ...filterSelections.value, [panelId]: value }
+  chartDataMap.value = {}
+  metricDataMap.value = {}
+  void loadPanelData()
 }
 
 // B4: metric needs a value field only for sum/avg/min/max (count aggregates row presence).
@@ -821,7 +875,9 @@ async function loadPanelData() {
     if (kind === 'chart') {
       if (!panel.chartId || chartDataMap.value[panel.chartId]) return
       try {
-        const data = await props.client!.getChartData(props.sheetId, panel.chartId)
+        // B4: thread the active dashboard filter so the aggregation is narrowed (AND-combined with
+        // the chart's own filter). Empty = no constraint (the client omits the query param).
+        const data = await props.client!.getChartData(props.sheetId, panel.chartId, activeDashboardFilters.value)
         chartDataMap.value[panel.chartId] = data
       } catch {
         // skip
@@ -847,7 +903,8 @@ async function loadMetricData(panel: DashboardPanel) {
   if (!props.client || metricDataMap.value[panel.id] || metricInFlight.has(panel.id)) return
   metricInFlight.add(panel.id)
   try {
-    const data = await props.client.previewChartData(props.sheetId, buildMetricChartInput(panel))
+    // B4: a metric card narrows by the active dashboard filter too (preview-data carries it on the body).
+    const data = await props.client.previewChartData(props.sheetId, buildMetricChartInput(panel), activeDashboardFilters.value)
     metricDataMap.value[panel.id] = data
   } catch {
     // skip — panel keeps its loading state
@@ -1354,6 +1411,8 @@ onBeforeUnmount(resetChartPreview)
   flex-direction: column;
   gap: 6px;
 }
+.meta-dashboard__filter-field-label { font-size: 11px; font-weight: 600; color: #64748b; }
+.meta-dashboard__input--sm { padding: 3px 6px; font-size: 11px; }
 .meta-dashboard__textarea {
   resize: vertical;
   min-height: 80px;

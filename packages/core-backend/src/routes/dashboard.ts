@@ -32,7 +32,8 @@ import { poolManager } from '../integration/db/connection-pool'
 import type { MultitableCapabilities } from '../multitable/access'
 import type { AggregationFunction, ChartConfig, ChartCreateInput, ChartType } from '../multitable/charts'
 import { assertScatterFields, assertSeriesConstraints } from '../multitable/charts'
-import type { ChartData } from '../multitable/chart-aggregation-service'
+import type { ChartData, DashboardFilter } from '../multitable/chart-aggregation-service'
+import { applyDashboardFilter } from '../multitable/chart-aggregation-service'
 import { DashboardService } from '../multitable/dashboard-service'
 import type { MultitableField } from '../multitable/field-codecs'
 import { loadFieldsForSheet } from '../multitable/loaders'
@@ -199,8 +200,19 @@ function chartReferencedFieldIds(chart: ChartConfig): string[] {
   return ids.filter((id): id is string => typeof id === 'string' && id.length > 0)
 }
 
-function isChartDataRestricted(chart: ChartConfig, allowedFieldIds: Set<string>): boolean {
-  return chartReferencedFieldIds(chart).some((fieldId) => !allowedFieldIds.has(fieldId))
+/**
+ * B4: a dashboard-level filter on a field the actor cannot read is a side-channel — answering "how
+ * many records have hidden-field = X" leaks the hidden column by probing. So a dashboard filter
+ * referencing a non-allowed field RESTRICTS the whole chart (same wholesale-refuse discipline as a
+ * chart that references a denied field), and this is checked BEFORE any record is loaded or filtered.
+ */
+function isChartDataRestricted(
+  chart: ChartConfig,
+  allowedFieldIds: Set<string>,
+  dashboardFilters: DashboardFilter[] = [],
+): boolean {
+  if (chartReferencedFieldIds(chart).some((fieldId) => !allowedFieldIds.has(fieldId))) return true
+  return dashboardFilters.some((f) => !allowedFieldIds.has(f.fieldId))
 }
 
 function restrictedChartData(chart: ChartConfig): ChartData {
@@ -224,6 +236,39 @@ function readBarMode(display: unknown): 'stacked' | 'grouped' | undefined {
 
 function readString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+}
+
+/**
+ * B4: parse the dashboard-level filter(s) off a request. Accepts:
+ *   - GET  /charts/:id/data        → a `dashboardFilter` query param holding URL-encoded JSON
+ *   - POST /charts/:id/preview-data → a `dashboardFilter` body value (already JSON-parsed by express)
+ * Either form normalizes to a list of `{ fieldId, value }`. An entry is kept ONLY when `fieldId` is a
+ * non-empty string and `value` is present and non-empty (an empty/"All" selection contributes no
+ * constraint and is dropped here, so the aggregation is unconstrained). Malformed input → [] (treated
+ * as "no filter", never an error — a filter is an optional narrowing, not a contract field). The field
+ * is NOT permission-checked here; the route's restricted gate does that against allowedFieldIds.
+ */
+function parseDashboardFilters(raw: unknown): DashboardFilter[] {
+  let value = raw
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value)
+    } catch {
+      return []
+    }
+  }
+  if (!Array.isArray(value)) return []
+  const out: DashboardFilter[] = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue
+    const fieldId = readString((entry as { fieldId?: unknown }).fieldId)
+    if (!fieldId) continue
+    const v = (entry as { value?: unknown }).value
+    // Drop empty selections: undefined/null/'' = the "All" option = no constraint.
+    if (v === undefined || v === null || v === '') continue
+    out.push({ fieldId, value: v })
+  }
+  return out
 }
 
 function buildPreviewChart(sheetId: string, userId: string, body: unknown): ChartConfig {
@@ -348,18 +393,20 @@ export function dashboardRouter() {
       const auth = await requireSheetRead(req, res, req.params.sheetId)
       if (!auth) return
       const chart = buildPreviewChart(req.params.sheetId, auth.userId, req.body)
+      // B4: a metric card refetches through preview-data, so the dashboard filter rides on the body.
+      const dashboardFilters = parseDashboardFilters((req.body as { dashboardFilter?: unknown } | undefined)?.dashboardFilter)
       const allowedFieldIds = await loadAllowedFieldIds(
         auth.query,
         req.params.sheetId,
         auth.userId,
         auth.capabilities,
       )
-      if (isChartDataRestricted(chart, allowedFieldIds)) {
+      if (isChartDataRestricted(chart, allowedFieldIds, dashboardFilters)) {
         res.json(restrictedChartData(chart))
         return
       }
       const records = await loadChartRecords(auth.query, req.params.sheetId, auth.access, allowedFieldIds)
-      const data = await dashboardService.computeChartDataForConfig(chart, records)
+      const data = await dashboardService.computeChartDataForConfig(chart, applyDashboardFilter(records, dashboardFilters))
       res.json(data)
     } catch (err: unknown) {
       res.status(400).json({ error: (err as Error).message })
@@ -442,18 +489,24 @@ export function dashboardRouter() {
         res.status(404).json({ error: 'Chart not found' })
         return
       }
+      // B4: an optional dashboard-level filter (one filter widget → every data panel). Parsed off the
+      // query; AND-combined with the chart's own filter. A denied filter field restricts wholesale.
+      const dashboardFilters = parseDashboardFilters(req.query.dashboardFilter)
       const allowedFieldIds = await loadAllowedFieldIds(
         auth.query,
         req.params.sheetId,
         auth.userId,
         auth.capabilities,
       )
-      if (isChartDataRestricted(chart, allowedFieldIds)) {
+      if (isChartDataRestricted(chart, allowedFieldIds, dashboardFilters)) {
         res.json(restrictedChartData(chart))
         return
       }
       const records = await loadChartRecords(auth.query, req.params.sheetId, auth.access, allowedFieldIds)
-      const data = await dashboardService.getChartData(req.params.id, records)
+      // B4: narrow the ALREADY-masked + row-denied record set by the dashboard filter BEFORE aggregation.
+      // computeChartData then runs the chart's own filterRecords on the narrowed set → AND for free, and
+      // every chart type (number/scatter/grouped) is covered uniformly (it's a record-level pre-filter).
+      const data = await dashboardService.getChartData(req.params.id, applyDashboardFilter(records, dashboardFilters))
       res.json(data)
     } catch (err: unknown) {
       res.status(500).json({ error: (err as Error).message })

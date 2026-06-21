@@ -50,6 +50,38 @@ export interface ChartData {
 
 type RecordRow = { data: Record<string, unknown> }
 
+/**
+ * B4 dashboard-level filter: one (field, value) equals-constraint chosen in a dashboard filter widget.
+ * Applied to EVERY data panel's record set BEFORE aggregation (AND-combined with each chart's own
+ * `filterRecords`). Equals-only by design — the widget surfaces a single chosen value, mirroring the
+ * chart's own `equals` operator coercion exactly (`String(val) === String(value)`).
+ */
+export interface DashboardFilter {
+  fieldId: string
+  value: unknown
+}
+
+/** Shared equals matcher — the exact coercion `filterRecords`' `equals` branch uses, factored so the
+ *  dashboard pre-filter and the chart's own filter agree byte-for-byte (a null/absent field never matches). */
+function recordMatchesEquals(data: Record<string, unknown>, fieldId: string, value: unknown): boolean {
+  const val = data[fieldId]
+  return val != null && String(val) === String(value)
+}
+
+/**
+ * B4: narrow an ALREADY-masked / row-denied record set by the active dashboard filter(s) BEFORE it
+ * reaches the aggregation engine. AND-combines all filters; an empty list is a pass-through (no
+ * constraint, the "All" selection). Operates ONLY on the caller's pre-loaded `loadChartRecords`
+ * output — it never queries — so it inherits the field-mask + row-level read-deny already applied and
+ * cannot widen the visible set or leak a denied field's value. A filter on a field absent from the
+ * masked `data` (e.g. a denied field that was projected out) matches nothing → the route's restricted
+ * gate must reject such a filter UP FRONT so this never silently empties a chart instead.
+ */
+export function applyDashboardFilter(records: RecordRow[], filters: DashboardFilter[]): RecordRow[] {
+  if (filters.length === 0) return records
+  return records.filter((r) => filters.every((f) => recordMatchesEquals(r.data, f.fieldId, f.value)))
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -372,7 +404,7 @@ export class ChartAggregationService {
       const val = r.data[filterFieldId]
       switch (filterOperator) {
         case 'equals':
-          return val != null && String(val) === String(filterValue)
+          return recordMatchesEquals(r.data, filterFieldId, filterValue)
         case 'not_equals':
           return val == null || String(val) !== String(filterValue)
         case 'contains':
