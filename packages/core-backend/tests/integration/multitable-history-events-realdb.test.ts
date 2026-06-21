@@ -242,4 +242,37 @@ describeIfDatabase('global-history events — LOCK-3 security goldens (real DB)'
     expect(batchIds(await events({ fieldId: SALARY }))).not.toContain(FIELD_BATCH)
     expect(batchIds(await events({ fieldId: STATUS }))).toContain(FIELD_BATCH)
   })
+
+  // ----- T2b search (post-mask snapshot match, leak-free) -----
+
+  test('T2b search positive control: a VISIBLE field value IS searchable (non-vacuous)', async () => {
+    await mixedFieldRev() // FIELD_BATCH snapshot = { STATUS: 'public', SALARY: 99999 }
+    expect(batchIds(await events({ q: '99999' }))).toContain(FIELD_BATCH) // SALARY value (visible) searchable
+    expect(batchIds(await events({ q: 'public' }))).toContain(FIELD_BATCH) // STATUS value searchable
+  })
+
+  test('T2b search is LEAK-FREE (field-mask): a field_permissions-denied value is NOT searchable (post-mask)', async () => {
+    await mixedFieldRev()
+    await denyFieldForUser(SALARY)
+    // 99999 lives ONLY in the now-denied SALARY → searching it must return no batch (can't probe hidden values).
+    expect(batchIds(await events({ q: '99999' }))).not.toContain(FIELD_BATCH)
+    // non-vacuous: the still-visible STATUS value is still searchable.
+    expect(batchIds(await events({ q: 'public' }))).toContain(FIELD_BATCH)
+  })
+
+  test('T2b search is LEAK-FREE (row-deny): a row-denied record value is NOT searchable', async () => {
+    await setRules(denySecretRule)
+    await setFlag(true) // deny status='secret' records (REC_SECRET)
+    // 'secret' lives only in the row-denied REC_SECRET → searching it returns nothing.
+    expect(batchIds(await events({ q: 'secret' }))).toHaveLength(0)
+    // non-vacuous: 'public' (REC_PUBLIC, visible) still matches the bulk batch.
+    expect(batchIds(await events({ q: 'public' }))).toContain(BULK_BATCH)
+  })
+
+  test('T2b search: total is POST-search (a non-matching batch is not counted)', async () => {
+    await mixedFieldRev()
+    const res = await events({ q: '99999' }) // only FIELD_BATCH carries 99999
+    expect(batchIds(res)).toEqual([FIELD_BATCH])
+    expect(res.body?.data?.total).toBe(1) // post-search total
+  })
 })
