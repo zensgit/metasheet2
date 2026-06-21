@@ -1457,7 +1457,7 @@ export class MultitableApiClient {
   // --- Global History & Point-in-Time Restore (read-only) ---
   async listHistoryEvents(
     baseId: string,
-    params?: { sheetId?: string; actorId?: string; source?: string; action?: string; from?: string; to?: string; limit?: number; offset?: number },
+    params?: { sheetId?: string; actorId?: string; source?: string; action?: string; from?: string; to?: string; fieldId?: string; limit?: number; offset?: number },
   ): Promise<{ batches: HistoryBatchSummary[]; total: number }> {
     const res = await this.fetch(`/api/multitable/bases/${encodeURIComponent(baseId)}/history/events${qs(params ?? {})}`)
     const data = await this.parseJson<{ batches?: unknown[]; total?: number }>(res)

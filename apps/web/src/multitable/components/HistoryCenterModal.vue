@@ -22,6 +22,15 @@
           <option value="update">{{ t('更新', 'Update') }}</option>
           <option value="delete">{{ t('删除', 'Delete') }}</option>
         </select>
+        <input v-model="filterFrom" type="date" class="meta-hist__filter" :aria-label="t('起始日期', 'From date')" data-test="hist-filter-from" @change="reload" />
+        <input v-model="filterTo" type="date" class="meta-hist__filter" :aria-label="t('结束日期', 'To date')" data-test="hist-filter-to" @change="reload" />
+        <select v-if="fields && fields.length" v-model="filterField" class="meta-hist__filter" :aria-label="t('字段', 'Field')" data-test="hist-filter-field" @change="reload">
+          <option value="">{{ t('全部字段', 'All fields') }}</option>
+          <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
+        </select>
+        <label v-if="sheetId" class="meta-hist__scope" data-test="hist-filter-scope">
+          <input v-model="scopeAllSheets" type="checkbox" @change="reload" />{{ t('全部表', 'All tables') }}
+        </label>
         <button class="meta-hist__apply" type="button" data-test="hist-apply" @click="reload">{{ t('筛选', 'Filter') }}</button>
       </div>
 
@@ -60,7 +69,7 @@ import { useHistoryCenter } from '../composables/useHistoryCenter'
 import { historyActor } from '../utils/meta-record-labels'
 import type { HistoryBatchSummary } from '../types'
 
-const props = defineProps<{ open: boolean; baseId: string; sheetId?: string }>()
+const props = defineProps<{ open: boolean; baseId: string; sheetId?: string; fields?: Array<{ id: string; name: string }> }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const { isZh } = useLocale()
@@ -69,15 +78,25 @@ const t = (zh: string, en: string) => (isZh.value ? zh : en)
 const filterActor = ref('')
 const filterSource = ref('')
 const filterAction = ref('')
+const filterFrom = ref('')
+const filterTo = ref('')
+const filterField = ref('')
+const scopeAllSheets = ref(false) // T2b: default to the active sheet; opt in to all readable tables
 
 const { batches, loading, error, expandedId, detail, detailLoading, load, toggle: toggleBatch } = useHistoryCenter()
 
 function reload(): Promise<void> {
   return load(props.baseId, {
-    sheetId: props.sheetId,
+    // sheet scope: the active sheet by default; "all tables" clears it (the backend then spans every
+    // readable sheet in the base). The field filter is leak-free server-side (post-mask), so the dropdown
+    // is a convenience, not a security boundary.
+    sheetId: scopeAllSheets.value ? undefined : props.sheetId,
     actorId: filterActor.value,
     source: filterSource.value,
     action: filterAction.value,
+    from: filterFrom.value ? new Date(`${filterFrom.value}T00:00:00`).toISOString() : undefined,
+    to: filterTo.value ? new Date(`${filterTo.value}T23:59:59.999`).toISOString() : undefined,
+    fieldId: filterField.value,
   })
 }
 

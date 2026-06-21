@@ -476,6 +476,7 @@
       :open="showHistory"
       :base-id="activeBaseId || ''"
       :sheet-id="workbench.activeSheetId.value"
+      :fields="propertyVisibleGridFields"
       @close="showHistory = false"
     />
   </div>

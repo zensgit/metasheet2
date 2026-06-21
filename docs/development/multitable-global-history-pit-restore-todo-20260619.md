@@ -71,7 +71,7 @@ Tests:
 
 ### T2 - Global History Center Read-Only UI
 
-Status: split. **T2a SHIPPED (#2961); T2b FOLLOW-UP (read-only, in MVP envelope, not gated, not yet built).**
+Status: split. **T2a SHIPPED (#2961); T2b filters slice SHIPPED (2026-06-21: time-range + sheet-scope + field filter, field filter leak-free post-mask); T2b search + cursor pagination still FOLLOW-UP (read-only, in MVP envelope, not gated, need new backend).**
 The original single T2 scope over-stated what shipped; this split records the actual line.
 
 Goal: add a global history center entry and timeline UI.
@@ -86,9 +86,9 @@ Scope — T2a (SHIPPED, #2961):
 
 Scope — T2b (FOLLOW-UP, read-only, NOT yet built — each a small slice, not gated):
 
-- time-range (from/to) + sheet + field filters in the FE — backend already accepts `from`/`to`/`sheetId` (the FE just doesn't wire them); a **field** filter needs a new backend param;
-- search by visible record title / data — needs a new backend data-search param (a separate slice);
-- cursor pagination — the current backend is `offset`/`limit`; a cursor needs a new backend param.
+- ~~time-range (from/to) + sheet + field filters in the FE~~ — **SHIPPED 2026-06-21**: from/to date inputs + sheet-scope toggle (FE-wired the backend's existing params) + a `fieldId` filter (new backend param, applied POST-mask so it's leak-free: a field the actor can't read is never in `visibleFields`, so filtering by it returns no batch);
+- search by visible record title / data — FOLLOW-UP (needs a new backend data-search param; search must only hit records/fields the actor can read — LOCK-3 boundary);
+- cursor pagination — FOLLOW-UP (the current backend is `offset`/`limit`; a cursor needs a new backend param + must keep the LOCK-3 "total is post-filter" semantics).
 
 Out of scope:
 
