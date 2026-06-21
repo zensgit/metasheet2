@@ -295,4 +295,54 @@ describeIfDatabase('multitable view-aggregate (real DB)', () => {
     const groups = res.body.data.groups as Array<{ children?: unknown }>
     expect(groups.every((g) => g.children === undefined)).toBe(true) // single level → no nesting
   })
+
+  // ---- A5 full-column scale stats (statsFields) ----
+
+  test('STATS ABSENT: no statsFields → response has NO `stats` key (byte-identical footer shape)', async () => {
+    const res = await aggregate(V_MAIN) // no statsFields param
+    expect(res.status).toBe(200)
+    expect(res.body.data.stats).toBeUndefined()
+  })
+
+  test('STATS full-column: min/max/count over the FULL set (60 rows), NOT a page', async () => {
+    // FLD_QTY = 1..60. A page-scoped scan (50 rows) would yield max 50; the full column must be 60.
+    const res = await request(app).get(`/api/multitable/sheets/${SHEET_ID}/view-aggregate?viewId=${V_MAIN}&statsFields=${FLD_QTY}`)
+    expect(res.status).toBe(200)
+    expect(res.body.data.total).toBe(N)
+    expect(res.body.data.stats[FLD_QTY]).toEqual({ min: 1, max: 60, count: 60 })
+  })
+
+  test('STATS LEAK GATE: a field-permission-denied numeric column returns NO stats', async () => {
+    // FLD_SECRET is numeric (1..60) but field_permissions.visible=false for USER. Its min/max would leak
+    // the column's distribution → it MUST be omitted from `stats` (the SAME gate as the footer aggregate).
+    const res = await request(app).get(`/api/multitable/sheets/${SHEET_ID}/view-aggregate?viewId=${V_MAIN}&statsFields=${FLD_QTY},${FLD_SECRET}`)
+    expect(res.status).toBe(200)
+    expect(res.body.data.stats[FLD_QTY]).toEqual({ min: 1, max: 60, count: 60 }) // readable → present
+    expect(res.body.data.stats[FLD_SECRET]).toBeUndefined() // denied → omitted, NOT null/0 (no distribution leak)
+  })
+
+  test('STATS respects the PERSISTED view filter (cat=A → odd i, qty 1..59)', async () => {
+    // V_FILTER persists cat=A → odd i → FLD_QTY ∈ {1,3,…,59}: min 1, max 59, count 30. Proves the stats
+    // are scoped to the FILTERED set (not the whole sheet).
+    const res = await request(app).get(`/api/multitable/sheets/${SHEET_ID}/view-aggregate?viewId=${V_FILTER}&statsFields=${FLD_QTY}`)
+    expect(res.status).toBe(200)
+    expect(res.body.data.total).toBe(30)
+    expect(res.body.data.stats[FLD_QTY]).toEqual({ min: 1, max: 59, count: 30 })
+  })
+
+  test('STATS non-numeric / unknown requested fields are omitted (no leak, no error)', async () => {
+    // FLD_CAT is a string → not a numeric scale field; a bogus id has no field. Both omitted; FLD_QTY present.
+    const res = await request(app).get(`/api/multitable/sheets/${SHEET_ID}/view-aggregate?viewId=${V_MAIN}&statsFields=${FLD_CAT},nope_${TS},${FLD_QTY}`)
+    expect(res.status).toBe(200)
+    expect(res.body.data.stats[FLD_CAT]).toBeUndefined() // string → omitted
+    expect(res.body.data.stats[`nope_${TS}`]).toBeUndefined() // unknown → omitted
+    expect(res.body.data.stats[FLD_QTY]).toBeDefined()
+  })
+
+  test('STATS coexist with grouping: a grouped view still returns grand-total `stats`', async () => {
+    const res = await request(app).get(`/api/multitable/sheets/${SHEET_ID}/view-aggregate?viewId=${V_GROUP}&statsFields=${FLD_QTY}`)
+    expect(res.status).toBe(200)
+    expect(res.body.data.groups).toBeDefined() // grouping intact
+    expect(res.body.data.stats[FLD_QTY]).toEqual({ min: 1, max: 60, count: 60 }) // grand-total full-column stats
+  })
 })

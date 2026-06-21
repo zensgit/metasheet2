@@ -610,7 +610,7 @@ import {
 } from '../utils/view-display-prefs'
 import { useAiShortcut } from '../composables/useAiShortcut'
 import type { AiShortcutConfigInput } from '../api/client'
-import { buildFieldScaleMap, buildRecordFormattingMap, extractRulesFromConfig, extractScaleRulesFromConfig } from '../utils/conditional-formatting'
+import { buildFieldScaleMap, buildRecordFormattingMap, decideScaleStatsRefetch, extractRulesFromConfig, extractScaleRulesFromConfig, scaleStatsFieldIds, type FieldScaleServerStats } from '../utils/conditional-formatting'
 import {
   decorateAndSortBases,
   readFavoriteBaseIds,
@@ -1040,11 +1040,25 @@ const conditionalFormattingByRecord = computed(() => buildRecordFormattingMap(
   grid.rows.value,
   scopedAllFields.value,
 ))
-// A5-1: data-bar scale formatting. min/max over the already-loaded/masked rows
-// (client-side discipline; full-column server aggregate is a separate follow-up).
-const conditionalFormattingScaleByField = computed(() => buildFieldScaleMap(
+const conditionalFormattingScaleRules = computed(() =>
   extractScaleRulesFromConfig(workbench.activeView.value?.config),
+)
+// A5: full-column scale stats fetched lazily from the server (view-aggregate?statsFields) and keyed per
+// (view+filter+search). When present for a field, buildFieldScaleMap uses the FULL-column min/max for that
+// field's AUTO-range data-bar/color-scale endpoints; absent (no rule, non-numeric, denied, or fetch
+// failed) → it falls back to the page-local min/max. The per-record cell presentation is always local.
+const scaleServerStats = ref<FieldScaleServerStats>({})
+// A5-1/2/3: data-bar / color-scale / icon-set scale formatting. Per-record presentation over the loaded
+// rows; AUTO endpoints relocated to the full filtered column via scaleServerStats (A5) when available.
+const conditionalFormattingScaleByField = computed(() => buildFieldScaleMap(
+  conditionalFormattingScaleRules.value,
   grid.rows.value,
+  scaleServerStats.value,
+))
+// Numeric fields whose (auto-range) data-bar/color-scale rule needs a full-column min/max. Empty → no fetch.
+const autoScaleStatsFieldIds = computed(() => scaleStatsFieldIds(
+  conditionalFormattingScaleRules.value,
+  Object.fromEntries(scopedAllFields.value.map((f) => [f.id, f.type])),
 ))
 const readOnlyFieldIds = computed(() =>
   Object.entries(effectiveFieldPermissions.value)
@@ -2326,6 +2340,75 @@ watch(
   () => { void loadAggregates() },
   { immediate: true },
 )
+
+// A5: full-column scale stats. Fetch min/max/count over the WHOLE filtered + permission-masked column for
+// every auto-range numeric data-bar/color-scale field, so the gradient/bar denominator is correct across
+// pages. Lazy (only fields with such a rule), cached per view+filter+search, server enforces the leak gate
+// (a denied/tainted/non-numeric column returns no stats → we keep the page-local fallback for it).
+let scaleStatsReqSeq = 0
+async function loadScaleStats() {
+  const sheetId = workbench.activeSheetId.value
+  const viewId = workbench.activeViewId.value
+  const statsFields = autoScaleStatsFieldIds.value
+  const seq = ++scaleStatsReqSeq // monotonic: a slow stale response must not overwrite a newer one
+  if (!sheetId || statsFields.length === 0) {
+    scaleServerStats.value = {} // no scale rules need a full-column min/max → drop to page-local
+    return
+  }
+  try {
+    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, statsFields })
+    if (seq !== scaleStatsReqSeq) return // a newer request superseded this one
+    scaleServerStats.value = r.stats ?? {}
+  } catch {
+    if (seq !== scaleStatsReqSeq) return
+    // 413 (too large) / 422 (computed-filter view) / network → clear so buildFieldScaleMap falls back to
+    // the page-local min/max for these fields (the existing, correct degradation — never an error surface).
+    scaleServerStats.value = {}
+  }
+}
+// Idle-gated trigger (race-free): the server reads the PERSISTED view filterInfo. A filter APPLY routes
+// through grid.applySortFilter → loadViewData, which sets grid.loading=true BEFORE it awaits
+// persistSortFilter, so the loading true→false edge fires AFTER the filter is persisted and the grid
+// filter refs agree with it. View-switch / search / pagination / scale-rule edits all flow through here.
+//
+// CRUCIAL: the draft filter refs are part of the dedup KEY (so the post-apply fetch isn't deduped against a
+// pre-apply one) but are NOT watch SOURCES. A draft edit (e.g. onSetConjunction mutates filterConjunction
+// with no apply) must NOT trigger a fetch — the server still has the OLD persisted filter, and worse, firing
+// would advance lastScaleStatsKey to the draft key and then SUPPRESS the real post-apply fetch (stale stats).
+// So the handler runs only on idle-safe triggers, and computes/compares the full key (reading the filter
+// refs) INSIDE the handler — draft edits can neither trigger nor advance lastScaleStatsKey.
+const scaleStatsKey = () => JSON.stringify([
+  workbench.activeSheetId.value,
+  workbench.activeViewId.value,
+  grid.filterConjunction.value,
+  grid.filterRules.value,
+  grid.filterGroups.value,
+  searchText.value,
+  autoScaleStatsFieldIds.value,
+])
+let lastScaleStatsKey = ''
+watch(
+  // Triggers = idle-safe signals only. Filter APPLY is captured by the grid.loading edge (every apply goes
+  // through loadViewData); draft filter mutations are deliberately absent so they cannot trigger/dedup-advance.
+  [
+    () => grid.loading.value,
+    () => workbench.activeSheetId.value,
+    () => workbench.activeViewId.value,
+    () => searchText.value,
+    () => autoScaleStatsFieldIds.value.join(','),
+  ],
+  () => {
+    // Pure decision (unit-tested in multitable-cf-scale): skip while loading, skip on unchanged key,
+    // otherwise fetch + adopt the new key. The key reads the live (possibly-draft) filter refs, but this
+    // handler only runs on idle-safe triggers, so a draft edit can neither fetch nor advance lastScaleStatsKey.
+    const decision = decideScaleStatsRefetch({ loading: grid.loading.value, key: scaleStatsKey(), lastKey: lastScaleStatsKey })
+    if (!decision.fetch) return
+    lastScaleStatsKey = decision.key
+    void loadScaleStats()
+  },
+  { immediate: true },
+)
+
 // Nested grouping: setGroupFields PERSISTS groupInfo (server reads it to compute per-level subtotals),
 // so re-aggregate only AFTER the persist resolves — otherwise the request would read the stale
 // groupInfo and the new level's subtotals would never appear. Local display-grouping updates instantly
