@@ -72,6 +72,7 @@ import {
 import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
+import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
   HistoryAuditGrantError,
@@ -6996,6 +6997,65 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] history batch detail failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to load history batch' } })
+    }
+  })
+
+  // Global History — T7: point-in-time read-only view. The table "as of T", restricted to records that
+  // CURRENTLY EXIST (deleted-since-T records are OUT of v1 — a product-scope choice, NOT a safety deny). Row-deny
+  // uses the SAME loadDeniedRecordIds seam as the history surfaces (grant-deny ∪ 2b conditional read-deny),
+  // evaluated against CURRENT data (current-deny, never as-of-T: a record public-at-T but denied-now must NOT
+  // become an oracle to read it). Field-mask reuses loadAllowedFieldIds + maskStoredRecordFieldIds. Reveal never
+  // composes here (no reveal path). Read-only: reconstructs over meta_record_revisions, writes nothing.
+  router.get('/sheets/:sheetId/point-in-time', async (req: Request, res: Response) => {
+    try {
+      const pool = poolManager.get()
+      const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+      const asOf = typeof req.query.asOf === 'string' ? req.query.asOf.trim() : ''
+      if (!sheetId || !asOf) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and asOf are required' } })
+      const asMs = Date.parse(asOf)
+      if (!Number.isFinite(asMs)) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
+      const asOfIso = new Date(asMs).toISOString()
+      const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
+      const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : 0
+      const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 50
+      const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0
+
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (!capabilities.canRead) return sendForbidden(res)
+
+      // Scope to CURRENTLY-LIVE records (deleted-since-T are out of v1).
+      const liveIds = ((await pool.query('SELECT id FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: unknown }>).map((r) => String(r.id))
+      if (liveIds.length === 0) return res.json({ ok: true, data: { records: [], total: 0, asOf: asOfIso } })
+
+      // T-state of those live records (LOCK-9/11); keep the ones that existed at T.
+      const stateMap = await reconstructRecordsAtT(pool.query.bind(pool), sheetId, asOfIso, liveIds)
+      // Current row-deny (same seam as history): grant-deny ∪ conditional-rule-deny, non-admin + flag-on.
+      let denied = new Set<string>()
+      if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))) {
+        denied = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+      }
+      // Field-mask: the SAME allowed-field chain as history detail (visible ∧ field_permissions, taint-dropped).
+      const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+      const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
+
+      const visible: Array<{ recordId: string; version: number | null; data: Record<string, unknown> }> = []
+      for (const id of liveIds) {
+        const st = stateMap.get(id)
+        if (!st || !st.exists) continue // did not exist at T
+        if (denied.has(id)) continue // current row-deny — never shows a currently-denied record
+        const maskedData: Record<string, unknown> = {}
+        for (const [fid, val] of Object.entries(st.data ?? {})) if (allowed.has(fid)) maskedData[fid] = val
+        visible.push({ recordId: id, version: st.version, data: maskedData })
+      }
+      visible.sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0)) // stable pagination
+      const total = visible.length // post-permission-filter total (LOCK-3)
+      return res.json({ ok: true, data: { records: visible.slice(offset, offset + limit), total, asOf: asOfIso } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] point-in-time view failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to load point-in-time view' } })
     }
   })
 
